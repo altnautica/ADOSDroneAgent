@@ -19,7 +19,7 @@
 //! outright and never installs the auth layer.
 
 use std::convert::Infallible;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -33,12 +33,20 @@ use axum::Router;
 use hyper::body::Incoming;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as ConnBuilder;
+use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::oneshot;
 use tower::Service;
 
 use crate::auth::{self, PairingState, RateLimiter};
 use crate::routes::detail;
+
+/// The header the front stamps on a request that passes its on-box loopback
+/// check, so the residual Python (which does not see the TCP peer) can honour the
+/// same on-box trust the native edge applies. It is STRIPPED from every inbound
+/// request first, then set only when the front's own check passes, so a value
+/// arriving from off-box can never be spoofed in. See [`tcp_edge`].
+const ONBOX_HEADER: &str = "x-ados-onbox";
 
 /// The peer address of the accepted connection, attached to each LAN-edge
 /// request as an extension so the auth middleware can apply on-box loopback
@@ -54,19 +62,26 @@ struct EdgeAuth {
     rate: Arc<RateLimiter>,
 }
 
-/// The TCP-edge middleware: public-path bypass, then on-box loopback trust, then
-/// rate-limit, then auth. The Unix edge does not mount this, so trusted on-box
-/// callers bypass all of it.
-async fn tcp_edge(State(edge): State<EdgeAuth>, request: Request, next: Next) -> Response {
+/// The TCP-edge middleware: trustworthy on-box header stamping, then (for native
+/// routes) public-path bypass, on-box loopback trust, rate-limit, and auth. The
+/// Unix edge does not mount this, so trusted on-box callers bypass all of it.
+///
+/// Two distinct posture decisions happen here:
+///
+/// 1. **On-box header.** Every inbound request first has any client-supplied
+///    `X-ADOS-Onbox` STRIPPED, then the header is set to `1` only when the
+///    front's own on-box check passes (loopback peer + no proxy-forwarding
+///    header). Stripping first means a value arriving from off-box cannot be
+///    spoofed in, so the residual Python can trust the header the front forwards.
+///    This is done for native AND proxied requests so the forwarded value is
+///    always trustworthy.
+/// 2. **Auth.** A route the front serves natively keeps the full agent auth
+///    posture (public bypass, on-box trust, rate-limit, `X-ADOS-Key`). A route
+///    that is NOT native falls through to the reverse-proxy: the Rust auth is
+///    SKIPPED and the residual FastAPI applies its own auth on the forwarded
+///    request (which now carries the trustworthy `X-ADOS-Onbox`).
+async fn tcp_edge(State(edge): State<EdgeAuth>, mut request: Request, next: Next) -> Response {
     let path = request.uri().path().to_string();
-
-    // Liveness, version, and the pairing handshake are public and must always
-    // answer before any gate: a fresh GCS has no key yet, and a watchdog hitting
-    // `/healthz` must never be starved by a request flood, so the public paths
-    // skip the rate limiter and the auth check.
-    if auth::is_public(&path) {
-        return next.run(request).await;
-    }
 
     // On-box loopback trust: a request whose peer is loopback and that carries no
     // proxy-forwarding header is the local operator (the `ados` CLI over
@@ -81,7 +96,35 @@ async fn tcp_edge(State(edge): State<EdgeAuth>, request: Request, next: Next) ->
     let has_forwarding_header = auth::FORWARDED_HEADERS
         .iter()
         .any(|h| request.headers().contains_key(*h));
-    if auth::is_on_box(peer_is_loopback, has_forwarding_header) {
+    let on_box = auth::is_on_box(peer_is_loopback, has_forwarding_header);
+
+    // Strip any client-supplied on-box header first (it cannot be trusted), then
+    // set it only when the front's own check passes — for every request, native
+    // or proxied, so the forwarded value is always trustworthy.
+    request.headers_mut().remove(ONBOX_HEADER);
+    if on_box {
+        request
+            .headers_mut()
+            .insert(ONBOX_HEADER, axum::http::HeaderValue::from_static("1"));
+    }
+
+    // A route the front does not serve natively falls through to the reverse
+    // proxy. The Rust auth is skipped here; the residual FastAPI applies its own
+    // auth on the forwarded request (which now carries the trustworthy on-box
+    // header). The rate limit is the residual surface's concern too.
+    if !crate::routing::is_native(request.method(), &path) {
+        return next.run(request).await;
+    }
+
+    // Liveness, version, and the pairing handshake are public and must always
+    // answer before any gate: a fresh GCS has no key yet, and a watchdog hitting
+    // `/healthz` must never be starved by a request flood, so the public paths
+    // skip the rate limiter and the auth check.
+    if auth::is_public(&path) {
+        return next.run(request).await;
+    }
+
+    if on_box {
         return next.run(request).await;
     }
 
@@ -144,11 +187,59 @@ pub fn bind_unix(path: &Path) -> std::io::Result<UnixListener> {
     Ok(listener)
 }
 
-/// Bind the LAN TCP listener on the given port across all interfaces.
-pub async fn bind_tcp(port: u16) -> Result<TcpListener> {
-    TcpListener::bind(("0.0.0.0", port))
-        .await
-        .with_context(|| format!("bind control TCP port {port}"))
+/// Bind the LAN TCP front on the given port across BOTH address families: one
+/// AF_INET listener on `0.0.0.0` and one AF_INET6 listener on `::` with
+/// `IPV6_V6ONLY` set, so the two sockets do not contend for IPv4-mapped traffic.
+/// Returns both listeners; the caller serves the same Router on each.
+///
+/// A browser resolving a `*.local` host with both A and AAAA records often tries
+/// IPv4 first, so a v6-only listener leaves those clients with a TCP RST and a
+/// "failed to fetch" in the GCS even though IPv6 link-local works. Binding an
+/// explicit pair sidesteps the kernel/dual-stack uncertainty.
+///
+/// The AF_INET leg is mandatory — its bind error propagates (a port collision is
+/// the first thing the inert dual-run must rule out). The AF_INET6 leg is
+/// best-effort: on a kernel built without IPv6, or one that rejects the `::`
+/// bind, the v6 socket is dropped and the function returns the v4 listener alone,
+/// so the front still serves IPv4 clients. Mirrors the Python
+/// `make_dual_stack_sockets` helper.
+pub async fn bind_tcp(port: u16) -> Result<Vec<TcpListener>> {
+    let v4 = bind_one(Domain::IPV4, port, false)
+        .with_context(|| format!("bind control TCP port {port} (IPv4)"))?;
+    let mut listeners = vec![v4];
+    // The IPv6 leg is best-effort: a kernel without IPv6 or a restricted bind
+    // leaves the v4 listener serving alone rather than failing bring-up.
+    match bind_one(Domain::IPV6, port, true) {
+        Ok(v6) => listeners.push(v6),
+        Err(e) => {
+            tracing::debug!(error = %e, port, "IPv6 control listener unavailable; serving IPv4 only");
+        }
+    }
+    Ok(listeners)
+}
+
+/// Bind one address-family listener on the wildcard address for its family.
+/// `v6only` forces `IPV6_V6ONLY` on the AF_INET6 socket so the v6 leg never
+/// claims IPv4-mapped traffic the v4 leg owns. `SO_REUSEADDR` mirrors the Python
+/// helper so a quick restart does not trip `EADDRINUSE` on the TIME_WAIT window.
+/// The socket is set non-blocking and handed to tokio as a [`TcpListener`].
+fn bind_one(domain: Domain, port: u16, v6only: bool) -> std::io::Result<TcpListener> {
+    let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+    socket.set_reuse_address(true)?;
+    if v6only {
+        socket.set_only_v6(true)?;
+    }
+    let addr: SocketAddr = if domain == Domain::IPV6 {
+        SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0))
+    } else {
+        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port))
+    };
+    socket.bind(&addr.into())?;
+    // The same backlog depth the Python helper uses; comfortably above the burst
+    // a fresh GCS opens while it walks the pairing handshake.
+    socket.listen(2048)?;
+    socket.set_nonblocking(true)?;
+    TcpListener::from_std(socket.into())
 }
 
 /// Serve the Router on the Unix listener: accept connections and hand each to
@@ -229,5 +320,29 @@ where
         .await
     {
         tracing::debug!(error = %e, "control connection ended");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn bind_tcp_returns_real_bound_listeners() {
+        // Port 0 lets the kernel pick a free port; the v4 leg binds first and the
+        // v6 leg follows on the SAME port. On a dual-stack host both bind (2); on a
+        // host without IPv6 only the v4 leg returns (1). Either way every returned
+        // listener is a real bound socket with a resolvable local address.
+        let listeners = bind_tcp(0).await.expect("v4 leg must bind");
+        assert!(
+            listeners.len() == 1 || listeners.len() == 2,
+            "expected 1 (IPv4-only host) or 2 (dual-stack) listeners, got {}",
+            listeners.len()
+        );
+        for l in &listeners {
+            // A real listener resolves its bound address.
+            let addr = l.local_addr().expect("a bound listener resolves its addr");
+            assert_ne!(addr.port(), 0, "an ephemeral bind resolves to a real port");
+        }
     }
 }

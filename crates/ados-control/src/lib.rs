@@ -18,7 +18,9 @@ pub mod config;
 pub mod ipc;
 pub mod pairing_store;
 pub mod profile;
+pub mod proxy;
 pub mod routes;
+pub mod routing;
 pub mod serve;
 pub mod state;
 
@@ -236,27 +238,39 @@ where
     let unix_router = unix_app(build_router(state.clone()));
     let tcp_router = tcp_app(build_router(state), Arc::clone(&pairing));
 
-    // Bind both listeners up front so a bind failure surfaces here.
+    // Bind every listener up front so a bind failure surfaces here. The LAN front
+    // binds an AF_INET and (best-effort) an AF_INET6 socket on the same port, so a
+    // browser that resolves a `*.local` host to both A and AAAA records reaches
+    // the front whichever family it tries first.
     let unix_listener = bind_unix(&paths.control_socket)
         .with_context(|| format!("bind control socket {}", paths.control_socket.display()))?;
-    let tcp_listener = bind_tcp(paths.control_tcp_port).await?;
+    let tcp_listeners = bind_tcp(paths.control_tcp_port).await?;
     tracing::info!(
         socket = %paths.control_socket.display(),
         tcp_port = paths.control_tcp_port,
+        tcp_listeners = tcp_listeners.len(),
         "control API listening"
     );
 
-    // Two graceful-shutdown signals fan out from the single shutdown future.
+    // Each listener gets its own stop signal, all fanned from the single shutdown
+    // future: the Unix edge plus one per LAN-front address family.
     let (unix_stop_tx, unix_stop_rx) = oneshot::channel::<()>();
-    let (tcp_stop_tx, tcp_stop_rx) = oneshot::channel::<()>();
+    let mut tcp_stop_txs = Vec::with_capacity(tcp_listeners.len());
+    let mut tcp_tasks = Vec::with_capacity(tcp_listeners.len());
+    for listener in tcp_listeners {
+        let (tx, rx) = oneshot::channel::<()>();
+        tcp_stop_txs.push(tx);
+        tcp_tasks.push(tokio::spawn(serve_tcp(listener, tcp_router.clone(), rx)));
+    }
     tokio::spawn(async move {
         shutdown.await;
         let _ = unix_stop_tx.send(());
-        let _ = tcp_stop_tx.send(());
+        for tx in tcp_stop_txs {
+            let _ = tx.send(());
+        }
     });
 
     let unix = tokio::spawn(serve_unix(unix_listener, unix_router, unix_stop_rx));
-    let tcp = tokio::spawn(serve_tcp(tcp_listener, tcp_router, tcp_stop_rx));
 
     sd_ready();
 
@@ -270,7 +284,9 @@ where
     watchdog.tick().await;
     let serving = async {
         let _ = unix.await;
-        let _ = tcp.await;
+        for tcp in tcp_tasks {
+            let _ = tcp.await;
+        }
     };
     tokio::pin!(serving);
     loop {

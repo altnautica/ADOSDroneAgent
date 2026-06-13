@@ -45,13 +45,26 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 # HTTP framework + per-connection serving. The same axum Router is served on the
 # trusted unix socket and the LAN TCP port; hyper + the tokio glue carry the
-# per-connection accept loop, http the request/response types.
+# per-connection accept loop, http the request/response types. The `client`
+# feature adds hyper's client-side connection driver the reverse-proxy front uses
+# to forward un-migrated routes to the residual FastAPI over its internal Unix
+# socket (a per-request HTTP/1.1 handshake on a fresh `UnixStream`).
+hyper = { workspace = true, features = ["client"] }
 axum = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }
-hyper = { workspace = true }
 hyper-util = { workspace = true }
 http = { workspace = true }
+# Streaming request + response bodies for the reverse-proxy passthrough: the
+# front forwards the request body and relays the upstream response body without
+# buffering either, so a large upload or an SSE stream passes through unbroken.
+http-body-util = { workspace = true }
+bytes = { workspace = true }
+# Raw IPV6_V6ONLY on the AF_INET6 listener so the dual-stack front opens one
+# AF_INET (0.0.0.0) and one AF_INET6 (::) socket on the same port without the two
+# contending for IPv4-mapped traffic. socket2 is pure Rust (libc only, no C
+# build), so it cross-compiles to the musl SBC target cleanly.
+socket2 = { version = "0.5", features = ["all"] }
 
 [dev-dependencies]
 tempfile = "3"

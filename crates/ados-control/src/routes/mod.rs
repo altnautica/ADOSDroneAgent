@@ -22,25 +22,27 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::json;
 
+use crate::proxy::proxy_to_residual;
 use crate::state::AppState;
 
 /// Build a FastAPI-shaped error response: `(status, {"detail": message})`. Every
 /// 4xx/5xx on this surface goes through this so the body shape never drifts to
 /// the logd `{"error":{...}}` envelope. Used by the routes that land in later
-/// chunks (pairing 409s, command 503/400) as well as the 404 fallback.
+/// chunks (pairing 409s, command 503/400) as well as the proxy's
+/// graceful-degradation reply.
 pub fn detail(status: StatusCode, message: impl Into<String>) -> Response {
     (status, Json(json!({ "detail": message.into() }))).into_response()
-}
-
-/// The 404 handler returns the FastAPI `{"detail"}` shape, matching how the
-/// agent's API answers an unknown path.
-async fn not_found() -> Response {
-    detail(StatusCode::NOT_FOUND, "Not Found")
 }
 
 /// Build the route Router for a given app state. The same Router is served on
 /// both edges; the auth/rate-limit layer is added per edge by the serve loop.
 /// `/healthz` sits at the root; everything else is mounted under `/api`.
+///
+/// Any path not registered here falls through to the reverse-proxy fallback,
+/// which forwards it to the residual Python over its internal Unix socket (and
+/// degrades cleanly to a FastAPI-shaped `{"detail"}` when that upstream is
+/// absent), so the front serves the migrated routes natively and proxies the
+/// rest while the migration is in flight.
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(system::healthz))
@@ -59,6 +61,7 @@ pub fn build_router(state: AppState) -> Router {
         // it to the mavlink socket; the catalog is the static command list.
         .route("/api/command", post(command::execute_command))
         .route("/api/commands", get(command::list_commands))
-        .fallback(not_found)
+        // Everything else: reverse-proxy to the residual Python.
+        .fallback(proxy_to_residual)
         .with_state(state)
 }
