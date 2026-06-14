@@ -100,11 +100,8 @@ def create_app(agent: Any) -> FastAPI:
         await observability.aclose_client()
         await telemetry_source.aclose()
 
-    # Health check. Moved off `/` so the ground-station static mount
-    # can own the root path (`/` -> `static-ground/index.html`).
-    @app.get("/healthz")
-    async def health_check():
-        return {"status": "ok", "version": __version__}
+    # /healthz is served by the native control front; the residual no longer
+    # registers it (the front owns the LAN port and answers the liveness probe).
 
     # Mount routes
     app.include_router(version.router, prefix="/api")

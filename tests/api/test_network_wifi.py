@@ -71,61 +71,6 @@ class TestNetworkWifi:
         assert len(body["connections"]) == 1
         assert body["connections"][0]["name"] == "HomeWifi"
 
-    def test_join_success(self, client, fake_manager):
-        fake_manager.join.return_value = {
-            "joined": True,
-            "ip": "192.168.1.50",
-            "gateway": "192.168.1.1",
-            "error": None,
-        }
-        resp = client.put(
-            "/api/v1/network/client/join",
-            json={"ssid": "HomeWifi", "passphrase": "secret"},
-        )
-        assert resp.status_code == 200
-        assert resp.json()["joined"] is True
-        assert resp.json()["ip"] == "192.168.1.50"
-
-    def test_join_busy_ap_returns_409(self, client, fake_manager):
-        fake_manager.join.return_value = {
-            "joined": False,
-            "error": "wlan0_busy_ap_active",
-            "hint": "Stop AP first or force",
-            "ip": None,
-            "gateway": None,
-        }
-        resp = client.put(
-            "/api/v1/network/client/join",
-            json={"ssid": "HomeWifi", "passphrase": "secret"},
-        )
-        assert resp.status_code == 409
-        body = resp.json()
-        assert body["detail"]["error"]["code"] == "E_WLAN0_BUSY_AP_ACTIVE"
-        assert body["detail"]["needs_force"] is True
-
-    def test_leave_returns_manager_dict(self, client, fake_manager):
-        fake_manager.leave.return_value = {"left": True, "previous_ssid": "BenchWifi"}
-        resp = client.delete("/api/v1/network/client")
-        assert resp.status_code == 200
-        assert resp.json()["left"] is True
-
-    def test_forget_success(self, client, fake_manager):
-        fake_manager.forget.return_value = {
-            "forgot": True, "name": "HomeWifi", "error": None,
-        }
-        resp = client.delete("/api/v1/network/client/configured/HomeWifi")
-        assert resp.status_code == 200
-        assert resp.json()["forgot"] is True
-
-    def test_forget_nmcli_failure_returns_400(self, client, fake_manager):
-        fake_manager.forget.return_value = {
-            "forgot": False, "name": "HomeWifi", "error": "Connection 'HomeWifi' not found.",
-        }
-        resp = client.delete("/api/v1/network/client/configured/HomeWifi")
-        assert resp.status_code == 400
-        body = resp.json()
-        assert body["detail"]["error"]["code"] == "E_WIFI_FORGET_FAILED"
-
     def test_autoconnect_enable(self, client, fake_manager):
         fake_manager.set_autoconnect.return_value = {
             "autoconnect": True, "name": "HomeWifi", "error": None,

@@ -60,7 +60,6 @@ from .encoder_config import (
     get_video_config,
     set_video_config,
 )
-from .latency import get_air_pipeline_status, get_video_latency
 from .recording import start_recording, stop_recording
 from .snapshot import get_snapshot_jpg, trigger_snapshot
 from .stream_status import _discover_cameras_for_api, get_video_status
@@ -106,6 +105,4 @@ __all__ = [
     "switch_camera",
     "get_video_config",
     "set_video_config",
-    "get_video_latency",
-    "get_air_pipeline_status",
 ]

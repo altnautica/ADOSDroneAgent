@@ -29,8 +29,6 @@ from typing import Any
 
 from fastapi import APIRouter
 
-from ados.api.routes import ground_station as _gs
-
 router = APIRouter(prefix="/v1/ground-station", tags=["ground-station"])
 
 _CACHE_TTL_SECONDS = 5.0
@@ -252,9 +250,3 @@ async def _cached_snapshot() -> dict[str, Any]:
         _cache_ts = now
         return snap
 
-
-@router.get("/modem-status")
-async def get_modem_status() -> dict[str, Any]:
-    """Cellular modem snapshot. Returns ``present: false`` when no modem."""
-    _gs._require_ground_profile()
-    return await _cached_snapshot()

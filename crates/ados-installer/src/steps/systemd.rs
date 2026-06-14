@@ -837,6 +837,26 @@ fn reconcile_front_unit() {
     }
 }
 
+/// Ensure the native front is on by default. The status / pairing / command /
+/// telemetry / params / services / fleet / signing / wfb / video / ground-station
+/// read + control routes are served by `ados-control` and have been removed from
+/// the residual FastAPI (which keeps only the permanent-Python features —
+/// vision, plugins, setup, OTA, WHEP, display — behind the front's proxy). So the
+/// front is the only LAN surface that answers those routes: a fresh box, and an
+/// upgrade from a pre-removal release, must come up with `ados-control` owning
+/// :8080 or the migrated routes would 404 on FastAPI. Write the marker the two
+/// reconciles below read when it is absent. Idempotent. An operator can still
+/// `ados rust disable front` for a debug session; the next install restores it.
+fn ensure_front_default_on() {
+    let marker = Path::new(CONFIG_DIR).join("front-rust-enabled");
+    if !marker.exists() {
+        match std::fs::write(&marker, "1\n") {
+            Ok(()) => tracing::info!("front default: native control surface owns the LAN port"),
+            Err(e) => tracing::warn!(error = %e, "writing front-rust-enabled marker failed"),
+        }
+    }
+}
+
 /// Remove cutover marker files retired by a default sense flip so an
 /// `--upgrade` from an older release leaves no stale marker behind. The plugin
 /// host moved from an opt-IN marker (native only when the marker was present) to
@@ -1337,10 +1357,16 @@ impl Step for Systemd {
         //     off; the start step brings it up after the supervisor.
         reconcile_logd_unit();
 
-        // 5b-bis. The native control surface is off by default (the GCS uses the
-        //     FastAPI surface). Enable it only when the operator pinned it on via
-        //     `ados rust enable control` (or the LAN-front marker); otherwise it
-        //     stays disabled.
+        // 5b-pre. The native front is the only LAN surface that answers the
+        //     migrated routes now that they are removed from FastAPI, so ensure
+        //     it is on by default before the control + front reconciles read the
+        //     marker.
+        ensure_front_default_on();
+
+        // 5b-bis. The native control surface runs as the LAN front when the
+        //     front marker is present (the default, ensured above) or when the
+        //     operator pinned the alternate-port control surface on via
+        //     `ados rust enable control`.
         reconcile_control_unit();
 
         // 5b-ter. The LAN-front cutover is off by default. When pinned on, the

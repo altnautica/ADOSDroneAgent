@@ -8,7 +8,6 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from pymavlink.dialects.v20 import common as mavlink2
 
-from ados.api.deps import get_agent_app
 from ados.core.ipc import MAVLINK_SOCK, MavlinkIPCClient
 from ados.core.logging import get_logger
 
@@ -363,39 +362,3 @@ async def _send_via_mavlink_ipc(frame: bytes) -> None:
         except Exception:
             pass
 
-
-@router.post("/command")
-async def execute_command(req: CommandRequest):
-    """Execute a text command.
-
-    Gates on the same FC-connected signal `/api/status` reports
-    (`app.fc_status().connected`, derived from the state-socket snapshot in the
-    multi-process runtime) rather than an in-process pymavlink connection object,
-    which the standalone API service never holds. The command becomes a
-    COMMAND_LONG frame written to the MAVLink IPC socket the router reads.
-    """
-    app = get_agent_app()
-
-    if not app.fc_status().connected:
-        raise HTTPException(status_code=503, detail="FC not connected")
-
-    cmd = req.cmd.lower()
-    log.info("command_received", cmd=cmd, args=req.args)
-
-    # Resolve the live vehicle class from the router's state snapshot so the
-    # mode/rtl frames carry the correct custom_mode for this FC (Copter vs
-    # Plane vs Rover vs Sub differ); mav_type 0 (no heartbeat yet) resolves to
-    # None and the mode/rtl paths refuse rather than guess Copter.
-    snapshot = app.state_ipc_state()
-    mav_type = int(snapshot.get("mav_type", 0) or 0)
-    vehicle = _vehicle_class(mav_type)
-
-    frame, body = _build_command_frame(cmd, req.args, vehicle)
-    await _send_via_mavlink_ipc(frame)
-    return body
-
-
-@router.get("/commands")
-async def list_commands():
-    """List available commands."""
-    return {"commands": SIMPLE_COMMANDS}

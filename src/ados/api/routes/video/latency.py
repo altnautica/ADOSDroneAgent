@@ -21,7 +21,6 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 
-from ados.api.sources.video import latest_air_pipeline, latest_video_latency
 from ados.core.logging import get_logger
 
 log = get_logger("api.video")
@@ -64,21 +63,6 @@ def _read_latency_live() -> dict[str, Any]:
     }
 
 
-@router.get("/video/latency")
-async def get_video_latency() -> dict[str, Any]:
-    """Return the most recent SEI-probe glass-to-glass latency.
-
-    Reads the store first; falls back to the live ``lcd-latency.json`` read
-    when the store is unreachable or the SEI probe has produced no samples, so
-    the route degrades to the same ``{latency_ms: None, source: ...}`` shape it
-    always did.
-    """
-    derived = await latest_video_latency()
-    if derived is not None:
-        return derived
-    return _read_latency_live()
-
-
 def _read_air_pipeline_live_blob():
     """The live air-pipeline read: the raw blob, or a Response/Exception.
 
@@ -105,36 +89,4 @@ def _read_air_pipeline_live_blob():
     return blob
 
 
-@router.get("/v1/video/air-pipeline")
-async def get_air_pipeline_status():
-    """Return the air-side GStreamer pipeline's live stats snapshot.
-
-    Reads the store first; the three monotonic-clock floats the store cannot
-    carry (``started_at`` / ``last_state_change_at`` / ``last_buffer_at``) are
-    filled from the live ``air-pipeline.json`` blob when it is present. Falls
-    back wholesale to the live file read when the store is unreachable or the
-    air pipeline is not running, preserving the 204 (not in use) and 503
-    (read error) contract.
-    """
-    derived = await latest_air_pipeline()
-    if derived is not None:
-        # The store carries every field but the three monotonic floats; merge
-        # those from the live file when it is present so the snapshot is whole.
-        # A raised live-float read (a read/parse error that the live-only path
-        # turns into a 503) must not sink the otherwise-fresh store snapshot:
-        # the three floats stay None (already set by the store path), which is
-        # strictly better than a 503 when every other field is present.
-        try:
-            live = _read_air_pipeline_live_blob()
-        except (HTTPException, OSError, ValueError):
-            live = None
-        if isinstance(live, dict):
-            for key in ("started_at", "last_state_change_at", "last_buffer_at"):
-                live_value = live.get(key)
-                if live_value is not None:
-                    derived[key] = live_value
-        return derived
-    return _read_air_pipeline_live_blob()
-
-
-__all__ = ["router", "get_video_latency", "get_air_pipeline_status"]
+__all__ = ["router"]

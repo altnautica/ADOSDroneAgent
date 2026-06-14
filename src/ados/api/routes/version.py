@@ -13,8 +13,6 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from ados import __version__
-
 router = APIRouter()
 
 # Wire-protocol contract version. Bump when the request/response shape
@@ -67,16 +65,3 @@ CAPABILITIES: list[str] = [
     "can.passthrough",
 ]
 
-
-@router.get("/version")
-async def get_version():
-    """Wire-protocol version + capability flags.
-
-    Stable shape. Add new keys at will; do not rename or remove existing
-    keys without bumping `api_version`.
-    """
-    return {
-        "api_version": API_VERSION,
-        "agent_version": __version__,
-        "capabilities": CAPABILITIES,
-    }

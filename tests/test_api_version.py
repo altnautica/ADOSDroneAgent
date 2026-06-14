@@ -8,69 +8,7 @@ the agent supports them.
 
 from __future__ import annotations
 
-import pytest
-from fastapi.testclient import TestClient
-
-from ados import __version__
-from ados.api.routes.version import API_VERSION, CAPABILITIES
-from ados.api.server import create_app
-from tests.api_runtime_utils import build_api_runtime
-
-
-@pytest.fixture
-def client():
-    app = build_api_runtime(uptime_seconds=0.0)
-    return TestClient(create_app(app))
-
-
-def test_version_endpoint_returns_expected_shape(client):
-    resp = client.get("/api/version")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert set(data.keys()) == {"api_version", "agent_version", "capabilities"}
-
-
-def test_api_version_is_string(client):
-    resp = client.get("/api/version")
-    data = resp.json()
-    assert isinstance(data["api_version"], str)
-    assert data["api_version"] == API_VERSION
-
-
-def test_agent_version_matches_package_version(client):
-    resp = client.get("/api/version")
-    data = resp.json()
-    assert data["agent_version"] == __version__
-
-
-def test_capabilities_is_list_of_strings(client):
-    resp = client.get("/api/version")
-    data = resp.json()
-    assert isinstance(data["capabilities"], list)
-    for cap in data["capabilities"]:
-        assert isinstance(cap, str)
-        assert "." in cap, f"capability flag {cap!r} should be dot-namespaced"
-
-
-def test_capabilities_includes_known_flags(client):
-    resp = client.get("/api/version")
-    data = resp.json()
-    caps = set(data["capabilities"])
-    # Sanity: at least the core endpoints we know shipped before today are present.
-    expected = {
-        "version.endpoint",
-        "status.full",
-        "services.control",
-        "video.pipeline",
-        "wfb.link",
-        "scripts.runtime",
-        "ota.updater",
-        "pairing.mnemonic",
-        "ground_station.profile",
-        "signing.mavlink",
-    }
-    missing = expected - caps
-    assert not missing, f"missing expected capability flags: {missing}"
+from ados.api.routes.version import CAPABILITIES
 
 
 def test_capabilities_constant_is_unique():

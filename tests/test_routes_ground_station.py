@@ -72,56 +72,15 @@ def patch_role(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_status_route_exists(client, monkeypatch):
-    """GET /status returns a ground-station snapshot with the OLED schema keys."""
-    from ados.api.routes import ground_station as gs
-
-    fake_pm = MagicMock()
-    fake_pm.status = AsyncMock(return_value={"paired": False, "key_fingerprint": None})
-    monkeypatch.setattr(gs, "_pair_manager", lambda: fake_pm)
-
-    resp = client.get(f"{GS_PREFIX}/status")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["profile"] == "ground_station"
-    for key in ("paired_drone", "link", "gcs", "network", "system", "role", "mesh"):
-        assert key in data
-
-
-def test_status_profile_gate_drone(drone_client):
-    """Drone profile gets 404 with the profile mismatch error code."""
-    resp = drone_client.get(f"{GS_PREFIX}/status")
-    assert resp.status_code == 404
-    body = resp.json()
-    assert body["detail"]["error"]["code"] == "E_PROFILE_MISMATCH"
-
-
 # ---------------------------------------------------------------------------
 # Group 2: /wfb, /wfb/relay, /wfb/receiver
 # ---------------------------------------------------------------------------
-
-
-def test_wfb_get_returns_radio_view(client):
-    """GET /wfb surfaces channel + bitrate + fec from agent config."""
-    resp = client.get(f"{GS_PREFIX}/wfb")
-    assert resp.status_code == 200
-    data = resp.json()
-    for key in ("channel", "bitrate_profile", "fec"):
-        assert key in data
 
 
 def test_wfb_put_updates_radio(client):
     """PUT /wfb accepts a partial update and echoes the new state."""
     resp = client.put(f"{GS_PREFIX}/wfb", json={"channel": 161})
     assert resp.status_code in (200, 503)
-
-
-def test_wfb_relay_status_wrong_role(client, patch_role):
-    """GET /wfb/relay/status on a non-relay returns 404 with role error."""
-    patch_role("direct")
-    resp = client.get(f"{GS_PREFIX}/wfb/relay/status")
-    assert resp.status_code == 404
-    assert resp.json()["detail"]["error"]["code"] == "E_WRONG_ROLE"
 
 
 def test_wfb_receiver_relays_wrong_role(client, patch_role):
@@ -141,32 +100,6 @@ def test_wfb_receiver_combined_wrong_role(client, patch_role):
 # ---------------------------------------------------------------------------
 # Group 3: /network, /network/ethernet
 # ---------------------------------------------------------------------------
-
-
-def test_network_get_returns_uplink_matrix(client, monkeypatch):
-    """GET /network surfaces the four uplinks plus the active uplink view."""
-    from ados.api.routes import ground_station as gs
-
-    monkeypatch.setattr(gs, "_ap_view", lambda app: {"enabled": False})
-    monkeypatch.setattr(
-        gs, "_wifi_client_view", AsyncMock(return_value={"connected": False})
-    )
-    monkeypatch.setattr(
-        gs, "_ethernet_view", AsyncMock(return_value={"connected": False})
-    )
-    monkeypatch.setattr(gs, "_modem_view", AsyncMock(return_value={"connected": False}))
-    monkeypatch.setattr(
-        gs,
-        "_router_state_view",
-        lambda: {"active_uplink": None, "priority": []},
-    )
-    monkeypatch.setattr(gs, "_load_share_uplink_flag", lambda: False)
-
-    resp = client.get(f"{GS_PREFIX}/network")
-    assert resp.status_code == 200
-    data = resp.json()
-    for key in ("ap", "wifi_client", "ethernet", "modem_4g", "active_uplink"):
-        assert key in data
 
 
 def test_network_modem_put_converts_cap_mb_to_cap_gb(client, monkeypatch):
@@ -292,19 +225,6 @@ def test_share_uplink_non_native_runs_python_apply(client, monkeypatch):
     assert apply_called["hit"] is True
 
 
-def test_network_ethernet_get(client, monkeypatch):
-    """GET /network/ethernet returns a view from the ethernet manager."""
-    from ados.api.routes import ground_station as gs
-
-    fake_mgr = MagicMock()
-    fake_mgr.config = AsyncMock(return_value={"mode": "dhcp", "link_up": False})
-    monkeypatch.setattr(gs, "_ethernet_mgr", lambda: fake_mgr)
-
-    resp = client.get(f"{GS_PREFIX}/network/ethernet")
-    assert resp.status_code == 200
-    assert resp.json()["mode"] == "dhcp"
-
-
 def test_network_ethernet_put_static_missing_fields(client, monkeypatch):
     """PUT /network/ethernet with mode=static and no ip returns 400."""
     from ados.api.routes import ground_station as gs
@@ -389,42 +309,9 @@ def test_gamepads_list(client, monkeypatch):
     assert "primary_id" in data
 
 
-def test_pic_get_state(client, monkeypatch):
-    """GET /pic returns the arbiter snapshot."""
-    from ados.api.routes import ground_station as gs
-
-    fake_arb = MagicMock()
-    fake_arb.get_state = MagicMock(
-        return_value={"claimed_by": None, "ttl_ms": 0}
-    )
-    monkeypatch.setattr(gs, "_pic_arbiter", lambda: fake_arb)
-
-    resp = client.get(f"{GS_PREFIX}/pic")
-    assert resp.status_code == 200
-    assert "claimed_by" in resp.json()
-
-
 # ---------------------------------------------------------------------------
 # Group 5: /mesh, /role, /ws/uplink
 # ---------------------------------------------------------------------------
-
-
-def test_role_get(client, patch_role):
-    """GET /role surfaces current role + supported roles."""
-    patch_role("direct")
-    resp = client.get(f"{GS_PREFIX}/role")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["role"] == "direct"
-    assert "direct" in data["supported"]
-
-
-def test_mesh_get_direct_returns_404(client, patch_role):
-    """GET /mesh on a direct node returns 404 with the not-in-mesh code."""
-    patch_role("direct")
-    resp = client.get(f"{GS_PREFIX}/mesh")
-    assert resp.status_code == 404
-    assert resp.json()["detail"]["error"]["code"] == "E_NOT_IN_MESH"
 
 
 def test_mesh_neighbors_direct_404(client, patch_role):
@@ -432,15 +319,6 @@ def test_mesh_neighbors_direct_404(client, patch_role):
     patch_role("direct")
     resp = client.get(f"{GS_PREFIX}/mesh/neighbors")
     assert resp.status_code == 404
-
-
-def test_mesh_config_get(client):
-    """GET /mesh/config reads the mesh sub-block from agent config."""
-    resp = client.get(f"{GS_PREFIX}/mesh/config")
-    assert resp.status_code == 200
-    data = resp.json()
-    for key in ("mesh_id", "carrier", "channel", "bat_iface"):
-        assert key in data
 
 
 def test_ws_uplink_profile_gate_drone(drone_client):

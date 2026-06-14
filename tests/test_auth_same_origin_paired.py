@@ -58,18 +58,16 @@ def test_spoofed_origin_without_key_is_rejected() -> None:
 def test_spoofed_origin_with_key_passes_auth() -> None:
     """The same spoofed-origin request WITH the key clears the auth layer.
 
-    The FC is disconnected in the test double, so the command route then 503s;
-    the point is the request is NOT a 401 — auth admitted it because the key is
+    The point is the request is NOT a 401 — auth admitted it because the key is
     valid, not because of any same-origin shortcut.
     """
     client = _paired_client()
-    resp = client.post(
-        "/api/command",
-        json={"cmd": "arm"},
+    resp = client.get(
+        "/api/config",
         headers=_spoofed_headers({"X-ADOS-Key": _KNOWN_KEY}),
     )
     assert resp.status_code != 401
-    assert resp.status_code == 503  # FC not connected — past auth
+    assert resp.status_code == 200  # valid key cleared auth
 
 
 def test_get_config_spoofed_origin_without_key_is_rejected() -> None:

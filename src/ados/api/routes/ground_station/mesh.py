@@ -54,27 +54,6 @@ def _ensure_mesh_event_tailer() -> None:
 # ---------------------------------------------------------------------------
 
 
-@router.get("/role")
-async def get_role() -> dict[str, Any]:
-    """Read current mesh role plus a capability hint."""
-    app = _gs._require_ground_profile()
-    from ados.services.ground_station.role_manager import (
-        all_mesh_units,
-        get_current_role,
-        role_units,
-    )
-    current = get_current_role()
-    return {
-        "role": current,
-        "configured": getattr(
-            getattr(app.config, "ground_station", None), "role", "direct"
-        ),
-        "supported": ["direct", "relay", "receiver"],
-        "units": role_units(current),
-        "all_mesh_units": all_mesh_units(),
-    }
-
-
 @router.put("/role")
 async def put_role(req: RoleChangeRequest) -> dict[str, Any]:
     """Change mesh role. Applies mask/unmask + start/stop in order."""
@@ -137,85 +116,6 @@ async def put_role(req: RoleChangeRequest) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # /mesh
 # ---------------------------------------------------------------------------
-
-
-@router.get("/mesh")
-async def get_mesh_health() -> dict[str, Any]:
-    """Snapshot of batman-adv state. 404 with E_NOT_IN_MESH on direct nodes.
-
-    Reads the durable store's most-recent mesh snapshot first (the
-    relay/receiver poll loop ships the same body it writes to the sidecar), and
-    falls back to the sidecar file when the store is unreachable, so a losable
-    store degrades to the old behavior, never to a 500.
-    """
-    _gs._require_ground_profile()
-    from ados.services.ground_station.role_manager import get_current_role
-    if get_current_role() == "direct":
-        raise HTTPException(
-            status_code=404,
-            detail={"error": {"code": "E_NOT_IN_MESH"}},
-        )
-    from ados.api.sources.mesh import latest_mesh_snapshot
-    detail = await latest_mesh_snapshot()
-    if detail is not None:
-        return detail
-    return _gs._read_json_or_empty(_gs._MESH_STATE_JSON)
-
-
-@router.get("/mesh/neighbors")
-async def get_mesh_neighbors() -> dict[str, Any]:
-    _gs._require_ground_profile()
-    from ados.services.ground_station.role_manager import get_current_role
-    if get_current_role() == "direct":
-        raise HTTPException(
-            status_code=404,
-            detail={"error": {"code": "E_NOT_IN_MESH"}},
-        )
-    from ados.api.sources.mesh import latest_mesh_snapshot, slice_neighbors
-    detail = await latest_mesh_snapshot()
-    if detail is not None:
-        return slice_neighbors(detail)
-    snap = _gs._read_json_or_empty(_gs._MESH_STATE_JSON)
-    return {"neighbors": snap.get("neighbors", [])}
-
-
-@router.get("/mesh/routes")
-async def get_mesh_routes() -> dict[str, Any]:
-    _gs._require_ground_profile()
-    from ados.services.ground_station.role_manager import get_current_role
-    if get_current_role() == "direct":
-        raise HTTPException(
-            status_code=404,
-            detail={"error": {"code": "E_NOT_IN_MESH"}},
-        )
-    # Routes are derived from neighbors today; mesh_manager can expand
-    # this to `batctl o -H` when multi-hop visibility is needed.
-    from ados.api.sources.mesh import latest_mesh_snapshot, slice_routes
-    detail = await latest_mesh_snapshot()
-    if detail is not None:
-        return slice_routes(detail)
-    snap = _gs._read_json_or_empty(_gs._MESH_STATE_JSON)
-    return {"routes": snap.get("neighbors", [])}
-
-
-@router.get("/mesh/gateways")
-async def get_mesh_gateways() -> dict[str, Any]:
-    _gs._require_ground_profile()
-    from ados.services.ground_station.role_manager import get_current_role
-    if get_current_role() == "direct":
-        raise HTTPException(
-            status_code=404,
-            detail={"error": {"code": "E_NOT_IN_MESH"}},
-        )
-    from ados.api.sources.mesh import latest_mesh_snapshot, slice_gateways
-    detail = await latest_mesh_snapshot()
-    if detail is not None:
-        return slice_gateways(detail)
-    snap = _gs._read_json_or_empty(_gs._MESH_STATE_JSON)
-    return {
-        "gateways": snap.get("gateways", []),
-        "selected": snap.get("selected_gateway"),
-    }
 
 
 @router.put("/mesh/gateway_preference")
@@ -285,19 +185,6 @@ async def put_gateway_preference(
     if persist_error is not None:
         resp["persist_error"] = persist_error
     return resp
-
-
-@router.get("/mesh/config")
-async def get_mesh_config() -> dict[str, Any]:
-    app = _gs._require_ground_profile()
-    mesh = app.config.ground_station.mesh
-    return {
-        "mesh_id": mesh.mesh_id,
-        "carrier": mesh.carrier,
-        "channel": mesh.channel,
-        "bat_iface": mesh.bat_iface,
-        "interface_override": mesh.interface_override,
-    }
 
 
 @router.put("/mesh/config")

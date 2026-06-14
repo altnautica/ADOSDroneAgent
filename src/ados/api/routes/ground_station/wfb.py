@@ -21,13 +21,6 @@ from ados.api.routes.ground_station._common import (
 router = APIRouter(prefix="/v1/ground-station", tags=["ground-station"])
 
 
-@router.get("/wfb")
-async def get_ground_station_wfb() -> dict[str, Any]:
-    """Current radio config as stored in agent config."""
-    app = _gs._require_ground_profile()
-    return _gs._read_wfb_view(app)
-
-
 @router.put("/wfb")
 async def put_ground_station_wfb(update: WfbUpdate) -> dict[str, Any]:
     """Update channel, bitrate profile, or FEC and persist.
@@ -172,66 +165,3 @@ async def delete_wfb_pair() -> dict[str, Any]:
             detail={"error": {"code": "E_UNPAIR_FAILED", "message": str(exc)}},
         ) from exc
 
-
-@router.get("/wfb/relay/status")
-async def get_wfb_relay_status() -> dict[str, Any]:
-    """Relay-side WFB fragment counters + receiver reachability.
-
-    Reads the durable store's most-recent relay state first (the relay loop
-    ships the same body it writes to the sidecar), falling back to the sidecar
-    file when the store is unreachable, so a losable store degrades to the old
-    behavior, never to a 500.
-    """
-    _gs._require_ground_profile()
-    from ados.services.ground_station.role_manager import get_current_role
-    if get_current_role() != "relay":
-        raise HTTPException(
-            status_code=404,
-            detail={"error": {"code": "E_WRONG_ROLE", "required": "relay"}},
-        )
-    from ados.api.sources.gs import latest_relay_state
-    detail = await latest_relay_state()
-    if detail is not None:
-        return detail
-    return _gs._read_json_or_empty(_gs._WFB_RELAY_JSON)
-
-
-@router.get("/wfb/receiver/relays")
-async def get_wfb_receiver_relays() -> dict[str, Any]:
-    """Per-relay fragment counters on the receiver side."""
-    _gs._require_ground_profile()
-    from ados.services.ground_station.role_manager import get_current_role
-    if get_current_role() != "receiver":
-        raise HTTPException(
-            status_code=404,
-            detail={"error": {"code": "E_WRONG_ROLE", "required": "receiver"}},
-        )
-    from ados.api.sources.gs import latest_receiver_state, slice_receiver_relays
-    detail = await latest_receiver_state()
-    if detail is not None:
-        return slice_receiver_relays(detail)
-    snap = _gs._read_json_or_empty(_gs._WFB_RECEIVER_JSON)
-    return {"relays": snap.get("relays", [])}
-
-
-@router.get("/wfb/receiver/combined")
-async def get_wfb_receiver_combined() -> dict[str, Any]:
-    """Receiver's combined FEC output stats + stream bitrate."""
-    _gs._require_ground_profile()
-    from ados.services.ground_station.role_manager import get_current_role
-    if get_current_role() != "receiver":
-        raise HTTPException(
-            status_code=404,
-            detail={"error": {"code": "E_WRONG_ROLE", "required": "receiver"}},
-        )
-    from ados.api.sources.gs import latest_receiver_state, slice_receiver_combined
-    detail = await latest_receiver_state()
-    if detail is not None:
-        return slice_receiver_combined(detail)
-    snap = _gs._read_json_or_empty(_gs._WFB_RECEIVER_JSON)
-    return {
-        "fragments_after_dedup": snap.get("fragments_after_dedup", 0),
-        "fec_repaired": snap.get("fec_repaired", 0),
-        "output_kbps": snap.get("output_kbps", 0),
-        "up": snap.get("up", False),
-    }

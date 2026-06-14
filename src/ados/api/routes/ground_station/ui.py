@@ -149,29 +149,6 @@ async def put_ground_station_ui_screens(update: ScreensUpdate) -> dict[str, Any]
 # ---------------------------------------------------------------------------
 
 
-@router.get("/captive-token")
-async def get_captive_token(request: Request) -> dict[str, Any]:
-    """Mint a single-use captive-portal token for the setup webapp.
-
-    Gated on the AP subnet (192.168.4.0/24). Hosts connecting over any
-    other interface get 403. The token is attached by the webapp as
-    `X-ADOS-Captive-Key` on destructive operations.
-    """
-    _gs._require_ground_profile()
-
-    client_host = request.client.host if request.client else None
-    if not _gs._is_ap_subnet_client(client_host):
-        raise HTTPException(
-            status_code=403,
-            detail={"error": {"code": "E_CAPTIVE_ONLY"}},
-        )
-
-    from ados.services.setup_webapp.captive_token import get_captive_token_store
-
-    token = get_captive_token_store().generate()
-    return {"token": token}
-
-
 # ---------------------------------------------------------------------------
 # /factory-reset
 # ---------------------------------------------------------------------------
@@ -485,23 +462,6 @@ async def put_gamepad_primary(update: GamepadPrimaryUpdate) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # /pic
 # ---------------------------------------------------------------------------
-
-
-@router.get("/pic")
-async def get_pic_state() -> dict[str, Any]:
-    """Return the current PIC state dict."""
-    _gs._require_ground_profile()
-
-    try:
-        state = _gs._pic_arbiter().get_state()
-        if asyncio.iscoroutine(state):
-            state = await state
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail={"error": {"code": "E_PIC_STATE_FAILED", "message": str(exc)}},
-        ) from exc
-    return state if isinstance(state, dict) else {"state": state}
 
 
 @router.post("/pic/claim")

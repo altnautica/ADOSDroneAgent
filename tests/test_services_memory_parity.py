@@ -20,12 +20,8 @@ from __future__ import annotations
 import io
 
 import pytest
-from fastapi.testclient import TestClient
 
-from ados.api.server import create_app
 from ados.core import systemd_memory as sm
-from ados.core.service_tracker import ServiceState
-from tests.api_runtime_utils import build_api_runtime
 
 # One per-unit PSS fixture in KiB, the shared ground truth both paths derive from.
 # ados-health has two PIDs (orchestrator + child) so the live scan exercises its
@@ -132,51 +128,3 @@ async def test_store_reader_returns_none_on_a_store_gap(monkeypatch) -> None:
 
     monkeypatch.setattr(store_src, "query_rows", no_rows)
     assert await store_src.latest_service_memory() is None
-
-
-# ── the route produces the same per-service map either way ────────────────────
-
-
-def _client_with_one_running_service():
-    """A TestClient whose tracker has one running service mapping to a unit."""
-    agent_app = build_api_runtime()
-    # health-monitor resolves to ados-health.service via unit_for_service, and a
-    # running state keeps the route off the (empty-in-test) systemd inventory.
-    agent_app.services.set_state("health-monitor", ServiceState.RUNNING)
-    return agent_app, TestClient(create_app(agent_app))
-
-
-def test_route_store_first_equals_live_fallback(monkeypatch) -> None:
-    """The route's per-service memory_mb is identical store-first vs live."""
-    _install_fake_proc(monkeypatch)
-
-    # Run 1: store gap -> the route uses the live /proc scan.
-    from ados.api.sources import services as store_src
-
-    async def no_rows(kind, limit, **params):  # noqa: ANN001
-        return None
-
-    monkeypatch.setattr(store_src, "query_rows", no_rows)
-    _, client_live = _client_with_one_running_service()
-    live_resp = client_live.get("/api/services")
-    assert live_resp.status_code == 200
-    live_mem = {
-        s["name"]: s["memory_mb"] for s in live_resp.json()["services"]
-    }
-
-    # Run 2: the store serves the byte-valued rows -> store-first path.
-    async def store_rows(kind, limit, **params):  # noqa: ANN001
-        return _store_rows()
-
-    monkeypatch.setattr(store_src, "query_rows", store_rows)
-    _, client_store = _client_with_one_running_service()
-    store_resp = client_store.get("/api/services")
-    assert store_resp.status_code == 200
-    store_mem = {
-        s["name"]: s["memory_mb"] for s in store_resp.json()["services"]
-    }
-
-    # Same per-service memory_mb on both runs, and the health-monitor entry
-    # carries the fixture's MiB (42.5), proving a non-zero value flowed through.
-    assert store_mem == live_mem
-    assert live_mem.get("health-monitor") == 42.5

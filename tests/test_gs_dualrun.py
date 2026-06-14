@@ -21,9 +21,7 @@ import httpx
 import pytest
 
 from ados.api import telemetry_source
-from ados.api.routes.ground_station import wfb as wfb_routes
 from ados.api.sources import gs as gs_source
-from tests._parity import assert_route_parity
 
 # A full relay-state body (the wfb-relay.json shape), with the null receiver_ip
 # leg exercised.
@@ -148,79 +146,6 @@ def test_receiver_projections_match_the_live_route():
         "up": False,
     }
     assert gs_source.slice_receiver_relays({}) == {"relays": []}
-
-
-# --- end-to-end route parity ------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_relay_status_route_dual_run_parity(tmp_path):
-    """/wfb/relay/status returns the same dict from the store or the sidecar."""
-    sidecar = tmp_path / "wfb-relay.json"
-    import json
-
-    sidecar.write_text(json.dumps(_FULL_RELAY), encoding="utf-8")
-    with (
-        patch.object(wfb_routes._gs, "_require_ground_profile", lambda: None),
-        patch(
-            "ados.services.ground_station.role_manager.get_current_role",
-            return_value="relay",
-        ),
-        patch.object(wfb_routes._gs, "_WFB_RELAY_JSON", sidecar),
-    ):
-        await assert_route_parity(
-            call_route=wfb_routes.get_wfb_relay_status,
-            source_target="ados.api.sources.gs.latest_relay_state",
-            logd_signals=_FULL_RELAY,
-            ignore_fields=set(),
-        )
-
-
-@pytest.mark.asyncio
-async def test_receiver_routes_dual_run_parity(tmp_path):
-    """The two receiver routes return the same dict from the store or the sidecar."""
-    sidecar = tmp_path / "wfb-receiver.json"
-    import json
-
-    sidecar.write_text(json.dumps(_FULL_RECEIVER), encoding="utf-8")
-    with (
-        patch.object(wfb_routes._gs, "_require_ground_profile", lambda: None),
-        patch(
-            "ados.services.ground_station.role_manager.get_current_role",
-            return_value="receiver",
-        ),
-        patch.object(wfb_routes._gs, "_WFB_RECEIVER_JSON", sidecar),
-    ):
-        for call_route in (
-            wfb_routes.get_wfb_receiver_relays,
-            wfb_routes.get_wfb_receiver_combined,
-        ):
-            await assert_route_parity(
-                call_route=call_route,
-                source_target="ados.api.sources.gs.latest_receiver_state",
-                logd_signals=_FULL_RECEIVER,
-                ignore_fields=set(),
-            )
-
-
-@pytest.mark.asyncio
-async def test_relay_status_store_down_falls_back_to_sidecar(tmp_path):
-    """When the store is down the relay route reads the sidecar, never 500s."""
-    sidecar = tmp_path / "wfb-relay.json"
-    import json
-
-    sidecar.write_text(json.dumps(_FULL_RELAY), encoding="utf-8")
-    with (
-        patch.object(wfb_routes._gs, "_require_ground_profile", lambda: None),
-        patch(
-            "ados.services.ground_station.role_manager.get_current_role",
-            return_value="relay",
-        ),
-        patch.object(wfb_routes._gs, "_WFB_RELAY_JSON", sidecar),
-        patch("ados.api.sources.gs.latest_relay_state", return_value=None),
-    ):
-        out = await wfb_routes.get_wfb_relay_status()
-    assert out == _FULL_RELAY
 
 
 # --- /status mesh sub-block --------------------------------------------------

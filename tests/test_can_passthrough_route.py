@@ -42,10 +42,3 @@ def test_can_passthrough_appears_in_openapi(client):
     paths = schema.get("paths", {})
     assert "/api/can/passthrough" in paths
     assert "post" in paths["/api/can/passthrough"]
-
-
-def test_can_passthrough_capability_flag_present(client):
-    resp = client.get("/api/version")
-    assert resp.status_code == 200
-    caps = resp.json().get("capabilities", [])
-    assert "can.passthrough" in caps

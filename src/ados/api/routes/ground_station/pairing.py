@@ -106,23 +106,6 @@ async def post_pair_close() -> dict[str, Any]:
         ) from exc
 
 
-@router.get("/pair/pending")
-async def get_pair_pending() -> dict[str, Any]:
-    _gs._require_ground_profile()
-    from ados.services.ground_station.pairing_client_rpc import (
-        PairingRpcError,
-        pairing_facade,
-    )
-    try:
-        snap = await pairing_facade().snapshot()
-        return snap
-    except PairingRpcError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail={"error": {"code": "E_PAIR_DAEMON_UNAVAILABLE", "message": str(exc)}},
-        ) from exc
-
-
 @router.post("/pair/approve/{device_id}")
 async def post_pair_approve(device_id: str) -> dict[str, Any]:
     """Approve a pending relay. Encrypts + returns the invite blob.

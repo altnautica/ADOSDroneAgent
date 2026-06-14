@@ -15,23 +15,13 @@ strips any 64-char hex token from request bodies before they are logged.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from ados.api.deps import get_agent_app
 from ados.core.ipc import MAVLINK_SOCK, MavlinkIPCClient
 from ados.core.logging import get_logger
-from ados.services.mavlink.signing import (
-    detect_capability,
-    disable_on_fc,
-    enroll_fc,
-    get_require,
-    parse_key_hex,
-    set_require,
-)
 
 log = get_logger("api.signing")
 
@@ -93,154 +83,3 @@ class RequireRequest(BaseModel):
 # Routes
 # ──────────────────────────────────────────────────────────────
 
-@router.get("/mavlink/signing/capability")
-async def capability() -> dict[str, Any]:
-    """Report whether the connected FC supports MAVLink signing.
-
-    Returns {supported, reason, firmware_name, firmware_version, signing_params_present}.
-    reason enum: ok | fc_not_connected | firmware_not_supported | firmware_too_old
-                 | firmware_px4_no_persistent_store | msp_protocol.
-    """
-    app = get_agent_app()
-    return detect_capability(
-        _fc_connected(app),
-        _autopilot(app),
-        _cached_params(app),
-    )
-
-
-@router.post("/mavlink/signing/enroll-fc")
-async def enroll_fc_route(req: EnrollRequest) -> dict[str, Any]:
-    """Push a 32-byte signing key to the FC via SETUP_SIGNING.
-
-    Body `{key_hex, link_id, target_system, target_component}`. The key is
-    zeroized from memory before this route returns. The returned `key_id`
-    is a short fingerprint (first 8 hex chars of sha256), not the key.
-    """
-    app = get_agent_app()
-    if not _fc_connected(app):
-        raise HTTPException(status_code=503, detail="FC not connected")
-
-    # Parse and validate hex. key_bytes is a bytearray so enroll_fc() can
-    # overwrite it in place on exit.
-    try:
-        key_bytes = parse_key_hex(req.key_hex)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    try:
-        ipc = await _connect_mavlink_ipc()
-    except ConnectionError as exc:
-        for i in range(len(key_bytes)):
-            key_bytes[i] = 0
-        raise HTTPException(
-            status_code=503, detail="MAVLink command link unavailable"
-        ) from exc
-
-    try:
-        result = await enroll_fc(
-            ipc.send,
-            key_bytes,
-            target_system=req.target_system,
-            target_component=req.target_component,
-        )
-        # Yield so the scheduled drains flush the frames before disconnect.
-        await asyncio.sleep(0)
-    except Exception as exc:
-        # Defensive zeroize even if enroll_fc's own finally already ran.
-        for i in range(len(key_bytes)):
-            key_bytes[i] = 0
-        log.error("signing_enroll_failed", error=str(exc), error_type=type(exc).__name__)
-        raise HTTPException(status_code=500, detail="enrollment failed") from exc
-    finally:
-        try:
-            await ipc.disconnect()
-        except Exception:
-            pass
-
-    # Log with key_id fingerprint only; never the hex key.
-    log.info(
-        "signing_enroll_completed",
-        key_id=result["key_id"],
-        link_id=req.link_id,
-        target_system=req.target_system,
-    )
-    # Return only the public-safe fields. req.key_hex was already zeroized in key_bytes.
-    return result
-
-
-@router.post("/mavlink/signing/disable-on-fc")
-async def disable_on_fc_route() -> dict[str, Any]:
-    """Clear the FC's signing store (SETUP_SIGNING with all-zero key)."""
-    app = get_agent_app()
-    if not _fc_connected(app):
-        raise HTTPException(status_code=503, detail="FC not connected")
-    try:
-        ipc = await _connect_mavlink_ipc()
-    except ConnectionError as exc:
-        raise HTTPException(
-            status_code=503, detail="MAVLink command link unavailable"
-        ) from exc
-    try:
-        result = disable_on_fc(ipc.send)
-        await asyncio.sleep(0)
-        return result
-    except Exception as exc:
-        log.error("signing_disable_failed", error=str(exc), error_type=type(exc).__name__)
-        raise HTTPException(status_code=500, detail="disable failed") from exc
-    finally:
-        try:
-            await ipc.disconnect()
-        except Exception:
-            pass
-
-
-@router.get("/mavlink/signing/require")
-async def require_get() -> dict[str, Any]:
-    """Current SIGNING_REQUIRE param value from the cached param blob."""
-    app = get_agent_app()
-    return get_require(_cached_params(app))
-
-
-@router.put("/mavlink/signing/require")
-async def require_put(req: RequireRequest) -> dict[str, Any]:
-    """Set SIGNING_REQUIRE on the FC."""
-    app = get_agent_app()
-    if not _fc_connected(app):
-        raise HTTPException(status_code=503, detail="FC not connected")
-    try:
-        ipc = await _connect_mavlink_ipc()
-    except ConnectionError as exc:
-        raise HTTPException(
-            status_code=503, detail="MAVLink command link unavailable"
-        ) from exc
-    try:
-        result = set_require(ipc.send, req.require)
-        await asyncio.sleep(0)
-        return result
-    except Exception as exc:
-        log.error("signing_set_require_failed", error=str(exc), error_type=type(exc).__name__)
-        raise HTTPException(status_code=500, detail="set require failed") from exc
-    finally:
-        try:
-            await ipc.disconnect()
-        except Exception:
-            pass
-
-
-@router.get("/mavlink/signing/counters")
-async def counters() -> dict[str, Any]:
-    """Signed-frame counters from the passive IPC observer.
-
-    These are observational: the agent does not validate signatures (it
-    holds no key). Counters just confirm signed frames are transiting.
-    """
-    app = get_agent_app()
-    observer = app.signing_observer()
-    if observer is None:
-        return {
-            "tx_signed_count": 0,
-            "rx_signed_count": 0,
-            "last_signed_rx_at": None,
-        }
-    return observer.snapshot()

@@ -14,7 +14,7 @@ event-age staleness flip.
 from __future__ import annotations
 
 import time
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -23,8 +23,6 @@ from ados.api import telemetry_source
 from ados.api.routes import wfb as wfb_routes
 from ados.api.sources import wfb as wfb_source
 from ados.core.config import ADOSConfig
-from tests._parity import assert_route_parity
-from tests.api_runtime_utils import build_api_runtime
 
 # A full air-side wfb-status body, the exact value ados-radio's build_stats_value
 # emits, carrying the hard cases: an effective tx_power (5) distinct from the
@@ -221,46 +219,6 @@ def test_status_stale_when_event_is_old(_reg):
     assert fresh["state"] == "connected"
 
 
-@pytest.mark.asyncio
-@patch.object(wfb_routes, "_read_regulatory_domain", return_value="US")
-async def test_status_route_dual_run_parity(_reg):
-    """End-to-end route parity via the shared harness: the route returns the same
-    dict whether it reads the store (the captured snapshot) or the live file.
-
-    The route resolves its WFB manager through the api-runtime facade, so the
-    test double is wrapped the same way ``create_app`` wraps it (the facade's
-    ``wfb_manager()`` returns ``None`` here, which selects the native dual-run
-    branch).
-    """
-    from ados.api.runtime import ensure_api_runtime
-
-    facade = ensure_api_runtime(build_api_runtime(wfb_manager=None))
-
-    # Seed the live fallback with the same body + a fresh mtime.
-    import json
-    import os
-    import pathlib
-    import tempfile
-
-    fd, path = tempfile.mkstemp(suffix=".json")
-    with os.fdopen(fd, "w") as fh:
-        json.dump(_FULL_BODY, fh)
-    ts_us = int(time.time() * 1_000_000)
-    try:
-        with (
-            patch.object(wfb_routes, "get_agent_app", return_value=facade),
-            patch("ados.core.paths.WFB_STATS_JSON", pathlib.Path(path)),
-        ):
-            await assert_route_parity(
-                call_route=wfb_routes.get_wfb_status,
-                source_target="ados.api.sources.wfb.latest_wfb_status",
-                logd_signals=(dict(_FULL_BODY), ts_us),
-                ignore_fields=set(),
-            )
-    finally:
-        os.unlink(path)
-
-
 # --- history reshape ---------------------------------------------------------
 
 
@@ -382,27 +340,3 @@ async def test_failover_empty_store_falls_back():
         telemetry_source, "_get_client", lambda: _failover_client(None)
     ):
         assert await wfb_source.latest_wfb_failover() is None
-
-
-@pytest.mark.asyncio
-async def test_failover_route_dual_run_parity(tmp_path):
-    """The failover route returns the same dict whether it reads the store or the
-    sidecar, across the producible states. The route reads only the helper + the
-    sidecar, so no agent app is needed."""
-    for state in ("local", "cloud_relay"):
-        # Logd path: the helper returns the state.
-        with patch.object(
-            wfb_source, "latest_wfb_failover", new=AsyncMock(return_value=state)
-        ):
-            logd = await wfb_routes.get_failover_status()
-        # Sidecar path: the helper returns None, the sidecar carries the state.
-        sidecar = tmp_path / "wfb_failover.json"
-        sidecar.write_text(f'{{"state": "{state}"}}', encoding="utf-8")
-        with (
-            patch.object(
-                wfb_source, "latest_wfb_failover", new=AsyncMock(return_value=None)
-            ),
-            patch.object(wfb_routes, "FAILOVER_STATE_PATH", sidecar),
-        ):
-            live = await wfb_routes.get_failover_status()
-        assert logd == live == {"failover_state": state}

@@ -16,47 +16,10 @@ from ados.api.routes.ground_station._common import (
     EthernetConfigUpdate,
     ModemConfigUpdate,
     ShareUplinkUpdate,
-    UplinkPriorityUpdate,
     WifiJoinRequest,
 )
-from ados.api.sources.network import latest_uplink_active
 
 router = APIRouter(prefix="/v1/ground-station", tags=["ground-station"])
-
-
-@router.get("/network")
-async def get_ground_station_network() -> dict[str, Any]:
-    """Network uplinks view.
-
-    Covers all four uplinks (wifi_client, ethernet, modem_4g) plus the
-    active_uplink + priority surfaced by UplinkRouter and the
-    share_uplink flag.
-
-    The active_uplink leg reads the durable store first: the native
-    ``ados-net`` daemon owns the failover loop and ships its selected uplink as
-    a ``net.uplink_active`` event, while the in-FastAPI-process router singleton
-    never ticks (its ``active_uplink`` is dead-on-read). On a store gap this
-    falls back to the live in-process view, so the leg never 500s. The priority
-    list stays the live config-file read, and the ap / wifi_client / ethernet /
-    modem_4g / share_uplink legs are unchanged live probes.
-    """
-    app = _gs._require_ground_profile()
-    router_view = _gs._router_state_view()
-    store = await latest_uplink_active()
-    active_uplink = (
-        store.get("active_uplink")
-        if store is not None
-        else router_view["active_uplink"]
-    )
-    return {
-        "ap": _gs._ap_view(app),
-        "wifi_client": await _gs._wifi_client_view(),
-        "ethernet": await _gs._ethernet_view(),
-        "modem_4g": await _gs._modem_view(),
-        "active_uplink": active_uplink,
-        "priority": router_view["priority"],
-        "share_uplink": _gs._load_share_uplink_flag(),
-    }
 
 
 @router.put("/network/ap")
@@ -105,19 +68,6 @@ async def put_ground_station_ap(update: ApUpdate) -> dict[str, Any]:
         _gs._save_config(app)
 
     return _gs._ap_view(app)
-
-
-@router.get("/network/ethernet")
-async def get_network_ethernet() -> dict[str, Any]:
-    """Return the configured Ethernet profile plus live link state."""
-    _gs._require_ground_profile()
-    try:
-        return await _gs._ethernet_mgr().config()
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail={"error": {"code": "E_ETHERNET_CONFIG_READ_FAILED", "message": str(exc)}},
-        ) from exc
 
 
 @router.put("/network/ethernet")
@@ -178,20 +128,6 @@ async def put_network_ethernet(update: EthernetConfigUpdate) -> dict[str, Any]:
         return await mgr.config()
     except Exception:
         return {"mode": update.mode, "applied": True}
-
-
-@router.get("/network/client/scan")
-async def get_network_client_scan() -> dict[str, Any]:
-    """Scan for nearby WiFi networks via nmcli."""
-    _gs._require_ground_profile()
-    try:
-        networks = await _gs._wifi_client_manager().scan(timeout_s=10)
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail={"error": {"code": "E_WIFI_SCAN_FAILED", "message": str(exc)}},
-        ) from exc
-    return {"networks": networks or []}
 
 
 @router.put("/network/client/join")
@@ -288,13 +224,6 @@ async def delete_network_client() -> dict[str, Any]:
         ) from exc
 
 
-@router.get("/network/modem")
-async def get_network_modem() -> dict[str, Any]:
-    """Return modem status + data usage + configured cap."""
-    _gs._require_ground_profile()
-    return await _gs._modem_view()
-
-
 @router.put("/network/modem")
 async def put_network_modem(update: ModemConfigUpdate) -> dict[str, Any]:
     """Update modem config (apn, cap_gb / cap_mb, enabled). Returns refreshed view.
@@ -319,39 +248,6 @@ async def put_network_modem(update: ModemConfigUpdate) -> dict[str, Any]:
             detail={"error": {"code": "E_MODEM_CONFIGURE_FAILED", "message": str(exc)}},
         ) from exc
     return await _gs._modem_view()
-
-
-@router.get("/network/priority")
-async def get_network_priority() -> dict[str, Any]:
-    """Return the current uplink priority list."""
-    _gs._require_ground_profile()
-    try:
-        priority = list(_gs._uplink_router().get_priority())
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail={"error": {"code": "E_UPLINK_PRIORITY_FAILED", "message": str(exc)}},
-        ) from exc
-    return {"priority": priority}
-
-
-@router.put("/network/priority")
-async def put_network_priority(update: UplinkPriorityUpdate) -> dict[str, Any]:
-    """Set the uplink priority list. Router persists to its own JSON."""
-    _gs._require_ground_profile()
-    try:
-        _gs._uplink_router().set_priority(list(update.priority))
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail={"error": {"code": "E_UPLINK_PRIORITY_INVALID", "message": str(exc)}},
-        ) from exc
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail={"error": {"code": "E_UPLINK_PRIORITY_FAILED", "message": str(exc)}},
-        ) from exc
-    return {"priority": list(_gs._uplink_router().get_priority())}
 
 
 @router.put("/network/share_uplink")

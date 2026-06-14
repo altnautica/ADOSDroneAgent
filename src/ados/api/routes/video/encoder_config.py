@@ -142,15 +142,12 @@ def _hop_supervisor_snapshot(app: Any) -> dict[str, Any] | None:
     return _read_state_file(str(HOP_SUPERVISOR_JSON))
 
 
-@router.get("/video/config")
 async def get_video_config() -> dict[str, Any]:
     """Live snapshot of the adaptive bitrate + FEC + radio config.
 
-    Combines the static wfb config (channel, mcs, fec_k/fec_n
-    persisted to /etc/ados/config.yaml) with the dynamic ladder
-    state from the BitrateController. Shape is stable enough that
-    the GCS Video Link panel can render its sparklines without a
-    schema migration when an additional metric is added.
+    Served natively by the front; retained here as the helper the
+    config-write path and the package re-export call to read the
+    current config back.
     """
     app = get_agent_app()
     cfg = app.config
@@ -187,11 +184,6 @@ async def get_video_config() -> dict[str, Any]:
     if snap is not None:
         adaptive.update(snap)
 
-    # Hop supervisor snapshot: drone-side periodic + reactive
-    # frequency hopper. Drives the GCS ChannelHistoryChart.
-    # Falls back to a minimal stub on incapable rigs (e.g. GS
-    # profile, which spawns the listener only, no supervisor)
-    # so the GCS chart can render an "armed but quiet" state.
     hop_snap = _hop_supervisor_snapshot(app)
     if hop_snap is None:
         hopping = {
@@ -210,10 +202,6 @@ async def get_video_config() -> dict[str, Any]:
     else:
         hopping = hop_snap
 
-    # Live radio-link liveness block. The GCS Video Link panel polls
-    # only this endpoint and reads config.link.* to drive its liveness
-    # UI (throughput, valid-decode rate, channel lock, acquisition
-    # state). Without this block the panel renders dead.
     link = _link_snapshot(app, wfb_cfg)
 
     return {
