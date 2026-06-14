@@ -82,7 +82,7 @@ pub async fn get_status(State(state): State<AppState>) -> Json<Value> {
     let health = derive_health(signals.as_ref());
     let board = read_board(&state.board_path);
 
-    Json(json!({
+    let mut body = json!({
         "version": state.agent_version,
         "uptime_seconds": uptime,
         "board": board,
@@ -91,7 +91,19 @@ pub async fn get_status(State(state): State<AppState>) -> Json<Value> {
         "fc_port": fc_port,
         "fc_baud": fc_baud,
         "dependencies": Value::Object(dependencies),
-    }))
+    });
+
+    // Fold in the camera presence + USB-recovery keys (the same `cameraState` /
+    // `cameraUsbRecovery` the cloud heartbeat and the consolidated status carry),
+    // present only when their sidecars are fresh + valid. Mirrors the FastAPI
+    // status route folding `_read_camera_status()` into the body.
+    if let Some(obj) = body.as_object_mut() {
+        for (key, value) in crate::routes::status_full::read_camera_status() {
+            obj.insert(key, value);
+        }
+    }
+
+    Json(body)
 }
 
 /// `GET /api/telemetry` → the vehicle-state dict from the live snapshot, with the

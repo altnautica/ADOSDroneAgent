@@ -1333,8 +1333,9 @@ const CAMERA_RECOVERY_FRESH_S: f64 = 60.0;
 ///
 /// Reads `/run/ados/camera-state.json` (the `cameraState` enum) and
 /// `/run/ados/camera-usb-recovery.json` (the recovery block), staleness-gated on
-/// each sidecar's `updated_at_unix`. Mirrors `_read_camera_status`.
-fn read_camera_status() -> Vec<(String, Value)> {
+/// each sidecar's `updated_at_unix`. Mirrors `_read_camera_status`. Shared with
+/// the `/api/status` route, which folds the same camera keys into its body.
+pub(crate) fn read_camera_status() -> Vec<(String, Value)> {
     read_camera_status_in(&run_dir(), now_unix_secs())
 }
 

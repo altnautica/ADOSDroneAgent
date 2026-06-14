@@ -38,6 +38,12 @@ import httpx
 # response is not misread as unreachable; the native front answers these in ms.
 DEFAULT_TIMEOUT_S = 10.0
 
+# The residual FastAPI's rate limiter can 429 the harness's rapid back-to-back
+# probes (a throttle, not a parity signal). Retry a 429 a few times with a short
+# escalating backoff so the comparison sees the handler's real response.
+_RATE_LIMIT_RETRIES = 4
+_RATE_LIMIT_BACKOFF_S = 0.5
+
 # How many SSE frames a streaming read collects before it returns, and the hard
 # wall-clock deadline for collecting them (so a quiet stream returns what it has
 # rather than blocking to the per-request timeout repeatedly).
@@ -92,8 +98,17 @@ def _do_request(
     req_headers.setdefault("host", _FIXED_HOST)
     if content_type and body is not None:
         req_headers.setdefault("content-type", content_type)
+    # The residual FastAPI carries a per-client rate limiter; the harness probes
+    # every route in quick succession on one connection, so it can trip a 429 the
+    # native front (which serves these routes itself) never emits. A 429 is a
+    # transient throttle, not a parity signal — back off briefly and retry so the
+    # comparison sees the real handler response.
     try:
-        resp = client.request(method, path, headers=req_headers, content=body)
+        for attempt in range(_RATE_LIMIT_RETRIES):
+            resp = client.request(method, path, headers=req_headers, content=body)
+            if resp.status_code != 429 or attempt == _RATE_LIMIT_RETRIES - 1:
+                break
+            time.sleep(_RATE_LIMIT_BACKOFF_S * (attempt + 1))
     except (httpx.HTTPError, OSError) as exc:
         return Probe(ok=False, error=f"{type(exc).__name__}: {exc}")
     return Probe(

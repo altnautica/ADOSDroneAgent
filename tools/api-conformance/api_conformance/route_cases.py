@@ -26,6 +26,54 @@ from dataclasses import dataclass, field
 # faithful (an Authorization header is present) without embedding a secret.
 PAIRED_AUTH_PLACEHOLDER = "Bearer <api-key>"
 
+# The live-flight telemetry leaves that move every read whenever a vehicle is
+# connected: the IMU/attitude, battery, position, velocity, and GPS readings the
+# FC streams, plus the telemetry-frame timestamps and the IPC drop tally. With no
+# FC (e.g. a ground station) these are static zeros and compare clean; with a live
+# FC they drift between the two separate reads, so the routes carrying the vehicle
+# snapshot mask them. The stable scalars (armed, mode, mav_type, the param cache)
+# are left to compare — the structural contract is what the two handlers must
+# agree on. Scoped to the telemetry-bearing cases (not global) because some of
+# these names are generic; the FC param keys are uppercase and never collide.
+_TELEMETRY_VOLATILE: tuple[str, ...] = (
+    # attitude
+    "pitch",
+    "roll",
+    "yaw",
+    "rollspeed",
+    "pitchspeed",
+    "yawspeed",
+    # battery
+    "voltage",
+    "current",
+    "cell_voltages",
+    "remaining",
+    "temperature",
+    # position
+    "lat",
+    "lon",
+    "alt",
+    "alt_rel",
+    "relative_alt",
+    "heading",
+    # velocity
+    "vx",
+    "vy",
+    "vz",
+    "groundspeed",
+    "airspeed",
+    "climb",
+    # gps
+    "eph",
+    "epv",
+    "fix_type",
+    "satellites",
+    # telemetry-frame timestamps + IPC drop tally
+    "last_heartbeat",
+    "last_update",
+    "ipc_mavlink_drops",
+)
+
 
 @dataclass(frozen=True)
 class RouteCase:
@@ -109,6 +157,7 @@ REGISTRY: list[RouteCase] = [
         method="GET",
         path="/api/telemetry",
         paired_headers={"authorization": PAIRED_AUTH_PLACEHOLDER},
+        extra_volatile=_TELEMETRY_VOLATILE,
     ),
     # Pairing info: what an unpaired agent advertises to a claimer on the LAN.
     # Read freely while unpaired (being on the LAN is the auth boundary).
@@ -306,7 +355,8 @@ REGISTRY: list[RouteCase] = [
             # Camera USB-recovery attempt counters.
             "attempts",
             "maxAttempts",
-        ),
+        )
+        + _TELEMETRY_VOLATILE,
     ),
     # Video glass-to-glass latency. The latency / ewma / pipeline readings and the
     # sample count move every read (the SEI probe keeps sampling), so they are
