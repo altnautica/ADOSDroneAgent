@@ -30,9 +30,7 @@ from fastapi import FastAPI  # noqa: E402
 
 from ados import __version__  # noqa: E402
 from ados.api.routes import (  # noqa: E402
-    commands,
     config,
-    fleet,
     ground_station,
     logs,
     ota,
@@ -41,9 +39,6 @@ from ados.api.routes import (  # noqa: E402
     peripherals,
     peripherals_v1,
     plugins,
-    services,
-    signing,
-    status,
     system,
     version,
     video,
@@ -65,10 +60,7 @@ def build_spec_app() -> FastAPI:
     # Middlewares are intentionally left off; they do not affect the
     # OpenAPI surface.
     app.include_router(version.router, prefix="/api")
-    app.include_router(status.router, prefix="/api")
-    app.include_router(services.router, prefix="/api")
     app.include_router(params.router, prefix="/api")
-    app.include_router(commands.router, prefix="/api")
     app.include_router(config.router, prefix="/api")
     app.include_router(logs.router, prefix="/api")
     app.include_router(video.router, prefix="/api")
@@ -78,10 +70,8 @@ def build_spec_app() -> FastAPI:
     app.include_router(system.router, prefix="/api")
     app.include_router(peripherals.router, prefix="/api")
     app.include_router(peripherals_v1.router, prefix="/api")
-    app.include_router(fleet.router, prefix="/api")
     app.include_router(vision_models.router, prefix="/api")
     app.include_router(ground_station.router, prefix="/api")
-    app.include_router(signing.router, prefix="/api")
     app.include_router(plugins.router, prefix="/api")
 
     return app

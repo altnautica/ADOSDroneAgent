@@ -35,7 +35,6 @@ from ados.api.routes.ground_station.modem import router as _modem_router
 from ados.api.routes.ground_station.network import router as _network_router
 from ados.api.routes.ground_station.pairing import router as _pairing_router
 from ados.api.routes.ground_station.recording import router as _recording_router
-from ados.api.routes.ground_station.status import router as _status_router
 from ados.api.routes.ground_station.ui import router as _ui_router
 from ados.api.routes.ground_station.wfb import router as _wfb_router
 
@@ -62,7 +61,6 @@ def _paired_drone_camera_count() -> int:
 
 
 router = APIRouter()
-router.include_router(_status_router)
 router.include_router(_wfb_router)
 router.include_router(_network_router)
 router.include_router(_ui_router)

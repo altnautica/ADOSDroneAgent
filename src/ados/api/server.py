@@ -15,12 +15,10 @@ from ados.api.deps import set_agent_app
 from ados.api.middleware.auth import ApiKeyAuthMiddleware
 from ados.api.routes import (
     can,
-    commands,
     config,
     dashboard,
     diagnostics,
     display,
-    fleet,
     ground_station,
     logs,
     network,
@@ -31,10 +29,7 @@ from ados.api.routes import (
     peripherals,
     peripherals_v1,
     plugins,
-    services,
     setup,
-    signing,
-    status,
     system,
     version,
     video,
@@ -105,10 +100,7 @@ def create_app(agent: Any) -> FastAPI:
 
     # Mount routes
     app.include_router(version.router, prefix="/api")
-    app.include_router(status.router, prefix="/api")
-    app.include_router(services.router, prefix="/api")
     app.include_router(params.router, prefix="/api")
-    app.include_router(commands.router, prefix="/api")
     app.include_router(config.router, prefix="/api")
     app.include_router(logs.router, prefix="/api")
     # Reverse-proxy bridge to the local logging and telemetry store's query
@@ -128,7 +120,6 @@ def create_app(agent: Any) -> FastAPI:
     # Peripheral Manager plugin registry. Lives alongside the legacy
     # /api/peripherals hardware scan route.
     app.include_router(peripherals_v1.router, prefix="/api")
-    app.include_router(fleet.router, prefix="/api")
     app.include_router(vision_models.router, prefix="/api")
     # Live vision-detection WebSocket bridge. Forwards the engine's
     # detection-batch broadcast socket to the browser as JSON.
@@ -140,9 +131,6 @@ def create_app(agent: Any) -> FastAPI:
     # common case via CAN_FRAME / CANFD_FRAME / CAN_FILTER_MODIFY
     # passthrough plus the CAN_FORWARD command.
     app.include_router(can.router, prefix="/api")
-    # MAVLink v2 message signing: capability + one-shot FC enrollment.
-    # Agent holds no key material; key lives in the GCS browser.
-    app.include_router(signing.router, prefix="/api")
     # Plugin lifecycle: install / enable / disable / remove.
     app.include_router(plugins.router, prefix="/api")
 
