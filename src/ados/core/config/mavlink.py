@@ -27,6 +27,14 @@ class MavlinkConfig(BaseModel):
     endpoints: list[EndpointConfig] = Field(default_factory=lambda: [
         EndpointConfig(type="websocket", port=8765, enabled=True),
     ])
+    # When true, the raw MAVLink WebSocket proxy rejects an off-box connection
+    # from a paired agent that presents no valid pairing key (the on-box and
+    # unpaired paths stay open). The native router reads this same key from the
+    # written config; declaring it here keeps it from being stripped on a config
+    # rewrite and lets it be set through the authenticated config surface. Off by
+    # default: the proxy logs an unauthorized connection but still admits it, so
+    # enabling enforcement is an explicit, deliberate step.
+    ws_proxy_enforce_auth: bool = False
 
     @model_validator(mode="before")
     @classmethod

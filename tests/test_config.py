@@ -142,6 +142,18 @@ def test_mavlink_endpoints_default():
     assert cfg.mavlink.endpoints[0].port == 8765
 
 
+def test_ws_proxy_enforce_auth_defaults_off_and_round_trips():
+    """The WS-proxy auth-enforcement flag defaults off and survives a round trip
+    through the config model (so it is not stripped and can be set the sanctioned
+    way rather than hand-editing the on-disk config)."""
+    assert ADOSConfig().mavlink.ws_proxy_enforce_auth is False
+    with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+        yaml.safe_dump({"mavlink": {"ws_proxy_enforce_auth": True}}, f)
+        path = f.name
+    cfg = load_config(path)
+    assert cfg.mavlink.ws_proxy_enforce_auth is True
+
+
 def test_security_defaults():
     """Security defaults should be reasonable."""
     cfg = ADOSConfig()
