@@ -154,6 +154,21 @@ pub fn parse_neighbor_reachable(text: &str) -> bool {
     false
 }
 
+/// Whether to confirm a passive "gateway unreachable" with an active ping. A
+/// passive neighbour-cache read reports a stale or absent entry as unreachable
+/// even when the gateway answers; on an otherwise-up link (carrier + lease) that
+/// is exactly the false-negative an active probe resolves, so the guardian is
+/// not pinned in `Degraded` after its own repair churns the neighbour entry with
+/// no traffic to re-resolve it. A down link (no carrier / no lease) is `Down`
+/// regardless and needs no probe. Pure.
+pub fn should_active_probe_gateway(
+    passive_reachable: bool,
+    carrier: bool,
+    has_lease: bool,
+) -> bool {
+    !passive_reachable && carrier && has_lease
+}
+
 /// True when a kernel driver name denotes the WFB injection adapter (a
 /// Realtek monitor-mode radio), which is never a management link. Lower-cased
 /// compare; matches the radio adapter selection's compatible-driver set. Pure.
@@ -271,18 +286,43 @@ pub async fn collect_signals(iface: &str) -> LinkSignals {
             Some(o) => parse_gateway(&o),
             None => None,
         };
-    let gateway_reachable = match gateway {
-        Some(g) => match super::run_output("ip", &["neighbor", "show", &g, "dev", iface]).await {
+    // Passive neighbour-cache read first (cheap, generates no traffic).
+    let passive_reachable = match &gateway {
+        Some(g) => match super::run_output("ip", &["neighbor", "show", g, "dev", iface]).await {
             Some(o) => parse_neighbor_reachable(&o),
             None => false,
         },
         None => false,
+    };
+    // A passive "unreachable" on an otherwise-up link is the stale/absent-ARP
+    // false-negative that can pin the guardian in Degraded after its own repair
+    // churned the neighbour entry with no traffic to re-resolve it. Confirm with
+    // one active, interface-bound ping (which forces ARP re-resolution) before
+    // trusting the passive verdict.
+    let gateway_reachable = if should_active_probe_gateway(passive_reachable, carrier, has_lease) {
+        match &gateway {
+            Some(g) => active_gateway_probe(iface, g).await,
+            None => false,
+        }
+    } else {
+        passive_reachable
     };
     LinkSignals {
         carrier,
         has_lease,
         gateway_reachable,
     }
+}
+
+/// Actively confirm gateway reachability with a single interface-bound ping.
+/// Forces ARP (re-)resolution so a stale or absent neighbour cache cannot report
+/// a live gateway as dead — the false-negative that otherwise pins the guardian
+/// in `Degraded` after a repair churns the neighbour entry. One ICMP echo with a
+/// 1 s timeout; false when ping is unavailable or the gateway stays silent.
+/// Read-only with respect to configuration.
+#[cfg(target_os = "linux")]
+async fn active_gateway_probe(iface: &str, gateway: &str) -> bool {
+    super::run_status("ping", &["-c", "1", "-W", "1", "-I", iface, gateway]).await
 }
 
 /// The interface carrying the kernel default route, or `None`. Read-only.
@@ -430,6 +470,17 @@ mod tests {
             "192.168.200.1 dev eth0 lladdr aa:bb:cc:dd:ee:ff FAILED\n"
         ));
         assert!(!parse_neighbor_reachable(""));
+    }
+
+    #[test]
+    fn active_probe_only_on_up_link_with_passive_miss() {
+        // Stale/absent-ARP false-negative on an up link → confirm actively.
+        assert!(should_active_probe_gateway(false, true, true));
+        // Passive already reachable → no active probe needed.
+        assert!(!should_active_probe_gateway(true, true, true));
+        // A down link (no carrier or no lease) is Down regardless → no probe.
+        assert!(!should_active_probe_gateway(false, false, true));
+        assert!(!should_active_probe_gateway(false, true, false));
     }
 
     #[test]
