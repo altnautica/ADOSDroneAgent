@@ -38,6 +38,9 @@ fn default_endpoint_enabled() -> bool {
 fn default_endpoints() -> Vec<EndpointConfig> {
     vec![EndpointConfig::default()]
 }
+fn default_ws_proxy_enforce_auth() -> bool {
+    false
+}
 
 /// A network entry point. v1 ships only the `websocket` type.
 #[derive(Debug, Clone, Deserialize)]
@@ -76,6 +79,13 @@ pub struct MavlinkConfig {
     pub component_id: u8,
     #[serde(default = "default_endpoints")]
     pub endpoints: Vec<EndpointConfig>,
+    /// When true, the direct-GCS WebSocket proxy rejects a paired-agent
+    /// connection from an off-box peer that does not present the stored pairing
+    /// key. When false (the default), an unauthorized connection is logged but
+    /// still admitted, so the data-path behaviour is unchanged until a bench
+    /// session enables enforcement.
+    #[serde(default = "default_ws_proxy_enforce_auth")]
+    pub ws_proxy_enforce_auth: bool,
 }
 
 impl Default for MavlinkConfig {
@@ -86,6 +96,7 @@ impl Default for MavlinkConfig {
             system_id: default_system_id(),
             component_id: default_component_id(),
             endpoints: default_endpoints(),
+            ws_proxy_enforce_auth: default_ws_proxy_enforce_auth(),
         }
     }
 }
@@ -190,5 +201,24 @@ mod tests {
         );
         let c = MavlinkConfig::load_from(&cfg);
         assert_eq!(c.websocket_port(), None);
+    }
+
+    #[test]
+    fn ws_proxy_enforce_auth_defaults_off() {
+        let dir = tempfile::tempdir().unwrap();
+        // Missing file, and a config that omits the flag, both default to off so
+        // an un-upgraded config never starts enforcing.
+        assert!(!MavlinkConfig::load_from(&dir.path().join("nope.yaml")).ws_proxy_enforce_auth);
+        let cfg = dir.path().join("config.yaml");
+        write(&cfg, "mavlink:\n  serial_port: /dev/ttyACM0\n");
+        assert!(!MavlinkConfig::load_from(&cfg).ws_proxy_enforce_auth);
+    }
+
+    #[test]
+    fn ws_proxy_enforce_auth_reads_explicit_true() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        write(&cfg, "mavlink:\n  ws_proxy_enforce_auth: true\n");
+        assert!(MavlinkConfig::load_from(&cfg).ws_proxy_enforce_auth);
     }
 }

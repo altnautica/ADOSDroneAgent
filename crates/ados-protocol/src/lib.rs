@@ -25,6 +25,9 @@
 //!   `[[method]]` section of `capabilities.toml`).
 //! - [`wfb_tables`] — the generated WFB adapter classification and
 //!   management-WiFi deny-set tables (source of truth is `wfb-adapters.toml`).
+//! - [`pairing_posture`] — the data-plane auth primitives (pairing-state read,
+//!   constant-time key compare, on-box loopback trust, access decision) shared
+//!   by the native HTTP control surface and the direct MAVLink WebSocket proxy.
 
 pub mod capabilities;
 pub mod dispatch;
@@ -35,6 +38,7 @@ pub mod ipc;
 pub mod logd;
 #[cfg(feature = "mavlink")]
 pub mod mavlink;
+pub mod pairing_posture;
 pub mod plugin;
 pub mod rest;
 pub mod state;

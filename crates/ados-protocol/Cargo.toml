@@ -28,6 +28,10 @@ rust_mavlink = { package = "mavlink", version = "0.13", default-features = false
 tracing = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 
+[dev-dependencies]
+# Temp directories for the pairing-posture file-reader tests.
+tempfile = "3"
+
 [features]
 default = []
 # Enable the MAVLink codec module (ardupilotmega dialect).

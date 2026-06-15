@@ -20,7 +20,7 @@ use tokio::sync::{Mutex, Notify};
 use ados_mavlink_router::config::MavlinkConfig;
 use ados_mavlink_router::connection::FcConnection;
 use ados_mavlink_router::param_cache::ParamCache;
-use ados_mavlink_router::proxies::{run_tcp_proxy, run_udp_proxy, run_ws_proxy};
+use ados_mavlink_router::proxies::{run_tcp_proxy, run_udp_proxy, run_ws_proxy, WsProxyAuth};
 use ados_mavlink_router::state::VehicleState;
 
 const MAVLINK_QUEUE_DEPTH: usize = 256;
@@ -318,8 +318,13 @@ async fn main() {
     if let Some(ws_port) = ws_proxy_port(&cfg) {
         let fc = fc.clone();
         let cancel = cancel.clone();
+        // The direct WebSocket proxy carries raw MAVLink to/from the FC, so a
+        // paired agent gates an off-box connection on the stored pairing key.
+        // Enforcement is config-driven and defaults off (observe-only), so this
+        // build does not change the data path until a bench session enables it.
+        let auth = WsProxyAuth::from_config(cfg.ws_proxy_enforce_auth);
         tasks.push(tokio::spawn(async move {
-            run_ws_proxy(fc, ws_port, cancel).await
+            run_ws_proxy(fc, ws_port, auth, cancel).await
         }));
     }
 
