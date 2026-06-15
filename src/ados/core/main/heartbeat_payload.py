@@ -328,6 +328,21 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
         ),
     }
 
+    # Authenticated MAVLink WebSocket bridge, served by the front on the
+    # API port. Distinct from the raw, unauthenticated ``mavlinkWs``
+    # listener above: this endpoint enforces the pairing-keyed ticket
+    # flow. The gated bridge exists only on the ground-station profile,
+    # so advertise it there and leave it absent on drone/compute nodes
+    # (the GCS never dials a route that would 404). Resolve through the
+    # same source of truth the node advertises on the wire.
+    from ados.core.profile import current_profile_and_role
+
+    _hb_profile, _hb_role = current_profile_and_role(app.config)
+    if _hb_profile == "ground-station" and local_ip:
+        manual_connection_urls["mavlinkWsAuthenticated"] = (
+            f"ws://{local_ip}:8080/api/v1/ground-station/ws/mavlink"
+        )
+
     # Cloud relay = MQTT-to-Convex pair. Cloudflare = inbound tunnel.
     # These are distinct concepts. The GCS used to conflate them
     # under a single "Remote" label; surface them separately here

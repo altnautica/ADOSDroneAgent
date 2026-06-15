@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from ados import __version__
+from ados.core.profile import current_profile_and_role
 from ados.setup.hardware_check import run_hardware_check
 from ados.setup.models import (
     MavlinkAccess,
@@ -19,6 +20,13 @@ from ados.setup.models import (
 from ados.setup.profile import build_profile_suggestion
 from ados.setup.state import read_state, record_ever_complete
 from ados.setup.state_machine import _setup_steps
+
+# Request path of the authenticated MAVLink WebSocket bridge on the
+# ground-station profile (router prefix ``/v1/ground-station`` mounted
+# under ``/api`` + the ``/ws/mavlink`` endpoint). The raw unauthenticated
+# ``websocket_url`` points at the port-8765 listener; this gated endpoint
+# enforces the pairing-keyed ticket flow on the front's API port.
+_GS_MAVLINK_WS_PATH = "/api/v1/ground-station/ws/mavlink"
 
 from ._access_urls import _access_urls, _mission_control_url, _video_access
 from ._cloud_actions import _cloud_choice_status
@@ -93,6 +101,18 @@ async def build_setup_status(  # noqa: C901
         rssi_dbm=rssi_dbm,
         ip_addresses=_local_ip_addresses(),
     )
+    # The authenticated WS bridge only exists on the ground-station
+    # profile; advertise it there and leave it null on drone/compute so
+    # the GCS never dials a route that 404s. Resolve through the same
+    # source of truth the node advertises on the wire (an auto-installed
+    # ground station carries "auto" in the config field but resolves to
+    # "ground-station").
+    resolved_profile, _resolved_role = current_profile_and_role(config)
+    auth_ws_path: str | None = None
+    auth_ws_url: str | None = None
+    if resolved_profile == "ground-station":
+        auth_ws_path = _GS_MAVLINK_WS_PATH
+        auth_ws_url = f"ws://{lan_host}:{port}{_GS_MAVLINK_WS_PATH}"
     mavlink = MavlinkAccess(
         connected=fc.connected,
         port=str(fc.port or ""),
@@ -100,6 +120,8 @@ async def build_setup_status(  # noqa: C901
         websocket_url=mavlink_url,
         public_websocket_url=config.remote_access.cloudflare.mavlink_ws_url or None,
         tcp_url=mavlink_tcp_url,
+        authenticated_websocket_path=auth_ws_path,
+        authenticated_websocket_url=auth_ws_url,
     )
     if video.public_whep_url is None and config.remote_access.cloudflare.video_whep_url:
         video.public_whep_url = config.remote_access.cloudflare.video_whep_url

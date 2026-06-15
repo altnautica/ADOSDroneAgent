@@ -56,6 +56,16 @@ class MavlinkAccess(BaseModel):
     # The GCS can dial this without the WebSocket adapter when a desktop
     # GCS (Mission Planner, QGroundControl) is on the same LAN.
     tcp_url: str | None = None
+    # Authenticated MAVLink WebSocket bridge served by the front on the
+    # API port. Unlike ``websocket_url`` (a raw, unauthenticated port-8765
+    # listener), this endpoint enforces the pairing-keyed ticket flow.
+    # Populated only on the ground-station profile, where the gated bridge
+    # exists; null/absent on drone and compute nodes. The GCS prefers it
+    # when present. ``authenticated_websocket_path`` is the request path on
+    # the agent's API surface; ``authenticated_websocket_url`` is the full
+    # LAN-routable URL clients elsewhere on the LAN can dial.
+    authenticated_websocket_path: str | None = None
+    authenticated_websocket_url: str | None = None
 
 
 class NetworkStatus(BaseModel):

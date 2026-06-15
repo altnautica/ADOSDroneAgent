@@ -29,6 +29,39 @@ def test_extract_cloudflare_token_rejects_missing_token() -> None:
         extract_cloudflare_token("sudo cloudflared service install")
 
 
+# --- authenticated MAVLink WS advertisement (ground-station only) ------------
+
+
+from ados.setup.models import MavlinkAccess  # noqa: E402
+from ados.setup.service._status import _GS_MAVLINK_WS_PATH  # noqa: E402
+
+
+def test_mavlink_access_authenticated_ws_fields_default_absent() -> None:
+    """A bare MavlinkAccess (drone/compute) carries no authenticated WS
+    endpoint, and the legacy raw listener field is untouched."""
+    mav = MavlinkAccess(websocket_url="ws://host:8765/")
+    assert mav.authenticated_websocket_path is None
+    assert mav.authenticated_websocket_url is None
+    assert mav.websocket_url == "ws://host:8765/"
+
+
+def test_mavlink_access_authenticated_ws_fields_populated() -> None:
+    """When advertised on a ground station, the gated endpoint sits
+    alongside the legacy raw listener without replacing it."""
+    mav = MavlinkAccess(
+        websocket_url="ws://10.0.0.5:8765/",
+        authenticated_websocket_path=_GS_MAVLINK_WS_PATH,
+        authenticated_websocket_url=f"ws://10.0.0.5:8080{_GS_MAVLINK_WS_PATH}",
+    )
+    assert mav.authenticated_websocket_path == "/api/v1/ground-station/ws/mavlink"
+    assert (
+        mav.authenticated_websocket_url
+        == "ws://10.0.0.5:8080/api/v1/ground-station/ws/mavlink"
+    )
+    # Legacy unauthenticated listener is preserved.
+    assert mav.websocket_url == "ws://10.0.0.5:8765/"
+
+
 # --- host-header validation ---------------------------------------------------
 
 
