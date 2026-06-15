@@ -37,7 +37,6 @@ from ados.api.routes import (
     vision_models,
     wfb,
     whep,
-    ws_tickets,
 )
 from ados.api.runtime import ensure_api_runtime
 
@@ -134,11 +133,10 @@ def create_app(agent: Any) -> FastAPI:
     # Plugin lifecycle: install / enable / disable / remove.
     app.include_router(plugins.router, prefix="/api")
 
-    # Unified one-shot ticket mint for WebSocket auth. Browsers cannot
-    # set ``X-ADOS-Key`` on a handshake; they exchange the pairing key
-    # for a short-lived ticket here and present it as a WebSocket
-    # subprotocol on connect.
-    app.include_router(ws_tickets.router, prefix="/api")
+    # The WebSocket-auth ticket mint (POST /api/_ws/ticket) is served by the
+    # native control surface; the residual WebSocket routes verify the
+    # self-contained HMAC ticket via ados.core.ws_ticket, so there is no Python
+    # mint to register here.
 
     # WHEP reverse-proxy mounted at root (no /api prefix) so WebRTC
     # clients reach the offer/answer exchange at the same host:port as

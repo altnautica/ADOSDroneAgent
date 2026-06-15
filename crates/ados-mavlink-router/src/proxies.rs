@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use ados_protocol::pairing_posture::{
     data_plane_access, is_on_box, load_pairing, Access, Pairing, FORWARDED_HEADERS,
 };
+use ados_protocol::ws_ticket::{now_unix, WsTicketIssuer, SCOPE_MAVLINK_WS};
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
@@ -25,6 +26,7 @@ use tokio::sync::{Mutex, Notify};
 use tokio_tungstenite::tungstenite::handshake::server::{
     ErrorResponse, Request as HandshakeRequest, Response as HandshakeResponse,
 };
+use tokio_tungstenite::tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL;
 use tokio_tungstenite::tungstenite::http::{HeaderValue, StatusCode};
 use tokio_tungstenite::tungstenite::Message;
 
@@ -33,6 +35,13 @@ use crate::connection::FcConnection;
 /// The data-path auth header a paired GCS presents to the direct WebSocket
 /// proxy, matching the HTTP control surface's `X-ADOS-Key`.
 const WS_KEY_HEADER: &str = "x-ados-key";
+
+/// The WebSocket subprotocol marker carrying an auth ticket, for a browser GCS
+/// that cannot set `X-ADOS-Key` on the handshake: it dials
+/// `new WebSocket(url, ["ados-ws-ticket", <token>])`. The agent echoes the
+/// marker back on the accepted handshake per RFC 6455. Matches the GCS
+/// `WS_TICKET_PROTOCOL` and the Python `ws_auth.WS_TICKET_PROTOCOL`.
+const WS_TICKET_SUBPROTOCOL: &str = "ados-ws-ticket";
 
 /// How long a loaded pairing state is trusted before `pairing.json` is re-read.
 /// Short enough that a pair/unpair is honoured for a new connection within a few
@@ -118,23 +127,74 @@ impl WsProxyAuth {
         data_plane_access(&self.current(), on_box, presented_key)
     }
 
+    /// Whether the offered WebSocket subprotocols carry a valid `gs.mavlink_ws`
+    /// ticket for the current paired key. A browser cannot set `X-ADOS-Key`, so
+    /// it presents a short-lived HMAC ticket (minted by the native control
+    /// surface, keyed off the same `pairing.json`) through the subprotocol list.
+    /// Always false when unpaired (the unpaired posture already admits, so there
+    /// is nothing to verify against) or when no ticket is offered.
+    fn ticket_valid(&self, offered: &[String]) -> bool {
+        let Pairing::Paired(key) = self.current() else {
+            return false;
+        };
+        let Some(token) = extract_ticket(offered) else {
+            return false;
+        };
+        WsTicketIssuer::from_api_key(&key)
+            .verify(token, SCOPE_MAVLINK_WS, now_unix())
+            .is_ok()
+    }
+
     /// Whether to admit a connection, honouring the two-stage rollout. Returns
     /// `(admit, access)`: when `enforce` is off an unauthorized posture still
     /// admits (`admit = true`) so the caller can log-only; when `enforce` is on
     /// an unauthorized posture rejects (`admit = false`).
+    ///
+    /// A valid ticket in the offered subprotocols promotes an otherwise
+    /// unauthorized (paired + off-box, no/bad key) connection to `Accept` — it is
+    /// an off-box credential equivalent to a valid `X-ADOS-Key`. So a browser GCS
+    /// (ticket) and a native client (header) both authenticate, and the
+    /// `enforce`-on gate is safe to flip for either.
     fn should_admit(
         &self,
         peer_is_loopback: bool,
         has_forwarding_header: bool,
         presented_key: Option<&str>,
+        offered_subprotocols: &[String],
     ) -> (bool, Access) {
-        let access = self.decide(peer_is_loopback, has_forwarding_header, presented_key);
+        let mut access = self.decide(peer_is_loopback, has_forwarding_header, presented_key);
+        if access == Access::Unauthorized && self.ticket_valid(offered_subprotocols) {
+            access = Access::Accept;
+        }
         let admit = match access {
             Access::Accept => true,
             Access::Unauthorized => !self.enforce,
         };
         (admit, access)
     }
+}
+
+/// Pull the ticket value that follows the `ados-ws-ticket` marker in the offered
+/// subprotocol list (`["ados-ws-ticket", "<token>"]`). The token itself is
+/// pipe-delimited and carries no commas, so it survives the comma-split of the
+/// `Sec-WebSocket-Protocol` header intact.
+fn extract_ticket(offered: &[String]) -> Option<&str> {
+    let pos = offered.iter().position(|p| p == WS_TICKET_SUBPROTOCOL)?;
+    offered.get(pos + 1).map(String::as_str)
+}
+
+/// Parse the offered WebSocket subprotocols from the handshake. Values may be
+/// split across multiple `Sec-WebSocket-Protocol` headers and/or comma-joined
+/// within one; flatten both forms.
+fn offered_subprotocols(req: &HandshakeRequest) -> Vec<String> {
+    req.headers()
+        .get_all(SEC_WEBSOCKET_PROTOCOL)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|raw| raw.split(','))
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 /// How long a learned UDP peer survives without an inbound datagram before it
@@ -352,7 +412,7 @@ async fn handle_ws_client(
     let callback_auth = auth.clone();
     let ws = tokio_tungstenite::accept_hdr_async(
         stream,
-        move |req: &HandshakeRequest, response: HandshakeResponse| {
+        move |req: &HandshakeRequest, mut response: HandshakeResponse| {
             let presented = req
                 .headers()
                 .get(WS_KEY_HEADER)
@@ -360,14 +420,26 @@ async fn handle_ws_client(
             let has_forwarding_header = FORWARDED_HEADERS
                 .iter()
                 .any(|h| req.headers().contains_key(*h));
+            let offered = offered_subprotocols(req);
             let (admit, access) = callback_auth.should_admit(
                 peer.ip().is_loopback(),
                 has_forwarding_header,
                 presented,
+                &offered,
             );
             *callback_decision.lock().unwrap_or_else(|p| p.into_inner()) =
                 Some(HandshakeDecision { admit, access });
             if admit {
+                // If the client offered the ticket subprotocol, the server MUST
+                // select one of the offered subprotocols (RFC 6455 §4.2.2) or a
+                // browser handshake fails — echo the marker back. We never echo
+                // the token itself, only the marker.
+                if offered.iter().any(|p| p == WS_TICKET_SUBPROTOCOL) {
+                    response.headers_mut().insert(
+                        SEC_WEBSOCKET_PROTOCOL,
+                        HeaderValue::from_static(WS_TICKET_SUBPROTOCOL),
+                    );
+                }
                 Ok(response)
             } else {
                 let mut err = ErrorResponse::new(Some(
@@ -472,7 +544,7 @@ mod tests {
         let (_d, auth) = unpaired_auth(true);
         // off-box (not loopback), no forwarding header, no key
         assert_eq!(auth.decide(false, false, None), Access::Accept);
-        let (admit, access) = auth.should_admit(false, false, None);
+        let (admit, access) = auth.should_admit(false, false, None, &[]);
         assert!(admit);
         assert_eq!(access, Access::Accept);
     }
@@ -524,7 +596,7 @@ mod tests {
     #[test]
     fn enforce_off_admits_an_unauthorized_connection_for_log_only() {
         let (_d, auth) = paired_auth(false, "ados_secret");
-        let (admit, access) = auth.should_admit(false, false, None);
+        let (admit, access) = auth.should_admit(false, false, None, &[]);
         assert!(
             admit,
             "with enforcement off the connection is still admitted"
@@ -541,7 +613,7 @@ mod tests {
     #[test]
     fn enforce_on_rejects_an_unauthorized_connection() {
         let (_d, auth) = paired_auth(true, "ados_secret");
-        let (admit, access) = auth.should_admit(false, false, None);
+        let (admit, access) = auth.should_admit(false, false, None, &[]);
         assert!(!admit, "with enforcement on the connection is rejected");
         assert_eq!(access, Access::Unauthorized);
     }
@@ -551,10 +623,64 @@ mod tests {
     fn an_authorized_connection_is_admitted_under_either_flag() {
         for enforce in [false, true] {
             let (_d, auth) = paired_auth(enforce, "k");
-            let (admit, access) = auth.should_admit(false, false, Some("k"));
+            let (admit, access) = auth.should_admit(false, false, Some("k"), &[]);
             assert!(admit);
             assert_eq!(access, Access::Accept);
         }
+    }
+
+    // A valid ticket in the offered subprotocols authenticates a paired,
+    // off-box, keyless connection (the browser GCS path) under either flag.
+    #[test]
+    fn a_valid_ticket_admits_off_box_without_a_key() {
+        use ados_protocol::ws_ticket::{WsTicketIssuer, SCOPE_MAVLINK_WS};
+        for enforce in [false, true] {
+            let (_d, auth) = paired_auth(enforce, "ados_secret");
+            let token = WsTicketIssuer::from_api_key("ados_secret")
+                .mint(SCOPE_MAVLINK_WS, 30)
+                .token;
+            let offered = vec!["ados-ws-ticket".to_string(), token];
+            // off-box, no key, but a valid ticket => Accept under either flag.
+            let (admit, access) = auth.should_admit(false, false, None, &offered);
+            assert!(admit, "a valid ticket admits even with enforcement on");
+            assert_eq!(access, Access::Accept);
+        }
+    }
+
+    // A ticket minted for a DIFFERENT key does not authenticate.
+    #[test]
+    fn a_ticket_for_the_wrong_key_is_unauthorized() {
+        use ados_protocol::ws_ticket::{WsTicketIssuer, SCOPE_MAVLINK_WS};
+        let (_d, auth) = paired_auth(true, "ados_secret");
+        let token = WsTicketIssuer::from_api_key("a-different-key")
+            .mint(SCOPE_MAVLINK_WS, 30)
+            .token;
+        let offered = vec!["ados-ws-ticket".to_string(), token];
+        let (admit, access) = auth.should_admit(false, false, None, &offered);
+        assert!(!admit);
+        assert_eq!(access, Access::Unauthorized);
+    }
+
+    // A ticket minted for another scope does not authenticate the MAVLink WS.
+    #[test]
+    fn a_ticket_for_the_wrong_scope_is_unauthorized() {
+        use ados_protocol::ws_ticket::WsTicketIssuer;
+        let (_d, auth) = paired_auth(true, "ados_secret");
+        let token = WsTicketIssuer::from_api_key("ados_secret")
+            .mint("gs.pic_events", 30)
+            .token;
+        let offered = vec!["ados-ws-ticket".to_string(), token];
+        let (admit, _access) = auth.should_admit(false, false, None, &offered);
+        assert!(!admit);
+    }
+
+    #[test]
+    fn extract_ticket_finds_the_value_after_the_marker() {
+        let offered = vec!["ados-ws-ticket".to_string(), "v1|s|1|2|ff".to_string()];
+        assert_eq!(extract_ticket(&offered), Some("v1|s|1|2|ff"));
+        // Marker with no following value, and no marker at all, both yield None.
+        assert_eq!(extract_ticket(&["ados-ws-ticket".to_string()]), None);
+        assert_eq!(extract_ticket(&["mavlink".to_string()]), None);
     }
 
     // A pair/unpair that happens while the proxy runs is honoured for a new

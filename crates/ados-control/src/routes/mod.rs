@@ -40,6 +40,7 @@ pub mod system;
 pub mod video;
 pub mod wfb;
 pub mod wfb_write;
+pub mod ws_ticket;
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -86,6 +87,10 @@ pub fn build_router(state: AppState) -> Router {
         // it to the mavlink socket; the catalog is the static command list.
         .route("/api/command", post(command::execute_command))
         .route("/api/commands", get(command::list_commands))
+        // WebSocket auth ticket mint: exchanges the pairing key (LAN-edge auth)
+        // for a short-lived self-contained HMAC ticket a browser GCS hands to the
+        // MAVLink WS proxy through the subprotocol list.
+        .route("/api/_ws/ticket", post(ws_ticket::mint_ws_ticket))
         // Params: the full cached FC parameter list + the single-param write (a
         // path-param route that builds a PARAM_SET frame and sends it to the FC;
         // the single-param read stays proxied).

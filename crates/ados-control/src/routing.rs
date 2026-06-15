@@ -74,6 +74,8 @@ fn native_routes() -> Vec<NativeRoute> {
         // Command.
         post("/api/command"),
         get("/api/commands"),
+        // WebSocket auth ticket mint.
+        post("/api/_ws/ticket"),
         // Params (full list; the single-param path-param route stays proxied).
         get("/api/params"),
         // Services inventory.
@@ -317,7 +319,7 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            58,
+            59,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);
@@ -385,5 +387,7 @@ mod tests {
         // The original surface stays native.
         assert!(has(Method::GET, "/healthz"));
         assert!(has(Method::POST, "/api/command"));
+        // The WS-ticket mint is native (replaces the proxied Python route).
+        assert!(has(Method::POST, "/api/_ws/ticket"));
     }
 }

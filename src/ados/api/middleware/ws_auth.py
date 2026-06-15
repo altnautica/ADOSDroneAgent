@@ -43,6 +43,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ados.core.logging import get_logger
+from ados.core.ws_ticket import load_pairing_api_key, verify_ticket
 
 log = get_logger("api.ws_auth")
 
@@ -213,13 +214,23 @@ async def authenticate_websocket(
     # WebSocket handshake; the GCS hands the ticket through the
     # subprotocols list instead. Expect at least the marker and one
     # ticket value; ignore any additional entries.
+    #
+    # The unified ``ados-ws-ticket`` marker carries a self-contained
+    # HMAC ticket minted by the native control surface and keyed off
+    # the same pairing key, so it verifies with no shared store. The
+    # legacy ``ados-job-ticket`` marker for the plugin install-job
+    # flow still consumes from the in-process store (the plugin
+    # runtime mints those itself).
     offered = _extract_subprotocols(websocket)
     if len(offered) >= 2:
         marker, ticket_value = offered[0], offered[1]
-        accepted_markers = {WS_TICKET_PROTOCOL}
-        if allow_legacy_job_protocol:
-            accepted_markers.add(WS_JOB_TICKET_PROTOCOL)
-        if marker in accepted_markers:
+        if marker == WS_TICKET_PROTOCOL:
+            pairing_key = load_pairing_api_key()
+            if pairing_key and verify_ticket(
+                ticket_value, expected_scope=scope, api_key=pairing_key
+            ):
+                return marker
+        elif allow_legacy_job_protocol and marker == WS_JOB_TICKET_PROTOCOL:
             if await ws_ticket_store.consume(ticket_value, scope=scope):
                 return marker
 

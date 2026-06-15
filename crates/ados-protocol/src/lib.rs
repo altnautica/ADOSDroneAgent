@@ -43,3 +43,4 @@ pub mod plugin;
 pub mod rest;
 pub mod state;
 pub mod wfb_tables;
+pub mod ws_ticket;

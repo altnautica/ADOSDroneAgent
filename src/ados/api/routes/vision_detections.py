@@ -65,8 +65,8 @@ VISION_DETECTIONS_SOCK = _paths.ADOS_RUN_DIR / "vision-detections.sock"
 _HEADER_SIZE = 4
 _MAX_FRAME_SIZE = 1024 * 1024
 
-# WebSocket auth scope. Must match an entry in
-# ``ws_tickets.ALLOWED_SCOPES`` so the GCS can mint a ticket for it.
+# WebSocket auth scope. Must match an entry in the control surface's
+# ticket-mint allow-set so the GCS can mint a ticket for it.
 _WS_SCOPE = "vision.detections"
 
 
