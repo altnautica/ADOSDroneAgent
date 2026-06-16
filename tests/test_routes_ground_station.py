@@ -98,151 +98,6 @@ def test_wfb_receiver_combined_wrong_role(client, patch_role):
 
 
 # ---------------------------------------------------------------------------
-# Group 3: /network, /network/ethernet
-# ---------------------------------------------------------------------------
-
-
-def test_network_modem_put_converts_cap_mb_to_cap_gb(client, monkeypatch):
-    """PUT /network/modem with cap_mb (the unit the GET view reports) converts to
-    cap_gb before the manager persists it, instead of dropping the cap."""
-    from ados.api.routes import ground_station as gs
-
-    captured: dict[str, Any] = {}
-
-    fake_mgr = MagicMock()
-
-    async def _configure(*, apn=None, cap_gb=None, enabled=None):
-        captured["apn"] = apn
-        captured["cap_gb"] = cap_gb
-        captured["enabled"] = enabled
-        return {}
-
-    fake_mgr.configure = _configure
-    monkeypatch.setattr(gs, "_modem_mgr", lambda: fake_mgr)
-    monkeypatch.setattr(gs, "_modem_view", AsyncMock(return_value={"connected": False}))
-
-    # 2048 MB → 2.0 GB.
-    resp = client.put(f"{GS_PREFIX}/network/modem", json={"cap_mb": 2048})
-    assert resp.status_code == 200, resp.text
-    assert captured["cap_gb"] == pytest.approx(2.0)
-
-
-def test_network_modem_put_cap_gb_wins_over_cap_mb(client, monkeypatch):
-    """When both cap_gb and cap_mb are present, cap_gb is authoritative."""
-    from ados.api.routes import ground_station as gs
-
-    captured: dict[str, Any] = {}
-
-    fake_mgr = MagicMock()
-
-    async def _configure(*, apn=None, cap_gb=None, enabled=None):
-        captured["cap_gb"] = cap_gb
-        return {}
-
-    fake_mgr.configure = _configure
-    monkeypatch.setattr(gs, "_modem_mgr", lambda: fake_mgr)
-    monkeypatch.setattr(gs, "_modem_view", AsyncMock(return_value={"connected": False}))
-
-    resp = client.put(
-        f"{GS_PREFIX}/network/modem", json={"cap_gb": 5.0, "cap_mb": 1024}
-    )
-    assert resp.status_code == 200, resp.text
-    assert captured["cap_gb"] == pytest.approx(5.0)
-
-
-def test_network_modem_put_cap_gb_only_unchanged(client, monkeypatch):
-    """A cap_gb-only PUT (no cap_mb) passes cap_gb through unmodified."""
-    from ados.api.routes import ground_station as gs
-
-    captured: dict[str, Any] = {}
-
-    fake_mgr = MagicMock()
-
-    async def _configure(*, apn=None, cap_gb=None, enabled=None):
-        captured["cap_gb"] = cap_gb
-        return {}
-
-    fake_mgr.configure = _configure
-    monkeypatch.setattr(gs, "_modem_mgr", lambda: fake_mgr)
-    monkeypatch.setattr(gs, "_modem_view", AsyncMock(return_value={"connected": False}))
-
-    resp = client.put(f"{GS_PREFIX}/network/modem", json={"cap_gb": 3.0})
-    assert resp.status_code == 200, resp.text
-    assert captured["cap_gb"] == pytest.approx(3.0)
-
-
-def test_share_uplink_native_persists_only_no_python_apply(client, monkeypatch):
-    """When ados-net owns net, PUT /network/share_uplink persists the flag and
-    does NOT run the Python sysctl/iptables apply (the daemon reconciles)."""
-    from ados.api.routes import ground_station as gs
-    from ados.core import runtime_mode
-
-    persisted: dict[str, Any] = {}
-    monkeypatch.setattr(
-        gs, "_persist_share_uplink_flag", lambda enabled: persisted.update(v=enabled)
-    )
-    monkeypatch.setattr(
-        runtime_mode, "is_service_native", lambda name: name == "net"
-    )
-
-    apply_called = {"hit": False}
-
-    async def _should_not_run(_enabled):
-        apply_called["hit"] = True
-        return {"applied": True, "apply_error": None, "backend": "iptables"}
-
-    monkeypatch.setattr(gs, "_apply_share_uplink", _should_not_run)
-
-    resp = client.put(f"{GS_PREFIX}/network/share_uplink", json={"enabled": True})
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["enabled"] is True
-    assert body["applied"] is True
-    assert body["backend"] == "native"
-    assert persisted["v"] is True
-    assert apply_called["hit"] is False  # the in-process apply never ran
-
-
-def test_share_uplink_non_native_runs_python_apply(client, monkeypatch):
-    """When ados-net does NOT own net, the Python apply still runs (fallback)."""
-    from ados.api.routes import ground_station as gs
-    from ados.core import runtime_mode
-
-    monkeypatch.setattr(gs, "_persist_share_uplink_flag", lambda enabled: None)
-    monkeypatch.setattr(runtime_mode, "is_service_native", lambda name: False)
-
-    apply_called = {"hit": False}
-
-    async def _apply(_enabled):
-        apply_called["hit"] = True
-        return {"applied": True, "apply_error": None, "backend": "iptables-runtime"}
-
-    monkeypatch.setattr(gs, "_apply_share_uplink", _apply)
-
-    resp = client.put(f"{GS_PREFIX}/network/share_uplink", json={"enabled": True})
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["backend"] == "iptables-runtime"
-    assert apply_called["hit"] is True
-
-
-def test_network_ethernet_put_static_missing_fields(client, monkeypatch):
-    """PUT /network/ethernet with mode=static and no ip returns 400."""
-    from ados.api.routes import ground_station as gs
-
-    fake_mgr = MagicMock()
-    monkeypatch.setattr(gs, "_ethernet_mgr", lambda: fake_mgr)
-
-    resp = client.put(
-        f"{GS_PREFIX}/network/ethernet",
-        json={"mode": "static"},
-    )
-    assert resp.status_code == 400
-    assert (
-        resp.json()["detail"]["error"]["code"] == "E_ETHERNET_STATIC_MISSING_FIELDS"
-    )
-
-
-# ---------------------------------------------------------------------------
 # Group 4: /ui, /display, /bluetooth, /gamepads, /pic
 # ---------------------------------------------------------------------------
 
@@ -256,26 +111,10 @@ def test_ui_get_returns_full_config(client):
         assert key in data
 
 
-def test_ui_oled_put_validation(client):
-    """PUT /ui/oled rejects out-of-range brightness."""
-    resp = client.put(f"{GS_PREFIX}/ui/oled", json={"brightness": 999})
-    assert resp.status_code == 422
-
-
 def test_display_get(client):
     """GET /display returns the persisted HDMI display config."""
     resp = client.get(f"{GS_PREFIX}/display")
     assert resp.status_code == 200
-
-
-def test_display_put_invalid_resolution(client):
-    """PUT /display with a bogus resolution returns 400."""
-    resp = client.put(
-        f"{GS_PREFIX}/display",
-        json={"resolution": "8k"},
-    )
-    assert resp.status_code == 400
-    assert resp.json()["detail"]["error"]["code"] == "E_INVALID_RESOLUTION"
 
 
 def test_bluetooth_paired_list(client, monkeypatch):

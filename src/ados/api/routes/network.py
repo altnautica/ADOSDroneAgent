@@ -79,37 +79,6 @@ async def get_client_scan() -> dict[str, Any]:
     return {"networks": networks or []}
 
 
-@router.put("/client/configured/{name}/autoconnect")
-async def put_client_autoconnect(
-    name: str, body: dict[str, Any]
-) -> dict[str, Any]:
-    """Toggle the autoconnect flag on a saved Wi-Fi profile."""
-    enabled = bool(body.get("enabled"))
-    try:
-        result = await _manager().set_autoconnect(name, enabled)
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "error": {
-                    "code": "E_WIFI_AUTOCONNECT_FAILED",
-                    "message": str(exc),
-                },
-            },
-        ) from exc
-    if isinstance(result, dict) and result.get("error"):
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": {
-                    "code": "E_WIFI_AUTOCONNECT_FAILED",
-                    "message": str(result.get("error")),
-                },
-            },
-        )
-    return result
-
-
 # ── Stable-MAC pinning ──────────────────────────────────────────────────────
 # An onboard adapter with no efuse MAC randomizes its address each boot, churning
 # the DHCP lease (and the box's IP). The agent auto-pins a deterministic stable
@@ -225,9 +194,7 @@ async def post_mac_pin(req: MacPinRequest) -> dict[str, Any]:
         else:
             try:
                 for args in (["down"], ["address", mac], ["up"]):
-                    subprocess.run(
-                        ["ip", "link", "set", "dev", req.iface, *args], check=True
-                    )
+                    subprocess.run(["ip", "link", "set", "dev", req.iface, *args], check=True)
                 applied_live = True
                 note = "applied to the live interface now"
             except Exception as exc:  # noqa: BLE001

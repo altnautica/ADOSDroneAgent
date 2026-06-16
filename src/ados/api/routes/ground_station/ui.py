@@ -28,17 +28,11 @@ from fastapi import (
 from ados.api.deps import get_agent_app
 from ados.api.routes import ground_station as _gs
 from ados.api.routes.ground_station._common import (
-    BluetoothPairRequest,
-    BluetoothScanRequest,
-    ButtonsUpdate,
-    DisplayUpdate,
     GamepadPrimaryUpdate,
-    OledUpdate,
     PicClaimRequest,
     PicConfirmTokenRequest,
     PicHeartbeatRequest,
     PicReleaseRequest,
-    ScreensUpdate,
 )
 from ados.core.paths import MESH_GATEWAY_JSON
 
@@ -57,91 +51,6 @@ async def get_ground_station_ui() -> dict[str, Any]:
     """Return the full UI config (OLED, buttons, screens)."""
     _gs._require_ground_profile()
     return _gs._load_ui_config()
-
-
-@router.put("/ui/oled")
-async def put_ground_station_ui_oled(update: OledUpdate) -> dict[str, Any]:
-    """Update OLED settings, persist to config.yaml, signal the display service."""
-    app = _gs._require_ground_profile()
-
-    data = _gs._load_ui_config()
-    oled = dict(data["oled"])
-    if update.brightness is not None:
-        oled["brightness"] = update.brightness
-    if update.auto_dim_enabled is not None:
-        oled["auto_dim_enabled"] = update.auto_dim_enabled
-    if update.screen_cycle_seconds is not None:
-        oled["screen_cycle_seconds"] = update.screen_cycle_seconds
-    data["oled"] = oled
-
-    try:
-        _gs._persist_gs_ui_section("oled", oled)
-    except OSError as exc:
-        raise HTTPException(
-            status_code=500,
-            detail={"error": {"code": "E_UI_SAVE_FAILED", "message": str(exc)}},
-        ) from exc
-
-    _gs._refresh_in_memory_ui(app, "oled", oled)
-
-    from ados.services.ui.reload_signal import signal_oled_reload
-
-    signal_oled_reload()
-    return data
-
-
-@router.put("/ui/buttons")
-async def put_ground_station_ui_buttons(update: ButtonsUpdate) -> dict[str, Any]:
-    """Replace the button mapping. Persisted to config and SIGHUP'd live."""
-    app = _gs._require_ground_profile()
-
-    data = _gs._load_ui_config()
-    if update.mapping is not None:
-        data["buttons"] = {"mapping": dict(update.mapping)}
-
-    try:
-        _gs._persist_gs_ui_section("buttons", data["buttons"])
-    except OSError as exc:
-        raise HTTPException(
-            status_code=500,
-            detail={"error": {"code": "E_UI_SAVE_FAILED", "message": str(exc)}},
-        ) from exc
-
-    _gs._refresh_in_memory_ui(app, "buttons", data["buttons"])
-
-    from ados.services.ui.reload_signal import signal_buttons_reload
-
-    signal_buttons_reload()
-    return data
-
-
-@router.put("/ui/screens")
-async def put_ground_station_ui_screens(update: ScreensUpdate) -> dict[str, Any]:
-    """Update screen order and/or enabled set. SIGHUPs the display service live."""
-    app = _gs._require_ground_profile()
-
-    data = _gs._load_ui_config()
-    screens = dict(data["screens"])
-    if update.order is not None:
-        screens["order"] = list(update.order)
-    if update.enabled is not None:
-        screens["enabled"] = list(update.enabled)
-    data["screens"] = screens
-
-    try:
-        _gs._persist_gs_ui_section("screens", screens)
-    except OSError as exc:
-        raise HTTPException(
-            status_code=500,
-            detail={"error": {"code": "E_UI_SAVE_FAILED", "message": str(exc)}},
-        ) from exc
-
-    _gs._refresh_in_memory_ui(app, "screens", screens)
-
-    from ados.services.ui.reload_signal import signal_oled_reload
-
-    signal_oled_reload()
-    return data
 
 
 # ---------------------------------------------------------------------------
@@ -304,90 +213,9 @@ async def get_ground_station_display() -> dict[str, Any]:
     return _gs._load_display_config()
 
 
-@router.put("/display")
-async def put_ground_station_display(update: DisplayUpdate) -> dict[str, Any]:
-    """Update the HDMI kiosk display config and persist."""
-    _gs._require_ground_profile()
-    current = _gs._load_display_config()
-
-    allowed_res = {"auto", "720p", "1080p"}
-    if update.resolution is not None:
-        if update.resolution not in allowed_res:
-            raise HTTPException(
-                status_code=400,
-                detail={"error": {"code": "E_INVALID_RESOLUTION"}},
-            )
-        current["resolution"] = update.resolution
-    if update.kiosk_enabled is not None:
-        current["kiosk_enabled"] = bool(update.kiosk_enabled)
-    if update.kiosk_target_url is not None:
-        current["kiosk_target_url"] = update.kiosk_target_url
-
-    try:
-        _gs._save_display_config(current)
-    except OSError as exc:
-        raise HTTPException(
-            status_code=500,
-            detail={"error": {"code": "E_UI_SAVE_FAILED", "message": str(exc)}},
-        ) from exc
-    return current
-
-
 # ---------------------------------------------------------------------------
 # /bluetooth
 # ---------------------------------------------------------------------------
-
-
-@router.post("/bluetooth/scan")
-async def post_bluetooth_scan(req: BluetoothScanRequest) -> dict[str, Any]:
-    """Run a BlueZ scan for nearby gamepads. Default duration 10 s."""
-    _gs._require_ground_profile()
-
-    duration = req.duration_s if req.duration_s is not None else 10
-    try:
-        devices = await _gs._input_manager().scan_bluetooth(duration_s=duration)
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail={"error": {"code": "E_BT_SCAN_FAILED", "message": str(exc)}},
-        ) from exc
-    return {"devices": devices or []}
-
-
-@router.post("/bluetooth/pair")
-async def post_bluetooth_pair(req: BluetoothPairRequest) -> dict[str, Any]:
-    """Attempt to pair with a Bluetooth device by MAC address."""
-    _gs._require_ground_profile()
-
-    try:
-        result = await _gs._input_manager().pair_bluetooth(req.mac)
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail={"error": {"code": "E_BT_PAIR_FAILED", "message": str(exc)}},
-        ) from exc
-
-    if isinstance(result, dict):
-        return result
-    return {"paired": bool(result), "error": None}
-
-
-@router.delete("/bluetooth/{mac}")
-async def delete_bluetooth(mac: str) -> dict[str, Any]:
-    """Forget a previously-paired Bluetooth device."""
-    _gs._require_ground_profile()
-
-    try:
-        result = await _gs._input_manager().forget_bluetooth(mac)
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail={"error": {"code": "E_BT_FORGET_FAILED", "message": str(exc)}},
-        ) from exc
-
-    if isinstance(result, dict):
-        return result
-    return {"forgotten": bool(result)}
 
 
 @router.get("/bluetooth/paired")
@@ -600,6 +428,7 @@ async def ws_pic_events(websocket: WebSocket) -> None:
     # Profile gate before accepting so wrong-profile agents close 1008.
     app = get_agent_app()
     from ados.api.routes.ground_station._common.profile import is_ground_station
+
     if not is_ground_station(app):
         await websocket.close(code=1008, reason="E_PROFILE_MISMATCH")
         return
@@ -615,10 +444,12 @@ async def ws_pic_events(websocket: WebSocket) -> None:
     arb = _gpa()
     bus = getattr(arb, "bus", None) or getattr(arb, "event_bus", None)
     if bus is None:
-        await websocket.send_json({
-            "event": "error",
-            "code": "E_PIC_BUS_UNAVAILABLE",
-        })
+        await websocket.send_json(
+            {
+                "event": "error",
+                "code": "E_PIC_BUS_UNAVAILABLE",
+            }
+        )
         await websocket.close()
         return
 
@@ -671,7 +502,9 @@ async def ws_pic_events(websocket: WebSocket) -> None:
         while True:
             payload = await queue.get()
             try:
-                await websocket.send_json(payload if isinstance(payload, dict) else {"event": payload})
+                await websocket.send_json(
+                    payload if isinstance(payload, dict) else {"event": payload}
+                )
             except (WebSocketDisconnect, RuntimeError):
                 break
     except WebSocketDisconnect:

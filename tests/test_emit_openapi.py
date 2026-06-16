@@ -10,7 +10,7 @@ def test_emit_openapi_does_not_duplicate_v1_prefixes() -> None:
     paths = spec["paths"]
 
     assert not any("/api/v1/v1/" in path for path in paths)
-    assert "/api/v1/ground-station/role" in paths
+    assert "/api/v1/ground-station/ui" in paths
     assert "/api/v1/peripherals" in paths
 
 

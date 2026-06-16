@@ -29,6 +29,7 @@ _UPLINK_ACTIVE_BLOB: dict[str, Any] = {
     "data_cap_state": "ok",
 }
 
+
 def _patch_store(monkeypatch, *, event_rows: list[dict[str, Any]]) -> None:
     """Make query_rows in the network source return canned event rows.
 
@@ -125,38 +126,6 @@ async def test_share_uplink_apply_resolves_iface_from_store(monkeypatch):
     assert result["backend"] == "iptables-persistent"
     # The active uplink "eth0" was mapped to its kernel iface and passed through.
     assert applied_with == {"enabled": True, "iface": "eth0"}
-
-
-@pytest.mark.asyncio
-async def test_put_share_uplink_route_surfaces_reason(monkeypatch):
-    # End-to-end through the route: persist succeeds, the apply reports
-    # no_active_uplink, and the route surfaces `applied:false` + the `reason`.
-    from ados.api.routes.ground_station import network as network_route_mod
-    from ados.api.routes.ground_station._common import models
-
-    monkeypatch.setattr(
-        network_route_mod._gs, "_require_ground_profile", lambda: MagicMock()
-    )
-    monkeypatch.setattr(
-        network_route_mod._gs, "_persist_share_uplink_flag", lambda enabled: None
-    )
-
-    async def fake_apply(enabled):
-        return {
-            "applied": False,
-            "reason": "no_active_uplink",
-            "apply_error": "no_active_uplink",
-            "backend": None,
-        }
-
-    monkeypatch.setattr(network_route_mod._gs, "_apply_share_uplink", fake_apply)
-
-    res = await network_route_mod.put_network_share_uplink(
-        models.ShareUplinkUpdate(enabled=True)
-    )
-    assert res["enabled"] is True
-    assert res["applied"] is False
-    assert res["reason"] == "no_active_uplink"
 
 
 def _empty_query_rows():
