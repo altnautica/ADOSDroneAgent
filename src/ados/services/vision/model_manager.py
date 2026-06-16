@@ -4,13 +4,15 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 import httpx
 
@@ -73,6 +75,62 @@ class ModelInfo:
             "task": self.task,
             "variants": self.variants,
         }
+
+
+@runtime_checkable
+class ModelRefLike(Protocol):
+    """Structural type for a manifest VisionModelRef — kept decoupled (no plugin import here)."""
+
+    id: str
+    runtime: str
+    board_match: str
+    sha256: str | None
+    source: str | None
+    path: str | None
+
+
+class ResolutionState(StrEnum):
+    RESOLVED = "resolved"            # a verified model file is available at .path
+    NEEDS_MODEL = "needs_model"      # not cached + not fetchable → sideload (carries a reason)
+    VERIFY_FAILED = "verify_failed"  # fetched but sha256 != the pinned digest
+
+
+@dataclass
+class ModelResolution:
+    """Outcome of resolving a plugin's model reference (the heartbeat needs-model surface)."""
+
+    state: str
+    model_id: str
+    runtime: str | None = None
+    path: str | None = None
+    reason: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.state == ResolutionState.RESOLVED
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"state": self.state, "model_id": self.model_id, "runtime": self.runtime,
+                "path": self.path, "reason": self.reason}
+
+
+def sha256_file(path: str | Path, chunk: int = 1 << 20) -> str:
+    """Hex SHA-256 of a file, streamed."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(chunk), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def board_family(board_id: str | None) -> str:
+    """Map a HAL board id to the model ``board_match`` family (rk3588 | orin | generic)."""
+    b = (board_id or "").lower()
+    if "rk3588" in b or any(k in b for k in ("orange-pi-5", "rock-5c")):
+        return "rk3588"
+    if "orin" in b:
+        return "orin"
+    return "generic"
 
 
 class ModelManager:
@@ -341,3 +399,90 @@ class ModelManager:
     @property
     def registry(self) -> list[ModelInfo]:
         return list(self._registry)
+
+    # ── by-reference model delivery (the model-delivery framework) ──────────
+    # A plugin declares per-board model references {id, runtime, board_match, sha256, source};
+    # the agent board-matches, checks the cache by the pinned digest, fetches + verifies, and
+    # reports needs-model(reason) rather than coming up half-armed. The plugin names WHAT and
+    # FROM WHERE; the agent makes it so.
+
+    def select_ref_for_board(
+        self, refs: Sequence[ModelRefLike], board_id: str | None
+    ) -> ModelRefLike | None:
+        """Pick the variant whose board_match fits the detected board; fall back to generic."""
+        if not refs:
+            return None
+        fam = board_family(board_id)
+        for r in refs:
+            if (r.board_match or "generic").lower() == fam:
+                return r
+        for r in refs:
+            if (r.board_match or "generic").lower() == "generic":
+                return r
+        return refs[0]
+
+    def cached_ref_path(self, ref: ModelRefLike) -> Path | None:
+        """A cached file whose sha256 matches the pinned digest (a verified cache hit)."""
+        if not ref.sha256 or not self._models_dir.is_dir():
+            return None
+        want = ref.sha256.lower()
+        for f in self._models_dir.iterdir():
+            if f.is_file() and f.name.startswith(ref.id):
+                try:
+                    if sha256_file(f) == want:
+                        return f
+                except OSError:
+                    continue
+        return None
+
+    async def _fetch_ref(self, ref: ModelRefLike) -> Path:
+        """Fetch a by-reference model from its source into the cache (open-registry URL path).
+        The authenticated private-registry backend (signed URL + credential) layers on here."""
+        if not ref.source:
+            raise ValueError("model ref has no source")
+        self._models_dir.mkdir(parents=True, exist_ok=True)
+        suffix = {"rknn": ".rknn", "tensorrt": ".engine", "tflite": ".tflite",
+                  "pytorch": ".pt"}.get(ref.runtime, ".onnx")
+        dest = self._models_dir / f"{ref.id}-{ref.board_match}{suffix}"
+        tmp = dest.with_suffix(dest.suffix + ".tmp")
+        async with httpx.AsyncClient(timeout=300.0, follow_redirects=True) as client:
+            async with client.stream("GET", ref.source) as resp:
+                resp.raise_for_status()
+                with open(tmp, "wb") as fh:
+                    async for chunk in resp.aiter_bytes(chunk_size=65536):
+                        fh.write(chunk)
+        os.replace(str(tmp), str(dest))
+        return dest
+
+    async def resolve_model_ref(
+        self, refs: Sequence[ModelRefLike], board_id: str | None, *, allow_fetch: bool = True
+    ) -> ModelResolution:
+        """Resolve a plugin's per-board model references: board-match select → verified cache
+        hit → fetch + verify-against-the-pinned-sha256 → register-ready path; else needs_model."""
+        ref = self.select_ref_for_board(refs, board_id)
+        if ref is None:
+            return ModelResolution(ResolutionState.NEEDS_MODEL, "?", reason="no model variant declared")
+        # bundled in the archive → the plugin loader resolves the relative path
+        if ref.path and not ref.source:
+            return ModelResolution(ResolutionState.RESOLVED, ref.id, ref.runtime, ref.path)
+        # verified cache hit
+        cached = self.cached_ref_path(ref)
+        if cached is not None:
+            return ModelResolution(ResolutionState.RESOLVED, ref.id, ref.runtime, str(cached))
+        # not cached → fetch if allowed + source present, else needs_model(reason)
+        if not ref.source or not allow_fetch:
+            return ModelResolution(
+                ResolutionState.NEEDS_MODEL, ref.id, ref.runtime,
+                reason=f"{ref.id} ({ref.board_match}/{ref.runtime}) not cached; "
+                       "sideload or provide a reachable source",
+            )
+        try:
+            path = await self._fetch_ref(ref)
+        except (httpx.HTTPError, OSError, ValueError) as exc:
+            return ModelResolution(ResolutionState.NEEDS_MODEL, ref.id, ref.runtime,
+                                   reason=f"fetch failed: {exc}")
+        if ref.sha256 and sha256_file(path) != ref.sha256.lower():
+            Path(path).unlink(missing_ok=True)
+            return ModelResolution(ResolutionState.VERIFY_FAILED, ref.id, ref.runtime,
+                                   reason="fetched model sha256 does not match the pinned digest")
+        return ModelResolution(ResolutionState.RESOLVED, ref.id, ref.runtime, str(path))

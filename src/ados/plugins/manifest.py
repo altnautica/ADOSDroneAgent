@@ -115,10 +115,38 @@ class VendorAttribution(BaseModel):
     notice: str | None = None
 
 
+class VisionModelRef(BaseModel):
+    """A typed view of a ``vision.models[]`` entry. A model is delivered either BY
+    REFERENCE — ``source`` + a pinned ``sha256``, per-board ``board_match`` — so the
+    agent fetches/verifies/caches it (the model-delivery framework), or BUNDLED in the
+    archive at ``path``. Lenient (``extra=ignore``) and additive: the manifest field stays
+    free-form ``list[dict]`` for backward compatibility; this only parses the entries the
+    framework resolves. The pinned ``sha256`` is signed (the manifest is signed), so a
+    by-reference model is tamper-proof even though the weights are not inside the archive.
+    """
+
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+
+    id: str
+    runtime: str = "onnx"            # onnx | rknn | tensorrt | tflite | pytorch
+    board_match: str = "generic"     # board family this variant targets (e.g. rk3588, orin, generic)
+    sha256: str | None = None        # pinned hex digest the fetched model is verified against
+    source: str | None = None        # where to fetch (registry ref / url); None ⇒ bundled or cache-only
+    path: str | None = None          # relative in-archive path when the model is bundled
+
+
 class VisionContribution(_StrictModel):
     behaviors: list[dict[str, Any]] = Field(default_factory=list)
     models: list[dict[str, Any]] = Field(default_factory=list)
     detectors: list[dict[str, Any]] = Field(default_factory=list)
+
+    def model_refs(self) -> list[VisionModelRef]:
+        """Typed view of the model entries that declare an id + runtime (additive, lenient)."""
+        return [
+            VisionModelRef.model_validate(d)
+            for d in self.models
+            if isinstance(d, dict) and d.get("id") and d.get("runtime")
+        ]
 
 
 class AgentContributes(_StrictModel):
