@@ -45,3 +45,29 @@ class TestNetworkWifi:
         body = resp.json()
         assert len(body["networks"]) == 2
         assert body["networks"][0]["ssid"] == "A"
+
+    def test_autoconnect_enable(self, client, fake_manager):
+        fake_manager.set_autoconnect.return_value = {
+            "autoconnect": True,
+            "name": "HomeWifi",
+            "error": None,
+        }
+        resp = client.put(
+            "/api/v1/network/client/configured/HomeWifi/autoconnect",
+            json={"enabled": True},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["autoconnect"] is True
+
+    def test_autoconnect_disable(self, client, fake_manager):
+        fake_manager.set_autoconnect.return_value = {
+            "autoconnect": False,
+            "name": "HomeWifi",
+            "error": None,
+        }
+        resp = client.put(
+            "/api/v1/network/client/configured/HomeWifi/autoconnect",
+            json={"enabled": False},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["autoconnect"] is False

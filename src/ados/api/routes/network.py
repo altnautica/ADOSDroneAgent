@@ -79,6 +79,41 @@ async def get_client_scan() -> dict[str, Any]:
     return {"networks": networks or []}
 
 
+@router.put("/client/configured/{name}/autoconnect")
+async def put_client_autoconnect(name: str, body: dict[str, Any]) -> dict[str, Any]:
+    """Toggle the autoconnect flag on a saved Wi-Fi profile.
+
+    Profile-agnostic, served in-process: the native front only routes this to a
+    command socket where the ``ados-net`` daemon owns the uplink (a ground
+    station). A drone has no such daemon, so the front proxies here and the
+    packaged Wi-Fi manager drives nmcli directly.
+    """
+    enabled = bool(body.get("enabled"))
+    try:
+        result = await _manager().set_autoconnect(name, enabled)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": {
+                    "code": "E_WIFI_AUTOCONNECT_FAILED",
+                    "message": str(exc),
+                },
+            },
+        ) from exc
+    if isinstance(result, dict) and result.get("error"):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": {
+                    "code": "E_WIFI_AUTOCONNECT_FAILED",
+                    "message": str(result.get("error")),
+                },
+            },
+        )
+    return result
+
+
 # ── Stable-MAC pinning ──────────────────────────────────────────────────────
 # An onboard adapter with no efuse MAC randomizes its address each boot, churning
 # the DHCP lease (and the box's IP). The agent auto-pins a deterministic stable
