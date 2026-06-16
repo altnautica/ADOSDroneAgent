@@ -71,6 +71,7 @@ from ados.plugins.install_from_url_impl import (
     stream_archive_to_path,
     validate_install_url,
 )
+from ados.plugins.state import save_state, state_lock
 from ados.plugins.supervisor import PluginSupervisor
 
 log = get_logger("api.plugins")
@@ -681,6 +682,55 @@ async def grant_permission(plugin_id: str, body: GrantRequest):
     return {"ok": True}
 
 
+async def _deliver_plugin_models(sup: PluginSupervisor, plugin_id: str) -> None:
+    """Resolve + cache the board-appropriate model for each model a plugin declares, and
+    persist the outcome on the install record so the heartbeat can surface it.
+
+    Best-effort + automatic (a plugin that references a model gets it delivered on enable
+    with no operator step): board-match select → verified cache hit → fetch + sha256 verify,
+    else needs-model(reason). Never raises into the enable path — a delivery hiccup leaves a
+    needs-model marker for the GCS, it does not fail the enable. The plugin itself performs
+    the engine registration (the capability-gated SDK ``register_model``) against the
+    delivered path; this only delivers + surfaces."""
+    try:
+        manifest = sup.manifest_for(plugin_id)
+    except SupervisorError:
+        return
+    contributes = getattr(getattr(manifest, "agent", None), "contributes", None)
+    vision = getattr(contributes, "vision", None)
+    refs = vision.model_refs() if vision is not None else []
+    if not refs:
+        return
+    app = get_agent_app()
+    mm = getattr(app, "model_manager", None)
+    if mm is None:
+        return
+    board = getattr(app, "_board", None)
+    board_hint = " ".join(
+        str(x)
+        for x in (
+            getattr(app, "board_name", None),
+            getattr(board, "soc", None),
+            getattr(board, "model", None),
+        )
+        if x
+    )
+    resolutions = await mm.resolve_plugin_models(refs, board_hint or None)
+    status = [r.to_dict() for r in resolutions]
+    live = sup.find_install(plugin_id)
+    if live is not None:
+        live.model_status = status
+        with state_lock():
+            save_state(sup.installs())
+    needs = [s for s in status if s.get("state") != "resolved"]
+    log.info(
+        "plugin_models_delivered",
+        plugin_id=plugin_id,
+        total=len(status),
+        needs_model=len(needs),
+    )
+
+
 @router.post("/plugins/{plugin_id}/enable")
 async def enable_plugin(plugin_id: str):
     sup = _get_supervisor()
@@ -690,6 +740,10 @@ async def enable_plugin(plugin_id: str):
         if "not installed" in str(exc):
             return _err(14, "not_found", str(exc), 404)
         return _err(20, "host_io_error", str(exc), 500)
+    try:
+        await _deliver_plugin_models(sup, plugin_id)
+    except Exception as exc:  # delivery is best-effort; never fail the enable
+        log.warning("plugin_model_delivery_failed", plugin_id=plugin_id, error=str(exc))
     return {"ok": True}
 
 

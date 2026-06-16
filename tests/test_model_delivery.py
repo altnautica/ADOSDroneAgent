@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 from types import SimpleNamespace
 
 from ados.plugins.manifest import VisionContribution, VisionModelRef
@@ -16,6 +17,7 @@ from ados.services.vision.model_manager import (
     ModelResolution,
     ResolutionState,
     board_family,
+    registry_auth_headers,
     sha256_file,
 )
 
@@ -122,3 +124,51 @@ def test_manifest_model_refs_typed() -> None:
 def test_resolution_to_dict() -> None:
     d = ModelResolution(ResolutionState.NEEDS_MODEL, "coco-detector", "onnx", reason="x").to_dict()
     assert d["state"] == "needs_model" and d["model_id"] == "coco-detector" and d["reason"] == "x"
+
+
+# ── board-family siblings + display names ──────────────────────────────────────
+def test_board_family_siblings_and_display_names() -> None:
+    # RK3588 NPU-class sibling (rk3582) + a display name carrying the SoC both resolve.
+    assert board_family("rk3582") == "rk3588"
+    assert board_family("Radxa ROCK 5C Lite (RK3582)") == "rk3588"
+    assert board_family("NVIDIA Jetson Orin Nano") == "orin"
+    assert board_family("tegra234") == "orin"
+    # the small rk356x NPU is a different class → generic, not rk3588
+    assert board_family("rk3566") == "generic"
+
+
+# ── private-registry auth headers (network-free) ───────────────────────────────
+def test_registry_auth_headers(tmp_path) -> None:
+    creds = tmp_path / "model-registry-auth.json"
+    creds.write_text(json.dumps({
+        "models.example.com": "s3cr3t",                                  # bare token → Bearer
+        "registry.example.org": "Bearer already-scheme",                 # scheme passthrough
+        "custom.example.net": {"header": "X-Api-Key", "value": "k123"},  # custom header
+    }))
+
+    def h(url: str) -> dict:
+        return registry_auth_headers(url, creds_path=creds)
+
+    assert h("https://models.example.com/m.rknn") == {"Authorization": "Bearer s3cr3t"}
+    assert h("https://registry.example.org/m.onnx") == {"Authorization": "Bearer already-scheme"}
+    assert h("https://custom.example.net/m.onnx") == {"X-Api-Key": "k123"}
+    assert h("https://unlisted.example.com/m.onnx") == {}                # host not listed
+    # a signed-URL source whose creds file is absent → no header (credential is in the query)
+    assert registry_auth_headers("https://x.com/m?sig=abc", creds_path=tmp_path / "absent.json") == {}
+
+
+# ── multi-model plugin resolution (group-by-id) ────────────────────────────────
+def test_resolve_plugin_models_groups_by_id(tmp_path) -> None:
+    mgr = _mgr(tmp_path)
+    content = b"detector-weights"
+    (tmp_path / "det-a-generic.onnx").write_bytes(content)  # cached + verified
+    refs = [
+        _ref(id="det-a", runtime="onnx", board_match="generic",
+             sha256=hashlib.sha256(content).hexdigest()),
+        _ref(id="det-b", runtime="rknn", board_match="rk3588", sha256="deadbeef"),  # absent, no source
+    ]
+    out = asyncio.run(mgr.resolve_plugin_models(refs, "rk3588s2"))
+    assert len(out) == 2  # one resolution per distinct id
+    by_id = {r.model_id: r for r in out}
+    assert by_id["det-a"].state == ResolutionState.RESOLVED
+    assert by_id["det-b"].state == ResolutionState.NEEDS_MODEL

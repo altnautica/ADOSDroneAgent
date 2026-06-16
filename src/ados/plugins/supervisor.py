@@ -339,6 +339,10 @@ class PluginSupervisor:
             raise SupervisorError(f"plugin {plugin_id} is not installed")
         return install
 
+    def manifest_for(self, plugin_id: str) -> PluginManifest:
+        """Public accessor: the manifest for an installed/built-in plugin (tamper-checked)."""
+        return self._manifest_for(plugin_id)
+
     def _manifest_for(self, plugin_id: str) -> PluginManifest:
         # Built-in first; otherwise read from unpacked dir.
         builtin = self._builtin.get(plugin_id)

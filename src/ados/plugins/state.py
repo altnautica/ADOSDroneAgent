@@ -100,6 +100,11 @@ class PluginInstall:
     pinned_version: str | None = None
     last_update_check_at: int | None = None
     last_update_attempt: dict | None = None
+    # Model-delivery outcome for the plugin's declared vision model refs, one entry per
+    # model id (state=resolved|needs_model|verify_failed + path/reason). Filled in at enable
+    # time by the model-delivery framework; surfaced on the heartbeat. None = not yet resolved
+    # / declares no models. Backward-compatible: older state files load with this None.
+    model_status: list[dict] | None = None
 
 
 @contextlib.contextmanager
@@ -194,6 +199,7 @@ def load_state(path: Path | None = None) -> list[PluginInstall]:
                     pinned_version=entry.get("pinned_version"),
                     last_update_check_at=entry.get("last_update_check_at"),
                     last_update_attempt=last_attempt,
+                    model_status=entry.get("model_status"),
                 )
             )
         except (KeyError, TypeError) as exc:

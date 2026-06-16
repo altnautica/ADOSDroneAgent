@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -124,13 +125,52 @@ def sha256_file(path: str | Path, chunk: int = 1 << 20) -> str:
 
 
 def board_family(board_id: str | None) -> str:
-    """Map a HAL board id to the model ``board_match`` family (rk3588 | orin | generic)."""
+    """Map a board identifier to the model ``board_match`` family (rk3588 | orin | generic).
+
+    Substring-matched + case-insensitive so a SoC string ("RK3582"), a board slug
+    ("rock-5c-lite") or a display name ("Radxa ROCK 5C Lite (RK3582)") all resolve. The
+    RK3588 family covers the rk3588/rk3582 NPU-class siblings (the small rk356x NPU is NOT
+    in this family — it falls through to generic)."""
     b = (board_id or "").lower()
-    if "rk3588" in b or any(k in b for k in ("orange-pi-5", "rock-5c")):
-        return "rk3588"
-    if "orin" in b:
+    if any(k in b for k in ("orin", "tegra", "jetson")):
         return "orin"
+    if any(k in b for k in ("rk3588", "rk3582", "orange-pi-5", "rock-5c", "rock5c")):
+        return "rk3588"
     return "generic"
+
+
+# Optional per-host credentials for a private model registry. The agent's open registry
+# path is unauthenticated and a pre-signed URL carries its own credential, so this is only
+# consulted when a source host needs a header (bearer/basic). Tokens are NEVER logged.
+_REGISTRY_AUTH_PATH = Path("/etc/ados/model-registry-auth.json")
+
+
+def registry_auth_headers(source: str, *, creds_path: Path = _REGISTRY_AUTH_PATH) -> dict[str, str]:
+    """Auth headers for a by-reference model fetch, keyed by the source host.
+
+    ``/etc/ados/model-registry-auth.json`` maps a host to either a token string (sent as
+    ``Authorization: Bearer <token>`` unless it already names a scheme) or an object
+    ``{"header": ..., "value": ...}`` for a custom header. A signed-URL source needs no entry.
+    Missing/unreadable/unmatched ⇒ no headers (the fetch proceeds unauthenticated)."""
+    try:
+        host = urlsplit(source).hostname or ""
+    except ValueError:
+        return {}
+    if not host:
+        return {}
+    try:
+        creds = json.loads(creds_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    entry = creds.get(host) if isinstance(creds, dict) else None
+    if isinstance(entry, str) and entry:
+        scheme_named = entry.lower().startswith(("bearer ", "basic ", "token "))
+        return {"Authorization": entry if scheme_named else f"Bearer {entry}"}
+    if isinstance(entry, dict):
+        value = entry.get("value")
+        if value:
+            return {str(entry.get("header") or "Authorization"): str(value)}
+    return {}
 
 
 class ModelManager:
@@ -445,8 +485,9 @@ class ModelManager:
                   "pytorch": ".pt"}.get(ref.runtime, ".onnx")
         dest = self._models_dir / f"{ref.id}-{ref.board_match}{suffix}"
         tmp = dest.with_suffix(dest.suffix + ".tmp")
+        headers = registry_auth_headers(ref.source)  # empty unless the host needs a credential
         async with httpx.AsyncClient(timeout=300.0, follow_redirects=True) as client:
-            async with client.stream("GET", ref.source) as resp:
+            async with client.stream("GET", ref.source, headers=headers) as resp:
                 resp.raise_for_status()
                 with open(tmp, "wb") as fh:
                     async for chunk in resp.aiter_bytes(chunk_size=65536):
@@ -486,3 +527,28 @@ class ModelManager:
             return ModelResolution(ResolutionState.VERIFY_FAILED, ref.id, ref.runtime,
                                    reason="fetched model sha256 does not match the pinned digest")
         return ModelResolution(ResolutionState.RESOLVED, ref.id, ref.runtime, str(path))
+
+    async def resolve_plugin_models(
+        self, refs: Sequence[ModelRefLike], board_id: str | None, *, allow_fetch: bool = True
+    ) -> list[ModelResolution]:
+        """Resolve EVERY distinct model a plugin declares (one ModelResolution per model id).
+
+        A plugin may declare several models, each with per-board variants; group the refs by
+        id and resolve each group to the board-appropriate variant via resolve_model_ref. The
+        result list is the model-delivery surface the heartbeat reports (each entry RESOLVED
+        with a path, or NEEDS_MODEL/VERIFY_FAILED with a reason) so the agent never comes up
+        half-armed silently."""
+        by_id: dict[str, list[ModelRefLike]] = {}
+        order: list[str] = []
+        for r in refs:
+            rid = getattr(r, "id", None)
+            if not rid:
+                continue
+            if rid not in by_id:
+                by_id[rid] = []
+                order.append(rid)
+            by_id[rid].append(r)
+        return [
+            await self.resolve_model_ref(by_id[rid], board_id, allow_fetch=allow_fetch)
+            for rid in order
+        ]

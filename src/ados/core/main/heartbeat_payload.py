@@ -737,6 +737,14 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
                 "plugin_id": inst.plugin_id,
                 "version": getattr(inst, "version", None),
                 "status": getattr(inst, "status", None),
+                # Model-delivery outcome (one entry per declared model id) so the GCS can
+                # show resolved / needs-model / verify-failed without a separate poll.
+                # Omitted when the plugin declares no models or none were resolved yet.
+                **(
+                    {"model_status": ms}
+                    if (ms := getattr(inst, "model_status", None))
+                    else {}
+                ),
             }
             for inst in installs
         ]
