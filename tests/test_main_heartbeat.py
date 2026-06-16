@@ -161,36 +161,19 @@ def test_heartbeat_payload_wfb_failover_state_reflects_sidecar(monkeypatch) -> N
     assert payload["wfbFailoverState"] == "cloud_relay"
 
 
-def test_heartbeat_payload_authenticated_ws_on_ground_station(monkeypatch) -> None:
-    """A ground-station node advertises the authenticated MAVLink WS
-    endpoint alongside the legacy raw listener."""
+def test_heartbeat_payload_advertises_only_the_raw_mavlink_ws(monkeypatch) -> None:
+    """The MAVLink WS is authenticated on the raw ``mavlinkWs`` proxy via a
+    ticket subprotocol the native router validates — there is no separate gated
+    endpoint, so no profile advertises ``mavlinkWsAuthenticated``."""
     import ados.core.main.heartbeat_payload as hb
 
     monkeypatch.setattr(hb, "_get_local_ip", lambda: "10.0.0.5")
-    app = _fresh_app()
-    app.config.agent.profile = "ground_station"
-    payload = app._build_heartbeat_payload()
-    urls = payload["manualConnectionUrls"]
-    assert (
-        urls["mavlinkWsAuthenticated"]
-        == "ws://10.0.0.5:8080/api/v1/ground-station/ws/mavlink"
-    )
-    # The legacy raw listener stays present and unchanged.
-    assert urls["mavlinkWs"] == "ws://10.0.0.5:8765/"
-
-
-def test_heartbeat_payload_authenticated_ws_absent_on_drone(monkeypatch) -> None:
-    """A drone node never advertises the gated bridge (it 404s there),
-    but keeps the legacy raw listener."""
-    import ados.core.main.heartbeat_payload as hb
-
-    monkeypatch.setattr(hb, "_get_local_ip", lambda: "10.0.0.5")
-    app = _fresh_app()
-    app.config.agent.profile = "drone"
-    payload = app._build_heartbeat_payload()
-    urls = payload["manualConnectionUrls"]
-    assert "mavlinkWsAuthenticated" not in urls
-    assert urls["mavlinkWs"] == "ws://10.0.0.5:8765/"
+    for profile in ("ground_station", "drone"):
+        app = _fresh_app()
+        app.config.agent.profile = profile
+        urls = app._build_heartbeat_payload()["manualConnectionUrls"]
+        assert "mavlinkWsAuthenticated" not in urls
+        assert urls["mavlinkWs"] == "ws://10.0.0.5:8765/"
 
 
 def test_heartbeat_payload_radio_churn_fields_ride_block() -> None:

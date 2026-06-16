@@ -156,44 +156,10 @@ def test_pic_events_ws_accepts_ticket(paired_ground_client):
         assert ws is not None
 
 
-# ---------------------------------------------------------------------------
-# /api/v1/ground-station/ws/mavlink
-# ---------------------------------------------------------------------------
-
-
-def test_mavlink_ws_rejects_unauthenticated(paired_ground_client):
-    _expect_ws_rejected(
-        paired_ground_client, "/api/v1/ground-station/ws/mavlink"
-    )
-
-
-def test_mavlink_ws_rejects_bad_key(paired_ground_client):
-    _expect_ws_rejected(
-        paired_ground_client,
-        "/api/v1/ground-station/ws/mavlink",
-        headers={"X-ADOS-Key": "wrong-key"},
-    )
-
-
-def test_mavlink_ws_rejects_api_key_query_param(paired_ground_client):
-    _expect_ws_rejected(
-        paired_ground_client,
-        "/api/v1/ground-station/ws/mavlink?api_key=valid-pair-key",
-    )
-
-
-def test_mavlink_ws_rejects_wrong_scope_ticket(paired_ground_client):
-    _expect_ws_rejected(
-        paired_ground_client,
-        "/api/v1/ground-station/ws/mavlink",
-        subprotocols=[WS_TICKET_PROTOCOL, _ticket("gs.mesh_events")],
-    )
-
-
-# Note: the success paths for ``/ws/mavlink`` require a live MAVLink IPC
-# socket, which the test harness does not stand up. The auth rejection paths
-# above establish the contract: bad-or-missing credentials close 4401 BEFORE
-# the IPC code runs.
+# Note: the MAVLink WebSocket is no longer a Python FastAPI route — it is the
+# native Rust router's raw :8765 proxy, which validates the same ticket
+# subprotocol in its handshake (covered by the ados-mavlink-router crate's
+# tests). The remaining Python WS routes below still flow through this helper.
 
 
 # ---------------------------------------------------------------------------
