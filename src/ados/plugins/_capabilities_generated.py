@@ -44,6 +44,11 @@ AGENT_CAPABILITIES: frozenset[str] = frozenset(
         "vision.frame.read",
         "vision.model.register",
         "vision.detection.publish",
+        "button.subscribe",
+        "flight.guided_setpoint",
+        "mavlink.tunnel",
+        "radio.aux_stream",
+        "display.oled.page",
     }
 )
 
@@ -299,5 +304,40 @@ CAPABILITY_CATALOG: dict[str, dict[str, str]] = {
         "category": "data_network",
         "risk": "low",
         "risk_reason": "Detections are derived data on a sandboxed topic and do not affect flight.",
+    },
+    "button.subscribe": {
+        "label": "Subscribe to onboard button press events",
+        "description": "Lets the plugin receive press events (short, long, chord) from the host's front-panel buttons. Used by node plugins that drive an on-device workflow from physical buttons. Read-only; it does not remap or consume the buttons from other consumers.",
+        "category": "hardware",
+        "risk": "medium",
+        "risk_reason": "Button events drive plugin actions; an input source should be reviewed like any other.",
+    },
+    "flight.guided_setpoint": {
+        "label": "Emit guided-mode setpoints",
+        "description": "Lets the plugin command the flight controller with guided-mode position or velocity setpoints (and the guided-mode entry and exit handshake) through a scoped sender, instead of raw MAVLink writes. The setpoint stream is the only flight-command surface this capability grants.",
+        "category": "flight_control",
+        "risk": "high",
+        "risk_reason": "Commands vehicle motion in guided mode; a faulty stream can fly the aircraft.",
+    },
+    "mavlink.tunnel": {
+        "label": "Send and receive MAVLink TUNNEL payloads",
+        "description": "Lets the plugin exchange application payloads over MAVLink TUNNEL frames (a private payload_type) on the existing link, without the full MAVLink write surface. Used for plugin-to-plugin or node-to-node application data carried inside the MAVLink stream.",
+        "category": "flight_control",
+        "risk": "high",
+        "risk_reason": "Shares the flight-control link; a misbehaving tunnel can congest MAVLink traffic.",
+    },
+    "radio.aux_stream": {
+        "label": "Open and use an auxiliary radio stream",
+        "description": "Lets the plugin open a dedicated auxiliary stream on the radio link (a separate radio-port from the data and control planes) managed by the radio service, and read or write application frames on it. Used by plugins that need an isolated low-rate channel between nodes.",
+        "category": "data_network",
+        "risk": "high",
+        "risk_reason": "Consumes radio airtime on the shared adapter and owns an application channel between nodes.",
+    },
+    "display.oled.page": {
+        "label": "Contribute a page to the onboard display",
+        "description": "Lets the plugin register a page (its rendered content and touch or hit zones) on the host's onboard display, so a plugin can present status without recompiling the display service. The host owns page switching and arbitration between contributed pages.",
+        "category": "hardware",
+        "risk": "low",
+        "risk_reason": "Draws to the local display only; no effect on flight or the network.",
     },
 }

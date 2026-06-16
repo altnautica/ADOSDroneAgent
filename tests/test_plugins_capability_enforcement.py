@@ -83,10 +83,9 @@ def _install_with_perms(plugin_id: str, **grants: bool) -> PluginInstall:
 
 
 def test_catalog_size_matches_spec() -> None:
-    # 29 base entries + 3 pose/process additions (mavlink.component.vio,
-    # estimator.pose.inject, process.spawn) + 3 vision-engine additions
-    # (vision.frame.read, vision.model.register, vision.detection.publish).
-    assert len(AGENT_CAPABILITIES) == 35
+    # 35 prior entries + 5 plugin-substrate caps (button.subscribe,
+    # flight.guided_setpoint, mavlink.tunnel, radio.aux_stream, display.oled.page).
+    assert len(AGENT_CAPABILITIES) == 40
 
 
 def test_only_event_caps_are_enforced_today() -> None:

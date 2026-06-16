@@ -22,9 +22,10 @@ NEW_AGENT_CAPS = (
 )
 
 
-def test_agent_capability_count_is_35() -> None:
-    """29 baseline entries + three schema-v2 caps + three vision caps = 35."""
-    assert len(AGENT_CAPABILITIES) == 35
+def test_agent_capability_count_is_40() -> None:
+    """35 prior entries + five plugin-substrate caps (button.subscribe,
+    flight.guided_setpoint, mavlink.tunnel, radio.aux_stream, display.oled.page) = 40."""
+    assert len(AGENT_CAPABILITIES) == 40
 
 
 def test_new_agent_capabilities_present() -> None:
