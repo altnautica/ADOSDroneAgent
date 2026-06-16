@@ -438,6 +438,53 @@ impl WifiClientManager {
         }
     }
 
+    /// Toggle the NetworkManager autoconnect flag for a saved profile. Mirrors
+    /// the Python `set_autoconnect`: an empty name is `{"autoconnect": false,
+    /// "name": "", "error": "name_required"}`; otherwise it runs `nmcli
+    /// connection modify <name> connection.autoconnect yes|no` and returns
+    /// `{"autoconnect": <enabled>, "name": <name>, "error": null}` on success, or
+    /// the trimmed stderr/stdout (falling back to `nmcli_failed`) on a nonzero
+    /// nmcli exit. The `autoconnect` field always echoes the requested value (the
+    /// Python reports the intended state even on a failed write).
+    pub async fn set_autoconnect(&self, connection_name: &str, enabled: bool) -> Value {
+        if connection_name.is_empty() {
+            return json!({"autoconnect": false, "name": "", "error": "name_required"});
+        }
+        let toggle = if enabled { "yes" } else { "no" };
+        let out = self
+            .runner
+            .run(
+                &[
+                    "nmcli",
+                    "connection",
+                    "modify",
+                    connection_name,
+                    "connection.autoconnect",
+                    toggle,
+                ],
+                SYSTEMCTL_TIMEOUT,
+            )
+            .await;
+        if !out.ok() {
+            // Mirror the Python `(err or out).strip() or "nmcli_failed"`: pick
+            // stderr when it is a non-empty STRING (raw Python truthiness, before
+            // trimming) else stdout, THEN trim, then fall back to nmcli_failed.
+            let source = if out.stderr.is_empty() {
+                &out.stdout
+            } else {
+                &out.stderr
+            };
+            let trimmed = source.trim();
+            let err = if trimmed.is_empty() {
+                "nmcli_failed".to_string()
+            } else {
+                trimmed.to_string()
+            };
+            return json!({"autoconnect": enabled, "name": connection_name, "error": err});
+        }
+        json!({"autoconnect": enabled, "name": connection_name, "error": null})
+    }
+
     /// Current station status. Mirrors `status`.
     pub async fn status(&self) -> serde_json::Map<String, Value> {
         let list = self
@@ -1065,5 +1112,83 @@ mod tests {
             "powersave modify did not target the resolved connection name: {modify:?}"
         );
         assert!(!modify.iter().any(|a| a == "MyAP"));
+    }
+
+    #[tokio::test]
+    async fn set_autoconnect_rejects_an_empty_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = mgr(dir.path(), Arc::new(ScriptedRunner::new()));
+        let res = m.set_autoconnect("", true).await;
+        assert_eq!(
+            res,
+            json!({"autoconnect": false, "name": "", "error": "name_required"})
+        );
+    }
+
+    #[tokio::test]
+    async fn set_autoconnect_enables_via_nmcli_modify_yes() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = Arc::new(ScriptedRunner::new());
+        runner.push(CmdOut::failed(0, "")); // nmcli modify ok
+        let m_runner = Arc::clone(&runner);
+        let m = mgr(dir.path(), runner);
+        let res = m.set_autoconnect("HomeNet", true).await;
+        assert_eq!(
+            res,
+            json!({"autoconnect": true, "name": "HomeNet", "error": null})
+        );
+        // The exact nmcli args: modify <name> connection.autoconnect yes.
+        let call = &m_runner.recorded()[0];
+        assert_eq!(
+            call,
+            &vec![
+                "nmcli",
+                "connection",
+                "modify",
+                "HomeNet",
+                "connection.autoconnect",
+                "yes",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn set_autoconnect_disables_via_nmcli_modify_no() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = Arc::new(ScriptedRunner::new());
+        runner.push(CmdOut::failed(0, "")); // nmcli modify ok
+        let m_runner = Arc::clone(&runner);
+        let m = mgr(dir.path(), runner);
+        let res = m.set_autoconnect("HomeNet", false).await;
+        assert_eq!(
+            res,
+            json!({"autoconnect": false, "name": "HomeNet", "error": null})
+        );
+        let call = &m_runner.recorded()[0];
+        assert_eq!(call.last().map(String::as_str), Some("no"));
+    }
+
+    #[tokio::test]
+    async fn set_autoconnect_surfaces_the_nmcli_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = Arc::new(ScriptedRunner::new());
+        runner.push(CmdOut::failed(10, "unknown connection 'Nope'")); // nmcli fails
+        let m = mgr(dir.path(), runner);
+        let res = m.set_autoconnect("Nope", true).await;
+        // The intended autoconnect value is still echoed; the error is the
+        // trimmed stderr.
+        assert_eq!(res["autoconnect"], json!(true));
+        assert_eq!(res["name"], json!("Nope"));
+        assert_eq!(res["error"], json!("unknown connection 'Nope'"));
+    }
+
+    #[tokio::test]
+    async fn set_autoconnect_falls_back_to_nmcli_failed_on_empty_streams() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = Arc::new(ScriptedRunner::new());
+        runner.push(CmdOut::failed(1, "")); // nonzero, no stderr/stdout
+        let m = mgr(dir.path(), runner);
+        let res = m.set_autoconnect("Net", false).await;
+        assert_eq!(res["error"], json!("nmcli_failed"));
     }
 }

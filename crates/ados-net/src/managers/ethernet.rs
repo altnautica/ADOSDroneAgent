@@ -210,7 +210,11 @@ impl EthernetManager {
         let name = match self.discover_primary_connection().await {
             Some(n) => n,
             None => {
-                return json!({"ok": false, "error": "no_ethernet_connection"});
+                return json!({
+                    "ok": false,
+                    "error": "no_ethernet_connection",
+                    "hint": "No saved NetworkManager Ethernet connection found",
+                });
             }
         };
         let dns_str = dns.join(" ");
@@ -250,12 +254,99 @@ impl EthernetManager {
         json!({"mode": "static", "ip": ip, "gateway": gateway, "dns": dns, "ok": true})
     }
 
+    /// The persisted-profile config view backing `GET .../network/ethernet` and
+    /// the success body of the ethernet PUT. Mirrors `config`: the mode + static
+    /// fields come from the NM connection PROFILE (`nmcli -t -f
+    /// ipv4.method,ipv4.addresses,ipv4.gateway,ipv4.dns connection show <name>`,
+    /// so the UI reflects what applies on next reconnect, not the runtime `ip
+    /// addr`), with the live link + current IP merged in from `status`. Returns
+    /// `{mode, connection_name, ip, gateway, dns, link, speed_mbps, current_ip,
+    /// current_gateway}`. A board with no ethernet profile reports the defaults
+    /// (mode dhcp, null profile fields) plus the live link legs.
+    pub async fn config(&self) -> Value {
+        let name = self.discover_primary_connection().await;
+        let mut mode = "dhcp".to_string();
+        let mut profile_ip: Option<String> = None;
+        let mut profile_gateway: Option<String> = None;
+        let mut profile_dns: Vec<String> = Vec::new();
+
+        if let Some(ref n) = name {
+            let out = self
+                .runner
+                .run(
+                    &[
+                        "nmcli",
+                        "-t",
+                        "-f",
+                        "ipv4.method,ipv4.addresses,ipv4.gateway,ipv4.dns",
+                        "connection",
+                        "show",
+                        n,
+                    ],
+                    RUN_TIMEOUT,
+                )
+                .await;
+            if out.ok() {
+                for line in out.stdout.lines() {
+                    // Mirror Python `line.partition(":")`: split on the FIRST ':'.
+                    let Some((key, val)) = line.split_once(':') else {
+                        continue;
+                    };
+                    let val = val.trim();
+                    match key {
+                        "ipv4.method" => {
+                            mode = if val == "manual" {
+                                "static".to_string()
+                            } else {
+                                "dhcp".to_string()
+                            };
+                        }
+                        "ipv4.addresses" => {
+                            profile_ip = (!val.is_empty()).then(|| val.to_string());
+                        }
+                        "ipv4.gateway" => {
+                            profile_gateway = (!val.is_empty()).then(|| val.to_string());
+                        }
+                        "ipv4.dns" => {
+                            profile_dns = if val.is_empty() {
+                                Vec::new()
+                            } else {
+                                val.split(',')
+                                    .filter(|d| !d.is_empty())
+                                    .map(str::to_string)
+                                    .collect()
+                            };
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        let live = self.status().await;
+        json!({
+            "mode": mode,
+            "connection_name": name,
+            "ip": profile_ip,
+            "gateway": profile_gateway,
+            "dns": profile_dns,
+            "link": live.get("link").and_then(Value::as_bool).unwrap_or(false),
+            "speed_mbps": live.get("speed_mbps").cloned().unwrap_or(Value::Null),
+            "current_ip": live.get("ip").cloned().unwrap_or(Value::Null),
+            "current_gateway": live.get("gateway").cloned().unwrap_or(Value::Null),
+        })
+    }
+
     /// Reset the primary connection to DHCP via nmcli. Mirrors `configure_dhcp`.
     pub async fn configure_dhcp(&self) -> Value {
         let name = match self.discover_primary_connection().await {
             Some(n) => n,
             None => {
-                return json!({"ok": false, "error": "no_ethernet_connection"});
+                return json!({
+                    "ok": false,
+                    "error": "no_ethernet_connection",
+                    "hint": "No saved NetworkManager Ethernet connection found",
+                });
             }
         };
         let modify = self
@@ -553,5 +644,102 @@ mod tests {
         let res = m.configure_dhcp().await;
         assert_eq!(res["ok"], true);
         assert_eq!(res["mode"], "dhcp");
+    }
+
+    #[tokio::test]
+    async fn no_ethernet_connection_error_carries_the_hint() {
+        // The no-connection error carries the same `hint` the Python manager
+        // returns, so the PUT route's error body matches byte-for-byte.
+        let runner = Arc::new(ScriptedRunner::new());
+        runner.push(CmdOut {
+            rc: 0,
+            stdout: "MyWifi:802-11-wireless:wlan0\n".to_string(),
+            stderr: String::new(),
+        });
+        runner.push(CmdOut::failed(0, "")); // --active empty
+        let m = EthernetManager::new("eth0", runner);
+        let res = m.configure_dhcp().await;
+        assert_eq!(res["ok"], false);
+        assert_eq!(res["error"], "no_ethernet_connection");
+        assert_eq!(
+            res["hint"],
+            "No saved NetworkManager Ethernet connection found"
+        );
+    }
+
+    #[tokio::test]
+    async fn config_reads_the_static_profile_and_merges_live_link() {
+        let dir = tempfile::tempdir().unwrap();
+        write_carrier(dir.path(), "eth0", "1\n");
+        let speed_dir = dir.path().join("class/net").join("eth0");
+        std::fs::write(speed_dir.join("speed"), "1000\n").unwrap();
+        let runner = Arc::new(ScriptedRunner::new());
+        // discover_primary_connection: connection show + active.
+        runner.push(CmdOut {
+            rc: 0,
+            stdout: "Wired:802-3-ethernet:eth0\n".to_string(),
+            stderr: String::new(),
+        });
+        runner.push(CmdOut {
+            rc: 0,
+            stdout: "Wired:802-3-ethernet:eth0\n".to_string(),
+            stderr: String::new(),
+        }); // --active
+            // The profile read (-t -f ipv4.*): a manual (static) profile.
+        runner.push(CmdOut {
+            rc: 0,
+            stdout: "ipv4.method:manual\nipv4.addresses:10.0.0.5/24\nipv4.gateway:10.0.0.1\nipv4.dns:8.8.8.8,1.1.1.1\n".to_string(),
+            stderr: String::new(),
+        });
+        // status(): ip addr + ip route (status) + ip route (get_gateway follow-up).
+        runner.push(CmdOut {
+            rc: 0,
+            stdout: "    inet 10.0.0.5/24 scope global eth0\n".to_string(),
+            stderr: String::new(),
+        });
+        runner.push(CmdOut {
+            rc: 0,
+            stdout: "default via 10.0.0.1 dev eth0\n".to_string(),
+            stderr: String::new(),
+        });
+        runner.push(CmdOut {
+            rc: 0,
+            stdout: "default via 10.0.0.1 dev eth0\n".to_string(),
+            stderr: String::new(),
+        });
+        let m = EthernetManager::with_sysfs_root("eth0", dir.path().to_path_buf(), runner);
+        let cfg = m.config().await;
+        assert_eq!(cfg["mode"], "static");
+        assert_eq!(cfg["connection_name"], "Wired");
+        assert_eq!(cfg["ip"], "10.0.0.5/24");
+        assert_eq!(cfg["gateway"], "10.0.0.1");
+        assert_eq!(cfg["dns"], json!(["8.8.8.8", "1.1.1.1"]));
+        assert_eq!(cfg["link"], true);
+        assert_eq!(cfg["speed_mbps"], 1000);
+        assert_eq!(cfg["current_ip"], "10.0.0.5");
+        assert_eq!(cfg["current_gateway"], "10.0.0.1");
+    }
+
+    #[tokio::test]
+    async fn config_with_no_profile_reports_dhcp_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = Arc::new(ScriptedRunner::new());
+        // discover: no ethernet profile.
+        runner.push(CmdOut {
+            rc: 0,
+            stdout: "MyWifi:802-11-wireless:wlan0\n".to_string(),
+            stderr: String::new(),
+        });
+        runner.push(CmdOut::failed(0, "")); // --active empty
+                                            // status(): ip addr + ip route both fail (no link).
+        runner.push(CmdOut::failed(1, ""));
+        runner.push(CmdOut::failed(1, ""));
+        let m = EthernetManager::with_sysfs_root("eth0", dir.path().to_path_buf(), runner);
+        let cfg = m.config().await;
+        assert_eq!(cfg["mode"], "dhcp");
+        assert!(cfg["connection_name"].is_null());
+        assert!(cfg["ip"].is_null());
+        assert_eq!(cfg["dns"], json!([]));
+        assert_eq!(cfg["link"], false);
     }
 }

@@ -260,18 +260,48 @@ async fn main() -> Result<()> {
         })
     };
 
-    // Operator WiFi-join/forget command socket. The REST `/network/client/*`
-    // handlers forward to this when the native daemon owns the uplink, so they
-    // never drive `nmcli` on `wlan0` in-process and race this daemon's WiFi
-    // manager for the radio. A dedicated manager instance owns the operator
-    // actions; at steady state it is idle (holds no lock, touches no nmcli), so
-    // it adds no management-link risk, and it shares the `wlan0` advisory file
-    // lock + the real system state with the router's WiFi manager so the two
-    // never both transition the radio.
+    // Bring up the LAN-side AP and the USB-gadget tether. Both are best-effort:
+    // a board with no wlan0 or no configfs logs and continues. The AP manager is
+    // shared (behind a Mutex) with the operator command socket below so the AP
+    // PUT write drives this same live instance instead of a second hostapd owner.
+    let hostapd = Arc::new(Mutex::new(HostapdManager::new(
+        &device_id,
+        None,
+        6,
+        String::new(),
+        runner.clone(),
+    )));
+    {
+        let mut hostapd = hostapd.lock().await;
+        hostapd.ensure_passphrase();
+        if !hostapd.start().await {
+            let ssid = hostapd.ssid().to_string();
+            tracing::warn!(ssid = %ssid, "ap_start_incomplete");
+        }
+    }
+
+    // Operator uplink-matrix command socket. The REST `/network/*` write handlers
+    // forward to this when the native daemon owns the uplink, so they never drive
+    // `nmcli` / `hostapd` / `iptables` in-process and race the daemon's managers
+    // for the radio + firewall. A dedicated WiFi-client instance owns the operator
+    // join/forget/autoconnect actions; at steady state it is idle (holds no lock,
+    // touches no nmcli), so it adds no management-link risk, and it shares the
+    // `wlan0` advisory file lock + the real system state with the router's WiFi
+    // manager so the two never both transition the radio. The AP / ethernet /
+    // modem managers shared here are the same live instances the daemon already
+    // owns (the modem) or a stateless-apply peer (ethernet), so the socket drives
+    // the live system, not a parallel copy. The share-uplink toggle takes no op
+    // here: the REST layer only persists the flag and the daemon's reconciler
+    // applies the firewall, so a socket apply would be a second writer racing it.
     let wifi_cmd = Arc::new(Mutex::new(WifiClientManager::new(runner.clone())));
+    let eth_iface = detect_ethernet_iface();
+    let eth_cmd = Arc::new(EthernetManager::new(eth_iface, runner.clone()));
     let cmdsock_task = {
         let state = ados_net::CmdState {
             wifi: Arc::clone(&wifi_cmd),
+            hostapd: Arc::clone(&hostapd),
+            ethernet: Arc::clone(&eth_cmd),
+            modem: Arc::clone(&modem),
         };
         tokio::spawn(async move {
             if let Err(e) = ados_net::cmdsock::serve(state, ados_net::paths::wifi_cmd_sock()).await
@@ -280,14 +310,6 @@ async fn main() -> Result<()> {
             }
         })
     };
-
-    // Bring up the LAN-side AP and the USB-gadget tether. Both are best-effort:
-    // a board with no wlan0 or no configfs logs and continues.
-    let mut hostapd = HostapdManager::new(&device_id, None, 6, String::new(), runner.clone());
-    hostapd.ensure_passphrase();
-    if !hostapd.start().await {
-        tracing::warn!(ssid = hostapd.ssid(), "ap_start_incomplete");
-    }
 
     let mut usb_gadget = UsbGadgetManager::new();
     if usb_gadget.configfs_available() {
@@ -328,7 +350,7 @@ async fn main() -> Result<()> {
         let _ = modem.bring_down().await;
     }
     usb_gadget.teardown().await;
-    hostapd.stop().await;
+    hostapd.lock().await.stop().await;
     throttle.abort();
     share_uplink_task.abort();
     cmdsock_task.abort();
