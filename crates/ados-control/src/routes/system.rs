@@ -71,7 +71,7 @@ pub const CAPABILITIES: [&str; 16] = [
 pub async fn get_version(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
         "api_version": API_VERSION,
-        "agent_version": state.agent_version,
+        "agent_version": state.agent_version(),
         "capabilities": CAPABILITIES,
     }))
 }
@@ -81,7 +81,7 @@ pub async fn get_version(State(state): State<AppState>) -> Json<Value> {
 pub async fn healthz(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
         "status": "ok",
-        "version": state.agent_version,
+        "version": state.agent_version(),
     }))
 }
 

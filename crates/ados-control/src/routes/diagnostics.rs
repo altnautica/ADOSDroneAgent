@@ -81,7 +81,7 @@ pub async fn get_diagnostics(State(state): State<AppState>) -> Json<Value> {
 fn collect_agent(state: &AppState) -> Value {
     let (cpu, mem) = process_metrics();
     json!({
-        "version": state.agent_version,
+        "version": state.agent_version(),
         "uptime_seconds": state.process_uptime_seconds(),
         "process_cpu_percent": cpu,
         "process_memory_mb": mem,

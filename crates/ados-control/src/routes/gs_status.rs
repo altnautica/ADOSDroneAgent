@@ -607,7 +607,7 @@ async fn system_snapshot(state: &AppState) -> Value {
         "ram_total_mb": ram_total_mb,
         "temp_c": temp_c,
         "uptime_seconds": proc_uptime_seconds(),
-        "agent_version": state.agent_version,
+        "agent_version": state.agent_version(),
     })
 }
 

@@ -84,7 +84,7 @@ pub async fn get_pairing_info(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
         "device_id": device_id,
         "name": name,
-        "version": state.agent_version,
+        "version": state.agent_version(),
         // Board is HAL-detected at runtime in the Python (the FastAPI route reads
         // `app.board_name`); the native surface has no in-process HAL-detect port,
         // so it reads the `name` field live off the board sidecar

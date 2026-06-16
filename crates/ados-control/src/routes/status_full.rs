@@ -105,7 +105,7 @@ pub async fn get_full_status(State(state): State<AppState>, headers: HeaderMap) 
     let capabilities: Value = json!({});
 
     let mut payload = Map::new();
-    payload.insert("version".to_string(), json!(state.agent_version));
+    payload.insert("version".to_string(), json!(state.agent_version()));
     payload.insert("uptime_seconds".to_string(), uptime);
     payload.insert("board".to_string(), board);
     payload.insert("health".to_string(), health);

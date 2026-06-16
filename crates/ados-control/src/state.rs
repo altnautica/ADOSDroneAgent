@@ -18,9 +18,10 @@ use crate::auth::PairingState;
 use crate::ipc::{LogdQueryClient, MavlinkIpcClient, StateIpcClient};
 use crate::routes::status::process_uptime_seconds;
 
-/// The agent version string, resolved once at startup, so the native surface
-/// reports the exact same version the FastAPI surface does (`/api/version`,
-/// `/healthz`, `/api/status`). Resolution order:
+/// The agent version string, resolved live on each call (through
+/// [`AppState::agent_version`]), so the native surface reports the exact same
+/// version the FastAPI surface does (`/api/version`, `/healthz`, `/api/status`)
+/// and tracks an upgrade without a front restart. Resolution order:
 /// 1. `ADOS_AGENT_VERSION` env, when a caller/unit pins it explicitly;
 /// 2. the `version` the installer records in the install-result contract
 ///    (`/var/lib/ados/install-result.json`), the real on-box agent version;
@@ -168,8 +169,6 @@ pub struct PairingPaths {
 /// every field is an `Arc` or a small owned value.
 #[derive(Clone)]
 pub struct AppState {
-    /// The agent version, reported by `/healthz` and `/api/version`.
-    pub agent_version: String,
     /// The pairing-state reader, shared with the LAN-edge auth middleware so a
     /// route and the gate read the same short-TTL-cached posture.
     pub pairing: Arc<PairingState>,
@@ -201,8 +200,9 @@ pub struct AppState {
 impl AppState {
     /// Build the state from a pairing reader, a vehicle-state client, the MAVLink
     /// command client, the logging-store query client, the board sidecar path, and
-    /// the pairing route paths, resolving the agent version from the environment
-    /// and stamping the process start instant.
+    /// the pairing route paths, stamping the process start instant. The agent
+    /// version is resolved live per request (see [`AppState::agent_version`]), not
+    /// cached here, so an upgrade is reflected without a front restart.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         pairing: Arc<PairingState>,
@@ -213,7 +213,6 @@ impl AppState {
         pairing_paths: PairingPaths,
     ) -> Self {
         Self {
-            agent_version: agent_version(),
             pairing,
             state,
             mavlink,
@@ -222,6 +221,18 @@ impl AppState {
             pairing_paths,
             started: Instant::now(),
         }
+    }
+
+    /// The agent version reported by `/healthz`, `/api/version`, and the status
+    /// payloads — resolved LIVE per call (`ADOS_AGENT_VERSION` env, then the
+    /// install-result contract, then the crate version), NOT cached at
+    /// construction. The installer starts the front before it finalizes
+    /// `install-result.json`, so a startup snapshot reports the pre-upgrade version
+    /// until the next front restart; reading live picks the new version up on the
+    /// next request. Cheap: the contract is a few hundred bytes, read only on the
+    /// version/status routes. (Bare call resolves to the free `agent_version`.)
+    pub fn agent_version(&self) -> String {
+        agent_version()
     }
 
     /// Seconds since this daemon started. The status route's uptime fallback.

@@ -83,7 +83,7 @@ pub async fn get_status(State(state): State<AppState>) -> Json<Value> {
     let board = read_board(&state.board_path);
 
     let mut body = json!({
-        "version": state.agent_version,
+        "version": state.agent_version(),
         "uptime_seconds": uptime,
         "board": board,
         "health": health,
