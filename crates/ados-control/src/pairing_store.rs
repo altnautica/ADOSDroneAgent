@@ -8,10 +8,16 @@
 //!
 //! The writers are byte-faithful to the Python `PairingManager`:
 //!
-//! - **claim**: prefer the cached `pending_api_key` over minting a fresh key,
-//!   set `paired:true` + `api_key` + `owner_id` + `paired_at`, and DROP
-//!   `pairing_code` / `code_created_at` / `pending_api_key`. The written object
-//!   carries exactly four keys in the Python insertion order.
+//! - **claim**: on an UNPAIRED agent, prefer the cached `pending_api_key` over
+//!   minting a fresh key, set `paired:true` + `api_key` + `owner_id` +
+//!   `paired_at`, and DROP `pairing_code` / `code_created_at` /
+//!   `pending_api_key`. The written object carries exactly four keys in the
+//!   Python insertion order. On an ALREADY-PAIRED agent the claim is
+//!   idempotent — it returns the live `api_key` unchanged and does not rewrite
+//!   or rotate. This is a deliberate divergence from the Python `claim` (which
+//!   raises "already paired"); it is safe because this is the LAN-local claim
+//!   surface, and rotating on re-claim would silently lock out every client
+//!   already holding the key. A key change is an explicit unpair-then-claim.
 //! - **unpair**: write an empty object `{}` (the Python `unpair` resets the
 //!   in-memory state to `{}` then saves).
 //!
@@ -198,6 +204,17 @@ impl std::error::Error for ClaimError {}
 /// test can pin it; production passes the wall clock.
 pub fn claim(path: &Path, user_id: &str, now: f64) -> Result<ClaimOutcome, ClaimError> {
     let current = PairingDoc::load(path);
+    // Idempotent re-claim: an already-paired agent returns its EXISTING key
+    // rather than rotating to the pending one. Rotating on re-claim silently
+    // invalidates every client already holding the key (the GCS, other
+    // browsers), so a key change must be an explicit unpair-then-claim. This
+    // also lets a first-party surface (the agent's own webapp, reached over the
+    // LAN) re-acquire the current key without disturbing existing pairings.
+    if current.paired {
+        if let Some(existing) = current.api_key.clone().filter(|k| !k.is_empty()) {
+            return Ok(ClaimOutcome { api_key: existing });
+        }
+    }
     let api_key = match current.pending_api_key.clone().filter(|k| !k.is_empty()) {
         Some(pending) => pending,
         None => generate_api_key().map_err(ClaimError::KeyGen)?,
@@ -388,6 +405,33 @@ mod tests {
         assert_eq!(on_disk["paired_at"], serde_json::json!(1700000000.5));
         assert!(on_disk.get("pairing_code").is_none());
         assert!(on_disk.get("pending_api_key").is_none());
+    }
+
+    #[test]
+    fn reclaim_of_a_paired_agent_returns_the_existing_key_without_rotating() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pairing.json");
+        // Already paired with a live key, and a DIFFERENT pending key present
+        // (e.g. the pair code rotated since). A re-claim must return the
+        // existing key, never the pending one, and never mint a new one — so a
+        // client already holding the key is not silently locked out.
+        std::fs::write(
+            &path,
+            r#"{"paired":true,"api_key":"ados_LIVE","owner_id":"op","paired_at":1.0,"pending_api_key":"ados_OTHER"}"#,
+        )
+        .unwrap();
+        let out = claim(&path, "someone-else", 2.0).unwrap();
+        assert_eq!(
+            out.api_key, "ados_LIVE",
+            "re-claim must reveal the live key"
+        );
+        let on_disk = read_json(&path);
+        assert_eq!(on_disk["api_key"], Value::String("ados_LIVE".into()));
+        assert_eq!(
+            on_disk["owner_id"],
+            Value::String("op".into()),
+            "re-claim must not reassign ownership"
+        );
     }
 
     #[test]
