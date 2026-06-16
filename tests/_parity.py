@@ -25,7 +25,7 @@ async def assert_route_parity(
 
     * ``call_route``    – zero-arg coroutine that invokes the route handler.
     * ``source_target`` – import path of the route's logd source helper to patch
-                          (e.g. "ados.api.routes.system.latest_hw_signals").
+                          (e.g. "ados.api.telemetry_source.latest_hw_signals").
     * ``logd_signals``  – the mock store payload returned when the source is live.
     * ``derive``        – optional; when the route derives via a second helper,
                           its target is patched through to the real impl so the

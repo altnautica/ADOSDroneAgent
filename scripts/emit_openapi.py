@@ -39,7 +39,6 @@ from ados.api.routes import (  # noqa: E402
     peripherals,
     peripherals_v1,
     plugins,
-    system,
     version,
     video,
     vision_models,
@@ -67,7 +66,6 @@ def build_spec_app() -> FastAPI:
     app.include_router(wfb.router, prefix="/api")
     app.include_router(ota.router, prefix="/api")
     app.include_router(pairing.router, prefix="/api")
-    app.include_router(system.router, prefix="/api")
     app.include_router(peripherals.router, prefix="/api")
     app.include_router(peripherals_v1.router, prefix="/api")
     app.include_router(vision_models.router, prefix="/api")
