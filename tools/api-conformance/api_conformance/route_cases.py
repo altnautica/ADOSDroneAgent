@@ -831,6 +831,29 @@ REGISTRY: list[RouteCase] = [
         content_type="application/json",
         require_sandbox=True,
     ),
+    # System resources snapshot: CPU / memory / swap / disk / per-sensor
+    # temperatures from the logging store's hardware snapshot. The live readings
+    # move every read, so they are masked; the stable capacities (cpu_count, the
+    # *_total_* fields) are the contract. The per-sensor `temperatures` map is an
+    # environment-specific live reading, so it is masked too.
+    RouteCase(
+        name="system",
+        method="GET",
+        path="/api/system",
+        paired_headers={"authorization": PAIRED_AUTH_PLACEHOLDER},
+        extra_volatile=(
+            "cpu_percent",
+            "memory_used_mb",
+            "memory_available_mb",
+            "memory_cache_mb",
+            "memory_percent",
+            "swap_used_mb",
+            "swap_percent",
+            "disk_used_gb",
+            "disk_percent",
+            "temperatures",
+        ),
+    ),
     # <append a RouteCase line per route as it migrates — the only shared edit>
 ]
 

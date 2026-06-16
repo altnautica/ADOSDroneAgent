@@ -94,6 +94,8 @@ fn native_routes() -> Vec<NativeRoute> {
         get("/api/wfb/pair/failover-status"),
         // Consolidated status.
         get("/api/status/full"),
+        // System resources snapshot (CPU/memory/swap/disk/temperatures).
+        get("/api/system"),
         // Video reads.
         get("/api/video/latency"),
         get("/api/v1/video/air-pipeline"),
@@ -319,7 +321,7 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            59,
+            60,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);
@@ -389,5 +391,7 @@ mod tests {
         assert!(has(Method::POST, "/api/command"));
         // The WS-ticket mint is native (replaces the proxied Python route).
         assert!(has(Method::POST, "/api/_ws/ticket"));
+        // The system-resources snapshot is native.
+        assert!(has(Method::GET, "/api/system"));
     }
 }

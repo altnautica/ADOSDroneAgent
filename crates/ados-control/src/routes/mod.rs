@@ -37,6 +37,7 @@ pub mod signing_write;
 pub mod status;
 pub mod status_full;
 pub mod system;
+pub mod system_resources;
 pub mod video;
 pub mod wfb;
 pub mod wfb_write;
@@ -145,6 +146,9 @@ pub fn build_router(state: AppState) -> Router {
         // The consolidated status: agent info, services, resources, video,
         // telemetry, radio, and mesh in one round-trip.
         .route("/api/status/full", get(status_full::get_full_status))
+        // System resources: CPU / memory / swap / disk / per-sensor temperatures
+        // from the logging store's hardware snapshot (the LCD + GCS resource read).
+        .route("/api/system", get(system_resources::get_system_resources))
         // Video reads: glass-to-glass latency, the air-side pipeline snapshot, and
         // the encoder/radio config (the snapshot/record/switch writes + the
         // camera-enumeration route stay proxied).
