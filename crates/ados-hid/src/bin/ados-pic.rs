@@ -158,7 +158,14 @@ async fn main() -> Result<()> {
     }
 
     tracing::info!("ados-pic stopped");
-    Ok(())
+    // The button reader runs on a blocking thread that may be parked on a
+    // synchronous GPIO read; returning from main would drop the runtime and wait
+    // for that thread to finish, which never happens, so the unit would sit in
+    // "deactivating" until the systemd stop-timeout SIGKILLs it. Exit the process
+    // directly on the shutdown signal instead — there is no shutdown-only state to
+    // flush (the sidecar is mirrored after each op, and the socket is removed on
+    // the next start), so an immediate exit is clean.
+    std::process::exit(0);
 }
 
 /// Load + merge `ground_station.ui.buttons.mapping` over the defaults. A missing
