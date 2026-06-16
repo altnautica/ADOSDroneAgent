@@ -119,7 +119,10 @@ pub fn build_router(state: AppState) -> Router {
         // frame and sends it to the FC, the read projects the one cached param).
         .route("/api/params", get(params::get_all_params))
         .route(
-            "/api/params/{name}",
+            // axum 0.7 path params use the `:name` form; the `{name}` form is a
+            // literal segment here and would never match a real value (the
+            // request would fall through to the reverse-proxy fallback).
+            "/api/params/:name",
             get(params_single::get_param).post(params_write::set_param),
         )
         // Services: the live `ados-*.service` unit inventory + the per-unit restart
@@ -127,7 +130,7 @@ pub fn build_router(state: AppState) -> Router {
         // cycles the whole agent process tree.
         .route("/api/services", get(services::list_services))
         .route(
-            "/api/services/{name}/restart",
+            "/api/services/:name/restart",
             post(service_control::restart_service),
         )
         .route(
@@ -311,7 +314,7 @@ pub fn build_router(state: AppState) -> Router {
             delete(network_write::delete_client),
         )
         .route(
-            "/api/v1/network/client/configured/{name}",
+            "/api/v1/network/client/configured/:name",
             delete(network_write::delete_client_configured),
         )
         // MAC-pin read: the per-adapter stable-MAC verdicts from the on-disk state
@@ -325,7 +328,7 @@ pub fn build_router(state: AppState) -> Router {
         // and drives the shared mac-pin engine for the .link removal + gated re-tag.
         .route("/api/v1/network/mac/pin", post(mac_pin::post_mac_pin))
         .route(
-            "/api/v1/network/mac/{iface}",
+            "/api/v1/network/mac/:iface",
             delete(mac_pin::delete_mac_pin),
         )
         // Ground-station network writes: AP config + share-uplink toggle + the
@@ -339,7 +342,7 @@ pub fn build_router(state: AppState) -> Router {
             put(gs_network_write::put_network_share_uplink),
         )
         .route(
-            "/api/v1/network/client/configured/{name}/autoconnect",
+            "/api/v1/network/client/configured/:name/autoconnect",
             put(network_write::put_client_autoconnect),
         )
         // Ground-station mesh + WFB-pair writes (role/mesh-config PUTs share their
@@ -409,10 +412,32 @@ pub fn build_router(state: AppState) -> Router {
             post(gs_bluetooth::post_bluetooth_pair),
         )
         .route(
-            "/api/v1/ground-station/bluetooth/{mac}",
+            "/api/v1/ground-station/bluetooth/:mac",
             delete(gs_bluetooth::delete_bluetooth),
         )
         // Everything else: reverse-proxy to the residual Python.
         .fallback(proxy_to_residual)
         .with_state(state)
+}
+
+#[cfg(test)]
+mod param_syntax_tests {
+    /// axum 0.7 path parameters use the `:name` form. A `{name}` literal in a
+    /// `.route(...)` path is matched verbatim and never binds a real value, so
+    /// the request silently falls through to the reverse-proxy fallback — the
+    /// route is registered for auth but never served natively. Guard against
+    /// reintroducing the 0.8 `{param}` form until the crate moves to axum 0.8.
+    #[test]
+    fn route_paths_use_axum_07_param_syntax() {
+        let src = include_str!("mod.rs");
+        let offenders: Vec<&str> = src
+            .lines()
+            .map(str::trim_start)
+            .filter(|l| l.starts_with("\"/api") && l.contains('{'))
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "route path(s) use {{param}} (axum 0.8) syntax; axum 0.7 needs :param: {offenders:?}"
+        );
+    }
 }
