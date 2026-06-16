@@ -66,7 +66,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use ados_macpin::engine::{link_file_name, NETWORKD_DIR, STATE_PATH};
+use ados_macpin::engine::{NETWORKD_DIR, STATE_PATH};
 
 use crate::state::AppState;
 
@@ -368,7 +368,7 @@ fn remove_link_file(dir: &Path, iface: &str) -> bool {
 
 #[cfg(not(target_os = "linux"))]
 fn remove_link_file(dir: &Path, iface: &str) -> bool {
-    let path = dir.join(link_file_name(iface));
+    let path = dir.join(ados_macpin::engine::link_file_name(iface));
     if path.exists() {
         std::fs::remove_file(&path).is_ok()
     } else {
@@ -921,7 +921,7 @@ mod tests {
         )
         .unwrap();
         // Seed a .link file at the engine's canonical name so the remove reports true.
-        let link = netd.join(link_file_name("wlan0"));
+        let link = netd.join(ados_macpin::engine::link_file_name("wlan0"));
         std::fs::write(
             &link,
             "[Match]\nOriginalName=wlan0\n[Link]\nMACAddress=02:c6:75:83:1a:3e\n",
