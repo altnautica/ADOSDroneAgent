@@ -35,6 +35,12 @@ ados-hid = { path = "../ados-hid" }
 # supervisor reconciler and the Python route produced. Linux-target legs inside
 # the crate are cfg-gated, so a non-Linux dev build keeps the safe fallbacks.
 ados-macpin = { path = "../ados-macpin" }
+# The ground-station video recorder lifecycle, reused by the recording write
+# routes so the front holds one long-lived recorder (the ffmpeg child must
+# outlive a single request: start and stop are separate HTTP calls). The crate
+# carries only the recorder logic + the process-group teardown; this surface is
+# the thin REST wrapper over its start()/stop().
+ados-video = { path = "../ados-video" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # YAML reader for the slice of /etc/ados/config.yaml the pairing-info route

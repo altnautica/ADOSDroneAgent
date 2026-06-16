@@ -23,14 +23,23 @@ pub mod can;
 pub mod command;
 pub mod diagnostics;
 pub mod fleet;
+pub mod gs_bluetooth;
+pub mod gs_camera_write;
+pub mod gs_cmd;
+pub mod gs_gamepad_write;
 pub mod gs_input_read;
 pub mod gs_mesh;
+pub mod gs_mesh_write;
 pub mod gs_network;
 pub mod gs_network_write;
 pub mod gs_pairing;
+pub mod gs_pic;
+pub mod gs_recording;
 pub mod gs_recording_list;
 pub mod gs_status;
 pub mod gs_ui_read;
+pub mod gs_ui_write;
+pub mod gs_wfb_pair;
 pub mod gs_wfb_write;
 pub mod mac_adapters;
 pub mod mac_pin;
@@ -199,7 +208,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         // Ground-station mesh reads (profile-gated): the role + capability hint,
         // the batman-adv state + its three slices, and the configured transport.
-        .route("/api/v1/ground-station/role", get(gs_mesh::get_role))
+        .route(
+            "/api/v1/ground-station/role",
+            get(gs_mesh::get_role).put(gs_mesh_write::put_role),
+        )
         .route("/api/v1/ground-station/mesh", get(gs_mesh::get_mesh_health))
         .route(
             "/api/v1/ground-station/mesh/neighbors",
@@ -215,7 +227,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route(
             "/api/v1/ground-station/mesh/config",
-            get(gs_mesh::get_mesh_config),
+            get(gs_mesh::get_mesh_config).put(gs_mesh_write::put_mesh_config),
         )
         // Ground-station network uplink reads (404 off a drone): the aggregate
         // view, ethernet, client scan, modem, the priority list, and cellular.
@@ -225,7 +237,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route(
             "/api/v1/ground-station/network/ethernet",
-            get(gs_network::get_network_ethernet),
+            get(gs_network::get_network_ethernet).put(gs_network_write::put_network_ethernet),
         )
         .route(
             "/api/v1/ground-station/network/client/scan",
@@ -233,7 +245,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route(
             "/api/v1/ground-station/network/modem",
-            get(gs_network::get_network_modem),
+            get(gs_network::get_network_modem).put(gs_network_write::put_network_modem),
         )
         .route(
             "/api/v1/ground-station/network/priority",
@@ -264,7 +276,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/ground-station/ui", get(gs_ui_read::get_ui))
         .route(
             "/api/v1/ground-station/display",
-            get(gs_ui_read::get_display),
+            get(gs_ui_read::get_display).put(gs_ui_write::put_display),
         )
         // Ground-station input reads (profile-gated): attached controllers + the
         // primary selection, and the paired Bluetooth devices.
@@ -315,6 +327,90 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/network/mac/{iface}",
             delete(mac_pin::delete_mac_pin),
+        )
+        // Ground-station network writes: AP config + share-uplink toggle + the
+        // Wi-Fi-client autoconnect flag (ethernet/modem PUTs share their read paths).
+        .route(
+            "/api/v1/ground-station/network/ap",
+            put(gs_network_write::put_network_ap),
+        )
+        .route(
+            "/api/v1/ground-station/network/share_uplink",
+            put(gs_network_write::put_network_share_uplink),
+        )
+        .route(
+            "/api/v1/network/client/configured/{name}/autoconnect",
+            put(network_write::put_client_autoconnect),
+        )
+        // Ground-station mesh + WFB-pair writes (role/mesh-config PUTs share their
+        // read paths): gateway preference + the WFB rx-key pair/unpair.
+        .route(
+            "/api/v1/ground-station/mesh/gateway_preference",
+            put(gs_mesh_write::put_gateway_preference),
+        )
+        .route(
+            "/api/v1/ground-station/wfb/pair",
+            post(gs_wfb_pair::post_wfb_pair).delete(gs_wfb_pair::delete_wfb_pair),
+        )
+        // Ground-station video writes: recording start/stop + the camera-source switch.
+        .route(
+            "/api/v1/ground-station/recording/start",
+            post(gs_recording::post_recording_start),
+        )
+        .route(
+            "/api/v1/ground-station/recording/stop",
+            post(gs_recording::post_recording_stop),
+        )
+        .route(
+            "/api/v1/ground-station/camera/switch",
+            post(gs_camera_write::post_camera_switch),
+        )
+        // Ground-station UI config writes (display PUT shares its read path): OLED +
+        // buttons + screens, each persisted + SIGHUP to the display service.
+        .route(
+            "/api/v1/ground-station/ui/oled",
+            put(gs_ui_write::put_ui_oled),
+        )
+        .route(
+            "/api/v1/ground-station/ui/buttons",
+            put(gs_ui_write::put_ui_buttons),
+        )
+        .route(
+            "/api/v1/ground-station/ui/screens",
+            put(gs_ui_write::put_ui_screens),
+        )
+        // Ground-station PIC arbiter + Bluetooth + gamepad writes (the ados-hid socket).
+        .route(
+            "/api/v1/ground-station/pic/claim",
+            post(gs_pic::post_pic_claim),
+        )
+        .route(
+            "/api/v1/ground-station/pic/release",
+            post(gs_pic::post_pic_release),
+        )
+        .route(
+            "/api/v1/ground-station/pic/confirm-token",
+            post(gs_pic::post_pic_confirm_token),
+        )
+        .route(
+            "/api/v1/ground-station/pic/heartbeat",
+            post(gs_pic::post_pic_heartbeat),
+        )
+        .route(
+            "/api/v1/ground-station/gamepads/primary",
+            put(gs_gamepad_write::put_gamepad_primary),
+        )
+        .route(
+            "/api/v1/ground-station/bluetooth/scan",
+            post(gs_bluetooth::post_bluetooth_scan),
+        )
+        .route(
+            "/api/v1/ground-station/bluetooth/pair",
+            post(gs_bluetooth::post_bluetooth_pair),
+        )
+        .route(
+            "/api/v1/ground-station/bluetooth/{mac}",
+            delete(gs_bluetooth::delete_bluetooth),
         )
         // Everything else: reverse-proxy to the residual Python.
         .fallback(proxy_to_residual)

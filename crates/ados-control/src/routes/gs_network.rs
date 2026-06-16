@@ -395,7 +395,12 @@ fn ethernet_view_default() -> Value {
 /// `percent`) are overlaid from the store's most-recent `net.modem_usage` event
 /// when present. Mirrors `_modem_view` over a box whose `status()` reports no
 /// modem + the store overlay.
-async fn modem_view(state: &AppState) -> Value {
+///
+/// Shared with the `PUT .../network/modem` write route, which returns the same
+/// `_modem_view()` body after persisting the config sidecar (exactly as the
+/// FastAPI modem PUT returns `_modem_view()` after `configure()`), so the PUT
+/// response is the GET response over the freshly-persisted config.
+pub(crate) async fn modem_view(state: &AppState) -> Value {
     let cfg = load_json_object(&gs_modem_json()).unwrap_or_default();
     let enabled = cfg.get("enabled").map(json_truthy).unwrap_or(false);
     let apn = cfg

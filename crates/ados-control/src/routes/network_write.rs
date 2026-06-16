@@ -1,6 +1,6 @@
-//! Profile-agnostic Wi-Fi client write routes (join / leave / forget).
+//! Profile-agnostic Wi-Fi client write routes (join / leave / forget / autoconnect).
 //!
-//! Three operator on-demand writes that mutate the upstream Wi-Fi-client link:
+//! Four operator on-demand writes that mutate the upstream Wi-Fi-client link:
 //!
 //! - **`PUT /api/v1/network/client/join`** — join a Wi-Fi network. The body is
 //!   `{"ssid", "passphrase"?, "force"?}`; the route returns
@@ -11,40 +11,39 @@
 //! - **`DELETE /api/v1/network/client/configured/{name}`** — forget a saved
 //!   profile by name; returns `{"forgot", "name", "error"}`, or a `400` when the
 //!   delete failed.
+//! - **`PUT /api/v1/network/client/configured/{name}/autoconnect`** — toggle the
+//!   NetworkManager autoconnect flag of a saved profile. The body is
+//!   `{"enabled"?}` (a missing / falsey value is `false`); the route returns
+//!   `{"autoconnect", "name", "error"}`, or a `400` when the manager reports an
+//!   `error` (a missing connection / an `nmcli` failure / an empty name).
 //!
 //! ## Why these forward to the `ados-net` command socket (the working write path)
 //!
 //! On this native front the uplink loop runs in a sibling `ados-net` daemon that
-//! holds the `wlan0` AP/STA advisory lock. The front MUST NOT drive `nmcli` on
-//! `wlan0` itself, or it would race the daemon's own Wi-Fi-client manager for the
-//! radio (the same reason the read side serves an empty scan instead of scanning,
-//! see [`crate::routes::gs_network`]). So each write forwards to the daemon's
-//! command socket at `/run/ados/wifi-cmd.sock` with one newline-terminated JSON
-//! request, reads one newline-terminated JSON reply, then strips the transport
-//! `ok` flag so the body matches the manager's own shape — the same forward the
-//! FastAPI route performs through its Wi-Fi command client when the native daemon
-//! owns net. The ops are `wifi_join` / `wifi_leave` / `wifi_forget`.
+//! holds the `wlan0` AP/STA advisory lock and owns the saved Wi-Fi profiles. The
+//! front MUST NOT drive `nmcli` itself, or it would race the daemon's own
+//! Wi-Fi-client manager (the same reason the read side serves an empty scan
+//! instead of scanning, see [`crate::routes::gs_network`]). So each write forwards
+//! to the daemon's command socket at `/run/ados/wifi-cmd.sock` with one
+//! newline-terminated JSON request, reads one newline-terminated JSON reply, then
+//! strips the transport `ok` flag so the body matches the manager's own shape. The
+//! ops are `wifi_join` / `wifi_leave` / `wifi_forget` / `wifi_autoconnect`.
 //!
 //! ## Degrade posture (parity with the FastAPI route's reachable arm)
 //!
-//! The FastAPI route falls back to the packaged in-process `nmcli` manager when
-//! the socket is unreachable. The native front cannot mirror that fallback — it
-//! must not drive `nmcli` and race the daemon — so an unreachable / non-replying
-//! socket degrades to a `503 "Wi-Fi command socket unavailable"` rather than a
-//! `500`, the same no-link posture the param-write surface takes when its own seam
-//! (the MAVLink socket) is absent. The command is never silently dropped.
+//! The FastAPI join/leave/forget routes fall back to the packaged in-process
+//! `nmcli` manager when the socket is unreachable. The native front cannot mirror
+//! that fallback — it must not drive `nmcli` and race the daemon — so an
+//! unreachable / non-replying socket degrades to a `503 "Wi-Fi command socket
+//! unavailable"` rather than a `500`, the same no-link posture the param-write
+//! surface takes when its own seam (the MAVLink socket) is absent. The command is
+//! never silently dropped. The autoconnect route's FastAPI twin has no fallback
+//! arm at all (it always calls the manager directly), so its unreachable case
+//! takes the same `503` posture.
 //!
 //! A reply with `ok:false` carries the daemon's `error` code; the route surfaces
 //! it as a `500` with the FastAPI `E_WIFI_*_FAILED` error-object body, matching
 //! the FastAPI server-reported-failure arm.
-//!
-//! ## What this module does NOT port
-//!
-//! `PUT /api/v1/network/client/configured/{name}/autoconnect` is intentionally
-//! NOT here: the daemon's command socket has no autoconnect op, and the FastAPI
-//! route only ever calls the packaged in-process `nmcli` manager
-//! (`set_autoconnect`) — a write the front cannot mirror without driving `nmcli`
-//! itself. It stays on the residual surface.
 
 use axum::extract::Path;
 use axum::http::StatusCode;
@@ -337,6 +336,65 @@ pub async fn delete_client_configured(Path(name): Path<String>) -> Response {
             .unwrap_or("nmcli_failed")
             .to_string();
         return wifi_error(StatusCode::BAD_REQUEST, "E_WIFI_FORGET_FAILED", message);
+    }
+
+    Json(Value::Object(reply)).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// PUT /api/v1/network/client/configured/{name}/autoconnect
+// ---------------------------------------------------------------------------
+
+/// The `PUT .../autoconnect` request body. Mirrors the FastAPI route, which reads
+/// `bool(body.get("enabled"))` off an untyped dict: a missing / null / falsey
+/// value is `false`, so the field is optional and defaults to `false`.
+#[derive(Debug, Default, Deserialize)]
+pub struct AutoconnectRequest {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
+/// `PUT /api/v1/network/client/configured/{name}/autoconnect` →
+/// `{"autoconnect", "name", "error"}`.
+///
+/// Forwards a `wifi_autoconnect` op to the `ados-net` command socket (the daemon
+/// runs `nmcli connection modify <name> connection.autoconnect yes|no` through its
+/// Wi-Fi-client manager). A reply with a non-null `error` (a missing connection,
+/// an `nmcli` failure, or an empty name → `name_required`) maps to the FastAPI
+/// `400` (`E_WIFI_AUTOCONNECT_FAILED` carrying the manager's `error`); an
+/// `error:null` reply is returned verbatim. An unreachable socket → 503; an
+/// `ok:false` reply → the FastAPI `E_WIFI_AUTOCONNECT_FAILED` 500.
+pub async fn put_client_autoconnect(
+    Path(name): Path<String>,
+    Json(req): Json<AutoconnectRequest>,
+) -> Response {
+    let enabled = req.enabled.unwrap_or(false);
+    let request = json!({"op": "wifi_autoconnect", "name": name, "enabled": enabled});
+    let reply = match wifi_cmd(&request).await {
+        NetCmd::Reply(r) => r,
+        NetCmd::Error(msg) => {
+            return wifi_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "E_WIFI_AUTOCONNECT_FAILED",
+                msg,
+            );
+        }
+        NetCmd::Unavailable => return socket_unavailable("E_WIFI_AUTOCONNECT_FAILED"),
+    };
+
+    // A processed-but-failed toggle carries a truthy `error` (the manager reports
+    // name_required / nmcli_failed / the trimmed nmcli stderr); the FastAPI route
+    // turns any truthy `error` into a 400 with that message.
+    if let Some(err) = reply.get("error").filter(|v| json_truthy(v)) {
+        let message = err
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| err.to_string());
+        return wifi_error(
+            StatusCode::BAD_REQUEST,
+            "E_WIFI_AUTOCONNECT_FAILED",
+            message,
+        );
     }
 
     Json(Value::Object(reply)).into_response()
@@ -703,5 +761,114 @@ mod tests {
         assert!(!json_truthy(&json!(false)));
         assert!(!json_truthy(&json!("")));
         assert!(json_truthy(&json!("x")));
+    }
+
+    // ── autoconnect: no-socket 503 + the full forward path ───────────────────
+
+    #[tokio::test]
+    async fn autoconnect_with_no_socket_is_a_503() {
+        let _guard = crate::lock_env().await;
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ADOS_RUN_DIR", dir.path());
+        let resp = put_client_autoconnect(
+            Path("HomeNet".to_string()),
+            Json(AutoconnectRequest {
+                enabled: Some(true),
+            }),
+        )
+        .await;
+        std::env::remove_var("ADOS_RUN_DIR");
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = body_json(resp).await;
+        assert_eq!(
+            body["detail"]["error"]["code"],
+            json!("E_WIFI_AUTOCONNECT_FAILED")
+        );
+    }
+
+    #[tokio::test]
+    async fn autoconnect_forwards_the_op_and_returns_the_reply() {
+        let _guard = crate::lock_env().await;
+        let out = with_socket(
+            json!({"ok": true, "autoconnect": true, "name": "HomeNet", "error": null}),
+            put_client_autoconnect(
+                Path("HomeNet".to_string()),
+                Json(AutoconnectRequest {
+                    enabled: Some(true),
+                }),
+            ),
+        )
+        .await;
+        // The exact op + fields forwarded to the daemon.
+        assert_eq!(out["request"]["op"], json!("wifi_autoconnect"));
+        assert_eq!(out["request"]["name"], json!("HomeNet"));
+        assert_eq!(out["request"]["enabled"], json!(true));
+        // The success body is the manager reply with the ok flag stripped.
+        assert_eq!(out["status"], json!(200));
+        assert_eq!(
+            out["body"],
+            json!({"autoconnect": true, "name": "HomeNet", "error": null})
+        );
+    }
+
+    #[tokio::test]
+    async fn autoconnect_defaults_a_missing_enabled_to_false() {
+        let _guard = crate::lock_env().await;
+        let out = with_socket(
+            json!({"ok": true, "autoconnect": false, "name": "HomeNet", "error": null}),
+            put_client_autoconnect(
+                Path("HomeNet".to_string()),
+                Json(AutoconnectRequest { enabled: None }),
+            ),
+        )
+        .await;
+        // A missing `enabled` forwards as false (Python `bool(body.get("enabled"))`).
+        assert_eq!(out["request"]["enabled"], json!(false));
+        assert_eq!(out["status"], json!(200));
+    }
+
+    #[tokio::test]
+    async fn autoconnect_maps_a_manager_error_to_a_400() {
+        let _guard = crate::lock_env().await;
+        let out = with_socket(
+            json!({"ok": true, "autoconnect": true, "name": "Nope", "error": "unknown connection 'Nope'"}),
+            put_client_autoconnect(
+                Path("Nope".to_string()),
+                Json(AutoconnectRequest {
+                    enabled: Some(true),
+                }),
+            ),
+        )
+        .await;
+        // A truthy `error` on the reply → the FastAPI 400 carrying the message.
+        assert_eq!(out["status"], json!(400));
+        assert_eq!(
+            out["body"]["detail"]["error"]["code"],
+            json!("E_WIFI_AUTOCONNECT_FAILED")
+        );
+        assert_eq!(
+            out["body"]["detail"]["error"]["message"],
+            json!("unknown connection 'Nope'")
+        );
+    }
+
+    #[tokio::test]
+    async fn autoconnect_surfaces_an_ok_false_reply_as_a_500() {
+        let _guard = crate::lock_env().await;
+        let out = with_socket(
+            json!({"ok": false, "error": "E_MISSING_NAME"}),
+            put_client_autoconnect(
+                Path("".to_string()),
+                Json(AutoconnectRequest {
+                    enabled: Some(true),
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(out["status"], json!(500));
+        assert_eq!(
+            out["body"]["detail"]["error"]["code"],
+            json!("E_WIFI_AUTOCONNECT_FAILED")
+        );
     }
 }

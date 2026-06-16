@@ -168,6 +168,39 @@ fn native_routes() -> Vec<NativeRoute> {
         // Ground-station WFB config write (PUT on the wfb read's path): a surgical
         // video.wfb config merge the radio/ground services pick up on their cadence.
         put("/api/v1/ground-station/wfb"),
+        // Ground-station network writes (ap/share_uplink + autoconnect; ethernet +
+        // modem PUTs share their read paths) forwarded to the ados-net command socket.
+        put("/api/v1/ground-station/network/ap"),
+        put("/api/v1/ground-station/network/ethernet"),
+        put("/api/v1/ground-station/network/modem"),
+        put("/api/v1/ground-station/network/share_uplink"),
+        put("/api/v1/network/client/configured/{name}/autoconnect"),
+        // Ground-station mesh + WFB-pair writes (role + mesh/config PUTs share their
+        // read paths) forwarded to the ados-groundlink command socket.
+        put("/api/v1/ground-station/role"),
+        put("/api/v1/ground-station/mesh/gateway_preference"),
+        put("/api/v1/ground-station/mesh/config"),
+        post("/api/v1/ground-station/wfb/pair"),
+        delete("/api/v1/ground-station/wfb/pair"),
+        // Ground-station video writes: recording start/stop (ados-video) + the
+        // camera-source switch (a MAVLink COMMAND_LONG to the FC socket).
+        post("/api/v1/ground-station/recording/start"),
+        post("/api/v1/ground-station/recording/stop"),
+        post("/api/v1/ground-station/camera/switch"),
+        // Ground-station UI config writes (display PUT shares its read path).
+        put("/api/v1/ground-station/ui/oled"),
+        put("/api/v1/ground-station/ui/buttons"),
+        put("/api/v1/ground-station/ui/screens"),
+        put("/api/v1/ground-station/display"),
+        // Ground-station PIC arbiter + gamepad + Bluetooth writes (ados-hid socket).
+        post("/api/v1/ground-station/pic/claim"),
+        post("/api/v1/ground-station/pic/release"),
+        post("/api/v1/ground-station/pic/confirm-token"),
+        post("/api/v1/ground-station/pic/heartbeat"),
+        put("/api/v1/ground-station/gamepads/primary"),
+        post("/api/v1/ground-station/bluetooth/scan"),
+        post("/api/v1/ground-station/bluetooth/pair"),
+        delete("/api/v1/ground-station/bluetooth/{mac}"),
     ]
 }
 
@@ -346,7 +379,7 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            74,
+            99,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);
@@ -421,6 +454,47 @@ mod tests {
         assert!(has(Method::PUT, "/api/wfb/tx-power"));
         assert!(has(Method::PUT, "/api/v1/ground-station/network/priority"));
         assert!(has(Method::PUT, "/api/v1/ground-station/wfb"));
+        // The ground-station write surge: network/mesh/video/UI/PIC/Bluetooth writes.
+        assert!(has(Method::PUT, "/api/v1/ground-station/network/ap"));
+        assert!(has(Method::PUT, "/api/v1/ground-station/network/ethernet"));
+        assert!(has(Method::PUT, "/api/v1/ground-station/network/modem"));
+        assert!(has(
+            Method::PUT,
+            "/api/v1/ground-station/network/share_uplink"
+        ));
+        assert!(has(
+            Method::PUT,
+            "/api/v1/network/client/configured/{name}/autoconnect"
+        ));
+        assert!(has(Method::PUT, "/api/v1/ground-station/role"));
+        assert!(has(
+            Method::PUT,
+            "/api/v1/ground-station/mesh/gateway_preference"
+        ));
+        assert!(has(Method::PUT, "/api/v1/ground-station/mesh/config"));
+        assert!(has(Method::POST, "/api/v1/ground-station/wfb/pair"));
+        assert!(has(Method::DELETE, "/api/v1/ground-station/wfb/pair"));
+        assert!(has(Method::POST, "/api/v1/ground-station/recording/start"));
+        assert!(has(Method::POST, "/api/v1/ground-station/recording/stop"));
+        assert!(has(Method::POST, "/api/v1/ground-station/camera/switch"));
+        assert!(has(Method::PUT, "/api/v1/ground-station/ui/oled"));
+        assert!(has(Method::PUT, "/api/v1/ground-station/ui/buttons"));
+        assert!(has(Method::PUT, "/api/v1/ground-station/ui/screens"));
+        assert!(has(Method::PUT, "/api/v1/ground-station/display"));
+        assert!(has(Method::POST, "/api/v1/ground-station/pic/claim"));
+        assert!(has(Method::POST, "/api/v1/ground-station/pic/release"));
+        assert!(has(
+            Method::POST,
+            "/api/v1/ground-station/pic/confirm-token"
+        ));
+        assert!(has(Method::POST, "/api/v1/ground-station/pic/heartbeat"));
+        assert!(has(Method::PUT, "/api/v1/ground-station/gamepads/primary"));
+        assert!(has(Method::POST, "/api/v1/ground-station/bluetooth/scan"));
+        assert!(has(Method::POST, "/api/v1/ground-station/bluetooth/pair"));
+        assert!(has(
+            Method::DELETE,
+            "/api/v1/ground-station/bluetooth/{mac}"
+        ));
         // The original surface stays native.
         assert!(has(Method::GET, "/healthz"));
         assert!(has(Method::POST, "/api/command"));
