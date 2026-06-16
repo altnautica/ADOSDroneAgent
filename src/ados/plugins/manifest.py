@@ -149,10 +149,77 @@ class VisionContribution(_StrictModel):
         ]
 
 
+class ServiceSpec(_StrictModel):
+    """A long-running service a plugin declares on top of its main half.
+
+    The supervisor renders one extra systemd unit per spec under the
+    plugin slice and starts/stops it across the plugin's enable/disable
+    lifecycle. Each spec reports readiness on the heartbeat so the GCS
+    can show whether the declared daemon is actually up and serving.
+
+    Fields:
+
+    * ``name`` — short identifier, unique within the plugin. Used to
+      build the unit name (``ados-plugin-<id>-<name>.service``, with
+      dots and underscores sanitized to hyphens) and to key the
+      readiness entry. Lowercase alnum plus ``.``, ``_``, ``-``.
+    * ``command`` — the exec line the unit runs. Treated as a verbatim
+      ``ExecStart``; the plugin author is responsible for an absolute
+      path or a binary on ``PATH``.
+    * ``ready_check`` — how readiness is probed. ``None`` ⇒ the service
+      is ready iff its unit is active. A value that starts with
+      ``http://`` or ``https://`` ⇒ an HTTP GET, ready on a 2xx status.
+      Any other value ⇒ a shell command, ready on exit code 0.
+    * ``restart`` — systemd restart policy for the unit.
+    * ``slice`` — cgroup slice the unit runs in; defaults to the shared
+      plugin slice so resource accounting stays grouped.
+
+    Backward-compatible: a bare string element in ``services`` is
+    coerced to ``{"name": <s>, "command": <s>}`` so existing
+    ``services: ["foo"]`` manifests still parse.
+    """
+
+    name: str = Field(..., min_length=1, max_length=64)
+    command: str = Field(..., min_length=1)
+    ready_check: str | None = None
+    restart: Literal["always", "on-failure", "no"] = "on-failure"
+    slice: str = "ados-plugins.slice"
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, v: str) -> str:
+        if not re.match(r"^[a-z0-9][a-z0-9._-]*$", v):
+            raise ManifestError(
+                f"service name {v!r} must be lowercase alnum plus ._- , "
+                "starting with an alnum"
+            )
+        return v
+
+
 class AgentContributes(_StrictModel):
-    services: list[str] = Field(default_factory=list)
+    services: list[ServiceSpec] = Field(default_factory=list)
     drivers: list[dict[str, Any]] = Field(default_factory=list)
     vision: VisionContribution | None = None
+
+    @field_validator("services", mode="before")
+    @classmethod
+    def _coerce_services(cls, raw: Any) -> Any:
+        """Accept the legacy ``list[str]`` shape alongside the rich
+        ``list[ServiceSpec]`` shape. A bare string ``s`` becomes
+        ``{"name": s, "command": s}`` so old manifests keep parsing."""
+        if not isinstance(raw, list):
+            return raw
+        out: list[Any] = []
+        for item in raw:
+            if isinstance(item, str):
+                out.append({"name": item, "command": item})
+            else:
+                out.append(item)
+        return out
+
+    def service_specs(self) -> list[ServiceSpec]:
+        """Typed accessor for the declared services (already parsed)."""
+        return list(self.services)
 
 
 def _validate_entrypoint(value: str) -> str:

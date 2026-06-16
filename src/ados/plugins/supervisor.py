@@ -36,6 +36,8 @@ from __future__ import annotations
 import hashlib
 import shutil
 import subprocess
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -74,7 +76,10 @@ from ados.plugins.state import (
     upsert_install,
 )
 from ados.plugins.systemd import (
+    render_service_unit,
     render_unit,
+    service_unit_name_for,
+    service_unit_path_for,
     slice_unit_content,
     unit_name_for,
     unit_path_for,
@@ -273,8 +278,18 @@ class PluginSupervisor:
             unit = unit_name_for(plugin_id)
             self._systemctl("enable", unit)
             self._systemctl("start", unit)
+            # Start each declared extra service under its own unit. These
+            # are ADDITIONAL to the main runner unit above. A failure to
+            # render or start one is surfaced as not-ready(reason) rather
+            # than crashing the enable — the plugin's main half still runs.
+            self._start_declared_services(plugin_id, manifest)
             install.status = "running"
             install.enabled_at = _now_ms()
+            # Probe + persist readiness of the declared services so the
+            # heartbeat surfaces it without a separate poll.
+            install.service_status = self._compute_service_readiness(
+                plugin_id, manifest
+            )
             save_state(self._installs)
         log.info("plugin_enabled", plugin_id=plugin_id)
 
@@ -288,11 +303,16 @@ class PluginSupervisor:
                 manifest.agent is not None
                 and manifest.agent.isolation == "subprocess"
             ):
+                # Stop the declared extra services first, then the main
+                # runner unit. Best-effort on the extras so a missing
+                # unit does not block the main teardown.
+                self._stop_declared_services(plugin_id, manifest)
                 unit = unit_name_for(plugin_id)
                 self._systemctl("stop", unit)
                 self._systemctl("disable", unit)
             install.status = "disabled"
             install.enabled_at = None
+            install.service_status = None
             save_state(self._installs)
         log.info("plugin_disabled", plugin_id=plugin_id)
 
@@ -314,6 +334,14 @@ class PluginSupervisor:
                 manifest.agent is not None
                 and manifest.agent.isolation == "subprocess"
             ):
+                # Delete the declared extra-service unit files alongside
+                # the main runner unit. disable() already stopped them.
+                for service in self._declared_services(manifest):
+                    svc_unit_path = service_unit_path_for(
+                        plugin_id, service.name
+                    )
+                    if svc_unit_path.exists():
+                        svc_unit_path.unlink()
                 unit_path = unit_path_for(plugin_id)
                 if unit_path.exists():
                     unit_path.unlink()
@@ -423,6 +451,168 @@ class PluginSupervisor:
         slice_path.parent.mkdir(parents=True, exist_ok=True)
         slice_path.write_text(slice_unit_content(), encoding="utf-8")
         self._systemctl("daemon-reload")
+
+    # ------------------------------------------------------------------
+    # Declared extra services (additive to the main runner unit)
+    # ------------------------------------------------------------------
+
+    def _declared_services(self, manifest: PluginManifest):
+        """The list of ``ServiceSpec`` a plugin declares, or empty.
+
+        Only subprocess agent halves get extra units; an inprocess
+        built-in has no systemd footprint to attach services to.
+        """
+        agent = manifest.agent
+        if agent is None or agent.isolation != "subprocess":
+            return []
+        return list(agent.contributes.services)
+
+    def _start_declared_services(
+        self, plugin_id: str, manifest: PluginManifest
+    ) -> None:
+        """Render + enable + start one unit per declared service.
+
+        Best-effort per service: a render or systemctl failure on one
+        service is logged and left to surface as not-ready(reason) on
+        the readiness probe; it never aborts the enable of the plugin's
+        main half."""
+        for service in self._declared_services(manifest):
+            try:
+                svc_unit_path = service_unit_path_for(plugin_id, service.name)
+                svc_unit_path.write_text(
+                    render_service_unit(manifest, service, self._install_dir),
+                    encoding="utf-8",
+                )
+                self._systemctl("daemon-reload")
+                unit = service_unit_name_for(plugin_id, service.name)
+                self._systemctl("enable", unit)
+                self._systemctl("start", unit)
+            except (SupervisorError, OSError, ValueError) as exc:
+                log.warning(
+                    "plugin_service_start_failed",
+                    plugin_id=plugin_id,
+                    service=service.name,
+                    error=str(exc),
+                )
+
+    def _stop_declared_services(
+        self, plugin_id: str, manifest: PluginManifest
+    ) -> None:
+        """Stop + disable each declared service unit. Best-effort."""
+        for service in self._declared_services(manifest):
+            unit = service_unit_name_for(plugin_id, service.name)
+            for verb in ("stop", "disable"):
+                try:
+                    self._systemctl(verb, unit)
+                except SupervisorError as exc:
+                    log.warning(
+                        "plugin_service_stop_failed",
+                        plugin_id=plugin_id,
+                        service=service.name,
+                        verb=verb,
+                        error=str(exc),
+                    )
+
+    def _compute_service_readiness(
+        self, plugin_id: str, manifest: PluginManifest
+    ) -> list[dict] | None:
+        """Probe each declared service and return readiness entries.
+
+        Returns ``None`` when the plugin declares no services so the
+        heartbeat omits the block entirely. Each entry is
+        ``{"name", "ready": bool, "reason": str | None}``.
+
+        Readiness rules per service:
+
+        * ``ready_check`` absent ⇒ ready iff the unit is active.
+        * ``ready_check`` an ``http(s)://`` URL ⇒ ready on a 2xx GET.
+        * ``ready_check`` anything else ⇒ ready on a shell command
+          exiting 0.
+
+        All probes are short-timeout and never raise into the caller;
+        a probe error becomes ``ready=False`` with the error as the
+        reason.
+        """
+        services = self._declared_services(manifest)
+        if not services:
+            return None
+        out: list[dict] = []
+        for service in services:
+            ready, reason = self._probe_service_ready(plugin_id, service)
+            out.append({"name": service.name, "ready": ready, "reason": reason})
+        return out
+
+    def _probe_service_ready(
+        self, plugin_id: str, service
+    ) -> tuple[bool, str | None]:
+        """Probe one service's readiness. ``service`` is a ServiceSpec."""
+        check = service.ready_check
+        if check is None:
+            active = self._unit_is_active(
+                service_unit_name_for(plugin_id, service.name)
+            )
+            return (active, None if active else "unit not active")
+        check = check.strip()
+        if check.startswith("http://") or check.startswith("https://"):
+            return self._probe_http_ready(check)
+        return self._probe_command_ready(check)
+
+    def _unit_is_active(self, unit: str) -> bool:
+        """``systemctl is-active --quiet <unit>`` ⇒ exit 0 means active."""
+        try:
+            proc = subprocess.run(
+                ["systemctl", "is-active", "--quiet", unit],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
+        return proc.returncode == 0
+
+    def _probe_http_ready(self, url: str) -> tuple[bool, str | None]:
+        """HTTP GET; ready on a 2xx status."""
+        try:
+            with urllib.request.urlopen(url, timeout=5) as resp:  # noqa: S310
+                status = getattr(resp, "status", None) or resp.getcode()
+            if 200 <= int(status) < 300:
+                return (True, None)
+            return (False, f"http status {status}")
+        except urllib.error.HTTPError as exc:
+            return (False, f"http status {exc.code}")
+        except (urllib.error.URLError, ValueError, OSError) as exc:
+            return (False, f"http probe failed: {exc}")
+
+    def _probe_command_ready(self, command: str) -> tuple[bool, str | None]:
+        """Run the readiness command via the shell; ready on exit 0."""
+        try:
+            proc = subprocess.run(
+                command,
+                shell=True,  # noqa: S602 — operator-approved manifest command
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            return (False, f"command probe failed: {exc}")
+        if proc.returncode == 0:
+            return (True, None)
+        detail = (proc.stderr or proc.stdout or "").strip()
+        reason = f"exit {proc.returncode}"
+        if detail:
+            reason = f"{reason}: {detail[:200]}"
+        return (False, reason)
+
+    def readiness_for(self, plugin_id: str) -> list[dict]:
+        """Public read: probe the declared services of an installed
+        plugin and return the readiness entries (empty list when none).
+
+        Reuses the same probe path the enable flow persists. Raises
+        :class:`SupervisorError` if the plugin is not installed.
+        """
+        self._require_install(plugin_id)
+        manifest = self._manifest_for(plugin_id)
+        return self._compute_service_readiness(plugin_id, manifest) or []
 
     def _systemctl(self, *args: str) -> None:
         try:

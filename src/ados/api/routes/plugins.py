@@ -794,6 +794,28 @@ async def revoke_plugin_permission(plugin_id: str, permission_id: str):
     }
 
 
+@router.get("/plugins/{plugin_id}/readiness")
+async def get_plugin_readiness(plugin_id: str):
+    """Per-service readiness for an installed plugin.
+
+    Probes each service the plugin declares under
+    ``agent.contributes.services`` and returns whether it is up and
+    serving. Same probe the enable flow persists onto the heartbeat;
+    this surface lets the GCS poll on demand. 404 when the plugin is
+    not installed.
+    """
+    sup = _get_supervisor()
+    if sup.find_install(plugin_id) is None:
+        return _err(14, "not_found", f"plugin {plugin_id} not installed", 404)
+    try:
+        services = sup.readiness_for(plugin_id)
+    except SupervisorError as exc:
+        if "not installed" in str(exc):
+            return _err(14, "not_found", str(exc), 404)
+        return _err(20, "host_io_error", str(exc), 500)
+    return {"ok": True, "plugin_id": plugin_id, "services": services}
+
+
 # ---------------------------------------------------------------------
 # One-shot WebSocket ticket mint
 # ---------------------------------------------------------------------

@@ -87,6 +87,25 @@ def unit_name_for(plugin_id: str) -> str:
     return f"{PLUGIN_UNIT_PREFIX}{_sanitize_unit_name(plugin_id)}.service"
 
 
+def service_unit_name_for(plugin_id: str, service_name: str) -> str:
+    """Unit name for a plugin-declared extra service.
+
+    Distinct from :func:`unit_name_for` (the plugin's main runner unit)
+    by the trailing ``-<service>`` segment, so the declared services
+    never collide with the main unit or with each other.
+    """
+    return (
+        f"{PLUGIN_UNIT_PREFIX}{_sanitize_unit_name(plugin_id)}"
+        f"-{_sanitize_unit_name(service_name)}.service"
+    )
+
+
+def service_unit_path_for(plugin_id: str, service_name: str) -> Path:
+    return globals()["PLUGIN_UNIT_DIR"] / service_unit_name_for(
+        plugin_id, service_name
+    )
+
+
 def _sanitize_unit_name(plugin_id: str) -> str:
     """Convert reverse-DNS to a systemd-safe unit name.
 
@@ -146,6 +165,48 @@ def render_unit(manifest: PluginManifest, install_dir: Path) -> str:
     )
 
 
+def render_service_unit(
+    manifest: PluginManifest,
+    service,
+    install_dir: Path,
+) -> str:
+    """Render a systemd unit for one plugin-declared extra service.
+
+    The service runs its own ``ExecStart`` (``service.command``) in the
+    plugin's install directory, under the spec's slice (defaulting to
+    the shared plugin slice so resource accounting stays grouped), with
+    the same hardening flags as the main plugin unit. Resource limits
+    come from the plugin's ``agent.resources`` so a declared service is
+    bounded by the same envelope the operator approved at install.
+
+    ``service`` is a ``ServiceSpec`` from
+    ``manifest.agent.contributes.services``.
+    """
+    if manifest.agent is None:
+        raise ValueError(
+            f"plugin {manifest.id} has no agent half; no service unit needed"
+        )
+    res = manifest.agent.resources
+    plugin_dir = install_dir / manifest.id
+    safe_service = _sanitize_unit_name(service.name)
+    log_path = (
+        PLUGIN_LOG_DIR
+        / f"{_sanitize_unit_name(manifest.id)}-{safe_service}.log"
+    )
+    return SERVICE_UNIT_TEMPLATE.format(
+        plugin_id=manifest.id,
+        service_name=service.name,
+        slice_name=service.slice or PLUGIN_SLICE_NAME,
+        working_dir=plugin_dir,
+        exec_start=service.command,
+        restart=service.restart,
+        max_ram_mb=res.max_ram_mb,
+        max_cpu_percent=res.max_cpu_percent,
+        max_pids=res.max_pids,
+        log_path=log_path,
+    )
+
+
 UNIT_TEMPLATE = """\
 [Unit]
 Description=ADOS plugin {plugin_id}
@@ -159,6 +220,42 @@ Environment=ADOS_PLUGIN_SOCKET={socket_path}
 EnvironmentFile=-{token_env_file}
 ExecStart={exec_start}
 Restart=on-failure
+RestartSec=2s
+StartLimitInterval=60s
+StartLimitBurst=5
+MemoryMax={max_ram_mb}M
+CPUQuota={max_cpu_percent}%
+TasksMax={max_pids}
+StandardOutput=append:{log_path}
+StandardError=append:{log_path}
+User=ados
+Group=ados
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/ados/plugin-data /var/log/ados/plugins /run/ados/plugins
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=ados-supervisor.service
+"""
+
+
+SERVICE_UNIT_TEMPLATE = """\
+[Unit]
+Description=ADOS plugin {plugin_id} service {service_name}
+After=ados-supervisor.service
+PartOf=ados-supervisor.service
+
+[Service]
+Slice={slice_name}
+Type=simple
+WorkingDirectory={working_dir}
+ExecStart={exec_start}
+Restart={restart}
 RestartSec=2s
 StartLimitInterval=60s
 StartLimitBurst=5

@@ -105,6 +105,11 @@ class PluginInstall:
     # time by the model-delivery framework; surfaced on the heartbeat. None = not yet resolved
     # / declares no models. Backward-compatible: older state files load with this None.
     model_status: list[dict] | None = None
+    # Readiness outcome for the plugin's declared extra services, one entry per declared
+    # service name ({name, ready: bool, reason: str|None}). Filled in at enable time by the
+    # service-readiness probe; surfaced on the heartbeat. None = not yet probed / declares no
+    # services. Backward-compatible: older state files load with this None.
+    service_status: list[dict] | None = None
 
 
 @contextlib.contextmanager
@@ -200,6 +205,7 @@ def load_state(path: Path | None = None) -> list[PluginInstall]:
                     last_update_check_at=entry.get("last_update_check_at"),
                     last_update_attempt=last_attempt,
                     model_status=entry.get("model_status"),
+                    service_status=entry.get("service_status"),
                 )
             )
         except (KeyError, TypeError) as exc:

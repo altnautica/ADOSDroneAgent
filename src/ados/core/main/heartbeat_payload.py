@@ -745,6 +745,14 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
                     if (ms := getattr(inst, "model_status", None))
                     else {}
                 ),
+                # Service-readiness outcome (one entry per declared service) so the GCS can
+                # show per-service ready / not-ready(reason) without a separate poll.
+                # Omitted when the plugin declares no services or none were probed yet.
+                **(
+                    {"service_status": ss}
+                    if (ss := getattr(inst, "service_status", None))
+                    else {}
+                ),
             }
             for inst in installs
         ]
