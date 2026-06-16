@@ -63,22 +63,6 @@ async def _join_via_manager(req: WifiJoinRequest) -> dict[str, Any]:
         ) from exc
 
 
-@router.get("/client/status")
-async def get_client_status() -> dict[str, Any]:
-    """Current Wi-Fi client connection state.
-
-    Returns ``{connected, ssid, bssid, signal, ip, gateway, security}``
-    from ``WifiClientManager.status()``.
-    """
-    try:
-        return await _manager().status()
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail={"error": {"code": "E_WIFI_STATUS_FAILED", "message": str(exc)}},
-        ) from exc
-
-
 @router.get("/client/scan")
 async def get_client_scan() -> dict[str, Any]:
     """Scan nearby Wi-Fi networks via nmcli.
@@ -93,21 +77,6 @@ async def get_client_scan() -> dict[str, Any]:
             detail={"error": {"code": "E_WIFI_SCAN_FAILED", "message": str(exc)}},
         ) from exc
     return {"networks": networks or []}
-
-
-@router.get("/client/configured")
-async def get_client_configured() -> dict[str, Any]:
-    """List saved NetworkManager Wi-Fi profiles."""
-    try:
-        connections = await _manager().configured_connections()
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "error": {"code": "E_WIFI_CONFIGURED_FAILED", "message": str(exc)},
-            },
-        ) from exc
-    return {"connections": connections or []}
 
 
 @router.put("/client/configured/{name}/autoconnect")
@@ -188,27 +157,6 @@ def _remove_link_file(iface: str) -> bool:
         return True
     except OSError:
         return False
-
-
-@router.get("/mac/adapters")
-async def get_mac_adapters() -> dict[str, Any]:
-    """Per-adapter stable-MAC verdicts (camelCase, same shape as the heartbeat).
-
-    Returns ``{"version": N, "adapters": [...]}``; an empty list on a board with
-    no tracked adapters.
-    """
-    from ados.services.cloud.heartbeat import (
-        _mac_adapter_to_camel,
-        read_mac_pins_state,
-    )
-
-    raw = read_mac_pins_state() or {}
-    adapters = [
-        _mac_adapter_to_camel(a)
-        for a in (raw.get("adapters") or [])
-        if isinstance(a, dict)
-    ]
-    return {"version": raw.get("version", 1), "adapters": adapters}
 
 
 @router.post("/mac/pin")

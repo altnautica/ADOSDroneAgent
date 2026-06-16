@@ -51,11 +51,6 @@ def test_get_setup_status(client):
     )
 
 
-def test_get_param_not_found(client):
-    resp = client.get("/api/params/NONEXISTENT")
-    assert resp.status_code == 404
-
-
 def test_get_config(client):
     resp = client.get("/api/config")
     assert resp.status_code == 200

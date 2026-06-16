@@ -14,7 +14,6 @@ from ados import __version__
 from ados.api.deps import set_agent_app
 from ados.api.middleware.auth import ApiKeyAuthMiddleware
 from ados.api.routes import (
-    can,
     config,
     dashboard,
     display,
@@ -24,7 +23,6 @@ from ados.api.routes import (
     observability,
     ota,
     pairing,
-    params,
     peripherals,
     peripherals_v1,
     plugins,
@@ -97,7 +95,6 @@ def create_app(agent: Any) -> FastAPI:
 
     # Mount routes
     app.include_router(version.router, prefix="/api")
-    app.include_router(params.router, prefix="/api")
     app.include_router(config.router, prefix="/api")
     app.include_router(logs.router, prefix="/api")
     # Reverse-proxy bridge to the local logging and telemetry store's query
@@ -121,11 +118,6 @@ def create_app(agent: Any) -> FastAPI:
     app.include_router(vision_detections.router, prefix="/api")
     app.include_router(ground_station.router, prefix="/api")
     app.include_router(network.router, prefix="/api")
-    # CAN passthrough surface reserved for a future agent-side bridge.
-    # Today the route is a 501 stub; the MAVLink relay covers the
-    # common case via CAN_FRAME / CANFD_FRAME / CAN_FILTER_MODIFY
-    # passthrough plus the CAN_FORWARD command.
-    app.include_router(can.router, prefix="/api")
     # Plugin lifecycle: install / enable / disable / remove.
     app.include_router(plugins.router, prefix="/api")
 

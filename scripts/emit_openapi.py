@@ -35,7 +35,6 @@ from ados.api.routes import (  # noqa: E402
     logs,
     ota,
     pairing,
-    params,
     peripherals,
     peripherals_v1,
     plugins,
@@ -59,7 +58,6 @@ def build_spec_app() -> FastAPI:
     # Middlewares are intentionally left off; they do not affect the
     # OpenAPI surface.
     app.include_router(version.router, prefix="/api")
-    app.include_router(params.router, prefix="/api")
     app.include_router(config.router, prefix="/api")
     app.include_router(logs.router, prefix="/api")
     app.include_router(video.router, prefix="/api")

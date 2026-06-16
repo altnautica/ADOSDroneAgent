@@ -35,21 +35,6 @@ def fake_manager():
 
 
 class TestNetworkWifi:
-    def test_status_returns_manager_dict(self, client, fake_manager):
-        fake_manager.status.return_value = {
-            "connected": True,
-            "ssid": "BenchWifi",
-            "bssid": "aa:bb:cc:dd:ee:ff",
-            "signal": 72,
-            "ip": "192.168.1.42",
-            "gateway": "192.168.1.1",
-            "security": "WPA2",
-        }
-        resp = client.get("/api/v1/network/client/status")
-        assert resp.status_code == 200
-        assert resp.json()["ssid"] == "BenchWifi"
-        assert resp.json()["connected"] is True
-
     def test_scan_returns_networks_list(self, client, fake_manager):
         fake_manager.scan.return_value = [
             {"ssid": "A", "bssid": "x", "signal": 90, "security": "WPA2", "in_use": False},
@@ -60,16 +45,6 @@ class TestNetworkWifi:
         body = resp.json()
         assert len(body["networks"]) == 2
         assert body["networks"][0]["ssid"] == "A"
-
-    def test_configured_returns_connections_list(self, client, fake_manager):
-        fake_manager.configured_connections.return_value = [
-            {"name": "HomeWifi", "type": "802-11-wireless", "device": "wlan0", "autoconnect": True},
-        ]
-        resp = client.get("/api/v1/network/client/configured")
-        assert resp.status_code == 200
-        body = resp.json()
-        assert len(body["connections"]) == 1
-        assert body["connections"][0]["name"] == "HomeWifi"
 
     def test_autoconnect_enable(self, client, fake_manager):
         fake_manager.set_autoconnect.return_value = {
