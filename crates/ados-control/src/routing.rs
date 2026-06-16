@@ -74,10 +74,13 @@ fn native_routes() -> Vec<NativeRoute> {
         // Command.
         post("/api/command"),
         get("/api/commands"),
+        // CAN passthrough 501 stub.
+        post("/api/can/passthrough"),
         // WebSocket auth ticket mint.
         post("/api/_ws/ticket"),
-        // Params (full list; the single-param path-param route stays proxied).
+        // Params: the full list + the single-param read (a {name} template).
         get("/api/params"),
+        get("/api/params/{name}"),
         // Services inventory.
         get("/api/services"),
         // Fleet roster.
@@ -140,6 +143,12 @@ fn native_routes() -> Vec<NativeRoute> {
         post("/api/mavlink/signing/enroll-fc"),
         post("/api/mavlink/signing/disable-on-fc"),
         put("/api/mavlink/signing/require"),
+        // Wi-Fi client reads (profile-agnostic): live station status + saved NM
+        // profiles. The scan stays proxied (its rescan is a side effect).
+        get("/api/v1/network/client/status"),
+        get("/api/v1/network/client/configured"),
+        // MAC-pin read: the per-adapter stable-MAC verdicts from the state file.
+        get("/api/v1/network/mac/adapters"),
         // Wi-Fi client writes: join (PUT) + leave (DELETE) + forget (DELETE, a
         // {name} template). Each forwards to the native uplink daemon's command
         // socket; the autoconnect toggle stays proxied.
@@ -337,7 +346,7 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            69,
+            74,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);
@@ -379,12 +388,18 @@ mod tests {
             "/api/v1/ground-station/pair/pending",
             "/api/v1/ground-station/pic",
             "/api/v1/ground-station/captive-token",
+            "/api/params/{name}",
+            "/api/v1/network/client/status",
+            "/api/v1/network/client/configured",
+            "/api/v1/network/mac/adapters",
         ] {
             assert!(has(Method::GET, p), "{p} must be in the native set");
         }
         // The write routes must be native under their own methods (else
         // auth-skipped). The path-param routes are templates the matcher resolves.
         assert!(has(Method::POST, "/api/params/{name}"));
+        // The CAN passthrough 501 stub is native (POST).
+        assert!(has(Method::POST, "/api/can/passthrough"));
         assert!(has(Method::POST, "/api/services/{name}/restart"));
         assert!(has(Method::POST, "/api/v1/system/restart-supervisor"));
         assert!(has(Method::POST, "/api/mavlink/signing/enroll-fc"));

@@ -542,7 +542,7 @@ fn pick_primary_connection_name(
 /// the terse rows. Each row is truncated to `fields.len()` columns. An absent
 /// `nmcli` / a non-zero exit / a spawn error all yield an empty list, so the
 /// caller degrades to the no-connection `null`.
-fn nmcli_connections(fields: &[&str], active: bool) -> Vec<Vec<String>> {
+pub(crate) fn nmcli_connections(fields: &[&str], active: bool) -> Vec<Vec<String>> {
     let mut args = vec!["-t", "-f"];
     let field_spec = fields.join(",");
     args.push(&field_spec);
@@ -716,7 +716,7 @@ fn mmcli_available() -> bool {
 /// socket / a malformed reply / `ok:false` all yield `None`, so the caller
 /// degrades to the manager-absent default shape. Mirrors the framing the radio /
 /// Wi-Fi command sockets use (one newline-terminated JSON each way).
-async fn wifi_status() -> Option<Map<String, Value>> {
+pub(crate) async fn wifi_status() -> Option<Map<String, Value>> {
     let reply = wifi_cmd_roundtrip(r#"{"op":"wifi_status"}"#).await?;
     let obj = reply.as_object()?;
     if obj.get("ok").map(json_truthy) != Some(true) {
@@ -975,7 +975,7 @@ fn percent_encode(s: &str) -> String {
 /// Python `bool(x)` truthiness over a JSON value: `null`/`false`/`0`/`0.0`/`""`/
 /// `[]`/`{}` are falsey, everything else truthy. Mirrors the `bool(...)` coercion
 /// the config flag reads use.
-fn json_truthy(v: &Value) -> bool {
+pub(crate) fn json_truthy(v: &Value) -> bool {
     match v {
         Value::Null => false,
         Value::Bool(b) => *b,

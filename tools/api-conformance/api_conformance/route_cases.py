@@ -926,6 +926,68 @@ REGISTRY: list[RouteCase] = [
         path="/api/v1/ground-station/bluetooth/paired",
         extra_volatile=("devices",),
     ),
+    # CAN passthrough: a deliberate 501 stub with a fixed {error, message}
+    # envelope and no side effect, so it is safe to fire against both transports
+    # and is NOT sandboxed. Both return the same fixed body, no volatile fields.
+    RouteCase(
+        name="can-passthrough",
+        method="POST",
+        path="/api/can/passthrough",
+    ),
+    # A single FC parameter by name. The path carries a synthetic name no FC
+    # parameter ever uses, so both transports take the not-found path and return
+    # the byte-identical 404 {"detail": ...}. No volatile fields.
+    RouteCase(
+        name="params-single",
+        method="GET",
+        path="/api/params/__ADOS_CONFORMANCE_PROBE__",
+        paired_headers={"authorization": PAIRED_AUTH_PLACEHOLDER},
+    ),
+    # Per-adapter stable-MAC verdicts read from the on-disk state file. Profile
+    # agnostic (no gate); a board with no tracked adapters returns
+    # {"version": 1, "adapters": []}. The {version, adapters} envelope is the
+    # contract; the live-observed verdict fields move when the reconciler
+    # rewrites the file between the two reads, so they are masked.
+    RouteCase(
+        name="mac-adapters",
+        method="GET",
+        path="/api/v1/network/mac/adapters",
+        extra_volatile=(
+            "adapters",
+            "lastSeenMac",
+            "appliedLive",
+            "state",
+            "source",
+            "deferredReason",
+        ),
+    ),
+    # The live Wi-Fi-client station status off the uplink daemon's command
+    # socket. The link readings move with the live link, so they are masked; the
+    # {connected, ...} envelope is the contract.
+    RouteCase(
+        name="network-client-status",
+        method="GET",
+        path="/api/v1/network/client/status",
+        paired_headers={"authorization": PAIRED_AUTH_PLACEHOLDER},
+        extra_volatile=(
+            "connected",
+            "ssid",
+            "bssid",
+            "signal",
+            "ip",
+            "gateway",
+            "security",
+        ),
+    ),
+    # The saved Wi-Fi profiles read from the network manager. The profile list is
+    # environment-specific (masked); the {connections} envelope is the contract.
+    RouteCase(
+        name="network-client-configured",
+        method="GET",
+        path="/api/v1/network/client/configured",
+        paired_headers={"authorization": PAIRED_AUTH_PLACEHOLDER},
+        extra_volatile=("connections",),
+    ),
     # <append a RouteCase line per route as it migrates — the only shared edit>
 ]
 

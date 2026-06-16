@@ -19,6 +19,7 @@
 //! set would be served with the auth SKIPPED. The `native_set_matches_router`
 //! test pins the full set so the two never drift.
 
+pub mod can;
 pub mod command;
 pub mod diagnostics;
 pub mod fleet;
@@ -31,10 +32,13 @@ pub mod gs_recording_list;
 pub mod gs_status;
 pub mod gs_ui_read;
 pub mod gs_wfb_write;
+pub mod mac_adapters;
 pub mod mac_pin;
+pub mod network_client_read;
 pub mod network_write;
 pub mod pairing;
 pub mod params;
+pub mod params_single;
 pub mod params_write;
 pub mod service_control;
 pub mod services;
@@ -94,15 +98,21 @@ pub fn build_router(state: AppState) -> Router {
         // it to the mavlink socket; the catalog is the static command list.
         .route("/api/command", post(command::execute_command))
         .route("/api/commands", get(command::list_commands))
+        // CAN passthrough: a deliberate 501 stub (no agent-side bridge yet). The
+        // GCS probes it and falls back to the MAVLink CAN_FORWARD path.
+        .route("/api/can/passthrough", post(can::can_passthrough))
         // WebSocket auth ticket mint: exchanges the pairing key (LAN-edge auth)
         // for a short-lived self-contained HMAC ticket a browser GCS hands to the
         // MAVLink WS proxy through the subprotocol list.
         .route("/api/_ws/ticket", post(ws_ticket::mint_ws_ticket))
-        // Params: the full cached FC parameter list + the single-param write (a
-        // path-param route that builds a PARAM_SET frame and sends it to the FC;
-        // the single-param read stays proxied).
+        // Params: the full cached FC parameter list, plus the single-param read +
+        // write sharing one path (a path-param route; the write builds a PARAM_SET
+        // frame and sends it to the FC, the read projects the one cached param).
         .route("/api/params", get(params::get_all_params))
-        .route("/api/params/{name}", post(params_write::set_param))
+        .route(
+            "/api/params/{name}",
+            get(params_single::get_param).post(params_write::set_param),
+        )
         // Services: the live `ados-*.service` unit inventory + the per-unit restart
         // (allowlist-guarded to ados-* units) and the supervisor restart that
         // cycles the whole agent process tree.
@@ -266,6 +276,17 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/ground-station/bluetooth/paired",
             get(gs_input_read::get_bluetooth_paired),
         )
+        // Wi-Fi client reads (profile-agnostic): the live station status off the
+        // uplink daemon's command socket, and the saved NM profiles. The scan stays
+        // proxied (its rescan is a side effect with no daemon-socket op).
+        .route(
+            "/api/v1/network/client/status",
+            get(network_client_read::get_client_status),
+        )
+        .route(
+            "/api/v1/network/client/configured",
+            get(network_client_read::get_client_configured),
+        )
         // Wi-Fi client writes (profile-agnostic): join / leave / forget, each
         // forwarded to the native uplink daemon's command socket. The autoconnect
         // toggle stays proxied (the daemon socket has no autoconnect op).
@@ -280,6 +301,12 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/network/client/configured/{name}",
             delete(network_write::delete_client_configured),
+        )
+        // MAC-pin read: the per-adapter stable-MAC verdicts from the on-disk state
+        // file (a pure read, the same file the pin write resolves a candidate from).
+        .route(
+            "/api/v1/network/mac/adapters",
+            get(mac_adapters::get_mac_adapters),
         )
         // MAC-pin writes: pin a stable MAC for an adapter (POST) and clear it
         // (DELETE). Each merges the mac_pin config the supervisor reconciler reads
