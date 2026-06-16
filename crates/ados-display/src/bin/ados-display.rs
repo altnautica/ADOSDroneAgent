@@ -538,7 +538,7 @@ fn all_pages() -> Vec<Box<dyn ados_display::pages::Page>> {
     use ados_display::pages::{
         about::AboutDetailPage, channel_hops::ChannelHopsPage, dashboard::DashboardPage,
         diagnostics::DiagnosticsDetailPage, drone::DroneDetailPage, link_stats::LinkStatsPage,
-        mesh::MeshDetailPage, more::MorePage, pair_drone::PairDroneDetailPage,
+        mesh::MeshDetailPage, more::MorePage, pair_drone::PairDroneDetailPage, plugin::PluginPage,
         radio_link::RadioLinkDetailPage, settings::SettingsPage, uplink::UplinkDetailPage,
         video::VideoPage, Page,
     };
@@ -556,6 +556,9 @@ fn all_pages() -> Vec<Box<dyn ados_display::pages::Page>> {
         Box::new(AboutDetailPage),
         Box::new(PairDroneDetailPage),
         Box::new(DiagnosticsDetailPage),
+        // The reserved data-driven page a plugin contributes content to. Not a
+        // tab; reachable via a page-switch request for the `plugin` id.
+        Box::new(PluginPage::new()),
     ];
     pages
 }

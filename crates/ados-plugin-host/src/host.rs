@@ -177,6 +177,15 @@ pub trait HostServices: Send + Sync + 'static {
         Ok(not_implemented("process.spawn"))
     }
 
+    /// Set the content of the host's reserved data-driven display page (title,
+    /// label/value rows, touch zones). A real host writes the page sidecar the
+    /// display service reads. Fully gated at the dispatch level on the display
+    /// capability, so it does not see the caller's caps. The default returns
+    /// `not_implemented` so [`NoopHost`] stays inert.
+    fn display_page_set(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
+        Ok(not_implemented("display.page.set"))
+    }
+
     /// Release every per-session host resource a plugin held when its
     /// connection drops (component reservations, driver registrations, camera
     /// claims, telemetry channels). Mirrors `_release_session_resources` in the

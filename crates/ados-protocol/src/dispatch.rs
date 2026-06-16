@@ -47,6 +47,7 @@ pub const DISPATCH_METHODS: &[DispatchMethod] = &[
     DispatchMethod { method: "vision.register_model", required_cap: Some("vision.model.register"), inline: false },
     DispatchMethod { method: "vision.infer", required_cap: Some("vision.model.register"), inline: false },
     DispatchMethod { method: "vision.publish_detection", required_cap: Some("vision.detection.publish"), inline: false },
+    DispatchMethod { method: "display.page.set", required_cap: Some("display.oled.page"), inline: false },
 ];
 
 /// Look up the dispatch-level required capability for a wire method.

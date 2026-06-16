@@ -33,6 +33,7 @@ pub mod link_stats;
 pub mod mesh;
 pub mod more;
 pub mod pair_drone;
+pub mod plugin;
 pub mod radio_link;
 pub mod settings;
 pub mod uplink;

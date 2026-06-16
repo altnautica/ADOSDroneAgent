@@ -58,6 +58,8 @@ pub enum Method {
     ConfigSet,
     // Vendor binary spawn.
     ProcessSpawn,
+    // Display: set the reserved data-driven page's content.
+    DisplayPageSet,
     // Vision: frame-descriptor subscribe, model register, inference, and
     // detection publish. The engine owns the cameras and the inference backend;
     // the host proxies these to it over its socket.
@@ -107,6 +109,7 @@ impl Method {
             "config.get" => Self::ConfigGet,
             "config.set" => Self::ConfigSet,
             "process.spawn" => Self::ProcessSpawn,
+            "display.page.set" => Self::DisplayPageSet,
             _ => return None,
         })
     }
@@ -135,6 +138,7 @@ impl Method {
             Self::ConfigGet => "config.get",
             Self::ConfigSet => "config.set",
             Self::ProcessSpawn => "process.spawn",
+            Self::DisplayPageSet => "display.page.set",
             Self::VisionSubscribeFrames => vision_methods::SUBSCRIBE_FRAMES,
             Self::VisionRegisterModel => vision_methods::REGISTER_MODEL,
             Self::VisionInfer => vision_methods::INFER,
@@ -268,6 +272,19 @@ mod tests {
     }
 
     #[test]
+    fn display_page_set_gates_on_the_display_capability() {
+        // Refused without the cap, allowed with it.
+        assert_eq!(
+            gate("display.page.set", false, &caps(&[])),
+            Gate::CapabilityDenied("capability_denied: display.oled.page".to_string())
+        );
+        assert_eq!(
+            gate("display.page.set", false, &caps(&["display.oled.page"])),
+            Gate::Allow(Method::DisplayPageSet)
+        );
+    }
+
+    #[test]
     fn process_spawn_gate_names_process_spawn_cap() {
         let g = gate("process.spawn", false, &caps(&["mavlink.read"]));
         assert_eq!(
@@ -300,6 +317,7 @@ mod tests {
         Method::ConfigGet,
         Method::ConfigSet,
         Method::ProcessSpawn,
+        Method::DisplayPageSet,
         Method::VisionSubscribeFrames,
         Method::VisionRegisterModel,
         Method::VisionInfer,

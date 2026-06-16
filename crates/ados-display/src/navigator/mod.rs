@@ -570,7 +570,7 @@ mod tests {
     use crate::pages::{
         about::AboutDetailPage, channel_hops::ChannelHopsPage, dashboard::DashboardPage,
         diagnostics::DiagnosticsDetailPage, drone::DroneDetailPage, link_stats::LinkStatsPage,
-        mesh::MeshDetailPage, more::MorePage, pair_drone::PairDroneDetailPage,
+        mesh::MeshDetailPage, more::MorePage, pair_drone::PairDroneDetailPage, plugin::PluginPage,
         radio_link::RadioLinkDetailPage, settings::SettingsPage, uplink::UplinkDetailPage,
         video::VideoPage,
     };
@@ -595,6 +595,7 @@ mod tests {
             Box::new(AboutDetailPage),
             Box::new(PairDroneDetailPage),
             Box::new(DiagnosticsDetailPage),
+            Box::new(PluginPage::new()),
         ]
     }
 
@@ -863,6 +864,33 @@ mod tests {
         assert!(n.modal_stack().is_empty());
         // The request file is consumed.
         assert!(!req.exists());
+    }
+
+    #[test]
+    fn routes_to_the_reserved_plugin_page_and_renders_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut n = nav(dir.path());
+        // The reserved page is registered (a non-tab route).
+        assert!(n.has("plugin"));
+        assert!(!TAB_PAGE_IDS.contains(&"plugin"));
+
+        // A page-switch request for the reserved id routes to it, exactly the
+        // path a remote page request takes.
+        let req = dir.path().join("lcd-page-request.json");
+        std::fs::write(&req, r#"{"page":"plugin"}"#).unwrap();
+        assert_eq!(n.drain_page_request_from(&req).as_deref(), Some("plugin"));
+        assert_eq!(n.active_page_id(), "plugin");
+        assert_eq!(n.current_page().id(), "plugin");
+
+        // It paints a full panel like every other page.
+        let c = n.render_active(&PageContext::default(), &crate::graphics::palette::DARK);
+        assert_eq!(c.width(), PANEL_W);
+        assert_eq!(c.height(), PANEL_H);
+
+        // A direct go() to the reserved page works too.
+        assert!(n.go("dashboard"));
+        assert!(n.go("plugin"));
+        assert_eq!(n.active_page_id(), "plugin");
     }
 
     #[test]

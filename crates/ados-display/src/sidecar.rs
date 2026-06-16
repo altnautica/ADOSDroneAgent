@@ -17,6 +17,12 @@ use crate::fb_writer::WriterStats;
 pub const LCD_STATE_PATH: &str = "/run/ados/lcd-state.json";
 pub const LCD_PAGE_REQUEST_PATH: &str = "/run/ados/lcd-page-request.json";
 pub const LCD_LATENCY_PATH: &str = "/run/ados/lcd-latency.json";
+/// Data-driven content for the reserved `plugin` page. A plugin contributes its
+/// page (title, label/value rows, optional touch zones) by writing this file;
+/// the `plugin` page reads it each render so a plugin can present a status
+/// surface without recompiling the display service. Absent file = an empty
+/// placeholder page with no zones.
+pub const LCD_PLUGIN_PAGE_PATH: &str = "/run/ados/lcd-plugin-page.json";
 /// PNG of the most recently rendered panel frame. The native page UI writes it
 /// after each render so the REST snapshot endpoint can serve exactly what the
 /// LCD shows without re-reading the framebuffer or depending on PIL.
@@ -101,6 +107,68 @@ pub fn take_page_request(path: &Path) -> Option<String> {
         None
     } else {
         Some(page)
+    }
+}
+
+/// One label/value row of a plugin-contributed page. Both fields default to an
+/// empty string so a partial row still deserializes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LcdPluginRow {
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub value: String,
+}
+
+/// One declared touch zone on a plugin page. The rectangle is in page-local
+/// content coordinates (origin at the top-left of the content region, the same
+/// convention every page's hit zones use). `key` is the stable action id the
+/// owning plugin interprets; `label` is the on-screen caption for the zone.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LcdPluginZone {
+    #[serde(default)]
+    pub x: i32,
+    #[serde(default)]
+    pub y: i32,
+    #[serde(default)]
+    pub w: i32,
+    #[serde(default)]
+    pub h: i32,
+    #[serde(default)]
+    pub key: String,
+    #[serde(default)]
+    pub label: String,
+}
+
+/// `lcd-plugin-page.json` payload — the data-driven content for the reserved
+/// `plugin` page. Every field is optional/defaulted so a partial or evolving
+/// payload still loads (lenient by design); unknown fields are ignored. The
+/// reserved page renders the `title` and `rows`, and maps each `zone` to a
+/// touch target the navigator surfaces back to the owning plugin.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LcdPluginPage {
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub rows: Vec<LcdPluginRow>,
+    #[serde(default)]
+    pub zones: Vec<LcdPluginZone>,
+}
+
+impl LcdPluginPage {
+    /// Read the plugin page content. `None` on a missing or malformed file, so
+    /// the reserved page falls back to its placeholder rather than failing.
+    pub fn load(path: &Path) -> Option<LcdPluginPage> {
+        let text = std::fs::read_to_string(path).ok()?;
+        serde_json::from_str(&text).ok()
+    }
+
+    /// Atomically write this page content to `path` (tmp sibling + fsync +
+    /// rename), creating the parent. Best-effort: an I/O error is returned for
+    /// the caller to log and discard, the same contract as the other sidecars.
+    pub fn write_to(&self, path: &Path) -> std::io::Result<()> {
+        let body = serde_json::to_vec(self).map_err(std::io::Error::other)?;
+        atomic_write(path, &body)
     }
 }
 
@@ -304,6 +372,112 @@ mod tests {
         let err = write_snapshot_png(&path, &[1, 2, 3], 2, 2).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn plugin_page_round_trips_through_write_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lcd-plugin-page.json");
+        let page = LcdPluginPage {
+            title: "Sensor Status".to_string(),
+            rows: vec![
+                LcdPluginRow {
+                    label: "Temp".to_string(),
+                    value: "42 C".to_string(),
+                },
+                LcdPluginRow {
+                    label: "State".to_string(),
+                    value: "ok".to_string(),
+                },
+            ],
+            zones: vec![LcdPluginZone {
+                x: 8,
+                y: 40,
+                w: 100,
+                h: 32,
+                key: "reset".to_string(),
+                label: "Reset".to_string(),
+            }],
+        };
+        page.write_to(&path).unwrap();
+        let loaded = LcdPluginPage::load(&path).unwrap();
+        assert_eq!(loaded, page);
+
+        // No stray tmp left behind.
+        let stray = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().ends_with(".tmp"));
+        assert!(!stray);
+    }
+
+    #[test]
+    fn plugin_page_loads_the_host_written_json_shape() {
+        // This is the exact JSON the plugin host writes (field names + nesting).
+        // It is the cross-crate contract: the host has no build dependency on
+        // this crate, so the shapes are pinned by this round-trip, not a type.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lcd-plugin-page.json");
+        std::fs::write(
+            &path,
+            r#"{"title":"Sensor","rows":[{"label":"Temp","value":"42 C"}],"zones":[{"x":8,"y":40,"w":100,"h":32,"key":"reset","label":"Reset"}]}"#,
+        )
+        .unwrap();
+        let loaded = LcdPluginPage::load(&path).unwrap();
+        assert_eq!(loaded.title, "Sensor");
+        assert_eq!(
+            loaded.rows,
+            vec![LcdPluginRow {
+                label: "Temp".into(),
+                value: "42 C".into()
+            }]
+        );
+        assert_eq!(
+            loaded.zones,
+            vec![LcdPluginZone {
+                x: 8,
+                y: 40,
+                w: 100,
+                h: 32,
+                key: "reset".into(),
+                label: "Reset".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn plugin_page_missing_or_malformed_is_none() {
+        assert!(LcdPluginPage::load(Path::new("/nonexistent/lcd-plugin-page.json")).is_none());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lcd-plugin-page.json");
+        std::fs::write(&path, "not json").unwrap();
+        assert!(LcdPluginPage::load(&path).is_none());
+    }
+
+    #[test]
+    fn plugin_page_lenient_defaults_for_partial_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lcd-plugin-page.json");
+        // Only a title; rows/zones absent, and an unknown field is ignored.
+        std::fs::write(&path, r#"{"title":"Just A Title","extra":123}"#).unwrap();
+        let loaded = LcdPluginPage::load(&path).unwrap();
+        assert_eq!(loaded.title, "Just A Title");
+        assert!(loaded.rows.is_empty());
+        assert!(loaded.zones.is_empty());
+
+        // A row missing its value still deserializes to an empty value.
+        std::fs::write(&path, r#"{"rows":[{"label":"L"}]}"#).unwrap();
+        let loaded = LcdPluginPage::load(&path).unwrap();
+        assert_eq!(loaded.rows.len(), 1);
+        assert_eq!(loaded.rows[0].label, "L");
+        assert_eq!(loaded.rows[0].value, "");
+
+        // An empty object is a valid empty page.
+        std::fs::write(&path, "{}").unwrap();
+        assert_eq!(
+            LcdPluginPage::load(&path).unwrap(),
+            LcdPluginPage::default()
+        );
     }
 
     #[test]

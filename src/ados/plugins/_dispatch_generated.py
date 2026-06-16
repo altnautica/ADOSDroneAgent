@@ -37,6 +37,7 @@ REQUIRED_CAP: dict[str, str | None] = {
     "vision.register_model": "vision.model.register",
     "vision.infer": "vision.model.register",
     "vision.publish_detection": "vision.detection.publish",
+    "display.page.set": "display.oled.page",
 }
 
 # Methods whose cap is decided inline by the handler from the request

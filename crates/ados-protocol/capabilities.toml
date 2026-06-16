@@ -668,3 +668,11 @@ required_cap = "vision.model.register"
 [[method]]
 id = "vision.publish_detection"
 required_cap = "vision.detection.publish"
+
+# ---- display ----
+# Set the content (title, rows, touch zones) of the host's reserved data-driven
+# display page. The host writes the page sidecar the display reads, so the
+# method is fully gated at the dispatch level on the display capability.
+[[method]]
+id = "display.page.set"
+required_cap = "display.oled.page"

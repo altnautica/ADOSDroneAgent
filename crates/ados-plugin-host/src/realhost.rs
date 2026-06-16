@@ -509,6 +509,130 @@ fn write_bytes_owner_only(path: &std::path::Path, bytes: &[u8]) -> std::io::Resu
 }
 
 // ---------------------------------------------------------------------
+// Display page sidecar
+// ---------------------------------------------------------------------
+
+/// One label/value row of a plugin-contributed display page. The serde shape is
+/// the contract `ados_display::sidecar::LcdPluginRow` reads; the display crate
+/// is not a build dependency of the host, so the shape is shared by JSON, not a
+/// shared type.
+#[derive(serde::Serialize)]
+struct DisplayRow {
+    label: String,
+    value: String,
+}
+
+/// One declared touch zone on a plugin display page. Mirrors
+/// `ados_display::sidecar::LcdPluginZone`.
+#[derive(serde::Serialize)]
+struct DisplayZone {
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    key: String,
+    label: String,
+}
+
+/// The full plugin display-page content. Mirrors
+/// `ados_display::sidecar::LcdPluginPage`.
+#[derive(serde::Serialize)]
+struct DisplayPage {
+    title: String,
+    rows: Vec<DisplayRow>,
+    zones: Vec<DisplayZone>,
+}
+
+/// Coerce a msgpack value to an i32 zone coordinate, defaulting to 0 for an
+/// absent or non-numeric value (lenient, matching the display loader's
+/// defaulted fields).
+fn zone_i32(value: Option<&Value>) -> i32 {
+    value
+        .and_then(|v| v.as_i64())
+        .map(|n| n.clamp(i32::MIN as i64, i32::MAX as i64) as i32)
+        .unwrap_or(0)
+}
+
+/// Read a string field from a msgpack-map element, defaulting to an empty
+/// string for an absent or non-string value.
+fn elem_str(value: &Value, key: &str) -> String {
+    arg_str(value, key).unwrap_or("").to_string()
+}
+
+/// Parse a `display.page.set` request into the page content. Lenient by design:
+/// `title`/`rows`/`zones` are all optional, a row defaults its label/value to
+/// empty, and a zone defaults its coordinates to 0, so a partial payload still
+/// produces a valid (possibly empty) page. A non-array `rows`/`zones` is
+/// rejected so a misshaped request is a clear error rather than a silent empty.
+fn parse_display_page(args: &Value) -> Result<DisplayPage, HostError> {
+    let title = arg_str(args, "title").unwrap_or("").to_string();
+
+    let rows = match map_get(args, "rows") {
+        None | Some(Value::Nil) => Vec::new(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| DisplayRow {
+                label: elem_str(item, "label"),
+                value: elem_str(item, "value"),
+            })
+            .collect(),
+        Some(_) => return Err(HostError::Rpc("rows must be a list".to_string())),
+    };
+
+    let zones = match map_get(args, "zones") {
+        None | Some(Value::Nil) => Vec::new(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| DisplayZone {
+                x: zone_i32(map_get(item, "x")),
+                y: zone_i32(map_get(item, "y")),
+                w: zone_i32(map_get(item, "w")),
+                h: zone_i32(map_get(item, "h")),
+                key: elem_str(item, "key"),
+                label: elem_str(item, "label"),
+            })
+            .collect(),
+        Some(_) => return Err(HostError::Rpc("zones must be a list".to_string())),
+    };
+
+    Ok(DisplayPage { title, rows, zones })
+}
+
+/// Serialize a display page to JSON and write `path` via an atomic
+/// temp-then-rename, creating the parent. The sidecar is read by the display
+/// service (a separate process), so it uses default file perms like the other
+/// `/run/ados/lcd-*.json` sidecars, not the owner-only mode the config store
+/// uses for its secret-bearing file.
+fn write_display_page(path: &std::path::Path, page: &DisplayPage) -> std::io::Result<()> {
+    use std::io::Write;
+    let json = serde_json::to_vec(page).map_err(std::io::Error::other)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    let write_result = (|| -> std::io::Result<()> {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp)?;
+        f.write_all(&json)?;
+        f.flush()?;
+        f.sync_all()?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return write_result;
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------
 // MAVLink frame classification
 // ---------------------------------------------------------------------
 
@@ -626,7 +750,17 @@ pub struct RealHost {
     vision: Option<Arc<VisionClient>>,
     plugin_runtime_lookup: Option<RuntimeLookup>,
     agent_id_lookup: Option<AgentIdLookup>,
+    /// Sidecar path the reserved display page reads its content from. The
+    /// canonical `/run/ados/lcd-plugin-page.json`; a builder overrides it in
+    /// tests so the write round-trips without touching `/run`.
+    display_page_path: PathBuf,
 }
+
+/// Canonical sidecar the reserved data-driven display page reads. Kept in sync
+/// with `ados_display::sidecar::LCD_PLUGIN_PAGE_PATH` by the cross-crate JSON
+/// shape, not a build dependency (the display crate is not on the host's
+/// dependency path).
+const LCD_PLUGIN_PAGE_PATH: &str = "/run/ados/lcd-plugin-page.json";
 
 impl RealHost {
     /// A host with empty facades and every external slot unwired, matching
@@ -642,7 +776,15 @@ impl RealHost {
             vision: None,
             plugin_runtime_lookup: None,
             agent_id_lookup: None,
+            display_page_path: PathBuf::from(LCD_PLUGIN_PAGE_PATH),
         }
+    }
+
+    /// Override the display-page sidecar path (builder style, tests). Production
+    /// uses the canonical `/run/ados/lcd-plugin-page.json` from [`Self::new`].
+    pub fn with_display_page_path(mut self, path: PathBuf) -> Self {
+        self.display_page_path = path;
+        self
     }
 
     /// Wire the MAVLink client (builder style).
@@ -796,6 +938,7 @@ const ALL_DISPATCH_METHODS: &[crate::dispatch::Method] = {
         ConfigGet,
         ConfigSet,
         ProcessSpawn,
+        DisplayPageSet,
         VisionSubscribeFrames,
         VisionRegisterModel,
         VisionInfer,
@@ -1270,6 +1413,39 @@ impl HostServices for RealHost {
             (Value::from("basename"), Value::from(basename)),
             (Value::from("args"), spawn_args),
             (Value::from("env"), spawn_env),
+        ]))
+    }
+
+    fn display_page_set(&self, plugin_id: &str, args: &Value) -> Result<HostResult, HostError> {
+        // Parse the request into the display-page shape, then atomically write
+        // the sidecar the reserved page reads. The dispatch gate already
+        // enforced the display capability before this runs.
+        let page = parse_display_page(args)?;
+        let rows = page.rows.len();
+        let zones = page.zones.len();
+        if let Err(e) = write_display_page(&self.display_page_path, &page) {
+            tracing::warn!(
+                plugin_id = %plugin_id,
+                path = %self.display_page_path.display(),
+                error = %e,
+                "display page write failed"
+            );
+            // A write failure is a graceful-degrade response, not a gate
+            // failure (matches the not_available shape the other host methods
+            // return when their backing surface is unavailable).
+            return Ok(Value::Map(vec![
+                (Value::from("error"), Value::from("not_available")),
+                (Value::from("method"), Value::from("display.page.set")),
+                (
+                    Value::from("reason"),
+                    Value::from("display page write failed"),
+                ),
+            ]));
+        }
+        Ok(Value::Map(vec![
+            (Value::from("set"), Value::Boolean(true)),
+            (Value::from("rows"), Value::Integer((rows as i64).into())),
+            (Value::from("zones"), Value::Integer((zones as i64).into())),
         ]))
     }
 
@@ -2464,5 +2640,92 @@ mod tests {
             );
             assert_eq!(field(&m, "method").and_then(Value::as_str), Some(name));
         }
+    }
+
+    // ---- display.page.set ------------------------------------------------
+
+    #[test]
+    fn display_page_set_writes_the_sidecar_in_the_shared_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lcd-plugin-page.json");
+        let host = RealHost::new().with_display_page_path(path.clone());
+
+        let row = Value::Map(vec![
+            (Value::from("label"), Value::from("Temp")),
+            (Value::from("value"), Value::from("42 C")),
+        ]);
+        let zone = Value::Map(vec![
+            (Value::from("x"), Value::from(8)),
+            (Value::from("y"), Value::from(40)),
+            (Value::from("w"), Value::from(100)),
+            (Value::from("h"), Value::from(32)),
+            (Value::from("key"), Value::from("reset")),
+            (Value::from("label"), Value::from("Reset")),
+        ]);
+        let args = map(&[
+            ("title", Value::from("Sensor")),
+            ("rows", Value::Array(vec![row])),
+            ("zones", Value::Array(vec![zone])),
+        ]);
+
+        let m = ok_map(host.display_page_set("p", &args));
+        assert_eq!(field(&m, "set").and_then(Value::as_bool), Some(true));
+        assert_eq!(field(&m, "rows").and_then(Value::as_i64), Some(1));
+        assert_eq!(field(&m, "zones").and_then(Value::as_i64), Some(1));
+
+        // The written JSON matches the shape the display loader reads.
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(v["title"], "Sensor");
+        assert_eq!(v["rows"][0]["label"], "Temp");
+        assert_eq!(v["rows"][0]["value"], "42 C");
+        assert_eq!(v["zones"][0]["x"], 8);
+        assert_eq!(v["zones"][0]["key"], "reset");
+        assert_eq!(v["zones"][0]["label"], "Reset");
+
+        // No stray tmp left behind.
+        let stray = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().ends_with(".tmp"));
+        assert!(!stray);
+    }
+
+    #[test]
+    fn display_page_set_is_lenient_and_rejects_a_misshaped_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lcd-plugin-page.json");
+        let host = RealHost::new().with_display_page_path(path.clone());
+
+        // An empty payload writes an empty page.
+        let m = ok_map(host.display_page_set("p", &map(&[])));
+        assert_eq!(field(&m, "rows").and_then(Value::as_i64), Some(0));
+        assert_eq!(field(&m, "zones").and_then(Value::as_i64), Some(0));
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(v["title"], "");
+
+        // A non-list rows is a clear error.
+        assert_eq!(
+            err_body(host.display_page_set("p", &map(&[("rows", Value::from("nope"))]))),
+            "rows must be a list"
+        );
+        assert_eq!(
+            err_body(host.display_page_set("p", &map(&[("zones", Value::from(3))]))),
+            "zones must be a list"
+        );
+    }
+
+    #[test]
+    fn display_page_set_is_gated_on_the_display_capability() {
+        use crate::dispatch::{gate, Gate, Method};
+        // The handler itself does not gate; the dispatch loop does. An ungranted
+        // caller never reaches the handler.
+        assert_eq!(
+            gate("display.page.set", false, &caps(&[])),
+            Gate::CapabilityDenied("capability_denied: display.oled.page".to_string())
+        );
+        assert_eq!(
+            gate("display.page.set", false, &caps(&["display.oled.page"])),
+            Gate::Allow(Method::DisplayPageSet)
+        );
     }
 }
