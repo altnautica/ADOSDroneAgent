@@ -854,6 +854,80 @@ REGISTRY: list[RouteCase] = [
             "temperatures",
         ),
     ),
+    # The composite diagnostics snapshot (LCD drilldown + GCS remote-display).
+    # Six nested sections; the live readings drift between two reads so they are
+    # masked, leaving the nested shape the contract. The top-level `agent` block
+    # (and the `logs.agent` list, which shares the key) collapses to the sentinel
+    # under the `agent` mask; the board summary, system field set, network keys,
+    # and device id are what the two handlers must agree on.
+    RouteCase(
+        name="diagnostics",
+        method="GET",
+        path="/api/v1/diagnostics",
+        paired_headers={"authorization": PAIRED_AUTH_PLACEHOLDER},
+        extra_volatile=(
+            "agent",
+            "process_cpu_percent",
+            "process_memory_mb",
+            "cpu_percent",
+            "memory_used_mb",
+            "memory_total_mb",
+            "disk_used_gb",
+            "disk_total_gb",
+            "temp_c",
+            "load_avg",
+            "ip",
+        ),
+    ),
+    # Ground-station recordings listing {recording, current_filename, items[]}.
+    # 404 E_PROFILE_MISMATCH off a drone (identical both transports); on a GS the
+    # envelope is the contract and the per-file rows are volatile (a fresh GS with
+    # no recordings compares clean with an empty list).
+    RouteCase(
+        name="gs-recording-list",
+        method="GET",
+        path="/api/v1/ground-station/recording/list",
+        paired_headers={"authorization": PAIRED_AUTH_PLACEHOLDER},
+        extra_volatile=(
+            "items",
+            "filename",
+            "size_bytes",
+            "mtime",
+            "current_filename",
+        ),
+    ),
+    # Ground-station persisted UI config {oled, buttons, screens}: the on-disk
+    # side-file merged over the defaults. Stable between two reads; 404 off a
+    # drone profile.
+    RouteCase(
+        name="gs-ui",
+        method="GET",
+        path="/api/v1/ground-station/ui",
+    ),
+    # Ground-station HDMI kiosk display config {resolution, kiosk_enabled,
+    # kiosk_target_url}. Stable; 404 off a drone profile.
+    RouteCase(
+        name="gs-display",
+        method="GET",
+        path="/api/v1/ground-station/display",
+    ),
+    # Ground-station attached controllers + primary selection. 404 off a drone;
+    # on a GS the {devices, primary_id} shape is the contract while the list +
+    # persisted primary depend on what is plugged in, so both are masked.
+    RouteCase(
+        name="gs-gamepads",
+        method="GET",
+        path="/api/v1/ground-station/gamepads",
+        extra_volatile=("devices", "primary_id"),
+    ),
+    # Ground-station paired Bluetooth devices. 404 off a drone; on a GS the
+    # {devices} envelope is the contract while the paired list is masked.
+    RouteCase(
+        name="gs-bluetooth-paired",
+        method="GET",
+        path="/api/v1/ground-station/bluetooth/paired",
+        extra_volatile=("devices",),
+    ),
     # <append a RouteCase line per route as it migrates — the only shared edit>
 ]
 

@@ -96,6 +96,8 @@ fn native_routes() -> Vec<NativeRoute> {
         get("/api/status/full"),
         // System resources snapshot (CPU/memory/swap/disk/temperatures).
         get("/api/system"),
+        // Composite triage snapshot (LCD Diagnostics + GCS remote-display).
+        get("/api/v1/diagnostics"),
         // Video reads.
         get("/api/video/latency"),
         get("/api/v1/video/air-pipeline"),
@@ -124,6 +126,12 @@ fn native_routes() -> Vec<NativeRoute> {
         get("/api/v1/ground-station/pair/pending"),
         get("/api/v1/ground-station/pic"),
         get("/api/v1/ground-station/captive-token"),
+        // Ground-station reads ported in the read-tail wave (profile-gated).
+        get("/api/v1/ground-station/recording/list"),
+        get("/api/v1/ground-station/ui"),
+        get("/api/v1/ground-station/display"),
+        get("/api/v1/ground-station/gamepads"),
+        get("/api/v1/ground-station/bluetooth/paired"),
         // Writes. The path-param routes use the {name} template the matcher
         // recognises; the require PUT shares its path with the require GET read.
         post("/api/params/{name}"),
@@ -321,7 +329,7 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            60,
+            66,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);
@@ -393,5 +401,12 @@ mod tests {
         assert!(has(Method::POST, "/api/_ws/ticket"));
         // The system-resources snapshot is native.
         assert!(has(Method::GET, "/api/system"));
+        // The read-tail wave: composite diagnostics + the GS recording/ui/input reads.
+        assert!(has(Method::GET, "/api/v1/diagnostics"));
+        assert!(has(Method::GET, "/api/v1/ground-station/recording/list"));
+        assert!(has(Method::GET, "/api/v1/ground-station/ui"));
+        assert!(has(Method::GET, "/api/v1/ground-station/display"));
+        assert!(has(Method::GET, "/api/v1/ground-station/gamepads"));
+        assert!(has(Method::GET, "/api/v1/ground-station/bluetooth/paired"));
     }
 }

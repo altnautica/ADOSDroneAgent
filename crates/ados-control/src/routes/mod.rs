@@ -20,12 +20,16 @@
 //! test pins the full set so the two never drift.
 
 pub mod command;
+pub mod diagnostics;
 pub mod fleet;
+pub mod gs_input_read;
 pub mod gs_mesh;
 pub mod gs_network;
 pub mod gs_network_write;
 pub mod gs_pairing;
+pub mod gs_recording_list;
 pub mod gs_status;
+pub mod gs_ui_read;
 pub mod network_write;
 pub mod pairing;
 pub mod params;
@@ -149,6 +153,10 @@ pub fn build_router(state: AppState) -> Router {
         // System resources: CPU / memory / swap / disk / per-sensor temperatures
         // from the logging store's hardware snapshot (the LCD + GCS resource read).
         .route("/api/system", get(system_resources::get_system_resources))
+        // The composite triage snapshot: agent identity + board summary + system
+        // resources + network + device id + the last ados-agent log lines, for the
+        // LCD Diagnostics drilldown and the GCS remote-display pane.
+        .route("/api/v1/diagnostics", get(diagnostics::get_diagnostics))
         // Video reads: glass-to-glass latency, the air-side pipeline snapshot, and
         // the encoder/radio config (the snapshot/record/switch writes + the
         // camera-enumeration route stay proxied).
@@ -230,6 +238,28 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/ground-station/captive-token",
             get(gs_pairing::get_captive_token),
+        )
+        // Ground-station recordings listing (profile-gated 404 off a drone).
+        .route(
+            "/api/v1/ground-station/recording/list",
+            get(gs_recording_list::get_recording_list),
+        )
+        // Ground-station persisted-UI reads (profile-gated): the OLED/button/screen
+        // UI config blob and the HDMI kiosk display config.
+        .route("/api/v1/ground-station/ui", get(gs_ui_read::get_ui))
+        .route(
+            "/api/v1/ground-station/display",
+            get(gs_ui_read::get_display),
+        )
+        // Ground-station input reads (profile-gated): attached controllers + the
+        // primary selection, and the paired Bluetooth devices.
+        .route(
+            "/api/v1/ground-station/gamepads",
+            get(gs_input_read::get_gamepads),
+        )
+        .route(
+            "/api/v1/ground-station/bluetooth/paired",
+            get(gs_input_read::get_bluetooth_paired),
         )
         // Wi-Fi client writes (profile-agnostic): join / leave / forget, each
         // forwarded to the native uplink daemon's command socket. The autoconnect

@@ -65,6 +65,7 @@ dependencies = [
 name = "ados-control"
 version = "0.1.0"
 dependencies = [
+ "ados-hid",
  "ados-protocol",
  "anyhow",
  "axum",
