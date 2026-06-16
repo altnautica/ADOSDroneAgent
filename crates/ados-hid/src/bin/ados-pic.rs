@@ -19,6 +19,7 @@ use tokio::sync::Mutex;
 
 use ados_hid::buttons::{self, default_button_mapping};
 use ados_hid::eventbus::ButtonEventBus;
+use ados_hid::paths::pic_state_json;
 use ados_hid::pic::{PicArbiter, WATCHDOG_INTERVAL_SECONDS};
 use ados_hid::pic_ipc::{self, PIC_SOCK};
 
@@ -82,15 +83,23 @@ async fn main() -> Result<()> {
     // only the journal.
     let button_bus = ButtonEventBus::new();
 
+    // The PIC state sidecar (`/run/ados/pic-state.json`): the IPC server mirrors
+    // the arbiter snapshot here after every state-changing op, and the watchdog
+    // branch below mirrors it after an auto-release, so a reader (the native
+    // status route, the residual `/pic/events` consumer, the display layer) sees
+    // the live holder without a socket round-trip.
+    let sidecar_path = Arc::new(pic_state_json());
+
     // The IPC seam: the FastAPI /pic/* routes + the kiosk reach the arbiter
     // here, and the display layer streams button presses here. Always served —
     // every ground station needs it.
     {
         let arbiter = arbiter.clone();
         let button_bus = button_bus.clone();
+        let sidecar_path = sidecar_path.clone();
         tokio::spawn(async move {
             let path = Path::new(PIC_SOCK);
-            if let Err(e) = pic_ipc::serve(arbiter, button_bus, path).await {
+            if let Err(e) = pic_ipc::serve(arbiter, button_bus, path, Some(sidecar_path)).await {
                 tracing::error!(error = %e, "pic control socket exited");
             }
         });
@@ -123,6 +132,10 @@ async fn main() -> Result<()> {
                 };
                 if let Some(client) = released {
                     tracing::info!(client_id = %client, "pic auto-released on heartbeat timeout");
+                    // The auto-release moved the arbiter; mirror the fresh
+                    // (unclaimed) snapshot to the sidecar so a reader sees the
+                    // drop, matching the post-op mirror the IPC server does.
+                    pic_ipc::write_sidecar(&sidecar_path, &arbiter).await;
                 }
                 sd_watchdog();
             }

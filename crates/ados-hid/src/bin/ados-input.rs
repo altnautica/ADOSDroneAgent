@@ -22,12 +22,17 @@
 use std::path::Path;
 use std::time::Duration;
 
+use std::sync::Arc;
+
 use anyhow::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::signal::unix::{signal, SignalKind};
+use tokio::sync::Mutex;
 
+use ados_hid::hid_cmd::{self, CmdState};
 use ados_hid::input::{HotplugKind, HotplugTracker, PollOutcome, Snapshot};
+use ados_hid::paths::hid_cmd_sock;
 use ados_hid::pic_ipc::PIC_SOCK;
 use ados_hid::sidecar::GS_INPUT_JSON;
 
@@ -101,8 +106,30 @@ async fn main() -> Result<()> {
     tracing::info!("ados-input starting");
 
     let state_path = Path::new(GS_INPUT_JSON);
-    let mut tracker = HotplugTracker::from_sidecar(state_path);
-    tracing::info!(primary = ?tracker.primary(), "input primary loaded");
+    // The running hotplug tracker, shared behind a mutex with the operator command
+    // socket: the poll loop locks it to diff the device set, and the command socket
+    // locks it to apply a `set_primary` selection on the running state so a later
+    // poll does not re-promote a different device. Single owner, two callers.
+    let tracker = Arc::new(Mutex::new(HotplugTracker::from_sidecar(state_path)));
+    tracing::info!(primary = ?tracker.lock().await.primary(), "input primary loaded");
+
+    // The operator command socket (`/run/ados/hid-cmd.sock`): the native front
+    // forwards the primary-gamepad selection here so it lands on the running
+    // tracker (the single owner of the live primary) and persists the sidecar in
+    // lockstep, rather than touching only the on-disk record. Always served — the
+    // primary selection is a ground-station write the GCS Hardware tab drives.
+    {
+        let cmd_state = CmdState {
+            tracker: tracker.clone(),
+            sidecar_path: state_path.to_path_buf(),
+        };
+        tokio::spawn(async move {
+            let sock = hid_cmd_sock();
+            if let Err(e) = hid_cmd::serve(cmd_state, &sock).await {
+                tracing::error!(error = %e, "input command socket exited");
+            }
+        });
+    }
 
     sd_ready();
 
@@ -118,7 +145,10 @@ async fn main() -> Result<()> {
         tokio::select! {
             _ = tick.tick() => {
                 let snapshot = enumerate();
-                let outcome = tracker.poll(snapshot);
+                let outcome = {
+                    let mut t = tracker.lock().await;
+                    t.poll(snapshot)
+                };
                 handle_outcome(&outcome, state_path).await;
                 sd_watchdog();
             }

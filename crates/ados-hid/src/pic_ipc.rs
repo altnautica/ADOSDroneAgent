@@ -39,7 +39,7 @@
 //!   the consumer.
 //! ```
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::Deserialize;
@@ -90,10 +90,17 @@ const DEFAULT_CLIENT_HINT: &str = "hdmi-kiosk";
 /// The `buttons` handle is the fanout the `subscribe_buttons` op streams from;
 /// pass a clone of the daemon's button bus so the display/OLED consumer can
 /// reach front-panel presses over the same socket.
+///
+/// `sidecar_path`, when set, is the on-disk PIC state sidecar
+/// ([`crate::paths::pic_state_json`]): after every state-changing one-shot op the
+/// server mirrors the current arbiter snapshot to it (via
+/// [`crate::pic_sidecar::write_snapshot`]) so a reader sees the live holder
+/// without a socket round-trip. `None` disables the mirror (the prior behaviour).
 pub async fn serve(
     arbiter: SharedArbiter,
     buttons: ButtonEventBus,
     sock_path: &Path,
+    sidecar_path: Option<Arc<PathBuf>>,
 ) -> std::io::Result<()> {
     // A stale socket from a prior run makes bind() fail with EADDRINUSE.
     let _ = std::fs::remove_file(sock_path);
@@ -108,13 +115,20 @@ pub async fn serve(
     }
     tracing::info!(path = %sock_path.display(), "pic control socket listening");
 
+    // Seed the sidecar with the current (unclaimed) snapshot at startup so a
+    // reader has a file from the first boot before any transition.
+    if let Some(path) = sidecar_path.as_ref() {
+        write_sidecar(path, &arbiter).await;
+    }
+
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
                 let arbiter = arbiter.clone();
                 let buttons = buttons.clone();
+                let sidecar_path = sidecar_path.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_conn(stream, arbiter, buttons).await {
+                    if let Err(e) = handle_conn(stream, arbiter, buttons, sidecar_path).await {
                         tracing::debug!(error = %e, "pic conn error");
                     }
                 });
@@ -128,12 +142,25 @@ pub async fn serve(
     }
 }
 
+/// Mirror the current arbiter snapshot to the state sidecar. Best-effort: a write
+/// fault is logged at debug and never fails the transition the sidecar mirrors.
+pub async fn write_sidecar(path: &Path, arbiter: &SharedArbiter) {
+    let snapshot = {
+        let arb = arbiter.lock().await;
+        arb.get_state()
+    };
+    if let Err(e) = crate::pic_sidecar::write_snapshot(path, &snapshot) {
+        tracing::debug!(error = %e, path = %path.display(), "pic state sidecar write failed");
+    }
+}
+
 /// Read one newline-terminated request and either write one newline-terminated
 /// response (the request/response ops) or stream events (the subscribe ops).
 async fn handle_conn(
     mut stream: UnixStream,
     arbiter: SharedArbiter,
     buttons: ButtonEventBus,
+    sidecar_path: Option<Arc<PathBuf>>,
 ) -> std::io::Result<()> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 1024];
@@ -161,6 +188,14 @@ async fn handle_conn(
     }
 
     let resp = dispatch(line, &arbiter).await;
+
+    // A state-changing op may have moved the arbiter; mirror the fresh snapshot
+    // to the sidecar so a reader sees the live holder. `get_state` ops do not
+    // change state but re-writing the same snapshot is harmless and cheap.
+    if let Some(path) = sidecar_path.as_ref() {
+        write_sidecar(path, &arbiter).await;
+    }
+
     let mut body = serde_json::to_vec(&resp)
         .unwrap_or_else(|_| br#"{"ok":false,"error":"E_ENCODE"}"#.to_vec());
     body.push(b'\n');
@@ -515,7 +550,7 @@ mod tests {
             let arbiter = arbiter.clone();
             let buttons = buttons.clone();
             let sock = sock.clone();
-            async move { serve(arbiter, buttons, &sock).await }
+            async move { serve(arbiter, buttons, &sock, None).await }
         });
         // Wait for the socket to appear.
         for _ in 0..50 {
@@ -609,7 +644,7 @@ mod tests {
             let arbiter = arbiter.clone();
             let buttons = buttons.clone();
             let sock = sock.clone();
-            async move { serve(arbiter, buttons, &sock).await }
+            async move { serve(arbiter, buttons, &sock, None).await }
         });
         for _ in 0..50 {
             if sock.exists() {
@@ -648,6 +683,62 @@ mod tests {
         assert_eq!(ev["kind"], "short");
         assert_eq!(ev["action"], "cycle_screen");
         assert_eq!(ev["timestamp_ms"], 1500);
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn serve_mirrors_the_state_sidecar_on_startup_and_after_a_claim() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("pic.sock");
+        let sidecar = dir.path().join("pic-state.json");
+        let arbiter = fresh();
+        let buttons = ButtonEventBus::new();
+        let server = tokio::spawn({
+            let arbiter = arbiter.clone();
+            let buttons = buttons.clone();
+            let sock = sock.clone();
+            let sidecar = Arc::new(sidecar.clone());
+            async move { serve(arbiter, buttons, &sock, Some(sidecar)).await }
+        });
+        for _ in 0..50 {
+            if sock.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        // The startup seed: the sidecar holds the unclaimed default before any op.
+        for _ in 0..50 {
+            if sidecar.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let seed = crate::pic_sidecar::read_snapshot(&sidecar).unwrap();
+        assert_eq!(seed["state"], "unclaimed");
+        assert!(seed["claimed_by"].is_null());
+
+        // A claim over the socket moves the arbiter; the post-op mirror writes the
+        // fresh snapshot, so a reader sees the live holder without a round-trip.
+        let mut client = UnixStream::connect(&sock).await.unwrap();
+        client
+            .write_all(b"{\"op\":\"claim\",\"client_id\":\"op-a\"}\n")
+            .await
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(&mut client)
+            .read_line(&mut line)
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(v["claimed"], true);
+
+        // The sidecar now reflects the claim (the field set matches get_state).
+        let after = crate::pic_sidecar::read_snapshot(&sidecar).unwrap();
+        assert_eq!(after["state"], "claimed");
+        assert_eq!(after["claimed_by"], "op-a");
+        assert_eq!(after["claim_counter"], 1);
 
         server.abort();
     }

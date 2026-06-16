@@ -129,6 +129,27 @@ impl HotplugTracker {
         self.primary.as_deref()
     }
 
+    /// Set the primary device id on the running tracker. The operator-driven
+    /// selection (the REST `PUT /gamepads/primary`): the new primary takes
+    /// effect on the live tracker so a later poll does NOT re-promote a
+    /// different device, matching the Python `InputManager.set_primary` updating
+    /// the in-process singleton. The caller persists the sidecar separately (the
+    /// Python `set_primary` also persists; the daemon writes the sidecar after
+    /// this so the running state + the on-disk record stay in lockstep).
+    pub fn set_primary(&mut self, device_id: impl Into<String>) {
+        self.primary = Some(device_id.into());
+    }
+
+    /// Clear the primary on the running tracker. Used when the persisted primary
+    /// is forgotten (e.g. a paired Bluetooth controller is removed): the Python
+    /// `forget_bluetooth` drops `self._primary` when it pointed at the forgotten
+    /// device, so the running tracker must drop it too. With the primary cleared,
+    /// the next poll auto-promotes whatever gamepad is attached, matching the
+    /// Python lifecycle.
+    pub fn clear_primary(&mut self) {
+        self.primary = None;
+    }
+
     /// Diff `snapshot` against the last-seen set. On the first poll, only seeds.
     /// Returns the transition events plus any auto-promoted primary.
     pub fn poll(&mut self, snapshot: Snapshot) -> PollOutcome {
@@ -324,6 +345,21 @@ mod tests {
         let out = t.poll(snap(&["usb:5", "usb:6"]));
         assert!(out.auto_primary.is_none());
         assert_eq!(t.primary(), Some("usb:5"));
+    }
+
+    #[test]
+    fn set_primary_overrides_the_running_selection() {
+        let mut t = HotplugTracker::new(None);
+        // An operator selection wins, and a later poll does not re-promote a
+        // different device (the primary is now set).
+        t.set_primary("usb:7");
+        assert_eq!(t.primary(), Some("usb:7"));
+        let out = t.poll(snap(&["usb:1", "usb:2"]));
+        assert!(out.auto_primary.is_none());
+        assert_eq!(t.primary(), Some("usb:7"));
+        // A second selection replaces the first.
+        t.set_primary("usb:9");
+        assert_eq!(t.primary(), Some("usb:9"));
     }
 
     #[test]

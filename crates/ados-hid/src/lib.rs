@@ -19,14 +19,27 @@
 //!   persistence; the diff engine + gamepad predicate are pure, evdev gated.
 //! * [`sidecar`] — `/etc/ados` sidecar persistence (touch.calib path +
 //!   `ground-station-input.json`).
+//! * [`pic_sidecar`] — the PIC arbiter state sidecar (`/run/ados/pic-state.json`)
+//!   the `ados-pic` daemon mirrors the arbiter snapshot to on every transition,
+//!   so a reader (the display layer, a status route) has the live holder without
+//!   a socket round-trip.
+//! * [`hid_cmd`] — the `ados-input` daemon's operator command socket
+//!   (`/run/ados/hid-cmd.sock`): the write seam for the primary-gamepad selection,
+//!   applied through the running hotplug tracker (the single owner of the live
+//!   primary) so a selection takes effect without a daemon restart.
+//! * [`paths`] — the runtime path constants the PIC state sidecar + the input
+//!   command socket resolve under.
 //!
 //! The OLED/HDMI display layers (the `ados-display` crate) land separately.
 
 pub mod affine;
 pub mod buttons;
 pub mod eventbus;
+pub mod hid_cmd;
 pub mod input;
+pub mod paths;
 pub mod pic;
 pub mod pic_ipc;
+pub mod pic_sidecar;
 pub mod sidecar;
 pub mod touch;
