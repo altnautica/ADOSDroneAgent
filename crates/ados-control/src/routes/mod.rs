@@ -30,6 +30,8 @@ pub mod gs_pairing;
 pub mod gs_recording_list;
 pub mod gs_status;
 pub mod gs_ui_read;
+pub mod gs_wfb_write;
+pub mod mac_pin;
 pub mod network_write;
 pub mod pairing;
 pub mod params;
@@ -169,7 +171,10 @@ pub fn build_router(state: AppState) -> Router {
         // Ground-station profile reads (404 off a drone): the status snapshot, the
         // stored radio config, and the three distributed-receive role reads.
         .route("/api/v1/ground-station/status", get(gs_status::get_status))
-        .route("/api/v1/ground-station/wfb", get(gs_status::get_wfb))
+        .route(
+            "/api/v1/ground-station/wfb",
+            get(gs_status::get_wfb).put(gs_wfb_write::put_ground_station_wfb),
+        )
         .route(
             "/api/v1/ground-station/wfb/relay/status",
             get(gs_status::get_wfb_relay_status),
@@ -275,6 +280,14 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/network/client/configured/{name}",
             delete(network_write::delete_client_configured),
+        )
+        // MAC-pin writes: pin a stable MAC for an adapter (POST) and clear it
+        // (DELETE). Each merges the mac_pin config the supervisor reconciler reads
+        // and drives the shared mac-pin engine for the .link removal + gated re-tag.
+        .route("/api/v1/network/mac/pin", post(mac_pin::post_mac_pin))
+        .route(
+            "/api/v1/network/mac/{iface}",
+            delete(mac_pin::delete_mac_pin),
         )
         // Everything else: reverse-proxy to the residual Python.
         .fallback(proxy_to_residual)

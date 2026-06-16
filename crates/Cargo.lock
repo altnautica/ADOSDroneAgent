@@ -66,6 +66,7 @@ name = "ados-control"
 version = "0.1.0"
 dependencies = [
  "ados-hid",
+ "ados-macpin",
  "ados-protocol",
  "anyhow",
  "axum",

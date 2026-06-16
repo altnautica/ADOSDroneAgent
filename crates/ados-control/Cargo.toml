@@ -29,6 +29,12 @@ ados-protocol = { path = "../ados-protocol", features = ["mavlink"] }
 # Python input service writes. The evdev dependency inside this crate is itself
 # Linux-target-gated, so a non-Linux dev build keeps the empty-list fallback.
 ados-hid = { path = "../ados-hid" }
+# The shared MAC-pin engine: the canonical .link filename, the .link removal, the
+# gated live re-tag, and the state/networkd paths the mac-pin write routes reuse,
+# so a pin the native surface writes resolves to the exact same .link + state the
+# supervisor reconciler and the Python route produced. Linux-target legs inside
+# the crate are cfg-gated, so a non-Linux dev build keeps the safe fallbacks.
+ados-macpin = { path = "../ados-macpin" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # YAML reader for the slice of /etc/ados/config.yaml the pairing-info route

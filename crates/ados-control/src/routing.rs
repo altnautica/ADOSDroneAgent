@@ -146,11 +146,19 @@ fn native_routes() -> Vec<NativeRoute> {
         put("/api/v1/network/client/join"),
         delete("/api/v1/network/client"),
         delete("/api/v1/network/client/configured/{name}"),
+        // MAC-pin writes: pin a stable MAC (POST) + clear the pin (DELETE, an
+        // {iface} template). Each merges the mac_pin config + drives the shared
+        // mac-pin engine for the .link removal and the gated live re-tag.
+        post("/api/v1/network/mac/pin"),
+        delete("/api/v1/network/mac/{iface}"),
         // WFB radio writes.
         post("/api/wfb/channel"),
         put("/api/wfb/tx-power"),
         // Ground-station network priority write (PUT on the priority read's path).
         put("/api/v1/ground-station/network/priority"),
+        // Ground-station WFB config write (PUT on the wfb read's path): a surgical
+        // video.wfb config merge the radio/ground services pick up on their cadence.
+        put("/api/v1/ground-station/wfb"),
     ]
 }
 
@@ -329,7 +337,7 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            66,
+            69,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);
@@ -390,10 +398,14 @@ mod tests {
             Method::DELETE,
             "/api/v1/network/client/configured/{name}"
         ));
-        // The WFB radio writes + the GS network priority write.
+        // The MAC-pin writes: a POST pin + a DELETE {iface} clear template.
+        assert!(has(Method::POST, "/api/v1/network/mac/pin"));
+        assert!(has(Method::DELETE, "/api/v1/network/mac/{iface}"));
+        // The WFB radio writes + the GS network priority + GS wfb config writes.
         assert!(has(Method::POST, "/api/wfb/channel"));
         assert!(has(Method::PUT, "/api/wfb/tx-power"));
         assert!(has(Method::PUT, "/api/v1/ground-station/network/priority"));
+        assert!(has(Method::PUT, "/api/v1/ground-station/wfb"));
         // The original surface stays native.
         assert!(has(Method::GET, "/healthz"));
         assert!(has(Method::POST, "/api/command"));

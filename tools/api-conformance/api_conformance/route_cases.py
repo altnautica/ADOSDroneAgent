@@ -831,54 +831,52 @@ REGISTRY: list[RouteCase] = [
         content_type="application/json",
         require_sandbox=True,
     ),
-    # System resources snapshot: CPU / memory / swap / disk / per-sensor
-    # temperatures from the logging store's hardware snapshot. The live readings
-    # move every read, so they are masked; the stable capacities (cpu_count, the
-    # *_total_* fields) are the contract. The per-sensor `temperatures` map is an
-    # environment-specific live reading, so it is masked too.
+    # Pin a stable MAC for an adapter. A write (it merges the mac_pin config the
+    # supervisor reconciler reads + removes the stale .link), so sandboxed and
+    # skipped by default. The body is the {iface, mac}; the response is the
+    # {status, iface, mac, persisted, appliedLive, note} shape. The `note` text
+    # varies with the box's live default-route/mgmt-iface state, so it is masked.
     RouteCase(
-        name="system",
-        method="GET",
-        path="/api/system",
+        name="mac-pin",
+        method="POST",
+        path="/api/v1/network/mac/pin",
+        body=b'{"iface": "wlan0", "mac": "02:c6:75:83:1a:3e"}',
+        content_type="application/json",
         paired_headers={"authorization": PAIRED_AUTH_PLACEHOLDER},
-        extra_volatile=(
-            "cpu_percent",
-            "memory_used_mb",
-            "memory_available_mb",
-            "memory_cache_mb",
-            "memory_percent",
-            "swap_used_mb",
-            "swap_percent",
-            "disk_used_gb",
-            "disk_percent",
-            "temperatures",
-        ),
+        require_sandbox=True,
+        extra_volatile=("note",),
     ),
-    # The composite diagnostics snapshot (LCD drilldown + GCS remote-display).
-    # Six nested sections; the live readings drift between two reads so they are
-    # masked, leaving the nested shape the contract. The top-level `agent` block
-    # (and the `logs.agent` list, which shares the key) collapses to the sentinel
-    # under the `agent` mask; the board summary, system field set, network keys,
-    # and device id are what the two handlers must agree on.
+    # Clear a MAC pin for an adapter. A write (it pops the override + removes the
+    # .link), so sandboxed. The {iface} segment carries a representative adapter;
+    # the response is the static {status, iface, removedOverride, removedLinkFile,
+    # note} shape with no volatile fields.
     RouteCase(
-        name="diagnostics",
-        method="GET",
-        path="/api/v1/diagnostics",
+        name="mac-unpin",
+        method="DELETE",
+        path="/api/v1/network/mac/wlan0",
         paired_headers={"authorization": PAIRED_AUTH_PLACEHOLDER},
-        extra_volatile=(
-            "agent",
-            "process_cpu_percent",
-            "process_memory_mb",
-            "cpu_percent",
-            "memory_used_mb",
-            "memory_total_mb",
-            "disk_used_gb",
-            "disk_total_gb",
-            "temp_c",
-            "load_avg",
-            "ip",
-        ),
+        require_sandbox=True,
     ),
+    # Set the ground-station WFB radio config. A write (a surgical video.wfb config
+    # merge the radio/ground services read on their cadence), so sandboxed and
+    # skipped by default; the bench opts in on a ground-station rig. The body is the
+    # {channel, bitrate_profile, fec}; the deterministic {channel, bitrate_profile,
+    # fec} radio view is the contract. `persisted`/`persist_error` depend on the
+    # writer's euid (a non-root front vs the root FastAPI), so they are masked.
+    # Profile-gated: a drone node returns the same E_PROFILE_MISMATCH 404 on both.
+    RouteCase(
+        name="gs-wfb-config-set",
+        method="PUT",
+        path="/api/v1/ground-station/wfb",
+        body=b'{"channel": 161, "bitrate_profile": "high", "fec": "8/12"}',
+        content_type="application/json",
+        require_sandbox=True,
+        extra_volatile=("persisted", "persist_error"),
+    ),
+    # (The /api/system + /api/v1/diagnostics reads finished migration: native is
+    # the sole server, the residual no longer serves them, so their conformance
+    # cases retired with the Python prune — a diff against an absent residual would
+    # be a false failure. The native goldens in ados-control pin their shape now.)
     # Ground-station recordings listing {recording, current_filename, items[]}.
     # 404 E_PROFILE_MISMATCH off a drone (identical both transports); on a GS the
     # envelope is the contract and the per-file rows are volatile (a fresh GS with
