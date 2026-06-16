@@ -46,6 +46,25 @@ pub const MESH_EVENTS_JSONL: &str = "/run/ados/mesh-events.jsonl";
 /// tmp+rename write; missing/corrupt tolerated.
 pub const WFB_LOCKED_CHANNEL_HINT: &str = "/run/ados/wfb-locked-channel";
 
+/// The ground-station data-plane operator command socket. The native front has
+/// no in-process Python pair/role manager to call, so it forwards a
+/// newline-JSON `{"op":...}` request here and the running `ados-groundlink`
+/// service applies it (role transition, gateway preference, pair-key install /
+/// unpair). Mirrors the radio + Wi-Fi command sockets' framing: one
+/// newline-terminated JSON request, one newline-terminated JSON reply, close.
+pub const GROUNDLINK_CMD_SOCK: &str = "/run/ados/groundlink-cmd.sock";
+
+/// The setup-complete sentinel. Dropped on a successful pair so the captive DNS
+/// redirect stands down. Persistent (under `/var/lib/ados`), mode 0644.
+pub const SETUP_COMPLETE_PATH: &str = "/var/lib/ados/setup-complete";
+
+/// The hotspot passphrase file. Wiped on factory-reset so `hostapd_manager`
+/// regenerates a fresh key on the next boot.
+pub const AP_PASSPHRASE_PATH: &str = "/etc/ados/ap-passphrase";
+
+/// The agent config file the role/pair persist paths round-trip.
+pub const CONFIG_YAML: &str = "/etc/ados/config.yaml";
+
 // ---------------------------------------------------------------------------
 // Persistent mesh directory: /etc/ados/mesh/
 // ---------------------------------------------------------------------------

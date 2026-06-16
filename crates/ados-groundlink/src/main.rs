@@ -134,6 +134,20 @@ async fn main() -> Result<()> {
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
 
+    // The operator command socket runs for the whole service lifetime in every
+    // role: role transitions, gateway-preference, and WFB pair-key install /
+    // unpair are operator on-demand actions the native front forwards here (it
+    // has no in-process Python pair/role manager to call). Spawned before the
+    // role dispatch so it is reachable regardless of which role loop runs below.
+    tokio::spawn(async {
+        // Honour ADOS_RUN_DIR so a redirected runtime layout (a non-root dev host
+        // or a test) places the socket alongside the other run-dir sockets.
+        let sock = ados_groundlink::paths::run_path("groundlink-cmd.sock");
+        if let Err(e) = ados_groundlink::cmdsock::serve(std::path::Path::new(&sock)).await {
+            tracing::warn!(error = %e, path = %sock, "groundlink command socket exited");
+        }
+    });
+
     let role = resolve_role();
     match role {
         Role::Relay => {

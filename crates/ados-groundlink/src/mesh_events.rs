@@ -32,10 +32,22 @@ pub const KIND_RELAY_CONNECTED: &str = "relay_connected";
 pub const KIND_RELAY_DISCONNECTED: &str = "relay_disconnected";
 pub const KIND_RECEIVER_UNREACHABLE: &str = "receiver_unreachable";
 pub const KIND_WFB_ADAPTER_MISSING: &str = "wfb_adapter_missing";
+/// A mesh role transition. Emitted by the role-apply path so the GCS Hardware
+/// tab, OLED status row, and logs all see the change. Mirrors the in-process
+/// `MeshEvent(kind="role_changed", ...)` the Python `role_manager` published.
+pub const KIND_ROLE_CHANGED: &str = "role_changed";
 
 /// Resolve the journal path, honouring the `ADOS_RUN_DIR` test override.
 fn journal_path() -> PathBuf {
     PathBuf::from(crate::paths::run_path("mesh-events.jsonl"))
+}
+
+/// Append a `role_changed` event with the given payload at an explicit
+/// timestamp. The role-apply path calls this last so subscribers see the new
+/// role only after the unit transition has run; the timestamp is the
+/// transition's `ts_ms` so the event + the route's response carry the same value.
+pub fn emit_role_changed(payload: serde_json::Value, timestamp_ms: i64) {
+    emit_to(&journal_path(), KIND_ROLE_CHANGED, payload, timestamp_ms);
 }
 
 /// Append one mesh event to the cross-process journal. `payload` is any JSON

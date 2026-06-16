@@ -14,8 +14,10 @@
 pub mod batctl;
 pub mod identity;
 pub mod manager;
+pub mod role_apply;
 pub mod state;
 
 pub use identity::{ensure_mesh_identity, MeshIdentity, MeshIdentityError};
 pub use manager::{get_current_role, run_poll_loop};
+pub use role_apply::{apply_role, RoleResult};
 pub use state::{MeshGateway, MeshNeighbor, MeshSnapshot};

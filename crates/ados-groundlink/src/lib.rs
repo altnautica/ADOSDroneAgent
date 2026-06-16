@@ -9,11 +9,13 @@
 //! and the mesh tap-to-pair crypto.
 
 pub mod acquire;
+pub mod cmdsock;
 pub mod fanout;
 pub mod gs_config;
 pub mod mdns;
 pub mod mesh;
 pub mod mesh_events;
+pub mod pair_state;
 pub mod pairing;
 pub mod paths;
 pub mod presence;
