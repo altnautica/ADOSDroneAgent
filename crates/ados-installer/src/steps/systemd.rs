@@ -51,6 +51,11 @@ const UNIVERSAL_UNITS: &[&str] = &[
     // profiles fetch the binary, so it is enabled cross-profile here and the
     // supervisor pulls it up via `WantedBy=ados-supervisor.service`.
     "ados-plugin-host.service",
+    // GPIO-output service (status buzzer / LED). Enabled cross-profile so the
+    // supervisor manages it on either an air or a ground node; its ExecStart
+    // guard execs /bin/true until the operator drops the gpio-rust-enabled
+    // marker, so enabling it on a board with no GPIO header is a clean no-op.
+    "ados-gpio.service",
 ];
 
 /// Ground-station units enable-linked here (the START half is the `start`

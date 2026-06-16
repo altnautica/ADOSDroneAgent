@@ -30,6 +30,7 @@ AGENT_CAPABILITIES: frozenset[str] = frozenset(
         "hardware.i2c",
         "hardware.spi",
         "hardware.gpio",
+        "hardware.gpio_out",
         "hardware.usb",
         "hardware.usb.uvc",
         "hardware.camera.csi",
@@ -56,6 +57,7 @@ ENFORCED_AGENT_CAPABILITIES: frozenset[str] = frozenset(
     {
         "event.publish",
         "event.subscribe",
+        "hardware.gpio_out",
     }
 )
 
@@ -206,6 +208,13 @@ CAPABILITY_CATALOG: dict[str, dict[str, str]] = {
         "category": "hardware",
         "risk": "medium",
         "risk_reason": "GPIO outputs can drive external hardware; mis-driven pins can damage attached devices.",
+    },
+    "hardware.gpio_out": {
+        "label": "Drive GPIO output lines (status buzzer or LED)",
+        "description": "Lets the plugin drive a host GPIO output line high or low and play a bounded buzzer or LED beep pattern through the agent's GPIO-output service. Output-only; it does not read input pins.",
+        "category": "hardware",
+        "risk": "high",
+        "risk_reason": "Drives physical output hardware; a mis-driven pin can energize or damage an attached device.",
     },
     "hardware.usb": {
         "label": "Claim raw USB devices on the host",

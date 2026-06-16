@@ -137,6 +137,11 @@ pub const SERVICE_REGISTRY: &[ServiceDef] = &[
     def_keep("ados-control", OnDemand, None, None),
     // Peripheral Manager registry. Cross-profile.
     def("ados-peripherals", Hardware, None, None),
+    // GPIO-output substrate (status buzzer / LED). Cross-profile (a header GPIO
+    // can drive an indicator on either an air or a ground node) and not in the
+    // headless KEEP set. The unit ships disabled until the operator turns it on,
+    // so on a board with no GPIO header it is a clean no-op.
+    def("ados-gpio", Hardware, None, None),
     // Ground-station-only services. ados-wfb-rx is the single-node RX path,
     // gated to the direct role so it does not grab the adapter the relay or
     // receiver units drive.
@@ -261,7 +266,7 @@ mod tests {
     #[test]
     fn registry_has_expected_shape() {
         let specs = build_specs();
-        assert_eq!(specs.len(), 28, "service count drifted from the catalog");
+        assert_eq!(specs.len(), 29, "service count drifted from the catalog");
         // Core tier members. The single cross-profile cloud unit serves the
         // gateway + heartbeat on both profiles (it spawns the ground-station
         // bridge when the role resolves to a ground station), so there is no

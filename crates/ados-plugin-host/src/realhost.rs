@@ -633,6 +633,70 @@ fn write_display_page(path: &std::path::Path, page: &DisplayPage) -> std::io::Re
 }
 
 // ---------------------------------------------------------------------
+// GPIO command-socket forward
+// ---------------------------------------------------------------------
+
+/// Cap on the reply read so a misbehaving service can't grow the buffer.
+const GPIO_REPLY_CAP: usize = 64 * 1024;
+
+/// Send one newline-JSON request to a unix command socket and read the one-line
+/// JSON reply. Blocking (synchronous), so the synchronous host trait method can
+/// call it directly, with short read/write timeouts so a wedged service surfaces
+/// as an error rather than hanging the plugin connection. The forward mirrors the
+/// REST layer's radio/wifi command-socket clients.
+#[cfg(unix)]
+fn gpio_socket_roundtrip(
+    sock_path: &std::path::Path,
+    request: &serde_json::Value,
+) -> std::io::Result<serde_json::Value> {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    let mut stream = UnixStream::connect(sock_path)?;
+    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+
+    let mut body = serde_json::to_vec(request)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    body.push(b'\n');
+    stream.write_all(&body)?;
+    stream.flush()?;
+
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 1024];
+    loop {
+        let n = stream.read(&mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if buf.contains(&b'\n') || buf.len() > GPIO_REPLY_CAP {
+            break;
+        }
+    }
+    let line = match buf.iter().position(|&b| b == b'\n') {
+        Some(i) => &buf[..i],
+        None => &buf[..],
+    };
+    serde_json::from_slice(line)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+/// Non-unix dev hosts have no unix-socket command plane: report the service as
+/// unreachable so the forward degrades to `not_available`.
+#[cfg(not(unix))]
+fn gpio_socket_roundtrip(
+    _sock_path: &std::path::Path,
+    _request: &serde_json::Value,
+) -> std::io::Result<serde_json::Value> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "no unix socket on this platform",
+    ))
+}
+
+// ---------------------------------------------------------------------
 // MAVLink frame classification
 // ---------------------------------------------------------------------
 
@@ -678,6 +742,41 @@ fn arg_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
 /// `env.args.get(key)` coerced to a clone, or `Value::Nil` when absent.
 fn arg_owned(args: &Value, key: &str) -> Value {
     map_get(args, key).cloned().unwrap_or(Value::Nil)
+}
+
+/// Read an integer field from a msgpack-map `args`, accepting a signed or
+/// unsigned msgpack integer. Returns `None` for an absent or non-integer value.
+fn arg_i64(args: &Value, key: &str) -> Option<i64> {
+    let v = map_get(args, key)?;
+    v.as_i64()
+        .or_else(|| v.as_u64().and_then(|n| i64::try_from(n).ok()))
+}
+
+/// Convert a `serde_json::Value` (a command-socket reply) to the msgpack
+/// `rmpv::Value` the plugin sees as the response `args`. Integers stay integers,
+/// floats stay floats, null becomes nil, so the reply shape round-trips into the
+/// plugin's response envelope unchanged.
+fn json_to_mpv(value: &serde_json::Value) -> Value {
+    match value {
+        serde_json::Value::Null => Value::Nil,
+        serde_json::Value::Bool(b) => Value::Boolean(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Value::Integer(i.into())
+            } else if let Some(u) = n.as_u64() {
+                Value::Integer(u.into())
+            } else {
+                Value::F64(n.as_f64().unwrap_or(0.0))
+            }
+        }
+        serde_json::Value::String(s) => Value::from(s.as_str()),
+        serde_json::Value::Array(items) => Value::Array(items.iter().map(json_to_mpv).collect()),
+        serde_json::Value::Object(map) => Value::Map(
+            map.iter()
+                .map(|(k, v)| (Value::from(k.as_str()), json_to_mpv(v)))
+                .collect(),
+        ),
+    }
 }
 
 /// Coerce a msgpack value to raw bytes, mirroring the Python `msg_bytes`
@@ -754,6 +853,10 @@ pub struct RealHost {
     /// canonical `/run/ados/lcd-plugin-page.json`; a builder overrides it in
     /// tests so the write round-trips without touching `/run`.
     display_page_path: PathBuf,
+    /// Command socket the GPIO-output service serves. The host forwards each
+    /// `gpio.*` method to it (the radio/wifi-cmd-socket precedent); a builder
+    /// overrides it in tests so the forward round-trips against a stub.
+    gpio_cmd_path: PathBuf,
 }
 
 /// Canonical sidecar the reserved data-driven display page reads. Kept in sync
@@ -761,6 +864,11 @@ pub struct RealHost {
 /// shape, not a build dependency (the display crate is not on the host's
 /// dependency path).
 const LCD_PLUGIN_PAGE_PATH: &str = "/run/ados/lcd-plugin-page.json";
+
+/// Canonical GPIO-output command socket the host forwards `gpio.*` methods to.
+/// Kept in sync with `ados_gpio::GPIO_CMD_SOCK` by the cross-crate wire string,
+/// not a build dependency (the gpio crate is not on the host's dependency path).
+const GPIO_CMD_SOCK: &str = "/run/ados/gpio-cmd.sock";
 
 impl RealHost {
     /// A host with empty facades and every external slot unwired, matching
@@ -777,6 +885,7 @@ impl RealHost {
             plugin_runtime_lookup: None,
             agent_id_lookup: None,
             display_page_path: PathBuf::from(LCD_PLUGIN_PAGE_PATH),
+            gpio_cmd_path: PathBuf::from(GPIO_CMD_SOCK),
         }
     }
 
@@ -784,6 +893,13 @@ impl RealHost {
     /// uses the canonical `/run/ados/lcd-plugin-page.json` from [`Self::new`].
     pub fn with_display_page_path(mut self, path: PathBuf) -> Self {
         self.display_page_path = path;
+        self
+    }
+
+    /// Override the GPIO command socket path (builder style, tests). Production
+    /// uses the canonical `/run/ados/gpio-cmd.sock` from [`Self::new`].
+    pub fn with_gpio_cmd_path(mut self, path: PathBuf) -> Self {
+        self.gpio_cmd_path = path;
         self
     }
 
@@ -832,6 +948,32 @@ impl RealHost {
         match &self.agent_id_lookup {
             Some(lookup) => lookup(plugin_id),
             None => String::new(),
+        }
+    }
+
+    /// Forward a built `gpio.*` request to the GPIO-output service's command
+    /// socket and return its reply as the plugin's response `args`. Synchronous
+    /// (a blocking unix-socket round-trip), so the host trait method stays
+    /// non-async like its siblings; the service answers a `set` / `beep` request
+    /// immediately (a beep schedules and returns), so the round-trip is short.
+    ///
+    /// A missing service / connection / IO error degrades to the `not_available`
+    /// shape rather than erroring, matching the `mavlink.send` and `process.spawn`
+    /// not-available paths — the GPIO service may simply not be up on this board.
+    fn forward_gpio(&self, request: serde_json::Value, method: &str) -> HostResult {
+        match gpio_socket_roundtrip(&self.gpio_cmd_path, &request) {
+            Ok(reply) => json_to_mpv(&reply),
+            Err(e) => {
+                tracing::debug!(method, error = %e, "gpio command forward failed");
+                Value::Map(vec![
+                    (Value::from("error"), Value::from("not_available")),
+                    (Value::from("method"), Value::from(method)),
+                    (
+                        Value::from("reason"),
+                        Value::from("gpio service unavailable"),
+                    ),
+                ])
+            }
         }
     }
 
@@ -939,6 +1081,8 @@ const ALL_DISPATCH_METHODS: &[crate::dispatch::Method] = {
         ConfigSet,
         ProcessSpawn,
         DisplayPageSet,
+        GpioOutputSet,
+        GpioBuzzerBeep,
         VisionSubscribeFrames,
         VisionRegisterModel,
         VisionInfer,
@@ -1447,6 +1591,50 @@ impl HostServices for RealHost {
             (Value::from("rows"), Value::Integer((rows as i64).into())),
             (Value::from("zones"), Value::Integer((zones as i64).into())),
         ]))
+    }
+
+    fn gpio_output_set(&self, _plugin_id: &str, args: &Value) -> Result<HostResult, HostError> {
+        // Build the service's `set` request from the validated args, then forward
+        // it to the GPIO-output command socket. The dispatch gate already enforced
+        // the GPIO-output capability before this runs.
+        let pin = arg_i64(args, "pin")
+            .ok_or_else(|| HostError::Rpc("pin must be an integer".to_string()))?;
+        let level = arg_str(args, "level").filter(|l| *l == "high" || *l == "low");
+        let Some(level) = level else {
+            return Err(HostError::Rpc(
+                "level must be \"high\" or \"low\"".to_string(),
+            ));
+        };
+        let chip = arg_i64(args, "chip").unwrap_or(0);
+        let req = serde_json::json!({"op": "set", "chip": chip, "pin": pin, "level": level});
+        Ok(self.forward_gpio(req, "gpio.output.set"))
+    }
+
+    fn gpio_buzzer_beep(&self, _plugin_id: &str, args: &Value) -> Result<HostResult, HostError> {
+        // Build the service's `beep` request from the validated args. The service
+        // clamps the pattern into the safe bounds, so the host forwards the raw
+        // values verbatim and lets the single owner enforce the ceiling.
+        let pin = arg_i64(args, "pin")
+            .ok_or_else(|| HostError::Rpc("pin must be an integer".to_string()))?;
+        let on_ms = arg_i64(args, "on_ms")
+            .ok_or_else(|| HostError::Rpc("on_ms must be an integer".to_string()))?;
+        let cycles = arg_i64(args, "cycles")
+            .ok_or_else(|| HostError::Rpc("cycles must be an integer".to_string()))?;
+        let chip = arg_i64(args, "chip").unwrap_or(0);
+        let mut req = serde_json::json!({
+            "op": "beep", "chip": chip, "pin": pin, "on_ms": on_ms, "cycles": cycles,
+        });
+        // Optional carrier/envelope fields ride through when present.
+        if let Some(off_ms) = arg_i64(args, "off_ms") {
+            req["off_ms"] = off_ms.into();
+        }
+        if let Some(freq_hz) = arg_i64(args, "freq_hz") {
+            req["freq_hz"] = freq_hz.into();
+        }
+        if let Some(duty_pct) = arg_i64(args, "duty_pct") {
+            req["duty_pct"] = duty_pct.into();
+        }
+        Ok(self.forward_gpio(req, "gpio.buzzer.beep"))
     }
 
     fn release_plugin(&self, plugin_id: &str) {
@@ -2727,5 +2915,155 @@ mod tests {
             gate("display.page.set", false, &caps(&["display.oled.page"])),
             Gate::Allow(Method::DisplayPageSet)
         );
+    }
+
+    // ---- gpio.output.set / gpio.buzzer.beep ------------------------------
+
+    /// Run a one-shot stub on a unix socket that captures the request line and
+    /// replies with `reply`. Returns the captured request once a client connects.
+    #[cfg(unix)]
+    fn gpio_stub(path: std::path::PathBuf, reply: &'static str) -> std::thread::JoinHandle<String> {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixListener;
+        let listener = UnixListener::bind(&path).expect("bind stub socket");
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 256];
+            loop {
+                let n = stream.read(&mut chunk).expect("read");
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                if buf.contains(&b'\n') {
+                    break;
+                }
+            }
+            stream.write_all(reply.as_bytes()).expect("write reply");
+            stream.write_all(b"\n").expect("write nl");
+            stream.flush().ok();
+            let end = buf.iter().position(|&b| b == b'\n').unwrap_or(buf.len());
+            String::from_utf8_lossy(&buf[..end]).to_string()
+        })
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gpio_output_set_forwards_a_set_request_and_returns_the_reply() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gpio-cmd.sock");
+        let stub = gpio_stub(
+            path.clone(),
+            r#"{"ok":true,"chip":0,"pin":17,"level":"high"}"#,
+        );
+        let host = RealHost::new().with_gpio_cmd_path(path);
+
+        let args = map(&[("pin", Value::from(17)), ("level", Value::from("high"))]);
+        let m = ok_map(host.gpio_output_set("p", &args));
+        // The reply round-trips back to the plugin verbatim.
+        assert_eq!(field(&m, "ok").and_then(Value::as_bool), Some(true));
+        assert_eq!(field(&m, "pin").and_then(Value::as_i64), Some(17));
+        assert_eq!(field(&m, "level").and_then(Value::as_str), Some("high"));
+
+        // The forwarded request carried the op + the validated fields.
+        let sent = stub.join().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&sent).unwrap();
+        assert_eq!(v["op"], "set");
+        assert_eq!(v["pin"], 17);
+        assert_eq!(v["level"], "high");
+        assert_eq!(v["chip"], 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gpio_buzzer_beep_forwards_the_envelope() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gpio-cmd.sock");
+        let stub = gpio_stub(path.clone(), r#"{"ok":true,"phases":4}"#);
+        let host = RealHost::new().with_gpio_cmd_path(path);
+
+        let args = map(&[
+            ("pin", Value::from(18)),
+            ("on_ms", Value::from(120)),
+            ("off_ms", Value::from(80)),
+            ("cycles", Value::from(2)),
+            ("freq_hz", Value::from(2700)),
+        ]);
+        let m = ok_map(host.gpio_buzzer_beep("p", &args));
+        assert_eq!(field(&m, "ok").and_then(Value::as_bool), Some(true));
+        assert_eq!(field(&m, "phases").and_then(Value::as_i64), Some(4));
+
+        let sent = stub.join().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&sent).unwrap();
+        assert_eq!(v["op"], "beep");
+        assert_eq!(v["pin"], 18);
+        assert_eq!(v["on_ms"], 120);
+        assert_eq!(v["off_ms"], 80);
+        assert_eq!(v["cycles"], 2);
+        assert_eq!(v["freq_hz"], 2700);
+    }
+
+    #[test]
+    fn gpio_set_validates_args_before_forwarding() {
+        // A bad request fails validation in the host with no socket touched.
+        let host = RealHost::new();
+        assert_eq!(
+            err_body(host.gpio_output_set("p", &map(&[("level", Value::from("high"))]))),
+            "pin must be an integer"
+        );
+        assert_eq!(
+            err_body(host.gpio_output_set("p", &map(&[("pin", Value::from(17))]))),
+            "level must be \"high\" or \"low\""
+        );
+        assert_eq!(
+            err_body(host.gpio_output_set(
+                "p",
+                &map(&[("pin", Value::from(17)), ("level", Value::from("mid"))])
+            )),
+            "level must be \"high\" or \"low\""
+        );
+        assert_eq!(
+            err_body(host.gpio_buzzer_beep(
+                "p",
+                &map(&[("pin", Value::from(18)), ("cycles", Value::from(2))])
+            )),
+            "on_ms must be an integer"
+        );
+    }
+
+    #[test]
+    fn gpio_set_degrades_to_not_available_when_the_service_is_absent() {
+        // No socket bound: the forward reports not_available, never errors.
+        let host = RealHost::new()
+            .with_gpio_cmd_path(std::path::PathBuf::from("/nonexistent/ados-gpio-test.sock"));
+        let args = map(&[("pin", Value::from(17)), ("level", Value::from("high"))]);
+        let m = ok_map(host.gpio_output_set("p", &args));
+        assert_eq!(
+            field(&m, "error").and_then(Value::as_str),
+            Some("not_available")
+        );
+        assert_eq!(
+            field(&m, "method").and_then(Value::as_str),
+            Some("gpio.output.set")
+        );
+    }
+
+    #[test]
+    fn gpio_methods_are_gated_on_the_gpio_output_capability() {
+        use crate::dispatch::{gate, Gate, Method};
+        for (method, variant) in [
+            ("gpio.output.set", Method::GpioOutputSet),
+            ("gpio.buzzer.beep", Method::GpioBuzzerBeep),
+        ] {
+            assert_eq!(
+                gate(method, false, &caps(&[])),
+                Gate::CapabilityDenied("capability_denied: hardware.gpio_out".to_string())
+            );
+            assert_eq!(
+                gate(method, false, &caps(&["hardware.gpio_out"])),
+                Gate::Allow(variant)
+            );
+        }
     }
 }

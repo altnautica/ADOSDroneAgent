@@ -210,6 +210,15 @@ risk_reason = "GPIO outputs can drive external hardware; mis-driven pins can dam
 enforced = false
 
 [[agent]]
+id = "hardware.gpio_out"
+label = "Drive GPIO output lines (status buzzer or LED)"
+description = "Lets the plugin drive a host GPIO output line high or low and play a bounded buzzer or LED beep pattern through the agent's GPIO-output service. Output-only; it does not read input pins."
+category = "hardware"
+risk = "high"
+risk_reason = "Drives physical output hardware; a mis-driven pin can energize or damage an attached device."
+enforced = true
+
+[[agent]]
 id = "hardware.usb"
 label = "Claim raw USB devices on the host"
 description = "Lets the plugin attach to and exchange bulk transfers with USB devices. Required by vendor SDK drivers that talk to specific USB peripherals."
@@ -676,3 +685,15 @@ required_cap = "vision.detection.publish"
 [[method]]
 id = "display.page.set"
 required_cap = "display.oled.page"
+
+# ---- gpio output (status buzzer / LED) ----
+# Drive a host GPIO output line, and play a bounded buzzer/LED beep pattern. The
+# host forwards each to the gpio-output service's command socket. Fully gated at
+# the dispatch level on the GPIO-output capability.
+[[method]]
+id = "gpio.output.set"
+required_cap = "hardware.gpio_out"
+
+[[method]]
+id = "gpio.buzzer.beep"
+required_cap = "hardware.gpio_out"

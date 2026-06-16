@@ -60,6 +60,9 @@ pub enum Method {
     ProcessSpawn,
     // Display: set the reserved data-driven page's content.
     DisplayPageSet,
+    // GPIO output: drive a status buzzer/LED line, or play a bounded beep.
+    GpioOutputSet,
+    GpioBuzzerBeep,
     // Vision: frame-descriptor subscribe, model register, inference, and
     // detection publish. The engine owns the cameras and the inference backend;
     // the host proxies these to it over its socket.
@@ -110,6 +113,8 @@ impl Method {
             "config.set" => Self::ConfigSet,
             "process.spawn" => Self::ProcessSpawn,
             "display.page.set" => Self::DisplayPageSet,
+            "gpio.output.set" => Self::GpioOutputSet,
+            "gpio.buzzer.beep" => Self::GpioBuzzerBeep,
             _ => return None,
         })
     }
@@ -139,6 +144,8 @@ impl Method {
             Self::ConfigSet => "config.set",
             Self::ProcessSpawn => "process.spawn",
             Self::DisplayPageSet => "display.page.set",
+            Self::GpioOutputSet => "gpio.output.set",
+            Self::GpioBuzzerBeep => "gpio.buzzer.beep",
             Self::VisionSubscribeFrames => vision_methods::SUBSCRIBE_FRAMES,
             Self::VisionRegisterModel => vision_methods::REGISTER_MODEL,
             Self::VisionInfer => vision_methods::INFER,
@@ -285,6 +292,25 @@ mod tests {
     }
 
     #[test]
+    fn gpio_methods_gate_on_the_gpio_output_capability() {
+        // Both the digital set and the beep pattern are refused without the
+        // GPIO-output cap, allowed with it.
+        for (method, variant) in [
+            ("gpio.output.set", Method::GpioOutputSet),
+            ("gpio.buzzer.beep", Method::GpioBuzzerBeep),
+        ] {
+            assert_eq!(
+                gate(method, false, &caps(&[])),
+                Gate::CapabilityDenied("capability_denied: hardware.gpio_out".to_string())
+            );
+            assert_eq!(
+                gate(method, false, &caps(&["hardware.gpio_out"])),
+                Gate::Allow(variant)
+            );
+        }
+    }
+
+    #[test]
     fn process_spawn_gate_names_process_spawn_cap() {
         let g = gate("process.spawn", false, &caps(&["mavlink.read"]));
         assert_eq!(
@@ -318,6 +344,8 @@ mod tests {
         Method::ConfigSet,
         Method::ProcessSpawn,
         Method::DisplayPageSet,
+        Method::GpioOutputSet,
+        Method::GpioBuzzerBeep,
         Method::VisionSubscribeFrames,
         Method::VisionRegisterModel,
         Method::VisionInfer,

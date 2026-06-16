@@ -1,0 +1,45 @@
+[Unit]
+Description=ADOS GPIO Output Service (status buzzer / LED)
+PartOf=ados-supervisor.service
+StartLimitInterval=60s
+StartLimitBurst=5
+
+[Service]
+# Join the shared accounting slice so MemoryCurrent/CPUUsage are observable.
+Slice=ados.slice
+# Opt-in, off by default: the unit runs the native GPIO-output binary only when
+# the operator has enabled it AND the binary is present. Otherwise it execs
+# /bin/true, a clean no-op, so the unit is inert on a board with no GPIO header
+# or where the operator has not opted in. Enable for a bench with:
+#   touch /etc/ados/gpio-rust-enabled && systemctl restart ados-gpio
+Type=simple
+ExecStart=/bin/sh -c 'if [ -e /etc/ados/gpio-rust-enabled ] && [ -x /opt/ados/bin/ados-gpio ]; then exec /opt/ados/bin/ados-gpio; else exec /bin/true; fi'
+Restart=on-failure
+RestartSec=5
+Environment=RUST_LOG=info
+EnvironmentFile=-/etc/ados/env
+
+# Drives output lines via /dev/gpiochip*, serves /run/ados/gpio-cmd.sock, and
+# writes the /run/ados/gpio-output.json sidecar. It needs the GPIO character
+# devices plus the run dir; nothing else.
+SupplementaryGroups=gpio
+DeviceAllow=char-gpiochip rw
+NoNewPrivileges=yes
+ProtectSystem=strict
+PrivateTmp=yes
+ReadWritePaths=/run/ados /etc/ados
+
+# Lightweight (no Python runtime); cap it so a runaway can never starve the box.
+MemoryMax=32M
+CPUQuota=10%
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-gpio
+
+[Install]
+# Not enabled by default at the .wants level beyond the supervisor; the
+# installer enable-links it cross-profile (like ados-peripherals) and the
+# supervisor pulls it up via WantedBy. The ExecStart guard keeps it inert until
+# the operator drops the gpio-rust-enabled marker.
+WantedBy=ados-supervisor.service

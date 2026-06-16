@@ -38,6 +38,8 @@ REQUIRED_CAP: dict[str, str | None] = {
     "vision.infer": "vision.model.register",
     "vision.publish_detection": "vision.detection.publish",
     "display.page.set": "display.oled.page",
+    "gpio.output.set": "hardware.gpio_out",
+    "gpio.buzzer.beep": "hardware.gpio_out",
 }
 
 # Methods whose cap is decided inline by the handler from the request

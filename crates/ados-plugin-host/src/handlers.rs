@@ -335,6 +335,8 @@ pub async fn route_host_method<H: HostServices + ?Sized>(
         Method::ConfigSet => host.config_set(plugin_id, args),
         Method::ProcessSpawn => host.process_spawn(plugin_id, args),
         Method::DisplayPageSet => host.display_page_set(plugin_id, args),
+        Method::GpioOutputSet => host.gpio_output_set(plugin_id, args),
+        Method::GpioBuzzerBeep => host.gpio_buzzer_beep(plugin_id, args),
         // Vision request/response methods proxy to the engine and await its
         // reply. (vision.subscribe_frames is handled in the server, where it
         // arms the frame-descriptor push stream, never reaching here.)

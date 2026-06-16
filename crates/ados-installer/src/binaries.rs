@@ -196,6 +196,19 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
         gate: Gate::BestEffort,
         profiles: BOTH,
     },
+    // The GPIO-output service (status buzzer / LED). Best-effort and opt-in: it
+    // ships disabled (the unit's ExecStart guard execs /bin/true until the
+    // operator drops the enable marker), so a missing binary degrades nothing. It
+    // is fetched and placed so enabling it works on demand. Cross-profile: a
+    // header GPIO can drive an indicator on an air or a ground node.
+    PrebuiltBinary {
+        service: "ados-gpio",
+        asset: "ados-gpio-aarch64",
+        release_tag: "prebuilt-gpio",
+        dest: "/opt/ados/bin/ados-gpio",
+        gate: Gate::BestEffort,
+        profiles: BOTH,
+    },
     // The video relay the pipeline streams through. It is a mirrored
     // third-party binary rather than an `ados-*` service, so it lands in the
     // system bin dir. Best-effort: a missing relay degrades video without
@@ -223,8 +236,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_has_seventeen_entries() {
-        assert_eq!(PREBUILT.len(), 17);
+    fn catalog_has_eighteen_entries() {
+        assert_eq!(PREBUILT.len(), 18);
+    }
+
+    #[test]
+    fn gpio_is_best_effort_on_both_profiles() {
+        let gpio = PREBUILT
+            .iter()
+            .find(|b| b.service == "ados-gpio")
+            .expect("ados-gpio must be in the catalog");
+        // The GPIO-output service ships disabled (the unit guard execs /bin/true
+        // until the operator opts in), so a missing binary degrades nothing and
+        // must never abort the install.
+        assert_eq!(gpio.gate, Gate::BestEffort);
+        assert_eq!(gpio.release_tag, "prebuilt-gpio");
+        assert!(for_profile("drone")
+            .iter()
+            .any(|b| b.service == "ados-gpio"));
+        assert!(for_profile("ground_station")
+            .iter()
+            .any(|b| b.service == "ados-gpio"));
     }
 
     #[test]

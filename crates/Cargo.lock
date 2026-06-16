@@ -125,6 +125,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "ados-gpio"
+version = "0.1.0"
+dependencies = [
+ "ados-protocol",
+ "anyhow",
+ "gpio-cdev",
+ "nix 0.29.0",
+ "sd-notify",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-journald",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "ados-groundlink"
 version = "0.1.0"
 dependencies = [

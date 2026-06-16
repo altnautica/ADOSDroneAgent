@@ -48,6 +48,8 @@ pub const DISPATCH_METHODS: &[DispatchMethod] = &[
     DispatchMethod { method: "vision.infer", required_cap: Some("vision.model.register"), inline: false },
     DispatchMethod { method: "vision.publish_detection", required_cap: Some("vision.detection.publish"), inline: false },
     DispatchMethod { method: "display.page.set", required_cap: Some("display.oled.page"), inline: false },
+    DispatchMethod { method: "gpio.output.set", required_cap: Some("hardware.gpio_out"), inline: false },
+    DispatchMethod { method: "gpio.buzzer.beep", required_cap: Some("hardware.gpio_out"), inline: false },
 ];
 
 /// Look up the dispatch-level required capability for a wire method.

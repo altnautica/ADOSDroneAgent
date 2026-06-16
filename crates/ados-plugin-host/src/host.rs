@@ -186,6 +186,22 @@ pub trait HostServices: Send + Sync + 'static {
         Ok(not_implemented("display.page.set"))
     }
 
+    /// Drive a host GPIO output line (a status buzzer or LED) high or low. A real
+    /// host forwards the request to the GPIO-output service's command socket.
+    /// Fully gated at the dispatch level on the GPIO-output capability, so it does
+    /// not see the caller's caps. The default returns `not_implemented` so
+    /// [`NoopHost`] stays inert.
+    fn gpio_output_set(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
+        Ok(not_implemented("gpio.output.set"))
+    }
+
+    /// Play a bounded buzzer/LED beep pattern on a host GPIO output line. A real
+    /// host forwards the request to the GPIO-output service's command socket,
+    /// which clamps the pattern into the safe bounds before driving the line.
+    fn gpio_buzzer_beep(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
+        Ok(not_implemented("gpio.buzzer.beep"))
+    }
+
     /// Release every per-session host resource a plugin held when its
     /// connection drops (component reservations, driver registrations, camera
     /// claims, telemetry channels). Mirrors `_release_session_resources` in the
