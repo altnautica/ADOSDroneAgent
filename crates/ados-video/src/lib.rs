@@ -24,6 +24,7 @@ pub mod lifecycle;
 pub mod mediamtx;
 pub mod orchestrator;
 pub mod process;
+pub mod recorder;
 pub mod shutdown;
 pub mod stderr_drain;
 pub mod tap;
