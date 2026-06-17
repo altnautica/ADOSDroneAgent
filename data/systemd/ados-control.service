@@ -28,13 +28,15 @@ Environment=RUST_LOG=info
 EnvironmentFile=-/etc/ados/env
 
 # The control surface reads the vehicle-state + MAVLink + logging sockets and the
-# install-result + board sidecars, and writes only the pairing document and its
-# own control socket. /var/lib/ados is listed for the install-result read so the
-# version resolves under ProtectSystem=strict exactly as the sibling daemons do.
+# install-result + board sidecars, writes the pairing document and its own control
+# socket, and on a ground station creates + writes session recordings under
+# /var/ados/recordings. /var/ados (mutable agent data) and /var/lib/ados (the
+# install-result read) are both listed so writes resolve under ProtectSystem=strict
+# exactly as the sibling daemons do.
 NoNewPrivileges=yes
 ProtectSystem=strict
 PrivateTmp=yes
-ReadWritePaths=/etc/ados /run/ados /var/lib/ados
+ReadWritePaths=/var/ados /etc/ados /run/ados /var/lib/ados
 
 # The surface is lightweight (no Python runtime, no plugin load); cap it so a
 # runaway can never starve the box.
