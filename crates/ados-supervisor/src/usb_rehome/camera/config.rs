@@ -32,6 +32,13 @@ pub struct CameraRecoveryConfig {
     pub boot_reset_window: Duration,
     /// Allow a clean per-port re-enable on a hub that exposes it.
     pub allow_ppps: bool,
+    /// Opt-in (bench/ground): allow an AGGRESSIVE shared-hub reset that
+    /// re-enumerates the camera even when it shares the hub with the radio/FC
+    /// (the guard would otherwise refuse). Recovers a wedged camera on a board
+    /// with no per-port power without a manual replug, at the cost of a brief
+    /// radio+FC re-enumeration. Gated additionally on the FC being DISARMED
+    /// (fail-closed), so it can never fire in flight. Off by default.
+    pub allow_shared_hub_reset: bool,
 }
 
 impl Default for CameraRecoveryConfig {
@@ -47,6 +54,7 @@ impl Default for CameraRecoveryConfig {
             allow_hub_reset: false,
             boot_reset_window: Duration::from_secs(DEFAULT_BOOT_RESET_WINDOW_S),
             allow_ppps: true,
+            allow_shared_hub_reset: false,
         }
     }
 }
@@ -91,6 +99,8 @@ pub fn read_config_from(text: &str) -> CameraRecoveryConfig {
         boot_reset_window_s: Option<u64>,
         #[serde(default)]
         allow_ppps: Option<bool>,
+        #[serde(default)]
+        allow_shared_hub_reset: Option<bool>,
     }
     fn default_true() -> bool {
         true
@@ -122,6 +132,7 @@ pub fn read_config_from(text: &str) -> CameraRecoveryConfig {
                     .max(1),
             );
             cfg.allow_ppps = r.allow_ppps.unwrap_or(true);
+            cfg.allow_shared_hub_reset = r.allow_shared_hub_reset.unwrap_or(false);
         }
     }
     cfg
@@ -160,12 +171,13 @@ mod tests {
         assert_eq!(cfg.debounce, Duration::from_secs(DEFAULT_DEBOUNCE_S));
         assert!(!cfg.allow_hub_reset);
         assert!(cfg.allow_ppps);
+        assert!(!cfg.allow_shared_hub_reset);
     }
 
     #[test]
     fn explicit_tunables_and_expected() {
         let cfg = read_config_from(
-            "video:\n  camera:\n    expected: \"true\"\n  usb_recovery:\n    enabled: false\n    debounce_s: 5\n    max_attempts: 2\n    allow_hub_reset: true\n    allow_ppps: false\n",
+            "video:\n  camera:\n    expected: \"true\"\n  usb_recovery:\n    enabled: false\n    debounce_s: 5\n    max_attempts: 2\n    allow_hub_reset: true\n    allow_ppps: false\n    allow_shared_hub_reset: true\n",
         );
         assert!(!cfg.enabled);
         assert_eq!(cfg.expected, "true");
@@ -173,6 +185,7 @@ mod tests {
         assert_eq!(cfg.max_attempts, 2);
         assert!(cfg.allow_hub_reset);
         assert!(!cfg.allow_ppps);
+        assert!(cfg.allow_shared_hub_reset);
     }
 
     #[test]

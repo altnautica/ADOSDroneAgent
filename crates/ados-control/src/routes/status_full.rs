@@ -1380,6 +1380,8 @@ fn read_camera_status_in(run_dir: &Path, now: f64) -> Vec<(String, Value)> {
                             "cameraPresent": json_truthy_default_false(&rec, "camera_present"),
                             "expected": json_truthy_default_false(&rec, "expected"),
                             "pppsCapable": json_truthy_default_false(&rec, "ppps_capable"),
+                            "powerContention": json_truthy_default_false(&rec, "power_contention"),
+                            "contentionPeer": rec.get("contention_peer").cloned().unwrap_or(Value::Null),
                         }),
                     ));
                 }
@@ -2038,6 +2040,26 @@ mod tests {
         assert_eq!(rec["cameraPresent"], json!(false));
         assert_eq!(rec["expected"], json!(true));
         assert_eq!(rec["pppsCapable"], json!(true));
+        // The power-contention fields surface; default safe when omitted.
+        assert_eq!(rec["powerContention"], json!(false));
+        assert_eq!(rec["contentionPeer"], Value::Null);
+    }
+
+    #[test]
+    fn camera_status_surfaces_power_contention() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = 1_700_000_000.0;
+        std::fs::write(
+            dir.path().join("camera-usb-recovery.json"),
+            format!(
+                r#"{{"camera_usb_recovery_state":"needs_hub_reset","case":"absent","attempts":0,"max_attempts":3,"camera_present":true,"expected":true,"ppps_capable":false,"power_contention":true,"contention_peer":"1-1.2","updated_at_unix":{now}}}"#
+            ),
+        )
+        .unwrap();
+        let map: Map<String, Value> = read_camera_status_in(dir.path(), now).into_iter().collect();
+        let rec = map.get("cameraUsbRecovery").unwrap().as_object().unwrap();
+        assert_eq!(rec["powerContention"], json!(true));
+        assert_eq!(rec["contentionPeer"], json!("1-1.2"));
     }
 
     #[test]

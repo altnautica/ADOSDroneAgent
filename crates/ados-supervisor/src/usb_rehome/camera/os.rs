@@ -157,6 +157,41 @@ async fn read_wfb_iface() -> Option<String> {
     }
 }
 
+/// The WFB radio's USB topology, for the power-contention diagnostic: the camera
+/// brown-out happens when it shares a hub with this high-draw TX device.
+#[cfg(target_os = "linux")]
+pub(super) async fn read_radio_topo() -> Option<topo::UsbTopo> {
+    let iface = read_wfb_iface().await?;
+    topo::resolve_usb_topo(&iface).await
+}
+
+/// Read the FC armed state from the vehicle-state socket (the MAVLink service
+/// pushes a snapshot on connect, then a fresh one at ~10 Hz). `Some(armed)` on a
+/// fresh read; `None` when the socket is absent / unreadable / carries no armed
+/// field (an idle agent, no FC). The aggressive-hub-reset caller treats `None` as
+/// unsafe (fail-closed): never reset the shared hub unless the FC is provably
+/// disarmed, so the reset can never fire in flight.
+#[cfg(target_os = "linux")]
+pub(super) async fn read_fc_armed() -> Option<bool> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    const STATE_SOCK: &str = "/run/ados/state.sock";
+    let stream = tokio::time::timeout(
+        Duration::from_secs(1),
+        tokio::net::UnixStream::connect(STATE_SOCK),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    tokio::time::timeout(Duration::from_secs(1), reader.read_line(&mut line))
+        .await
+        .ok()?
+        .ok()?;
+    let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    v.get("armed").and_then(|x| x.as_bool())
+}
+
 /// Build the protected set: the management link AND the WFB radio AND the FC. A
 /// hub reset must disturb none of them.
 #[cfg(target_os = "linux")]

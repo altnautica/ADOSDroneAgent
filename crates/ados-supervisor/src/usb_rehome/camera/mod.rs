@@ -47,6 +47,12 @@ pub use os::execute_camera_recovery;
 /// The event kind recorded for a camera-recovery attempt + outcome.
 pub const CAMERA_RECOVERY_KIND: &str = "camera.usb_recovery";
 
+/// The event kind for the power-contention diagnostic: the camera shares an
+/// over-subscribed hub (no per-port power) with the high-draw WFB radio, so a
+/// radio TX spike can brown the camera off the bus. Surfaced so the operator
+/// sees the real cause + the hardware fix.
+pub const CAMERA_CONTENTION_KIND: &str = "camera.power_contention";
+
 /// The recovery action the supervisor executes (no unit lifecycle: the video
 /// pipeline re-discovers via udev once the device re-enumerates).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,6 +94,11 @@ pub struct CameraUsbRecovery {
     hub: String,
     port: Option<u32>,
     ppps: bool,
+    /// The camera shares its hub (with no per-port power) with the high-draw WFB
+    /// radio — a power-contention brown-out risk. Surfaced in the sidecar; the
+    /// diagnostic event is emitted once per false→true transition.
+    power_contention: bool,
+    contention_peer: String,
 }
 
 impl CameraUsbRecovery {
@@ -107,6 +118,8 @@ impl CameraUsbRecovery {
             hub: String::new(),
             port: None,
             ppps: false,
+            power_contention: false,
+            contention_peer: String::new(),
         }
     }
 
@@ -160,6 +173,7 @@ impl CameraUsbRecovery {
             self.camera_present = true;
             if let Some(path) = &sig.primary_path {
                 self.persist_last_good(path).await;
+                self.check_power_contention(path).await;
             }
         }
 
@@ -318,6 +332,28 @@ impl CameraUsbRecovery {
                 });
             }
         }
+
+        // Opt-in AGGRESSIVE shared-hub reset (bench/ground): the camera is wedged
+        // on a hub it shares with the radio/FC and the hub exposes no per-port
+        // power, so the only re-enumeration is a whole-hub reset the guard refuses.
+        // An operator who set `allow_shared_hub_reset` accepts the brief radio+FC
+        // re-enumeration to recover the camera without a manual replug — but only
+        // while the FC is provably DISARMED (fail-closed on an unknown/absent armed
+        // state), so this can never fire in flight. The radio re-pairs and the FC
+        // reconnects on their own self-heal paths after the reset.
+        if cfg.allow_shared_hub_reset && !hub.is_empty() {
+            if matches!(os::read_fc_armed().await, Some(false)) {
+                self.case = "hub_reset".to_string();
+                self.state = "hub_resetting".to_string();
+                self.emit_reason("hub_resetting", "shared_hub_aggressive", cfg, index);
+                return Some(CameraRecoveryPlan {
+                    action: CameraRecoveryAction::ResetHub { bind_id: hub },
+                    attempt: index,
+                });
+            }
+            self.hold_alert("needs_hub_reset", "armed_or_unknown", cfg, index);
+            return None;
+        }
         self.hold_alert("needs_hub_reset", "shared_hub", cfg, index);
         None
     }
@@ -379,6 +415,8 @@ impl CameraUsbRecovery {
             hub: &'a str,
             port: Option<u32>,
             ppps_capable: bool,
+            power_contention: bool,
+            contention_peer: &'a str,
             updated_at_unix: u64,
         }
         let snap = Snap {
@@ -392,12 +430,68 @@ impl CameraUsbRecovery {
             hub: &self.hub,
             port: self.port,
             ppps_capable: self.ppps,
+            power_contention: self.power_contention,
+            contention_peer: &self.contention_peer,
             updated_at_unix: os::now_unix(),
         };
         if let Err(e) = os::write_json_atomic(std::path::Path::new(os::SIDECAR_PATH), &snap, 0o644)
         {
             tracing::debug!(error = %e, "camera recovery sidecar write failed");
         }
+    }
+
+    /// Detect the power-contention brown-out risk: the camera sharing a hub (with
+    /// no per-port power) with the high-draw WFB radio. The radio's TX spikes
+    /// starve the camera on an over-subscribed shared hub — the real cause of the
+    /// "works for hours then drops, port won't re-enable" symptom. Recomputed each
+    /// ready tick (cheap sysfs reads); the diagnostic is emitted once per
+    /// false→true transition so the operator sees the cause + the hardware fix.
+    #[cfg(target_os = "linux")]
+    async fn check_power_contention(&mut self, primary_path: &str) {
+        let Some(cam) = topo::resolve_usb_topo_for_video(primary_path).await else {
+            return;
+        };
+        let Some((cam_hub, cam_port)) = topo::hub_and_port(&cam.bind_id) else {
+            return;
+        };
+        let radio = os::read_radio_topo().await;
+        let radio_bind = radio.as_ref().map(|r| r.bind_id.clone());
+        let shares_hub = radio
+            .as_ref()
+            .and_then(|r| topo::hub_and_port(&r.bind_id))
+            .map(|(rhub, _)| rhub == cam_hub)
+            .unwrap_or(false);
+        // Contention only bites when the hub cannot isolate the port: a hub with
+        // per-port power gives the camera its own budget, so it is not at risk.
+        let now_contention = shares_hub && !topo::ppps_capable(&cam_hub, cam_port);
+
+        if now_contention && !self.power_contention {
+            use ados_protocol::logd::{Fields, Level, Value};
+            let mut d = Fields::new();
+            d.insert(
+                "camera_bind_id".to_string(),
+                Value::from(cam.bind_id.as_str()),
+            );
+            d.insert("hub".to_string(), Value::from(cam_hub.as_str()));
+            d.insert(
+                "radio_bind_id".to_string(),
+                Value::from(radio_bind.as_deref().unwrap_or("")),
+            );
+            d.insert(
+                "advice".to_string(),
+                Value::from(
+                    "camera shares an over-subscribed USB hub with the radio; move \
+                     the camera to a separate port or a self-powered hub",
+                ),
+            );
+            self.events.emit(CAMERA_CONTENTION_KIND, Level::Warn, d);
+        }
+        self.power_contention = now_contention;
+        self.contention_peer = if now_contention {
+            radio_bind.unwrap_or_default()
+        } else {
+            String::new()
+        };
     }
 
     /// Persist where the camera lives (bind id + hub + port + ids) so the absent
