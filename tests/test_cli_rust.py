@@ -117,26 +117,3 @@ def test_enable_requires_root(tmp_path, monkeypatch):
     assert not (tmp_path / _SERVICES["control"].flag).exists()
 
 
-def test_enable_kills_subsumed_unit_that_will_not_stop(tmp_path, monkeypatch):
-    """A subsumed unit slow to honor SIGTERM is SIGKILLed and reset-failed so
-    it ends cleanly inactive instead of lingering as failed. The native input
-    arbiter (hid) absorbs the packaged button service, so enabling it exercises
-    the mask path."""
-    monkeypatch.setattr(rust_mod, "ADOS_ETC_DIR", tmp_path)
-    monkeypatch.setattr(rust_mod.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(rust_mod, "_binaries_present", lambda svc: True)
-    monkeypatch.setattr(rust_mod, "_unit_active", lambda unit: True)
-    calls: list[tuple[str, ...]] = []
-
-    def fake(*a, **k):
-        calls.append(a)
-        # Every stop "times out" so the kill fallback must engage.
-        return 124 if a and a[0] == "stop" else 0
-
-    monkeypatch.setattr(rust_mod, "_systemctl", fake)
-    result = CliRunner().invoke(rust_group, ["enable", "hid"])
-    assert result.exit_code == 0, result.output
-    assert _SERVICES["hid"].subsumes  # guard: the test relies on hid masking a unit
-    for unit in _SERVICES["hid"].subsumes:
-        assert ("kill", "-s", "SIGKILL", unit) in calls
-        assert ("reset-failed", unit) in calls

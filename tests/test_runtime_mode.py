@@ -276,16 +276,17 @@ def test_is_service_native_radio_native_only(roots: tuple[Path, Path]) -> None:
     assert is_service_native("radio", bin_dir=bin_dir, etc_dir=etc_dir)
 
 
-def test_is_service_native_opt_in(roots: tuple[Path, Path]) -> None:
-    """An opt-in service (hid) is native only when BOTH its binaries and the
-    enable flag are present."""
+def test_is_service_native_hid_native_only(roots: tuple[Path, Path]) -> None:
+    """Hid is native-only (the packaged PIC arbiter + input manager were
+    deleted): native once its binaries are present, and a stray legacy
+    hid-rust-enabled marker does not change the verdict."""
     bin_dir, etc_dir = roots
     bin_dir.mkdir(parents=True, exist_ok=True)
     etc_dir.mkdir(parents=True, exist_ok=True)
     _make_bin(bin_dir, "ados-pic")
     _make_bin(bin_dir, "ados-input")
-    # Binaries present but no enable flag → not native (opt-in).
-    assert not is_service_native("hid", bin_dir=bin_dir, etc_dir=etc_dir)
+    assert is_service_native("hid", bin_dir=bin_dir, etc_dir=etc_dir)
+    # A stray legacy enable marker is ignored (there is no flag to honor).
     _touch_flag(etc_dir, "hid-rust-enabled")
     assert is_service_native("hid", bin_dir=bin_dir, etc_dir=etc_dir)
 

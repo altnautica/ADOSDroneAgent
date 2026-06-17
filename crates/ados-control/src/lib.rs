@@ -257,24 +257,19 @@ where
         pairing_paths,
     );
 
-    // Native-vs-residual gates for the profile/flag-conditional route groups,
-    // resolved once at startup (the profile + the flag are fixed for the process).
-    // Wi-Fi client WRITES are served natively only on a ground station — that is the
-    // only profile that runs the ados-net daemon binding wifi-cmd.sock; on a drone
-    // they fall through to the residual's in-process nmcli handler. The PIC /
-    // gamepad / Bluetooth writes reach the Rust ados-pic / ados-input daemons, which
-    // bind their sockets only when hid-rust is enabled; off that, they fall through
-    // to the residual's in-process handlers. Registering these natively where their
-    // daemon is absent would 503/500 instead of proxying to the working residual.
-    let net_native = {
+    // Native-vs-residual gates for the profile-conditional route groups, resolved
+    // once at startup (the profile is fixed for the process). The Wi-Fi client
+    // WRITES and the PIC / gamepad / Bluetooth writes are served natively only on
+    // a ground station — the only profile that runs the daemons binding their
+    // command sockets (ados-net's wifi-cmd.sock; ados-pic's pic.sock + ados-input's
+    // hid-cmd.sock, both now native-only). On a drone they fall through to the
+    // residual; registering them natively there would 503 instead of proxying.
+    let is_ground_station = {
         let cfg = crate::config::PairingConfig::load_from(&paths.config_path);
         crate::profile::current_profile_and_role(&cfg.agent.profile).0 == "ground-station"
     };
-    let hid_native = paths
-        .config_path
-        .parent()
-        .map(|d| d.join("hid-rust-enabled").exists())
-        .unwrap_or(false);
+    let net_native = is_ground_station;
+    let hid_native = is_ground_station;
 
     // The Unix edge: the bare Router, no auth. The LAN edge: the same Router
     // wrapped with the rate-limit + auth layer keyed on the shared pairing

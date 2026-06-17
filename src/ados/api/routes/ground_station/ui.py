@@ -2,17 +2,20 @@
 
 Covers:
 * /ui (OLED, buttons, screens persisted UI config)
-* /captive-token (single-use token for the setup webapp)
 * /factory-reset (pair + mesh wipe with fingerprint confirm)
 * /display (HDMI kiosk config)
-* /bluetooth (gamepad scan, pair, forget, list)
-* /gamepads (list + primary selection)
-* /pic (claim, release, confirm-token, heartbeat, websocket events)
+* /pic/events (websocket relay of the native PIC arbiter's event stream)
+
+The PIC claim/release/confirm-token/heartbeat REST routes and the gamepad +
+Bluetooth read/write routes are served natively by ``ados-control`` (the Rust
+``ados-pic`` / ``ados-input`` daemons own the arbiter + input state); only the
+``/pic/events`` WebSocket remains here, relaying the daemon's subscribe stream.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 import structlog
@@ -27,14 +30,7 @@ from fastapi import (
 
 from ados.api.deps import get_agent_app
 from ados.api.routes import ground_station as _gs
-from ados.api.routes.ground_station._common import (
-    GamepadPrimaryUpdate,
-    PicClaimRequest,
-    PicConfirmTokenRequest,
-    PicHeartbeatRequest,
-    PicReleaseRequest,
-)
-from ados.core.paths import MESH_GATEWAY_JSON
+from ados.core.paths import MESH_GATEWAY_JSON, PIC_SOCK
 
 log = structlog.get_logger("ground_station.ui")
 
@@ -54,11 +50,6 @@ async def get_ground_station_ui() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# /captive-token
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
 # /factory-reset
 # ---------------------------------------------------------------------------
 
@@ -67,7 +58,7 @@ async def get_ground_station_ui() -> dict[str, Any]:
 async def post_factory_reset(
     request: Request,
     confirm: str = Query(..., description="Current pair key fingerprint or stock token"),
-) -> dict[str, Any]:
+) -> dict:
     """Wipe pair state and AP passphrase. Requires the current fingerprint.
 
     When the ground station is paired, the confirm token must match the
@@ -132,7 +123,7 @@ async def post_factory_reset(
         apply_role,
     )
 
-    mesh_wipe: dict[str, Any] = {"cleared_mesh": False}
+    mesh_wipe: dict = {"cleared_mesh": False}
     try:
         had_identity = has_persisted_identity()
         await apply_role("direct", reason="factory_reset")
@@ -207,217 +198,27 @@ async def post_factory_reset(
 
 
 @router.get("/display")
-async def get_ground_station_display() -> dict[str, Any]:
+async def get_ground_station_display() -> dict:
     """Return the persisted HDMI kiosk display config."""
     _gs._require_ground_profile()
     return _gs._load_display_config()
 
 
 # ---------------------------------------------------------------------------
-# /bluetooth
+# /pic/events — relay the native arbiter's event stream
 # ---------------------------------------------------------------------------
-
-
-@router.get("/bluetooth/paired")
-async def get_bluetooth_paired() -> dict[str, Any]:
-    """List paired Bluetooth devices."""
-    _gs._require_ground_profile()
-
-    try:
-        devices = await _gs._input_manager().paired_bluetooth()
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail={"error": {"code": "E_BT_LIST_FAILED", "message": str(exc)}},
-        ) from exc
-    return {"devices": devices or []}
-
-
-# ---------------------------------------------------------------------------
-# /gamepads
-# ---------------------------------------------------------------------------
-
-
-@router.get("/gamepads")
-async def get_gamepads() -> dict[str, Any]:
-    """List connected gamepads and the current primary device id."""
-    _gs._require_ground_profile()
-
-    mgr = _gs._input_manager()
-    try:
-        devices = mgr.list_gamepads()
-        if asyncio.iscoroutine(devices):
-            devices = await devices
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail={"error": {"code": "E_GAMEPAD_LIST_FAILED", "message": str(exc)}},
-        ) from exc
-
-    primary_id: str | None = None
-    try:
-        primary = mgr.get_primary()
-        if asyncio.iscoroutine(primary):
-            primary = await primary
-        if isinstance(primary, dict):
-            primary_id = primary.get("device_id") or primary.get("id")
-        elif isinstance(primary, str):
-            primary_id = primary
-    except Exception:
-        primary_id = None
-
-    return {"devices": devices or [], "primary_id": primary_id}
-
-
-@router.put("/gamepads/primary")
-async def put_gamepad_primary(update: GamepadPrimaryUpdate) -> dict[str, Any]:
-    """Select the primary gamepad used by the PIC arbiter."""
-    _gs._require_ground_profile()
-
-    try:
-        result = _gs._input_manager().set_primary(update.device_id)
-        if asyncio.iscoroutine(result):
-            result = await result
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail={"error": {"code": "E_GAMEPAD_PRIMARY_FAILED", "message": str(exc)}},
-        ) from exc
-
-    return {"primary_id": update.device_id, "result": result}
-
-
-# ---------------------------------------------------------------------------
-# /pic
-# ---------------------------------------------------------------------------
-
-
-@router.post("/pic/claim")
-async def post_pic_claim(req: PicClaimRequest) -> dict[str, Any]:
-    """Claim PIC. Returns 409 with needs_confirm=True when re-claim is required."""
-    _gs._require_ground_profile()
-
-    arb = _gs._pic_arbiter()
-    try:
-        result = arb.claim(
-            req.client_id,
-            confirm_token=req.confirm_token,
-            force=bool(req.force),
-        )
-        if asyncio.iscoroutine(result):
-            result = await result
-    except PermissionError as exc:
-        # Raised when another client holds PIC and no confirm token was
-        # provided. Signal the caller to mint a confirm token and retry.
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": {"code": "E_PIC_CONFIRM_REQUIRED", "message": str(exc)},
-                "needs_confirm": True,
-            },
-        ) from exc
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail={"error": {"code": "E_PIC_CLAIM_INVALID", "message": str(exc)}},
-        ) from exc
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail={"error": {"code": "E_PIC_CLAIM_FAILED", "message": str(exc)}},
-        ) from exc
-
-    if isinstance(result, dict):
-        if result.get("needs_confirm") and not result.get("granted"):
-            # Soft-reject path: arbiter returns dict rather than raising.
-            return {**result, "needs_confirm": True}
-        return result
-    return {"granted": bool(result), "client_id": req.client_id}
-
-
-@router.post("/pic/release")
-async def post_pic_release(req: PicReleaseRequest) -> dict[str, Any]:
-    """Release PIC held by the given client id."""
-    _gs._require_ground_profile()
-
-    try:
-        result = _gs._pic_arbiter().release(req.client_id)
-        if asyncio.iscoroutine(result):
-            result = await result
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail={"error": {"code": "E_PIC_RELEASE_FAILED", "message": str(exc)}},
-        ) from exc
-
-    if isinstance(result, dict):
-        return result
-    return {"released": bool(result), "client_id": req.client_id}
-
-
-@router.post("/pic/confirm-token")
-async def post_pic_confirm_token(req: PicConfirmTokenRequest) -> dict[str, Any]:
-    """Mint a short-lived PIC takeover confirmation token."""
-    _gs._require_ground_profile()
-
-    try:
-        token = _gs._pic_arbiter().create_confirm_token(req.client_id)
-        if asyncio.iscoroutine(token):
-            token = await token
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail={"error": {"code": "E_PIC_TOKEN_FAILED", "message": str(exc)}},
-        ) from exc
-
-    value: str
-    ttl: int = 2
-    if isinstance(token, dict):
-        value = str(token.get("token", ""))
-        ttl = int(token.get("ttl_seconds", 2))
-    else:
-        value = str(token)
-
-    return {"token": value, "ttl_seconds": ttl}
-
-
-@router.post("/pic/heartbeat")
-async def post_pic_heartbeat(req: PicHeartbeatRequest) -> dict[str, Any]:
-    """Refresh the PIC session TTL. 410 if the client does not hold PIC."""
-    _gs._require_ground_profile()
-
-    try:
-        result = _gs._pic_arbiter().heartbeat(req.client_id)
-        if asyncio.iscoroutine(result):
-            result = await result
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail={"error": {"code": "E_PIC_HEARTBEAT_FAILED", "message": str(exc)}},
-        ) from exc
-
-    if isinstance(result, dict) and result.get("ok") is False:
-        raise HTTPException(
-            status_code=int(result.get("status", 410)),
-            detail={
-                "error": {
-                    "code": "E_PIC_NO_ACTIVE_CLAIM",
-                    "message": str(result.get("error", "no active claim")),
-                    "current_pic": result.get("current_pic"),
-                }
-            },
-        )
-    return result if isinstance(result, dict) else {"ok": True}
 
 
 @router.websocket("/pic/events")
 async def ws_pic_events(websocket: WebSocket) -> None:
-    """Stream PIC arbiter events as JSON until the client disconnects.
+    """Relay the native PIC arbiter's event stream as JSON until disconnect.
 
-    Native clients pass ``X-ADOS-Key`` on the handshake; browsers
-    exchange the pairing key for a one-shot ticket via
-    ``POST /api/_ws/ticket`` with ``scope=gs.pic_events`` and present
-    it through the ``ados-ws-ticket`` subprotocol.
+    The native ``ados-pic`` daemon owns the arbiter and binds
+    ``/run/ados/pic.sock``; its ``subscribe`` op streams one newline-JSON
+    object per transition. This route relays that stream. Native clients pass
+    ``X-ADOS-Key`` on the handshake; browsers exchange the pairing key for a
+    one-shot ticket via ``POST /api/_ws/ticket`` with ``scope=gs.pic_events``
+    and present it through the ``ados-ws-ticket`` subprotocol.
     """
     from ados.api.middleware.ws_auth import authenticate_websocket as _ws_auth
 
@@ -438,80 +239,38 @@ async def ws_pic_events(websocket: WebSocket) -> None:
     else:
         await websocket.accept()
 
-    # Lazy import to avoid a circular at module load.
-    from ados.services.ground_station.pic_arbiter import get_pic_arbiter as _gpa
-
-    arb = _gpa()
-    bus = getattr(arb, "bus", None) or getattr(arb, "event_bus", None)
-    if bus is None:
-        await websocket.send_json(
-            {
-                "event": "error",
-                "code": "E_PIC_BUS_UNAVAILABLE",
-            }
-        )
-        await websocket.close()
+    # Connect to the native arbiter's control socket and subscribe. The Rust
+    # side bounds its own broadcast (a lagging subscriber drops the oldest
+    # events), so a slow WS client applies backpressure to the read here rather
+    # than growing an unbounded queue.
+    try:
+        reader, writer = await asyncio.open_unix_connection(str(PIC_SOCK))
+    except OSError as exc:
+        try:
+            await websocket.send_json(
+                {"event": "error", "code": "E_PIC_BUS_UNAVAILABLE", "message": str(exc)}
+            )
+            await websocket.close()
+        except (WebSocketDisconnect, RuntimeError):
+            pass
         return
 
-    # Bounded outbound queue. A slow WS client (e.g. on a degraded
-    # cellular link) used to grow the queue without limit because the
-    # default asyncio.Queue() has no maxsize, which made the QueueFull
-    # branch below dead code and gave the agent an OOM vector.
-    # Drop-oldest keeps the most recent state events; we also log when
-    # we shed events so an operator can see the backpressure.
-    _PIC_WS_QUEUE_MAX = 100
-    queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=_PIC_WS_QUEUE_MAX)
-    dropped = 0
-
-    def _on_event(payload: Any) -> None:
-        nonlocal dropped
-        try:
-            queue.put_nowait(payload)
-        except asyncio.QueueFull:
-            # Make room for the new event by discarding the oldest, so
-            # the client always sees the latest state during sustained
-            # backpressure rather than a stale snapshot.
-            try:
-                queue.get_nowait()
-                queue.task_done()
-            except asyncio.QueueEmpty:
-                pass
-            try:
-                queue.put_nowait(payload)
-            except asyncio.QueueFull:
-                pass
-            dropped += 1
-            # Log every 10 dropped events so an operator can correlate
-            # with WS disconnect / reconnect storms in journalctl.
-            if dropped % 10 == 1:
-                log.warning(
-                    "pic_ws_backpressure_drop",
-                    dropped_count=dropped,
-                    queue_max=_PIC_WS_QUEUE_MAX,
-                )
-
-    unsubscribe: Any = None
     try:
-        subscribe = getattr(bus, "subscribe", None)
-        if callable(subscribe):
-            unsubscribe = subscribe(_on_event)
-    except Exception:
-        unsubscribe = None
-
-    try:
+        writer.write(b'{"op":"subscribe"}\n')
+        await writer.drain()
         while True:
-            payload = await queue.get()
+            line = await reader.readline()
+            if not line:
+                break  # arbiter socket closed
             try:
-                await websocket.send_json(
-                    payload if isinstance(payload, dict) else {"event": payload}
-                )
-            except (WebSocketDisconnect, RuntimeError):
-                break
-    except WebSocketDisconnect:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            await websocket.send_json(event)
+    except (WebSocketDisconnect, RuntimeError, OSError):
         pass
     finally:
-        if callable(unsubscribe):
-            try:
-                unsubscribe()
-            except Exception:  # noqa: BLE001
-                pass
+        try:
+            writer.close()
+        except Exception:  # noqa: BLE001
+            pass

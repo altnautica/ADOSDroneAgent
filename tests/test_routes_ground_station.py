@@ -18,7 +18,6 @@ so the suite stays hermetic.
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -115,37 +114,6 @@ def test_display_get(client):
     """GET /display returns the persisted HDMI display config."""
     resp = client.get(f"{GS_PREFIX}/display")
     assert resp.status_code == 200
-
-
-def test_bluetooth_paired_list(client, monkeypatch):
-    """GET /bluetooth/paired returns the paired-device list from the input manager."""
-    from ados.api.routes import ground_station as gs
-
-    fake_input = MagicMock()
-    fake_input.paired_bluetooth = AsyncMock(return_value=[{"mac": "AA:BB:CC"}])
-    monkeypatch.setattr(gs, "_input_manager", lambda: fake_input)
-
-    resp = client.get(f"{GS_PREFIX}/bluetooth/paired")
-    assert resp.status_code == 200
-    devices = resp.json()["devices"]
-    assert isinstance(devices, list)
-    assert devices[0]["mac"] == "AA:BB:CC"
-
-
-def test_gamepads_list(client, monkeypatch):
-    """GET /gamepads exposes connected gamepads + primary id."""
-    from ados.api.routes import ground_station as gs
-
-    fake_input = MagicMock()
-    fake_input.list_gamepads = MagicMock(return_value=[{"id": "g0"}])
-    fake_input.get_primary = MagicMock(return_value=None)
-    monkeypatch.setattr(gs, "_input_manager", lambda: fake_input)
-
-    resp = client.get(f"{GS_PREFIX}/gamepads")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert "devices" in data
-    assert "primary_id" in data
 
 
 # ---------------------------------------------------------------------------

@@ -27,29 +27,6 @@ def client(tmp_path, monkeypatch):
     return TestClient(create_app(app))
 
 
-def test_pic_ws_backpressure_constant_is_present():
-    """Sanity: the bounded queue constant exists in the route source."""
-    import inspect
-
-    import ados.api.routes.ground_station.ui as ui_mod
-
-    src = inspect.getsource(ui_mod)
-    assert "_PIC_WS_QUEUE_MAX = 100" in src, (
-        "PIC WS queue must declare a maxsize so a slow client cannot "
-        "grow the queue without limit"
-    )
-    # Sanity: drop-oldest pattern present
-    assert "queue.get_nowait()" in src
-    assert "pic_ws_backpressure_drop" in src
-
-
-def test_pic_ws_queue_logger_is_imported():
-    """The structlog logger used for backpressure warnings must be wired."""
-    import ados.api.routes.ground_station.ui as ui_mod
-
-    assert hasattr(ui_mod, "log"), "ui module must expose `log` for backpressure warnings"
-
-
 def test_pic_ws_no_unbounded_asyncio_queue_in_routes():
     """A safety net: no other route file should reintroduce an unbounded
     asyncio.Queue() (default maxsize=0). Look for the literal pattern."""

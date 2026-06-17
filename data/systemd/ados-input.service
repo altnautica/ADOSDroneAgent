@@ -1,6 +1,10 @@
 [Unit]
 Description=ADOS Input Manager (ground-station profile)
 PartOf=ados-supervisor.service
+# Skip cleanly when the binary was not fetched for this profile rather than
+# crash-looping; the installer health gate is the loud failure for a binary
+# that should be present on a ground station.
+ConditionPathExists=/opt/ados/bin/ados-input
 StartLimitInterval=60s
 StartLimitBurst=5
 
@@ -13,14 +17,9 @@ User=root
 SupplementaryGroups=input plugdev bluetooth
 Environment=ADOS_CONFIG=/etc/ados/config.yaml
 EnvironmentFile=-/etc/ados/env
-# Flag-gated cutover: the native input manager runs only when BOTH the operator
-# enabled the flag file AND the binary is present; otherwise the packaged Python
-# service is the default, so a routine upgrade never changes behavior. To turn
-# the native input manager on for a bench:
-#   touch /etc/ados/hid-rust-enabled && systemctl restart ados-input
-# `exec` replaces the shell image so SupplementaryGroups=input plugdev bluetooth
-# carry to the chosen binary.
-ExecStart=/bin/sh -c 'if [ -e /etc/ados/hid-rust-enabled ] && [ -x /opt/ados/bin/ados-input ]; then exec /opt/ados/bin/ados-input; else exec /opt/ados/venv/bin/python -m ados.services.ground_station.input_manager; fi'
+# Native-only: the packaged Python input manager was deleted, so the daemon runs
+# its binary directly.
+ExecStart=/opt/ados/bin/ados-input
 Restart=on-failure
 RestartSec=5
 

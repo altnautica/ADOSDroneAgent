@@ -46,10 +46,8 @@ from ._paths import (
 from .managers import (
     _ethernet_mgr,
     _hostapd_manager,
-    _input_manager,
     _modem_mgr,
     _pair_manager,
-    _pic_arbiter,
     _uplink_router,
     _wifi_client_manager,
 )
@@ -147,8 +145,6 @@ __all__ = [
     "_wifi_client_manager",
     "_modem_mgr",
     "_uplink_router",
-    "_input_manager",
-    "_pic_arbiter",
     # views
     "_link_view",
     "_network_view",

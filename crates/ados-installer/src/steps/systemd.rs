@@ -709,37 +709,26 @@ fn mask_conflicting_standalone_services() {
     }
 }
 
-/// Reconcile the packaged units a native consolidator daemon subsumes against
-/// the cutover flags (`reconcile_rust_cutover_units`). GROUND-STATION ONLY.
-/// Net is native-only now (the packaged uplink entrypoints were deleted), so the
-/// native uplink daemon always owns ethernet/wifi-client/usb-gadget/modem
-/// in-process — their packaged units are ALWAYS masked. `hid-rust-enabled` stays
-/// opt-IN (disable its unit only when set).
+/// Reconcile the packaged units a native consolidator daemon subsumes
+/// (`reconcile_rust_cutover_units`). GROUND-STATION ONLY. Net and hid are both
+/// native-only now (the packaged uplink entrypoints + the PIC arbiter / input
+/// manager were deleted), so the native daemons always own
+/// ethernet/wifi-client/usb-gadget/modem and the front-panel buttons in-process
+/// — their packaged units are ALWAYS torn down.
 fn reconcile_rust_cutover_units() {
-    let net_subsumed = [
+    let always_subsumed = [
         "ados-ethernet.service",
         "ados-wifi-client.service",
         "ados-usb-gadget.service",
         "ados-modem.service",
+        // hid: the native ados-pic reads the GPIO buttons in-process.
+        "ados-buttons.service",
     ];
-    let hid_subsumed = ["ados-buttons.service"];
 
-    for unit in net_subsumed {
+    for unit in always_subsumed {
         let _ = exec::run("systemctl", &["stop", unit]);
         let _ = exec::run("systemctl", &["disable", unit]);
         let _ = exec::run("systemctl", &["reset-failed", unit]);
-    }
-
-    if Path::new(CONFIG_DIR).join("hid-rust-enabled").exists() {
-        for unit in hid_subsumed {
-            let _ = exec::run("systemctl", &["stop", unit]);
-            let _ = exec::run("systemctl", &["disable", unit]);
-            let _ = exec::run("systemctl", &["reset-failed", unit]);
-        }
-    } else {
-        for unit in hid_subsumed {
-            let _ = exec::run("systemctl", &["enable", unit]);
-        }
     }
 }
 

@@ -83,20 +83,6 @@ def _uplink_router() -> Any:
     return get_uplink_router()
 
 
-def _input_manager() -> Any:
-    """Lazy import helper for the InputManager singleton."""
-    from ados.services.ground_station.input_manager import get_input_manager
-
-    return get_input_manager()
-
-
-def _pic_arbiter() -> Any:
-    """Lazy import helper for the PicArbiter singleton."""
-    from ados.services.ground_station.pic_arbiter import get_pic_arbiter
-
-    return get_pic_arbiter()
-
-
 __all__ = [
     "_hostapd_manager",
     "_pair_manager",
@@ -104,6 +90,4 @@ __all__ = [
     "_wifi_client_manager",
     "_modem_mgr",
     "_uplink_router",
-    "_input_manager",
-    "_pic_arbiter",
 ]

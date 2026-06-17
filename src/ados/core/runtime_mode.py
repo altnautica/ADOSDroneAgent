@@ -140,7 +140,12 @@ _FLAG_GATED: dict[str, _FlagGated] = {
         opt_out=True,
     ),
     "hid": _FlagGated(
-        flag="hid-rust-enabled",
+        # Native-only: the packaged PIC arbiter + input manager were deleted, so
+        # there is no Python fallback to toggle. The native ados-pic + ados-input
+        # daemons always run on a ground station; the REST pic/gamepad/bluetooth
+        # routes forward to their command sockets, and the /pic/events stream
+        # reads the native arbiter over its pic.sock subscribe.
+        flag=None,
         binaries=("ados-pic", "ados-input"),
         profiles=("ground-station",),
     ),

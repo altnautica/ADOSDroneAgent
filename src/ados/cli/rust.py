@@ -80,13 +80,10 @@ _SERVICES: dict[str, _Service] = {
         note="native plugin host (default); the fallback marker pins the packaged path",
         opt_out=True,
     ),
-    "hid": _Service(
-        flag="hid-rust-enabled",
-        binaries=("/opt/ados/bin/ados-pic", "/opt/ados/bin/ados-input"),
-        extra_units=("ados-pic", "ados-input"),
-        subsumes=("ados-buttons",),
-        note="native input arbiter; absorbs the button service",
-    ),
+    # hid is native-only (no toggle): the packaged PIC arbiter + input manager
+    # were deleted, so ados-pic + ados-input always run on a ground station and
+    # absorb ados-buttons unconditionally (the installer masks it). Not listed
+    # here because there is no packaged fallback to switch to.
     "display": _Service(
         flag="display-python-fallback",
         binaries=(

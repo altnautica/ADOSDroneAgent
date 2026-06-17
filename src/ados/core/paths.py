@@ -42,6 +42,12 @@ WFB_CMD_SOCK = ADOS_RUN_DIR / "wfb-cmd.sock"
 # in-process and race the daemon's WiFi manager for the radio.
 WIFI_CMD_SOCK = ADOS_RUN_DIR / "wifi-cmd.sock"
 
+# PIC arbiter control socket served by the native ``ados-pic`` daemon. The
+# `/pic/events` WebSocket relays the daemon's `subscribe` event stream from here
+# (the native arbiter owns the pilot-in-command state; there is no in-process
+# Python arbiter anymore).
+PIC_SOCK = ADOS_RUN_DIR / "pic.sock"
+
 # Ingest socket for the local logging and telemetry store. The store's
 # writer process binds this; every producer (the native services and this
 # Python agent) connects and ships length-prefixed msgpack frames. The
