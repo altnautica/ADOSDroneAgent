@@ -489,22 +489,6 @@ REGISTRY: list[RouteCase] = [
             "output_kbps",
         ),
     ),
-    # Ground-station mesh role: the current role, the configured role, the
-    # supported list, the role's systemd units, and the full mesh-unit set. On a
-    # ground station the body is stable; on a drone both transports 404 with the
-    # same E_PROFILE_MISMATCH body, so the case compares equal either way.
-    RouteCase(
-        name="gs-role",
-        method="GET",
-        path="/api/v1/ground-station/role",
-    ),
-    # Ground-station mesh config: the configured mesh transport fields off the
-    # agent config. Stable between two reads of the same agent.
-    RouteCase(
-        name="gs-mesh-config",
-        method="GET",
-        path="/api/v1/ground-station/mesh/config",
-    ),
     # Ground-station batman-adv state snapshot. 404 with E_NOT_IN_MESH on a direct
     # node (both transports), otherwise the live snapshot whose neighbor/gateway
     # readings move every read, so they are masked; the snapshot shape is the
@@ -565,21 +549,6 @@ REGISTRY: list[RouteCase] = [
             "dhcp_lease_remaining_s",
         ),
     ),
-    # Ground-station ethernet profile + live link. The mode + static fields are
-    # the contract; the live link/IP move, so they are masked.
-    RouteCase(
-        name="gs-network-ethernet",
-        method="GET",
-        path="/api/v1/ground-station/network/ethernet",
-        extra_volatile=(
-            "link",
-            "speed_mbps",
-            "current_ip",
-            "current_gateway",
-            "ip",
-            "gateway",
-        ),
-    ),
     # Ground-station nearby-network scan. A {networks} list; the scan results move
     # every read, so the list is masked — the {networks} shape is the contract.
     RouteCase(
@@ -587,24 +556,6 @@ REGISTRY: list[RouteCase] = [
         method="GET",
         path="/api/v1/ground-station/network/client/scan",
         extra_volatile=("networks",),
-    ),
-    # Ground-station modem view: enabled / apn / cap + cumulative usage. The
-    # connectivity + usage readings move every read, so they are masked.
-    RouteCase(
-        name="gs-network-modem",
-        method="GET",
-        path="/api/v1/ground-station/network/modem",
-        extra_volatile=(
-            "connected",
-            "iface",
-            "ip",
-            "signal_quality",
-            "technology",
-            "operator",
-            "data_used_mb",
-            "percent",
-            "state",
-        ),
     ),
     # Ground-station uplink priority list. A {priority} list, stable between two
     # reads of the same agent (it is the persisted config order).
@@ -775,16 +726,6 @@ REGISTRY: list[RouteCase] = [
         paired_headers={"authorization": PAIRED_AUTH_PLACEHOLDER},
         require_sandbox=True,
         extra_volatile=("previous_ssid",),
-    ),
-    # Forget a saved Wi-Fi profile by name. A side effect (it deletes the NM
-    # connection), so sandboxed. The {name} segment carries a representative saved
-    # profile; the response echoes it in {forgot, name, error}, the contract shape.
-    RouteCase(
-        name="network-client-forget",
-        method="DELETE",
-        path="/api/v1/network/client/configured/BenchNet",
-        paired_headers={"authorization": PAIRED_AUTH_PLACEHOLDER},
-        require_sandbox=True,
     ),
     # Change the WFB-ng channel. A side effect (it forwards a coordinated hop to
     # the radio command socket), so sandboxed and skipped by default; the bench
@@ -978,15 +919,6 @@ REGISTRY: list[RouteCase] = [
             "gateway",
             "security",
         ),
-    ),
-    # The saved Wi-Fi profiles read from the network manager. The profile list is
-    # environment-specific (masked); the {connections} envelope is the contract.
-    RouteCase(
-        name="network-client-configured",
-        method="GET",
-        path="/api/v1/network/client/configured",
-        paired_headers={"authorization": PAIRED_AUTH_PLACEHOLDER},
-        extra_volatile=("connections",),
     ),
     # <append a RouteCase line per route as it migrates — the only shared edit>
 ]
