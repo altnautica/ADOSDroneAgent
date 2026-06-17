@@ -41,6 +41,7 @@ pub mod gs_ui_read;
 pub mod gs_ui_write;
 pub mod gs_wfb_pair;
 pub mod gs_wfb_write;
+pub mod guided;
 pub mod mac_adapters;
 pub mod mac_pin;
 pub mod network_client_read;

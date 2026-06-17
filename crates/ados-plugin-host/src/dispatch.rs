@@ -46,6 +46,9 @@ pub enum Method {
     // MAVLink.
     MavlinkSubscribe,
     MavlinkSend,
+    // Send one application payload over a MAVLink TUNNEL frame (a private
+    // payload_type), a transparent opaque pipe on the existing link.
+    MavlinkTunnelSend,
     MavlinkRegisterComponent,
     // Peripheral / driver / camera.
     PeripheralRegisterDriver,
@@ -63,6 +66,11 @@ pub enum Method {
     // GPIO output: drive a status buzzer/LED line, or play a bounded beep.
     GpioOutputSet,
     GpioBuzzerBeep,
+    // Flight: send one guided-mode position/velocity setpoint to the FC.
+    GuidedSetpointSend,
+    // Radio: open / close an additive auxiliary application stream on the link.
+    RadioAuxStreamOpen,
+    RadioAuxStreamClose,
     // Vision: frame-descriptor subscribe, model register, inference, and
     // detection publish. The engine owns the cameras and the inference backend;
     // the host proxies these to it over its socket.
@@ -103,6 +111,7 @@ impl Method {
             "recording.stop" => Self::RecordingStop,
             "mavlink.subscribe" => Self::MavlinkSubscribe,
             "mavlink.send" => Self::MavlinkSend,
+            "mavlink.tunnel.send" => Self::MavlinkTunnelSend,
             "mavlink.register_component" => Self::MavlinkRegisterComponent,
             "peripheral.register_driver" => Self::PeripheralRegisterDriver,
             "peripheral.unregister_driver" => Self::PeripheralUnregisterDriver,
@@ -115,6 +124,9 @@ impl Method {
             "display.page.set" => Self::DisplayPageSet,
             "gpio.output.set" => Self::GpioOutputSet,
             "gpio.buzzer.beep" => Self::GpioBuzzerBeep,
+            "flight.guided_setpoint.send" => Self::GuidedSetpointSend,
+            "radio.aux_stream.open" => Self::RadioAuxStreamOpen,
+            "radio.aux_stream.close" => Self::RadioAuxStreamClose,
             _ => return None,
         })
     }
@@ -134,6 +146,7 @@ impl Method {
             Self::RecordingStop => "recording.stop",
             Self::MavlinkSubscribe => "mavlink.subscribe",
             Self::MavlinkSend => "mavlink.send",
+            Self::MavlinkTunnelSend => "mavlink.tunnel.send",
             Self::MavlinkRegisterComponent => "mavlink.register_component",
             Self::PeripheralRegisterDriver => "peripheral.register_driver",
             Self::PeripheralUnregisterDriver => "peripheral.unregister_driver",
@@ -146,6 +159,9 @@ impl Method {
             Self::DisplayPageSet => "display.page.set",
             Self::GpioOutputSet => "gpio.output.set",
             Self::GpioBuzzerBeep => "gpio.buzzer.beep",
+            Self::GuidedSetpointSend => "flight.guided_setpoint.send",
+            Self::RadioAuxStreamOpen => "radio.aux_stream.open",
+            Self::RadioAuxStreamClose => "radio.aux_stream.close",
             Self::VisionSubscribeFrames => vision_methods::SUBSCRIBE_FRAMES,
             Self::VisionRegisterModel => vision_methods::REGISTER_MODEL,
             Self::VisionInfer => vision_methods::INFER,
@@ -311,6 +327,57 @@ mod tests {
     }
 
     #[test]
+    fn radio_aux_stream_methods_gate_on_the_aux_stream_capability() {
+        // Both open and close are refused without the aux-stream cap, allowed
+        // with it. A plugin can never bring up an additive radio stream without
+        // the operator-granted capability.
+        for (method, variant) in [
+            ("radio.aux_stream.open", Method::RadioAuxStreamOpen),
+            ("radio.aux_stream.close", Method::RadioAuxStreamClose),
+        ] {
+            assert_eq!(
+                gate(method, false, &caps(&[])),
+                Gate::CapabilityDenied("capability_denied: radio.aux_stream".to_string())
+            );
+            assert_eq!(
+                gate(method, false, &caps(&["radio.aux_stream"])),
+                Gate::Allow(variant)
+            );
+        }
+    }
+
+    #[test]
+    fn guided_setpoint_send_gates_on_the_guided_setpoint_capability() {
+        // Refused without the cap, allowed with it.
+        assert_eq!(
+            gate("flight.guided_setpoint.send", false, &caps(&[])),
+            Gate::CapabilityDenied("capability_denied: flight.guided_setpoint".to_string())
+        );
+        assert_eq!(
+            gate(
+                "flight.guided_setpoint.send",
+                false,
+                &caps(&["flight.guided_setpoint"])
+            ),
+            Gate::Allow(Method::GuidedSetpointSend)
+        );
+    }
+
+    #[test]
+    fn mavlink_tunnel_send_gates_on_the_tunnel_capability() {
+        // Refused without the tunnel cap (and the plain mavlink.write does not
+        // satisfy it), allowed with it.
+        assert_eq!(
+            gate("mavlink.tunnel.send", false, &caps(&["mavlink.write"])),
+            Gate::CapabilityDenied("capability_denied: mavlink.tunnel".to_string())
+        );
+        assert_eq!(
+            gate("mavlink.tunnel.send", false, &caps(&["mavlink.tunnel"])),
+            Gate::Allow(Method::MavlinkTunnelSend)
+        );
+    }
+
+    #[test]
     fn process_spawn_gate_names_process_spawn_cap() {
         let g = gate("process.spawn", false, &caps(&["mavlink.read"]));
         assert_eq!(
@@ -334,6 +401,7 @@ mod tests {
         Method::RecordingStop,
         Method::MavlinkSubscribe,
         Method::MavlinkSend,
+        Method::MavlinkTunnelSend,
         Method::MavlinkRegisterComponent,
         Method::PeripheralRegisterDriver,
         Method::PeripheralUnregisterDriver,
@@ -346,6 +414,9 @@ mod tests {
         Method::DisplayPageSet,
         Method::GpioOutputSet,
         Method::GpioBuzzerBeep,
+        Method::GuidedSetpointSend,
+        Method::RadioAuxStreamOpen,
+        Method::RadioAuxStreamClose,
         Method::VisionSubscribeFrames,
         Method::VisionRegisterModel,
         Method::VisionInfer,

@@ -321,6 +321,7 @@ pub async fn route_host_method<H: HostServices + ?Sized>(
         Method::RecordingStop => host.recording_stop(plugin_id, args),
         Method::MavlinkSubscribe => host.mavlink_subscribe(plugin_id, args),
         Method::MavlinkSend => host.mavlink_send(plugin_id, args, granted_caps),
+        Method::MavlinkTunnelSend => host.mavlink_tunnel_send(plugin_id, args),
         Method::MavlinkRegisterComponent => {
             host.mavlink_register_component(plugin_id, args, granted_caps)
         }
@@ -337,6 +338,9 @@ pub async fn route_host_method<H: HostServices + ?Sized>(
         Method::DisplayPageSet => host.display_page_set(plugin_id, args),
         Method::GpioOutputSet => host.gpio_output_set(plugin_id, args),
         Method::GpioBuzzerBeep => host.gpio_buzzer_beep(plugin_id, args),
+        Method::GuidedSetpointSend => host.guided_setpoint_send(plugin_id, args),
+        Method::RadioAuxStreamOpen => host.radio_aux_stream_open(plugin_id, args),
+        Method::RadioAuxStreamClose => host.radio_aux_stream_close(plugin_id, args),
         // Vision request/response methods proxy to the engine and await its
         // reply. (vision.subscribe_frames is handled in the server, where it
         // arms the frame-descriptor push stream, never reaching here.)

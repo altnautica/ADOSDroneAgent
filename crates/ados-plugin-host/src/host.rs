@@ -131,6 +131,24 @@ pub trait HostServices: Send + Sync + 'static {
     ) -> Result<HostResult, HostError> {
         Ok(not_implemented("mavlink.send"))
     }
+    /// Send one application payload over a MAVLink TUNNEL frame tagged with a
+    /// private `payload_type`. A real host validates the request (a private
+    /// payload_type strictly above the registered range, a payload within the
+    /// fixed TUNNEL width), builds the single TUNNEL frame, and writes it to the
+    /// MAVLink socket the router forwards on the link. The tunnel is a
+    /// transparent opaque pipe: the host applies no application semantics, so any
+    /// per-payload integrity (an HMAC, a replay counter) lives inside the payload.
+    /// Fully gated at the dispatch level on the tunnel capability, so it does not
+    /// see the caller's caps. The default returns `not_implemented` so
+    /// [`NoopHost`] stays inert.
+    fn mavlink_tunnel_send(
+        &self,
+        _plugin_id: &str,
+        _args: &Value,
+    ) -> Result<HostResult, HostError> {
+        Ok(not_implemented("mavlink.tunnel.send"))
+    }
+
     /// Gates on the requested component kind after arg validation, so it takes
     /// the caller's `granted_caps`.
     fn mavlink_register_component(
@@ -200,6 +218,56 @@ pub trait HostServices: Send + Sync + 'static {
     /// which clamps the pattern into the safe bounds before driving the line.
     fn gpio_buzzer_beep(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
         Ok(not_implemented("gpio.buzzer.beep"))
+    }
+
+    /// Send one guided-mode position/velocity setpoint to the flight controller.
+    /// A real host validates the request (finite numbers on every active axis, a
+    /// sane type mask, a coordinate frame valid for the message kind), builds the
+    /// single `SET_POSITION_TARGET` MAVLink frame, and writes it to the MAVLink
+    /// socket the router forwards to the FC. Fully gated at the dispatch level on
+    /// the guided-setpoint capability, so it does not see the caller's caps.
+    ///
+    /// This is a single-shot send: the host does not own any flight mode or
+    /// schedule. To hold a commanded velocity the caller must re-send well above
+    /// the autopilot's setpoint-timeout rate (the autopilot brakes a few seconds
+    /// after the last setpoint), and must itself have placed the vehicle in its
+    /// guided mode. The default returns `not_implemented` so [`NoopHost`] stays
+    /// inert.
+    fn guided_setpoint_send(
+        &self,
+        _plugin_id: &str,
+        _args: &Value,
+    ) -> Result<HostResult, HostError> {
+        Ok(not_implemented("flight.guided_setpoint.send"))
+    }
+
+    /// Open an additive auxiliary application stream on the radio link. A real
+    /// host forwards the request to the radio service's auxiliary command socket,
+    /// which brings up a transmit/receive pair on a separate radio-port from the
+    /// data and control planes. SAFE: the pair never starts on its own — only this
+    /// explicit open brings it up, and the matching close (or the plugin
+    /// disconnecting) tears it down. Fully gated at the dispatch level on the
+    /// auxiliary-stream capability, so it does not see the caller's caps. The
+    /// default returns `not_implemented` so [`NoopHost`] stays inert.
+    fn radio_aux_stream_open(
+        &self,
+        _plugin_id: &str,
+        _args: &Value,
+    ) -> Result<HostResult, HostError> {
+        Ok(not_implemented("radio.aux_stream.open"))
+    }
+
+    /// Close the auxiliary application stream a plugin opened. A real host forwards
+    /// the request to the radio service's auxiliary command socket, which tears
+    /// down the transmit/receive pair (additive — it never touches the data or
+    /// control planes). Idempotent: closing an already-closed stream is a quiet
+    /// success. The default returns `not_implemented` so [`NoopHost`] stays inert.
+    fn radio_aux_stream_close(
+        &self,
+        _plugin_id: &str,
+        _args: &Value,
+    ) -> Result<HostResult, HostError> {
+        Ok(not_implemented("radio.aux_stream.close"))
     }
 
     /// Release every per-session host resource a plugin held when its

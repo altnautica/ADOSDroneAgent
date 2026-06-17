@@ -24,6 +24,7 @@ REQUIRED_CAP: dict[str, str | None] = {
     "recording.stop": "recording.write",
     "mavlink.subscribe": "mavlink.read",
     "mavlink.send": "mavlink.write",
+    "mavlink.tunnel.send": "mavlink.tunnel",
     "mavlink.register_component": None,
     "peripheral.register_driver": None,
     "peripheral.unregister_driver": None,
@@ -40,6 +41,9 @@ REQUIRED_CAP: dict[str, str | None] = {
     "display.page.set": "display.oled.page",
     "gpio.output.set": "hardware.gpio_out",
     "gpio.buzzer.beep": "hardware.gpio_out",
+    "flight.guided_setpoint.send": "flight.guided_setpoint",
+    "radio.aux_stream.open": "radio.aux_stream",
+    "radio.aux_stream.close": "radio.aux_stream",
 }
 
 # Methods whose cap is decided inline by the handler from the request

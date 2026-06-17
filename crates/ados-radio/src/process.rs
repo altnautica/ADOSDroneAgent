@@ -22,6 +22,8 @@ use crate::config::WfbConfig;
 
 const TX_CONTROL_LOG: &str = "/run/ados/wfb-drone-tx-control.log";
 const RX_CONTROL_LOG: &str = "/run/ados/wfb-drone-rx-control.log";
+const AUX_TX_LOG: &str = "/run/ados/wfb-drone-aux-tx.log";
+const AUX_RX_LOG: &str = "/run/ados/wfb-drone-aux-rx.log";
 
 /// True when a Reed-Solomon `(k, n)` ratio is valid for `wfb_tx`: a positive
 /// data-shard count and at least one parity shard (`n > k`). Mirrors the Python
@@ -138,6 +140,51 @@ pub fn stats_rx_args(iface: &str, rx_key_path: &Path) -> Vec<String> {
     ]
 }
 
+/// Auxiliary-stream `wfb_tx` args (radio_id 2). A separate radio-port from the
+/// data plane (0) and control plane (1) carrying an application stream on its own
+/// UDP ingress port, with its own (light) Reed-Solomon ratio and MCS. The aux
+/// pair shares the injection adapter but never the radio_id, so it can never
+/// collide with the data or control planes on the air.
+pub fn aux_tx_args(iface: &str, cfg: &WfbConfig, key_path: &Path) -> Vec<String> {
+    vec![
+        "-p".into(),
+        "2".into(),
+        "-u".into(),
+        cfg.aux_tx_port.to_string(),
+        "-K".into(),
+        key_str(key_path),
+        "-k".into(),
+        cfg.aux_fec_k.to_string(),
+        "-n".into(),
+        cfg.aux_fec_n.to_string(),
+        "-B".into(),
+        "20".into(),
+        "-M".into(),
+        cfg.aux_mcs().to_string(),
+        iface.into(),
+    ]
+}
+
+/// Auxiliary-stream `wfb_rx` args (radio_id 3, re-emit decoded application frames
+/// on 127.0.0.1:`aux_rx_port`). The re-emit port is deliberately distinct from
+/// the aux tx ingress (`aux_tx_port`) so the receive side can never feed back into
+/// the transmit ingress. Uses the same key path as the aux tx.
+pub fn aux_rx_args(iface: &str, cfg: &WfbConfig, key_path: &Path) -> Vec<String> {
+    vec![
+        "-p".into(),
+        "3".into(),
+        "-c".into(),
+        "127.0.0.1".into(),
+        "-u".into(),
+        cfg.aux_rx_port.to_string(),
+        "-K".into(),
+        key_str(key_path),
+        "-l".into(),
+        "1000".into(),
+        iface.into(),
+    ]
+}
+
 /// A live wfb child (data or control plane) in its own process group.
 pub struct WfbProcess {
     #[cfg(target_os = "linux")]
@@ -186,6 +233,37 @@ impl WfbProcess {
     pub async fn spawn_stats_rx(iface: &str, rx_key_path: &Path) -> std::io::Result<Self> {
         // stderr → null (we only want stdout's stats stream); stdout piped.
         Self::spawn_in_group_piped_stdout("wfb_rx", &stats_rx_args(iface, rx_key_path)).await
+    }
+
+    /// Spawn the **auxiliary tx** `wfb_tx` (radio_id 2, application ingress).
+    /// stderr → truncated log file (avoids the PIPE deadlock), same as the
+    /// control planes.
+    pub async fn spawn_aux_tx(
+        iface: &str,
+        cfg: &WfbConfig,
+        key_path: &Path,
+    ) -> std::io::Result<Self> {
+        Self::spawn_in_group(
+            "wfb_tx",
+            &aux_tx_args(iface, cfg, key_path),
+            Some(AUX_TX_LOG),
+        )
+        .await
+    }
+
+    /// Spawn the **auxiliary rx** `wfb_rx` (radio_id 3, re-emit decoded frames on
+    /// 127.0.0.1:`aux_rx_port`). stderr → truncated log file.
+    pub async fn spawn_aux_rx(
+        iface: &str,
+        cfg: &WfbConfig,
+        key_path: &Path,
+    ) -> std::io::Result<Self> {
+        Self::spawn_in_group(
+            "wfb_rx",
+            &aux_rx_args(iface, cfg, key_path),
+            Some(AUX_RX_LOG),
+        )
+        .await
     }
 
     /// Take the child's stdout handle (for the stats reader). Returns `None` if
@@ -308,6 +386,17 @@ pub struct RadioProcesses {
     stats_rx: Option<WfbProcess>,
     /// The task reading the stats RX stdout into the shared `LinkStats`.
     stats_reader: Option<tokio::task::JoinHandle<()>>,
+    /// Auxiliary application-stream transmit (radio_id 2). `None` whenever the
+    /// aux stream is closed, which is the boot state (safe-by-default): no aux
+    /// process is ever spawned until something explicitly opens the stream.
+    aux_tx: Option<WfbProcess>,
+    /// Auxiliary application-stream receive (radio_id 3). Paired with `aux_tx`:
+    /// both are `Some` while the stream is open, both `None` while it is closed.
+    aux_rx: Option<WfbProcess>,
+    /// The aux pair's retained tunables (ports + FEC + MCS), captured at open so
+    /// a whole-group respawn (a channel hop) can re-open the aux pair on the new
+    /// channel with the same settings. `None` while the aux stream is closed.
+    aux_settings: Option<AuxSettings>,
     /// The interface + key + current data-plane FEC/MCS, retained so a single
     /// data-tx process can be respawned with new tunables without touching the
     /// control planes (an adaptive FEC/MCS change restarts only the data plane).
@@ -316,6 +405,45 @@ pub struct RadioProcesses {
     data_fec_k: u8,
     data_fec_n: u8,
     data_mcs_index: u8,
+}
+
+/// The auxiliary stream's retained tunables, captured at open so the pair can be
+/// re-spawned (after a channel hop) byte-identically without re-reading config.
+#[derive(Debug, Clone, Copy)]
+struct AuxSettings {
+    tx_port: u16,
+    rx_port: u16,
+    fec_k: u8,
+    fec_n: u8,
+    mcs_index: u8,
+}
+
+impl AuxSettings {
+    /// Read the aux trio from a [`WfbConfig`] (the `open` request resolves the
+    /// effective settings through the config defaults / overrides).
+    fn from_cfg(cfg: &WfbConfig) -> Self {
+        Self {
+            tx_port: cfg.aux_tx_port,
+            rx_port: cfg.aux_rx_port,
+            fec_k: cfg.aux_fec_k,
+            fec_n: cfg.aux_fec_n,
+            mcs_index: cfg.aux_mcs(),
+        }
+    }
+
+    /// Rebuild a [`WfbConfig`]-shaped view carrying these aux settings, so the
+    /// `aux_*_args` builders (which read from a `WfbConfig`) produce the retained
+    /// pair on a respawn. Only the aux fields matter to those builders.
+    fn to_cfg(self) -> WfbConfig {
+        WfbConfig {
+            aux_tx_port: self.tx_port,
+            aux_rx_port: self.rx_port,
+            aux_fec_k: self.fec_k,
+            aux_fec_n: self.fec_n,
+            aux_mcs_index: Some(self.mcs_index),
+            ..WfbConfig::default()
+        }
+    }
 }
 
 impl RadioProcesses {
@@ -356,6 +484,11 @@ impl RadioProcesses {
             rx_control,
             stats_rx,
             stats_reader,
+            // Safe-by-default: the auxiliary stream never starts at boot. It is
+            // brought up only by an explicit open_aux_stream call.
+            aux_tx: None,
+            aux_rx: None,
+            aux_settings: None,
             iface: iface.to_string(),
             tx_key_path: key_path.to_path_buf(),
             data_fec_k: cfg.fec_k,
@@ -496,6 +629,151 @@ impl RadioProcesses {
         crate::adapter::set_tx_power(&self.iface, dbm).await
     }
 
+    /// True while the auxiliary application stream is open (both halves running).
+    pub fn aux_active(&self) -> bool {
+        self.aux_tx.is_some() && self.aux_rx.is_some()
+    }
+
+    /// The auxiliary tx PID, for the delta-counter TX-liveness watchdog.
+    /// `None` while the aux stream is closed.
+    pub fn aux_tx_pid(&self) -> Option<u32> {
+        self.aux_tx.as_ref().and_then(|p| p.pid())
+    }
+
+    /// The auxiliary rx PID, for the aux receive-side watchdog. `None` while the
+    /// aux stream is closed.
+    pub fn aux_rx_pid(&self) -> Option<u32> {
+        self.aux_rx.as_ref().and_then(|p| p.pid())
+    }
+
+    /// Open the auxiliary application stream: spawn the aux tx (radio_id 2) and
+    /// aux rx (radio_id 3) pair on the SAME injection interface as the data and
+    /// control planes, using the aux settings from `cfg`. ADDITIVE — it never
+    /// stops or restarts the data plane or the control planes, so opening the aux
+    /// stream cannot interrupt video or the FHSS HopAnnounce/HopAck transport.
+    ///
+    /// Idempotent: a second open while the stream is already up is a no-op
+    /// (returns `true`) rather than spawning a duplicate pair. On a tx-spawn or
+    /// rx-spawn failure the partially-spawned half is torn down and the stream is
+    /// left closed (returns `false`), so a failed open never leaves a half-open
+    /// stream. The retained aux settings are captured on success so a later
+    /// whole-group respawn (a channel hop) re-opens the pair on the new channel.
+    ///
+    /// SAFE: nothing here ever runs at boot — this is reached only from an
+    /// explicit open request.
+    ///
+    /// The operator dead-switch is honoured structurally: when `cfg.aux_enable`
+    /// is false the stream is REFUSED (returns `false`) and no process is
+    /// spawned, so the config-level disable is a real kill-switch rather than a
+    /// false affordance. Safe-by-default is preserved: the flag is off unless an
+    /// operator opts in.
+    pub async fn open_aux_stream(&mut self, cfg: &WfbConfig) -> bool {
+        if !cfg.aux_enable {
+            tracing::warn!("aux_stream_open_refused: aux_enable is false");
+            return false;
+        }
+        if self.aux_active() {
+            return true;
+        }
+        let key_path = self.tx_key_path.clone();
+        let aux_tx = match WfbProcess::spawn_aux_tx(&self.iface, cfg, &key_path).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error = %e, "aux_tx_spawn_failed");
+                return false;
+            }
+        };
+        let aux_rx = match WfbProcess::spawn_aux_rx(&self.iface, cfg, &key_path).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error = %e, "aux_rx_spawn_failed");
+                // Tear down the tx half so a failed open never leaves a half-open
+                // stream. `aux_tx` drops here, whose Drop killpg's the group.
+                drop(aux_tx);
+                return false;
+            }
+        };
+        self.aux_tx = Some(aux_tx);
+        self.aux_rx = Some(aux_rx);
+        self.aux_settings = Some(AuxSettings::from_cfg(cfg));
+        tracing::info!(
+            tx_port = cfg.aux_tx_port,
+            rx_port = cfg.aux_rx_port,
+            "aux_stream_opened"
+        );
+        true
+    }
+
+    /// Close the auxiliary application stream: kill the aux tx + aux rx pair and
+    /// drop the retained settings so a later respawn does NOT re-open it. ADDITIVE
+    /// — it never touches the data plane or the control planes. Idempotent: a
+    /// close while the stream is already down is a quiet no-op.
+    pub async fn close_aux_stream(&mut self) {
+        let was_open = self.aux_active();
+        if let Some(mut tx) = self.aux_tx.take() {
+            tx.kill().await;
+        }
+        if let Some(mut rx) = self.aux_rx.take() {
+            rx.kill().await;
+        }
+        self.aux_settings = None;
+        if was_open {
+            tracing::info!("aux_stream_closed");
+        }
+    }
+
+    /// Restart the auxiliary pair in place, reusing the retained aux settings.
+    ///
+    /// This is the liveness-watchdog recovery path: when the aux tx counter is
+    /// flat (a silently-stalled transmitter) the watchdog asks for a restart, NOT
+    /// a close — the plugin still wants the stream, so the retained settings are
+    /// kept and the pair is re-spawned on the same ports/FEC/MCS. ADDITIVE: it
+    /// only touches the aux pair, never the data plane or the control planes.
+    ///
+    /// A no-op (`false`) when the stream is not open (nothing to restart). On a
+    /// re-spawn failure the aux pair is left closed but the retained settings are
+    /// KEPT, so a later whole-group respawn (a channel hop) still re-opens it — the
+    /// primary link is unaffected regardless of the additive aux pair's health.
+    pub async fn restart_aux_stream(&mut self) -> bool {
+        let Some(settings) = self.aux_settings else {
+            return false;
+        };
+        // Kill the current pair without clearing the settings.
+        if let Some(mut tx) = self.aux_tx.take() {
+            tx.kill().await;
+        }
+        if let Some(mut rx) = self.aux_rx.take() {
+            rx.kill().await;
+        }
+        let aux_cfg = settings.to_cfg();
+        let key_path = self.tx_key_path.clone();
+        let aux_tx = WfbProcess::spawn_aux_tx(&self.iface, &aux_cfg, &key_path).await;
+        let aux_rx = WfbProcess::spawn_aux_rx(&self.iface, &aux_cfg, &key_path).await;
+        match (aux_tx, aux_rx) {
+            (Ok(tx), Ok(rx)) => {
+                self.aux_tx = Some(tx);
+                self.aux_rx = Some(rx);
+                tracing::info!("aux_stream_restarted");
+                true
+            }
+            (tx, rx) => {
+                if let Err(e) = &tx {
+                    tracing::warn!(error = %e, "restart_aux_tx_failed");
+                }
+                if let Err(e) = &rx {
+                    tracing::warn!(error = %e, "restart_aux_rx_failed");
+                }
+                // Drop any half that spawned so a partial restart never leaves one
+                // process running; keep the settings so a channel hop can retry.
+                drop(tx);
+                drop(rx);
+                self.aux_tx = None;
+                self.aux_rx = None;
+                false
+            }
+        }
+    }
+
     /// Kill the whole radio group and respawn it, REUSING the live data-plane
     /// tunables (`data_fec_k`/`data_fec_n`/`data_mcs_index`) rather than the
     /// boot-time `cfg` values. A channel hop / return-home restarts the entire
@@ -560,6 +838,37 @@ impl RadioProcesses {
         self.rx_control = rx_control;
         self.stats_rx = stats_rx;
         self.stats_reader = stats_reader;
+        // kill_all cleared the aux processes but kept aux_settings; re-open the
+        // aux pair on the NEW channel iff it was open before the hop. A re-open
+        // failure leaves the aux stream closed (settings dropped) but does NOT
+        // fail the whole group — the data + control planes are already up, so the
+        // primary link is healthy regardless of the additive aux pair.
+        if let Some(settings) = self.aux_settings {
+            let aux_cfg = settings.to_cfg();
+            let aux_tx = WfbProcess::spawn_aux_tx(&self.iface, &aux_cfg, &key_path).await;
+            let aux_rx = WfbProcess::spawn_aux_rx(&self.iface, &aux_cfg, &key_path).await;
+            match (aux_tx, aux_rx) {
+                (Ok(tx), Ok(rx)) => {
+                    self.aux_tx = Some(tx);
+                    self.aux_rx = Some(rx);
+                }
+                (tx, rx) => {
+                    if let Err(e) = &tx {
+                        tracing::warn!(error = %e, "respawn_group_aux_tx_failed");
+                    }
+                    if let Err(e) = &rx {
+                        tracing::warn!(error = %e, "respawn_group_aux_rx_failed");
+                    }
+                    // Drop any half that spawned so a partial re-open does not
+                    // leave one process running, and forget the settings.
+                    drop(tx);
+                    drop(rx);
+                    self.aux_tx = None;
+                    self.aux_rx = None;
+                    self.aux_settings = None;
+                }
+            }
+        }
         true
     }
 
@@ -586,7 +895,11 @@ impl RadioProcesses {
         }
     }
 
-    /// Kill every process group + stop the stats reader.
+    /// Kill every process group + stop the stats reader. This INCLUDES the
+    /// auxiliary pair when it is open, so a respawn or shutdown never orphans the
+    /// aux processes. `aux_settings` is deliberately left intact so a whole-group
+    /// respawn (a channel hop) can re-open the aux pair on the new channel; a
+    /// `close` is what clears the settings.
     pub async fn kill_all(&mut self) {
         if let Some(r) = self.stats_reader.take() {
             r.abort();
@@ -596,6 +909,12 @@ impl RadioProcesses {
         self.rx_control.kill().await;
         if let Some(mut s) = self.stats_rx.take() {
             s.kill().await;
+        }
+        if let Some(mut tx) = self.aux_tx.take() {
+            tx.kill().await;
+        }
+        if let Some(mut rx) = self.aux_rx.take() {
+            rx.kill().await;
         }
     }
 }
@@ -800,5 +1119,91 @@ mod tests {
         let ctrl_k = ctrl[ctrl.iter().position(|x| x == "-k").unwrap() + 1].clone();
         assert_eq!(data_k, "8");
         assert_eq!(ctrl_k, "1");
+    }
+
+    /// Read the value following `flag` in an arg vector.
+    fn arg_after(args: &[String], flag: &str) -> String {
+        args[args.iter().position(|x| x == flag).unwrap() + 1].clone()
+    }
+
+    #[test]
+    fn aux_tx_args_use_radio_id_2_and_aux_port_and_fec() {
+        // The aux tx must sit on radio_id 2 (separate from data 0 / control 1)
+        // with the aux ingress port and the light aux FEC, riding the data-plane
+        // MCS by default.
+        let cfg = WfbConfig::default();
+        let a = aux_tx_args("wlan1", &cfg, Path::new("/etc/ados/wfb/tx.key"));
+        assert_eq!(arg_after(&a, "-p"), "2");
+        assert_eq!(arg_after(&a, "-u"), cfg.aux_tx_port.to_string());
+        assert_eq!(arg_after(&a, "-k"), cfg.aux_fec_k.to_string());
+        assert_eq!(arg_after(&a, "-n"), cfg.aux_fec_n.to_string());
+        // No aux MCS override → the aux pair rides the data-plane rate.
+        assert_eq!(arg_after(&a, "-M"), cfg.mcs_index.to_string());
+        assert_eq!(a.last().unwrap(), "wlan1");
+    }
+
+    #[test]
+    fn aux_rx_args_use_radio_id_3_and_loopback_reemit() {
+        // The aux rx must sit on radio_id 3 and re-emit on loopback at the aux rx
+        // port — distinct from the aux tx ingress so receive can't feed transmit.
+        let cfg = WfbConfig::default();
+        let a = aux_rx_args("wlan1", &cfg, Path::new("/etc/ados/wfb/tx.key"));
+        assert_eq!(arg_after(&a, "-p"), "3");
+        assert_eq!(arg_after(&a, "-c"), "127.0.0.1");
+        assert_eq!(arg_after(&a, "-u"), cfg.aux_rx_port.to_string());
+        // The re-emit port differs from the tx ingress.
+        assert_ne!(cfg.aux_rx_port, cfg.aux_tx_port);
+    }
+
+    #[test]
+    fn aux_tx_args_honour_an_explicit_aux_mcs_override() {
+        let cfg = WfbConfig {
+            mcs_index: 1,
+            aux_mcs_index: Some(5),
+            ..WfbConfig::default()
+        };
+        let a = aux_tx_args("wlan1", &cfg, Path::new("/k"));
+        // The aux pair uses the override, not the data-plane MCS.
+        assert_eq!(arg_after(&a, "-M"), "5");
+    }
+
+    #[test]
+    fn aux_radio_ids_never_collide_with_data_or_control_planes() {
+        // The four wfb planes claim four distinct radio_ids on the shared adapter:
+        // data 0, control 1, aux tx 2, aux rx 3. A collision would corrupt one
+        // plane's frames, so this is a hard invariant.
+        let cfg = WfbConfig::default();
+        let key = Path::new("/k");
+        let data_id = arg_after(&data_tx_args("wlan1", &cfg, key), "-p");
+        let ctrl_id = arg_after(&tx_control_args("wlan1", &cfg, key), "-p");
+        let aux_tx_id = arg_after(&aux_tx_args("wlan1", &cfg, key), "-p");
+        let aux_rx_id = arg_after(&aux_rx_args("wlan1", &cfg, key), "-p");
+        let ids = [data_id, ctrl_id, aux_tx_id, aux_rx_id];
+        for i in 0..ids.len() {
+            for j in (i + 1)..ids.len() {
+                assert_ne!(ids[i], ids[j], "radio_id collision between planes");
+            }
+        }
+    }
+
+    #[test]
+    fn aux_settings_round_trip_through_a_cfg_view() {
+        // The retained aux settings rebuild a cfg view that reproduces the same
+        // aux args on a respawn — the channel-hop preservation path.
+        let s = AuxSettings {
+            tx_port: 5620,
+            rx_port: 5621,
+            fec_k: 2,
+            fec_n: 4,
+            mcs_index: 3,
+        };
+        let cfg = s.to_cfg();
+        let a = aux_tx_args("wlan1", &cfg, Path::new("/k"));
+        assert_eq!(arg_after(&a, "-u"), "5620");
+        assert_eq!(arg_after(&a, "-k"), "2");
+        assert_eq!(arg_after(&a, "-n"), "4");
+        assert_eq!(arg_after(&a, "-M"), "3");
+        let r = aux_rx_args("wlan1", &cfg, Path::new("/k"));
+        assert_eq!(arg_after(&r, "-u"), "5621");
     }
 }

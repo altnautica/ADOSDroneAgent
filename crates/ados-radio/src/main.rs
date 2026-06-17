@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{watch, Notify};
 
 use ados_radio::adapter;
+use ados_radio::aux_cmd::{self, AuxCmdState};
 use ados_radio::bitrate::{
     new_enabled, new_snapshot, BitrateController, EnabledHandle, SnapshotHandle,
 };
@@ -38,8 +39,8 @@ use ados_radio::link_state::derive_link_state;
 use ados_radio::paths::{read_bind_sentinel_active, DRONE_KEY, WFB_TX_KEY};
 use ados_radio::process::RadioProcesses;
 use ados_radio::watchdog::{
-    new_counters, tx_health_watchdog, video_recvq_watchdog, CounterHandle, WatchdogCounters,
-    WatchdogFired,
+    aux_liveness_watchdog, new_counters, tx_health_watchdog, video_recvq_watchdog, CounterHandle,
+    WatchdogCounters, WatchdogFired,
 };
 
 use bringup::{channel_from_iface, ensure_monitor_and_channel, ensure_radiating};
@@ -1024,6 +1025,20 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
         let mut watchdog2 =
             tokio::spawn(async move { video_recvq_watchdog(recvq_counters, recvq_cancel).await });
 
+        // Auxiliary application-stream liveness watchdog. Idles while the aux pair
+        // is closed (the safe-by-default boot state) and, when a plugin has opened
+        // the stream, applies the same delta-counter contract the data plane uses
+        // — a flat ingress counter on a live aux transmitter is a silent stall.
+        // It owns its OWN recovery (restart only the aux pair in place), so it
+        // never trips the whole-group respawn select; it ends only when cancelled,
+        // and is aborted alongside the other siblings on respawn/shutdown.
+        let aux_wd_cancel = task_cancel.clone();
+        let aux_wd_proc = proc.clone();
+        // Not `&mut`-selected in the run loop (it owns its own recovery and ends
+        // only on cancel), so it is only ever aborted, never polled by the select.
+        let aux_watchdog =
+            tokio::spawn(async move { aux_liveness_watchdog(aux_wd_proc, aux_wd_cancel).await });
+
         // Data-tx exit watch. The counter watchdog only fires after a 30 s flat
         // window, so a `wfb_tx` that crashes on its own (segfault, OOM kill, a
         // driver-rejected arg on respawn) would otherwise leave the link dead for
@@ -1117,6 +1132,30 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
                     }
                 }
                 _ = radio_cmd_cancel.notified() => {}
+            }
+        });
+
+        // Auxiliary-stream command socket: a plugin (via the plugin host) opens or
+        // closes the additive aux transmit/receive pair through this socket. Holds
+        // the SAME process handle the watchdogs + operator socket use, and the boot
+        // config (the source of the effective aux ports/FEC/MCS an open applies).
+        // SAFE-BY-DEFAULT: nothing starts here at bring-up — the pair exists only
+        // between an explicit open and its close. Spawned + aborted per bring-up
+        // like the sibling sockets.
+        let aux_cmd_state = AuxCmdState {
+            proc: proc.clone(),
+            cfg: Arc::new(cfg.clone()),
+        };
+        let aux_cmd_cancel = task_cancel.clone();
+        let aux_cmd_sock_path = ados_radio::paths::run_path("radio-aux.sock");
+        let aux_cmd_server = tokio::spawn(async move {
+            tokio::select! {
+                r = aux_cmd::serve(aux_cmd_state, Path::new(&aux_cmd_sock_path)) => {
+                    if let Err(e) = r {
+                        tracing::warn!(error = %e, "aux_command_socket_serve_ended");
+                    }
+                }
+                _ = aux_cmd_cancel.notified() => {}
             }
         });
 
@@ -1218,10 +1257,12 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
                     heartbeat.abort();
                     watchdog1.abort();
                     watchdog2.abort();
+                    aux_watchdog.abort();
                     data_tx_exit.abort();
                     bitrate_ctrl.abort();
                     cmd_server.abort();
                     radio_cmd_server.abort();
+                    aux_cmd_server.abort();
                     hop.abort();
                     beacon.abort();
                     proc.lock().await.kill_all().await;
@@ -1284,10 +1325,12 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
             heartbeat.abort();
             watchdog1.abort();
             watchdog2.abort();
+            aux_watchdog.abort();
             data_tx_exit.abort();
             bitrate_ctrl.abort();
             cmd_server.abort();
             radio_cmd_server.abort();
+            aux_cmd_server.abort();
             hop.abort();
             beacon.abort();
             proc.lock().await.kill_all().await;
@@ -1303,10 +1346,12 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
         heartbeat.abort();
         watchdog1.abort();
         watchdog2.abort();
+        aux_watchdog.abort();
         data_tx_exit.abort();
         bitrate_ctrl.abort();
         cmd_server.abort();
         radio_cmd_server.abort();
+        aux_cmd_server.abort();
         hop.abort();
         beacon.abort();
         proc.lock().await.kill_all().await;

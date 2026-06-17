@@ -40,6 +40,16 @@ pub const WFB_CMD_SOCK: &str = "/run/ados/wfb-cmd.sock";
 /// `run_path("radio-cmd.sock")` so the `ADOS_RUN_DIR` env override is honoured.
 pub const RADIO_CMD_SOCK: &str = "/run/ados/radio-cmd.sock";
 
+/// Command socket the radio service listens on for the auxiliary-stream open /
+/// close requests a plugin drives through the plugin host. One newline-JSON
+/// request → one newline-JSON response per connection. The auxiliary stream is
+/// an additive transmit/receive pair on a separate radio-port; it is never
+/// started at boot — only an explicit `open` brings it up, and a `close` (or the
+/// plugin disconnecting) tears it down. Sibling to `wfb-cmd.sock` /
+/// `radio-cmd.sock`; use `run_path("radio-aux.sock")` so the `ADOS_RUN_DIR` env
+/// override is honoured.
+pub const RADIO_AUX_SOCK: &str = "/run/ados/radio-aux.sock";
+
 /// Return the run directory, honouring the `ADOS_RUN_DIR` env override.
 pub fn run_dir() -> String {
     std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string())

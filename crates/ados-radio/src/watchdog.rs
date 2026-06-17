@@ -230,6 +230,151 @@ pub enum WatchdogFired {
     Cancelled,
 }
 
+/// How often the auxiliary-stream liveness watchdog polls.
+const AUX_POLL_INTERVAL: Duration = Duration::from_secs(5);
+/// Flat-counter window before the aux watchdog treats the aux transmitter as
+/// silently stalled. Same 30 s window as the data-plane TX watchdog.
+const AUX_SILENCE_THRESHOLD: Duration = Duration::from_secs(30);
+
+/// Watch the **auxiliary** application-stream transmitter's liveness and restart
+/// the aux pair IN PLACE on a silent stall, never returning to the run loop's
+/// respawn select.
+///
+/// This mirrors the data-plane delta-counter contract — process-liveness alone is
+/// never proof of work, so the watchdog asserts that the aux tx process's ingress
+/// counter (the `rchar` it reads from its UDP ingress, i.e. the application frames
+/// a plugin feeds it) advances. It differs from the data-plane watchdog in ONE
+/// deliberate way: it owns its own recovery. A stalled aux pair must NOT trigger a
+/// whole-group respawn (that would interrupt the data + control planes, breaking
+/// the additive-aux invariant), so on a stall the watchdog calls
+/// [`RadioProcesses::restart_aux_stream`] directly and keeps watching. It returns
+/// only when cancelled (a whole-group respawn / shutdown aborts it like the other
+/// sibling tasks).
+///
+/// SAFE while the aux stream is closed: the aux tx PID resolves `None`, so the
+/// watchdog idles (resetting its progress clock) and never restarts anything. It
+/// can run for the entire radio bring-up regardless of whether a plugin has ever
+/// opened the stream.
+///
+/// IDLE IS NOT A STALL. A low-rate aux channel legitimately sends nothing for
+/// long stretches, so a flat ingress counter on its own is NOT evidence of a
+/// wedged transmitter — restarting an idle-but-healthy stream every 30 s is
+/// churn, not recovery. The watchdog therefore fires ONLY on a *post-activity*
+/// stall: the counter must have advanced at least once (the plugin really did
+/// feed the pipe) and THEN gone flat for the silence window. A stream that has
+/// never been fed since it was opened (or has gone quiescent and stayed there)
+/// is left running. That keeps the only fire path the same orphaned-`wfb_tx`
+/// failure class the data plane guards — a transmitter that WAS carrying frames
+/// and silently died — without ever penalising a healthy idle channel.
+///
+/// The RF-confirmation half of the dual-check (an independent received-side or
+/// PHY-speed signal proving the energy reaches a peer) is bench-gated for the aux
+/// pair; this guards the process-liveness + ingress-advance half so a wedged aux
+/// transmitter is recovered in the field.
+pub async fn aux_liveness_watchdog(
+    proc: std::sync::Arc<Mutex<RadioProcesses>>,
+    cancel: std::sync::Arc<tokio::sync::Notify>,
+) {
+    let mut last_progress = Instant::now();
+    let mut prev_rchar: Option<u64> = None;
+    // Whether the counter has advanced at least once since the stream was opened.
+    // A never-fed (idle) stream keeps this false, so it is never restarted; only
+    // a stream that DID feed and then went silent is a genuine stall.
+    let mut had_activity = false;
+
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep(AUX_POLL_INTERVAL) => {}
+            _ = cancel.notified() => return,
+        }
+
+        // Resolve the live aux tx PID for THIS tick. `None` means the stream is
+        // closed (or mid-restart) — reset the progress clock, the prev counter,
+        // and the activity flag so a fresh open starts from a clean window and the
+        // watchdog never fires on a stream that was simply never opened.
+        let pid = { proc.lock().await.aux_tx_pid() };
+        let Some(pid) = pid else {
+            last_progress = Instant::now();
+            prev_rchar = None;
+            had_activity = false;
+            continue;
+        };
+
+        let rchar = read_rchar(pid).await;
+        match (prev_rchar, rchar) {
+            // First reading of a freshly-opened stream: seed the baseline, don't
+            // judge progress yet.
+            (None, Some(cur)) => {
+                prev_rchar = Some(cur);
+                last_progress = Instant::now();
+            }
+            (Some(prev), Some(cur)) => {
+                let window_elapsed = last_progress.elapsed() >= AUX_SILENCE_THRESHOLD;
+                match aux_tick_decision(prev, cur, had_activity, window_elapsed) {
+                    AuxTick::Progress => {
+                        // The plugin fed the pipe: real activity. From here a later
+                        // sustained-flat window is a genuine stall.
+                        had_activity = true;
+                        last_progress = Instant::now();
+                        prev_rchar = Some(cur);
+                    }
+                    AuxTick::Restart => {
+                        tracing::warn!(
+                            pid,
+                            elapsed_s = last_progress.elapsed().as_secs(),
+                            "aux_tx_stalled_restarting"
+                        );
+                        // ADDITIVE recovery: restart ONLY the aux pair, in place.
+                        // The data + control planes are untouched. Reset the
+                        // baseline + the activity flag so the new pair starts from
+                        // a clean window.
+                        let _ = proc.lock().await.restart_aux_stream().await;
+                        last_progress = Instant::now();
+                        prev_rchar = None;
+                        had_activity = false;
+                    }
+                    AuxTick::Hold => {
+                        // Flat counter on an idle stream (never fed, or within the
+                        // window) — leave it running. Carry the baseline forward.
+                        prev_rchar = Some(cur);
+                    }
+                }
+            }
+            // The `/proc/<pid>/io` read failed (a recycle window): carry the
+            // previous baseline forward, never manufacture progress.
+            (_, None) => {}
+        }
+    }
+}
+
+/// The aux liveness watchdog's per-tick decision, factored out so the
+/// idle-vs-stall distinction is unit-testable without `/proc` or a live radio.
+///
+/// Given the previous + current ingress counters, whether the counter has ever
+/// advanced since the stream opened (`had_activity`), and whether the silence
+/// window has elapsed, decide whether to restart the aux pair. The cardinal
+/// rule: an idle stream (one that never fed) is NEVER restarted; only a stream
+/// that fed and then went sustained-flat is a stall.
+#[derive(Debug, PartialEq, Eq)]
+enum AuxTick {
+    /// Counter advanced: real activity, reset the progress clock.
+    Progress,
+    /// Counter flat but the stream is idle / within the window: leave running.
+    Hold,
+    /// Counter flat after prior activity AND past the silence window: restart.
+    Restart,
+}
+
+fn aux_tick_decision(prev: u64, cur: u64, had_activity: bool, window_elapsed: bool) -> AuxTick {
+    if cur > prev {
+        AuxTick::Progress
+    } else if had_activity && window_elapsed {
+        AuxTick::Restart
+    } else {
+        AuxTick::Hold
+    }
+}
+
 /// Read `/sys/class/net/<iface>/statistics/tx_bytes`.
 async fn read_tx_bytes(iface: &str) -> Option<u64> {
     let path = format!("/sys/class/net/{}/statistics/tx_bytes", iface);
@@ -389,6 +534,43 @@ mod tests {
         // the watchdog maps to the rchar-skip path via select_rchar.
         src.respawn_to(0);
         assert_eq!(LivePid::data_tx_pid(&src).await, None);
+    }
+
+    #[test]
+    fn aux_idle_stream_is_never_restarted_but_post_activity_stall_is() {
+        // A freshly-opened stream that has never fed: the counter is flat and
+        // there has been no prior activity. Even after the silence window has
+        // elapsed, an idle stream must be HELD (left running), never restarted.
+        assert_eq!(
+            aux_tick_decision(100, 100, false, true),
+            AuxTick::Hold,
+            "an idle stream past the window must not be restarted"
+        );
+        // The same flat counter within the window is also a Hold.
+        assert_eq!(aux_tick_decision(100, 100, false, false), AuxTick::Hold);
+
+        // The plugin fed the pipe: the counter advanced → Progress (resets the
+        // clock, marks activity).
+        assert_eq!(aux_tick_decision(100, 140, false, false), AuxTick::Progress);
+        assert_eq!(aux_tick_decision(100, 140, true, true), AuxTick::Progress);
+
+        // After prior activity the counter goes flat: within the window it Holds,
+        // but once the silence window elapses it is a genuine stall → Restart.
+        assert_eq!(aux_tick_decision(140, 140, true, false), AuxTick::Hold);
+        assert_eq!(
+            aux_tick_decision(140, 140, true, true),
+            AuxTick::Restart,
+            "a fed-then-silent stream past the window is a real stall"
+        );
+    }
+
+    #[test]
+    fn aux_thresholds_match_the_data_plane_contract() {
+        // The aux liveness watchdog reuses the same 5 s poll / 30 s silence window
+        // as the data-plane TX watchdog, so a stalled aux transmitter is recovered
+        // on the same cadence the operator already expects.
+        assert_eq!(AUX_POLL_INTERVAL.as_secs(), 5);
+        assert_eq!(AUX_SILENCE_THRESHOLD.as_secs(), 30);
     }
 
     #[tokio::test]

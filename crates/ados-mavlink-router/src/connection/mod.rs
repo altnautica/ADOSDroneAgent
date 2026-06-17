@@ -304,9 +304,26 @@ impl FcConnection {
             for frame in extract_frames(&mut buf) {
                 // Fan the raw frame out verbatim (drop if no consumers / lagging).
                 // The original bytes are forwarded unchanged for both protocol
-                // versions; nothing here re-encodes a received frame.
+                // versions; nothing here re-encodes a received frame. This same
+                // fan-out is the plugin lane: a subscribed consumer (the MAVLink
+                // socket) receives every frame, including a TUNNEL one, and
+                // filters for its own private payload_type on its side.
                 let _ = self.frame_tx.send(frame.clone());
                 *self.last_msg_at.lock().await = Instant::now();
+                // Classify a TUNNEL (385) carrying a private (application)
+                // payload_type. The typed parser below rejects an unregistered
+                // payload_type as an unknown enum value, so this reads the type
+                // straight off the wire. This is observe-only: the frame is
+                // already on the plugin lane (the fan-out above); a TUNNEL is a
+                // transparent opaque pipe and is NEVER decoded, acted on, or
+                // re-sent toward the flight controller from here. The read loop
+                // only consumes FC->host frames, so there is no FC-injection path
+                // at this point regardless.
+                if let Some(payload_type) = mavlink::tunnel_payload_type(&frame) {
+                    if payload_type > mavlink::TUNNEL_RESERVED_PAYLOAD_TYPE_MAX {
+                        tracing::debug!(payload_type, "mavlink_tunnel_inbound_to_plugin_lane");
+                    }
+                }
                 if let Ok((header, msg)) = mavlink::parse_any(&frame) {
                     // Learn the FC system id from its (non-GCS) heartbeats.
                     if let MavMessage::HEARTBEAT(_) = &msg {

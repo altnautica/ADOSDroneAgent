@@ -15,8 +15,13 @@ path = "src/bin/ados-plugin-host.rs"
 [dependencies]
 # The wire (frame + envelope + capability token) lives in ados-protocol and is
 # byte-parity tested against the Python supervisor. This crate speaks it
-# unchanged; it never re-implements the framing or the token.
-ados-protocol = { path = "../ados-protocol", features = ["tracing-layer"] }
+# unchanged; it never re-implements the framing or the token. The `mavlink`
+# feature pulls in the guided-setpoint builder + the v2 serializer the host uses
+# to turn a validated setpoint request into the exact SET_POSITION_TARGET frame
+# it writes to the MAVLink socket (the same codec the router and the native
+# command surface build their FC frames with), so a setpoint this host emits is
+# byte-identical to one any other surface would.
+ados-protocol = { path = "../ados-protocol", features = ["tracing-layer", "mavlink"] }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

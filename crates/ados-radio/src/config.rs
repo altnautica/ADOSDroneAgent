@@ -58,6 +58,25 @@ fn default_link_preset() -> String {
 fn default_reg_gate_strict() -> bool {
     true
 }
+// Auxiliary stream radio-ports. The data plane owns radio_id 0 (UDP 5600), the
+// control plane radio_id 1 (UDP 5803 tx / 5810 rx). The auxiliary pair takes
+// radio_id 2/3 on UDP 5602 (tx ingress) / 5603 (rx re-emit) so it can never
+// collide with the data or control planes on the shared adapter.
+fn default_aux_tx_port() -> u16 {
+    5602
+}
+fn default_aux_rx_port() -> u16 {
+    5603
+}
+// The auxiliary channel is a low-rate application pipe between nodes, so it
+// defaults to the lightest valid Reed-Solomon ratio (k=1, n=2) — the same trio
+// the control plane uses — rather than the heavier video FEC.
+fn default_aux_fec_k() -> u8 {
+    1
+}
+fn default_aux_fec_n() -> u8 {
+    2
+}
 
 /// Operator-facing regulatory posture, read from the `network.regulatory:` block
 /// of `/etc/ados/config.yaml`. The DEFAULT is unrestricted: a fresh box with no
@@ -290,6 +309,36 @@ pub struct WfbConfig {
     /// never paired.
     #[serde(default)]
     pub paired_at: Option<String>,
+    /// Whether the auxiliary application stream is permitted to start. This is
+    /// the config-level allow flag, NOT a boot-time spawn: even with this true
+    /// the aux pair stays down until something explicitly opens it (the
+    /// safe-by-default invariant). Off by default. When false this is a hard
+    /// dead-switch: an `open` request on the radio aux command socket is REFUSED
+    /// (no process spawned), so a deployment can forbid the aux pair outright. An
+    /// `open` succeeds only when this flag is true AND a caller explicitly opens
+    /// the stream.
+    #[serde(default)]
+    pub aux_enable: bool,
+    /// UDP port the auxiliary tx ingress reads application frames from
+    /// (radio_id 2). Defaults clear of the data/control ports.
+    #[serde(default = "default_aux_tx_port")]
+    pub aux_tx_port: u16,
+    /// UDP port the auxiliary rx re-emits decoded application frames onto
+    /// (radio_id 3, 127.0.0.1). Defaults clear of the data/control ports.
+    #[serde(default = "default_aux_rx_port")]
+    pub aux_rx_port: u16,
+    /// Auxiliary stream Reed-Solomon data-shard count (k). Defaults to the light
+    /// control-plane ratio; the aux channel is a low-rate pipe, not video.
+    #[serde(default = "default_aux_fec_k")]
+    pub aux_fec_k: u8,
+    /// Auxiliary stream Reed-Solomon total-shard count (n). Defaults to the
+    /// light control-plane ratio (k=1, n=2).
+    #[serde(default = "default_aux_fec_n")]
+    pub aux_fec_n: u8,
+    /// Optional MCS index for the auxiliary stream. `None` reuses the data-plane
+    /// `mcs_index`, so the aux pair rides the same modulation rate by default.
+    #[serde(default)]
+    pub aux_mcs_index: Option<u8>,
 }
 
 impl Default for WfbConfig {
@@ -319,8 +368,49 @@ impl Default for WfbConfig {
             auto_pair_enabled: true,
             paired_with_device_id: None,
             paired_at: None,
+            aux_enable: false,
+            aux_tx_port: default_aux_tx_port(),
+            aux_rx_port: default_aux_rx_port(),
+            aux_fec_k: default_aux_fec_k(),
+            aux_fec_n: default_aux_fec_n(),
+            aux_mcs_index: None,
         }
     }
+}
+
+/// The UDP ports the data, stats, and control planes own on the shared adapter:
+/// data ingress 5600, data stats 5601, control tx 5803, control rx 5810. The
+/// auxiliary pair must never reuse one of these (it would inject into, or steal
+/// frames from, a primary plane), and the aux tx/rx ports must differ from each
+/// other. Operators can set the aux ports, so this is enforced at load time.
+pub const RESERVED_PLANE_PORTS: [u16; 4] = [5600, 5601, 5803, 5810];
+
+/// Why an aux port configuration is invalid, for a loud load-time log. `None`
+/// from [`aux_port_collision`] means the aux ports are safe.
+#[derive(Debug, PartialEq, Eq)]
+pub enum AuxPortCollision {
+    /// The aux tx ingress port reuses a reserved data/control plane port.
+    TxReservesPlanePort(u16),
+    /// The aux rx re-emit port reuses a reserved data/control plane port.
+    RxReservesPlanePort(u16),
+    /// The aux tx and rx ports are the same (receive would feed transmit).
+    TxRxSame(u16),
+}
+
+/// Validate the auxiliary UDP ports against the reserved data/control/stats
+/// ports and against each other. Pure (no I/O) so it is unit-testable; returns
+/// the first collision found, or `None` when the aux ports are clear.
+pub fn aux_port_collision(aux_tx_port: u16, aux_rx_port: u16) -> Option<AuxPortCollision> {
+    if aux_tx_port == aux_rx_port {
+        return Some(AuxPortCollision::TxRxSame(aux_tx_port));
+    }
+    if RESERVED_PLANE_PORTS.contains(&aux_tx_port) {
+        return Some(AuxPortCollision::TxReservesPlanePort(aux_tx_port));
+    }
+    if RESERVED_PLANE_PORTS.contains(&aux_rx_port) {
+        return Some(AuxPortCollision::RxReservesPlanePort(aux_rx_port));
+    }
+    None
 }
 
 impl WfbConfig {
@@ -340,7 +430,26 @@ impl WfbConfig {
             return WfbConfig::default();
         };
         let raw: RawConfig = serde_norway::from_str(&text).unwrap_or_default();
-        raw.video.wfb
+        let mut cfg = raw.video.wfb;
+        cfg.guard_aux_ports();
+        cfg
+    }
+
+    /// Reject a colliding auxiliary-port configuration at load time: a settable
+    /// aux port that reuses a reserved data/control/stats port (or an aux tx that
+    /// equals the aux rx) would silently corrupt a primary plane, so the aux
+    /// stream is disabled and the collision is logged loudly. Idempotent and safe
+    /// to call on every load. A clear configuration is left untouched.
+    pub fn guard_aux_ports(&mut self) {
+        if let Some(collision) = aux_port_collision(self.aux_tx_port, self.aux_rx_port) {
+            tracing::error!(
+                aux_tx_port = self.aux_tx_port,
+                aux_rx_port = self.aux_rx_port,
+                ?collision,
+                "aux_port_collision: auxiliary stream disabled (port collides with a data/control plane or itself)"
+            );
+            self.aux_enable = false;
+        }
     }
 
     /// The rendezvous (meeting) channel: the optional `rendezvous_channel` pin
@@ -349,6 +458,13 @@ impl WfbConfig {
     /// with zero search.
     pub fn rendezvous_channel(&self) -> u8 {
         self.rendezvous_channel.unwrap_or(self.channel)
+    }
+
+    /// The MCS index the auxiliary stream uses: the explicit `aux_mcs_index`
+    /// override when set, else the data-plane `mcs_index` so the aux pair rides
+    /// the same modulation rate by default.
+    pub fn aux_mcs(&self) -> u8 {
+        self.aux_mcs_index.unwrap_or(self.mcs_index)
     }
 
     /// Override `mcs_index`/`fec_k`/`fec_n` from `wfb_link_preset`.
@@ -727,5 +843,105 @@ mod tests {
         assert!(c.reg_gate_strict);
         assert!(!c.dfs_allowed);
         assert_eq!(c.rendezvous_channel(), 149);
+    }
+
+    #[test]
+    fn aux_stream_defaults_are_safe_off_and_clear_of_other_planes() {
+        // Safe-by-default: the aux allow flag is off, and even when later turned
+        // on nothing starts at boot (the process layer enforces that). The aux
+        // ports must never collide with the data (5600) or control (5803/5810)
+        // ports.
+        let c = WfbConfig::default();
+        assert!(!c.aux_enable);
+        assert_eq!(c.aux_tx_port, 5602);
+        assert_eq!(c.aux_rx_port, 5603);
+        assert_eq!(c.aux_fec_k, 1);
+        assert_eq!(c.aux_fec_n, 2);
+        // No explicit aux MCS → the aux pair rides the data-plane rate.
+        assert!(c.aux_mcs_index.is_none());
+        assert_eq!(c.aux_mcs(), c.mcs_index);
+        // The aux ports are distinct from the data/control/stats ports.
+        for reserved in [5600u16, 5601, 5803, 5810] {
+            assert_ne!(c.aux_tx_port, reserved);
+            assert_ne!(c.aux_rx_port, reserved);
+        }
+    }
+
+    #[test]
+    fn aux_port_collision_detects_reserved_and_self_collisions() {
+        // The safe default ports are clear.
+        assert_eq!(aux_port_collision(5602, 5603), None);
+        // An aux tx reusing the data-plane ingress (5600) collides.
+        assert_eq!(
+            aux_port_collision(5600, 5603),
+            Some(AuxPortCollision::TxReservesPlanePort(5600))
+        );
+        // An aux rx reusing the control rx (5810) collides.
+        assert_eq!(
+            aux_port_collision(5602, 5810),
+            Some(AuxPortCollision::RxReservesPlanePort(5810))
+        );
+        // Stats (5601) and control tx (5803) are reserved too.
+        assert_eq!(
+            aux_port_collision(5601, 5603),
+            Some(AuxPortCollision::TxReservesPlanePort(5601))
+        );
+        assert_eq!(
+            aux_port_collision(5602, 5803),
+            Some(AuxPortCollision::RxReservesPlanePort(5803))
+        );
+        // Aux tx == aux rx (receive would feed transmit).
+        assert_eq!(
+            aux_port_collision(5612, 5612),
+            Some(AuxPortCollision::TxRxSame(5612))
+        );
+    }
+
+    #[test]
+    fn loading_a_colliding_aux_port_disables_the_aux_stream() {
+        // An operator that sets aux_tx_port onto the data plane (5600) must not
+        // silently collide: the load-time guard disables the aux stream.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        std::fs::write(
+            &cfg,
+            "video:\n  wfb:\n    aux_enable: true\n    aux_tx_port: 5600\n    aux_rx_port: 5603\n",
+        )
+        .unwrap();
+        let c = WfbConfig::load_from(&cfg);
+        // The guard fired: the aux stream is disabled despite aux_enable: true.
+        assert!(!c.aux_enable);
+
+        // A clear configuration keeps the aux stream enabled.
+        let ok = dir.path().join("ok.yaml");
+        std::fs::write(
+            &ok,
+            "video:\n  wfb:\n    aux_enable: true\n    aux_tx_port: 5612\n    aux_rx_port: 5613\n",
+        )
+        .unwrap();
+        let c2 = WfbConfig::load_from(&ok);
+        assert!(c2.aux_enable);
+        assert_eq!(c2.aux_tx_port, 5612);
+        assert_eq!(c2.aux_rx_port, 5613);
+    }
+
+    #[test]
+    fn aux_stream_keys_read_from_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        std::fs::write(
+            &cfg,
+            "video:\n  wfb:\n    aux_enable: true\n    aux_tx_port: 5612\n    aux_rx_port: 5613\n    aux_fec_k: 4\n    aux_fec_n: 8\n    aux_mcs_index: 3\n",
+        )
+        .unwrap();
+        let c = WfbConfig::load_from(&cfg);
+        assert!(c.aux_enable);
+        assert_eq!(c.aux_tx_port, 5612);
+        assert_eq!(c.aux_rx_port, 5613);
+        assert_eq!(c.aux_fec_k, 4);
+        assert_eq!(c.aux_fec_n, 8);
+        // The explicit aux MCS overrides the data-plane rate.
+        assert_eq!(c.aux_mcs_index, Some(3));
+        assert_eq!(c.aux_mcs(), 3);
     }
 }

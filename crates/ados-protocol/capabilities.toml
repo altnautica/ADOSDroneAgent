@@ -619,6 +619,13 @@ required_cap = "mavlink.read"
 id = "mavlink.send"
 required_cap = "mavlink.write"
 
+# Send one application payload over a MAVLink TUNNEL frame tagged with a private
+# payload_type, a transparent opaque pipe separate from the full MAVLink write
+# surface. Fully gated at the dispatch level on the tunnel capability.
+[[method]]
+id = "mavlink.tunnel.send"
+required_cap = "mavlink.tunnel"
+
 [[method]]
 id = "mavlink.register_component"
 # The matching component-kind cap is decided inline from the requested kind.
@@ -697,3 +704,31 @@ required_cap = "hardware.gpio_out"
 [[method]]
 id = "gpio.buzzer.beep"
 required_cap = "hardware.gpio_out"
+
+# ---- guided setpoint sender ----
+# Send one position/velocity setpoint to the flight controller via the scoped
+# guided-setpoint sender (a single MAVLink SET_POSITION_TARGET frame), instead of
+# the raw MAVLink write surface. Fully gated at the dispatch level on the
+# guided-setpoint capability. The method is a single-shot send: it owns no flight
+# state or mode, so a caller that wants to hold a velocity must re-send (the
+# autopilot brakes a few seconds after the last setpoint) and must itself confirm
+# the vehicle is in its guided mode.
+[[method]]
+id = "flight.guided_setpoint.send"
+required_cap = "flight.guided_setpoint"
+
+# ---- auxiliary radio stream ----
+# Open or close a dedicated auxiliary stream on the radio link (a separate
+# radio-port from the data and control planes) managed by the radio service. The
+# host forwards each to the radio service's command socket, which starts (open) or
+# stops (close) the additional transmit/receive pair on the shared adapter. The
+# stream is SAFE-BY-DEFAULT: nothing starts at boot; it exists only between an
+# explicit open and the matching close (or plugin disconnect). Fully gated at the
+# dispatch level on the auxiliary-stream capability.
+[[method]]
+id = "radio.aux_stream.open"
+required_cap = "radio.aux_stream"
+
+[[method]]
+id = "radio.aux_stream.close"
+required_cap = "radio.aux_stream"

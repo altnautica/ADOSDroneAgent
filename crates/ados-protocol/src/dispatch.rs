@@ -34,6 +34,7 @@ pub const DISPATCH_METHODS: &[DispatchMethod] = &[
     DispatchMethod { method: "recording.stop", required_cap: Some("recording.write"), inline: false },
     DispatchMethod { method: "mavlink.subscribe", required_cap: Some("mavlink.read"), inline: false },
     DispatchMethod { method: "mavlink.send", required_cap: Some("mavlink.write"), inline: false },
+    DispatchMethod { method: "mavlink.tunnel.send", required_cap: Some("mavlink.tunnel"), inline: false },
     DispatchMethod { method: "mavlink.register_component", required_cap: None, inline: true },
     DispatchMethod { method: "peripheral.register_driver", required_cap: None, inline: true },
     DispatchMethod { method: "peripheral.unregister_driver", required_cap: None, inline: true },
@@ -50,6 +51,9 @@ pub const DISPATCH_METHODS: &[DispatchMethod] = &[
     DispatchMethod { method: "display.page.set", required_cap: Some("display.oled.page"), inline: false },
     DispatchMethod { method: "gpio.output.set", required_cap: Some("hardware.gpio_out"), inline: false },
     DispatchMethod { method: "gpio.buzzer.beep", required_cap: Some("hardware.gpio_out"), inline: false },
+    DispatchMethod { method: "flight.guided_setpoint.send", required_cap: Some("flight.guided_setpoint"), inline: false },
+    DispatchMethod { method: "radio.aux_stream.open", required_cap: Some("radio.aux_stream"), inline: false },
+    DispatchMethod { method: "radio.aux_stream.close", required_cap: Some("radio.aux_stream"), inline: false },
 ];
 
 /// Look up the dispatch-level required capability for a wire method.

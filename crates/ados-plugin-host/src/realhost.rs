@@ -752,6 +752,36 @@ fn arg_i64(args: &Value, key: &str) -> Option<i64> {
         .or_else(|| v.as_u64().and_then(|n| i64::try_from(n).ok()))
 }
 
+/// Read a numeric field from a msgpack-map `args` as an f64, accepting any
+/// msgpack number (a float OR an integer, so `0` and `0.0` both read). A present
+/// non-numeric value is an error (the caller distinguishes it from absent);
+/// `Ok(None)` is an absent key, which the caller defaults to 0.0. The returned
+/// f64 may be non-finite (a NaN/inf encoded by the client) — the setpoint
+/// validator rejects a non-finite value on an active axis downstream, so the
+/// finiteness check is one place, not scattered through the reads.
+fn arg_f64_opt(args: &Value, key: &str) -> Result<Option<f64>, HostError> {
+    match map_get(args, key) {
+        None | Some(Value::Nil) => Ok(None),
+        Some(v) => match v.as_f64() {
+            Some(n) => Ok(Some(n)),
+            None => Err(HostError::Rpc(format!("{key} must be a number"))),
+        },
+    }
+}
+
+/// Read a numeric field as an f64, defaulting an absent key to 0.0 (an axis the
+/// type mask ignores is conventionally left at 0). A present non-number errors.
+fn arg_f64(args: &Value, key: &str) -> Result<f64, HostError> {
+    Ok(arg_f64_opt(args, key)?.unwrap_or(0.0))
+}
+
+/// Read a numeric field as an f32, defaulting an absent key to 0.0. A present
+/// non-number errors. The f64→f32 narrowing matches the wire field width of the
+/// velocity / accel / yaw setpoint fields.
+fn arg_f32(args: &Value, key: &str) -> Result<f32, HostError> {
+    Ok(arg_f64(args, key)? as f32)
+}
+
 /// Convert a `serde_json::Value` (a command-socket reply) to the msgpack
 /// `rmpv::Value` the plugin sees as the response `args`. Integers stay integers,
 /// floats stay floats, null becomes nil, so the reply shape round-trips into the
@@ -827,6 +857,124 @@ fn coerce_component_id(value: &Value) -> Result<i64, String> {
 }
 
 // ---------------------------------------------------------------------
+// Guided setpoint parse
+// ---------------------------------------------------------------------
+
+/// Source system id stamped on a guided-setpoint frame: the agent/companion
+/// identity the router uses on its own FC send path, so a setpoint from this
+/// surface is wire-identical to one the router sent. Matches the native command
+/// surface's source identity.
+const GUIDED_SOURCE_SYSTEM_ID: u8 = 1;
+const GUIDED_SOURCE_COMPONENT_ID: u8 = 191;
+
+/// Target identity: the single-vehicle ArduPilot defaults (1/1). A request may
+/// override these with `target_system` / `target_component`.
+const GUIDED_TARGET_SYSTEM: u8 = 1;
+const GUIDED_TARGET_COMPONENT: u8 = 1;
+
+/// Read an optional u8 field, defaulting an absent key to `default`. A present
+/// value out of u8 range (or a non-integer) is a clear error rather than a wrap.
+fn u8_arg_or(args: &Value, key: &str, default: u8) -> Result<u8, HostError> {
+    match map_get(args, key) {
+        None | Some(Value::Nil) => Ok(default),
+        Some(_) => match arg_i64(args, key) {
+            Some(n) if (0..=u8::MAX as i64).contains(&n) => Ok(n as u8),
+            _ => Err(HostError::Rpc(format!("{key} out of range"))),
+        },
+    }
+}
+
+/// Source identity stamped on a TUNNEL frame from this surface: the same
+/// agent/companion identity the guided-setpoint surface and the router use, so a
+/// TUNNEL frame from a plugin is wire-consistent with the agent's other sends.
+const TUNNEL_SOURCE_SYSTEM_ID: u8 = GUIDED_SOURCE_SYSTEM_ID;
+const TUNNEL_SOURCE_COMPONENT_ID: u8 = GUIDED_SOURCE_COMPONENT_ID;
+
+/// Read a required u16 field (the TUNNEL `payload_type`). An absent key, a
+/// non-integer, or a value outside the u16 range is a clear error.
+fn required_u16_arg(args: &Value, key: &str) -> Result<u16, HostError> {
+    match map_get(args, key) {
+        None | Some(Value::Nil) => Err(HostError::Rpc(format!("{key} is required"))),
+        Some(_) => match arg_i64(args, key) {
+            Some(n) if (0..=u16::MAX as i64).contains(&n) => Ok(n as u16),
+            _ => Err(HostError::Rpc(format!("{key} out of range"))),
+        },
+    }
+}
+
+/// The MAVLink message id of the message this setpoint builds, for the response.
+fn setpoint_msg_id(sp: &ados_protocol::mavlink::GuidedSetpoint) -> u32 {
+    use ados_protocol::mavlink::SetpointKind;
+    match sp.kind {
+        SetpointKind::LocalNed => ados_protocol::mavlink::MSG_ID_SET_POSITION_TARGET_LOCAL_NED,
+        SetpointKind::GlobalInt => ados_protocol::mavlink::MSG_ID_SET_POSITION_TARGET_GLOBAL_INT,
+    }
+}
+
+/// Parse a `flight.guided_setpoint.send` request into a [`GuidedSetpoint`].
+///
+/// Required: `kind` (`"local_ned"` | `"global_int"`), `coordinate_frame` (an
+/// integer `MAV_FRAME_*`), and `type_mask` (an integer that fits u16; a set bit
+/// ignores that axis). The numeric axis fields default to 0 when absent (an
+/// ignored axis is conventionally left unset); each is read as a number and a
+/// present non-number is an error. The finiteness / sane-mask / valid-frame
+/// checks are NOT applied here — they live in [`GuidedSetpoint::validate`],
+/// called by `build_message`, so the policy lives in one place.
+fn parse_guided_setpoint(
+    args: &Value,
+) -> Result<ados_protocol::mavlink::GuidedSetpoint, HostError> {
+    use ados_protocol::mavlink::{GuidedSetpoint, SetpointKind};
+
+    let kind = match arg_str(args, "kind") {
+        Some("local_ned") => SetpointKind::LocalNed,
+        Some("global_int") => SetpointKind::GlobalInt,
+        Some(other) => {
+            return Err(HostError::Rpc(format!(
+                "kind must be \"local_ned\" or \"global_int\", got {other:?}"
+            )))
+        }
+        None => {
+            return Err(HostError::Rpc(
+                "kind must be \"local_ned\" or \"global_int\"".to_string(),
+            ))
+        }
+    };
+
+    let coordinate_frame = match arg_i64(args, "coordinate_frame") {
+        Some(n) if (0..=u8::MAX as i64).contains(&n) => n as u8,
+        Some(_) => return Err(HostError::Rpc("coordinate_frame out of range".to_string())),
+        None => {
+            return Err(HostError::Rpc(
+                "coordinate_frame must be an integer".to_string(),
+            ))
+        }
+    };
+
+    let type_mask = match arg_i64(args, "type_mask") {
+        Some(n) if (0..=u16::MAX as i64).contains(&n) => n as u16,
+        Some(_) => return Err(HostError::Rpc("type_mask out of range".to_string())),
+        None => return Err(HostError::Rpc("type_mask must be an integer".to_string())),
+    };
+
+    Ok(GuidedSetpoint {
+        kind,
+        coordinate_frame,
+        type_mask,
+        x: arg_f64(args, "x")?,
+        y: arg_f64(args, "y")?,
+        z: arg_f64(args, "z")?,
+        vx: arg_f32(args, "vx")?,
+        vy: arg_f32(args, "vy")?,
+        vz: arg_f32(args, "vz")?,
+        afx: arg_f32(args, "afx")?,
+        afy: arg_f32(args, "afy")?,
+        afz: arg_f32(args, "afz")?,
+        yaw: arg_f32(args, "yaw")?,
+        yaw_rate: arg_f32(args, "yaw_rate")?,
+    })
+}
+
+// ---------------------------------------------------------------------
 // RealHost
 // ---------------------------------------------------------------------
 
@@ -857,6 +1005,16 @@ pub struct RealHost {
     /// `gpio.*` method to it (the radio/wifi-cmd-socket precedent); a builder
     /// overrides it in tests so the forward round-trips against a stub.
     gpio_cmd_path: PathBuf,
+    /// Command socket the radio service serves for the auxiliary application
+    /// stream. The host forwards each `radio.aux_stream.*` method to it (the same
+    /// command-socket precedent); a builder overrides it in tests.
+    radio_aux_cmd_path: PathBuf,
+    /// The plugin id that currently holds the auxiliary stream open, or `None`
+    /// when the stream is closed. The aux pair is a single shared resource on the
+    /// one adapter, so at most one plugin owns it at a time. Used to close the
+    /// stream automatically when its owner disconnects (the SAFE-by-default
+    /// invariant: a stream never outlives the plugin that opened it).
+    aux_stream_owner: Mutex<Option<String>>,
 }
 
 /// Canonical sidecar the reserved data-driven display page reads. Kept in sync
@@ -869,6 +1027,12 @@ const LCD_PLUGIN_PAGE_PATH: &str = "/run/ados/lcd-plugin-page.json";
 /// Kept in sync with `ados_gpio::GPIO_CMD_SOCK` by the cross-crate wire string,
 /// not a build dependency (the gpio crate is not on the host's dependency path).
 const GPIO_CMD_SOCK: &str = "/run/ados/gpio-cmd.sock";
+
+/// Canonical radio auxiliary-stream command socket the host forwards
+/// `radio.aux_stream.*` methods to. Kept in sync with
+/// `ados_radio::paths::RADIO_AUX_SOCK` by the cross-crate wire string, not a build
+/// dependency (the radio crate is not on the host's dependency path).
+const RADIO_AUX_CMD_SOCK: &str = "/run/ados/radio-aux.sock";
 
 impl RealHost {
     /// A host with empty facades and every external slot unwired, matching
@@ -886,6 +1050,8 @@ impl RealHost {
             agent_id_lookup: None,
             display_page_path: PathBuf::from(LCD_PLUGIN_PAGE_PATH),
             gpio_cmd_path: PathBuf::from(GPIO_CMD_SOCK),
+            radio_aux_cmd_path: PathBuf::from(RADIO_AUX_CMD_SOCK),
+            aux_stream_owner: Mutex::new(None),
         }
     }
 
@@ -900,6 +1066,14 @@ impl RealHost {
     /// uses the canonical `/run/ados/gpio-cmd.sock` from [`Self::new`].
     pub fn with_gpio_cmd_path(mut self, path: PathBuf) -> Self {
         self.gpio_cmd_path = path;
+        self
+    }
+
+    /// Override the radio auxiliary-stream command socket path (builder style,
+    /// tests). Production uses the canonical `/run/ados/radio-aux.sock` from
+    /// [`Self::new`].
+    pub fn with_radio_aux_cmd_path(mut self, path: PathBuf) -> Self {
+        self.radio_aux_cmd_path = path;
         self
     }
 
@@ -973,6 +1147,38 @@ impl RealHost {
                         Value::from("gpio service unavailable"),
                     ),
                 ])
+            }
+        }
+    }
+
+    /// Forward a built `radio.aux_stream.*` request to the radio service's
+    /// auxiliary command socket and return its reply. Synchronous (a blocking
+    /// unix-socket round-trip over the shared [`gpio_socket_roundtrip`] newline-JSON
+    /// helper), so the host trait method stays non-async; the service answers an
+    /// open/close immediately. Returns `(reply, ok)` so the caller can update the
+    /// owner bookkeeping only when the service confirmed the apply.
+    ///
+    /// A missing service / connection / IO error degrades to the `not_available`
+    /// shape rather than erroring, matching the GPIO / mavlink not-available paths
+    /// — the radio service may not be up on this board (e.g. a ground-station
+    /// profile, or a drone with no adapter).
+    fn forward_radio_aux(&self, request: serde_json::Value, method: &str) -> (HostResult, bool) {
+        match gpio_socket_roundtrip(&self.radio_aux_cmd_path, &request) {
+            Ok(reply) => {
+                let ok = reply.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+                (json_to_mpv(&reply), ok)
+            }
+            Err(e) => {
+                tracing::debug!(method, error = %e, "radio aux command forward failed");
+                let v = Value::Map(vec![
+                    (Value::from("error"), Value::from("not_available")),
+                    (Value::from("method"), Value::from(method)),
+                    (
+                        Value::from("reason"),
+                        Value::from("radio service unavailable"),
+                    ),
+                ]);
+                (v, false)
             }
         }
     }
@@ -1071,6 +1277,7 @@ const ALL_DISPATCH_METHODS: &[crate::dispatch::Method] = {
         RecordingStop,
         MavlinkSubscribe,
         MavlinkSend,
+        MavlinkTunnelSend,
         MavlinkRegisterComponent,
         PeripheralRegisterDriver,
         PeripheralUnregisterDriver,
@@ -1083,6 +1290,9 @@ const ALL_DISPATCH_METHODS: &[crate::dispatch::Method] = {
         DisplayPageSet,
         GpioOutputSet,
         GpioBuzzerBeep,
+        GuidedSetpointSend,
+        RadioAuxStreamOpen,
+        RadioAuxStreamClose,
         VisionSubscribeFrames,
         VisionRegisterModel,
         VisionInfer,
@@ -1197,6 +1407,88 @@ impl HostServices for RealHost {
                     (
                         Value::from("len"),
                         Value::Integer((msg_bytes.len() as i64).into()),
+                    ),
+                ]))
+            }
+        }
+    }
+
+    fn mavlink_tunnel_send(&self, _plugin_id: &str, args: &Value) -> Result<HostResult, HostError> {
+        // Validate the request, build the single TUNNEL frame, and write it to
+        // the MAVLink socket. The dispatch gate already enforced the tunnel
+        // capability before this runs. The tunnel is a transparent opaque pipe:
+        // this stamps no application semantics on the payload, so any per-payload
+        // HMAC/replay lives inside the bytes the caller supplied.
+
+        // payload_type is required and must be a private (application) type; the
+        // builder re-checks the floor, so an out-of-range type is refused twice.
+        let payload_type = required_u16_arg(args, "payload_type")?;
+
+        // payload accepts the same shapes as mavlink.send's msg_bytes (a binary
+        // value or a list of byte-ints). It may be empty (a zero-byte tunnel
+        // ping). A wrong type is rejected, never silently coerced.
+        let payload_value = arg_owned(args, "payload");
+        let payload = match &payload_value {
+            Value::Binary(_) | Value::Array(_) => {
+                coerce_msg_bytes(&payload_value).map_err(HostError::Rpc)?
+            }
+            Value::Nil => Vec::new(),
+            _ => return Err(HostError::Rpc("payload must be bytes".to_string())),
+        };
+        if payload.len() > ados_protocol::mavlink::TUNNEL_MAX_PAYLOAD {
+            return Err(HostError::Rpc(format!(
+                "payload is {} bytes, exceeds the {}-byte TUNNEL limit",
+                payload.len(),
+                ados_protocol::mavlink::TUNNEL_MAX_PAYLOAD
+            )));
+        }
+
+        // Optional target overrides; default to the single-vehicle identity.
+        let target_system = u8_arg_or(args, "target_system", GUIDED_TARGET_SYSTEM)?;
+        let target_component = u8_arg_or(args, "target_component", GUIDED_TARGET_COMPONENT)?;
+
+        let header = ados_protocol::mavlink::MavHeader {
+            system_id: TUNNEL_SOURCE_SYSTEM_ID,
+            component_id: TUNNEL_SOURCE_COMPONENT_ID,
+            // Fire-and-forget; the router stamps its own sequence on its own send
+            // path, and a client-written frame does not require a specific one.
+            sequence: 0,
+        };
+        // The builder enforces the private-type floor and the payload width, so a
+        // bad request is a clean Rpc error rather than a malformed frame.
+        let frame = ados_protocol::mavlink::build_tunnel_v2(
+            header,
+            payload_type,
+            target_system,
+            target_component,
+            &payload,
+        )
+        .map_err(|e| HostError::Rpc(e.to_string()))?;
+
+        match &self.mavlink {
+            // No router socket up: degrade to not_available, never error — the
+            // same posture mavlink.send takes while its socket is absent.
+            None => Ok(Value::Map(vec![
+                (Value::from("error"), Value::from("not_available")),
+                (Value::from("method"), Value::from("mavlink.tunnel.send")),
+            ])),
+            Some(client) => {
+                // Best-effort send (send_bytes swallows a full queue / write
+                // error, matching mavlink.send), so the success shape stands.
+                client.send_bytes(&frame);
+                Ok(Value::Map(vec![
+                    (Value::from("sent"), Value::Boolean(true)),
+                    (
+                        Value::from("payload_type"),
+                        Value::Integer((payload_type as i64).into()),
+                    ),
+                    (
+                        Value::from("payload_len"),
+                        Value::Integer((payload.len() as i64).into()),
+                    ),
+                    (
+                        Value::from("len"),
+                        Value::Integer((frame.len() as i64).into()),
                     ),
                 ]))
             }
@@ -1637,6 +1929,117 @@ impl HostServices for RealHost {
         Ok(self.forward_gpio(req, "gpio.buzzer.beep"))
     }
 
+    fn radio_aux_stream_open(
+        &self,
+        plugin_id: &str,
+        _args: &Value,
+    ) -> Result<HostResult, HostError> {
+        // The dispatch gate already enforced the auxiliary-stream capability. The
+        // open carries no caller-tunable parameters: the radio service resolves the
+        // effective aux ports / FEC / MCS from its own config, so the host never
+        // lets a plugin pick a radio-port (which could collide with the data or
+        // control planes). Forward a bare open and record ownership on success so
+        // the stream is closed when this plugin disconnects.
+        let req = serde_json::json!({"op": "open"});
+        let (reply, ok) = self.forward_radio_aux(req, "radio.aux_stream.open");
+        if ok {
+            *self
+                .aux_stream_owner
+                .lock()
+                .expect("aux stream owner mutex poisoned") = Some(plugin_id.to_string());
+        }
+        Ok(reply)
+    }
+
+    fn radio_aux_stream_close(
+        &self,
+        plugin_id: &str,
+        _args: &Value,
+    ) -> Result<HostResult, HostError> {
+        // The dispatch gate already enforced the auxiliary-stream capability.
+        // Forward a bare close (idempotent on the service side) and clear the
+        // ownership record when this plugin held it, so a later disconnect does not
+        // forward a redundant close. A close by a plugin that does not own the
+        // stream still forwards (the service no-ops a closed stream) but leaves any
+        // other owner's record intact.
+        let req = serde_json::json!({"op": "close"});
+        let (reply, ok) = self.forward_radio_aux(req, "radio.aux_stream.close");
+        if ok {
+            let mut owner = self
+                .aux_stream_owner
+                .lock()
+                .expect("aux stream owner mutex poisoned");
+            if owner.as_deref() == Some(plugin_id) {
+                *owner = None;
+            }
+        }
+        Ok(reply)
+    }
+
+    fn guided_setpoint_send(
+        &self,
+        _plugin_id: &str,
+        args: &Value,
+    ) -> Result<HostResult, HostError> {
+        // Parse + validate the request into a setpoint, build the single
+        // SET_POSITION_TARGET frame, and write it to the MAVLink socket. The
+        // dispatch gate already enforced the guided-setpoint capability before
+        // this runs. This is a single-shot send: the host owns no flight mode or
+        // schedule, so a caller holding a velocity must re-send above the
+        // autopilot's setpoint timeout (it brakes a few seconds after the last
+        // setpoint) and must itself have the vehicle in its guided mode.
+        let setpoint = parse_guided_setpoint(args)?;
+
+        // Optional target overrides; default to the single-vehicle ArduPilot
+        // identity. An out-of-range override is a clear error rather than a wrap.
+        let target_system = u8_arg_or(args, "target_system", GUIDED_TARGET_SYSTEM)?;
+        let target_component = u8_arg_or(args, "target_component", GUIDED_TARGET_COMPONENT)?;
+
+        // Build the typed message (re-validates inside) and serialize it to a v2
+        // frame stamped with the companion source identity, so the bytes are
+        // wire-identical to a SET_POSITION_TARGET any other agent surface emits.
+        let msg = setpoint
+            .build_message(target_system, target_component)
+            .map_err(|e| HostError::Rpc(e.to_string()))?;
+        let header = ados_protocol::mavlink::MavHeader {
+            system_id: GUIDED_SOURCE_SYSTEM_ID,
+            component_id: GUIDED_SOURCE_COMPONENT_ID,
+            // Fire-and-forget; the router does not require a specific sequence on
+            // a client-written frame (it stamps its own on its own send path).
+            sequence: 0,
+        };
+        let frame = ados_protocol::mavlink::serialize_v2(header, &msg)
+            .map_err(|e| HostError::Rpc(format!("setpoint frame encode failed: {e}")))?;
+
+        match &self.mavlink {
+            // No router socket up: degrade to not_available, never error — the
+            // same posture mavlink.send takes while its socket is absent.
+            None => Ok(Value::Map(vec![
+                (Value::from("error"), Value::from("not_available")),
+                (
+                    Value::from("method"),
+                    Value::from("flight.guided_setpoint.send"),
+                ),
+            ])),
+            Some(client) => {
+                // Best-effort send (send_bytes swallows a full queue / write
+                // error, matching mavlink.send), so the success shape stands.
+                client.send_bytes(&frame);
+                Ok(Value::Map(vec![
+                    (Value::from("sent"), Value::Boolean(true)),
+                    (
+                        Value::from("msg_id"),
+                        Value::Integer((setpoint_msg_id(&setpoint) as i64).into()),
+                    ),
+                    (
+                        Value::from("len"),
+                        Value::Integer((frame.len() as i64).into()),
+                    ),
+                ]))
+            }
+        }
+    }
+
     fn release_plugin(&self, plugin_id: &str) {
         // Mirror _release_session_resources: components + drivers + cameras +
         // telemetry are cleared. The config store is deliberately NOT cleared
@@ -1657,6 +2060,27 @@ impl HostServices for RealHost {
             .lock()
             .expect("telemetry mutex poisoned")
             .clear_plugin(plugin_id);
+        // SAFE-by-default: a radio auxiliary stream never outlives the plugin that
+        // opened it. If this plugin held the stream open, forward a close so the
+        // additive radio pair is torn down on disconnect (it never touches the
+        // data / control planes). Take the owner slot first so the forward happens
+        // without holding the lock, and only when this plugin is the owner.
+        let owned = {
+            let mut owner = self
+                .aux_stream_owner
+                .lock()
+                .expect("aux stream owner mutex poisoned");
+            if owner.as_deref() == Some(plugin_id) {
+                *owner = None;
+                true
+            } else {
+                false
+            }
+        };
+        if owned {
+            let req = serde_json::json!({"op": "close"});
+            let _ = self.forward_radio_aux(req, "radio.aux_stream.close");
+        }
     }
 
     fn mavlink_subscribe_stream(
@@ -3065,5 +3489,463 @@ mod tests {
                 Gate::Allow(variant)
             );
         }
+    }
+
+    // ---- radio.aux_stream.open / radio.aux_stream.close ------------------
+
+    #[cfg(unix)]
+    #[test]
+    fn radio_aux_open_forwards_a_bare_open_and_records_the_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("radio-aux.sock");
+        let stub = gpio_stub(
+            path.clone(),
+            r#"{"ok":true,"active":true,"tx_port":5602,"rx_port":5603}"#,
+        );
+        let host = RealHost::new().with_radio_aux_cmd_path(path);
+
+        let m = ok_map(host.radio_aux_stream_open("p", &map(&[])));
+        // The reply round-trips back to the plugin verbatim.
+        assert_eq!(field(&m, "ok").and_then(Value::as_bool), Some(true));
+        assert_eq!(field(&m, "active").and_then(Value::as_bool), Some(true));
+        assert_eq!(field(&m, "tx_port").and_then(Value::as_i64), Some(5602));
+
+        // The forwarded request is a bare open — the plugin cannot pick a port.
+        let sent = stub.join().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&sent).unwrap();
+        assert_eq!(v["op"], "open");
+        assert_eq!(v.as_object().unwrap().len(), 1);
+
+        // Ownership recorded so a later disconnect closes the stream.
+        assert_eq!(
+            *host.aux_stream_owner.lock().unwrap(),
+            Some("p".to_string())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn radio_aux_close_forwards_and_clears_the_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("radio-aux.sock");
+        let host = RealHost::new().with_radio_aux_cmd_path(path.clone());
+        // Seed ownership as if this plugin had opened the stream.
+        *host.aux_stream_owner.lock().unwrap() = Some("p".to_string());
+
+        let stub = gpio_stub(path, r#"{"ok":true,"active":false}"#);
+        let m = ok_map(host.radio_aux_stream_close("p", &map(&[])));
+        assert_eq!(field(&m, "active").and_then(Value::as_bool), Some(false));
+
+        let sent = stub.join().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&sent).unwrap();
+        assert_eq!(v["op"], "close");
+
+        // The owner record is cleared on a confirmed close.
+        assert!(host.aux_stream_owner.lock().unwrap().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn radio_aux_close_by_non_owner_leaves_the_owner_record_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("radio-aux.sock");
+        let host = RealHost::new().with_radio_aux_cmd_path(path.clone());
+        // Another plugin owns the stream.
+        *host.aux_stream_owner.lock().unwrap() = Some("owner".to_string());
+
+        let stub = gpio_stub(path, r#"{"ok":true,"active":false}"#);
+        let _ = ok_map(host.radio_aux_stream_close("intruder", &map(&[])));
+        stub.join().unwrap();
+
+        // The real owner's record survives a close from a different plugin.
+        assert_eq!(
+            *host.aux_stream_owner.lock().unwrap(),
+            Some("owner".to_string())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn release_plugin_closes_an_aux_stream_the_plugin_owned() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("radio-aux.sock");
+        let host = RealHost::new().with_radio_aux_cmd_path(path.clone());
+        *host.aux_stream_owner.lock().unwrap() = Some("p".to_string());
+
+        let stub = gpio_stub(path, r#"{"ok":true,"active":false}"#);
+        host.release_plugin("p");
+        // The disconnect forwarded a close (safe-by-default: the stream never
+        // outlives its owner).
+        let sent = stub.join().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&sent).unwrap();
+        assert_eq!(v["op"], "close");
+        assert!(host.aux_stream_owner.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn radio_aux_open_degrades_to_not_available_when_the_service_is_absent() {
+        // No socket bound: the forward reports not_available, never errors, and
+        // NO ownership is recorded (so a later disconnect forwards nothing).
+        let host = RealHost::new()
+            .with_radio_aux_cmd_path(std::path::PathBuf::from("/nonexistent/ados-aux-test.sock"));
+        let m = ok_map(host.radio_aux_stream_open("p", &map(&[])));
+        assert_eq!(
+            field(&m, "error").and_then(Value::as_str),
+            Some("not_available")
+        );
+        assert_eq!(
+            field(&m, "method").and_then(Value::as_str),
+            Some("radio.aux_stream.open")
+        );
+        // A failed open never claims ownership.
+        assert!(host.aux_stream_owner.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn radio_aux_methods_are_gated_on_the_aux_stream_capability() {
+        use crate::dispatch::{gate, Gate, Method};
+        for (method, variant) in [
+            ("radio.aux_stream.open", Method::RadioAuxStreamOpen),
+            ("radio.aux_stream.close", Method::RadioAuxStreamClose),
+        ] {
+            assert_eq!(
+                gate(method, false, &caps(&[])),
+                Gate::CapabilityDenied("capability_denied: radio.aux_stream".to_string())
+            );
+            assert_eq!(
+                gate(method, false, &caps(&["radio.aux_stream"])),
+                Gate::Allow(variant)
+            );
+        }
+    }
+
+    // ---- guided setpoint sender -----------------------------------------
+
+    /// A pure-velocity local-NED setpoint request: ignore position / accel / yaw,
+    /// command vx/vy/vz, body frame (8). Mirrors the builder's velocity_setpoint.
+    fn velocity_args() -> Value {
+        // type_mask: X|Y|Z | AX|AY|AZ | YAW | YAW_RATE = 1+2+4 +64+128+256 +1024+2048.
+        let mask = 1 + 2 + 4 + 64 + 128 + 256 + 1024 + 2048;
+        map(&[
+            ("kind", Value::from("local_ned")),
+            ("coordinate_frame", Value::from(8)), // MAV_FRAME_BODY_NED
+            ("type_mask", Value::from(mask)),
+            ("vx", Value::F64(2.5)),
+            ("vy", Value::F64(-1.0)),
+            ("vz", Value::F64(0.5)),
+        ])
+    }
+
+    #[test]
+    fn guided_setpoint_is_gated_on_the_capability() {
+        use crate::dispatch::{gate, Gate, Method};
+        assert_eq!(
+            gate("flight.guided_setpoint.send", false, &caps(&[])),
+            Gate::CapabilityDenied("capability_denied: flight.guided_setpoint".to_string())
+        );
+        assert_eq!(
+            gate(
+                "flight.guided_setpoint.send",
+                false,
+                &caps(&["flight.guided_setpoint"])
+            ),
+            Gate::Allow(Method::GuidedSetpointSend)
+        );
+    }
+
+    #[test]
+    fn guided_setpoint_without_router_degrades_to_not_available() {
+        // No mavlink client wired: degrade, never error (the mavlink.send posture).
+        let host = RealHost::new();
+        let m = ok_map(host.guided_setpoint_send("p", &velocity_args()));
+        assert_eq!(
+            field(&m, "error").and_then(Value::as_str),
+            Some("not_available")
+        );
+        assert_eq!(
+            field(&m, "method").and_then(Value::as_str),
+            Some("flight.guided_setpoint.send")
+        );
+    }
+
+    #[test]
+    fn guided_setpoint_validates_args_before_any_send() {
+        let host = RealHost::new();
+        // Missing kind.
+        assert_eq!(
+            err_body(host.guided_setpoint_send("p", &map(&[("type_mask", Value::from(0))]))),
+            "kind must be \"local_ned\" or \"global_int\""
+        );
+        // Missing coordinate_frame.
+        assert_eq!(
+            err_body(host.guided_setpoint_send(
+                "p",
+                &map(&[
+                    ("kind", Value::from("local_ned")),
+                    ("type_mask", Value::from(0))
+                ]),
+            )),
+            "coordinate_frame must be an integer"
+        );
+        // A NaN on an active axis (vx is active under this mask) is rejected by
+        // the builder's validation.
+        let mut bad = match velocity_args() {
+            Value::Map(mut m) => {
+                m.retain(|(k, _)| k.as_str() != Some("vx"));
+                m.push((Value::from("vx"), Value::F64(f64::NAN)));
+                Value::Map(m)
+            }
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            err_body(host.guided_setpoint_send("p", &bad)),
+            "vx must be a finite number"
+        );
+        // A frame wrong for the kind (a global frame on a local message).
+        bad = map(&[
+            ("kind", Value::from("local_ned")),
+            ("coordinate_frame", Value::from(5)), // MAV_FRAME_GLOBAL_INT
+            ("type_mask", Value::from(0)),
+        ]);
+        assert!(err_body(host.guided_setpoint_send("p", &bad))
+            .contains("not valid for this setpoint kind"));
+        // A type_mask with an unknown high bit.
+        bad = map(&[
+            ("kind", Value::from("local_ned")),
+            ("coordinate_frame", Value::from(8)),
+            ("type_mask", Value::from(0x8000)),
+        ]);
+        assert!(err_body(host.guided_setpoint_send("p", &bad))
+            .contains("outside the defined position-target field"));
+    }
+
+    #[tokio::test]
+    async fn guided_setpoint_frame_reaches_the_router_and_decodes() {
+        // With a live mavlink client wired to a stub router socket, the handler
+        // builds the SET_POSITION_TARGET_LOCAL_NED (84) frame and writes it; the
+        // router side reads it back and it decodes to the same message + fields.
+        use crate::mavlink_client::{MavlinkClient, MAVLINK_BROADCAST_DEPTH};
+        use ados_protocol::ipc::IpcBroadcast;
+        use ados_protocol::mavlink::{ardupilotmega, parse_v2, MavMessage};
+
+        let mut sock = std::env::temp_dir();
+        sock.push(format!("ados-realhost-sp-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&sock);
+        let (_server, inbound) =
+            IpcBroadcast::bind(&sock, MAVLINK_BROADCAST_DEPTH, false, Some(16))
+                .await
+                .unwrap();
+        let mut inbound = inbound.expect("inbound channel requested");
+
+        let client = std::sync::Arc::new(MavlinkClient::connect(&sock).await.unwrap());
+        let host = RealHost::new().with_mavlink(client);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let m = ok_map(host.guided_setpoint_send("p", &velocity_args()));
+        assert_eq!(field(&m, "sent").and_then(Value::as_bool), Some(true));
+        assert_eq!(field(&m, "msg_id").and_then(Value::as_i64), Some(84));
+
+        // The router reads the raw frame; decode it and check the fields.
+        let frame = tokio::time::timeout(std::time::Duration::from_millis(500), inbound.recv())
+            .await
+            .unwrap()
+            .expect("a frame arrives");
+        let (_h, decoded) = parse_v2(&frame).expect("decode succeeds");
+        match decoded {
+            MavMessage::SET_POSITION_TARGET_LOCAL_NED(d) => {
+                assert_eq!(d.vx, 2.5);
+                assert_eq!(d.vy, -1.0);
+                assert_eq!(d.vz, 0.5);
+                assert_eq!(d.target_system, 1);
+                assert_eq!(d.target_component, 1);
+                assert_eq!(
+                    d.coordinate_frame,
+                    ardupilotmega::MavFrame::MAV_FRAME_BODY_NED
+                );
+            }
+            other => panic!("expected SET_POSITION_TARGET_LOCAL_NED, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn guided_setpoint_global_int_builds_and_decodes() {
+        // A global-int setpoint with a commanded position decodes back to msg 86
+        // with the scaled lat/lon and altitude intact.
+        use crate::mavlink_client::{MavlinkClient, MAVLINK_BROADCAST_DEPTH};
+        use ados_protocol::ipc::IpcBroadcast;
+        use ados_protocol::mavlink::{parse_v2, MavMessage};
+
+        let mut sock = std::env::temp_dir();
+        sock.push(format!("ados-realhost-sp-gi-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&sock);
+        let (_server, inbound) =
+            IpcBroadcast::bind(&sock, MAVLINK_BROADCAST_DEPTH, false, Some(16))
+                .await
+                .unwrap();
+        let mut inbound = inbound.expect("inbound channel requested");
+
+        let client = std::sync::Arc::new(MavlinkClient::connect(&sock).await.unwrap());
+        let host = RealHost::new().with_mavlink(client);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Position + velocity: clear the X/Y/Z ignore bits, keep accel/yaw ignored.
+        let mask = 64 + 128 + 256 + 1024 + 2048;
+        let args = map(&[
+            ("kind", Value::from("global_int")),
+            ("coordinate_frame", Value::from(6)), // GLOBAL_RELATIVE_ALT_INT
+            ("type_mask", Value::from(mask)),
+            ("x", Value::F64(374_224_080.0)), // scaled latitude (37.422408 * 1e7)
+            ("y", Value::F64(-1_220_842_700.0)),
+            ("z", Value::F64(30.0)),
+            ("vz", Value::F64(-0.5)),
+            ("target_system", Value::from(2)),
+        ]);
+        let m = ok_map(host.guided_setpoint_send("p", &args));
+        assert_eq!(field(&m, "msg_id").and_then(Value::as_i64), Some(86));
+
+        let frame = tokio::time::timeout(std::time::Duration::from_millis(500), inbound.recv())
+            .await
+            .unwrap()
+            .expect("a frame arrives");
+        match parse_v2(&frame).expect("decode succeeds").1 {
+            MavMessage::SET_POSITION_TARGET_GLOBAL_INT(d) => {
+                assert_eq!(d.lat_int, 374_224_080);
+                assert_eq!(d.lon_int, -1_220_842_700);
+                assert_eq!(d.alt, 30.0);
+                assert_eq!(d.vz, -0.5);
+                assert_eq!(d.target_system, 2, "target override is honoured");
+            }
+            other => panic!("expected SET_POSITION_TARGET_GLOBAL_INT, got {other:?}"),
+        }
+    }
+
+    // ---- mavlink.tunnel.send --------------------------------------------
+
+    #[test]
+    fn mavlink_tunnel_send_is_gated_on_the_tunnel_capability() {
+        use crate::dispatch::{gate, Gate, Method};
+        // The plain mavlink.write does not satisfy the tunnel cap.
+        assert_eq!(
+            gate("mavlink.tunnel.send", false, &caps(&["mavlink.write"])),
+            Gate::CapabilityDenied("capability_denied: mavlink.tunnel".to_string())
+        );
+        assert_eq!(
+            gate("mavlink.tunnel.send", false, &caps(&["mavlink.tunnel"])),
+            Gate::Allow(Method::MavlinkTunnelSend)
+        );
+    }
+
+    #[test]
+    fn mavlink_tunnel_send_without_router_degrades_to_not_available() {
+        // No mavlink client wired: degrade, never error (the mavlink.send posture).
+        let host = RealHost::new();
+        let args = map(&[
+            ("payload_type", Value::from(40001)),
+            ("payload", Value::Binary(vec![1, 2, 3])),
+        ]);
+        let m = ok_map(host.mavlink_tunnel_send("p", &args));
+        assert_eq!(
+            field(&m, "error").and_then(Value::as_str),
+            Some("not_available")
+        );
+        assert_eq!(
+            field(&m, "method").and_then(Value::as_str),
+            Some("mavlink.tunnel.send")
+        );
+    }
+
+    #[test]
+    fn mavlink_tunnel_send_validates_before_any_send() {
+        let host = RealHost::new();
+        // Missing payload_type.
+        assert_eq!(
+            err_body(host.mavlink_tunnel_send("p", &map(&[("payload", Value::Binary(vec![1]))]))),
+            "payload_type is required"
+        );
+        // A registered (non-private) payload_type is refused by the builder.
+        let registered = map(&[
+            ("payload_type", Value::from(200)),
+            ("payload", Value::Binary(vec![1])),
+        ]);
+        assert!(err_body(host.mavlink_tunnel_send("p", &registered)).contains("private type"));
+        // A wrong payload type (a string) is rejected, not coerced.
+        let bad_payload = map(&[
+            ("payload_type", Value::from(40001)),
+            ("payload", Value::from("not-bytes")),
+        ]);
+        assert_eq!(
+            err_body(host.mavlink_tunnel_send("p", &bad_payload)),
+            "payload must be bytes"
+        );
+        // An oversized payload is refused.
+        let oversize = map(&[
+            ("payload_type", Value::from(40001)),
+            (
+                "payload",
+                Value::Binary(vec![0u8; ados_protocol::mavlink::TUNNEL_MAX_PAYLOAD + 1]),
+            ),
+        ]);
+        assert!(err_body(host.mavlink_tunnel_send("p", &oversize)).contains("exceeds"));
+    }
+
+    #[tokio::test]
+    async fn mavlink_tunnel_send_frame_reaches_the_router_and_round_trips_the_payload() {
+        // With a live mavlink client wired to a stub router socket, the handler
+        // builds the TUNNEL (385) frame and writes it; the router side reads it
+        // back, the classifier recovers the private payload_type off the wire,
+        // and the application payload round-trips byte-for-byte.
+        use crate::mavlink_client::{MavlinkClient, MAVLINK_BROADCAST_DEPTH};
+        use ados_protocol::ipc::IpcBroadcast;
+        use ados_protocol::mavlink::{tunnel_payload_type, MSG_ID_TUNNEL};
+
+        let mut sock = std::env::temp_dir();
+        sock.push(format!("ados-realhost-tun-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&sock);
+        let (_server, inbound) =
+            IpcBroadcast::bind(&sock, MAVLINK_BROADCAST_DEPTH, false, Some(16))
+                .await
+                .unwrap();
+        let mut inbound = inbound.expect("inbound channel requested");
+
+        let client = std::sync::Arc::new(MavlinkClient::connect(&sock).await.unwrap());
+        let host = RealHost::new().with_mavlink(client);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let payload_type = 40001;
+        let app_payload = b"opaque-app-bytes".to_vec();
+        let args = map(&[
+            ("payload_type", Value::from(payload_type)),
+            ("payload", Value::Binary(app_payload.clone())),
+            ("target_system", Value::from(2)),
+        ]);
+        let m = ok_map(host.mavlink_tunnel_send("p", &args));
+        assert_eq!(field(&m, "sent").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            field(&m, "payload_type").and_then(Value::as_i64),
+            Some(payload_type as i64)
+        );
+        assert_eq!(
+            field(&m, "payload_len").and_then(Value::as_i64),
+            Some(app_payload.len() as i64)
+        );
+
+        // The router reads the raw frame; it is a TUNNEL carrying the private
+        // type, and the application payload bytes survive verbatim.
+        let frame = tokio::time::timeout(std::time::Duration::from_millis(500), inbound.recv())
+            .await
+            .unwrap()
+            .expect("a frame arrives");
+        let mut id = [0u8; 4];
+        id[..3].copy_from_slice(&frame[7..10]);
+        assert_eq!(u32::from_le_bytes(id), MSG_ID_TUNNEL);
+        assert_eq!(tunnel_payload_type(&frame), Some(payload_type));
+        // TUNNEL wire layout after the 10-byte v2 header: payload_type (bytes
+        // 10..12), target_system (12), target_component (13), payload_length
+        // (14), then the payload at byte 15.
+        assert_eq!(frame[12], 2, "target_system override rode through");
+        assert_eq!(frame[14] as usize, app_payload.len());
+        assert_eq!(&frame[15..15 + app_payload.len()], &app_payload[..]);
+
+        let _ = std::fs::remove_file(&sock);
     }
 }
