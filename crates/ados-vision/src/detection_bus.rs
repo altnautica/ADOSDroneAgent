@@ -116,6 +116,8 @@ mod tests {
                 class_label: "weed".into(),
                 confidence: 0.87,
                 track_id: Some(3),
+                assoc_confidence: None,
+                lock_state: None,
             }],
         }
     }

@@ -350,6 +350,8 @@ mod tests {
                 class_label: "x".into(),
                 confidence: 0.5,
                 track_id: None,
+                assoc_confidence: None,
+                lock_state: None,
             }],
         };
         let reached = e.publish_detection(batch.clone());

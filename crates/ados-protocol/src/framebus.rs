@@ -461,6 +461,22 @@ pub struct BoundingBox {
     pub height: f32,
 }
 
+/// Confidence that this frame's detection belongs to the same object as the
+/// track it was associated with. `Locked` = the tracker is confident the
+/// identity held; `Uncertain` = the association is weak (occlusion, a nearby
+/// similar object, a low-confidence re-match) so a downstream consumer should
+/// treat the identity as provisional; `Lost` = the track could not be
+/// re-associated this frame. Carrying this on the wire makes a silent identity
+/// swap impossible to hide: the uncertainty travels with the detection instead
+/// of being collapsed away by the tracker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LockState {
+    Locked,
+    Uncertain,
+    Lost,
+}
+
 /// One detection from a model.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Detection {
@@ -470,6 +486,16 @@ pub struct Detection {
     /// Stable track id across frames (tracking models only).
     #[serde(default)]
     pub track_id: Option<u64>,
+    /// How confident the tracker is that this detection is the same object as
+    /// its `track_id` (0..1). `None` when the source does not score
+    /// association (e.g. a stateless detector). Distinct from `confidence`,
+    /// which scores the class/object detection itself.
+    #[serde(default)]
+    pub assoc_confidence: Option<f32>,
+    /// Discrete lock state of the track's identity this frame. `None` when the
+    /// source does not report a lock state.
+    #[serde(default)]
+    pub lock_state: Option<LockState>,
 }
 
 /// The payload on `vision.detection`, labelled by source model and frame so
@@ -529,10 +555,101 @@ mod contract_tests {
                 class_label: "weed".into(),
                 confidence: 0.87,
                 track_id: None,
+                assoc_confidence: None,
+                lock_state: None,
             }],
         };
         let bytes = b.to_msgpack().unwrap();
         assert_eq!(DetectionBatch::from_msgpack(&bytes).unwrap(), b);
+    }
+
+    #[test]
+    fn detection_lock_fields_round_trip_present() {
+        let d = Detection {
+            bbox: BoundingBox {
+                x: 1.0,
+                y: 2.0,
+                width: 10.0,
+                height: 20.0,
+            },
+            class_label: "target".into(),
+            confidence: 0.91,
+            track_id: Some(42),
+            assoc_confidence: Some(0.73),
+            lock_state: Some(LockState::Uncertain),
+        };
+        let bytes = rmp_serde::to_vec_named(&d).unwrap();
+        let back: Detection = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(back, d);
+    }
+
+    #[test]
+    fn detection_lock_state_serializes_lowercase() {
+        let s = rmp_serde::to_vec_named(&LockState::Locked).unwrap();
+        assert_eq!(rmp_serde::from_slice::<String>(&s).unwrap(), "locked");
+        let s = rmp_serde::to_vec_named(&LockState::Lost).unwrap();
+        assert_eq!(rmp_serde::from_slice::<String>(&s).unwrap(), "lost");
+    }
+
+    #[test]
+    fn detection_new_fields_default_when_absent() {
+        // A msgpack named-map written by an old producer that predates the
+        // lock fields must still decode (the new fields default to None).
+        #[derive(Serialize)]
+        struct OldDetection {
+            bbox: BoundingBox,
+            class_label: String,
+            confidence: f32,
+            track_id: Option<u64>,
+        }
+        let old = OldDetection {
+            bbox: BoundingBox {
+                x: 0.0,
+                y: 0.0,
+                width: 5.0,
+                height: 5.0,
+            },
+            class_label: "weed".into(),
+            confidence: 0.5,
+            track_id: Some(7),
+        };
+        let bytes = rmp_serde::to_vec_named(&old).unwrap();
+        let back: Detection = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(back.track_id, Some(7));
+        assert_eq!(back.assoc_confidence, None);
+        assert_eq!(back.lock_state, None);
+    }
+
+    #[test]
+    fn detection_new_fields_skipped_for_old_readers() {
+        // A new producer's bytes must still decode for a reader that only
+        // knows the old fields (forward compatibility).
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct OldReader {
+            bbox: BoundingBox,
+            class_label: String,
+            confidence: f32,
+            #[serde(default)]
+            track_id: Option<u64>,
+        }
+        let d = Detection {
+            bbox: BoundingBox {
+                x: 1.0,
+                y: 1.0,
+                width: 2.0,
+                height: 2.0,
+            },
+            class_label: "target".into(),
+            confidence: 0.8,
+            track_id: Some(3),
+            assoc_confidence: Some(0.4),
+            lock_state: Some(LockState::Lost),
+        };
+        let bytes = rmp_serde::to_vec_named(&d).unwrap();
+        let back: OldReader = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(back.track_id, Some(3));
+        assert_eq!(back.class_label, "target");
     }
 
     #[test]

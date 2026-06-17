@@ -153,10 +153,20 @@ def test_detection_batch_msgpack_field_names_match_rust():
         "detections",
     }
     det = raw["detections"][0]
-    assert set(det.keys()) == {"bbox", "class_label", "confidence", "track_id"}
+    assert set(det.keys()) == {
+        "bbox",
+        "class_label",
+        "confidence",
+        "track_id",
+        "assoc_confidence",
+        "lock_state",
+    }
     assert set(det["bbox"].keys()) == {"x", "y", "width", "height"}
     assert det["class_label"] == "weed"
     assert det["track_id"] is None
+    # The optional lock fields default-absent: present as keys but nil.
+    assert det["assoc_confidence"] is None
+    assert det["lock_state"] is None
     assert DetectionBatch.from_msgpack(b.to_msgpack()) == b
 
 
@@ -176,8 +186,22 @@ def test_detection_dict_shape_aligns_with_sidecar_protocol():
         confidence=0.9,
         track_id=7,
     )
+    # The optional lock fields default-absent on both sides.
+    assert det.assoc_confidence is None
+    assert det.lock_state is None
     # And the round-trip back to a dict preserves the contract keys.
     assert det.to_dict() == raw
+
+    # When the sidecar scores association, the lock fields round-trip too.
+    raw_locked = detection_dict(
+        x=1.0, y=2.0, width=3.0, height=4.0,
+        class_label="weed", confidence=0.9, track_id=7,
+        assoc_confidence=0.55, lock_state="uncertain",
+    )
+    det_locked = Detection.from_dict(raw_locked)
+    assert det_locked.assoc_confidence == 0.55
+    assert det_locked.lock_state == "uncertain"
+    assert det_locked.to_dict() == raw_locked
 
 
 # ---------------------------------------------------------------------------

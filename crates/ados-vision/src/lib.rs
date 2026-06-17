@@ -26,6 +26,10 @@
 //! - [`detection_bus`] — the `/run/ados/vision-detections.sock` broadcast that
 //!   re-publishes every detection batch as length-prefixed msgpack so the API
 //!   process can forward it to the browser over a WebSocket.
+//! - [`tracker`] — a single-object visual tracker that turns the noisy per-frame
+//!   detection stream into one stable identity by filling `track_id` on the
+//!   canonical detection type (the lock primitive follow-me / framing /
+//!   target-lock consumers read).
 //! - [`config`] — the `vision:` block of the agent config.
 
 pub mod backend;
@@ -34,4 +38,5 @@ pub mod detection_bus;
 pub mod engine;
 pub mod ring;
 pub mod source;
+pub mod tracker;
 pub mod visionsock;

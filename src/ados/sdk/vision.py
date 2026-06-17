@@ -491,7 +491,9 @@ class Detection:
     """One detection from a model.
 
     Field names match the shared contract: ``bbox``, ``class_label``,
-    ``confidence``, ``track_id``. The same shape the inference sidecar emits.
+    ``confidence``, ``track_id``, ``assoc_confidence``, ``lock_state``. The same
+    shape the inference sidecar emits. The two lock fields are optional and
+    default-absent so they round-trip with producers/readers that predate them.
     """
 
     bbox: BoundingBox
@@ -499,6 +501,14 @@ class Detection:
     confidence: float
     track_id: int | None = None
     """Stable track id across frames (tracking models only)."""
+    assoc_confidence: float | None = None
+    """How confident the tracker is that this detection is the same object as
+    its ``track_id`` (0..1). ``None`` when the source does not score
+    association. Distinct from ``confidence`` (the class/object detection)."""
+    lock_state: str | None = None
+    """Discrete identity-lock state this frame: ``"locked"`` | ``"uncertain"``
+    | ``"lost"`` (lowercase, matching the wire enum). ``None`` when the source
+    does not report a lock state."""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -506,6 +516,12 @@ class Detection:
             "class_label": self.class_label,
             "confidence": float(self.confidence),
             "track_id": self.track_id,
+            "assoc_confidence": (
+                float(self.assoc_confidence)
+                if self.assoc_confidence is not None
+                else None
+            ),
+            "lock_state": self.lock_state,
         }
 
     @classmethod
@@ -517,6 +533,16 @@ class Detection:
             track_id=(
                 int(raw["track_id"])
                 if raw.get("track_id") is not None
+                else None
+            ),
+            assoc_confidence=(
+                float(raw["assoc_confidence"])
+                if raw.get("assoc_confidence") is not None
+                else None
+            ),
+            lock_state=(
+                str(raw["lock_state"])
+                if raw.get("lock_state") is not None
                 else None
             ),
         )

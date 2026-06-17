@@ -302,6 +302,8 @@ mod tests {
                 class_label: "weed".into(),
                 confidence: 0.5,
                 track_id: None,
+                assoc_confidence: None,
+                lock_state: None,
             }],
         };
         engine.capture(batch.clone());

@@ -152,11 +152,17 @@ def detection_dict(
     class_label: str,
     confidence: float,
     track_id: int | None = None,
+    assoc_confidence: float | None = None,
+    lock_state: str | None = None,
 ) -> dict[str, Any]:
     """Build one detection mapping in the Rust ``Detection`` shape.
 
     The ``bbox`` is pixel-space, origin top-left, in the frame's own
     resolution, matching ``ados_protocol::framebus::BoundingBox``.
+
+    ``assoc_confidence`` (0..1) and ``lock_state`` (``"locked"`` |
+    ``"uncertain"`` | ``"lost"``) are optional and default-absent so a sidecar
+    that does not score association round-trips with readers that predate them.
     """
     return {
         "bbox": {
@@ -168,6 +174,10 @@ def detection_dict(
         "class_label": class_label,
         "confidence": float(confidence),
         "track_id": track_id,
+        "assoc_confidence": (
+            float(assoc_confidence) if assoc_confidence is not None else None
+        ),
+        "lock_state": lock_state,
     }
 
 
