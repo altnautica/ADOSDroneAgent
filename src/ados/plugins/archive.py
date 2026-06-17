@@ -6,7 +6,8 @@ Archive layout (zip, no compression for binary stability):
     SIGNATURE                       optional, format below
     agent/                          optional, agent half
         wheel/<plugin>-<ver>-py3-none-any.whl
-        py/                         OR loose Python source for inprocess plugins
+        src/                         OR loose Python source root (src-layout)
+        py/                         OR loose Python source root (flat)
     gcs/                            optional, GCS half
         dist/index.js
         dist/style.css
