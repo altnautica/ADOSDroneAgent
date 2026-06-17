@@ -257,11 +257,33 @@ where
         pairing_paths,
     );
 
+    // Native-vs-residual gates for the profile/flag-conditional route groups,
+    // resolved once at startup (the profile + the flag are fixed for the process).
+    // Wi-Fi client WRITES are served natively only on a ground station — that is the
+    // only profile that runs the ados-net daemon binding wifi-cmd.sock; on a drone
+    // they fall through to the residual's in-process nmcli handler. The PIC /
+    // gamepad / Bluetooth writes reach the Rust ados-pic / ados-input daemons, which
+    // bind their sockets only when hid-rust is enabled; off that, they fall through
+    // to the residual's in-process handlers. Registering these natively where their
+    // daemon is absent would 503/500 instead of proxying to the working residual.
+    let net_native = {
+        let cfg = crate::config::PairingConfig::load_from(&paths.config_path);
+        crate::profile::current_profile_and_role(&cfg.agent.profile).0 == "ground-station"
+    };
+    let hid_native = paths
+        .config_path
+        .parent()
+        .map(|d| d.join("hid-rust-enabled").exists())
+        .unwrap_or(false);
+
     // The Unix edge: the bare Router, no auth. The LAN edge: the same Router
     // wrapped with the rate-limit + auth layer keyed on the shared pairing
     // reader (so a route and the gate read one short-TTL-cached posture).
-    let unix_router = unix_app(build_router(state.clone()));
-    let tcp_router = tcp_app(build_router(state), Arc::clone(&pairing));
+    let unix_router = unix_app(build_router(state.clone(), net_native, hid_native));
+    let tcp_router = tcp_app(
+        build_router(state, net_native, hid_native),
+        Arc::clone(&pairing),
+    );
 
     // Bind every listener up front so a bind failure surfaces here. The LAN front
     // binds an AF_INET and (best-effort) an AF_INET6 socket on the same port, so a

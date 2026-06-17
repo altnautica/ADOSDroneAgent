@@ -89,8 +89,8 @@ pub fn detail(status: StatusCode, message: impl Into<String>) -> Response {
 /// degrades cleanly to a FastAPI-shaped `{"detail"}` when that upstream is
 /// absent), so the front serves the migrated routes natively and proxies the
 /// rest while the migration is in flight.
-pub fn build_router(state: AppState) -> Router {
-    Router::new()
+pub fn build_router(state: AppState, net_native: bool, hid_native: bool) -> Router {
+    let mut router = Router::new()
         .route("/healthz", get(system::healthz))
         .route("/api/version", get(system::get_version))
         .route("/api/status", get(status::get_status))
@@ -302,21 +302,6 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/network/client/configured",
             get(network_client_read::get_client_configured),
         )
-        // Wi-Fi client writes (profile-agnostic): join / leave / forget, each
-        // forwarded to the native uplink daemon's command socket. The autoconnect
-        // toggle stays proxied (the daemon socket has no autoconnect op).
-        .route(
-            "/api/v1/network/client/join",
-            put(network_write::put_client_join),
-        )
-        .route(
-            "/api/v1/network/client",
-            delete(network_write::delete_client),
-        )
-        .route(
-            "/api/v1/network/client/configured/:name",
-            delete(network_write::delete_client_configured),
-        )
         // MAC-pin read: the per-adapter stable-MAC verdicts from the on-disk state
         // file (a pure read, the same file the pin write resolves a candidate from).
         .route(
@@ -331,8 +316,8 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/network/mac/:iface",
             delete(mac_pin::delete_mac_pin),
         )
-        // Ground-station network writes: AP config + share-uplink toggle + the
-        // Wi-Fi-client autoconnect flag (ethernet/modem PUTs share their read paths).
+        // Ground-station network writes: AP config + share-uplink toggle
+        // (ethernet/modem PUTs share their read paths).
         .route(
             "/api/v1/ground-station/network/ap",
             put(gs_network_write::put_network_ap),
@@ -340,10 +325,6 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/ground-station/network/share_uplink",
             put(gs_network_write::put_network_share_uplink),
-        )
-        .route(
-            "/api/v1/network/client/configured/:name/autoconnect",
-            put(network_write::put_client_autoconnect),
         )
         // Ground-station mesh + WFB-pair writes (role/mesh-config PUTs share their
         // read paths): gateway preference + the WFB rx-key pair/unpair.
@@ -381,43 +362,72 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/ground-station/ui/screens",
             put(gs_ui_write::put_ui_screens),
-        )
-        // Ground-station PIC arbiter + Bluetooth + gamepad writes (the ados-hid socket).
-        .route(
-            "/api/v1/ground-station/pic/claim",
-            post(gs_pic::post_pic_claim),
-        )
-        .route(
-            "/api/v1/ground-station/pic/release",
-            post(gs_pic::post_pic_release),
-        )
-        .route(
-            "/api/v1/ground-station/pic/confirm-token",
-            post(gs_pic::post_pic_confirm_token),
-        )
-        .route(
-            "/api/v1/ground-station/pic/heartbeat",
-            post(gs_pic::post_pic_heartbeat),
-        )
-        .route(
-            "/api/v1/ground-station/gamepads/primary",
-            put(gs_gamepad_write::put_gamepad_primary),
-        )
-        .route(
-            "/api/v1/ground-station/bluetooth/scan",
-            post(gs_bluetooth::post_bluetooth_scan),
-        )
-        .route(
-            "/api/v1/ground-station/bluetooth/pair",
-            post(gs_bluetooth::post_bluetooth_pair),
-        )
-        .route(
-            "/api/v1/ground-station/bluetooth/:mac",
-            delete(gs_bluetooth::delete_bluetooth),
-        )
-        // Everything else: reverse-proxy to the residual Python.
-        .fallback(proxy_to_residual)
-        .with_state(state)
+        );
+
+    // Wi-Fi client writes (profile-agnostic) are served natively only where the
+    // ados-net uplink daemon runs (a ground station); elsewhere the route is not
+    // registered and falls through to the residual's in-process nmcli handler.
+    if net_native {
+        router = router
+            .route(
+                "/api/v1/network/client/join",
+                put(network_write::put_client_join),
+            )
+            .route(
+                "/api/v1/network/client",
+                delete(network_write::delete_client),
+            )
+            .route(
+                "/api/v1/network/client/configured/:name",
+                delete(network_write::delete_client_configured),
+            )
+            .route(
+                "/api/v1/network/client/configured/:name/autoconnect",
+                put(network_write::put_client_autoconnect),
+            );
+    }
+
+    // PIC arbiter + gamepad + Bluetooth writes reach the Rust ados-pic / ados-input
+    // daemons over their sockets, which exist only when hid-rust is enabled;
+    // otherwise the routes fall through to the residual's in-process handlers.
+    if hid_native {
+        router = router
+            .route(
+                "/api/v1/ground-station/pic/claim",
+                post(gs_pic::post_pic_claim),
+            )
+            .route(
+                "/api/v1/ground-station/pic/release",
+                post(gs_pic::post_pic_release),
+            )
+            .route(
+                "/api/v1/ground-station/pic/confirm-token",
+                post(gs_pic::post_pic_confirm_token),
+            )
+            .route(
+                "/api/v1/ground-station/pic/heartbeat",
+                post(gs_pic::post_pic_heartbeat),
+            )
+            .route(
+                "/api/v1/ground-station/gamepads/primary",
+                put(gs_gamepad_write::put_gamepad_primary),
+            )
+            .route(
+                "/api/v1/ground-station/bluetooth/scan",
+                post(gs_bluetooth::post_bluetooth_scan),
+            )
+            .route(
+                "/api/v1/ground-station/bluetooth/pair",
+                post(gs_bluetooth::post_bluetooth_pair),
+            )
+            .route(
+                "/api/v1/ground-station/bluetooth/:mac",
+                delete(gs_bluetooth::delete_bluetooth),
+            );
+    }
+
+    // Everything else: reverse-proxy to the residual Python.
+    router.fallback(proxy_to_residual).with_state(state)
 }
 
 #[cfg(test)]
