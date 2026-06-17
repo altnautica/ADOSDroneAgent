@@ -685,10 +685,14 @@ async def run_daily_loop(ctx: Any) -> None:
     board = ctx.board
     device_id = config.agent.device_id
     current_board_id = board.name if board else None
+    current_board_tier = board.tier if board else None
 
     log.info("auto_update_loop_started")
 
-    supervisor = PluginSupervisor(current_board_id=current_board_id)
+    supervisor = PluginSupervisor(
+        current_board_id=current_board_id,
+        current_board_tier=current_board_tier,
+    )
     try:
         supervisor.discover()
     except Exception as exc:  # noqa: BLE001

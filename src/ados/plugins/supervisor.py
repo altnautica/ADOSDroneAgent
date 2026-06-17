@@ -113,10 +113,12 @@ class PluginSupervisor:
         install_dir: Path | None = None,
         require_signed: bool = True,
         current_board_id: str | None = None,
+        current_board_tier: int | None = None,
     ) -> None:
         self._install_dir = install_dir or PLUGINS_INSTALL_DIR
         self._require_signed = require_signed
         self._current_board_id = current_board_id
+        self._current_board_tier = current_board_tier
         self._installs: list[PluginInstall] = []
         self._builtin: dict[str, PluginManifest] = {}
 
@@ -420,6 +422,19 @@ class PluginSupervisor:
             raise SupervisorError(
                 f"plugin {manifest.id} does not support board "
                 f"{self._current_board_id}"
+            )
+        # min_tier floor: refuse when the plugin needs a higher compute
+        # class than the current board provides. Lenient when either the
+        # floor or the board tier is unknown, matching supported_boards.
+        min_tier = manifest.compatibility.min_tier
+        if (
+            min_tier is not None
+            and self._current_board_tier is not None
+            and self._current_board_tier < min_tier
+        ):
+            raise SupervisorError(
+                f"plugin {manifest.id} requires compute tier {min_tier}; "
+                f"this board is tier {self._current_board_tier}"
             )
         if (
             manifest.agent is not None

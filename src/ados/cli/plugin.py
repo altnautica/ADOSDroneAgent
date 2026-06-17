@@ -83,7 +83,25 @@ def _emit_err(
 
 
 def _make_supervisor(*, allow_unsigned: bool = False) -> PluginSupervisor:
-    sup = PluginSupervisor(require_signed=not allow_unsigned)
+    # Detect the board so the supervisor can enforce board-id and
+    # compute-tier compatibility gates. Detection is best-effort: if it
+    # fails the supervisor falls back to lenient (no board/tier floor).
+    board_id: str | None = None
+    board_tier: int | None = None
+    try:
+        from ados.hal.detect import detect_board
+
+        board = detect_board()
+        if board is not None:
+            board_id = board.name
+            board_tier = board.tier
+    except Exception:  # noqa: BLE001 — detection is advisory, never fatal
+        pass
+    sup = PluginSupervisor(
+        require_signed=not allow_unsigned,
+        current_board_id=board_id,
+        current_board_tier=board_tier,
+    )
     sup.discover()
     return sup
 

@@ -241,3 +241,93 @@ agent:
     sup.discover()
     with pytest.raises(SupervisorError):
         sup.install_archive(archive_path)
+
+
+def _build_min_tier_archive(
+    tmp_path: Path, min_tier: int, plugin_id: str = "com.example.tiered"
+) -> Path:
+    """Build a plugin archive whose compatibility declares a min_tier floor."""
+    manifest_yaml = f"""\
+schema_version: 1
+id: {plugin_id}
+version: 0.1.0
+name: Tiered
+license: GPL-3.0-or-later
+risk: low
+compatibility:
+  ados_version: ">=0.0.0"
+  min_tier: {min_tier}
+agent:
+  entrypoint: agent/plugin.py
+  isolation: subprocess
+  permissions: []
+"""
+    archive_path = tmp_path / f"{plugin_id}.adosplug"
+    with zipfile.ZipFile(archive_path, "w") as zf:
+        zf.writestr(MANIFEST_FILENAME, manifest_yaml)
+        zf.writestr("agent/plugin.py", "# stub\n")
+    return archive_path
+
+
+def test_min_tier_blocks_install_on_under_tier_board(
+    isolated_paths, tmp_path: Path
+):
+    """A board below the plugin's min_tier floor is refused with a reason."""
+    archive = _build_min_tier_archive(tmp_path, min_tier=4)
+    sup = PluginSupervisor(
+        install_dir=isolated_paths["install_dir"],
+        require_signed=False,
+        current_board_tier=2,
+    )
+    sup.discover()
+    with pytest.raises(SupervisorError, match="requires compute tier 4"):
+        sup.install_archive(archive)
+
+
+def test_min_tier_allows_install_at_or_above_tier(
+    isolated_paths, tmp_path: Path
+):
+    """A board at or above the floor installs normally."""
+    archive = _build_min_tier_archive(tmp_path, min_tier=2)
+    sup = PluginSupervisor(
+        install_dir=isolated_paths["install_dir"],
+        require_signed=False,
+        current_board_tier=3,
+    )
+    sup.discover()
+    with patch("ados.plugins.supervisor.subprocess.run") as run_mock:
+        run_mock.return_value = MagicMock(returncode=0, stderr="")
+        result = sup.install_archive(archive)
+    assert result.plugin_id == "com.example.tiered"
+
+
+def test_absent_min_tier_installs_as_before(isolated_paths, tmp_path: Path):
+    """No min_tier means no floor: install succeeds even on a low tier."""
+    archive = _build_archive(tmp_path)  # baseline manifest, no min_tier
+    sup = PluginSupervisor(
+        install_dir=isolated_paths["install_dir"],
+        require_signed=False,
+        current_board_tier=1,
+    )
+    sup.discover()
+    with patch("ados.plugins.supervisor.subprocess.run") as run_mock:
+        run_mock.return_value = MagicMock(returncode=0, stderr="")
+        result = sup.install_archive(archive)
+    assert result.plugin_id == "com.example.basic"
+
+
+def test_min_tier_lenient_when_board_tier_unknown(
+    isolated_paths, tmp_path: Path
+):
+    """An unknown board tier never blocks, even with a high floor declared."""
+    archive = _build_min_tier_archive(tmp_path, min_tier=4)
+    sup = PluginSupervisor(
+        install_dir=isolated_paths["install_dir"],
+        require_signed=False,
+        current_board_tier=None,
+    )
+    sup.discover()
+    with patch("ados.plugins.supervisor.subprocess.run") as run_mock:
+        run_mock.return_value = MagicMock(returncode=0, stderr="")
+        result = sup.install_archive(archive)
+    assert result.plugin_id == "com.example.tiered"

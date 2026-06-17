@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from ados.plugins.capabilities import (
     AGENT_CAPABILITIES,
+    CAPABILITY_CATALOG,
     ENFORCED_AGENT_CAPABILITIES,
     is_known_agent_capability,
 )
@@ -21,11 +22,25 @@ NEW_AGENT_CAPS = (
     "process.spawn",
 )
 
+# The current size of the generated agent capability catalog. The catalog is the
+# single source of truth (generated from capabilities.toml); this test guards
+# that the count does not change unnoticed, while the internal-consistency check
+# below proves the catalog and its metadata table agree.
+EXPECTED_AGENT_CAPABILITY_COUNT = 41
 
-def test_agent_capability_count_is_40() -> None:
-    """35 prior entries + five plugin-substrate caps (button.subscribe,
-    flight.guided_setpoint, mavlink.tunnel, radio.aux_stream, display.oled.page) = 40."""
-    assert len(AGENT_CAPABILITIES) == 40
+
+def test_agent_capability_count() -> None:
+    """The agent catalog is the source of truth (generated from
+    ``capabilities.toml``). Assert its size and that the catalog and its
+    metadata table are internally consistent (no orphans, no duplicates), so a
+    drift between the two is caught here rather than at import time."""
+    # No duplicates: a frozenset can't hold them, but assert the count matches
+    # the de-duplicated set explicitly so an accidental TOML duplicate (which the
+    # codegen would collapse) is visible as a count drop.
+    assert len(AGENT_CAPABILITIES) == len(set(AGENT_CAPABILITIES))
+    assert len(AGENT_CAPABILITIES) == EXPECTED_AGENT_CAPABILITY_COUNT
+    # The catalog and its metadata table describe the same set of capabilities.
+    assert set(AGENT_CAPABILITIES) == set(CAPABILITY_CATALOG.keys())
 
 
 def test_new_agent_capabilities_present() -> None:

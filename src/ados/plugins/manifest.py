@@ -461,6 +461,16 @@ class Compatibility(_StrictModel):
     gcs_version: str | None = None
     supported_boards: list[str] = Field(default_factory=list)
 
+    min_tier: int | None = Field(None, ge=1, le=4)
+    """Minimum compute-class tier the plugin needs (1=basic … 4=highest).
+
+    Optional and additive: when absent there is no tier floor and any
+    board passes (lenient, matching the ``supported_boards`` empty-list
+    behavior). When set, the supervisor refuses install/enable on a board
+    whose detected tier is below this value. A board with an unknown tier
+    is never blocked, so the gate only bites when both the floor and the
+    board tier are known."""
+
 
 class HardwareRequirements(_StrictModel):
     """Optional hardware-side requirements surfaced in the install dialog.

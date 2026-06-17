@@ -184,6 +184,28 @@ def test_round_trip_preserves_v2_fields() -> None:
     )
 
 
+def test_min_tier_parses() -> None:
+    """A manifest with compatibility.min_tier parses and exposes the value."""
+    src = _v1_baseline_dict()
+    src["compatibility"]["min_tier"] = 3
+    m = PluginManifest.from_yaml_text(_yaml(src))
+    assert m.compatibility.min_tier == 3
+
+
+def test_min_tier_absent_defaults_none() -> None:
+    """A manifest without min_tier has no tier floor (lenient default)."""
+    m = PluginManifest.from_yaml_text(_yaml(_v1_baseline_dict()))
+    assert m.compatibility.min_tier is None
+
+
+def test_min_tier_out_of_range_rejected() -> None:
+    """min_tier is bounded to the 1..4 compute-class range."""
+    bad = _v1_baseline_dict()
+    bad["compatibility"]["min_tier"] = 5
+    with pytest.raises(ManifestError):
+        PluginManifest.from_yaml_text(_yaml(bad))
+
+
 def test_schema_dict_emits_new_definitions() -> None:
     from ados.plugins.manifest import schema_dict
 
