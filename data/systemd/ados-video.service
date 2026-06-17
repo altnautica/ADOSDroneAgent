@@ -2,6 +2,13 @@
 Description=ADOS Video Pipeline
 After=ados-mavlink.service
 PartOf=ados-supervisor.service
+# Video capture/encode runs on the air side only; the installer fetches the
+# binary on the drone profile, never on a ground station (a receiver). Gate the
+# unit on the binary's presence so a node that did not fetch it skips cleanly
+# instead of crash-looping "binary missing" forever under Restart=always. The
+# installer's health gate is the loud failure for a genuinely missing binary on
+# a profile that SHOULD have it.
+ConditionPathExists=/opt/ados/bin/ados-video
 # No start-limit: a USB camera that wedges off the bus (cheap UVC modules
 # mishandle resume) must never make systemd give up and leave the pipeline
 # inactive. The native orchestrator already backs off internally and the

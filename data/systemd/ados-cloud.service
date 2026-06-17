@@ -2,6 +2,10 @@
 Description=ADOS Cloud Relay (MQTT + Convex Heartbeat)
 After=ados-mavlink.service
 PartOf=ados-supervisor.service
+# Skip cleanly when the binary was not fetched for this profile rather than
+# crash-looping "binary missing"; the installer's health gate is the loud
+# failure for a binary that SHOULD be present.
+ConditionPathExists=/opt/ados/bin/ados-cloud
 StartLimitInterval=60s
 StartLimitBurst=5
 
