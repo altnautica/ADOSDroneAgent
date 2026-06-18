@@ -1,7 +1,7 @@
 # ADOS Dashboard
 
 Browser-side dashboard for the ADOS Drone Agent. Single-page React app
-served by the agent's FastAPI service at port 8080.
+served by the agent's HTTP front at port 8080.
 
 ## Stack
 

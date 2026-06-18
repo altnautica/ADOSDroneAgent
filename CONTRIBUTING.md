@@ -100,7 +100,7 @@ src/                # Python runtime
   hal/            # Hardware detection and board profiles
   plugins/        # Plugin system (Python entry points)
   sdk/            # Python SDK (ados package)
-  api/            # REST API (FastAPI)
+  api/            # REST routes (Python feature service)
 ```
 
 Each service runs as a systemd unit. Plugins extend functionality via Python or
