@@ -86,7 +86,7 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 # the same listener Router is served on a unix socket and a TCP port.
 axum = "0.7"
 tower = "0.4"
-tower-http = { version = "0.5", features = ["trace"] }
+tower-http = { version = "0.5", features = ["trace", "cors"] }
 # hyper 1 + the tokio glue serve the same axum Router on the trusted unix
 # socket (a per-connection accept loop) and the LAN TCP port. The http /
 # http-body-util / bytes crates carry the request/response and streaming-body

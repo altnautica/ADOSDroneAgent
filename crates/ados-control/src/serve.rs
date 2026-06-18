@@ -36,7 +36,8 @@ use hyper_util::server::conn::auto::Builder as ConnBuilder;
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::oneshot;
-use tower::Service;
+use tower::{Service, ServiceBuilder};
+use tower_http::cors::CorsLayer;
 
 use crate::auth::{self, PairingState, RateLimiter};
 use crate::routes::detail;
@@ -165,7 +166,20 @@ pub fn tcp_app(router: Router, pairing: Arc<PairingState>) -> Router {
         pairing,
         rate: Arc::new(RateLimiter::default_control()),
     };
-    router.layer(middleware::from_fn_with_state(edge, tcp_edge))
+    // CORS wraps OUTSIDE the auth layer (ServiceBuilder applies the first layer
+    // outermost). A browser cross-origin call to this LAN edge sends a custom
+    // `X-ADOS-Key` header, which forces a preflight `OPTIONS` that carries no
+    // key — the CORS layer must answer it before `tcp_edge` can 401 it, and it
+    // stamps `Access-Control-Allow-Origin` onto every response (incl. auth
+    // rejections) so the GCS reads the real status instead of a CORS error.
+    // Auth stays the X-ADOS-Key (CORS is not a security boundary here), so any
+    // GCS origin is allowed. Restores the CORS the FastAPI front carried before
+    // the native front took over :8080.
+    router.layer(
+        ServiceBuilder::new()
+            .layer(CorsLayer::permissive())
+            .layer(middleware::from_fn_with_state(edge, tcp_edge)),
+    )
 }
 
 /// Bind the Unix listener, removing a stale socket and tightening the mode to
