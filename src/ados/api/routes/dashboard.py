@@ -181,22 +181,23 @@ def _video_slice(app: Any) -> dict[str, Any]:
             }
         )
 
-    mediamtx_alive = False
+    # Readiness is decided by the authoritative :9997 paths-list (a publisher is
+    # really delivering only when the `main` path is ready WITH a source), NOT by
+    # a flaky 1s WHEP GET whose only positive signal is a 405 ("bound", not
+    # "streaming"). This is the fix for "video keeps disappearing": a slow WHEP
+    # response under SBC load used to flip video to no_camera even while the
+    # paths-list (already fetched) proved the stream up.
+    mediamtx_ready = False
     track_info: dict[str, Any] | None = None
     try:
-        from ados.api.routes.video._common import (
-            mediamtx_track_info_sync,
-            mediamtx_whep_alive_sync,
-        )
+        from ados.api.routes.video._common import mediamtx_ready_sync
 
-        mediamtx_alive = mediamtx_whep_alive_sync()
-        if mediamtx_alive:
-            track_info = mediamtx_track_info_sync()
+        mediamtx_ready, track_info = mediamtx_ready_sync()
     except Exception:
-        mediamtx_alive = False
+        mediamtx_ready = False
         track_info = None
 
-    if mediamtx_alive:
+    if mediamtx_ready:
         state["state"] = "running"
     elif _video_devices_present():
         state["state"] = "ready"

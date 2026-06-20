@@ -47,6 +47,17 @@ use transport::{
 const RECONNECT_MIN: Duration = Duration::from_secs(1);
 const RECONNECT_MAX: Duration = Duration::from_secs(30);
 
+/// A decoded HEARTBEAT older than this means the FC link is open but the
+/// autopilot is no longer talking: the transport may still be up (the serial
+/// node is open, bytes may even be flowing) but no fresh HEARTBEAT has arrived,
+/// so the link is NOT confirmed alive. A port that opens at a fixed baud but
+/// never sees a HEARTBEAT (a wrong baud, an unpowered FC, a cable on the wrong
+/// pins) reads as transport-open-but-not-alive rather than connected. The
+/// window is generous relative to ArduPilot's 1 Hz HEARTBEAT so a single
+/// dropped frame never flips the state. "Presence is not proof": an open
+/// transport is necessary but not sufficient to declare the FC connected.
+const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(4);
+
 /// Frame fan-out channel capacity (raw frames awaiting consumers).
 const FRAME_CHANNEL_CAP: usize = 1024;
 
@@ -75,6 +86,13 @@ pub struct FcConnection {
     port: Mutex<String>,
     baud: AtomicU32,
     last_msg_at: Mutex<Instant>,
+    /// Monotonic clock of the last decoded HEARTBEAT, distinct from
+    /// `last_msg_at` (which bumps on ANY inbound frame bytes, including garbage
+    /// that happens to form a frame). `None` until the first HEARTBEAT decodes
+    /// on the current process. Drives the heartbeat-freshness gate that decides
+    /// whether the link is alive, not merely transport-open. Reset to `None` on
+    /// link teardown so a stale value from a prior session never reads as alive.
+    last_heartbeat_at: Mutex<Option<Instant>>,
     stream_interval: Mutex<Duration>,
     last_stream_req: Mutex<Option<Instant>>,
     param_priming: AtomicBool,
@@ -106,6 +124,7 @@ impl FcConnection {
             port: Mutex::new(String::new()),
             baud: AtomicU32::new(0),
             last_msg_at: Mutex::new(Instant::now()),
+            last_heartbeat_at: Mutex::new(None),
             stream_interval: Mutex::new(STREAM_DEFAULT),
             last_stream_req: Mutex::new(None),
             param_priming: AtomicBool::new(false),
@@ -121,14 +140,72 @@ impl FcConnection {
         self.frame_tx.subscribe()
     }
 
-    pub fn connected(&self) -> bool {
+    /// Whether the FC transport is open: the serial node / network socket has
+    /// been opened and not yet torn down. This is NOT proof the FC is talking —
+    /// see [`Self::mavlink_alive`]. Kept distinct so a consumer can render
+    /// "port open, no MAVLink" separately from "no port".
+    pub fn transport_open(&self) -> bool {
         self.connected.load(Ordering::Relaxed)
+    }
+    /// Seconds since the last decoded HEARTBEAT, or `None` when none has been
+    /// seen on the current process. The freshness signal the alive gate reads.
+    pub async fn heartbeat_age_s(&self) -> Option<f64> {
+        self.last_heartbeat_at
+            .lock()
+            .await
+            .map(|t| t.elapsed().as_secs_f64())
+    }
+    /// Whether a fresh HEARTBEAT has decoded within [`HEARTBEAT_TIMEOUT`]. The
+    /// demo loop has no real HEARTBEAT clock but drives synthetic telemetry, so
+    /// it reports alive whenever the transport is open (the port label `demo`).
+    pub async fn mavlink_alive(&self) -> bool {
+        if &*self.port.lock().await == "demo" {
+            return self.connected.load(Ordering::Relaxed);
+        }
+        match *self.last_heartbeat_at.lock().await {
+            Some(t) => t.elapsed() < HEARTBEAT_TIMEOUT,
+            None => false,
+        }
+    }
+    /// The gated truth: the FC is connected only when the transport is open AND
+    /// a fresh HEARTBEAT has been decoded. "Presence is not proof" — an open
+    /// serial port at a configured baud is not enough; the autopilot must be
+    /// talking. Replaces the old transport-open-only `connected()` for the
+    /// published `fc_connected` extra.
+    pub async fn connected(&self) -> bool {
+        self.transport_open() && self.mavlink_alive().await
     }
     pub async fn port(&self) -> String {
         self.port.lock().await.clone()
     }
     pub fn baud(&self) -> u32 {
         self.baud.load(Ordering::Relaxed)
+    }
+    /// The configured FC transport class for the snapshot: `serial`, `udp`,
+    /// `tcp`, or `auto` (empty `serial_port` → discovery). Derived from the
+    /// config's `source` field, falling back to the shape of `serial_port` for a
+    /// config that predates the explicit field (a `udp:`/`tcp:` prefix is a
+    /// network transport; a non-empty path is serial; empty is auto-detect).
+    pub fn source(&self) -> &'static str {
+        match self.cfg.source.trim().to_ascii_lowercase().as_str() {
+            "serial" => "serial",
+            "udp" => "udp",
+            "tcp" => "tcp",
+            "auto" => "auto",
+            // Unset / unknown: infer from the connection string shape.
+            _ => {
+                let port = self.cfg.serial_port.trim();
+                if port.is_empty() {
+                    "auto"
+                } else if port.starts_with("udp:") {
+                    "udp"
+                } else if port.starts_with("tcp:") {
+                    "tcp"
+                } else {
+                    "serial"
+                }
+            }
+        }
     }
     pub fn param_priming(&self) -> bool {
         self.param_priming.load(Ordering::Relaxed)
@@ -184,14 +261,17 @@ impl FcConnection {
                 }
                 _ = cancel.notified() => {
                     self.connected.store(false, Ordering::Relaxed);
+                    *self.last_heartbeat_at.lock().await = None;
                     *self.writer.lock().await = None;
                     return;
                 }
             }
 
             // Link dropped (read EOF/error or a write failure): reset state and
-            // reconnect.
+            // reconnect. Clearing the heartbeat clock means the freshly re-opened
+            // link reads as not-alive until a real HEARTBEAT arrives again.
             self.connected.store(false, Ordering::Relaxed);
+            *self.last_heartbeat_at.lock().await = None;
             *self.writer.lock().await = None;
             self.param_priming.store(false, Ordering::Relaxed);
             *self.param_sweep_started.lock().await = None;
@@ -325,11 +405,16 @@ impl FcConnection {
                     }
                 }
                 if let Ok((header, msg)) = mavlink::parse_any(&frame) {
-                    // Learn the FC system id from its (non-GCS) heartbeats.
+                    // Learn the FC system id from its (non-GCS) heartbeats, and
+                    // stamp the heartbeat-freshness clock the alive gate reads.
+                    // Only a real FC HEARTBEAT (not our own companion one) bumps
+                    // the clock, so a port that opens but never hears the
+                    // autopilot stays not-alive.
                     if let MavMessage::HEARTBEAT(_) = &msg {
                         if header.system_id != self.cfg.system_id {
                             self.target_system
                                 .store(header.system_id, Ordering::Relaxed);
+                            *self.last_heartbeat_at.lock().await = Some(Instant::now());
                         }
                     }
                     let now = now_iso();
@@ -453,5 +538,135 @@ impl FcConnection {
                 .collect(),
             Err(_) => Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod liveness_tests {
+    use super::*;
+    use crate::param_cache::ParamCache;
+    use crate::state::VehicleState;
+
+    fn conn_with(cfg: MavlinkConfig) -> std::sync::Arc<FcConnection> {
+        let state = std::sync::Arc::new(Mutex::new(VehicleState::default()));
+        let params = std::sync::Arc::new(Mutex::new(ParamCache::new(
+            "/tmp/ados-liveness-params.json",
+        )));
+        FcConnection::new(cfg, state, params)
+    }
+
+    #[tokio::test]
+    async fn fresh_connection_is_transport_closed_and_not_alive() {
+        let c = conn_with(MavlinkConfig::default());
+        assert!(!c.transport_open());
+        assert!(!c.mavlink_alive().await);
+        assert!(!c.connected().await);
+        assert!(c.heartbeat_age_s().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn transport_open_without_a_heartbeat_is_not_connected() {
+        // The exact bug: the port opens but no HEARTBEAT decodes → the link is
+        // transport-open but NOT alive, so fc_connected must be false.
+        let c = conn_with(MavlinkConfig::default());
+        c.connected.store(true, Ordering::Relaxed);
+        assert!(c.transport_open());
+        assert!(!c.mavlink_alive().await, "no heartbeat → not alive");
+        assert!(
+            !c.connected().await,
+            "transport open alone is not connected"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fresh_heartbeat_makes_an_open_transport_connected() {
+        let c = conn_with(MavlinkConfig::default());
+        c.connected.store(true, Ordering::Relaxed);
+        *c.last_heartbeat_at.lock().await = Some(Instant::now());
+        assert!(c.mavlink_alive().await);
+        assert!(c.connected().await);
+        let age = c
+            .heartbeat_age_s()
+            .await
+            .expect("age present after a heartbeat");
+        assert!((0.0..1.0).contains(&age));
+    }
+
+    #[tokio::test]
+    async fn a_stale_heartbeat_reads_not_alive() {
+        let c = conn_with(MavlinkConfig::default());
+        c.connected.store(true, Ordering::Relaxed);
+        *c.last_heartbeat_at.lock().await =
+            Some(Instant::now() - (HEARTBEAT_TIMEOUT + Duration::from_secs(1)));
+        assert!(!c.mavlink_alive().await, "stale heartbeat → not alive");
+        assert!(!c.connected().await);
+    }
+
+    #[test]
+    fn source_infers_from_serial_port_shape_when_unset() {
+        // An empty `source` (a config that predates the field) is inferred from
+        // the connection-string shape so the picker still reflects reality.
+        // Empty port → auto-detect.
+        assert_eq!(
+            conn_source(MavlinkConfig {
+                source: String::new(),
+                serial_port: String::new(),
+                ..MavlinkConfig::default()
+            }),
+            "auto"
+        );
+        // A udp:/tcp: prefix is a network transport.
+        assert_eq!(
+            conn_source(MavlinkConfig {
+                source: String::new(),
+                serial_port: "udp:127.0.0.1:14550".into(),
+                ..MavlinkConfig::default()
+            }),
+            "udp"
+        );
+        assert_eq!(
+            conn_source(MavlinkConfig {
+                source: String::new(),
+                serial_port: "tcp:127.0.0.1:5760".into(),
+                ..MavlinkConfig::default()
+            }),
+            "tcp"
+        );
+        // A bare device path is serial.
+        assert_eq!(
+            conn_source(MavlinkConfig {
+                source: String::new(),
+                serial_port: "/dev/ttyACM0".into(),
+                ..MavlinkConfig::default()
+            }),
+            "serial"
+        );
+    }
+
+    #[test]
+    fn source_honors_an_explicit_value() {
+        // An explicit pick is reported verbatim (NOT re-inferred): "auto" means
+        // the operator chose agent-decides, even with a serial_port present.
+        assert_eq!(
+            conn_source(MavlinkConfig {
+                source: "auto".into(),
+                serial_port: "/dev/ttyACM0".into(),
+                ..MavlinkConfig::default()
+            }),
+            "auto"
+        );
+        for kind in ["serial", "udp", "tcp", "auto"] {
+            assert_eq!(
+                conn_source(MavlinkConfig {
+                    source: kind.into(),
+                    ..MavlinkConfig::default()
+                }),
+                kind
+            );
+        }
+    }
+
+    fn conn_source(cfg: MavlinkConfig) -> &'static str {
+        conn_with(cfg).source()
     }
 }

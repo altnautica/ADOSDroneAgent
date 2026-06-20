@@ -28,6 +28,32 @@ CODE_TTL = 24 * 60 * 60
 PAIRING_STATE_PATH = str(PAIRING_JSON)
 
 
+def _normalize_convex_site_url(url: str) -> str:
+    """Normalize an operator-entered Convex URL toward the SITE (HTTP-actions)
+    origin where ``/pairing/register`` is served.
+
+    Convex serves client functions on the BACKEND origin and HTTP actions on the
+    SITE origin. On the managed cloud these are different hostnames
+    (``convex.altnautica.com`` vs ``convex-site.altnautica.com``); on a
+    self-hosted deployment they are the same host on different ports — the
+    backend on ``:3210`` and the site on ``:3211``. An operator who pastes the
+    backend URL would 404 the register call, so map a known backend coordinate to
+    its site sibling. A URL that is already a site origin (or one we cannot
+    confidently rewrite) is returned unchanged so we never break a correct entry.
+    """
+    cleaned = (url or "").strip().rstrip("/")
+    if not cleaned:
+        return ""
+    # Self-hosted: the backend runs on :3210, the HTTP-actions site on :3211.
+    if ":3210" in cleaned:
+        return cleaned.replace(":3210", ":3211")
+    # Managed cloud: the backend host has a `-site` sibling for HTTP actions.
+    # Only rewrite the exact managed backend host; leave anything else alone.
+    if "://convex.altnautica.com" in cleaned:
+        return cleaned.replace("://convex.altnautica.com", "://convex-site.altnautica.com")
+    return cleaned
+
+
 class PairingManager:
     """Manages pairing state, code generation, and API key validation.
 
@@ -268,6 +294,7 @@ async def claim_with_external_code(app: object, code: str) -> dict:
 
     cleaned = "".join(ch for ch in (code or "").upper() if ch.isalnum())
     if len(cleaned) != CODE_LENGTH:
+        log.warning("pairing_accept_failed", error="invalid_code", code_len=len(cleaned))
         return {
             "ok": False,
             "error": "invalid_code",
@@ -277,6 +304,7 @@ async def claim_with_external_code(app: object, code: str) -> dict:
     pairing_manager = getattr(app, "pairing_manager", None)
     config = getattr(app, "config", None)
     if pairing_manager is None or config is None:
+        log.warning("pairing_accept_failed", error="agent_not_ready")
         return {
             "ok": False,
             "error": "agent_not_ready",
@@ -284,6 +312,7 @@ async def claim_with_external_code(app: object, code: str) -> dict:
         }
 
     if pairing_manager.is_paired:
+        log.warning("pairing_accept_failed", error="already_paired")
         return {
             "ok": False,
             "error": "already_paired",
@@ -291,20 +320,40 @@ async def claim_with_external_code(app: object, code: str) -> dict:
         }
 
     server = getattr(config, "server", None)
+    mode = getattr(server, "mode", "") if server is not None else ""
     convex_url = ""
     if server is not None:
-        if getattr(server, "mode", "") == "self_hosted":
+        if mode == "self_hosted":
             self_hosted = getattr(server, "self_hosted", None)
             convex_url = (getattr(self_hosted, "url", "") or "").rstrip("/")
         else:
             cloud = getattr(server, "cloud", None)
             convex_url = (getattr(cloud, "url", "") or "").rstrip("/")
+    # The HTTP actions (/pairing/register) live on the Convex SITE origin, not the
+    # backend origin. Normalize whatever the operator entered toward the site
+    # origin so a backend-URL paste does not 404 the register call.
+    convex_url = _normalize_convex_site_url(convex_url)
     if not convex_url:
+        # The default local posture (no URL) lands here. Make the silence loud:
+        # the dashboard reads {ok:false} and shows the message, and the box leaves
+        # a durable log line so RCA is `ados logs query`, not nothing.
+        log.warning("pairing_accept_failed", error="no_backend", mode=mode or "local")
         return {
             "ok": False,
             "error": "no_backend",
-            "message": "Cloud backend URL is not configured.",
+            "message": (
+                "No cloud backend is configured. This agent is in local mode — "
+                "pair it directly from Mission Control by hostname or IP instead."
+            ),
         }
+
+    log.info(
+        "pairing_accept_attempt",
+        code=cleaned,
+        convex_url=convex_url,
+        mode=mode or "local",
+        device_id=config.agent.device_id,
+    )
 
     discovery = getattr(app, "discovery_service", None)
     short_id = config.agent.device_id[:6].lower()
@@ -330,7 +379,12 @@ async def claim_with_external_code(app: object, code: str) -> dict:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(f"{convex_url}/pairing/register", json=body)
     except httpx.HTTPError as exc:
-        log.warning("pairing_external_register_failed", error=str(exc))
+        log.warning(
+            "pairing_accept_failed",
+            error="network",
+            convex_url=convex_url,
+            detail=str(exc),
+        )
         return {
             "ok": False,
             "error": "network",
@@ -338,6 +392,12 @@ async def claim_with_external_code(app: object, code: str) -> dict:
         }
 
     if resp.status_code != 200:
+        log.warning(
+            "pairing_accept_failed",
+            error="backend_error",
+            convex_url=convex_url,
+            backend_status=resp.status_code,
+        )
         return {
             "ok": False,
             "error": "backend_error",
@@ -347,6 +407,7 @@ async def claim_with_external_code(app: object, code: str) -> dict:
     try:
         result = resp.json()
     except ValueError:
+        log.warning("pairing_accept_failed", error="bad_response", convex_url=convex_url)
         return {"ok": False, "error": "bad_response", "message": "Backend response was not JSON."}
 
     if isinstance(result, dict) and result.get("error"):
@@ -359,10 +420,12 @@ async def claim_with_external_code(app: object, code: str) -> dict:
                 "The pairing code has expired. Generate a fresh one."
             ),
         }
+        log.warning("pairing_accept_failed", error=err, convex_url=convex_url)
         return {"ok": False, "error": err, "message": msg_map.get(err, err)}
 
     matched = bool(result.get("autoMatched") or result.get("alreadyClaimed"))
     if not matched:
+        log.warning("pairing_accept_failed", error="code_unknown", convex_url=convex_url)
         return {
             "ok": False,
             "error": "code_unknown",
@@ -374,6 +437,7 @@ async def claim_with_external_code(app: object, code: str) -> dict:
 
     owner_id = result.get("userId") or result.get("ownerId") or "cloud"
     pairing_manager.claim(owner_id, api_key)
+    log.info("pairing_accept_succeeded", owner_id=owner_id, device_id=config.agent.device_id)
 
     if discovery is not None:
         try:

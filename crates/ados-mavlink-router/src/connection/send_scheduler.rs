@@ -105,7 +105,7 @@ impl FcConnection {
     /// been idle (stalled link re-requests fast; healthy link relaxes toward
     /// the max), then re-sends the per-message rates when the interval elapses.
     pub async fn tick_streams(&self) {
-        if !self.connected() {
+        if !self.transport_open() {
             return;
         }
         let idle = self.last_msg_at.lock().await.elapsed();
@@ -152,7 +152,7 @@ impl FcConnection {
     /// Rate-limited to one PARAM_REQUEST_LIST per [`PARAM_RATE_LIMIT`]; flips
     /// the timeout flag when the deadline passes with no parameters cached.
     pub async fn tick_param_sweep(&self) {
-        if !self.connected() {
+        if !self.transport_open() {
             return;
         }
         // Progress check: clear priming once the cache is fully populated.
@@ -254,10 +254,11 @@ mod tests {
         );
 
         // The write path must NOT declare the FC permanently disconnected; the
-        // run loop owns `connected` and clears it only on a real teardown.
+        // run loop owns the transport-open flag and clears it only on a real
+        // teardown.
         assert!(
-            conn.connected(),
-            "send_bytes must not latch connected=false on a transient write error"
+            conn.transport_open(),
+            "send_bytes must not latch the transport closed on a transient write error"
         );
 
         // The reconnect signal must have been raised so run() rebuilds the link.

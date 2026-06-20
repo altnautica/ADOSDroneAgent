@@ -33,11 +33,21 @@ use serde_json::{json, Map, Value};
 
 use crate::state::AppState;
 
-/// The four runtime-only keys the state snapshot carries alongside the vehicle
-/// state. `/api/telemetry` strips them so it surfaces only the vehicle fields the
-/// GCS expects; `/api/status` reads them as the FC connection triple + the
-/// service uptime. Mirrors the Python `_ipc_only_keys` set.
-const IPC_ONLY_KEYS: [&str; 4] = ["fc_connected", "fc_port", "fc_baud", "service_uptime"];
+/// The runtime-only keys the state snapshot carries alongside the vehicle state.
+/// `/api/telemetry` strips them so it surfaces only the vehicle fields the GCS
+/// expects; `/api/status` reads them as the FC connection triple + the service
+/// uptime + the FC-liveness detail (transport_open / mavlink_alive /
+/// heartbeat_age_s / fc_source). Mirrors the Python `_ipc_only_keys` set.
+const IPC_ONLY_KEYS: [&str; 8] = [
+    "fc_connected",
+    "fc_port",
+    "fc_baud",
+    "service_uptime",
+    "transport_open",
+    "mavlink_alive",
+    "heartbeat_age_s",
+    "fc_source",
+];
 
 /// External binaries the video pipeline may use, checked by presence on `PATH`.
 /// Name + whether it is required, mirroring `check_video_dependencies`. The
@@ -82,6 +92,13 @@ pub async fn get_status(State(state): State<AppState>) -> Json<Value> {
     let health = derive_health(signals.as_ref());
     let board = read_board(&state.board_path);
 
+    // The FC-liveness detail the GCS lane reads (camelCase, like the heartbeat):
+    // transportOpen + mavlinkAlive split the truth so a broken-but-open link
+    // renders "port open · no MAVLink", heartbeatAgeS validates the link is live,
+    // fcSource reflects the picker choice. Present alongside the legacy snake
+    // fc_connected (which is now the gated truth, not transport-open).
+    let liveness = fc_liveness_from_snapshot(snapshot.as_ref());
+
     let mut body = json!({
         "version": state.agent_version(),
         "uptime_seconds": uptime,
@@ -90,6 +107,10 @@ pub async fn get_status(State(state): State<AppState>) -> Json<Value> {
         "fc_connected": fc_connected,
         "fc_port": fc_port,
         "fc_baud": fc_baud,
+        "transportOpen": liveness.transport_open,
+        "mavlinkAlive": liveness.mavlink_alive,
+        "heartbeatAgeS": liveness.heartbeat_age_s,
+        "fcSource": liveness.fc_source,
         "dependencies": Value::Object(dependencies),
     });
 
@@ -282,6 +303,48 @@ pub(crate) fn fc_from_snapshot(snapshot: Option<&Value>) -> (Value, Value, Value
     (json!(connected), port, baud, uptime)
 }
 
+/// The FC-liveness detail the GCS lane reads, split out of the snapshot extras
+/// the MAVLink router publishes. `transport_open` is whether the FC transport is
+/// open; `mavlink_alive` is whether a fresh HEARTBEAT decoded within the router's
+/// timeout; `heartbeat_age_s` is the seconds since the last HEARTBEAT (`null`
+/// when none yet); `fc_source` is the configured transport class (`auto` /
+/// `serial` / `udp` / `tcp`). Together they let the GCS show "port open · no
+/// MAVLink" distinctly from connected, and validate the link is actually live.
+pub(crate) struct FcLiveness {
+    pub transport_open: bool,
+    pub mavlink_alive: bool,
+    pub heartbeat_age_s: Value,
+    pub fc_source: Value,
+}
+
+/// Read the FC-liveness extras out of a snapshot. An absent snapshot or absent
+/// fields fall back to the safe defaults: transport closed, not alive, no
+/// heartbeat age, source `"auto"` (the config default). Shared with
+/// `/api/status/full`.
+pub(crate) fn fc_liveness_from_snapshot(snapshot: Option<&Value>) -> FcLiveness {
+    let obj = snapshot.and_then(Value::as_object);
+    FcLiveness {
+        transport_open: obj
+            .and_then(|m| m.get("transport_open"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        mavlink_alive: obj
+            .and_then(|m| m.get("mavlink_alive"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        heartbeat_age_s: obj
+            .and_then(|m| m.get("heartbeat_age_s"))
+            .cloned()
+            .filter(|v| !v.is_null())
+            .unwrap_or(Value::Null),
+        fc_source: obj
+            .and_then(|m| m.get("fc_source"))
+            .cloned()
+            .filter(|v| !v.is_null())
+            .unwrap_or_else(|| json!("auto")),
+    }
+}
+
 /// True when `name` is found as an executable on `PATH`. Mirrors
 /// `shutil.which(name)` for the no-explicit-path case (the dependency names are
 /// bare command names, never absolute paths): walk each `PATH` entry, join the
@@ -376,6 +439,53 @@ mod tests {
         assert_eq!(port, json!("/dev/ttyACM0"));
         assert_eq!(baud, json!(115200));
         assert_eq!(uptime, Some(json!(42.0)));
+    }
+
+    #[test]
+    fn fc_liveness_defaults_when_the_snapshot_is_absent() {
+        let l = fc_liveness_from_snapshot(None);
+        assert!(!l.transport_open);
+        assert!(!l.mavlink_alive);
+        assert_eq!(l.heartbeat_age_s, Value::Null);
+        assert_eq!(l.fc_source, json!("auto"));
+    }
+
+    #[test]
+    fn fc_liveness_reads_the_snapshot_extras() {
+        let snap = json!({
+            "transport_open": true,
+            "mavlink_alive": false,
+            "heartbeat_age_s": 7.5,
+            "fc_source": "serial",
+        });
+        let l = fc_liveness_from_snapshot(Some(&snap));
+        // The exact bug it guards: transport open but MAVLink not alive.
+        assert!(l.transport_open);
+        assert!(!l.mavlink_alive);
+        assert_eq!(l.heartbeat_age_s, json!(7.5));
+        assert_eq!(l.fc_source, json!("serial"));
+    }
+
+    #[test]
+    fn telemetry_strips_the_fc_liveness_extras() {
+        let snapshot = json!({
+            "armed": true,
+            "transport_open": true,
+            "mavlink_alive": true,
+            "heartbeat_age_s": 0.5,
+            "fc_source": "serial",
+        });
+        let tel = project_telemetry(Some(snapshot));
+        let obj = tel.as_object().unwrap();
+        assert!(obj.contains_key("armed"));
+        for k in [
+            "transport_open",
+            "mavlink_alive",
+            "heartbeat_age_s",
+            "fc_source",
+        ] {
+            assert!(!obj.contains_key(k), "{k} must be stripped from telemetry");
+        }
     }
 
     #[test]

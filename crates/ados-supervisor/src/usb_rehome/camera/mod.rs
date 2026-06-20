@@ -419,6 +419,15 @@ impl CameraUsbRecovery {
             contention_peer: &'a str,
             updated_at_unix: u64,
         }
+        // Power contention is a FAULT worth surfacing only while the camera is
+        // actually in a recovery episode. On the healthy/idle path the shared
+        // hub is a LATENT topology risk, not a fault — reporting
+        // `state:"idle" + power_contention:true` (while the camera streams fine)
+        // is a false positive the GCS would badge. `self.power_contention` is
+        // detected on the healthy tick (the only time the camera's topology can
+        // be resolved); we keep it latent and expose it on the wire only once a
+        // recovery is in flight, so the drop can be diagnosed as contention.
+        let contention_active = self.power_contention && self.state != "idle";
         let snap = Snap {
             camera_usb_recovery_state: &self.state,
             case: &self.case,
@@ -430,8 +439,12 @@ impl CameraUsbRecovery {
             hub: &self.hub,
             port: self.port,
             ppps_capable: self.ppps,
-            power_contention: self.power_contention,
-            contention_peer: &self.contention_peer,
+            power_contention: contention_active,
+            contention_peer: if contention_active {
+                self.contention_peer.as_str()
+            } else {
+                ""
+            },
             updated_at_unix: os::now_unix(),
         };
         if let Err(e) = os::write_json_atomic(std::path::Path::new(os::SIDECAR_PATH), &snap, 0o644)

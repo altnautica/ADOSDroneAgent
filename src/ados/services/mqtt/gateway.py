@@ -131,13 +131,19 @@ class MqttGateway:
                     qos=0,
                 )
 
-                # Publish status
+                # Publish status. fc_connected is the router's GATED truth from
+                # the state snapshot (transport open AND a fresh HEARTBEAT), NOT
+                # `bool(last_heartbeat)` — that ISO string is non-empty forever
+                # after the first heartbeat ever decoded, so it reported connected
+                # long after the link went dead. "Presence is not proof."
                 status = {
                     "device_id": self._device_id,
                     "name": self.config.agent.name,
                     "tier": self.config.agent.tier,
                     "armed": self.state.armed,
-                    "fc_connected": bool(self.state.last_heartbeat),
+                    "fc_connected": bool(self.state.snapshot.get("fc_connected", False)),
+                    "mavlink_alive": bool(self.state.snapshot.get("mavlink_alive", False)),
+                    "heartbeat_age_s": self.state.snapshot.get("heartbeat_age_s"),
                 }
                 await asyncio.to_thread(
                     client.publish,

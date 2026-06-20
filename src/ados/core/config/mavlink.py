@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field, model_validator
 
 
@@ -20,6 +22,14 @@ class EndpointConfig(BaseModel):
 
 
 class MavlinkConfig(BaseModel):
+    # FC transport class the operator picked, surfaced as `fc_source` on the
+    # status snapshot so the GCS/setup picker reflects the live choice:
+    #   - `auto`   — discover + baud-probe any candidate serial port (the default)
+    #   - `serial` — use the configured `serial_port` + `baud_rate`
+    #   - `udp`/`tcp` — a network transport, with host:port carried in
+    #     `serial_port` as `udp:host:port` / `tcp:host:port`
+    # Default `auto` so an un-upgraded config behaves exactly as before.
+    source: Literal["auto", "serial", "udp", "tcp"] = "auto"
     serial_port: str = ""
     baud_rate: int = 57600
     system_id: int = 1

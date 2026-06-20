@@ -99,6 +99,27 @@ pub async fn get_time() -> Json<Value> {
     }))
 }
 
+/// `GET /api/ping` → `{pong: <server_epoch_ms>}`. A cheap, FC-independent
+/// control-plane echo: the GCS times the request round-trip around its own poll
+/// to measure transport RTT to the agent (the `controlRttMs` it surfaces next to
+/// the link badge). The body carries the agent's wall-clock millisecond stamp so
+/// a caller can also estimate one-way offset. Public (no key) so RTT can be
+/// measured before a key is held; never touches the FC or any service, so it is
+/// always 200 and adds no load. Distinct from `/api/time` (which reports
+/// nanosecond + monotonic stamps for glass-to-glass clock-offset estimation).
+pub async fn get_ping() -> Json<Value> {
+    Json(json!({ "pong": wall_clock_ms() }))
+}
+
+/// Wall-clock time in milliseconds since the Unix epoch (the `pong` stamp). A
+/// clock before the epoch clamps to zero rather than panicking.
+fn wall_clock_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
 /// Wall-clock time in nanoseconds since the Unix epoch, matching Python
 /// `time.time_ns()`. A clock before the epoch (never expected on a sane host)
 /// clamps to zero rather than panicking.
@@ -227,5 +248,21 @@ mod tests {
         // Off Linux this is false; on Linux it is a best-effort probe. Either way
         // the call must not panic.
         let _ = ntp_synced();
+    }
+
+    #[test]
+    fn wall_clock_ms_is_after_the_epoch() {
+        // Any sane host is well past 2020 (~1.6e12 ms since the epoch).
+        assert!(wall_clock_ms() > 1_600_000_000_000);
+    }
+
+    #[tokio::test]
+    async fn ping_returns_a_pong_millisecond_stamp() {
+        let Json(body) = get_ping().await;
+        let pong = body.get("pong").and_then(|v| v.as_u64());
+        assert!(
+            pong.is_some_and(|v| v > 1_600_000_000_000),
+            "pong: {body:?}"
+        );
     }
 }

@@ -4,6 +4,7 @@ agent:
   tier: "auto"
 
 mavlink:
+  source: "auto"
   serial_port: ""
   baud_rate: 57600
   system_id: 1

@@ -44,6 +44,7 @@ pub mod gs_wfb_write;
 pub mod guided;
 pub mod mac_adapters;
 pub mod mac_pin;
+pub mod mavlink_ports;
 pub mod network_client_read;
 pub mod network_write;
 pub mod pairing;
@@ -97,6 +98,13 @@ pub fn build_router(state: AppState, net_native: bool, hid_native: bool) -> Rout
         .route("/api/status", get(status::get_status))
         .route("/api/telemetry", get(status::get_telemetry))
         .route("/api/time", get(system::get_time))
+        // Control-plane RTT echo: a cheap FC-independent `{pong: epoch_ms}` the
+        // GCS times its round-trip around to surface controlRttMs next to the
+        // link badge. Public (no key), never touches the FC.
+        .route("/api/ping", get(system::get_ping))
+        // FC-source picker enumeration: the serial devices an FC could be on, for
+        // the setup webapp + GCS dropdown (a filesystem scan, never a probe).
+        .route("/api/mavlink/ports", get(mavlink_ports::list_ports))
         // Pairing: the node-identity probe + the local pairing handshake. info /
         // code / claim are public (the auth-exempt set); unpair requires the key.
         .route("/api/pairing/info", get(pairing::get_pairing_info))

@@ -26,6 +26,13 @@ _EXTRA_KEYS = frozenset(
         "fc_connected",
         "fc_port",
         "fc_baud",
+        # FC-liveness detail the router publishes alongside fc_connected: the
+        # transport-open / heartbeat-alive split, the heartbeat age, and the
+        # configured source. Runtime-only, so stripped from the telemetry view.
+        "transport_open",
+        "mavlink_alive",
+        "heartbeat_age_s",
+        "fc_source",
         "service_uptime",
         "param_priming",
         "param_sweep_timed_out",
@@ -250,7 +257,37 @@ class IpcFcConnection:
 
     @property
     def connected(self) -> bool:
+        # The router's gated truth: transport open AND a fresh HEARTBEAT. A port
+        # that opens but never hears the FC reads False here, not True.
         return bool(self._vs.snapshot.get("fc_connected", False))
+
+    @property
+    def transport_open(self) -> bool:
+        """Whether the FC transport (serial node / socket) is open, regardless of
+        whether the autopilot is talking. Distinct from ``connected``."""
+        return bool(self._vs.snapshot.get("transport_open", False))
+
+    @property
+    def mavlink_alive(self) -> bool:
+        """Whether a fresh MAVLink HEARTBEAT decoded within the router's window."""
+        return bool(self._vs.snapshot.get("mavlink_alive", False))
+
+    @property
+    def heartbeat_age_s(self) -> float | None:
+        """Seconds since the last decoded HEARTBEAT, or ``None`` when none yet."""
+        value = self._vs.snapshot.get("heartbeat_age_s")
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @property
+    def source(self) -> str:
+        """The configured FC transport class (``auto`` / ``serial`` / ``udp`` /
+        ``tcp``). Defaults to ``auto`` on a snapshot that predates the field."""
+        return str(self._vs.snapshot.get("fc_source", "auto") or "auto")
 
     @property
     def port(self):

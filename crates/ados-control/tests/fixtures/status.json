@@ -20,6 +20,10 @@
   "fc_baud": 0,
   "fc_connected": false,
   "fc_port": "",
+  "fcSource": "auto",
+  "heartbeatAgeS": null,
+  "mavlinkAlive": false,
+  "transportOpen": false,
   "health": {
     "cpu_percent": 0.0,
     "disk_percent": 3.0,

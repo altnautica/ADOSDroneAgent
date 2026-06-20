@@ -17,6 +17,9 @@ pub const CONFIG_YAML: &str = "/etc/ados/config.yaml";
 fn default_baud_rate() -> u32 {
     57600
 }
+fn default_source() -> String {
+    "auto".to_string()
+}
 fn default_system_id() -> u8 {
     1
 }
@@ -69,6 +72,14 @@ impl Default for EndpointConfig {
 /// The `mavlink:` config section.
 #[derive(Debug, Clone, Deserialize)]
 pub struct MavlinkConfig {
+    /// The FC transport class the operator picked: `auto` (discover + baud-probe
+    /// any candidate serial port), `serial` (the configured `serial_port` +
+    /// `baud_rate`), or `udp`/`tcp` (a network transport, with the host:port in
+    /// `serial_port` as `udp:host:port` / `tcp:host:port`). Default `auto` so an
+    /// un-upgraded config behaves exactly as before. Surfaced on the state
+    /// snapshot as `fc_source` so the GCS picker reflects the live choice.
+    #[serde(default = "default_source")]
+    pub source: String,
     #[serde(default)]
     pub serial_port: String,
     #[serde(default = "default_baud_rate")]
@@ -91,6 +102,7 @@ pub struct MavlinkConfig {
 impl Default for MavlinkConfig {
     fn default() -> Self {
         Self {
+            source: default_source(),
             serial_port: String::new(),
             baud_rate: default_baud_rate(),
             system_id: default_system_id(),
@@ -220,5 +232,25 @@ mod tests {
         let cfg = dir.path().join("config.yaml");
         write(&cfg, "mavlink:\n  ws_proxy_enforce_auth: true\n");
         assert!(MavlinkConfig::load_from(&cfg).ws_proxy_enforce_auth);
+    }
+
+    #[test]
+    fn source_defaults_to_auto_and_reads_explicit() {
+        let dir = tempfile::tempdir().unwrap();
+        // Missing file and an omitted field both default to "auto".
+        assert_eq!(
+            MavlinkConfig::load_from(&dir.path().join("nope.yaml")).source,
+            "auto"
+        );
+        let cfg = dir.path().join("config.yaml");
+        write(&cfg, "mavlink:\n  serial_port: /dev/ttyACM0\n");
+        assert_eq!(MavlinkConfig::load_from(&cfg).source, "auto");
+        // An explicit value is read verbatim.
+        let cfg2 = dir.path().join("config2.yaml");
+        write(
+            &cfg2,
+            "mavlink:\n  source: serial\n  serial_port: /dev/ttyACM0\n",
+        );
+        assert_eq!(MavlinkConfig::load_from(&cfg2).source, "serial");
     }
 }

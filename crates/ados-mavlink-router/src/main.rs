@@ -358,7 +358,27 @@ async fn build_extras(
     let expected = state.lock().await.param_count;
     let params_blob = params.lock().await.get_all();
     let mut extras = Map::new();
-    extras.insert("fc_connected".into(), json!(fc.connected()));
+    // The gated truth: fc_connected = transport_open && mavlink_alive. A port
+    // that opens but never hears a HEARTBEAT reads transport_open:true but
+    // fc_connected:false, so a broken link never shows "connected". Surface the
+    // two halves + the heartbeat age + the configured source so a consumer can
+    // render "port open · no MAVLink" distinctly and validate the link is live.
+    let transport_open = fc.transport_open();
+    let mavlink_alive = fc.mavlink_alive().await;
+    extras.insert(
+        "fc_connected".into(),
+        json!(transport_open && mavlink_alive),
+    );
+    extras.insert("transport_open".into(), json!(transport_open));
+    extras.insert("mavlink_alive".into(), json!(mavlink_alive));
+    extras.insert(
+        "heartbeat_age_s".into(),
+        fc.heartbeat_age_s()
+            .await
+            .map(|v| json!(v))
+            .unwrap_or(Value::Null),
+    );
+    extras.insert("fc_source".into(), json!(fc.source()));
     extras.insert("fc_port".into(), json!(fc.port().await));
     extras.insert("fc_baud".into(), json!(fc.baud()));
     extras.insert(

@@ -74,6 +74,9 @@ pub async fn get_full_status(State(state): State<AppState>, headers: HeaderMap) 
     let snapshot = state.state.snapshot();
     let (fc_connected, fc_port, fc_baud, snapshot_uptime) =
         crate::routes::status::fc_from_snapshot(snapshot.as_ref());
+    // The FC-liveness detail (read before `snapshot` is moved into the telemetry
+    // projection below): the same camelCase fields /api/status carries.
+    let fc_liveness = crate::routes::status::fc_liveness_from_snapshot(snapshot.as_ref());
     let uptime = snapshot_uptime.unwrap_or_else(|| json!(state.process_uptime_seconds()));
     let board = crate::routes::status::read_board(&state.board_path);
 
@@ -112,6 +115,13 @@ pub async fn get_full_status(State(state): State<AppState>, headers: HeaderMap) 
     payload.insert("fc_connected".to_string(), fc_connected);
     payload.insert("fc_port".to_string(), fc_port);
     payload.insert("fc_baud".to_string(), fc_baud);
+    payload.insert(
+        "transportOpen".to_string(),
+        json!(fc_liveness.transport_open),
+    );
+    payload.insert("mavlinkAlive".to_string(), json!(fc_liveness.mavlink_alive));
+    payload.insert("heartbeatAgeS".to_string(), fc_liveness.heartbeat_age_s);
+    payload.insert("fcSource".to_string(), fc_liveness.fc_source);
     payload.insert("services".to_string(), services);
     payload.insert("resources".to_string(), resources);
     payload.insert("video".to_string(), video);

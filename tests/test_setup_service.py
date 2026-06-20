@@ -141,8 +141,13 @@ class _Server:
     mqtt_password = ""
 
 
+class _Pairing:
+    convex_url = ""
+
+
 class _CloudChoiceConfig:
     server = _Server()
+    pairing = _Pairing()
 
 
 def test_cloud_choice_status_local_returns_minimal_record() -> None:
@@ -209,6 +214,11 @@ def test_apply_cloud_choice_self_hosted_persists_url_and_port() -> None:
     assert runtime.config.server.self_hosted.url == "https://convex.example.com"
     assert runtime.config.server.self_hosted.mqtt_broker == "mqtt.example.com"
     assert runtime.config.server.self_hosted.mqtt_port == 8884
+    # The backend URL is mirrored onto pairing.convex_url so the native cloud
+    # beacon (which reads pairing.convex_url only) can beacon. A generic host
+    # with no :3210 port and not the managed host is carried through unchanged
+    # (the operator is expected to have entered the HTTP-actions/site origin).
+    assert runtime.config.pairing.convex_url == "https://convex.example.com"
 
 
 def test_apply_cloud_choice_self_hosted_requires_url() -> None:

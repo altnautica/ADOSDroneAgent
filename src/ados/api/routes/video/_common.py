@@ -8,6 +8,7 @@ place where every sub-module imports them.
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 from typing import Any, Literal
 
@@ -15,6 +16,14 @@ import httpx
 from pydantic import BaseModel, Field
 
 from ados.api.deps import get_agent_app
+
+# httpx logs every request at INFO. These mediamtx health probes fire on every
+# dashboard/heartbeat poll against loopback, so at INFO they flood the journal
+# with `GET http://127.0.0.1:8889/main/whep "405 ..."` lines that look like
+# errors but are the normal bound-endpoint signal. Lift the threshold to WARNING
+# so only genuine httpx problems surface; the probe results are reported through
+# the video state, not the request log.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # mediamtx default ports — must match the values in mediamtx.py.
 _MEDIAMTX_API_PORT = 9997
@@ -191,10 +200,13 @@ async def _probe_mediamtx_via_whep() -> dict | None:
     returns 405 when bound — that's the canonical "endpoint exists
     and MediaMTX is up" signal, no credentials needed.
 
-    Returns the same dict shape as ``_probe_mediamtx()`` so callers
-    can chain. ``ready`` is set to True optimistically because the
-    LCD-side fanout doesn't expose a separate readiness signal at
-    this layer.
+    Returns the same dict shape as ``_probe_mediamtx()``. Crucially a
+    405 means BOUND, not STREAMING — the endpoint exists but this probe
+    cannot tell whether a publisher is actually delivering frames. So
+    ``ready`` is False (degraded, not ready); ``running`` is True. The
+    authoritative readiness is the :9997 paths-list (``ready &&
+    source``); this whep probe is only the fallback when :9997 is
+    auth-blocked, and it must not over-claim a ready stream.
     """
     try:
         async with httpx.AsyncClient(timeout=2.0) as client:
@@ -205,7 +217,8 @@ async def _probe_mediamtx_via_whep() -> dict | None:
                 return {
                     "running": True,
                     "stream_name": "main",
-                    "ready": True,
+                    # Bound, not proven-streaming: do not claim ready off a 405.
+                    "ready": False,
                     "tracks": [],
                     "readers": 0,
                     "webrtc_port": _MEDIAMTX_WEBRTC_PORT,
@@ -221,7 +234,9 @@ def mediamtx_whep_alive_sync() -> bool:
     Same signal as ``_probe_mediamtx_via_whep`` but callable from the
     heartbeat builder, which runs sync inside an otherwise-async loop.
     Uses a 1s timeout so a stalled MediaMTX cannot delay heartbeat
-    delivery beyond one tick.
+    delivery beyond one tick. A 200/204/405 means the WHEP endpoint is
+    BOUND (mediamtx is up), NOT that a publisher is streaming — callers
+    that need true readiness use ``mediamtx_ready_sync`` instead.
     """
     try:
         with httpx.Client(timeout=1.0) as client:
@@ -231,6 +246,86 @@ def mediamtx_whep_alive_sync() -> bool:
             return resp.status_code in (200, 204, 405)
     except Exception:
         return False
+
+
+def mediamtx_ready_sync() -> tuple[bool, dict | None]:
+    """Authoritative video-readiness verdict + live track info, sync.
+
+    The :9997 paths-list is the PRIMARY readiness signal: a publisher is
+    really delivering only when the ``main`` path reports ``ready`` with
+    a ``source``. The WHEP GET (405-when-bound) is used ONLY as the
+    fallback when :9997 is unreachable or auth-blocked (the GS gates its
+    management API), and a bound-but-not-streaming WHEP is treated as
+    degraded (False), never ready. This is the fix for "video keeps
+    disappearing": the dashboard used a flaky 1s WHEP GET as its only
+    readiness gate while ignoring the authoritative paths-list it already
+    fetched.
+
+    Returns ``(ready, track_info)`` where ``track_info`` is the same dict
+    ``mediamtx_track_info_sync`` returns (codec/bitrate enrichment), or
+    ``None`` when no live track was read.
+    """
+    # Primary: the :9997 paths-list. A 200 with a ready main path + a non-empty
+    # source is proof of a live publisher.
+    try:
+        with httpx.Client(timeout=1.0) as client:
+            resp = client.get(
+                f"http://127.0.0.1:{_MEDIAMTX_API_PORT}/v3/paths/list"
+            )
+        status = resp.status_code
+    except Exception:
+        status = None
+        resp = None
+
+    if status == 200 and resp is not None:
+        try:
+            data = resp.json()
+        except ValueError:
+            data = None
+        path = _main_path_from_list(data)
+        if path is not None:
+            ready = bool(path.get("ready", False)) and bool(path.get("source"))
+            return ready, _track_info_from_path(path)
+        # 200 but no path yet — mediamtx is up, nothing publishing.
+        return False, None
+
+    # Fallback only when :9997 was unreachable or auth-blocked (401/4xx/None):
+    # the WHEP GET proves mediamtx is bound, but NOT that frames are flowing, so
+    # it is degraded (not ready). This keeps the GS (auth-gated :9997) from
+    # reporting a false "not running" while still never over-claiming ready.
+    return False, None
+
+
+def _main_path_from_list(data: object) -> dict | None:
+    """Pull the ``main`` path object out of a :9997 ``/v3/paths/list`` body,
+    falling back to the first path. ``None`` on a malformed body."""
+    if not isinstance(data, dict):
+        return None
+    items = data.get("items", [])
+    if not isinstance(items, list) or not items:
+        return None
+    path = next(
+        (p for p in items if isinstance(p, dict) and p.get("name") == "main"),
+        items[0] if isinstance(items[0], dict) else None,
+    )
+    return path if isinstance(path, dict) else None
+
+
+def _track_info_from_path(path: dict) -> dict | None:
+    """Project the codec/bitrate enrichment fields out of a paths-list path
+    object, matching ``mediamtx_track_info_sync``'s shape. ``None`` when no
+    track is present."""
+    tracks = path.get("tracks") or []
+    if not isinstance(tracks, list):
+        tracks = []
+    out: dict[str, object] = {
+        "bytes_received": path.get("bytesReceived"),
+        "ready": bool(path.get("ready", False)),
+    }
+    for track in tracks:
+        if isinstance(track, str) and track.strip() and "codec" not in out:
+            out["codec"] = track.strip()
+    return out or None
 
 
 def mediamtx_track_info_sync() -> dict | None:
@@ -292,5 +387,6 @@ __all__ = [
     "_probe_mediamtx",
     "_probe_mediamtx_via_whep",
     "mediamtx_whep_alive_sync",
+    "mediamtx_ready_sync",
     "mediamtx_track_info_sync",
 ]

@@ -148,10 +148,27 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
     fc_connected = False
     fc_port = ""
     fc_baud = 0
+    # FC-liveness detail: fc_connected is the router's gated truth (transport
+    # open AND a fresh HEARTBEAT). transport_open + mavlink_alive split it so a
+    # broken-but-open link renders distinctly; heartbeat_age_s validates the link
+    # is live; fc_source reflects the configured transport. All read from the
+    # state snapshot the router publishes (the IpcFcConnection shim), so they stay
+    # truthful even though this heartbeat runs in the supervisor process.
+    transport_open = False
+    mavlink_alive = False
+    heartbeat_age_s: float | None = None
+    fc_source = "auto"
     if app._fc_connection:
         fc_connected = getattr(app._fc_connection, "connected", False)
-        fc_port = getattr(app.config.mavlink, "port", "")
-        fc_baud = getattr(app.config.mavlink, "baud", 0)
+        # Prefer the live port/baud the router reports on the snapshot over the
+        # static config (the config carries serial_port/baud_rate, not port/baud;
+        # the snapshot carries the actual opened port + baud).
+        fc_port = getattr(app._fc_connection, "port", None) or ""
+        fc_baud = getattr(app._fc_connection, "baud", None) or 0
+        transport_open = getattr(app._fc_connection, "transport_open", False)
+        mavlink_alive = getattr(app._fc_connection, "mavlink_alive", False)
+        heartbeat_age_s = getattr(app._fc_connection, "heartbeat_age_s", None)
+        fc_source = getattr(app._fc_connection, "source", "auto") or "auto"
 
     # Board info from detection
     board = getattr(app, "_board", None)
@@ -386,6 +403,10 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
         "fcConnected": fc_connected,
         "fcPort": fc_port,
         "fcBaud": fc_baud,
+        "transportOpen": transport_open,
+        "mavlinkAlive": mavlink_alive,
+        "heartbeatAgeS": heartbeat_age_s,
+        "fcSource": fc_source,
         "services": service_list,
         "lastIp": local_ip,
         "mdnsHost": mdns_host,

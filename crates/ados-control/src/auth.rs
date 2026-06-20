@@ -132,6 +132,7 @@ pub fn is_public(path: &str) -> bool {
     matches!(
         path,
         "/healthz"
+            | "/api/ping"
             | "/api/pairing/info"
             | "/api/pairing/code"
             | "/api/pairing/claim"

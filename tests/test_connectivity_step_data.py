@@ -137,10 +137,11 @@ class _FakeApp:
 
 
 class TestVideoSlice:
-    def test_running_when_mediamtx_alive(self, monkeypatch) -> None:
+    def test_running_when_mediamtx_ready(self, monkeypatch) -> None:
+        # Readiness is now the authoritative paths-list verdict (ready, track).
         monkeypatch.setattr(
-            "ados.api.routes.video._common.mediamtx_whep_alive_sync",
-            lambda: True,
+            "ados.api.routes.video._common.mediamtx_ready_sync",
+            lambda: (True, None),
         )
         monkeypatch.setattr(
             dashboard_route, "_video_devices_present", lambda: True
@@ -150,10 +151,13 @@ class TestVideoSlice:
         assert slice_["codec"] == "h264"
         assert slice_["width"] == 1920
 
-    def test_ready_when_camera_present_but_mediamtx_down(self, monkeypatch) -> None:
+    def test_ready_when_camera_present_but_mediamtx_not_ready(self, monkeypatch) -> None:
+        # mediamtx bound but no publisher streaming → not ready, but a camera
+        # device exists → "ready" (the prior 405-only gate would have flipped
+        # this incorrectly under load).
         monkeypatch.setattr(
-            "ados.api.routes.video._common.mediamtx_whep_alive_sync",
-            lambda: False,
+            "ados.api.routes.video._common.mediamtx_ready_sync",
+            lambda: (False, None),
         )
         monkeypatch.setattr(
             dashboard_route, "_video_devices_present", lambda: True
@@ -163,8 +167,8 @@ class TestVideoSlice:
 
     def test_no_camera_when_v4l2_empty(self, monkeypatch) -> None:
         monkeypatch.setattr(
-            "ados.api.routes.video._common.mediamtx_whep_alive_sync",
-            lambda: False,
+            "ados.api.routes.video._common.mediamtx_ready_sync",
+            lambda: (False, None),
         )
         monkeypatch.setattr(
             dashboard_route, "_video_devices_present", lambda: False
@@ -174,8 +178,8 @@ class TestVideoSlice:
 
     def test_glass_to_glass_default_preserved(self, monkeypatch) -> None:
         monkeypatch.setattr(
-            "ados.api.routes.video._common.mediamtx_whep_alive_sync",
-            lambda: True,
+            "ados.api.routes.video._common.mediamtx_ready_sync",
+            lambda: (True, None),
         )
         monkeypatch.setattr(
             dashboard_route, "_video_devices_present", lambda: True

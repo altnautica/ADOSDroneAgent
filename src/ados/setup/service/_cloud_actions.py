@@ -103,6 +103,18 @@ def apply_cloud_choice(  # noqa: C901
         sh = config.server.self_hosted
         sh.url = str(self_hosted.get("url") or "").strip()
         sh.mqtt_broker = str(self_hosted.get("mqtt_broker") or "").strip()
+        # Mirror the backend URL onto pairing.convex_url as the Convex SITE
+        # (HTTP-actions) origin: the native ados-cloud beacon reads
+        # pairing.convex_url ONLY, so without this a self-hosted pair would never
+        # beacon even though the relay is enabled (the "pairs but never beacons"
+        # bug). The accept/register POST normalizes the same way, so the two
+        # agree on which origin /pairing/register lives on. Guarded so a config
+        # object without a pairing section (a partial runtime) never raises.
+        pairing = getattr(config, "pairing", None)
+        if pairing is not None:
+            from ados.core.pairing import _normalize_convex_site_url
+
+            pairing.convex_url = _normalize_convex_site_url(sh.url)
         port_raw = self_hosted.get("mqtt_port")
         if port_raw is not None:
             try:

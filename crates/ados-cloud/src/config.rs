@@ -85,6 +85,18 @@ impl Default for CloudSection {
     }
 }
 
+/// The `server.self_hosted:` section: an operator's own Convex deployment. Only
+/// `url` is read here (the MQTT coordinates + api_key the relay reads live
+/// elsewhere). Used as the convex-URL fallback when `pairing.convex_url` is
+/// empty but the operator chose the self_hosted posture, so a self-hosted pair
+/// that only wrote `server.self_hosted.url` still beacons. Mirrors the Python
+/// `SelfHostedServerConfig`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SelfHostedSection {
+    #[serde(default)]
+    pub url: String,
+}
+
 /// The `server:` section: the cloud endpoint + the relay mode + transport.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServerSection {
@@ -92,6 +104,8 @@ pub struct ServerSection {
     pub mode: String,
     #[serde(default)]
     pub cloud: CloudSection,
+    #[serde(default)]
+    pub self_hosted: SelfHostedSection,
     #[serde(default = "default_mqtt_transport")]
     pub mqtt_transport: String,
     #[serde(default = "default_telemetry_rate")]
@@ -110,6 +124,7 @@ impl Default for ServerSection {
         ServerSection {
             mode: default_server_mode(),
             cloud: CloudSection::default(),
+            self_hosted: SelfHostedSection::default(),
             mqtt_transport: default_mqtt_transport(),
             telemetry_rate: default_telemetry_rate(),
             cloud_logs_enabled: false,
@@ -212,12 +227,29 @@ impl CloudConfig {
     /// Cloud relay is on only for an explicit cloud posture; absent, "local",
     /// or an unknown/typo mode all stay local-first and silent. An allowlist
     /// (not a denylist) so a typo'd mode fails CLOSED — it never beacons.
+    ///
+    /// `pairing.convex_url` is the canonical source. When it is empty but the
+    /// operator chose the self_hosted posture, fall back to
+    /// `server.self_hosted.url`: the setup writer historically wrote only the
+    /// latter, so without this fallback a self-hosted pair would never beacon
+    /// even though the relay is enabled (the "pairs but never beacons" bug).
     pub fn effective_convex_url(&self) -> String {
-        if self.cloud_relay_enabled() {
-            self.pairing.convex_url.clone()
-        } else {
-            String::new()
+        if !self.cloud_relay_enabled() {
+            return String::new();
         }
+        let primary = self.pairing.convex_url.trim();
+        if !primary.is_empty() {
+            return primary.to_string();
+        }
+        // Fallback: a self_hosted posture whose URL only landed in
+        // server.self_hosted.url (the pre-fix setup writer's behaviour).
+        if self.server.mode == "self_hosted" {
+            let fallback = self.server.self_hosted.url.trim();
+            if !fallback.is_empty() {
+                return fallback.to_string();
+            }
+        }
+        String::new()
     }
 
     /// Whether the configured server mode is an explicit cloud-relay posture.
@@ -397,5 +429,53 @@ pairing:
         assert!(cfg.effective_convex_url().is_empty());
         assert!(!cfg.cloud_relay_enabled());
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn self_hosted_url_is_the_fallback_when_pairing_convex_url_is_empty() {
+        // The "pairs but never beacons" case: a self_hosted posture whose URL
+        // only landed in server.self_hosted.url (no pairing.convex_url). The
+        // relay must still resolve a URL and beacon.
+        let yaml = "\
+server:
+  mode: self_hosted
+  self_hosted:
+    url: https://convex-site.operator.example
+";
+        let path = temp_yaml("selfhosted-fallback", yaml);
+        let cfg = CloudConfig::load_from(&path);
+        assert!(cfg.cloud_relay_enabled());
+        assert_eq!(
+            cfg.effective_convex_url(),
+            "https://convex-site.operator.example"
+        );
+        let _ = std::fs::remove_file(&path);
+
+        // pairing.convex_url still wins when both are present.
+        let yaml2 = "\
+server:
+  mode: self_hosted
+  self_hosted:
+    url: https://fallback.example
+pairing:
+  convex_url: https://primary.example
+";
+        let path2 = temp_yaml("selfhosted-primary-wins", yaml2);
+        let cfg2 = CloudConfig::load_from(&path2);
+        assert_eq!(cfg2.effective_convex_url(), "https://primary.example");
+        let _ = std::fs::remove_file(&path2);
+
+        // A cloud posture does NOT borrow the self_hosted URL (the fallback is
+        // self_hosted-only): empty pairing.convex_url under cloud → empty.
+        let yaml3 = "\
+server:
+  mode: cloud
+  self_hosted:
+    url: https://should-not-be-used.example
+";
+        let path3 = temp_yaml("cloud-no-selfhosted-borrow", yaml3);
+        let cfg3 = CloudConfig::load_from(&path3);
+        assert!(cfg3.effective_convex_url().is_empty());
+        let _ = std::fs::remove_file(&path3);
     }
 }

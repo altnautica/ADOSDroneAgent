@@ -66,6 +66,9 @@ fn native_routes() -> Vec<NativeRoute> {
         get("/api/status"),
         get("/api/telemetry"),
         get("/api/time"),
+        // Control-plane RTT echo + the FC-source picker enumeration.
+        get("/api/ping"),
+        get("/api/mavlink/ports"),
         // Pairing handshake.
         get("/api/pairing/info"),
         get("/api/pairing/code"),
@@ -379,7 +382,7 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            99,
+            101,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);
@@ -498,6 +501,9 @@ mod tests {
         // The original surface stays native.
         assert!(has(Method::GET, "/healthz"));
         assert!(has(Method::POST, "/api/command"));
+        // The control-plane ping + the FC-source picker enumeration.
+        assert!(has(Method::GET, "/api/ping"));
+        assert!(has(Method::GET, "/api/mavlink/ports"));
         // The WS-ticket mint is native (replaces the proxied Python route).
         assert!(has(Method::POST, "/api/_ws/ticket"));
         // The system-resources snapshot is native.
