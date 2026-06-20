@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from ados.core.pairing import _normalize_convex_site_url, claim_with_external_code
 
-
 # --- Convex SITE-origin normalization (the /pairing/register host) ---
 
 

@@ -33,7 +33,7 @@ class _FakeClient:
     def __init__(self, responses: dict[str, _FakeResponse]) -> None:
         self._responses = responses
 
-    def __enter__(self) -> "_FakeClient":
+    def __enter__(self) -> _FakeClient:
         return self
 
     def __exit__(self, *exc) -> None:
