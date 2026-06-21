@@ -51,17 +51,26 @@ impl LinkState {
 /// Precedence (highest first):
 ///   1. no WFB TX key on disk            → `unpaired`
 ///   2. a bind session is in flight      → `binding`
-///   3. loss > 50% or RSSI < -85 dBm     → `degraded`
-///   4. `tx_bytes` advanced in the last 5 s → `active`-equivalent `connected`
-///      reporting; the radio is injecting RF.
+///   3. a REAL measurement (decoded packets) shows loss > 50% or RSSI < -85 dBm
+///      → `degraded`
+///   4. `tx_bytes` advanced in the last 5 s → `connected` (the radio is
+///      injecting RF)
 ///   5. data packets are decoding        → `connected`
 ///   6. otherwise                        → `connecting`
 ///
 /// `tx_live` is true when the interface `tx_bytes` counter is non-zero and has
 /// moved within the last 5 s, the same liveness window the TX-health watchdog
 /// uses. It is the strongest "RF is leaving the antenna" signal, so it promotes
-/// the link to `connected` even before the stats RX has decoded a return packet
-/// (a drone-only rig with no rx.key never gets decode stats).
+/// the link to `connected` even before the stats RX has decoded a return packet.
+///
+/// The `degraded` verdict requires a REAL link measurement. The default
+/// `LinkStats` sentinel (rssi -100, 0 packets, empty timestamp) means "no return
+/// signal decoded" — NOT a bad link — and a transmit-dominant drone (its video
+/// reaches the peer, yet it decodes no inbound stream) sits on that sentinel.
+/// Calling the sentinel `degraded` reported a healthy injecting drone as
+/// degraded. The same `packets_received`-based real-measurement gate the
+/// reactive hop applies (`hop_supervisor::reactive_should_fire`) is used here so
+/// the status surface and the hop logic agree on what counts as a measurement.
 pub fn derive_link_state(
     tx_key_present: bool,
     bind_active: bool,
@@ -74,7 +83,11 @@ pub fn derive_link_state(
     if bind_active {
         return LinkState::Binding;
     }
-    if link.loss_percent > DEGRADED_LOSS_PERCENT || link.rssi_dbm < DEGRADED_RSSI_DBM {
+    // Only a decoded measurement can be judged degraded; the sentinel cannot.
+    let has_real_measurement = link.packets_received > 0;
+    if has_real_measurement
+        && (link.loss_percent > DEGRADED_LOSS_PERCENT || link.rssi_dbm < DEGRADED_RSSI_DBM)
+    {
         return LinkState::Degraded;
     }
     if tx_live {
@@ -260,12 +273,41 @@ mod tests {
     }
 
     #[test]
-    fn default_link_no_tx_is_degraded_by_rssi() {
-        // The raw default LinkStats has rssi -100 which is below the -85 floor,
-        // so an idle keyed rig with no tx activity surfaces as degraded — this
-        // matches Python's _update_state_from_stats on the default sentinel.
+    fn default_sentinel_no_tx_is_connecting_not_degraded() {
+        // The raw default LinkStats has rssi -100, but with 0 decoded packets it
+        // is the "no measurement" sentinel, not a real reading — so an idle keyed
+        // rig with no tx activity surfaces as connecting (trying), never degraded
+        // (a bad measured link). The degraded verdict needs a real decode.
         assert_eq!(
             derive_link_state(true, false, &LinkStats::default(), false),
+            LinkState::Connecting
+        );
+    }
+
+    #[test]
+    fn tx_live_on_sentinel_rssi_is_connected_not_degraded() {
+        // The transmit-dominant drone case: the default sentinel (rssi -100, 0
+        // packets) while the radio is injecting RF must report connected, NOT
+        // degraded. The drone's video reaches the peer; it simply decodes no
+        // return signal of its own, so the sentinel rssi must not mark it bad.
+        assert_eq!(
+            derive_link_state(true, false, &LinkStats::default(), true),
+            LinkState::Connected
+        );
+    }
+
+    #[test]
+    fn real_low_rssi_still_degraded_with_tx_live() {
+        // A genuine weak measured link (real decoded packets, rssi below the
+        // floor) is still degraded even while injecting — the gate only spares
+        // the no-measurement sentinel, not a real bad reading.
+        let link = LinkStats {
+            rssi_dbm: -92.0,
+            packets_received: 50,
+            ..LinkStats::default()
+        };
+        assert_eq!(
+            derive_link_state(true, false, &link, true),
             LinkState::Degraded
         );
     }

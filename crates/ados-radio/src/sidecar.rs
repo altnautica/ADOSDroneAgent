@@ -207,6 +207,15 @@ pub(crate) fn build_stats_value(
     // the peer id / paired-at / auto-pair flag from the persisted config block.
     let fingerprint = read_public_fingerprint(Path::new(WFB_TX_KEY));
     let paired = fingerprint.is_some();
+    // A real return-signal measurement requires a decoded packet. Without one
+    // the signal-strength fields are the default sentinel (rssi -100), not a
+    // reading — a transmit-dominant drone whose video reaches the peer but
+    // decodes no inbound stream sits here. Reporting them as null (no
+    // measurement) rather than -100 dBm keeps a healthy injecting drone from
+    // looking like a weak-signal link, and lets the GCS show its air-side hint.
+    // Same real-decode gate `derive_link_state` uses, so the state and the
+    // numbers agree.
+    let measured = link.packets_received > 0;
     let v = json!({
         "state": state,
         // The state-machine state, surfaced under its own key so the panel can
@@ -301,12 +310,15 @@ pub(crate) fn build_stats_value(
         // position alongside the live FEC so an adaptive step is legible).
         "recommended_tier_idx": bitrate.tier_idx,
         "recommended_tier_name": bitrate.tier_name,
-        // Link-quality block (from the stats wfb_rx; defaults until frames flow).
-        "rssi_dbm": link.rssi_dbm,
-        "rssi_min": link.rssi_min,
-        "rssi_max": link.rssi_max,
-        "noise_dbm": link.noise_dbm,
-        "snr_db": link.snr_db,
+        // Link-quality block (from the stats wfb_rx). Signal-strength fields are
+        // null until a return signal is actually decoded (see `measured` above)
+        // so the no-measurement sentinel never masquerades as a real reading;
+        // the counters stay 0 (honestly zero received).
+        "rssi_dbm": measured.then_some(link.rssi_dbm),
+        "rssi_min": measured.then_some(link.rssi_min),
+        "rssi_max": measured.then_some(link.rssi_max),
+        "noise_dbm": measured.then_some(link.noise_dbm),
+        "snr_db": measured.then_some(link.snr_db),
         "packets_received": link.packets_received,
         "packets_lost": link.packets_lost,
         "fec_recovered": link.fec_recovered,
@@ -554,8 +566,17 @@ mod tests {
         // channel_locked is the proof-derived value, not hardcoded true.
         assert_eq!(v["channel_locked"], true);
         assert_eq!(v["rf_unverified"], false);
-        // link_state mirrors the lifecycle state string.
+        // link_state mirrors the lifecycle state string. The default LinkStats
+        // sentinel (0 decoded packets) is a transmit-dominant drone injecting
+        // RF, not a degraded link, so it surfaces as connected.
         assert_eq!(v["link_state"], "connected");
+        // No return signal decoded → the signal-strength fields are null, not
+        // the -100 dBm sentinel, so a healthy injecting drone is never shown as
+        // a weak-signal link. The counters stay 0 (honestly zero received).
+        assert!(v["rssi_dbm"].is_null());
+        assert!(v["snr_db"].is_null());
+        assert!(v["noise_dbm"].is_null());
+        assert_eq!(v["packets_received"], 0);
         // Default RegSnapshot posture: unrestricted with no pinned region. The
         // cross-surface contract keys carry the honest operating-region state.
         assert_eq!(v["regPosture"], "unrestricted");
