@@ -37,8 +37,9 @@ use crate::state::AppState;
 /// `/api/telemetry` strips them so it surfaces only the vehicle fields the GCS
 /// expects; `/api/status` reads them as the FC connection triple + the service
 /// uptime + the FC-liveness detail (transport_open / mavlink_alive /
-/// heartbeat_age_s / fc_source). Mirrors the Python `_ipc_only_keys` set.
-const IPC_ONLY_KEYS: [&str; 8] = [
+/// heartbeat_age_s / fc_source / fc_link_hint). Mirrors the Python
+/// `_ipc_only_keys` set.
+const IPC_ONLY_KEYS: [&str; 9] = [
     "fc_connected",
     "fc_port",
     "fc_baud",
@@ -47,6 +48,7 @@ const IPC_ONLY_KEYS: [&str; 8] = [
     "mavlink_alive",
     "heartbeat_age_s",
     "fc_source",
+    "fc_link_hint",
 ];
 
 /// External binaries the video pipeline may use, checked by presence on `PATH`.
@@ -111,6 +113,7 @@ pub async fn get_status(State(state): State<AppState>) -> Json<Value> {
         "mavlinkAlive": liveness.mavlink_alive,
         "heartbeatAgeS": liveness.heartbeat_age_s,
         "fcSource": liveness.fc_source,
+        "fcLinkHint": liveness.fc_link_hint,
         "dependencies": Value::Object(dependencies),
     });
 
@@ -262,6 +265,14 @@ fn iso8601_from_unix_secs(secs: i64) -> String {
 pub(crate) fn project_telemetry(snapshot: Option<Value>) -> Value {
     match snapshot {
         Some(Value::Object(map)) => {
+            // Honesty gate: when the FC link is explicitly not alive, the vehicle
+            // fields are stale or default (no fresh HEARTBEAT decoded), so surface
+            // nothing rather than zeros-as-live (0 alt, 0 battery, 360 heading,
+            // HDOP 655). Absence of the flag (an older snapshot) keeps the prior
+            // behavior — staleness cannot be proven, so the fields pass through.
+            if map.get("mavlink_alive").and_then(Value::as_bool) == Some(false) {
+                return json!({});
+            }
             let projected: Map<String, Value> = map
                 .into_iter()
                 .filter(|(k, _)| !IPC_ONLY_KEYS.contains(&k.as_str()))
@@ -315,6 +326,9 @@ pub(crate) struct FcLiveness {
     pub mavlink_alive: bool,
     pub heartbeat_age_s: Value,
     pub fc_source: Value,
+    /// The not-alive diagnostic hint: `msp_detected` (the FC speaks MSP, not
+    /// MAVLink, on this port), `no_heartbeat` (open but silent), or `none`.
+    pub fc_link_hint: Value,
 }
 
 /// Read the FC-liveness extras out of a snapshot. An absent snapshot or absent
@@ -342,6 +356,11 @@ pub(crate) fn fc_liveness_from_snapshot(snapshot: Option<&Value>) -> FcLiveness 
             .cloned()
             .filter(|v| !v.is_null())
             .unwrap_or_else(|| json!("auto")),
+        fc_link_hint: obj
+            .and_then(|m| m.get("fc_link_hint"))
+            .cloned()
+            .filter(|v| !v.is_null())
+            .unwrap_or_else(|| json!("none")),
     }
 }
 
@@ -448,6 +467,7 @@ mod tests {
         assert!(!l.mavlink_alive);
         assert_eq!(l.heartbeat_age_s, Value::Null);
         assert_eq!(l.fc_source, json!("auto"));
+        assert_eq!(l.fc_link_hint, json!("none"));
     }
 
     #[test]
@@ -457,6 +477,7 @@ mod tests {
             "mavlink_alive": false,
             "heartbeat_age_s": 7.5,
             "fc_source": "serial",
+            "fc_link_hint": "msp_detected",
         });
         let l = fc_liveness_from_snapshot(Some(&snap));
         // The exact bug it guards: transport open but MAVLink not alive.
@@ -464,6 +485,37 @@ mod tests {
         assert!(!l.mavlink_alive);
         assert_eq!(l.heartbeat_age_s, json!(7.5));
         assert_eq!(l.fc_source, json!("serial"));
+        assert_eq!(l.fc_link_hint, json!("msp_detected"));
+    }
+
+    #[test]
+    fn telemetry_blanks_when_mavlink_not_alive() {
+        // Transport open but the link is not alive: the vehicle fields are stale
+        // defaults, so telemetry must surface nothing rather than zeros-as-live.
+        let snapshot = json!({
+            "armed": false,
+            "mode": "STABILIZE",
+            "battery": {"voltage": 0.0},
+            "transport_open": true,
+            "mavlink_alive": false,
+            "fc_link_hint": "no_heartbeat",
+        });
+        assert_eq!(project_telemetry(Some(snapshot)), json!({}));
+    }
+
+    #[test]
+    fn telemetry_passes_through_when_mavlink_alive() {
+        // A live link surfaces the vehicle fields (minus the runtime-only extras).
+        let snapshot = json!({
+            "armed": true,
+            "mode": "GUIDED",
+            "mavlink_alive": true,
+        });
+        let tel = project_telemetry(Some(snapshot));
+        let obj = tel.as_object().unwrap();
+        assert_eq!(obj["armed"], json!(true));
+        assert_eq!(obj["mode"], json!("GUIDED"));
+        assert!(!obj.contains_key("mavlink_alive"));
     }
 
     #[test]

@@ -16,7 +16,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::UdpSocket;
 use tokio_serial::{SerialPortBuilderExt, SerialPortType, SerialStream};
 
-use super::framing::extract_frames;
+use super::framing::{count_msp_frame_starts, extract_frames};
 
 /// A duplex MAVLink byte transport: serial, TCP, or (datagram) UDP. Reading and
 /// writing go through the boxed [`AsyncRead`]/[`AsyncWrite`] halves below, so the
@@ -69,12 +69,32 @@ const SERIAL_PREFIXES: &[&str] = &[
     "/dev/tty.usbserial",
 ];
 
-/// Baud rates probed in order; falls back to the last one.
-pub(crate) const BAUD_CANDIDATES: &[u32] = &[921600, 115200, 57600];
+/// Baud rates probed in order (most-common-first so the usual case early-outs
+/// fast), falling back to [`BAUD_FALLBACK`] when none yields a HEARTBEAT. 115200
+/// is the common USB-CDC / UART default, 921600 the high-rate telemetry UART,
+/// 57600 the legacy radio default; the tail covers the less common rates a
+/// UART-attached FC may use. A USB-CDC ACM device ignores the requested baud
+/// (bytes flow at native USB rate), so widening this list helps real-UART FCs,
+/// not a USB-VCP board — for that, the MSP sniff in [`probe_baud`] is the signal.
+pub(crate) const BAUD_CANDIDATES: &[u32] = &[115200, 921600, 57600, 230400, 1500000, 38400, 19200];
 pub(crate) const BAUD_FALLBACK: u32 = 57600;
 
-/// How long to listen for an FC heartbeat at each candidate baud.
-const PROBE_WINDOW: Duration = Duration::from_secs(3);
+/// How long to listen for an FC heartbeat (or MSP traffic) at each candidate
+/// baud. A real ArduPilot/PX4 HEARTBEAT is 1 Hz, so this window catches one with
+/// margin while bounding the worst-case sweep over the candidate list.
+const PROBE_WINDOW: Duration = Duration::from_millis(1500);
+
+/// The outcome of probing a single candidate baud.
+pub(crate) enum ProbeOutcome {
+    /// A MAVLink HEARTBEAT decoded — this baud is the live FC link.
+    Heartbeat,
+    /// MSP frame starts were seen (and no HEARTBEAT). The FC is emitting MSP, not
+    /// MAVLink, so no baud will ever yield a HEARTBEAT — the caller stops the
+    /// sweep and opens here so the read loop surfaces the `msp_detected` hint.
+    Msp,
+    /// Neither a HEARTBEAT nor MSP traffic within the window.
+    None,
+}
 
 /// Current ISO-8601 UTC timestamp, e.g. `2026-05-28T15:28:23.880948Z`.
 pub(crate) fn now_iso() -> String {
@@ -157,30 +177,42 @@ pub(crate) fn parse_net_spec(s: &str) -> Option<NetSpec> {
     }
 }
 
-/// Open at `baud` and listen for an FC HEARTBEAT within [`PROBE_WINDOW`].
-pub(crate) async fn probe_baud(port: &str, baud: u32) -> bool {
+/// Open at `baud` and listen for an FC HEARTBEAT within [`PROBE_WINDOW`], also
+/// counting MSP frame starts so a board emitting MSP (not MAVLink) is detected
+/// and the sweep can stop early. Returns [`ProbeOutcome::Heartbeat`] on the first
+/// decoded HEARTBEAT, [`ProbeOutcome::Msp`] once at least two MSP frame starts
+/// are seen with no HEARTBEAT, and [`ProbeOutcome::None`] when the window expires
+/// with neither.
+pub(crate) async fn probe_baud(port: &str, baud: u32) -> ProbeOutcome {
     let Some(mut stream) = open_serial(port, baud) else {
-        return false;
+        return ProbeOutcome::None;
     };
     let deadline = tokio::time::Instant::now() + PROBE_WINDOW;
     let mut buf: Vec<u8> = Vec::with_capacity(2048);
     let mut chunk = [0u8; 1024];
+    let mut msp_starts: usize = 0;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
-            return false;
+            return ProbeOutcome::None;
         }
         match tokio::time::timeout(remaining, stream.read(&mut chunk)).await {
-            Ok(Ok(0)) | Err(_) => return false,
+            Ok(Ok(0)) | Err(_) => return ProbeOutcome::None,
             Ok(Ok(n)) => {
+                msp_starts += count_msp_frame_starts(&chunk[..n]);
                 buf.extend_from_slice(&chunk[..n]);
                 for frame in extract_frames(&mut buf) {
                     if let Ok((_, MavMessage::HEARTBEAT(_))) = mavlink::parse_any(&frame) {
-                        return true;
+                        return ProbeOutcome::Heartbeat;
                     }
                 }
+                // No MAVLink HEARTBEAT here but a clear MSP stream: stop probing,
+                // no other baud will produce a HEARTBEAT from an MSP FC.
+                if msp_starts >= 2 {
+                    return ProbeOutcome::Msp;
+                }
             }
-            Ok(Err(_)) => return false,
+            Ok(Err(_)) => return ProbeOutcome::None,
         }
     }
 }

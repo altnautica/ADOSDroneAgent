@@ -122,6 +122,7 @@ pub async fn get_full_status(State(state): State<AppState>, headers: HeaderMap) 
     payload.insert("mavlinkAlive".to_string(), json!(fc_liveness.mavlink_alive));
     payload.insert("heartbeatAgeS".to_string(), fc_liveness.heartbeat_age_s);
     payload.insert("fcSource".to_string(), fc_liveness.fc_source);
+    payload.insert("fcLinkHint".to_string(), fc_liveness.fc_link_hint);
     payload.insert("services".to_string(), services);
     payload.insert("resources".to_string(), resources);
     payload.insert("video".to_string(), video);

@@ -35,12 +35,12 @@ use crate::config::MavlinkConfig;
 use crate::param_cache::ParamCache;
 use crate::state::VehicleState;
 
-use framing::extract_frames;
+use framing::{count_msp_frame_starts, extract_frames};
 use send_scheduler::STREAM_DEFAULT;
 use transport::{
     is_candidate_port, now_iso, open_serial, parse_net_spec, persist_params, probe_baud,
-    split_serial, BoxedReadHalf, BoxedWriteHalf, NetSpec, UdpAdapter, BAUD_CANDIDATES,
-    BAUD_FALLBACK,
+    split_serial, BoxedReadHalf, BoxedWriteHalf, NetSpec, ProbeOutcome, UdpAdapter,
+    BAUD_CANDIDATES, BAUD_FALLBACK,
 };
 
 /// Reconnect backoff bounds.
@@ -57,6 +57,17 @@ const RECONNECT_MAX: Duration = Duration::from_secs(30);
 /// dropped frame never flips the state. "Presence is not proof": an open
 /// transport is necessary but not sufficient to declare the FC connected.
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(4);
+
+/// How long a sighting of MSP traffic keeps the `msp_detected` link hint armed.
+/// Generous relative to the read cadence so a steady MSP stream holds the hint,
+/// and the hint ages out on its own once the byte stream goes quiet.
+const MSP_HINT_TTL: Duration = Duration::from_secs(5);
+
+/// The rolling window over which MSP frame starts are accumulated before the
+/// link hint is armed. Requiring two starts inside this window (rather than a
+/// single byte match) rejects a stray `$M`/`$X` that lands inside a MAVLink
+/// payload.
+const MSP_WINDOW: Duration = Duration::from_secs(2);
 
 /// Frame fan-out channel capacity (raw frames awaiting consumers).
 const FRAME_CHANNEL_CAP: usize = 1024;
@@ -93,6 +104,16 @@ pub struct FcConnection {
     /// whether the link is alive, not merely transport-open. Reset to `None` on
     /// link teardown so a stale value from a prior session never reads as alive.
     last_heartbeat_at: Mutex<Option<Instant>>,
+    /// Monotonic clock of the last time MSP frame starts were seen on the inbound
+    /// byte stream while no HEARTBEAT was decoding. Drives the `msp_detected`
+    /// link hint: an FC whose serial port is configured for MSP rather than
+    /// MAVLink emits these, so the agent can tell the operator the link speaks
+    /// the wrong protocol. `None` until MSP traffic is seen; cleared on a real
+    /// HEARTBEAT and on link teardown so it never carries across sessions.
+    last_msp_at: Mutex<Option<Instant>>,
+    /// True once the MSP-detected condition has been logged for the current MSP
+    /// episode, so the warning fires once per episode rather than every read.
+    msp_warned: AtomicBool,
     stream_interval: Mutex<Duration>,
     last_stream_req: Mutex<Option<Instant>>,
     param_priming: AtomicBool,
@@ -125,6 +146,8 @@ impl FcConnection {
             baud: AtomicU32::new(0),
             last_msg_at: Mutex::new(Instant::now()),
             last_heartbeat_at: Mutex::new(None),
+            last_msp_at: Mutex::new(None),
+            msp_warned: AtomicBool::new(false),
             stream_interval: Mutex::new(STREAM_DEFAULT),
             last_stream_req: Mutex::new(None),
             param_priming: AtomicBool::new(false),
@@ -174,6 +197,43 @@ impl FcConnection {
     /// published `fc_connected` extra.
     pub async fn connected(&self) -> bool {
         self.transport_open() && self.mavlink_alive().await
+    }
+    /// A human-actionable hint about why the FC link is not alive, computed from
+    /// the current liveness plus recent MSP evidence:
+    ///
+    ///   - `none` — the link is alive (or a demo run, or there is no transport),
+    ///     so there is nothing to explain.
+    ///   - `msp_detected` — the transport is open, no HEARTBEAT decoded, and MSP
+    ///     frame starts were seen on the byte stream within the recent window:
+    ///     the FC is configured for MSP, not MAVLink, on this port. The operator
+    ///     fix is to set the FC's serial-port protocol to MAVLink.
+    ///   - `no_heartbeat` — the transport is open, no HEARTBEAT decoded, and no
+    ///     MSP traffic was seen: a wrong baud, an unpowered / not-yet-booted FC,
+    ///     wrong wiring, or a serial protocol other than MAVLink/MSP.
+    ///
+    /// Derived (not latched) so it self-corrects: the moment a HEARTBEAT decodes
+    /// it reads `none`, and the MSP evidence ages out via [`MSP_HINT_TTL`].
+    pub async fn link_hint(&self) -> &'static str {
+        if &*self.port.lock().await == "demo" {
+            return "none";
+        }
+        if self.mavlink_alive().await {
+            return "none";
+        }
+        if !self.transport_open() {
+            return "none";
+        }
+        let msp_recent = self
+            .last_msp_at
+            .lock()
+            .await
+            .map(|t| t.elapsed() < MSP_HINT_TTL)
+            .unwrap_or(false);
+        if msp_recent {
+            "msp_detected"
+        } else {
+            "no_heartbeat"
+        }
     }
     pub async fn port(&self) -> String {
         self.port.lock().await.clone()
@@ -272,6 +332,8 @@ impl FcConnection {
             // link reads as not-alive until a real HEARTBEAT arrives again.
             self.connected.store(false, Ordering::Relaxed);
             *self.last_heartbeat_at.lock().await = None;
+            *self.last_msp_at.lock().await = None;
+            self.msp_warned.store(false, Ordering::Relaxed);
             *self.writer.lock().await = None;
             self.param_priming.store(false, Ordering::Relaxed);
             *self.param_sweep_started.lock().await = None;
@@ -370,6 +432,9 @@ impl FcConnection {
         let mut buf: Vec<u8> = Vec::with_capacity(4096);
         let mut chunk = [0u8; 2048];
         let mut since_save = Instant::now();
+        // Rolling MSP-evidence accumulator for the link-hint detector.
+        let mut msp_count: usize = 0;
+        let mut msp_window = Instant::now();
         loop {
             let n = match reader.read(&mut chunk).await {
                 Ok(0) => return, // EOF: link gone
@@ -380,6 +445,29 @@ impl FcConnection {
             // Cap the reassembly buffer so a stream of junk cannot grow it.
             if buf.len() > 1 << 20 {
                 buf.clear();
+            }
+            // Sniff the raw chunk for MSP frame starts before reassembly drains
+            // the leading junk where they live. An FC whose serial port is set to
+            // MSP instead of MAVLink emits these; arming the hint lets the
+            // operator be told the link speaks the wrong protocol. Observe-only:
+            // MSP bytes are never decoded, acted on, or forwarded to the FC.
+            let starts = count_msp_frame_starts(&chunk[..n]);
+            if starts > 0 {
+                if msp_window.elapsed() > MSP_WINDOW {
+                    msp_count = 0;
+                    msp_window = Instant::now();
+                }
+                msp_count += starts;
+                // Two starts inside the window, and only while no HEARTBEAT is
+                // live — the alive gate is what guards against a stray `$M`/`$X`
+                // landing inside a MAVLink payload on a healthy link.
+                if msp_count >= 2 && !self.mavlink_alive().await {
+                    *self.last_msp_at.lock().await = Some(Instant::now());
+                    if !self.msp_warned.swap(true, Ordering::Relaxed) {
+                        let port = self.port.lock().await.clone();
+                        tracing::warn!(port = %port, "fc_link_msp_detected_not_mavlink");
+                    }
+                }
             }
             for frame in extract_frames(&mut buf) {
                 // Fan the raw frame out verbatim (drop if no consumers / lagging).
@@ -415,6 +503,13 @@ impl FcConnection {
                             self.target_system
                                 .store(header.system_id, Ordering::Relaxed);
                             *self.last_heartbeat_at.lock().await = Some(Instant::now());
+                            // A real FC HEARTBEAT clears any MSP suspicion so a
+                            // link that started noisy (or recovered) reads as
+                            // healthy at once, and re-arms the once-per-episode
+                            // warning for any future MSP episode.
+                            *self.last_msp_at.lock().await = None;
+                            self.msp_warned.store(false, Ordering::Relaxed);
+                            msp_count = 0;
                         }
                     }
                     let now = now_iso();
@@ -470,10 +565,22 @@ impl FcConnection {
                 continue;
             }
             for &baud in BAUD_CANDIDATES {
-                if probe_baud(&port, baud).await {
-                    if let Some(stream) = open_serial(&port, baud) {
-                        return Some(split_serial(stream, port, baud));
+                match probe_baud(&port, baud).await {
+                    ProbeOutcome::Heartbeat => {
+                        if let Some(stream) = open_serial(&port, baud) {
+                            return Some(split_serial(stream, port, baud));
+                        }
                     }
+                    ProbeOutcome::Msp => {
+                        // The FC is emitting MSP, not MAVLink — no baud will yield
+                        // a HEARTBEAT. Open here so the read loop surfaces the
+                        // msp_detected hint, and stop sweeping the remaining bauds.
+                        if let Some(stream) = open_serial(&port, baud) {
+                            return Some(split_serial(stream, port, baud));
+                        }
+                        break;
+                    }
+                    ProbeOutcome::None => {}
                 }
             }
             // Last-ditch: open at the fallback baud without a positive probe.
@@ -600,6 +707,46 @@ mod liveness_tests {
             Some(Instant::now() - (HEARTBEAT_TIMEOUT + Duration::from_secs(1)));
         assert!(!c.mavlink_alive().await, "stale heartbeat → not alive");
         assert!(!c.connected().await);
+    }
+
+    #[tokio::test]
+    async fn link_hint_is_none_when_alive_or_no_transport() {
+        let c = conn_with(MavlinkConfig::default());
+        // Fresh connection: transport closed → nothing to explain.
+        assert_eq!(c.link_hint().await, "none");
+        // Transport open with a fresh heartbeat → alive → still none.
+        c.connected.store(true, Ordering::Relaxed);
+        *c.last_heartbeat_at.lock().await = Some(Instant::now());
+        assert_eq!(c.link_hint().await, "none");
+    }
+
+    #[tokio::test]
+    async fn link_hint_is_no_heartbeat_when_open_and_silent() {
+        let c = conn_with(MavlinkConfig::default());
+        c.connected.store(true, Ordering::Relaxed);
+        // Transport open, no heartbeat, no MSP evidence → no_heartbeat.
+        assert_eq!(c.link_hint().await, "no_heartbeat");
+    }
+
+    #[tokio::test]
+    async fn link_hint_is_msp_detected_with_recent_evidence_and_clears_on_heartbeat() {
+        let c = conn_with(MavlinkConfig::default());
+        c.connected.store(true, Ordering::Relaxed);
+        *c.last_msp_at.lock().await = Some(Instant::now());
+        assert_eq!(c.link_hint().await, "msp_detected");
+        // A fresh HEARTBEAT (alive) overrides the MSP hint immediately.
+        *c.last_heartbeat_at.lock().await = Some(Instant::now());
+        assert_eq!(c.link_hint().await, "none");
+    }
+
+    #[tokio::test]
+    async fn link_hint_msp_evidence_ages_out() {
+        let c = conn_with(MavlinkConfig::default());
+        c.connected.store(true, Ordering::Relaxed);
+        *c.last_msp_at.lock().await =
+            Some(Instant::now() - (MSP_HINT_TTL + Duration::from_secs(1)));
+        // Stale MSP evidence no longer arms the hint; falls back to no_heartbeat.
+        assert_eq!(c.link_hint().await, "no_heartbeat");
     }
 
     #[test]

@@ -228,6 +228,21 @@ pub struct HeartbeatPayload {
     pub fc_connected: Option<bool>,
     pub fc_port: String,
     pub fc_baud: i64,
+    // FC link gated-truth detail. The LAN `/api/status` already carries these; the
+    // enrichment producer lifts them from the state snapshot so a cloud-relay drone
+    // can render "port open · no MAVLink" + the diagnostic hint, not just a
+    // connected boolean. All optional + skip so an older agent (absent fields)
+    // reads as honest "unknown" rather than asserting a value (operating rule 37).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transport_open: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mavlink_alive: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub heartbeat_age_s: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fc_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fc_link_hint: Option<String>,
 
     // --- services + URLs ---
     // The service list comes from the enrichment producer (the API process owns
@@ -421,6 +436,11 @@ mod tests {
             fc_connected: Some(false),
             fc_port: String::new(),
             fc_baud: 0,
+            transport_open: None,
+            mavlink_alive: None,
+            heartbeat_age_s: None,
+            fc_source: None,
+            fc_link_hint: None,
             services: Some(vec![]),
             last_ip: "127.0.0.1".to_string(),
             mdns_host: String::new(),

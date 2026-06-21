@@ -8,6 +8,24 @@
 pub(crate) const STX_V2: u8 = 0xFD;
 pub(crate) const STX_V1: u8 = 0xFE;
 
+/// Count MSP frame-start sequences in a raw byte slice: MSPv1 `$M<` / `$M>`
+/// (`24 4D 3C/3E`) and MSPv2 `$X<` / `$X>` (`24 58 3C/3E`).
+///
+/// Used to detect a flight controller that is emitting MSP instead of MAVLink on
+/// its serial port (e.g. a board whose USB port is left on MSP rather than
+/// MAVLink), so the agent can tell the operator the link speaks the wrong
+/// protocol rather than silently reporting no flight controller. This is
+/// observe-only: MSP frames are never decoded, acted on, or forwarded to the
+/// flight controller — only the three-byte frame-start signatures are counted.
+pub(crate) fn count_msp_frame_starts(bytes: &[u8]) -> usize {
+    bytes
+        .windows(3)
+        .filter(|w| {
+            w[0] == b'$' && (w[1] == b'M' || w[1] == b'X') && (w[2] == b'<' || w[2] == b'>')
+        })
+        .count()
+}
+
 /// Total byte length of a complete frame whose head is at `buf[0]`, or `None`
 /// when more bytes are needed (or the head is not a recognised magic byte).
 ///
@@ -214,5 +232,27 @@ mod tests {
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0], frame);
         assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn counts_mspv1_and_mspv2_frame_starts() {
+        // Two MSPv1 starts (`$M<` request, `$M>` response) plus one MSPv2 (`$X<`),
+        // each with arbitrary trailing payload bytes between them.
+        let buf = b"\x24\x4D\x3C\x01\x02\x24\x4D\x3E\x03\x24\x58\x3C\x04";
+        assert_eq!(count_msp_frame_starts(buf), 3);
+    }
+
+    #[test]
+    fn ignores_lone_dollar_or_wrong_third_byte() {
+        // `$M` not followed by `<`/`>` is not a frame start.
+        assert_eq!(count_msp_frame_starts(b"\x24\x4D\x41"), 0);
+        // A bare `$` and ordinary text carry no frame starts.
+        assert_eq!(count_msp_frame_starts(b"\x24"), 0);
+        assert_eq!(count_msp_frame_starts(b"hello world"), 0);
+        // The second byte must be `M` or `X`; `$A<` is not MSP.
+        assert_eq!(count_msp_frame_starts(b"\x24\x41\x3C"), 0);
+        // A slice shorter than one signature is zero, never a panic.
+        assert_eq!(count_msp_frame_starts(b""), 0);
+        assert_eq!(count_msp_frame_starts(b"\x24\x4D"), 0);
     }
 }

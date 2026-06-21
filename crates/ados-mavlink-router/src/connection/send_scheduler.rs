@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use ados_protocol::mavlink::ardupilotmega::{
     MavAutopilot, MavCmd, MavMessage, MavModeFlag, MavState, MavType, COMMAND_LONG_DATA,
-    HEARTBEAT_DATA, PARAM_REQUEST_LIST_DATA,
+    HEARTBEAT_DATA, PARAM_REQUEST_LIST_DATA, REQUEST_DATA_STREAM_DATA,
 };
 use ados_protocol::mavlink::{self, MavHeader};
 
@@ -36,6 +36,22 @@ const STREAM_RATES: &[(u32, f32)] = &[
     (74, 4.0),  // VFR_HUD
     (147, 1.0), // BATTERY_STATUS
     (65, 4.0),  // RC_CHANNELS
+];
+
+/// Legacy data-stream groups requested via `REQUEST_DATA_STREAM`, alongside the
+/// modern `SET_MESSAGE_INTERVAL` above: `(MAV_DATA_STREAM id, Hz)`. Some
+/// firmwares (iNav, older ArduPilot, Betaflight's MAVLink telemetry) honor only
+/// this legacy mechanism and ignore `SET_MESSAGE_INTERVAL`; ArduPilot 4.1+ does
+/// the reverse. The two requests are therefore mutually exclusive per firmware
+/// and never double-rate the same message. `MAV_DATA_STREAM_ALL` (id 0) is
+/// deliberately omitted: it would overlap the specific groups and double-rate on
+/// any firmware that honored both.
+const STREAM_GROUPS: &[(u8, u16)] = &[
+    (2, 2),   // EXTENDED_STATUS — SYS_STATUS, GPS_RAW_INT
+    (6, 5),   // POSITION — GLOBAL_POSITION_INT
+    (10, 10), // EXTRA1 — ATTITUDE
+    (11, 4),  // EXTRA2 — VFR_HUD
+    (3, 4),   // RC_CHANNELS
 ];
 
 /// Parameter sweep timing.
@@ -144,6 +160,20 @@ impl FcConnection {
                 param7: 0.0,
             });
             self.send_msg(&cmd).await;
+        }
+        // Belt-and-suspenders for firmwares that honor only the legacy
+        // REQUEST_DATA_STREAM mechanism (iNav / older ArduPilot / Betaflight).
+        // Harmless on ArduPilot 4.1+, which ignores it in favor of the interval
+        // requests above; see STREAM_GROUPS.
+        for &(stream_id, rate_hz) in STREAM_GROUPS {
+            let req = MavMessage::REQUEST_DATA_STREAM(REQUEST_DATA_STREAM_DATA {
+                target_system: target,
+                target_component: 1,
+                req_stream_id: stream_id,
+                req_message_rate: rate_hz,
+                start_stop: 1,
+            });
+            self.send_msg(&req).await;
         }
         *self.last_stream_req.lock().await = Some(Instant::now());
     }
@@ -281,5 +311,36 @@ mod tests {
             !signalled,
             "no writer means nothing to fail and no reconnect to raise"
         );
+    }
+
+    #[test]
+    fn request_data_stream_serializes_and_round_trips() {
+        // The legacy stream request must be a real ardupilotmega variant and must
+        // round-trip through the same v2 codec the send path uses.
+        let msg = MavMessage::REQUEST_DATA_STREAM(REQUEST_DATA_STREAM_DATA {
+            target_system: 1,
+            target_component: 1,
+            req_stream_id: 6, // POSITION
+            req_message_rate: 5,
+            start_stop: 1,
+        });
+        let bytes = mavlink::serialize_v2(
+            MavHeader {
+                system_id: 191,
+                component_id: 1,
+                sequence: 0,
+            },
+            &msg,
+        )
+        .expect("REQUEST_DATA_STREAM serializes");
+        let (_h, parsed) = mavlink::parse_v2(&bytes).expect("round-trips");
+        match parsed {
+            MavMessage::REQUEST_DATA_STREAM(d) => {
+                assert_eq!(d.req_stream_id, 6);
+                assert_eq!(d.req_message_rate, 5);
+                assert_eq!(d.start_stop, 1);
+            }
+            other => panic!("expected REQUEST_DATA_STREAM, got {other:?}"),
+        }
     }
 }

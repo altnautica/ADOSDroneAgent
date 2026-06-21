@@ -122,6 +122,13 @@ fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
         fc_connected: None,
         fc_port: String::new(),
         fc_baud: 0,
+        // The FC link gated-truth detail is the enrichment producer's to lift from
+        // the state snapshot; the native base leaves it absent (honest "unknown").
+        transport_open: None,
+        mavlink_alive: None,
+        heartbeat_age_s: None,
+        fc_source: None,
+        fc_link_hint: None,
         services: None,
         last_ip: String::new(),
         mdns_host: String::new(),

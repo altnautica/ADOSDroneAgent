@@ -379,6 +379,9 @@ async fn build_extras(
             .unwrap_or(Value::Null),
     );
     extras.insert("fc_source".into(), json!(fc.source()));
+    // A human-actionable hint for the not-alive case: msp_detected (the FC speaks
+    // MSP, not MAVLink, on this port), no_heartbeat (open but silent), or none.
+    extras.insert("fc_link_hint".into(), json!(fc.link_hint().await));
     extras.insert("fc_port".into(), json!(fc.port().await));
     extras.insert("fc_baud".into(), json!(fc.baud()));
     extras.insert(

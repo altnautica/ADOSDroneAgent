@@ -325,6 +325,30 @@ fn fold_fc(obj: &mut Map<String, Value>) {
             obj.insert("fcBaud".to_string(), json!(baud));
         }
     }
+    // The gated-truth detail behind fcConnected: transport-open vs alive, the
+    // heartbeat age, the configured transport class, and the not-alive hint. The
+    // GCS already renders these on the LAN path; carry them over cloud relay too
+    // so a cloud-paired drone can show "port open · no MAVLink" + the hint rather
+    // than only a connected boolean.
+    if let Some(open) = map.get("transport_open").and_then(Value::as_bool) {
+        obj.insert("transportOpen".to_string(), json!(open));
+    }
+    if let Some(alive) = map.get("mavlink_alive").and_then(Value::as_bool) {
+        obj.insert("mavlinkAlive".to_string(), json!(alive));
+    }
+    if let Some(age) = map.get("heartbeat_age_s").and_then(Value::as_f64) {
+        obj.insert("heartbeatAgeS".to_string(), json!(age));
+    }
+    if let Some(source) = map.get("fc_source").and_then(Value::as_str) {
+        if !source.is_empty() {
+            obj.insert("fcSource".to_string(), json!(source));
+        }
+    }
+    if let Some(hint) = map.get("fc_link_hint").and_then(Value::as_str) {
+        if !hint.is_empty() {
+            obj.insert("fcLinkHint".to_string(), json!(hint));
+        }
+    }
 }
 
 /// Read one newline-JSON snapshot from the state IPC socket. The state socket
@@ -677,7 +701,7 @@ ados-mavlink-router.service loaded active running ADOS MAVLink router
         let handle = std::thread::spawn(move || {
             if let Ok((mut stream, _)) = listener.accept() {
                 use std::io::Write;
-                let line = br#"{"armed":false,"fc_connected":true,"fc_port":"/dev/ttyACM0","fc_baud":115200}
+                let line = br#"{"armed":false,"fc_connected":true,"fc_port":"/dev/ttyACM0","fc_baud":115200,"transport_open":true,"mavlink_alive":true,"heartbeat_age_s":0.5,"fc_source":"serial","fc_link_hint":"none"}
 "#;
                 let _ = stream.write_all(line);
                 let _ = stream.flush();
@@ -694,6 +718,12 @@ ados-mavlink-router.service loaded active running ADOS MAVLink router
         assert_eq!(obj.get("fcConnected"), Some(&json!(true)));
         assert_eq!(obj.get("fcPort"), Some(&json!("/dev/ttyACM0")));
         assert_eq!(obj.get("fcBaud"), Some(&json!(115200)));
+        // The gated-truth detail lifts alongside the connection triple.
+        assert_eq!(obj.get("transportOpen"), Some(&json!(true)));
+        assert_eq!(obj.get("mavlinkAlive"), Some(&json!(true)));
+        assert_eq!(obj.get("heartbeatAgeS"), Some(&json!(0.5)));
+        assert_eq!(obj.get("fcSource"), Some(&json!("serial")));
+        assert_eq!(obj.get("fcLinkHint"), Some(&json!("none")));
     }
 
     #[test]
