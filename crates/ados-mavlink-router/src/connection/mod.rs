@@ -277,6 +277,18 @@ impl FcConnection {
         self.param_sweep_send_failed.load(Ordering::Relaxed)
     }
 
+    /// Whether a HEARTBEAT with this source identity is our OWN injected
+    /// companion heartbeat — identified by the FULL (system_id, component_id)
+    /// pair, never system_id alone. A companion computer shares the vehicle's
+    /// system_id (commonly 1) and is distinguished only by its component_id
+    /// (191 vs the autopilot's 1), so a system_id-only check would wrongly
+    /// treat the FC's own heartbeat as ours whenever the agent's configured
+    /// system_id equals the FC's — and the link would never read alive even
+    /// while the autopilot streams HEARTBEAT at 1 Hz.
+    fn is_own_heartbeat(&self, system_id: u8, component_id: u8) -> bool {
+        system_id == self.cfg.system_id && component_id == self.cfg.component_id
+    }
+
     /// Connect-and-read loop. Returns only on shutdown via `cancel`.
     ///
     /// Three things end a live session: the read half hits EOF/error (the FC
@@ -493,13 +505,20 @@ impl FcConnection {
                     }
                 }
                 if let Ok((header, msg)) = mavlink::parse_any(&frame) {
-                    // Learn the FC system id from its (non-GCS) heartbeats, and
-                    // stamp the heartbeat-freshness clock the alive gate reads.
-                    // Only a real FC HEARTBEAT (not our own companion one) bumps
-                    // the clock, so a port that opens but never hears the
-                    // autopilot stays not-alive.
+                    // Learn the FC system id from its heartbeats, and stamp the
+                    // heartbeat-freshness clock the alive gate reads. Bump the
+                    // clock for any HEARTBEAT that is NOT our own injected
+                    // companion one — identified by the full (system_id,
+                    // component_id) identity, NOT system_id alone. A companion
+                    // shares the vehicle's system_id (commonly 1) and differs
+                    // only by component_id (191 vs the autopilot's 1), so a
+                    // system_id-only filter wrongly discards the FC's own
+                    // heartbeat whenever the agent's configured system_id equals
+                    // the FC's — the link then never reads alive even though the
+                    // autopilot is streaming. A port that opens but never hears
+                    // the autopilot still stays not-alive.
                     if let MavMessage::HEARTBEAT(_) = &msg {
-                        if header.system_id != self.cfg.system_id {
+                        if !self.is_own_heartbeat(header.system_id, header.component_id) {
                             self.target_system
                                 .store(header.system_id, Ordering::Relaxed);
                             *self.last_heartbeat_at.lock().await = Some(Instant::now());
@@ -747,6 +766,26 @@ mod liveness_tests {
             Some(Instant::now() - (MSP_HINT_TTL + Duration::from_secs(1)));
         // Stale MSP evidence no longer arms the hint; falls back to no_heartbeat.
         assert_eq!(c.link_hint().await, "no_heartbeat");
+    }
+
+    #[test]
+    fn fc_heartbeat_is_recognized_when_it_shares_the_agent_system_id() {
+        // The standard ArduPilot companion config: FC sysid 1 / compid 1, agent
+        // companion sysid 1 / compid 191. The FC heartbeat SHARES the agent's
+        // system_id but differs by component_id, so it must NOT be filtered as
+        // our own — else the link never reads alive while the FC streams.
+        let c = conn_with(MavlinkConfig::default());
+        assert_eq!(c.cfg.system_id, 1, "default companion system_id is 1");
+        assert_ne!(
+            c.cfg.component_id, 1,
+            "the companion component_id must differ from the autopilot's (1)"
+        );
+        // The FC's own heartbeat (autopilot component 1) is NOT ours → counted.
+        assert!(!c.is_own_heartbeat(1, 1));
+        // Our own companion heartbeat (matching sysid AND compid) is filtered.
+        assert!(c.is_own_heartbeat(c.cfg.system_id, c.cfg.component_id));
+        // A heartbeat from a different system is also not ours.
+        assert!(!c.is_own_heartbeat(2, 1));
     }
 
     #[test]
