@@ -554,6 +554,21 @@ impl SingleObjectTracker {
         self.needs_redesignation = false;
     }
 
+    /// Operator designation: drop any current lock and seed a fresh track onto a
+    /// specific detection (the box the operator clicked), instead of the
+    /// most-confident one — the operator's pick overrides the confidence floor.
+    /// Returns the new track id. The next [`update`] associates from this seed.
+    /// Used by the click-to-follow path so the operator picks the target rather
+    /// than the tracker's auto-lock.
+    ///
+    /// [`update`]: Self::update
+    pub fn designate(&mut self, detection: &Detection) -> Option<u64> {
+        self.track = None;
+        let cand = Candidate::motion_only(detection.clone());
+        let _ = self.seed(&[&cand]);
+        self.track.as_ref().map(|t| t.id)
+    }
+
     /// Advance one frame on a list of wire detections, motion-only (no
     /// appearance descriptors). Each detection is wrapped as a [`Candidate`]
     /// with no appearance, so association falls back to the motion gate plus the

@@ -25,6 +25,7 @@ use tokio::sync::{broadcast, Mutex, Semaphore};
 
 use crate::backend::{LoadedModel, VisionBackend};
 use crate::ring::RingWriter;
+use crate::tracker::{SingleObjectTracker, TrackerConfig};
 
 /// Broadcast depth for frame descriptors and detections. Slow subscribers lag
 /// and skip rather than back up the publisher (latest-wins, like the rings).
@@ -54,11 +55,37 @@ pub struct VisionEngine {
     detection_tx: broadcast::Sender<DetectionBatch>,
     /// Ring slot count and downscale target, from config.
     slot_count: u32,
+    /// Per-camera single-object tracker. Built lazily on the first detection or
+    /// an operator designation for a camera. Only consulted when
+    /// `tracker_enabled`.
+    trackers: Mutex<HashMap<String, SingleObjectTracker>>,
+    /// When true, `infer_and_publish` runs the per-camera tracker between
+    /// inference and publish so the published batch carries a stable `track_id`
+    /// + `lock_state` on the locked object. Default false ⇒ raw detections.
+    tracker_enabled: bool,
+    /// Tuning the per-camera trackers are built with.
+    tracker_cfg: TrackerConfig,
 }
 
 impl VisionEngine {
-    /// Build the engine around a chosen backend.
+    /// Build the engine around a chosen backend. The tracker is off: the engine
+    /// publishes raw detections (the long-standing behaviour).
     pub fn new(backend: Box<dyn VisionBackend>, slot_count: u32) -> Arc<Self> {
+        Self::with_tracker(backend, slot_count, false, TrackerConfig::default())
+    }
+
+    /// Build the engine with the per-camera tracker explicitly enabled or
+    /// disabled. When enabled, `infer_and_publish` runs a single-object tracker
+    /// per camera and stamps the locked object's `track_id` + `lock_state` onto
+    /// the published batch; when disabled the behaviour is identical to [`new`].
+    ///
+    /// [`new`]: Self::new
+    pub fn with_tracker(
+        backend: Box<dyn VisionBackend>,
+        slot_count: u32,
+        tracker_enabled: bool,
+        tracker_cfg: TrackerConfig,
+    ) -> Arc<Self> {
         let (frame_tx, _) = broadcast::channel(BROADCAST_DEPTH);
         let (detection_tx, _) = broadcast::channel(BROADCAST_DEPTH);
         Arc::new(Self {
@@ -69,6 +96,9 @@ impl VisionEngine {
             frame_tx,
             detection_tx,
             slot_count: slot_count.max(2),
+            trackers: Mutex::new(HashMap::new()),
+            tracker_enabled,
+            tracker_cfg,
         })
     }
 
@@ -218,7 +248,9 @@ impl VisionEngine {
     }
 
     /// Convenience for the engine-run flow: infer then publish, building the
-    /// batch from the frame descriptor and the model's id.
+    /// batch from the frame descriptor and the model's id. When the tracker is
+    /// enabled, the detections pass through the camera's single-object tracker
+    /// first so the locked object carries a stable `track_id` + `lock_state`.
     pub async fn infer_and_publish(
         &self,
         model_id: &str,
@@ -228,6 +260,11 @@ impl VisionEngine {
         let detections = self
             .infer(model_id, frame, desc.width, desc.height, desc.format)
             .await?;
+        let detections = if self.tracker_enabled {
+            self.apply_tracker(&desc.camera_id, detections).await
+        } else {
+            detections
+        };
         let batch = DetectionBatch {
             model_id: model_id.to_string(),
             camera_id: desc.camera_id.clone(),
@@ -237,6 +274,122 @@ impl VisionEngine {
         };
         self.publish_detection(batch.clone());
         Ok(batch)
+    }
+
+    /// Run the camera's single-object tracker over `detections` and return the
+    /// batch to publish: every detection is kept (so an overlay sees them all),
+    /// and the locked object's `track_id` / `lock_state` / `assoc_confidence`
+    /// are stamped onto its detection. On a measured frame the stamp lands on the
+    /// best-matching input box; on a coast/ambiguous frame (no measured box) the
+    /// tracker's predicted box is appended so the held target stays visible and
+    /// followable.
+    async fn apply_tracker(&self, camera_id: &str, detections: Vec<Detection>) -> Vec<Detection> {
+        let mut trackers = self.trackers.lock().await;
+        let tracker = trackers
+            .entry(camera_id.to_string())
+            .or_insert_with(|| SingleObjectTracker::new(self.tracker_cfg));
+        let update = tracker.update(&detections);
+        merge_tracked(detections, update)
+    }
+
+    /// The track id the camera's lock currently holds (confirmed or coasting), if
+    /// any. The operator/GCS reads this to know whether a target is locked.
+    pub async fn current_track(&self, camera_id: &str) -> Option<u64> {
+        self.trackers
+            .lock()
+            .await
+            .get(camera_id)
+            .and_then(|t| t.current_id())
+    }
+
+    /// Operator designation: lock the camera's tracker onto a specific detection
+    /// (the box the operator clicked), overriding the auto-lock. Returns the new
+    /// track id. Builds the camera's tracker if it does not exist yet.
+    pub async fn designate(&self, camera_id: &str, target: &Detection) -> Option<u64> {
+        let mut trackers = self.trackers.lock().await;
+        let tracker = trackers
+            .entry(camera_id.to_string())
+            .or_insert_with(|| SingleObjectTracker::new(self.tracker_cfg));
+        tracker.designate(target)
+    }
+
+    /// Operator re-confirm: clear the ambiguity latch on the camera's tracker
+    /// after the operator re-confirms the target out of band. Returns false when
+    /// the camera has no tracker yet.
+    pub async fn redesignate(&self, camera_id: &str) -> bool {
+        match self.trackers.lock().await.get_mut(camera_id) {
+            Some(t) => {
+                t.redesignate();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Drop the camera's lock so the tracker re-seeds on the next detection.
+    pub async fn reset_track(&self, camera_id: &str) {
+        self.trackers.lock().await.remove(camera_id);
+    }
+}
+
+/// Merge a [`TrackUpdate`] back into the frame's detections: stamp the locked
+/// object onto its best-matching input box (measured frame), or append the
+/// tracker's predicted box (coast/ambiguous frame, no measured input).
+fn merge_tracked(mut detections: Vec<Detection>, update: crate::tracker::TrackUpdate) -> Vec<Detection> {
+    let Some(locked) = update.detection else {
+        // Idle or tentative-not-yet-confirmed: nothing to stamp.
+        return detections;
+    };
+    if update.measured {
+        // The tracker associated to one of the input boxes; stamp the closest.
+        match best_overlap_index(&detections, &locked.bbox) {
+            Some(idx) => {
+                detections[idx].track_id = locked.track_id;
+                detections[idx].lock_state = locked.lock_state;
+                detections[idx].assoc_confidence = locked.assoc_confidence;
+            }
+            // No overlapping input (shouldn't happen on a measured frame) — keep
+            // the held target visible rather than dropping it.
+            None => detections.push(locked),
+        }
+    } else {
+        // Coasting / ambiguous hold: the predicted box has no input counterpart.
+        detections.push(locked);
+    }
+    detections
+}
+
+/// The index of the detection with the greatest IoU against `bbox`, or `None`
+/// when the list is empty or nothing overlaps at all.
+fn best_overlap_index(detections: &[Detection], bbox: &ados_protocol::framebus::BoundingBox) -> Option<usize> {
+    let mut best: Option<(usize, f32)> = None;
+    for (i, d) in detections.iter().enumerate() {
+        let i_o_u = bbox_iou(&d.bbox, bbox);
+        if i_o_u > 0.0 && best.is_none_or(|(_, b)| i_o_u > b) {
+            best = Some((i, i_o_u));
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
+/// Intersection-over-union of two corner-form boxes.
+fn bbox_iou(
+    a: &ados_protocol::framebus::BoundingBox,
+    b: &ados_protocol::framebus::BoundingBox,
+) -> f32 {
+    let (ax2, ay2) = (a.x + a.width, a.y + a.height);
+    let (bx2, by2) = (b.x + b.width, b.y + b.height);
+    let iw = (ax2.min(bx2) - a.x.max(b.x)).max(0.0);
+    let ih = (ay2.min(by2) - a.y.max(b.y)).max(0.0);
+    let inter = iw * ih;
+    if inter <= 0.0 {
+        return 0.0;
+    }
+    let union = a.width * a.height + b.width * b.height - inter;
+    if union > 0.0 {
+        inter / union
+    } else {
+        0.0
     }
 }
 
@@ -384,5 +537,71 @@ mod tests {
         assert_eq!(batch.camera_id, "uvc-0");
         assert_eq!(batch.frame_id, 9);
         assert_eq!(rx.try_recv().unwrap(), batch);
+    }
+
+    fn det(x: f32, y: f32, conf: f32, label: &str) -> Detection {
+        Detection {
+            bbox: BoundingBox {
+                x,
+                y,
+                width: 40.0,
+                height: 40.0,
+            },
+            class_label: label.into(),
+            confidence: conf,
+            track_id: None,
+            assoc_confidence: None,
+            lock_state: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn tracker_stamps_a_stable_track_id_and_holds_through_a_drop() {
+        let e = VisionEngine::with_tracker(Box::new(MockBackend), 4, true, TrackerConfig::default());
+        // Run up to confirmation: the same box for a few frames.
+        e.apply_tracker("cam", vec![det(100.0, 100.0, 0.9, "uav")]).await;
+        e.apply_tracker("cam", vec![det(100.0, 100.0, 0.9, "uav")]).await;
+        let confirmed = e.apply_tracker("cam", vec![det(100.0, 100.0, 0.9, "uav")]).await;
+
+        let stamped: Vec<_> = confirmed.iter().filter(|d| d.track_id.is_some()).collect();
+        assert_eq!(stamped.len(), 1, "exactly one detection carries the lock");
+        let id = stamped[0].track_id.unwrap();
+        assert!(stamped[0].lock_state.is_some(), "the locked box reports a lock state");
+        assert_eq!(e.current_track("cam").await, Some(id));
+
+        // A dropped frame: the tracker coasts and the held target is appended
+        // with the SAME id, still reported as the current track (never a silent
+        // identity loss).
+        let coast = e.apply_tracker("cam", vec![]).await;
+        assert!(
+            coast.iter().any(|d| d.track_id == Some(id)),
+            "the held target survives a dropped frame with its id"
+        );
+        assert_eq!(e.current_track("cam").await, Some(id));
+    }
+
+    #[tokio::test]
+    async fn operator_designate_locks_a_specific_detection() {
+        let e = VisionEngine::with_tracker(Box::new(MockBackend), 4, true, TrackerConfig::default());
+        // Two detections; the operator picks the lower-confidence one — the
+        // auto-lock would have taken the other.
+        let target = det(200.0, 50.0, 0.4, "person");
+        let id = e
+            .designate("cam", &target)
+            .await
+            .expect("designate seeds a track");
+        // A freshly-seeded track is tentative, so current_track is None until a
+        // measured frame confirms it — but the designated id is fixed.
+        assert_eq!(e.current_track("cam").await, None);
+
+        // Feed the designated box: it confirms under the SAME id, not a new one.
+        e.apply_tracker("cam", vec![target.clone()]).await;
+        let confirmed = e.apply_tracker("cam", vec![target.clone()]).await;
+        assert_eq!(e.current_track("cam").await, Some(id));
+        assert!(confirmed.iter().any(|d| d.track_id == Some(id)));
+
+        // reset_track drops the lock entirely.
+        e.reset_track("cam").await;
+        assert_eq!(e.current_track("cam").await, None);
     }
 }

@@ -126,7 +126,18 @@ async fn main() {
     tracing::info!(soc = %soc, backend = backend.name(), "vision backend selected");
 
     let slot_count = config.effective_slot_count();
-    let engine = VisionEngine::new(backend, slot_count);
+    // The tracker is off unless the config opts in. When on, the published
+    // detection batch carries a stable track_id + lock_state on the locked
+    // object; when off, the engine publishes raw detections.
+    let engine = VisionEngine::with_tracker(
+        backend,
+        slot_count,
+        config.tracker_enabled,
+        ados_vision::tracker::TrackerConfig::default(),
+    );
+    if config.tracker_enabled {
+        tracing::info!(reid = config.reid_enabled, "vision tracker enabled");
+    }
     let cancel = Arc::new(Notify::new());
 
     // Resolve the camera set: an explicit config list wins; otherwise HAL
