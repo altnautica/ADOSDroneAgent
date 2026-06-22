@@ -260,6 +260,7 @@ mod tests {
             input_format: FrameFormat::Rgb24,
             output_classes: vec!["x".into()],
             model_path: None,
+            head: ados_protocol::framebus::DetectionHead::Yolo8,
         }
     }
 

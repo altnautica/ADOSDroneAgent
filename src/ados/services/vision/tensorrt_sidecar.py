@@ -37,7 +37,7 @@ from ados.services.vision import sidecar_protocol as proto
 from ados.services.vision.rknn_sidecar import (
     DEFAULT_CONF_THRESHOLD,
     DEFAULT_NMS_IOU,
-    _nms,
+    decode_yolo_detections,
 )
 from ados.services.vision.sidecar_protocol import SidecarServer
 
@@ -57,6 +57,7 @@ class _LoadedEngine:
     input_h: int
     fmt: str
     class_labels: list[str]
+    head: str = "yolov8"
 
 
 class TensorRTBackend:
@@ -116,6 +117,7 @@ class TensorRTBackend:
             input_h=req.input_h,
             fmt=req.format,
             class_labels=req.class_labels,
+            head=req.head,
         )
         log.info("tensorrt_model_loaded", model=req.model_id, path=req.path)
         return proto.ok_response()
@@ -175,61 +177,24 @@ class TensorRTBackend:
         frame_h: int,
         loaded: _LoadedEngine,
     ) -> list[dict[str, Any]]:
-        """Decode a YOLO-style head to detections in source-frame pixels.
+        """Decode this engine's head to detections in source-frame pixels.
 
-        Same flat ``[cx, cy, w, h, objectness, class_scores...]`` layout the
-        RKNN sidecar decodes, scaled by ``frame / input`` and reduced by
-        class-agnostic non-maximum suppression.
+        Delegates to the shared :func:`decode_yolo_detections` so a model
+        exported to both ``.rknn`` and ``.engine`` produces identical boxes; the
+        ``yolov8`` / ``yolov5`` layout is selected by ``loaded.head``.
         """
-        if not outputs:
-            return []
-        arr = np.asarray(outputs[0]).reshape(-1)
-        n_classes = max(len(loaded.class_labels), 1)
-        stride = 5 + n_classes
-        if stride <= 5 or arr.size < stride:
-            return []
-        rows = arr[: (arr.size // stride) * stride].reshape((-1, stride))
-
-        scale_x = frame_w / loaded.input_w if loaded.input_w else 1.0
-        scale_y = frame_h / loaded.input_h if loaded.input_h else 1.0
-
-        boxes: list[tuple[float, float, float, float]] = []
-        scores: list[float] = []
-        labels: list[str] = []
-
-        for row in rows:
-            objectness = float(row[4])
-            class_scores = row[5:]
-            best = int(np.argmax(class_scores))
-            conf = objectness * float(class_scores[best])
-            if conf < self._conf_threshold:
-                continue
-            cx, cy, bw, bh = (float(row[0]), float(row[1]), float(row[2]), float(row[3]))
-            x = (cx - bw / 2.0) * scale_x
-            y = (cy - bh / 2.0) * scale_y
-            w = bw * scale_x
-            h = bh * scale_y
-            boxes.append((x, y, w, h))
-            scores.append(conf)
-            label = (
-                loaded.class_labels[best]
-                if best < len(loaded.class_labels)
-                else str(best)
-            )
-            labels.append(label)
-
-        keep = _nms(boxes, scores, self._nms_iou)
-        return [
-            proto.detection_dict(
-                x=boxes[i][0],
-                y=boxes[i][1],
-                width=boxes[i][2],
-                height=boxes[i][3],
-                class_label=labels[i],
-                confidence=scores[i],
-            )
-            for i in keep
-        ]
+        return decode_yolo_detections(
+            np,
+            outputs,
+            frame_w=frame_w,
+            frame_h=frame_h,
+            input_w=loaded.input_w,
+            input_h=loaded.input_h,
+            class_labels=loaded.class_labels,
+            head=loaded.head,
+            conf_threshold=self._conf_threshold,
+            nms_iou=self._nms_iou,
+        )
 
 
 async def serve(socket_path: str = DEFAULT_SOCKET) -> None:

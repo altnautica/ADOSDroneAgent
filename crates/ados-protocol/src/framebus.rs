@@ -424,6 +424,22 @@ pub enum ModelExecution {
     PluginSide,
 }
 
+/// The output-tensor layout of a detection model's head, so the decoder reads
+/// the right axes. `Yolo8` is the transposed `[1, 4+nc, anchors]` head — box
+/// (cx, cy, w, h) plus one score per class, no objectness — that ultralytics
+/// YOLOv8/v11 export. `Yolo5` is the legacy `[1, anchors, 5+nc]` head — box plus
+/// an objectness column plus per-class scores — of YOLOv5/v7. They are decoded
+/// differently (a v8 model read as v5 shifts every field by one and mistakes the
+/// first class score for objectness), so the layout travels with the model.
+/// Defaults to `Yolo8`, the current export path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum DetectionHead {
+    #[default]
+    Yolo8,
+    Yolo5,
+}
+
 /// Metadata a plugin supplies when registering a model.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelMetadata {
@@ -441,6 +457,11 @@ pub struct ModelMetadata {
     /// Path to the model file on the agent, for engine-run models.
     #[serde(default)]
     pub model_path: Option<String>,
+    /// Output-head layout for decoding (detection models). Defaults to `Yolo8`;
+    /// a model that ships the legacy YOLOv5/v7 head pins `Yolo5`. A payload that
+    /// predates this field deserializes to the `Yolo8` default.
+    #[serde(default)]
+    pub head: DetectionHead,
 }
 
 impl ModelMetadata {
@@ -533,9 +554,55 @@ mod contract_tests {
             input_format: FrameFormat::Rgb24,
             output_classes: vec!["weed".into(), "crop".into()],
             model_path: Some("/opt/ados/models/vision/weeds.onnx".into()),
+            head: DetectionHead::Yolo8,
         };
         let bytes = m.to_msgpack().unwrap();
         assert_eq!(ModelMetadata::from_msgpack(&bytes).unwrap(), m);
+    }
+
+    #[test]
+    fn model_metadata_without_head_defaults_to_yolo8() {
+        // A payload serialized before the `head` field existed (no `head` key)
+        // must still decode, defaulting to the YOLOv8 head.
+        let legacy = ModelMetadataLegacy {
+            id: "com.example.old".into(),
+            kind: ModelKind::Detection,
+            execution: ModelExecution::EngineRun,
+            input_width: 640,
+            input_height: 640,
+            input_format: FrameFormat::Rgb24,
+            output_classes: vec!["uav".into()],
+            model_path: None,
+        };
+        let bytes = rmp_serde::to_vec_named(&legacy).unwrap();
+        let decoded = ModelMetadata::from_msgpack(&bytes).unwrap();
+        assert_eq!(decoded.head, DetectionHead::Yolo8);
+        assert_eq!(decoded.id, "com.example.old");
+    }
+
+    // The pre-`head` shape, to prove forward-compatibility of the new field.
+    #[derive(Serialize)]
+    struct ModelMetadataLegacy {
+        id: String,
+        kind: ModelKind,
+        execution: ModelExecution,
+        input_width: u32,
+        input_height: u32,
+        input_format: FrameFormat,
+        output_classes: Vec<String>,
+        model_path: Option<String>,
+    }
+
+    #[test]
+    fn detection_head_serializes_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&DetectionHead::Yolo8).unwrap(),
+            "\"yolo8\""
+        );
+        assert_eq!(
+            serde_json::to_string(&DetectionHead::Yolo5).unwrap(),
+            "\"yolo5\""
+        );
     }
 
     #[test]

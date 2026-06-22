@@ -70,6 +70,12 @@ class LoadModelRequest:
     # Class labels in output-index order. Carried so the sidecar can label
     # detections even when the caller (not the model file) owns the labels.
     class_labels: list[str] = field(default_factory=list)
+    # Output-head layout for decoding: "yolov8" (the transposed [1, 4+nc,
+    # anchors] head with per-class scores and no objectness, the ultralytics
+    # v8/v11 export) or "yolov5" (the legacy [1, anchors, 5+nc] head with an
+    # objectness column). Defaults to yolov8; a request that predates this field
+    # decodes as yolov8.
+    head: str = "yolov8"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -80,6 +86,7 @@ class LoadModelRequest:
             "input_h": self.input_h,
             "format": self.format,
             "class_labels": self.class_labels,
+            "head": self.head,
         }
 
     @classmethod
@@ -91,6 +98,7 @@ class LoadModelRequest:
             input_h=int(raw["input_h"]),
             format=str(raw["format"]),
             class_labels=[str(c) for c in (raw.get("class_labels") or [])],
+            head=str(raw.get("head") or "yolov8"),
         )
 
 

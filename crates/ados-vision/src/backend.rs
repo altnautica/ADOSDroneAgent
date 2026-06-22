@@ -14,7 +14,9 @@
 //!   agent sockets. The NPU vendor runtime (RKNN, TensorRT) is reached only
 //!   through that sidecar, never linked here.
 
-use ados_protocol::framebus::{BoundingBox, Detection, FrameFormat, LockState, ModelMetadata};
+use ados_protocol::framebus::{
+    BoundingBox, Detection, DetectionHead, FrameFormat, LockState, ModelMetadata,
+};
 use anyhow::{anyhow, Context, Result};
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -173,6 +175,8 @@ struct RknnModel {
     input_h: u32,
     input_format: String,
     class_labels: Vec<String>,
+    /// The output-head layout the sidecar must decode with (`yolov8` | `yolov5`).
+    head: String,
     /// Whether `load_model` has been sent to the sidecar this session. The
     /// sidecar keeps loaded models across connections, so we send the load
     /// handshake once (lazily, on the first infer) and re-send it only if the
@@ -194,6 +198,7 @@ impl VisionBackend for RknnSidecarBackend {
             input_h: meta.input_height,
             input_format: fmt_str(meta.input_format).to_string(),
             class_labels: meta.output_classes.clone(),
+            head: head_str(meta.head).to_string(),
             loaded: Mutex::new(false),
         }))
     }
@@ -217,6 +222,7 @@ impl RknnModel {
             self.input_h,
             &self.input_format,
             &self.class_labels,
+            &self.head,
         );
         let resp = round_trip(&self.socket_path, &req)?;
         check_ok(&resp).context("sidecar load_model")?;
@@ -259,10 +265,20 @@ fn fmt_str(f: FrameFormat) -> &'static str {
     }
 }
 
+/// The sidecar's lowercase name for a detection head, so it decodes the right
+/// output-tensor layout.
+fn head_str(h: DetectionHead) -> &'static str {
+    match h {
+        DetectionHead::Yolo8 => "yolov8",
+        DetectionHead::Yolo5 => "yolov5",
+    }
+}
+
 fn mv(s: &str) -> rmpv::Value {
     rmpv::Value::from(s)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn load_request(
     model_id: &str,
     path: &str,
@@ -270,6 +286,7 @@ fn load_request(
     input_h: u32,
     format: &str,
     classes: &[String],
+    head: &str,
 ) -> rmpv::Value {
     rmpv::Value::Map(vec![
         (mv("op"), mv("load_model")),
@@ -282,6 +299,7 @@ fn load_request(
             mv("class_labels"),
             rmpv::Value::Array(classes.iter().map(|c| mv(c)).collect()),
         ),
+        (mv("head"), mv(head)),
     ])
 }
 
@@ -481,6 +499,7 @@ mod tests {
             input_format: FrameFormat::Rgb24,
             output_classes: vec!["a".into()],
             model_path: None,
+            head: ados_protocol::framebus::DetectionHead::Yolo8,
         }
     }
 

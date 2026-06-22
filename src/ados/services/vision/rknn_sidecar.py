@@ -16,10 +16,19 @@ ONNX Runtime path; the sidecar process itself stays up and serving.
 
 Run as ``python -m ados.services.vision.rknn_sidecar``.
 
-Postprocessing assumes a YOLO-style detection head: a flat tensor of
-``[x, y, w, h, objectness, class_0..class_n]`` rows in input-image pixel space.
-Boxes are decoded, scaled back to the source frame, confidence-thresholded, and
-reduced by non-maximum suppression before they cross the wire.
+Postprocessing decodes a YOLO detection head whose layout is selected per model
+by the ``head`` field of the load request:
+
+* ``"yolov8"`` (the default): the transposed ``[1, 4+nc, anchors]`` head — four
+  box rows ``(cx, cy, w, h)`` then one score row per class, with no objectness.
+  This is the ultralytics YOLOv8/v11 export.
+* ``"yolov5"``: the legacy ``[1, anchors, 5+nc]`` head — per anchor
+  ``[cx, cy, w, h, objectness, class_scores...]`` (YOLOv5/v7).
+
+Boxes are in the model's input resolution; they scale back to the source frame
+by ``frame / input``, pass a confidence gate, and are reduced by class-agnostic
+non-maximum suppression before they cross the wire. The decoder is orientation
+robust: a head delivered as ``(anchors, features)`` is transposed automatically.
 """
 
 from __future__ import annotations
@@ -55,6 +64,7 @@ class _LoadedModel:
     input_h: int
     fmt: str
     class_labels: list[str]
+    head: str = "yolov8"
 
 
 class RknnBackend:
@@ -114,6 +124,7 @@ class RknnBackend:
             input_h=req.input_h,
             fmt=req.format,
             class_labels=req.class_labels,
+            head=req.head,
         )
         log.info("rknn_model_loaded", model=req.model_id, path=req.path)
         return proto.ok_response()
@@ -166,63 +177,162 @@ class RknnBackend:
         frame_h: int,
         model: _LoadedModel,
     ) -> list[dict[str, Any]]:
-        """Decode a YOLO-style head to detections in source-frame pixels.
+        """Decode this model's head to detections in source-frame pixels.
 
-        The first output tensor is flattened to rows of
-        ``[cx, cy, w, h, objectness, class_scores...]``. Coordinates are in the
-        model's input resolution, so they scale by ``frame / input``. After a
-        confidence gate (objectness x best class score) the boxes pass through
-        class-agnostic non-maximum suppression.
+        Delegates to :func:`decode_yolo_detections`, which selects the
+        ``yolov8`` (transposed, no objectness) or ``yolov5`` (legacy, with
+        objectness) layout by ``model.head``.
         """
-        if not outputs:
-            return []
-        arr = np.asarray(outputs[0]).reshape(-1)
-        n_classes = max(len(model.class_labels), 1)
-        stride = 5 + n_classes
-        if stride <= 5 or arr.size < stride:
-            return []
-        rows = arr[: (arr.size // stride) * stride].reshape((-1, stride))
+        return decode_yolo_detections(
+            np,
+            outputs,
+            frame_w=frame_w,
+            frame_h=frame_h,
+            input_w=model.input_w,
+            input_h=model.input_h,
+            class_labels=model.class_labels,
+            head=model.head,
+            conf_threshold=self._conf_threshold,
+            nms_iou=self._nms_iou,
+        )
 
-        scale_x = frame_w / model.input_w if model.input_w else 1.0
-        scale_y = frame_h / model.input_h if model.input_h else 1.0
 
-        boxes: list[tuple[float, float, float, float]] = []
-        scores: list[float] = []
-        labels: list[str] = []
+def decode_yolo_detections(
+    np: Any,
+    outputs: list[Any],
+    *,
+    frame_w: int,
+    frame_h: int,
+    input_w: int,
+    input_h: int,
+    class_labels: list[str],
+    head: str,
+    conf_threshold: float,
+    nms_iou: float,
+) -> list[dict[str, Any]]:
+    """Decode a YOLO detection head to detections in source-frame pixels.
 
-        for row in rows:
-            objectness = float(row[4])
-            class_scores = row[5:]
-            best = int(np.argmax(class_scores))
-            conf = objectness * float(class_scores[best])
-            if conf < self._conf_threshold:
-                continue
-            cx, cy, bw, bh = (float(row[0]), float(row[1]), float(row[2]), float(row[3]))
-            x = (cx - bw / 2.0) * scale_x
-            y = (cy - bh / 2.0) * scale_y
-            w = bw * scale_x
-            h = bh * scale_y
-            boxes.append((x, y, w, h))
-            scores.append(conf)
-            label = (
-                model.class_labels[best]
-                if best < len(model.class_labels)
-                else str(best)
-            )
-            labels.append(label)
+    ``head`` selects the output-tensor layout:
 
-        keep = _nms(boxes, scores, self._nms_iou)
-        return [
+    * ``"yolov8"`` (default): the transposed ``[1, 4+nc, anchors]`` head — four
+      box rows ``(cx, cy, w, h)`` then one score row per class, no objectness.
+    * ``"yolov5"``: the legacy ``[1, anchors, 5+nc]`` head — per anchor
+      ``[cx, cy, w, h, objectness, class_scores...]``.
+
+    Box coordinates are in the model's input resolution and scale to the source
+    frame by ``frame / input``. Confidence is the best class score (v8) or
+    ``objectness x best class score`` (v5). Boxes pass class-agnostic NMS. The
+    decoder transposes a head delivered as ``(anchors, features)`` automatically.
+    """
+    if not outputs:
+        return []
+    arr = np.asarray(outputs[0], dtype=np.float32)
+    # Drop leading singleton batch dims: (1, F, A) -> (F, A).
+    while arr.ndim > 2 and arr.shape[0] == 1:
+        arr = arr[0]
+    if arr.ndim != 2:
+        return []
+    n_classes = max(len(class_labels), 1)
+
+    if str(head).lower() in ("yolov5", "yolo5", "v5"):
+        centers, scores, classes = _decode_v5(np, arr, n_classes, conf_threshold)
+    else:
+        centers, scores, classes = _decode_v8(np, arr, n_classes, conf_threshold)
+
+    if centers.shape[0] == 0:
+        return []
+
+    scale_x = frame_w / input_w if input_w else 1.0
+    scale_y = frame_h / input_h if input_h else 1.0
+    cx, cy, bw, bh = centers[:, 0], centers[:, 1], centers[:, 2], centers[:, 3]
+    xs = (cx - bw / 2.0) * scale_x
+    ys = (cy - bh / 2.0) * scale_y
+    ws = bw * scale_x
+    hs = bh * scale_y
+
+    boxes = [
+        (float(xs[i]), float(ys[i]), float(ws[i]), float(hs[i]))
+        for i in range(xs.shape[0])
+    ]
+    score_list = [float(s) for s in scores]
+    keep = _nms(boxes, score_list, nms_iou)
+    out: list[dict[str, Any]] = []
+    for i in keep:
+        ci = int(classes[i])
+        label = class_labels[ci] if ci < len(class_labels) else str(ci)
+        out.append(
             proto.detection_dict(
                 x=boxes[i][0],
                 y=boxes[i][1],
                 width=boxes[i][2],
                 height=boxes[i][3],
-                class_label=labels[i],
-                confidence=scores[i],
+                class_label=label,
+                confidence=score_list[i],
             )
-            for i in keep
-        ]
+        )
+    return out
+
+
+def _empty_decode(np: Any) -> tuple[Any, Any, Any]:
+    """The no-detection result shape: zero-row centers/scores/classes arrays."""
+    return (
+        np.empty((0, 4), dtype=np.float32),
+        np.empty((0,), dtype=np.float32),
+        np.empty((0,), dtype=np.int64),
+    )
+
+
+def _decode_v8(np: Any, arr: Any, n_classes: int, conf_threshold: float) -> tuple[Any, Any, Any]:
+    """Decode the transposed YOLOv8 head ``(4+nc, anchors)`` (no objectness)."""
+    feat_len = 4 + n_classes
+    if arr.shape[0] == feat_len:
+        feat = arr
+    elif arr.shape[1] == feat_len:
+        feat = arr.T
+    else:
+        # Unknown class count: take the short axis as the feature axis.
+        feat = arr if arr.shape[0] <= arr.shape[1] else arr.T
+    if feat.shape[0] < 5:
+        return _empty_decode(np)
+    cls = feat[4 : 4 + n_classes, :]
+    if cls.shape[0] == 0:
+        return _empty_decode(np)
+    best = cls.argmax(axis=0)
+    conf = cls.max(axis=0)
+    mask = conf >= conf_threshold
+    centers = feat[:4, :].T[mask]
+    return (
+        centers.astype(np.float32),
+        conf[mask].astype(np.float32),
+        best[mask].astype(np.int64),
+    )
+
+
+def _decode_v5(np: Any, arr: Any, n_classes: int, conf_threshold: float) -> tuple[Any, Any, Any]:
+    """Decode the legacy YOLOv5 head ``(anchors, 5+nc)`` (with objectness)."""
+    row_len = 5 + n_classes
+    if arr.shape[1] == row_len:
+        rows = arr
+    elif arr.shape[0] == row_len:
+        rows = arr.T
+    else:
+        # Unknown class count: take the long axis as the anchor axis.
+        rows = arr if arr.shape[0] >= arr.shape[1] else arr.T
+    if rows.shape[1] < 6:
+        return _empty_decode(np)
+    obj = rows[:, 4]
+    cls = rows[:, 5 : 5 + n_classes]
+    if cls.shape[1] == 0:
+        return _empty_decode(np)
+    best = cls.argmax(axis=1)
+    conf = obj * cls.max(axis=1)
+    mask = conf >= conf_threshold
+    centers = rows[mask, :4]
+    return (
+        centers.astype(np.float32),
+        conf[mask].astype(np.float32),
+        best[mask].astype(np.int64),
+    )
 
 
 def _iou(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:

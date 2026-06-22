@@ -485,6 +485,7 @@ mod tests {
             input_format: FrameFormat::Rgb24,
             output_classes: vec!["x".into()],
             model_path: None,
+            head: ados_protocol::framebus::DetectionHead::Yolo8,
         };
         let args: Value = rmp_serde::from_slice(&meta.to_msgpack().unwrap()).unwrap();
         let (resp, err) = dispatch(&e, &req_env(methods::REGISTER_MODEL, args)).await;
@@ -510,6 +511,7 @@ mod tests {
             input_format: FrameFormat::Rgb24,
             output_classes: vec![],
             model_path: None,
+            head: ados_protocol::framebus::DetectionHead::Yolo8,
         };
         e.register_model(meta).await.unwrap();
 
