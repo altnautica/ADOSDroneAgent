@@ -228,6 +228,14 @@ impl<H: HostServices> Connection<H> {
         let mut vision_subs: Vec<String> = Vec::new();
         let (vis_tx, mut vis_rx) = tokio::sync::mpsc::channel::<VisionDelivery>(256);
 
+        // Vision detection-batch subscriptions. Each `vision.subscribe_detections`
+        // records the camera_id and a batch receiver from the host's vision
+        // client; a per-subscription forwarder pulls batch bytes into one merged
+        // channel, so a single select branch writes the `vision.deliver_detection`
+        // envelopes without competing writers. Same shape as the frame pump.
+        let mut detection_subs: Vec<String> = Vec::new();
+        let (det_tx, mut det_rx) = tokio::sync::mpsc::channel::<DetectionDelivery>(256);
+
         // ---- dispatch loop --------------------------------------------
         let result = loop {
             // Race the inbound request against an outgoing event or MAVLink frame
@@ -251,6 +259,8 @@ impl<H: HostServices> Connection<H> {
                             &mav_tx,
                             &mut vision_subs,
                             &vis_tx,
+                            &mut detection_subs,
+                            &det_tx,
                             &mut forwarders,
                         )
                         .await
@@ -298,6 +308,18 @@ impl<H: HostServices> Connection<H> {
                         }
                     }
                 }
+                delivery = det_rx.recv() => {
+                    // None means every detection forwarder dropped its sender;
+                    // keep serving requests rather than tearing down.
+                    if let Some(DetectionDelivery { batch }) = delivery {
+                        if let Err(e) = self
+                            .deliver_vision_detection(&mut write_half, &token, &batch)
+                            .await
+                        {
+                            break Err(e);
+                        }
+                    }
+                }
             }
         };
 
@@ -320,6 +342,8 @@ impl<H: HostServices> Connection<H> {
         mav_tx: &tokio::sync::mpsc::Sender<MavlinkDelivery>,
         vision_subs: &mut Vec<String>,
         vis_tx: &tokio::sync::mpsc::Sender<VisionDelivery>,
+        detection_subs: &mut Vec<String>,
+        det_tx: &tokio::sync::mpsc::Sender<DetectionDelivery>,
         forwarders: &mut Vec<JoinHandle<()>>,
     ) -> Result<(), ServerError> {
         let req_id = env.request_id.clone();
@@ -341,6 +365,8 @@ impl<H: HostServices> Connection<H> {
                     mav_tx,
                     vision_subs,
                     vis_tx,
+                    detection_subs,
+                    det_tx,
                     forwarders,
                 )
                 .await
@@ -362,6 +388,8 @@ impl<H: HostServices> Connection<H> {
         mav_tx: &tokio::sync::mpsc::Sender<MavlinkDelivery>,
         vision_subs: &mut Vec<String>,
         vis_tx: &tokio::sync::mpsc::Sender<VisionDelivery>,
+        detection_subs: &mut Vec<String>,
+        det_tx: &tokio::sync::mpsc::Sender<DetectionDelivery>,
         forwarders: &mut Vec<JoinHandle<()>>,
     ) -> Result<(), ServerError> {
         match method {
@@ -510,6 +538,51 @@ impl<H: HostServices> Connection<H> {
                 ]);
                 send_response(write_half, &env.request_id, result).await
             }
+            // vision.subscribe_detections arms the per-connection detection-batch
+            // push stream, exactly like vision.subscribe_frames arms the frame
+            // pump. On the first subscribe to a camera we obtain a batch receiver
+            // from the host's vision client (if wired) and spawn a forwarder that
+            // pushes each batch into the merged delivery channel, so the select
+            // loop writes `vision.deliver_detection` envelopes. A camera_id of ""
+            // subscribes to every camera (the host fans out all batches); the
+            // response echoes the requested camera_id.
+            Method::VisionSubscribeDetections => {
+                let camera_id = vision_subscribe_camera_id(&env.args);
+                if detection_subs.iter().any(|c| c == &camera_id) {
+                    let result = Value::Map(vec![(
+                        Value::from("already_subscribed"),
+                        Value::Boolean(true),
+                    )]);
+                    return send_response(write_half, &env.request_id, result).await;
+                }
+                detection_subs.push(camera_id.clone());
+                if let Some(mut rx) = self
+                    .host
+                    .vision_subscribe_detection_stream(&self.plugin_id, &camera_id)
+                {
+                    let tx = det_tx.clone();
+                    forwarders.push(tokio::spawn(async move {
+                        loop {
+                            match rx.recv().await {
+                                Ok(batch) => {
+                                    if tx.send(DetectionDelivery { batch }).await.is_err() {
+                                        break; // connection gone
+                                    }
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                    continue
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                            }
+                        }
+                    }));
+                }
+                let result = Value::Map(vec![
+                    (Value::from("subscribed"), Value::Boolean(true)),
+                    (Value::from("camera_id"), Value::from(camera_id.as_str())),
+                ]);
+                send_response(write_half, &env.request_id, result).await
+            }
             // Host-coupled methods route to the facade. The three payload-gated
             // methods (mavlink.send, mavlink.register_component,
             // peripheral.register_driver) receive the token's granted caps and
@@ -616,6 +689,35 @@ impl<H: HostServices> Connection<H> {
         };
         write_frame(write_half, &env).await
     }
+
+    /// Push a vision detection batch to the plugin as a `vision.deliver_detection`
+    /// envelope. Mirrors the frame deliver shape: kind `event`, method
+    /// `vision.deliver_detection`, capability `vision.detection.subscribe`, args
+    /// `{batch: bytes, timestamp_ms}`, request_id `vis-det-<ms>`. The `batch`
+    /// bytes are an encoded `ados_protocol::framebus::DetectionBatch`; the plugin
+    /// decodes it to read the detections.
+    async fn deliver_vision_detection<W: AsyncWriteExt + Unpin>(
+        &self,
+        write_half: &mut W,
+        token: &CapabilityToken,
+        batch: &[u8],
+    ) -> Result<(), ServerError> {
+        let ts = now_ms();
+        let env = Envelope {
+            version: PROTOCOL_VERSION,
+            kind: "event".to_string(),
+            method: ados_protocol::framebus::methods::DELIVER_DETECTION.to_string(),
+            capability: "vision.detection.subscribe".to_string(),
+            args: Value::Map(vec![
+                (Value::from("batch"), Value::Binary(batch.to_vec())),
+                (Value::from("timestamp_ms"), Value::Integer(ts.into())),
+            ]),
+            request_id: format!("vis-det-{ts}"),
+            token: token.to_token_string(),
+            error: None,
+        };
+        write_frame(write_half, &env).await
+    }
 }
 
 /// One subscribed MAVLink frame to push, tagged with the subscription's
@@ -645,6 +747,13 @@ fn mavlink_subscribe_msg_name(args: &Value) -> Option<String> {
 /// select loop drains.
 struct VisionDelivery {
     descriptor: Vec<u8>,
+}
+
+/// One subscribed vision detection batch to push. The per-subscription forwarder
+/// builds these into the merged delivery channel the connection's select loop
+/// drains. The bytes are an encoded `ados_protocol::framebus::DetectionBatch`.
+struct DetectionDelivery {
+    batch: Vec<u8>,
 }
 
 /// Extract the `camera_id` arg for `vision.subscribe_frames`. Unlike the MAVLink

@@ -17,7 +17,9 @@ use std::time::Duration;
 use ados_plugin_host::host::{HostError, HostResult, HostServices};
 use ados_plugin_host::{EventBus, PluginIpcServer};
 use ados_protocol::frame::{decode_len, HEADER_SIZE, PLUGIN_MAX_FRAME};
-use ados_protocol::framebus::{methods, FrameDescriptor, FrameFormat};
+use ados_protocol::framebus::{
+    methods, BoundingBox, Detection, DetectionBatch, FrameDescriptor, FrameFormat,
+};
 use ados_protocol::plugin::{Envelope, TokenIssuer, PROTOCOL_VERSION};
 use rmpv::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -30,17 +32,24 @@ const PLUGIN_ID: &str = "com.example.vision";
 /// request methods with a fixed marker so the route is observable end-to-end.
 struct VisionTestHost {
     frames: broadcast::Sender<Vec<u8>>,
+    detections: broadcast::Sender<Vec<u8>>,
 }
 
 impl VisionTestHost {
     fn new() -> Self {
         let (frames, _rx) = broadcast::channel(256);
-        Self { frames }
+        let (detections, _drx) = broadcast::channel(256);
+        Self { frames, detections }
     }
 
     /// Publish a frame descriptor as if the vision engine pushed it.
     fn push(&self, descriptor: &FrameDescriptor) {
         let _ = self.frames.send(descriptor.to_msgpack().unwrap());
+    }
+
+    /// Publish a detection batch as if the vision engine pushed it.
+    fn push_detection(&self, batch: &DetectionBatch) {
+        let _ = self.detections.send(batch.to_msgpack().unwrap());
     }
 }
 
@@ -53,6 +62,14 @@ impl HostServices for VisionTestHost {
         Some(self.frames.subscribe())
     }
 
+    fn vision_subscribe_detection_stream(
+        &self,
+        _plugin_id: &str,
+        _camera_id: &str,
+    ) -> Option<broadcast::Receiver<Vec<u8>>> {
+        Some(self.detections.subscribe())
+    }
+
     async fn vision_register_model(
         &self,
         _plugin_id: &str,
@@ -62,6 +79,29 @@ impl HostServices for VisionTestHost {
             Value::from("registered"),
             Value::Boolean(true),
         )]))
+    }
+
+    async fn vision_designate_track(
+        &self,
+        _plugin_id: &str,
+        args: &Value,
+    ) -> Result<HostResult, HostError> {
+        // Echo the camera_id back and report a fixed assigned track id, so the
+        // designate route is observable end-to-end.
+        let camera_id = match args {
+            Value::Map(m) => m
+                .iter()
+                .find(|(k, _)| k.as_str() == Some("camera_id"))
+                .and_then(|(_, v)| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            _ => String::new(),
+        };
+        Ok(Value::Map(vec![
+            (Value::from("designated"), Value::Boolean(true)),
+            (Value::from("track_id"), Value::from(42u64)),
+            (Value::from("camera_id"), Value::from(camera_id.as_str())),
+        ]))
     }
 }
 
@@ -254,6 +294,162 @@ async fn second_subscribe_to_same_camera_reports_already_subscribed() {
     .await;
     let second = recv(&mut client).await;
     assert_eq!(args_bool(&second, "already_subscribed"), Some(true));
+}
+
+fn sample_batch(frame_id: u64) -> DetectionBatch {
+    DetectionBatch {
+        model_id: "com.example.det".into(),
+        camera_id: "uvc-0".into(),
+        frame_id,
+        ts_ms: 1_700_000_000_000 + frame_id as i64,
+        detections: vec![Detection {
+            bbox: BoundingBox {
+                x: frame_id as f32,
+                y: 2.0,
+                width: 3.0,
+                height: 4.0,
+            },
+            class_label: "person".into(),
+            confidence: 0.9,
+            track_id: Some(frame_id),
+            assoc_confidence: None,
+            lock_state: None,
+        }],
+    }
+}
+
+#[tokio::test]
+async fn subscribe_detections_is_denied_without_the_subscribe_cap() {
+    let h = harness();
+    let token = h.issuer.mint(PLUGIN_ID, &caps(&[]), 600).to_token_string();
+    let mut client = connect(&h.path).await;
+    send(&mut client, &request("hello", &token, Value::Map(vec![]))).await;
+    let _ = recv(&mut client).await; // ready
+
+    send(
+        &mut client,
+        &request(methods::SUBSCRIBE_DETECTIONS, &token, Value::Map(vec![])),
+    )
+    .await;
+    let resp = recv(&mut client).await;
+    assert_eq!(
+        resp.error.as_deref(),
+        Some("capability_denied: vision.detection.subscribe")
+    );
+}
+
+#[tokio::test]
+async fn subscribe_detections_delivers_n_batches_in_order() {
+    let h = harness();
+    let token = h
+        .issuer
+        .mint(PLUGIN_ID, &caps(&["vision.detection.subscribe"]), 600)
+        .to_token_string();
+    let mut client = connect(&h.path).await;
+    send(&mut client, &request("hello", &token, Value::Map(vec![]))).await;
+    let _ = recv(&mut client).await; // ready
+
+    send(
+        &mut client,
+        &request(methods::SUBSCRIBE_DETECTIONS, &token, Value::Map(vec![])),
+    )
+    .await;
+    let resp = recv(&mut client).await;
+    assert_eq!(resp.error, None);
+    assert_eq!(args_bool(&resp, "subscribed"), Some(true));
+
+    // Let the per-subscription forwarder arm before the first publish.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    const N: u64 = 5;
+    for i in 0..N {
+        h.host.push_detection(&sample_batch(i));
+    }
+
+    // The engine fans batches in publish order; the host preserves that order on
+    // the single connection writer, so the plugin sees them 0..N in sequence.
+    for i in 0..N {
+        let frame = tokio::time::timeout(Duration::from_secs(2), recv(&mut client))
+            .await
+            .expect("vision.deliver_detection within timeout");
+        assert_eq!(frame.kind, "event");
+        assert_eq!(frame.method, methods::DELIVER_DETECTION);
+        assert_eq!(frame.capability, "vision.detection.subscribe");
+        let got = args_bytes(&frame, "batch").expect("batch bytes present");
+        let batch = DetectionBatch::from_msgpack(&got).unwrap();
+        assert_eq!(batch.frame_id, i, "batches must arrive in publish order");
+        assert_eq!(batch, sample_batch(i));
+    }
+}
+
+#[tokio::test]
+async fn second_subscribe_detections_to_same_camera_reports_already_subscribed() {
+    let h = harness();
+    let token = h
+        .issuer
+        .mint(PLUGIN_ID, &caps(&["vision.detection.subscribe"]), 600)
+        .to_token_string();
+    let mut client = connect(&h.path).await;
+    send(&mut client, &request("hello", &token, Value::Map(vec![]))).await;
+    let _ = recv(&mut client).await; // ready
+
+    let args = Value::Map(vec![(Value::from("camera_id"), Value::from("uvc-0"))]);
+    send(
+        &mut client,
+        &request(methods::SUBSCRIBE_DETECTIONS, &token, args.clone()),
+    )
+    .await;
+    let first = recv(&mut client).await;
+    assert_eq!(args_bool(&first, "subscribed"), Some(true));
+
+    send(
+        &mut client,
+        &request(methods::SUBSCRIBE_DETECTIONS, &token, args),
+    )
+    .await;
+    let second = recv(&mut client).await;
+    assert_eq!(args_bool(&second, "already_subscribed"), Some(true));
+}
+
+#[tokio::test]
+async fn designate_track_routes_to_the_host() {
+    let h = harness();
+    let token = h
+        .issuer
+        .mint(PLUGIN_ID, &caps(&["vision.track.designate"]), 600)
+        .to_token_string();
+    let mut client = connect(&h.path).await;
+    send(&mut client, &request("hello", &token, Value::Map(vec![]))).await;
+    let _ = recv(&mut client).await; // ready
+
+    let args = Value::Map(vec![
+        (Value::from("camera_id"), Value::from("uvc-0")),
+        (
+            Value::from("bbox"),
+            Value::Map(vec![
+                (Value::from("x"), Value::from(10.0)),
+                (Value::from("y"), Value::from(20.0)),
+                (Value::from("width"), Value::from(30.0)),
+                (Value::from("height"), Value::from(40.0)),
+            ]),
+        ),
+    ]);
+    send(
+        &mut client,
+        &request(methods::DESIGNATE_TRACK, &token, args),
+    )
+    .await;
+    let resp = recv(&mut client).await;
+    assert_eq!(resp.error, None, "granted cap must not produce a gate error");
+    assert_eq!(args_bool(&resp, "designated"), Some(true));
+    let camera = match &resp.args {
+        Value::Map(m) => m
+            .iter()
+            .find(|(k, _)| k.as_str() == Some("camera_id"))
+            .and_then(|(_, v)| v.as_str()),
+        _ => None,
+    };
+    assert_eq!(camera, Some("uvc-0"));
 }
 
 #[tokio::test]

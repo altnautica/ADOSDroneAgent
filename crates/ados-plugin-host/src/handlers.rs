@@ -348,10 +348,11 @@ pub async fn route_host_method<H: HostServices + ?Sized>(
         Method::VisionInfer => host.vision_infer(plugin_id, args).await,
         Method::VisionPublishDetection => host.vision_publish_detection(plugin_id, args).await,
         Method::VisionDesignateTrack => host.vision_designate_track(plugin_id, args).await,
-        // The event surface, ping, and the subscribe methods never reach here;
-        // the server short-circuits them (frames now; detections once the
-        // detection push is wired). Treat as a programming error guarded by a
-        // stable response.
+        // The event surface, ping, and the streaming subscribe methods never
+        // reach here; the server short-circuits both `vision.subscribe_frames`
+        // and `vision.subscribe_detections`, arming the per-connection push
+        // streams before they could route to the facade. Reaching this arm is a
+        // programming error guarded by a stable response.
         Method::EventPublish
         | Method::EventSubscribe
         | Method::Ping

@@ -82,6 +82,13 @@ class PluginIpcClient:
         self._mavlink_callbacks: dict[
             str, list[Callable[[dict], Awaitable[None] | None]]
         ] = {}
+        # Vision detection deliveries arrive as ``vision.deliver_detection``
+        # events carrying no ``topic`` field, so they are routed by method name
+        # (like ``mavlink.deliver``) to these callbacks rather than through the
+        # topic-based event surface.
+        self._detection_callbacks: list[
+            Callable[[dict], Awaitable[None] | None]
+        ] = []
         self._reader_task: asyncio.Task | None = None
         self._next_id = 0
 
@@ -164,6 +171,21 @@ class PluginIpcClient:
             capability="mavlink.read",
             args={"msg_name": msg_name},
         )
+
+    # ---- Vision -------------------------------------------------------
+
+    async def vision_subscribe_detections(
+        self,
+        callback: Callable[[dict], Awaitable[None] | None],
+    ) -> None:
+        """Register a callback for ``vision.deliver_detection`` events.
+
+        The subscribe RPC is sent by the SDK facade; this only records the local
+        deliver callback. Each delivered batch is routed here by method name (the
+        event carries no ``topic``) and the callback receives ``{batch,
+        timestamp_ms}``.
+        """
+        self._detection_callbacks.append(callback)
 
     # ---- Telemetry ----------------------------------------------------
 
@@ -352,6 +374,8 @@ class PluginIpcClient:
                 if env.type == "event":
                     if env.method == "mavlink.deliver":
                         await self._dispatch_mavlink(env)
+                    elif env.method == "vision.deliver_detection":
+                        await self._dispatch_detection(env)
                     else:
                         await self._dispatch_event(env)
                 else:
@@ -386,6 +410,23 @@ class PluginIpcClient:
                             topic=topic,
                             error=str(exc),
                         )
+
+    async def _dispatch_detection(self, env: Envelope) -> None:
+        payload = {
+            "batch": env.args.get("batch"),
+            "timestamp_ms": env.args.get("timestamp_ms"),
+        }
+        for cb in list(self._detection_callbacks):
+            try:
+                result = cb(payload)
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception as exc:  # noqa: BLE001
+                log.error(
+                    "plugin_detection_callback_error",
+                    plugin_id=self._plugin_id,
+                    error=str(exc),
+                )
 
     async def _dispatch_mavlink(self, env: Envelope) -> None:
         msg_name: Any = env.args.get("msg_name")
@@ -461,6 +502,7 @@ class _NullIpcClient:
     async def event_subscribe(self, *_a, **_k) -> None: return self._unavail("event_subscribe")
     async def mavlink_send(self, *_a, **_k) -> dict: return self._unavail("mavlink_send")
     async def mavlink_subscribe(self, *_a, **_k) -> None: return self._unavail("mavlink_subscribe")
+    async def vision_subscribe_detections(self, *_a, **_k) -> None: return self._unavail("vision_subscribe_detections")
     async def mavlink_register_component(self, *_a, **_k) -> dict: return self._unavail("mavlink_register_component")
     async def telemetry_extend(self, *_a, **_k) -> dict: return self._unavail("telemetry_extend")
     async def peripheral_register_driver(self, *_a, **_k) -> dict: return self._unavail("peripheral_register_driver")

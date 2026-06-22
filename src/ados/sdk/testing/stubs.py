@@ -52,6 +52,11 @@ class FakeIpcClient:
         self._responses: dict[str, dict[str, Any]] = {}
         self.registered_components: list[tuple[int, str]] = []
         self.sent_mavlink: list[tuple[bytes, int | None]] = []
+        # Detection-deliver callbacks registered via the vision facade. A test
+        # injects a batch with :meth:`deliver_detection`.
+        self._detection_callbacks: list[
+            Callable[[dict[str, Any]], Any]
+        ] = []
 
     def grant(self, capability: str) -> None:
         self._granted.add(capability)
@@ -135,3 +140,23 @@ class FakeIpcClient:
             raise CapabilityDenied(self.plugin_id, cap)
         self.registered_components.append((int(comp_id), kind))
         return {"registered": True}
+
+    async def vision_subscribe_detections(
+        self, callback: Callable[[dict[str, Any]], Any]
+    ) -> None:
+        """Record a detection-deliver callback. The subscribe RPC itself is sent
+        by the vision facade via ``_send_request``; this only registers the
+        local deliver handler, matching the real client."""
+        self._detection_callbacks.append(callback)
+
+    async def deliver_detection(self, payload: dict[str, Any]) -> int:
+        """Inject a ``vision.deliver_detection`` payload (``{batch,
+        timestamp_ms}``) as if the host pushed it, invoking every registered
+        detection callback. Returns the number invoked."""
+        delivered = 0
+        for cb in list(self._detection_callbacks):
+            result = cb(payload)
+            if asyncio.iscoroutine(result):
+                await result
+            delivered += 1
+        return delivered

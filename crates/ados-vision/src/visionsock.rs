@@ -105,6 +105,7 @@ async fn handle_client(
     // task, so both serialize their frames through one mutex.
     let writer = Arc::new(tokio::sync::Mutex::new(write_half));
     let mut frame_task: Option<tokio::task::JoinHandle<()>> = None;
+    let mut detection_task: Option<tokio::task::JoinHandle<()>> = None;
 
     loop {
         let mut header = [0u8; HEADER_SIZE];
@@ -149,11 +150,34 @@ async fn handle_client(
             continue;
         }
 
+        if env.method == methods::SUBSCRIBE_DETECTIONS {
+            // Acknowledge, then start (or restart) the detection-batch push task.
+            send_response(
+                &writer,
+                &env.request_id,
+                ok_map(&[("subscribed", Value::Boolean(true))]),
+                None,
+            )
+            .await?;
+            if let Some(t) = detection_task.take() {
+                t.abort();
+            }
+            detection_task = Some(spawn_detection_push(
+                engine.clone(),
+                writer.clone(),
+                filter_camera(&env.args),
+            ));
+            continue;
+        }
+
         let (args, err) = dispatch(&engine, &env).await;
         send_response(&writer, &env.request_id, args, err).await?;
     }
 
     if let Some(t) = frame_task.take() {
+        t.abort();
+    }
+    if let Some(t) = detection_task.take() {
         t.abort();
     }
     Ok(())
@@ -320,6 +344,61 @@ fn deliver_frame(desc: &FrameDescriptor) -> Result<Vec<u8>> {
     };
     env.encode_frame()
         .map_err(|e| anyhow!("encode deliver envelope: {e}"))
+}
+
+/// Spawn the per-connection detection-batch push task. Every published batch
+/// (optionally filtered to one camera) is wrapped in a `vision.deliver_detection`
+/// event envelope and written to the connection. A lagged subscriber skips to
+/// the tail (latest-wins); a write error ends the task.
+fn spawn_detection_push(
+    engine: Arc<VisionEngine>,
+    writer: Arc<tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>>,
+    camera_filter: Option<String>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut rx = engine.subscribe_detections();
+        loop {
+            match rx.recv().await {
+                Ok(batch) => {
+                    if let Some(want) = &camera_filter {
+                        if &batch.camera_id != want {
+                            continue;
+                        }
+                    }
+                    let frame = match deliver_detection(&batch) {
+                        Ok(f) => f,
+                        Err(_) => continue,
+                    };
+                    let mut w = writer.lock().await;
+                    if w.write_all(&frame).await.is_err() || w.flush().await.is_err() {
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
+}
+
+/// Build a `vision.deliver_detection` event frame carrying the encoded
+/// `DetectionBatch` as a binary `batch` field, ready to write.
+fn deliver_detection(batch: &DetectionBatch) -> Result<Vec<u8>> {
+    let bytes = batch
+        .to_msgpack()
+        .map_err(|e| anyhow!("encode detection batch: {e}"))?;
+    let env = Envelope {
+        version: PROTOCOL_VERSION,
+        kind: "event".to_string(),
+        method: methods::DELIVER_DETECTION.to_string(),
+        capability: "vision.detection.subscribe".to_string(),
+        args: Value::Map(vec![(Value::from("batch"), Value::Binary(bytes))]),
+        request_id: format!("vis-det-{}-{}", batch.camera_id, batch.frame_id),
+        token: String::new(),
+        error: None,
+    };
+    env.encode_frame()
+        .map_err(|e| anyhow!("encode deliver detection envelope: {e}"))
 }
 
 /// Write a response envelope sharing `request_id`. An `error` sets the envelope
@@ -666,6 +745,47 @@ mod tests {
             _ => panic!("args not a map"),
         };
         assert_eq!(FrameDescriptor::from_msgpack(&bytes).unwrap(), desc);
+    }
+
+    #[test]
+    fn deliver_detection_carries_batch_binary() {
+        let batch = DetectionBatch {
+            model_id: "m".into(),
+            camera_id: "uvc-0".into(),
+            frame_id: 9,
+            ts_ms: 5,
+            detections: vec![Detection {
+                bbox: BoundingBox {
+                    x: 1.0,
+                    y: 2.0,
+                    width: 3.0,
+                    height: 4.0,
+                },
+                class_label: "person".into(),
+                confidence: 0.9,
+                track_id: Some(7),
+                assoc_confidence: None,
+                lock_state: None,
+            }],
+        };
+        let frame = deliver_detection(&batch).unwrap();
+        let body = &frame[HEADER_SIZE..];
+        let env = Envelope::from_msgpack(body).unwrap();
+        assert_eq!(env.method, methods::DELIVER_DETECTION);
+        assert_eq!(env.kind, "event");
+        assert_eq!(env.capability, "vision.detection.subscribe");
+        let bytes = match &env.args {
+            Value::Map(entries) => entries
+                .iter()
+                .find(|(k, _)| k.as_str() == Some("batch"))
+                .and_then(|(_, v)| match v {
+                    Value::Binary(b) => Some(b.clone()),
+                    _ => None,
+                })
+                .unwrap(),
+            _ => panic!("args not a map"),
+        };
+        assert_eq!(DetectionBatch::from_msgpack(&bytes).unwrap(), batch);
     }
 
     #[test]

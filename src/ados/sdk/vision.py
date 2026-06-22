@@ -59,10 +59,13 @@ VISION_DETECTION_TOPIC = "vision.detection"
 # Plugin RPC method names for the vision surface. The plugin host gates each on
 # the matching capability before routing to the vision engine.
 SUBSCRIBE_FRAMES = "vision.subscribe_frames"
+SUBSCRIBE_DETECTIONS = "vision.subscribe_detections"
+DESIGNATE_TRACK = "vision.designate_track"
 REGISTER_MODEL = "vision.register_model"
 INFER = "vision.infer"
 PUBLISH_DETECTION = "vision.publish_detection"
 DELIVER_FRAME = "vision.deliver"
+DELIVER_DETECTION = "vision.deliver_detection"
 
 # MAVLink component id a vision plugin registers as when it feeds pose to the
 # flight controller. MAV_COMP_ID_VISUAL_INERTIAL_ODOMETRY (197): the FC tags
@@ -200,6 +203,12 @@ class Frame:
 # resolve (torn or stale read, or a ring that vanished) is dropped silently and
 # the callback does not fire for it.
 FrameCallback = Callable[[Frame], Awaitable[None] | None]
+
+
+# A callback invoked once per delivered detection batch. The batch is decoded
+# from the host's ``vision.deliver_detection`` event; a batch that fails to
+# decode is dropped silently and the callback does not fire for it.
+DetectionCallback = Callable[["DetectionBatch"], Awaitable[None] | None]
 
 
 # ---------------------------------------------------------------------------
@@ -956,6 +965,74 @@ class VisionClient:
         # Frame descriptors arrive as events on the reserved frame topic.
         await self._ipc.event_subscribe(VISION_FRAME_TOPIC, _on_event)
 
+    async def subscribe_detections(
+        self,
+        callback: DetectionCallback,
+        *,
+        camera_id: str | None = None,
+    ) -> None:
+        """Subscribe to published detection batches, optionally filtered to one
+        ``camera_id``. Gated on ``vision.detection.subscribe``.
+
+        Sends the subscribe-detections RPC then registers a deliver handler. A
+        ``camera_id`` of ``None`` receives every camera's batches; a filter is
+        applied both in the RPC argument (so the host can narrow the stream) and
+        locally (so a broader host stream is still filtered). The host delivers
+        each batch as a ``vision.deliver_detection`` event whose ``batch`` field
+        is the encoded :class:`DetectionBatch`; this decodes it and invokes
+        ``callback`` with the batch.
+
+        The deliver event carries no ``topic`` field, so it is routed explicitly
+        by the IPC reader by method name (like ``mavlink.deliver``) rather than
+        through the topic-based event surface.
+        """
+        want = camera_id
+
+        async def _on_batch(payload: dict[str, Any]) -> None:
+            raw = payload.get("batch")
+            if not isinstance(raw, (bytes, bytearray, memoryview)):
+                return
+            try:
+                batch = DetectionBatch.from_msgpack(bytes(raw))
+            except (ValueError, KeyError, msgpack.UnpackException):
+                return
+            if want is not None and batch.camera_id != want:
+                return
+            result = callback(batch)
+            if hasattr(result, "__await__"):
+                await result  # type: ignore[union-attr]
+
+        sub_args: dict[str, Any] = {}
+        if camera_id is not None:
+            sub_args["camera_id"] = camera_id
+        await self._request(
+            SUBSCRIBE_DETECTIONS, "vision.detection.subscribe", sub_args
+        )
+        await self._ipc.vision_subscribe_detections(_on_batch)
+
+    async def designate_track(
+        self,
+        camera_id: str,
+        bbox: BoundingBox,
+        *,
+        class_label: str = "",
+        confidence: float = 1.0,
+    ) -> dict:
+        """Designate the engine's single follow target on ``camera_id`` (the
+        operator's click-to-follow pick), overriding the auto-lock. Gated on
+        ``vision.track.designate``. Returns the engine's response args
+        ``{designated: bool, track_id: int|None, camera_id: str}``."""
+        return await self._request(
+            DESIGNATE_TRACK,
+            "vision.track.designate",
+            {
+                "camera_id": camera_id,
+                "bbox": bbox.to_dict(),
+                "class_label": class_label,
+                "confidence": float(confidence),
+            },
+        )
+
     async def register_model(self, model: ModelMetadata) -> dict:
         """Register an inference model with the engine. Carries the metadata as
         a msgpack blob the engine decodes. Gated on ``vision.model.register``.
@@ -1040,6 +1117,7 @@ __all__ = [
     "FrameDescriptor",
     "Frame",
     "FrameCallback",
+    "DetectionCallback",
     "RingLayout",
     "write_slot",
     "read_slot",
@@ -1055,10 +1133,13 @@ __all__ = [
     "VISION_FRAME_TOPIC",
     "VISION_DETECTION_TOPIC",
     "SUBSCRIBE_FRAMES",
+    "SUBSCRIBE_DETECTIONS",
+    "DESIGNATE_TRACK",
     "REGISTER_MODEL",
     "INFER",
     "PUBLISH_DETECTION",
     "DELIVER_FRAME",
+    "DELIVER_DETECTION",
     "VIO_COMPONENT_ID",
     "POSE_COVARIANCE_LEN",
 ]

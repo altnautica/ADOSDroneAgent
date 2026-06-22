@@ -524,6 +524,101 @@ async def test_subscribe_frames_denied_without_cap():
         await client.subscribe_frames(lambda _f: None)
 
 
+async def test_subscribe_detections_denied_without_cap():
+    client = VisionClient(_ipc(set()))
+    with pytest.raises(CapabilityDenied):
+        await client.subscribe_detections(lambda _b: None)
+
+
+async def test_subscribe_detections_sends_rpc_and_delivers_batches_in_order():
+    ipc = _ipc({"vision.detection.subscribe"})
+    client = VisionClient(ipc)
+    seen: list[DetectionBatch] = []
+
+    async def handler(batch: DetectionBatch) -> None:
+        seen.append(batch)
+
+    await client.subscribe_detections(handler)
+    # The gated subscribe RPC went out under the subscribe capability.
+    method, args = ipc.requests[-1]
+    assert method == "vision.subscribe_detections"
+    assert args == {}
+
+    # The host pushes encoded batches as deliver payloads; they decode and reach
+    # the handler in order.
+    for i in range(3):
+        batch = DetectionBatch(
+            model_id="m", camera_id="uvc-0", frame_id=i, ts_ms=i,
+            detections=[Detection(BoundingBox(float(i), 0, 1, 1), "weed", 0.5)],
+        )
+        await ipc.deliver_detection(
+            {"batch": batch.to_msgpack(), "timestamp_ms": i}
+        )
+
+    assert [b.frame_id for b in seen] == [0, 1, 2]
+    assert seen[1].detections[0].bbox.x == 1.0
+
+
+async def test_subscribe_detections_filters_by_camera_id():
+    ipc = _ipc({"vision.detection.subscribe"})
+    client = VisionClient(ipc)
+    seen: list[DetectionBatch] = []
+    await client.subscribe_detections(lambda b: seen.append(b), camera_id="uvc-9")
+    # The RPC argument carried the camera filter.
+    _, args = ipc.requests[-1]
+    assert args == {"camera_id": "uvc-9"}
+
+    other = DetectionBatch(
+        model_id="m", camera_id="uvc-0", frame_id=1, ts_ms=1, detections=[]
+    )
+    match = DetectionBatch(
+        model_id="m", camera_id="uvc-9", frame_id=2, ts_ms=2, detections=[]
+    )
+    await ipc.deliver_detection({"batch": other.to_msgpack(), "timestamp_ms": 1})
+    await ipc.deliver_detection({"batch": match.to_msgpack(), "timestamp_ms": 2})
+    # Only the matching camera's batch reaches the handler.
+    assert [b.camera_id for b in seen] == ["uvc-9"]
+
+
+async def test_subscribe_detections_drops_a_malformed_batch():
+    ipc = _ipc({"vision.detection.subscribe"})
+    client = VisionClient(ipc)
+    seen: list[DetectionBatch] = []
+    await client.subscribe_detections(lambda b: seen.append(b))
+    # A non-bytes batch and undecodable bytes are both dropped silently.
+    await ipc.deliver_detection({"batch": None, "timestamp_ms": 1})
+    await ipc.deliver_detection({"batch": b"\xff\xff not msgpack", "timestamp_ms": 2})
+    assert seen == []
+
+
+async def test_designate_track_sends_under_correct_cap():
+    ipc = _ipc({"vision.track.designate"})
+    ipc.set_response(
+        "vision.designate_track",
+        {"designated": True, "track_id": 5, "camera_id": "uvc-0"},
+    )
+    client = VisionClient(ipc)
+    out = await client.designate_track(
+        "uvc-0",
+        BoundingBox(10.0, 20.0, 30.0, 40.0),
+        class_label="person",
+        confidence=0.8,
+    )
+    method, args = ipc.requests[-1]
+    assert method == "vision.designate_track"
+    assert args["camera_id"] == "uvc-0"
+    assert args["bbox"] == {"x": 10.0, "y": 20.0, "width": 30.0, "height": 40.0}
+    assert args["class_label"] == "person"
+    assert args["confidence"] == 0.8
+    assert out == {"designated": True, "track_id": 5, "camera_id": "uvc-0"}
+
+
+async def test_designate_track_denied_without_cap():
+    client = VisionClient(_ipc(set()))
+    with pytest.raises(CapabilityDenied):
+        await client.designate_track("uvc-0", BoundingBox(0, 0, 1, 1))
+
+
 # ---------------------------------------------------------------------------
 # Pose / odometry injection.
 # ---------------------------------------------------------------------------

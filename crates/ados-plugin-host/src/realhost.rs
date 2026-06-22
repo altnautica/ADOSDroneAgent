@@ -2105,6 +2105,18 @@ impl HostServices for RealHost {
         self.vision.as_ref().map(|c| c.subscribe_frames())
     }
 
+    fn vision_subscribe_detection_stream(
+        &self,
+        _plugin_id: &str,
+        _camera_id: &str,
+    ) -> Option<broadcast::Receiver<Vec<u8>>> {
+        // The engine fans every camera's detection batches out on one broadcast;
+        // the per-camera filter is applied plugin-side (the SDK callback drops a
+        // non-matching camera). When the engine socket is not up the slot is None
+        // and no stream arms, matching the frame-stream posture.
+        self.vision.as_ref().map(|c| c.subscribe_detections())
+    }
+
     async fn vision_register_model(
         &self,
         _plugin_id: &str,

@@ -312,6 +312,23 @@ pub trait HostServices: Send + Sync + 'static {
         None
     }
 
+    /// A receiver for the vision engine's detection-batch fanout, when this host
+    /// has a wired vision client. The server obtains one per
+    /// `vision.subscribe_detections` and pushes each batch to the plugin as a
+    /// `vision.deliver_detection` event, mirroring the frame-descriptor pump.
+    /// The bytes are an encoded `ados_protocol::framebus::DetectionBatch`.
+    ///
+    /// The default returns `None`, keeping [`NoopHost`] unaffected (no push
+    /// stream). A real host returns a receiver when its vision slot is wired and
+    /// `None` when the engine socket has not surfaced yet.
+    fn vision_subscribe_detection_stream(
+        &self,
+        _plugin_id: &str,
+        _camera_id: &str,
+    ) -> Option<tokio::sync::broadcast::Receiver<Vec<u8>>> {
+        None
+    }
+
     /// Register an inference model with the vision engine. The host proxies the
     /// request to `/run/ados/vision.sock` and returns the engine's response.
     /// Async because the proxy awaits the engine's reply on the socket, unlike

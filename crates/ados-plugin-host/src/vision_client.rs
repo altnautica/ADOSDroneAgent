@@ -72,6 +72,9 @@ pub struct VisionClient {
     /// Frame-descriptor fanout: descriptor bytes pulled from the engine's
     /// `vision.deliver` pushes.
     frames: broadcast::Sender<Vec<u8>>,
+    /// Detection-batch fanout: encoded `DetectionBatch` bytes pulled from the
+    /// engine's `vision.deliver_detection` pushes.
+    detections: broadcast::Sender<Vec<u8>>,
     reader: JoinHandle<()>,
 }
 
@@ -92,11 +95,13 @@ impl VisionClient {
         let (read_half, write_half) = stream.into_split();
 
         let (frames, _rx) = broadcast::channel(VISION_FRAME_BROADCAST_DEPTH);
+        let (detections, _drx) = broadcast::channel(VISION_FRAME_BROADCAST_DEPTH);
         let (resp_tx, resp_rx) = tokio::sync::mpsc::channel::<Result<Value, String>>(64);
         let frames_tx = frames.clone();
+        let detections_tx = detections.clone();
 
         let reader = tokio::spawn(async move {
-            read_loop(read_half, frames_tx, resp_tx).await;
+            read_loop(read_half, frames_tx, detections_tx, resp_tx).await;
         });
 
         Ok(Self {
@@ -105,6 +110,7 @@ impl VisionClient {
                 responses: resp_rx,
             }),
             frames,
+            detections,
             reader,
         })
     }
@@ -114,6 +120,13 @@ impl VisionClient {
     /// than blocking the reader. Mirrors [`crate::mavlink_client::MavlinkClient::subscribe`].
     pub fn subscribe_frames(&self) -> broadcast::Receiver<Vec<u8>> {
         self.frames.subscribe()
+    }
+
+    /// A fresh receiver for the engine's detection-batch fanout. Each subscribed
+    /// plugin holds its own receiver; a slow consumer lags to the tail rather
+    /// than blocking the reader. Mirrors [`Self::subscribe_frames`].
+    pub fn subscribe_detections(&self) -> broadcast::Receiver<Vec<u8>> {
+        self.detections.subscribe()
     }
 
     /// Proxy a `register_model` request to the engine and return its response
@@ -199,6 +212,7 @@ impl Drop for VisionClient {
 async fn read_loop(
     mut read_half: OwnedReadHalf,
     frames: broadcast::Sender<Vec<u8>>,
+    detections: broadcast::Sender<Vec<u8>>,
     responses: tokio::sync::mpsc::Sender<Result<Value, String>>,
 ) {
     loop {
@@ -226,6 +240,12 @@ async fn read_loop(
             }
             continue;
         }
+        if env.method == methods::DELIVER_DETECTION {
+            if let Some(batch) = detection_batch_bytes(&env.args) {
+                let _ = detections.send(batch);
+            }
+            continue;
+        }
         // A response: forward the error if set, else the args map. If the
         // receiver is gone the requester already moved on, so stop.
         let payload = match env.error {
@@ -247,6 +267,23 @@ fn frame_descriptor_bytes(args: &Value) -> Option<Vec<u8>> {
         Value::Map(entries) => entries
             .iter()
             .find(|(k, _)| k.as_str() == Some("descriptor"))
+            .and_then(|(_, v)| match v {
+                Value::Binary(b) => Some(b.clone()),
+                _ => None,
+            }),
+        _ => None,
+    }
+}
+
+/// Extract the detection-batch bytes from a `vision.deliver_detection` envelope.
+/// The engine carries the encoded [`ados_protocol::framebus::DetectionBatch`] as
+/// a binary `batch` field; the host forwards those bytes unchanged to the
+/// plugin. Returns `None` if the field is absent or not binary.
+fn detection_batch_bytes(args: &Value) -> Option<Vec<u8>> {
+    match args {
+        Value::Map(entries) => entries
+            .iter()
+            .find(|(k, _)| k.as_str() == Some("batch"))
             .and_then(|(_, v)| match v {
                 Value::Binary(b) => Some(b.clone()),
                 _ => None,
@@ -346,6 +383,48 @@ mod tests {
             .expect("descriptor within timeout")
             .expect("descriptor, not lagged/closed");
         assert_eq!(FrameDescriptor::from_msgpack(&got).unwrap(), descriptor);
+    }
+
+    fn deliver_detection_envelope(batch: &[u8]) -> Vec<u8> {
+        let env = Envelope {
+            version: PROTOCOL_VERSION,
+            kind: "event".to_string(),
+            method: methods::DELIVER_DETECTION.to_string(),
+            capability: "vision.detection.subscribe".to_string(),
+            args: Value::Map(vec![(Value::from("batch"), Value::Binary(batch.to_vec()))]),
+            request_id: "vis-det-uvc-0-1".to_string(),
+            token: String::new(),
+            error: None,
+        };
+        let body = env.to_msgpack().unwrap();
+        encode_frame(&body, PLUGIN_MAX_FRAME).unwrap()
+    }
+
+    #[tokio::test]
+    async fn detection_batches_fan_out_to_a_subscriber() {
+        use ados_protocol::framebus::DetectionBatch;
+        let path = temp_sock("det-fanout");
+        let (server, _inbound) = IpcBroadcast::bind(&path, 256, false, None).await.unwrap();
+
+        let client = VisionClient::connect(&path).await.unwrap();
+        let mut rx = client.subscribe_detections();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let batch = DetectionBatch {
+            model_id: "m".into(),
+            camera_id: "uvc-0".into(),
+            frame_id: 1,
+            ts_ms: 1,
+            detections: vec![],
+        };
+        let bytes = batch.to_msgpack().unwrap();
+        server.broadcast(deliver_detection_envelope(&bytes)).await;
+
+        let got = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("batch within timeout")
+            .expect("batch, not lagged/closed");
+        assert_eq!(DetectionBatch::from_msgpack(&got).unwrap(), batch);
     }
 
     #[tokio::test]
