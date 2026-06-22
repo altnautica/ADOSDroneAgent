@@ -43,6 +43,8 @@ ados-macpin = { path = "../ados-macpin" }
 ados-video = { path = "../ados-video" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# Dynamic msgpack values for the vision-socket envelope (designate route).
+rmpv = { workspace = true }
 # YAML reader for the slice of /etc/ados/config.yaml the pairing-info route
 # projects (device identity, profile, the radio peer). The same reader the cloud
 # relay uses, so a config the Python agent wrote reads identically here.

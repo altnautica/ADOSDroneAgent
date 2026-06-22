@@ -60,6 +60,7 @@ pub mod status_full;
 pub mod system;
 pub mod system_resources;
 pub mod video;
+pub mod vision;
 pub mod wfb;
 pub mod wfb_write;
 pub mod ws_ticket;
@@ -119,6 +120,10 @@ pub fn build_router(state: AppState, net_native: bool, hid_native: bool) -> Rout
         // CAN passthrough: a deliberate 501 stub (no agent-side bridge yet). The
         // GCS probes it and falls back to the MAVLink CAN_FORWARD path.
         .route("/api/can/passthrough", post(can::can_passthrough))
+        // Vision designate: operator click-to-follow. Locks the vision engine's
+        // tracker for a camera onto the box the operator clicked, via the vision
+        // socket. Auth-gated when paired (a write), 503 when vision is not up.
+        .route("/api/vision/designate", post(vision::designate))
         // WebSocket auth ticket mint: exchanges the pairing key (LAN-edge auth)
         // for a short-lived self-contained HMAC ticket a browser GCS hands to the
         // MAVLink WS proxy through the subprotocol list.

@@ -81,6 +81,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "nix 0.29.0",
+ "rmpv",
  "sd-notify",
  "serde",
  "serde_json",

@@ -79,6 +79,8 @@ fn native_routes() -> Vec<NativeRoute> {
         get("/api/commands"),
         // CAN passthrough 501 stub.
         post("/api/can/passthrough"),
+        // Vision designate (operator click-to-follow).
+        post("/api/vision/designate"),
         // WebSocket auth ticket mint.
         post("/api/_ws/ticket"),
         // Params: the full list + the single-param read (a {name} template).
@@ -382,7 +384,7 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            101,
+            102,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);
