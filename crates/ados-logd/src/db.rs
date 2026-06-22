@@ -34,6 +34,14 @@ pub const BUSY_TIMEOUT_MS: u32 = 5000;
 /// the SD card.
 pub const WAL_AUTOCHECKPOINT_PAGES: u32 = 1000;
 
+/// Per-connection page-cache size for read-only connections, as SQLite's
+/// negative-means-KiB form (`-512` = 512 KiB). Read-only connections are
+/// short-lived and many open concurrently off the blocking pool; SQLite's
+/// default cache (~2 MiB each) adds up across them and inflates the daemon's
+/// resident set, while 512 KiB still keeps a working set of hot index and leaf
+/// pages warm. The single writer keeps the larger default for write batching.
+pub const RO_CACHE_SIZE_KIB: i32 = -512;
+
 /// Errors raised opening or migrating the store.
 #[derive(Debug, Error)]
 pub enum DbError {
@@ -183,6 +191,9 @@ pub fn open_readonly(path: impl AsRef<Path>) -> Result<Connection, DbError> {
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     conn.busy_timeout(std::time::Duration::from_millis(BUSY_TIMEOUT_MS as u64))?;
+    // Cap the page cache so the many concurrent short-lived readers do not each
+    // carry SQLite's ~2 MiB default and inflate the daemon's resident set.
+    conn.pragma_update(None, "cache_size", RO_CACHE_SIZE_KIB)?;
     Ok(conn)
 }
 

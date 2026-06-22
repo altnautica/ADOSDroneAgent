@@ -16,6 +16,12 @@ name = "ados-logd"
 path = "src/main.rs"
 
 [dependencies]
+# Global allocator. The long-running daemon serves a constant stream of
+# short-lived read-only SQLite connections off the blocking pool and a steady
+# ingest + hardware-sample churn; the system allocator answers that pattern by
+# growing per-thread heap arenas it then keeps resident. mimalloc bounds the
+# fragmentation and returns freed pages to the OS, holding the resident set down.
+mimalloc = "0.1"
 # Shared wire contracts: the versioned ingest frames, the read-API envelope,
 # and the secret-field redaction applied at ingest.
 ados-protocol = { path = "../ados-protocol" }
