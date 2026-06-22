@@ -21,6 +21,10 @@ default = []
 # Opt-in ONNX Runtime backend. Pulls a heavy native runtime, so it is never on
 # by default.
 onnx = ["dep:ort"]
+# Opt-in appearance (re-id) model support for the tracker: builds the
+# sidecar-backed appearance extractor. Compiled out by default so the motion-only
+# tracker carries no extra weight; mirrors `onnx` in being a non-default feature.
+reid = []
 
 [dependencies]
 ados-protocol = { path = "../ados-protocol", features = ["mavlink", "tracing-layer"] }

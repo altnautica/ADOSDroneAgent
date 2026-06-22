@@ -74,6 +74,25 @@ pub struct VisionConfig {
     /// Backend preference: "auto" (pick by SoC) | "mock" | "onnx" | "rknn".
     #[serde(default = "default_backend")]
     pub backend: String,
+    /// Run the engine-side single-object tracker between inference and publish so
+    /// every published detection carries a stable `track_id` + `lock_state`.
+    /// Default off: the engine publishes raw detections, exactly as before.
+    #[serde(default)]
+    pub tracker_enabled: bool,
+    /// Build the tracker with an appearance (re-id) model so identity survives a
+    /// crossing. Requires `tracker_enabled` and a resident re-id model; default
+    /// off. When off the tracker is motion-only.
+    #[serde(default)]
+    pub reid_enabled: bool,
+    /// The re-id model id the appearance model loads in the sidecar (when
+    /// `reid_enabled`). Resolved through the model registry like any other model.
+    #[serde(default)]
+    pub reid_model_id: Option<String>,
+    /// The camera id an operator-driven designate/follow flow targets by default
+    /// (the click-to-follow camera). `None` ⇒ no default; the caller names the
+    /// camera per request.
+    #[serde(default)]
+    pub designate_camera: Option<String>,
 }
 
 impl Default for VisionConfig {
@@ -87,6 +106,10 @@ impl Default for VisionConfig {
             downscale_height: default_downscale_height(),
             slot_count: default_slot_count(),
             backend: default_backend(),
+            tracker_enabled: false,
+            reid_enabled: false,
+            reid_model_id: None,
+            designate_camera: None,
         }
     }
 }
@@ -125,6 +148,14 @@ impl VisionConfig {
             slot_count: u32,
             #[serde(default = "default_backend")]
             backend: String,
+            #[serde(default)]
+            tracker_enabled: bool,
+            #[serde(default)]
+            reid_enabled: bool,
+            #[serde(default)]
+            reid_model_id: Option<String>,
+            #[serde(default)]
+            designate_camera: Option<String>,
         }
 
         let Ok(text) = std::fs::read_to_string(path) else {
@@ -149,6 +180,10 @@ impl VisionConfig {
             downscale_height: v.downscale_height,
             slot_count: v.slot_count,
             backend: v.backend,
+            tracker_enabled: v.tracker_enabled,
+            reid_enabled: v.reid_enabled,
+            reid_model_id: v.reid_model_id,
+            designate_camera: v.designate_camera,
         }
     }
 
@@ -276,6 +311,40 @@ vision:
             c.detections_socket_path(),
             "/tmp/run/vision-detections.sock"
         );
+    }
+
+    #[test]
+    fn tracker_and_reid_default_off_and_parse() {
+        // A config with no tracker/reid keys leaves both off and the model ids
+        // unset — the engine publishes raw detections exactly as before.
+        let c = VisionConfig::default();
+        assert!(!c.tracker_enabled);
+        assert!(!c.reid_enabled);
+        assert!(c.reid_model_id.is_none());
+        assert!(c.designate_camera.is_none());
+
+        let yaml = "\
+vision:
+  enabled: true
+  tracker_enabled: true
+  reid_enabled: true
+  reid_model_id: com.example.reid-osnet
+  designate_camera: uvc-0
+";
+        let (_d, p) = write_tmp(yaml);
+        let c = VisionConfig::load_from(&p);
+        assert!(c.tracker_enabled);
+        assert!(c.reid_enabled);
+        assert_eq!(c.reid_model_id.as_deref(), Some("com.example.reid-osnet"));
+        assert_eq!(c.designate_camera.as_deref(), Some("uvc-0"));
+
+        // A vision block that omits the new keys keeps them at the safe default.
+        let yaml2 = "vision:\n  enabled: true\n";
+        let (_d2, p2) = write_tmp(yaml2);
+        let c2 = VisionConfig::load_from(&p2);
+        assert!(c2.enabled);
+        assert!(!c2.tracker_enabled);
+        assert!(!c2.reid_enabled);
     }
 
     #[test]
