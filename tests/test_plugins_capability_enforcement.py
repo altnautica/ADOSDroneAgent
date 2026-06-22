@@ -83,14 +83,18 @@ def _install_with_perms(plugin_id: str, **grants: bool) -> PluginInstall:
 
 
 def test_catalog_size_matches_spec() -> None:
-    # 35 prior entries + 5 plugin-substrate caps (button.subscribe,
-    # flight.guided_setpoint, mavlink.tunnel, radio.aux_stream, display.oled.page).
-    assert len(AGENT_CAPABILITIES) == 40
+    # 43 agent capabilities in the catalog. Beyond the earlier substrate set
+    # (button.subscribe, flight.guided_setpoint, mavlink.tunnel,
+    # radio.aux_stream, display.oled.page), the GPIO output and vision
+    # designate/subscribe caps (hardware.gpio_out, vision.detection.subscribe,
+    # vision.track.designate) were added.
+    assert len(AGENT_CAPABILITIES) == 43
 
 
 def test_only_event_caps_are_enforced_today() -> None:
+    # The event bus caps plus GPIO output carry a runtime gate today.
     assert ENFORCED_AGENT_CAPABILITIES == frozenset(
-        {"event.publish", "event.subscribe"}
+        {"event.publish", "event.subscribe", "hardware.gpio_out"}
     )
 
 

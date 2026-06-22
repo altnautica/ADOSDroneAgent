@@ -48,6 +48,7 @@ EXPECTED: dict[str, str | None] = {
     "recording.stop": "recording.write",
     "mavlink.subscribe": "mavlink.read",
     "mavlink.send": "mavlink.write",
+    "mavlink.tunnel.send": "mavlink.tunnel",
     "mavlink.register_component": None,
     "peripheral.register_driver": None,
     "peripheral.unregister_driver": None,
@@ -61,6 +62,14 @@ EXPECTED: dict[str, str | None] = {
     "vision.register_model": "vision.model.register",
     "vision.infer": "vision.model.register",
     "vision.publish_detection": "vision.detection.publish",
+    "vision.subscribe_detections": "vision.detection.subscribe",
+    "vision.designate_track": "vision.track.designate",
+    "display.page.set": "display.oled.page",
+    "gpio.output.set": "hardware.gpio_out",
+    "gpio.buzzer.beep": "hardware.gpio_out",
+    "flight.guided_setpoint.send": "flight.guided_setpoint",
+    "radio.aux_stream.open": "radio.aux_stream",
+    "radio.aux_stream.close": "radio.aux_stream",
 }
 
 

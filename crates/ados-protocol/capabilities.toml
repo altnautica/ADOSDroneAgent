@@ -408,7 +408,7 @@ risk_reason = "Draws to the local display only; no effect on flight or the netwo
 enforced = false
 
 # ===========================================================================
-# GCS capabilities (20): 13 UI slots + 7 data/command/mission/cloud
+# GCS capabilities (21): 14 UI slots + 7 data/command/mission/cloud
 # ===========================================================================
 
 [[gcs]]
@@ -506,6 +506,14 @@ description = "Lets the plugin run a post-flight processing step over recordings
 category = "ui_slot"
 risk = "low"
 risk_reason = "Operates on stored recordings; no live flight effect."
+
+[[gcs]]
+id = "ui.slot.flight-skill"
+label = "Contribute a flight skill to the cockpit"
+description = "Lets the plugin register a flight skill that appears in the cockpit Skill Bar, can be bound to a hotkey or gamepad button, and activated by the operator. Activation flips the plugin's per-drone config; the cockpit's arm and confirmation gates still apply."
+category = "ui_slot"
+risk = "medium"
+risk_reason = "A bindable skill triggers plugin behavior; the plugin still needs its own flight-control capabilities to act, and the cockpit's arm/confirm gates still apply."
 
 [[gcs]]
 id = "ui.slot.drone-detail-tab"
