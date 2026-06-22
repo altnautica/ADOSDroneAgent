@@ -20,6 +20,8 @@
 //!   direct V4L2/CSI capture, behind one [`source::FrameSource`] trait.
 //! - [`backend`] — the inference backends: a mock, an opt-in ONNX Runtime one,
 //!   and an IPC client to the accelerator sidecar.
+//! - [`yolo`] — YOLO detection-head decoding (the Rust twin of the sidecar's
+//!   decoder) used by the ONNX backend to turn a raw output tensor into boxes.
 //! - [`engine`] — the per-camera rings + sources, the model registry, the
 //!   accelerator lease arbiter, and the detection publisher.
 //! - [`visionsock`] — the `/run/ados/vision.sock` request/response server.
@@ -40,3 +42,4 @@ pub mod ring;
 pub mod source;
 pub mod tracker;
 pub mod visionsock;
+pub mod yolo;
