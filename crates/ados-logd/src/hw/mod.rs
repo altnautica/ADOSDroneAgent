@@ -39,6 +39,7 @@ pub mod helpers;
 pub mod memory;
 pub mod net;
 pub mod power;
+pub mod pss;
 pub mod reader;
 pub mod regdomain;
 pub mod sched;
@@ -56,7 +57,8 @@ use tokio::sync::{mpsc, oneshot};
 use ados_protocol::logd::{HwSnapshot, IngestFrame, TelemetryFrame};
 
 use self::cpu::ProcStat;
-use self::helpers::{emit, fold_throttle};
+use self::helpers::{emit, fold_service_memory, fold_throttle};
+use self::pss::{resolve_ados_unit_pids, sample_service_pss};
 use self::soc::{detect_soc, SocFamily, SocInfo};
 use self::throttle::read_throttle;
 
@@ -89,6 +91,11 @@ pub const THROTTLE_CADENCE: Duration = Duration::from_secs(1);
 /// Regulatory domain per phy (`iw reg get`). Changes only on a reg-set; a slow
 /// cadence matched to the USB pass keeps the subprocess cost negligible.
 pub const REGDOMAIN_CADENCE: Duration = Duration::from_secs(10);
+/// Per-service proportional memory (PSS). The `systemctl`-resolve + `smaps_rollup`
+/// read is subprocess-backed, like the throttle / reg-domain passes, so it runs on
+/// the async side. Memory footprints drift over seconds-to-minutes, so a 10 s
+/// cadence keeps the per-service series useful while the subprocess cost stays low.
+pub const PSS_CADENCE: Duration = Duration::from_secs(10);
 /// Headline summary metrics (CPU utilization, available memory, disk used,
 /// primary temperature). One per second is the at-a-glance health cadence; the
 /// underlying per-class reads run faster, this just derives the canonical
@@ -129,6 +136,7 @@ pub struct Collector {
     next_usb: Instant,
     next_throttle: Instant,
     next_regdomain: Instant,
+    next_pss: Instant,
     next_summary: Instant,
     /// Latest aggregate CPU utilization percentage, cached from the freq/util
     /// class so the 1 Hz summary can emit `cpu.utilization_pct` without a second
@@ -162,6 +170,7 @@ impl Collector {
             next_usb: now,
             next_throttle: now,
             next_regdomain: now,
+            next_pss: now,
             next_summary: now,
             last_cpu_util_all: None,
             last_mem: None,
@@ -188,6 +197,7 @@ struct TickOutput {
     metrics: Vec<TelemetryFrame>,
     throttle_due: bool,
     regdomain_due: bool,
+    pss_due: bool,
 }
 
 /// Run the hardware collector until `shutdown` resolves.
@@ -258,6 +268,28 @@ pub async fn run_collector(
                     let reg = self::regdomain::read_regdomain().await;
                     for (key, value) in reg {
                         output.snapshot.signals.insert(key, value);
+                    }
+                }
+
+                // Sample per-service proportional memory on the async side when
+                // due: the unit→pid resolve is a bounded `systemctl` subprocess
+                // (like the throttle / reg-domain reads) and the `smaps_rollup`
+                // reads are tiny. Best-effort throughout — no running unit means
+                // no per-service rows, not an error.
+                if output.pss_due {
+                    moved.mark_pss_fired(now);
+                    let units = resolve_ados_unit_pids().await;
+                    if !units.is_empty() {
+                        let services = sample_service_pss(&units);
+                        let ts = output.snapshot.ts_us;
+                        let mut pss_metrics = Vec::new();
+                        fold_service_memory(
+                            &services,
+                            ts,
+                            &mut output.snapshot,
+                            &mut pss_metrics,
+                        );
+                        output.metrics.extend(pss_metrics);
                     }
                 }
                 collector = moved;

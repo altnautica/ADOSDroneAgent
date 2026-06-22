@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 
 use ados_protocol::logd::{HwSnapshot, IngestFrame, TelemetryFrame};
 
+use super::pss::ServiceMemory;
 use super::throttle::Throttle;
 
 /// Used memory in MiB, derived from total minus available. Zero when either is
@@ -76,6 +77,33 @@ pub(super) fn fold_throttle(
         MpVal::from(t.soft_temp_limit),
     );
     push_metric(metrics, ts, "throttle.flags", t.raw as f64, &[]);
+}
+
+/// Fold per-service proportional memory into the snapshot + per-service metrics.
+///
+/// Each service contributes a `mem.service.<name>.pss_kib` signal in the snapshot
+/// blob and a `mem.service.pss_kib` metric tagged with the service name, mirroring
+/// the per-entity shape the net / USB classes use (a blob key per entity plus a
+/// tagged time series). The service name is sanitized for the dotted signal key so
+/// a unit name cannot break the key convention; the untouched name rides in the
+/// metric tag. An empty service list contributes nothing.
+pub(super) fn fold_service_memory(
+    services: &[ServiceMemory],
+    ts: i64,
+    snap: &mut HwSnapshot,
+    metrics: &mut Vec<TelemetryFrame>,
+) {
+    for svc in services {
+        let key = format!("mem.service.{}.pss_kib", sanitize(&svc.name));
+        snap.signals.insert(key, MpVal::from(svc.pss_kib));
+        push_metric(
+            metrics,
+            ts,
+            "mem.service.pss_kib",
+            svc.pss_kib as f64,
+            &[("service", &svc.name)],
+        );
+    }
 }
 
 /// Send a snapshot and its metric frames into the ingest channel.

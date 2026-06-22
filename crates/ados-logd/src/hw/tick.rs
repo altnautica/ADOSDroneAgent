@@ -91,6 +91,7 @@ impl Collector {
             metrics,
             throttle_due: now >= self.next_throttle,
             regdomain_due: now >= self.next_regdomain,
+            pss_due: now >= self.next_pss,
         }
     }
 
@@ -415,6 +416,13 @@ impl Collector {
     /// get` domain, which mirrors the throttle subprocess pattern.
     pub(super) fn mark_regdomain_fired(&mut self, now: Instant) {
         self.next_regdomain = now + super::REGDOMAIN_CADENCE;
+    }
+
+    /// Mark the per-service-memory class as fired and set its next deadline.
+    /// Called by the async loop after it resolves unit PIDs (the subprocess-backed
+    /// `systemctl` query) and samples `smaps_rollup`.
+    pub(super) fn mark_pss_fired(&mut self, now: Instant) {
+        self.next_pss = now + super::PSS_CADENCE;
     }
 
     /// Fold per-core and aggregate utilization into the snapshot + metrics, using
