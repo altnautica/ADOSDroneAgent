@@ -190,6 +190,35 @@ fn sidecar(artifact: &Path, ext: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(s)
 }
 
+/// Verify `artifact` against an explicit `.sha256` sidecar path: compute the
+/// file's SHA256 in-process and compare it against the digest the sidecar
+/// declares. A missing/malformed sidecar or a digest mismatch is a hard error.
+///
+/// This is the SHA256-only check (no signature policy), exposed for callers that
+/// fetch a single artifact + its `.sha256` and need only the integrity gate
+/// (e.g. the release wheel install). It reuses the same streaming hasher and
+/// sidecar parser as [`verify_artifact`].
+pub fn verify_sha256(artifact: &Path, sidecar_path: &Path) -> anyhow::Result<()> {
+    let name = artifact
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| artifact.to_string_lossy().into_owned());
+
+    let sidecar_contents = std::fs::read_to_string(sidecar_path).map_err(|_| {
+        anyhow::anyhow!(
+            "SHA256 verification failed for {name}: missing {}",
+            sidecar_path.display()
+        )
+    })?;
+    let declared = parse_sha256_sidecar(&sidecar_contents)
+        .map_err(|e| anyhow::anyhow!("SHA256 verification failed for {name}: {e}"))?;
+    let computed = sha256_hex(artifact)?;
+    if sha_check(&computed, &declared) == ShaCheck::Mismatch {
+        anyhow::bail!("SHA256 verification failed for {name}");
+    }
+    Ok(())
+}
+
 /// Verify `artifact` against its `.sha256` (mandatory) and, when `pubkey` is
 /// `Some`, its `.minisig`. `allow_unsigned` short-circuits the signature check.
 pub fn verify_artifact(
@@ -283,6 +312,23 @@ mod tests {
     fn parse_sidecar_rejects_garbage() {
         assert!(parse_sha256_sidecar("not-hex  file").is_err());
         assert!(parse_sha256_sidecar("   \n").is_err());
+    }
+
+    #[test]
+    fn verify_sha256_matches_and_mismatches() {
+        // A matching sidecar passes; a wrong digest is fatal; a missing sidecar
+        // is fatal.
+        let (dir_ok, art_ok) = artifact_with_sha(b"wheel bytes", true);
+        let sidecar_ok = dir_ok.path().join("ados-video-aarch64.sha256");
+        assert!(verify_sha256(&art_ok, &sidecar_ok).is_ok());
+
+        let (dir_bad, art_bad) = artifact_with_sha(b"wheel bytes", false);
+        let sidecar_bad = dir_bad.path().join("ados-video-aarch64.sha256");
+        let e = verify_sha256(&art_bad, &sidecar_bad).unwrap_err();
+        assert!(e.to_string().contains("SHA256 verification failed"));
+
+        let missing = dir_ok.path().join("does-not-exist.sha256");
+        assert!(verify_sha256(&art_ok, &missing).is_err());
     }
 
     #[test]

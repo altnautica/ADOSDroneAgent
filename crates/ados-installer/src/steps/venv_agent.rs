@@ -8,20 +8,28 @@
 //!      failure)
 //!   3. install the agent package per channel:
 //!      edge   — git clone the repo (honoring --branch) + `pip install <repo>`
-//!      stable — pip-install the verified wheel (TODO: bails clearly for now)
+//!      stable — download + SHA256-verify the release wheel for `--version`,
+//!      then `pip install <wheel>` (no on-disk source tree)
 //!
-//! The venv-path + pip-args builders are pure so a unit test exercises them
-//! without a real interpreter.
+//! The venv-path + pip-args + wheel-URL builders are pure so a unit test
+//! exercises them without a real interpreter or the network.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::ctx::Ctx;
 use crate::env;
 use crate::exec;
 use crate::graph::{Step, StepKind, StepOutcome};
+use crate::net;
+use crate::verify;
 
 /// The agent's git repo URL (edge channel clones from here, honoring --branch).
 const REPO_URL: &str = "https://github.com/altnautica/ADOSDroneAgent.git";
+
+/// GitHub release-download base; the stable channel hangs the wheel asset off
+/// `<base>/v<version>/<wheel>` (plus its `.sha256` sidecar). Mirrors the same
+/// base the prebuilt-binary fetch uses.
+const RELEASE_BASE: &str = "https://github.com/altnautica/ADOSDroneAgent/releases/download";
 
 /// The venv interpreter path (`/opt/ados/venv/bin/python`). Pure.
 pub fn venv_python() -> String {
@@ -53,6 +61,37 @@ pub fn pip_install_edge_args(source: &str) -> Vec<String> {
         source.to_string(),
         "--quiet".to_string(),
     ]
+}
+
+/// Build the `pip install` args for the stable (wheel) channel (pure). The arg
+/// is a local wheel file path (not `-e <repo>` / a URL), so pip installs the
+/// already-downloaded, already-verified wheel from disk.
+pub fn pip_install_wheel_args(wheel_path: &str) -> Vec<String> {
+    vec![
+        "install".to_string(),
+        wheel_path.to_string(),
+        "--quiet".to_string(),
+    ]
+}
+
+/// Normalize a `--version` value to the bare `X.Y.Z` form (pure). The operator
+/// may pass either a `v`-prefixed tag (`v0.93.0`) or a bare version (`0.93.0`);
+/// the wheel filename uses the bare form. Only a single leading `v` is stripped.
+pub fn normalize_version(raw: &str) -> String {
+    raw.strip_prefix('v').unwrap_or(raw).to_string()
+}
+
+/// Build the release wheel asset filename (pure). The release workflow publishes
+/// `ados_drone_agent-<X.Y.Z>-py3-none-any.whl`; `version` is the bare form.
+pub fn wheel_filename(version: &str) -> String {
+    format!("ados_drone_agent-{version}-py3-none-any.whl")
+}
+
+/// Build the wheel asset download URL (pure). The release tag is `v`-prefixed
+/// (`v<X.Y.Z>`) while the wheel filename uses the bare `<X.Y.Z>`; `version` here
+/// is the already-normalized bare form.
+pub fn wheel_url(version: &str) -> String {
+    format!("{RELEASE_BASE}/v{version}/{}", wheel_filename(version))
 }
 
 /// Build the `git clone` args for the edge channel (pure). Honors an optional
@@ -170,6 +209,74 @@ fn install_agent_edge(ctx: &Ctx) -> anyhow::Result<PathBuf> {
     }
 }
 
+/// Install the agent package on the stable channel: download the release wheel
+/// for the pinned `--version` plus its `.sha256` sidecar, verify the SHA256, then
+/// `pip install <wheel>` into the venv. Unlike the edge path there is NO on-disk
+/// source tree, so the caller records no `ctx.source_dir`; the downstream OS
+/// steps resolve their unit files / udev rules / driver scripts from the
+/// persisted `/opt/ados/source` (left by a prior install or the package data)
+/// instead. Temp downloads are cleaned up on every exit path.
+fn install_agent_stable(ctx: &Ctx) -> anyhow::Result<()> {
+    let raw = ctx.args.version.as_deref().ok_or_else(|| {
+        anyhow::anyhow!("stable channel requires --version (the release to install)")
+    })?;
+    let version = normalize_version(raw);
+    let url = wheel_url(&version);
+
+    // Stage the wheel + its sidecar under a unique temp dir so a partial fetch
+    // never collides with a concurrent run and cleanup is a single dir remove.
+    let dir = wheel_tmp_dir()?;
+    let wheel_path = dir.join(wheel_filename(&version));
+    let sha_path = sidecar(&wheel_path, "sha256");
+
+    let outcome = (|| {
+        net::fetch(&url, &wheel_path)?;
+        net::fetch(&format!("{url}.sha256"), &sha_path)?;
+
+        // A SHA256 mismatch (tamper / truncation) is a hard failure.
+        verify::verify_sha256(&wheel_path, &sha_path)?;
+
+        let wheel_s = wheel_path.to_string_lossy().into_owned();
+        let pip = pip_install_wheel_args(&wheel_s);
+        let pip_argv: Vec<&str> = pip.iter().map(String::as_str).collect();
+        let pip_res = exec::run(&venv_pip(), &pip_argv);
+        if pip_res.success() {
+            Ok(())
+        } else if !pip_res.spawned {
+            anyhow::bail!("venv pip {} could not be spawned", venv_pip());
+        } else {
+            anyhow::bail!(
+                "pip install of the agent wheel failed: {}",
+                pip_res.stderr.trim()
+            );
+        }
+    })();
+
+    // Always remove the temp download tree, success or failure.
+    let _ = std::fs::remove_dir_all(&dir);
+    outcome
+}
+
+/// `<path>.<ext>` sidecar next to `path` (matches `verify_sha256`'s lookup).
+fn sidecar(path: &Path, ext: &str) -> PathBuf {
+    let mut s = path.as_os_str().to_owned();
+    s.push(".");
+    s.push(ext);
+    PathBuf::from(s)
+}
+
+/// A unique temp directory for the stable wheel download (pid + a monotonic
+/// counter), created under the system temp root.
+fn wheel_tmp_dir() -> std::io::Result<PathBuf> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let base =
+        std::env::temp_dir().join(format!("ados-installer-wheel-{}-{n}", std::process::id()));
+    std::fs::create_dir_all(&base)?;
+    Ok(base)
+}
+
 /// The persisted clone destination. On a real SBC this is `/opt/ados/source`
 /// itself (the repo CONTENTS land directly there, so `scripts/` resolves to
 /// `/opt/ados/source/scripts` — the layout the runtime agent expects:
@@ -231,19 +338,19 @@ impl Step for VenvAgent {
             return StepOutcome::Failed(e.to_string());
         }
 
-        // (3) Install the agent package per channel.
-        if ctx.channel == "stable" {
-            // The stable path pip-installs a verified wheel; that fetch+verify
-            // wiring lands with the channel work. Bail clearly rather than
-            // silently doing the wrong thing.
-            return StepOutcome::Failed(
-                "stable channel agent install is not yet wired; use --channel edge".to_string(),
-            );
-        }
-
-        let repo = match install_agent_edge(ctx) {
-            Ok(repo) => repo,
-            Err(e) => return StepOutcome::Failed(e.to_string()),
+        // (3) Install the agent package per channel. The stable path installs a
+        // verified release wheel (no on-disk source tree); the edge path clones
+        // the repo and records the tree into `ctx.source_dir`.
+        let repo = if ctx.channel == "stable" {
+            if let Err(e) = install_agent_stable(ctx) {
+                return StepOutcome::Failed(e.to_string());
+            }
+            None
+        } else {
+            match install_agent_edge(ctx) {
+                Ok(repo) => Some(repo),
+                Err(e) => return StepOutcome::Failed(e.to_string()),
+            }
         };
 
         // (4) Post-provision dependency health gate. The state IPC wire defaults
@@ -264,9 +371,11 @@ impl Step for VenvAgent {
             );
         }
 
-        // Record the cloned tree so the downstream OS steps find the unit files,
-        // udev rules, and driver scripts under it.
-        ctx.source_dir = Some(repo);
+        // Record the cloned tree (edge channel only) so the downstream OS steps
+        // find the unit files, udev rules, and driver scripts under it. The
+        // stable channel has no source tree, so it leaves `ctx.source_dir` unset
+        // and the OS steps resolve from the persisted `/opt/ados/source`.
+        ctx.source_dir = repo;
         StepOutcome::Ok
     }
 }
@@ -294,6 +403,49 @@ mod tests {
     fn pip_edge_args_install_quietly() {
         let args = pip_install_edge_args("/tmp/repo");
         assert_eq!(args, vec!["install", "/tmp/repo", "--quiet"]);
+    }
+
+    #[test]
+    fn pip_wheel_args_install_a_local_file_quietly() {
+        let args = pip_install_wheel_args("/tmp/ados_drone_agent-0.93.0-py3-none-any.whl");
+        assert_eq!(
+            args,
+            vec![
+                "install",
+                "/tmp/ados_drone_agent-0.93.0-py3-none-any.whl",
+                "--quiet"
+            ]
+        );
+    }
+
+    #[test]
+    fn normalize_version_strips_one_leading_v() {
+        // Both the v-prefixed tag form and the bare form collapse to bare.
+        assert_eq!(normalize_version("v0.93.0"), "0.93.0");
+        assert_eq!(normalize_version("0.93.0"), "0.93.0");
+        // Only a single leading `v` is stripped (a digit-led version has none).
+        assert_eq!(normalize_version("v1.2.3"), "1.2.3");
+        assert_eq!(normalize_version("1.2.3"), "1.2.3");
+    }
+
+    #[test]
+    fn wheel_filename_uses_the_bare_version() {
+        assert_eq!(
+            wheel_filename("0.93.0"),
+            "ados_drone_agent-0.93.0-py3-none-any.whl"
+        );
+    }
+
+    #[test]
+    fn wheel_url_v_prefixes_the_tag_but_not_the_filename() {
+        // The release tag is v-prefixed; the wheel filename is the bare version.
+        let from_bare = wheel_url("0.93.0");
+        assert_eq!(
+            from_bare,
+            "https://github.com/altnautica/ADOSDroneAgent/releases/download/v0.93.0/ados_drone_agent-0.93.0-py3-none-any.whl"
+        );
+        // A v-prefixed input normalizes to the identical URL.
+        assert_eq!(wheel_url(&normalize_version("v0.93.0")), from_bare);
     }
 
     #[test]
