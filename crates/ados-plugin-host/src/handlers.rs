@@ -347,13 +347,16 @@ pub async fn route_host_method<H: HostServices + ?Sized>(
         Method::VisionRegisterModel => host.vision_register_model(plugin_id, args).await,
         Method::VisionInfer => host.vision_infer(plugin_id, args).await,
         Method::VisionPublishDetection => host.vision_publish_detection(plugin_id, args).await,
-        // The event surface, ping, and the two subscribe methods never reach
-        // here; the server short-circuits them. Treat as a programming error
-        // guarded by a stable response.
+        Method::VisionDesignateTrack => host.vision_designate_track(plugin_id, args).await,
+        // The event surface, ping, and the subscribe methods never reach here;
+        // the server short-circuits them (frames now; detections once the
+        // detection push is wired). Treat as a programming error guarded by a
+        // stable response.
         Method::EventPublish
         | Method::EventSubscribe
         | Method::Ping
-        | Method::VisionSubscribeFrames => Ok(crate::host::not_implemented("event")),
+        | Method::VisionSubscribeFrames
+        | Method::VisionSubscribeDetections => Ok(crate::host::not_implemented("event")),
     }
 }
 

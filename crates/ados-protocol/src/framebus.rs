@@ -398,6 +398,14 @@ pub mod methods {
     /// `vision.detection.publish`.
     pub const PUBLISH_DETECTION: &str = "vision.publish_detection";
 
+    /// Subscribe to published `DetectionBatch`es. Gated on
+    /// `vision.detection.subscribe`. The host then delivers each batch as a
+    /// `vision.deliver_detection` event (mirrors `subscribe_frames`).
+    pub const SUBSCRIBE_DETECTIONS: &str = "vision.subscribe_detections";
+
+    /// Event method the host uses to push a detection batch to a subscriber.
+    pub const DELIVER_DETECTION: &str = "vision.deliver_detection";
+
     /// Designate the engine's single-object follow target: lock the camera's
     /// tracker onto a specific box (the operator's click-to-follow pick). Served
     /// by the engine to trusted on-box callers; not yet exposed to the plugin

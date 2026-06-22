@@ -136,6 +136,13 @@ impl VisionClient {
             .await
     }
 
+    /// Proxy a `designate_track` request to the engine (set the follow target)
+    /// and return its response `args`.
+    pub async fn designate_track(&self, args: &Value) -> Result<Value, VisionRpcError> {
+        self.request(methods::DESIGNATE_TRACK, "vision.track.designate", args)
+            .await
+    }
+
     /// Write one request envelope toward the engine and await the response. The
     /// connection mutex serializes the write+await so the engine's in-order
     /// responses match the requests. A transport failure or an engine `error`

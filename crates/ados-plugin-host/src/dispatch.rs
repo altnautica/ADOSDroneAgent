@@ -78,6 +78,8 @@ pub enum Method {
     VisionRegisterModel,
     VisionInfer,
     VisionPublishDetection,
+    VisionSubscribeDetections,
+    VisionDesignateTrack,
 }
 
 impl Method {
@@ -98,6 +100,12 @@ impl Method {
         }
         if name == vision_methods::PUBLISH_DETECTION {
             return Some(Self::VisionPublishDetection);
+        }
+        if name == vision_methods::SUBSCRIBE_DETECTIONS {
+            return Some(Self::VisionSubscribeDetections);
+        }
+        if name == vision_methods::DESIGNATE_TRACK {
+            return Some(Self::VisionDesignateTrack);
         }
         Some(match name {
             "event.publish" => Self::EventPublish,
@@ -166,6 +174,8 @@ impl Method {
             Self::VisionRegisterModel => vision_methods::REGISTER_MODEL,
             Self::VisionInfer => vision_methods::INFER,
             Self::VisionPublishDetection => vision_methods::PUBLISH_DETECTION,
+            Self::VisionSubscribeDetections => vision_methods::SUBSCRIBE_DETECTIONS,
+            Self::VisionDesignateTrack => vision_methods::DESIGNATE_TRACK,
         }
     }
 
@@ -421,6 +431,8 @@ mod tests {
         Method::VisionRegisterModel,
         Method::VisionInfer,
         Method::VisionPublishDetection,
+        Method::VisionSubscribeDetections,
+        Method::VisionDesignateTrack,
     ];
 
     #[test]
@@ -477,6 +489,11 @@ mod tests {
                 vision_methods::PUBLISH_DETECTION,
                 "vision.detection.publish",
             ),
+            (
+                vision_methods::SUBSCRIBE_DETECTIONS,
+                "vision.detection.subscribe",
+            ),
+            (vision_methods::DESIGNATE_TRACK, "vision.track.designate"),
         ] {
             let row = DISPATCH_METHODS
                 .iter()

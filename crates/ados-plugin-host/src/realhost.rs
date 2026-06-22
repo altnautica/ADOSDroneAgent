@@ -1297,6 +1297,8 @@ const ALL_DISPATCH_METHODS: &[crate::dispatch::Method] = {
         VisionRegisterModel,
         VisionInfer,
         VisionPublishDetection,
+        VisionSubscribeDetections,
+        VisionDesignateTrack,
     ]
 };
 
@@ -2136,6 +2138,20 @@ impl HostServices for RealHost {
         };
         client
             .publish_detection(args)
+            .await
+            .map_err(|e| HostError::Rpc(e.0))
+    }
+
+    async fn vision_designate_track(
+        &self,
+        _plugin_id: &str,
+        args: &Value,
+    ) -> Result<HostResult, HostError> {
+        let Some(client) = self.vision.as_ref() else {
+            return Ok(not_implemented("vision.designate_track"));
+        };
+        client
+            .designate_track(args)
             .await
             .map_err(|e| HostError::Rpc(e.0))
     }

@@ -344,6 +344,16 @@ pub trait HostServices: Send + Sync + 'static {
     ) -> impl std::future::Future<Output = Result<HostResult, HostError>> + Send {
         std::future::ready(Ok(not_implemented("vision.publish_detection")))
     }
+
+    /// Set the engine's follow target: lock a camera's tracker onto a specific
+    /// box. Proxied to the engine over its socket.
+    fn vision_designate_track(
+        &self,
+        _plugin_id: &str,
+        _args: &Value,
+    ) -> impl std::future::Future<Output = Result<HostResult, HostError>> + Send {
+        std::future::ready(Ok(not_implemented("vision.designate_track")))
+    }
 }
 
 /// The default host: every host-coupled method returns `not_implemented`.
