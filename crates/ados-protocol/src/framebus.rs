@@ -398,6 +398,13 @@ pub mod methods {
     /// `vision.detection.publish`.
     pub const PUBLISH_DETECTION: &str = "vision.publish_detection";
 
+    /// Designate the engine's single-object follow target: lock the camera's
+    /// tracker onto a specific box (the operator's click-to-follow pick). Served
+    /// by the engine to trusted on-box callers; not yet exposed to the plugin
+    /// capability dispatch (a plugin-facing gate lands with the follow-me
+    /// plugin). Args: `{camera_id, bbox, class_label?, confidence?}`.
+    pub const DESIGNATE_TRACK: &str = "vision.designate_track";
+
     /// Event method the host uses to push a frame descriptor to a subscriber
     /// (mirrors `mavlink.deliver`).
     pub const DELIVER_FRAME: &str = "vision.deliver";

@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 use ados_protocol::frame::{decode_len, HEADER_SIZE, PLUGIN_MAX_FRAME};
 use ados_protocol::framebus::{
-    methods, DetectionBatch, FrameDescriptor, FrameFormat, ModelMetadata,
+    methods, BoundingBox, Detection, DetectionBatch, FrameDescriptor, FrameFormat, ModelMetadata,
 };
 use ados_protocol::plugin::{Envelope, PROTOCOL_VERSION};
 use anyhow::{anyhow, Result};
@@ -165,6 +165,7 @@ async fn dispatch(engine: &Arc<VisionEngine>, env: &Envelope) -> (Value, Option<
         m if m == methods::REGISTER_MODEL => handle_register(engine, &env.args).await,
         m if m == methods::INFER => handle_infer(engine, &env.args).await,
         m if m == methods::PUBLISH_DETECTION => handle_publish(engine, &env.args).await,
+        m if m == methods::DESIGNATE_TRACK => handle_designate_track(engine, &env.args).await,
         other => Err(anyhow!("unknown vision method {other}")),
     };
     match result {
@@ -212,6 +213,58 @@ async fn handle_publish(engine: &Arc<VisionEngine>, args: &Value) -> Result<Valu
     let batch: DetectionBatch = decode_args(args)?;
     let reached = engine.publish_detection(batch);
     Ok(ok_map(&[("subscribers", Value::from(reached as u64))]))
+}
+
+/// Handle `vision.designate_track`: lock the named camera's tracker onto a
+/// specific box (the operator's click-to-follow pick), overriding the auto-lock.
+/// Args: `{camera_id, bbox:{x,y,width,height}, class_label?, confidence?}`. The
+/// box fields are read with numeric coercion so an int- or float-encoded value
+/// decodes the same. `class_label` / `confidence` default to a neutral label and
+/// full confidence (the operator's pick overrides the auto-lock regardless).
+async fn handle_designate_track(engine: &Arc<VisionEngine>, args: &Value) -> Result<Value> {
+    let map = args.as_map().ok_or_else(|| anyhow!("designate args not a map"))?;
+    let camera_id = map_str(map, "camera_id").ok_or_else(|| anyhow!("designate missing camera_id"))?;
+    let bbox_map = map_get(map, "bbox")
+        .and_then(|v| v.as_map())
+        .ok_or_else(|| anyhow!("designate missing bbox"))?;
+    let bf = |k: &str| map_get(bbox_map, k).and_then(num_f32).unwrap_or(0.0);
+    let target = Detection {
+        bbox: BoundingBox {
+            x: bf("x"),
+            y: bf("y"),
+            width: bf("width"),
+            height: bf("height"),
+        },
+        class_label: map_str(map, "class_label").unwrap_or_default(),
+        confidence: map_get(map, "confidence").and_then(num_f32).unwrap_or(1.0),
+        track_id: None,
+        assoc_confidence: None,
+        lock_state: None,
+    };
+    let track_id = engine.designate(&camera_id, &target).await;
+    Ok(ok_map(&[
+        ("designated", Value::Boolean(track_id.is_some())),
+        ("track_id", track_id.map(Value::from).unwrap_or(Value::Nil)),
+        ("camera_id", Value::from(camera_id)),
+    ]))
+}
+
+/// Look up a key in a msgpack map by string key.
+fn map_get<'a>(map: &'a [(Value, Value)], key: &str) -> Option<&'a Value> {
+    map.iter().find(|(k, _)| k.as_str() == Some(key)).map(|(_, v)| v)
+}
+
+/// A string-valued map entry.
+fn map_str(map: &[(Value, Value)], key: &str) -> Option<String> {
+    map_get(map, key).and_then(|v| v.as_str()).map(str::to_owned)
+}
+
+/// Coerce a msgpack number (f64 / i64 / u64) to f32.
+fn num_f32(v: &Value) -> Option<f32> {
+    v.as_f64()
+        .or_else(|| v.as_i64().map(|i| i as f64))
+        .or_else(|| v.as_u64().map(|u| u as f64))
+        .map(|f| f as f32)
 }
 
 /// Spawn the per-connection frame-descriptor push task. Every published
@@ -623,6 +676,42 @@ mod tests {
     }
 
     // --- small helpers --------------------------------------------------
+    #[tokio::test]
+    async fn designate_track_dispatch_locks_a_camera() {
+        let e = engine();
+        // Mixed numeric encodings for the bbox fields exercise the coercion path.
+        let args = Value::Map(vec![
+            (Value::from("camera_id"), Value::from("cam-0")),
+            (
+                Value::from("bbox"),
+                Value::Map(vec![
+                    (Value::from("x"), Value::F64(10.0)),
+                    (Value::from("y"), Value::Integer(20.into())),
+                    (Value::from("width"), Value::F32(30.0)),
+                    (Value::from("height"), Value::F64(40.0)),
+                ]),
+            ),
+            (Value::from("class_label"), Value::from("person")),
+        ]);
+        let (resp, err) = dispatch(&e, &req_env(methods::DESIGNATE_TRACK, args)).await;
+        assert!(err.is_none(), "designate dispatch errored: {err:?}");
+        let map = as_map(&resp);
+        assert_eq!(get(&map, "designated"), Some(Value::Boolean(true)));
+        assert_eq!(get(&map, "camera_id"), Some(Value::from("cam-0")));
+        assert!(
+            matches!(get(&map, "track_id"), Some(Value::Integer(_))),
+            "a track id was assigned"
+        );
+    }
+
+    #[tokio::test]
+    async fn designate_track_missing_bbox_errors_softly() {
+        let e = engine();
+        let args = Value::Map(vec![(Value::from("camera_id"), Value::from("cam-0"))]);
+        let (_resp, err) = dispatch(&e, &req_env(methods::DESIGNATE_TRACK, args)).await;
+        assert!(err.is_some(), "a missing bbox is a soft error, not a panic");
+    }
+
     fn as_map(v: &Value) -> Vec<(Value, Value)> {
         match v {
             Value::Map(m) => m.clone(),
