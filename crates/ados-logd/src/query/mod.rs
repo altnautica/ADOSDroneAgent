@@ -26,6 +26,7 @@ pub mod export;
 pub mod openapi;
 pub mod pagination;
 pub mod params;
+pub mod pool;
 pub mod routes;
 pub mod rows;
 pub mod sse;
@@ -166,8 +167,13 @@ where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
     let pairing = Arc::new(PairingState::with_path(pairing_path));
+    // The shared pool of warm read-only connections the handlers check out from.
+    // The export path opens its own connection on its dedicated thread, so it
+    // does not draw from (or starve) this pool.
+    let pool = self::pool::ConnPool::new(db_path.clone(), self::pool::DEFAULT_MAX_IDLE);
     let state = AppState {
         db_path,
+        pool,
         broadcast,
         ingest,
         tail_slots: Arc::new(TailSlots::default()),

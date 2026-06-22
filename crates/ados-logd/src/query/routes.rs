@@ -36,6 +36,7 @@ use super::export::{self, Format};
 use super::openapi;
 use super::pagination::{Cursor, CursorError};
 use super::params::{ParamError, QueryFilters, QueryParams, Table};
+use super::pool::{ConnPool, PooledConn};
 use super::rows::{self, Page as RowPage};
 use super::sse::{frame_matches, frame_to_json, ExportSlots, TailSlots};
 use super::stats;
@@ -48,8 +49,11 @@ use crate::writer::now_us;
 /// from `db_path`.
 #[derive(Clone)]
 pub struct AppState {
-    /// The store path, opened read-only per request.
+    /// The store path. The pool checks out read-only connections from it; the
+    /// export thread and `healthz` open from it directly.
     pub db_path: PathBuf,
+    /// The shared pool of warm read-only connections the handlers check out from.
+    pub pool: Arc<ConnPool>,
     /// The writer's broadcast sender; `subscribe()` feeds the live tail.
     pub broadcast: broadcast::Sender<IngestFrame>,
     /// The live ingest counters surfaced by `stats`.
@@ -66,10 +70,12 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Open a read-only connection to the store. Returns the API error shape on
-    /// failure so a handler can surface a 503.
-    fn open_ro(&self) -> Result<rusqlite::Connection, ApiErr> {
-        db::open_readonly(&self.db_path).map_err(|e| {
+    /// Check out a read-only connection from the pool. Returns the API error
+    /// shape on failure so a handler can surface a 503. The connection parks
+    /// back into the pool when the returned guard drops at the end of the
+    /// handler's blocking closure.
+    fn open_ro(&self) -> Result<PooledConn, ApiErr> {
+        self.pool.checkout().map_err(|e| {
             ApiErr::status(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "db_unavailable",
@@ -662,6 +668,10 @@ mod tests {
         drop(rx);
         let state = AppState {
             db_path: std::path::PathBuf::from("/nonexistent/logs.db"),
+            pool: super::super::pool::ConnPool::new(
+                std::path::PathBuf::from("/nonexistent/logs.db"),
+                super::super::pool::DEFAULT_MAX_IDLE,
+            ),
             broadcast: broadcast::channel(1).0,
             ingest: Arc::new(crate::ingest::IngestStats::default()),
             tail_slots: Arc::new(super::super::sse::TailSlots::default()),
