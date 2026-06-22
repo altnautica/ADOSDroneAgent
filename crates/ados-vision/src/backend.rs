@@ -14,8 +14,15 @@
 //!   agent sockets. The NPU vendor runtime (RKNN, TensorRT) is reached only
 //!   through that sidecar, never linked here.
 
-use ados_protocol::framebus::{Detection, FrameFormat, ModelMetadata};
-use anyhow::Result;
+use ados_protocol::framebus::{BoundingBox, Detection, FrameFormat, LockState, ModelMetadata};
+use anyhow::{anyhow, Context, Result};
+use std::io::{Read, Write};
+use std::os::unix::net::UnixStream;
+use std::sync::Mutex;
+use std::time::Duration;
+
+/// Cap on a single framed message, matching the sidecar's `MAX_FRAME_BYTES`.
+const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 /// A loaded, ready-to-run model.
 pub trait LoadedModel: Send + Sync {
@@ -161,17 +168,33 @@ impl RknnSidecarBackend {
 struct RknnModel {
     socket_path: String,
     model_id: String,
+    model_path: String,
+    input_w: u32,
+    input_h: u32,
+    input_format: String,
+    class_labels: Vec<String>,
+    /// Whether `load_model` has been sent to the sidecar this session. The
+    /// sidecar keeps loaded models across connections, so we send the load
+    /// handshake once (lazily, on the first infer) and re-send it only if the
+    /// sidecar reports the model is no longer loaded (it was restarted).
+    loaded: Mutex<bool>,
 }
 
 impl VisionBackend for RknnSidecarBackend {
     fn load(&self, meta: &ModelMetadata) -> Result<Box<dyn LoadedModel>> {
-        // The load handshake is a blocking round-trip to the sidecar. It is
-        // attempted lazily on the first infer in this build so the registry can
-        // record the model even when the sidecar is not up yet; the model id
-        // and socket are captured here.
+        // Capture the load parameters; the sidecar handshake is deferred to the
+        // first infer so the registry can record the model even when the sidecar
+        // is not up yet (a missing model_path degrades to an unreachable sidecar
+        // at infer time, which the engine treats as a degraded model).
         Ok(Box::new(RknnModel {
             socket_path: self.socket_path.clone(),
             model_id: meta.id.clone(),
+            model_path: meta.model_path.clone().unwrap_or_default(),
+            input_w: meta.input_width,
+            input_h: meta.input_height,
+            input_format: fmt_str(meta.input_format).to_string(),
+            class_labels: meta.output_classes.clone(),
+            loaded: Mutex::new(false),
         }))
     }
     fn name(&self) -> &str {
@@ -179,15 +202,194 @@ impl VisionBackend for RknnSidecarBackend {
     }
 }
 
-impl LoadedModel for RknnModel {
-    fn infer(&self, _frame: &[u8], _w: u32, _h: u32, _f: FrameFormat) -> Result<Vec<Detection>> {
-        // The synchronous sidecar round-trip (frame ref + model id over the
-        // length-prefixed msgpack socket, detection batch back) is wired with
-        // the sidecar's first model. The fields are captured so the call site
-        // is fixed.
-        let _ = (&self.socket_path, &self.model_id);
-        Ok(Vec::new())
+impl RknnModel {
+    /// Send `load_model` to the sidecar once. Idempotent: a no-op after the
+    /// first success until [`mark_unloaded`] resets it.
+    fn ensure_loaded(&self) -> Result<()> {
+        let mut loaded = self.loaded.lock().expect("rknn load lock");
+        if *loaded {
+            return Ok(());
+        }
+        let req = load_request(
+            &self.model_id,
+            &self.model_path,
+            self.input_w,
+            self.input_h,
+            &self.input_format,
+            &self.class_labels,
+        );
+        let resp = round_trip(&self.socket_path, &req)?;
+        check_ok(&resp).context("sidecar load_model")?;
+        *loaded = true;
+        Ok(())
     }
+
+    fn mark_unloaded(&self) {
+        *self.loaded.lock().expect("rknn load lock") = false;
+    }
+}
+
+impl LoadedModel for RknnModel {
+    fn infer(&self, frame: &[u8], width: u32, height: u32, format: FrameFormat) -> Result<Vec<Detection>> {
+        let fmt = fmt_str(format);
+        self.ensure_loaded()?;
+        let req = infer_request(&self.model_id, frame, width, height, fmt);
+        let resp = round_trip(&self.socket_path, &req)?;
+        match decode_detections(&resp) {
+            Ok(dets) => Ok(dets),
+            Err(e) if is_not_loaded(&e) => {
+                // The sidecar restarted and dropped the model: reload once and retry.
+                self.mark_unloaded();
+                self.ensure_loaded()?;
+                let resp2 = round_trip(&self.socket_path, &infer_request(&self.model_id, frame, width, height, fmt))?;
+                decode_detections(&resp2)
+            }
+            Err(e) => Err(e),
+        }
+    }
+}
+
+// --- sidecar wire protocol (4-byte BE length + msgpack named map) ----------
+
+fn fmt_str(f: FrameFormat) -> &'static str {
+    match f {
+        FrameFormat::Rgb24 => "rgb24",
+        FrameFormat::Nv12 => "nv12",
+        FrameFormat::Yuv420p => "yuv420p",
+    }
+}
+
+fn mv(s: &str) -> rmpv::Value {
+    rmpv::Value::from(s)
+}
+
+fn load_request(
+    model_id: &str,
+    path: &str,
+    input_w: u32,
+    input_h: u32,
+    format: &str,
+    classes: &[String],
+) -> rmpv::Value {
+    rmpv::Value::Map(vec![
+        (mv("op"), mv("load_model")),
+        (mv("model_id"), mv(model_id)),
+        (mv("path"), mv(path)),
+        (mv("input_w"), rmpv::Value::from(input_w as u64)),
+        (mv("input_h"), rmpv::Value::from(input_h as u64)),
+        (mv("format"), mv(format)),
+        (
+            mv("class_labels"),
+            rmpv::Value::Array(classes.iter().map(|c| mv(c)).collect()),
+        ),
+    ])
+}
+
+fn infer_request(model_id: &str, frame: &[u8], width: u32, height: u32, format: &str) -> rmpv::Value {
+    rmpv::Value::Map(vec![
+        (mv("op"), mv("infer")),
+        (mv("model_id"), mv(model_id)),
+        // bytes MUST be a msgpack bin, not an int array, so the sidecar can
+        // np.frombuffer it.
+        (mv("frame"), rmpv::Value::Binary(frame.to_vec())),
+        (mv("width"), rmpv::Value::from(width as u64)),
+        (mv("height"), rmpv::Value::from(height as u64)),
+        (mv("format"), mv(format)),
+    ])
+}
+
+/// One blocking framed request/response against the sidecar socket. A fresh
+/// connection per call; the sidecar keys loaded models by id across connections.
+fn round_trip(socket_path: &str, req: &rmpv::Value) -> Result<rmpv::Value> {
+    let mut body = Vec::new();
+    rmpv::encode::write_value(&mut body, req).context("encode request")?;
+    if body.len() > MAX_FRAME_BYTES {
+        return Err(anyhow!("request body {} exceeds {MAX_FRAME_BYTES}", body.len()));
+    }
+    let mut stream =
+        UnixStream::connect(socket_path).with_context(|| format!("connect sidecar at {socket_path}"))?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    stream.write_all(&(body.len() as u32).to_be_bytes())?;
+    stream.write_all(&body)?;
+    stream.flush()?;
+
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf)?;
+    let n = u32::from_be_bytes(len_buf) as usize;
+    if n > MAX_FRAME_BYTES {
+        return Err(anyhow!("response body {n} exceeds {MAX_FRAME_BYTES}"));
+    }
+    let mut buf = vec![0u8; n];
+    stream.read_exact(&mut buf)?;
+    rmpv::decode::read_value(&mut &buf[..]).context("decode response")
+}
+
+fn map_get<'a>(map: &'a [(rmpv::Value, rmpv::Value)], key: &str) -> Option<&'a rmpv::Value> {
+    map.iter().find(|(k, _)| k.as_str() == Some(key)).map(|(_, v)| v)
+}
+
+fn num_f32(v: &rmpv::Value) -> Option<f32> {
+    v.as_f64()
+        .or_else(|| v.as_i64().map(|i| i as f64))
+        .or_else(|| v.as_u64().map(|u| u as f64))
+        .map(|f| f as f32)
+}
+
+fn parse_lock(s: &str) -> Option<LockState> {
+    match s {
+        "locked" => Some(LockState::Locked),
+        "uncertain" => Some(LockState::Uncertain),
+        "lost" => Some(LockState::Lost),
+        _ => None,
+    }
+}
+
+fn check_ok(resp: &rmpv::Value) -> Result<()> {
+    let map = resp.as_map().ok_or_else(|| anyhow!("response is not a map"))?;
+    match map_get(map, "status").and_then(|v| v.as_str()) {
+        Some("ok") => Ok(()),
+        _ => {
+            let err = map_get(map, "error").and_then(|v| v.as_str()).unwrap_or("unknown error");
+            Err(anyhow!("{err}"))
+        }
+    }
+}
+
+fn is_not_loaded(e: &anyhow::Error) -> bool {
+    e.to_string().to_ascii_lowercase().contains("not loaded")
+}
+
+/// Decode an `{status, detections}` reply into the wire `Detection` shape.
+fn decode_detections(resp: &rmpv::Value) -> Result<Vec<Detection>> {
+    check_ok(resp)?;
+    let map = resp.as_map().ok_or_else(|| anyhow!("response is not a map"))?;
+    let dets = match map_get(map, "detections").and_then(|v| v.as_array()) {
+        Some(a) => a,
+        None => return Ok(Vec::new()),
+    };
+    let mut out = Vec::with_capacity(dets.len());
+    for d in dets {
+        let dm = d.as_map().ok_or_else(|| anyhow!("detection is not a map"))?;
+        let bm = map_get(dm, "bbox")
+            .and_then(|v| v.as_map())
+            .ok_or_else(|| anyhow!("detection has no bbox map"))?;
+        let bf = |k: &str| map_get(bm, k).and_then(num_f32).unwrap_or(0.0);
+        out.push(Detection {
+            bbox: BoundingBox {
+                x: bf("x"),
+                y: bf("y"),
+                width: bf("width"),
+                height: bf("height"),
+            },
+            class_label: map_get(dm, "class_label").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            confidence: map_get(dm, "confidence").and_then(num_f32).unwrap_or(0.0),
+            track_id: map_get(dm, "track_id").and_then(|v| v.as_u64()),
+            assoc_confidence: map_get(dm, "assoc_confidence").and_then(num_f32),
+            lock_state: map_get(dm, "lock_state").and_then(|v| v.as_str()).and_then(parse_lock),
+        });
+    }
+    Ok(out)
 }
 
 // --- picker ---------------------------------------------------------------
@@ -292,16 +494,88 @@ mod tests {
     }
 
     #[test]
-    fn rknn_backend_records_socket_and_loads() {
-        let b = RknnSidecarBackend::new("/run/ados/vision-rknn.sock");
+    fn rknn_backend_records_socket_and_errors_without_sidecar() {
+        let b = RknnSidecarBackend::new("/nonexistent/ados-vision-rknn.sock");
         assert_eq!(b.name(), "rknn");
-        assert_eq!(b.socket_path(), "/run/ados/vision-rknn.sock");
+        assert_eq!(b.socket_path(), "/nonexistent/ados-vision-rknn.sock");
         let m = b.load(&meta()).unwrap();
-        // No sidecar present in test ⇒ infer is a no-op (empty), never panics.
-        assert!(m
-            .infer(&[0u8; 4], 1, 1, FrameFormat::Rgb24)
-            .unwrap()
-            .is_empty());
+        // No sidecar at the socket ⇒ infer returns Err (the engine degrades to the
+        // mock model for this registration), never panics.
+        assert!(m.infer(&[0u8; 4], 1, 1, FrameFormat::Rgb24).is_err());
+    }
+
+    #[test]
+    fn rknn_infer_round_trips_with_mock_sidecar() {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixListener;
+
+        let dir = std::env::temp_dir().join(format!("ados-vision-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("rknn.sock");
+        let _ = std::fs::remove_file(&sock);
+        let listener = UnixListener::bind(&sock).unwrap();
+
+        // A mock sidecar: answer the load handshake, then return one detection for infer.
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut conn, _) = listener.accept().unwrap();
+                let mut len = [0u8; 4];
+                conn.read_exact(&mut len).unwrap();
+                let n = u32::from_be_bytes(len) as usize;
+                let mut buf = vec![0u8; n];
+                conn.read_exact(&mut buf).unwrap();
+                let req = rmpv::decode::read_value(&mut &buf[..]).unwrap();
+                let op = req
+                    .as_map()
+                    .and_then(|m| map_get(m, "op"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let resp = if op == "infer" {
+                    let det = rmpv::Value::Map(vec![
+                        (
+                            mv("bbox"),
+                            rmpv::Value::Map(vec![
+                                (mv("x"), rmpv::Value::F64(10.0)),
+                                (mv("y"), rmpv::Value::F64(20.0)),
+                                (mv("width"), rmpv::Value::F64(30.0)),
+                                (mv("height"), rmpv::Value::F64(40.0)),
+                            ]),
+                        ),
+                        (mv("class_label"), mv("UAV")),
+                        (mv("confidence"), rmpv::Value::F64(0.9)),
+                        (mv("track_id"), rmpv::Value::from(7u64)),
+                        (mv("lock_state"), mv("locked")),
+                    ]);
+                    rmpv::Value::Map(vec![
+                        (mv("status"), mv("ok")),
+                        (mv("detections"), rmpv::Value::Array(vec![det])),
+                    ])
+                } else {
+                    rmpv::Value::Map(vec![(mv("status"), mv("ok"))])
+                };
+                let mut body = Vec::new();
+                rmpv::encode::write_value(&mut body, &resp).unwrap();
+                conn.write_all(&(body.len() as u32).to_be_bytes()).unwrap();
+                conn.write_all(&body).unwrap();
+                conn.flush().unwrap();
+            }
+        });
+
+        let backend = RknnSidecarBackend::new(sock.to_str().unwrap());
+        let mut m = meta();
+        m.model_path = Some("/tmp/uav.rknn".into());
+        let model = backend.load(&m).unwrap();
+        let dets = model.infer(&[1, 2, 3, 4], 1, 1, FrameFormat::Rgb24).unwrap();
+        server.join().unwrap();
+        let _ = std::fs::remove_file(&sock);
+
+        assert_eq!(dets.len(), 1);
+        assert_eq!(dets[0].class_label, "UAV");
+        assert_eq!(dets[0].track_id, Some(7));
+        assert_eq!(dets[0].lock_state, Some(LockState::Locked));
+        assert!((dets[0].bbox.x - 10.0).abs() < 1e-3);
+        assert!((dets[0].bbox.height - 40.0).abs() < 1e-3);
+        assert!((dets[0].confidence - 0.9).abs() < 1e-3);
     }
 
     #[test]
