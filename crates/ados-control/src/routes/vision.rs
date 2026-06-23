@@ -84,7 +84,11 @@ pub async fn designate(State(_state): State<AppState>, Json(req): Json<Designate
             // The engine returns {designated, track_id, camera_id}. Project it
             // into the FastAPI-shaped JSON the GCS reads.
             let map = resp.as_map().map(|m| m.to_vec()).unwrap_or_default();
-            let get = |key: &str| map.iter().find(|(k, _)| k.as_str() == Some(key)).map(|(_, v)| v);
+            let get = |key: &str| {
+                map.iter()
+                    .find(|(k, _)| k.as_str() == Some(key))
+                    .map(|(_, v)| v)
+            };
             let designated = get("designated").and_then(|v| v.as_bool()).unwrap_or(false);
             let track_id = get("track_id").and_then(|v| v.as_u64());
             (

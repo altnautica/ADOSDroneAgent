@@ -180,7 +180,11 @@ fn decode_v8(data: &[f32], rows: usize, cols: usize, nc: usize, conf: f32) -> Ve
     } else {
         rows <= cols
     };
-    let (n_feat, n_anchor) = if feat_major { (rows, cols) } else { (cols, rows) };
+    let (n_feat, n_anchor) = if feat_major {
+        (rows, cols)
+    } else {
+        (cols, rows)
+    };
     if n_feat < 5 {
         return Vec::new();
     }
@@ -230,7 +234,11 @@ fn decode_v5(data: &[f32], rows: usize, cols: usize, nc: usize, conf: f32) -> Ve
     } else {
         rows >= cols
     };
-    let (n_anchor, n_feat) = if anchor_major { (rows, cols) } else { (cols, rows) };
+    let (n_anchor, n_feat) = if anchor_major {
+        (rows, cols)
+    } else {
+        (cols, rows)
+    };
     if n_feat < 6 {
         return Vec::new();
     }
@@ -455,7 +463,7 @@ mod tests {
         assert!((t[0] - 1.0).abs() < 1e-3); // (0,0) red R=1
         assert!((t[1] - 0.0).abs() < 1e-3); // (0,1) blue R=0
         assert!((t[3] - 1.0).abs() < 1e-3); // (1,1) white R=1
-        // G plane (channel 1) starts at index 4.
+                                            // G plane (channel 1) starts at index 4.
         assert!((t[4 + 2] - 1.0).abs() < 1e-3); // (1,0) green G=1
     }
 

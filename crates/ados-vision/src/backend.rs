@@ -140,13 +140,7 @@ mod onnx_backend {
     }
 
     impl LoadedModel for OnnxModel {
-        fn infer(
-            &self,
-            frame: &[u8],
-            w: u32,
-            h: u32,
-            f: FrameFormat,
-        ) -> Result<Vec<Detection>> {
+        fn infer(&self, frame: &[u8], w: u32, h: u32, f: FrameFormat) -> Result<Vec<Detection>> {
             if f != FrameFormat::Rgb24 {
                 return Err(anyhow!(
                     "onnx backend requires rgb24 frames, got {f:?}; \
@@ -298,7 +292,13 @@ impl RknnModel {
 }
 
 impl LoadedModel for RknnModel {
-    fn infer(&self, frame: &[u8], width: u32, height: u32, format: FrameFormat) -> Result<Vec<Detection>> {
+    fn infer(
+        &self,
+        frame: &[u8],
+        width: u32,
+        height: u32,
+        format: FrameFormat,
+    ) -> Result<Vec<Detection>> {
         let fmt = fmt_str(format);
         self.ensure_loaded()?;
         let req = infer_request(&self.model_id, frame, width, height, fmt);
@@ -309,7 +309,10 @@ impl LoadedModel for RknnModel {
                 // The sidecar restarted and dropped the model: reload once and retry.
                 self.mark_unloaded();
                 self.ensure_loaded()?;
-                let resp2 = round_trip(&self.socket_path, &infer_request(&self.model_id, frame, width, height, fmt))?;
+                let resp2 = round_trip(
+                    &self.socket_path,
+                    &infer_request(&self.model_id, frame, width, height, fmt),
+                )?;
                 decode_detections(&resp2)
             }
             Err(e) => Err(e),
@@ -365,7 +368,13 @@ fn load_request(
     ])
 }
 
-fn infer_request(model_id: &str, frame: &[u8], width: u32, height: u32, format: &str) -> rmpv::Value {
+fn infer_request(
+    model_id: &str,
+    frame: &[u8],
+    width: u32,
+    height: u32,
+    format: &str,
+) -> rmpv::Value {
     rmpv::Value::Map(vec![
         (mv("op"), mv("infer")),
         (mv("model_id"), mv(model_id)),
@@ -384,10 +393,13 @@ fn round_trip(socket_path: &str, req: &rmpv::Value) -> Result<rmpv::Value> {
     let mut body = Vec::new();
     rmpv::encode::write_value(&mut body, req).context("encode request")?;
     if body.len() > MAX_FRAME_BYTES {
-        return Err(anyhow!("request body {} exceeds {MAX_FRAME_BYTES}", body.len()));
+        return Err(anyhow!(
+            "request body {} exceeds {MAX_FRAME_BYTES}",
+            body.len()
+        ));
     }
-    let mut stream =
-        UnixStream::connect(socket_path).with_context(|| format!("connect sidecar at {socket_path}"))?;
+    let mut stream = UnixStream::connect(socket_path)
+        .with_context(|| format!("connect sidecar at {socket_path}"))?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     stream.write_all(&(body.len() as u32).to_be_bytes())?;
@@ -406,7 +418,9 @@ fn round_trip(socket_path: &str, req: &rmpv::Value) -> Result<rmpv::Value> {
 }
 
 fn map_get<'a>(map: &'a [(rmpv::Value, rmpv::Value)], key: &str) -> Option<&'a rmpv::Value> {
-    map.iter().find(|(k, _)| k.as_str() == Some(key)).map(|(_, v)| v)
+    map.iter()
+        .find(|(k, _)| k.as_str() == Some(key))
+        .map(|(_, v)| v)
 }
 
 fn num_f32(v: &rmpv::Value) -> Option<f32> {
@@ -426,11 +440,15 @@ fn parse_lock(s: &str) -> Option<LockState> {
 }
 
 fn check_ok(resp: &rmpv::Value) -> Result<()> {
-    let map = resp.as_map().ok_or_else(|| anyhow!("response is not a map"))?;
+    let map = resp
+        .as_map()
+        .ok_or_else(|| anyhow!("response is not a map"))?;
     match map_get(map, "status").and_then(|v| v.as_str()) {
         Some("ok") => Ok(()),
         _ => {
-            let err = map_get(map, "error").and_then(|v| v.as_str()).unwrap_or("unknown error");
+            let err = map_get(map, "error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown error");
             Err(anyhow!("{err}"))
         }
     }
@@ -443,14 +461,18 @@ fn is_not_loaded(e: &anyhow::Error) -> bool {
 /// Decode an `{status, detections}` reply into the wire `Detection` shape.
 fn decode_detections(resp: &rmpv::Value) -> Result<Vec<Detection>> {
     check_ok(resp)?;
-    let map = resp.as_map().ok_or_else(|| anyhow!("response is not a map"))?;
+    let map = resp
+        .as_map()
+        .ok_or_else(|| anyhow!("response is not a map"))?;
     let dets = match map_get(map, "detections").and_then(|v| v.as_array()) {
         Some(a) => a,
         None => return Ok(Vec::new()),
     };
     let mut out = Vec::with_capacity(dets.len());
     for d in dets {
-        let dm = d.as_map().ok_or_else(|| anyhow!("detection is not a map"))?;
+        let dm = d
+            .as_map()
+            .ok_or_else(|| anyhow!("detection is not a map"))?;
         let bm = map_get(dm, "bbox")
             .and_then(|v| v.as_map())
             .ok_or_else(|| anyhow!("detection has no bbox map"))?;
@@ -462,11 +484,16 @@ fn decode_detections(resp: &rmpv::Value) -> Result<Vec<Detection>> {
                 width: bf("width"),
                 height: bf("height"),
             },
-            class_label: map_get(dm, "class_label").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            class_label: map_get(dm, "class_label")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
             confidence: map_get(dm, "confidence").and_then(num_f32).unwrap_or(0.0),
             track_id: map_get(dm, "track_id").and_then(|v| v.as_u64()),
             assoc_confidence: map_get(dm, "assoc_confidence").and_then(num_f32),
-            lock_state: map_get(dm, "lock_state").and_then(|v| v.as_str()).and_then(parse_lock),
+            lock_state: map_get(dm, "lock_state")
+                .and_then(|v| v.as_str())
+                .and_then(parse_lock),
         });
     }
     Ok(out)
@@ -646,7 +673,9 @@ mod tests {
         let mut m = meta();
         m.model_path = Some("/tmp/uav.rknn".into());
         let model = backend.load(&m).unwrap();
-        let dets = model.infer(&[1, 2, 3, 4], 1, 1, FrameFormat::Rgb24).unwrap();
+        let dets = model
+            .infer(&[1, 2, 3, 4], 1, 1, FrameFormat::Rgb24)
+            .unwrap();
         server.join().unwrap();
         let _ = std::fs::remove_file(&sock);
 

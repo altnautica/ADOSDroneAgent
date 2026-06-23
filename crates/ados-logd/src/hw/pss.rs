@@ -156,7 +156,10 @@ async fn main_pid_of(unit: &str) -> Option<u32> {
         // is killed on drop): no PID for this unit.
         _ => return None,
     };
-    let pid: u32 = String::from_utf8_lossy(&output.stdout).trim().parse().ok()?;
+    let pid: u32 = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .ok()?;
     // A stopped or not-installed unit reports MainPID 0; skip it.
     (pid != 0).then_some(pid)
 }

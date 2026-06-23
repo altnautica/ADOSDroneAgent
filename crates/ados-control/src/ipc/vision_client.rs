@@ -130,7 +130,10 @@ mod tests {
     async fn designate_against_absent_socket_is_io_error() {
         let dir = tempfile::tempdir().unwrap();
         let client = VisionIpcClient::new(dir.path().join("absent.sock"));
-        let err = client.designate_track(Value::Map(vec![])).await.unwrap_err();
+        let err = client
+            .designate_track(Value::Map(vec![]))
+            .await
+            .unwrap_err();
         assert!(matches!(err, VisionError::Io(_)), "expected Io: {err:?}");
     }
 

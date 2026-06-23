@@ -335,7 +335,10 @@ impl VisionEngine {
 /// Merge a [`TrackUpdate`] back into the frame's detections: stamp the locked
 /// object onto its best-matching input box (measured frame), or append the
 /// tracker's predicted box (coast/ambiguous frame, no measured input).
-fn merge_tracked(mut detections: Vec<Detection>, update: crate::tracker::TrackUpdate) -> Vec<Detection> {
+fn merge_tracked(
+    mut detections: Vec<Detection>,
+    update: crate::tracker::TrackUpdate,
+) -> Vec<Detection> {
     let Some(locked) = update.detection else {
         // Idle or tentative-not-yet-confirmed: nothing to stamp.
         return detections;
@@ -361,7 +364,10 @@ fn merge_tracked(mut detections: Vec<Detection>, update: crate::tracker::TrackUp
 
 /// The index of the detection with the greatest IoU against `bbox`, or `None`
 /// when the list is empty or nothing overlaps at all.
-fn best_overlap_index(detections: &[Detection], bbox: &ados_protocol::framebus::BoundingBox) -> Option<usize> {
+fn best_overlap_index(
+    detections: &[Detection],
+    bbox: &ados_protocol::framebus::BoundingBox,
+) -> Option<usize> {
     let mut best: Option<(usize, f32)> = None;
     for (i, d) in detections.iter().enumerate() {
         let i_o_u = bbox_iou(&d.bbox, bbox);
@@ -557,16 +563,24 @@ mod tests {
 
     #[tokio::test]
     async fn tracker_stamps_a_stable_track_id_and_holds_through_a_drop() {
-        let e = VisionEngine::with_tracker(Box::new(MockBackend), 4, true, TrackerConfig::default());
+        let e =
+            VisionEngine::with_tracker(Box::new(MockBackend), 4, true, TrackerConfig::default());
         // Run up to confirmation: the same box for a few frames.
-        e.apply_tracker("cam", vec![det(100.0, 100.0, 0.9, "uav")]).await;
-        e.apply_tracker("cam", vec![det(100.0, 100.0, 0.9, "uav")]).await;
-        let confirmed = e.apply_tracker("cam", vec![det(100.0, 100.0, 0.9, "uav")]).await;
+        e.apply_tracker("cam", vec![det(100.0, 100.0, 0.9, "uav")])
+            .await;
+        e.apply_tracker("cam", vec![det(100.0, 100.0, 0.9, "uav")])
+            .await;
+        let confirmed = e
+            .apply_tracker("cam", vec![det(100.0, 100.0, 0.9, "uav")])
+            .await;
 
         let stamped: Vec<_> = confirmed.iter().filter(|d| d.track_id.is_some()).collect();
         assert_eq!(stamped.len(), 1, "exactly one detection carries the lock");
         let id = stamped[0].track_id.unwrap();
-        assert!(stamped[0].lock_state.is_some(), "the locked box reports a lock state");
+        assert!(
+            stamped[0].lock_state.is_some(),
+            "the locked box reports a lock state"
+        );
         assert_eq!(e.current_track("cam").await, Some(id));
 
         // A dropped frame: the tracker coasts and the held target is appended
@@ -582,7 +596,8 @@ mod tests {
 
     #[tokio::test]
     async fn operator_designate_locks_a_specific_detection() {
-        let e = VisionEngine::with_tracker(Box::new(MockBackend), 4, true, TrackerConfig::default());
+        let e =
+            VisionEngine::with_tracker(Box::new(MockBackend), 4, true, TrackerConfig::default());
         // Two detections; the operator picks the lower-confidence one — the
         // auto-lock would have taken the other.
         let target = det(200.0, 50.0, 0.4, "person");

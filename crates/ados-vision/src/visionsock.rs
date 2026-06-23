@@ -246,8 +246,11 @@ async fn handle_publish(engine: &Arc<VisionEngine>, args: &Value) -> Result<Valu
 /// decodes the same. `class_label` / `confidence` default to a neutral label and
 /// full confidence (the operator's pick overrides the auto-lock regardless).
 async fn handle_designate_track(engine: &Arc<VisionEngine>, args: &Value) -> Result<Value> {
-    let map = args.as_map().ok_or_else(|| anyhow!("designate args not a map"))?;
-    let camera_id = map_str(map, "camera_id").ok_or_else(|| anyhow!("designate missing camera_id"))?;
+    let map = args
+        .as_map()
+        .ok_or_else(|| anyhow!("designate args not a map"))?;
+    let camera_id =
+        map_str(map, "camera_id").ok_or_else(|| anyhow!("designate missing camera_id"))?;
     let bbox_map = map_get(map, "bbox")
         .and_then(|v| v.as_map())
         .ok_or_else(|| anyhow!("designate missing bbox"))?;
@@ -275,12 +278,16 @@ async fn handle_designate_track(engine: &Arc<VisionEngine>, args: &Value) -> Res
 
 /// Look up a key in a msgpack map by string key.
 fn map_get<'a>(map: &'a [(Value, Value)], key: &str) -> Option<&'a Value> {
-    map.iter().find(|(k, _)| k.as_str() == Some(key)).map(|(_, v)| v)
+    map.iter()
+        .find(|(k, _)| k.as_str() == Some(key))
+        .map(|(_, v)| v)
 }
 
 /// A string-valued map entry.
 fn map_str(map: &[(Value, Value)], key: &str) -> Option<String> {
-    map_get(map, key).and_then(|v| v.as_str()).map(str::to_owned)
+    map_get(map, key)
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
 }
 
 /// Coerce a msgpack number (f64 / i64 / u64) to f32.

@@ -440,7 +440,10 @@ async fn designate_track_routes_to_the_host() {
     )
     .await;
     let resp = recv(&mut client).await;
-    assert_eq!(resp.error, None, "granted cap must not produce a gate error");
+    assert_eq!(
+        resp.error, None,
+        "granted cap must not produce a gate error"
+    );
     assert_eq!(args_bool(&resp, "designated"), Some(true));
     let camera = match &resp.args {
         Value::Map(m) => m
