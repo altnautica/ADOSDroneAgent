@@ -284,7 +284,7 @@ class AgentBlock(_StrictModel):
     """When true, the supervisor runs one process instance per
     connected drone with a distinct ``ctx.agent_id`` and a per-drone
     config dict at
-    ``/var/lib/ados/plugins/<plugin_id>/config/<agent_id>.yaml``.
+    ``/var/ados/plugin-data/<plugin_id>/config/<agent_id>.yaml``.
     Default false preserves single-config behavior from the v1
     schema. Schema v2."""
 

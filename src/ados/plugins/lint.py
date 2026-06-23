@@ -24,6 +24,7 @@ from ados.plugins.archive import (
     SIGNATURE_FILENAME,
     parse_archive_bytes,
 )
+from ados.plugins.capabilities import CAPABILITY_CATALOG
 
 SEVERITY_INFO = "info"
 SEVERITY_WARN = "warn"
@@ -325,12 +326,11 @@ def lint_archive(path: str | Path) -> LintReport:
             )
         )
 
-    high_risk_caps = {
-        "vehicle.command",
-        "vehicle.payload.actuate",
-        "filesystem.host",
-        "mavlink.command.send",
-    }
+    high_risk_caps = frozenset(
+        cap_id
+        for cap_id, meta in CAPABILITY_CATALOG.items()
+        if meta.get("risk") in ("high", "critical")
+    )
     if declared_perms & high_risk_caps:
         report.findings.append(
             LintFinding(
