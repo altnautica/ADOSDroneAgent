@@ -26,7 +26,14 @@ classifiers = [
 
 dependencies = [
     "pymavlink>=2.4.41",
-    "fastapi>=0.109.0",
+    # fastapi>=0.135 is the floor that accepts the modern starlette 1.x line.
+    # Older fastapi (<=0.116) caps starlette<0.48; if a stray starlette 1.x ends
+    # up in such an env, every APIRouter() raises at import time (starlette 1.x
+    # dropped the on_startup/on_shutdown kwargs fastapi passed through). Pinning
+    # the fastapi floor past that cap and bracketing starlette to the 1.x major
+    # keeps the pair coherent on a clean resolve.
+    "fastapi>=0.135.0",
+    "starlette>=1.0.0,<2.0",
     "uvicorn[standard]>=0.27.0",
     "paho-mqtt>=2.0.0",
     "pyyaml>=6.0",
