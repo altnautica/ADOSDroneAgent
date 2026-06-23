@@ -2,26 +2,23 @@
 //!
 //! The native front already authenticates the routes it serves itself
 //! ([`crate::serve::tcp_edge`]). The routes it does NOT serve fall through to
-//! the reverse proxy: today the front forwards those to the residual Python,
-//! which applies its own two auth middlewares. This module ports both of those
-//! middlewares into Rust so the front can run the SAME decision on a proxied
-//! request before forwarding it, once a config flag turns the gate on. The flag
-//! defaults off, so with it off this module is never consulted and behavior is
-//! byte-identical to forwarding straight through.
+//! the reverse proxy. This module ports the two former Python auth middlewares
+//! into Rust so the front runs the SAME decision on a proxied request before
+//! forwarding it, making the front the single authenticator for the whole
+//! surface (the residual Python no longer carries its own auth layers).
 //!
-//! Two Python middlewares are ported:
+//! Two auth gates are ported:
 //!
-//! 1. The API-key gate (`api/middleware/auth.py` `ApiKeyAuthMiddleware`): the
-//!    exempt set, the OPTIONS bypass, on-box trust, the cloud-posture setup
-//!    routes, the setup-mutation routes, the unpaired-open pass, and the paired
-//!    `X-ADOS-Key` requirement.
-//! 2. The HMAC/replay gate (`api/middleware/security.py` `SecurityMiddleware`):
-//!    a request signature over the timestamp + body, plus a nonce/timestamp
-//!    replay window, applied to mutating methods when HMAC is enabled.
+//! 1. The API-key gate: the exempt set, the OPTIONS bypass, on-box trust, the
+//!    cloud-posture setup routes, the setup-mutation routes, the unpaired-open
+//!    pass, and the paired `X-ADOS-Key` requirement.
+//! 2. The HMAC/replay gate: a request signature over the timestamp + body, plus
+//!    a nonce/timestamp replay window, applied to mutating methods when HMAC is
+//!    enabled.
 //!
-//! Status codes, body shapes, and message strings are matched to the Python
-//! byte-for-byte: a GCS that surfaces the rejection body reads the same text
-//! whether the front or the residual Python answered it.
+//! Status codes, body shapes, and message strings are preserved byte-for-byte
+//! from the predecessor middlewares so a GCS that surfaces the rejection body
+//! reads stable text across the cutover.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -44,15 +41,7 @@ type HmacSha256 = Hmac<Sha256>;
 /// env-override convention the sibling paths use.
 pub const DEFAULT_SETUP_TOKEN_PATH: &str = "/etc/ados/secrets/setup-token";
 
-/// The sentinel `ados rust enable front-auth` writes (and `disable` removes) to
-/// turn the proxied-route gate on without an `/etc/ados/config.yaml` edit. The
-/// front resolves the gate as `config.front_proxied_auth OR this marker exists`,
-/// so the operator flips it through the agent's own tooling (the same marker
-/// idiom the LAN-front cutover uses). Overridable via `ADOS_FRONT_AUTH_MARKER`
-/// for tests.
-pub const DEFAULT_FRONT_AUTH_MARKER: &str = "/etc/ados/front-proxied-auth-enabled";
-
-/// Routes that never require authentication. Mirrors `auth.py` `EXEMPT_PATHS`.
+/// Routes that never require authentication. Mirrors the former `EXEMPT_PATHS`.
 const EXEMPT_PATHS: &[&str] = &[
     "/",
     "/docs",
@@ -258,10 +247,6 @@ fn unix_now() -> f64 {
 /// replay detector + the setup-token path. Built once at startup and shared
 /// behind an `Arc` in the edge state.
 pub struct ProxiedAuth {
-    /// The resolved gate state: the `security.front_proxied_auth` config field
-    /// OR the `ados rust enable front-auth` marker. Computed once at startup
-    /// (the front restarts on a flip, so a fresh value is read each boot).
-    enabled: bool,
     config: SecuritySection,
     replay: ReplayDetector,
     setup_token_path: PathBuf,
@@ -270,50 +255,33 @@ pub struct ProxiedAuth {
 impl ProxiedAuth {
     /// Build from the loaded `security:` config slice, the standard setup-token
     /// path (or its `ADOS_SETUP_TOKEN_PATH` override), and a fresh 300s/50000
-    /// replay detector. The gate is on when the config field is true OR the
-    /// `ados rust enable front-auth` marker is present (its `ADOS_FRONT_AUTH_MARKER`
-    /// override for tests).
+    /// replay detector.
     pub fn new(config: SecuritySection) -> Self {
         let setup_token_path = std::env::var("ADOS_SETUP_TOKEN_PATH")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from(DEFAULT_SETUP_TOKEN_PATH));
-        let marker = std::env::var("ADOS_FRONT_AUTH_MARKER")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from(DEFAULT_FRONT_AUTH_MARKER));
-        let enabled = resolve_enabled(config.front_proxied_auth, &marker);
         Self {
-            enabled,
             config,
             replay: ReplayDetector::default_security(),
             setup_token_path,
         }
     }
 
-    /// Build with an explicit setup-token path + detector (tests). The gate
-    /// follows the config field only here (no marker is consulted), so a test
-    /// drives `enabled` purely through `front_proxied_auth`.
+    /// Build with an explicit setup-token path + detector (tests).
     pub fn with_paths(
         config: SecuritySection,
         setup_token_path: PathBuf,
         replay: ReplayDetector,
     ) -> Self {
         Self {
-            enabled: config.front_proxied_auth,
             config,
             replay,
             setup_token_path,
         }
     }
 
-    /// Whether the gate is on. When false the caller forwards the request
-    /// untouched (the inert default). Resolved from the config field OR the
-    /// `front-auth` marker at construction.
-    pub fn enabled(&self) -> bool {
-        self.enabled
-    }
-
     /// Whether the HMAC gate is active: enabled in config AND the secret is at
-    /// least the minimum length. Mirrors `SecurityMiddleware.__init__`'s
+    /// least the minimum length. Mirrors the predecessor middleware's
     /// `enabled and bool(secret)` plus the `>= 16` length guard.
     pub fn hmac_active(&self) -> bool {
         self.config.hmac_enabled && self.config.hmac_secret.len() >= HMAC_MIN_SECRET_LEN
@@ -632,14 +600,6 @@ fn contains(set: &[&str], value: &str) -> bool {
     set.contains(&value)
 }
 
-/// Resolve the proxied-auth gate: on when the `security.front_proxied_auth`
-/// config field is set OR the `front-auth` marker file is present. The marker
-/// lets `ados rust enable front-auth` flip the gate through the agent's own
-/// tooling, without an `/etc/ados/config.yaml` edit.
-fn resolve_enabled(config_field: bool, marker: &std::path::Path) -> bool {
-    config_field || marker.exists()
-}
-
 /// `Some(s)` when the option holds a non-empty string, else `None`. Mirrors the
 /// Python truthiness check on a header (`if not api_key` etc.): a present-but-
 /// empty header is treated as absent.
@@ -664,17 +624,14 @@ mod tests {
         Pairing::Paired(key.to_string())
     }
 
-    fn cfg(front_proxied_auth: bool) -> SecuritySection {
-        SecuritySection {
-            front_proxied_auth,
-            ..Default::default()
-        }
+    fn cfg() -> SecuritySection {
+        SecuritySection::default()
     }
 
-    /// An auth with the gate on, no configured key, HMAC off, no token file.
+    /// An auth with no configured key, HMAC off, no token file.
     fn auth_basic() -> ProxiedAuth {
         ProxiedAuth::with_paths(
-            cfg(true),
+            cfg(),
             PathBuf::from("/nonexistent/setup-token"),
             ReplayDetector::default_security(),
         )
@@ -685,34 +642,6 @@ mod tests {
             x_ados_key: Some(key.to_string()),
             ..Default::default()
         }
-    }
-
-    // ---- the default-off flag ----
-
-    #[test]
-    fn the_gate_defaults_off() {
-        let auth = ProxiedAuth::with_paths(
-            SecuritySection::default(),
-            PathBuf::from("/nonexistent"),
-            ReplayDetector::default_security(),
-        );
-        assert!(!auth.enabled(), "front_proxied_auth must default to false");
-    }
-
-    #[test]
-    fn the_marker_turns_the_gate_on_without_the_config_field() {
-        // The config field is false; a present marker file flips the gate on
-        // (the `ados rust enable front-auth` path). An absent marker leaves it
-        // off; the config field on its own still turns it on.
-        let dir = tempfile::tempdir().unwrap();
-        let marker = dir.path().join("front-proxied-auth-enabled");
-        assert!(
-            !resolve_enabled(false, &marker),
-            "no field, no marker → off"
-        );
-        assert!(resolve_enabled(true, &marker), "field on → on regardless");
-        std::fs::write(&marker, "").unwrap();
-        assert!(resolve_enabled(false, &marker), "marker present → on");
     }
 
     // ---- exempt + static-asset ----
@@ -850,8 +779,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let token_path = dir.path().join("setup-token");
         std::fs::write(&token_path, "  tok-123\n").unwrap();
-        let auth =
-            ProxiedAuth::with_paths(cfg(true), token_path, ReplayDetector::default_security());
+        let auth = ProxiedAuth::with_paths(cfg(), token_path, ReplayDetector::default_security());
         let headers = RequestHeaders {
             x_ados_setup_token: Some("tok-123".to_string()),
             ..Default::default()
@@ -903,7 +831,7 @@ mod tests {
 
     #[test]
     fn setup_mutation_rejects_when_token_required_and_absent() {
-        let mut c = cfg(true);
+        let mut c = cfg();
         c.setup_token_required = true;
         let auth = ProxiedAuth::with_paths(
             c,
@@ -936,7 +864,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let token_path = dir.path().join("setup-token");
         std::fs::write(&token_path, "tok-xyz").unwrap();
-        let mut c = cfg(true);
+        let mut c = cfg();
         c.setup_token_required = true;
         let auth = ProxiedAuth::with_paths(c, token_path, ReplayDetector::default_security());
         let headers = RequestHeaders {
@@ -1068,7 +996,7 @@ mod tests {
     fn paired_configured_key_accepts_independent_of_pairing_key() {
         // The manually-configured security.api.api_key passes even when it
         // differs from the pairing key.
-        let mut c = cfg(true);
+        let mut c = cfg();
         c.api.api_key = "configured-key".to_string();
         let auth = ProxiedAuth::with_paths(
             c,
@@ -1152,7 +1080,7 @@ mod tests {
 
     /// A known secret + a hand-computed signature to lock the wire format.
     fn hmac_auth(secret: &str) -> ProxiedAuth {
-        let mut c = cfg(true);
+        let mut c = cfg();
         c.hmac_enabled = true;
         c.hmac_secret = secret.to_string();
         ProxiedAuth::with_paths(
@@ -1172,13 +1100,13 @@ mod tests {
     #[test]
     fn hmac_inactive_when_disabled_or_short_secret() {
         // Disabled → not active.
-        let mut c = cfg(true);
+        let mut c = cfg();
         c.hmac_enabled = false;
         c.hmac_secret = "a-long-enough-secret-key".to_string();
         let a = ProxiedAuth::with_paths(c, PathBuf::from("/x"), ReplayDetector::default_security());
         assert!(!a.hmac_active());
         // Enabled but a < 16-byte secret → not active (matches the Python guard).
-        let mut c2 = cfg(true);
+        let mut c2 = cfg();
         c2.hmac_enabled = true;
         c2.hmac_secret = "short".to_string();
         let a2 =

@@ -62,9 +62,8 @@ struct PeerAddr(SocketAddr);
 struct EdgeAuth {
     pairing: Arc<PairingState>,
     rate: Arc<RateLimiter>,
-    /// The proxied-route auth decision. Consulted ONLY when its config flag
-    /// (`security.front_proxied_auth`) is on; with the flag off (the default)
-    /// the proxied branch forwards untouched, byte-identical to today.
+    /// The proxied-route auth decision, run on every forwarded request before
+    /// it reaches the residual surface (the front is the single authenticator).
     proxied: Arc<ProxiedAuth>,
 }
 
@@ -115,15 +114,10 @@ async fn tcp_edge(State(edge): State<EdgeAuth>, mut request: Request, next: Next
     }
 
     // A route the front does not serve natively falls through to the reverse
-    // proxy. With the proxied-auth gate OFF (the default) the Rust auth is
-    // skipped here and the residual FastAPI applies its own auth on the
-    // forwarded request (which now carries the trustworthy on-box header) — the
-    // rate limit is the residual surface's concern too. With the gate ON the
-    // front runs the ported auth decision itself before forwarding.
+    // proxy. The front runs the ported auth decision itself before forwarding,
+    // so the residual surface no longer carries its own auth layers — the front
+    // is the single authenticator for every route it serves or forwards.
     if !crate::routing::is_native(request.method(), &path) {
-        if !edge.proxied.enabled() {
-            return next.run(request).await;
-        }
         return proxied_auth_then_forward(
             edge.proxied.clone(),
             edge.pairing.clone(),
@@ -172,10 +166,10 @@ async fn tcp_edge(State(edge): State<EdgeAuth>, mut request: Request, next: Next
 
 /// Run the ported proxied-route auth decision, then forward to the proxy on an
 /// accept. The on-box header has already been stamped on `request` by the
-/// caller, so the residual still sees the trustworthy on-box signal regardless
-/// of this gate. The body is buffered ONLY when the HMAC gate needs it (a
-/// mutating, non-exempt method while HMAC is active); otherwise it streams
-/// through untouched, so a large upload or an SSE request is not buffered.
+/// caller, so the residual still sees the trustworthy on-box signal. The body
+/// is buffered ONLY when the HMAC gate needs it (a mutating, non-exempt method
+/// while HMAC is active); otherwise it streams through untouched, so a large
+/// upload or an SSE request is not buffered.
 async fn proxied_auth_then_forward(
     proxied: Arc<ProxiedAuth>,
     pairing_state: Arc<PairingState>,
@@ -278,8 +272,7 @@ pub fn unix_app(router: Router) -> Router {
 
 /// Build the LAN-edge app: the same Router wrapped with the rate-limit + auth
 /// layer keyed on the shared pairing reader. `proxied` carries the ported
-/// proxied-route auth decision; it is inert unless its config flag is on, so a
-/// default deployment is byte-identical to forwarding straight through.
+/// proxied-route auth decision the front runs on every forwarded request.
 pub fn tcp_app(router: Router, pairing: Arc<PairingState>, proxied: Arc<ProxiedAuth>) -> Router {
     let edge = EdgeAuth {
         pairing,

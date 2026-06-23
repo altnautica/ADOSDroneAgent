@@ -108,14 +108,6 @@ def test_ticket_mint_returns_hex_and_expiry(
     assert body["expiresAt"] > 0
 
 
-def test_ticket_mint_requires_pairing_key(
-    paired_client, isolated_sidecar, isolated_supervisor, reset_ticket_store
-):
-    # No ``X-ADOS-Key`` header → REST middleware rejects with 401.
-    resp = paired_client.post("/api/plugins/jobs/job-noauth/ticket")
-    assert resp.status_code in (401, 403)
-
-
 # ---------------------------------------------------------------------
 # WebSocket subprotocol path
 # ---------------------------------------------------------------------

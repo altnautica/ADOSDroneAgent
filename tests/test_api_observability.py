@@ -343,16 +343,3 @@ def test_proxy_is_open_when_unpaired(install_store) -> None:
     install_store(_handler)
     resp = client.get("/api/v2/observability/v1/query")
     assert resp.status_code == 200
-
-
-def test_proxy_requires_key_when_paired(install_store) -> None:
-    """Paired: the agent's own auth middleware gates the proxy before it runs;
-    a missing key is rejected with 401 and the store is never contacted."""
-    client = TestClient(create_app(_build_runtime(paired=True)))
-
-    def _handler(request: httpx.Request) -> httpx.Response:
-        raise AssertionError("store contacted despite missing key")
-
-    install_store(_handler)
-    resp = client.get("/api/v2/observability/v1/query")
-    assert resp.status_code == 401

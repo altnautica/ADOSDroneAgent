@@ -1,9 +1,8 @@
 """Shared WebSocket authentication helpers.
 
-``ApiKeyAuthMiddleware`` extends Starlette's ``BaseHTTPMiddleware``,
-which by design only processes HTTP requests. WebSocket handshakes
-bypass it entirely, so every ``@router.websocket`` route must enforce
-the paired-key contract itself.
+The native control front authenticates the HTTP surface, but a WebSocket
+handshake is upgraded past that HTTP auth layer, so every
+``@router.websocket`` route must enforce the paired-key contract itself.
 
 Two accepted credentials per the agent's WebSocket auth contract:
 
@@ -13,7 +12,7 @@ Two accepted credentials per the agent's WebSocket auth contract:
 * ``Sec-WebSocket-Protocol: ados-ws-ticket, <ticket-hex>`` — the
   subprotocol-based ticket flow for browser clients. The GCS first
   mints a one-shot ticket via ``POST /api/_ws/ticket`` (which the
-  HTTP middleware still authenticates with the pairing key) and then
+  native front authenticates with the pairing key) and then
   hands the ticket to ``new WebSocket(url, ["ados-ws-ticket",
   <ticket>])``. The ticket is consumed on first use, is bound to a
   specific scope string, and expires within 30 s. Replaces the

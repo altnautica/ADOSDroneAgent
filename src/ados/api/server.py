@@ -12,7 +12,6 @@ from fastapi.staticfiles import StaticFiles
 
 from ados import __version__
 from ados.api.deps import set_agent_app
-from ados.api.middleware.auth import ApiKeyAuthMiddleware
 from ados.api.routes import (
     config,
     dashboard,
@@ -59,22 +58,13 @@ def create_app(agent: Any) -> FastAPI:
             allow_headers=["*"],
         )
 
-    # Auth middleware — added after CORS.
-    # FastAPI/Starlette executes middleware in reverse order of add_middleware() calls,
-    # so auth runs AFTER CORS headers are added but BEFORE rate limiting.
-    app.add_middleware(ApiKeyAuthMiddleware)
+    # API-key auth and HMAC/replay protection are enforced by the native control
+    # front, which authenticates every route it serves or forwards to this
+    # surface. This residual API binds only the internal socket behind the front,
+    # so it no longer carries its own auth layers.
 
-    # HMAC + replay protection — added after auth, before rate limit.
-    # Only active when config.security.hmac_enabled = True.
-    from ados.api.middleware.security import SecurityMiddleware
-    app.add_middleware(
-        SecurityMiddleware,
-        enabled=api_runtime.config.security.hmac_enabled,
-        secret=api_runtime.config.security.hmac_secret,
-    )
-
-    # Rate limiting middleware — added after auth + security.
-    # Execution order: CORS → Auth → Security (HMAC+Replay) → Rate Limit → Route handler.
+    # Rate limiting middleware — added after CORS.
+    # Execution order: CORS → Rate Limit → Route handler.
     from ados.security.rate_limit import RateLimitMiddleware
     app.add_middleware(RateLimitMiddleware, rate=10.0, burst=20)
 

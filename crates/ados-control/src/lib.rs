@@ -273,10 +273,10 @@ where
     let hid_native = is_ground_station;
 
     // The proxied-route auth decision: the ported Python auth + HMAC middlewares
-    // the front can run on the forwarded (non-native) routes. Inert by default —
-    // the `security.front_proxied_auth` flag (read here from the same config the
-    // Python agent writes) defaults false, so the front forwards proxied routes
-    // untouched until the flag is flipped. Built once and shared across all
+    // the front runs on every forwarded (non-native) route, so the front is the
+    // single authenticator for the whole surface. The `security:` slice (read
+    // here from the same config the Python agent writes) supplies the configured
+    // key + HMAC settings the gate reads. Built once and shared across all
     // connections (it holds the replay-detector nonce store).
     let proxied_auth = {
         let sec = crate::config::ControlSecurityConfig::load_from(&paths.config_path);

@@ -139,16 +139,7 @@ _FRONT_API_DROPIN_BODY = (
     "[Service]\nEnvironment=ADOS_API_INTERNAL_SOCKET=/run/ados/api-internal.sock\n"
 )
 
-# The proxied-route auth cutover. The native front authenticates the routes it
-# forwards to the residual Python itself when this marker is present (the front
-# resolves the gate as `security.front_proxied_auth` OR this marker). Flipping it
-# only restarts the native surface so it re-reads the marker; it makes sense only
-# once `front` owns the LAN port. Handled specially like `front` (it does not
-# swap a unit), offered as `ados rust enable front-auth`.
-_FRONT_AUTH = "front-auth"
-_FRONT_AUTH_MARKER = "front-proxied-auth-enabled"
-
-_FLIP_NAMES = _SVC_NAMES + (_FRONT, _FRONT_AUTH)
+_FLIP_NAMES = _SVC_NAMES + (_FRONT,)
 
 
 def _require_root() -> None:
@@ -258,10 +249,6 @@ def rust_status() -> None:
     front_on = (ADOS_ETC_DIR / _FRONT_MARKER).exists()
     front_line = _front_status_line()
     click.echo(click.style(front_line, fg="green") if front_on else front_line)
-    # The proxied-route auth gate rides on the front; show it directly below.
-    front_auth_on = (ADOS_ETC_DIR / _FRONT_AUTH_MARKER).exists()
-    front_auth_line = _front_auth_status_line()
-    click.echo(click.style(front_auth_line, fg="green") if front_auth_on else front_auth_line)
 
 
 def _set_marker(svc: _Service, *, native: bool) -> None:
@@ -351,34 +338,6 @@ def _front_status_line() -> str:
     return f"  {_FRONT:<11}  {mode:<22}  {flag:<8}  {binp:<7}  —"
 
 
-def _front_auth_apply(*, enable: bool) -> None:
-    """Flip the proxied-route auth gate on or off.
-
-    Write (ON) or remove (OFF) the marker the native front resolves the gate
-    from, then restart the native surface so it re-reads it on boot. No drop-ins
-    or unit swaps — the gate is a startup-resolved property of the running
-    `ados-control`. A no-op for FastAPI's own auth (which always applies on the
-    routes it serves); this only governs whether the FRONT pre-authenticates the
-    routes it forwards.
-    """
-    marker = ADOS_ETC_DIR / _FRONT_AUTH_MARKER
-    if enable:
-        ADOS_ETC_DIR.mkdir(parents=True, exist_ok=True)
-        marker.touch()
-    elif marker.exists():
-        marker.unlink()
-    # Re-read on boot: restart only when the native surface is actually running.
-    _systemctl("restart", "ados-control")
-
-
-def _front_auth_status_line() -> str:
-    """One status line describing the proxied-route auth-gate state."""
-    on = (ADOS_ETC_DIR / _FRONT_AUTH_MARKER).exists()
-    mode = "on (front authenticates)" if on else "off (residual authenticates)"
-    flag = "set" if on else "—"
-    return f"  {_FRONT_AUTH:<11}  {mode:<26}  {flag:<8}  —        —"
-
-
 def _apply(svc: _Service, *, enable: bool) -> None:
     if enable:
         _set_marker(svc, native=True)
@@ -425,15 +384,6 @@ def rust_enable(services: tuple[str, ...]) -> None:
                 click.style("  front: native surface now owns the LAN port (:8080).", fg="green")
             )
             continue
-        if name == _FRONT_AUTH:
-            _front_auth_apply(enable=True)
-            click.echo(
-                click.style(
-                    "  front-auth: native front now authenticates the routes it forwards.",
-                    fg="green",
-                )
-            )
-            continue
         svc = _SERVICES[name]
         if not _binaries_present(svc):
             click.echo(
@@ -456,10 +406,6 @@ def rust_disable(services: tuple[str, ...]) -> None:
         if name == _FRONT:
             _front_apply(enable=False)
             click.echo("  front: FastAPI reclaimed the LAN port (:8080).")
-            continue
-        if name == _FRONT_AUTH:
-            _front_auth_apply(enable=False)
-            click.echo("  front-auth: the residual surface authenticates the forwarded routes.")
             continue
         _apply(_SERVICES[name], enable=False)
         click.echo(f"  {name}: reverted to the packaged service.")

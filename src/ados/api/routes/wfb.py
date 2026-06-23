@@ -440,12 +440,6 @@ class LocalBindRequest(BaseModel):
     )
 
 
-class AutoPairToggleRequest(BaseModel):
-    """PUT body for `/wfb/pair/auto-pair`."""
-
-    enabled: bool
-
-
 @router.post("/wfb/pair/local-bind")
 async def post_wfb_pair_local_bind(request: LocalBindRequest) -> dict[str, Any]:
     """Open a local-radio bind window via the upstream wfb-ng protocol.
@@ -529,28 +523,4 @@ async def post_wfb_pair_unpair() -> dict[str, Any]:
 
     pm = get_pair_manager()
     return await pm.unpair(role)
-
-
-@router.put("/wfb/pair/auto-pair")
-async def put_wfb_pair_auto_pair(request: AutoPairToggleRequest) -> dict[str, Any]:
-    """Toggle `wfb.auto_pair_enabled`.
-
-    Re-arming on a paired rig returns `rearm_blocked: true`; the
-    operator must `unpair` first.
-    """
-    app = get_agent_app()
-    role = _current_role(app)
-
-    from ados.services.ground_station.pair_manager import get_pair_manager
-
-    pm = get_pair_manager()
-    result = await pm.set_auto_pair(bool(request.enabled), role)
-
-    # Mirror onto the live config object so the auto_pair supervisor
-    # observes the change without a config reload race.
-    wfb_cfg = getattr(app.config.video, "wfb", None) if app.config is not None else None
-    if wfb_cfg is not None:
-        wfb_cfg.auto_pair_enabled = bool(result.get("auto_pair_enabled", False))
-
-    return result
 

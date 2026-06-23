@@ -193,11 +193,11 @@ def test_capability_token_mint_not_paired(
 
 
 # ---------------------------------------------------------------------
-# WebSocket auth (BaseHTTPMiddleware bypass closed)
+# WebSocket auth (HTTP-auth bypass closed)
 # ---------------------------------------------------------------------
 #
-# ``ApiKeyAuthMiddleware`` extends Starlette's HTTP middleware base and
-# never processes the WebSocket handshake. The route enforces the
+# The native front authenticates the HTTP surface, but a WebSocket
+# handshake is upgraded past that layer, so the route enforces the
 # paired-key contract inline. Three cases covered here:
 #   (a) no key                 → close 4401
 #   (b) bad / unknown key      → close 4401
