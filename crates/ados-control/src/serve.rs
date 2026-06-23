@@ -40,6 +40,7 @@ use tower::{Service, ServiceBuilder};
 use tower_http::cors::CorsLayer;
 
 use crate::auth::{self, PairingState, RateLimiter};
+use crate::proxy_auth::{BodyField, Decision, ProxiedAuth, RequestHeaders};
 use crate::routes::detail;
 
 /// The header the front stamps on a request that passes its on-box loopback
@@ -61,6 +62,10 @@ struct PeerAddr(SocketAddr);
 struct EdgeAuth {
     pairing: Arc<PairingState>,
     rate: Arc<RateLimiter>,
+    /// The proxied-route auth decision. Consulted ONLY when its config flag
+    /// (`security.front_proxied_auth`) is on; with the flag off (the default)
+    /// the proxied branch forwards untouched, byte-identical to today.
+    proxied: Arc<ProxiedAuth>,
 }
 
 /// The TCP-edge middleware: trustworthy on-box header stamping, then (for native
@@ -110,11 +115,23 @@ async fn tcp_edge(State(edge): State<EdgeAuth>, mut request: Request, next: Next
     }
 
     // A route the front does not serve natively falls through to the reverse
-    // proxy. The Rust auth is skipped here; the residual FastAPI applies its own
-    // auth on the forwarded request (which now carries the trustworthy on-box
-    // header). The rate limit is the residual surface's concern too.
+    // proxy. With the proxied-auth gate OFF (the default) the Rust auth is
+    // skipped here and the residual FastAPI applies its own auth on the
+    // forwarded request (which now carries the trustworthy on-box header) — the
+    // rate limit is the residual surface's concern too. With the gate ON the
+    // front runs the ported auth decision itself before forwarding.
     if !crate::routing::is_native(request.method(), &path) {
-        return next.run(request).await;
+        if !edge.proxied.enabled() {
+            return next.run(request).await;
+        }
+        return proxied_auth_then_forward(
+            edge.proxied.clone(),
+            edge.pairing.clone(),
+            on_box,
+            request,
+            next,
+        )
+        .await;
     }
 
     // Liveness, version, and the pairing handshake are public and must always
@@ -153,6 +170,106 @@ async fn tcp_edge(State(edge): State<EdgeAuth>, mut request: Request, next: Next
     next.run(request).await
 }
 
+/// Run the ported proxied-route auth decision, then forward to the proxy on an
+/// accept. The on-box header has already been stamped on `request` by the
+/// caller, so the residual still sees the trustworthy on-box signal regardless
+/// of this gate. The body is buffered ONLY when the HMAC gate needs it (a
+/// mutating, non-exempt method while HMAC is active); otherwise it streams
+/// through untouched, so a large upload or an SSE request is not buffered.
+async fn proxied_auth_then_forward(
+    proxied: Arc<ProxiedAuth>,
+    pairing_state: Arc<PairingState>,
+    on_box: bool,
+    request: Request,
+    next: Next,
+) -> Response {
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+    let headers = collect_headers(request.headers());
+    // The pairing posture comes from the SAME short-TTL-cached reader the native
+    // edge uses, so the gate and every other surface agree on one posture.
+    let pairing = pairing_state.current();
+
+    // The API-key gate first (the same order the Python middleware stack runs:
+    // ApiKeyAuthMiddleware sits outside SecurityMiddleware).
+    if let Decision::Reject {
+        status,
+        field,
+        message,
+    } = proxied.decide_api_key(&method, &path, &headers, on_box, &pairing)
+    {
+        return reject_response(status, field, message);
+    }
+
+    // The HMAC gate. Only here do we touch the body, and only when the gate is
+    // active for this method+path; otherwise forward the original request with
+    // its body still streaming.
+    if proxied.hmac_needs_body(&method, &path) {
+        let (parts, body) = request.into_parts();
+        let bytes = match axum::body::to_bytes(body, usize::MAX).await {
+            Ok(b) => b,
+            Err(_) => {
+                // A body we cannot read cannot be HMAC-verified; reject with the
+                // same shape an invalid signature would (the request never
+                // reaches the upstream).
+                return reject_response(
+                    StatusCode::UNAUTHORIZED,
+                    BodyField::Error,
+                    "Invalid HMAC signature",
+                );
+            }
+        };
+        if let Decision::Reject {
+            status,
+            field,
+            message,
+        } = proxied.decide_hmac(&method, &path, &headers, &bytes)
+        {
+            return reject_response(status, field, message);
+        }
+        // Rebuild the request with the buffered body so the proxy still streams
+        // it downstream unchanged.
+        let rebuilt = Request::from_parts(parts, Body::from(bytes));
+        return next.run(rebuilt).await;
+    }
+
+    next.run(request).await
+}
+
+/// Pull the headers the proxied-auth decision reads into the typed struct, so
+/// the decision is a pure function of strings (decoupled from the live
+/// `HeaderMap`). A non-UTF-8 header value is treated as absent.
+fn collect_headers(map: &axum::http::HeaderMap) -> RequestHeaders {
+    let get = |name: &str| {
+        map.get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+    };
+    RequestHeaders {
+        origin: get("origin"),
+        referer: get("referer"),
+        host: get("host"),
+        x_ados_key: get("x-ados-key"),
+        x_ados_setup_token: get("x-ados-setup-token"),
+        x_timestamp: get("x-timestamp"),
+        x_nonce: get("x-nonce"),
+        x_hmac_signature: get("x-hmac-signature"),
+    }
+}
+
+/// Turn a `Reject` into the FastAPI-shaped JSON response, rendering the message
+/// under `detail` (the API-key middleware) or `error` (the HMAC middleware) so
+/// the body matches the Python byte-for-byte.
+fn reject_response(status: StatusCode, field: BodyField, message: &str) -> Response {
+    match field {
+        BodyField::Detail => detail(status, message),
+        BodyField::Error => {
+            use axum::response::IntoResponse;
+            (status, axum::Json(serde_json::json!({ "error": message }))).into_response()
+        }
+    }
+}
+
 /// Build the Unix-edge app: the bare Router, no auth (the socket is the trust
 /// boundary).
 pub fn unix_app(router: Router) -> Router {
@@ -160,11 +277,14 @@ pub fn unix_app(router: Router) -> Router {
 }
 
 /// Build the LAN-edge app: the same Router wrapped with the rate-limit + auth
-/// layer keyed on the shared pairing reader.
-pub fn tcp_app(router: Router, pairing: Arc<PairingState>) -> Router {
+/// layer keyed on the shared pairing reader. `proxied` carries the ported
+/// proxied-route auth decision; it is inert unless its config flag is on, so a
+/// default deployment is byte-identical to forwarding straight through.
+pub fn tcp_app(router: Router, pairing: Arc<PairingState>, proxied: Arc<ProxiedAuth>) -> Router {
     let edge = EdgeAuth {
         pairing,
         rate: Arc::new(RateLimiter::default_control()),
+        proxied,
     };
     // CORS wraps OUTSIDE the auth layer (ServiceBuilder applies the first layer
     // outermost). A browser cross-origin call to this LAN edge sends a custom

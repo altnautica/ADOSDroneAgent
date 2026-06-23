@@ -111,6 +111,79 @@ impl PairingConfig {
     }
 }
 
+/// The `security.api:` slice the proxied-route auth gate reads. Only the
+/// manually-configured key is typed; every other field is tolerated. Mirrors
+/// the Python `ApiSecurityConfig.api_key` (default `""`).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ApiSecuritySection {
+    #[serde(default)]
+    pub api_key: String,
+}
+
+/// The `security:` section of `/etc/ados/config.yaml` the proxied-route auth
+/// gate reads. Mirrors the Python `SecurityConfig` field names + defaults so a
+/// config the Python agent wrote reads identically here:
+///
+/// - `api.api_key` ⇒ the manually-configured key (default `""`).
+/// - `hmac_enabled` / `hmac_secret` ⇒ the HMAC signing gate (default off / `""`).
+/// - `setup_token_required` ⇒ the setup-mutation token escalation (default off).
+///
+/// `front_proxied_auth` is a NEW field with NO Python counterpart: it gates
+/// whether the native front authenticates the PROXIED routes itself. It
+/// defaults to **false** so a config the Python agent wrote (which never has
+/// this key) leaves the front inert and byte-identical to today.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SecuritySection {
+    /// The gate. When false (the default and the value for any Python-written
+    /// config that lacks the key) the front leaves proxied routes to the
+    /// residual Python exactly as before. When true the front runs the ported
+    /// auth decision on proxied routes before forwarding.
+    #[serde(default)]
+    pub front_proxied_auth: bool,
+    #[serde(default)]
+    pub api: ApiSecuritySection,
+    #[serde(default)]
+    pub hmac_enabled: bool,
+    #[serde(default)]
+    pub hmac_secret: String,
+    #[serde(default)]
+    pub setup_token_required: bool,
+}
+
+/// The top-level config slice carrying only the `security:` section. A separate
+/// total reader (not folded into `PairingConfig`) so each surface types only
+/// the section it needs. Like `PairingConfig`, the reader is total: a missing
+/// or unparseable file yields all-defaults (the gate stays off), so a fresh or
+/// partially-configured agent never fails to load and the front stays inert.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ControlSecurityConfig {
+    #[serde(default)]
+    pub security: SecuritySection,
+}
+
+impl ControlSecurityConfig {
+    /// Load from the canonical path (or the `ADOS_CONFIG` override).
+    pub fn load() -> Self {
+        let path = std::env::var("ADOS_CONFIG").unwrap_or_else(|_| CONFIG_YAML.to_string());
+        Self::load_from(Path::new(&path))
+    }
+
+    /// Load from an explicit path (testable). All-defaults on absence / parse
+    /// error, so the gate stays off on a config the front cannot read.
+    pub fn load_from(path: &Path) -> Self {
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(_) => return ControlSecurityConfig::default(),
+        };
+        serde_norway::from_str(&text).unwrap_or_default()
+    }
+
+    /// The `security:` section.
+    pub fn security(&self) -> &SecuritySection {
+        &self.security
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,6 +259,59 @@ video:
         let path = temp_yaml("emptypeer", yaml);
         let cfg = PairingConfig::load_from(&path);
         assert_eq!(cfg.radio_peer_device_id(), None);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn security_defaults_leave_the_gate_off() {
+        // A missing file → all-defaults → the new gate is OFF, matching today.
+        let cfg = ControlSecurityConfig::load_from(Path::new("/nonexistent/ados/config.yaml"));
+        let s = cfg.security();
+        assert!(
+            !s.front_proxied_auth,
+            "the proxied-auth gate must default to false"
+        );
+        assert_eq!(s.api.api_key, "");
+        assert!(!s.hmac_enabled);
+        assert_eq!(s.hmac_secret, "");
+        assert!(!s.setup_token_required);
+    }
+
+    #[test]
+    fn a_python_written_config_leaves_the_gate_off() {
+        // A config the Python agent wrote carries a `security:` block but never
+        // the new `front_proxied_auth` key → it reads false (inert).
+        let yaml = "\
+security:
+  api:
+    api_key: configured-key
+  hmac_enabled: true
+  hmac_secret: a-very-long-secret-key
+  setup_token_required: true
+";
+        let path = temp_yaml("py-security", yaml);
+        let cfg = ControlSecurityConfig::load_from(&path);
+        let s = cfg.security();
+        assert!(
+            !s.front_proxied_auth,
+            "an absent front_proxied_auth key reads false"
+        );
+        assert_eq!(s.api.api_key, "configured-key");
+        assert!(s.hmac_enabled);
+        assert_eq!(s.hmac_secret, "a-very-long-secret-key");
+        assert!(s.setup_token_required);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn the_gate_reads_true_when_set() {
+        let yaml = "\
+security:
+  front_proxied_auth: true
+";
+        let path = temp_yaml("gate-on", yaml);
+        let cfg = ControlSecurityConfig::load_from(&path);
+        assert!(cfg.security().front_proxied_auth);
         let _ = std::fs::remove_file(&path);
     }
 }

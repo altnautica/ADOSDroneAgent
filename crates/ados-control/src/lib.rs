@@ -19,6 +19,7 @@ pub mod ipc;
 pub mod pairing_store;
 pub mod profile;
 pub mod proxy;
+pub mod proxy_auth;
 pub mod routes;
 pub mod routing;
 pub mod serve;
@@ -271,6 +272,17 @@ where
     let net_native = is_ground_station;
     let hid_native = is_ground_station;
 
+    // The proxied-route auth decision: the ported Python auth + HMAC middlewares
+    // the front can run on the forwarded (non-native) routes. Inert by default —
+    // the `security.front_proxied_auth` flag (read here from the same config the
+    // Python agent writes) defaults false, so the front forwards proxied routes
+    // untouched until the flag is flipped. Built once and shared across all
+    // connections (it holds the replay-detector nonce store).
+    let proxied_auth = {
+        let sec = crate::config::ControlSecurityConfig::load_from(&paths.config_path);
+        Arc::new(crate::proxy_auth::ProxiedAuth::new(sec.security.clone()))
+    };
+
     // The Unix edge: the bare Router, no auth. The LAN edge: the same Router
     // wrapped with the rate-limit + auth layer keyed on the shared pairing
     // reader (so a route and the gate read one short-TTL-cached posture).
@@ -278,6 +290,7 @@ where
     let tcp_router = tcp_app(
         build_router(state, net_native, hid_native),
         Arc::clone(&pairing),
+        Arc::clone(&proxied_auth),
     );
 
     // Bind every listener up front so a bind failure surfaces here. The LAN front

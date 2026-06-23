@@ -63,6 +63,10 @@ hex = { workspace = true }
 # sha256 for the signing-enroll key fingerprint (the first 8 hex of sha256(key)
 # the route returns; the raw key never leaves the route, only this digest does).
 sha2 = { workspace = true }
+# HMAC-SHA256 for the proxied-route request signing gate: a verified hex digest
+# over the timestamp + body, compared in constant time. Same primitive the
+# ground-station WS ticket derives its key with.
+hmac = { workspace = true }
 # UTC clock for the signing-enroll `enrolled_at` ISO-8601 timestamp and the
 # MAVLink signing initial-timestamp (10us units since the 2015 signing epoch).
 # Matches the sibling crates' `time` usage.
