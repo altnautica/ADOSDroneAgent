@@ -42,6 +42,7 @@ pub mod gs_ui_write;
 pub mod gs_wfb_pair;
 pub mod gs_wfb_write;
 pub mod guided;
+pub mod logs_write;
 pub mod mac_adapters;
 pub mod mac_pin;
 pub mod mavlink_ports;
@@ -62,6 +63,7 @@ pub mod system_resources;
 pub mod video;
 pub mod vision;
 pub mod wfb;
+pub mod wfb_pair_write;
 pub mod wfb_write;
 pub mod ws_ticket;
 
@@ -120,6 +122,9 @@ pub fn build_router(state: AppState, net_native: bool, hid_native: bool) -> Rout
         // CAN passthrough: a deliberate 501 stub (no agent-side bridge yet). The
         // GCS probes it and falls back to the MAVLink CAN_FORWARD path.
         .route("/api/can/passthrough", post(can::can_passthrough))
+        // Operator cloud-export trigger: writes a push-request file the cloud
+        // service consumes and reports the outcome. A thin trigger, no store read.
+        .route("/api/logs/push", post(logs_write::push_logs))
         // Vision designate: operator click-to-follow. Locks the vision engine's
         // tracker for a camera onto the box the operator clicked, via the vision
         // socket. Auth-gated when paired (a write), 503 when vision is not up.
@@ -185,6 +190,13 @@ pub fn build_router(state: AppState, net_native: bool, hid_native: bool) -> Rout
         // command socket) and the runtime TX-power (set + persist).
         .route("/api/wfb/channel", post(wfb_write::set_wfb_channel))
         .route("/api/wfb/tx-power", put(wfb_write::set_wfb_tx_power))
+        // WFB auto-pair toggle: persists the video.wfb.auto_pair_enabled arm flag
+        // after reading the live pair status (a surgical config merge; a re-arm on
+        // a paired rig is refused without a persist).
+        .route(
+            "/api/wfb/pair/auto-pair",
+            put(wfb_pair_write::put_auto_pair),
+        )
         // The consolidated status: agent info, services, resources, video,
         // telemetry, radio, and mesh in one round-trip.
         .route("/api/status/full", get(status_full::get_full_status))

@@ -814,6 +814,45 @@ REGISTRY: list[RouteCase] = [
         require_sandbox=True,
         extra_volatile=("persisted", "persist_error"),
     ),
+    # Toggle the WFB auto-pair arm flag. A write (it merges video.wfb.auto_pair_enabled
+    # into the config after reading the live pair status), so sandboxed and skipped by
+    # default; the bench opts in. The body is {"enabled": false} (disable is never
+    # re-arm-blocked, so both transports take the persist path). The response is the
+    # pair-status snapshot {paired, paired_with_device_id, paired_at, fingerprint,
+    # auto_pair_enabled, role}; the per-pair-state fields move with whatever the rig is
+    # bound to, so they are masked, and the {auto_pair_enabled, role} legs are the
+    # contract. `rearm_blocked` would appear only on the enabled=true paired path.
+    RouteCase(
+        name="wfb-auto-pair-set",
+        method="PUT",
+        path="/api/wfb/pair/auto-pair",
+        body=b'{"enabled": false}',
+        content_type="application/json",
+        paired_headers={"authorization": PAIRED_AUTH_PLACEHOLDER},
+        require_sandbox=True,
+        extra_volatile=(
+            "paired",
+            "paired_with_device_id",
+            "paired_at",
+            "fingerprint",
+        ),
+    ),
+    # Trigger an operator cloud-export of a log window. A write (it writes the
+    # push-request file the cloud service consumes), so sandboxed and skipped by
+    # default. The body is {"wait": false} so both transports return the immediate 202
+    # pending placeholder without blocking on the poll. The `request_id` is a fresh
+    # uuid per call, so it is masked; the {accepted, pushed, deduped, bytes, rows,
+    # synced, error, pending} placeholder shape is the contract.
+    RouteCase(
+        name="logs-push",
+        method="POST",
+        path="/api/logs/push",
+        body=b'{"wait": false}',
+        content_type="application/json",
+        paired_headers={"authorization": PAIRED_AUTH_PLACEHOLDER},
+        require_sandbox=True,
+        extra_volatile=("request_id",),
+    ),
     # (The /api/system + /api/v1/diagnostics reads finished migration: native is
     # the sole server, the residual no longer serves them, so their conformance
     # cases retired with the Python prune — a diff against an absent residual would

@@ -79,6 +79,9 @@ fn native_routes() -> Vec<NativeRoute> {
         get("/api/commands"),
         // CAN passthrough 501 stub.
         post("/api/can/passthrough"),
+        // Operator cloud-export trigger: writes the push-request file the cloud
+        // service consumes (a thin trigger; the response is the brief poll result).
+        post("/api/logs/push"),
         // Vision designate (operator click-to-follow).
         post("/api/vision/designate"),
         // WebSocket auth ticket mint.
@@ -168,6 +171,9 @@ fn native_routes() -> Vec<NativeRoute> {
         // WFB radio writes.
         post("/api/wfb/channel"),
         put("/api/wfb/tx-power"),
+        // WFB auto-pair toggle (a surgical video.wfb config merge after a live
+        // pair-status read; a re-arm on a paired rig is refused without a persist).
+        put("/api/wfb/pair/auto-pair"),
         // Ground-station network priority write (PUT on the priority read's path).
         put("/api/v1/ground-station/network/priority"),
         // Ground-station WFB config write (PUT on the wfb read's path): a surgical
@@ -384,7 +390,7 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            102,
+            104,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);
@@ -457,6 +463,10 @@ mod tests {
         // The WFB radio writes + the GS network priority + GS wfb config writes.
         assert!(has(Method::POST, "/api/wfb/channel"));
         assert!(has(Method::PUT, "/api/wfb/tx-power"));
+        // The WFB auto-pair toggle is native (PUT).
+        assert!(has(Method::PUT, "/api/wfb/pair/auto-pair"));
+        // The operator cloud-export trigger is native (POST).
+        assert!(has(Method::POST, "/api/logs/push"));
         assert!(has(Method::PUT, "/api/v1/ground-station/network/priority"));
         assert!(has(Method::PUT, "/api/v1/ground-station/wfb"));
         // The ground-station write surge: network/mesh/video/UI/PIC/Bluetooth writes.
