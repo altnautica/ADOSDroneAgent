@@ -48,6 +48,7 @@ from ados.core.paths import (
 
 from .events import PairingEvent, get_pairing_event_bus
 from .mdns_announce import iface_ip, resolve_receiver
+from .pair_journal import publish_pair_event
 from .pairing_manager import (
     PAIR_UDP_PORT,
     InviteBundle,
@@ -243,7 +244,8 @@ async def request_join(
                 log.debug("pairing_decrypt_skipped", error=str(exc))
                 continue
             _persist_bundle(bundle)
-            await bus.publish(
+            await publish_pair_event(
+                bus,
                 PairingEvent(
                     kind="join_completed",
                     timestamp_ms=int(time.time() * 1000),
@@ -251,7 +253,7 @@ async def request_join(
                         "mesh_id": bundle.mesh_id,
                         "receiver_host": bundle.receiver_mdns_host,
                     },
-                )
+                ),
             )
             log.info(
                 "pairing_join_completed",

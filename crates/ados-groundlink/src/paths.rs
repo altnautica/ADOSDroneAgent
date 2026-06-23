@@ -37,6 +37,15 @@ pub const WFB_RECEIVER_JSON: &str = "/run/ados/wfb-receiver.json";
 /// best-effort; a reader seeks to end on start and follows new lines.
 pub const MESH_EVENTS_JSONL: &str = "/run/ados/mesh-events.jsonl";
 
+/// Cross-process field-pairing event journal: the sibling of
+/// [`MESH_EVENTS_JSONL`] for the field tap-to-pair flow. The pairing manager
+/// (in the API process) appends each pair event here so the native control
+/// surface, in a different process, can tail it and fan it into the mesh event
+/// stream. Same line envelope (`{"bus":"pair","kind","timestamp_ms","payload"}`),
+/// append-only, best-effort; a reader seeks to end on start and follows new
+/// lines.
+pub const PAIR_EVENTS_JSONL: &str = "/run/ados/pair-events.jsonl";
+
 /// Last-locked WFB channel hint. Written by the receiver when a channel
 /// acquisition sweep locks onto the transmitter so a restart can try that
 /// channel first instead of sweeping from scratch. Runtime HINT only: it lives

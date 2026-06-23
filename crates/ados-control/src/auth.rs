@@ -129,7 +129,7 @@ impl Default for PairingState {
 /// is the native surface's exempt set, narrower than the Python middleware's
 /// (no setup/static paths live here). `/api/time` is deliberately NOT public.
 ///
-/// The two ground-station WebSocket relays are exempt here too: a WebSocket
+/// The ground-station WebSocket relays are exempt here too: a WebSocket
 /// handshake is upgraded past the HTTP key gate, and a browser cannot set the
 /// `X-ADOS-Key` header on it, so the edge must let the upgrade reach the handler,
 /// which then enforces the WebSocket auth contract itself (a header key OR a
@@ -146,6 +146,7 @@ pub fn is_public(path: &str) -> bool {
             | "/api/version"
             | "/api/v1/ground-station/ws/uplink"
             | "/api/v1/ground-station/pic/events"
+            | "/api/v1/ground-station/ws/mesh"
     )
 }
 
@@ -261,10 +262,11 @@ mod tests {
             "/api/pairing/info",
             "/api/pairing/code",
             "/api/pairing/claim",
-            // The two ground-station WebSocket relays: the upgrade bypasses the
-            // HTTP key gate, so the handler does its own ticket/header auth.
+            // The ground-station WebSocket relays: the upgrade bypasses the HTTP
+            // key gate, so the handler does its own ticket/header auth.
             "/api/v1/ground-station/ws/uplink",
             "/api/v1/ground-station/pic/events",
+            "/api/v1/ground-station/ws/mesh",
         ] {
             assert!(is_public(p), "{p} should be public");
         }
@@ -274,8 +276,6 @@ mod tests {
             "/api/command",
             "/api/pairing/unpair",
             "/v1/openapi.json",
-            // The mesh WebSocket stays proxied to the residual, NOT public.
-            "/api/v1/ground-station/ws/mesh",
         ] {
             assert!(!is_public(p), "{p} should NOT be public");
         }

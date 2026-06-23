@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+from ados.services.ground_station import pair_journal
 from ados.services.ground_station import pairing_manager as pm
 from ados.services.ground_station.pairing_manager import (
     InviteBundle,
@@ -48,6 +49,21 @@ def tmp_revocations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(pm, "_REVOCATIONS_CACHE", None)
     monkeypatch.setattr(pm, "_REVOCATIONS_CACHE_TS_NS", 0)
     return target
+
+
+@pytest.fixture
+def tmp_pair_journal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Redirect the cross-process pair-event journal to a tmp file. The journal
+    helper resolves the path inside `pair_journal`, so that is where to patch."""
+    target = tmp_path / "pair-events.jsonl"
+    monkeypatch.setattr(pair_journal, "PAIR_EVENTS_JSONL", target)
+    return target
+
+
+def _read_journal(path: Path) -> list[dict]:
+    if not path.is_file():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
 def _bundle(now_ms: int | None = None) -> InviteBundle:
@@ -424,3 +440,101 @@ async def test_snapshot_with_open_window_and_pending(
     assert snap["pending"][0]["device_id"] == "dev-snap"
     assert snap["pending"][0]["remote_ip"] == "192.168.1.5"
     assert "approvals" in snap
+
+
+# ---------------------------------------------------------------------------
+# Cross-process pair-event journal seam
+# ---------------------------------------------------------------------------
+
+
+async def test_pair_events_mirrored_to_journal(
+    tmp_revocations: Path,
+    tmp_pair_journal: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each pair event published onto the in-process bus is also mirrored as
+    one newline-JSON line to the cross-process journal the native handler tails,
+    carrying the `{bus, kind, timestamp_ms, payload}` envelope."""
+    manager = PairingManager()
+
+    async def _fake_bind(self, bind_addr: str | None = None) -> bool:
+        self._transport = object()
+        return True
+
+    monkeypatch.setattr(PairingManager, "_bind_socket", _fake_bind)
+
+    await manager.open_window(duration_s=5)
+    _, relay_pub = generate_keypair()
+    await manager.submit_request("dev-j", relay_pub, ("10.0.0.20", 5801))
+    await manager.approve("dev-j", _bundle())
+
+    events = _read_journal(tmp_pair_journal)
+    kinds = [e["kind"] for e in events]
+    # The accept-window open, the join request, and the approval all journalled.
+    assert "accept_window_opened" in kinds
+    assert "join_request_received" in kinds
+    assert "join_approved" in kinds
+
+    # Every line carries the same envelope the in-process bus event has.
+    for e in events:
+        assert e["bus"] == "pair"
+        assert isinstance(e["kind"], str)
+        assert isinstance(e["timestamp_ms"], int)
+        assert isinstance(e["payload"], dict)
+
+    opened = next(e for e in events if e["kind"] == "accept_window_opened")
+    assert opened["payload"] == {"duration_s": 5}
+    approved = next(e for e in events if e["kind"] == "join_approved")
+    assert approved["payload"] == {"device_id": "dev-j"}
+
+
+async def test_revoked_event_mirrored_to_journal(
+    tmp_revocations: Path,
+    tmp_pair_journal: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A revoked-device join attempt journals a `revoked` pair event."""
+    revoke("dev-banned-j")
+    manager = PairingManager()
+
+    async def _fake_bind(self, bind_addr: str | None = None) -> bool:
+        self._transport = object()
+        return True
+
+    monkeypatch.setattr(PairingManager, "_bind_socket", _fake_bind)
+    await manager.open_window(duration_s=5)
+
+    await manager.submit_request("dev-banned-j", b"\x00" * 32, ("10.0.0.21", 5801))
+
+    events = _read_journal(tmp_pair_journal)
+    revoked = [e for e in events if e["kind"] == "revoked"]
+    assert revoked, "the revoked event must be journalled"
+    assert revoked[0]["bus"] == "pair"
+    assert revoked[0]["payload"] == {"device_id": "dev-banned-j"}
+
+
+def test_pair_journal_write_failure_does_not_raise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A journal write error is best-effort: it must never propagate (pairing
+    must keep working even if the journal cannot be written)."""
+    from ados.services.ground_station.events import PairingEvent
+
+    class _FailingPath:
+        # A stand-in for the journal Path whose parent dir + open both raise, so
+        # the helper's try/except OSError is the only thing keeping it quiet.
+        @property
+        def parent(self):
+            return self
+
+        def mkdir(self, *args, **kwargs):
+            raise OSError("read-only filesystem")
+
+        def open(self, *args, **kwargs):
+            raise OSError("disk full")
+
+    monkeypatch.setattr(pair_journal, "PAIR_EVENTS_JSONL", _FailingPath())
+    # Should swallow the error rather than raise.
+    pair_journal.journal_pair_event(
+        PairingEvent(kind="accept_window_opened", timestamp_ms=1, payload={})
+    )

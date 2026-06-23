@@ -59,6 +59,7 @@ from ados.core.logging import get_logger
 from ados.core.paths import MESH_REVOCATIONS_JSON
 
 from .events import PairingEvent, get_pairing_event_bus
+from .pair_journal import publish_pair_event as _publish_pair_event
 
 log = get_logger("ground_station.pairing_manager")
 
@@ -485,12 +486,13 @@ class PairingManager:
                     return
                 remaining_s = max(0, int(remaining_ns // 1_000_000_000))
                 now_ms = int(time.time() * 1000)
-            await self._bus.publish(
+            await _publish_pair_event(
+                self._bus,
                 PairingEvent(
                     kind="accept_window_tick",
                     timestamp_ms=now_ms,
                     payload={"remaining_seconds": remaining_s},
-                )
+                ),
             )
 
     async def _publish_close_locked(self) -> None:
@@ -505,12 +507,13 @@ class PairingManager:
         if self._tick_task is not None and not self._tick_task.done():
             self._tick_task.cancel()
             self._tick_task = None
-        await self._bus.publish(
+        await _publish_pair_event(
+            self._bus,
             PairingEvent(
                 kind="accept_window_closed",
                 timestamp_ms=now_ms,
                 payload={},
-            )
+            ),
         )
         log.info("pairing_window_closed")
 
@@ -530,12 +533,13 @@ class PairingManager:
                     time.monotonic_ns() + duration_s * 1_000_000_000
                 ),
             )
-            await self._bus.publish(
+            await _publish_pair_event(
+                self._bus,
                 PairingEvent(
                     kind="accept_window_opened",
                     timestamp_ms=now_ms,
                     payload={"duration_s": duration_s},
-                )
+                ),
             )
             log.info("pairing_window_opened", duration_s=duration_s)
         # Bind the UDP listener outside the lock so a slow bind does
@@ -607,12 +611,13 @@ class PairingManager:
         the check and the append.
         """
         if is_revoked(device_id):
-            await self._bus.publish(
+            await _publish_pair_event(
+                self._bus,
                 PairingEvent(
                     kind="revoked",
                     timestamp_ms=int(time.time() * 1000),
                     payload={"device_id": device_id},
-                )
+                ),
             )
             return False
         async with self._lock:
@@ -630,12 +635,13 @@ class PairingManager:
                         received_at_ms=int(time.time() * 1000),
                     )
                 )
-                await self._bus.publish(
+                await _publish_pair_event(
+                    self._bus,
                     PairingEvent(
                         kind="join_request_received",
                         timestamp_ms=int(time.time() * 1000),
                         payload={"device_id": device_id},
-                    )
+                    ),
                 )
                 log.info("pairing_join_request", device_id=device_id)
         return True
@@ -667,12 +673,13 @@ class PairingManager:
             blob = encrypt_invite(bundle, self._priv, match.relay_pubkey)
             self._window.approvals[device_id] = int(time.time() * 1000)
             remote_addr = match.remote_addr
-            await self._bus.publish(
+            await _publish_pair_event(
+                self._bus,
                 PairingEvent(
                     kind="join_approved",
                     timestamp_ms=int(time.time() * 1000),
                     payload={"device_id": device_id},
-                )
+                ),
             )
             log.info("pairing_join_approved", device_id=device_id)
         # Send outside the lock so a slow sendto does not stall other

@@ -89,6 +89,14 @@ WFB_RECEIVER_JSON = ADOS_RUN_DIR / "wfb-receiver.json"
 # The mesh-event tailer follows this file and republishes each line onto the
 # in-process bus so the REST WebSocket + OLED light up unchanged.
 MESH_EVENTS_JSONL = ADOS_RUN_DIR / "mesh-events.jsonl"
+# Cross-process field-pairing event journal. The in-process pairing bus lives in
+# the API process; the native control surface that serves the mesh event stream
+# is a separate process and cannot reach that bus, so the pairing manager mirrors
+# each pair event here as one newline-delimited JSON object. The native handler
+# tails this file alongside the mesh-event journal. Same envelope shape as the
+# mesh journal (`{"bus","kind","timestamp_ms","payload"}`), append-only,
+# best-effort; bounded by the tmpfs wipe on reboot.
+PAIR_EVENTS_JSONL = ADOS_RUN_DIR / "pair-events.jsonl"
 
 # Live wfb-ng radio stats snapshot (rssi, snr, packets, fec, bitrate).
 # Written ~once per second by whichever wfb manager owns the radio:

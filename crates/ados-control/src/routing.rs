@@ -144,12 +144,14 @@ fn native_routes() -> Vec<NativeRoute> {
         get("/api/v1/ground-station/gamepads"),
         get("/api/v1/ground-station/bluetooth/paired"),
         // Ground-station WebSocket relays (profile-gated): the uplink-matrix
-        // change stream + the PIC arbiter transition stream. They are native so
-        // the edge routes the upgrade to the front (not the proxy); the handlers
-        // do their own WebSocket auth, and the paths are public-exempt so the
-        // edge does not gate the keyless browser handshake.
+        // change stream + the PIC arbiter transition stream + the mesh/pairing
+        // event stream. They are native so the edge routes the upgrade to the
+        // front (not the proxy); the handlers do their own WebSocket auth, and the
+        // paths are public-exempt so the edge does not gate the keyless browser
+        // handshake.
         get("/api/v1/ground-station/ws/uplink"),
         get("/api/v1/ground-station/pic/events"),
+        get("/api/v1/ground-station/ws/mesh"),
         // Writes. The path-param routes use the {name} template the matcher
         // recognises; the require PUT shares its path with the require GET read.
         post("/api/params/{name}"),
@@ -397,7 +399,7 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            106,
+            107,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);
@@ -534,8 +536,9 @@ mod tests {
         assert!(has(Method::GET, "/api/v1/ground-station/display"));
         assert!(has(Method::GET, "/api/v1/ground-station/gamepads"));
         assert!(has(Method::GET, "/api/v1/ground-station/bluetooth/paired"));
-        // The two native WebSocket relays (the upgrade is a GET).
+        // The native WebSocket relays (the upgrade is a GET).
         assert!(has(Method::GET, "/api/v1/ground-station/ws/uplink"));
         assert!(has(Method::GET, "/api/v1/ground-station/pic/events"));
+        assert!(has(Method::GET, "/api/v1/ground-station/ws/mesh"));
     }
 }

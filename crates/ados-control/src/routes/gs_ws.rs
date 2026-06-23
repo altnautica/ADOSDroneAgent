@@ -1,6 +1,6 @@
 //! Ground-station WebSocket relays served natively by the front.
 //!
-//! These two streams are upgraded past the HTTP auth edge, so each handler
+//! These streams are upgraded past the HTTP auth edge, so each handler
 //! enforces the agent's WebSocket auth contract itself (mirroring the residual
 //! handlers, which did the same because the upgrade bypasses the HTTP gate):
 //!
@@ -34,6 +34,17 @@
 //! the arbiter and binds `/run/ados/pic.sock`; its `subscribe` op emits one
 //! newline-JSON object per transition. This handler subscribes to that socket
 //! and forwards each line verbatim as a WebSocket text frame.
+//!
+//! ## `/ws/mesh`
+//!
+//! Fans two cross-process journals into one socket: the mesh-event journal
+//! (`/run/ados/mesh-events.jsonl`, written by the native data-plane relay /
+//! receiver loops, stamped `bus:"mesh"`) and the pairing-event journal
+//! (`/run/ados/pair-events.jsonl`, mirrored by the field-pairing manager,
+//! stamped `bus:"pair"`). Each line already carries the
+//! `{bus, kind, timestamp_ms, payload}` envelope, so the handler follows both
+//! files and forwards each well-formed line verbatim, the same fan the residual
+//! `ws_mesh_events` did off the two in-process buses.
 
 use std::time::Duration;
 
@@ -59,10 +70,19 @@ const SCOPE_UPLINK_EVENTS: &str = "gs.uplink_events";
 /// The scope a `/pic/events` ticket must be minted for.
 const SCOPE_PIC_EVENTS: &str = "gs.pic_events";
 
+/// The scope a `/ws/mesh` ticket must be minted for.
+const SCOPE_MESH_EVENTS: &str = "gs.mesh_events";
+
 /// How long to sleep between durable-store polls for the uplink stream. The
 /// router daemon emits `net.uplink_active` / `net.modem_usage` at a low rate, so
 /// a short poll keeps latency low without busy-waiting the store query socket.
 const UPLINK_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How long to sleep between journal polls for the mesh stream when neither
+/// journal has a new line. Both journals are append-only and low-rate, so a
+/// short poll keeps latency low without busy-waiting; matches the cadence the
+/// prior Python tailer used to republish journal lines onto the bus.
+const MESH_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 // ---------------------------------------------------------------------------
 // Handshake auth (mirrors the Python `authenticate_websocket`).
@@ -370,6 +390,173 @@ async fn pic_loop(mut socket: WebSocket, state: AppState, _auth: WsAuth) {
                     None | Some(Ok(Message::Close(_))) | Some(Err(_)) => return,
                     _ => {}
                 }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// /ws/mesh
+// ---------------------------------------------------------------------------
+
+/// The `/ws/mesh` upgrade entry point. Resolves the handshake auth and the
+/// profile gate, then fans the mesh-event journal + the pairing-event journal
+/// into the one socket.
+pub async fn ws_mesh(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let auth = decide_ws_auth(&state, &headers, SCOPE_MESH_EVENTS);
+    let Some((ws, auth)) = upgrade_with(ws, auth) else {
+        return ws_reject();
+    };
+    ws.on_upgrade(move |socket| mesh_loop(socket, state, auth))
+}
+
+/// Fan the two journals into the socket: profile-gate after accept (so a
+/// wrong-profile node closes 1008 the way the residual handler did), then follow
+/// both `mesh-events.jsonl` and `pair-events.jsonl` and forward each well-formed
+/// line verbatim. Each journal line already carries the
+/// `{bus, kind, timestamp_ms, payload}` envelope the residual `ws_mesh_events`
+/// sent (the mesh journal stamps `bus:"mesh"`, the pairing manager stamps
+/// `bus:"pair"`), so forwarding the line IS the byte-faithful frame. There is no
+/// initial snapshot and no keepalive, matching the residual handler which only
+/// subscribed-and-forwarded.
+async fn mesh_loop(mut socket: WebSocket, state: AppState, _auth: WsAuth) {
+    if !is_ground_station(&state) {
+        let _ = socket
+            .send(Message::Close(Some(close_frame(
+                1008,
+                "E_PROFILE_MISMATCH",
+            ))))
+            .await;
+        return;
+    }
+
+    let mut mesh_tail = JournalTail::new(run_dir().join("mesh-events.jsonl"));
+    let mut pair_tail = JournalTail::new(run_dir().join("pair-events.jsonl"));
+
+    loop {
+        // Drain whatever new lines each journal has, forwarding each verbatim.
+        // A journal that is missing/rotating yields nothing and is retried on the
+        // next poll, so one absent journal never starves the other.
+        let mut forwarded_any = false;
+        for tail in [&mut mesh_tail, &mut pair_tail] {
+            while let Some(line) = tail.next_line().await {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                // Forward only well-formed JSON, dropping a malformed line (the
+                // residual tailer `continue`s past a JSON decode error).
+                let event: Value = match serde_json::from_str(trimmed) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let text = match serde_json::to_string(&event) {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                };
+                if socket.send(Message::Text(text)).await.is_err() {
+                    return; // client gone
+                }
+                forwarded_any = true;
+            }
+        }
+
+        // If we forwarded at least one line this pass, loop straight back to
+        // drain any further backlog without sleeping; otherwise wait out the poll
+        // interval. Either way a select keeps the loop responsive to a disconnect:
+        // a zero timeout when there was a backlog, the poll interval otherwise.
+        let wait = if forwarded_any {
+            Duration::ZERO
+        } else {
+            MESH_POLL_INTERVAL
+        };
+        tokio::select! {
+            incoming = socket.recv() => {
+                match incoming {
+                    None | Some(Ok(Message::Close(_))) | Some(Err(_)) => return,
+                    _ => {}
+                }
+            }
+            _ = tokio::time::sleep(wait) => {}
+        }
+    }
+}
+
+/// A follower over an append-only newline-JSON journal: seek to end on first
+/// open (skip the backlog so a long-lived journal never replays stale events
+/// into a freshly connected client), tolerate a missing file (retried on the
+/// next call), and re-open on truncation/recreation (the tmpfs wipe on a service
+/// restart). Mirrors the Python `tail_mesh_events` loop.
+struct JournalTail {
+    path: std::path::PathBuf,
+    reader: Option<BufReader<tokio::fs::File>>,
+    offset: u64,
+}
+
+impl JournalTail {
+    fn new(path: std::path::PathBuf) -> Self {
+        Self {
+            path,
+            reader: None,
+            offset: 0,
+        }
+    }
+
+    /// Return the next complete line from the journal, or `None` when there is
+    /// nothing new to read right now (missing file, no new bytes, or a partial
+    /// trailing line). Opens the file lazily and seeks to its end on first open.
+    async fn next_line(&mut self) -> Option<String> {
+        // `read_line` comes from the top-level `AsyncBufReadExt`; `seek` needs
+        // the seek extension trait in scope here.
+        use tokio::io::AsyncSeekExt;
+
+        if self.reader.is_none() {
+            let mut file = tokio::fs::File::open(&self.path).await.ok()?;
+            // Seek to end: skip the backlog so only post-connect events stream.
+            let end = file.seek(std::io::SeekFrom::End(0)).await.ok()?;
+            self.offset = end;
+            self.reader = Some(BufReader::new(file));
+        }
+
+        let reader = self.reader.as_mut()?;
+        let mut line = String::new();
+        match reader.read_line(&mut line).await {
+            // EOF with no bytes: nothing new. Detect truncation/recreation (the
+            // file shrank below our offset) and re-open from the new end.
+            Ok(0) => {
+                if let Ok(meta) = tokio::fs::metadata(&self.path).await {
+                    if meta.len() < self.offset {
+                        self.reader = None;
+                        self.offset = 0;
+                    }
+                } else {
+                    // The file vanished; drop the handle and retry on next poll.
+                    self.reader = None;
+                    self.offset = 0;
+                }
+                None
+            }
+            Ok(n) => {
+                // A line is complete only when it ends in a newline; a partial
+                // trailing write is held back until the writer finishes it.
+                if line.ends_with('\n') {
+                    self.offset += n as u64;
+                    Some(line)
+                } else {
+                    // Rewind so the partial line is re-read once it is complete.
+                    let reader = self.reader.as_mut()?;
+                    let _ = reader.seek(std::io::SeekFrom::Start(self.offset)).await;
+                    None
+                }
+            }
+            Err(_) => {
+                self.reader = None;
+                self.offset = 0;
+                None
             }
         }
     }
@@ -818,5 +1005,155 @@ mod tests {
         let (status, body) = parse_http_response(raw).unwrap();
         assert_eq!(status, 200);
         assert_eq!(body, br#"{"data":[]}"#);
+    }
+
+    // -- mesh stream: auth scope + the two-journal fan -------------------
+
+    #[test]
+    fn mesh_stream_admits_with_a_valid_mesh_scoped_ticket() {
+        let (_d, state) = state_with_pairing(r#"{"paired": true, "api_key": "k"}"#);
+        let token = WsTicketIssuer::from_api_key("k")
+            .mint(SCOPE_MESH_EVENTS, 30)
+            .token;
+        let h = headers_with(&[(
+            "sec-websocket-protocol",
+            &format!("ados-ws-ticket, {token}"),
+        )]);
+        assert!(matches!(
+            decide_ws_auth(&state, &h, SCOPE_MESH_EVENTS),
+            WsAuth::AcceptTicket
+        ));
+    }
+
+    #[test]
+    fn mesh_stream_rejects_a_wrong_scope_ticket() {
+        let (_d, state) = state_with_pairing(r#"{"paired": true, "api_key": "k"}"#);
+        // A uplink-scoped ticket presented to the mesh scope is rejected.
+        let token = WsTicketIssuer::from_api_key("k")
+            .mint(SCOPE_UPLINK_EVENTS, 30)
+            .token;
+        let h = headers_with(&[(
+            "sec-websocket-protocol",
+            &format!("ados-ws-ticket, {token}"),
+        )]);
+        assert!(matches!(
+            decide_ws_auth(&state, &h, SCOPE_MESH_EVENTS),
+            WsAuth::Reject
+        ));
+    }
+
+    #[tokio::test]
+    async fn journal_tail_skips_backlog_then_follows_new_lines() {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("events.jsonl");
+        // A pre-existing backlog line: the tail seeks to end on first open, so
+        // this is never replayed.
+        {
+            let mut f = std::fs::File::create(&p).unwrap();
+            writeln!(
+                f,
+                r#"{{"bus":"mesh","kind":"backlog","timestamp_ms":1,"payload":{{}}}}"#
+            )
+            .unwrap();
+        }
+        let mut tail = JournalTail::new(p.clone());
+        // First poll opens + seeks to end: nothing to read.
+        assert!(tail.next_line().await.is_none());
+        // Append a fresh line; the tail reads it verbatim.
+        {
+            let mut f = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
+            writeln!(f, r#"{{"bus":"mesh","kind":"relay_connected","timestamp_ms":2,"payload":{{"relay_mac":"aa:bb"}}}}"#)
+                .unwrap();
+        }
+        let line = tail.next_line().await.expect("a new line");
+        let v: Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(v["bus"], "mesh");
+        assert_eq!(v["kind"], "relay_connected");
+        assert_eq!(v["payload"]["relay_mac"], "aa:bb");
+        // No further lines pending.
+        assert!(tail.next_line().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn journal_tail_tolerates_a_missing_file_then_picks_it_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("late.jsonl");
+        let mut tail = JournalTail::new(p.clone());
+        // The file does not exist yet: a poll yields nothing without erroring.
+        assert!(tail.next_line().await.is_none());
+        // It appears with one line; the tail opens, seeks to end, and (because
+        // the line was written before the first successful open) treats it as
+        // backlog. A line appended after the open is the one that streams.
+        {
+            use std::io::Write as _;
+            let mut f = std::fs::File::create(&p).unwrap();
+            writeln!(f, r#"{{"bus":"pair","kind":"accept_window_opened","timestamp_ms":3,"payload":{{"duration_s":60}}}}"#)
+                .unwrap();
+        }
+        // Opens + seeks to end of the existing content.
+        assert!(tail.next_line().await.is_none());
+        {
+            use std::io::Write as _;
+            let mut f = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
+            writeln!(f, r#"{{"bus":"pair","kind":"join_approved","timestamp_ms":4,"payload":{{"device_id":"d1"}}}}"#)
+                .unwrap();
+        }
+        let line = tail.next_line().await.expect("the post-open line");
+        let v: Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(v["bus"], "pair");
+        assert_eq!(v["kind"], "join_approved");
+        assert_eq!(v["payload"]["device_id"], "d1");
+    }
+
+    #[tokio::test]
+    async fn two_journals_fan_with_bus_envelopes_intact() {
+        // The frame the handler forwards is the journal line itself: the mesh
+        // journal stamps `bus:"mesh"`, the pairing journal stamps `bus:"pair"`,
+        // and both carry the `{bus,kind,timestamp_ms,payload}` envelope the
+        // residual `ws_mesh_events` sent. Tail both and assert each line
+        // round-trips with its bus marker.
+        let dir = tempfile::tempdir().unwrap();
+        let mesh_p = dir.path().join("mesh-events.jsonl");
+        let pair_p = dir.path().join("pair-events.jsonl");
+        std::fs::write(&mesh_p, "").unwrap();
+        std::fs::write(&pair_p, "").unwrap();
+        let mut mesh_tail = JournalTail::new(mesh_p.clone());
+        let mut pair_tail = JournalTail::new(pair_p.clone());
+        // Prime both tails (open + seek to end of the empty files).
+        assert!(mesh_tail.next_line().await.is_none());
+        assert!(pair_tail.next_line().await.is_none());
+
+        use std::io::Write as _;
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&mesh_p)
+                .unwrap();
+            writeln!(f, r#"{{"bus":"mesh","kind":"role_changed","timestamp_ms":10,"payload":{{"role":"relay"}}}}"#)
+                .unwrap();
+        }
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&pair_p)
+                .unwrap();
+            writeln!(f, r#"{{"bus":"pair","kind":"join_request_received","timestamp_ms":11,"payload":{{"device_id":"d2"}}}}"#)
+                .unwrap();
+        }
+
+        let mesh_line = mesh_tail.next_line().await.expect("mesh line");
+        let mv: Value = serde_json::from_str(mesh_line.trim()).unwrap();
+        assert_eq!(mv["bus"], "mesh");
+        assert_eq!(mv["kind"], "role_changed");
+        assert_eq!(mv["timestamp_ms"], 10);
+        assert_eq!(mv["payload"]["role"], "relay");
+
+        let pair_line = pair_tail.next_line().await.expect("pair line");
+        let pv: Value = serde_json::from_str(pair_line.trim()).unwrap();
+        assert_eq!(pv["bus"], "pair");
+        assert_eq!(pv["kind"], "join_request_received");
+        assert_eq!(pv["timestamp_ms"], 11);
+        assert_eq!(pv["payload"]["device_id"], "d2");
     }
 }

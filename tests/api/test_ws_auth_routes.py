@@ -11,11 +11,13 @@ Each route shares the same contract:
 * Anything else closes the handshake with code ``4401``.
 * The previous ``?api_key=`` query-string fallback is gone.
 
-Covers the setup cloudflare-logs, ground-station PIC-events, ground-station
-MAVLink bridge, ground-station uplink-events, and ground-station mesh-events
-sockets. The ticket mint itself is the native ``POST /api/_ws/ticket`` route,
-tested in the ``ados-control`` crate; here the ticket is minted directly via
-the Python verifier's mirror so the WS auth contract is exercised end-to-end.
+Covers the setup cloudflare-logs socket. The ground-station PIC-events,
+uplink-events, MAVLink-bridge, and mesh-events sockets are served natively by
+the front (``ados-control``), which validates the same header-or-ticket auth in
+its own handshake (covered by the ``ados-control`` crate tests). The ticket mint
+itself is the native ``POST /api/_ws/ticket`` route; here the ticket is minted
+directly via the Python verifier's mirror so the WS auth contract is exercised
+end-to-end against the remaining Python route.
 """
 
 from __future__ import annotations
@@ -47,11 +49,6 @@ def _make_paired_client(monkeypatch, profile: str = "ground_station") -> TestCli
         lambda *a, **k: PAIR_KEY,
     )
     return TestClient(create_app(app_double))
-
-
-@pytest.fixture
-def paired_ground_client(monkeypatch):
-    return _make_paired_client(monkeypatch, profile="ground_station")
 
 
 @pytest.fixture
@@ -122,40 +119,8 @@ def test_cloudflare_logs_ws_rejects_wrong_scope_ticket(paired_drone_client):
     )
 
 
-# Note: the PIC-events and uplink WebSockets, like the MAVLink WebSocket, are no
-# longer Python FastAPI routes — they are served natively by the front
-# (`ados-control`), which validates the same header-or-ticket WebSocket auth in
-# its own handshake (covered by the `ados-control` crate tests). The remaining
-# Python WS route below (the mesh stream) still flows through this helper.
-
-
-# ---------------------------------------------------------------------------
-# /api/v1/ground-station/ws/mesh
-# ---------------------------------------------------------------------------
-
-
-def test_mesh_ws_rejects_unauthenticated(paired_ground_client):
-    _expect_ws_rejected(paired_ground_client, "/api/v1/ground-station/ws/mesh")
-
-
-def test_mesh_ws_rejects_api_key_query_param(paired_ground_client):
-    _expect_ws_rejected(
-        paired_ground_client,
-        "/api/v1/ground-station/ws/mesh?api_key=valid-pair-key",
-    )
-
-
-def test_mesh_ws_accepts_header(paired_ground_client):
-    with paired_ground_client.websocket_connect(
-        "/api/v1/ground-station/ws/mesh",
-        headers={"X-ADOS-Key": PAIR_KEY},
-    ) as ws:
-        assert ws is not None
-
-
-def test_mesh_ws_accepts_ticket(paired_ground_client):
-    with paired_ground_client.websocket_connect(
-        "/api/v1/ground-station/ws/mesh",
-        subprotocols=[WS_TICKET_PROTOCOL, _ticket("gs.mesh_events")],
-    ) as ws:
-        assert ws is not None
+# Note: the PIC-events, uplink, mesh, and MAVLink WebSockets are no longer Python
+# FastAPI routes — they are served natively by the front (`ados-control`), which
+# validates the same header-or-ticket WebSocket auth in its own handshake
+# (covered by the `ados-control` crate tests). Only the setup cloudflare-logs WS
+# route above still flows through this Python helper.
