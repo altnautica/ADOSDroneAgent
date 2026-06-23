@@ -44,6 +44,14 @@ type HmacSha256 = Hmac<Sha256>;
 /// env-override convention the sibling paths use.
 pub const DEFAULT_SETUP_TOKEN_PATH: &str = "/etc/ados/secrets/setup-token";
 
+/// The sentinel `ados rust enable front-auth` writes (and `disable` removes) to
+/// turn the proxied-route gate on without an `/etc/ados/config.yaml` edit. The
+/// front resolves the gate as `config.front_proxied_auth OR this marker exists`,
+/// so the operator flips it through the agent's own tooling (the same marker
+/// idiom the LAN-front cutover uses). Overridable via `ADOS_FRONT_AUTH_MARKER`
+/// for tests.
+pub const DEFAULT_FRONT_AUTH_MARKER: &str = "/etc/ados/front-proxied-auth-enabled";
+
 /// Routes that never require authentication. Mirrors `auth.py` `EXEMPT_PATHS`.
 const EXEMPT_PATHS: &[&str] = &[
     "/",
@@ -250,6 +258,10 @@ fn unix_now() -> f64 {
 /// replay detector + the setup-token path. Built once at startup and shared
 /// behind an `Arc` in the edge state.
 pub struct ProxiedAuth {
+    /// The resolved gate state: the `security.front_proxied_auth` config field
+    /// OR the `ados rust enable front-auth` marker. Computed once at startup
+    /// (the front restarts on a flip, so a fresh value is read each boot).
+    enabled: bool,
     config: SecuritySection,
     replay: ReplayDetector,
     setup_token_path: PathBuf,
@@ -258,21 +270,35 @@ pub struct ProxiedAuth {
 impl ProxiedAuth {
     /// Build from the loaded `security:` config slice, the standard setup-token
     /// path (or its `ADOS_SETUP_TOKEN_PATH` override), and a fresh 300s/50000
-    /// replay detector.
+    /// replay detector. The gate is on when the config field is true OR the
+    /// `ados rust enable front-auth` marker is present (its `ADOS_FRONT_AUTH_MARKER`
+    /// override for tests).
     pub fn new(config: SecuritySection) -> Self {
         let setup_token_path = std::env::var("ADOS_SETUP_TOKEN_PATH")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from(DEFAULT_SETUP_TOKEN_PATH));
-        Self::with_paths(config, setup_token_path, ReplayDetector::default_security())
+        let marker = std::env::var("ADOS_FRONT_AUTH_MARKER")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from(DEFAULT_FRONT_AUTH_MARKER));
+        let enabled = resolve_enabled(config.front_proxied_auth, &marker);
+        Self {
+            enabled,
+            config,
+            replay: ReplayDetector::default_security(),
+            setup_token_path,
+        }
     }
 
-    /// Build with an explicit setup-token path + detector (tests).
+    /// Build with an explicit setup-token path + detector (tests). The gate
+    /// follows the config field only here (no marker is consulted), so a test
+    /// drives `enabled` purely through `front_proxied_auth`.
     pub fn with_paths(
         config: SecuritySection,
         setup_token_path: PathBuf,
         replay: ReplayDetector,
     ) -> Self {
         Self {
+            enabled: config.front_proxied_auth,
             config,
             replay,
             setup_token_path,
@@ -280,9 +306,10 @@ impl ProxiedAuth {
     }
 
     /// Whether the gate is on. When false the caller forwards the request
-    /// untouched (the inert default).
+    /// untouched (the inert default). Resolved from the config field OR the
+    /// `front-auth` marker at construction.
     pub fn enabled(&self) -> bool {
-        self.config.front_proxied_auth
+        self.enabled
     }
 
     /// Whether the HMAC gate is active: enabled in config AND the secret is at
@@ -605,6 +632,14 @@ fn contains(set: &[&str], value: &str) -> bool {
     set.contains(&value)
 }
 
+/// Resolve the proxied-auth gate: on when the `security.front_proxied_auth`
+/// config field is set OR the `front-auth` marker file is present. The marker
+/// lets `ados rust enable front-auth` flip the gate through the agent's own
+/// tooling, without an `/etc/ados/config.yaml` edit.
+fn resolve_enabled(config_field: bool, marker: &std::path::Path) -> bool {
+    config_field || marker.exists()
+}
+
 /// `Some(s)` when the option holds a non-empty string, else `None`. Mirrors the
 /// Python truthiness check on a header (`if not api_key` etc.): a present-but-
 /// empty header is treated as absent.
@@ -662,6 +697,22 @@ mod tests {
             ReplayDetector::default_security(),
         );
         assert!(!auth.enabled(), "front_proxied_auth must default to false");
+    }
+
+    #[test]
+    fn the_marker_turns_the_gate_on_without_the_config_field() {
+        // The config field is false; a present marker file flips the gate on
+        // (the `ados rust enable front-auth` path). An absent marker leaves it
+        // off; the config field on its own still turns it on.
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("front-proxied-auth-enabled");
+        assert!(
+            !resolve_enabled(false, &marker),
+            "no field, no marker → off"
+        );
+        assert!(resolve_enabled(true, &marker), "field on → on regardless");
+        std::fs::write(&marker, "").unwrap();
+        assert!(resolve_enabled(false, &marker), "marker present → on");
     }
 
     // ---- exempt + static-asset ----
