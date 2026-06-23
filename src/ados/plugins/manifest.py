@@ -425,6 +425,13 @@ class GcsContributes(_StrictModel):
     overlays: list[dict[str, Any]] = Field(default_factory=list)
     notifications: list[dict[str, Any]] = Field(default_factory=list)
     smart_functions: list[dict[str, Any]] = Field(default_factory=list)
+    # Flight Skill contributions. Each entry surfaces a behavior as a
+    # first-class Skill in the cockpit Skill Bar (toggle, hotkey/gamepad
+    # binding, activation via per-drone config, read-back via an event
+    # topic). The agent does not interpret these; they are read by the
+    # GCS skill registry. Kept free-form (``dict``) and additive so a
+    # forward-compatible manifest parses without a schema bump.
+    skills: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class GcsBlock(_StrictModel):
