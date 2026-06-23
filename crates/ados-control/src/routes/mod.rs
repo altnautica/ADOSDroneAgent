@@ -41,6 +41,7 @@ pub mod gs_ui_read;
 pub mod gs_ui_write;
 pub mod gs_wfb_pair;
 pub mod gs_wfb_write;
+pub mod gs_ws;
 pub mod guided;
 pub mod logs_write;
 pub mod mac_adapters;
@@ -316,6 +317,18 @@ pub fn build_router(state: AppState, net_native: bool, hid_native: bool) -> Rout
         .route(
             "/api/v1/ground-station/bluetooth/paired",
             get(gs_input_read::get_bluetooth_paired),
+        )
+        // Ground-station WebSocket relays (profile-gated): the uplink-matrix
+        // change stream (polled off the durable store) and the PIC arbiter's
+        // transition stream (relayed off the native control socket). Each handler
+        // enforces the WebSocket auth contract itself (header key OR a scoped
+        // ticket) because the upgrade bypasses the HTTP auth edge; the matching
+        // paths are in the public-exempt set so the edge passes the handshake
+        // through to the handler.
+        .route("/api/v1/ground-station/ws/uplink", get(gs_ws::ws_uplink))
+        .route(
+            "/api/v1/ground-station/pic/events",
+            get(gs_ws::ws_pic_events),
         )
         // Wi-Fi client reads (profile-agnostic): the live station status off the
         // uplink daemon's command socket, and the saved NM profiles. The scan stays

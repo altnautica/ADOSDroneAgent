@@ -117,8 +117,12 @@ def test_display_get(client):
 
 
 # ---------------------------------------------------------------------------
-# Group 5: /mesh, /role, /ws/uplink
+# Group 5: /mesh, /role
 # ---------------------------------------------------------------------------
+#
+# The uplink change stream (`/ws/uplink`) is served natively by the front (the
+# Rust `ados-control` surface polls the durable store + does its own WebSocket
+# auth), so its routes are validated by the `ados-control` crate tests, not here.
 
 
 def test_mesh_neighbors_direct_404(client, patch_role):
@@ -126,70 +130,6 @@ def test_mesh_neighbors_direct_404(client, patch_role):
     patch_role("direct")
     resp = client.get(f"{GS_PREFIX}/mesh/neighbors")
     assert resp.status_code == 404
-
-
-def test_ws_uplink_profile_gate_drone(drone_client):
-    """WS /ws/uplink closes 1008 on drone profile."""
-    with pytest.raises(Exception):
-        with drone_client.websocket_connect(f"{GS_PREFIX}/ws/uplink"):
-            pass
-
-
-def test_ws_uplink_emits_store_uplink_change(client, monkeypatch):
-    """WS /ws/uplink yields an event built from the durable store's uplink row.
-
-    The in-process UplinkRouter bus never publishes in the API process; the
-    native ados-net daemon ships net.uplink_active / net.modem_usage to the
-    store, and this WS reads those back. Mock the two source helpers and assert
-    the WS emits a payload carrying the active uplink and the data-cap state
-    folded from the modem-usage block.
-    """
-    from ados.api.sources import network as net_source
-
-    async def _fake_uplink() -> dict[str, Any]:
-        return {
-            "active_uplink": "modem_4g",
-            "available": ["modem_4g", "ethernet"],
-            "internet_reachable": True,
-            "timestamp_ms": 12345,
-            "data_cap_state": "ok",
-        }
-
-    async def _fake_usage() -> dict[str, Any]:
-        return {"data_used_mb": 900, "cap_mb": 1000, "percent": 90, "state": "warning"}
-
-    monkeypatch.setattr(net_source, "latest_uplink_active", _fake_uplink)
-    monkeypatch.setattr(net_source, "latest_modem_usage", _fake_usage)
-
-    with client.websocket_connect(f"{GS_PREFIX}/ws/uplink") as ws:
-        payload = ws.receive_json()
-
-    assert payload["active_uplink"] == "modem_4g"
-    assert payload["available"] == ["modem_4g", "ethernet"]
-    assert payload["internet_reachable"] is True
-    assert payload["timestamp_ms"] == 12345
-    # The live modem-usage state wins over the uplink event's own data_cap_state.
-    assert payload["data_cap_state"] == "warning"
-
-
-def test_ws_uplink_no_store_data_keeps_socket_open(client, monkeypatch):
-    """No stored uplink row → the WS stays open and silent, never errors out.
-
-    A losable store must degrade the stream to silence, not to a crash. The WS
-    accepts and the connection can be closed cleanly without an event.
-    """
-    from ados.api.sources import network as net_source
-
-    async def _no_uplink() -> None:
-        return None
-
-    monkeypatch.setattr(net_source, "latest_uplink_active", _no_uplink)
-    monkeypatch.setattr(net_source, "latest_modem_usage", _no_uplink)
-
-    with client.websocket_connect(f"{GS_PREFIX}/ws/uplink") as ws:
-        # The handshake completed; closing without a received event is the
-        # silent-degrade contract.
-        ws.close()
 
 
 # ---------------------------------------------------------------------------

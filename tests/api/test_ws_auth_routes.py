@@ -122,78 +122,11 @@ def test_cloudflare_logs_ws_rejects_wrong_scope_ticket(paired_drone_client):
     )
 
 
-# ---------------------------------------------------------------------------
-# /api/v1/ground-station/pic/events
-# ---------------------------------------------------------------------------
-
-
-def test_pic_events_ws_rejects_unauthenticated(paired_ground_client):
-    _expect_ws_rejected(
-        paired_ground_client, "/api/v1/ground-station/pic/events"
-    )
-
-
-def test_pic_events_ws_rejects_api_key_query_param(paired_ground_client):
-    _expect_ws_rejected(
-        paired_ground_client,
-        "/api/v1/ground-station/pic/events?api_key=valid-pair-key",
-    )
-
-
-def test_pic_events_ws_accepts_header(paired_ground_client):
-    with paired_ground_client.websocket_connect(
-        "/api/v1/ground-station/pic/events",
-        headers={"X-ADOS-Key": PAIR_KEY},
-    ) as ws:
-        assert ws is not None
-
-
-def test_pic_events_ws_accepts_ticket(paired_ground_client):
-    with paired_ground_client.websocket_connect(
-        "/api/v1/ground-station/pic/events",
-        subprotocols=[WS_TICKET_PROTOCOL, _ticket("gs.pic_events")],
-    ) as ws:
-        assert ws is not None
-
-
-# Note: the MAVLink WebSocket is no longer a Python FastAPI route — it is the
-# native Rust router's raw :8765 proxy, which validates the same ticket
-# subprotocol in its handshake (covered by the ados-mavlink-router crate's
-# tests). The remaining Python WS routes below still flow through this helper.
-
-
-# ---------------------------------------------------------------------------
-# /api/v1/ground-station/ws/uplink
-# ---------------------------------------------------------------------------
-
-
-def test_uplink_ws_rejects_unauthenticated(paired_ground_client):
-    _expect_ws_rejected(
-        paired_ground_client, "/api/v1/ground-station/ws/uplink"
-    )
-
-
-def test_uplink_ws_rejects_api_key_query_param(paired_ground_client):
-    _expect_ws_rejected(
-        paired_ground_client,
-        "/api/v1/ground-station/ws/uplink?api_key=valid-pair-key",
-    )
-
-
-def test_uplink_ws_accepts_header(paired_ground_client):
-    with paired_ground_client.websocket_connect(
-        "/api/v1/ground-station/ws/uplink",
-        headers={"X-ADOS-Key": PAIR_KEY},
-    ) as ws:
-        assert ws is not None
-
-
-def test_uplink_ws_accepts_ticket(paired_ground_client):
-    with paired_ground_client.websocket_connect(
-        "/api/v1/ground-station/ws/uplink",
-        subprotocols=[WS_TICKET_PROTOCOL, _ticket("gs.uplink_events")],
-    ) as ws:
-        assert ws is not None
+# Note: the PIC-events and uplink WebSockets, like the MAVLink WebSocket, are no
+# longer Python FastAPI routes — they are served natively by the front
+# (`ados-control`), which validates the same header-or-ticket WebSocket auth in
+# its own handshake (covered by the `ados-control` crate tests). The remaining
+# Python WS route below (the mesh stream) still flows through this helper.
 
 
 # ---------------------------------------------------------------------------

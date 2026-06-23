@@ -85,7 +85,11 @@ thiserror = { workspace = true }
 # to forward un-migrated routes to the residual FastAPI over its internal Unix
 # socket (a per-request HTTP/1.1 handshake on a fresh `UnixStream`).
 hyper = { workspace = true, features = ["client"] }
-axum = { workspace = true }
+# The `ws` feature adds the native WebSocket extractor the ground-station relay
+# routes use (the uplink-matrix change stream + the PIC arbiter transition
+# stream), so those upgrades are served by the front directly rather than
+# proxied to the residual.
+axum = { workspace = true, features = ["ws"] }
 tower = { workspace = true }
 tower-http = { workspace = true }
 hyper-util = { workspace = true }

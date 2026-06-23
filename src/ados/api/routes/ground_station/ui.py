@@ -4,18 +4,15 @@ Covers:
 * /ui (OLED, buttons, screens persisted UI config)
 * /factory-reset (pair + mesh wipe with fingerprint confirm)
 * /display (HDMI kiosk config)
-* /pic/events (websocket relay of the native PIC arbiter's event stream)
 
-The PIC claim/release/confirm-token/heartbeat REST routes and the gamepad +
-Bluetooth read/write routes are served natively by ``ados-control`` (the Rust
-``ados-pic`` / ``ados-input`` daemons own the arbiter + input state); only the
-``/pic/events`` WebSocket remains here, relaying the daemon's subscribe stream.
+The PIC claim/release/confirm-token/heartbeat REST routes, the gamepad +
+Bluetooth read/write routes, and the ``/pic/events`` WebSocket relay of the
+arbiter's transition stream are served natively by ``ados-control`` (the Rust
+``ados-pic`` / ``ados-input`` daemons own the arbiter + input state).
 """
 
 from __future__ import annotations
 
-import asyncio
-import json
 from typing import Any
 
 import structlog
@@ -24,13 +21,10 @@ from fastapi import (
     HTTPException,
     Query,
     Request,
-    WebSocket,
-    WebSocketDisconnect,
 )
 
-from ados.api.deps import get_agent_app
 from ados.api.routes import ground_station as _gs
-from ados.core.paths import MESH_GATEWAY_JSON, PIC_SOCK
+from ados.core.paths import MESH_GATEWAY_JSON
 
 log = structlog.get_logger("ground_station.ui")
 
@@ -202,75 +196,3 @@ async def get_ground_station_display() -> dict:
     """Return the persisted HDMI kiosk display config."""
     _gs._require_ground_profile()
     return _gs._load_display_config()
-
-
-# ---------------------------------------------------------------------------
-# /pic/events — relay the native arbiter's event stream
-# ---------------------------------------------------------------------------
-
-
-@router.websocket("/pic/events")
-async def ws_pic_events(websocket: WebSocket) -> None:
-    """Relay the native PIC arbiter's event stream as JSON until disconnect.
-
-    The native ``ados-pic`` daemon owns the arbiter and binds
-    ``/run/ados/pic.sock``; its ``subscribe`` op streams one newline-JSON
-    object per transition. This route relays that stream. Native clients pass
-    ``X-ADOS-Key`` on the handshake; browsers exchange the pairing key for a
-    one-shot ticket via ``POST /api/_ws/ticket`` with ``scope=gs.pic_events``
-    and present it through the ``ados-ws-ticket`` subprotocol.
-    """
-    from ados.api.middleware.ws_auth import authenticate_websocket as _ws_auth
-
-    accept_subprotocol = await _ws_auth(websocket, scope="gs.pic_events")
-    if accept_subprotocol is None:
-        return
-
-    # Profile gate before accepting so wrong-profile agents close 1008.
-    app = get_agent_app()
-    from ados.api.routes.ground_station._common.profile import is_ground_station
-
-    if not is_ground_station(app):
-        await websocket.close(code=1008, reason="E_PROFILE_MISMATCH")
-        return
-
-    if accept_subprotocol:
-        await websocket.accept(subprotocol=accept_subprotocol)
-    else:
-        await websocket.accept()
-
-    # Connect to the native arbiter's control socket and subscribe. The Rust
-    # side bounds its own broadcast (a lagging subscriber drops the oldest
-    # events), so a slow WS client applies backpressure to the read here rather
-    # than growing an unbounded queue.
-    try:
-        reader, writer = await asyncio.open_unix_connection(str(PIC_SOCK))
-    except OSError as exc:
-        try:
-            await websocket.send_json(
-                {"event": "error", "code": "E_PIC_BUS_UNAVAILABLE", "message": str(exc)}
-            )
-            await websocket.close()
-        except (WebSocketDisconnect, RuntimeError):
-            pass
-        return
-
-    try:
-        writer.write(b'{"op":"subscribe"}\n')
-        await writer.drain()
-        while True:
-            line = await reader.readline()
-            if not line:
-                break  # arbiter socket closed
-            try:
-                event = json.loads(line)
-            except ValueError:
-                continue
-            await websocket.send_json(event)
-    except (WebSocketDisconnect, RuntimeError, OSError):
-        pass
-    finally:
-        try:
-            writer.close()
-        except Exception:  # noqa: BLE001
-            pass

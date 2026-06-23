@@ -128,6 +128,13 @@ impl Default for PairingState {
 /// before it holds a key, and a liveness probe can always hit `/healthz`. This
 /// is the native surface's exempt set, narrower than the Python middleware's
 /// (no setup/static paths live here). `/api/time` is deliberately NOT public.
+///
+/// The two ground-station WebSocket relays are exempt here too: a WebSocket
+/// handshake is upgraded past the HTTP key gate, and a browser cannot set the
+/// `X-ADOS-Key` header on it, so the edge must let the upgrade reach the handler,
+/// which then enforces the WebSocket auth contract itself (a header key OR a
+/// scoped one-shot ticket). Mirrors the residual handlers, which authenticated
+/// inside the handler for the same reason.
 pub fn is_public(path: &str) -> bool {
     matches!(
         path,
@@ -137,6 +144,8 @@ pub fn is_public(path: &str) -> bool {
             | "/api/pairing/code"
             | "/api/pairing/claim"
             | "/api/version"
+            | "/api/v1/ground-station/ws/uplink"
+            | "/api/v1/ground-station/pic/events"
     )
 }
 
@@ -244,13 +253,18 @@ mod tests {
     }
 
     #[test]
-    fn is_public_is_exactly_the_five_exempt_paths() {
+    fn is_public_is_exactly_the_exempt_paths() {
         for p in [
             "/healthz",
+            "/api/ping",
             "/api/version",
             "/api/pairing/info",
             "/api/pairing/code",
             "/api/pairing/claim",
+            // The two ground-station WebSocket relays: the upgrade bypasses the
+            // HTTP key gate, so the handler does its own ticket/header auth.
+            "/api/v1/ground-station/ws/uplink",
+            "/api/v1/ground-station/pic/events",
         ] {
             assert!(is_public(p), "{p} should be public");
         }
@@ -260,6 +274,8 @@ mod tests {
             "/api/command",
             "/api/pairing/unpair",
             "/v1/openapi.json",
+            // The mesh WebSocket stays proxied to the residual, NOT public.
+            "/api/v1/ground-station/ws/mesh",
         ] {
             assert!(!is_public(p), "{p} should NOT be public");
         }
