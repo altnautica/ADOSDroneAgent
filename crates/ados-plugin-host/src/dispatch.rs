@@ -565,4 +565,50 @@ mod tests {
             Gate::Allow(Method::VisionPublishDetection)
         );
     }
+
+    #[test]
+    fn follow_me_grant_set_is_sufficient_and_bounded() {
+        // The reference click-to-follow plugin's exact agent grant set. Every
+        // method it actually calls must be allowed, and the set must NOT reach
+        // the guided-setpoint surface: the plugin emits its position targets
+        // over plain mavlink.send (the mavlink.write cap), never the
+        // higher-privilege flight.guided_setpoint cap it was not granted.
+        let granted = caps(&[
+            "vision.detection.subscribe",
+            "mavlink.read",
+            "mavlink.write",
+        ]);
+
+        // Allowed with its grants: detection stream, FC telemetry, FC send.
+        assert!(matches!(
+            gate(vision_methods::SUBSCRIBE_DETECTIONS, false, &granted),
+            Gate::Allow(Method::VisionSubscribeDetections)
+        ));
+        assert!(matches!(
+            gate("mavlink.subscribe", false, &granted),
+            Gate::Allow(Method::MavlinkSubscribe)
+        ));
+        assert!(matches!(
+            gate("mavlink.send", false, &granted),
+            Gate::Allow(Method::MavlinkSend)
+        ));
+
+        // Bounded: it cannot reach the guided-setpoint surface even though it
+        // holds mavlink.write — the two are distinct caps and the grant set
+        // never included the flight one.
+        assert_eq!(
+            gate("flight.guided_setpoint.send", false, &granted),
+            Gate::CapabilityDenied("capability_denied: flight.guided_setpoint".to_string())
+        );
+
+        // And a caller with no grant is refused at the same gate.
+        assert_eq!(
+            gate("mavlink.send", false, &caps(&[])),
+            Gate::CapabilityDenied("capability_denied: mavlink.write".to_string())
+        );
+        assert_eq!(
+            gate(vision_methods::SUBSCRIBE_DETECTIONS, false, &caps(&[])),
+            Gate::CapabilityDenied("capability_denied: vision.detection.subscribe".to_string())
+        );
+    }
 }

@@ -2978,6 +2978,41 @@ mod tests {
     }
 
     #[test]
+    fn apply_config_set_is_session_scoped_per_plugin() {
+        // The on-box control-socket write (apply_config_set, the GCS skill/
+        // settings path) writes ONLY the named plugin's own namespace: a write
+        // for plugin "a" is invisible to plugin "b". This is the reason config.*
+        // is intentionally session-scoped rather than capability-gated — an
+        // off-RPC write can never cross-write another plugin's config.
+        let host = RealHost::new().with_agent_id_lookup(Box::new(|_pid| "agent-1".to_string()));
+        let scope = host
+            .apply_config_set("a", "active", Value::Boolean(true), "drone")
+            .expect("write a");
+        assert_eq!(scope, "drone");
+        // a sees its own value.
+        let g_a = ok_map(host.config_get("a", &map(&[("key", Value::from("active"))])));
+        assert_eq!(field(&g_a, "value").and_then(Value::as_bool), Some(true));
+        // b does not — its default comes back.
+        let g_b = ok_map(host.config_get(
+            "b",
+            &map(&[
+                ("key", Value::from("active")),
+                ("default", Value::Boolean(false)),
+            ]),
+        ));
+        assert_eq!(field(&g_b, "value").and_then(Value::as_bool), Some(false));
+    }
+
+    #[test]
+    fn apply_config_set_rejects_a_bad_scope() {
+        let host = RealHost::new();
+        let err = host
+            .apply_config_set("p", "k", Value::from("v"), "nonsense")
+            .unwrap_err();
+        assert!(err.contains("scope must be drone or global"));
+    }
+
+    #[test]
     fn config_set_validation() {
         let host = RealHost::new();
         // missing value.
