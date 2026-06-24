@@ -31,6 +31,7 @@ pub mod dkms;
 pub mod fetch_binaries;
 pub mod health;
 pub mod network_mac_pin;
+pub mod npu_provision;
 pub mod preflight;
 pub mod purge_residue;
 pub mod rtl_regulatory;
@@ -49,6 +50,7 @@ pub fn full_install_chain() -> Vec<Box<dyn Step>> {
         Box::new(purge_residue::PurgeResidue),
         Box::new(deps::Deps),
         Box::new(venv_agent::VenvAgent),
+        Box::new(npu_provision::NpuProvision),
         Box::new(wfb_ng::WfbNg),
         Box::new(fetch_binaries::FetchBinaries),
         Box::new(dkms::Dkms),
@@ -71,11 +73,14 @@ mod tests {
     fn full_chain_orders_cleanly() {
         let steps = full_install_chain();
         let order = topo_order(&steps).expect("the install chain must be a valid DAG");
-        assert_eq!(order.len(), 14);
+        assert_eq!(order.len(), 15);
 
         let pos = |id: &str| order.iter().position(|x| x == id).unwrap();
         // Spot-check the load-bearing edges.
         assert!(pos("preflight") < pos("deps"));
+        // The NPU runtime provisioning installs its wheel into the agent venv,
+        // so it must run after the venv exists.
+        assert!(pos("venv_agent") < pos("npu_provision"));
         // The MAC pin runs after config (machine-id + /etc/ados exist).
         assert!(pos("config_identity") < pos("network_mac_pin"));
         assert!(pos("deps") < pos("venv_agent"));

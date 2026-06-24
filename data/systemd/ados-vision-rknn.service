@@ -1,0 +1,44 @@
+[Unit]
+Description=ADOS Vision NPU Inference Sidecar (RKNN)
+After=ados-mavlink.service
+PartOf=ados-supervisor.service
+# Start only when the Rockchip NPU runtime library is present. The sidecar
+# imports rknn-toolkit-lite2, which links librknnrt at runtime; on a board
+# without the NPU runtime the unit is a clean no-op rather than a crash loop.
+# The installer's npu-provision step places this library on rknn-class boards.
+ConditionPathExists=/usr/lib/librknnrt.so
+StartLimitInterval=60s
+StartLimitBurst=5
+
+[Service]
+# Join the shared accounting slice so MemoryCurrent/CPUUsage are
+# observable per unit (the slice sets MemoryAccounting=yes).
+Slice=ados.slice
+Type=simple
+# The sidecar owns the proprietary rknn-toolkit-lite2 wheel the Rust vision
+# engine cannot link. It listens on /run/ados/vision-rknn.sock and answers the
+# engine's load_model / infer requests. Run from the agent venv where the wheel
+# is installed; pass the socket explicitly so the path is unambiguous.
+ExecStart=/opt/ados/venv/bin/python -m ados.services.vision.rknn_sidecar --socket /run/ados/vision-rknn.sock
+Restart=on-failure
+RestartSec=3
+Environment=ADOS_CONFIG=/etc/ados/config.yaml
+EnvironmentFile=-/etc/ados/env
+# Pin the inference loop to the big (A76) cluster on RK3588-class SoCs so the
+# postprocessing keeps up with the encode/track loop on the little cores.
+# systemd silently clamps to the CPUs that exist, so this is a no-op on a
+# board with fewer cores.
+CPUAffinity=4 5 6 7
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/ados /run/ados /etc/ados /dev/shm
+
+MemoryMax=512M
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-vision-rknn
+
+[Install]
+WantedBy=ados-supervisor.service
