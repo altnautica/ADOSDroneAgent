@@ -353,3 +353,128 @@ def test_full_lifecycle_install_grant_enable_disable_remove(
 
     # Listing is empty again.
     assert client.get("/api/plugins").json() == {"installs": []}
+
+
+# ---------------------------------------------------------------------
+# GCS half: extended /plugins/{id} detail + the LAN bundle-serve route
+# ---------------------------------------------------------------------
+
+
+BUNDLE_JS = 'console.log("gcs boot");export const x=1;'
+
+
+def _build_gcs_archive(
+    tmp_path: Path, plugin_id: str = "com.example.gcs"
+) -> Path:
+    manifest_yaml = f"""\
+schema_version: 1
+id: {plugin_id}
+version: 0.1.0
+name: Gcs Hybrid
+license: GPL-3.0-or-later
+risk: low
+compatibility:
+  ados_version: ">=0.0.0"
+agent:
+  entrypoint: agent/plugin.py
+  isolation: subprocess
+  permissions: ["event.publish"]
+  resources:
+    max_ram_mb: 32
+    max_cpu_percent: 10
+    max_pids: 4
+gcs:
+  entrypoint: gcs/plugin.bundle.js
+  isolation: iframe
+  contributes:
+    panels:
+      - id: gcs-tab
+        slot: drone.detail.tab
+        title: Demo
+    overlays:
+      - id: gcs-overlay
+  locales: ["en"]
+"""
+    archive_path = tmp_path / f"{plugin_id}.adosplug"
+    with zipfile.ZipFile(archive_path, "w") as zf:
+        zf.writestr(MANIFEST_FILENAME, manifest_yaml)
+        zf.writestr("agent/plugin.py", "# stub\n")
+        zf.writestr("gcs/plugin.bundle.js", BUNDLE_JS)
+        zf.writestr("gcs/extra/asset.js", "// nested\n")
+    return archive_path
+
+
+def _install_gcs(client, tmp_path: Path, plugin_id: str = "com.example.gcs") -> str:
+    raw = _build_gcs_archive(tmp_path, plugin_id).read_bytes()
+    with patch("ados.plugins.supervisor.subprocess.run") as run_mock:
+        run_mock.return_value = MagicMock(returncode=0, stderr="")
+        resp = client.post(
+            "/api/plugins/install",
+            files={"file": (f"{plugin_id}.adosplug", raw, "application/zip")},
+        )
+    assert resp.status_code == 200, resp.text
+    return plugin_id
+
+
+def test_get_plugin_includes_gcs_block_and_granted_caps(
+    client, supervisor, tmp_path: Path
+):
+    pid = _install_gcs(client, tmp_path)
+    detail = client.get(f"/api/plugins/{pid}").json()
+    gcs = detail["manifest"]["gcs"]
+    assert gcs is not None
+    assert gcs["entrypoint"] == "gcs/plugin.bundle.js"
+    assert gcs["contributes"]["panels"][0]["id"] == "gcs-tab"
+    assert gcs["contributes"]["overlays"][0]["id"] == "gcs-overlay"
+    assert gcs["locales"] == ["en"]
+    assert "gcs" in detail["manifest"]["halves"]
+    assert isinstance(detail["granted_capabilities"], list)
+
+
+def test_get_plugin_gcs_block_none_for_agent_only(
+    client, supervisor, tmp_path: Path
+):
+    raw = _build_archive(tmp_path).read_bytes()
+    with patch("ados.plugins.supervisor.subprocess.run") as run_mock:
+        run_mock.return_value = MagicMock(returncode=0, stderr="")
+        client.post(
+            "/api/plugins/install",
+            files={
+                "file": ("com.example.basic.adosplug", raw, "application/zip")
+            },
+        )
+    detail = client.get("/api/plugins/com.example.basic").json()
+    assert detail["manifest"]["gcs"] is None
+
+
+def test_gcs_asset_route_serves_bundle_and_nested(
+    client, supervisor, tmp_path: Path
+):
+    pid = _install_gcs(client, tmp_path)
+    r = client.get(f"/api/plugins/{pid}/gcs/plugin.bundle.js")
+    assert r.status_code == 200, r.text
+    assert r.text == BUNDLE_JS
+    r2 = client.get(f"/api/plugins/{pid}/gcs/extra/asset.js")
+    assert r2.status_code == 200
+    assert "nested" in r2.text
+
+
+def test_gcs_asset_route_404s(client, supervisor, tmp_path: Path):
+    pid = _install_gcs(client, tmp_path)
+    assert client.get(f"/api/plugins/{pid}/gcs/nope.js").status_code == 404
+    assert (
+        client.get(
+            "/api/plugins/com.example.absent/gcs/plugin.bundle.js"
+        ).status_code
+        == 404
+    )
+
+
+def test_gcs_asset_route_rejects_traversal(client, supervisor, tmp_path: Path):
+    pid = _install_gcs(client, tmp_path)
+    # An encoded ../ must never serve the sibling manifest.yaml one level
+    # up from gcs/: either rejected (400) or normalized to a miss (404),
+    # never 200 with the parent file's bytes.
+    r = client.get(f"/api/plugins/{pid}/gcs/%2e%2e/manifest.yaml")
+    assert r.status_code in (400, 404), r.text
+    assert "schema_version" not in r.text

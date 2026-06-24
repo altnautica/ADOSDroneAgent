@@ -40,7 +40,7 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 from ados.api.deps import get_agent_app
@@ -54,7 +54,11 @@ from ados.api.routes._plugins_helpers import (
     write_sidecar,
 )
 from ados.core.logging import get_logger
-from ados.plugins.capabilities import get_capability_meta, is_known_capability
+from ados.plugins.capabilities import (
+    get_capability_meta,
+    get_granted_caps,
+    is_known_capability,
+)
 from ados.plugins.errors import (
     ArchiveError,
     ManifestError,
@@ -230,8 +234,23 @@ async def get_plugin(plugin_id: str):
     except SupervisorError as exc:
         return _err(20, "host_io_error", str(exc), 500)
     permission_ids = sorted(manifest.declared_permissions())
+    gcs_block = None
+    if manifest.gcs is not None:
+        gcs_block = {
+            "entrypoint": manifest.gcs.entrypoint,
+            "contributes": {
+                "panels": manifest.gcs.contributes.panels,
+                "overlays": manifest.gcs.contributes.overlays,
+                "notifications": manifest.gcs.contributes.notifications,
+                "skills": manifest.gcs.contributes.skills,
+            },
+            "locales": manifest.gcs.locales,
+        }
     return {
         "install": _install_to_dict(install),
+        # Capability ids currently granted to this plugin, so a LAN GCS
+        # can gate ui.slot.* contributions without a cloud round-trip.
+        "granted_capabilities": sorted(get_granted_caps(sup, plugin_id)),
         "manifest": {
             "id": manifest.id,
             "version": manifest.version,
@@ -242,9 +261,50 @@ async def get_plugin(plugin_id: str):
                 ["agent"] if manifest.agent is not None else []
             )
             + (["gcs"] if manifest.gcs is not None else []),
+            # The GCS half's iframe entrypoint + slot contributions, so a
+            # LAN-paired GCS can build the contribution set and locate the
+            # bundle (served by GET /plugins/{id}/gcs/{path}) with no cloud.
+            "gcs": gcs_block,
             "permissions": _enrich_permissions(permission_ids),
         },
     }
+
+
+@router.get("/plugins/{plugin_id}/gcs/{asset_path:path}")
+async def get_plugin_gcs_asset(plugin_id: str, asset_path: str):
+    """Serve a file from an installed plugin's unpacked ``gcs/`` directory.
+
+    Lets a LAN-paired Mission Control fetch a plugin's iframe bundle
+    (``gcs/plugin.bundle.js`` and any sibling assets) straight from the
+    agent that holds it, so the GCS half mounts with no cloud. The agent
+    auth posture (unpaired open / paired ``X-ADOS-Key`` / on-box trust)
+    is applied by the API layer; this handler only adds path-containment.
+
+    Traversal-guarded: the requested path is resolved and must stay
+    inside ``<install>/<id>/gcs/`` (``..`` escapes and symlinks that
+    point outside resolve away and are rejected), and only regular files
+    are served.
+    """
+    sup = _get_supervisor()
+    install = next(
+        (i for i in sup.installs() if i.plugin_id == plugin_id), None
+    )
+    if install is None:
+        return _err(14, "not_found", f"plugin {plugin_id} not installed", 404)
+    # Derive the dir from the supervisor (matches where it unpacked the
+    # archive; injectable in tests) rather than a module-level constant.
+    gcs_root = (sup._install_dir / plugin_id / "gcs").resolve()
+    try:
+        target = (gcs_root / asset_path).resolve()
+    except (OSError, ValueError) as exc:
+        return _err(12, "manifest_invalid", f"bad gcs asset path: {exc}", 400)
+    if target != gcs_root and not target.is_relative_to(gcs_root):
+        return _err(
+            12, "manifest_invalid", "gcs asset path escapes the plugin dir", 400
+        )
+    if not target.is_file():
+        return _err(14, "not_found", f"gcs asset {asset_path!r} not found", 404)
+    return FileResponse(target)
 
 
 # ---------------------------------------------------------------------
