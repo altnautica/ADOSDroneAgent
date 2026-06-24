@@ -25,7 +25,7 @@
       "homepage": "https://github.com/altnautica/ADOSExtensions/tree/main/extensions/thermal-camera-flir-lepton-usb",
       "license": "GPL-3.0-or-later",
       "risk": "medium",
-      "category": "camera",
+      "category": "drivers",
       "halves": ["agent", "gcs"],
       "download_url": "https://github.com/altnautica/ADOSExtensions/releases/download/thermal-camera-flir-lepton-usb-v1.0.2/com.altnautica.thermal-flir-lepton-usb-1.0.2.signed.adosplug",
       "archive_sha256": "a0a791387216a4e13f4b672e9d491d4b59d6daa7cae1586d93c02f5fd1653ea9"
@@ -39,7 +39,7 @@
       "homepage": "https://github.com/altnautica/ADOSExtensions/tree/main/extensions/mavlink-gimbal-v2",
       "license": "GPL-3.0-or-later",
       "risk": "medium",
-      "category": "gimbal",
+      "category": "drivers",
       "halves": ["agent", "gcs"],
       "download_url": "https://github.com/altnautica/ADOSExtensions/releases/download/mavlink-gimbal-v2-v1.0.2/com.altnautica.mavlink-gimbal-v2-1.0.2.signed.adosplug",
       "archive_sha256": "e98468c86720813db7072a64bbd16e34689c9955d58450184470d820f79331c9"
@@ -53,7 +53,7 @@
       "homepage": "https://github.com/altnautica/ADOSExtensions/tree/main/extensions/vision-nav",
       "license": "GPL-3.0-or-later",
       "risk": "high",
-      "category": "navigation",
+      "category": "ai",
       "halves": ["agent", "gcs"],
       "download_url": "https://github.com/altnautica/ADOSExtensions/releases/download/extensions/vision-nav-v0.2.8/com.altnautica.vision-nav-0.2.8.signed.adosplug",
       "archive_sha256": "cef55687bd7f5145cb7429c931ad133c552523863e706ebbb7261bc28f064813"
