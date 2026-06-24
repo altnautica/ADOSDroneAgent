@@ -86,6 +86,9 @@ fn native_routes() -> Vec<NativeRoute> {
         post("/api/vision/designate"),
         // Plugin per-drone config write (GCS skill toggle / settings → live host).
         put("/api/plugins/{plugin_id}/config"),
+        // Plugin published-state read (a {plugin_id} template under the otherwise
+        // permanent-Python /api/plugins prefix; only this exact GET is native).
+        get("/api/plugins/{plugin_id}/state"),
         // WebSocket auth ticket mint.
         post("/api/_ws/ticket"),
         // Params: the full list + the single-param read (a {name} template).
@@ -401,7 +404,7 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            108,
+            109,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);
@@ -447,6 +450,7 @@ mod tests {
             "/api/v1/network/client/status",
             "/api/v1/network/client/configured",
             "/api/v1/network/mac/adapters",
+            "/api/plugins/{plugin_id}/state",
         ] {
             assert!(has(Method::GET, p), "{p} must be in the native set");
         }

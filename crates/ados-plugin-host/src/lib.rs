@@ -51,6 +51,7 @@ pub mod realhost;
 pub mod server;
 pub mod signing;
 pub mod state;
+pub mod state_sidecar;
 pub mod supervisor;
 pub mod systemd;
 pub mod token_secret;

@@ -98,6 +98,7 @@ impl<H: HostServices> PluginIpcServer<H> {
         let token_issuer = self.token_issuer.clone();
         let bus = self.bus.clone();
         let host = self.host.clone();
+        let socket_dir = self.socket_dir.clone();
         let task = tokio::spawn(async move {
             loop {
                 let stream = match listener.accept().await {
@@ -109,6 +110,7 @@ impl<H: HostServices> PluginIpcServer<H> {
                     token_issuer: token_issuer.clone(),
                     bus: bus.clone(),
                     host: host.clone(),
+                    socket_dir: socket_dir.clone(),
                 };
                 tokio::spawn(async move {
                     if let Err(err) = conn.run(stream).await {
@@ -134,6 +136,9 @@ impl<H: HostServices> PluginIpcServer<H> {
     pub fn stop_plugin(&self, plugin_id: &str) {
         let path = self.socket_path(plugin_id);
         let _ = std::fs::remove_file(&path);
+        // Drop the plugin's published-state sidecar too, so a stopped plugin
+        // does not leave a stale state file the front would keep serving.
+        crate::state_sidecar::remove(&self.socket_dir, plugin_id);
     }
 }
 
@@ -143,6 +148,9 @@ struct Connection<H: HostServices> {
     token_issuer: Arc<TokenIssuer>,
     bus: Arc<EventBus>,
     host: Arc<H>,
+    /// The per-plugin socket directory, used to locate the published-state
+    /// sidecar written on each authorized publish.
+    socket_dir: PathBuf,
 }
 
 impl<H: HostServices> Connection<H> {
@@ -405,6 +413,26 @@ impl<H: HostServices> Connection<H> {
                     now_ms(),
                 ) {
                     PublishOutcome::Publish(event) => {
+                        // Persist the latest event per topic to the plugin's
+                        // state sidecar before fanning out, so the native front
+                        // can serve the plugin's own published state to the GCS
+                        // over the LAN. The publish authorization is the security
+                        // boundary; a write fault is logged, never fatal to the
+                        // publish.
+                        if let Err(e) = crate::state_sidecar::record(
+                            &self.socket_dir,
+                            &self.plugin_id,
+                            &event.topic,
+                            &event.payload,
+                            event.timestamp_ms,
+                        ) {
+                            tracing::warn!(
+                                plugin_id = %self.plugin_id,
+                                topic = %event.topic,
+                                error = %e,
+                                "failed to write plugin state sidecar"
+                            );
+                        }
                         let delivered = self.bus.publish(event);
                         let result = Value::Map(vec![(
                             Value::from("delivered"),
