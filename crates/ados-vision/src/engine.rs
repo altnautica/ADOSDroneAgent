@@ -411,8 +411,13 @@ impl VisionEngine {
             .map(|d| crate::reid::crop_resize_rgb24(frame, width, height, &d.bbox, iw, ih))
             .collect();
 
-        // Embed under the accelerator lease + the model lock.
-        let _permit = self.accel_lease.acquire().await.ok();
+        // Embed under the accelerator lease + the model lock. If the lease can't
+        // be acquired (a closing engine), degrade to motion-only rather than
+        // running embeds lease-less against a concurrent detector inference.
+        let _permit = match self.accel_lease.acquire().await {
+            Ok(p) => p,
+            Err(_) => return none(),
+        };
         let models = self.models.lock().await;
         let Some(reg) = models.get(&model_id) else {
             return none();

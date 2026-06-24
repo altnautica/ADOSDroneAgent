@@ -491,7 +491,12 @@ fn decode_embedding(resp: &rmpv::Value) -> Result<Vec<f32>> {
     let arr = map_get(map, "embedding")
         .and_then(|v| v.as_array())
         .ok_or_else(|| anyhow!("embed response has no embedding array"))?;
-    Ok(arr.iter().filter_map(num_f32).collect())
+    // Error (not silently shorten) on a non-numeric element: a truncated
+    // embedding would not match the template length and would silently fail the
+    // appearance gate. The engine treats this Err as motion-only for the box.
+    arr.iter()
+        .map(|v| num_f32(v).ok_or_else(|| anyhow!("embedding has a non-numeric element")))
+        .collect()
 }
 
 /// One blocking framed request/response against the sidecar socket. A fresh

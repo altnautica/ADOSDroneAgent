@@ -313,69 +313,83 @@ async fn operator_designate_overrides_the_auto_lock() {
     assert_eq!(engine.current_track("cam").await, None);
 }
 
-/// The re-id path is exercised end-to-end through the public surface: with the
-/// appearance model on, when the locked red target and a blue distractor sit at
-/// the SAME position on successive frames (a pure-appearance ambiguity), the
-/// lock stays on the red subject. The embedding — not motion — resolves it.
-#[tokio::test]
-async fn reid_keeps_the_lock_on_appearance_through_a_distractor() {
+/// Run the SAME appearance-vs-motion crossing through the public path with the
+/// re-id path on or off, and return the x of the box that carries the lock at
+/// the end. The scenario: lock on a stationary red target at x≈100; then a blue
+/// distractor sits ON the prediction (x≈100, motion-favored, higher confidence)
+/// while the red target jumps to x≈160 (in-gate but motion-disfavored). The two
+/// boxes never overlap in pixels, so each crop returns its own pure colour. Only
+/// the embedding can prefer the red target over the closer blue distractor.
+async fn crossing_end_x(reid: bool) -> f32 {
     let red = [220u8, 20, 20];
     let blue = [20u8, 20, 220];
-    // The target sits at a fixed spot; confirm a lock on it.
-    let target = det(140.0, 80.0, 0.9);
+    let target_lock = det(100.0, 100.0, 0.9);
+    // After the lock, the red target jumps right; the blue distractor takes the
+    // lock's old spot. Boxes are 40 wide so x=100 (100..140) and x=160 (160..200)
+    // do not overlap — clean, single-colour crops.
+    let target_jumped = det(160.0, 100.0, 0.9);
+    let distractor = det(100.0, 100.0, 0.92);
+
     let script: Script = Arc::new(Mutex::new(VecDeque::new()));
     for _ in 0..4 {
-        script.lock().unwrap().push_back(vec![target.clone()]);
+        script.lock().unwrap().push_back(vec![target_lock.clone()]);
     }
-    // Then two equal-confidence boxes very close together: the red target
-    // (barely moved) and a blue distractor overlapping it. Motion alone is
-    // ambiguous; appearance is not.
-    let target_moved = det(146.0, 84.0, 0.9);
-    let distractor = det(150.0, 86.0, 0.9);
-    for _ in 0..3 {
+    for _ in 0..4 {
         script
             .lock()
             .unwrap()
-            .push_back(vec![target_moved.clone(), distractor.clone()]);
+            .push_back(vec![distractor.clone(), target_jumped.clone()]);
     }
-    let engine = build_engine(true, script).await;
+    let engine = build_engine(reid, script).await;
 
-    let lock_frame = frame_with(&[(target.bbox, red)]);
-    let mut locked_id = None;
+    let lock_frame = frame_with(&[(target_lock.bbox, red)]);
+    let mut lock_id = None;
     for i in 0..4 {
         let b = engine
             .infer_and_publish("det", &desc(i), &lock_frame)
             .await
             .unwrap();
         if let Some(d) = b.detections.iter().find(|d| d.track_id.is_some()) {
-            locked_id = d.track_id;
+            lock_id = d.track_id;
         }
     }
-    let locked_id = locked_id.expect("locked the red target");
+    let lock_id = lock_id.expect("locked the red target");
 
-    // The contested frames: the red target keeps the lock id; the blue
-    // distractor never steals it.
-    let contest = frame_with(&[(target_moved.bbox, red), (distractor.bbox, blue)]);
-    for i in 4..7 {
+    let contest = frame_with(&[(distractor.bbox, blue), (target_jumped.bbox, red)]);
+    let mut end_x = 100.0;
+    for i in 4..8 {
         let b = engine
             .infer_and_publish("det", &desc(i), &contest)
             .await
             .unwrap();
-        let stamped: Vec<_> = b
-            .detections
-            .iter()
-            .filter(|d| d.track_id == Some(locked_id))
-            .collect();
-        assert_eq!(stamped.len(), 1, "exactly one box keeps the lock id");
-        // The box that keeps the id must be the red (target) one: its bbox is
-        // the target's, near (146, 84), not the distractor's (150, 86). Allow a
-        // small tolerance; the key is the lock did not jump to the distractor.
-        let kept = stamped[0];
-        assert!(
-            (kept.bbox.x - target_moved.bbox.x).abs()
-                < (kept.bbox.x - distractor.bbox.x).abs() + 1.0,
-            "the lock stayed on the red target, not the blue distractor"
-        );
+        if let Some(d) = b.detections.iter().find(|d| d.track_id == Some(lock_id)) {
+            end_x = d.bbox.x;
+        }
     }
-    assert_eq!(engine.current_track("cam").await, Some(locked_id));
+    end_x
+}
+
+/// The re-id embedding is wired end-to-end through the PUBLIC path and changes
+/// which subject is tracked: with re-id ON the lock follows the red target by
+/// appearance (to x≈160) even though a blue distractor sits closer on the
+/// prediction; with re-id OFF the same scene is resolved by motion and the lock
+/// follows the blue distractor (x≈100). A re-id test that does not behave
+/// differently with re-id off is not a re-id test — this asserts the difference.
+#[tokio::test]
+async fn reid_changes_the_tracked_subject_vs_motion_only() {
+    let x_reid = crossing_end_x(true).await;
+    let x_motion = crossing_end_x(false).await;
+
+    assert!(
+        x_reid > 140.0,
+        "with re-id, the lock follows the red target by appearance (x={x_reid}, expected ~160)"
+    );
+    assert!(
+        x_motion < 130.0,
+        "without re-id, motion follows the closer blue distractor (x={x_motion}, expected ~100)"
+    );
+    assert!(
+        x_reid - x_motion > 30.0,
+        "re-id selects a different subject than motion alone (reid x={x_reid}, motion x={x_motion})"
+    );
 }
