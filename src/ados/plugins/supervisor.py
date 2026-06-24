@@ -51,6 +51,7 @@ from ados.plugins.archive import (
     MANIFEST_FILENAME,
     open_archive,
     unpack_to,
+    verify_entrypoints_present,
 )
 from ados.plugins.errors import (
     ManifestError,
@@ -199,6 +200,17 @@ class PluginSupervisor:
             if target.exists():
                 shutil.rmtree(target)
             unpack_to(contents.raw_archive_bytes, target)
+
+            # A manifest that declares a GCS half (or a rust agent binary)
+            # must actually ship the file it points at. Fail the install
+            # loudly here rather than letting a missing bundle surface
+            # later as an empty iframe or a unit that cannot start.
+            unpacked = {
+                p.relative_to(target).as_posix()
+                for p in target.rglob("*")
+                if p.is_file()
+            }
+            verify_entrypoints_present(manifest, unpacked)
 
             # Write systemd unit for subprocess agent halves.
             if (

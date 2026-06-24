@@ -31,7 +31,10 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ados.core.logging import get_logger
-from ados.plugins.capabilities import is_known_agent_capability
+from ados.plugins.capabilities import (
+    is_known_agent_capability,
+    is_known_gcs_capability,
+)
 from ados.plugins.errors import ManifestError
 
 log = get_logger("plugins.manifest")
@@ -439,7 +442,7 @@ class GcsBlock(_StrictModel):
 
     entrypoint: str
     """Relative path inside the archive to the GCS bundle entrypoint
-    (``gcs/dist/index.js``)."""
+    (``gcs/plugin.bundle.js``)."""
 
     isolation: Literal["iframe", "worker", "inline"] = "iframe"
     """Inline is restricted to first-party signers."""
@@ -459,6 +462,22 @@ class GcsBlock(_StrictModel):
         if not isinstance(raw, list):
             return raw
         return [_normalize_permission(item) for item in raw]
+
+    @model_validator(mode="after")
+    def _warn_unknown_capabilities(self) -> GcsBlock:
+        """Log a warning for any GCS permission id not in the known GCS
+        capability set. Older or experimental manifests must still load,
+        so this never rejects; it only flags drift between the manifest
+        author and the host's known GCS capability set. Symmetric with
+        the agent-half validator.
+        """
+        for perm in self.permissions:
+            if not is_known_gcs_capability(perm.id):
+                log.warning(
+                    "plugin_manifest_unknown_gcs_capability",
+                    capability=perm.id,
+                )
+        return self
 
 
 class Compatibility(_StrictModel):

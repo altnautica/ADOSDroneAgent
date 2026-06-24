@@ -9,8 +9,8 @@ Archive layout (zip, no compression for binary stability):
         src/                         OR loose Python source root (src-layout)
         py/                         OR loose Python source root (flat)
     gcs/                            optional, GCS half
-        dist/index.js
-        dist/style.css
+        plugin.bundle.js
+        style.css
         locale/<lang>.json
     assets/                         optional, additional files (models, fixtures)
 
@@ -30,6 +30,7 @@ fail at unpack with :class:`ArchiveError`. Path traversal entries
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import io
 import os
@@ -47,6 +48,69 @@ ARCHIVE_MAX_BYTES = 50 * 1024 * 1024
 ENTRY_MAX_BYTES = 25 * 1024 * 1024
 SIGNATURE_FILENAME = "SIGNATURE"
 MANIFEST_FILENAME = "manifest.yaml"
+
+# Build, source-tree, test, and cache cruft that must never ride in a
+# shipped archive. A shipped plugin carries the built GCS bundle
+# (``gcs/plugin.bundle.js``) and the Python agent half under
+# ``agent/<pkg>/`` — never the GCS TypeScript source, the npm/pnpm store,
+# the test tree, or any compiler/linter cache. Matched as a path segment
+# (a directory name anywhere in the relative path) for the directory
+# entries, and by basename or glob for the file entries.
+_EXCLUDE_DIR_SEGMENTS = frozenset(
+    {
+        "dist",
+        "node_modules",
+        ".venv",
+        ".pnpm-store",
+        "tests",
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        "target",
+    }
+)
+# Two-segment directory paths to exclude (the GCS source and its deps live
+# under gcs/, but the built bundle ``gcs/plugin.bundle.js`` must stay).
+_EXCLUDE_DIR_PREFIXES = (
+    "gcs/src/",
+    "gcs/node_modules/",
+)
+# Exact tooling-config basenames that have no place in a shipped archive.
+_EXCLUDE_FILENAMES = frozenset(
+    {
+        "package.json",
+        "tsconfig.json",
+        "vitest.config.ts",
+    }
+)
+# Basename glob patterns: build configs and compiler caches by extension.
+_EXCLUDE_FILENAME_GLOBS = (
+    "esbuild.config.*",
+    "*.tsbuildinfo",
+)
+
+
+def _is_excluded_from_pack(rel: str) -> bool:
+    """True when ``rel`` (a posix relative path) is build/source/cache cruft
+    that must not be packed into a shipped ``.adosplug`` archive."""
+    posix = rel
+    parts = posix.split("/")
+    # Any matching directory segment anywhere in the path is excluded
+    # (covers e.g. ``gcs/dist/...``, ``agent/foo/__pycache__/...``).
+    if any(seg in _EXCLUDE_DIR_SEGMENTS for seg in parts[:-1]):
+        return True
+    # ``*.egg-info`` directory segments (name carries the package name).
+    if any(seg.endswith(".egg-info") for seg in parts[:-1]):
+        return True
+    if any(posix.startswith(prefix) for prefix in _EXCLUDE_DIR_PREFIXES):
+        return True
+    name = parts[-1]
+    if name in _EXCLUDE_FILENAMES:
+        return True
+    if any(fnmatch.fnmatch(name, pat) for pat in _EXCLUDE_FILENAME_GLOBS):
+        return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -224,13 +288,64 @@ def unpack_to(archive_bytes: bytes, dest: Path) -> None:
             _restore_exec_mode(target, info)
 
 
+def _required_entrypoints(manifest: PluginManifest) -> list[tuple[str, str]]:
+    """The archive-relative files a manifest's declared halves require.
+
+    Returns ``(label, relative_path)`` pairs for every entrypoint that
+    must be present as a real file in the packed/unpacked archive:
+
+    * the GCS bundle at ``gcs.entrypoint`` when a ``gcs`` block exists;
+    * the agent binary at ``agent.entrypoint`` when ``agent.runtime`` is
+      ``rust`` (a Python agent's ``module:Class`` entrypoint is resolved
+      by the runner, not a packed file, so it is skipped).
+
+    A ``module:Class`` value (it contains a ``:``) is never a packed
+    file and is excluded from the must-exist set.
+    """
+    required: list[tuple[str, str]] = []
+    if manifest.gcs is not None and ":" not in manifest.gcs.entrypoint:
+        required.append(("gcs.entrypoint", manifest.gcs.entrypoint))
+    if (
+        manifest.agent is not None
+        and manifest.agent.runtime == "rust"
+        and ":" not in manifest.agent.entrypoint
+    ):
+        required.append(("agent.entrypoint", manifest.agent.entrypoint))
+    return required
+
+
+def verify_entrypoints_present(
+    manifest: PluginManifest, present_paths: set[str]
+) -> None:
+    """Assert every must-exist entrypoint is in ``present_paths``.
+
+    ``present_paths`` is the set of archive-relative posix paths actually
+    in the archive (packed or unpacked). Raises :class:`ArchiveError`
+    naming the missing entrypoint so a half-archive fails loudly instead
+    of dying later at iframe-load or unit-start.
+    """
+    for label, rel in _required_entrypoints(manifest):
+        if rel not in present_paths:
+            raise ArchiveError(
+                f"plugin {manifest.id}: manifest declares {label} {rel!r} "
+                f"but that file is not present in the archive"
+            )
+
+
 def pack_directory(src: Path, manifest: PluginManifest, output: Path) -> Path:
     """Build an unsigned ``.adosplug`` archive from a source directory.
 
     Used by ``ados-plugin pack`` in the dev tool. The signing step is
     separate (``ados-plugin sign``).
+
+    Build, source-tree, test, and cache cruft (see
+    :func:`_is_excluded_from_pack`) is skipped so a shipped archive
+    carries only the built GCS bundle, the Python agent half, the
+    manifest, and runtime assets. After packing, every entrypoint a
+    declared half requires must be present, or the build fails loudly.
     """
     output.parent.mkdir(parents=True, exist_ok=True)
+    packed: set[str] = {MANIFEST_FILENAME}
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as zf:
         # Always write the manifest first, deterministically.
         zf.writestr(MANIFEST_FILENAME, _serialize_manifest(manifest))
@@ -240,11 +355,22 @@ def pack_directory(src: Path, manifest: PluginManifest, output: Path) -> Path:
             rel = path.relative_to(src).as_posix()
             if rel == MANIFEST_FILENAME or rel == SIGNATURE_FILENAME:
                 continue
+            if _is_excluded_from_pack(rel):
+                continue
             if path.stat().st_size > ENTRY_MAX_BYTES:
                 raise ArchiveError(
                     f"asset {rel} exceeds per-entry cap {ENTRY_MAX_BYTES}"
                 )
             zf.write(path, rel)
+            packed.add(rel)
+
+    # A half-archive (a declared GCS bundle or rust binary that never made
+    # it in) must fail at pack time, not silently ship.
+    try:
+        verify_entrypoints_present(manifest, packed)
+    except ArchiveError:
+        output.unlink(missing_ok=True)
+        raise
     return output
 
 

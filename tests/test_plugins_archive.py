@@ -154,6 +154,168 @@ def test_unpack_restores_exec_bit_for_executable_entries(tmp_path: Path) -> None
     assert not (mani_mode & 0o111), "plain entry must not gain exec bits"
 
 
+def _manifest_with_gcs_yaml(gcs_entrypoint: str = "gcs/plugin.bundle.js") -> str:
+    return f"""\
+schema_version: 1
+id: com.example.gcs
+version: 0.1.0
+name: Gcs
+license: GPL-3.0-or-later
+risk: low
+compatibility:
+  ados_version: ">=0.9.0,<1.0.0"
+agent:
+  entrypoint: agent/plugin.py
+  isolation: subprocess
+  permissions:
+    - event.publish
+gcs:
+  entrypoint: {gcs_entrypoint}
+  isolation: iframe
+  permissions:
+    - ui.slot.fc-tab
+"""
+
+
+def test_pack_excludes_source_and_cache_cruft(tmp_path: Path) -> None:
+    """A tree carrying GCS source, deps, tests, and caches must pack only
+    the runtime files — never the cruft a shipped archive should omit."""
+    src = tmp_path / "src"
+    (src / "agent").mkdir(parents=True)
+    (src / "agent" / "plugin.py").write_text("# stub")
+    (src / "agent" / "__pycache__").mkdir()
+    (src / "agent" / "__pycache__" / "plugin.cpython-313.pyc").write_bytes(b"\x00")
+    # Built GCS bundle stays; gcs/src and gcs/node_modules drop.
+    (src / "gcs").mkdir()
+    (src / "gcs" / "plugin.bundle.js").write_text("export const x = 1;")
+    (src / "gcs" / "src").mkdir()
+    (src / "gcs" / "src" / "index.ts").write_text("// source")
+    (src / "gcs" / "node_modules").mkdir()
+    (src / "gcs" / "node_modules" / "dep.js").write_text("// dep")
+    (src / "gcs" / "dist").mkdir()
+    (src / "gcs" / "dist" / "leftover.js").write_text("// stale build output")
+    (src / "node_modules").mkdir()
+    (src / "node_modules" / "root-dep.js").write_text("// root dep")
+    (src / "tests").mkdir()
+    (src / "tests" / "test_plugin.py").write_text("# test")
+    (src / ".ruff_cache").mkdir()
+    (src / ".ruff_cache" / "cache").write_bytes(b"\x00")
+    (src / "package.json").write_text("{}")
+    (src / "tsconfig.json").write_text("{}")
+    (src / "vitest.config.ts").write_text("// config")
+    (src / "esbuild.config.mjs").write_text("// config")
+    (src / "buildinfo.tsbuildinfo").write_text("{}")
+    egg = src / "com_example_gcs.egg-info"
+    egg.mkdir()
+    (egg / "PKG-INFO").write_text("Metadata")
+    # Runtime assets that must survive.
+    (src / "icon.png").write_bytes(b"\x89PNG\r\n")
+    (src / "README.md").write_text("readme")
+    (src / "config-schema.json").write_text("{}")
+    (src / "locales").mkdir()
+    (src / "locales" / "en.json").write_text("{}")
+
+    manifest = PluginManifest.from_yaml_text(_manifest_with_gcs_yaml())
+    out = tmp_path / "gcs.adosplug"
+    pack_directory(src, manifest, out)
+
+    raw = out.read_bytes()
+    names = set(zipfile.ZipFile(io.BytesIO(raw)).namelist())
+
+    # Cruft excluded.
+    assert not any(n.startswith("gcs/src/") for n in names)
+    assert not any(n.startswith("gcs/node_modules/") for n in names)
+    assert not any(n.startswith("gcs/dist/") for n in names)
+    assert not any(n.startswith("node_modules/") for n in names)
+    assert not any(n.startswith("tests/") for n in names)
+    assert not any("__pycache__" in n for n in names)
+    assert not any(".ruff_cache" in n for n in names)
+    assert not any(".egg-info" in n for n in names)
+    assert "package.json" not in names
+    assert "tsconfig.json" not in names
+    assert "vitest.config.ts" not in names
+    assert "esbuild.config.mjs" not in names
+    assert "buildinfo.tsbuildinfo" not in names
+
+    # Runtime files kept.
+    assert MANIFEST_FILENAME in names
+    assert "agent/plugin.py" in names
+    assert "gcs/plugin.bundle.js" in names
+    assert "icon.png" in names
+    assert "README.md" in names
+    assert "config-schema.json" in names
+    assert "locales/en.json" in names
+
+    # And the packed archive round-trips back through the parser.
+    contents = parse_archive_bytes(raw)
+    assert contents.manifest.id == "com.example.gcs"
+
+
+def test_pack_raises_when_declared_gcs_bundle_missing(tmp_path: Path) -> None:
+    """A manifest declaring a GCS entrypoint with no built bundle present
+    must fail loudly at pack time, and not leave a half-archive behind."""
+    src = tmp_path / "src"
+    (src / "agent").mkdir(parents=True)
+    (src / "agent" / "plugin.py").write_text("# stub")
+    # No gcs/plugin.bundle.js on disk.
+
+    manifest = PluginManifest.from_yaml_text(_manifest_with_gcs_yaml())
+    out = tmp_path / "broken.adosplug"
+    with pytest.raises(ArchiveError) as exc:
+        pack_directory(src, manifest, out)
+    assert "gcs.entrypoint" in str(exc.value)
+    assert "gcs/plugin.bundle.js" in str(exc.value)
+    assert not out.exists()
+
+
+def test_pack_complete_gcs_tree_round_trips(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    (src / "agent").mkdir(parents=True)
+    (src / "agent" / "plugin.py").write_text("# stub")
+    (src / "gcs").mkdir()
+    (src / "gcs" / "plugin.bundle.js").write_text("export const x = 1;")
+
+    manifest = PluginManifest.from_yaml_text(_manifest_with_gcs_yaml())
+    out = tmp_path / "ok.adosplug"
+    pack_directory(src, manifest, out)
+    assert out.exists()
+
+    raw = out.read_bytes()
+    dest = tmp_path / "unpacked"
+    unpack_to(raw, dest)
+    assert (dest / "gcs" / "plugin.bundle.js").read_text() == "export const x = 1;"
+    assert (dest / "agent" / "plugin.py").read_text() == "# stub"
+
+
+def test_pack_raises_when_rust_binary_missing(tmp_path: Path) -> None:
+    """A rust-runtime agent half whose entrypoint binary is absent must
+    fail at pack time the same way a missing GCS bundle does."""
+    src = tmp_path / "src"
+    src.mkdir()
+    manifest_yaml = """\
+schema_version: 1
+id: com.example.rust
+version: 0.1.0
+name: Rust
+license: GPL-3.0-or-later
+risk: low
+compatibility:
+  ados_version: ">=0.9.0,<1.0.0"
+agent:
+  entrypoint: agent/bin/com.example.rust
+  isolation: subprocess
+  runtime: rust
+  permissions:
+    - event.publish
+"""
+    manifest = PluginManifest.from_yaml_text(manifest_yaml)
+    out = tmp_path / "rust.adosplug"
+    with pytest.raises(ArchiveError) as exc:
+        pack_directory(src, manifest, out)
+    assert "agent.entrypoint" in str(exc.value)
+    assert not out.exists()
+
+
 def test_payload_hash_deterministic() -> None:
     archive_a = _make_zip(
         {

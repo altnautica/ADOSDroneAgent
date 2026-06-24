@@ -103,10 +103,11 @@ def encode_frame(env: Envelope) -> bytes:
 async def read_frame(reader) -> Envelope | None:
     """Read one length-prefixed frame from an asyncio StreamReader.
 
-    Returns ``None`` on clean EOF (peer closed). Raises
-    :class:`FrameError` on protocol errors.
+    Returns ``None`` on clean EOF (the peer closed the connection before
+    any byte of the next frame). Raises :class:`FrameError` on protocol
+    errors, including a length-prefix header that arrives truncated.
     """
-    header = await reader.readexactly(4) if False else await _read_exact(reader, 4)
+    header = await _read_exact(reader, 4)
     if header is None:
         return None
     length = int.from_bytes(header, "big")
@@ -122,11 +123,23 @@ async def read_frame(reader) -> Envelope | None:
 
 
 async def _read_exact(reader, n: int) -> bytes | None:
+    """Read exactly ``n`` bytes.
+
+    Returns the buffer on success. Returns ``None`` only on a clean EOF
+    at a frame boundary — the peer closed before sending any of the ``n``
+    bytes. A partial read (1..n-1 bytes followed by EOF) is a truncated
+    frame, not a clean close, so it raises :class:`FrameError`. Treating a
+    truncated header as a clean EOF would silently drop a half-sent frame.
+    """
     buf = b""
     while len(buf) < n:
         chunk = await reader.read(n - len(buf))
         if not chunk:
-            return None if not buf else None
+            if not buf:
+                return None
+            raise FrameError(
+                f"connection closed mid-frame: read {len(buf)} of {n} bytes"
+            )
         buf += chunk
     return buf
 

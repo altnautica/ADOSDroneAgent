@@ -122,6 +122,84 @@ def test_install_unsigned_when_signing_required_fails(
         sup.install_archive(archive)
 
 
+def _build_gcs_archive(
+    tmp_path: Path,
+    plugin_id: str = "com.example.gcsplug",
+    include_bundle: bool = True,
+) -> Path:
+    """Build an archive whose manifest declares a GCS half. When
+    ``include_bundle`` is false the declared bundle file is omitted so
+    the install-time entrypoint check has something to reject."""
+    manifest_yaml = f"""\
+schema_version: 1
+id: {plugin_id}
+version: 0.1.0
+name: Gcs Plug
+license: GPL-3.0-or-later
+risk: low
+compatibility:
+  ados_version: ">=0.0.0"
+agent:
+  entrypoint: agent/plugin.py
+  isolation: subprocess
+  permissions: ["event.publish"]
+gcs:
+  entrypoint: gcs/plugin.bundle.js
+  isolation: iframe
+  permissions: ["ui.slot.fc-tab"]
+"""
+    archive_path = tmp_path / f"{plugin_id}.adosplug"
+    with zipfile.ZipFile(archive_path, "w") as zf:
+        zf.writestr(MANIFEST_FILENAME, manifest_yaml)
+        zf.writestr("agent/plugin.py", "# stub\n")
+        if include_bundle:
+            zf.writestr("gcs/plugin.bundle.js", "export const x = 1;\n")
+    return archive_path
+
+
+def test_install_rejects_manifest_with_missing_gcs_bundle(
+    isolated_paths, tmp_path: Path
+):
+    """A manifest that declares a GCS bundle the archive never shipped
+    must fail the install loudly rather than installing a dead iframe."""
+    from ados.plugins.errors import ArchiveError
+
+    archive = _build_gcs_archive(tmp_path, include_bundle=False)
+    sup = PluginSupervisor(
+        install_dir=isolated_paths["install_dir"],
+        require_signed=False,
+    )
+    sup.discover()
+    with patch("ados.plugins.supervisor.subprocess.run") as run_mock:
+        run_mock.return_value = MagicMock(returncode=0, stderr="")
+        with pytest.raises(ArchiveError) as exc:
+            sup.install_archive(archive)
+    assert "gcs.entrypoint" in str(exc.value)
+    # Nothing should be recorded as installed after a rejected install.
+    assert sup.installs() == []
+
+
+def test_install_accepts_manifest_with_present_gcs_bundle(
+    isolated_paths, tmp_path: Path
+):
+    archive = _build_gcs_archive(tmp_path, include_bundle=True)
+    sup = PluginSupervisor(
+        install_dir=isolated_paths["install_dir"],
+        require_signed=False,
+    )
+    sup.discover()
+    with patch("ados.plugins.supervisor.subprocess.run") as run_mock:
+        run_mock.return_value = MagicMock(returncode=0, stderr="")
+        result = sup.install_archive(archive)
+    assert result.plugin_id == "com.example.gcsplug"
+    assert (
+        isolated_paths["install_dir"]
+        / "com.example.gcsplug"
+        / "gcs"
+        / "plugin.bundle.js"
+    ).exists()
+
+
 def test_disable_then_remove(isolated_paths, tmp_path: Path):
     archive = _build_archive(tmp_path)
     sup = PluginSupervisor(

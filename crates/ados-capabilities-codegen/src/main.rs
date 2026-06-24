@@ -203,7 +203,17 @@ fn emit_python(cat: &Catalog) -> String {
         ));
         out.push_str("    },\n");
     }
-    out.push_str("}\n");
+    out.push_str("}\n\n");
+
+    // The GCS-half capability id set. The browser-side runtime owns the
+    // GCS catalog metadata (the two TypeScript catalogs); the agent only
+    // needs the id set so the manifest's gcs block can warn on an
+    // unrecognised capability without rejecting it.
+    out.push_str("GCS_CAPABILITIES: frozenset[str] = frozenset(\n    {\n");
+    for c in &cat.gcs {
+        out.push_str(&format!("        \"{}\",\n", esc(&c.id)));
+    }
+    out.push_str("    }\n)\n");
     out
 }
 

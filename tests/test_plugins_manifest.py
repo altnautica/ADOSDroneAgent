@@ -39,7 +39,7 @@ def _good_manifest_dict() -> dict:
             ],
         },
         "gcs": {
-            "entrypoint": "gcs/dist/index.js",
+            "entrypoint": "gcs/plugin.bundle.js",
             "isolation": "iframe",
             "permissions": ["ui.slot.fc-tab"],
             "contributes": {
@@ -199,3 +199,31 @@ def test_target_profiles_rejects_unknown_profile() -> None:
     raw["agent"]["target_profiles"] = ["spacecraft"]
     with pytest.raises(ManifestError):
         PluginManifest.from_yaml_text(_yaml(raw))
+
+
+# ── gcs unknown-capability warning ───────────────────────────
+
+
+def test_known_gcs_capability_does_not_warn(capsys) -> None:
+    raw = _good_manifest_dict()
+    raw["gcs"]["permissions"] = ["ui.slot.fc-tab"]
+    m = PluginManifest.from_yaml_text(_yaml(raw))
+    assert m.gcs is not None
+    captured = capsys.readouterr()
+    assert "plugin_manifest_unknown_gcs_capability" not in (
+        captured.out + captured.err
+    )
+
+
+def test_unknown_gcs_capability_warns_but_still_loads(capsys) -> None:
+    raw = _good_manifest_dict()
+    raw["gcs"]["permissions"] = ["ui.slot.fc-tab", "ui.slot.not-a-real-slot"]
+    m = PluginManifest.from_yaml_text(_yaml(raw))
+    # Warn-only: the manifest still loads with the unknown permission, and
+    # the unknown id is flagged in a warning rather than silently dropped.
+    assert m.gcs is not None
+    assert "ui.slot.not-a-real-slot" in {p.id for p in m.gcs.permissions}
+    captured = capsys.readouterr()
+    blob = captured.out + captured.err
+    assert "plugin_manifest_unknown_gcs_capability" in blob
+    assert "ui.slot.not-a-real-slot" in blob

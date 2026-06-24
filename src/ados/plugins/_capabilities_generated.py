@@ -366,3 +366,29 @@ CAPABILITY_CATALOG: dict[str, dict[str, str]] = {
         "risk_reason": "Draws to the local display only; no effect on flight or the network.",
     },
 }
+
+GCS_CAPABILITIES: frozenset[str] = frozenset(
+    {
+        "ui.slot.fc-tab",
+        "ui.slot.command-tab",
+        "ui.slot.hardware-tab",
+        "ui.slot.suite-widget",
+        "ui.slot.mission-template",
+        "ui.slot.map-overlay",
+        "ui.slot.video-overlay",
+        "ui.slot.notification-channel",
+        "ui.slot.smart-function",
+        "ui.slot.settings-section",
+        "ui.slot.connection-protocol",
+        "ui.slot.recording-processor",
+        "ui.slot.flight-skill",
+        "ui.slot.drone-detail-tab",
+        "telemetry.subscribe",
+        "command.send",
+        "recording.write",
+        "mission.read",
+        "mission.write",
+        "cloud.read",
+        "cloud.write",
+    }
+)

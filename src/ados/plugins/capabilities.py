@@ -36,6 +36,7 @@ from ados.plugins._capabilities_generated import (
     AGENT_CAPABILITIES,
     CAPABILITY_CATALOG,
     ENFORCED_AGENT_CAPABILITIES,
+    GCS_CAPABILITIES,
 )
 from ados.plugins.errors import CapabilityDenied
 
@@ -45,9 +46,11 @@ if TYPE_CHECKING:
 __all__ = [
     "AGENT_CAPABILITIES",
     "ENFORCED_AGENT_CAPABILITIES",
+    "GCS_CAPABILITIES",
     "CAPABILITY_CATALOG",
     "CapabilityMeta",
     "is_known_agent_capability",
+    "is_known_gcs_capability",
     "get_capability_meta",
     "is_known_capability",
     "get_granted_caps",
@@ -96,6 +99,17 @@ del _missing_catalog_entries, _orphan_catalog_entries
 def is_known_agent_capability(cap: str) -> bool:
     """Return True if the capability is declared in the catalog."""
     return cap in AGENT_CAPABILITIES
+
+
+def is_known_gcs_capability(cap: str) -> bool:
+    """Return True if ``cap`` is a known GCS-half capability.
+
+    The browser-side runtime owns the GCS catalog metadata; the agent
+    keeps only the id set so a manifest's ``gcs`` block can warn (never
+    reject) on an unrecognised GCS capability, symmetric with the
+    agent-half check above.
+    """
+    return cap in GCS_CAPABILITIES
 
 
 def get_capability_meta(cap_id: str) -> CapabilityMeta | None:

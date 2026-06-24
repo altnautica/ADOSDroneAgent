@@ -114,6 +114,16 @@ async def test_clean_eof_returns_none() -> None:
     assert await read_frame(reader) is None
 
 
+@pytest.mark.asyncio
+async def test_truncated_header_raises() -> None:
+    """A length-prefix header that arrives partially (1-3 bytes) then the
+    peer closes is a truncated frame, not a clean EOF — it must raise."""
+    for partial in (b"\x00", b"\x00\x00", b"\x00\x00\x00"):
+        reader = _AsyncByteReader(partial)
+        with pytest.raises(FrameError):
+            await read_frame(reader)
+
+
 # ---------------------------------------------------------------------
 # Capability tokens
 # ---------------------------------------------------------------------
