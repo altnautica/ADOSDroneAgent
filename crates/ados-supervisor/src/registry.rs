@@ -282,7 +282,7 @@ mod tests {
     #[test]
     fn registry_has_expected_shape() {
         let specs = build_specs();
-        assert_eq!(specs.len(), 30, "service count drifted from the catalog");
+        assert_eq!(specs.len(), 31, "service count drifted from the catalog");
         // Core tier members. The single cross-profile cloud unit serves the
         // gateway + heartbeat on both profiles (it spawns the ground-station
         // bridge when the role resolves to a ground station), so there is no
