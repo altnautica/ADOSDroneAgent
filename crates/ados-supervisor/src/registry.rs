@@ -126,6 +126,16 @@ pub const SERVICE_REGISTRY: &[ServiceDef] = &[
     // Drone-side WFB-ng TX manager. Profile-gated to drone so a ground station
     // does not bring up wfb_tx and fight the GS wfb_rx for the same adapter.
     def_keep("ados-wfb", Hardware, Some("drone"), None),
+    // The onboard vision engine: loads the configured detector and publishes the
+    // detection stream that follow / designate plugins consume. Drone-only (the
+    // air side owns the cameras) to match the prebuilt catalog, which fetches the
+    // ados-vision binary on the drone profile only. The engine self-gates on
+    // `vision.enabled` (it exits cleanly when vision is off, the default), so the
+    // unit is a clean no-op until provisioning enables vision + a detector. NOT
+    // in the headless KEEP set: vision/AI is excluded from the lean headless core
+    // (DEC-180). On an NPU board the engine reaches its model through the
+    // ados-vision-rknn sidecar.
+    def("ados-vision", Hardware, Some("drone"), None),
     // On-demand.
     def("ados-ota", OnDemand, None, None),
     def("ados-discovery", OnDemand, None, None),
@@ -266,7 +276,7 @@ mod tests {
     #[test]
     fn registry_has_expected_shape() {
         let specs = build_specs();
-        assert_eq!(specs.len(), 29, "service count drifted from the catalog");
+        assert_eq!(specs.len(), 30, "service count drifted from the catalog");
         // Core tier members. The single cross-profile cloud unit serves the
         // gateway + heartbeat on both profiles (it spawns the ground-station
         // bridge when the role resolves to a ground station), so there is no
@@ -289,6 +299,12 @@ mod tests {
         // wifi-client stays cross-profile.
         let wc = specs.iter().find(|s| s.name == "ados-wifi-client").unwrap();
         assert_eq!(wc.profile_gate, None);
+        // The vision engine is a drone-gated Hardware unit and is NOT in the
+        // headless keep set (vision/AI is excluded from the lean core).
+        let vis = specs.iter().find(|s| s.name == "ados-vision").unwrap();
+        assert_eq!(vis.profile_gate, Some("drone"));
+        assert_eq!(vis.category, Category::Hardware);
+        assert!(!vis.headless_keep);
     }
 
     #[test]

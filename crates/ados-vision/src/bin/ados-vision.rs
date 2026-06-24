@@ -138,6 +138,37 @@ async fn main() {
     if config.tracker_enabled {
         tracing::info!(reid = config.reid_enabled, "vision tracker enabled");
     }
+
+    // Register the configured detector as an engine-run model. With it, each
+    // camera's capture loop drives inference and the engine publishes a
+    // detection stream (consumed by follow / designate plugins). Absent ⇒ the
+    // engine only runs models a plugin registers over vision.sock.
+    let detector_id: Option<String> = if let Some(det) = &config.detector {
+        let meta = det.to_metadata();
+        let id = meta.id.clone();
+        match engine.register_model(meta).await {
+            Ok((_, loaded)) => {
+                tracing::info!(
+                    model = %id, backend_loaded = loaded, path = %det.model_path,
+                    "detector registered"
+                );
+                if !loaded {
+                    tracing::warn!(
+                        model = %id,
+                        "detector backend not loaded; no detections until the model file/sidecar is reachable"
+                    );
+                }
+                Some(id)
+            }
+            Err(e) => {
+                tracing::error!(model = %id, error = %e, "detector registration failed");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let cancel = Arc::new(Notify::new());
 
     // Resolve the camera set: an explicit config list wins; otherwise HAL
@@ -152,8 +183,9 @@ async fn main() {
         let engine = engine.clone();
         let cancel = cancel.clone();
         let downscale = (config.downscale_width, config.downscale_height);
+        let detector_id = detector_id.clone();
         tasks.push(tokio::spawn(async move {
-            run_camera(engine, cam, downscale, cancel).await;
+            run_camera(engine, cam, downscale, detector_id, cancel).await;
         }));
     }
 
@@ -248,9 +280,14 @@ async fn run_camera(
     engine: Arc<VisionEngine>,
     cam: ResolvedCamera,
     _downscale: (u32, u32),
+    detector_id: Option<String>,
     cancel: Arc<Notify>,
 ) {
     let mut frame_id: u64 = 0;
+    // One in-flight inference per camera: a frame captured while the detector is
+    // busy is skipped, so capture (and the video ring) never blocks on
+    // inference. Decoupled, latest-frame-wins.
+    let infer_sem = Arc::new(tokio::sync::Semaphore::new(1));
     loop {
         // Build the source for this attempt.
         let mut source: AnySource = match cam.kind.as_str() {
@@ -284,7 +321,7 @@ async fn run_camera(
                     match frame {
                         Ok(raw) => {
                             frame_id = frame_id.wrapping_add(1);
-                            if let Err(e) = engine
+                            match engine
                                 .publish_frame(
                                     &cam.id,
                                     frame_id,
@@ -296,7 +333,32 @@ async fn run_camera(
                                 )
                                 .await
                             {
-                                tracing::warn!(camera = %cam.id, error = %e, "publish_frame_failed");
+                                Ok(desc) => {
+                                    // Drive the detector on this frame unless an
+                                    // inference is already in flight (skip then,
+                                    // keeping capture decoupled, latest-wins).
+                                    if let Some(det) = &detector_id {
+                                        if let Ok(permit) =
+                                            infer_sem.clone().try_acquire_owned()
+                                        {
+                                            let eng = engine.clone();
+                                            let det = det.clone();
+                                            let data = raw.data.clone();
+                                            tokio::spawn(async move {
+                                                let _permit = permit;
+                                                if let Err(e) = eng
+                                                    .infer_and_publish(&det, &desc, &data)
+                                                    .await
+                                                {
+                                                    tracing::warn!(error = %e, "detector_infer_failed");
+                                                }
+                                            });
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(camera = %cam.id, error = %e, "publish_frame_failed");
+                                }
                             }
                         }
                         Err(e) => {

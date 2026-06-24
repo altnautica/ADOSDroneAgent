@@ -3,6 +3,9 @@
 //! malformed config never blocks startup — a missing `vision:` block yields a
 //! disabled engine, which is the safe default on a rig that does not run vision.
 
+use ados_protocol::framebus::{
+    DetectionHead, FrameFormat, ModelExecution, ModelKind, ModelMetadata,
+};
 use serde::Deserialize;
 
 fn default_socket_dir() -> String {
@@ -43,6 +46,64 @@ pub struct CameraEntry {
 
 fn default_camera_kind() -> String {
     "tap".to_string()
+}
+
+fn default_detector_dim() -> u32 {
+    640
+}
+
+/// A detector model the engine auto-loads and runs on every captured frame to
+/// produce the `vision.detection` stream that follow / designate plugins
+/// subscribe to. Absent ⇒ the engine produces no detections on its own (a
+/// plugin must drive inference through the `vision.sock` register/infer RPCs).
+#[derive(Debug, Clone, Deserialize)]
+pub struct DetectorConfig {
+    /// Model id stamped on every published `DetectionBatch`.
+    pub model_id: String,
+    /// Resolved path to the model file (`.rknn` on an NPU board, `.onnx` on a
+    /// CPU build). Provisioning resolves a registry id to this path; a sideload
+    /// sets it directly.
+    pub model_path: String,
+    #[serde(default = "default_detector_dim")]
+    pub input_width: u32,
+    #[serde(default = "default_detector_dim")]
+    pub input_height: u32,
+    /// Output-head layout: `yolo8` (default) or `yolo5`.
+    #[serde(default)]
+    pub head: String,
+    /// Class labels in output-index order (e.g. the COCO-80 list). Empty ⇒
+    /// detections carry no class name (the track id still flows).
+    #[serde(default)]
+    pub class_labels: Vec<String>,
+}
+
+impl DetectorConfig {
+    /// Build the engine-run [`ModelMetadata`] for this detector. Frames are fed
+    /// as RGB24; the head defaults to YOLOv8 (the current export).
+    pub fn to_metadata(&self) -> ModelMetadata {
+        ModelMetadata {
+            id: self.model_id.clone(),
+            kind: ModelKind::Detection,
+            execution: ModelExecution::EngineRun,
+            input_width: if self.input_width == 0 {
+                default_detector_dim()
+            } else {
+                self.input_width
+            },
+            input_height: if self.input_height == 0 {
+                default_detector_dim()
+            } else {
+                self.input_height
+            },
+            input_format: FrameFormat::Rgb24,
+            output_classes: self.class_labels.clone(),
+            model_path: Some(self.model_path.clone()),
+            head: match self.head.to_ascii_lowercase().as_str() {
+                "yolo5" | "yolov5" => DetectionHead::Yolo5,
+                _ => DetectionHead::Yolo8,
+            },
+        }
+    }
 }
 
 /// The `vision:` config block.
@@ -93,6 +154,10 @@ pub struct VisionConfig {
     /// camera per request.
     #[serde(default)]
     pub designate_camera: Option<String>,
+    /// A detector the engine auto-loads and runs on every captured frame to
+    /// produce the detection stream. Absent ⇒ no engine-driven detections.
+    #[serde(default)]
+    pub detector: Option<DetectorConfig>,
 }
 
 impl Default for VisionConfig {
@@ -110,6 +175,7 @@ impl Default for VisionConfig {
             reid_enabled: false,
             reid_model_id: None,
             designate_camera: None,
+            detector: None,
         }
     }
 }
@@ -156,6 +222,8 @@ impl VisionConfig {
             reid_model_id: Option<String>,
             #[serde(default)]
             designate_camera: Option<String>,
+            #[serde(default)]
+            detector: Option<DetectorConfig>,
         }
 
         let Ok(text) = std::fs::read_to_string(path) else {
@@ -184,6 +252,7 @@ impl VisionConfig {
             reid_enabled: v.reid_enabled,
             reid_model_id: v.reid_model_id,
             designate_camera: v.designate_camera,
+            detector: v.detector,
         }
     }
 
@@ -345,6 +414,47 @@ vision:
         assert!(c2.enabled);
         assert!(!c2.tracker_enabled);
         assert!(!c2.reid_enabled);
+    }
+
+    #[test]
+    fn detector_absent_by_default_and_parses_to_metadata() {
+        use ados_protocol::framebus::{DetectionHead, FrameFormat, ModelExecution, ModelKind};
+
+        // No detector key ⇒ the engine drives no inference of its own.
+        assert!(VisionConfig::default().detector.is_none());
+
+        let yaml = "\
+vision:
+  enabled: true
+  detector:
+    model_id: com.example.coco-yolov8n
+    model_path: /var/ados/models/coco_yolov8n_640_int8.rknn
+    class_labels: [person, bicycle, car]
+";
+        let (_d, p) = write_tmp(yaml);
+        let c = VisionConfig::load_from(&p);
+        let det = c.detector.expect("detector parsed");
+        assert_eq!(det.model_id, "com.example.coco-yolov8n");
+        // input dims default to 640 when the YAML omits them.
+        assert_eq!(det.input_width, 640);
+        assert_eq!(det.input_height, 640);
+
+        let meta = det.to_metadata();
+        assert_eq!(meta.id, "com.example.coco-yolov8n");
+        assert!(matches!(meta.kind, ModelKind::Detection));
+        assert!(matches!(meta.execution, ModelExecution::EngineRun));
+        assert!(matches!(meta.input_format, FrameFormat::Rgb24));
+        assert!(matches!(meta.head, DetectionHead::Yolo8));
+        assert_eq!(meta.input_width, 640);
+        assert_eq!(
+            meta.model_path.as_deref(),
+            Some("/var/ados/models/coco_yolov8n_640_int8.rknn")
+        );
+        assert_eq!(meta.output_classes, vec!["person", "bicycle", "car"]);
+
+        // A vision block without a detector keeps it absent.
+        let (_d2, p2) = write_tmp("vision:\n  enabled: true\n");
+        assert!(VisionConfig::load_from(&p2).detector.is_none());
     }
 
     #[test]
