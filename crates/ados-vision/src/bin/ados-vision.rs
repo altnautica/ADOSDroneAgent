@@ -128,12 +128,17 @@ async fn main() {
     let slot_count = config.effective_slot_count();
     // The tracker is off unless the config opts in. When on, the published
     // detection batch carries a stable track_id + lock_state on the locked
-    // object; when off, the engine publishes raw detections.
-    let engine = VisionEngine::with_tracker(
+    // object; when off, the engine publishes raw detections. When re-id is on
+    // and a re-id model is configured, the tracker associates on the model's
+    // appearance embedding (registered below); otherwise it is motion-only.
+    let reid_model_id = config.reid.as_ref().map(|r| r.model_id.clone());
+    let engine = VisionEngine::with_tracker_reid(
         backend,
         slot_count,
         config.tracker_enabled,
         ados_vision::tracker::TrackerConfig::default(),
+        config.reid_enabled,
+        reid_model_id,
     );
     if config.tracker_enabled {
         tracing::info!(reid = config.reid_enabled, "vision tracker enabled");
@@ -168,6 +173,27 @@ async fn main() {
     } else {
         None
     };
+
+    // Register the appearance (re-id) model when enabled. It is loaded as a
+    // second engine-run model whose `embed` the tracker calls per detection; a
+    // failed load (missing file / sidecar) leaves the tracker motion-only.
+    if config.reid_enabled {
+        if let Some(reid) = &config.reid {
+            let meta = reid.to_metadata();
+            let id = meta.id.clone();
+            match engine.register_model(meta).await {
+                Ok((_, loaded)) => tracing::info!(
+                    model = %id, backend_loaded = loaded, path = %reid.model_path,
+                    "re-id model registered"
+                ),
+                Err(e) => tracing::error!(model = %id, error = %e, "re-id registration failed"),
+            }
+        } else {
+            tracing::warn!(
+                "reid_enabled but no vision.reid model configured; tracker stays motion-only"
+            );
+        }
+    }
 
     let cancel = Arc::new(Notify::new());
 

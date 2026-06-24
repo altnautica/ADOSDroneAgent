@@ -52,6 +52,14 @@ fn default_detector_dim() -> u32 {
     640
 }
 
+fn default_reid_width() -> u32 {
+    128
+}
+
+fn default_reid_height() -> u32 {
+    256
+}
+
 /// A detector model the engine auto-loads and runs on every captured frame to
 /// produce the `vision.detection` stream that follow / designate plugins
 /// subscribe to. Absent ⇒ the engine produces no detections on its own (a
@@ -102,6 +110,55 @@ impl DetectorConfig {
                 "yolo5" | "yolov5" => DetectionHead::Yolo5,
                 _ => DetectionHead::Yolo8,
             },
+        }
+    }
+}
+
+/// An appearance (re-id) model the engine loads alongside the detector so the
+/// tracker can re-identify its locked subject by learned appearance, not motion
+/// alone. Required when `reid_enabled` is set; absent ⇒ the tracker stays
+/// motion-only even with `reid_enabled` (the engine degrades cleanly).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReidConfig {
+    /// Model id the engine registers the re-id model under; it must match the
+    /// `reid_model_id` the tracker looks up.
+    pub model_id: String,
+    /// Resolved path to the re-id model file (`.rknn` on an NPU board, `.onnx`
+    /// on a CPU build). Provisioning resolves a registry id to this path; a
+    /// sideload sets it directly.
+    pub model_path: String,
+    /// Model input width. OSNet-class person re-id is portrait: 128 wide.
+    #[serde(default = "default_reid_width")]
+    pub input_width: u32,
+    /// Model input height. OSNet-class person re-id is portrait: 256 tall.
+    #[serde(default = "default_reid_height")]
+    pub input_height: u32,
+}
+
+impl ReidConfig {
+    /// Build the engine-run [`ModelMetadata`] for this re-id model. Crops are fed
+    /// as RGB24 at the model's input size; it carries no class labels (an
+    /// embedder, not a detector). The head is unused for embedding but the
+    /// metadata requires one, so it defaults to YOLOv8.
+    pub fn to_metadata(&self) -> ModelMetadata {
+        ModelMetadata {
+            id: self.model_id.clone(),
+            kind: ModelKind::Tracking,
+            execution: ModelExecution::EngineRun,
+            input_width: if self.input_width == 0 {
+                default_reid_width()
+            } else {
+                self.input_width
+            },
+            input_height: if self.input_height == 0 {
+                default_reid_height()
+            } else {
+                self.input_height
+            },
+            input_format: FrameFormat::Rgb24,
+            output_classes: Vec::new(),
+            model_path: Some(self.model_path.clone()),
+            head: DetectionHead::Yolo8,
         }
     }
 }
@@ -158,6 +215,10 @@ pub struct VisionConfig {
     /// produce the detection stream. Absent ⇒ no engine-driven detections.
     #[serde(default)]
     pub detector: Option<DetectorConfig>,
+    /// The appearance (re-id) model the engine loads when `reid_enabled`. Absent
+    /// ⇒ the tracker stays motion-only even with `reid_enabled`.
+    #[serde(default)]
+    pub reid: Option<ReidConfig>,
 }
 
 impl Default for VisionConfig {
@@ -176,6 +237,7 @@ impl Default for VisionConfig {
             reid_model_id: None,
             designate_camera: None,
             detector: None,
+            reid: None,
         }
     }
 }
@@ -224,6 +286,8 @@ impl VisionConfig {
             designate_camera: Option<String>,
             #[serde(default)]
             detector: Option<DetectorConfig>,
+            #[serde(default)]
+            reid: Option<ReidConfig>,
         }
 
         let Ok(text) = std::fs::read_to_string(path) else {
@@ -253,6 +317,7 @@ impl VisionConfig {
             reid_model_id: v.reid_model_id,
             designate_camera: v.designate_camera,
             detector: v.detector,
+            reid: v.reid,
         }
     }
 
@@ -455,6 +520,46 @@ vision:
         // A vision block without a detector keeps it absent.
         let (_d2, p2) = write_tmp("vision:\n  enabled: true\n");
         assert!(VisionConfig::load_from(&p2).detector.is_none());
+    }
+
+    #[test]
+    fn reid_absent_by_default_and_parses_to_portrait_metadata() {
+        use ados_protocol::framebus::{FrameFormat, ModelExecution, ModelKind};
+
+        // No reid key ⇒ the tracker stays motion-only.
+        assert!(VisionConfig::default().reid.is_none());
+
+        let yaml = "\
+vision:
+  enabled: true
+  tracker_enabled: true
+  reid_enabled: true
+  reid_model_id: com.example.reid-osnet
+  reid:
+    model_id: com.example.reid-osnet
+    model_path: /var/ados/models/osnet_x0_5_reid.rknn
+";
+        let (_d, p) = write_tmp(yaml);
+        let c = VisionConfig::load_from(&p);
+        assert!(c.reid_enabled);
+        let reid = c.reid.expect("reid parsed");
+        assert_eq!(reid.model_id, "com.example.reid-osnet");
+        // OSNet input defaults: 128 wide x 256 tall (portrait, person-shaped).
+        assert_eq!(reid.input_width, 128);
+        assert_eq!(reid.input_height, 256);
+
+        let meta = reid.to_metadata();
+        assert_eq!(meta.id, "com.example.reid-osnet");
+        assert!(matches!(meta.kind, ModelKind::Tracking));
+        assert!(matches!(meta.execution, ModelExecution::EngineRun));
+        assert!(matches!(meta.input_format, FrameFormat::Rgb24));
+        assert_eq!(meta.input_width, 128);
+        assert_eq!(meta.input_height, 256);
+        assert!(meta.output_classes.is_empty(), "an embedder has no classes");
+        assert_eq!(
+            meta.model_path.as_deref(),
+            Some("/var/ados/models/osnet_x0_5_reid.rknn")
+        );
     }
 
     #[test]
