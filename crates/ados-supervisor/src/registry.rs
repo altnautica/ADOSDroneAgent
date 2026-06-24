@@ -123,6 +123,12 @@ pub const SERVICE_REGISTRY: &[ServiceDef] = &[
     // a ground station start a unit whose binary is (correctly) absent — an
     // endless restart loop. Gate it to drone to match the catalog.
     def_keep("ados-video", Hardware, Some("drone"), None),
+    // NPU inference sidecar (RKNN). Drone-only: the camera + vision pipeline
+    // runs air-side, so the detector sidecar follows the camera. Python (it
+    // owns the proprietary rknn-toolkit-lite2 wheel the Rust engine cannot
+    // link), so it is NOT in the headless KEEP set. The unit self-gates on the
+    // NPU runtime library, so it is a clean no-op on a board without the NPU.
+    def("ados-vision-rknn", Hardware, Some("drone"), None),
     // Drone-side WFB-ng TX manager. Profile-gated to drone so a ground station
     // does not bring up wfb_tx and fight the GS wfb_rx for the same adapter.
     def_keep("ados-wfb", Hardware, Some("drone"), None),
@@ -266,7 +272,7 @@ mod tests {
     #[test]
     fn registry_has_expected_shape() {
         let specs = build_specs();
-        assert_eq!(specs.len(), 29, "service count drifted from the catalog");
+        assert_eq!(specs.len(), 30, "service count drifted from the catalog");
         // Core tier members. The single cross-profile cloud unit serves the
         // gateway + heartbeat on both profiles (it spawns the ground-station
         // bridge when the role resolves to a ground station), so there is no
