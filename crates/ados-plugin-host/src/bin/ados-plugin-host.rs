@@ -121,6 +121,10 @@ struct WiredDaemon<H: ados_plugin_host::HostServices> {
     server: PluginIpcServer<H>,
     served: Vec<(String, JoinHandle<()>)>,
     issuer: Arc<TokenIssuer>,
+    /// The daemon-lifetime control socket (the on-box config-write reach for the
+    /// native `ados-control` plugin-config route), and its accept task. Bound
+    /// once for the whole daemon, not per plugin.
+    control: Option<(PathBuf, JoinHandle<()>)>,
 }
 
 impl<H: ados_plugin_host::HostServices> WiredDaemon<H> {
@@ -131,6 +135,10 @@ impl<H: ados_plugin_host::HostServices> WiredDaemon<H> {
         for (id, handle) in self.served {
             handle.abort();
             self.server.stop_plugin(&id);
+        }
+        if let Some((path, handle)) = self.control {
+            handle.abort();
+            let _ = std::fs::remove_file(&path);
         }
     }
 }
@@ -274,6 +282,27 @@ async fn wire(
     let bus = Arc::new(EventBus::new());
     let host = build_host(install_dir.clone(), run_dir).await;
 
+    // The on-box control socket: the native `ados-control` plugin-config route
+    // reaches this daemon's live `ConfigStore` through it (a GCS skill toggle /
+    // per-drone settings change for a plugin the writer is not). Bound once for
+    // the whole daemon on the shared host Arc, before the host moves into the
+    // per-plugin server. A bind failure is non-fatal: plugin RPC still works,
+    // only the off-box config-write reach is unavailable.
+    let control = match ados_plugin_host::serve_control(host.clone(), socket_dir.clone()) {
+        Ok((path, handle)) => {
+            tracing::info!(socket = %path.display(), "serving plugin-host control socket");
+            Some((path, handle))
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "failed to bind plugin-host control socket; GCS plugin config writes \
+                 will not reach the live host"
+            );
+            None
+        }
+    };
+
     let server = PluginIpcServer::new(&socket_dir, issuer.clone(), bus, host);
 
     let mut served: Vec<(String, JoinHandle<()>)> = Vec::new();
@@ -335,6 +364,7 @@ async fn wire(
         server,
         served,
         issuer,
+        control,
     }
 }
 
@@ -344,7 +374,12 @@ async fn main() -> Result<()> {
 
     let paths = ados_plugin_host::supervisor::Paths::default();
     let install_dir = paths.install_dir.clone();
-    let socket_dir = PathBuf::from(DEFAULT_SOCKET_DIR);
+    // The per-plugin + control socket dir. Honours `ADOS_PLUGIN_SOCKET_DIR` so a
+    // test / SITL run (and the matching `ados-control` control client) point at a
+    // writable tempdir instead of `/run/ados/plugins`.
+    let socket_dir = PathBuf::from(
+        std::env::var("ADOS_PLUGIN_SOCKET_DIR").unwrap_or_else(|_| DEFAULT_SOCKET_DIR.to_string()),
+    );
     let run = run_dir();
     let version = agent_version();
 

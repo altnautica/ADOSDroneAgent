@@ -2205,6 +2205,61 @@ fn coerce_timeout_ms(value: &Value) -> Option<i64> {
     }
 }
 
+impl RealHost {
+    /// Apply a config write that originates off the per-plugin RPC path — the
+    /// on-box control socket (a GCS skill toggle / per-drone settings change for
+    /// a plugin the writer is not). It resolves the per-drone scope via the same
+    /// `agent_id_for` lookup `config.set` uses, so an operator's `active` flip
+    /// lands in the exact per-drone namespace the plugin reads, and the store
+    /// flushes its 0600 JSON on the set. The trust boundary is the control socket
+    /// itself (on-box, owner+group); there is no capability token here. Returns
+    /// the effective scope (`drone` collapses to `global` when no device id is
+    /// bound, matching `ConfigStore::set`).
+    pub fn apply_config_set(
+        &self,
+        plugin_id: &str,
+        key: &str,
+        value: Value,
+        scope: &str,
+    ) -> Result<String, String> {
+        if plugin_id.is_empty() {
+            return Err("plugin_id must be a non-empty string".to_string());
+        }
+        if key.is_empty() {
+            return Err("key must be a non-empty string".to_string());
+        }
+        if scope != "drone" && scope != "global" {
+            return Err(format!(
+                "scope must be drone or global, got {}",
+                py_repr(scope)
+            ));
+        }
+        let agent_id = self.agent_id_for(plugin_id);
+        self.config
+            .lock()
+            .expect("config mutex poisoned")
+            .set(plugin_id, key, value, scope, &agent_id);
+        let effective = if scope == "drone" && agent_id.is_empty() {
+            "global"
+        } else {
+            scope
+        };
+        Ok(effective.to_string())
+    }
+}
+
+impl crate::control::ConfigControl for RealHost {
+    fn apply_config_set(
+        &self,
+        plugin_id: &str,
+        key: &str,
+        value: Value,
+        scope: &str,
+    ) -> Result<String, String> {
+        RealHost::apply_config_set(self, plugin_id, key, value, scope)
+    }
+}
+
 /// Python `repr()` of a string: single-quoted. Used in the few error strings
 /// that interpolate a value with `{x!r}` so the wire body matches byte-for-byte.
 fn py_repr(s: &str) -> String {

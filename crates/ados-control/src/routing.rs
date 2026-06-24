@@ -84,6 +84,8 @@ fn native_routes() -> Vec<NativeRoute> {
         post("/api/logs/push"),
         // Vision designate (operator click-to-follow).
         post("/api/vision/designate"),
+        // Plugin per-drone config write (GCS skill toggle / settings → live host).
+        put("/api/plugins/{plugin_id}/config"),
         // WebSocket auth ticket mint.
         post("/api/_ws/ticket"),
         // Params: the full list + the single-param read (a {name} template).
@@ -399,7 +401,7 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            107,
+            108,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);
@@ -527,6 +529,9 @@ mod tests {
         assert!(has(Method::GET, "/api/mavlink/ports"));
         // The WS-ticket mint is native (replaces the proxied Python route).
         assert!(has(Method::POST, "/api/_ws/ticket"));
+        // The plugin per-drone config write is native (a control-plane write, so
+        // it stays off the residual Python plugin surface).
+        assert!(has(Method::PUT, "/api/plugins/{plugin_id}/config"));
         // The system-resources snapshot is native.
         assert!(has(Method::GET, "/api/system"));
         // The read-tail wave: composite diagnostics + the GS recording/ui/input reads.

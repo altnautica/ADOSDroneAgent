@@ -22,10 +22,12 @@
 
 pub mod logd_client;
 pub mod mavlink_client;
+pub mod plugin_control_client;
 pub mod state_client;
 pub mod vision_client;
 
 pub use logd_client::LogdQueryClient;
 pub use mavlink_client::MavlinkIpcClient;
+pub use plugin_control_client::{PluginControlClient, PluginControlError};
 pub use state_client::StateIpcClient;
 pub use vision_client::VisionIpcClient;

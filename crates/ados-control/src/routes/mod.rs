@@ -53,6 +53,7 @@ pub mod pairing;
 pub mod params;
 pub mod params_single;
 pub mod params_write;
+pub mod plugins_config;
 pub mod service_control;
 pub mod services;
 pub mod signing;
@@ -130,6 +131,14 @@ pub fn build_router(state: AppState, net_native: bool, hid_native: bool) -> Rout
         // tracker for a camera onto the box the operator clicked, via the vision
         // socket. Auth-gated when paired (a write), 503 when vision is not up.
         .route("/api/vision/designate", post(vision::designate))
+        // Plugin per-drone config write: a GCS skill toggle / per-drone settings
+        // change flips a plugin's `active`/settings config in the live plugin
+        // host (the daemon's control socket). Auth-gated when paired (a write),
+        // 503 when the plugin host is not up. The plugin READ routes stay proxied.
+        .route(
+            "/api/plugins/:plugin_id/config",
+            put(plugins_config::put_plugin_config),
+        )
         // WebSocket auth ticket mint: exchanges the pairing key (LAN-edge auth)
         // for a short-lived self-contained HMAC ticket a browser GCS hands to the
         // MAVLink WS proxy through the subprotocol list.

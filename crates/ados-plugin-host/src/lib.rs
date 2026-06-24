@@ -40,6 +40,7 @@
 //! - [`errors`] — the lifecycle error hierarchy.
 
 pub mod archive;
+pub mod control;
 pub mod dispatch;
 pub mod errors;
 pub mod handlers;
@@ -55,6 +56,7 @@ pub mod systemd;
 pub mod token_secret;
 pub mod vision_client;
 
+pub use control::{control_socket_path, serve_control, ConfigControl, CONTROL_SOCKET_NAME};
 pub use dispatch::{gate, Gate, Method};
 pub use errors::{
     ArchiveError, LifecycleError, ManifestError, SignatureError, SignatureErrorKind,
