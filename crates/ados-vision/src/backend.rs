@@ -37,6 +37,21 @@ pub trait LoadedModel: Send + Sync {
         height: u32,
         format: FrameFormat,
     ) -> Result<Vec<Detection>>;
+
+    /// Extract a re-id appearance embedding from a pre-cropped, model-input-sized
+    /// `crop` (the engine crops + resizes a detection box to this model's input
+    /// before calling). Returns the embedding as a flat f32 vector, or `None`
+    /// when this model is a detector / the backend cannot embed (the default).
+    /// The caller L2-normalizes the result, so an embedder need not.
+    fn embed(
+        &self,
+        _crop: &[u8],
+        _width: u32,
+        _height: u32,
+        _format: FrameFormat,
+    ) -> Result<Option<Vec<f32>>> {
+        Ok(None)
+    }
 }
 
 /// A backend that can load models of the kinds it supports.
@@ -179,6 +194,39 @@ mod onnx_backend {
             };
             Ok(yolo::decode(data, rows, cols, &params))
         }
+
+        fn embed(&self, crop: &[u8], w: u32, h: u32, f: FrameFormat) -> Result<Option<Vec<f32>>> {
+            if f != FrameFormat::Rgb24 {
+                return Err(anyhow!("onnx embed requires rgb24 crops, got {f:?}"));
+            }
+            let iw = self.meta.input_width;
+            let ih = self.meta.input_height;
+            if w != iw || h != ih {
+                return Err(anyhow!(
+                    "onnx embed crop {w}x{h} does not match model input {iw}x{ih}"
+                ));
+            }
+            // The re-id ONNX expects ImageNet-normalized input (applied here, the
+            // same way the detector path divides by 255 outside the model).
+            let chw = crate::reid::preprocess_osnet_nchw(crop, w, h)
+                .ok_or_else(|| anyhow!("onnx embed preprocess failed (crop too small)"))?;
+            let input =
+                ort::value::Tensor::from_array(([1usize, 3, ih as usize, iw as usize], chw))?;
+            let mut session = self
+                .session
+                .lock()
+                .map_err(|_| anyhow!("onnx session lock poisoned"))?;
+            let outputs = session.run(ort::inputs![self.input_name.as_str() => input])?;
+            let value = outputs
+                .iter()
+                .next()
+                .map(|(_, v)| v)
+                .ok_or_else(|| anyhow!("onnx embed produced no output"))?;
+            let (_, data) = value.try_extract_tensor::<f32>()?;
+            // The engine L2-normalizes uniformly across backends (the trait
+            // contract), so the raw model output is returned here.
+            Ok(Some(data.to_vec()))
+        }
     }
 
     /// The last two dimensions of an output shape (the feature/anchor axes after
@@ -318,6 +366,33 @@ impl LoadedModel for RknnModel {
             Err(e) => Err(e),
         }
     }
+
+    fn embed(
+        &self,
+        crop: &[u8],
+        width: u32,
+        height: u32,
+        format: FrameFormat,
+    ) -> Result<Option<Vec<f32>>> {
+        let fmt = fmt_str(format);
+        self.ensure_loaded()?;
+        let req = embed_request(&self.model_id, crop, width, height, fmt);
+        let resp = round_trip(&self.socket_path, &req)?;
+        match decode_embedding(&resp) {
+            Ok(emb) => Ok(Some(emb)),
+            Err(e) if is_not_loaded(&e) => {
+                // The sidecar restarted and dropped the model: reload + retry once.
+                self.mark_unloaded();
+                self.ensure_loaded()?;
+                let resp2 = round_trip(
+                    &self.socket_path,
+                    &embed_request(&self.model_id, crop, width, height, fmt),
+                )?;
+                decode_embedding(&resp2).map(Some)
+            }
+            Err(e) => Err(e),
+        }
+    }
 }
 
 // --- sidecar wire protocol (4-byte BE length + msgpack named map) ----------
@@ -385,6 +460,38 @@ fn infer_request(
         (mv("height"), rmpv::Value::from(height as u64)),
         (mv("format"), mv(format)),
     ])
+}
+
+/// An `embed` request: a pre-cropped, model-input-sized rgb24 crop the sidecar
+/// runs through a resident re-id model, returning the embedding. The crop is a
+/// msgpack bin (same as `infer`'s frame) so the sidecar can `np.frombuffer` it.
+fn embed_request(
+    model_id: &str,
+    crop: &[u8],
+    width: u32,
+    height: u32,
+    format: &str,
+) -> rmpv::Value {
+    rmpv::Value::Map(vec![
+        (mv("op"), mv("embed")),
+        (mv("model_id"), mv(model_id)),
+        (mv("crop"), rmpv::Value::Binary(crop.to_vec())),
+        (mv("crop_w"), rmpv::Value::from(width as u64)),
+        (mv("crop_h"), rmpv::Value::from(height as u64)),
+        (mv("format"), mv(format)),
+    ])
+}
+
+/// Decode an `{status, embedding}` reply into a flat f32 embedding.
+fn decode_embedding(resp: &rmpv::Value) -> Result<Vec<f32>> {
+    check_ok(resp)?;
+    let map = resp
+        .as_map()
+        .ok_or_else(|| anyhow!("response is not a map"))?;
+    let arr = map_get(map, "embedding")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| anyhow!("embed response has no embedding array"))?;
+    Ok(arr.iter().filter_map(num_f32).collect())
 }
 
 /// One blocking framed request/response against the sidecar socket. A fresh

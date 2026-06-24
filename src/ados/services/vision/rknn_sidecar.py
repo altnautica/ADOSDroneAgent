@@ -151,6 +151,42 @@ class RknnBackend:
         )
         return proto.ok_response(detections)
 
+    def embed(self, req: proto.EmbedRequest) -> dict[str, Any]:
+        """Run a resident re-id model over one pre-cropped box and return its
+        embedding. The crop arrives already cropped + resized to the model's
+        input (the engine does the crop so the ONNX and RKNN paths consume
+        identical bytes); the converted ``.rknn`` folds the appearance model's
+        normalization, so a raw uint8 crop is fed. The output tensor is flattened
+        to a 1-D embedding; the engine L2-normalizes it."""
+        model = self._models.get(req.model_id)
+        if model is None:
+            return proto.error_response(f"model not loaded: {req.model_id}")
+
+        try:
+            import numpy as np  # lazy: numpy only needed on the real embed path
+        except ImportError as exc:  # pragma: no cover - board has numpy
+            return proto.error_response(f"numpy unavailable: {exc}")
+
+        try:
+            # The crop reshapes to NHWC uint8 exactly like a detector frame.
+            crop_frame = proto.InferRequest(
+                model_id=req.model_id,
+                frame=req.crop,
+                width=req.crop_w,
+                height=req.crop_h,
+                format=req.format,
+            )
+            tensor = self._frame_to_input(np, crop_frame, model)
+            outputs = model.runtime.inference(inputs=[tensor])
+        except Exception as exc:  # pragma: no cover - depends on board wheel
+            log.error("rknn_embed_failed", model=req.model_id, error=str(exc))
+            return proto.error_response(f"rknn embed error: {exc}")
+
+        if not outputs:
+            return proto.error_response("rknn embed produced no output")
+        embedding = np.asarray(outputs[0], dtype=np.float32).reshape(-1).tolist()
+        return proto.embedding_response(embedding)
+
     @staticmethod
     def _frame_to_input(np: Any, req: proto.InferRequest, model: _LoadedModel) -> Any:
         """Reshape a raw RGB24 frame into an NHWC uint8 tensor.

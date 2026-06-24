@@ -25,7 +25,7 @@ use tokio::sync::{broadcast, Mutex, Semaphore};
 
 use crate::backend::{LoadedModel, VisionBackend};
 use crate::ring::RingWriter;
-use crate::tracker::{SingleObjectTracker, TrackerConfig};
+use crate::tracker::{Appearance, Candidate, SingleObjectTracker, TrackerConfig};
 
 /// Broadcast depth for frame descriptors and detections. Slow subscribers lag
 /// and skip rather than back up the publisher (latest-wins, like the rings).
@@ -65,6 +65,13 @@ pub struct VisionEngine {
     tracker_enabled: bool,
     /// Tuning the per-camera trackers are built with.
     tracker_cfg: TrackerConfig,
+    /// When true (and a `reid_model_id` is registered + loaded), the tracker is
+    /// fed a learned appearance embedding per detection so it re-identifies the
+    /// locked subject across a distractor crossing or a brief occlusion, not by
+    /// motion alone. Off ⇒ the long-standing motion-only association.
+    reid_enabled: bool,
+    /// The registered model id whose `embed` produces the appearance embedding.
+    reid_model_id: Option<String>,
 }
 
 impl VisionEngine {
@@ -86,6 +93,30 @@ impl VisionEngine {
         tracker_enabled: bool,
         tracker_cfg: TrackerConfig,
     ) -> Arc<Self> {
+        Self::with_tracker_reid(
+            backend,
+            slot_count,
+            tracker_enabled,
+            tracker_cfg,
+            false,
+            None,
+        )
+    }
+
+    /// Build the engine with the tracker and the learned-appearance (re-id) path
+    /// configured. When `reid_enabled` and `reid_model_id` names a registered,
+    /// loaded model, the tracker associates on the model's appearance embedding
+    /// (plus motion); otherwise it is motion-only. The re-id model is registered
+    /// separately (a second `register_model`), so a missing/failed re-id model
+    /// degrades cleanly to motion-only rather than rejecting the build.
+    pub fn with_tracker_reid(
+        backend: Box<dyn VisionBackend>,
+        slot_count: u32,
+        tracker_enabled: bool,
+        tracker_cfg: TrackerConfig,
+        reid_enabled: bool,
+        reid_model_id: Option<String>,
+    ) -> Arc<Self> {
         let (frame_tx, _) = broadcast::channel(BROADCAST_DEPTH);
         let (detection_tx, _) = broadcast::channel(BROADCAST_DEPTH);
         Arc::new(Self {
@@ -99,6 +130,8 @@ impl VisionEngine {
             trackers: Mutex::new(HashMap::new()),
             tracker_enabled,
             tracker_cfg,
+            reid_enabled,
+            reid_model_id,
         })
     }
 
@@ -261,7 +294,15 @@ impl VisionEngine {
             .infer(model_id, frame, desc.width, desc.height, desc.format)
             .await?;
         let detections = if self.tracker_enabled {
-            self.apply_tracker(&desc.camera_id, detections).await
+            self.apply_tracker(
+                &desc.camera_id,
+                detections,
+                frame,
+                desc.width,
+                desc.height,
+                desc.format,
+            )
+            .await
         } else {
             detections
         };
@@ -283,13 +324,115 @@ impl VisionEngine {
     /// best-matching input box; on a coast/ambiguous frame (no measured box) the
     /// tracker's predicted box is appended so the held target stays visible and
     /// followable.
-    async fn apply_tracker(&self, camera_id: &str, detections: Vec<Detection>) -> Vec<Detection> {
+    async fn apply_tracker(
+        &self,
+        camera_id: &str,
+        detections: Vec<Detection>,
+        frame: &[u8],
+        width: u32,
+        height: u32,
+        format: FrameFormat,
+    ) -> Vec<Detection> {
+        // Extract appearance embeddings BEFORE taking the tracker lock (the
+        // extraction takes the accelerator lease + the model lock; keeping the
+        // lock order accel→models, distinct from the tracker lock, avoids any
+        // nesting). When re-id is off this is skipped entirely (motion-only).
+        let appearances = if self.reid_enabled {
+            Some(
+                self.extract_appearances(frame, width, height, format, &detections)
+                    .await,
+            )
+        } else {
+            None
+        };
+
         let mut trackers = self.trackers.lock().await;
         let tracker = trackers
             .entry(camera_id.to_string())
             .or_insert_with(|| SingleObjectTracker::new(self.tracker_cfg));
-        let update = tracker.update(&detections);
+        let update = match appearances {
+            Some(apps) => {
+                let candidates: Vec<Candidate> = detections
+                    .iter()
+                    .cloned()
+                    .zip(apps)
+                    .map(|(det, app)| match app {
+                        Some(a) => Candidate::with_appearance(det, a),
+                        None => Candidate::motion_only(det),
+                    })
+                    .collect();
+                tracker.update_with_appearance(&candidates)
+            }
+            None => tracker.update(&detections),
+        };
         merge_tracked(detections, update)
+    }
+
+    /// Extract a per-detection appearance embedding for the re-id path: crop each
+    /// box to the re-id model's input, run the model's `embed`, and L2-normalize
+    /// the result. Returns one `Option<Appearance>` per detection (in order); a
+    /// `None` means motion-only for that box (the re-id model is not loaded, the
+    /// crop was degenerate, or the embed failed) and never blocks tracking. The
+    /// embeds run under the accelerator lease so they never contend with the
+    /// detector on the shared NPU.
+    async fn extract_appearances(
+        &self,
+        frame: &[u8],
+        width: u32,
+        height: u32,
+        format: FrameFormat,
+        detections: &[Detection],
+    ) -> Vec<Option<Appearance>> {
+        let none = || vec![None; detections.len()];
+        if format != FrameFormat::Rgb24 {
+            // The crop + ONNX/RKNN embed paths are rgb24; a non-rgb24 frame
+            // degrades to motion-only rather than guessing a conversion.
+            return none();
+        }
+        let Some(model_id) = self.reid_model_id.clone() else {
+            return none();
+        };
+        // The re-id model's input dims, if it is registered + loaded.
+        let dims = {
+            let models = self.models.lock().await;
+            match models.get(&model_id) {
+                Some(reg) if reg.loaded.is_some() => {
+                    Some((reg.meta.input_width, reg.meta.input_height))
+                }
+                _ => None,
+            }
+        };
+        let Some((iw, ih)) = dims else {
+            return none();
+        };
+        // Crop every box first (no lock needed).
+        let crops: Vec<Option<Vec<u8>>> = detections
+            .iter()
+            .map(|d| crate::reid::crop_resize_rgb24(frame, width, height, &d.bbox, iw, ih))
+            .collect();
+
+        // Embed under the accelerator lease + the model lock.
+        let _permit = self.accel_lease.acquire().await.ok();
+        let models = self.models.lock().await;
+        let Some(reg) = models.get(&model_id) else {
+            return none();
+        };
+        let Some(loaded) = reg.loaded.as_ref() else {
+            return none();
+        };
+        crops
+            .into_iter()
+            .map(|crop| {
+                let crop = crop?;
+                match loaded.embed(&crop, iw, ih, FrameFormat::Rgb24) {
+                    Ok(Some(mut emb)) if !emb.is_empty() => {
+                        crate::reid::l2_normalize(&mut emb);
+                        Some(Appearance::from_features(emb))
+                    }
+                    _ => None,
+                }
+            })
+            .collect()
     }
 
     /// The track id the camera's lock currently holds (confirmed or coasting), if
@@ -566,12 +709,33 @@ mod tests {
         let e =
             VisionEngine::with_tracker(Box::new(MockBackend), 4, true, TrackerConfig::default());
         // Run up to confirmation: the same box for a few frames.
-        e.apply_tracker("cam", vec![det(100.0, 100.0, 0.9, "uav")])
-            .await;
-        e.apply_tracker("cam", vec![det(100.0, 100.0, 0.9, "uav")])
-            .await;
+        e.apply_tracker(
+            "cam",
+            vec![det(100.0, 100.0, 0.9, "uav")],
+            &[],
+            0,
+            0,
+            FrameFormat::Rgb24,
+        )
+        .await;
+        e.apply_tracker(
+            "cam",
+            vec![det(100.0, 100.0, 0.9, "uav")],
+            &[],
+            0,
+            0,
+            FrameFormat::Rgb24,
+        )
+        .await;
         let confirmed = e
-            .apply_tracker("cam", vec![det(100.0, 100.0, 0.9, "uav")])
+            .apply_tracker(
+                "cam",
+                vec![det(100.0, 100.0, 0.9, "uav")],
+                &[],
+                0,
+                0,
+                FrameFormat::Rgb24,
+            )
             .await;
 
         let stamped: Vec<_> = confirmed.iter().filter(|d| d.track_id.is_some()).collect();
@@ -586,7 +750,9 @@ mod tests {
         // A dropped frame: the tracker coasts and the held target is appended
         // with the SAME id, still reported as the current track (never a silent
         // identity loss).
-        let coast = e.apply_tracker("cam", vec![]).await;
+        let coast = e
+            .apply_tracker("cam", vec![], &[], 0, 0, FrameFormat::Rgb24)
+            .await;
         assert!(
             coast.iter().any(|d| d.track_id == Some(id)),
             "the held target survives a dropped frame with its id"
@@ -610,8 +776,11 @@ mod tests {
         assert_eq!(e.current_track("cam").await, None);
 
         // Feed the designated box: it confirms under the SAME id, not a new one.
-        e.apply_tracker("cam", vec![target.clone()]).await;
-        let confirmed = e.apply_tracker("cam", vec![target.clone()]).await;
+        e.apply_tracker("cam", vec![target.clone()], &[], 0, 0, FrameFormat::Rgb24)
+            .await;
+        let confirmed = e
+            .apply_tracker("cam", vec![target.clone()], &[], 0, 0, FrameFormat::Rgb24)
+            .await;
         assert_eq!(e.current_track("cam").await, Some(id));
         assert!(confirmed.iter().any(|d| d.track_id == Some(id)));
 

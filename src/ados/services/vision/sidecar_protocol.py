@@ -44,6 +44,7 @@ MAX_FRAME_BYTES = 8 * 1024 * 1024
 # Request operations.
 OP_LOAD_MODEL = "load_model"
 OP_INFER = "infer"
+OP_EMBED = "embed"
 
 # Response statuses.
 STATUS_OK = "ok"
@@ -141,13 +142,58 @@ class InferRequest:
         )
 
 
-def parse_request(raw: dict[str, Any]) -> LoadModelRequest | InferRequest:
+@dataclass
+class EmbedRequest:
+    """Ask the sidecar to run a resident re-id model against one cropped box and
+    return its appearance embedding.
+
+    ``crop`` is the raw pixel buffer of the box, already cropped + resized to the
+    model's input (``crop_w`` x ``crop_h``) in ``format`` (the engine does the
+    crop so the ONNX and RKNN paths consume identical bytes). The reply carries a
+    flat ``embedding`` list of floats; the engine L2-normalizes it.
+    """
+
+    model_id: str
+    crop: bytes
+    crop_w: int
+    crop_h: int
+    format: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "op": OP_EMBED,
+            "model_id": self.model_id,
+            "crop": self.crop,
+            "crop_w": self.crop_w,
+            "crop_h": self.crop_h,
+            "format": self.format,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> EmbedRequest:
+        crop = raw.get("crop", b"")
+        if isinstance(crop, (bytearray, memoryview)):
+            crop = bytes(crop)
+        elif not isinstance(crop, bytes):
+            raise ProtocolError("embed.crop must be raw bytes")
+        return cls(
+            model_id=str(raw["model_id"]),
+            crop=crop,
+            crop_w=int(raw["crop_w"]),
+            crop_h=int(raw["crop_h"]),
+            format=str(raw["format"]),
+        )
+
+
+def parse_request(raw: dict[str, Any]) -> LoadModelRequest | InferRequest | EmbedRequest:
     """Dispatch a decoded request mapping to its typed form by ``op``."""
     op = raw.get("op")
     if op == OP_LOAD_MODEL:
         return LoadModelRequest.from_dict(raw)
     if op == OP_INFER:
         return InferRequest.from_dict(raw)
+    if op == OP_EMBED:
+        return EmbedRequest.from_dict(raw)
     raise ProtocolError(f"unknown request op: {op!r}")
 
 
@@ -192,6 +238,14 @@ def detection_dict(
 def ok_response(detections: list[dict[str, Any]] | None = None, **extra: Any) -> dict[str, Any]:
     """Build an ``ok`` response, defaulting ``detections`` to an empty list."""
     resp: dict[str, Any] = {"status": STATUS_OK, "detections": detections or []}
+    resp.update(extra)
+    return resp
+
+
+def embedding_response(embedding: list[float], **extra: Any) -> dict[str, Any]:
+    """Build an ``ok`` response carrying a flat re-id ``embedding`` (the engine
+    L2-normalizes it)."""
+    resp: dict[str, Any] = {"status": STATUS_OK, "embedding": [float(x) for x in embedding]}
     resp.update(extra)
     return resp
 
@@ -290,6 +344,8 @@ class Backend(Protocol):
 
     def infer(self, req: InferRequest) -> dict[str, Any]: ...
 
+    def embed(self, req: EmbedRequest) -> dict[str, Any]: ...
+
 
 class SidecarServer:
     """An asyncio Unix-socket server that frames requests, dispatches them to a
@@ -363,6 +419,8 @@ class SidecarServer:
         try:
             if isinstance(req, LoadModelRequest):
                 return await asyncio.to_thread(self._backend.load_model, req)
+            if isinstance(req, EmbedRequest):
+                return await asyncio.to_thread(self._backend.embed, req)
             return await asyncio.to_thread(self._backend.infer, req)
         except Exception as exc:  # backend bug must not drop the connection
             self._log.error("sidecar_backend_error", error=str(exc))

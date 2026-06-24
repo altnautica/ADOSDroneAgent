@@ -38,6 +38,7 @@ pub mod backend;
 pub mod config;
 pub mod detection_bus;
 pub mod engine;
+pub mod reid;
 pub mod ring;
 pub mod source;
 pub mod tracker;

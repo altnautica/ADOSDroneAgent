@@ -108,13 +108,62 @@ def test_detection_dict_matches_rust_field_names():
     )
     # BoundingBox fields, exactly as the Rust struct names them.
     assert set(det["bbox"].keys()) == {"x", "y", "width", "height"}
-    # Detection fields, exactly as the Rust struct names them.
-    assert set(det.keys()) == {"bbox", "class_label", "confidence", "track_id"}
+    # Detection fields, exactly as the Rust struct names them (the association
+    # fields are default-absent on the wire but always present as keys).
+    assert set(det.keys()) == {
+        "bbox",
+        "class_label",
+        "confidence",
+        "track_id",
+        "assoc_confidence",
+        "lock_state",
+    }
     assert det["bbox"]["x"] == 10.0
     assert det["bbox"]["width"] == 30.0
     assert det["class_label"] == "person"
     assert det["confidence"] == pytest.approx(0.91)
     assert det["track_id"] == 7
+
+
+def test_embed_request_round_trips_through_parse():
+    req = proto.EmbedRequest(
+        model_id="reid", crop=b"\x01\x02\x03", crop_w=256, crop_h=128, format="rgb24"
+    )
+    d = req.to_dict()
+    assert d["op"] == proto.OP_EMBED
+    parsed = proto.parse_request(d)
+    assert isinstance(parsed, proto.EmbedRequest)
+    assert parsed.model_id == "reid"
+    assert parsed.crop == b"\x01\x02\x03"
+    assert parsed.crop_w == 256
+    assert parsed.crop_h == 128
+    assert parsed.format == "rgb24"
+
+
+def test_embed_request_rejects_a_non_bytes_crop():
+    with pytest.raises(proto.ProtocolError):
+        proto.EmbedRequest.from_dict(
+            {"model_id": "r", "crop": "not-bytes", "crop_w": 256, "crop_h": 128, "format": "rgb24"}
+        )
+
+
+def test_embedding_response_shape():
+    r = proto.embedding_response([1.0, 2.0, 3.0])
+    assert r["status"] == proto.STATUS_OK
+    assert r["embedding"] == [1.0, 2.0, 3.0]
+
+
+def test_rknn_embed_unknown_model_is_an_error():
+    from ados.services.vision.rknn_sidecar import RknnBackend
+
+    backend = RknnBackend()
+    resp = backend.embed(
+        proto.EmbedRequest(
+            model_id="missing", crop=b"x" * (256 * 128 * 3), crop_w=256, crop_h=128, format="rgb24"
+        )
+    )
+    assert resp["status"] == proto.STATUS_ERROR
+    assert "not loaded" in resp["error"]
 
 
 def test_detection_dict_defaults_track_id_to_none():
