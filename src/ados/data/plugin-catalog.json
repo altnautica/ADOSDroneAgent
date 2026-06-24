@@ -57,6 +57,20 @@
       "halves": ["agent", "gcs"],
       "download_url": "https://github.com/altnautica/ADOSExtensions/releases/download/extensions/vision-nav-v0.2.8/com.altnautica.vision-nav-0.2.8.signed.adosplug",
       "archive_sha256": "cef55687bd7f5145cb7429c931ad133c552523863e706ebbb7261bc28f064813"
+    },
+    {
+      "id": "com.altnautica.follow-me",
+      "name": "ADOS Follow-Me",
+      "version": "0.1.0",
+      "description": "Click a detected person in the live video and the drone follows at a set standoff distance and height. On-companion vision lock with a safety gate that stops on an uncertain or lost lock.",
+      "author": "Altnautica",
+      "homepage": "https://github.com/altnautica/ADOSExtensions/tree/main/extensions/follow-me",
+      "license": "GPL-3.0-or-later",
+      "risk": "high",
+      "category": "ai",
+      "halves": ["agent", "gcs"],
+      "download_url": "https://github.com/altnautica/ADOSExtensions/releases/download/follow-me-v0.1.0/com.altnautica.follow-me-0.1.0.signed.adosplug",
+      "archive_sha256": "b5463bef3a36c843f93adb1e2f7d54efd44e9f45acefe0dd1429886cc1ff402a"
     }
   ]
 }
