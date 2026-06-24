@@ -41,6 +41,16 @@ fn run_dir() -> PathBuf {
     PathBuf::from(std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string()))
 }
 
+/// The per-plugin socket directory, where the per-plugin sockets, token env
+/// files, and the published-state sidecars live. Honours `ADOS_PLUGIN_SOCKET_DIR`
+/// (the same env the native front reads to locate a plugin's state sidecar),
+/// defaulting to [`DEFAULT_SOCKET_DIR`] so both daemons agree on the path.
+fn plugin_socket_dir() -> PathBuf {
+    PathBuf::from(
+        std::env::var("ADOS_PLUGIN_SOCKET_DIR").unwrap_or_else(|_| DEFAULT_SOCKET_DIR.to_string()),
+    )
+}
+
 /// The running agent semver, used by the supervisor's compatibility gate. The
 /// `ADOS_AGENT_VERSION` env mirrors the Python `ados.__version__` source; the
 /// crate version is the inert fallback when the env is unset.
@@ -344,7 +354,7 @@ async fn main() -> Result<()> {
 
     let paths = ados_plugin_host::supervisor::Paths::default();
     let install_dir = paths.install_dir.clone();
-    let socket_dir = PathBuf::from(DEFAULT_SOCKET_DIR);
+    let socket_dir = plugin_socket_dir();
     let run = run_dir();
     let version = agent_version();
 
