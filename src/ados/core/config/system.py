@@ -1,4 +1,4 @@
-"""System-level service configuration (OTA, vision, logging, pairing, discovery, swarm, UI)."""
+"""System-level service configuration (OTA, vision, atlas, logging, pairing, discovery, swarm, UI)."""
 
 from __future__ import annotations
 
@@ -26,6 +26,18 @@ class VisionConfig(BaseModel):
     models_cache_max_mb: int = 500
     registry_url: str = "https://raw.githubusercontent.com/altnautica/ADOSMissionControl/main/public/models/registry.json"
     auto_download: bool = True
+
+
+class AtlasConfig(BaseModel):
+    """ADOS Atlas world-model gate.
+
+    Default off: a fresh agent runs no Atlas capture, no compute-node services,
+    and no perception offload until this is enabled. One flag keeps the whole
+    program inert, the same shape as ``VisionConfig``. The capture service and
+    the compute services read it when they ship in later releases.
+    """
+
+    enabled: bool = False
 
 
 class LoggingConfig(BaseModel):

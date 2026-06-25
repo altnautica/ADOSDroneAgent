@@ -14,6 +14,7 @@ from .mavlink import MavlinkConfig
 from .network import NetworkConfig
 from .security import SecurityConfig
 from .system import (
+    AtlasConfig,
     DiscoveryConfig,
     LoggingConfig,
     OtaConfig,
@@ -39,6 +40,7 @@ class ADOSConfig(BaseModel):
     pairing: PairingConfig = PairingConfig()
     discovery: DiscoveryConfig = DiscoveryConfig()
     vision: VisionConfig = VisionConfig()
+    atlas: AtlasConfig = AtlasConfig()
     swarm: SwarmConfig = SwarmConfig()
     ground_station: GroundStationConfig = GroundStationConfig()
     ui: UiConfig = Field(default_factory=UiConfig)

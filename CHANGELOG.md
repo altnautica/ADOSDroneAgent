@@ -4,6 +4,14 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.98.1] - 2026-06-26
+
+### Added
+
+- An inert `atlas` config gate (`atlas.enabled`, default off) for the
+  world-model feature. Mirrors the `vision` gate. The capture and compute
+  services read it when they ship; nothing runs while it is off.
+
 ## [0.62.0] - 2026-06-11
 
 ### Added
