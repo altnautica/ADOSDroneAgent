@@ -52,6 +52,9 @@ AGENT_CAPABILITIES: frozenset[str] = frozenset(
         "mavlink.tunnel",
         "radio.aux_stream",
         "display.oled.page",
+        "compute.job.submit",
+        "compute.job.read",
+        "compute.dataset.write",
     }
 )
 
@@ -364,6 +367,27 @@ CAPABILITY_CATALOG: dict[str, dict[str, str]] = {
         "category": "hardware",
         "risk": "low",
         "risk_reason": "Draws to the local display only; no effect on flight or the network.",
+    },
+    "compute.job.submit": {
+        "label": "Submit a job to the compute node",
+        "description": "Lets the plugin submit a job to a paired compute node: a reconstruction over a keyframe bag, or a streaming offload session that sends frames to the node and receives detections or poses back. The job runs off the drone on the node's accelerator; the plugin does not get raw compute access.",
+        "category": "compute_process",
+        "risk": "medium",
+        "risk_reason": "Sends data off the drone to another node and consumes shared compute; a streaming offload also moves imagery off the normal path.",
+    },
+    "compute.job.read": {
+        "label": "Read compute-node job status and results",
+        "description": "Lets the plugin poll the status and progress of jobs it submitted and learn where the finished artifact can be fetched. Read-only on the job interface; it does not start work or command the vehicle.",
+        "category": "compute_process",
+        "risk": "low",
+        "risk_reason": "Read-only on the job interface; no effect on flight or on other plugins' jobs.",
+    },
+    "compute.dataset.write": {
+        "label": "Upload a dataset to the compute node",
+        "description": "Lets the plugin upload an input dataset (a keyframe bag, or the frames of a live session) to a paired compute node for a job to consume. The data leaves the drone for the node's local store.",
+        "category": "compute_process",
+        "risk": "medium",
+        "risk_reason": "Moves captured data (imagery, keyframes) off the drone to another node.",
     },
 }
 

@@ -29,7 +29,9 @@
 //!   constant-time key compare, on-box loopback trust, access decision) shared
 //!   by the native HTTP control surface and the direct MAVLink WebSocket proxy.
 
+pub mod atlas;
 pub mod capabilities;
+pub mod compute;
 pub mod dispatch;
 pub mod frame;
 pub mod framebus;

@@ -4,6 +4,19 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.0] - 2026-06-26
+
+### Added
+
+- An Atlas world-model wire contract in `ados-protocol`: the `atlas.*` and
+  `plugin.atlas.*` topics, a tier-aware keyframe envelope (light descriptor vs
+  full keyframe, camera id and role, the VIO-vs-offloaded pose source), the
+  world-model descriptors, the offloaded-pose return leg, and a compute-offload
+  contract (the job interface and the master/slave cluster shape).
+- Capabilities `compute.job.submit`, `compute.job.read`, and
+  `compute.dataset.write` for pushing work to a compute node. Inert: no service
+  consumes the contract yet.
+
 ## [0.98.1] - 2026-06-26
 
 ### Added

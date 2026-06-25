@@ -26,7 +26,7 @@ NEW_AGENT_CAPS = (
 # single source of truth (generated from capabilities.toml); this test guards
 # that the count does not change unnoticed, while the internal-consistency check
 # below proves the catalog and its metadata table agree.
-EXPECTED_AGENT_CAPABILITY_COUNT = 43
+EXPECTED_AGENT_CAPABILITY_COUNT = 46
 
 
 def test_agent_capability_count() -> None:
