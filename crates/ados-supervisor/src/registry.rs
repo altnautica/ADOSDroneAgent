@@ -138,8 +138,8 @@ pub const SERVICE_REGISTRY: &[ServiceDef] = &[
     // ados-vision binary on the drone profile only. The engine self-gates on
     // `vision.enabled` (it exits cleanly when vision is off, the default), so the
     // unit is a clean no-op until provisioning enables vision + a detector. NOT
-    // in the headless KEEP set: vision/AI is excluded from the lean headless core
-    // (DEC-180). On an NPU board the engine reaches its model through the
+    // in the headless KEEP set: vision/AI is excluded from the lean headless
+    // core. On an NPU board the engine reaches its model through the
     // ados-vision-rknn sidecar.
     def("ados-vision", Hardware, Some("drone"), None),
     // On-demand.

@@ -36,7 +36,7 @@ struct AgentSection {
     profile: Option<String>,
     /// `agent.headless`: when true, the supervisor boots only the lean KEEP set
     /// (the Rust core), blocking FastAPI / cloud / health / GS units. Absent or
-    /// false → the full agent. The zero-Python flight profile (DEC-180).
+    /// false → the full agent. The zero-Python flight profile.
     #[serde(default)]
     headless: Option<bool>,
 }
