@@ -408,7 +408,7 @@ risk_reason = "Draws to the local display only; no effect on flight or the netwo
 enforced = false
 
 # ===========================================================================
-# GCS capabilities (21): 14 UI slots + 7 data/command/mission/cloud
+# GCS capabilities (19): 12 UI slots + 7 data/command/mission/cloud
 # ===========================================================================
 
 [[gcs]]
@@ -420,28 +420,12 @@ risk = "low"
 risk_reason = "Sandboxed iframe; no host DOM access."
 
 [[gcs]]
-id = "ui.slot.command-tab"
-label = "Add a tab to the command page"
-description = "Lets the plugin add a top-level tab in the Command area for fleet-wide tools. The tab renders inside a sandboxed iframe."
-category = "ui_slot"
-risk = "low"
-risk_reason = "Sandboxed iframe; fleet-scoped read-only by default."
-
-[[gcs]]
 id = "ui.slot.hardware-tab"
 label = "Add a tab to the hardware page"
 description = "Lets the plugin add a tab on the Hardware page so the operator can inspect or configure devices the plugin manages."
 category = "ui_slot"
 risk = "low"
 risk_reason = "Sandboxed iframe inside the Hardware page."
-
-[[gcs]]
-id = "ui.slot.suite-widget"
-label = "Add a widget to a mission suite"
-description = "Lets the plugin contribute a widget to a mission suite layout (Agriculture, Survey, Inspection, etc.) for in-mission readouts and controls."
-category = "ui_slot"
-risk = "low"
-risk_reason = "Sandboxed iframe inside a suite layout."
 
 [[gcs]]
 id = "ui.slot.mission-template"
@@ -476,14 +460,6 @@ risk = "low"
 risk_reason = "Toasts only; the operator can mute or dismiss any channel."
 
 [[gcs]]
-id = "ui.slot.smart-function"
-label = "Register a smart function"
-description = "Lets the plugin add an entry to the Smart Functions list so the operator can trigger a plugin-driven action from the GCS toolbar."
-category = "ui_slot"
-risk = "medium"
-risk_reason = "Smart functions can chain commands; the operator must approve each invocation."
-
-[[gcs]]
 id = "ui.slot.settings-section"
 label = "Add a section to the Settings page"
 description = "Lets the plugin add its own section to the GCS Settings page so the operator can configure the plugin from a single place."
@@ -516,12 +492,20 @@ risk = "medium"
 risk_reason = "A bindable skill triggers plugin behavior; the plugin still needs its own flight-control capabilities to act, and the cockpit's arm/confirm gates still apply."
 
 [[gcs]]
-id = "ui.slot.drone-detail-tab"
-label = "Add a tab to the drone detail panel"
-description = "Lets the plugin add a per-drone tab inside the drone detail panel. The tab is scoped to the currently selected drone."
+id = "ui.slot.node-detail-tab"
+label = "Add a tab to the node detail panel"
+description = "Lets the plugin add a per-node tab inside the node detail panel on any node profile (drone, ground station, compute). The tab is scoped to the currently selected node."
 category = "ui_slot"
 risk = "low"
-risk_reason = "Sandboxed iframe scoped to one drone."
+risk_reason = "Sandboxed iframe scoped to one node."
+
+[[gcs]]
+id = "ui.slot.cockpit-panel"
+label = "Add a panel to the cockpit quick settings"
+description = "Lets the plugin add a panel to the in-flight cockpit quick-settings surface, scoped to the currently selected drone."
+category = "ui_slot"
+risk = "low"
+risk_reason = "Sandboxed iframe scoped to the cockpit of one drone."
 
 [[gcs]]
 id = "telemetry.subscribe"

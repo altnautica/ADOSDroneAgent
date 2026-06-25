@@ -467,7 +467,7 @@ fn persist_pair_state(
 /// replaced with an empty mapping (matching the residual `_get_section`, which
 /// overwrites a non-dict section with `{}`). Only the document root being a
 /// non-mapping fails (handled by the caller's earlier `as_mapping_mut`).
-fn section_mut<'a>(
+pub(crate) fn section_mut<'a>(
     root: &'a mut serde_norway::Mapping,
     parent: &str,
     child: &str,
@@ -514,7 +514,7 @@ fn top_section_mut<'a>(
 /// Write `bytes` to `path` atomically: ensure the parent dir, write a `.tmp`
 /// sibling, then rename over the target. Mirrors the residual tmp-write +
 /// `os.rename` idiom. Returns `Err(message)` on any I/O fault.
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }

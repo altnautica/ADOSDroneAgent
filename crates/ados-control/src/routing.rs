@@ -84,6 +84,10 @@ fn native_routes() -> Vec<NativeRoute> {
         post("/api/logs/push"),
         // Vision designate (operator click-to-follow).
         post("/api/vision/designate"),
+        // Vision detector selection (PUT pick / DELETE clear) + custom-model upload.
+        put("/api/vision/detector"),
+        delete("/api/vision/detector"),
+        post("/api/vision/models/upload"),
         // Plugin per-drone config write (GCS skill toggle / settings → live host).
         put("/api/plugins/{plugin_id}/config"),
         // Plugin published-state read (a {plugin_id} template under the otherwise
@@ -404,7 +408,7 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            109,
+            112,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);
@@ -536,6 +540,12 @@ mod tests {
         // The plugin per-drone config write is native (a control-plane write, so
         // it stays off the residual Python plugin surface).
         assert!(has(Method::PUT, "/api/plugins/{plugin_id}/config"));
+        // The vision detector selection (PUT/DELETE) + custom-model upload (POST)
+        // are native control-plane writes under the otherwise permanent-Python
+        // /api/vision prefix (only these exact routes are served natively).
+        assert!(has(Method::PUT, "/api/vision/detector"));
+        assert!(has(Method::DELETE, "/api/vision/detector"));
+        assert!(has(Method::POST, "/api/vision/models/upload"));
         // The system-resources snapshot is native.
         assert!(has(Method::GET, "/api/system"));
         // The read-tail wave: composite diagnostics + the GS recording/ui/input reads.

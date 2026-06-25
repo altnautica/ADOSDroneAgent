@@ -452,6 +452,224 @@ def test_get_cache_usage_counts_only_model_extensions(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Custom-model catalog (the native upload route writes it; the manager reads it)
+# ---------------------------------------------------------------------------
+
+
+def test_list_custom_empty_when_no_catalog(tmp_path: Path) -> None:
+    """No catalog file → an empty custom list (a rig with no sideloaded models)."""
+    mgr = ModelManager(_make_config(tmp_path), npu_tops=1.0)
+    assert mgr.list_custom() == []
+
+
+def test_list_custom_reads_catalog_entries(tmp_path: Path) -> None:
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    (models_dir / "custom-catalog.json").write_text(
+        json.dumps(
+            [
+                {
+                    "id": "custom-1",
+                    "name": "Custom One",
+                    "classes": ["person", "car"],
+                    "head": "yolo8",
+                    "input_w": 640,
+                    "input_h": 640,
+                    "runtime": "onnx",
+                    "board_match": "generic",
+                    "filename": "custom-1.onnx",
+                    "sha256": "abc",
+                    "size_bytes": 12,
+                    "custom": True,
+                },
+                {"name": "no-id-dropped"},  # entries with no id are dropped
+            ]
+        )
+    )
+    mgr = ModelManager(_make_config(tmp_path), npu_tops=1.0)
+    custom = mgr.list_custom()
+    assert len(custom) == 1
+    assert custom[0]["id"] == "custom-1"
+    assert custom[0]["classes"] == ["person", "car"]
+
+
+def test_list_custom_tolerates_malformed_catalog(tmp_path: Path) -> None:
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    (models_dir / "custom-catalog.json").write_text("{ not an array }")
+    mgr = ModelManager(_make_config(tmp_path), npu_tops=1.0)
+    assert mgr.list_custom() == []
+
+
+def test_list_installed_folds_custom_metadata_over_the_bare_file(tmp_path: Path) -> None:
+    """A sideloaded file + its catalog entry collapse to one rich record."""
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    (models_dir / "custom-1.onnx").write_bytes(b"x" * 12)
+    (models_dir / "registry-model.rknn").write_bytes(b"y" * 8)
+    (models_dir / "custom-catalog.json").write_text(
+        json.dumps(
+            [
+                {
+                    "id": "custom-1",
+                    "name": "Custom One",
+                    "classes": ["person"],
+                    "filename": "custom-1.onnx",
+                    "custom": True,
+                }
+            ]
+        )
+    )
+    mgr = ModelManager(_make_config(tmp_path), npu_tops=1.0)
+    installed = mgr.list_installed()
+
+    by_id = {item["id"]: item for item in installed}
+    # The custom model appears once, with its rich catalog metadata (not a bare twin).
+    assert "custom-1" in by_id
+    assert by_id["custom-1"]["classes"] == ["person"]
+    assert by_id["custom-1"]["custom"] is True
+    # Only one record for the custom id (no duplicate bare-file entry).
+    assert sum(1 for item in installed if item["id"] == "custom-1") == 1
+    # A non-custom on-disk model is still listed by the file scan.
+    assert "registry-model" in by_id
+    assert by_id["registry-model"]["format"] == "rknn"
+
+
+# ---------------------------------------------------------------------------
+# Download sha256 verification
+# ---------------------------------------------------------------------------
+
+
+class _FakeStreamResponse:
+    """An async streaming response that yields the configured body bytes."""
+
+    def __init__(self, body: bytes, headers: dict[str, str] | None = None) -> None:
+        self._body = body
+        self.headers = headers or {}
+        self.status_code = 200
+
+    async def __aenter__(self) -> _FakeStreamResponse:
+        return self
+
+    async def __aexit__(self, *_exc: Any) -> None:
+        return None
+
+    def raise_for_status(self) -> None:
+        return None
+
+    async def aiter_bytes(self, chunk_size: int = 65536) -> Any:
+        yield self._body
+
+
+class _FakeStreamClient:
+    """An async client whose ``stream`` returns the queued streaming response."""
+
+    def __init__(self, response: _FakeStreamResponse) -> None:
+        self._response = response
+
+    async def __aenter__(self) -> _FakeStreamClient:
+        return self
+
+    async def __aexit__(self, *_exc: Any) -> None:
+        return None
+
+    def stream(self, _method: str, _url: str, headers: dict[str, str] | None = None):
+        return self._response
+
+
+@pytest.mark.asyncio
+async def test_download_model_verifies_sha256_and_rejects_a_mismatch(tmp_path: Path) -> None:
+    """A variant with a wrong pinned sha256 → the file is deleted and the call fails."""
+    body = b"model-bytes-here"
+    registry = [
+        {
+            "id": "verified",
+            "task": "detection",
+            "variants": [
+                {
+                    "min_tops": 0.0,
+                    "url": "https://example.invalid/verified.onnx",
+                    "filename": "verified.onnx",
+                    "size_bytes": len(body),
+                    "sha256": "0" * 64,  # deliberately wrong
+                }
+            ],
+        }
+    ]
+    mgr = ModelManager(_make_config(tmp_path), npu_tops=1.0)
+    mgr._registry = [ModelInfo(**entry) for entry in registry]
+
+    client = _FakeStreamClient(_FakeStreamResponse(body))
+    with patch("httpx.AsyncClient", return_value=client):
+        with pytest.raises(ValueError, match="sha256 does not match"):
+            await mgr.download_model("verified")
+
+    # The mismatched file must NOT be left on disk.
+    assert not (tmp_path / "models" / "verified.onnx").exists()
+
+
+@pytest.mark.asyncio
+async def test_download_model_accepts_a_matching_sha256(tmp_path: Path) -> None:
+    """A correct pinned sha256 → the download completes and the file remains."""
+    import hashlib
+
+    body = b"the-real-model-bytes"
+    digest = hashlib.sha256(body).hexdigest()
+    registry = [
+        {
+            "id": "good",
+            "task": "detection",
+            "variants": [
+                {
+                    "min_tops": 0.0,
+                    "url": "https://example.invalid/good.onnx",
+                    "filename": "good.onnx",
+                    "size_bytes": len(body),
+                    "sha256": digest,
+                }
+            ],
+        }
+    ]
+    mgr = ModelManager(_make_config(tmp_path), npu_tops=1.0)
+    mgr._registry = [ModelInfo(**entry) for entry in registry]
+
+    client = _FakeStreamClient(_FakeStreamResponse(body))
+    with patch("httpx.AsyncClient", return_value=client):
+        path = await mgr.download_model("good")
+
+    assert Path(path).exists()
+    assert Path(path).read_bytes() == body
+
+
+@pytest.mark.asyncio
+async def test_download_model_skips_verification_when_no_sha256(tmp_path: Path) -> None:
+    """A variant with no pinned digest downloads without a hash check (best effort)."""
+    body = b"unverified-model"
+    registry = [
+        {
+            "id": "nohash",
+            "task": "detection",
+            "variants": [
+                {
+                    "min_tops": 0.0,
+                    "url": "https://example.invalid/nohash.onnx",
+                    "filename": "nohash.onnx",
+                    "size_bytes": len(body),
+                }
+            ],
+        }
+    ]
+    mgr = ModelManager(_make_config(tmp_path), npu_tops=1.0)
+    mgr._registry = [ModelInfo(**entry) for entry in registry]
+
+    client = _FakeStreamClient(_FakeStreamResponse(body))
+    with patch("httpx.AsyncClient", return_value=client):
+        path = await mgr.download_model("nohash")
+
+    assert Path(path).exists()
+
+
+# ---------------------------------------------------------------------------
 # Dataclass helpers
 # ---------------------------------------------------------------------------
 

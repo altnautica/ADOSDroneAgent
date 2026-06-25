@@ -65,11 +65,14 @@ pub mod system;
 pub mod system_resources;
 pub mod video;
 pub mod vision;
+pub mod vision_detector;
+pub mod vision_upload;
 pub mod wfb;
 pub mod wfb_pair_write;
 pub mod wfb_write;
 pub mod ws_ticket;
 
+use axum::extract::DefaultBodyLimit;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
@@ -132,6 +135,26 @@ pub fn build_router(state: AppState, net_native: bool, hid_native: bool) -> Rout
         // tracker for a camera onto the box the operator clicked, via the vision
         // socket. Auth-gated when paired (a write), 503 when vision is not up.
         .route("/api/vision/designate", post(vision::designate))
+        // Vision detector selection: pick (PUT) / clear (DELETE) the model the
+        // engine auto-loads. The write merges the vision.detector config block
+        // (model_id + enabled, optional model_path) and restarts ados-vision so
+        // the new detector takes effect. Auth-gated when paired (a write).
+        .route(
+            "/api/vision/detector",
+            put(vision_detector::put_detector).delete(vision_detector::delete_detector),
+        )
+        // Vision custom-model upload: a multipart file + metadata streamed into
+        // the models dir, hashed, and recorded in the custom-model catalog so the
+        // model manager + the models-list route surface it. Auth-gated when paired.
+        // The default 2 MB multipart body cap is lifted for this one route — a real
+        // detector file (a yolov8n `.onnx` is ~12 MB, a `.rknn` several MB) exceeds
+        // it, and this route's whole purpose is sideloading those files. The handler
+        // streams the field to disk chunk-by-chunk, so disabling the cap does not
+        // buffer the model in RAM; the on-disk size is bounded by the partition.
+        .route(
+            "/api/vision/models/upload",
+            post(vision_upload::upload_model).layer(DefaultBodyLimit::disable()),
+        )
         // Plugin per-drone config write: a GCS skill toggle / per-drone settings
         // change flips a plugin's `active`/settings config in the live plugin
         // host (the daemon's control socket). Auth-gated when paired (a write),

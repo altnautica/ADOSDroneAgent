@@ -267,21 +267,60 @@ class ModelManager:
             log.warning("registry_fetch_failed", error=str(exc))
             return self._registry
 
+    # The catalog file (in the models dir) the native upload route writes for each
+    # operator-supplied model; it carries the rich metadata the bare file scan
+    # cannot infer (classes, head, input dims, runtime, board_match).
+    _CUSTOM_CATALOG = "custom-catalog.json"
+
+    def list_custom(self) -> list[dict[str, Any]]:
+        """List operator-uploaded models from the custom-model catalog.
+
+        The catalog is a JSON array of entry objects the native upload route
+        writes (``{id, name, classes, head, input_w, input_h, runtime,
+        board_match, filename, sha256, size_bytes, custom}``). A missing /
+        unreadable / non-array catalog yields an empty list, so a rig with no
+        sideloaded models surfaces nothing here.
+        """
+        catalog_path = self._models_dir / self._CUSTOM_CATALOG
+        try:
+            data = json.loads(catalog_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return []
+        if not isinstance(data, list):
+            return []
+        return [e for e in data if isinstance(e, dict) and e.get("id")]
+
     def list_installed(self) -> list[dict[str, Any]]:
-        """List models already installed in the models directory."""
+        """List models already installed in the models directory.
+
+        Combines the on-disk file scan with the custom-model catalog: a file the
+        scan finds and a catalog entry for the same id collapse to one record that
+        keeps the richer catalog metadata, so a sideloaded model appears once with
+        its classes/head/dims rather than as a bare ``{id, filename}`` twin.
+        """
         installed: list[dict[str, Any]] = []
+        seen: set[str] = set()
         if not self._models_dir.is_dir():
             return installed
+
+        # The catalog metadata first, so it wins the id over the bare file twin.
+        for entry in self.list_custom():
+            mid = str(entry.get("id"))
+            installed.append({**entry, "id": mid, "custom": True})
+            seen.add(mid)
 
         valid_suffixes = {".rknn", ".tflite", ".onnx", ".engine"}
         for model_file in sorted(self._models_dir.iterdir()):
             if model_file.is_file() and model_file.suffix in valid_suffixes:
+                if model_file.stem in seen:
+                    continue
                 installed.append({
                     "id": model_file.stem,
                     "filename": model_file.name,
                     "size_bytes": model_file.stat().st_size,
                     "format": model_file.suffix.lstrip("."),
                 })
+                seen.add(model_file.stem)
         return installed
 
     def select_best_variant(self, model_id: str) -> dict[str, Any] | None:
@@ -407,6 +446,26 @@ class ModelManager:
 
         if etag_file.exists():
             etag_file.unlink(missing_ok=True)
+
+        # Verify the downloaded file against the variant's pinned digest, the same
+        # gate the by-reference resolver applies: a mismatch means a corrupted or
+        # tampered download, so delete the file and fail rather than register a bad
+        # model. A variant with no declared sha256 skips the check (best effort).
+        want = variant.get("sha256")
+        if isinstance(want, str) and want:
+            got = sha256_file(final_file)
+            if got != want.lower():
+                Path(final_file).unlink(missing_ok=True)
+                progress.state = DownloadState.FAILED
+                log.error(
+                    "model_download_sha256_mismatch",
+                    model=model_id,
+                    expected=want.lower(),
+                    actual=got,
+                )
+                raise ValueError(
+                    f"downloaded model sha256 does not match the pinned digest for {model_id}"
+                )
 
         progress.state = DownloadState.COMPLETED
         progress.speed_bps = 0.0

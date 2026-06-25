@@ -88,8 +88,9 @@ hyper = { workspace = true, features = ["client"] }
 # The `ws` feature adds the native WebSocket extractor the ground-station relay
 # routes use (the uplink-matrix change stream + the PIC arbiter transition
 # stream), so those upgrades are served by the front directly rather than
-# proxied to the residual.
-axum = { workspace = true, features = ["ws"] }
+# proxied to the residual. The `multipart` feature adds the streaming multipart
+# extractor the custom-model upload route reads the file + metadata parts with.
+axum = { workspace = true, features = ["ws", "multipart"] }
 tower = { workspace = true }
 tower-http = { workspace = true }
 hyper-util = { workspace = true }

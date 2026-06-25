@@ -84,6 +84,7 @@ const ALLOWED_UNITS: &[&str] = &[
     "ados-pic",
     "ados-uplink-router",
     "ados-video",
+    "ados-vision",
     "ados-wfb",
     "ados-wfb-rx",
     "ados-wfb-relay",
@@ -116,6 +117,17 @@ const RESTART_TIMEOUT: Duration = Duration::from_secs(30);
 /// all `{"status":"error", ...}` bodies, never an HTTP error.
 pub async fn restart_service(Path(name): Path<String>) -> Json<Value> {
     Json(restart_service_result(&name))
+}
+
+/// Restart one allowlisted `ados-*` unit and return the same verdict body the
+/// service-restart route produces, for the routes that need a restart as a side
+/// effect of another write (e.g. the vision-detector selection restarting
+/// `ados-vision`). The name flows through the identical allowlist guard +
+/// GS-alias + restart-confirmation path, so a unit outside the fixed set is
+/// refused here too; the caller folds the returned `{status, ...}` into its own
+/// response without trusting an arbitrary unit name.
+pub fn restart_unit(name: &str) -> Value {
+    restart_service_result(name)
 }
 
 /// The pure restart logic + the systemd shell-outs, factored out of the axum

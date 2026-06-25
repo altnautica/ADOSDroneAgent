@@ -136,7 +136,7 @@ def test_gcs_capability_count_matches_ts_catalog() -> None:
     assert len(entries) >= 17
     # Spot-check spec-defined slots survive.
     for required in (
-        "ui.slot.drone-detail-tab",
+        "ui.slot.node-detail-tab",
         "telemetry.subscribe",
         "command.send",
         "mission.read",

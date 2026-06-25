@@ -3,32 +3,69 @@
 """Vision model registry + download API routes.
 
 Provides:
-  - GET  /api/vision/models                          list registry + installed + cache usage
+  - GET  /api/vision/models                          list registry + installed + custom + active + cache usage
   - POST /api/vision/models/{model_id}/download     pick the best variant for this board
   - GET  /api/vision/models/{model_id}/status       download progress + installed state
 
 The model cache is decoupled from any specific autonomy feature; plugins
 that need an inference model load via the same registry.
+
+The active-detector selection and the custom-model upload are control-plane
+writes served by the native front; this read route projects them back so the
+GCS sees which model is active and lists operator-uploaded models alongside the
+registry and the on-disk files.
 """
 
 from __future__ import annotations
 
+from typing import Any
+
+import yaml
 from fastapi import APIRouter
 
 from ados.api.deps import get_agent_app
+from ados.core.paths import CONFIG_YAML
 
 router = APIRouter()
 
 
+def _active_detector_model_id() -> str | None:
+    """The currently-selected detector model id, read straight from the config.
+
+    The native ``PUT /api/vision/detector`` route writes ``vision.detector`` into
+    ``/etc/ados/config.yaml`` (a block the Python ``VisionConfig`` model does not
+    declare, so it is dropped on the typed load); the raw YAML is the source of
+    truth. A missing file / block / id yields ``None``.
+    """
+    try:
+        with open(str(CONFIG_YAML), encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+    except (OSError, yaml.YAMLError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    vision = data.get("vision")
+    if not isinstance(vision, dict):
+        return None
+    detector = vision.get("detector")
+    if not isinstance(detector, dict):
+        return None
+    model_id = detector.get("model_id")
+    return model_id if isinstance(model_id, str) and model_id else None
+
+
 @router.get("/vision/models")
-async def list_vision_models():
-    """List available and installed vision models."""
+async def list_vision_models() -> dict[str, Any]:
+    """List available, installed, and custom vision models plus the active one."""
+    active = _active_detector_model_id()
     app = get_agent_app()
     mm = getattr(app, "model_manager", None)
     if mm is None:
         return {
             "registry": [],
             "installed": [],
+            "custom": [],
+            "active": active,
             "cache": {"used_bytes": 0, "max_bytes": 0, "used_mb": 0, "max_mb": 0},
         }
 
@@ -38,6 +75,8 @@ async def list_vision_models():
     return {
         "registry": [m.to_dict() for m in mm.registry],
         "installed": mm.list_installed(),
+        "custom": mm.list_custom(),
+        "active": active,
         "cache": mm.get_cache_usage(),
     }
 
