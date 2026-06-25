@@ -5,10 +5,11 @@
 //!
 //!   cargo test -p ados-vision --features onnx --test onnx_coco_infer -- --ignored
 //!
-//! It proves the real model loads into an ORT session and one inference call
-//! returns a valid (possibly empty) detection set without panicking — the
-//! end-to-end CPU detector path. A real person-detection assertion belongs to
-//! the SITL run with real video; here a synthetic frame just exercises the path.
+//! It proves the real model loads into an ORT session and inference runs
+//! end-to-end on the CPU path: one test runs on a synthetic frame (the path
+//! always executes), and a second runs on a real decoded person frame
+//! (`ADOS_TEST_PERSON_RGB`) and asserts the detector finds a real person — the
+//! live perception check the SITL run leans on.
 
 #![cfg(feature = "onnx")]
 
@@ -63,6 +64,55 @@ fn coco_onnx_loads_and_infers_one_frame() {
         assert!(d.confidence >= 0.0 && d.confidence <= 1.0);
         assert!(d.bbox.width >= 0.0 && d.bbox.height >= 0.0);
     }
+}
+
+/// The real detector finds a real person. `#[ignore]` by default: it needs the
+/// COCO ONNX plus a 640x640 rgb24 frame of a person at `ADOS_TEST_PERSON_RGB`
+/// (decode any photo with ffmpeg: `-vf "scale=640:640:force_original_aspect_ratio
+/// =decrease,pad=640:640:(ow-iw)/2:(oh-ih)/2,format=rgb24" -f rawvideo`). This is
+/// the live perception check the SITL run leans on — real model, real person.
+#[test]
+#[ignore = "needs the COCO ONNX + a 640x640 rgb24 person frame; run with --ignored"]
+fn coco_onnx_detects_a_real_person() {
+    let model = model_path();
+    assert!(model.is_file(), "model not found at {}", model.display());
+    let Ok(frame_path) = std::env::var("ADOS_TEST_PERSON_RGB") else {
+        panic!("set ADOS_TEST_PERSON_RGB to a 640x640 rgb24 person frame");
+    };
+    let frame = std::fs::read(&frame_path).expect("read person frame");
+    assert_eq!(frame.len(), 640 * 640 * 3, "frame must be 640x640 rgb24");
+
+    let meta = ModelMetadata {
+        id: "coco".into(),
+        kind: ModelKind::Detection,
+        execution: ModelExecution::EngineRun,
+        input_width: 640,
+        input_height: 640,
+        input_format: FrameFormat::Rgb24,
+        output_classes: coco80(),
+        model_path: Some(model.to_string_lossy().into_owned()),
+        head: DetectionHead::Yolo8,
+    };
+    let model = OnnxBackend::new().load(&meta).expect("load coco onnx");
+    let dets = model
+        .infer(&frame, 640, 640, FrameFormat::Rgb24)
+        .expect("inference runs");
+    let people: Vec<_> = dets.iter().filter(|d| d.class_label == "person").collect();
+    eprintln!(
+        "real-frame inference: {} detections, {} people",
+        dets.len(),
+        people.len()
+    );
+    for p in &people {
+        eprintln!(
+            "  person conf={:.2} bbox=({:.0},{:.0},{:.0},{:.0})",
+            p.confidence, p.bbox.x, p.bbox.y, p.bbox.width, p.bbox.height
+        );
+    }
+    assert!(
+        !people.is_empty(),
+        "the COCO detector finds at least one real person"
+    );
 }
 
 fn coco80() -> Vec<String> {
