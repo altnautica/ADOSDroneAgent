@@ -4,6 +4,16 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.1] - 2026-06-26
+
+### Added
+
+- The `ados-compute` engine crate: the compute-node core. A SQLite-backed job
+  store (datasets / jobs / outputs, FIFO queue, cancel, retention), a scheduler
+  with a worker model, the reconstructor and perception-offload traits with mock
+  backends (no GPU, no camera, no network), the master/slave cluster view, and a
+  node `Engine` with a `tick` and a `heartbeat`. Inert: no service runs it yet.
+
 ## [0.99.0] - 2026-06-26
 
 ### Added

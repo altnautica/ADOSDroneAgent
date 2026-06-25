@@ -1,0 +1,19 @@
+[package]
+name = "ados-compute"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Compute-node engine: a SQLite-backed job store, a queue and scheduler, the reconstructor and perception-offload traits with mock backends, and the master/slave cluster. The heavy-compute substrate a drone or GCS pairs with to run reconstruction and perception offload."
+
+[lib]
+name = "ados_compute"
+path = "src/lib.rs"
+
+[dependencies]
+ados-protocol = { path = "../ados-protocol" }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
