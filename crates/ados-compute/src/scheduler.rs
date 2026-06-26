@@ -1,11 +1,28 @@
 //! The scheduler: claim the next queued job, run it on the right backend, write
-//! the output, and record the terminal state. `run_one` processes a single job
-//! (the unit the tests and a worker loop both call); a service wraps it in a
-//! loop. One worker is modeled here; a multi-accelerator node runs several.
+//! the output, and record the terminal state.
+//!
+//! The work is split into three steps so a real backend (which runs for
+//! minutes) never holds the engine lock across its run:
+//!
+//! 1. [`Scheduler::claim_and_prepare`] — atomically claim the oldest queued job
+//!    (flipping it to `Running`) and gather its input. Runs under the engine
+//!    lock; cheap and store-only.
+//! 2. [`Scheduler::run_backend`] — an associated fn (no `&self`, no store) that
+//!    runs the reconstructor/detector. The worker calls this WITHOUT the lock,
+//!    so a long run does not block the API.
+//! 3. [`Scheduler::finalize`] — re-read the job and record the terminal state.
+//!    If the job is no longer `Running` (cancelled or removed during the run)
+//!    the cancel wins: the backend result is discarded, not written.
+//!
+//! [`Scheduler::run_one`] composes all three synchronously for the tests and
+//! the instant mock path; the daemon drives the three steps itself so it can
+//! drop the lock around the backend run.
+
+use std::sync::Arc;
 
 use crate::{
-    ComputeError, ComputeJobKind, ComputeJobState, Detection, Detector, FrameRef, JobStore, Output,
-    Reconstructor,
+    ComputeError, ComputeJobKind, ComputeJobState, Dataset, Detection, Detector, FrameRef,
+    JobRecord, JobStore, Output, Reconstructor,
 };
 
 /// The result of running one job.
@@ -18,19 +35,59 @@ pub struct JobOutcome {
     pub detections: Vec<Detection>,
 }
 
+/// The prepared input a backend needs, gathered while the lock is held so the
+/// backend run itself touches no store state.
+#[derive(Debug)]
+pub enum PreparedInput {
+    /// A reconstruction over a resolved dataset.
+    Reconstruct(Dataset),
+    /// A perception or SLAM offload over one frame.
+    Offload {
+        kind: ComputeJobKind,
+        frame: FrameRef,
+    },
+}
+
+/// The outcome of [`Scheduler::claim_and_prepare`].
+#[derive(Debug)]
+pub enum Prepared {
+    /// The queue was empty; there was nothing to claim.
+    Empty,
+    /// The claimed job failed at the prepare step (e.g. a missing dataset or a
+    /// malformed frame param). Its terminal `Failed` state is already recorded.
+    Failed(JobOutcome),
+    /// A job is claimed (now `Running`) and ready for the backend.
+    Ready {
+        job: JobRecord,
+        input: PreparedInput,
+    },
+}
+
+/// What a backend produced, before it is committed to the store. Held by value
+/// so it can cross the lock boundary (the backend runs unlocked, finalize
+/// commits this under the lock).
+#[derive(Debug)]
+pub struct BackendResult {
+    pub outputs: Vec<Output>,
+    pub detections: Vec<Detection>,
+    /// `Some` if the backend failed; the message is recorded on the job.
+    pub error: Option<String>,
+}
+
 /// Ties the store to the backends. Holds the reconstructor and detector behind
-/// trait objects so the mock and a real backend are interchangeable.
+/// `Arc` trait objects so the worker can clone a handle, drop the engine lock,
+/// and run the backend without holding it.
 pub struct Scheduler {
     store: JobStore,
-    reconstructor: Box<dyn Reconstructor>,
-    detector: Box<dyn Detector>,
+    reconstructor: Arc<dyn Reconstructor>,
+    detector: Arc<dyn Detector>,
 }
 
 impl Scheduler {
     pub fn new(
         store: JobStore,
-        reconstructor: Box<dyn Reconstructor>,
-        detector: Box<dyn Detector>,
+        reconstructor: Arc<dyn Reconstructor>,
+        detector: Arc<dyn Detector>,
     ) -> Self {
         Self {
             store,
@@ -44,138 +101,238 @@ impl Scheduler {
         &self.store
     }
 
-    /// Claim and run the next queued job. Returns `None` when the queue is
-    /// empty. A backend error fails the job (recorded), it does not propagate,
-    /// so one bad job never stalls the worker; store errors do propagate.
-    pub fn run_one(&self, now_ms: i64) -> Result<Option<JobOutcome>, ComputeError> {
-        let job = match self.store.next_queued_job()? {
+    /// Clone the backend handles so the worker can run them after dropping the
+    /// engine lock.
+    pub fn backends(&self) -> (Arc<dyn Reconstructor>, Arc<dyn Detector>) {
+        (self.reconstructor.clone(), self.detector.clone())
+    }
+
+    /// Claim the oldest queued job (flipping it to `Running`) and gather the
+    /// input its backend needs. Returns [`Prepared::Empty`] when the queue is
+    /// empty. A job that cannot be prepared (missing dataset, malformed frame)
+    /// is failed here and returned as [`Prepared::Failed`] — bad input fails the
+    /// job, it never propagates, so one bad job never stalls the worker. Run
+    /// this under the engine lock; it is store-only and cheap.
+    pub fn claim_and_prepare(&self, now_ms: i64) -> Result<Prepared, ComputeError> {
+        let job = match self.store.claim_next_queued(now_ms)? {
             Some(j) => j,
-            None => return Ok(None),
+            None => return Ok(Prepared::Empty),
         };
-        self.store
-            .set_job_state(&job.id, ComputeJobState::Running, 0.0, None, None, now_ms)?;
 
         match job.kind {
             ComputeJobKind::Reconstruct => {
-                self.run_reconstruct(&job.id, &job.dataset_id, &job.params, now_ms)
+                let dataset = match job.dataset_id.as_deref() {
+                    Some(id) => self.store.get_dataset(id)?,
+                    None => None,
+                };
+                let Some(dataset) = dataset else {
+                    return Ok(Prepared::Failed(self.fail(
+                        &job.id,
+                        "reconstruct job has no dataset",
+                        now_ms,
+                    )?));
+                };
+                Ok(Prepared::Ready {
+                    job,
+                    input: PreparedInput::Reconstruct(dataset),
+                })
             }
             ComputeJobKind::PerceptionOffload | ComputeJobKind::SlamOffload => {
-                self.run_offload(&job.id, job.kind, &job.params, now_ms)
+                // The frame to process rides the job params on this lane; absent
+                // one, a default frame keeps the mock path exercised. A
+                // malformed `frame` is bad input: fail the job (recorded).
+                let frame: FrameRef = match job.params.get("frame") {
+                    Some(v) => match serde_json::from_value(v.clone()) {
+                        Ok(f) => f,
+                        Err(e) => {
+                            return Ok(Prepared::Failed(self.fail(
+                                &job.id,
+                                &format!("invalid frame param: {e}"),
+                                now_ms,
+                            )?));
+                        }
+                    },
+                    None => FrameRef {
+                        camera_id: "front".into(),
+                        width: 1280,
+                        height: 720,
+                        ts_ms: now_ms,
+                    },
+                };
+                let kind = job.kind;
+                Ok(Prepared::Ready {
+                    job,
+                    input: PreparedInput::Offload { kind, frame },
+                })
             }
         }
     }
 
-    fn run_reconstruct(
-        &self,
-        job_id: &str,
-        dataset_id: &Option<String>,
-        params: &serde_json::Value,
+    /// Run the backend for a prepared job. An associated fn (no `&self`, no
+    /// store access) so the worker can call it WITHOUT the engine lock — the
+    /// whole point of the claim/run/finalize split. A backend error is captured
+    /// in [`BackendResult::error`] rather than propagating, so finalize records
+    /// it as a failed job.
+    pub fn run_backend(
+        reconstructor: &dyn Reconstructor,
+        detector: &dyn Detector,
+        job: &JobRecord,
+        input: &PreparedInput,
         now_ms: i64,
-    ) -> Result<Option<JobOutcome>, ComputeError> {
-        let dataset = match dataset_id.as_deref() {
-            Some(id) => self.store.get_dataset(id)?,
-            None => None,
-        };
-        let Some(dataset) = dataset else {
-            return self.fail(job_id, "reconstruct job has no dataset", now_ms);
-        };
-
-        match self.reconstructor.reconstruct(&dataset, params) {
-            Ok(out) => {
-                let output = Output {
-                    id: format!("{job_id}-out"),
-                    job_id: job_id.to_string(),
-                    kind: out.kind,
-                    uri: out.uri.clone(),
-                    created_ms: now_ms,
+    ) -> BackendResult {
+        match input {
+            PreparedInput::Reconstruct(dataset) => {
+                match reconstructor.reconstruct(dataset, &job.params) {
+                    Ok(out) => {
+                        let gaussian_count = out.gaussian_count;
+                        let mut output = Output::new(
+                            format!("{}-out", job.id),
+                            job.id.clone(),
+                            out.kind,
+                            out.uri,
+                            now_ms,
+                        );
+                        // Surface the backend's result metadata to clients.
+                        output.meta = serde_json::json!({ "gaussian_count": gaussian_count });
+                        BackendResult {
+                            outputs: vec![output],
+                            detections: Vec::new(),
+                            error: None,
+                        }
+                    }
+                    Err(e) => BackendResult {
+                        outputs: Vec::new(),
+                        detections: Vec::new(),
+                        error: Some(e.to_string()),
+                    },
+                }
+            }
+            PreparedInput::Offload { kind, frame } => {
+                // A SLAM offload returns poses; a perception offload returns
+                // detections. The artifact KIND reflects the job kind while the
+                // detections ride the result.
+                let out_kind = if matches!(kind, ComputeJobKind::SlamOffload) {
+                    "pose"
+                } else {
+                    "detection"
                 };
-                self.store.insert_output(&output)?;
-                self.store.set_job_state(
-                    job_id,
-                    ComputeJobState::Completed,
-                    1.0,
-                    Some(&out.uri),
-                    None,
-                    now_ms,
-                )?;
-                Ok(Some(JobOutcome {
-                    job_id: job_id.to_string(),
-                    state: ComputeJobState::Completed,
-                    outputs: vec![output],
+                match detector.infer(frame) {
+                    Ok(detections) => {
+                        let output = Output::new(
+                            format!("{}-out", job.id),
+                            job.id.clone(),
+                            out_kind.into(),
+                            format!("mock://{out_kind}/{}", job.id),
+                            now_ms,
+                        );
+                        BackendResult {
+                            outputs: vec![output],
+                            detections,
+                            error: None,
+                        }
+                    }
+                    Err(e) => BackendResult {
+                        outputs: Vec::new(),
+                        detections: Vec::new(),
+                        error: Some(e.to_string()),
+                    },
+                }
+            }
+        }
+    }
+
+    /// Record the terminal state for a job whose backend has run. Re-reads the
+    /// job first: if it is no longer `Running` (cancelled or removed while the
+    /// backend ran), the cancel WINS — the backend result is discarded and the
+    /// current state is returned, never overwritten. Otherwise a backend error
+    /// fails the job, and a success inserts every output and completes the job
+    /// with the first output's uri as the result ref. Run this under the lock.
+    pub fn finalize(
+        &self,
+        job: &JobRecord,
+        result: BackendResult,
+        now_ms: i64,
+    ) -> Result<JobOutcome, ComputeError> {
+        // The backend ran without the lock; a cancel (or a retention purge)
+        // could have landed in the meantime. If the job is no longer Running,
+        // do not overwrite its terminal state — the cancel wins.
+        match self.store.get_job(&job.id)? {
+            Some(current) if current.state != ComputeJobState::Running => {
+                return Ok(JobOutcome {
+                    job_id: job.id.clone(),
+                    state: current.state,
+                    outputs: Vec::new(),
                     detections: Vec::new(),
-                }))
+                });
             }
-            Err(e) => self.fail(job_id, &e.to_string(), now_ms),
+            None => {
+                return Ok(JobOutcome {
+                    job_id: job.id.clone(),
+                    state: ComputeJobState::Cancelled,
+                    outputs: Vec::new(),
+                    detections: Vec::new(),
+                });
+            }
+            Some(_) => {}
+        }
+
+        if let Some(message) = result.error {
+            self.store.set_job_state(
+                &job.id,
+                ComputeJobState::Failed,
+                0.0,
+                None,
+                Some(&message),
+                now_ms,
+            )?;
+            return Ok(JobOutcome {
+                job_id: job.id.clone(),
+                state: ComputeJobState::Failed,
+                outputs: Vec::new(),
+                detections: Vec::new(),
+            });
+        }
+
+        for output in &result.outputs {
+            self.store.insert_output(output)?;
+        }
+        let result_ref = result.outputs.first().map(|o| o.uri.clone());
+        self.store.set_job_state(
+            &job.id,
+            ComputeJobState::Completed,
+            1.0,
+            result_ref.as_deref(),
+            None,
+            now_ms,
+        )?;
+        Ok(JobOutcome {
+            job_id: job.id.clone(),
+            state: ComputeJobState::Completed,
+            outputs: result.outputs,
+            detections: result.detections,
+        })
+    }
+
+    /// Claim and run the next queued job synchronously, all in one call. Returns
+    /// `None` when the queue is empty. This is the instant path the tests and
+    /// the engine `tick` use; the daemon drives `claim_and_prepare` /
+    /// `run_backend` / `finalize` itself so it can drop the lock around the
+    /// backend run.
+    pub fn run_one(&self, now_ms: i64) -> Result<Option<JobOutcome>, ComputeError> {
+        match self.claim_and_prepare(now_ms)? {
+            Prepared::Empty => Ok(None),
+            Prepared::Failed(outcome) => Ok(Some(outcome)),
+            Prepared::Ready { job, input } => {
+                let result =
+                    Self::run_backend(&*self.reconstructor, &*self.detector, &job, &input, now_ms);
+                Ok(Some(self.finalize(&job, result, now_ms)?))
+            }
         }
     }
 
-    fn run_offload(
-        &self,
-        job_id: &str,
-        kind: ComputeJobKind,
-        params: &serde_json::Value,
-        now_ms: i64,
-    ) -> Result<Option<JobOutcome>, ComputeError> {
-        // The frame to process rides the job params on this lane; absent one, a
-        // default frame keeps the mock path exercised. A malformed `frame` is
-        // bad input: fail the job (recorded), never propagate, per the run_one
-        // contract (mirrors the missing-dataset path in run_reconstruct).
-        let frame: FrameRef = match params.get("frame") {
-            Some(v) => match serde_json::from_value(v.clone()) {
-                Ok(f) => f,
-                Err(e) => return self.fail(job_id, &format!("invalid frame param: {e}"), now_ms),
-            },
-            None => FrameRef {
-                camera_id: "front".into(),
-                width: 1280,
-                height: 720,
-                ts_ms: now_ms,
-            },
-        };
-
-        // A SLAM offload returns poses; a perception offload returns detections.
-        // The mock detector stands in for both real backends, so the artifact
-        // KIND reflects the job kind while the detections ride the outcome.
-        let out_kind = match kind {
-            ComputeJobKind::SlamOffload => "pose",
-            _ => "detection",
-        };
-
-        match self.detector.infer(&frame) {
-            Ok(detections) => {
-                let output = Output {
-                    id: format!("{job_id}-out"),
-                    job_id: job_id.to_string(),
-                    kind: out_kind.into(),
-                    uri: format!("mock://{out_kind}/{job_id}"),
-                    created_ms: now_ms,
-                };
-                self.store.insert_output(&output)?;
-                self.store.set_job_state(
-                    job_id,
-                    ComputeJobState::Completed,
-                    1.0,
-                    Some(&output.uri),
-                    None,
-                    now_ms,
-                )?;
-                Ok(Some(JobOutcome {
-                    job_id: job_id.to_string(),
-                    state: ComputeJobState::Completed,
-                    outputs: vec![output],
-                    detections,
-                }))
-            }
-            Err(e) => self.fail(job_id, &e.to_string(), now_ms),
-        }
-    }
-
-    fn fail(
-        &self,
-        job_id: &str,
-        message: &str,
-        now_ms: i64,
-    ) -> Result<Option<JobOutcome>, ComputeError> {
+    /// Mark a job failed with `message` and return the failed outcome. Used by
+    /// the prepare step for bad input.
+    fn fail(&self, job_id: &str, message: &str, now_ms: i64) -> Result<JobOutcome, ComputeError> {
         self.store.set_job_state(
             job_id,
             ComputeJobState::Failed,
@@ -184,25 +341,25 @@ impl Scheduler {
             Some(message),
             now_ms,
         )?;
-        Ok(Some(JobOutcome {
+        Ok(JobOutcome {
             job_id: job_id.to_string(),
             state: ComputeJobState::Failed,
             outputs: Vec::new(),
             detections: Vec::new(),
-        }))
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Dataset, JobRecord, MockDetector, MockReconstructor};
+    use crate::{MockDetector, MockReconstructor};
 
     fn scheduler() -> Scheduler {
         Scheduler::new(
             JobStore::open_in_memory().unwrap(),
-            Box::new(MockReconstructor),
-            Box::new(MockDetector),
+            Arc::new(MockReconstructor),
+            Arc::new(MockDetector),
         )
     }
 
@@ -226,6 +383,17 @@ mod tests {
         }
     }
 
+    fn with_dataset(s: &Scheduler, id: &str) {
+        s.store()
+            .insert_dataset(&Dataset {
+                id: id.into(),
+                kind: "bag".into(),
+                created_ms: 100,
+                meta: serde_json::json!({ "cameras": 1 }),
+            })
+            .unwrap();
+    }
+
     #[test]
     fn empty_queue_runs_nothing() {
         assert!(scheduler().run_one(1).unwrap().is_none());
@@ -234,14 +402,7 @@ mod tests {
     #[test]
     fn reconstruct_job_runs_queue_to_worker_to_output() {
         let s = scheduler();
-        s.store()
-            .insert_dataset(&Dataset {
-                id: "ds-1".into(),
-                kind: "bag".into(),
-                created_ms: 100,
-                meta: serde_json::json!({ "cameras": 1 }),
-            })
-            .unwrap();
+        with_dataset(&s, "ds-1");
         s.store()
             .submit_job(&queued(
                 "job-1",
@@ -262,6 +423,27 @@ mod tests {
         assert_eq!(job.state, ComputeJobState::Completed);
         assert_eq!(job.result_ref.as_deref(), Some("mock://splat/ds-1"));
         assert_eq!(s.store().outputs_for_job("job-1").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn reconstruct_output_carries_gaussian_count_meta() {
+        let s = scheduler();
+        with_dataset(&s, "ds-1");
+        s.store()
+            .submit_job(&queued(
+                "job-1",
+                ComputeJobKind::Reconstruct,
+                Some("ds-1"),
+                serde_json::json!({}),
+            ))
+            .unwrap();
+
+        let outcome = s.run_one(200).unwrap().unwrap();
+        // The backend's gaussian_count rides the output meta (the MockReconstructor reports 1000).
+        assert_eq!(outcome.outputs[0].meta["gaussian_count"], 1000);
+        // And it persisted to the store, not just the in-memory outcome.
+        let outs = s.store().outputs_for_job("job-1").unwrap();
+        assert_eq!(outs[0].meta["gaussian_count"], 1000);
     }
 
     #[test]
@@ -373,5 +555,45 @@ mod tests {
         // job-1 (created 100) before job-2 (created 200).
         assert_eq!(s.run_one(300).unwrap().unwrap().job_id, "job-1");
         assert_eq!(s.run_one(301).unwrap().unwrap().job_id, "job-2");
+    }
+
+    #[test]
+    fn cancel_of_a_running_job_wins() {
+        let s = scheduler();
+        with_dataset(&s, "ds-1");
+        s.store()
+            .submit_job(&queued(
+                "job-1",
+                ComputeJobKind::Reconstruct,
+                Some("ds-1"),
+                serde_json::json!({}),
+            ))
+            .unwrap();
+
+        // Claim the job: it is now Running, modeling the moment a long backend
+        // run begins (without the lock).
+        let (job, input) = match s.claim_and_prepare(200).unwrap() {
+            Prepared::Ready { job, input } => (job, input),
+            other => panic!("expected a ready job, got {other:?}"),
+        };
+        assert_eq!(
+            s.store().get_job("job-1").unwrap().unwrap().state,
+            ComputeJobState::Running
+        );
+
+        // A cancel lands while the backend is running.
+        assert!(s.store().cancel_job("job-1", 210).unwrap());
+
+        // The backend finishes and we finalize — the cancel must win.
+        let (reconstructor, detector) = s.backends();
+        let result = Scheduler::run_backend(&*reconstructor, &*detector, &job, &input, 220);
+        let outcome = s.finalize(&job, result, 220).unwrap();
+
+        assert_eq!(outcome.state, ComputeJobState::Cancelled);
+        assert!(outcome.outputs.is_empty());
+        // The store holds Cancelled, not Completed, and no output was written.
+        let job = s.store().get_job("job-1").unwrap().unwrap();
+        assert_eq!(job.state, ComputeJobState::Cancelled);
+        assert!(s.store().outputs_for_job("job-1").unwrap().is_empty());
     }
 }

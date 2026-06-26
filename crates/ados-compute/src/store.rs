@@ -41,7 +41,25 @@ pub struct Output {
     pub kind: String,
     /// Where the artifact can be fetched (a stream-lane url or a local path).
     pub uri: String,
+    /// Backend result metadata surfaced to clients (e.g. a splat's
+    /// `{"gaussian_count": N}`), or `Null` when the backend reports none.
+    #[serde(default)]
+    pub meta: serde_json::Value,
     pub created_ms: i64,
+}
+
+impl Output {
+    /// An output with no metadata.
+    pub fn new(id: String, job_id: String, kind: String, uri: String, created_ms: i64) -> Self {
+        Self {
+            id,
+            job_id,
+            kind,
+            uri,
+            meta: serde_json::Value::Null,
+            created_ms,
+        }
+    }
 }
 
 fn enum_to_db<T: Serialize>(v: &T) -> Result<String, ComputeError> {
@@ -116,6 +134,7 @@ impl JobStore {
                  job_id TEXT NOT NULL,
                  kind TEXT NOT NULL,
                  uri TEXT NOT NULL,
+                 meta TEXT NOT NULL DEFAULT 'null',
                  created_ms INTEGER NOT NULL
              );
              CREATE INDEX IF NOT EXISTS outputs_job ON outputs(job_id);",
@@ -205,6 +224,26 @@ impl JobStore {
     const JOB_COLS: &'static str =
         "id, kind, dataset_id, state, progress, params, result_ref, error, created_ms, updated_ms";
 
+    /// Atomically claim the oldest queued job: mark it `Running` and return the
+    /// updated row. A single UPDATE...RETURNING statement, so the claim and the
+    /// state flip cannot race; the returned job already has `state = Running`.
+    /// Returns `None` when the queue is empty. This is the worker's claim step,
+    /// run under the engine lock; the backend then runs WITHOUT the lock.
+    pub fn claim_next_queued(&self, now_ms: i64) -> Result<Option<JobRecord>, ComputeError> {
+        let sql = format!(
+            "UPDATE jobs SET state = 'running', updated_ms = ?1
+             WHERE id = (SELECT id FROM jobs WHERE state = 'queued' ORDER BY created_ms ASC LIMIT 1)
+             RETURNING {}",
+            Self::JOB_COLS
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query(params![now_ms])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(Self::row_to_job(row)?)),
+            None => Ok(None),
+        }
+    }
+
     /// The oldest queued job, or `None` if the queue is empty. This is the
     /// scheduler's pick; a real multi-worker node would claim it atomically.
     pub fn next_queued_job(&self) -> Result<Option<JobRecord>, ComputeError> {
@@ -281,28 +320,52 @@ impl JobStore {
         Ok(n > 0)
     }
 
+    /// Requeue any job left in `Running` (e.g. the daemon crashed mid-backend so
+    /// the job never reached a terminal state). Called once at startup so a
+    /// crash does not strand a job forever: a `Running` job is neither claimable
+    /// (claim picks only `queued`) nor purgeable (retention drops only terminal
+    /// states). Returns the number requeued.
+    pub fn requeue_stale_running(&self, updated_ms: i64) -> Result<usize, ComputeError> {
+        let n = self.conn.execute(
+            "UPDATE jobs SET state = 'queued', progress = 0.0, updated_ms = ?1
+             WHERE state = 'running'",
+            params![updated_ms],
+        )?;
+        Ok(n)
+    }
+
     // --- outputs ----------------------------------------------------------
 
     pub fn insert_output(&self, o: &Output) -> Result<(), ComputeError> {
         self.conn.execute(
-            "INSERT INTO outputs (id, job_id, kind, uri, created_ms) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![o.id, o.job_id, o.kind, o.uri, o.created_ms],
+            "INSERT INTO outputs (id, job_id, kind, uri, meta, created_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                o.id,
+                o.job_id,
+                o.kind,
+                o.uri,
+                serde_json::to_string(&o.meta)?,
+                o.created_ms
+            ],
         )?;
         Ok(())
     }
 
     pub fn outputs_for_job(&self, job_id: &str) -> Result<Vec<Output>, ComputeError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, job_id, kind, uri, created_ms FROM outputs WHERE job_id = ?1
+            "SELECT id, job_id, kind, uri, meta, created_ms FROM outputs WHERE job_id = ?1
              ORDER BY created_ms ASC",
         )?;
         let rows = stmt.query_map(params![job_id], |row| {
+            let meta_s: String = row.get(4)?;
             Ok(Output {
                 id: row.get(0)?,
                 job_id: row.get(1)?,
                 kind: row.get(2)?,
                 uri: row.get(3)?,
-                created_ms: row.get(4)?,
+                meta: serde_json::from_str(&meta_s).unwrap_or(serde_json::Value::Null),
+                created_ms: row.get(5)?,
             })
         })?;
         let mut out = Vec::new();
@@ -394,13 +457,13 @@ mod tests {
         assert_eq!(j.state, ComputeJobState::Completed);
         assert_eq!(j.result_ref.as_deref(), Some("mock://splat/ds-1"));
 
-        s.insert_output(&Output {
-            id: "out-1".into(),
-            job_id: "job-1".into(),
-            kind: "splat".into(),
-            uri: "mock://splat/ds-1".into(),
-            created_ms: 120,
-        })
+        s.insert_output(&Output::new(
+            "out-1".into(),
+            "job-1".into(),
+            "splat".into(),
+            "mock://splat/ds-1".into(),
+            120,
+        ))
         .unwrap();
         assert_eq!(s.outputs_for_job("job-1").unwrap().len(), 1);
     }
@@ -430,12 +493,14 @@ mod tests {
             .unwrap();
         // Both jobs have an output; the purge must cascade-delete the old job's
         // output and leave the fresh one's intact (no orphaned outputs).
-        let out = |id: &str, t: i64| Output {
-            id: format!("{id}-out"),
-            job_id: id.into(),
-            kind: "splat".into(),
-            uri: format!("mock://splat/{id}"),
-            created_ms: t,
+        let out = |id: &str, t: i64| {
+            Output::new(
+                format!("{id}-out"),
+                id.into(),
+                "splat".into(),
+                format!("mock://splat/{id}"),
+                t,
+            )
         };
         s.insert_output(&out("old", 100)).unwrap();
         s.insert_output(&out("fresh", 500)).unwrap();
@@ -472,6 +537,32 @@ mod tests {
             .submit_job(&job("dup", ComputeJobKind::Reconstruct, 2))
             .unwrap_err();
         assert!(matches!(err, ComputeError::Conflict(_)));
+    }
+
+    #[test]
+    fn requeue_stale_running_reclaims_orphans() {
+        let s = JobStore::open_in_memory().unwrap();
+        // Simulate a crash mid-backend: a job stranded in Running.
+        s.submit_job(&job("stranded", ComputeJobKind::Reconstruct, 1))
+            .unwrap();
+        s.claim_next_queued(2).unwrap(); // -> Running
+        s.submit_job(&job("done", ComputeJobKind::Reconstruct, 3))
+            .unwrap();
+        s.set_job_state("done", ComputeJobState::Completed, 1.0, None, None, 4)
+            .unwrap();
+
+        let n = s.requeue_stale_running(10).unwrap();
+        assert_eq!(n, 1); // only the Running one
+                          // The stranded job is claimable again; the completed one is untouched.
+        assert_eq!(
+            s.get_job("stranded").unwrap().unwrap().state,
+            ComputeJobState::Queued
+        );
+        assert_eq!(
+            s.get_job("done").unwrap().unwrap().state,
+            ComputeJobState::Completed
+        );
+        assert_eq!(s.claim_next_queued(11).unwrap().unwrap().id, "stranded");
     }
 
     #[test]

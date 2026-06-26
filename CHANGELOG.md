@@ -4,6 +4,20 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.4] - 2026-06-26
+
+### Changed
+
+- Hardened the compute worker for production. The worker now claims a job under
+  the engine lock, runs the (real, possibly minutes-long) backend WITHOUT the
+  lock, and finalizes under the lock, so a long reconstruction never blocks the
+  job API. A cancel that lands during a run now wins (the terminal write refuses
+  to overwrite a no-longer-running job). A startup reaper requeues any job left
+  in `running` by a crash. The configured worker count now runs that many jobs
+  in parallel (each claims a distinct job atomically), and a dedicated task runs
+  retention. Backend result metadata (a splat's `gaussian_count`) is surfaced on
+  the output record.
+
 ## [0.99.3] - 2026-06-26
 
 ### Fixed

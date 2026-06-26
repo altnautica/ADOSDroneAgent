@@ -27,7 +27,7 @@ pub use cluster::Cluster;
 pub use engine::{ComputeHeartbeat, Engine};
 pub use offload::{Detection, Detector, FrameRef, MockDetector};
 pub use reconstructor::{MockReconstructor, ReconstructOutput, Reconstructor};
-pub use scheduler::{JobOutcome, Scheduler};
+pub use scheduler::{BackendResult, JobOutcome, Prepared, PreparedInput, Scheduler};
 pub use store::{Dataset, JobRecord, JobStore, Output};
 
 // Re-export the shared wire contract so callers get one import surface.

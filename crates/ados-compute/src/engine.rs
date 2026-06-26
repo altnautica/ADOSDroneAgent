@@ -83,10 +83,11 @@ mod tests {
         ComputeJobKind, Dataset, JobRecord, JobStore, MockDetector, MockReconstructor,
         SlaveDescriptor,
     };
+    use std::sync::Arc;
 
     fn engine() -> Engine {
         let store = JobStore::open_in_memory().unwrap();
-        let scheduler = Scheduler::new(store, Box::new(MockReconstructor), Box::new(MockDetector));
+        let scheduler = Scheduler::new(store, Arc::new(MockReconstructor), Arc::new(MockDetector));
         Engine::new(scheduler, Cluster::new_master("node-a"), 2)
     }
 

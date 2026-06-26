@@ -9,10 +9,12 @@
 //! discovery and that auth wrap this surface later; today it is the lean local
 //! job API on `127.0.0.1`.
 //!
-//! Worker note: the worker runs one job per tick while holding the engine lock.
-//! That is fine for the instant mock backends; before a real backend (which
-//! runs for minutes) lands, the worker must claim-run-finalize so the long
-//! backend run does not hold the lock and block the API (tracked for M15).
+//! Worker note: the worker claims the next job under the engine lock, then
+//! releases the lock and runs the (real, possibly minutes-long) backend
+//! WITHOUT it, so a long reconstruction never blocks the API. It re-acquires
+//! the lock only briefly to record the terminal state; a cancel that lands
+//! during the run wins (`Scheduler::finalize` refuses to overwrite a job that
+//! is no longer `Running`).
 //!
 //! Configuration is read from the environment so the install layer can set it
 //! without a config-file dependency:
@@ -26,7 +28,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ados_compute::{
-    build_router, Cluster, Engine, JobStore, MockDetector, MockReconstructor, Scheduler,
+    build_router, Cluster, Engine, JobStore, MockDetector, MockReconstructor, Prepared, Scheduler,
 };
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
@@ -104,56 +106,90 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let store = JobStore::open(&db)?;
-    let scheduler = Scheduler::new(store, Box::new(MockReconstructor), Box::new(MockDetector));
+    let scheduler = Scheduler::new(store, Arc::new(MockReconstructor), Arc::new(MockDetector));
     let engine = Engine::new(scheduler, Cluster::new_master(node_id), workers);
     let state = Arc::new(Mutex::new(engine));
 
-    // The worker loop drains the queue, then idles. When idle, it periodically
-    // reclaims terminal jobs older than the retention window so the store does
-    // not grow without bound. Each iteration releases the lock so the API
-    // handlers interleave.
-    let worker_state = state.clone();
-    tokio::spawn(async move {
-        let mut idle_ticks: u32 = 0;
-        loop {
-            let ran = {
-                let engine = worker_state.lock().await;
-                engine.tick(now_ms())
-            };
-            match ran {
-                Ok(Some(outcome)) => {
-                    idle_ticks = 0;
-                    tracing::info!(job = %outcome.job_id, state = ?outcome.state, "ran job");
-                }
-                Ok(None) => {
-                    // Run retention roughly once a minute of idle (every 120
-                    // idle ticks at 500 ms).
-                    idle_ticks = idle_ticks.saturating_add(1);
-                    if idle_ticks.is_multiple_of(120) {
-                        let engine = worker_state.lock().await;
-                        match engine
-                            .scheduler()
-                            .store()
-                            .purge_terminal_before(now_ms() - retention_ms)
-                        {
-                            Ok(n) if n > 0 => tracing::info!(removed = n, "retention purge"),
-                            Ok(_) => {}
-                            Err(e) => tracing::warn!(error = %e, "retention purge failed"),
-                        }
-                    }
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "worker tick failed");
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                }
+    // Startup recovery: a job left in Running (the daemon crashed mid-backend)
+    // is neither claimable nor purgeable, so requeue it before the workers start.
+    {
+        let engine = state.lock().await;
+        match engine.scheduler().store().requeue_stale_running(now_ms()) {
+            Ok(n) if n > 0 => {
+                tracing::info!(requeued = n, "requeued stale running jobs at startup")
             }
+            Ok(_) => {}
+            Err(e) => tracing::error!(error = %e, "startup requeue failed"),
         }
-    });
+    }
+
+    // One worker task per configured slot. Each claims a distinct job atomically
+    // (claim_next_queued), runs its backend WITHOUT the engine lock, and
+    // finalizes under the lock, so N backends run in parallel while the API stays
+    // responsive. A separate task runs retention on a fixed cadence.
+    for _ in 0..workers.max(1) {
+        let ws = state.clone();
+        tokio::spawn(async move { worker_loop(ws).await });
+    }
+    let rs = state.clone();
+    tokio::spawn(async move { retention_loop(rs, retention_ms).await });
 
     let router = build_router(state);
     let listener = TcpListener::bind(&bind).await?;
-    tracing::info!(bind = %bind, "compute job API listening (loopback, unauthenticated)");
+    tracing::info!(bind = %bind, workers, "compute job API listening (loopback, unauthenticated)");
     axum::serve(listener, router).await?;
     Ok(())
+}
+
+/// One worker: claim a job under the lock, run the backend WITHOUT it, finalize
+/// under the lock. Idles 500 ms when the queue is empty. A cancel that lands
+/// during the backend run wins inside `finalize`.
+async fn worker_loop(state: Arc<Mutex<Engine>>) {
+    loop {
+        let (prepared, reconstructor, detector) = {
+            let engine = state.lock().await;
+            let prepared = engine.scheduler().claim_and_prepare(now_ms());
+            let (reconstructor, detector) = engine.scheduler().backends();
+            (prepared, reconstructor, detector)
+        };
+        match prepared {
+            Ok(Prepared::Ready { job, input }) => {
+                let result =
+                    Scheduler::run_backend(&*reconstructor, &*detector, &job, &input, now_ms());
+                let outcome = {
+                    let engine = state.lock().await;
+                    engine.scheduler().finalize(&job, result, now_ms())
+                };
+                match outcome {
+                    Ok(o) => tracing::info!(job = %o.job_id, state = ?o.state, "ran job"),
+                    Err(e) => tracing::error!(job = %job.id, error = %e, "finalize failed"),
+                }
+            }
+            Ok(Prepared::Failed(o)) => {
+                tracing::info!(job = %o.job_id, state = ?o.state, "job failed at prepare");
+            }
+            Ok(Prepared::Empty) => tokio::time::sleep(Duration::from_millis(500)).await,
+            Err(e) => {
+                tracing::error!(error = %e, "worker claim failed");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
+    }
+}
+
+/// Periodically reclaim terminal jobs older than the retention window.
+async fn retention_loop(state: Arc<Mutex<Engine>>, retention_ms: i64) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        let engine = state.lock().await;
+        match engine
+            .scheduler()
+            .store()
+            .purge_terminal_before(now_ms() - retention_ms)
+        {
+            Ok(n) if n > 0 => tracing::info!(removed = n, "retention purge"),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = %e, "retention purge failed"),
+        }
+    }
 }

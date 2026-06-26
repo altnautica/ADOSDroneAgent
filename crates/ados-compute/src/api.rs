@@ -188,7 +188,7 @@ mod tests {
 
     fn test_state() -> ApiState {
         let store = JobStore::open_in_memory().unwrap();
-        let scheduler = Scheduler::new(store, Box::new(MockReconstructor), Box::new(MockDetector));
+        let scheduler = Scheduler::new(store, Arc::new(MockReconstructor), Arc::new(MockDetector));
         let engine = Engine::new(scheduler, Cluster::new_master("node-a"), 2);
         Arc::new(Mutex::new(engine))
     }
