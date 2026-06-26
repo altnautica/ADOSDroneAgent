@@ -4,6 +4,8 @@
 //! REST job API, mDNS pairing, and the real heartbeat transport wrap this; the
 //! engine itself does no I/O so it stays testable.
 
+use serde::{Deserialize, Serialize};
+
 use crate::{
     Cluster, ClusterDescriptor, ComputeError, ComputeJobState, ComputeRole, JobOutcome, Scheduler,
 };
@@ -11,7 +13,7 @@ use crate::{
 /// The small status a compute node advertises (the seam the cloud + GCS
 /// heartbeat fills in later). Carries the cluster view so a paired client sees
 /// the whole master/slave cluster, not just the master.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ComputeHeartbeat {
     pub role: ComputeRole,
     pub cluster: ClusterDescriptor,

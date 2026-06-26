@@ -14,6 +14,7 @@
 //! [`ados_protocol::compute`]; this crate owns the store, the scheduler, and
 //! the backends.
 
+mod api;
 mod cluster;
 mod engine;
 mod offload;
@@ -21,6 +22,7 @@ mod reconstructor;
 mod scheduler;
 mod store;
 
+pub use api::{build_router, ApiState};
 pub use cluster::Cluster;
 pub use engine::{ComputeHeartbeat, Engine};
 pub use offload::{Detection, Detector, FrameRef, MockDetector};

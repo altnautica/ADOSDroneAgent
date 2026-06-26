@@ -4,6 +4,17 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.2] - 2026-06-26
+
+### Added
+
+- The compute-node service layer: a native Rust REST job API (axum) for
+  datasets, jobs, status, cancel, outputs, and the node heartbeat; the
+  `ados-compute` daemon (a worker loop draining the queue plus the LAN job API);
+  and a new supervisor `compute` profile that runs `ados-compute` only on a
+  compute node. Inert: the `compute` profile is opt-in and no existing node
+  selects it.
+
 ## [0.99.1] - 2026-06-26
 
 ### Added

@@ -10,6 +10,10 @@ description = "Compute-node engine: a SQLite-backed job store, a queue and sched
 name = "ados_compute"
 path = "src/lib.rs"
 
+[[bin]]
+name = "ados-compute"
+path = "src/bin/ados-compute.rs"
+
 [dependencies]
 ados-protocol = { path = "../ados-protocol" }
 rusqlite = { workspace = true }
@@ -17,3 +21,12 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+# The job API is served on the trusted unix socket and the LAN TCP port, the
+# same axum-over-tokio surface the logging daemon uses.
+tokio = { workspace = true }
+axum = { workspace = true }
+
+[dev-dependencies]
+# `ServiceExt::oneshot` drives the router in tests without binding a port.
+tower = { workspace = true, features = ["util"] }
