@@ -1,0 +1,18 @@
+[package]
+name = "ados-atlas"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Atlas world-model capture: subscribes the camera frame ring, selects pose-tagged keyframes (one camera up to an all-sides rig, one flow), and builds the keyframe + pose contract a compute node reconstructs from. The light on-drone half of the world-model program."
+
+[lib]
+name = "ados_atlas"
+path = "src/lib.rs"
+
+[dependencies]
+ados-protocol = { path = "../ados-protocol" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

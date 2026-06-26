@@ -4,6 +4,17 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.5] - 2026-06-26
+
+### Added
+
+- The `ados-atlas` capture core: the light on-drone half of the world-model
+  program. A camera config (one camera up to an all-sides rig, one flow at any
+  count), a keyframe selector (translation / rotation / time-interval triggers
+  with the baseline measured from the last keyframe), and a capture session that
+  builds the keyframe envelope, the pose descriptor, and the capture status from
+  the shared wire contract. Pure logic, no service wiring yet (inert).
+
 ## [0.99.4] - 2026-06-26
 
 ### Changed
