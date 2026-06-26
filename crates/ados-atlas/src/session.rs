@@ -148,6 +148,30 @@ impl CaptureSession {
         }
     }
 
+    /// Non-mutating peek: whether the next [`on_frame`](Self::on_frame) for this
+    /// camera at this pose and time WOULD produce a keyframe. Mirrors
+    /// `on_frame`'s gates (capturing + camera enabled + the per-camera selector),
+    /// so the capture service can skip the expensive keyframe image encode when
+    /// the frame would only contribute to the pose stream. Records nothing.
+    pub fn would_select(&self, camera_id: &str, pose: &Pose, ts_ms: i64) -> bool {
+        if self.state != CaptureState::Capturing {
+            return false;
+        }
+        let enabled = self
+            .config
+            .cameras
+            .iter()
+            .any(|c| c.id == camera_id && c.enabled);
+        if !enabled {
+            return false;
+        }
+        match self.selectors.get(camera_id) {
+            Some(sel) => sel.peek_select(pose, ts_ms, &self.config.selection),
+            // A camera with no selector yet: its first frame always selects.
+            None => true,
+        }
+    }
+
     /// Ingest one frame for `camera_id`. Returns `None` when the session is not
     /// capturing or the camera is not enabled. Otherwise it always produces a
     /// pose descriptor for the live pose stream and, when the camera's selector
@@ -343,6 +367,41 @@ mod tests {
         // Two keyframes (one per enabled camera), and is_session_start only on
         // the very first keyframe of the session.
         assert_eq!(s.status().keyframes, 2);
+    }
+
+    #[test]
+    fn would_select_mirrors_on_frame_keyframe_decision() {
+        let mut s = CaptureSession::new(config(vec![
+            cam("front", CameraRole::Primary, true),
+            cam("down", CameraRole::Down, false),
+        ]));
+        // Idle: nothing selects.
+        assert!(!s.would_select("front", &frame_at([0.0, 0.0, 0.0]).pose, 0));
+        s.start("sess-w".into());
+        // A disabled / unknown camera never selects.
+        assert!(!s.would_select("down", &frame_at([0.0, 0.0, 0.0]).pose, 0));
+        assert!(!s.would_select("nope", &frame_at([0.0, 0.0, 0.0]).pose, 0));
+        // First frame: peek says select; committing via on_frame agrees.
+        assert!(s.would_select("front", &frame_at([0.0, 0.0, 0.0]).pose, 0));
+        assert!(s
+            .on_frame("front", frame_at([0.0, 0.0, 0.0]), 0)
+            .unwrap()
+            .keyframe
+            .is_some());
+        // A tiny move: peek says no, and on_frame produces no keyframe.
+        assert!(!s.would_select("front", &frame_at([0.05, 0.0, 0.0]).pose, 100));
+        assert!(s
+            .on_frame("front", frame_at([0.05, 0.0, 0.0]), 100)
+            .unwrap()
+            .keyframe
+            .is_none());
+        // A baseline move: peek says yes, and on_frame produces a keyframe.
+        assert!(s.would_select("front", &frame_at([0.7, 0.0, 0.0]).pose, 200));
+        assert!(s
+            .on_frame("front", frame_at([0.7, 0.0, 0.0]), 200)
+            .unwrap()
+            .keyframe
+            .is_some());
     }
 
     #[test]

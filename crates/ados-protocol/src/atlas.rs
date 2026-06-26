@@ -25,6 +25,12 @@ use serde::{Deserialize, Serialize};
 /// Capture-session state (state, keyframe counts, VIO health). Host-published.
 pub const ATLAS_CAPTURE_STATE_TOPIC: &str = "atlas.capture.state";
 
+/// A selected pose-tagged keyframe ([`KeyframeEnvelope`]) the capture service
+/// emits drone-to-compute. The agent's own namespace (the keyframe is the
+/// capture artifact, not shared plugin data); a compute node and the world-model
+/// stream lane consume it.
+pub const ATLAS_KEYFRAME_TOPIC: &str = "atlas.keyframe";
+
 /// The compute node returns an offloaded pose to the drone on this topic. The
 /// drone streamed an image to the node, the node ran SLAM, and the pose comes
 /// back here for the drone to stamp into the keyframe envelope. This is the
@@ -279,6 +285,19 @@ pub struct MeshDescriptor {
     pub handle: Option<String>,
 }
 
+/// One framed message on the agent's local atlas bus. The capture service binds
+/// a single broadcast socket and tags every message with the topic it belongs to
+/// (one of the `atlas.*` / `plugin.atlas.*` constants above) so a subscriber can
+/// demultiplex pose, keyframe, and capture-state streams off one connection.
+/// `payload` is the topic's own struct already msgpack-encoded (e.g. a
+/// [`KeyframeEnvelope`] for [`PLUGIN_ATLAS_POSE_TOPIC`]'s sibling keyframe lane),
+/// so the wrapper stays agnostic to which struct it carries.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AtlasEvent {
+    pub topic: String,
+    pub payload: Vec<u8>,
+}
+
 macro_rules! impl_msgpack {
     ($($t:ty),+ $(,)?) => {
         $(impl $t {
@@ -303,6 +322,7 @@ impl_msgpack!(
     OccupancyDescriptor,
     SplatDescriptor,
     MeshDescriptor,
+    AtlasEvent,
 );
 
 #[cfg(test)]
@@ -415,12 +435,36 @@ mod tests {
     #[test]
     fn topic_names_are_stable() {
         assert_eq!(ATLAS_CAPTURE_STATE_TOPIC, "atlas.capture.state");
+        assert_eq!(ATLAS_KEYFRAME_TOPIC, "atlas.keyframe");
         assert_eq!(ATLAS_POSE_OFFLOAD_TOPIC, "atlas.pose.offload");
         assert_eq!(PLUGIN_ATLAS_POSE_TOPIC, "plugin.atlas.pose");
         assert_eq!(PLUGIN_ATLAS_POINTCLOUD_TOPIC, "plugin.atlas.pointcloud");
         assert_eq!(PLUGIN_ATLAS_OCCUPANCY_TOPIC, "plugin.atlas.occupancy");
         assert_eq!(PLUGIN_ATLAS_SPLAT_TOPIC, "plugin.atlas.splat");
         assert_eq!(PLUGIN_ATLAS_MESH_TOPIC, "plugin.atlas.mesh");
+    }
+
+    #[test]
+    fn atlas_event_round_trips_and_carries_a_struct_payload() {
+        // The bus wrapper carries an already-encoded topic struct as its opaque
+        // payload, so a subscriber demuxes by topic and decodes the inner struct.
+        let status = CaptureStatus {
+            session_id: "sess-1".into(),
+            state: CaptureState::Capturing,
+            keyframes: 3,
+            vio_health: VioHealth::Good,
+            camera_count: 2,
+            ingest_rate_hz: 9.5,
+        };
+        let ev = AtlasEvent {
+            topic: ATLAS_CAPTURE_STATE_TOPIC.into(),
+            payload: status.to_msgpack().unwrap(),
+        };
+        let back = AtlasEvent::from_msgpack(&ev.to_msgpack().unwrap()).unwrap();
+        assert_eq!(back, ev);
+        assert_eq!(back.topic, "atlas.capture.state");
+        let inner = CaptureStatus::from_msgpack(&back.payload).unwrap();
+        assert_eq!(inner, status);
     }
 
     #[test]

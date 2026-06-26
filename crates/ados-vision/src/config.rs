@@ -350,6 +350,17 @@ impl VisionConfig {
         )
     }
 
+    /// The `vision-frames.sock` path: a last-state broadcast socket that
+    /// re-publishes every frame descriptor so an on-box service (the world-model
+    /// capture service) can subscribe and map the ring the descriptor names.
+    /// Carries length-prefixed msgpack [`ados_protocol::framebus::FrameDescriptor`].
+    pub fn frames_socket_path(&self) -> String {
+        format!(
+            "{}/vision-frames.sock",
+            self.socket_dir.trim_end_matches('/')
+        )
+    }
+
     /// The accelerator sidecar socket path the RKNN backend talks to.
     pub fn rknn_socket_path(&self) -> String {
         format!("{}/vision-rknn.sock", self.socket_dir.trim_end_matches('/'))
@@ -445,6 +456,7 @@ vision:
             c.detections_socket_path(),
             "/tmp/run/vision-detections.sock"
         );
+        assert_eq!(c.frames_socket_path(), "/tmp/run/vision-frames.sock");
     }
 
     #[test]

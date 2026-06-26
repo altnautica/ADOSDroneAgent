@@ -22,6 +22,7 @@ use ados_vision::backend::{select_backend, BackendPrefs};
 use ados_vision::config::{CameraEntry, VisionConfig};
 use ados_vision::detection_bus;
 use ados_vision::engine::VisionEngine;
+use ados_vision::frame_bus;
 use ados_vision::ring::now_ms;
 use ados_vision::source::{
     discover_cameras_default, AnySource, CaptureSource, FrameSource, TapSource,
@@ -237,6 +238,21 @@ async fn main() {
         tasks.push(tokio::spawn(async move {
             if let Err(e) = detection_bus::serve(engine, &sock, cancel).await {
                 tracing::error!(error = %e, "vision_detections_serve_failed");
+            }
+        }));
+    }
+
+    // The vision-frames.sock broadcast: every published frame descriptor is
+    // re-framed onto a Unix socket an on-box service (the world-model capture
+    // service) subscribes to, then maps the ring the descriptor names and reads
+    // the slot itself. Only the descriptor crosses the socket; pixels stay in shm.
+    {
+        let engine = engine.clone();
+        let cancel = cancel.clone();
+        let sock = config.frames_socket_path();
+        tasks.push(tokio::spawn(async move {
+            if let Err(e) = frame_bus::serve(engine, &sock, cancel).await {
+                tracing::error!(error = %e, "vision_frames_serve_failed");
             }
         }));
     }

@@ -10,9 +10,31 @@ description = "Atlas world-model capture: subscribes the camera frame ring, sele
 name = "ados_atlas"
 path = "src/lib.rs"
 
+[[bin]]
+name = "ados-atlas"
+path = "src/bin/ados-atlas.rs"
+
 [dependencies]
-ados-protocol = { path = "../ados-protocol" }
+# `tracing-layer` pulls in the LogdLayer so the daemon's logs reach the durable
+# ados-logd Black Box store, not just journald (Rule 41).
+ados-protocol = { path = "../ados-protocol", features = ["tracing-layer"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_norway = { workspace = true }
+rmp-serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-journald = { workspace = true }
+anyhow = { workspace = true }
+# The capture loop, the frame/pose source readers, and the publish bus are all
+# async over the same Unix-socket IPC the other services use.
+tokio = { workspace = true }
+# Map the /dev/shm camera ring a frame descriptor names and read the slot.
+memmap2 = { workspace = true }
+# Encode a selected keyframe's raw ring frame to JPEG before it ships to the
+# compute node (a reconstructor ingests compressed images, never raw planes).
+image = { workspace = true, features = ["jpeg"] }
+
+[dev-dependencies]
+tempfile = "3"

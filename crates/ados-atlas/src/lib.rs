@@ -26,9 +26,28 @@ mod config;
 mod selector;
 mod session;
 
+pub mod encode;
+pub mod frame_source;
+pub mod pose_source;
+pub mod publish;
+pub mod runtime;
+pub mod service;
+
 pub use config::{CameraConfig, CaptureConfig, CaptureProfile, SelectionParams};
 pub use selector::{rotation_angle, KeyframeSelector};
 pub use session::{CaptureOutput, CaptureSession, FrameInput};
+
+pub use encode::encode_keyframe_jpeg;
+pub use frame_source::{AtlasFrameSource, CapturedFrame, SyntheticFrameSource, VisionFrameSource};
+pub use pose_source::{
+    build_pose_provider, euler_to_rotation, geodetic_to_enu, HybridPose, OffloadPose, PoseProvider,
+    PoseSample, ReplayPose, StateSockPose,
+};
+pub use publish::AtlasPublisher;
+pub use runtime::{
+    default_intrinsics, select_pose_tier, AtlasRuntimeConfig, PoseTier, PoseTierConfig,
+};
+pub use service::run_capture_loop;
 
 // Re-export the shared wire contract so callers get one import surface.
 pub use ados_protocol::atlas::{

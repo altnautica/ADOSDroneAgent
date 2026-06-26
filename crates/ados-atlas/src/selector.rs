@@ -21,7 +21,21 @@ impl KeyframeSelector {
     /// the rotation from the last keyframe is `>= min_rotation_rad`; or the time
     /// since the last keyframe is `>= max_interval_ms`.
     pub fn should_select(&mut self, pose: &Pose, ts_ms: i64, params: &SelectionParams) -> bool {
-        let select = match &self.last {
+        let select = self.peek_select(pose, ts_ms, params);
+        if select {
+            self.last = Some((pose.clone(), ts_ms));
+        }
+        select
+    }
+
+    /// Non-mutating peek: whether [`should_select`](Self::should_select) WOULD
+    /// accept this pose at this time, without recording it. The capture service
+    /// calls this to decide whether the (expensive) keyframe image encode is
+    /// worth doing before committing the frame via `on_frame`; because
+    /// `should_select` is defined in terms of this predicate, the peek and the
+    /// commit can never disagree.
+    pub fn peek_select(&self, pose: &Pose, ts_ms: i64, params: &SelectionParams) -> bool {
+        match &self.last {
             // The first frame of a (sub-)stream is always a keyframe.
             None => true,
             Some((last_pose, last_ts)) => {
@@ -31,11 +45,7 @@ impl KeyframeSelector {
                 let elapsed = ts_ms.saturating_sub(*last_ts) >= params.max_interval_ms;
                 translated || rotated || elapsed
             }
-        };
-        if select {
-            self.last = Some((pose.clone(), ts_ms));
         }
-        select
     }
 
     /// Whether this selector has accepted any keyframe yet.
@@ -106,6 +116,26 @@ mod tests {
         let selected = sel.should_select(&pose_at([0.0, 0.0, 0.0], IDENTITY), 0, &params());
         assert!(selected);
         assert!(sel.has_keyframe());
+    }
+
+    #[test]
+    fn peek_matches_should_select_and_does_not_mutate() {
+        let mut sel = KeyframeSelector::default();
+        let p = params();
+        // A fresh selector: peek and commit both say select; peek alone records
+        // nothing, so a second peek still says select.
+        assert!(sel.peek_select(&pose_at([0.0, 0.0, 0.0], IDENTITY), 0, &p));
+        assert!(!sel.has_keyframe(), "peek must not record");
+        assert!(sel.peek_select(&pose_at([0.0, 0.0, 0.0], IDENTITY), 0, &p));
+        // Commit, then a sub-threshold pose: peek and should_select agree (no).
+        assert!(sel.should_select(&pose_at([0.0, 0.0, 0.0], IDENTITY), 0, &p));
+        let near = pose_at([0.1, 0.0, 0.0], IDENTITY);
+        assert!(!sel.peek_select(&near, 200, &p));
+        assert!(!sel.should_select(&near, 200, &p));
+        // A past-threshold pose: peek predicts the commit.
+        let far = pose_at([0.6, 0.0, 0.0], IDENTITY);
+        assert!(sel.peek_select(&far, 300, &p));
+        assert!(sel.should_select(&far, 300, &p));
     }
 
     #[test]

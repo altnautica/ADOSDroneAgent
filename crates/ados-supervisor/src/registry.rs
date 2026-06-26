@@ -142,6 +142,14 @@ pub const SERVICE_REGISTRY: &[ServiceDef] = &[
     // core. On an NPU board the engine reaches its model through the
     // ados-vision-rknn sidecar.
     def("ados-vision", Hardware, Some("drone"), None),
+    // The world-model capture service: subscribes the vision frame ring, selects
+    // pose-tagged keyframes, and publishes the keyframe + pose + capture-state
+    // streams a compute node reconstructs from. Drone-only (the air side owns the
+    // cameras) to match the prebuilt catalog. It self-gates on `atlas.enabled`
+    // (it exits cleanly when atlas is off, the default), so the unit is a clean
+    // no-op until provisioning enables it. NOT in the headless KEEP set:
+    // world-model capture is excluded from the lean headless core.
+    def("ados-atlas", Hardware, Some("drone"), None),
     // The compute-node engine: the job store, the scheduler, and the REST job
     // API. Profile-gated to `compute` so it runs only on a compute node (a GPU
     // box, a Mac, or any spare box), never on a drone or ground station. It
@@ -289,7 +297,7 @@ mod tests {
     #[test]
     fn registry_has_expected_shape() {
         let specs = build_specs();
-        assert_eq!(specs.len(), 32, "service count drifted from the catalog");
+        assert_eq!(specs.len(), 33, "service count drifted from the catalog");
         // Core tier members. ados-mavlink/api/cloud/health are the cross-profile
         // always-on core (the single cloud unit serves the gateway + heartbeat on
         // both profiles, spawning the ground-station bridge when the role resolves
@@ -331,6 +339,13 @@ mod tests {
         assert_eq!(vis.profile_gate, Some("drone"));
         assert_eq!(vis.category, Category::Hardware);
         assert!(!vis.headless_keep);
+        // The world-model capture service is a drone-gated Hardware unit and is
+        // NOT in the headless keep set (world-model capture is excluded from the
+        // lean core, like vision).
+        let atlas = specs.iter().find(|s| s.name == "ados-atlas").unwrap();
+        assert_eq!(atlas.profile_gate, Some("drone"));
+        assert_eq!(atlas.category, Category::Hardware);
+        assert!(!atlas.headless_keep);
     }
 
     #[test]

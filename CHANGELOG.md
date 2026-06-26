@@ -4,6 +4,33 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.6] - 2026-06-26
+
+### Added
+
+- The `ados-atlas` capture service: the on-drone world-model capture daemon that
+  wraps the capture core. It subscribes the vision engine's frame-descriptor
+  broadcast (pixels stay in shared memory), tags each frame with the flight
+  controller's fused pose read from the state socket (a local-frame pose: euler
+  attitude plus a geodetic-to-local-ENU position) or an offloaded SLAM pose via a
+  local / offload / hybrid tier picker, selects keyframes, encodes them to JPEG
+  off the reactor, and publishes the keyframe, pose, and capture-state streams on
+  a new atlas bus. Camera count is configurable from one to an all-sides rig, one
+  flow at any count. Registered as a drone-profile supervised service with its
+  own systemd unit; idle and inert until `atlas.enabled` is set (default off).
+- A frame-descriptor broadcast on the vision engine (`vision-frames.sock`) so an
+  on-box service can subscribe to the descriptor stream and map the ring itself;
+  only the small descriptor crosses the socket. A re-stat of the ring file by
+  device + inode lets a vision restart be detected so a dead mapping is never
+  reused.
+
+### Changed
+
+- The `atlas:` config block is modelled on both the Rust and Python sides with
+  matching field optionality and strict enum value sets, so a config valid on one
+  half is valid on the other (a minimal camera entry or a partial selection block
+  no longer silently disables the service).
+
 ## [0.99.5] - 2026-06-26
 
 ### Added

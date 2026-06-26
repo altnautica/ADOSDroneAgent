@@ -28,16 +28,66 @@ class VisionConfig(BaseModel):
     auto_download: bool = True
 
 
-class AtlasConfig(BaseModel):
-    """ADOS Atlas world-model gate.
+class AtlasCameraConfig(BaseModel):
+    """One camera on the world-model rig (mirrors the Rust capture-core shape).
 
-    Default off: a fresh agent runs no Atlas capture, no compute-node services,
-    and no perception offload until this is enabled. One flag keeps the whole
-    program inert, the same shape as ``VisionConfig``. The capture service and
-    the compute services read it when they ship in later releases.
+    ``enabled`` gates whether the camera's frames are captured at all;
+    ``reconstruct`` is the per-camera hint about whether the stream feeds the
+    world-model reconstruction (a camera may be captured for situational video
+    yet excluded from the splat).
+    """
+
+    id: str
+    # Matches the Rust CameraRole variants exactly so an invalid value is
+    # rejected here (at the write boundary) instead of silently disabling the
+    # Rust capture service when its strict serde enum fails to parse.
+    role: Literal["primary", "aux", "down", "left", "right", "back", "up"] = "primary"
+    enabled: bool = True
+    reconstruct: bool = True
+
+
+class AtlasSelectionParams(BaseModel):
+    """Keyframe-selection thresholds (mirrors the Rust defaults)."""
+
+    min_translation_m: float = 0.5
+    min_rotation_rad: float = 0.26  # ~15 degrees
+    max_interval_ms: int = 2000
+
+
+class AtlasIntrinsicsOverride(BaseModel):
+    """A per-camera calibrated pinhole. Absent, the capture service derives an
+    uncalibrated pinhole from the frame size and the field of view."""
+
+    fx: float
+    fy: float
+    cx: float
+    cy: float
+    distortion_model: str | None = None
+    distortion_params: list[float] = []
+
+
+class AtlasConfig(BaseModel):
+    """ADOS Atlas world-model configuration.
+
+    Default off (``enabled``): a fresh agent runs no Atlas capture, no
+    compute-node services, and no perception offload until this is enabled. One
+    flag keeps the whole program inert, the same shape as ``VisionConfig``. The
+    remaining fields mirror the Rust ``atlas:`` block the native capture service
+    (``ados-atlas``) reads, so the persisted YAML round-trips identically through
+    both halves rather than dropping fields the Rust side relies on.
     """
 
     enabled: bool = False
+    socket_dir: str = "/run/ados"
+    cameras: list[AtlasCameraConfig] = []
+    # capture_profile and pose_tier match the Rust CaptureProfile / PoseTierConfig
+    # variants exactly (strict serde enums on the Rust side); Literal rejects an
+    # invalid value here rather than letting it silently disable the Rust service.
+    capture_profile: Literal["orbit", "lawnmower", "freeform", "inspection"] = "freeform"
+    selection: AtlasSelectionParams = AtlasSelectionParams()
+    pose_tier: Literal["auto", "local", "offload", "hybrid"] = "auto"
+    hfov_deg: float = 70.0
+    intrinsics: dict[str, AtlasIntrinsicsOverride] = {}
 
 
 class LoggingConfig(BaseModel):

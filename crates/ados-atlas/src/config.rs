@@ -10,15 +10,29 @@ use ados_protocol::atlas::CameraRole;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
+fn default_camera_role() -> CameraRole {
+    CameraRole::Primary
+}
+fn default_true() -> bool {
+    true
+}
+
 /// One camera on the rig. `enabled` gates whether its frames are ingested at
 /// all; `reconstruct` is the per-camera hint to the compute node about whether
 /// this stream feeds the world-model reconstruction (a camera may be captured
 /// for situational video yet excluded from the splat).
+///
+/// Every field but `id` carries a serde default so a minimal config entry
+/// (`- id: front`) deserializes — matching the Python `AtlasCameraConfig`
+/// optionality so a config valid on one half is valid on the other.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CameraConfig {
     pub id: String,
+    #[serde(default = "default_camera_role")]
     pub role: CameraRole,
+    #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default = "default_true")]
     pub reconstruct: bool,
 }
 
@@ -39,27 +53,45 @@ pub enum CaptureProfile {
     Inspection,
 }
 
+fn default_min_translation_m() -> f64 {
+    0.5
+}
+/// ~15 degrees.
+fn default_min_rotation_rad() -> f64 {
+    0.26
+}
+fn default_max_interval_ms() -> i64 {
+    2000
+}
+
 /// Thresholds the [`crate::KeyframeSelector`] uses to decide when the camera has
 /// moved enough to be worth a new keyframe. A frame is selected when it crosses
 /// ANY one of these (translation, rotation, or elapsed time).
+///
+/// Each field carries a serde default (the same sane values as [`Default`]) so a
+/// partial `selection:` block (the operator tunes only one threshold) keeps the
+/// others sane instead of zeroing them — and so it matches the Python
+/// `AtlasSelectionParams` optionality.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct SelectionParams {
     /// Minimum baseline (metres) from the last keyframe's position.
+    #[serde(default = "default_min_translation_m")]
     pub min_translation_m: f64,
     /// Minimum viewing-angle change (radians) from the last keyframe.
+    #[serde(default = "default_min_rotation_rad")]
     pub min_rotation_rad: f64,
     /// Maximum gap (milliseconds) between keyframes even while stationary, so a
     /// hovering drone still lays down a heartbeat keyframe.
+    #[serde(default = "default_max_interval_ms")]
     pub max_interval_ms: i64,
 }
 
 impl Default for SelectionParams {
     fn default() -> Self {
         Self {
-            min_translation_m: 0.5,
-            // ~15 degrees.
-            min_rotation_rad: 0.26,
-            max_interval_ms: 2000,
+            min_translation_m: default_min_translation_m(),
+            min_rotation_rad: default_min_rotation_rad(),
+            max_interval_ms: default_max_interval_ms(),
         }
     }
 }
@@ -193,5 +225,26 @@ mod tests {
         assert_eq!(json, "\"lawnmower\"");
         let back: CaptureProfile = serde_json::from_str("\"inspection\"").unwrap();
         assert_eq!(back, CaptureProfile::Inspection);
+    }
+
+    #[test]
+    fn camera_config_fills_defaults_for_a_minimal_entry() {
+        // The minimal entry the Python model invites (`- id: front`) must
+        // deserialize on the Rust side too, or the whole atlas block is dropped:
+        // role->Primary, enabled->true, reconstruct->true.
+        let c: CameraConfig = serde_json::from_str(r#"{"id":"front"}"#).unwrap();
+        assert_eq!(c.id, "front");
+        assert_eq!(c.role, CameraRole::Primary);
+        assert!(c.enabled);
+        assert!(c.reconstruct);
+    }
+
+    #[test]
+    fn selection_params_fill_defaults_for_a_partial_block() {
+        // Tuning one threshold keeps the others at their sane defaults.
+        let p: SelectionParams = serde_json::from_str(r#"{"min_translation_m":1.0}"#).unwrap();
+        assert!((p.min_translation_m - 1.0).abs() < 1e-9);
+        assert!((p.min_rotation_rad - 0.26).abs() < 1e-9);
+        assert_eq!(p.max_interval_ms, 2000);
     }
 }

@@ -28,6 +28,9 @@
 //! - [`detection_bus`] — the `/run/ados/vision-detections.sock` broadcast that
 //!   re-publishes every detection batch as length-prefixed msgpack so the API
 //!   process can forward it to the browser over a WebSocket.
+//! - [`frame_bus`] — the `/run/ados/vision-frames.sock` broadcast that
+//!   re-publishes every frame descriptor as length-prefixed msgpack so an on-box
+//!   service (the world-model capture service) can subscribe and read the ring.
 //! - [`tracker`] — a single-object visual tracker that turns the noisy per-frame
 //!   detection stream into one stable identity by filling `track_id` on the
 //!   canonical detection type (the lock primitive follow-me / framing /
@@ -38,6 +41,7 @@ pub mod backend;
 pub mod config;
 pub mod detection_bus;
 pub mod engine;
+pub mod frame_bus;
 pub mod reid;
 pub mod ring;
 pub mod source;

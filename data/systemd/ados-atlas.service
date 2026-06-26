@@ -1,0 +1,41 @@
+[Unit]
+Description=ADOS Atlas World-Model Capture
+# Consumes the vision engine's frame ring and the flight-controller state, so it
+# starts after both. PartOf the supervisor so it stops with the stack.
+After=ados-mavlink.service ados-vision.service
+PartOf=ados-supervisor.service
+# Skip cleanly when the binary was not fetched for this profile rather than
+# crash-looping "binary missing"; the installer's health gate is the loud
+# failure for a binary that SHOULD be present.
+ConditionPathExists=/opt/ados/bin/ados-atlas
+StartLimitInterval=60s
+StartLimitBurst=5
+
+[Service]
+# Join the shared accounting slice so MemoryCurrent/CPUUsage are observable per
+# unit (the slice sets MemoryAccounting=yes).
+Slice=ados.slice
+Type=simple
+# The native capture service is the only implementation; there is no Python
+# fallback. exec the binary when present (failing loudly if it is absent rather
+# than running a stale path); the installer provisions it best-effort. `exec`
+# replaces the shell image so the chosen binary owns the cgroup + restart track.
+ExecStart=/bin/sh -c 'if [ -x /opt/ados/bin/ados-atlas ]; then exec /opt/ados/bin/ados-atlas; else echo "ados-atlas binary missing; reinstall to fetch it" >&2; exit 1; fi'
+Restart=on-failure
+RestartSec=3
+Environment=ADOS_CONFIG=/etc/ados/config.yaml
+EnvironmentFile=-/etc/ados/env
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+# /dev/shm: the capture service maps the vision frame rings read-only.
+ReadWritePaths=/var/ados /run/ados /etc/ados /dev/shm
+
+MemoryMax=256M
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-atlas
+
+[Install]
+WantedBy=ados-supervisor.service
