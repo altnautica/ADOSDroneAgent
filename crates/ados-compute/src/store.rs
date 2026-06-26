@@ -60,6 +60,17 @@ fn enum_from_db<T: for<'de> Deserialize<'de>>(s: &str) -> Result<T, ComputeError
     ))?)
 }
 
+/// Map an INSERT error: a UNIQUE-constraint violation (a duplicate id) becomes a
+/// `Conflict` so a retrying client gets a 409, not an opaque store fault.
+fn store_or_conflict(e: rusqlite::Error, ctx: String) -> ComputeError {
+    if let rusqlite::Error::SqliteFailure(f, _) = &e {
+        if f.code == rusqlite::ErrorCode::ConstraintViolation {
+            return ComputeError::Conflict(ctx);
+        }
+    }
+    ComputeError::Store(e)
+}
+
 /// The job store over one SQLite connection.
 pub struct JobStore {
     conn: Connection,
@@ -115,10 +126,12 @@ impl JobStore {
     // --- datasets ---------------------------------------------------------
 
     pub fn insert_dataset(&self, d: &Dataset) -> Result<(), ComputeError> {
-        self.conn.execute(
-            "INSERT INTO datasets (id, kind, created_ms, meta) VALUES (?1, ?2, ?3, ?4)",
-            params![d.id, d.kind, d.created_ms, serde_json::to_string(&d.meta)?],
-        )?;
+        self.conn
+            .execute(
+                "INSERT INTO datasets (id, kind, created_ms, meta) VALUES (?1, ?2, ?3, ?4)",
+                params![d.id, d.kind, d.created_ms, serde_json::to_string(&d.meta)?],
+            )
+            .map_err(|e| store_or_conflict(e, format!("dataset {} already exists", d.id)))?;
         Ok(())
     }
 
@@ -158,8 +171,20 @@ impl JobStore {
                 j.created_ms,
                 j.updated_ms,
             ],
-        )?;
+        )
+        .map_err(|e| store_or_conflict(e, format!("job {} already exists", j.id)))?;
         Ok(())
+    }
+
+    /// Count jobs in a given state. Cheap and indexed (`jobs_state_created`), so
+    /// the heartbeat can poll queue depth without loading the whole table.
+    pub fn count_in_state(&self, state: ComputeJobState) -> Result<u32, ComputeError> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM jobs WHERE state = ?1",
+            params![enum_to_db(&state)?],
+            |row| row.get(0),
+        )?;
+        Ok(n as u32)
     }
 
     fn row_to_job(row: &Row) -> Result<JobRecord, ComputeError> {
@@ -403,10 +428,50 @@ mod tests {
             .unwrap();
         s.submit_job(&job("fresh", ComputeJobKind::Reconstruct, 500))
             .unwrap();
+        // Both jobs have an output; the purge must cascade-delete the old job's
+        // output and leave the fresh one's intact (no orphaned outputs).
+        let out = |id: &str, t: i64| Output {
+            id: format!("{id}-out"),
+            job_id: id.into(),
+            kind: "splat".into(),
+            uri: format!("mock://splat/{id}"),
+            created_ms: t,
+        };
+        s.insert_output(&out("old", 100)).unwrap();
+        s.insert_output(&out("fresh", 500)).unwrap();
+
         let removed = s.purge_terminal_before(200).unwrap();
         assert_eq!(removed, 1);
         assert!(s.get_job("old").unwrap().is_none());
         assert!(s.get_job("fresh").unwrap().is_some());
+        // The cascade fired for the purged job, not for the surviving one.
+        assert!(s.outputs_for_job("old").unwrap().is_empty());
+        assert_eq!(s.outputs_for_job("fresh").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn count_in_state_counts_per_state() {
+        let s = JobStore::open_in_memory().unwrap();
+        s.submit_job(&job("a", ComputeJobKind::Reconstruct, 1))
+            .unwrap();
+        s.submit_job(&job("b", ComputeJobKind::Reconstruct, 2))
+            .unwrap();
+        s.set_job_state("b", ComputeJobState::Running, 0.0, None, None, 3)
+            .unwrap();
+        assert_eq!(s.count_in_state(ComputeJobState::Queued).unwrap(), 1);
+        assert_eq!(s.count_in_state(ComputeJobState::Running).unwrap(), 1);
+        assert_eq!(s.count_in_state(ComputeJobState::Completed).unwrap(), 0);
+    }
+
+    #[test]
+    fn duplicate_id_is_a_conflict_not_a_store_fault() {
+        let s = JobStore::open_in_memory().unwrap();
+        s.submit_job(&job("dup", ComputeJobKind::Reconstruct, 1))
+            .unwrap();
+        let err = s
+            .submit_job(&job("dup", ComputeJobKind::Reconstruct, 2))
+            .unwrap_err();
+        assert!(matches!(err, ComputeError::Conflict(_)));
     }
 
     #[test]

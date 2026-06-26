@@ -59,15 +59,12 @@ impl Engine {
     /// The current node status for the heartbeat. `workers_idle` is the node's
     /// worker count minus the jobs currently running.
     pub fn heartbeat(&self) -> Result<ComputeHeartbeat, ComputeError> {
-        let jobs = self.scheduler.store().list_jobs()?;
-        let queue_depth = jobs
-            .iter()
-            .filter(|j| j.state == ComputeJobState::Queued)
-            .count() as u32;
-        let active_jobs = jobs
-            .iter()
-            .filter(|j| j.state == ComputeJobState::Running)
-            .count() as u32;
+        // The heartbeat is the hot path a paired drone or GCS polls, so count
+        // by state with indexed COUNT(*) queries rather than loading the whole
+        // jobs table (params JSON and all) just to count two states.
+        let store = self.scheduler.store();
+        let queue_depth = store.count_in_state(ComputeJobState::Queued)?;
+        let active_jobs = store.count_in_state(ComputeJobState::Running)?;
         let workers_idle = self.workers.saturating_sub(active_jobs);
         Ok(ComputeHeartbeat {
             role: self.cluster.role(),
@@ -158,5 +155,27 @@ mod tests {
         // master idle 2 + slave idle 4 = 6
         assert_eq!(hb.cluster.aggregate_workers_idle, 6);
         assert_eq!(hb.cluster.slaves.len(), 1);
+    }
+
+    #[test]
+    fn heartbeat_counts_running_jobs_and_idle_workers() {
+        let e = engine(); // 2 workers
+        let store = e.scheduler().store();
+        for (id, st) in [
+            ("q", ComputeJobState::Queued),
+            ("r1", ComputeJobState::Running),
+            ("r2", ComputeJobState::Running),
+            ("r3", ComputeJobState::Running),
+        ] {
+            store.submit_job(&queued_reconstruct(id, "ds")).unwrap();
+            if st != ComputeJobState::Queued {
+                store.set_job_state(id, st, 0.0, None, None, 1).unwrap();
+            }
+        }
+        let hb = e.heartbeat().unwrap();
+        assert_eq!(hb.queue_depth, 1);
+        assert_eq!(hb.active_jobs, 3);
+        // 3 running > 2 workers, so idle saturates at 0 (never underflows).
+        assert_eq!(hb.workers_idle, 0);
     }
 }

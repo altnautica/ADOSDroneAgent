@@ -1,9 +1,10 @@
 //! The compute node's REST job API (native Rust, axum over tokio). A drone or
-//! GCS submits reconstruction and offload jobs here over the LAN and reads their
-//! status and results. Handlers lock the engine (a single-writer SQLite store)
-//! briefly per request. This is the local-first control surface; mDNS discovery
-//! and the pairing auth wrap it, and the daemon serves it on a unix socket plus
-//! a LAN TCP port.
+//! GCS submits reconstruction and offload jobs here and reads their status and
+//! results. Handlers lock the engine (a single-writer SQLite store) briefly per
+//! request. This is the local-first control surface. Today the daemon serves it
+//! on a single TCP listener, bound to loopback, with no authentication; the
+//! mDNS discovery and the pairing-auth wrapper that make it a real LAN surface
+//! land later.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -58,6 +59,7 @@ impl IntoResponse for ComputeError {
     fn into_response(self) -> Response {
         let status = match self {
             ComputeError::NotFound(_) => StatusCode::NOT_FOUND,
+            ComputeError::Conflict(_) => StatusCode::CONFLICT,
             ComputeError::WrongKind(_) => StatusCode::BAD_REQUEST,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
@@ -298,6 +300,31 @@ mod tests {
         )
         .await;
         assert_eq!(job["state"], "completed");
+        assert_eq!(job["result_ref"], "mock://detection/job-off");
+        // The offload must have produced a detection ARTIFACT, not just a
+        // terminal state. The worker discards JobOutcome.detections, so the
+        // recorded Output is the only evidence through the REST surface.
+        let (_, outs) = send(
+            &router,
+            "GET",
+            "/api/compute/jobs/job-off/outputs",
+            serde_json::Value::Null,
+        )
+        .await;
+        let outs: Vec<Output> = serde_json::from_value(outs).unwrap();
+        assert_eq!(outs.len(), 1);
+        assert_eq!(outs[0].kind, "detection");
+    }
+
+    #[tokio::test]
+    async fn duplicate_job_id_is_a_409() {
+        let router = build_router(test_state());
+        let body =
+            serde_json::json!({ "job_id": "dup", "kind": "reconstruct", "dataset_id": "ds-x" });
+        let (st1, _) = send(&router, "POST", "/api/compute/jobs", body.clone()).await;
+        assert_eq!(st1, StatusCode::CREATED);
+        let (st2, _) = send(&router, "POST", "/api/compute/jobs", body).await;
+        assert_eq!(st2, StatusCode::CONFLICT);
     }
 
     #[tokio::test]

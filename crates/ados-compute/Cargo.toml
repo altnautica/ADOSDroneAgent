@@ -15,15 +15,18 @@ name = "ados-compute"
 path = "src/bin/ados-compute.rs"
 
 [dependencies]
-ados-protocol = { path = "../ados-protocol" }
+# `tracing-layer` pulls in the LogdLayer so the daemon's logs reach the durable
+# ados-logd Black Box store, not just journald (Rule 41).
+ados-protocol = { path = "../ados-protocol", features = ["tracing-layer"] }
 rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-# The job API is served on the trusted unix socket and the LAN TCP port, the
-# same axum-over-tokio surface the logging daemon uses.
+tracing-journald = { workspace = true }
+# The job API is served on a single TCP listener (loopback until auth ships),
+# the same axum-over-tokio surface the logging daemon uses.
 tokio = { workspace = true }
 axum = { workspace = true }
 

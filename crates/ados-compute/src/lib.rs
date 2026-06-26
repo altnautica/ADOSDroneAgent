@@ -51,6 +51,9 @@ pub enum ComputeError {
     /// A job, dataset, or output id was not found.
     #[error("not found: {0}")]
     NotFound(String),
+    /// An id already exists (a duplicate submit) — distinct from a store fault.
+    #[error("conflict: {0}")]
+    Conflict(String),
     /// The job kind does not match the backend it was dispatched to.
     #[error("wrong job kind for {0}")]
     WrongKind(String),

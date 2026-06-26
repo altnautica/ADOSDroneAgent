@@ -4,6 +4,25 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.3] - 2026-06-26
+
+### Fixed
+
+- Atlas keyframe wire keys now match the contract: the HEVC encoding serializes
+  as `hevc-keyframe` (was `hevckeyframe`), the intrinsic and rotation matrices use
+  `K`/`R`, and a golden wire-key test pins them so a serde-rename regression fails
+  the build.
+- A malformed `frame` param on an offload job now fails the job (recorded) instead
+  of propagating and orphaning it in `running` (restores the fail-not-stall
+  contract). A SLAM offload now records a `pose` artifact, not a `detection`.
+- A duplicate job/dataset id returns `409 Conflict` instead of an opaque `500`.
+- The compute heartbeat counts jobs with indexed `COUNT(*)` queries instead of
+  loading the whole jobs table on every poll; the daemon wires periodic retention
+  so the store does not grow without bound.
+- The daemon attaches the logging-daemon layer (logs reach the Black Box store),
+  refuses a non-loopback bind while the API is unauthenticated, and its doc
+  comments no longer claim a unix socket it does not create.
+
 ## [0.99.2] - 2026-06-26
 
 ### Added

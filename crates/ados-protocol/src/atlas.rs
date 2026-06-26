@@ -86,10 +86,10 @@ pub enum PoseSource {
 
 /// Image encoding carried in a full keyframe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "kebab-case")]
 pub enum ImageEncoding {
     Jpeg,
-    /// HEVC keyframe (I-frame) bytes.
+    /// HEVC keyframe (I-frame) bytes. Serializes as `hevc-keyframe`.
     HevcKeyframe,
 }
 
@@ -99,7 +99,8 @@ pub enum ImageEncoding {
 /// row-major order; `distortion` names the model and its parameters.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CameraIntrinsics {
-    /// Row-major 3x3 intrinsic matrix K.
+    /// Row-major 3x3 intrinsic matrix K (wire key `K`, the math convention).
+    #[serde(rename = "K")]
     pub k: [f64; 9],
     pub distortion: Distortion,
 }
@@ -115,6 +116,8 @@ pub struct Distortion {
 /// translation, `cov` an optional 6x6 covariance (36 row-major elements).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Pose {
+    /// Row-major 3x3 rotation (wire key `R`, the math convention).
+    #[serde(rename = "R")]
     pub r: [f64; 9],
     pub t: [f64; 3],
     pub cov: Option<Vec<f64>>,
@@ -418,5 +421,88 @@ mod tests {
         assert_eq!(PLUGIN_ATLAS_OCCUPANCY_TOPIC, "plugin.atlas.occupancy");
         assert_eq!(PLUGIN_ATLAS_SPLAT_TOPIC, "plugin.atlas.splat");
         assert_eq!(PLUGIN_ATLAS_MESH_TOPIC, "plugin.atlas.mesh");
+    }
+
+    #[test]
+    fn wire_keys_match_the_spec() {
+        // The serialized key names are the contract a Python/TS consumer reads.
+        // Pin them so a serde-rename regression (which a same-struct round-trip
+        // can never catch) fails the build instead of breaking the wire.
+        let mut kf = sample_keyframe();
+        kf.image.encoding = ImageEncoding::HevcKeyframe;
+        let v = serde_json::to_value(&kf).unwrap();
+        for key in [
+            "session_id",
+            "kf_id",
+            "ts_unix_ms",
+            "camera_id",
+            "camera_role",
+            "tier",
+            "pose_source",
+            "global_anchor",
+            "flags",
+        ] {
+            assert!(v.get(key).is_some(), "keyframe key `{key}` missing");
+        }
+        assert!(v["imu_window"].is_array(), "imu_window is a bare array");
+        // K and R are capitalized per the spec's math convention; t stays lower.
+        assert!(v["camera"].get("K").is_some(), "intrinsics key is `K`");
+        assert!(v["pose"].get("R").is_some(), "rotation key is `R`");
+        assert!(v["pose"].get("t").is_some(), "translation key is `t`");
+        // The HEVC encoding is hyphenated on the wire.
+        assert_eq!(v["image"]["encoding"], "hevc-keyframe");
+        assert_eq!(serde_json::to_value(ImageEncoding::Jpeg).unwrap(), "jpeg");
+        assert_eq!(
+            serde_json::to_value(ImageEncoding::HevcKeyframe).unwrap(),
+            "hevc-keyframe"
+        );
+    }
+
+    #[test]
+    fn occupancy_splat_mesh_pose_round_trip() {
+        let occ = OccupancyDescriptor {
+            origin: [0.0, 0.0, 0.0],
+            resolution_m: 0.05,
+            dims: [100, 100, 40],
+            shm_name: Some("atlas-occ-0".into()),
+            slot: Some(1),
+            seq: Some(7),
+        };
+        assert_eq!(
+            occ,
+            OccupancyDescriptor::from_msgpack(&occ.to_msgpack().unwrap()).unwrap()
+        );
+
+        let splat = SplatDescriptor {
+            gaussian_count: 250_000,
+            step: 1500,
+            url: Some("spz://session/1".into()),
+            handle: None,
+        };
+        assert_eq!(
+            splat,
+            SplatDescriptor::from_msgpack(&splat.to_msgpack().unwrap()).unwrap()
+        );
+
+        let mesh = MeshDescriptor {
+            vertex_count: 8000,
+            face_count: 16000,
+            url: None,
+            handle: Some("mesh-0".into()),
+        };
+        assert_eq!(
+            mesh,
+            MeshDescriptor::from_msgpack(&mesh.to_msgpack().unwrap()).unwrap()
+        );
+
+        let pose_desc = PoseDescriptor {
+            pose: sample_pose(),
+            anchor: None,
+            ts_ms: 5,
+        };
+        assert_eq!(
+            pose_desc,
+            PoseDescriptor::from_msgpack(&pose_desc.to_msgpack().unwrap()).unwrap()
+        );
     }
 }

@@ -60,7 +60,7 @@ impl Scheduler {
                 self.run_reconstruct(&job.id, &job.dataset_id, &job.params, now_ms)
             }
             ComputeJobKind::PerceptionOffload | ComputeJobKind::SlamOffload => {
-                self.run_offload(&job.id, &job.params, now_ms)
+                self.run_offload(&job.id, job.kind, &job.params, now_ms)
             }
         }
     }
@@ -112,13 +112,19 @@ impl Scheduler {
     fn run_offload(
         &self,
         job_id: &str,
+        kind: ComputeJobKind,
         params: &serde_json::Value,
         now_ms: i64,
     ) -> Result<Option<JobOutcome>, ComputeError> {
         // The frame to process rides the job params on this lane; absent one, a
-        // default frame keeps the mock path exercised.
+        // default frame keeps the mock path exercised. A malformed `frame` is
+        // bad input: fail the job (recorded), never propagate, per the run_one
+        // contract (mirrors the missing-dataset path in run_reconstruct).
         let frame: FrameRef = match params.get("frame") {
-            Some(v) => serde_json::from_value(v.clone())?,
+            Some(v) => match serde_json::from_value(v.clone()) {
+                Ok(f) => f,
+                Err(e) => return self.fail(job_id, &format!("invalid frame param: {e}"), now_ms),
+            },
             None => FrameRef {
                 camera_id: "front".into(),
                 width: 1280,
@@ -127,13 +133,21 @@ impl Scheduler {
             },
         };
 
+        // A SLAM offload returns poses; a perception offload returns detections.
+        // The mock detector stands in for both real backends, so the artifact
+        // KIND reflects the job kind while the detections ride the outcome.
+        let out_kind = match kind {
+            ComputeJobKind::SlamOffload => "pose",
+            _ => "detection",
+        };
+
         match self.detector.infer(&frame) {
             Ok(detections) => {
                 let output = Output {
                     id: format!("{job_id}-out"),
                     job_id: job_id.to_string(),
-                    kind: "detection".into(),
-                    uri: format!("mock://detection/{job_id}"),
+                    kind: out_kind.into(),
+                    uri: format!("mock://{out_kind}/{job_id}"),
                     created_ms: now_ms,
                 };
                 self.store.insert_output(&output)?;
@@ -288,6 +302,50 @@ mod tests {
         assert!(job.error.is_some());
         // The worker is still usable for the next job.
         assert!(s.run_one(201).unwrap().is_none());
+    }
+
+    #[test]
+    fn offload_with_malformed_frame_fails_the_job_not_the_worker() {
+        let s = scheduler();
+        // A `frame` that is present but malformed is bad input: it must fail the
+        // job (recorded), not propagate and orphan the job in Running.
+        s.store()
+            .submit_job(&queued(
+                "job-bad-frame",
+                ComputeJobKind::PerceptionOffload,
+                None,
+                serde_json::json!({ "frame": { "width": "oops" } }),
+            ))
+            .unwrap();
+        let outcome = s.run_one(200).unwrap().unwrap();
+        assert_eq!(outcome.state, ComputeJobState::Failed);
+        let job = s.store().get_job("job-bad-frame").unwrap().unwrap();
+        assert_eq!(job.state, ComputeJobState::Failed);
+        assert!(job
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("invalid frame param"));
+        // The worker is not stalled.
+        assert!(s.run_one(201).unwrap().is_none());
+    }
+
+    #[test]
+    fn slam_offload_produces_a_pose_output() {
+        let s = scheduler();
+        s.store()
+            .submit_job(&queued(
+                "job-slam",
+                ComputeJobKind::SlamOffload,
+                None,
+                serde_json::json!({}),
+            ))
+            .unwrap();
+        let outcome = s.run_one(300).unwrap().unwrap();
+        assert_eq!(outcome.state, ComputeJobState::Completed);
+        // A SLAM offload's artifact is a pose, not a detection.
+        assert_eq!(outcome.outputs[0].kind, "pose");
+        assert_eq!(outcome.outputs[0].uri, "mock://pose/job-slam");
     }
 
     #[test]
