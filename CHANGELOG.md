@@ -4,6 +4,22 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.8] - 2026-06-28
+
+### Added
+
+- Compute-node reconstruct pipeline core. Reconstructor backends (Brush /
+  nerfstudio / COLMAP / WebODM) as command-builders behind the `Reconstructor`
+  trait, with a PATH-aware selector that falls back to the mock on a node with no
+  tool installed; a multi-stage post-flight pipeline (COLMAP poses → splat train)
+  that chains each stage with `derived_from` lineage and feeds the prior stage's
+  output (`input_uri`) to the next; a live in-flight session state machine
+  (pairing → ready → active ↔ paused → ended) with incremental training and an
+  SPZ-delta producer behind a trait; and a Rerun-aligned recording adapter that
+  maps the keyframe envelope + world-model descriptors onto the Rerun entity-path
+  tree (each camera's pinhole logged once). Inert until the compute profile is
+  selected.
+
 ## [0.99.7] - 2026-06-27
 
 ### Added

@@ -16,20 +16,34 @@
 
 mod api;
 mod auth;
+mod backends;
 mod cluster;
 mod engine;
 mod offload;
+mod pipeline;
 mod reconstructor;
+mod rerun_log;
 mod scheduler;
+mod session;
 mod store;
 
 pub use api::{build_router, ApiState};
 pub use auth::{require_pairing, ComputeAuth, PairingGate, RateLimiter, DEFAULT_PAIRING_PATH};
+pub use backends::{
+    file_uri_to_path, is_tool_available, parse_gaussian_count, path_to_file_uri,
+    select_reconstructor, CliReconstructor, ReconstructCommand, ReconstructorKind,
+};
 pub use cluster::Cluster;
 pub use engine::{ComputeHeartbeat, Engine};
 pub use offload::{Detection, Detector, FrameRef, MockDetector};
+pub use pipeline::{stage_index_of, Pipeline, PipelineRunner, PipelineStage};
 pub use reconstructor::{MockReconstructor, ReconstructOutput, Reconstructor};
+pub use rerun_log::{
+    log_keyframe, log_mesh, log_occupancy, log_pointcloud, log_splat, RerunArchetype,
+    RerunLogEntry, RerunRecording,
+};
 pub use scheduler::{BackendResult, JobOutcome, Prepared, PreparedInput, Scheduler};
+pub use session::{DeltaProducer, LiveSession, LiveSessionState, MockDeltaProducer, SplatDelta};
 pub use store::{Dataset, JobRecord, JobStore, Output};
 
 // Re-export the shared wire contract so callers get one import surface.
