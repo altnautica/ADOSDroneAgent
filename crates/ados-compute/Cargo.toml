@@ -29,6 +29,9 @@ tracing-journald = { workspace = true }
 # the same axum-over-tokio surface the logging daemon uses.
 tokio = { workspace = true }
 axum = { workspace = true }
+# The compute-offload client (the agent-side caller of this node's job API).
+# Plain HTTP on the LAN (no TLS); the cloud leg's TLS rides its own bearer.
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
 
 [dev-dependencies]
 # `ServiceExt::oneshot` drives the router in tests without binding a port.

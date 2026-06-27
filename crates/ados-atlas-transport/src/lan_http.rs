@@ -50,14 +50,15 @@ impl LanHttpBearer {
     /// A bearer targeting `base_url` (e.g. `http://compute.local:8092`), with a
     /// client that has connect + request timeouts so a hung peer fails the send.
     pub fn new(base_url: impl Into<String>) -> Self {
+        // build() only fails on a TLS-stack init error, which a plain-HTTP
+        // (no-TLS) client never hits; `expect` keeps the timeout guarantee
+        // rather than silently degrading to a timeout-less default (which would
+        // let a hung peer park the send the timeouts exist to prevent).
         let client = Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
             .build()
-            // build() only fails on a TLS-stack init error, which a plain-HTTP
-            // (no-TLS) client never hits; fall back to a basic client if it ever
-            // does rather than panic in a constructor.
-            .unwrap_or_default();
+            .expect("build atlas lan-http client");
         Self::with_client(client, base_url)
     }
 

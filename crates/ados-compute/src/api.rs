@@ -90,15 +90,17 @@ struct SubmitRequest {
     params: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Serialize)]
-struct SubmitResponse {
-    job_id: String,
-    state: ComputeJobState,
+/// The reply to a job submission (shared with the offload client).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubmitResponse {
+    pub job_id: String,
+    pub state: ComputeJobState,
 }
 
-#[derive(Debug, Serialize)]
-struct CancelResponse {
-    cancelled: bool,
+/// The reply to a cancel (shared with the offload client).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CancelResponse {
+    pub cancelled: bool,
 }
 
 async fn status(State(state): State<ApiState>) -> Result<Response, ComputeError> {

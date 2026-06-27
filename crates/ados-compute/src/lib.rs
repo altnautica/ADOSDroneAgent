@@ -17,6 +17,7 @@
 mod api;
 mod auth;
 mod backends;
+mod client;
 mod cluster;
 mod engine;
 mod offload;
@@ -27,12 +28,13 @@ mod scheduler;
 mod session;
 mod store;
 
-pub use api::{build_router, ApiState};
+pub use api::{build_router, ApiState, CancelResponse, SubmitResponse};
 pub use auth::{require_pairing, ComputeAuth, PairingGate, RateLimiter, DEFAULT_PAIRING_PATH};
 pub use backends::{
     file_uri_to_path, is_tool_available, parse_gaussian_count, path_to_file_uri,
     select_reconstructor, CliReconstructor, ReconstructCommand, ReconstructorKind,
 };
+pub use client::{ClientError, ComputeClient};
 pub use cluster::Cluster;
 pub use engine::{ComputeHeartbeat, Engine};
 pub use offload::{Detection, Detector, FrameRef, MockDetector};

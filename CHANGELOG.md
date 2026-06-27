@@ -4,7 +4,22 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
-## [0.99.9] - 2026-06-28
+## [0.99.10] - 2026-06-28
+
+### Added
+
+- Compute-offload contract: the agent-side `ComputeClient` (a timeout-bounded,
+  `X-ADOS-Key`-authenticated client to a paired compute node's job API —
+  register a dataset, submit a job with an optional idempotency id, read status
+  + outputs, cancel) and the `ctx.compute` plugin facade (cap-gated
+  `compute.dataset.write` / `compute.job.submit` / `compute.job.read`), so a
+  plugin can run a reconstruction or a perception / SLAM offload on the node.
+
+### Changed
+
+- Harden HTTP client construction in the compute-offload client and the LAN
+  bearer: a build failure is now loud rather than silently degrading to a
+  timeout-less client.
 
 ### Added
 
