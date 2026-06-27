@@ -45,6 +45,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "ados-atlas-transport"
+version = "0.1.0"
+dependencies = [
+ "ados-protocol",
+ "async-trait",
+ "axum",
+ "bytes",
+ "futures-util",
+ "reqwest",
+ "rmp-serde",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+]
+
+[[package]]
 name = "ados-capabilities-codegen"
 version = "0.1.0"
 dependencies = [

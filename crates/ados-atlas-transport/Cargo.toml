@@ -1,0 +1,27 @@
+[package]
+name = "ados-atlas-transport"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Atlas world-model stream lane: the bearer-agnostic AtlasTransport over a priority failover ladder (direct LAN HTTP primary; WFB relay + cloud bearers added with their carriers), carrying keyframes drone->compute and splat deltas compute->GCS as the identical framed envelope on every bearer."
+
+[lib]
+name = "ados_atlas_transport"
+path = "src/lib.rs"
+
+[dependencies]
+ados-protocol = { path = "../ados-protocol" }
+serde = { workspace = true }
+rmp-serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true, features = ["ws"] }
+bytes = "1"
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false }
+
+[dev-dependencies]
+tokio-tungstenite = "0.24"

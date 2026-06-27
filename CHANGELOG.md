@@ -4,6 +4,19 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.9] - 2026-06-28
+
+### Added
+
+- World-model stream lane (`ados-atlas-transport` crate): a bearer-agnostic
+  `AtlasBearer` transport over a priority failover ladder (local-first), carrying
+  the framed keyframe/delta envelope identically on every bearer. Ships a real
+  direct-LAN HTTP bearer (a timeout-bounded sender + a bounded-ingest axum
+  receiver that backpressures with 503 and accepts multi-megabyte keyframes), an
+  in-process loopback bearer, and a per-device splat-delta WebSocket broadcaster
+  (compute -> GCS, lag-skip + idle-disconnect reap + keepalive). The WFB-relay
+  and cloud bearers are added with their carriers; the ladder accepts them then.
+
 ## [0.99.8] - 2026-06-28
 
 ### Added
