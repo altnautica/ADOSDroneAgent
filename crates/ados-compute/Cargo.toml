@@ -33,3 +33,5 @@ axum = { workspace = true }
 [dev-dependencies]
 # `ServiceExt::oneshot` drives the router in tests without binding a port.
 tower = { workspace = true, features = ["util"] }
+# Temp pairing.json files for the auth-gate tests.
+tempfile = "3"

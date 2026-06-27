@@ -3,11 +3,11 @@
 //! periodically reclaims terminal jobs, and serves the REST job API on a single
 //! TCP listener. The supervisor starts it for the `compute` profile.
 //!
-//! Local-first reach (Rule 39) is the goal, but the job API has no
-//! authentication yet, so the daemon binds **loopback by default** and refuses
-//! to bind a non-loopback address until the pairing-auth layer ships. mDNS
-//! discovery and that auth wrap this surface later; today it is the lean local
-//! job API on `127.0.0.1`.
+//! Local-first reach (Rule 39): the job API is gated by the pairing posture
+//! (unpaired ⇒ open, paired + on-box ⇒ open, paired + off-box ⇒ `X-ADOS-Key`),
+//! so binding a non-loopback address is safe. It still defaults to `127.0.0.1`;
+//! the installer opts a node into serving the LAN with `ADOS_COMPUTE_BIND`. mDNS
+//! discovery wraps this surface later.
 //!
 //! Worker note: the worker claims the next job under the engine lock, then
 //! releases the lock and runs the (real, possibly minutes-long) backend
@@ -23,12 +23,17 @@
 //! - `ADOS_COMPUTE_NODE_ID`   this node's id (default `compute-node`)
 //! - `ADOS_COMPUTE_WORKERS`   worker slots (default `1`)
 //! - `ADOS_COMPUTE_RETENTION_S` terminal-job retention seconds (default `86400`)
+//! - `ADOS_PAIRING_JSON`      pairing.json path (default `/etc/ados/pairing.json`,
+//!   the same override the rest of the agent honours)
 
+use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ados_compute::{
-    build_router, Cluster, Engine, JobStore, MockDetector, MockReconstructor, Prepared, Scheduler,
+    build_router, Cluster, ComputeAuth, Engine, JobStore, MockDetector, MockReconstructor,
+    Prepared, Scheduler, DEFAULT_PAIRING_PATH,
 };
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
@@ -85,20 +90,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(86_400)
         .saturating_mul(1000);
 
-    // Safety gate: the job API is unauthenticated, so a non-loopback bind would
-    // expose it LAN-wide. Refuse it until the pairing-auth layer is in place. A
-    // hostname (unparseable as a SocketAddr) is left to the listener to resolve.
-    if let Ok(addr) = bind.parse::<std::net::SocketAddr>() {
-        if !addr.ip().is_loopback() {
-            return Err(format!(
-                "refusing to bind {bind}: the compute job API is not authenticated yet, \
-                 so it must stay on loopback. Use a 127.0.0.0/8 or ::1 address until the \
-                 pairing-auth layer ships."
-            )
-            .into());
-        }
-    }
-
     if db != ":memory:" {
         if let Some(parent) = std::path::Path::new(&db).parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -134,10 +125,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rs = state.clone();
     tokio::spawn(async move { retention_loop(rs, retention_ms).await });
 
-    let router = build_router(state);
+    let auth = Arc::new(ComputeAuth::new(PathBuf::from(env_or(
+        "ADOS_PAIRING_JSON",
+        DEFAULT_PAIRING_PATH,
+    ))));
+    let router = build_router(state, auth);
     let listener = TcpListener::bind(&bind).await?;
-    tracing::info!(bind = %bind, workers, "compute job API listening (loopback, unauthenticated)");
-    axum::serve(listener, router).await?;
+    tracing::info!(bind = %bind, workers, "compute job API listening (pairing-gated)");
+    // ConnectInfo carries the peer address the auth gate reads to resolve on-box
+    // loopback trust.
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 

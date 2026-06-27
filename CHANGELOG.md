@@ -4,6 +4,20 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.7] - 2026-06-27
+
+### Added
+
+- Pairing auth on the compute node's job API. A `PairingGate` + axum middleware
+  reuse the shared data-plane posture (unpaired ⇒ open, paired + on-box ⇒ open,
+  paired + off-box ⇒ `X-ADOS-Key`, constant-time compared), gated uniformly on
+  every route including `/api/compute/status`, plus an off-box token-bucket rate
+  limiter. With the gate in place the daemon serves with `ConnectInfo` and the
+  old loopback-only bind restriction is removed, so a paired node can serve the
+  LAN safely (it still defaults to `127.0.0.1`; the installer opts into a LAN
+  bind). The pairing-state path honours `ADOS_PAIRING_JSON`, the same override
+  the rest of the agent uses.
+
 ## [0.99.6] - 2026-06-26
 
 ### Added

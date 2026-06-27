@@ -15,6 +15,7 @@
 //! the backends.
 
 mod api;
+mod auth;
 mod cluster;
 mod engine;
 mod offload;
@@ -23,6 +24,7 @@ mod scheduler;
 mod store;
 
 pub use api::{build_router, ApiState};
+pub use auth::{require_pairing, ComputeAuth, PairingGate, RateLimiter, DEFAULT_PAIRING_PATH};
 pub use cluster::Cluster;
 pub use engine::{ComputeHeartbeat, Engine};
 pub use offload::{Detection, Detector, FrameRef, MockDetector};

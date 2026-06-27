@@ -1,10 +1,10 @@
 //! The compute node's REST job API (native Rust, axum over tokio). A drone or
 //! GCS submits reconstruction and offload jobs here and reads their status and
 //! results. Handlers lock the engine (a single-writer SQLite store) briefly per
-//! request. This is the local-first control surface. Today the daemon serves it
-//! on a single TCP listener, bound to loopback, with no authentication; the
-//! mDNS discovery and the pairing-auth wrapper that make it a real LAN surface
-//! land later.
+//! request. This is the local-first control surface, gated by the pairing
+//! posture (see [`crate::auth`]): unpaired ⇒ open, paired + on-box ⇒ open,
+//! paired + off-box ⇒ `X-ADOS-Key`, with an off-box rate limiter. mDNS discovery
+//! wraps it later.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -18,14 +18,20 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
+use crate::auth::{require_pairing, ComputeAuth};
 use crate::{ComputeError, ComputeJobKind, ComputeJobState, Dataset, Engine, JobRecord};
 
 /// Shared engine handle. One mutex serializes access to the single-writer store,
 /// shared by the API handlers and the worker loop.
 pub type ApiState = Arc<Mutex<Engine>>;
 
-/// Build the job-API router over a shared engine.
-pub fn build_router(state: ApiState) -> Router {
+/// Build the job-API router over a shared engine, gated by the pairing posture.
+///
+/// Every route passes through [`require_pairing`]: unpaired ⇒ open, paired +
+/// on-box ⇒ open, paired + off-box ⇒ `X-ADOS-Key` required, with an off-box rate
+/// limiter. The peer address the gate reads comes from `ConnectInfo`, so the
+/// daemon serves the router with `into_make_service_with_connect_info::<SocketAddr>()`.
+pub fn build_router(state: ApiState, auth: Arc<ComputeAuth>) -> Router {
     Router::new()
         .route("/api/compute/status", get(status))
         .route("/api/compute/datasets", post(create_dataset))
@@ -33,6 +39,7 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/api/compute/jobs/:id", get(job_status))
         .route("/api/compute/jobs/:id/cancel", post(cancel_job))
         .route("/api/compute/jobs/:id/outputs", get(job_outputs))
+        .layer(axum::middleware::from_fn_with_state(auth, require_pairing))
         .with_state(state)
 }
 
@@ -193,6 +200,40 @@ mod tests {
         Arc::new(Mutex::new(engine))
     }
 
+    /// A nonexistent pairing file reads as Unpaired (open), the posture the
+    /// job-flow tests run under.
+    fn unpaired_auth() -> Arc<ComputeAuth> {
+        Arc::new(ComputeAuth::new(
+            "/nonexistent/ados-compute-test-pairing.json".into(),
+        ))
+    }
+
+    /// Auth over a temp pairing.json that is paired with `ados_secret`.
+    fn paired_auth(dir: &std::path::Path) -> Arc<ComputeAuth> {
+        let path = dir.join("pairing.json");
+        std::fs::write(&path, r#"{"paired": true, "api_key": "ados_secret"}"#).unwrap();
+        Arc::new(ComputeAuth::new(path))
+    }
+
+    const OFFBOX: &str = "192.168.1.50:55000";
+    const ONBOX: &str = "127.0.0.1:55000";
+
+    /// GET /api/compute/status from `peer`, optionally presenting a key.
+    async fn send_auth(
+        router: &Router,
+        peer: std::net::SocketAddr,
+        key: Option<&str>,
+    ) -> StatusCode {
+        let mut builder = Request::builder().method("GET").uri("/api/compute/status");
+        if let Some(k) = key {
+            builder = builder.header("x-ados-key", k);
+        }
+        let mut req = builder.body(Body::empty()).unwrap();
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(peer));
+        router.clone().oneshot(req).await.unwrap().status()
+    }
+
     async fn send(
         router: &Router,
         method: &str,
@@ -221,7 +262,7 @@ mod tests {
     #[tokio::test]
     async fn submit_reconstruct_then_run_then_read_completed() {
         let state = test_state();
-        let router = build_router(state.clone());
+        let router = build_router(state.clone(), unpaired_auth());
 
         // Create a dataset.
         let (st, ds) = send(
@@ -281,7 +322,7 @@ mod tests {
     #[tokio::test]
     async fn submit_offload_then_run_completes() {
         let state = test_state();
-        let router = build_router(state.clone());
+        let router = build_router(state.clone(), unpaired_auth());
         let (st, _) = send(
             &router,
             "POST",
@@ -318,7 +359,7 @@ mod tests {
 
     #[tokio::test]
     async fn duplicate_job_id_is_a_409() {
-        let router = build_router(test_state());
+        let router = build_router(test_state(), unpaired_auth());
         let body =
             serde_json::json!({ "job_id": "dup", "kind": "reconstruct", "dataset_id": "ds-x" });
         let (st1, _) = send(&router, "POST", "/api/compute/jobs", body.clone()).await;
@@ -329,7 +370,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_job_is_404() {
-        let router = build_router(test_state());
+        let router = build_router(test_state(), unpaired_auth());
         let (st, body) = send(
             &router,
             "GET",
@@ -343,7 +384,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_a_queued_job() {
-        let router = build_router(test_state());
+        let router = build_router(test_state(), unpaired_auth());
         send(
             &router,
             "POST",
@@ -364,7 +405,7 @@ mod tests {
 
     #[tokio::test]
     async fn status_reports_master_role() {
-        let router = build_router(test_state());
+        let router = build_router(test_state(), unpaired_auth());
         let (st, body) = send(
             &router,
             "GET",
@@ -376,5 +417,138 @@ mod tests {
         assert_eq!(body["role"], "master");
         assert_eq!(body["workers_idle"], 2);
         assert_eq!(body["cluster"]["master_id"], "node-a");
+    }
+
+    #[tokio::test]
+    async fn unpaired_admits_an_offbox_caller_with_no_key() {
+        let router = build_router(test_state(), unpaired_auth());
+        assert_eq!(
+            send_auth(&router, OFFBOX.parse().unwrap(), None).await,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn paired_rejects_an_offbox_caller_with_no_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let router = build_router(test_state(), paired_auth(dir.path()));
+        assert_eq!(
+            send_auth(&router, OFFBOX.parse().unwrap(), None).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn paired_admits_an_offbox_caller_with_the_key_and_rejects_a_wrong_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let router = build_router(test_state(), paired_auth(dir.path()));
+        assert_eq!(
+            send_auth(&router, OFFBOX.parse().unwrap(), Some("ados_secret")).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            send_auth(&router, OFFBOX.parse().unwrap(), Some("wrong")).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn paired_admits_an_onbox_caller_without_a_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let router = build_router(test_state(), paired_auth(dir.path()));
+        assert_eq!(
+            send_auth(&router, ONBOX.parse().unwrap(), None).await,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn a_forwarded_loopback_caller_is_not_trusted_on_box() {
+        // A tunnel terminating on 127.0.0.1 carries a forwarding header; it must
+        // NOT get on-box trust, so a paired node still demands the key.
+        let dir = tempfile::tempdir().unwrap();
+        let router = build_router(test_state(), paired_auth(dir.path()));
+        let mut req = Request::builder()
+            .method("GET")
+            .uri("/api/compute/status")
+            .header("x-forwarded-for", "203.0.113.7")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo::<std::net::SocketAddr>(
+                ONBOX.parse().unwrap(),
+            ));
+        let st = router.clone().oneshot(req).await.unwrap().status();
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn the_gate_covers_non_status_routes_too() {
+        // The auth layer wraps the WHOLE router, not just /status: a paired node
+        // rejects an off-box keyless POST to the job route.
+        let dir = tempfile::tempdir().unwrap();
+        let router = build_router(test_state(), paired_auth(dir.path()));
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/api/compute/jobs")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({ "kind": "reconstruct" })).unwrap(),
+            ))
+            .unwrap();
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo::<std::net::SocketAddr>(
+                OFFBOX.parse().unwrap(),
+            ));
+        let st = router.clone().oneshot(req).await.unwrap().status();
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn paired_rejects_an_empty_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let router = build_router(test_state(), paired_auth(dir.path()));
+        assert_eq!(
+            send_auth(&router, OFFBOX.parse().unwrap(), Some("")).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn serve_path_attaches_connect_info_so_onbox_is_trusted() {
+        // Prove the PRODUCTION wiring, not just the middleware logic: serving with
+        // into_make_service_with_connect_info attaches the peer, so a real loopback
+        // request is on-box and admitted keyless even on a PAIRED node. A refactor
+        // that drops the connect-info wiring would default every caller to off-box
+        // and this would 401.
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::{TcpListener, TcpStream};
+
+        let dir = tempfile::tempdir().unwrap();
+        let router = build_router(test_state(), paired_auth(dir.path()));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await;
+        });
+
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(b"GET /api/compute/status HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.unwrap();
+        let head = String::from_utf8_lossy(&buf);
+        assert!(
+            head.starts_with("HTTP/1.1 200"),
+            "on-box trusted through the real serve path; got: {}",
+            &head[..head.len().min(40)]
+        );
+        server.abort();
     }
 }
