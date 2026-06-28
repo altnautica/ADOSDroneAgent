@@ -4,7 +4,20 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
-## [0.99.10] - 2026-06-28
+## [0.99.11] - 2026-06-28
+
+### Added
+
+- Perception / SLAM offload for NPU-less drones (`ados-offload` crate + the
+  `ados.sdk.offload` plugin gate): the tier picker (local / offload / hybrid),
+  the link-aware freshness gate, and the lock-state safety gate. A drone with no
+  on-board accelerator offloads detection / tracking / SLAM to a paired compute
+  node and flies its behaviours on the results, while the fast control loop stays
+  local. The safety invariant: a result past its freshness budget or a dropped
+  link is treated as absent — stop and hold, never extrapolate, never
+  auto-re-acquire a dropped lock (only an explicit re-designate re-locks).
+  Freshness is anchored on the local monotonic arrival time, so a clock-skewed or
+  frozen-but-connected node cannot make a stale stream read fresh.
 
 ### Added
 

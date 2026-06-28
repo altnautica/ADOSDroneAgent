@@ -380,6 +380,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ados-offload"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "ados-plugin-host"
 version = "0.1.0"
 dependencies = [

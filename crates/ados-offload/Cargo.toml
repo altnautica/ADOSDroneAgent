@@ -1,0 +1,14 @@
+[package]
+name = "ados-offload"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Perception/SLAM offload for NPU-less drones: the tier picker (local | offload | hybrid), the link-aware freshness gate, and the lock-state safety gate (stale or link-lost = lost; stop and hold; never extrapolate, never auto-re-acquire). Pure logic the agent runs while the fast control loop stays local and the heavy perception runs on a paired compute node."
+
+[lib]
+name = "ados_offload"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
