@@ -4,7 +4,25 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
-## [0.99.11] - 2026-06-28
+## [0.99.12] - 2026-06-28
+
+### Added
+
+- Compute-node cloud heartbeat: `ados-compute` writes its cluster + queue state
+  to a self-dating sidecar (`/run/ados/compute-heartbeat.json`) every 5 s, and
+  the native cloud relay folds the compute fields into the agent heartbeat it
+  posts to the cloud — completing the loop for the GCS compute-cluster surface.
+  A non-compute node has no sidecar, so the heartbeat is byte-identical to
+  before.
+
+### Fixed
+
+- The relay treats a compute sidecar older than its staleness budget as absent,
+  so a crashed or hung compute service no longer makes the heartbeat report a
+  frozen-but-live cluster state.
+- Build the compute-offload HTTP client with the process-default RustCrypto
+  rustls provider installed first, so constructing it can no longer panic
+  ("No provider set") under the workspace's no-provider rustls posture.
 
 ### Added
 

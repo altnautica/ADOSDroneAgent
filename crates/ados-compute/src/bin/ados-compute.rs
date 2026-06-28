@@ -32,8 +32,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ados_compute::{
-    build_router, Cluster, ComputeAuth, Engine, JobStore, MockDetector, MockReconstructor,
-    Prepared, Scheduler, DEFAULT_PAIRING_PATH,
+    build_router, write_compute_heartbeat, Cluster, ComputeAuth, Engine, JobStore, MockDetector,
+    MockReconstructor, Prepared, Scheduler, DEFAULT_PAIRING_PATH,
 };
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
@@ -124,6 +124,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let rs = state.clone();
     tokio::spawn(async move { retention_loop(rs, retention_ms).await });
+    // Publish the cluster + queue state to the heartbeat sidecar so the native
+    // cloud relay can fold the compute fields into the agent heartbeat (RUST-
+    // first; the relay reads the file, no cross-crate coupling).
+    let hs = state.clone();
+    tokio::spawn(async move { heartbeat_loop(hs).await });
 
     let auth = Arc::new(ComputeAuth::new(PathBuf::from(env_or(
         "ADOS_PAIRING_JSON",
@@ -191,6 +196,28 @@ async fn retention_loop(state: Arc<Mutex<Engine>>, retention_ms: i64) {
             Ok(n) if n > 0 => tracing::info!(removed = n, "retention purge"),
             Ok(_) => {}
             Err(e) => tracing::warn!(error = %e, "retention purge failed"),
+        }
+    }
+}
+
+/// Every 5 s, snapshot the engine heartbeat and write it to the sidecar the
+/// cloud relay folds into the agent heartbeat. Best-effort: a store or write
+/// error is logged, never fatal (the relay treats an absent/stale sidecar as
+/// "no compute state", which is the honest reading).
+async fn heartbeat_loop(state: Arc<Mutex<Engine>>) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let hb = {
+            let engine = state.lock().await;
+            engine.heartbeat()
+        };
+        match hb {
+            Ok(hb) => {
+                if let Err(e) = write_compute_heartbeat(&hb, now_ms()) {
+                    tracing::warn!(error = %e, "compute heartbeat sidecar write failed");
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "compute heartbeat snapshot failed"),
         }
     }
 }

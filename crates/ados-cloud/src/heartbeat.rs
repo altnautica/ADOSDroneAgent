@@ -31,7 +31,7 @@
 //! its `None` fields as JSON `null` deliberately, matching the Python nested
 //! dict which keeps the `None` values.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// One service entry in the heartbeat `services[]` array. The cloud loop sources
 /// these from `get_services_status()`; the always-present keys are `name`,
@@ -332,6 +332,38 @@ pub struct HeartbeatPayload {
     // --- FC CAN buses (omitted when no CAN params cached) ---
     #[serde(skip_serializing_if = "Option::is_none")]
     pub can_buses: Option<Vec<CanBus>>,
+
+    // --- Compute-node cluster + queue state (compute profile only) ---
+    // Folded from the /run/ados/compute-heartbeat.json sidecar written by
+    // ados-compute. All `None` on a non-compute node, so they are omitted and
+    // the heartbeat stays byte-identical (the frozen golden case has no
+    // sidecar). The keys are the cmd_droneStatus compute* field names.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compute_role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compute_cluster_master_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compute_queue_depth: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compute_active_jobs: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compute_workers_idle: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compute_cluster_aggregate_workers_idle: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compute_cluster_slaves: Option<Vec<ClusterSlave>>,
+}
+
+/// One compute slave node's capacity, as folded onto the heartbeat under
+/// `computeClusterSlaves`. camelCase keys (the nested struct does not inherit
+/// the root rename), matching the cmd_droneStatus shape.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClusterSlave {
+    pub node_id: String,
+    pub accelerators: Vec<String>,
+    pub workers_idle: i64,
+    pub queue_depth: i64,
 }
 
 /// One FC CAN bus entry. The block is omitted from the payload when no CAN
@@ -480,6 +512,13 @@ mod tests {
             video_pipeline_state: None,
             display_type: None,
             can_buses: None,
+            compute_role: None,
+            compute_cluster_master_id: None,
+            compute_queue_depth: None,
+            compute_active_jobs: None,
+            compute_workers_idle: None,
+            compute_cluster_aggregate_workers_idle: None,
+            compute_cluster_slaves: None,
         }
     }
 }

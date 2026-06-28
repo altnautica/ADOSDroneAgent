@@ -20,6 +20,7 @@ mod backends;
 mod client;
 mod cluster;
 mod engine;
+mod heartbeat_sidecar;
 mod offload;
 mod pipeline;
 mod reconstructor;
@@ -37,6 +38,10 @@ pub use backends::{
 pub use client::{ClientError, ComputeClient};
 pub use cluster::Cluster;
 pub use engine::{ComputeHeartbeat, Engine};
+pub use heartbeat_sidecar::{
+    write_compute_heartbeat, write_compute_heartbeat_to, ComputeHeartbeatSidecar, SlaveEntry,
+    COMPUTE_HEARTBEAT_SIDECAR,
+};
 pub use offload::{Detection, Detector, FrameRef, MockDetector};
 pub use pipeline::{stage_index_of, Pipeline, PipelineRunner, PipelineStage};
 pub use reconstructor::{MockReconstructor, ReconstructOutput, Reconstructor};

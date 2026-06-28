@@ -107,6 +107,8 @@ dependencies = [
  "axum",
  "reqwest",
  "rusqlite",
+ "rustls",
+ "rustls-rustcrypto",
  "serde",
  "serde_json",
  "tempfile",

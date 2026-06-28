@@ -86,6 +86,13 @@ fn base_payload() -> HeartbeatPayload {
         video_pipeline_state: None,
         display_type: None,
         can_buses: None,
+        compute_role: None,
+        compute_cluster_master_id: None,
+        compute_queue_depth: None,
+        compute_active_jobs: None,
+        compute_workers_idle: None,
+        compute_cluster_aggregate_workers_idle: None,
+        compute_cluster_slaves: None,
     }
 }
 
