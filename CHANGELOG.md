@@ -4,7 +4,16 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
-## [0.99.12] - 2026-06-28
+## [0.99.13] - 2026-06-28
+
+### Fixed
+
+- Install the RustCrypto rustls crypto provider as the process default once via
+  a shared `ados_protocol::crypto::ensure_crypto_provider()`, called by every
+  bare reqwest client builder (the compute-offload client, the Atlas LAN-HTTP
+  bearer, the WHEP poster). Under the workspace's no-provider rustls posture,
+  building such a client without it could panic "No provider set"
+  non-deterministically under concurrent first builds.
 
 ### Added
 

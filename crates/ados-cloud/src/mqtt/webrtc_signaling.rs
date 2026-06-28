@@ -93,6 +93,10 @@ pub struct LocalWhepPoster {
 
 impl LocalWhepPoster {
     pub fn new() -> Self {
+        // This is a bare (not preconfigured-TLS) builder, so install the
+        // process-default crypto provider first or build() can panic
+        // "No provider set" under the workspace's no-provider rustls path.
+        ados_protocol::crypto::ensure_crypto_provider();
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(5))
             .build()

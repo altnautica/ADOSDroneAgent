@@ -19,21 +19,6 @@ use crate::{ComputeHeartbeat, ComputeJobKind, Dataset, JobRecord, Output};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Install the RustCrypto rustls crypto provider as the process default, once.
-/// The workspace's reqwest is unified onto the no-provider rustls path
-/// (ados-cloud's posture, no ring / aws-lc), so a reqwest `Client::builder()`
-/// build constructs a default TLS config that needs a process-default provider;
-/// without one it panics "No provider set", non-deterministically under
-/// concurrent first builds. `Once` makes the install deterministic + race-free;
-/// an `Err` means a provider is already installed, which is fine.
-fn ensure_crypto_provider() {
-    use std::sync::Once;
-    static INIT: Once = Once::new();
-    INIT.call_once(|| {
-        let _ = rustls::crypto::CryptoProvider::install_default(rustls_rustcrypto::provider());
-    });
-}
-
 /// A failure calling the compute node's job API.
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
@@ -100,7 +85,7 @@ impl ComputeClient {
         // process-default crypto provider; install it first or build() panics
         // ("No provider set"), non-deterministically under concurrent first
         // builds.
-        ensure_crypto_provider();
+        ados_protocol::crypto::ensure_crypto_provider();
         // build() only fails on a TLS-stack init error; `expect` keeps the
         // timeout guarantee (a silent fall back to a timeout-less default would
         // let a hung node park the caller — the exact thing the timeouts prevent).

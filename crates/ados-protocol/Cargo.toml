@@ -9,6 +9,11 @@ description = "Canonical implementation of the ADOS Drone Agent IPC wire contrac
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+# The shared no-provider rustls crypto-provider install (crypto.rs), so every
+# bare reqwest client builder in the agent installs the RustCrypto provider once
+# (no ring / aws-lc). Already in the workspace via ados-cloud.
+rustls = { version = "0.23", default-features = false }
+rustls-rustcrypto = "=0.0.2-alpha"
 rmp-serde = { workspace = true }
 rmpv = { workspace = true }
 hmac = { workspace = true }

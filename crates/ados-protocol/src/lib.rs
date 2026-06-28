@@ -32,6 +32,7 @@
 pub mod atlas;
 pub mod capabilities;
 pub mod compute;
+pub mod crypto;
 pub mod dispatch;
 pub mod frame;
 pub mod framebus;

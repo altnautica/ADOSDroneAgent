@@ -31,14 +31,10 @@ tokio = { workspace = true }
 axum = { workspace = true }
 # The compute-offload client (the agent-side caller of this node's job API).
 # Local-first plain HTTP on the LAN; the workspace's reqwest is unified onto the
-# no-provider rustls path (ados-cloud), so a reqwest Client built here must have
-# the process-default crypto provider installed first or `build()` panics
-# ("No provider set") — see `ensure_crypto_provider` in client.rs.
+# no-provider rustls path (ados-cloud), so the client builder calls the shared
+# ados_protocol::crypto::ensure_crypto_provider() first or build() panics
+# ("No provider set").
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
-# Install the RustCrypto rustls provider (no ring / aws-lc, matching ados-cloud,
-# so the crate stays a clean musl static build) as the process default.
-rustls = { version = "0.23", default-features = false }
-rustls-rustcrypto = "=0.0.2-alpha"
 
 [dev-dependencies]
 # `ServiceExt::oneshot` drives the router in tests without binding a port.
