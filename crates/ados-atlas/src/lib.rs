@@ -32,6 +32,7 @@ pub mod pose_source;
 pub mod publish;
 pub mod runtime;
 pub mod service;
+pub mod state_sidecar;
 
 pub use config::{CameraConfig, CaptureConfig, CaptureProfile, SelectionParams};
 pub use selector::{rotation_angle, KeyframeSelector};

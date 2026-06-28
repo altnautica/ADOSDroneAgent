@@ -75,6 +75,72 @@ fn now_epoch_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// The directory every plugin / feature writes its own state sidecar into
+/// (`<id>-state.json`): sandboxed plugins via the plugin host, plus first-party
+/// services (e.g. `ados-atlas`) that surface telemetry the same way. The
+/// heartbeat ferries each slice opaquely under `pluginState[<id>]`.
+const PLUGIN_STATE_DIR: &str = "/run/ados/plugins";
+
+/// A plugin sidecar not re-written within this window is treated as absent, so a
+/// dead/hung producer (whose tmpfs file persists) never makes the relay fold a
+/// frozen-but-live slice forever (operating rule 44). Mirrors the on-box
+/// `/api/plugins/{id}/state` 10 s gate, with a little slack.
+const PLUGIN_STATE_STALE: Duration = Duration::from_secs(15);
+
+/// Read every fresh plugin/feature state sidecar in `dir` into a map keyed by id
+/// (the filename minus `-state.json`), each value the sidecar's JSON verbatim.
+/// The core never inspects a slice's shape — each plugin owns + validates its
+/// own. Staleness is gated on the file mtime (uniform across every producer's
+/// sidecar format, whatever its payload looks like), so a producer that stopped
+/// writing drops out. An absent dir (a non-plugin device) yields an empty map.
+/// `now` is the reference instant the mtime ages against (injected for tests).
+fn read_plugin_state_sidecars_from(
+    dir: &std::path::Path,
+    now: std::time::SystemTime,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut out = serde_json::Map::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(id) = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_suffix("-state.json"))
+        else {
+            continue;
+        };
+        // mtime staleness gate. A future mtime (clock skew) counts as fresh.
+        let fresh = std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .map(|mtime| {
+                now.duration_since(mtime)
+                    .map(|age| age <= PLUGIN_STATE_STALE)
+                    .unwrap_or(true)
+            })
+            .unwrap_or(false);
+        if !fresh {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        out.insert(id.to_string(), val);
+    }
+    out
+}
+
+fn read_plugin_state_sidecars() -> serde_json::Map<String, serde_json::Value> {
+    read_plugin_state_sidecars_from(
+        std::path::Path::new(PLUGIN_STATE_DIR),
+        std::time::SystemTime::now(),
+    )
+}
+
 /// Heartbeat cadence. Mirrors the Python loop's 5 s base sleep.
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -146,6 +212,15 @@ fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
     // Fold the compute-node sidecar (compute profile only; None elsewhere, and
     // None when the file is stale so a dead producer is not folded forever).
     let compute = read_compute_sidecar(now_epoch_ms()).unwrap_or_default();
+    // Ferry every fresh plugin/feature state slice opaquely (empty map omitted).
+    let plugin_state = {
+        let slices = read_plugin_state_sidecars();
+        if slices.is_empty() {
+            None
+        } else {
+            Some(slices)
+        }
+    };
     HeartbeatPayload {
         device_id: base.device_id.clone(),
         version: base.version.clone(),
@@ -228,6 +303,7 @@ fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
         compute_workers_idle: compute.compute_workers_idle,
         compute_cluster_aggregate_workers_idle: compute.compute_cluster_aggregate_workers_idle,
         compute_cluster_slaves: compute.compute_cluster_slaves,
+        plugin_state,
     }
 }
 
@@ -329,6 +405,55 @@ mod tests {
         );
         assert!(read_compute_sidecar_from(&path, 1_000_000).is_none());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn write_named(dir: &std::path::Path, name: &str, body: &str) {
+        use std::io::Write;
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::File::create(dir.join(name))
+            .unwrap()
+            .write_all(body.as_bytes())
+            .unwrap();
+    }
+
+    #[test]
+    fn fresh_plugin_sidecars_fold_keyed_by_id_with_the_slice_verbatim() {
+        let dir = std::env::temp_dir().join(format!("ados-cloud-plugins-{}", std::process::id()));
+        write_named(
+            &dir,
+            "atlas-state.json",
+            r#"{"state":"active","gaussianCount":42}"#,
+        );
+        write_named(&dir, "follow-me-state.json", r#"{"lock":"locked"}"#);
+        write_named(&dir, "bad-state.json", "{ not json");
+        write_named(&dir, "notes.txt", "ignored: not a *-state.json file");
+
+        let out = read_plugin_state_sidecars_from(&dir, std::time::SystemTime::now());
+        // Keyed by id (filename minus -state.json); the slice is opaque/verbatim.
+        assert_eq!(out["atlas"]["state"], "active");
+        assert_eq!(out["atlas"]["gaussianCount"], 42);
+        assert_eq!(out["follow-me"]["lock"], "locked");
+        // Malformed JSON + non-state files are skipped, never the whole read.
+        assert!(!out.contains_key("bad"));
+        assert!(!out.contains_key("notes"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_stale_plugin_sidecar_is_dropped() {
+        let dir =
+            std::env::temp_dir().join(format!("ados-cloud-plugins-stale-{}", std::process::id()));
+        write_named(&dir, "atlas-state.json", r#"{"state":"active"}"#);
+        // A reference `now` an hour after the just-written file -> past the gate.
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        assert!(read_plugin_state_sidecars_from(&dir, later).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_absent_plugin_dir_is_an_empty_map() {
+        let dir = std::env::temp_dir().join("ados-cloud-plugins-nope-does-not-exist");
+        assert!(read_plugin_state_sidecars_from(&dir, std::time::SystemTime::now()).is_empty());
     }
 
     #[test]

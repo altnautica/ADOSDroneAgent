@@ -4,6 +4,19 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.14] - 2026-06-28
+
+### Added
+
+- The cloud heartbeat now carries a generic `pluginState` channel: it reads
+  every `<id>-state.json` sidecar under the plugin socket directory, drops any
+  that have gone stale, and forwards each slice verbatim under
+  `pluginState[<id>]`. Plugins and first-party services own their slice shape
+  end-to-end; the heartbeat schema grows no per-plugin fields.
+- The world-model capture service publishes its live state (enabled cameras,
+  VIO/tracking health, session, keyframes ingested, ingest rate) to its state
+  sidecar so it rides the same generic channel.
+
 ## [0.99.13] - 2026-06-28
 
 ### Fixed

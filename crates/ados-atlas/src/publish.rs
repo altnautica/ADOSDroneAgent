@@ -70,8 +70,11 @@ impl AtlasPublisher {
         }
     }
 
-    /// Publish the capture-session state (on change).
+    /// Publish the capture-session state (on change). Also persists the slice to
+    /// the plugin-state sidecar so the cloud heartbeat surfaces it under
+    /// `pluginState.atlas` and the on-box state route serves it locally.
     pub async fn publish_capture_state(&self, status: &CaptureStatus) {
+        crate::state_sidecar::write_atlas_state_sidecar(status);
         match status.to_msgpack() {
             Ok(body) => self.publish(ATLAS_CAPTURE_STATE_TOPIC, body).await,
             Err(e) => tracing::warn!(error = %e, "atlas_state_encode_failed"),

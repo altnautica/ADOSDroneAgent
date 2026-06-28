@@ -352,6 +352,13 @@ pub struct HeartbeatPayload {
     pub compute_cluster_aggregate_workers_idle: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compute_cluster_slaves: Option<Vec<ClusterSlave>>,
+
+    // --- Generic plugin/feature state (any profile) ---
+    // A map from plugin id to that plugin's own opaque telemetry slice, ferried
+    // verbatim from /run/ados/plugins/<id>-state.json. The core never inspects a
+    // slice; each plugin owns its shape. Omitted when no plugin reports state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plugin_state: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 /// One compute slave node's capacity, as folded onto the heartbeat under
@@ -519,6 +526,7 @@ mod tests {
             compute_workers_idle: None,
             compute_cluster_aggregate_workers_idle: None,
             compute_cluster_slaves: None,
+            plugin_state: None,
         }
     }
 }
