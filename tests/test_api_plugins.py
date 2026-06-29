@@ -280,6 +280,8 @@ def test_parse_from_url_returns_the_summary_without_committing(
     body = resp.json()
     assert body["ok"] is True
     assert body["plugin_id"] == "com.example.basic"
+    # The archive digest is returned so the GCS can pin the subsequent install.
+    assert body["archive_sha256"] == hashlib.sha256(raw).hexdigest()
     # Parse must NOT have created an install row.
     assert client.get("/api/plugins").json() == {"installs": []}
 

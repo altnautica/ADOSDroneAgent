@@ -409,7 +409,7 @@ async def parse_plugin_from_url(body: ParseFromUrlRequest):
         archive_path = Path(tmp_dir) / "archive.adosplug"
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
-                await stream_archive_to_path(
+                outcome = await stream_archive_to_path(
                     client=client,
                     url=url,
                     dest=archive_path,
@@ -423,12 +423,19 @@ async def parse_plugin_from_url(body: ParseFromUrlRequest):
         except (ArchiveDownloadError, httpx.HTTPError) as exc:
             return _err(20, "download_failed", str(exc), 502)
         raw = archive_path.read_bytes()
+        archive_sha = outcome.sha256_hex
     try:
-        return _archive_to_summary(raw)
+        summary = _archive_to_summary(raw)
     except SignatureError as exc:
         return _err(10, f"signature_{exc.kind}", str(exc), 400)
     except (ManifestError, ArchiveError) as exc:
         return _err(12, "manifest_invalid", str(exc), 400)
+    # Return the computed archive digest so the GCS can PIN the subsequent
+    # install_from_url to the exact bytes the operator reviewed (TOCTOU-safe,
+    # and satisfies the install endpoint's from_catalog SHA requirement).
+    if isinstance(summary, dict):
+        summary["archive_sha256"] = archive_sha
+    return summary
 
 
 # ---------------------------------------------------------------------
