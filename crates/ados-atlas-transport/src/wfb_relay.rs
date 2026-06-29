@@ -14,14 +14,15 @@
 //! ~1.4 KB per-packet payload cap, so a full-res keyframe (the LAN bearer's
 //! many-MB envelope) cannot ride it — only small descriptor/pose/status events
 //! do. A framed event over the cap is rejected with [`TransportError::
-//! PayloadTooLarge`] (non-retriable: a thinner cloud lane cannot carry it
-//! either, so the ladder stops rather than burning down to cloud).
+//! PayloadTooLarge`] (a per-bearer capacity limit, so retriable: the ladder
+//! declines WFB by its cap and offers the event to a fatter downstream lane).
 //!
 //! The aux stream is safe-by-default off (an `aux_enable` dead-switch in
 //! `ados-radio`): an open against a disabled deployment is refused, which this
 //! bearer surfaces as [`TransportError::Unavailable`] so the ladder skips it.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use ados_protocol::atlas::AtlasEvent;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -33,6 +34,11 @@ use crate::{AtlasBearer, BearerKind, TransportError};
 /// The wfb-ng per-packet payload ceiling for a single aux datagram. Conservative
 /// vs the ~1.4 KB FEC-block cap so a framed event never silently truncates.
 pub const WFB_MAX_DATAGRAM: usize = 1300;
+
+/// Bound on the aux command-socket round-trip. A wedged `ados-radio` (accepts
+/// but never replies) must NOT park the send path: on timeout the bearer reports
+/// Unavailable (retriable) so the ladder falls over to the cloud lane.
+const AUX_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Default aux command socket (matches `ados_radio::paths::RADIO_AUX_SOCK`).
 const DEFAULT_AUX_SOCK: &str = "/run/ados/radio-aux.sock";
@@ -76,29 +82,37 @@ impl WfbRelayBearer {
     }
 
     /// One newline-JSON request/response round-trip against the aux command
-    /// socket. `op` is `open` / `close` / `status`.
+    /// socket, bounded by `AUX_TIMEOUT`. `op` is `open` / `close` / `status`. A
+    /// timeout (a wedged `ados-radio`) maps to Unavailable so the caller skips
+    /// this bearer rather than blocking the ladder forever.
     async fn aux_request(sock: &Path, op: &str) -> Result<serde_json::Value, TransportError> {
-        let stream = UnixStream::connect(sock)
+        let work = async {
+            let stream = UnixStream::connect(sock)
+                .await
+                .map_err(|e| TransportError::Request(e.to_string()))?;
+            let (rx, mut tx) = stream.into_split();
+            tx.write_all(format!("{{\"op\":\"{op}\"}}\n").as_bytes())
+                .await
+                .map_err(|e| TransportError::Request(e.to_string()))?;
+            let mut line = String::new();
+            BufReader::new(rx)
+                .read_line(&mut line)
+                .await
+                .map_err(|e| TransportError::Request(e.to_string()))?;
+            serde_json::from_str(&line).map_err(|e| TransportError::Request(e.to_string()))
+        };
+        tokio::time::timeout(AUX_TIMEOUT, work)
             .await
-            .map_err(|e| TransportError::Request(e.to_string()))?;
-        let (rx, mut tx) = stream.into_split();
-        tx.write_all(format!("{{\"op\":\"{op}\"}}\n").as_bytes())
-            .await
-            .map_err(|e| TransportError::Request(e.to_string()))?;
-        let mut line = String::new();
-        BufReader::new(rx)
-            .read_line(&mut line)
-            .await
-            .map_err(|e| TransportError::Request(e.to_string()))?;
-        serde_json::from_str(&line).map_err(|e| TransportError::Request(e.to_string()))
+            .map_err(|_| TransportError::Unavailable)?
     }
 
-    /// Ensure the aux stream is open and the egress socket is connected. Idempotent.
-    async fn ensure_conn<'a>(
-        &'a self,
-        guard: &mut tokio::sync::MutexGuard<'a, Option<UdpSocket>>,
-    ) -> Result<(), TransportError> {
-        if guard.is_some() {
+    /// Ensure the aux stream is open and the egress socket is connected. The open
+    /// handshake runs WITHOUT holding the conn mutex, so a slow/hung `ados-radio`
+    /// can never block a concurrent `is_available()` or `send()` (it only stalls
+    /// its own call, which the `AUX_TIMEOUT` bounds). Idempotent: a concurrent
+    /// opener that wins the race keeps its socket; the loser drops its own.
+    async fn ensure_conn(&self) -> Result<(), TransportError> {
+        if self.conn.lock().await.is_some() {
             return Ok(());
         }
         let reply = Self::aux_request(&self.aux_cmd_sock, "open").await?;
@@ -108,17 +122,23 @@ impl WfbRelayBearer {
         {
             return Err(TransportError::Unavailable);
         }
-        let tx_port = reply
+        let tx_port: u16 = reply
             .get("tx_port")
             .and_then(|v| v.as_u64())
-            .ok_or(TransportError::Unavailable)? as u16;
+            .and_then(|v| u16::try_from(v).ok())
+            .filter(|p| *p != 0)
+            .ok_or(TransportError::Unavailable)?;
         let sock = UdpSocket::bind("127.0.0.1:0")
             .await
             .map_err(|e| TransportError::Request(e.to_string()))?;
         sock.connect(("127.0.0.1", tx_port))
             .await
             .map_err(|e| TransportError::Request(e.to_string()))?;
-        **guard = Some(sock);
+        // Store only if nobody beat us; either socket targets the same port.
+        let mut guard = self.conn.lock().await;
+        if guard.is_none() {
+            *guard = Some(sock);
+        }
         Ok(())
     }
 }
@@ -151,18 +171,29 @@ impl AtlasBearer for WfbRelayBearer {
         // Frame first so an oversized event is rejected before opening anything.
         let body = event.to_msgpack()?;
         if body.len() > self.max_datagram {
+            // Retriable: a fatter downstream lane may carry it (the ladder
+            // declines WFB by its cap and falls over).
             return Err(TransportError::PayloadTooLarge(body.len()));
         }
+        // Open outside the conn lock (ensure_conn does its handshake unlocked).
+        self.ensure_conn().await?;
         let mut guard = self.conn.lock().await;
-        self.ensure_conn(&mut guard).await?;
-        let sock = guard.as_ref().ok_or(TransportError::Unavailable)?;
-        // UDP fire-and-forget: Ok means the datagram entered the kernel, NOT that
-        // wfb_tx radiated it or the peer decoded it (Rule 37 / DEC-170 family) —
-        // the ground relay's received-side counter is the delivery proof.
-        sock.send(&body)
-            .await
-            .map_err(|e| TransportError::Request(e.to_string()))?;
-        Ok(())
+        let send_res = match guard.as_ref() {
+            // UDP fire-and-forget: Ok means the datagram entered the kernel, NOT
+            // that wfb_tx radiated it or the peer decoded it (Rule 37 / DEC-170) —
+            // the ground relay's received-side counter is the delivery proof.
+            Some(sock) => sock.send(&body).await,
+            None => return Err(TransportError::Unavailable),
+        };
+        match send_res {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                // Self-heal: drop the dead socket so the next send re-opens the
+                // aux stream rather than blackholing into a stale handle.
+                *guard = None;
+                Err(TransportError::Request(e.to_string()))
+            }
+        }
     }
 }
 
@@ -199,7 +230,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_oversized_event_is_rejected_non_retriably_without_sending() {
+    async fn an_oversized_event_is_rejected_retriably_without_sending() {
         // A receiver that must NEVER get a datagram.
         let rx = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let tx = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -212,8 +243,8 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, TransportError::PayloadTooLarge(_)));
         assert!(
-            !err.is_retriable(),
-            "too-large must not burn to the cloud lane"
+            err.is_retriable(),
+            "WFB declines by its cap; the ladder falls over to a fatter lane"
         );
         // Nothing was sent: a short read times out with no datagram.
         let mut buf = [0u8; 64];

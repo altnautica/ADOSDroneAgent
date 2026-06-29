@@ -13,6 +13,7 @@
 //! actually decodes proves the RF lane carried it.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use ados_atlas_transport::{AtlasBearer, AtlasEvent, LanHttpBearer};
 use tokio::net::UdpSocket;
@@ -65,15 +66,27 @@ pub async fn run_atlas_relay(
     let bearer = LanHttpBearer::new(compute_base_url);
     let mut buf = vec![0u8; BUF_SIZE];
     let mut stats = AtlasRelayStats::default();
+    // Consecutive recv errors with no intervening successful read. A transient
+    // error (a downstream ICMP-unreachable bouncing back) self-clears; a run of
+    // them with zero successes means the socket cannot be read at all, so a short
+    // sleep keeps a hard failure from spinning the CPU (the fanout precedent).
+    let mut consecutive_errors: u32 = 0;
     tracing::info!(listen_port, "atlas_relay_started");
     loop {
         tokio::select! {
             _ = cancel.notified() => break,
             r = in_sock.recv_from(&mut buf) => match r {
-                Ok((n, _)) => forward_datagram(&bearer, &buf[..n], &mut stats).await,
-                // A transient recv error (a downstream ICMP unreachable bouncing
-                // back) self-clears; log and keep reading rather than exit.
-                Err(e) => tracing::debug!(error = %e, "atlas_relay_recv_error"),
+                Ok((n, _)) => {
+                    consecutive_errors = 0;
+                    forward_datagram(&bearer, &buf[..n], &mut stats).await;
+                }
+                Err(e) => {
+                    consecutive_errors += 1;
+                    tracing::warn!(error = %e, consecutive_errors, "atlas_relay_recv_error");
+                    if consecutive_errors >= 8 {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                }
             }
         }
     }

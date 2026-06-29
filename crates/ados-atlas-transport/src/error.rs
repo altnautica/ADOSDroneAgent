@@ -39,11 +39,17 @@ impl TransportError {
     pub fn is_retriable(&self) -> bool {
         match self {
             TransportError::Http(code) => !(400..500).contains(code),
-            // The event is bad for any bearer (encode fault) or too large for a
-            // thin lane and the larger LAN bearer (tried first) already failed —
-            // either way, falling to a thinner cloud lane is futile, so stop.
-            TransportError::Encode(_) | TransportError::PayloadTooLarge(_) => false,
-            TransportError::Closed
+            // An encode fault is the event's own fault — every bearer rejects it
+            // identically, so stop.
+            TransportError::Encode(_) => false,
+            // PayloadTooLarge is a PER-BEARER capacity limit (the ~1.3 KB WFB
+            // datagram cap), NOT an event-validity error: a downstream bearer
+            // with more capacity may still carry it, so retry. Each bearer
+            // rejects by its own ceiling (WFB declines a keyframe, the cloud lane
+            // accepts a descriptor but declines a multi-MB keyframe), and when no
+            // bearer's ceiling fits the ladder ends in NoBearer.
+            TransportError::PayloadTooLarge(_)
+            | TransportError::Closed
             | TransportError::Unavailable
             | TransportError::NoBearer
             | TransportError::Request(_) => true,
