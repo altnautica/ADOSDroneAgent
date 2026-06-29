@@ -22,6 +22,10 @@ pub const DATA_RX_PORT: u16 = 5599;
 pub const RX_CONTROL_PORT: u16 = 5803;
 /// GS tx-control loopback ingress (HopAck/Presence out over the air).
 pub const TX_CONTROL_PORT: u16 = 5810;
+/// GS Atlas-aux egress: the drone radiates small Atlas events on radio_id 2 (the
+/// aux application stream); the GS decodes them to this loopback port, where the
+/// Atlas relay reads and re-POSTs them onto the LAN.
+pub const ATLAS_RX_PORT: u16 = 5604;
 /// wfb stats poll interval: the zombie watchdog cadence.
 pub const RX_HEALTH_POLL_INTERVAL_S: f64 = 5.0;
 
@@ -48,6 +52,26 @@ pub fn data_rx_args(iface: &str, rx_key: &Path, channel_port: u16) -> Vec<String
         "127.0.0.1".into(),
         "-u".into(),
         channel_port.to_string(),
+        "-K".into(),
+        rx_key.to_string_lossy().into_owned(),
+        "-l".into(),
+        "1000".into(),
+        iface.into(),
+    ]
+}
+
+/// GS Atlas-aux RX `wfb_rx` args: radio_id 2 (the aux application stream the
+/// drone radiates small Atlas events on), decoded to `atlas_port`. Mirrors
+/// `data_rx_args` with the aux radio_id; the asymmetric-by-direction aux pair
+/// means the GS receives on `-p 2` (the drone egresses on p2), never p3.
+pub fn gs_atlas_rx_args(iface: &str, rx_key: &Path, atlas_port: u16) -> Vec<String> {
+    vec![
+        "-p".into(),
+        "2".into(),
+        "-c".into(),
+        "127.0.0.1".into(),
+        "-u".into(),
+        atlas_port.to_string(),
         "-K".into(),
         rx_key.to_string_lossy().into_owned(),
         "-l".into(),
@@ -127,6 +151,18 @@ mod tests {
                 "wlan1"
             ]
         );
+    }
+
+    #[test]
+    fn gs_atlas_rx_uses_radio_id_2_and_the_atlas_port() {
+        // The drone egresses Atlas events on the aux radio_id 2; the GS receives
+        // on p2 (NOT p3), decoding to ATLAS_RX_PORT.
+        let a = gs_atlas_rx_args("wlan1", Path::new("/etc/ados/wfb/rx.key"), ATLAS_RX_PORT);
+        assert_eq!(a[0], "-p");
+        assert_eq!(a[1], "2");
+        let u = a.iter().position(|x| x == "-u").unwrap();
+        assert_eq!(a[u + 1], "5604");
+        assert_eq!(a.last().unwrap(), "wlan1");
     }
 
     #[test]

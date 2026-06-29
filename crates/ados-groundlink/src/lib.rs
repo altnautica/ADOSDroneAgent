@@ -9,6 +9,7 @@
 //! and the mesh tap-to-pair crypto.
 
 pub mod acquire;
+pub mod atlas_relay;
 pub mod cmdsock;
 pub mod fanout;
 pub mod gs_config;

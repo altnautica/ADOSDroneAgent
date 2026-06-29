@@ -20,6 +20,9 @@ path = "src/main.rs"
 ados-radio = { path = "../ados-radio" }
 ados-supervisor = { path = "../ados-supervisor" }
 ados-protocol = { path = "../ados-protocol", features = ["tracing-layer"] }
+# The Atlas stream lane: the GS relay re-POSTs decoded WFB-aux datagrams into the
+# compute receiver via the LAN bearer.
+ados-atlas-transport = { path = "../ados-atlas-transport" }
 
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -64,3 +67,5 @@ nix = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+# Stand up the compute event router in-process for the Atlas relay round-trip test.
+axum = { workspace = true }
