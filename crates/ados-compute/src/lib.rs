@@ -21,6 +21,7 @@ mod client;
 mod cluster;
 mod engine;
 mod heartbeat_sidecar;
+mod ingest;
 mod mdns;
 mod offload;
 mod pipeline;
@@ -43,6 +44,7 @@ pub use heartbeat_sidecar::{
     write_compute_heartbeat, write_compute_heartbeat_to, ComputeHeartbeatSidecar, SlaveEntry,
     COMPUTE_HEARTBEAT_SIDECAR,
 };
+pub use ingest::AtlasIngest;
 pub use mdns::{advertise_compute, ComputeAdvert};
 pub use offload::{Detection, Detector, FrameRef, MockDetector};
 pub use pipeline::{stage_index_of, Pipeline, PipelineRunner, PipelineStage};

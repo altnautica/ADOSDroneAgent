@@ -46,3 +46,7 @@ mdns-sd = "0.13"
 tower = { workspace = true, features = ["util"] }
 # Temp pairing.json files for the auth-gate tests.
 tempfile = "3"
+# The SITL gate harness wires the transport lane (the bearer + the event router)
+# to the compute engine end-to-end in-process.
+ados-atlas-transport = { path = "../ados-atlas-transport" }
+axum = { workspace = true }

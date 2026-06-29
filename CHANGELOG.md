@@ -4,6 +4,22 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.19] - 2026-06-29
+
+### Added
+
+- Compute-node Atlas capture ingest (`AtlasIngest`): turns the keyframe +
+  capture-state events a drone forwards to the compute node into a reconstruct
+  job — counting keyframes and, on the terminal `Bagged` state, inserting the
+  dataset + submitting the job the scheduler picks up. A malformed capture-state
+  frame is dropped, never an error.
+- Atlas SITL gate harness: in-process, mock-runnable end-to-end gates proving the
+  pipeline composes — a simulated capture's events travel drone→compute over the
+  real LAN bearer + event router, get ingested, and reconstruct (mock) into a
+  splat (G0); a perception offload runs the detector and returns a detection; the
+  cluster master aggregates a registered slave. The real-GPU / camera / RF
+  criteria stay bench.
+
 ## [0.99.18] - 2026-06-29
 
 ### Added
