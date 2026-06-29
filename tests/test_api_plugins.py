@@ -8,6 +8,7 @@ the route module.
 
 from __future__ import annotations
 
+import hashlib
 import zipfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -242,6 +243,45 @@ def test_parse_rejects_malformed_archive(client, supervisor):
     assert resp.status_code == 400
     body = resp.json()
     assert body["code"] == 12
+
+
+def test_parse_from_url_rejects_a_non_allowlisted_url(client, supervisor):
+    resp = client.post(
+        "/api/plugins/parse_from_url",
+        json={"url": "https://evil.example.com/x.adosplug"},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["code"] == 2  # url_invalid
+
+
+def test_parse_from_url_returns_the_summary_without_committing(
+    client, supervisor, tmp_path: Path, monkeypatch
+):
+    raw = _build_archive(tmp_path).read_bytes()
+
+    async def fake_stream(*, client, url, dest, expected_sha256=""):
+        from ados.plugins.install_from_url_impl import DownloadOutcome
+
+        Path(dest).write_bytes(raw)
+        return DownloadOutcome(
+            path=Path(dest),
+            sha256_hex=hashlib.sha256(raw).hexdigest(),
+            byte_count=len(raw),
+        )
+
+    monkeypatch.setattr(
+        "ados.api.routes.plugins.stream_archive_to_path", fake_stream
+    )
+    resp = client.post(
+        "/api/plugins/parse_from_url",
+        json={"url": "https://github.com/altnautica/x/releases/download/v1/p.adosplug"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["plugin_id"] == "com.example.basic"
+    # Parse must NOT have created an install row.
+    assert client.get("/api/plugins").json() == {"installs": []}
 
 
 def test_revoke_unknown_plugin_returns_404(client, supervisor):

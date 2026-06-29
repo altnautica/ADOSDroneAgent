@@ -372,6 +372,65 @@ async def parse_plugin_archive(file: UploadFile = File(...)):
         return _err(12, "manifest_invalid", str(exc), 400)
 
 
+class ParseFromUrlRequest(BaseModel):
+    """Body of ``POST /api/plugins/parse_from_url``: an allowlisted ``.adosplug``
+    URL and an optional SHA-256 pin. The URL twin of the multipart ``/parse``."""
+
+    url: str
+    expected_sha256: str | None = None
+
+
+@router.post("/plugins/parse_from_url")
+async def parse_plugin_from_url(body: ParseFromUrlRequest):
+    """Download an allowlisted ``.adosplug`` URL and return its manifest summary
+    WITHOUT committing the install — the URL companion to the multipart
+    ``/parse``, so the install dialog can review permissions before consent for
+    an operator-supplied URL. Same allowlist + size cap + optional SHA-256 pin
+    as ``/install_from_url``; nothing is written to the plugin store.
+    """
+    url = (body.url or "").strip()
+    if not url:
+        return _err(2, "usage_error", "url required", 400)
+    try:
+        validate_install_url(url)
+    except UrlValidationError as exc:
+        return _err(2, "url_invalid", str(exc), 400)
+    expected_sha = (body.expected_sha256 or "").strip()
+    timeout = httpx.Timeout(
+        DOWNLOAD_TOTAL_TIMEOUT,
+        connect=DOWNLOAD_CONNECT_TIMEOUT,
+    )
+    tempdir_kwargs: dict[str, str] = {"prefix": "ados-plug-parse-"}
+    plugin_tmp_root = Path("/run/ados/plugin-downloads")
+    if plugin_tmp_root.parent.exists():
+        plugin_tmp_root.mkdir(parents=True, exist_ok=True)
+        tempdir_kwargs["dir"] = str(plugin_tmp_root)
+    with tempfile.TemporaryDirectory(**tempdir_kwargs) as tmp_dir:
+        archive_path = Path(tmp_dir) / "archive.adosplug"
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                await stream_archive_to_path(
+                    client=client,
+                    url=url,
+                    dest=archive_path,
+                    expected_sha256=expected_sha,
+                )
+        except ArchiveTooLargeError as exc:
+            return _err(13, "archive_too_large", str(exc), 413)
+        except Sha256MismatchError as exc:
+            log.debug("plugin sha256 mismatch", detail=str(exc))
+            return _err(12, "sha256_mismatch", "archive sha256 did not match pin", 400)
+        except (ArchiveDownloadError, httpx.HTTPError) as exc:
+            return _err(20, "download_failed", str(exc), 502)
+        raw = archive_path.read_bytes()
+    try:
+        return _archive_to_summary(raw)
+    except SignatureError as exc:
+        return _err(10, f"signature_{exc.kind}", str(exc), 400)
+    except (ManifestError, ArchiveError) as exc:
+        return _err(12, "manifest_invalid", str(exc), 400)
+
+
 # ---------------------------------------------------------------------
 # Install
 # ---------------------------------------------------------------------

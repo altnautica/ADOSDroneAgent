@@ -4,6 +4,17 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.21] - 2026-06-29
+
+### Added
+
+- `POST /api/plugins/parse_from_url`: download an allowlisted `.adosplug`
+  URL and return its manifest summary without installing -- the URL companion
+  to the multipart `/parse`, so the GCS install dialog can review permissions
+  before consent for an operator-supplied URL (the browser cannot fetch an
+  arbitrary URL itself). Same allowlist + size cap + signature check as
+  install-from-url; nothing is written to the plugin store.
+
 ## [0.99.20] - 2026-06-29
 
 ### Added
