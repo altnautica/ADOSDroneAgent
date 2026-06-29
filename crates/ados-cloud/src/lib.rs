@@ -37,6 +37,7 @@
 //!   window from the durable on-device store, driven by an operator-triggered
 //!   request file and default-off.
 
+pub mod atlas_bearer;
 pub mod config;
 pub mod dispatch;
 pub mod ground_station;
@@ -47,6 +48,7 @@ pub mod mqtt;
 pub mod pairing;
 pub mod tls;
 
+pub use atlas_bearer::CloudBearer;
 pub use config::CloudConfig;
 pub use dispatch::{CommandResult, CommandStatus};
 pub use ground_station::{CloudRelayBridge, GsHeartbeat, ThrottleState, UplinkSnapshot};

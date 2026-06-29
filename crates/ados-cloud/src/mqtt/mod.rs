@@ -59,6 +59,17 @@ pub fn topic_webrtc_offer(device_id: &str) -> String {
 pub fn topic_webrtc_answer(device_id: &str) -> String {
     format!("ados/{device_id}/webrtc/answer")
 }
+/// Map an Atlas event topic to its cloud topic under `ados/{id}/atlas/...`.
+/// The `plugin.atlas.` / `atlas.` prefix is dropped and dots become slashes, so
+/// `atlas.keyframe`->`ados/{id}/atlas/keyframe`, `atlas.pose.offload`->
+/// `ados/{id}/atlas/pose/offload`, `plugin.atlas.pose`->`ados/{id}/atlas/pose`.
+pub fn topic_atlas(device_id: &str, event_topic: &str) -> String {
+    let leaf = event_topic
+        .trim_start_matches("plugin.atlas.")
+        .trim_start_matches("atlas.")
+        .replace('.', "/");
+    format!("ados/{device_id}/atlas/{leaf}")
+}
 
 /// The gateway's MQTT username: the bare device id (so the broker ACL pattern
 /// `ados/%u/#` substitutes to the agent's own topic subtree). Mirrors the
