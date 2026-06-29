@@ -13,6 +13,7 @@ path = "src/lib.rs"
 [dependencies]
 ados-protocol = { path = "../ados-protocol" }
 serde = { workspace = true }
+serde_json = { workspace = true }
 rmp-serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
@@ -25,3 +26,4 @@ reqwest = { version = "0.12", default-features = false }
 
 [dev-dependencies]
 tokio-tungstenite = "0.24"
+tempfile = "3"

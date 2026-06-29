@@ -21,6 +21,11 @@ pub enum TransportError {
     /// The event failed to (de)serialize to msgpack.
     #[error("encode: {0}")]
     Encode(String),
+    /// The framed event exceeds this bearer's per-datagram payload ceiling (the
+    /// WFB lane is decimated: wfb_tx FEC-blocks per UDP datagram with a ~1.4 KB
+    /// cap, so a full-res keyframe cannot ride it). Carries the framed size.
+    #[error("payload too large: {0} bytes")]
+    PayloadTooLarge(usize),
 }
 
 impl TransportError {
@@ -34,7 +39,10 @@ impl TransportError {
     pub fn is_retriable(&self) -> bool {
         match self {
             TransportError::Http(code) => !(400..500).contains(code),
-            TransportError::Encode(_) => false,
+            // The event is bad for any bearer (encode fault) or too large for a
+            // thin lane and the larger LAN bearer (tried first) already failed —
+            // either way, falling to a thinner cloud lane is futile, so stop.
+            TransportError::Encode(_) | TransportError::PayloadTooLarge(_) => false,
             TransportError::Closed
             | TransportError::Unavailable
             | TransportError::NoBearer

@@ -26,6 +26,7 @@ mod error;
 mod ladder;
 mod lan_http;
 mod loopback;
+mod wfb_relay;
 
 pub use bearer::{AtlasBearer, BearerKind};
 pub use delta::{delta_ws_path, delta_ws_router, DeltaBroadcaster, DELTA_WS_ROUTE};
@@ -33,6 +34,7 @@ pub use error::TransportError;
 pub use ladder::BearerLadder;
 pub use lan_http::{atlas_event_router, LanHttpBearer};
 pub use loopback::LoopbackBearer;
+pub use wfb_relay::{WfbRelayBearer, WFB_MAX_DATAGRAM};
 
 // Re-export the framed event the lane carries so callers get one import surface.
 pub use ados_protocol::atlas::AtlasEvent;
