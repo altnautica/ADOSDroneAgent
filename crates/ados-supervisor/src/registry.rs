@@ -108,11 +108,12 @@ use Category::{Core, Hardware, OnDemand};
 pub const SERVICE_REGISTRY: &[ServiceDef] = &[
     // Core (always running). ados-mavlink is the sole command-and-control path
     // to the flight controller: it execs the native router binary and has no
-    // packaged fallback, so it must always be started (Core) on every profile
-    // (no profile gate). A missing router binary makes this unit crash-loop, so
-    // the installer Hard-gates the binary's fetch and re-checks its presence in
-    // the health gate before reporting the install OK.
-    def_keep("ados-mavlink", Core, None, None),
+    // packaged fallback. The FC-bearing profiles (drone + ground station) always
+    // start it (Core); the FC-less compute node does NOT (it never fetches the
+    // router binary, so an unconditional start would crash-loop). A missing
+    // router on a drone/GS still crash-loops visibly, and the installer
+    // Hard-gates the binary's fetch + re-checks its presence in the health gate.
+    def_keep("ados-mavlink", Core, Some("drone|ground_station"), None),
     def("ados-api", Core, None, None),
     def("ados-cloud", Core, None, None),
     def("ados-health", Core, None, None),
@@ -371,16 +372,19 @@ mod tests {
     }
 
     #[test]
-    fn mavlink_is_core_and_ungated_on_every_profile() {
+    fn mavlink_is_core_on_the_fc_profiles_only() {
         // The MAVLink router is the sole C2 path with no packaged fallback, so
-        // it must always be started: Core tier, no profile gate, no role gate.
+        // it is Core (always started) on the FC-bearing profiles. It is gated to
+        // `drone|ground_station`, NOT the FC-less compute node (which never
+        // fetches the router binary and would crash-loop on an unconditional
+        // start). No role gate.
         let specs = build_specs();
         let mav = specs
             .iter()
             .find(|s| s.name == "ados-mavlink")
             .expect("ados-mavlink must be in the registry");
         assert_eq!(mav.category, Category::Core);
-        assert_eq!(mav.profile_gate, None);
+        assert_eq!(mav.profile_gate, Some("drone|ground_station"));
         assert_eq!(mav.role_gate, None);
     }
 

@@ -61,11 +61,11 @@ jobs:
       # which has no aarch64-musl prebuilt, so --all-features cannot target
       # musl; the host clippy above already covers the onnx path.
       - name: Clippy (aarch64-musl target, default features)
-        # ados-logd and ados-cloud carry bundled C (SQLite, zstd) and are
-        # excluded here: the host clippy above already lint-covers them, and
-        # clippy compiles build scripts which would need the C cross-compiler.
+        # ados-logd, ados-cloud, and ados-compute carry bundled C (SQLite, zstd)
+        # and are excluded here: the host clippy above already lint-covers them,
+        # and clippy compiles build scripts which would need the C cross-compiler.
         # Their musl cross-builds are proven by the zig steps below.
-        run: cargo clippy --all-targets --target aarch64-unknown-linux-musl --workspace --exclude ados-logd --exclude ados-cloud -- -D warnings
+        run: cargo clippy --all-targets --target aarch64-unknown-linux-musl --workspace --exclude ados-logd --exclude ados-cloud --exclude ados-compute -- -D warnings
 
       - name: Test (default features)
         run: cargo test
@@ -542,6 +542,63 @@ jobs:
           tag_name: prebuilt-cloud
           prerelease: true
           name: "Prebuilt ados-cloud (rolling)"
+          files: crates/rel/*
+
+  # Build the compute reconstructor/offload daemon as a static arm64 binary and
+  # publish it for the compute profile. (An x86_64/macOS compute host builds from
+  # source; this covers an aarch64 compute appliance, mirroring the cloud job.)
+  publish-compute:
+    needs: build-test
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (musl target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+
+      - name: Install zig
+        uses: mlugg/setup-zig@v2
+
+      - name: Install cargo-zigbuild
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
+      - name: Build static ados-compute (bundled SQLite via zig)
+        run: cargo zigbuild --release --target aarch64-unknown-linux-musl -p ados-compute
+
+      - name: Stage artifacts + checksums
+        run: |
+          set -euo pipefail
+          mkdir -p rel
+          cp target/aarch64-unknown-linux-musl/release/ados-compute rel/ados-compute-aarch64
+          ( cd rel && sha256sum ados-compute-aarch64 > ados-compute-aarch64.sha256 )
+
+      - name: Sign artifacts (only when the signing key is present)
+        env:
+          SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SIGNING_KEY}" ]; then
+            echo "No ADOS_DRIVER_SIGNING_KEY set; publishing SHA256-only (dev posture)."
+            exit 0
+          fi
+          sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
+          printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
+          minisign -S -s /tmp/sign.key -m rel/ados-compute-aarch64 -x rel/ados-compute-aarch64.minisig
+          rm -f /tmp/sign.key
+
+      - name: Publish rolling prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: prebuilt-compute
+          prerelease: true
+          name: "Prebuilt ados-compute (rolling)"
           files: crates/rel/*
 
   # Build the ground-station data-plane as a static arm64 binary and publish it

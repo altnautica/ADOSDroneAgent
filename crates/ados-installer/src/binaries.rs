@@ -41,6 +41,13 @@ pub struct PrebuiltBinary {
 const BOTH: &[&str] = &["drone", "ground_station"];
 const DRONE: &[&str] = &["drone"];
 const GROUND: &[&str] = &["ground_station"];
+/// The compute profile (a GPU box / Mac / spare box that reconstructs +
+/// serves perception offload). Distinct from the SBC profiles.
+const COMPUTE: &[&str] = &["compute"];
+/// Every profile, including compute. Used for the profile-agnostic core
+/// services every node needs (orchestrator, cloud relay, control front,
+/// logging, TUI) so a `--profile compute` install fetches them too.
+const ANY: &[&str] = &["drone", "ground_station", "compute"];
 
 /// The full catalog of prebuilt service binaries.
 ///
@@ -61,7 +68,7 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
         release_tag: "prebuilt-tui",
         dest: "/opt/ados/bin/ados-tui",
         gate: Gate::BestEffort,
-        profiles: BOTH,
+        profiles: ANY,
     },
     PrebuiltBinary {
         service: "ados-supervisor",
@@ -69,7 +76,7 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
         release_tag: "prebuilt-supervisor",
         dest: "/opt/ados/bin/ados-supervisor",
         gate: Gate::Hard,
-        profiles: BOTH,
+        profiles: ANY,
     },
     PrebuiltBinary {
         service: "ados-mavlink-router",
@@ -113,7 +120,7 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
         release_tag: "prebuilt-cloud",
         dest: "/opt/ados/bin/ados-cloud",
         gate: Gate::Hard,
-        profiles: BOTH,
+        profiles: ANY,
     },
     PrebuiltBinary {
         service: "ados-groundlink",
@@ -182,7 +189,7 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
         release_tag: "prebuilt-logd",
         dest: "/opt/ados/bin/ados-logd",
         gate: Gate::BestEffort,
-        profiles: BOTH,
+        profiles: ANY,
     },
     // The native HTTP control surface. Best-effort and opt-in: it ships disabled
     // (the GCS uses the FastAPI surface), so a missing binary degrades nothing.
@@ -194,7 +201,7 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
         release_tag: "prebuilt-control",
         dest: "/opt/ados/bin/ados-control",
         gate: Gate::BestEffort,
-        profiles: BOTH,
+        profiles: ANY,
     },
     // The GPIO-output service (status buzzer / LED). Best-effort and opt-in: it
     // ships disabled (the unit's ExecStart guard execs /bin/true until the
@@ -221,9 +228,22 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
         gate: Gate::BestEffort,
         profiles: BOTH,
     },
+    // The compute reconstructor/offload daemon. Best-effort so a compute host
+    // whose CPU arch the prebuilt pipeline does not cover (a GPU box / Mac is
+    // typically x86_64/arm64-macOS, while the catalog ships aarch64) degrades +
+    // reports rather than failing the install; that host builds from source.
+    PrebuiltBinary {
+        service: "ados-compute",
+        asset: "ados-compute-aarch64",
+        release_tag: "prebuilt-compute",
+        dest: "/opt/ados/bin/ados-compute",
+        gate: Gate::BestEffort,
+        profiles: COMPUTE,
+    },
 ];
 
-/// The subset of the catalog needed by `profile` (`drone` | `ground_station`).
+/// The subset of the catalog needed by `profile`
+/// (`drone` | `ground_station` | `compute`).
 pub fn for_profile(profile: &str) -> Vec<&'static PrebuiltBinary> {
     PREBUILT
         .iter()
@@ -236,8 +256,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_has_eighteen_entries() {
-        assert_eq!(PREBUILT.len(), 18);
+    fn catalog_has_nineteen_entries() {
+        assert_eq!(PREBUILT.len(), 19);
+    }
+
+    #[test]
+    fn compute_profile_fetches_the_cores_and_the_compute_daemon() {
+        let svcs: Vec<&str> = for_profile("compute").iter().map(|b| b.service).collect();
+        // The compute node is a full agent: the orchestrator, cloud relay,
+        // control front (LAN pairing), logging, and TUI, plus the compute daemon.
+        for svc in [
+            "ados-supervisor",
+            "ados-cloud",
+            "ados-control",
+            "ados-logd",
+            "ados-tui",
+            "ados-compute",
+        ] {
+            assert!(
+                svcs.contains(&svc),
+                "compute profile must fetch {svc}: {svcs:?}"
+            );
+        }
+        // It does NOT fetch the SBC-only flight/radio/video surfaces.
+        for svc in [
+            "ados-mavlink-router",
+            "ados-video",
+            "ados-vision",
+            "ados-radio",
+        ] {
+            assert!(
+                !svcs.contains(&svc),
+                "compute profile must NOT fetch {svc}: {svcs:?}"
+            );
+        }
+        // The compute daemon degrades (build-from-source on an uncovered arch).
+        let compute = PREBUILT
+            .iter()
+            .find(|b| b.service == "ados-compute")
+            .expect("ados-compute in the catalog");
+        assert_eq!(compute.gate, Gate::BestEffort);
+        assert_eq!(compute.release_tag, "prebuilt-compute");
     }
 
     #[test]

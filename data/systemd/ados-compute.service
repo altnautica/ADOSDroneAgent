@@ -1,0 +1,45 @@
+[Unit]
+Description=ADOS Compute Node (reconstruction + perception offload)
+# The compute node serves the LAN job API + folds its heartbeat through the
+# cloud relay. PartOf the supervisor so it stops with the stack. Starts after
+# the network is up since it binds a LAN address.
+After=network-online.target
+Wants=network-online.target
+PartOf=ados-supervisor.service
+# Skip cleanly when the binary was not fetched/built for this host's arch rather
+# than crash-loop "binary missing"; the installer's health gate is the loud
+# failure for a binary that SHOULD be present. A compute host whose CPU arch the
+# prebuilt pipeline does not cover builds the binary from source to this path.
+ConditionPathExists=/opt/ados/bin/ados-compute
+StartLimitInterval=60s
+StartLimitBurst=5
+
+[Service]
+# Join the shared accounting slice so MemoryCurrent/CPUUsage are observable per
+# unit (the slice sets MemoryAccounting=yes). No MemoryMax: reconstruction is
+# heavy and a compute box has the RAM; capping it would kill jobs.
+Slice=ados.slice
+Type=simple
+# The native compute daemon is the only implementation. exec the binary when
+# present (failing loudly if absent rather than running a stale path).
+ExecStart=/bin/sh -c 'if [ -x /opt/ados/bin/ados-compute ]; then exec /opt/ados/bin/ados-compute; else echo "ados-compute binary missing; reinstall or build from source to fetch it" >&2; exit 1; fi'
+Restart=on-failure
+RestartSec=3
+Environment=ADOS_CONFIG=/etc/ados/config.yaml
+# Serve the job API on the LAN (not just loopback) so a drone/GCS on the same
+# network reaches it. The pairing gate makes a non-loopback bind safe (an
+# off-box caller needs the pairing key; on-box + unpaired stay open).
+Environment=ADOS_COMPUTE_BIND=0.0.0.0:8092
+Environment=ADOS_COMPUTE_DB=/var/ados/compute/jobs.db
+EnvironmentFile=-/etc/ados/env
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/ados /run/ados /etc/ados
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-compute
+
+[Install]
+WantedBy=ados-supervisor.service

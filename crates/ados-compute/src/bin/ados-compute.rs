@@ -70,6 +70,33 @@ fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
+/// Resolve a stable per-node id: the `ADOS_COMPUTE_NODE_ID` override if set,
+/// else derived from the host `machine-id` so two compute nodes never collide on
+/// the mDNS instance / deviceId / cluster identity, else a generic fallback.
+/// Pure (the inputs are injected) so the derivation is unit-tested.
+fn derive_node_id(env: Option<String>, machine_id: Option<String>) -> String {
+    if let Some(id) = env {
+        let id = id.trim();
+        if !id.is_empty() {
+            return id.to_string();
+        }
+    }
+    if let Some(mid) = machine_id {
+        let mid = mid.trim();
+        if !mid.is_empty() {
+            return format!("compute-{}", &mid[..mid.len().min(12)]);
+        }
+    }
+    "compute-node".to_string()
+}
+
+fn resolve_node_id() -> String {
+    derive_node_id(
+        std::env::var("ADOS_COMPUTE_NODE_ID").ok(),
+        std::fs::read_to_string("/etc/machine-id").ok(),
+    )
+}
+
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -83,7 +110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let db = env_or("ADOS_COMPUTE_DB", "/var/ados/compute/jobs.db");
     let bind = env_or("ADOS_COMPUTE_BIND", "127.0.0.1:8092");
-    let node_id = env_or("ADOS_COMPUTE_NODE_ID", "compute-node");
+    let node_id = resolve_node_id();
     let workers: u32 = env_or("ADOS_COMPUTE_WORKERS", "1").parse().unwrap_or(1);
     let retention_ms: i64 = env_or("ADOS_COMPUTE_RETENTION_S", "86400")
         .parse::<i64>()
@@ -98,7 +125,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let store = JobStore::open(&db)?;
     let scheduler = Scheduler::new(store, Arc::new(MockReconstructor), Arc::new(MockDetector));
-    let engine = Engine::new(scheduler, Cluster::new_master(node_id), workers);
+    let engine = Engine::new(scheduler, Cluster::new_master(node_id.clone()), workers);
     let state = Arc::new(Mutex::new(engine));
 
     // Startup recovery: a job left in Running (the daemon crashed mid-backend)
@@ -137,6 +164,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let router = build_router(state, auth);
     let listener = TcpListener::bind(&bind).await?;
     tracing::info!(bind = %bind, workers, "compute job API listening (pairing-gated)");
+    // Advertise on mDNS so the GCS Add-a-Node card auto-discovers this node for
+    // LAN pairing (Rule 39). Best-effort: a None means no auto-discovery, manual
+    // add-by-IP still works. Held for the process lifetime (unregisters on exit).
+    let job_port = bind
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(8092);
+    let _mdns_advert = ados_compute::advertise_compute(&node_id, job_port);
     // ConnectInfo carries the peer address the auth gate reads to resolve on-box
     // loopback trust.
     axum::serve(
@@ -219,5 +255,33 @@ async fn heartbeat_loop(state: Arc<Mutex<Engine>>) {
             }
             Err(e) => tracing::warn!(error = %e, "compute heartbeat snapshot failed"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::derive_node_id;
+
+    #[test]
+    fn node_id_prefers_the_env_override() {
+        assert_eq!(
+            derive_node_id(Some("rtx-box".to_string()), Some("mid".to_string())),
+            "rtx-box"
+        );
+    }
+
+    #[test]
+    fn node_id_derives_from_machine_id_when_env_unset_and_is_unique_per_host() {
+        let a = derive_node_id(None, Some("aaaaaaaaaaaaaaaa1111".to_string()));
+        let b = derive_node_id(None, Some("bbbbbbbbbbbbbbbb2222".to_string()));
+        assert_eq!(a, "compute-aaaaaaaaaaaa");
+        assert_ne!(a, b, "distinct machine-ids must yield distinct node ids");
+    }
+
+    #[test]
+    fn node_id_falls_back_when_nothing_is_available() {
+        assert_eq!(derive_node_id(None, None), "compute-node");
+        // A blank env / blank machine-id both fall through to the next source.
+        assert_eq!(derive_node_id(Some("  ".to_string()), None), "compute-node");
     }
 }

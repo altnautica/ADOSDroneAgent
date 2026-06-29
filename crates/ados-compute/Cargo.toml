@@ -35,6 +35,11 @@ axum = { workspace = true }
 # ados_protocol::crypto::ensure_crypto_provider() first or build() panics
 # ("No provider set").
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
+# mDNS advertisement so a compute node auto-appears in the GCS Add-a-Node card
+# for LAN pairing (Rule 39) from boot, like a drone/ground-station. The Python
+# `ados-discovery` advert is OnDemand (only runs while a pairing code is live),
+# so this always-on Rust advert is what makes the node discoverable at boot.
+mdns-sd = "0.13"
 
 [dev-dependencies]
 # `ServiceExt::oneshot` drives the router in tests without binding a port.

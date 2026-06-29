@@ -4,7 +4,19 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
-## [0.99.15] - 2026-06-29
+## [0.99.16] - 2026-06-29
+
+### Added
+
+- Compute-node install + discovery: a `--profile compute` install now fetches
+  the core services (orchestrator, cloud relay, control front, logging, TUI)
+  plus the compute daemon, deploys an `ados-compute` service unit that serves
+  the job API on the LAN (pairing-gated), and the compute node advertises itself
+  over mDNS so it auto-appears in the Add-a-Node card for LAN pairing — like a
+  drone or ground station. The compute node folds its heartbeat through the
+  existing cloud relay, so it shows up as a fleet node with no new relay code.
+
+
 
 ### Added
 

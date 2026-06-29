@@ -42,8 +42,11 @@ pub fn gate_allows(spec: &ServiceSpec, config: &AgentConfig) -> bool {
     }
     if let Some(gate) = spec.profile_gate {
         // The registry gates are the underscore form; the resolved profile is
-        // the hyphen wire form. Normalise once for the comparison.
-        if config.profile_gate() != gate {
+        // the hyphen wire form. A gate is a pipe-separated set (like role_gate),
+        // so a unit can scope to more than one profile but not all — e.g. the FC
+        // router runs on `drone|ground_station` but not the FC-less compute node.
+        // A single-value gate is a one-element set, so this is backward-compatible.
+        if !gate.split('|').any(|p| p == config.profile_gate()) {
             return false;
         }
     }
@@ -592,11 +595,25 @@ mod tests {
     #[test]
     fn drone_gate_blocks_ground_station_units() {
         let c = cfg("drone");
-        assert!(gate_allows(&spec("ados-mavlink"), &c)); // core, no gate
+        assert!(gate_allows(&spec("ados-mavlink"), &c)); // drone is in the FC set
         assert!(gate_allows(&spec("ados-wfb"), &c)); // drone-gated
         assert!(!gate_allows(&spec("ados-wfb-rx"), &c)); // ground_station-gated
         assert!(!gate_allows(&spec("ados-oled"), &c));
         assert!(gate_allows(&spec("ados-wifi-client"), &c)); // cross-profile
+    }
+
+    #[test]
+    fn compute_profile_excludes_the_fc_router_and_runs_the_core_infra() {
+        let c = cfg("compute");
+        // The FC router never runs on the FC-less compute node — it never fetches
+        // the router binary, so an unconditional start would crash-loop.
+        assert!(!gate_allows(&spec("ados-mavlink"), &c));
+        // The core infra the compute node DOES run, plus the compute daemon.
+        assert!(gate_allows(&spec("ados-cloud"), &c));
+        assert!(gate_allows(&spec("ados-compute"), &c));
+        // The pipe-set gate keeps the router on the FC-bearing profiles.
+        assert!(gate_allows(&spec("ados-mavlink"), &cfg("drone")));
+        assert!(gate_allows(&spec("ados-mavlink"), &cfg("ground_station")));
     }
 
     #[test]
