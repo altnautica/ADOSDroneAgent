@@ -2380,8 +2380,8 @@ impl RealHost {
     }
 
     /// Validate a config value against the plugin's declared parameter schema
-    /// before it is persisted — the agent never trusts the GCS form (DEC-217,
-    /// the agent half of the shared validator). A missing schema, a
+    /// before it is persisted — the agent half of the shared validator, so the
+    /// agent never trusts the GCS form. A missing schema, a
     /// non-JSON-representable value, or a schema that does not compile all ALLOW
     /// the write (graceful degradation); only a value a valid schema rejects is
     /// refused.
