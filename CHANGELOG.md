@@ -4,6 +4,15 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.17] - 2026-06-29
+
+### Added
+
+- The control front serves the compute node's cluster status at
+  `GET /api/compute/status` (reading the compute heartbeat sidecar), so a
+  LAN-paired ground station renders the compute-cluster view local-first,
+  fresher than the cloud heartbeat. An absent / stale sidecar is a 404.
+
 ## [0.99.16] - 2026-06-29
 
 ### Added

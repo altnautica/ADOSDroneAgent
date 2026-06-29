@@ -93,6 +93,8 @@ fn native_routes() -> Vec<NativeRoute> {
         // Plugin published-state read (a {plugin_id} template under the otherwise
         // permanent-Python /api/plugins prefix; only this exact GET is native).
         get("/api/plugins/{plugin_id}/state"),
+        // Compute-node cluster status (read from the heartbeat sidecar).
+        get("/api/compute/status"),
         // WebSocket auth ticket mint.
         post("/api/_ws/ticket"),
         // Params: the full list + the single-param read (a {name} template).
@@ -408,7 +410,7 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            112,
+            113,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);
@@ -455,6 +457,7 @@ mod tests {
             "/api/v1/network/client/configured",
             "/api/v1/network/mac/adapters",
             "/api/plugins/{plugin_id}/state",
+            "/api/compute/status",
         ] {
             assert!(has(Method::GET, p), "{p} must be in the native set");
         }

@@ -52,6 +52,7 @@ pub mod network_write;
 pub mod pairing;
 pub mod params;
 pub mod params_single;
+pub mod compute_status;
 pub mod params_write;
 pub mod plugins_config;
 pub mod plugins_state;
@@ -171,6 +172,12 @@ pub fn build_router(state: AppState, net_native: bool, hid_native: bool) -> Rout
         .route(
             "/api/plugins/:plugin_id/state",
             get(plugins_state::get_plugin_state),
+        )
+        // The compute node's cluster status, read from its heartbeat sidecar, so
+        // a LAN-paired GCS renders the compute-cluster card local-first (Rule 39).
+        .route(
+            "/api/compute/status",
+            get(compute_status::get_compute_status),
         )
         // WebSocket auth ticket mint: exchanges the pairing key (LAN-edge auth)
         // for a short-lived self-contained HMAC ticket a browser GCS hands to the
