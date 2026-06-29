@@ -4,6 +4,18 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.20] - 2026-06-29
+
+### Added
+
+- The plugin host validates a config write against the plugin's declared
+  parameter schema (`gcs.contributes.parameters[key].schema`, read from the
+  installed manifest) before persisting it -- JSON Schema Draft-07 via the
+  jsonschema crate, the agent half of the shared validator (DEC-217), so the
+  agent never trusts the GCS form. A missing/uncompilable schema or a
+  non-JSON value allows the write (graceful degradation); only a value a valid
+  schema rejects is refused.
+
 ## [0.99.19] - 2026-06-29
 
 ### Added

@@ -29,6 +29,10 @@ ados-compute = { path = "../ados-compute" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# JSON Schema (Draft-07) value validation: the agent's half of the shared
+# parameter validator (DEC-217), so a config write is checked against the
+# plugin's declared schema before it is persisted — never trusting the GCS form.
+jsonschema = "0.18"
 rmp-serde = { workspace = true }
 rmpv = { workspace = true }
 thiserror = { workspace = true }

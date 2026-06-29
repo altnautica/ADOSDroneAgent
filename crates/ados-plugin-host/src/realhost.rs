@@ -1812,6 +1812,8 @@ impl HostServices for RealHost {
             )));
         }
         let value = arg_owned(args, "value");
+        self.validate_plugin_config_value(plugin_id, key, &value)
+            .map_err(HostError::Rpc)?;
         let agent_id = self.agent_id_for(plugin_id);
         self.config
             .lock()
@@ -2342,6 +2344,78 @@ fn coerce_timeout_ms(value: &Value) -> Option<i64> {
 }
 
 impl RealHost {
+    /// The Draft-07 validation schema for a plugin parameter — mirrors the GCS
+    /// `toJsonSchema`: an `enum` reduces to membership-only (`{ enum }`) and the
+    /// UI-only `step` is dropped, so the agent + GCS accept/reject identically.
+    fn to_param_json_schema(raw: serde_json::Value) -> serde_json::Value {
+        let serde_json::Value::Object(mut obj) = raw else {
+            return raw;
+        };
+        if let Some(en) = obj.get("enum") {
+            return serde_json::json!({ "enum": en.clone() });
+        }
+        obj.remove("step");
+        serde_json::Value::Object(obj)
+    }
+
+    /// The declared JSON Schema for `(plugin_id, key)`, read from the installed
+    /// plugin's manifest (`gcs.contributes.parameters[key].schema`) via the
+    /// runtime install-dir lookup. `None` when there is no lookup, no manifest,
+    /// or no schema for the key — the caller then allows the write.
+    fn parameter_schema_json(&self, plugin_id: &str, key: &str) -> Option<serde_json::Value> {
+        let lookup = self.plugin_runtime_lookup.as_ref()?;
+        let (install_dir, _) = lookup(plugin_id)?;
+        let text = std::fs::read_to_string(install_dir.join("manifest.yaml")).ok()?;
+        let manifest = crate::manifest::PluginManifest::from_yaml_text(&text).ok()?;
+        let contributes = manifest.gcs.as_ref()?.extra.get("contributes")?;
+        let params = contributes.get("parameters")?.as_sequence()?;
+        for p in params {
+            if p.get("key").and_then(|k| k.as_str()) == Some(key) {
+                let schema = p.get("schema")?;
+                let json = serde_json::to_value(schema).ok()?;
+                return Some(Self::to_param_json_schema(json));
+            }
+        }
+        None
+    }
+
+    /// Validate a config value against the plugin's declared parameter schema
+    /// before it is persisted — the agent never trusts the GCS form (DEC-217,
+    /// the agent half of the shared validator). A missing schema, a
+    /// non-JSON-representable value, or a schema that does not compile all ALLOW
+    /// the write (graceful degradation); only a value a valid schema rejects is
+    /// refused.
+    fn validate_plugin_config_value(
+        &self,
+        plugin_id: &str,
+        key: &str,
+        value: &Value,
+    ) -> Result<(), String> {
+        let Some(schema) = self.parameter_schema_json(plugin_id, key) else {
+            return Ok(());
+        };
+        let Ok(instance) = serde_json::to_value(value) else {
+            return Ok(());
+        };
+        let compiled = match jsonschema::JSONSchema::compile(&schema) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::debug!(plugin_id, key, error = %e, "parameter schema did not compile; skipping value validation");
+                return Ok(());
+            }
+        };
+        if let Err(errors) = compiled.validate(&instance) {
+            let first = errors
+                .map(|e| e.to_string())
+                .next()
+                .unwrap_or_else(|| "does not match the parameter schema".to_string());
+            return Err(format!(
+                "value for '{key}' violates the parameter schema: {first}"
+            ));
+        }
+        Ok(())
+    }
+
     /// Apply a config write that originates off the per-plugin RPC path — the
     /// on-box control socket (a GCS skill toggle / per-drone settings change for
     /// a plugin the writer is not). It resolves the per-drone scope via the same
@@ -2370,6 +2444,7 @@ impl RealHost {
                 py_repr(scope)
             ));
         }
+        self.validate_plugin_config_value(plugin_id, key, &value)?;
         let agent_id = self.agent_id_for(plugin_id);
         self.config
             .lock()
@@ -3146,6 +3221,58 @@ mod tests {
             .apply_config_set("p", "k", Value::from("v"), "nonsense")
             .unwrap_err();
         assert!(err.contains("scope must be drone or global"));
+    }
+
+    #[test]
+    fn config_value_validated_against_the_manifest_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_dir = dir.path().join("myplugin");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("manifest.yaml"),
+            r#"
+id: myplugin
+version: 0.1.0
+compatibility:
+  ados_version: ">=0.9.0"
+gcs:
+  entrypoint: index.html
+  contributes:
+    parameters:
+      - key: follow_distance_m
+        schema:
+          type: number
+          minimum: 2
+          maximum: 50
+"#,
+        )
+        .unwrap();
+        let pd = plugin_dir.clone();
+        let host = RealHost::new().with_runtime_lookup(Box::new(move |id| {
+            if id == "myplugin" {
+                Some((pd.clone(), std::collections::BTreeSet::new()))
+            } else {
+                None
+            }
+        }));
+
+        // In-bounds value passes the schema.
+        assert!(host
+            .apply_config_set("myplugin", "follow_distance_m", Value::from(8.0), "drone")
+            .is_ok());
+        // Out-of-bounds value (> maximum) is rejected before it is persisted.
+        let err = host
+            .apply_config_set("myplugin", "follow_distance_m", Value::from(999.0), "drone")
+            .unwrap_err();
+        assert!(err.contains("follow_distance_m"), "{err}");
+        // A key with no declared schema is allowed (legacy / schemaless keys).
+        assert!(host
+            .apply_config_set("myplugin", "no_schema_key", Value::from("x"), "drone")
+            .is_ok());
+        // No runtime lookup at all -> allowed (no schema source).
+        assert!(RealHost::new()
+            .apply_config_set("p", "k", Value::from(999.0), "drone")
+            .is_ok());
     }
 
     #[test]
