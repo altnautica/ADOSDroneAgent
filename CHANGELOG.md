@@ -4,6 +4,23 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.18] - 2026-06-29
+
+### Added
+
+- Atlas transport — the two remaining bearers + the WFB-lane receive half:
+  - **WfbRelay bearer**: carries small Atlas events drone→ground over the WFB
+    radio link (the auxiliary application stream), for the field topology with
+    no shared LAN. The lane is decimated (~1.4 KB/datagram), so an oversized
+    framed event is rejected with the new non-retriable `PayloadTooLarge`.
+  - **Cloud bearer**: publishes the framed envelope to `ados/{id}/atlas/{leaf}`
+    over the shared MQTT connection (off-LAN, opt-in), gated on the real
+    ConnAck-driven connectivity so the ladder never reaches it against a down
+    broker.
+  - **GS Atlas relay**: the ground station decodes the drone's `wfb_rx -p 2`
+    aux stream and re-POSTs each event into the compute node's receiver, so the
+    field lane reaches the same endpoint the direct-LAN bearer uses.
+
 ## [0.99.17] - 2026-06-29
 
 ### Added
