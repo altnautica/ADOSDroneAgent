@@ -56,6 +56,8 @@ dependencies = [
  "reqwest",
  "rmp-serde",
  "serde",
+ "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite",
@@ -74,6 +76,7 @@ dependencies = [
 name = "ados-cloud"
 version = "0.1.0"
 dependencies = [
+ "ados-atlas-transport",
  "ados-plugin-host",
  "ados-protocol",
  "anyhow",
@@ -103,6 +106,7 @@ dependencies = [
 name = "ados-compute"
 version = "0.1.0"
 dependencies = [
+ "ados-atlas-transport",
  "ados-protocol",
  "axum",
  "mdns-sd",
@@ -207,10 +211,12 @@ dependencies = [
 name = "ados-groundlink"
 version = "0.1.0"
 dependencies = [
+ "ados-atlas-transport",
  "ados-protocol",
  "ados-radio",
  "ados-supervisor",
  "anyhow",
+ "axum",
  "base64",
  "blake2",
  "chacha20poly1305",

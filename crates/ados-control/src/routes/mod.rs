@@ -21,6 +21,7 @@
 
 pub mod can;
 pub mod command;
+pub mod compute_status;
 pub mod diagnostics;
 pub mod fleet;
 pub mod gs_bluetooth;
@@ -52,7 +53,6 @@ pub mod network_write;
 pub mod pairing;
 pub mod params;
 pub mod params_single;
-pub mod compute_status;
 pub mod params_write;
 pub mod plugins_config;
 pub mod plugins_state;
