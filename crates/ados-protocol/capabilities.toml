@@ -777,3 +777,29 @@ required_cap = "radio.aux_stream"
 [[method]]
 id = "radio.aux_stream.close"
 required_cap = "radio.aux_stream"
+
+# ---- compute offload ----
+# A plugin offloads heavy compute (reconstruction / perception / SLAM) to a
+# paired compute node. The host routes each call to its compute connection; the
+# results flow back on the plugin's own `plugin.<id>.*` bus namespace.
+[[method]]
+id = "compute.dataset.write"
+required_cap = "compute.dataset.write"
+
+[[method]]
+id = "compute.job.submit"
+required_cap = "compute.job.submit"
+
+[[method]]
+id = "compute.job.read"
+required_cap = "compute.job.read"
+
+# Reading a job's outputs is the same read surface as reading its status.
+[[method]]
+id = "compute.job.outputs"
+required_cap = "compute.job.read"
+
+# Cancelling a job is part of the submit surface (the submitter cancels).
+[[method]]
+id = "compute.job.cancel"
+required_cap = "compute.job.submit"

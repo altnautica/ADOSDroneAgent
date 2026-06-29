@@ -56,6 +56,11 @@ pub const DISPATCH_METHODS: &[DispatchMethod] = &[
     DispatchMethod { method: "flight.guided_setpoint.send", required_cap: Some("flight.guided_setpoint"), inline: false },
     DispatchMethod { method: "radio.aux_stream.open", required_cap: Some("radio.aux_stream"), inline: false },
     DispatchMethod { method: "radio.aux_stream.close", required_cap: Some("radio.aux_stream"), inline: false },
+    DispatchMethod { method: "compute.dataset.write", required_cap: Some("compute.dataset.write"), inline: false },
+    DispatchMethod { method: "compute.job.submit", required_cap: Some("compute.job.submit"), inline: false },
+    DispatchMethod { method: "compute.job.read", required_cap: Some("compute.job.read"), inline: false },
+    DispatchMethod { method: "compute.job.outputs", required_cap: Some("compute.job.read"), inline: false },
+    DispatchMethod { method: "compute.job.cancel", required_cap: Some("compute.job.submit"), inline: false },
 ];
 
 /// Look up the dispatch-level required capability for a wire method.

@@ -80,6 +80,12 @@ pub enum Method {
     VisionPublishDetection,
     VisionSubscribeDetections,
     VisionDesignateTrack,
+    // Compute offload: the host routes these to its paired compute connection.
+    ComputeDatasetWrite,
+    ComputeJobSubmit,
+    ComputeJobRead,
+    ComputeJobOutputs,
+    ComputeJobCancel,
 }
 
 impl Method {
@@ -135,6 +141,11 @@ impl Method {
             "flight.guided_setpoint.send" => Self::GuidedSetpointSend,
             "radio.aux_stream.open" => Self::RadioAuxStreamOpen,
             "radio.aux_stream.close" => Self::RadioAuxStreamClose,
+            "compute.dataset.write" => Self::ComputeDatasetWrite,
+            "compute.job.submit" => Self::ComputeJobSubmit,
+            "compute.job.read" => Self::ComputeJobRead,
+            "compute.job.outputs" => Self::ComputeJobOutputs,
+            "compute.job.cancel" => Self::ComputeJobCancel,
             _ => return None,
         })
     }
@@ -176,6 +187,11 @@ impl Method {
             Self::VisionPublishDetection => vision_methods::PUBLISH_DETECTION,
             Self::VisionSubscribeDetections => vision_methods::SUBSCRIBE_DETECTIONS,
             Self::VisionDesignateTrack => vision_methods::DESIGNATE_TRACK,
+            Self::ComputeDatasetWrite => "compute.dataset.write",
+            Self::ComputeJobSubmit => "compute.job.submit",
+            Self::ComputeJobRead => "compute.job.read",
+            Self::ComputeJobOutputs => "compute.job.outputs",
+            Self::ComputeJobCancel => "compute.job.cancel",
         }
     }
 
@@ -433,6 +449,11 @@ mod tests {
         Method::VisionPublishDetection,
         Method::VisionSubscribeDetections,
         Method::VisionDesignateTrack,
+        Method::ComputeDatasetWrite,
+        Method::ComputeJobSubmit,
+        Method::ComputeJobRead,
+        Method::ComputeJobOutputs,
+        Method::ComputeJobCancel,
     ];
 
     #[test]
@@ -563,6 +584,47 @@ mod tests {
                 &caps(&["vision.detection.publish"])
             ),
             Gate::Allow(Method::VisionPublishDetection)
+        );
+    }
+
+    #[test]
+    fn compute_methods_gate_on_their_capability() {
+        // Submit + cancel share the submit cap; read + outputs share the read cap.
+        for m in ["compute.job.submit", "compute.job.cancel"] {
+            assert_eq!(
+                gate(m, false, &caps(&[])),
+                Gate::CapabilityDenied("capability_denied: compute.job.submit".to_string())
+            );
+            assert!(matches!(
+                gate(m, false, &caps(&["compute.job.submit"])),
+                Gate::Allow(_)
+            ));
+        }
+        for m in ["compute.job.read", "compute.job.outputs"] {
+            assert_eq!(
+                gate(m, false, &caps(&[])),
+                Gate::CapabilityDenied("capability_denied: compute.job.read".to_string())
+            );
+            assert!(matches!(
+                gate(m, false, &caps(&["compute.job.read"])),
+                Gate::Allow(_)
+            ));
+        }
+        assert_eq!(
+            gate("compute.dataset.write", false, &caps(&[])),
+            Gate::CapabilityDenied("capability_denied: compute.dataset.write".to_string())
+        );
+        assert_eq!(
+            gate(
+                "compute.dataset.write",
+                false,
+                &caps(&["compute.dataset.write"])
+            ),
+            Gate::Allow(Method::ComputeDatasetWrite)
+        );
+        assert_eq!(
+            gate("compute.job.submit", false, &caps(&["compute.job.submit"])),
+            Gate::Allow(Method::ComputeJobSubmit)
         );
     }
 

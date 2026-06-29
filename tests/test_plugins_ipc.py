@@ -327,6 +327,25 @@ async def test_plugin_context_events_publish(harness) -> None:
     assert received[0].payload == {"status": "ok"}
 
 
+@pytest.mark.asyncio
+async def test_plugin_context_exposes_compute_facade(harness) -> None:
+    """``ctx.compute`` is the compute-offload facade (the M8 attachment),
+    alongside the vision facade, so a plugin can submit jobs to a paired
+    compute node through the host's gated dispatch."""
+    from ados.sdk.compute import ComputeClient
+    from ados.sdk.vision import VisionClient
+
+    _, _, _, client, _, _ = harness
+    ctx = PluginContext(
+        plugin_id=PLUGIN_ID,
+        plugin_version="0.1.0",
+        config={},
+        ipc=client,
+    )
+    assert isinstance(ctx.compute, ComputeClient)
+    assert isinstance(ctx.vision, VisionClient)
+
+
 # ---------------------------------------------------------------------
 # Mutual exclusion with the native plugin host
 # ---------------------------------------------------------------------

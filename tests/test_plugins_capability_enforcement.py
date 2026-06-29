@@ -83,12 +83,14 @@ def _install_with_perms(plugin_id: str, **grants: bool) -> PluginInstall:
 
 
 def test_catalog_size_matches_spec() -> None:
-    # 43 agent capabilities in the catalog. Beyond the earlier substrate set
+    # 46 agent capabilities in the catalog. Beyond the earlier substrate set
     # (button.subscribe, flight.guided_setpoint, mavlink.tunnel,
-    # radio.aux_stream, display.oled.page), the GPIO output and vision
+    # radio.aux_stream, display.oled.page) and the GPIO output + vision
     # designate/subscribe caps (hardware.gpio_out, vision.detection.subscribe,
-    # vision.track.designate) were added.
-    assert len(AGENT_CAPABILITIES) == 43
+    # vision.track.designate), the three compute-offload caps
+    # (compute.dataset.write, compute.job.submit, compute.job.read) back the
+    # plugin compute-offload methods.
+    assert len(AGENT_CAPABILITIES) == 46
 
 
 def test_only_event_caps_are_enforced_today() -> None:

@@ -29,6 +29,8 @@ use std::sync::{Arc, Mutex};
 use rmpv::Value;
 use tokio::sync::broadcast;
 
+use ados_compute::{ComputeClient, ComputeJobKind};
+
 use crate::host::{not_implemented, HostError, HostResult, HostServices};
 use crate::mavlink_client::MavlinkClient;
 use crate::vision_client::VisionClient;
@@ -809,6 +811,24 @@ fn json_to_mpv(value: &serde_json::Value) -> Value {
     }
 }
 
+/// Render a compute-node reply struct (any `Serialize`) as the msgpack response
+/// map the `ctx.compute` facade parses, mapping the typed reply 1:1 through
+/// JSON (the struct's serde field names are the keys the facade reads).
+fn compute_reply<T: serde::Serialize>(value: &T) -> Result<HostResult, HostError> {
+    let json = serde_json::to_value(value).map_err(|e| HostError::Rpc(e.to_string()))?;
+    Ok(json_to_mpv(&json))
+}
+
+/// A sub-value of the args map as `serde_json`, for forwarding `meta` / `params`
+/// to the compute node verbatim. Absent / null / non-convertible becomes an
+/// empty object (the facade always sends a dict; the node expects an object).
+fn compute_json_arg(args: &Value, key: &str) -> serde_json::Value {
+    map_get(args, key)
+        .and_then(|v| serde_json::to_value(v).ok())
+        .filter(|v| !v.is_null())
+        .unwrap_or_else(|| serde_json::Value::Object(Default::default()))
+}
+
 /// Coerce a msgpack value to raw bytes, mirroring the Python `msg_bytes`
 /// handling: a binary value is taken verbatim; a list of ints is coerced to
 /// bytes (msgpack may decode bytes-of-ints as a list on some configs). Any other
@@ -995,6 +1015,10 @@ pub struct RealHost {
     config: Mutex<ConfigStore>,
     mavlink: Option<Arc<MavlinkClient>>,
     vision: Option<Arc<VisionClient>>,
+    /// The paired compute node's offload client. `None` until the supervisor
+    /// wires a discovered/paired node; the `compute_*` methods return
+    /// `not_implemented` while unwired (the MAVLink/vision not-available posture).
+    compute: Option<Arc<ComputeClient>>,
     plugin_runtime_lookup: Option<RuntimeLookup>,
     agent_id_lookup: Option<AgentIdLookup>,
     /// Sidecar path the reserved display page reads its content from. The
@@ -1046,6 +1070,7 @@ impl RealHost {
             config: Mutex::new(ConfigStore::default()),
             mavlink: None,
             vision: None,
+            compute: None,
             plugin_runtime_lookup: None,
             agent_id_lookup: None,
             display_page_path: PathBuf::from(LCD_PLUGIN_PAGE_PATH),
@@ -1091,6 +1116,15 @@ impl RealHost {
     /// MAVLink not-available posture.
     pub fn with_vision(mut self, vision: Arc<VisionClient>) -> Self {
         self.vision = Some(vision);
+        self
+    }
+
+    /// Wire the paired compute node's offload client (builder style). The
+    /// supervisor calls this once it has a node base url and key (from discovery
+    /// and LAN pairing). When unwired the `compute_*` methods return the
+    /// `not_implemented` shape, matching the MAVLink/vision not-available posture.
+    pub fn with_compute(mut self, compute: Arc<ComputeClient>) -> Self {
+        self.compute = Some(compute);
         self
     }
 
@@ -1299,6 +1333,11 @@ const ALL_DISPATCH_METHODS: &[crate::dispatch::Method] = {
         VisionPublishDetection,
         VisionSubscribeDetections,
         VisionDesignateTrack,
+        ComputeDatasetWrite,
+        ComputeJobSubmit,
+        ComputeJobRead,
+        ComputeJobOutputs,
+        ComputeJobCancel,
     ]
 };
 
@@ -2166,6 +2205,103 @@ impl HostServices for RealHost {
             .designate_track(args)
             .await
             .map_err(|e| HostError::Rpc(e.0))
+    }
+
+    async fn compute_dataset_write(
+        &self,
+        _plugin_id: &str,
+        args: &Value,
+    ) -> Result<HostResult, HostError> {
+        let Some(client) = self.compute.as_ref() else {
+            return Ok(not_implemented("compute.dataset.write"));
+        };
+        let kind =
+            arg_str(args, "kind").ok_or_else(|| HostError::Rpc("kind is required".to_string()))?;
+        let meta = compute_json_arg(args, "meta");
+        let dataset = client
+            .write_dataset(kind, meta)
+            .await
+            .map_err(|e| HostError::Rpc(e.to_string()))?;
+        compute_reply(&dataset)
+    }
+
+    async fn compute_job_submit(
+        &self,
+        _plugin_id: &str,
+        args: &Value,
+    ) -> Result<HostResult, HostError> {
+        let Some(client) = self.compute.as_ref() else {
+            return Ok(not_implemented("compute.job.submit"));
+        };
+        let kind = match arg_str(args, "kind") {
+            Some("reconstruct") => ComputeJobKind::Reconstruct,
+            Some("perception_offload") => ComputeJobKind::PerceptionOffload,
+            Some("slam_offload") => ComputeJobKind::SlamOffload,
+            other => {
+                return Err(HostError::Rpc(format!(
+                    "unknown job kind {:?}",
+                    other.unwrap_or("")
+                )))
+            }
+        };
+        let dataset_id = arg_str(args, "dataset_id").map(str::to_string);
+        let params = compute_json_arg(args, "params");
+        let resp = client
+            .submit_job(kind, dataset_id, params, None)
+            .await
+            .map_err(|e| HostError::Rpc(e.to_string()))?;
+        compute_reply(&resp)
+    }
+
+    async fn compute_job_read(
+        &self,
+        _plugin_id: &str,
+        args: &Value,
+    ) -> Result<HostResult, HostError> {
+        let Some(client) = self.compute.as_ref() else {
+            return Ok(not_implemented("compute.job.read"));
+        };
+        let job_id = arg_str(args, "job_id")
+            .ok_or_else(|| HostError::Rpc("job_id is required".to_string()))?;
+        let job = client
+            .job_status(job_id)
+            .await
+            .map_err(|e| HostError::Rpc(e.to_string()))?;
+        compute_reply(&job)
+    }
+
+    async fn compute_job_outputs(
+        &self,
+        _plugin_id: &str,
+        args: &Value,
+    ) -> Result<HostResult, HostError> {
+        let Some(client) = self.compute.as_ref() else {
+            return Ok(not_implemented("compute.job.outputs"));
+        };
+        let job_id = arg_str(args, "job_id")
+            .ok_or_else(|| HostError::Rpc("job_id is required".to_string()))?;
+        let outputs = client
+            .job_outputs(job_id)
+            .await
+            .map_err(|e| HostError::Rpc(e.to_string()))?;
+        Ok(json_to_mpv(&serde_json::json!({ "outputs": outputs })))
+    }
+
+    async fn compute_job_cancel(
+        &self,
+        _plugin_id: &str,
+        args: &Value,
+    ) -> Result<HostResult, HostError> {
+        let Some(client) = self.compute.as_ref() else {
+            return Ok(not_implemented("compute.job.cancel"));
+        };
+        let job_id = arg_str(args, "job_id")
+            .ok_or_else(|| HostError::Rpc("job_id is required".to_string()))?;
+        let cancelled = client
+            .cancel_job(job_id)
+            .await
+            .map_err(|e| HostError::Rpc(e.to_string()))?;
+        Ok(json_to_mpv(&serde_json::json!({ "cancelled": cancelled })))
     }
 }
 
@@ -4065,5 +4201,122 @@ mod tests {
         assert_eq!(&frame[15..15 + app_payload.len()], &app_payload[..]);
 
         let _ = std::fs::remove_file(&sock);
+    }
+
+    #[tokio::test]
+    async fn compute_offload_routes_a_job_through_the_host_to_the_node() {
+        use crate::dispatch::Method;
+        use crate::handlers::route_host_method;
+        use ados_compute::{
+            build_router, Cluster, ComputeAuth, ComputeClient, Engine, JobStore, MockDetector,
+            MockReconstructor, Scheduler,
+        };
+        use std::collections::BTreeSet;
+        use std::net::SocketAddr;
+        use tokio::sync::Mutex;
+
+        // Spin the real job-API router over an in-memory engine on loopback, the
+        // way the compute daemon serves it. Unpaired auth => the gate is open, so
+        // a keyless client reaches it.
+        let store = JobStore::open_in_memory().unwrap();
+        let scheduler = Scheduler::new(store, Arc::new(MockReconstructor), Arc::new(MockDetector));
+        let engine = Arc::new(Mutex::new(Engine::new(
+            scheduler,
+            Cluster::new_master("node-a"),
+            2,
+        )));
+        let auth = Arc::new(ComputeAuth::new(
+            "/nonexistent/ados-plugin-host-compute-test.json".into(),
+        ));
+        let app = build_router(engine.clone(), auth);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+
+        // Wire the host to the node's offload client.
+        let host = RealHost::new()
+            .with_compute(Arc::new(ComputeClient::new(format!("http://{addr}"), None)));
+        let caps: BTreeSet<String> = ["compute.job.submit", "compute.job.read"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+
+        // Submit a perception offload (the frame rides params; no dataset).
+        let submit_args = Value::Map(vec![
+            (Value::from("kind"), Value::from("perception_offload")),
+            (
+                Value::from("params"),
+                Value::Map(vec![(
+                    Value::from("frame"),
+                    Value::Map(vec![
+                        (Value::from("camera_id"), Value::from("front")),
+                        (Value::from("width"), Value::from(640i64)),
+                        (Value::from("height"), Value::from(480i64)),
+                        (Value::from("ts_ms"), Value::from(1i64)),
+                    ]),
+                )]),
+            ),
+        ]);
+        let submitted =
+            route_host_method(&host, Method::ComputeJobSubmit, "p", &submit_args, &caps)
+                .await
+                .unwrap();
+        let job_id = map_get(&submitted, "job_id")
+            .and_then(Value::as_str)
+            .expect("submit reply carries a job_id")
+            .to_string();
+
+        // The daemon's worker loop runs the job; drive a tick directly.
+        engine.lock().await.tick(1).unwrap();
+
+        // Read the outputs back through the host route: one detection artifact.
+        let out_args = Value::Map(vec![(Value::from("job_id"), Value::from(job_id.as_str()))]);
+        let outputs_reply =
+            route_host_method(&host, Method::ComputeJobOutputs, "p", &out_args, &caps)
+                .await
+                .unwrap();
+        let Some(Value::Array(items)) = map_get(&outputs_reply, "outputs") else {
+            panic!("outputs reply is not an array");
+        };
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            map_get(&items[0], "kind").and_then(Value::as_str),
+            Some("detection")
+        );
+    }
+
+    #[tokio::test]
+    async fn compute_offload_unwired_is_not_implemented() {
+        use crate::dispatch::Method;
+        use crate::handlers::route_host_method;
+        use std::collections::BTreeSet;
+
+        // A host with no compute node wired routes to the impl and gets the
+        // not_implemented shape (the MAVLink/vision not-available posture).
+        let host = RealHost::new();
+        let caps: BTreeSet<String> = ["compute.job.submit"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let reply = route_host_method(
+            &host,
+            Method::ComputeJobSubmit,
+            "p",
+            &Value::Map(vec![(Value::from("kind"), Value::from("reconstruct"))]),
+            &caps,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            map_get(&reply, "error").and_then(Value::as_str),
+            Some("not_implemented")
+        );
     }
 }

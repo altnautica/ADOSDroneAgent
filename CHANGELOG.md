@@ -4,6 +4,18 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.15] - 2026-06-29
+
+### Added
+
+- Plugin compute-offload routing: a plugin's `ctx.compute` calls (register a
+  dataset, submit a reconstruct / perception / SLAM job, read status + outputs,
+  cancel) now route through the plugin host's capability gate to the paired
+  compute node's job API. Each call is gated on its capability
+  (`compute.dataset.write` / `compute.job.submit` / `compute.job.read`), and a
+  host with no compute node wired returns the not-available shape. Results flow
+  on the plugin's own event-bus namespace.
+
 ## [0.99.14] - 2026-06-28
 
 ### Added

@@ -46,6 +46,11 @@ REQUIRED_CAP: dict[str, str | None] = {
     "flight.guided_setpoint.send": "flight.guided_setpoint",
     "radio.aux_stream.open": "radio.aux_stream",
     "radio.aux_stream.close": "radio.aux_stream",
+    "compute.dataset.write": "compute.dataset.write",
+    "compute.job.submit": "compute.job.submit",
+    "compute.job.read": "compute.job.read",
+    "compute.job.outputs": "compute.job.read",
+    "compute.job.cancel": "compute.job.submit",
 }
 
 # Methods whose cap is decided inline by the handler from the request

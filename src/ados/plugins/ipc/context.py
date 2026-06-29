@@ -342,6 +342,14 @@ class PluginContext:
         from ados.sdk.vision import VisionClient
 
         self.vision = VisionClient(ipc)
+        # Compute-offload facade: register a dataset, submit a reconstruct /
+        # perception / SLAM job to the paired compute node, read status +
+        # outputs, cancel. The host gates the compute caps and routes each call
+        # to its compute connection; results flow on the plugin's own bus
+        # namespace. Imported lazily for the same reason as the vision facade.
+        from ados.sdk.compute import ComputeClient
+
+        self.compute = ComputeClient(ipc)
         self.telemetry = _TelemetryClient(ipc)
         self.config_kv = _ConfigClient(ipc, config)
         self.process = _ProcessClient(ipc)

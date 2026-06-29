@@ -390,8 +390,10 @@ dependencies = [
 name = "ados-plugin-host"
 version = "0.1.0"
 dependencies = [
+ "ados-compute",
  "ados-protocol",
  "anyhow",
+ "axum",
  "base64",
  "ed25519-dalek",
  "getrandom 0.2.17",

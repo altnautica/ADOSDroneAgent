@@ -22,6 +22,10 @@ path = "src/bin/ados-plugin-host.rs"
 # command surface build their FC frames with), so a setpoint this host emits is
 # byte-identical to one any other surface would.
 ados-protocol = { path = "../ados-protocol", features = ["tracing-layer", "mavlink"] }
+# The compute-offload HTTP client (submit/dataset/read/cancel/outputs). The host
+# forwards a plugin's gated `compute.*` calls to its paired compute node through
+# this client; it never re-implements the job API.
+ados-compute = { path = "../ados-compute" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -58,3 +62,6 @@ tracing-journald = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+# Test-only: serve the ados-compute job-API router over loopback so the
+# compute-offload host route can be driven end-to-end against a real client.
+axum = { workspace = true }

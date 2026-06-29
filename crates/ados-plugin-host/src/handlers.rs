@@ -348,6 +348,13 @@ pub async fn route_host_method<H: HostServices + ?Sized>(
         Method::VisionInfer => host.vision_infer(plugin_id, args).await,
         Method::VisionPublishDetection => host.vision_publish_detection(plugin_id, args).await,
         Method::VisionDesignateTrack => host.vision_designate_track(plugin_id, args).await,
+        // Compute offload: proxy to the paired compute node over HTTP, await the
+        // reply, and return the node's response map.
+        Method::ComputeDatasetWrite => host.compute_dataset_write(plugin_id, args).await,
+        Method::ComputeJobSubmit => host.compute_job_submit(plugin_id, args).await,
+        Method::ComputeJobRead => host.compute_job_read(plugin_id, args).await,
+        Method::ComputeJobOutputs => host.compute_job_outputs(plugin_id, args).await,
+        Method::ComputeJobCancel => host.compute_job_cancel(plugin_id, args).await,
         // The event surface, ping, and the streaming subscribe methods never
         // reach here; the server short-circuits both `vision.subscribe_frames`
         // and `vision.subscribe_detections`, arming the per-connection push

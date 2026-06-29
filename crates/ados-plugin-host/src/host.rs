@@ -371,6 +371,55 @@ pub trait HostServices: Send + Sync + 'static {
     ) -> impl std::future::Future<Output = Result<HostResult, HostError>> + Send {
         std::future::ready(Ok(not_implemented("vision.designate_track")))
     }
+
+    /// Register a dataset on the paired compute node. The host forwards to its
+    /// compute connection over HTTP and returns the node's reply. Async because
+    /// it awaits the node's HTTP response; the default returns `not_implemented`
+    /// so [`NoopHost`] (and a host with no compute node) stays inert.
+    fn compute_dataset_write(
+        &self,
+        _plugin_id: &str,
+        _args: &Value,
+    ) -> impl std::future::Future<Output = Result<HostResult, HostError>> + Send {
+        std::future::ready(Ok(not_implemented("compute.dataset.write")))
+    }
+
+    /// Submit a job (reconstruct / perception / SLAM offload) to the compute
+    /// node. Returns the node's `{job_id, state}` reply.
+    fn compute_job_submit(
+        &self,
+        _plugin_id: &str,
+        _args: &Value,
+    ) -> impl std::future::Future<Output = Result<HostResult, HostError>> + Send {
+        std::future::ready(Ok(not_implemented("compute.job.submit")))
+    }
+
+    /// Read a job's status + progress from the compute node.
+    fn compute_job_read(
+        &self,
+        _plugin_id: &str,
+        _args: &Value,
+    ) -> impl std::future::Future<Output = Result<HostResult, HostError>> + Send {
+        std::future::ready(Ok(not_implemented("compute.job.read")))
+    }
+
+    /// Read a finished job's outputs from the compute node.
+    fn compute_job_outputs(
+        &self,
+        _plugin_id: &str,
+        _args: &Value,
+    ) -> impl std::future::Future<Output = Result<HostResult, HostError>> + Send {
+        std::future::ready(Ok(not_implemented("compute.job.outputs")))
+    }
+
+    /// Cancel a job on the compute node.
+    fn compute_job_cancel(
+        &self,
+        _plugin_id: &str,
+        _args: &Value,
+    ) -> impl std::future::Future<Output = Result<HostResult, HostError>> + Send {
+        std::future::ready(Ok(not_implemented("compute.job.cancel")))
+    }
 }
 
 /// The default host: every host-coupled method returns `not_implemented`.
