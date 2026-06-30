@@ -191,12 +191,12 @@ fn read_raw_config(path: &Path) -> RawConfig {
 }
 
 /// Wire-contract profile string from a raw value. `"ground_station"` becomes
-/// the hyphen form; `"compute"` stays as-is (a compute node); `"drone"`/`"auto"`
+/// the hyphen form; `"workstation"` stays as-is (a workstation node); `"drone"`/`"auto"`
 /// /empty/unknown collapse to `"drone"`.
 pub fn normalize_profile(raw: Option<&str>) -> String {
     match raw {
         Some("ground_station") | Some("ground-station") => "ground-station".to_string(),
-        Some("compute") => "compute".to_string(),
+        Some("workstation") => "workstation".to_string(),
         _ => "drone".to_string(),
     }
 }
@@ -228,7 +228,10 @@ pub fn read_profile_conf_value(path: &Path) -> Option<String> {
         };
         if let Some(value) = value {
             let v = value.trim().trim_matches(|c| c == '"' || c == '\'');
-            if matches!(v, "drone" | "ground_station" | "ground-station" | "compute") {
+            if matches!(
+                v,
+                "drone" | "ground_station" | "ground-station" | "workstation"
+            ) {
                 return Some(v.replace('-', "_"));
             }
         }

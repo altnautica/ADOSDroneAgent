@@ -6,7 +6,7 @@
 //! no advert and would not appear in the GCS Add-a-Node card. This always-on
 //! Rust advert (the `mdns-sd` daemon, held by the compute daemon for its
 //! lifetime) fills that gap: the node advertises `_ados._tcp` with
-//! `profile=compute` in the TXT from boot, so it auto-appears for LAN pairing
+//! `profile=workstation` in the TXT from boot, so it auto-appears for LAN pairing
 //! (Rule 39) like a drone/ground-station, no pairing code required first.
 //!
 //! The advert points at the control front's pairing port (`:8080`, where the
@@ -54,7 +54,7 @@ fn advert_fields(node_id: &str, job_api_port: u16) -> (String, Vec<(String, Stri
     let short: String = node_id.chars().take(12).collect();
     let instance = format!("ados-compute-{short}");
     let txt = vec![
-        ("profile".to_string(), "compute".to_string()),
+        ("profile".to_string(), "workstation".to_string()),
         ("path".to_string(), "/api/pairing".to_string()),
         ("jobApi".to_string(), job_api_port.to_string()),
         ("deviceId".to_string(), node_id.to_string()),
@@ -131,7 +131,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn advert_fields_carry_the_compute_profile_and_ports() {
+    fn advert_fields_carry_the_workstation_profile_and_ports() {
         let (instance, txt) = advert_fields("node-abcdef0123456789", 8092);
         // The instance carries a node-id prefix (first 12 chars) for uniqueness.
         assert_eq!(instance, "ados-compute-node-abcdef0");
@@ -140,7 +140,7 @@ mod tests {
                 .find(|(key, _)| key == k)
                 .map(|(_, v)| v.as_str())
         };
-        assert_eq!(get("profile"), Some("compute"));
+        assert_eq!(get("profile"), Some("workstation"));
         assert_eq!(get("path"), Some("/api/pairing"));
         assert_eq!(get("jobApi"), Some("8092"));
         assert_eq!(get("deviceId"), Some("node-abcdef0123456789"));

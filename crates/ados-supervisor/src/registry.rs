@@ -151,13 +151,13 @@ pub const SERVICE_REGISTRY: &[ServiceDef] = &[
     // no-op until provisioning enables it. NOT in the headless KEEP set:
     // world-model capture is excluded from the lean headless core.
     def("ados-atlas", Hardware, Some("drone"), None),
-    // The compute-node engine: the job store, the scheduler, and the REST job
-    // API. Profile-gated to `compute` so it runs only on a compute node (a GPU
-    // box, a Mac, or any spare box), never on a drone or ground station. It
-    // serves the local-first job API a drone or GCS submits reconstruction and
-    // offload work to. NOT in the headless KEEP set: compute is a heavy profile,
-    // not the lean headless core.
-    def("ados-compute", Core, Some("compute"), None),
+    // The workstation engine: the job store, the scheduler, and the REST job
+    // API. Profile-gated to `workstation` so it runs only on a workstation node
+    // (a GPU box, a Mac, or any spare box), never on a drone or ground station.
+    // It serves the local-first job API a drone or GCS submits reconstruction
+    // and offload work to. NOT in the headless KEEP set: the workstation profile
+    // is heavy, not the lean headless core.
+    def("ados-compute", Core, Some("workstation"), None),
     // On-demand.
     def("ados-ota", OnDemand, None, None),
     def("ados-discovery", OnDemand, None, None),
@@ -302,8 +302,8 @@ mod tests {
         // Core tier members. ados-mavlink/api/cloud/health are the cross-profile
         // always-on core (the single cloud unit serves the gateway + heartbeat on
         // both profiles, spawning the ground-station bridge when the role resolves
-        // to a ground station). ados-compute is the Core service of the compute
-        // profile (it auto-runs only on a compute node).
+        // to a ground station). ados-compute is the Core service of the workstation
+        // profile (it auto-runs only on a workstation node).
         let core: Vec<_> = specs
             .iter()
             .filter(|s| s.category == Category::Core)
@@ -319,10 +319,10 @@ mod tests {
                 "ados-compute"
             ]
         );
-        // The compute engine is the Core service of the compute profile and is
-        // NOT in the headless keep set (compute is a heavy profile).
+        // The compute engine is the Core service of the workstation profile and is
+        // NOT in the headless keep set (the workstation profile is heavy).
         let compute = specs.iter().find(|s| s.name == "ados-compute").unwrap();
-        assert_eq!(compute.profile_gate, Some("compute"));
+        assert_eq!(compute.profile_gate, Some("workstation"));
         assert_eq!(compute.category, Category::Core);
         assert!(!compute.headless_keep);
         // The drone TX manager is drone-gated; the GS RX is role-gated to direct.

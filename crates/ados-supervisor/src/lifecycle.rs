@@ -603,12 +603,12 @@ mod tests {
     }
 
     #[test]
-    fn compute_profile_excludes_the_fc_router_and_runs_the_core_infra() {
-        let c = cfg("compute");
-        // The FC router never runs on the FC-less compute node — it never fetches
+    fn workstation_profile_excludes_the_fc_router_and_runs_the_core_infra() {
+        let c = cfg("workstation");
+        // The FC router never runs on the FC-less workstation node — it never fetches
         // the router binary, so an unconditional start would crash-loop.
         assert!(!gate_allows(&spec("ados-mavlink"), &c));
-        // The core infra the compute node DOES run, plus the compute daemon.
+        // The core infra the workstation node DOES run, plus the compute daemon.
         assert!(gate_allows(&spec("ados-cloud"), &c));
         assert!(gate_allows(&spec("ados-compute"), &c));
         // The pipe-set gate keeps the router on the FC-bearing profiles.

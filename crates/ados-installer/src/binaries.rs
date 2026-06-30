@@ -41,13 +41,13 @@ pub struct PrebuiltBinary {
 const BOTH: &[&str] = &["drone", "ground_station"];
 const DRONE: &[&str] = &["drone"];
 const GROUND: &[&str] = &["ground_station"];
-/// The compute profile (a GPU box / Mac / spare box that reconstructs +
+/// The workstation profile (a GPU box / Mac / spare box that reconstructs +
 /// serves perception offload). Distinct from the SBC profiles.
-const COMPUTE: &[&str] = &["compute"];
-/// Every profile, including compute. Used for the profile-agnostic core
+const WORKSTATION: &[&str] = &["workstation"];
+/// Every profile, including the workstation node. Used for the profile-agnostic core
 /// services every node needs (orchestrator, cloud relay, control front,
-/// logging, TUI) so a `--profile compute` install fetches them too.
-const ANY: &[&str] = &["drone", "ground_station", "compute"];
+/// logging, TUI) so a `--profile workstation` install fetches them too.
+const ANY: &[&str] = &["drone", "ground_station", "workstation"];
 
 /// The full catalog of prebuilt service binaries.
 ///
@@ -228,7 +228,7 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
         gate: Gate::BestEffort,
         profiles: BOTH,
     },
-    // The compute reconstructor/offload daemon. Best-effort so a compute host
+    // The compute reconstructor/offload daemon. Best-effort so a workstation host
     // whose CPU arch the prebuilt pipeline does not cover (a GPU box / Mac is
     // typically x86_64/arm64-macOS, while the catalog ships aarch64) degrades +
     // reports rather than failing the install; that host builds from source.
@@ -238,12 +238,12 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
         release_tag: "prebuilt-compute",
         dest: "/opt/ados/bin/ados-compute",
         gate: Gate::BestEffort,
-        profiles: COMPUTE,
+        profiles: WORKSTATION,
     },
 ];
 
 /// The subset of the catalog needed by `profile`
-/// (`drone` | `ground_station` | `compute`).
+/// (`drone` | `ground_station` | `workstation`).
 pub fn for_profile(profile: &str) -> Vec<&'static PrebuiltBinary> {
     PREBUILT
         .iter()
@@ -261,9 +261,12 @@ mod tests {
     }
 
     #[test]
-    fn compute_profile_fetches_the_cores_and_the_compute_daemon() {
-        let svcs: Vec<&str> = for_profile("compute").iter().map(|b| b.service).collect();
-        // The compute node is a full agent: the orchestrator, cloud relay,
+    fn workstation_profile_fetches_the_cores_and_the_compute_daemon() {
+        let svcs: Vec<&str> = for_profile("workstation")
+            .iter()
+            .map(|b| b.service)
+            .collect();
+        // The workstation node is a full agent: the orchestrator, cloud relay,
         // control front (LAN pairing), logging, and TUI, plus the compute daemon.
         for svc in [
             "ados-supervisor",
@@ -275,7 +278,7 @@ mod tests {
         ] {
             assert!(
                 svcs.contains(&svc),
-                "compute profile must fetch {svc}: {svcs:?}"
+                "workstation profile must fetch {svc}: {svcs:?}"
             );
         }
         // It does NOT fetch the SBC-only flight/radio/video surfaces.
@@ -287,7 +290,7 @@ mod tests {
         ] {
             assert!(
                 !svcs.contains(&svc),
-                "compute profile must NOT fetch {svc}: {svcs:?}"
+                "workstation profile must NOT fetch {svc}: {svcs:?}"
             );
         }
         // The compute daemon degrades (build-from-source on an uncovered arch).

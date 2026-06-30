@@ -524,7 +524,7 @@ mod tests {
         .is_none());
 
         // An unknown profile has no default WFB unit binary to gate on.
-        assert!(missing_default_radio_binary("compute", |_| false).is_none());
+        assert!(missing_default_radio_binary("workstation", |_| false).is_none());
     }
 
     #[test]
