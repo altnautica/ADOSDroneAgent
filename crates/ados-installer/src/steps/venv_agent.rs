@@ -3,6 +3,11 @@
 //!
 //! Ports the venv + agent-install portion of `scripts/install.d/13-main.sh`
 //! (fresh-install path) plus `ensure_venv_pip` from 14-orchestration.sh:
+//!   0. resolve a Python 3.11+ interpreter: prefer a system one, and when the
+//!      board has none (Debian 11 ships 3.9 with no `python3.11` package),
+//!      provision a portable CPython runtime ([`super::portable_python`]) so the
+//!      install stays fully automatic. The resolved interpreter creates the venv
+//!      for both the edge and stable channels.
 //!   1. `python3 -m venv --system-site-packages /opt/ados/venv`
 //!   2. self-heal a rotted pip (probe `pip --version`, recreate the venv on
 //!      failure)
@@ -112,6 +117,19 @@ pub fn git_clone_args(dest: &str, branch: Option<&str>) -> Vec<String> {
     args.push(REPO_URL.to_string());
     args.push(dest.to_string());
     args
+}
+
+/// Resolve a Python 3.11+ interpreter for the venv. Prefer a system interpreter
+/// (the fast path); when the board carries none, provision a portable CPython
+/// runtime so the install stays fully automatic on boards whose system Python
+/// is older than the agent's 3.11 floor. The returned path is shared by both
+/// install channels — `create_venv` is the single consumer.
+fn resolve_python() -> anyhow::Result<String> {
+    if let Some(p) = super::deps::find_python() {
+        return Ok(p);
+    }
+    tracing::warn!("no system Python 3.11+ found; provisioning a portable CPython runtime");
+    super::portable_python::provision()
 }
 
 /// Create the venv at `/opt/ados/venv` with the discovered interpreter.
@@ -318,12 +336,12 @@ impl Step for VenvAgent {
         StepKind::Required
     }
     fn run(&self, ctx: &mut Ctx) -> StepOutcome {
-        let python = match super::deps::find_python() {
-            Some(p) => p,
-            None => {
-                return StepOutcome::Failed(
-                    "no Python 3.11+ interpreter available to create the venv".to_string(),
-                )
+        let python = match resolve_python() {
+            Ok(p) => p,
+            Err(e) => {
+                return StepOutcome::Failed(format!(
+                    "could not obtain a Python 3.11+ interpreter to create the venv: {e}"
+                ))
             }
         };
 

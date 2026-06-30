@@ -32,6 +32,7 @@ pub mod fetch_binaries;
 pub mod health;
 pub mod network_mac_pin;
 pub mod npu_provision;
+pub mod portable_python;
 pub mod preflight;
 pub mod purge_residue;
 pub mod rtl_regulatory;

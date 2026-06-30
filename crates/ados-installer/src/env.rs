@@ -11,6 +11,11 @@ pub const INSTALL_DIR: &str = "/opt/ados";
 pub const BIN_DIR: &str = "/opt/ados/bin";
 /// Python virtualenv hosting the agent package + the ecosystem layers.
 pub const VENV_DIR: &str = "/opt/ados/venv";
+/// Portable, self-contained CPython runtime the venv step provisions when the
+/// host carries no system Python 3.11+ (e.g. Debian 11, whose system Python is
+/// 3.9). The relocatable build is extracted here; its interpreter is
+/// `<dir>/bin/python3`.
+pub const PORTABLE_PYTHON_DIR: &str = "/opt/ados/python";
 /// Operator config + identity (config.yaml, profile.conf, pairing, device-id).
 pub const CONFIG_DIR: &str = "/etc/ados";
 /// Mutable agent state (install-result, checkpoints, peripherals).

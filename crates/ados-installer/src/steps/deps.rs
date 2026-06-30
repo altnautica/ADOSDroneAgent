@@ -144,28 +144,38 @@ fn apt_install(pkgs: &[&str], required: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Discover a Python 3.11+ interpreter on PATH, returning its program name.
-/// Mirrors the bash `find_python` candidate order. Pure-ish (it execs each
-/// candidate's `--version`), used to fail the step early when no usable
-/// interpreter exists — the venv step cannot proceed without one.
-pub fn find_python() -> Option<String> {
-    const CANDIDATES: &[&str] = &[
-        "python3.13",
-        "python3.12",
-        "python3.11",
-        "/usr/local/bin/python3.11",
-        "python3",
-    ];
-    for cand in CANDIDATES {
-        if python_is_311_plus(cand) {
-            return Some((*cand).to_string());
-        }
-    }
-    None
+/// The ordered interpreter candidates [`find_python`] probes (pure). System
+/// interpreters come first so an OS-integrated Python always wins; the portable
+/// CPython the venv step provisions under the install root is the last resort,
+/// used only when no system 3.11+ exists. Listing it here means a re-run finds
+/// the already-provisioned runtime directly instead of re-provisioning it.
+pub fn python_candidates() -> Vec<String> {
+    vec![
+        "python3.13".to_string(),
+        "python3.12".to_string(),
+        "python3.11".to_string(),
+        "/usr/local/bin/python3.11".to_string(),
+        "python3".to_string(),
+        format!("{}/bin/python3", crate::env::PORTABLE_PYTHON_DIR),
+    ]
 }
 
-/// True when `prog -c <print version>` reports a >= 3.11 interpreter.
-fn python_is_311_plus(prog: &str) -> bool {
+/// Discover a Python 3.11+ interpreter, returning its program name. Probes the
+/// [`python_candidates`] in order (it execs each candidate's version check),
+/// preferring a system interpreter and falling back to the provisioned portable
+/// runtime. Returns `None` when nothing usable exists yet — the venv step then
+/// provisions a portable CPython.
+pub fn find_python() -> Option<String> {
+    python_candidates()
+        .into_iter()
+        .find(|cand| python_is_311_plus(cand))
+}
+
+/// True when `prog -c <print version>` reports a >= 3.11 interpreter. Shared
+/// with the portable-python provisioner, which uses it to confirm a freshly
+/// extracted runtime actually runs and reports >= 3.11 before the venv is built
+/// on it.
+pub(crate) fn python_is_311_plus(prog: &str) -> bool {
     let res = exec::run(
         prog,
         &[
@@ -275,11 +285,11 @@ impl Step for Deps {
 
         // A usable Python 3.11+ must exist before the venv step. We do not try
         // to install it here (the venv step + portable-python provisioning own
-        // that fallback); we only fail loudly when nothing usable is on PATH so
-        // the failure is attributed to deps rather than a cryptic venv error.
+        // that fallback); we only note the absence so the venv step's
+        // provisioning is the expected next move rather than a surprise.
         if find_python().is_none() {
             tracing::warn!(
-                "no Python 3.11+ found on PATH; the venv step will attempt to provision one"
+                "no system Python 3.11+ found; the venv step will provision a portable runtime"
             );
         }
 
@@ -347,6 +357,20 @@ mod tests {
             sorted.len(),
             len_before,
             "required package set must be unique"
+        );
+    }
+
+    #[test]
+    fn candidates_prefer_system_then_portable() {
+        let c = python_candidates();
+        // A system interpreter is probed first.
+        assert_eq!(c.first().unwrap(), "python3.13");
+        assert!(c.iter().any(|x| x == "python3"));
+        // The provisioned portable runtime is the last resort, under the install
+        // root so a re-run reuses it instead of re-downloading.
+        assert_eq!(
+            c.last().unwrap(),
+            &format!("{}/bin/python3", crate::env::PORTABLE_PYTHON_DIR)
         );
     }
 
