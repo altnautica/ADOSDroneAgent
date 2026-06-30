@@ -10,6 +10,12 @@ description = "WFB-ng radio link manager: adapter selection, monitor-mode, TX su
 name = "ados-radio"
 path = "src/main.rs"
 
+[features]
+# The cross-platform userspace USB (devourer) radio backend.
+# OFF by default — the backend seam ships inert; the userspace implementation
+# lands behind this gate in a later wave.
+userspace-usb = []
+
 [dependencies]
 # The producer-side log-shipping layer (feature-gated in ados-protocol) feeds
 # the logging daemon's ingest socket alongside journald; never on the hot path.
@@ -27,6 +33,8 @@ sha2 = { workspace = true }
 blake2 = { workspace = true }
 hex = { workspace = true }
 time = { version = "0.3", features = ["std", "formatting"] }
+# Object-safe async methods on the RadioBackend trait (the radio-backend seam).
+async-trait = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { workspace = true }

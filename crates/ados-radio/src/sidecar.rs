@@ -273,6 +273,10 @@ pub(crate) fn build_stats_value(
         // decode stats of its own, so this is true only when a verified return
         // signal (a control-plane ack or a peer beacon) was heard recently.
         "channel_locked": channels.locked,
+        // Which radio backend is driving the link. Always
+        // "kernel" today — the Linux monitor-mode + wfb_tx/wfb_rx backend — so
+        // Mission Control can badge the live radio path (additive; Rule 28).
+        "backend": crate::backend::BackendKind::KernelMonitor.as_wire(),
         "profile": "drone",
         // Count of radio-group respawns since service start (watchdog kills,
         // hop restarts, return-home restarts) — surfaces churn to the panel.
@@ -566,6 +570,9 @@ mod tests {
         // channel_locked is the proof-derived value, not hardcoded true.
         assert_eq!(v["channel_locked"], true);
         assert_eq!(v["rf_unverified"], false);
+        // The radio backend is the kernel monitor-mode path today (ADOS Direct
+        // Link: the userspace USB backend is a later wave).
+        assert_eq!(v["backend"], "kernel");
         // link_state mirrors the lifecycle state string. The default LinkStats
         // sentinel (0 decoded packets) is a transmit-dominant drone injecting
         // RF, not a degraded link, so it surfaces as connected.

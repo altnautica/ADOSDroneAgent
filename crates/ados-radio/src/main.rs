@@ -13,6 +13,11 @@
 // Focused sibling modules the orchestrator (`main` + `run_service`) drives.
 // Each groups one concern lifted out of this file; the binary behaves
 // identically — the helpers are simply re-homed and called through `use`.
+//
+// `backend` is the pluggable radio-backend seam. It is a
+// PURE-ADD: built + unit-tested but NOT yet wired into `run_service` (the live
+// bring-up still runs inline below), so declaring it here changes no behaviour.
+mod backend;
 mod bringup;
 mod hop_supervisor;
 mod reg_gate;

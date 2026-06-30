@@ -230,6 +230,55 @@ pub fn link_preset_trio(preset: &str) -> Option<(u8, u8, u8)> {
     }
 }
 
+/// Which radio backend drives the WFB link. `kernel` is the
+/// Linux monitor-mode + `wfb_tx`/`wfb_rx` backend (the SBC default); `userspace`
+/// selects the cross-platform devourer USB backend (built only under the
+/// `userspace-usb` feature; future); `auto` (the default) resolves to `kernel` on
+/// Linux. Read from `video.wfb.backend`. Parsing is permissive: an unknown value
+/// reads as `auto` rather than failing the config load.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BackendChoice {
+    /// Force the kernel monitor-mode backend.
+    Kernel,
+    /// Force the userspace USB (devourer) backend.
+    Userspace,
+    /// Resolve automatically (kernel on Linux). The default.
+    #[default]
+    Auto,
+}
+
+impl BackendChoice {
+    /// Parse the wire string. Anything other than `kernel` / `userspace`
+    /// (case-insensitive) reads as `auto`, so a fresh / malformed value is
+    /// permissive rather than fail-closed.
+    pub fn from_wire(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "kernel" => BackendChoice::Kernel,
+            "userspace" => BackendChoice::Userspace,
+            _ => BackendChoice::Auto,
+        }
+    }
+
+    /// The wire string persisted in config + surfaced on the sidecar.
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            BackendChoice::Kernel => "kernel",
+            BackendChoice::Userspace => "userspace",
+            BackendChoice::Auto => "auto",
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for BackendChoice {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Ok(BackendChoice::from_wire(&s))
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct WfbConfig {
     #[serde(default = "default_channel")]
@@ -339,6 +388,11 @@ pub struct WfbConfig {
     /// `mcs_index`, so the aux pair rides the same modulation rate by default.
     #[serde(default)]
     pub aux_mcs_index: Option<u8>,
+    /// Which radio backend drives the WFB link. `auto` (the
+    /// default) resolves to the kernel monitor backend on Linux. Read from
+    /// `video.wfb.backend`.
+    #[serde(default)]
+    pub backend: BackendChoice,
 }
 
 impl Default for WfbConfig {
@@ -374,6 +428,7 @@ impl Default for WfbConfig {
             aux_fec_k: default_aux_fec_k(),
             aux_fec_n: default_aux_fec_n(),
             aux_mcs_index: None,
+            backend: BackendChoice::default(),
         }
     }
 }
@@ -559,6 +614,28 @@ mod tests {
         assert!((c.hop_rssi_threshold_dbm - (-75.0)).abs() < 0.01);
         assert_eq!(c.fec_k, 8);
         assert_eq!(c.fec_n, 12);
+        // An absent `backend` key resolves to the auto default (kernel on Linux).
+        assert_eq!(c.backend, BackendChoice::Auto);
+    }
+
+    #[test]
+    fn backend_choice_reads_and_defaults_permissively() {
+        let dir = tempfile::tempdir().unwrap();
+        // Missing file → the auto default.
+        let c = WfbConfig::load_from(&dir.path().join("nope.yaml"));
+        assert_eq!(c.backend, BackendChoice::Auto);
+        // Explicit kernel / userspace parse.
+        let cfg = dir.path().join("config.yaml");
+        std::fs::write(&cfg, "video:\n  wfb:\n    backend: kernel\n").unwrap();
+        assert_eq!(WfbConfig::load_from(&cfg).backend, BackendChoice::Kernel);
+        std::fs::write(&cfg, "video:\n  wfb:\n    backend: userspace\n").unwrap();
+        assert_eq!(WfbConfig::load_from(&cfg).backend, BackendChoice::Userspace);
+        // An unknown value is permissive → auto, not a config-load failure.
+        std::fs::write(&cfg, "video:\n  wfb:\n    backend: bogus\n").unwrap();
+        assert_eq!(WfbConfig::load_from(&cfg).backend, BackendChoice::Auto);
+        // Case-insensitive.
+        assert_eq!(BackendChoice::from_wire("KERNEL"), BackendChoice::Kernel);
+        assert_eq!(BackendChoice::from_wire(""), BackendChoice::Auto);
     }
 
     #[test]
