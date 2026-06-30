@@ -33,11 +33,14 @@ pub const MESH_ROLE_PATH: &str = "/etc/ados/mesh/role";
 const VALID_ROLES: [&str; 3] = ["direct", "relay", "receiver"];
 
 /// Normalize a raw profile value to the wire-contract string. `"ground_station"`
-/// becomes `"ground-station"`; `"drone"`, `"auto"`, `""`, and any unknown value
-/// fall back to `"drone"` for wire purposes. Mirrors `normalize_profile`.
+/// becomes `"ground-station"`; `"workstation"` and `"compute"` pass through
+/// unchanged; `"drone"`, `"auto"`, `""`, and any unknown value fall back to
+/// `"drone"` for wire purposes. Mirrors `normalize_profile`.
 fn normalize_profile(raw: Option<&str>) -> &'static str {
     match raw {
         Some("ground_station") => "ground-station",
+        Some("workstation") => "workstation",
+        Some("compute") => "compute",
         _ => "drone",
     }
 }
@@ -61,7 +64,10 @@ fn read_profile_conf_value(path: &Path) -> Option<String> {
             continue;
         };
         let value = raw.trim().trim_matches(|c| c == '"' || c == '\'');
-        if matches!(value, "drone" | "ground_station" | "ground-station") {
+        if matches!(
+            value,
+            "drone" | "ground_station" | "ground-station" | "workstation" | "compute"
+        ) {
             return Some(value.replace('-', "_"));
         }
     }
@@ -151,6 +157,18 @@ mod tests {
             &dir.path().join("absent.role"),
         );
         assert_eq!(profile, "drone");
+        assert_eq!(role, None);
+    }
+
+    #[test]
+    fn workstation_config_is_workstation_with_no_role() {
+        let dir = tempfile::tempdir().unwrap();
+        let (profile, role) = current_profile_and_role_at(
+            "workstation",
+            &dir.path().join("absent.conf"),
+            &dir.path().join("absent.role"),
+        );
+        assert_eq!(profile, "workstation");
         assert_eq!(role, None);
     }
 
