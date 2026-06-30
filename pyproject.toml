@@ -51,6 +51,13 @@ dependencies = [
     # Form(...) parameter for the .adosplug upload endpoint. FastAPI
     # raises at module import time if this is missing.
     "python-multipart>=0.0.6",
+    # msgpack is the IPC wire format (ados.core.ipc plus the plugin and
+    # Rust-service sockets) — a hard runtime requirement, not optional. On the
+    # legacy boards it happened to be satisfied by the system python3-msgpack
+    # the venv's --system-site-packages exposed; a provisioned interpreter
+    # (e.g. Python 3.11 where the system python is older and invisible to the
+    # venv) has no such fallback, so `import msgpack` fails unless declared here.
+    "msgpack>=1.0.0",
 ]
 
 [project.optional-dependencies]
@@ -60,7 +67,6 @@ dev = [
     "ruff>=0.2.0",
     "mypy>=1.8.0",
     "black>=24.1.0",
-    "msgpack>=1.0.0",
 ]
 # Ground-station profile extras. Pulled only when the installer detects
 # the ground_station profile or when a developer runs
