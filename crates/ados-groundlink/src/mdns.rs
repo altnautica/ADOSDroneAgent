@@ -162,6 +162,81 @@ pub async fn resolve_receiver(
     None
 }
 
+/// Build the LAN job-API base URL for a resolved compute/workstation node.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn workstation_base_url(host: &str, port: u16) -> String {
+    format!("http://{host}:{port}")
+}
+
+/// Browse `_ados._tcp` for up to `timeout` and resolve the first compute /
+/// workstation node — a service whose TXT carries `profile=workstation` —
+/// returning its LAN job-API base URL (`http://host:jobApi`). The job-API port
+/// rides the `jobApi` TXT key, not the SRV record (the SRV port is the `:8080`
+/// pairing front). An IPv4 address is preferred; the advertised hostname is the
+/// fallback. `None` on timeout, when mDNS is unavailable, or when no workstation
+/// answers — the caller retries.
+///
+/// Mirrors `ados_compute::mdns::resolve_compute` (same browse + accept-by-TXT-
+/// `profile` predicate + `jobApi`-TXT port) so a ground-station Atlas relay can
+/// auto-find the compute node instead of requiring a hand-configured base URL.
+#[cfg(target_os = "linux")]
+pub async fn resolve_compute_base_url(timeout: Duration) -> Option<String> {
+    const PAIRING_SERVICE: &str = "_ados._tcp.local.";
+    const WORKSTATION_PROFILE: &str = "workstation";
+    let daemon = ServiceDaemon::new().ok()?;
+    let rx = match daemon.browse(PAIRING_SERVICE) {
+        Ok(rx) => rx,
+        Err(e) => {
+            tracing::debug!(error = %e, "compute_mdns_browse_failed");
+            let _ = daemon.shutdown();
+            return None;
+        }
+    };
+
+    let result = tokio::time::timeout(timeout, async {
+        while let Ok(event) = rx.recv_async().await {
+            if let ServiceEvent::ServiceResolved(info) = event {
+                // Only a workstation/compute node — skip a drone / ground-station
+                // advert sharing `_ados._tcp` on the same LAN.
+                if info.get_property_val_str("profile") != Some(WORKSTATION_PROFILE) {
+                    continue;
+                }
+                // The job API rides the `jobApi` TXT key (the SRV port is the
+                // pairing front). A missing / zero / unparseable port is skipped.
+                let Some(port) = info
+                    .get_property_val_str("jobApi")
+                    .and_then(|p| p.parse::<u16>().ok())
+                    .filter(|p| *p != 0)
+                else {
+                    continue;
+                };
+                // Prefer a concrete IPv4 (dial it directly); else the hostname.
+                for addr in info.get_addresses() {
+                    if let IpAddr::V4(v4) = addr {
+                        return Some(workstation_base_url(&v4.to_string(), port));
+                    }
+                }
+                let host = info.get_hostname().trim_end_matches('.').to_string();
+                if !host.is_empty() {
+                    return Some(workstation_base_url(&host, port));
+                }
+            }
+        }
+        None
+    })
+    .await
+    .ok()
+    .flatten();
+
+    let _ = daemon.shutdown();
+    result
+}
+
+#[cfg(not(target_os = "linux"))]
+pub async fn resolve_compute_base_url(_timeout: Duration) -> Option<String> {
+    None
+}
+
 /// Accept a resolved address iff it shares the `/24` of the mesh IP. When the
 /// mesh IP is unknown (no `bat0` address yet) we accept any address rather than
 /// drop everything — matching the Python `if bat_ip and not _same_subnet`
@@ -237,6 +312,18 @@ fn parse_iface_ipv4(text: &str) -> Option<Ipv4Addr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workstation_base_url_builds_http() {
+        assert_eq!(
+            workstation_base_url("192.168.1.5", 8092),
+            "http://192.168.1.5:8092"
+        );
+        assert_eq!(
+            workstation_base_url("compute-node.local", 8092),
+            "http://compute-node.local:8092"
+        );
+    }
 
     #[test]
     fn normalise_appends_local() {

@@ -233,9 +233,10 @@ async fn run_relay_or_receiver(
 /// Spawn the ground-station Atlas aux-lane relay when (and only when) this node is
 /// in the `relay` role and `ground_station.atlas.enabled` is set with a configured
 /// `compute_base_url`. Returns the task handle so the caller can reap it on
-/// teardown, or `None` when Atlas is disabled / not the relay role / no compute
-/// URL is configured. Inert by default → a non-Atlas ground station never reads
-/// the block and is byte-unchanged.
+/// teardown, or `None` when Atlas is disabled / not the relay role. When
+/// `compute_base_url` is unset the task auto-resolves the workstation node over
+/// mDNS (retrying until it answers or shutdown). Inert by default → a non-Atlas
+/// ground station never reads the block and is byte-unchanged.
 ///
 /// The relay reads the decoded WFB aux datagrams (the `wfb_rx` re-emit loopback
 /// port, `ground_station.atlas.listen_port`, default 5603) and re-POSTs each
@@ -253,19 +254,37 @@ fn maybe_spawn_atlas_relay(
     if !cfg.enabled {
         return None;
     }
-    let Some(compute_url) = cfg.compute_base_url.filter(|u| !u.trim().is_empty()) else {
-        tracing::warn!(
-            "atlas relay enabled but ground_station.atlas.compute_base_url is unset; skipping"
-        );
-        return None;
-    };
     let listen_port = cfg.listen_port;
-    tracing::info!(
-        listen_port,
-        compute_url = %compute_url,
-        "starting ground-station Atlas aux-lane relay"
-    );
+    let configured_url = cfg.compute_base_url.filter(|u| !u.trim().is_empty());
     Some(tokio::spawn(async move {
+        // Use the configured compute base URL, or auto-resolve the workstation
+        // node over mDNS so a field relay needs no hand-configured URL. The
+        // resolve loop self-stops on the shared shutdown Notify.
+        let compute_url = match configured_url {
+            Some(url) => url,
+            None => {
+                tracing::info!(
+                    "ground_station.atlas.compute_base_url unset; auto-resolving the compute node over mDNS"
+                );
+                loop {
+                    if let Some(url) =
+                        ados_groundlink::mdns::resolve_compute_base_url(Duration::from_secs(5)).await
+                    {
+                        tracing::info!(compute_url = %url, "auto-resolved the compute node over mDNS");
+                        break url;
+                    }
+                    tokio::select! {
+                        _ = shutdown.notified() => return,
+                        _ = tokio::time::sleep(Duration::from_secs(10)) => {}
+                    }
+                }
+            }
+        };
+        tracing::info!(
+            listen_port,
+            compute_url = %compute_url,
+            "starting ground-station Atlas aux-lane relay"
+        );
         match ados_groundlink::run_atlas_relay(listen_port, compute_url, shutdown).await {
             Ok(stats) => tracing::info!(?stats, "atlas relay exited"),
             Err(e) => tracing::warn!(error = %e, "atlas relay failed to bind/run"),
