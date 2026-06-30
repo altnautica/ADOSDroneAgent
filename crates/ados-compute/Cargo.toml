@@ -47,6 +47,14 @@ reqwest = { version = "0.12", default-features = false, features = ["json"] }
 # `ados-discovery` advert is OnDemand (only runs while a pairing code is live),
 # so this always-on Rust advert is what makes the node discoverable at boot.
 mdns-sd = "0.13"
+# Rerun logging SDK, pinned to =0.33.1 to match the GCS web-viewer
+# (@rerun-io/web-viewer@0.33.1) exactly: the .rrd encoding carries a version the
+# viewer checks, so the writer and the loader share one minor release. Write-only
+# feature set — `sdk` gives `RecordingStream` (+ the `.save()` file encoder) and
+# the archetypes, with `default-features = false` dropping the viewer
+# (egui/wgpu), analytics, the dataframe/mcap importers, and the gRPC server. The
+# only added tree is pure-Rust Arrow, no system or GPU dependency.
+rerun = { version = "=0.33.1", default-features = false, features = ["sdk"] }
 
 [dev-dependencies]
 # `ServiceExt::oneshot` drives the router in tests without binding a port.

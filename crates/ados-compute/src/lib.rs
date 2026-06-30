@@ -33,6 +33,7 @@ mod offload;
 mod pipeline;
 mod reconstructor;
 mod rerun_log;
+mod rerun_world;
 mod scheduler;
 mod session;
 mod store;
@@ -64,6 +65,7 @@ pub use rerun_log::{
     log_keyframe, log_mesh, log_occupancy, log_pointcloud, log_splat, RerunArchetype,
     RerunLogEntry, RerunRecording,
 };
+pub use rerun_world::{build_rerun_output, build_world_recording, RERUN_OUTPUT_FILE};
 pub use scheduler::{BackendResult, JobOutcome, Prepared, PreparedInput, Scheduler};
 pub use session::{DeltaProducer, LiveSession, LiveSessionState, MockDeltaProducer, SplatDelta};
 pub use store::{Dataset, JobRecord, JobStore, Output};

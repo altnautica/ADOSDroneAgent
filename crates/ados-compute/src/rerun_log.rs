@@ -196,7 +196,17 @@ pub struct RerunRecording {
     /// Cameras whose static Pinhole intrinsics have already been logged, so each
     /// camera's pinhole is logged once (internal state, not serialized).
     #[serde(skip)]
-    logged_cameras: std::collections::HashSet<String>,
+    pub(crate) logged_cameras: std::collections::HashSet<String>,
+    /// Real dense geometry (positions + colours) attached for the `.rrd` write —
+    /// the gaussian-splat / point-cloud points the summary `entries` only count.
+    /// Kept out of the JSON manifest (it is the heavy payload, not the summary),
+    /// so `to_json()` stays the lightweight manifest the GCS viewer reads.
+    #[serde(skip)]
+    pub(crate) real_points: Vec<crate::rerun_world::RealPoints>,
+    /// Real encoded keyframe images attached for the `.rrd` write — the captured
+    /// frames the summary `Image` entries only describe. Also kept out of JSON.
+    #[serde(skip)]
+    pub(crate) real_images: Vec<crate::rerun_world::RealImage>,
 }
 
 impl RerunRecording {

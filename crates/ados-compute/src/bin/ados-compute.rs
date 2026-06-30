@@ -45,9 +45,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ados_atlas_transport::{atlas_event_router, AtlasEvent};
 use ados_compute::{
-    artifact_router, build_router, derive_public_base, rewrite_output_to_artifact_url,
-    submit_reconstruct_job, write_compute_heartbeat, AtlasIngest, Cluster, ComputeAuth, Engine,
-    JobStore, MockDetector, Prepared, Scheduler, SelectingReconstructor, DEFAULT_PAIRING_PATH,
+    artifact_router, build_rerun_output, build_router, derive_public_base,
+    rewrite_output_to_artifact_url, submit_reconstruct_job, write_compute_heartbeat, AtlasIngest,
+    Cluster, ComputeAuth, Engine, JobStore, MockDetector, Prepared, PreparedInput, Scheduler,
+    SelectingReconstructor, DEFAULT_PAIRING_PATH,
 };
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex};
@@ -304,6 +305,29 @@ async fn worker_loop(state: Arc<Mutex<Engine>>, work_root: PathBuf, public_base:
             Ok(Prepared::Ready { job, input }) => {
                 let mut result =
                     Scheduler::run_backend(&*reconstructor, &*detector, &job, &input, now_ms());
+                // Write the Rerun world-model .rrd from the real capture + the
+                // reconstruction geometry so the GCS World viewer renders real data
+                // (camera trajectory + the reconstructed point cloud). Reconstruct
+                // jobs only; an offload job has no world model. Best-effort: a write
+                // fault is logged and the job still completes with its other output.
+                if let PreparedInput::Reconstruct(dataset) = &input {
+                    let input_path = dataset
+                        .meta
+                        .get("input_path")
+                        .and_then(|v| v.as_str())
+                        .map(std::path::Path::new);
+                    let geometry = result
+                        .outputs
+                        .first()
+                        .map(|o| (o.kind.as_str(), o.uri.as_str()));
+                    match build_rerun_output(&work_root, &job.id, input_path, geometry, now_ms()) {
+                        Ok(Some(rerun_out)) => result.outputs.push(rerun_out),
+                        Ok(None) => {}
+                        Err(e) => {
+                            tracing::warn!(job = %job.id, error = %e, "rerun world-model write failed")
+                        }
+                    }
+                }
                 for output in &mut result.outputs {
                     rewrite_output_to_artifact_url(output, &work_root, &public_base);
                 }
