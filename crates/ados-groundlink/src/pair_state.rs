@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use base64::Engine;
 use serde_json::{json, Value};
 
-use ados_supervisor::systemctl;
+use ados_supervisor::process_manager::select;
 
 use crate::paths::{CONFIG_YAML, SETUP_COMPLETE_PATH};
 
@@ -165,7 +165,8 @@ pub async fn apply_keypair_gs(
 
     // restart over reload: a unit restart is the prompt path to a fresh spawn
     // cycle that picks up the freshly written key.
-    if !systemctl::restart(WFB_GS_UNIT).await {
+    let pm = select();
+    if !pm.restart(WFB_GS_UNIT).await {
         tracing::info!(unit = WFB_GS_UNIT, "wfb_unit_restart_skipped");
     }
 
@@ -191,7 +192,8 @@ pub async fn unpair_gs() -> Result<Value, String> {
         }
     }
     persist_pair_state(None, None, Some(false))?;
-    let _ = systemctl::restart(WFB_GS_UNIT).await;
+    let pm = select();
+    let _ = pm.restart(WFB_GS_UNIT).await;
     tracing::warn!(role = "gs", "unpair_complete");
     Ok(json!({"paired": false, "role": "gs"}))
 }

@@ -9,7 +9,7 @@
 use std::path::Path;
 
 use crate::config::VALID_ROLES;
-use crate::systemctl;
+use crate::process_manager::ProcessManager;
 
 /// Units gated by role, in dependency order (batman before the wfb side).
 fn role_units(role: &str) -> &'static [&'static str] {
@@ -43,7 +43,7 @@ fn write_role_file(path: &Path, role: &str) -> std::io::Result<()> {
 
 /// Apply the mask/unmask state for `role` at supervisor boot. Best-effort:
 /// a sentinel write error is logged and the mask/unmask still runs.
-pub async fn apply_role_on_boot(role: &str, role_path: &Path) {
+pub async fn apply_role_on_boot(pm: &dyn ProcessManager, role: &str, role_path: &Path) {
     let role = if VALID_ROLES.contains(&role) {
         role
     } else {
@@ -55,10 +55,10 @@ pub async fn apply_role_on_boot(role: &str, role_path: &Path) {
     }
 
     for unit in ALL_MESH_UNITS {
-        systemctl::mask(unit).await;
+        pm.mask(unit).await;
     }
     for unit in role_units(role) {
-        systemctl::unmask(unit).await;
+        pm.unmask(unit).await;
     }
     tracing::info!(role, "ground-station role applied at boot");
 }

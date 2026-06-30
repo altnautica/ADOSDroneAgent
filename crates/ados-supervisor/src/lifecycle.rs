@@ -12,8 +12,8 @@ use tokio::time::sleep;
 
 use crate::bind::orchestrator::BindOrchestrator;
 use crate::config::AgentConfig;
+use crate::process_manager::{select, ProcessManager};
 use crate::registry::{build_specs, Category, ServiceSpec, ServiceState, PARKED_RETRY_COOLDOWN};
-use crate::systemctl;
 
 /// Units whose auto-restart the monitor skips while a bind handshake owns the
 /// radio adapter. The bind FSM now lives in this supervisor process, so the
@@ -62,6 +62,11 @@ pub fn gate_allows(spec: &ServiceSpec, config: &AgentConfig) -> bool {
 pub struct Supervisor {
     services: Vec<ServiceSpec>,
     config: AgentConfig,
+    /// The host service-manager backend (systemd / launchd / inert) every
+    /// start/stop/restart lifecycle call routes through. Selected for the host
+    /// OS by default; a test injects a recording double via
+    /// [`with_process_manager`](Supervisor::with_process_manager).
+    pm: Arc<dyn ProcessManager>,
     /// The bind orchestrator, shared with the control socket task. The monitor
     /// consults its in-process liveness to gate radio-unit auto-restart.
     bind: Arc<BindOrchestrator>,
@@ -119,10 +124,23 @@ pub struct Supervisor {
 }
 
 impl Supervisor {
+    /// Construct with the process-manager backend selected for the host OS.
     pub fn new(config: AgentConfig, bind: Arc<BindOrchestrator>) -> Self {
+        Self::with_process_manager(config, bind, select())
+    }
+
+    /// Construct with an explicit process-manager backend. The default
+    /// [`new`](Self::new) selects the host backend; tests inject a recording
+    /// double to assert the lifecycle routes through the trait.
+    pub fn with_process_manager(
+        config: AgentConfig,
+        bind: Arc<BindOrchestrator>,
+        pm: Arc<dyn ProcessManager>,
+    ) -> Self {
         Supervisor {
             services: build_specs(),
             config,
+            pm,
             bind,
             hotplug_coord: crate::hotplug::HotplugCoordinator::new(),
             events: ados_protocol::logd::emitter::EventEmitter::new("ados-supervisor"),
@@ -222,10 +240,10 @@ impl Supervisor {
 
         self.set_state(i, ServiceState::Starting, "start_requested");
         // Clear any prior failed / start-limit-hit state so `start` is not a
-        // no-op on a unit that crash-looped past systemd's StartLimitBurst.
-        systemctl::reset_failed(name).await;
+        // no-op on a unit that crash-looped past the start-limit burst.
+        self.pm.reset_failed(name).await;
 
-        if systemctl::start(name).await {
+        if self.pm.start(name).await {
             self.set_state(i, ServiceState::Running, "start_ok");
             tracing::info!(service = name, "service started");
             true
@@ -241,7 +259,7 @@ impl Supervisor {
         let Some(i) = self.index_of(name) else {
             return false;
         };
-        let ok = systemctl::stop(name).await;
+        let ok = self.pm.stop(name).await;
         self.set_state(i, ServiceState::Stopped, "stopped");
         tracing::info!(service = name, "service stopped");
         ok
@@ -265,7 +283,7 @@ impl Supervisor {
         loop {
             let mut still_up = Vec::new();
             for n in names {
-                if systemctl::is_active(n).await {
+                if self.pm.is_active(n).await {
                     still_up.push(*n);
                 }
             }
@@ -291,7 +309,12 @@ impl Supervisor {
         // supervisor exactly; see AgentConfig::raw_is_ground_station.
         if self.config.raw_is_ground_station() {
             let role = self.config.configured_gs_role.clone();
-            crate::role::apply_role_on_boot(&role, &crate::config::mesh_role_path()).await;
+            crate::role::apply_role_on_boot(
+                self.pm.as_ref(),
+                &role,
+                &crate::config::mesh_role_path(),
+            )
+            .await;
         }
 
         // Start core units. They are independent of one another (hardware and
@@ -445,7 +468,7 @@ impl Supervisor {
 
         // Liveness check + auto-restart for running services.
         for name in to_restart {
-            let active = systemctl::is_active(name).await;
+            let active = self.pm.is_active(name).await;
             let Some(i) = self.index_of(name) else {
                 continue;
             };
@@ -728,5 +751,80 @@ mod tests {
         );
         // ... while non-radio units are never gated.
         assert!(!sup.restart_blocked_by_bind("ados-mavlink").await);
+    }
+
+    /// A recording process-manager double: every verb logs `verb:unit` and
+    /// reports success so the lifecycle proceeds as if the unit really started.
+    struct MockProcessManager {
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl MockProcessManager {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+        fn record(&self, verb: &str, unit: &str) {
+            self.calls.lock().unwrap().push(format!("{verb}:{unit}"));
+        }
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ProcessManager for MockProcessManager {
+        async fn start(&self, unit: &str) -> bool {
+            self.record("start", unit);
+            true
+        }
+        async fn stop(&self, unit: &str) -> bool {
+            self.record("stop", unit);
+            true
+        }
+        async fn restart(&self, unit: &str) -> bool {
+            self.record("restart", unit);
+            true
+        }
+        async fn reset_failed(&self, unit: &str) {
+            self.record("reset_failed", unit);
+        }
+        async fn is_active(&self, unit: &str) -> bool {
+            self.record("is_active", unit);
+            true
+        }
+        async fn mask(&self, unit: &str) {
+            self.record("mask", unit);
+        }
+        async fn unmask(&self, unit: &str) {
+            self.record("unmask", unit);
+        }
+    }
+
+    #[tokio::test]
+    async fn lifecycle_routes_start_stop_restart_through_the_process_manager() {
+        let mock = Arc::new(MockProcessManager::new());
+        let bind = Arc::new(BindOrchestrator::new());
+        // ados-mavlink is a drone-gated core unit, so the profile/role gates
+        // permit it and the lifecycle calls reach the injected backend.
+        let mut sup = Supervisor::with_process_manager(cfg("drone"), bind, mock.clone());
+
+        assert!(sup.start_service("ados-mavlink").await); // reset_failed + start
+        assert!(sup.stop_service("ados-mavlink").await); // stop
+        assert!(sup.restart_service("ados-mavlink").await); // stop + reset_failed + start
+
+        // Every verb routed through the trait, in order.
+        assert_eq!(
+            mock.calls(),
+            vec![
+                "reset_failed:ados-mavlink",
+                "start:ados-mavlink",
+                "stop:ados-mavlink",
+                "stop:ados-mavlink",
+                "reset_failed:ados-mavlink",
+                "start:ados-mavlink",
+            ]
+        );
     }
 }

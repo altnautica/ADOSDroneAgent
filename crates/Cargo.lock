@@ -497,6 +497,7 @@ dependencies = [
  "ados-macpin",
  "ados-protocol",
  "anyhow",
+ "async-trait",
  "blake2",
  "getrandom 0.2.17",
  "hex",

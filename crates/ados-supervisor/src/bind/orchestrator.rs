@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::process_manager::ProcessManager;
 use ados_protocol::logd::{emitter::EventEmitter, Level};
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
@@ -136,6 +137,10 @@ pub struct BindOrchestrator {
     /// and non-blocking; an absent daemon socket is dropped quietly. The log
     /// lines remain the always-on fallback.
     events: EventEmitter,
+    /// The host service-manager backend the bind sequence drives when it stops
+    /// the normal radio unit, starts the bind unit, and restarts the units on
+    /// cleanup. Selected for the host OS.
+    pm: Arc<dyn ProcessManager>,
 }
 
 impl Default for BindOrchestrator {
@@ -155,6 +160,7 @@ impl BindOrchestrator {
             cancel: Arc::new(tokio::sync::Notify::new()),
             session_in_progress: Arc::new(AtomicBool::new(false)),
             events: EventEmitter::new("ados-supervisor"),
+            pm: crate::process_manager::select(),
         }
     }
 
@@ -426,7 +432,7 @@ impl BindOrchestrator {
 
         // Stop the normal unit so it releases the radio for the bind profile.
         // Past this point any failure MUST restart it (cleanup() does).
-        crate::systemctl::stop(role.normal_unit()).await;
+        self.pm.stop(role.normal_unit()).await;
 
         // The RTL is now free (the normal unit is stopped): if the LIVE injection
         // driver is on a stale efuse country rather than the configured private-
@@ -456,7 +462,7 @@ impl BindOrchestrator {
         self.set_state(BindState::OpeningTunnel).await;
 
         // Start the bind profile (brings up the L3 tunnel).
-        if !crate::systemctl::start(role.bind_unit()).await {
+        if !self.pm.start(role.bind_unit()).await {
             return Err(BindError::with_phase(
                 format!("failed to start {}", role.bind_unit()),
                 "opening_tunnel",
@@ -474,7 +480,7 @@ impl BindOrchestrator {
         // try { … } finally { stop bind_unit }: the bind unit is stopped on
         // BOTH success and failure once it has been started.
         let result = self.tunnel_and_transfer(role, peer_device_id).await;
-        crate::systemctl::stop(role.bind_unit()).await;
+        self.pm.stop(role.bind_unit()).await;
         result
     }
 
@@ -611,7 +617,7 @@ impl BindOrchestrator {
         self.set_state(BindState::RestartingServices).await;
         match tokio::time::timeout(
             RESTART_TIMEOUT,
-            keys::apply_keypair(&blob, role, peer_device_id.as_deref()),
+            keys::apply_keypair(self.pm.clone(), &blob, role, peer_device_id.as_deref()),
         )
         .await
         {
@@ -722,13 +728,13 @@ impl BindOrchestrator {
     /// never left with both bind and normal profiles stopped.
     async fn cleanup(&self, role: BindRole) {
         socat::kill_stale_bind_socats().await;
-        crate::systemctl::stop(role.bind_unit()).await;
-        crate::systemctl::start(role.normal_unit()).await;
+        self.pm.stop(role.bind_unit()).await;
+        self.pm.start(role.normal_unit()).await;
         // Same recovery as the success path: the drone's video pipeline does not
         // re-attach to the restarted wfb_tx on its own, so restart it too — video
         // resumes without a drone reboot after a failed/aborted bind (Rule 26).
         if role == BindRole::Drone {
-            crate::systemctl::restart("ados-video.service").await;
+            self.pm.restart("ados-video.service").await;
         }
         // Heal the global reg domain on the way out: a failed/cancelled/watchdog
         // retry cycled the bind unit's monitor mode and may have left the baked

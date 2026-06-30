@@ -19,8 +19,11 @@
 //!   - the key write is atomic (tmp + fsync + chmod + rename).
 
 use std::path::Path;
+use std::sync::Arc;
 
 use serde_norway::{Mapping, Value};
+
+use crate::process_manager::ProcessManager;
 
 use super::fsm::iso_now;
 use super::BindRole;
@@ -275,6 +278,7 @@ pub fn persist_pair_state(
 /// running to completion on the runtime, so the key is never left half-applied
 /// with the unit stopped. Once the blob has arrived here the apply is atomic.
 pub async fn apply_keypair(
+    pm: Arc<dyn ProcessManager>,
     blob: &[u8],
     role: BindRole,
     peer_device_id: Option<&str>,
@@ -282,13 +286,13 @@ pub async fn apply_keypair(
     validate_blob(blob)?;
 
     // Own the inputs so the apply task is self-contained (no borrow can be
-    // invalidated by a dropped caller future).
+    // invalidated by a dropped caller future). The process-manager backend is an
+    // `Arc`, cheap to move into the task.
     let blob = blob.to_vec();
     let peer_device_id = peer_device_id.map(|s| s.to_string());
-    let handle =
-        tokio::spawn(
-            async move { apply_keypair_inner(&blob, role, peer_device_id.as_deref()).await },
-        );
+    let handle = tokio::spawn(async move {
+        apply_keypair_inner(pm, &blob, role, peer_device_id.as_deref()).await
+    });
     // Joining propagates the inner result; a JoinError (the task panicked) is the
     // only way to land here without a result, surfaced as a write failure.
     match handle.await {
@@ -301,6 +305,7 @@ pub async fn apply_keypair(
 /// run inside the spawned, joined task so a dropped caller cannot interrupt it
 /// mid-sequence.
 async fn apply_keypair_inner(
+    pm: Arc<dyn ProcessManager>,
     blob: &[u8],
     role: BindRole,
     peer_device_id: Option<&str>,
@@ -314,10 +319,10 @@ async fn apply_keypair_inner(
     // stop → confirm-inactive → write → start guarantees any process running
     // after the start read the new key.
     let unit = role.normal_unit();
-    let _ = crate::systemctl::stop(unit).await;
+    let _ = pm.stop(unit).await;
     let mut confirmed_inactive = false;
     for _ in 0..10 {
-        if !crate::systemctl::is_active(unit).await {
+        if !pm.is_active(unit).await {
             confirmed_inactive = true;
             break;
         }
@@ -356,7 +361,7 @@ async fn apply_keypair_inner(
 
     // Start (not restart): the unit was stopped above, so this always spawns a
     // fresh process tree that reads the key written this session.
-    if !crate::systemctl::start(unit).await {
+    if !pm.start(unit).await {
         tracing::info!(
             unit,
             "wfb_unit_start_skipped (unit may not be installed yet)"
@@ -368,7 +373,7 @@ async fn apply_keypair_inner(
     // freshly restarted wfb_tx on its own — it recovers only via its slow
     // backoff FSM, so video can be silent for many seconds after a bind. Restart
     // it too so the feed re-establishes promptly without a drone reboot (Rule 26).
-    if role == BindRole::Drone && !crate::systemctl::restart("ados-video.service").await {
+    if role == BindRole::Drone && !pm.restart("ados-video.service").await {
         tracing::info!("ados_video_restart_skipped (not active / no video pipeline)");
     }
 
@@ -399,9 +404,14 @@ mod tests {
         // bad-length blob returns Err without ever stopping a unit or writing a
         // key, so the atomic stop→write→start sequence only runs once a real key
         // blob has arrived (the precondition the cancellation-safe spawn relies on).
-        let err = apply_keypair(&[0u8; 10], BindRole::Drone, None)
-            .await
-            .expect_err("a 10-byte blob must be rejected");
+        let err = apply_keypair(
+            crate::process_manager::select(),
+            &[0u8; 10],
+            BindRole::Drone,
+            None,
+        )
+        .await
+        .expect_err("a 10-byte blob must be rejected");
         assert!(
             err.contains("expected"),
             "error names the size mismatch: {err}"

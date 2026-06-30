@@ -22,6 +22,9 @@ serde_norway = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
+# Object-safe async methods on the process-manager backend trait so the
+# supervisor can hold the active backend behind an `Arc<dyn ProcessManager>`.
+async-trait = { workspace = true }
 # WFB key fingerprint (blake2b-8 over the peer-public half) + hex render +
 # session-id entropy for the bind orchestrator.
 blake2 = { workspace = true }

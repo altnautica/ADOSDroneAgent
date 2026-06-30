@@ -22,7 +22,7 @@
 
 use std::path::PathBuf;
 
-use ados_supervisor::systemctl;
+use ados_supervisor::process_manager::select;
 
 use crate::paths::{MESH_ROLE_PATH, MESH_STATE_JSON, WFB_RECEIVER_JSON, WFB_RELAY_JSON};
 
@@ -156,10 +156,11 @@ pub async fn apply_role(target: &str, reason: &str) -> Result<RoleResult, String
 
     let mut units_stopped: Vec<String> = Vec::new();
     let mut units_started: Vec<String> = Vec::new();
+    let pm = select();
 
     // Stop the old role's units in reverse dependency order (wfb before batman).
     for unit in role_units(&current).iter().rev() {
-        if !systemctl::stop(unit).await {
+        if !pm.stop(unit).await {
             tracing::debug!(unit, "stop_unit_noop");
         }
         units_stopped.push((*unit).to_string());
@@ -178,10 +179,10 @@ pub async fn apply_role(target: &str, reason: &str) -> Result<RoleResult, String
     // Mask every mesh unit, then unmask the ones for the target role. Masking is
     // idempotent.
     for unit in ALL_MESH_UNITS {
-        systemctl::mask(unit).await;
+        pm.mask(unit).await;
     }
     for unit in role_units(target) {
-        systemctl::unmask(unit).await;
+        pm.unmask(unit).await;
     }
 
     // Flip the sentinel BEFORE starting new units so their ConditionPathExists
@@ -192,7 +193,7 @@ pub async fn apply_role(target: &str, reason: &str) -> Result<RoleResult, String
 
     // Start new units in dependency order (batman first, then wfb).
     for unit in role_units(target) {
-        if systemctl::start(unit).await {
+        if pm.start(unit).await {
             units_started.push((*unit).to_string());
         }
     }
