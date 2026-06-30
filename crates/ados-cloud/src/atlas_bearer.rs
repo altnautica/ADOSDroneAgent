@@ -19,7 +19,7 @@
 //! so a remote operator keeps situational awareness off-LAN. A per-publish
 //! timeout bounds a wedged broker so the publish never stalls the ladder caller.
 //!
-//! Honest liveness (Rule 37 / DEC-170 family): `is_available()` reads the real
+//! Honest liveness: `is_available()` reads the real
 //! ConnAck-driven `connected` flag, not "the task exists". `send()` returning
 //! `Ok` means the event was ENQUEUED for delivery against a confirmed-up session
 //! (q1 hands rumqttc the PubAck retry), NOT that the broker has acked it — a

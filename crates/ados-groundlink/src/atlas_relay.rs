@@ -9,7 +9,7 @@
 //! A garbled or hostile frame off the air must never take the relay down: a
 //! malformed datagram is dropped + counted and the loop continues. The
 //! received-side counter is the delivery proof — the drone's UDP send into the
-//! aux tunnel is fire-and-forget (Rule 37 / DEC-170), so only what this relay
+//! aux tunnel is fire-and-forget, so only what this relay
 //! actually decodes proves the RF lane carried it.
 
 use std::sync::Arc;

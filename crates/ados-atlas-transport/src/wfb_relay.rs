@@ -180,7 +180,7 @@ impl AtlasBearer for WfbRelayBearer {
         let mut guard = self.conn.lock().await;
         let send_res = match guard.as_ref() {
             // UDP fire-and-forget: Ok means the datagram entered the kernel, NOT
-            // that wfb_tx radiated it or the peer decoded it (Rule 37 / DEC-170) —
+            // that wfb_tx radiated it or the peer decoded it —
             // the ground relay's received-side counter is the delivery proof.
             Some(sock) => sock.send(&body).await,
             None => return Err(TransportError::Unavailable),
