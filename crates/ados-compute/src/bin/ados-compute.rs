@@ -47,8 +47,8 @@ use ados_atlas_transport::{atlas_event_router, AtlasEvent};
 use ados_compute::{
     artifact_router, build_rerun_output, build_router, derive_public_base,
     rewrite_output_to_artifact_url, submit_reconstruct_job, write_compute_heartbeat, AtlasIngest,
-    Cluster, ComputeAuth, Engine, JobStore, MockDetector, Prepared, PreparedInput, Scheduler,
-    SelectingReconstructor, DEFAULT_PAIRING_PATH,
+    Cluster, ComputeAuth, ComputeJobState, Engine, JobStore, LiveReconstructConfig, MockDetector,
+    Prepared, PreparedInput, Scheduler, SelectingReconstructor, DEFAULT_PAIRING_PATH,
 };
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex};
@@ -60,6 +60,10 @@ const DEFAULT_CONFIG_YAML: &str = "/etc/ados/config.yaml";
 /// router returns `503` so the sender's failover ladder retries or drops — the
 /// reconstructor running behind never grows an unbounded in-memory queue.
 const ATLAS_EVENT_CHANNEL_CAP: usize = 256;
+/// How often the live-reconstruction cadence is evaluated (the interval trigger's
+/// granularity + the skip-while-running reconcile). The cadence's own thresholds
+/// are much coarser (tens of seconds / keyframes); this is just the poll period.
+const LIVE_CADENCE_TICK_SECS: u64 = 2;
 
 fn init_logging() {
     use ados_protocol::logd::layer::LogdLayer;
@@ -127,6 +131,14 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// True when a config flag string is an affirmative (`1`/`true`/`yes`/`on`).
+fn is_truthy(v: &str) -> bool {
+    matches!(
+        v.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
 /// True when the world-model program is enabled for this node, mirroring the
 /// air-side `ados-atlas` gate. `ADOS_ATLAS_ENABLED` is the install-layer override
 /// (consistent with the daemon's other env-driven config); absent, the
@@ -135,12 +147,70 @@ fn now_ms() -> i64 {
 /// byte-unchanged.
 fn atlas_enabled() -> bool {
     if let Ok(v) = std::env::var("ADOS_ATLAS_ENABLED") {
-        return matches!(
-            v.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        );
+        return is_truthy(&v);
     }
     atlas_enabled_in_yaml(&env_or("ADOS_CONFIG_YAML", DEFAULT_CONFIG_YAML))
+}
+
+/// True when live (in-flight) reconstruction is enabled for this node:
+/// `ADOS_ATLAS_LIVE` is the install-layer override; absent, the
+/// `atlas.live_reconstruct` key of the agent config is read. Opt-in (default
+/// off), so a node that only wants the post-flight bag reconstruct is unaffected.
+fn atlas_live_enabled() -> bool {
+    if let Ok(v) = std::env::var("ADOS_ATLAS_LIVE") {
+        return is_truthy(&v);
+    }
+    atlas_live_in_yaml(&env_or("ADOS_CONFIG_YAML", DEFAULT_CONFIG_YAML))
+}
+
+/// Read the `atlas.live_reconstruct` boolean from the agent config at `path`.
+/// Pure (the path is injected) so it is unit-tested. Disabled on any read/parse
+/// error or an absent block, the same fail-closed default as [`atlas_enabled_in_yaml`].
+fn atlas_live_in_yaml(path: &str) -> bool {
+    #[derive(serde::Deserialize, Default)]
+    struct Raw {
+        #[serde(default)]
+        atlas: Option<AtlasSection>,
+    }
+    #[derive(serde::Deserialize, Default)]
+    struct AtlasSection {
+        #[serde(default)]
+        live_reconstruct: bool,
+    }
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    serde_norway::from_str::<Raw>(&text)
+        .ok()
+        .and_then(|r| r.atlas)
+        .map(|a| a.live_reconstruct)
+        .unwrap_or(false)
+}
+
+/// Build the live-reconstruction cadence config from the environment + agent
+/// config. The cadence defaults (every 30 keyframes / 20 s / 8-keyframe floor)
+/// come from [`LiveReconstructConfig::default`]; `enabled` is set from the gate,
+/// and the thresholds can be tuned via env without a config-file dependency.
+fn live_reconstruct_config() -> LiveReconstructConfig {
+    let mut cfg = LiveReconstructConfig {
+        enabled: atlas_live_enabled(),
+        ..LiveReconstructConfig::default()
+    };
+    if let Some(v) = env_u64("ADOS_ATLAS_LIVE_EVERY_KEYFRAMES") {
+        cfg.every_keyframes = v.max(1);
+    }
+    if let Some(s) = env_u64("ADOS_ATLAS_LIVE_INTERVAL_S") {
+        cfg.interval_ms = (s as i64).saturating_mul(1000);
+    }
+    if let Some(v) = env_u64("ADOS_ATLAS_LIVE_MIN_KEYFRAMES") {
+        cfg.min_keyframes = v.max(1);
+    }
+    cfg
+}
+
+/// Parse a `u64` env var, or `None` when unset / unparseable.
+fn env_u64(key: &str) -> Option<u64> {
+    std::env::var(key).ok().and_then(|v| v.trim().parse().ok())
 }
 
 /// Read the `atlas.enabled` boolean from the agent config at `path` (the one
@@ -256,13 +326,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // When off, neither the route nor the drain task exists, so a non-atlas
     // workstation node is byte-unchanged.
     if atlas_enabled() {
+        let live_config = live_reconstruct_config();
         let (atlas_tx, atlas_rx) = mpsc::channel::<AtlasEvent>(ATLAS_EVENT_CHANNEL_CAP);
         router = router.merge(atlas_event_router(atlas_tx));
         let rs = state.clone();
         let wr = work_root.clone();
-        tokio::spawn(async move { atlas_receiver_loop(atlas_rx, rs, wr).await });
+        tokio::spawn(async move { atlas_receiver_loop(atlas_rx, rs, wr, live_config).await });
         tracing::info!(
             channel_cap = ATLAS_EVENT_CHANNEL_CAP,
+            live_reconstruct = live_config.enabled,
             "atlas enabled: world-model event receiver mounted at POST /api/atlas/event"
         );
     }
@@ -400,38 +472,144 @@ async fn heartbeat_loop(state: Arc<Mutex<Engine>>) {
 /// real filesystem or store fault is logged and the loop continues. The loop ends
 /// when the event channel closes (the receiver router dropped its senders), which
 /// only happens on shutdown.
+///
+/// When live reconstruction is enabled, the loop ALSO runs the per-session cadence
+/// ([`run_live_cycles`]) on a tick and after each keyframe: it periodically
+/// snapshots the growing capture and enqueues a real reconstruct so the world
+/// model updates during the flight, not only at the end. When disabled, it is the
+/// event-only drain (final bag reconstruct only) — byte-unchanged.
 async fn atlas_receiver_loop(
     mut rx: mpsc::Receiver<AtlasEvent>,
     state: Arc<Mutex<Engine>>,
     work_root: PathBuf,
+    live_config: LiveReconstructConfig,
 ) {
-    let mut ingest = AtlasIngest::new(work_root);
-    while let Some(event) = rx.recv().await {
-        match ingest.step(&event, now_ms()) {
-            Ok(Some((dataset, job))) => {
-                let submitted = {
-                    let engine = state.lock().await;
-                    submit_reconstruct_job(engine.scheduler().store(), &dataset, &job)
-                };
-                match submitted {
-                    Ok(job_id) => tracing::info!(
-                        job = %job_id,
-                        keyframes_received = ingest.keyframes_seen(),
-                        "atlas capture bagged: reconstruct job enqueued"
-                    ),
-                    Err(e) => tracing::error!(error = %e, "atlas reconstruct submit failed"),
-                }
+    let mut ingest = AtlasIngest::with_live_config(work_root, live_config);
+
+    if !live_config.enabled {
+        while let Some(event) = rx.recv().await {
+            drain_event(&mut ingest, &state, &event).await;
+        }
+        tracing::info!("atlas receiver loop ended (event channel closed)");
+        return;
+    }
+
+    let mut tick = tokio::time::interval(Duration::from_secs(LIVE_CADENCE_TICK_SECS));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            maybe_event = rx.recv() => {
+                let Some(event) = maybe_event else { break };
+                drain_event(&mut ingest, &state, &event).await;
+                // A keyframe may have hit the count trigger; check promptly.
+                run_live_cycles(&mut ingest, &state).await;
             }
-            Ok(None) => {}
-            Err(e) => tracing::error!(error = %e, "atlas ingest disk write failed"),
+            _ = tick.tick() => {
+                // The interval trigger + the skip-while-running reconcile.
+                run_live_cycles(&mut ingest, &state).await;
+            }
         }
     }
     tracing::info!("atlas receiver loop ended (event channel closed)");
 }
 
+/// Handle one received Atlas event: persist a keyframe or, on the terminal bag,
+/// enqueue the final reconstruct. A malformed frame is swallowed; a real disk or
+/// store fault is logged and the caller continues.
+async fn drain_event(ingest: &mut AtlasIngest, state: &Arc<Mutex<Engine>>, event: &AtlasEvent) {
+    match ingest.step(event, now_ms()) {
+        Ok(Some((dataset, job))) => {
+            let keyframes_received = ingest.keyframes_seen();
+            let submitted = {
+                let engine = state.lock().await;
+                submit_reconstruct_job(engine.scheduler().store(), &dataset, &job)
+            };
+            match submitted {
+                Ok(job_id) => tracing::info!(
+                    job = %job_id,
+                    keyframes_received,
+                    "atlas capture bagged: reconstruct job enqueued"
+                ),
+                Err(e) => tracing::error!(error = %e, "atlas reconstruct submit failed"),
+            }
+        }
+        Ok(None) => {}
+        Err(e) => tracing::error!(error = %e, "atlas ingest disk write failed"),
+    }
+}
+
+/// Drive the live-reconstruction cadence: reconcile the skip-while-running guard
+/// against the store (a cycle whose job reached a terminal state, or vanished,
+/// releases the guard), then enqueue a fresh periodic reconstruct for every
+/// session now due. The store is the source of truth for "is the cycle done", so
+/// cycles coalesce instead of piling up. A snapshot or submit fault is logged; the
+/// cadence keeps running.
+async fn run_live_cycles(ingest: &mut AtlasIngest, state: &Arc<Mutex<Engine>>) {
+    // 1. Release the guard for any session whose in-flight cycle finished.
+    let in_flight = ingest.in_flight_cycles();
+    if !in_flight.is_empty() {
+        let finished: Vec<String> = {
+            let engine = state.lock().await;
+            let store = engine.scheduler().store();
+            in_flight
+                .into_iter()
+                .filter_map(|(session, job_id)| match store.get_job(&job_id) {
+                    Ok(Some(job)) if is_terminal(job.state) => Some(session),
+                    // The job was purged (retention) — treat as finished so the
+                    // session is never stuck with a guard that never releases.
+                    Ok(None) => Some(session),
+                    Ok(Some(_)) => None, // still queued / running: keep the guard
+                    Err(e) => {
+                        tracing::warn!(error = %e, "live cycle reconcile read failed");
+                        None
+                    }
+                })
+                .collect()
+        };
+        for session in finished {
+            ingest.note_cycle_finished(&session);
+        }
+    }
+
+    // 2. Enqueue a fresh periodic reconstruct for every session now due.
+    match ingest.due_reconstructs(now_ms()) {
+        Ok(jobs) => {
+            for (dataset, job) in jobs {
+                let submitted = {
+                    let engine = state.lock().await;
+                    submit_reconstruct_job(engine.scheduler().store(), &dataset, &job)
+                };
+                let keyframes = dataset
+                    .meta
+                    .get("keyframes")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                match submitted {
+                    Ok(id) => tracing::info!(
+                        job = %id,
+                        keyframes,
+                        "atlas live reconstruct cycle enqueued"
+                    ),
+                    Err(e) => tracing::error!(error = %e, "atlas live reconstruct submit failed"),
+                }
+            }
+        }
+        Err(e) => tracing::error!(error = %e, "atlas live snapshot write failed"),
+    }
+}
+
+/// Whether a job has reached a terminal state (the live cadence's
+/// skip-while-running guard releases on a terminal in-flight cycle).
+fn is_terminal(state: ComputeJobState) -> bool {
+    matches!(
+        state,
+        ComputeJobState::Completed | ComputeJobState::Failed | ComputeJobState::Cancelled
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{atlas_enabled_in_yaml, derive_node_id};
+    use super::{atlas_enabled_in_yaml, atlas_live_in_yaml, derive_node_id};
 
     #[test]
     fn node_id_prefers_the_env_override() {
@@ -488,5 +666,27 @@ mod tests {
         // An unparseable file never enables the receiver (fail-closed).
         let (_d, bad) = write_cfg("atlas: [this is not a map\n");
         assert!(!atlas_enabled_in_yaml(bad.to_str().unwrap()));
+    }
+
+    #[test]
+    fn live_reconstruct_gate_reads_its_own_key_and_defaults_off() {
+        // Opt-in: the key must be present and true; atlas.enabled alone does NOT
+        // turn on live reconstruction.
+        let (_d1, on) = write_cfg("atlas:\n  enabled: true\n  live_reconstruct: true\n");
+        assert!(atlas_live_in_yaml(on.to_str().unwrap()));
+
+        let (_d2, only_enabled) = write_cfg("atlas:\n  enabled: true\n");
+        assert!(
+            !atlas_live_in_yaml(only_enabled.to_str().unwrap()),
+            "atlas enabled without live_reconstruct leaves live off"
+        );
+
+        let (_d3, off) = write_cfg("atlas:\n  live_reconstruct: false\n");
+        assert!(!atlas_live_in_yaml(off.to_str().unwrap()));
+
+        assert!(
+            !atlas_live_in_yaml("/nonexistent/ados/config.yaml"),
+            "a missing config reads live off (fail-closed)"
+        );
     }
 }

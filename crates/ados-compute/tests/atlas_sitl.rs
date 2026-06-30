@@ -15,9 +15,9 @@ use ados_atlas_transport::{
     LanHttpBearer, LoopbackBearer,
 };
 use ados_compute::{
-    submit_reconstruct_job, AtlasIngest, Cluster, Engine, JobRecord, JobStore, LiveSession,
-    LiveSessionState, MockDeltaProducer, MockDetector, MockReconstructor, RerunArchetype,
-    RerunRecording, Scheduler,
+    submit_reconstruct_job, AtlasIngest, Cluster, Engine, JobRecord, JobStore,
+    LiveReconstructConfig, MockDetector, MockReconstructor, RerunArchetype, RerunRecording,
+    Scheduler,
 };
 use ados_protocol::atlas::{
     CameraIntrinsics, CameraRole, CaptureState, CaptureStatus, Distortion, ImageEncoding,
@@ -480,79 +480,111 @@ async fn g3_plugin_data_share_isolates_per_device_and_offloads() {
     );
 }
 
-/// G4: a live session walks pairing -> ready -> active, trains on each ingested
-/// keyframe (monotonic gaussian/step growth, SPZ-framed deltas), pauses to stop
-/// ingest, and every emitted delta fans out to the device's Live World
-/// subscriber over the delta broadcaster.
+/// G4: a live (in-flight) session keeps the world model fresh by REAL periodic
+/// reconstruction. On the cadence the node snapshots the keyframes captured so
+/// far and runs a real reconstruct (the mock backend stands in for Brush with no
+/// GPU), yielding a fresh splat artifact mid-flight; while one cycle runs the
+/// cadence coalesces (skip-while-running, never piles up), then resumes over the
+/// grown set after it finishes — each cycle its own job/output the GCS polls.
 #[tokio::test]
-async fn g4_live_stream_delta_fanout() {
-    let mut session = LiveSession::new("live-1", 0);
-    assert!(session.try_transition(LiveSessionState::Ready, 1));
-    assert!(session.try_transition(LiveSessionState::Active, 2));
+async fn g4_live_session_periodic_reconstruct() {
+    let engine = engine();
+    let store = engine.scheduler().store();
+    let tmp = tempfile::tempdir().unwrap();
 
-    let broadcaster = DeltaBroadcaster::new(64);
-    let mut rx = broadcaster.subscribe();
+    // A tight cadence for the test: a cycle every 3 new keyframes, no time gate,
+    // a 2-keyframe floor (production defaults are coarser: 30 keyframes / 20 s).
+    let cfg = LiveReconstructConfig {
+        enabled: true,
+        every_keyframes: 3,
+        interval_ms: i64::MAX,
+        min_keyframes: 2,
+    };
+    let mut ingest = AtlasIngest::with_live_config(tmp.path(), cfg);
 
-    const N: u64 = 4;
-    let mut last_gaussians = 0u64;
-    let mut last_step = 0u64;
-    for i in 0..N {
-        let (desc, delta) = session
-            .ingest_keyframe(&MockDeltaProducer, None, 10 + i as i64)
-            .expect("an active session trains on each keyframe");
-        assert!(
-            desc.gaussian_count > last_gaussians,
-            "the trainer's gaussian count grows per keyframe"
-        );
-        assert!(
-            desc.step > last_step,
-            "the training step advances per keyframe"
-        );
-        assert_eq!(desc.gaussian_count, delta.gaussian_count);
-        assert_eq!(desc.step, delta.step);
-        last_gaussians = desc.gaussian_count;
-        last_step = desc.step;
-        // The delta frame carries the SPZ magic the Live World decoder reads.
-        assert_eq!(
-            &delta.bytes[0..4],
-            b"SPZ0",
-            "the delta carries the SPZ frame magic"
-        );
-        // Fan the delta out to the device's Live World subscriber.
-        broadcaster.publish(
-            "drone-live",
-            AtlasEvent {
-                topic: PLUGIN_ATLAS_SPLAT_TOPIC.into(),
-                payload: delta.bytes.clone(),
-            },
-        );
+    // Three keyframes from one moving camera; a keyframe never bags.
+    for kf in 0..3u64 {
+        let ev = AtlasEvent {
+            topic: ATLAS_KEYFRAME_TOPIC.into(),
+            payload: keyframe_env("cam-front", kf).to_msgpack().unwrap(),
+        };
+        assert!(ingest.step(&ev, 100).unwrap().is_none());
     }
 
-    // A paused session drops ingest (produces no further delta).
-    assert!(session.try_transition(LiveSessionState::Paused, 100));
-    assert!(
-        session
-            .ingest_keyframe(&MockDeltaProducer, None, 101)
-            .is_none(),
-        "a paused session drops ingest"
-    );
-
-    // The broadcaster delivered exactly N deltas to the device's subscriber.
-    let mut delivered = 0u64;
-    for _ in 0..N {
-        let (dev, ev) = rx.recv().await.expect("each published delta is on the bus");
-        assert_eq!(dev, "drone-live");
-        assert_eq!(ev.topic, PLUGIN_ATLAS_SPLAT_TOPIC);
-        delivered += 1;
-    }
+    // The cadence fires a first cycle: a real reconstruct over the snapshot of
+    // the keyframes captured so far (NOT synthetic deltas, NOT incremental
+    // training — a real, full reconstruct of the growing set).
+    let mut cycle0 = ingest.due_reconstructs(200).unwrap();
     assert_eq!(
-        delivered, N,
-        "every live delta reached the device's subscriber"
+        cycle0.len(),
+        1,
+        "the cadence enqueues one periodic reconstruct"
     );
+    let (dataset0, job0) = cycle0.remove(0);
+    assert_eq!(dataset0.meta["live"], true);
+    assert_eq!(dataset0.meta["keyframes"], 3);
+    // The snapshot manifest the reconstruct reads is on disk (real input).
+    let input_path = dataset0.meta["input_path"].as_str().unwrap();
+    assert!(std::path::Path::new(input_path)
+        .join("transforms.json")
+        .exists());
+
+    // Submit + run the worker: a fresh, real world-model artifact mid-flight.
+    let job_id0 = submit_reconstruct_job(store, &dataset0, &job0).unwrap();
+    let outcome = engine.tick(300).unwrap().expect("the live cycle ran");
+    assert_eq!(outcome.job_id, job_id0);
+    assert_eq!(outcome.state, ComputeJobState::Completed);
     assert!(
-        rx.try_recv().is_err(),
-        "the paused ingest published nothing further"
+        outcome.outputs.iter().any(|o| o.kind == "splat"),
+        "the live cycle yields a usable splat"
     );
+
+    // Skip-while-running: more keyframes arrive, but the cadence coalesces while
+    // the cycle's guard is held, so no second job piles up on top.
+    for kf in 3..6u64 {
+        let ev = AtlasEvent {
+            topic: ATLAS_KEYFRAME_TOPIC.into(),
+            payload: keyframe_env("cam-front", kf).to_msgpack().unwrap(),
+        };
+        ingest.step(&ev, 400).unwrap();
+    }
+    assert!(
+        ingest.due_reconstructs(500).unwrap().is_empty(),
+        "a cycle in flight blocks the next"
+    );
+
+    // The cycle's job is terminal (we ran it); the reconcile releases the guard
+    // (the daemon reads the store; here we assert it then release directly).
+    assert_eq!(
+        ingest.in_flight_cycles(),
+        vec![("sitl".to_string(), job_id0.clone())]
+    );
+    assert_eq!(
+        store.get_job(&job_id0).unwrap().unwrap().state,
+        ComputeJobState::Completed
+    );
+    ingest.note_cycle_finished("sitl");
+
+    // Now the next cycle, over the GROWN keyframe set, is due and runs to a fresh
+    // splat — its own job/output, distinct from the first.
+    let mut cycle1 = ingest.due_reconstructs(600).unwrap();
+    assert_eq!(cycle1.len(), 1);
+    let (dataset1, job1) = cycle1.remove(0);
+    assert_eq!(
+        dataset1.meta["keyframes"], 6,
+        "the cycle reconstructs the grown keyframe set"
+    );
+    let job_id1 = submit_reconstruct_job(store, &dataset1, &job1).unwrap();
+    assert_ne!(
+        job_id1, job_id0,
+        "each periodic cycle is its own job/output the GCS polls"
+    );
+    let outcome = engine
+        .tick(700)
+        .unwrap()
+        .expect("the second live cycle ran");
+    assert_eq!(outcome.state, ComputeJobState::Completed);
+    assert!(outcome.outputs.iter().any(|o| o.kind == "splat"));
 }
 
 /// G5: a multi-camera capture fuses into one world — N distinct cameras' frames

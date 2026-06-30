@@ -67,7 +67,7 @@ pub use rerun_log::{
 };
 pub use rerun_world::{build_rerun_output, build_world_recording, RERUN_OUTPUT_FILE};
 pub use scheduler::{BackendResult, JobOutcome, Prepared, PreparedInput, Scheduler};
-pub use session::{DeltaProducer, LiveSession, LiveSessionState, MockDeltaProducer, SplatDelta};
+pub use session::{LiveReconstructConfig, LiveReconstructDriver};
 pub use store::{Dataset, JobRecord, JobStore, Output};
 
 // Re-export the shared wire contract so callers get one import surface.

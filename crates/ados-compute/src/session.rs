@@ -1,154 +1,161 @@
-//! The live (in-flight) reconstruction session.
+//! The live (in-flight) reconstruction cadence.
 //!
 //! The post-flight pipeline ([`crate::pipeline`]) trains a deliverable from a
-//! finished bag. The live session is the other path: keyframes arrive over the
-//! relay as the drone flies, the node trains a splat incrementally (about 50
-//! steps per new keyframe), and it pushes SPZ deltas to the GCS Live World. This
-//! module owns the session state machine and the delta production seam; the
-//! incremental trainer is a backend behind [`DeltaProducer`], mocked in CI.
+//! finished bag. The live world model is the other path: keyframes arrive over
+//! the relay as the drone flies, and the node keeps the world model fresh by
+//! periodically running a REAL reconstruct over the keyframes accumulated so far.
+//!
+//! "Live" here is honest, real periodic reconstruction — NOT per-frame
+//! incremental gaussian training (that is a research problem and is out of
+//! scope). On a cadence (every N new keyframes, or every T since the last cycle,
+//! whichever comes first) the node finalizes a snapshot of the growing dataset
+//! and submits a fresh reconstruct job; each cycle yields a real `.ply` + `.rrd`
+//! tagged to the session so the GCS shows the latest world model.
+//!
+//! This module owns the PURE cadence decision: given the keyframes persisted and
+//! the time elapsed since the last cycle, and whether a cycle is still running,
+//! decide whether a new periodic reconstruct is due now. The I/O — snapshotting
+//! the dataset, submitting the job, running the backend — lives in
+//! [`crate::ingest`] and the daemon, so the cadence stays testable with no disk,
+//! no store, and no clock of its own.
 
 use serde::{Deserialize, Serialize};
 
-use ados_protocol::atlas::SplatDescriptor;
+/// Default cadence: start a periodic reconstruct every this many NEW keyframes...
+pub const DEFAULT_RECONSTRUCT_EVERY_KEYFRAMES: u64 = 30;
+/// ...or this many milliseconds since the last cycle, whichever comes first.
+pub const DEFAULT_RECONSTRUCT_INTERVAL_MS: i64 = 20_000;
+/// The minimum keyframes a session needs before the FIRST periodic reconstruct
+/// is worth attempting — a reconstruct over one or two frames is not a useful
+/// world model.
+pub const DEFAULT_MIN_KEYFRAMES: u64 = 8;
 
-/// Steps the incremental trainer advances per ingested keyframe.
-const STEPS_PER_KEYFRAME: u64 = 50;
-/// Gaussians the mock trainer adds per ingested keyframe.
-const GAUSSIANS_PER_KEYFRAME: u64 = 1200;
-
-/// The live-session lifecycle. `pairing` while the drone is connecting, `ready`
-/// once the worker is allocated, `active` while training on incoming keyframes,
-/// `paused` when the operator (or a link drop) halts ingest, `ended` terminal.
+/// Live-reconstruction cadence configuration for a node.
+///
+/// Opt-in: when `enabled` is false the node only reconstructs the final bag (the
+/// post-flight path), so a node that does not want a live-updating world model is
+/// byte-unchanged. The thresholds are the cadence: a new cycle becomes due once
+/// `every_keyframes` new keyframes have arrived since the last cycle OR
+/// `interval_ms` has elapsed since it, whichever first, provided the session has
+/// at least `min_keyframes` persisted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum LiveSessionState {
-    Pairing,
-    Ready,
-    Active,
-    Paused,
-    Ended,
+pub struct LiveReconstructConfig {
+    /// Run periodic reconstructs during an active session (opt-in).
+    pub enabled: bool,
+    /// New keyframes since the last cycle that force a reconstruct.
+    pub every_keyframes: u64,
+    /// Milliseconds since the last cycle that force a reconstruct.
+    pub interval_ms: i64,
+    /// Keyframes a session must have before its first periodic reconstruct.
+    pub min_keyframes: u64,
 }
 
-/// A compressed splat delta the live trainer emits per training-step batch. The
-/// `bytes` are an SPZ delta frame in production; the mock produces a small
-/// deterministic payload so the stream lane and Live World are exercised.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SplatDelta {
-    pub bytes: Vec<u8>,
-    pub gaussian_count: u64,
-    pub step: u64,
-}
-
-/// Produces a splat delta for the current trainer state. The real producer
-/// compresses the trainer's new/changed gaussians to an SPZ frame; the mock
-/// keeps the session testable with no GPU.
-pub trait DeltaProducer: Send + Sync {
-    fn produce(&self, gaussian_count: u64, step: u64) -> SplatDelta;
-}
-
-/// A no-GPU delta producer: a deterministic synthetic SPZ frame whose header
-/// carries the gaussian count + step, so the stream lane and Live World render
-/// real, changing values with no trainer.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct MockDeltaProducer;
-
-impl DeltaProducer for MockDeltaProducer {
-    fn produce(&self, gaussian_count: u64, step: u64) -> SplatDelta {
-        // A tiny deterministic "SPZ-ish" payload: a 4-byte magic + the counts.
-        let mut bytes = Vec::with_capacity(20);
-        bytes.extend_from_slice(b"SPZ0");
-        bytes.extend_from_slice(&gaussian_count.to_le_bytes());
-        bytes.extend_from_slice(&step.to_le_bytes());
-        SplatDelta {
-            bytes,
-            gaussian_count,
-            step,
-        }
-    }
-}
-
-/// One live reconstruction session on the compute node.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LiveSession {
-    pub id: String,
-    pub state: LiveSessionState,
-    pub keyframes_ingested: u64,
-    pub gaussian_count: u64,
-    pub step: u64,
-    pub created_ms: i64,
-    pub updated_ms: i64,
-}
-
-impl LiveSession {
-    /// A new session in `pairing` (the drone is connecting; no worker yet).
-    pub fn new(id: impl Into<String>, now_ms: i64) -> Self {
+impl Default for LiveReconstructConfig {
+    fn default() -> Self {
         Self {
-            id: id.into(),
-            state: LiveSessionState::Pairing,
-            keyframes_ingested: 0,
-            gaussian_count: 0,
-            step: 0,
-            created_ms: now_ms,
-            updated_ms: now_ms,
+            enabled: false,
+            every_keyframes: DEFAULT_RECONSTRUCT_EVERY_KEYFRAMES,
+            interval_ms: DEFAULT_RECONSTRUCT_INTERVAL_MS,
+            min_keyframes: DEFAULT_MIN_KEYFRAMES,
+        }
+    }
+}
+
+/// Tracks the live-reconstruction cadence for ONE capture session.
+///
+/// Pure: it is fed keyframe arrivals + the clock and reports when a periodic
+/// reconstruct is due; the caller performs the snapshot + submit, then tells the
+/// driver a cycle started ([`begin_cycle`](Self::begin_cycle)) and, when the
+/// job reaches a terminal state, finished ([`note_cycle_finished`](Self::note_cycle_finished)).
+/// The skip-while-running guard lives here: a new cycle is never due while one is
+/// in flight, so cycles coalesce instead of piling up.
+#[derive(Debug, Clone)]
+pub struct LiveReconstructDriver {
+    config: LiveReconstructConfig,
+    /// Keyframes persisted this session so far (the snapshot size).
+    persisted: u64,
+    /// `persisted` at the last cycle start, so the trigger counts NEW keyframes.
+    persisted_at_last_cycle: u64,
+    /// The clock at the last cycle start (the interval trigger's baseline); the
+    /// session start time before the first cycle.
+    last_cycle_ms: i64,
+    /// Periodic cycles started this session (the per-cycle job-id discriminator).
+    cycles: u64,
+    /// Whether a periodic cycle is currently in flight (the skip-while-running
+    /// guard); a new cycle is never due while this holds.
+    cycle_in_flight: bool,
+}
+
+impl LiveReconstructDriver {
+    /// A driver for `config`, with the interval baseline at `now_ms`.
+    pub fn new(config: LiveReconstructConfig, now_ms: i64) -> Self {
+        Self {
+            config,
+            persisted: 0,
+            persisted_at_last_cycle: 0,
+            last_cycle_ms: now_ms,
+            cycles: 0,
+            cycle_in_flight: false,
         }
     }
 
-    /// Whether `from -> to` is a legal transition. The session walks
-    /// pairing -> ready -> active, toggles active <-> paused, and any non-terminal
-    /// state can end. It never rewinds (e.g. ended -> active is illegal).
-    pub fn can_transition(from: LiveSessionState, to: LiveSessionState) -> bool {
-        use LiveSessionState::*;
-        matches!(
-            (from, to),
-            (Pairing, Ready)
-                | (Pairing, Ended)
-                | (Ready, Active)
-                | (Ready, Ended)
-                | (Active, Paused)
-                | (Active, Ended)
-                | (Paused, Active)
-                | (Paused, Ended)
-        )
+    /// Record one persisted keyframe (the snapshot grows by one).
+    pub fn note_keyframe(&mut self) {
+        self.persisted += 1;
     }
 
-    /// Apply a state transition. Returns `true` when applied, `false` when the
-    /// transition is illegal (the state is unchanged). Stamps `updated_ms` on a
-    /// successful transition.
-    pub fn try_transition(&mut self, to: LiveSessionState, now_ms: i64) -> bool {
-        if !Self::can_transition(self.state, to) {
+    /// Whether a periodic reconstruct is due now. False when disabled, while a
+    /// cycle is in flight (skip-while-running), below the minimum-keyframe floor,
+    /// or when no new keyframe has arrived since the last cycle. Otherwise true
+    /// once enough new keyframes have arrived OR the interval has elapsed.
+    pub fn due(&self, now_ms: i64) -> bool {
+        if !self.config.enabled || self.cycle_in_flight {
             return false;
         }
-        self.state = to;
-        self.updated_ms = now_ms;
-        true
+        if self.persisted < self.config.min_keyframes {
+            return false;
+        }
+        let new_keyframes = self.persisted.saturating_sub(self.persisted_at_last_cycle);
+        if new_keyframes == 0 {
+            // Nothing new since the last cycle: re-reconstructing the same set
+            // would only repeat the same result.
+            return false;
+        }
+        let elapsed = now_ms.saturating_sub(self.last_cycle_ms);
+        new_keyframes >= self.config.every_keyframes || elapsed >= self.config.interval_ms
     }
 
-    /// Ingest one keyframe: advance the incremental trainer and emit a splat
-    /// delta + the current splat descriptor. Only an `active` session ingests;
-    /// otherwise the keyframe is dropped and `None` is returned (a paused or
-    /// ended session does not train).
-    pub fn ingest_keyframe(
-        &mut self,
-        producer: &dyn DeltaProducer,
-        url: Option<String>,
-        now_ms: i64,
-    ) -> Option<(SplatDescriptor, SplatDelta)> {
-        if self.state != LiveSessionState::Active {
-            return None;
-        }
-        self.keyframes_ingested += 1;
-        self.step += STEPS_PER_KEYFRAME;
-        self.gaussian_count += GAUSSIANS_PER_KEYFRAME;
-        self.updated_ms = now_ms;
+    /// Mark a periodic cycle started: arm the skip-while-running guard, reset the
+    /// new-keyframe + interval baselines, and return the cycle index (the
+    /// per-cycle job-id / output discriminator).
+    pub fn begin_cycle(&mut self, now_ms: i64) -> u64 {
+        let cycle = self.cycles;
+        self.cycles += 1;
+        self.persisted_at_last_cycle = self.persisted;
+        self.last_cycle_ms = now_ms;
+        self.cycle_in_flight = true;
+        cycle
+    }
 
-        let delta = producer.produce(self.gaussian_count, self.step);
-        let descriptor = SplatDescriptor {
-            gaussian_count: self.gaussian_count,
-            step: self.step,
-            url,
-            handle: Some(self.id.clone()),
-        };
-        Some((descriptor, delta))
+    /// Release the skip-while-running guard: the in-flight cycle's job reached a
+    /// terminal state (or vanished). A no-op when no cycle is in flight.
+    pub fn note_cycle_finished(&mut self) {
+        self.cycle_in_flight = false;
+    }
+
+    /// Whether a periodic cycle is currently in flight.
+    pub fn cycle_in_flight(&self) -> bool {
+        self.cycle_in_flight
+    }
+
+    /// Keyframes persisted this session so far.
+    pub fn persisted(&self) -> u64 {
+        self.persisted
+    }
+
+    /// Periodic cycles started this session.
+    pub fn cycles(&self) -> u64 {
+        self.cycles
     }
 }
 
@@ -156,71 +163,122 @@ impl LiveSession {
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_new_session_starts_pairing() {
-        let s = LiveSession::new("ls-1", 100);
-        assert_eq!(s.state, LiveSessionState::Pairing);
-        assert_eq!(s.keyframes_ingested, 0);
-        assert_eq!(s.gaussian_count, 0);
+    fn enabled(every: u64, interval_ms: i64, min: u64) -> LiveReconstructConfig {
+        LiveReconstructConfig {
+            enabled: true,
+            every_keyframes: every,
+            interval_ms,
+            min_keyframes: min,
+        }
     }
 
     #[test]
-    fn legal_transitions_walk_pairing_to_active_and_end() {
-        let mut s = LiveSession::new("ls-1", 0);
-        assert!(s.try_transition(LiveSessionState::Ready, 1));
-        assert!(s.try_transition(LiveSessionState::Active, 2));
-        assert!(s.try_transition(LiveSessionState::Paused, 3));
-        assert!(s.try_transition(LiveSessionState::Active, 4));
-        assert!(s.try_transition(LiveSessionState::Ended, 5));
-        assert_eq!(s.state, LiveSessionState::Ended);
-        assert_eq!(s.updated_ms, 5);
+    fn a_fresh_driver_with_no_keyframes_is_not_due() {
+        let d = LiveReconstructDriver::new(enabled(4, 10_000, 2), 0);
+        assert!(!d.due(0));
+        assert!(
+            !d.due(1_000_000),
+            "no keyframes: never due, even far in time"
+        );
+        assert_eq!(d.cycles(), 0);
+        assert!(!d.cycle_in_flight());
     }
 
     #[test]
-    fn illegal_transitions_are_rejected_and_do_not_rewind() {
-        let mut s = LiveSession::new("ls-1", 0);
-        // pairing -> active is illegal (must go through ready)
-        assert!(!s.try_transition(LiveSessionState::Active, 1));
-        assert_eq!(s.state, LiveSessionState::Pairing);
-        // walk to ended, then ended -> active is illegal (never rewinds)
-        s.try_transition(LiveSessionState::Ready, 2);
-        s.try_transition(LiveSessionState::Active, 3);
-        s.try_transition(LiveSessionState::Ended, 4);
-        assert!(!s.try_transition(LiveSessionState::Active, 5));
-        assert_eq!(s.state, LiveSessionState::Ended);
+    fn a_disabled_driver_is_never_due() {
+        let mut d = LiveReconstructDriver::new(LiveReconstructConfig::default(), 0);
+        for _ in 0..100 {
+            d.note_keyframe();
+        }
+        assert!(
+            !d.due(1_000_000),
+            "the default config is disabled (opt-in), so a cycle is never due"
+        );
     }
 
     #[test]
-    fn only_an_active_session_ingests_keyframes() {
-        let mut s = LiveSession::new("ls-1", 0);
-        // pairing: dropped
-        assert!(s.ingest_keyframe(&MockDeltaProducer, None, 1).is_none());
-        assert_eq!(s.keyframes_ingested, 0);
+    fn the_keyframe_count_trigger_fires_a_cycle() {
+        let mut d = LiveReconstructDriver::new(enabled(4, i64::MAX, 2), 0);
+        for _ in 0..3 {
+            d.note_keyframe();
+        }
+        assert!(!d.due(10), "3 < every_keyframes(4): not due yet");
+        d.note_keyframe(); // 4th
+        assert!(d.due(10), "4 new keyframes hits the count trigger");
+    }
 
-        s.try_transition(LiveSessionState::Ready, 2);
-        s.try_transition(LiveSessionState::Active, 3);
+    #[test]
+    fn the_interval_trigger_fires_a_cycle_for_a_slow_capture() {
+        // A slow capture: few keyframes, but past the interval. Still needs at
+        // least one new keyframe and the minimum-keyframe floor.
+        let mut d = LiveReconstructDriver::new(enabled(30, 20_000, 2), 1_000);
+        d.note_keyframe();
+        d.note_keyframe(); // persisted = 2 == min
+        assert!(!d.due(10_000), "before the interval elapses: not due");
+        assert!(
+            d.due(21_001),
+            "past the 20s interval with >= min keyframes: due"
+        );
+    }
 
-        let (desc, delta) = s
-            .ingest_keyframe(&MockDeltaProducer, Some("spz://ls-1".into()), 4)
-            .unwrap();
-        assert_eq!(s.keyframes_ingested, 1);
-        assert_eq!(s.step, STEPS_PER_KEYFRAME);
-        assert_eq!(s.gaussian_count, GAUSSIANS_PER_KEYFRAME);
-        assert_eq!(desc.gaussian_count, GAUSSIANS_PER_KEYFRAME);
-        assert_eq!(desc.step, STEPS_PER_KEYFRAME);
-        assert_eq!(desc.url.as_deref(), Some("spz://ls-1"));
-        assert_eq!(desc.handle.as_deref(), Some("ls-1"));
-        assert_eq!(delta.gaussian_count, GAUSSIANS_PER_KEYFRAME);
-        assert_eq!(&delta.bytes[0..4], b"SPZ0");
+    #[test]
+    fn the_minimum_keyframe_floor_gates_the_first_cycle() {
+        let mut d = LiveReconstructDriver::new(enabled(4, 1_000, 8), 0);
+        for _ in 0..7 {
+            d.note_keyframe();
+        }
+        assert!(
+            !d.due(1_000_000),
+            "7 < min_keyframes(8): not due even past the interval and count"
+        );
+        d.note_keyframe(); // 8th: at the floor, and 8 >= every_keyframes(4)
+        assert!(
+            d.due(10),
+            "at the minimum-keyframe floor the cycle becomes due"
+        );
+    }
 
-        // A second keyframe grows the trainer monotonically.
-        let (desc2, _) = s.ingest_keyframe(&MockDeltaProducer, None, 5).unwrap();
-        assert_eq!(desc2.step, 2 * STEPS_PER_KEYFRAME);
-        assert_eq!(desc2.gaussian_count, 2 * GAUSSIANS_PER_KEYFRAME);
+    #[test]
+    fn an_in_flight_cycle_blocks_the_next_until_it_finishes() {
+        let mut d = LiveReconstructDriver::new(enabled(4, i64::MAX, 2), 0);
+        for _ in 0..4 {
+            d.note_keyframe();
+        }
+        assert!(d.due(10));
 
-        // Paused: ingest stops.
-        s.try_transition(LiveSessionState::Paused, 6);
-        assert!(s.ingest_keyframe(&MockDeltaProducer, None, 7).is_none());
-        assert_eq!(s.keyframes_ingested, 2);
+        let cycle = d.begin_cycle(10);
+        assert_eq!(cycle, 0);
+        assert!(d.cycle_in_flight());
+
+        // Four more keyframes arrive while the cycle runs: still not due (the
+        // skip-while-running guard coalesces, never piles up).
+        for _ in 0..4 {
+            d.note_keyframe();
+        }
+        assert!(!d.due(20), "a cycle in flight blocks the next");
+
+        // The job finishes: the next cycle (over the new keyframes) becomes due.
+        d.note_cycle_finished();
+        assert!(!d.cycle_in_flight());
+        assert!(d.due(20), "after the cycle finishes, the next is due");
+        assert_eq!(d.begin_cycle(20), 1, "the cycle index advances");
+    }
+
+    #[test]
+    fn no_new_keyframe_since_the_last_cycle_is_never_due() {
+        let mut d = LiveReconstructDriver::new(enabled(4, 1_000, 2), 0);
+        for _ in 0..4 {
+            d.note_keyframe();
+        }
+        d.begin_cycle(10);
+        d.note_cycle_finished();
+        // No keyframe arrived since the cycle; even far past the interval, a
+        // re-reconstruct of the identical set is not due.
+        assert!(
+            !d.due(1_000_000),
+            "no new keyframes since the last cycle: not due"
+        );
+        d.note_keyframe();
+        assert!(d.due(1_000_000), "one new keyframe past the interval: due");
     }
 }

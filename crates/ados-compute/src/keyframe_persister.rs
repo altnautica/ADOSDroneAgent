@@ -17,7 +17,7 @@
 //! held in memory until finalize.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ados_protocol::atlas::{Distortion, ImageEncoding, KeyframeEnvelope};
 use serde::Serialize;
@@ -161,7 +161,9 @@ fn nerf_frame(kf: &KeyframeEnvelope, file_path: String) -> NerfFrame {
 /// The scene document built from a session's accumulated frames; the scene-level
 /// intrinsics are the first frame's (a single-camera dataset is then fully
 /// described at the scene level, and a multi-camera one is corrected per frame).
-fn scene_from_frames(frames: Vec<NerfFrame>) -> NerfScene {
+/// Borrows the frames so a non-consuming snapshot can build a manifest from the
+/// growing set without taking ownership.
+fn scene_from_frames(frames: &[NerfFrame]) -> NerfScene {
     let f0 = &frames[0];
     NerfScene {
         camera_model: "OPENCV".to_string(),
@@ -175,8 +177,18 @@ fn scene_from_frames(frames: Vec<NerfFrame>) -> NerfScene {
         k2: f0.k2,
         p1: f0.p1,
         p2: f0.p2,
-        frames: frames.clone(),
+        frames: frames.to_vec(),
     }
+}
+
+/// Write a Nerfstudio manifest to `<dir>/transforms.json` atomically: a temp file
+/// in the same directory then a rename. A periodic live reconstruct may still be
+/// reading a prior snapshot's manifest when the next snapshot (or the final bag)
+/// is written; the rename makes the reader see a whole manifest, never a torn one.
+fn write_manifest_atomic(dir: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = dir.join(format!("{TRANSFORMS_FILE}.tmp"));
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, dir.join(TRANSFORMS_FILE))
 }
 
 /// Accumulates a single dataset's frame records until finalize.
@@ -253,9 +265,32 @@ impl KeyframePersister {
             return Ok(None);
         }
         std::fs::create_dir_all(&dataset_dir)?;
-        let scene = scene_from_frames(accum.frames);
+        let scene = scene_from_frames(&accum.frames);
         let json = serde_json::to_vec_pretty(&scene).map_err(std::io::Error::other)?;
-        std::fs::write(dataset_dir.join(TRANSFORMS_FILE), json)?;
+        write_manifest_atomic(&dataset_dir, &json)?;
+        Ok(Some(dataset_dir))
+    }
+
+    /// Snapshot the frames recorded so far to `<work_root>/<dataset_id>/transforms.json`
+    /// WITHOUT consuming them (the session keeps accumulating) and return the
+    /// dataset directory — the `input_path` a periodic live reconstruct reads, the
+    /// same directory the growing `images/` already sits in. The reconstruct over
+    /// this snapshot is a real, full reconstruct of the keyframes captured up to
+    /// now (NOT incremental training). Returns `None` when no frame has been
+    /// persisted yet (nothing to reconstruct). The manifest is written atomically,
+    /// so a reconstruct still reading a prior snapshot is never torn.
+    pub fn snapshot(&self, dataset_id: &str) -> std::io::Result<Option<PathBuf>> {
+        let Some(accum) = self.datasets.get(dataset_id) else {
+            return Ok(None);
+        };
+        if accum.frames.is_empty() {
+            return Ok(None);
+        }
+        let dataset_dir = self.work_root.join(dataset_id);
+        std::fs::create_dir_all(&dataset_dir)?;
+        let scene = scene_from_frames(&accum.frames);
+        let json = serde_json::to_vec_pretty(&scene).map_err(std::io::Error::other)?;
+        write_manifest_atomic(&dataset_dir, &json)?;
         Ok(Some(dataset_dir))
     }
 }
@@ -427,5 +462,38 @@ mod tests {
         // exists, so finalize returns the same directory rather than None.
         let second = p.finalize(&dataset_id_for("again")).unwrap().unwrap();
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn snapshot_writes_a_manifest_without_consuming_and_grows_with_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut p = KeyframePersister::new(dir.path());
+        let id = dataset_id_for("live");
+
+        // No frames yet: nothing to snapshot.
+        assert!(p.snapshot(&id).unwrap().is_none());
+
+        // Two keyframes, then a snapshot: a real manifest over the two frames.
+        p.persist(&keyframe("live", 0, "front", 900.0)).unwrap();
+        p.persist(&keyframe("live", 1, "front", 900.0)).unwrap();
+        let ds_dir = p.snapshot(&id).unwrap().expect("a non-empty snapshot");
+        let t = read_transforms(&ds_dir);
+        assert_eq!(t["frames"].as_array().unwrap().len(), 2);
+
+        // The snapshot did NOT consume: more keyframes accumulate, and a later
+        // snapshot reflects the grown set (the live world model updates).
+        assert_eq!(p.frame_count(&id), 2);
+        p.persist(&keyframe("live", 2, "front", 900.0)).unwrap();
+        let ds_dir = p.snapshot(&id).unwrap().expect("a grown snapshot");
+        let t = read_transforms(&ds_dir);
+        assert_eq!(t["frames"].as_array().unwrap().len(), 3);
+
+        // And the final finalize still consumes the full set + writes the manifest.
+        let ds_dir = p.finalize(&id).unwrap().expect("a non-empty finalize");
+        let t = read_transforms(&ds_dir);
+        assert_eq!(t["frames"].as_array().unwrap().len(), 3);
+        // Finalize consumed the frames; a subsequent snapshot has nothing in the
+        // accumulator (the manifest stays, but the session is done).
+        assert_eq!(p.frame_count(&id), 0);
     }
 }
