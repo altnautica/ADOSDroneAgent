@@ -8,15 +8,30 @@
 //! verbatim. This is the Contract-E sidecar pattern (mirrors the ground-station
 //! uplink sidecar): the producer owns its domain state, the relay owns the wire.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
 use crate::engine::ComputeHeartbeat;
 use crate::ComputeRole;
 
-/// Where the compute-node writes its heartbeat sidecar.
+/// The compute-node heartbeat sidecar's default absolute path. The cross-process
+/// contract anchor (`ados-cloud` folds this file onto the cloud heartbeat); the
+/// live path is resolved through [`compute_heartbeat_path`] so `ADOS_RUN_DIR`
+/// redirects it on a dev / macOS run.
 pub const COMPUTE_HEARTBEAT_SIDECAR: &str = "/run/ados/compute-heartbeat.json";
+
+/// The heartbeat sidecar filename, joined onto the resolved run dir.
+const COMPUTE_HEARTBEAT_FILE: &str = "compute-heartbeat.json";
+
+/// Resolve the heartbeat sidecar path, honouring the `ADOS_RUN_DIR` override
+/// (default `/run/ados`) the sibling daemons resolve their run-dir sidecars
+/// under. Byte-identical to [`COMPUTE_HEARTBEAT_SIDECAR`] when the override is
+/// unset, so a board with no override is unchanged.
+pub fn compute_heartbeat_path() -> PathBuf {
+    let dir = std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string());
+    Path::new(&dir).join(COMPUTE_HEARTBEAT_FILE)
+}
 
 /// One slave node's capacity, in the camelCase shape the GCS expects under
 /// `cmd_droneStatus.computeClusterSlaves`.
@@ -87,10 +102,10 @@ fn write_atomic(path: &Path, body: &[u8]) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
-/// Serialize + write the compute heartbeat sidecar to its canonical path,
-/// stamped with the local write time `now_ms`.
+/// Serialize + write the compute heartbeat sidecar to its resolved path
+/// (`ADOS_RUN_DIR`-aware), stamped with the local write time `now_ms`.
 pub fn write_compute_heartbeat(hb: &ComputeHeartbeat, now_ms: i64) -> std::io::Result<()> {
-    write_compute_heartbeat_to(Path::new(COMPUTE_HEARTBEAT_SIDECAR), hb, now_ms)
+    write_compute_heartbeat_to(&compute_heartbeat_path(), hb, now_ms)
 }
 
 /// Write to an explicit path (for tests).
@@ -145,6 +160,29 @@ mod tests {
         assert_eq!(slave["accelerators"][0], "cuda:0");
         assert_eq!(slave["workersIdle"], 2);
         assert_eq!(slave["queueDepth"], 1);
+    }
+
+    #[test]
+    fn compute_heartbeat_path_defaults_and_honours_run_dir_override() {
+        // The only env-mutating test in this crate, so the set/remove is safe
+        // under the parallel runner. SAFETY: single-threaded mutation here.
+        unsafe {
+            std::env::remove_var("ADOS_RUN_DIR");
+        }
+        assert_eq!(
+            compute_heartbeat_path(),
+            Path::new(COMPUTE_HEARTBEAT_SIDECAR)
+        );
+        unsafe {
+            std::env::set_var("ADOS_RUN_DIR", "/tmp/ados-compute-test-run");
+        }
+        assert_eq!(
+            compute_heartbeat_path(),
+            Path::new("/tmp/ados-compute-test-run/compute-heartbeat.json")
+        );
+        unsafe {
+            std::env::remove_var("ADOS_RUN_DIR");
+        }
     }
 
     #[test]

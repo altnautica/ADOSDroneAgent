@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# =============================================================================
+# run-compute-node-macos.sh — run a workstation/compute node on a dev laptop.
+#
+# Builds and launches the two daemons a workstation node needs locally — the
+# native HTTP control surface (ados-control) and the compute engine
+# (ados-compute) — pointed at a self-contained dev home under $HOME/.ados so the
+# default /run/ados and /etc/ados system paths are never touched. Both daemons
+# share the same run dir, config, and pairing file, so the LAN-paired GCS reaches
+# the control surface on :8080 and the compute card reads the heartbeat sidecar
+# local-first.
+#
+# Usage:
+#   scripts/dev/run-compute-node-macos.sh
+#
+# Overridable via the environment (sensible defaults seeded otherwise):
+#   ADOS_HOME              dev home dir            (default $HOME/.ados)
+#   ADOS_COMPUTE_NODE_ID   this node's id          (default mac-<short hostname>)
+#
+# No machine name or user path is baked in: the device id and node name are
+# derived at runtime from `hostname`, and every path hangs off $HOME.
+# =============================================================================
+set -uo pipefail
+
+# --- Locate the repo + the cargo workspace (the crates dir). -----------------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+CRATES_DIR="$REPO_ROOT/crates"
+TARGET_DIR="${CARGO_TARGET_DIR:-$CRATES_DIR/target}/debug"
+
+# --- Dev home + run/compute dirs (never the system /run//etc paths). ---------
+ADOS_HOME="${ADOS_HOME:-$HOME/.ados}"
+mkdir -p "$ADOS_HOME/run" "$ADOS_HOME/compute"
+
+# --- Derive a stable, non-personal node identity from the live hostname. -----
+HOSTNAME_SHORT="$(hostname -s 2>/dev/null || echo compute-node)"
+HOSTNAME_FULL="$(hostname 2>/dev/null || echo compute-node)"
+SLUG="$(printf '%s' "$HOSTNAME_SHORT" | tr '[:upper:] ' '[:lower:]-' | tr -cd 'a-z0-9-')"
+[ -n "$SLUG" ] || SLUG="node"
+DEVICE_ID="mac-${SLUG}"
+
+# --- Seed a workstation config if absent (atlas on). -------------------------
+CONFIG_PATH="$ADOS_HOME/config.yaml"
+if [ ! -f "$CONFIG_PATH" ]; then
+  echo "seeding $CONFIG_PATH (workstation profile, atlas enabled)"
+  cat > "$CONFIG_PATH" <<YAML
+agent:
+  profile: workstation
+  device_id: ${DEVICE_ID}
+  name: ${HOSTNAME_FULL}
+atlas:
+  enabled: true
+YAML
+fi
+
+# --- Build both daemons (hard-fail: a broken build must stop here). ----------
+echo "building ados-control + ados-compute ..."
+( cd "$CRATES_DIR" && cargo build -p ados-control -p ados-compute )
+
+CONTROL_BIN="$TARGET_DIR/ados-control"
+COMPUTE_BIN="$TARGET_DIR/ados-compute"
+for bin in "$CONTROL_BIN" "$COMPUTE_BIN"; do
+  if [ ! -x "$bin" ]; then
+    echo "error: built binary not found: $bin" >&2
+    exit 1
+  fi
+done
+
+# --- Shared runtime environment for both daemons. ----------------------------
+# ados-control reads ADOS_CONFIG; ados-compute reads ADOS_CONFIG_YAML — point
+# both at the same file. The pairing file is shared so a claim through the
+# control surface authorises the compute job API too.
+export ADOS_RUN_DIR="$ADOS_HOME/run"
+export ADOS_CONFIG="$CONFIG_PATH"
+export ADOS_CONFIG_YAML="$CONFIG_PATH"
+export ADOS_PAIRING_JSON="$ADOS_HOME/pairing.json"
+export ADOS_CONTROL_SOCKET="$ADOS_HOME/run/control.sock"
+export ADOS_CONTROL_PORT=8080
+export ADOS_COMPUTE_DB="$ADOS_HOME/compute/jobs.db"
+export ADOS_COMPUTE_BIND=0.0.0.0:8092
+export ADOS_ATLAS_ENABLED=1
+export ADOS_COMPUTE_NODE_ID="${ADOS_COMPUTE_NODE_ID:-${DEVICE_ID}}"
+
+# --- Launch both, tear both down on exit/signal. -----------------------------
+CONTROL_PID=""
+COMPUTE_PID=""
+cleanup() {
+  trap - INT TERM EXIT
+  echo
+  echo "stopping compute node ..."
+  [ -n "$CONTROL_PID" ] && kill "$CONTROL_PID" 2>/dev/null || true
+  [ -n "$COMPUTE_PID" ] && kill "$COMPUTE_PID" 2>/dev/null || true
+  wait 2>/dev/null || true
+}
+trap cleanup INT TERM EXIT
+
+echo "starting ados-control on :$ADOS_CONTROL_PORT (run dir $ADOS_RUN_DIR)"
+"$CONTROL_BIN" &
+CONTROL_PID=$!
+
+echo "starting ados-compute on $ADOS_COMPUTE_BIND (node $ADOS_COMPUTE_NODE_ID)"
+"$COMPUTE_BIN" &
+COMPUTE_PID=$!
+
+echo "compute node up — control :$ADOS_CONTROL_PORT, compute :8092. Ctrl-C to stop."
+# Block until both exit or a signal fires the trap.
+wait "$CONTROL_PID" 2>/dev/null || true
+wait "$COMPUTE_PID" 2>/dev/null || true

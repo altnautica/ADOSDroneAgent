@@ -45,8 +45,8 @@ pub use client::{ClientError, ComputeClient};
 pub use cluster::Cluster;
 pub use engine::{ComputeHeartbeat, Engine};
 pub use heartbeat_sidecar::{
-    write_compute_heartbeat, write_compute_heartbeat_to, ComputeHeartbeatSidecar, SlaveEntry,
-    COMPUTE_HEARTBEAT_SIDECAR,
+    compute_heartbeat_path, write_compute_heartbeat, write_compute_heartbeat_to,
+    ComputeHeartbeatSidecar, SlaveEntry, COMPUTE_HEARTBEAT_SIDECAR,
 };
 pub use ingest::AtlasIngest;
 pub use mdns::{advertise_compute, resolve_compute, ComputeAdvert};

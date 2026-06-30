@@ -21,16 +21,20 @@ use serde_json::Value;
 
 use crate::routes::detail;
 
-/// The compute daemon's heartbeat sidecar (matches `COMPUTE_HEARTBEAT_SIDECAR`
-/// in `ados-compute`).
-const SIDECAR: &str = "/run/ados/compute-heartbeat.json";
+/// The compute daemon's heartbeat sidecar filename under the run dir (matches
+/// `compute_heartbeat_path()` in `ados-compute`).
+const SIDECAR_FILE: &str = "compute-heartbeat.json";
 
 /// How stale the sidecar may be before the route treats it as absent. The
 /// daemon rewrites it every ~5 s; beyond this window it is no longer reporting.
 const STALE_AFTER: Duration = Duration::from_secs(20);
 
+/// Resolve the compute heartbeat sidecar path, honouring the `ADOS_RUN_DIR`
+/// override (default `/run/ados`) the daemon resolves it under, so the dev /
+/// macOS run path finds the sidecar the local compute daemon writes.
 fn sidecar_path() -> PathBuf {
-    PathBuf::from(SIDECAR)
+    let dir = std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string());
+    PathBuf::from(dir).join(SIDECAR_FILE)
 }
 
 /// `GET /api/compute/status` → the compute node's latest cluster status sidecar.
