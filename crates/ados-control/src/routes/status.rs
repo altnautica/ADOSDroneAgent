@@ -87,12 +87,26 @@ pub async fn get_status(State(state): State<AppState>) -> Json<Value> {
         .collect();
 
     // Health from the store's most-recent hardware snapshots (the collector
-    // samples CPU/memory/disk/temperature continuously); an unreachable store
-    // degrades to the zero-valued SystemHealth default. Board from the sidecar the
-    // detector persists; an absent file degrades to `{}`.
-    let signals = state.logd.latest_hw_signals().await;
+    // samples CPU/memory/disk/temperature continuously). On a workstation / macOS
+    // host the store's collector is not running, so the snapshot is absent — fall
+    // back to a direct host read (`hw_local`) so the health block carries real
+    // CPU/memory/disk instead of the zero-valued SystemHealth default. Board from
+    // the sidecar the detector persists; when that file is absent (no detector on
+    // a workstation host) the board is derived from the host instead of `{}`.
+    let signals = match state.logd.latest_hw_signals().await {
+        Some(s) => Some(s),
+        None => {
+            let local = crate::hw_local::collect_signals();
+            (!local.is_empty()).then_some(local)
+        }
+    };
     let health = derive_health(signals.as_ref());
     let board = read_board(&state.board_path);
+    let board = if board.as_object().map(Map::is_empty).unwrap_or(false) {
+        crate::hw_local::host_board()
+    } else {
+        board
+    };
 
     // The FC-liveness detail the GCS lane reads (camelCase, like the heartbeat):
     // transportOpen + mavlinkAlive split the truth so a broken-but-open link

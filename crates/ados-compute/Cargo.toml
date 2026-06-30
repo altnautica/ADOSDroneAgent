@@ -59,6 +59,10 @@ rerun = { version = "=0.33.1", default-features = false, features = ["sdk"] }
 # from the browser on an HTTP origin (the proxy is HTTPS-only), so this listener
 # needs the same permissive CORS layer ados-control serves on `:8080`.
 tower-http = { workspace = true }
+# Total/unified-memory read for the macOS host-GPU block (Apple Silicon shares
+# system memory with the GPU). Cross-platform; the GPU identity + utilisation are
+# macOS-cfg `system_profiler`/`powermetrics` calls in `gpu.rs`.
+sysinfo = { workspace = true }
 
 [dev-dependencies]
 # `ServiceExt::oneshot` drives the router in tests without binding a port.

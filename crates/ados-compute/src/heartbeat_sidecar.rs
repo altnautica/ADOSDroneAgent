@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::engine::ComputeHeartbeat;
-use crate::ComputeRole;
+use crate::{ComputeGpu, ComputeRole};
 
 /// The compute-node heartbeat sidecar's default absolute path. The cross-process
 /// contract anchor (`ados-cloud` folds this file onto the cloud heartbeat); the
@@ -58,6 +58,10 @@ pub struct ComputeHeartbeatSidecar {
     pub compute_workers_idle: u32,
     pub compute_cluster_aggregate_workers_idle: u32,
     pub compute_cluster_slaves: Vec<SlaveEntry>,
+    /// The host GPU block (identity + live utilisation). Serialized under `gpu`;
+    /// its own snake_case keys (`unified_memory_mb`, `utilization_pct`) are the
+    /// wire shape the GCS compute card reads. All-`null` on a non-macOS node.
+    pub gpu: ComputeGpu,
     /// Epoch ms this sidecar was written, so the relay can reject a stale file
     /// (the producer died/hung but the tmpfs file persists). NOT a heartbeat
     /// field — the relay consumes it for the freshness gate, never folds it.
@@ -65,9 +69,10 @@ pub struct ComputeHeartbeatSidecar {
 }
 
 impl ComputeHeartbeatSidecar {
-    /// Map the engine's heartbeat to the wire sidecar shape. `now_ms` is the
-    /// local epoch-ms write time, stamped so the relay can age-gate the file.
-    pub fn from_heartbeat(hb: &ComputeHeartbeat, now_ms: i64) -> Self {
+    /// Map the engine's heartbeat + a host-GPU sample to the wire sidecar shape.
+    /// `now_ms` is the local epoch-ms write time, stamped so the relay can
+    /// age-gate the file.
+    pub fn from_heartbeat(hb: &ComputeHeartbeat, gpu: ComputeGpu, now_ms: i64) -> Self {
         Self {
             generated_at_ms: now_ms,
             compute_role: hb.role,
@@ -87,6 +92,7 @@ impl ComputeHeartbeatSidecar {
                     queue_depth: s.queue_depth,
                 })
                 .collect(),
+            gpu,
         }
     }
 }
@@ -103,18 +109,24 @@ fn write_atomic(path: &Path, body: &[u8]) -> std::io::Result<()> {
 }
 
 /// Serialize + write the compute heartbeat sidecar to its resolved path
-/// (`ADOS_RUN_DIR`-aware), stamped with the local write time `now_ms`.
-pub fn write_compute_heartbeat(hb: &ComputeHeartbeat, now_ms: i64) -> std::io::Result<()> {
-    write_compute_heartbeat_to(&compute_heartbeat_path(), hb, now_ms)
+/// (`ADOS_RUN_DIR`-aware), stamped with the local write time `now_ms`. `gpu` is
+/// the host-GPU sample folded onto the heartbeat (all-`null` off macOS).
+pub fn write_compute_heartbeat(
+    hb: &ComputeHeartbeat,
+    gpu: ComputeGpu,
+    now_ms: i64,
+) -> std::io::Result<()> {
+    write_compute_heartbeat_to(&compute_heartbeat_path(), hb, gpu, now_ms)
 }
 
 /// Write to an explicit path (for tests).
 pub fn write_compute_heartbeat_to(
     path: &Path,
     hb: &ComputeHeartbeat,
+    gpu: ComputeGpu,
     now_ms: i64,
 ) -> std::io::Result<()> {
-    let sidecar = ComputeHeartbeatSidecar::from_heartbeat(hb, now_ms);
+    let sidecar = ComputeHeartbeatSidecar::from_heartbeat(hb, gpu, now_ms);
     let body = serde_json::to_vec(&sidecar)?;
     write_atomic(path, &body)
 }
@@ -144,10 +156,24 @@ mod tests {
         }
     }
 
+    fn sample_gpu() -> ComputeGpu {
+        ComputeGpu {
+            name: Some("Apple M1 Pro".into()),
+            cores: Some(16),
+            unified_memory_mb: Some(32768),
+            metal: Some("Metal 3".into()),
+            utilization_pct: Some(12.5),
+        }
+    }
+
     #[test]
     fn the_sidecar_uses_the_camelcase_cmd_drone_status_field_names() {
-        let v = serde_json::to_value(ComputeHeartbeatSidecar::from_heartbeat(&heartbeat(), 1700))
-            .unwrap();
+        let v = serde_json::to_value(ComputeHeartbeatSidecar::from_heartbeat(
+            &heartbeat(),
+            sample_gpu(),
+            1700,
+        ))
+        .unwrap();
         assert_eq!(v["computeRole"], "master");
         assert_eq!(v["computeClusterMasterId"], "node-master");
         assert_eq!(v["computeQueueDepth"], 3);
@@ -160,6 +186,13 @@ mod tests {
         assert_eq!(slave["accelerators"][0], "cuda:0");
         assert_eq!(slave["workersIdle"], 2);
         assert_eq!(slave["queueDepth"], 1);
+        // The gpu block rides under `gpu` with its own snake_case wire keys (it is
+        // NOT camelCased by the sidecar's rename — nested types keep their own).
+        assert_eq!(v["gpu"]["name"], "Apple M1 Pro");
+        assert_eq!(v["gpu"]["cores"], 16);
+        assert_eq!(v["gpu"]["unified_memory_mb"], 32768);
+        assert_eq!(v["gpu"]["metal"], "Metal 3");
+        assert_eq!(v["gpu"]["utilization_pct"], 12.5);
     }
 
     #[test]
@@ -190,11 +223,12 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ados-compute-hb-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("compute-heartbeat.json");
-        write_compute_heartbeat_to(&path, &heartbeat(), 1700).unwrap();
+        write_compute_heartbeat_to(&path, &heartbeat(), sample_gpu(), 1700).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(v["computeRole"], "master");
         assert_eq!(v["computeWorkersIdle"], 4);
+        assert_eq!(v["gpu"]["cores"], 16);
         assert_eq!(v["generatedAtMs"], 1700);
         // No leftover .tmp sibling.
         assert!(!dir.join("compute-heartbeat.json.tmp").exists());

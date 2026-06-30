@@ -15,6 +15,7 @@
 
 pub mod auth;
 pub mod config;
+pub mod hw_local;
 pub mod ipc;
 pub mod pairing_store;
 pub mod profile;

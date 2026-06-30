@@ -21,10 +21,19 @@ const BYTES_PER_MB: f64 = 1024.0 * 1024.0;
 const BYTES_PER_GB: f64 = 1024.0 * 1024.0 * 1024.0;
 
 /// `GET /api/system`. Guaranteed 200: degrades to the null shape rather than a
-/// 500 when the store has no usable snapshot.
+/// 500 when neither the store nor the host read yields a usable snapshot.
+///
+/// The store's merged snapshot is the source on an SBC (its collector runs). When
+/// the store is unreachable — the workstation / macOS path, where `ados-logd` is
+/// not the running collector — it falls back to a direct host read (`hw_local`)
+/// shaped as the same signal map, so the surface reports real numbers instead of
+/// the all-zero default. Only when both are empty does it serve the degraded shape.
 pub async fn get_system_resources(State(state): State<AppState>) -> Json<Value> {
-    let signals = state.logd.latest_hw_signals().await;
-    match signals.as_ref().and_then(derive_system) {
+    let signals = match state.logd.latest_hw_signals().await {
+        Some(s) => s,
+        None => crate::hw_local::collect_signals(),
+    };
+    match derive_system(&signals) {
         Some(body) => Json(body),
         None => Json(degraded()),
     }
@@ -130,8 +139,9 @@ fn degraded() -> Value {
 
 /// The logical CPU count, matching the Python `os.cpu_count()`: the total online
 /// logical CPUs (NOT affinity-limited), read by counting `processor` records in
-/// `/proc/cpuinfo`. Returns `Value::Null` when the count is indeterminate, the
-/// same null `os.cpu_count()` can return.
+/// `/proc/cpuinfo`. On a host with no `/proc/cpuinfo` (macOS / a workstation) it
+/// falls back to the host's online logical core count; `Value::Null` only when
+/// the count is genuinely indeterminate, the same null `os.cpu_count()` can return.
 fn cpu_count() -> Value {
     match std::fs::read_to_string("/proc/cpuinfo") {
         Ok(text) => {
@@ -139,10 +149,10 @@ fn cpu_count() -> Value {
             if n > 0 {
                 json!(n)
             } else {
-                Value::Null
+                crate::hw_local::cpu_count_fallback()
             }
         }
-        Err(_) => Value::Null,
+        Err(_) => crate::hw_local::cpu_count_fallback(),
     }
 }
 

@@ -448,10 +448,13 @@ async fn retention_loop(state: Arc<Mutex<Engine>>, retention_ms: i64) {
     }
 }
 
-/// Every 5 s, snapshot the engine heartbeat and write it to the sidecar the
-/// cloud relay folds into the agent heartbeat. Best-effort: a store or write
-/// error is logged, never fatal (the relay treats an absent/stale sidecar as
-/// "no compute state", which is the honest reading).
+/// Every 5 s, snapshot the engine heartbeat + the host-GPU block and write them
+/// to the sidecar the cloud relay folds into the agent heartbeat. The GPU read
+/// shells out to `system_profiler`/`powermetrics`, so it runs on a blocking
+/// thread to keep the async runtime responsive; a join failure degrades to an
+/// all-null GPU block. Best-effort: a store or write error is logged, never fatal
+/// (the relay treats an absent/stale sidecar as "no compute state", the honest
+/// reading).
 async fn heartbeat_loop(state: Arc<Mutex<Engine>>) {
     loop {
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -461,7 +464,10 @@ async fn heartbeat_loop(state: Arc<Mutex<Engine>>) {
         };
         match hb {
             Ok(hb) => {
-                if let Err(e) = write_compute_heartbeat(&hb, now_ms()) {
+                let gpu = tokio::task::spawn_blocking(ados_compute::gpu::sample)
+                    .await
+                    .unwrap_or_default();
+                if let Err(e) = write_compute_heartbeat(&hb, gpu, now_ms()) {
                     tracing::warn!(error = %e, "compute heartbeat sidecar write failed");
                 }
             }

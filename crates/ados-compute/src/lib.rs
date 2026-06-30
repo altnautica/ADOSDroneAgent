@@ -21,6 +21,9 @@ mod backends;
 mod client;
 mod cluster;
 mod engine;
+/// Host-GPU reporting for the workstation profile (identity + live utilisation).
+/// Public so the daemon's heartbeat loop can sample it: `ados_compute::gpu::sample`.
+pub mod gpu;
 mod heartbeat_sidecar;
 mod ingest;
 mod keyframe_persister;
@@ -72,8 +75,8 @@ pub use store::{Dataset, JobRecord, JobStore, Output};
 
 // Re-export the shared wire contract so callers get one import surface.
 pub use ados_protocol::compute::{
-    ClusterDescriptor, ComputeJobKind, ComputeJobRequest, ComputeJobState, ComputeJobStatus,
-    ComputeRole, SlaveDescriptor,
+    ClusterDescriptor, ComputeGpu, ComputeJobKind, ComputeJobRequest, ComputeJobState,
+    ComputeJobStatus, ComputeRole, SlaveDescriptor,
 };
 
 /// Errors from the compute engine.

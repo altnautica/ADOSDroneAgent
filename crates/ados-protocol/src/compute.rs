@@ -81,6 +81,30 @@ pub struct ComputeJobStatus {
     pub error: Option<String>,
 }
 
+/// The host GPU block carried on a compute node's status: identity (name, core
+/// count, Metal support, unified-memory size) plus a live utilisation sample.
+///
+/// Every field is optional and honest (Rule 44): an unknown field is `null`,
+/// never fabricated. On a non-macOS host (or when a probe tool is missing / a
+/// `powermetrics` sample needs sudo it does not have) the relevant field is
+/// `null`, so the whole block degrades to all-`null` rather than reporting a
+/// guessed value. The field names are the snake_case wire keys the GCS compute
+/// card reads (`unified_memory_mb`, `utilization_pct`).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct ComputeGpu {
+    /// GPU model name, e.g. `Apple M1 Pro`.
+    pub name: Option<String>,
+    /// GPU core count.
+    pub cores: Option<u32>,
+    /// Unified / total graphics memory in MB (on Apple Silicon the shared system
+    /// memory the GPU draws from).
+    pub unified_memory_mb: Option<u64>,
+    /// Metal support label, e.g. `Metal 3`.
+    pub metal: Option<String>,
+    /// Live GPU utilisation percentage (`0.0..=100.0`); `null` when not sampleable.
+    pub utilization_pct: Option<f32>,
+}
+
 /// One slave node's capacity, advertised to the master.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SlaveDescriptor {
@@ -146,6 +170,40 @@ mod tests {
         let back = ComputeJobRequest::from_msgpack(&req.to_msgpack().unwrap()).unwrap();
         assert_eq!(req, back);
         assert_eq!(back.kind, ComputeJobKind::PerceptionOffload);
+    }
+
+    #[test]
+    fn gpu_default_is_all_null_with_snake_case_keys() {
+        let v = serde_json::to_value(ComputeGpu::default()).unwrap();
+        for key in [
+            "name",
+            "cores",
+            "unified_memory_mb",
+            "metal",
+            "utilization_pct",
+        ] {
+            assert!(v.get(key).is_some(), "{key} key present");
+            assert!(v[key].is_null(), "{key} is null by default");
+        }
+    }
+
+    #[test]
+    fn gpu_round_trips_a_populated_block() {
+        let gpu = ComputeGpu {
+            name: Some("Apple M1 Pro".into()),
+            cores: Some(16),
+            unified_memory_mb: Some(32768),
+            metal: Some("Metal 3".into()),
+            utilization_pct: Some(12.5),
+        };
+        let v = serde_json::to_value(&gpu).unwrap();
+        assert_eq!(v["name"], "Apple M1 Pro");
+        assert_eq!(v["cores"], 16);
+        assert_eq!(v["unified_memory_mb"], 32768);
+        assert_eq!(v["metal"], "Metal 3");
+        assert_eq!(v["utilization_pct"], 12.5);
+        let back: ComputeGpu = serde_json::from_value(v).unwrap();
+        assert_eq!(back, gpu);
     }
 
     #[test]

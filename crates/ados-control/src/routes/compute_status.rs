@@ -10,10 +10,16 @@
 //!
 //! Served with the front's native auth posture (key-gated when the agent is
 //! paired), the same as the plugin-state read.
+//!
+//! The served body includes the host `gpu` block (identity + live utilisation)
+//! that the compute daemon writes into the sidecar; the route guarantees the key
+//! is present (an all-`null` block when the producer supplied none) so the GCS
+//! compute card can always read `gpu.*`.
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
+use ados_protocol::compute::ComputeGpu;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -58,11 +64,18 @@ fn read_compute_status(path: &std::path::Path, now: SystemTime) -> Response {
     let Ok(text) = std::fs::read_to_string(path) else {
         return not_found();
     };
-    let Ok(doc) = serde_json::from_str::<Value>(&text) else {
+    let Ok(mut doc) = serde_json::from_str::<Value>(&text) else {
         return not_found();
     };
-    if !doc.is_object() {
+    let Some(obj) = doc.as_object_mut() else {
         return not_found();
+    };
+    // Guarantee the host gpu block is present so the GCS compute card can always
+    // read `gpu.*` (all-null when the producing node supplied none). The macOS
+    // workstation daemon writes a populated block; this only fills an absent one.
+    if !obj.contains_key("gpu") {
+        let null_gpu = serde_json::to_value(ComputeGpu::default()).unwrap_or(Value::Null);
+        obj.insert("gpu".to_string(), null_gpu);
     }
     (StatusCode::OK, Json(doc)).into_response()
 }
@@ -88,6 +101,8 @@ mod tests {
 
     #[tokio::test]
     async fn serves_a_fresh_sidecar_unchanged() {
+        // A sidecar that already carries a gpu block passes through verbatim (the
+        // guarantee only fills an absent gpu, so a present one is untouched).
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("compute-heartbeat.json");
         let body = json!({
@@ -98,12 +113,41 @@ mod tests {
             "computeWorkersIdle": 3,
             "computeClusterAggregateWorkersIdle": 3,
             "computeClusterSlaves": [],
+            "gpu": {
+                "name": "Apple M1 Pro",
+                "cores": 16,
+                "unified_memory_mb": 32768,
+                "metal": "Metal 3",
+                "utilization_pct": 12.5,
+            },
             "generatedAtMs": 1234,
         });
         std::fs::write(&path, serde_json::to_string(&body).unwrap()).unwrap();
         let resp = read_compute_status(&path, SystemTime::now());
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(body_json(resp).await, body);
+    }
+
+    #[tokio::test]
+    async fn injects_an_all_null_gpu_block_when_absent() {
+        // A producer that wrote no gpu block still serves a `gpu` key (all-null) so
+        // the GCS can always read `gpu.*`.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("compute-heartbeat.json");
+        std::fs::write(&path, r#"{"computeRole":"master"}"#).unwrap();
+        let resp = read_compute_status(&path, SystemTime::now());
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert!(body["gpu"].is_object());
+        for key in [
+            "name",
+            "cores",
+            "unified_memory_mb",
+            "metal",
+            "utilization_pct",
+        ] {
+            assert!(body["gpu"][key].is_null(), "{key} is null");
+        }
     }
 
     #[tokio::test]
