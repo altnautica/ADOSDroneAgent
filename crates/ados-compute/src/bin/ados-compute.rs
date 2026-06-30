@@ -52,6 +52,7 @@ use ados_compute::{
 };
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex};
+use tower_http::cors::CorsLayer;
 
 /// Canonical agent config file the atlas gate reads (the air-side `ados-atlas`
 /// service reads the same path + key).
@@ -338,6 +339,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "atlas enabled: world-model event receiver mounted at POST /api/atlas/event"
         );
     }
+
+    // Permissive CORS so the GCS can read this listener cross-origin from the
+    // browser on an HTTP origin (the compute-client fetches `:8092` directly on
+    // http; the proxy is HTTPS-only). Matches ados-control's `:8080`. Outermost
+    // layer: OPTIONS preflights are answered ahead of the per-route pairing gate.
+    let router = router.layer(CorsLayer::permissive());
 
     let listener = TcpListener::bind(&bind).await?;
     tracing::info!(bind = %bind, workers, "compute job API listening (pairing-gated)");

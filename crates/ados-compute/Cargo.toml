@@ -55,6 +55,10 @@ mdns-sd = "0.13"
 # (egui/wgpu), analytics, the dataframe/mcap importers, and the gRPC server. The
 # only added tree is pure-Rust Arrow, no system or GPU dependency.
 rerun = { version = "=0.33.1", default-features = false, features = ["sdk"] }
+# CORS for the LAN job API + artifact server: the GCS fetches `:8092` directly
+# from the browser on an HTTP origin (the proxy is HTTPS-only), so this listener
+# needs the same permissive CORS layer ados-control serves on `:8080`.
+tower-http = { workspace = true }
 
 [dev-dependencies]
 # `ServiceExt::oneshot` drives the router in tests without binding a port.
