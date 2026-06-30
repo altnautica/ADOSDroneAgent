@@ -2,7 +2,13 @@
 //! pairing beacon. Each loop gates on the paired state and the configured
 //! convex URL, and authenticates with the `X-ADOS-Key` header. Ports the loop
 //! bodies in `src/ados/services/cloud/`.
+//!
+//! [`atlas_forwarder`] is the odd one out — it does not POST to Convex. It
+//! subscribes to the local atlas bus and forwards world-model events to a
+//! compute node over the bearer ladder (LAN -> WFB relay -> cloud), local-first,
+//! and is INERT unless Atlas is enabled.
 
+pub mod atlas_forwarder;
 pub mod beacon;
 pub mod command_poll;
 pub mod enrichment;

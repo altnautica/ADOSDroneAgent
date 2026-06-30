@@ -206,6 +206,17 @@ pub struct VideoSection {
     pub wfb: WfbSection,
 }
 
+/// The `atlas:` section. Only the enable gate is read here; the cameras /
+/// selection / intrinsics are the capture service's concern (`ados-atlas`). The
+/// Atlas forwarder reads this gate so a non-Atlas agent does no Atlas work.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AtlasSection {
+    /// Whether Atlas world-model capture + forwarding is enabled. Mirrors the
+    /// `atlas.enabled` key the capture service reads.
+    #[serde(default)]
+    pub enabled: bool,
+}
+
 /// The slice of the agent config the cloud relay reads. Every field defaults so
 /// a missing section never fails the load.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -220,6 +231,20 @@ pub struct CloudConfig {
     pub pairing: PairingSection,
     #[serde(default)]
     pub video: VideoSection,
+    #[serde(default)]
+    pub atlas: AtlasSection,
+}
+
+/// The `ADOS_ATLAS_ENABLED` env override (truthy = `1` / `true` / `yes` / `on`,
+/// case-insensitive). Lets a bench / a unit flip Atlas on or off without editing
+/// the yaml, matching the env-override convention the other crates use.
+fn atlas_env_override() -> Option<bool> {
+    std::env::var("ADOS_ATLAS_ENABLED").ok().map(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
 }
 
 impl CloudConfig {
@@ -265,6 +290,14 @@ impl CloudConfig {
     /// operator-triggered request, this is the full gate on any export.
     pub fn cloud_logs_enabled(&self) -> bool {
         self.server.cloud_logs_enabled
+    }
+
+    /// Whether the Atlas world-model forwarder should run. The
+    /// `ADOS_ATLAS_ENABLED` env var, when set, wins over the yaml `atlas.enabled`
+    /// key; absent both, Atlas is OFF so a non-Atlas agent does no Atlas work
+    /// (its loop early-returns and the process is byte-unchanged).
+    pub fn atlas_enabled(&self) -> bool {
+        atlas_env_override().unwrap_or(self.atlas.enabled)
     }
 }
 
@@ -356,6 +389,44 @@ server:
         let cfg = CloudConfig::load_from(&path);
         assert!(cfg.cloud_logs_enabled());
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn atlas_enabled_reads_the_yaml_gate_and_the_env_override() {
+        // The env var is process-global; keep every assertion in one test so the
+        // set/remove is serial and no parallel test sees a stale override.
+        let prev = std::env::var("ADOS_ATLAS_ENABLED").ok();
+        std::env::remove_var("ADOS_ATLAS_ENABLED");
+
+        // Absent atlas section → off.
+        assert!(!CloudConfig::default().atlas_enabled());
+
+        // yaml `atlas.enabled: true` → on.
+        let on = temp_yaml("atlas-on", "atlas:\n  enabled: true\n");
+        let cfg_on = CloudConfig::load_from(&on);
+        assert!(cfg_on.atlas_enabled());
+        let _ = std::fs::remove_file(&on);
+
+        // yaml `atlas.enabled: false` → off.
+        let off = temp_yaml("atlas-off", "atlas:\n  enabled: false\n");
+        let cfg_off = CloudConfig::load_from(&off);
+        assert!(!cfg_off.atlas_enabled());
+        let _ = std::fs::remove_file(&off);
+
+        // The env override wins over the yaml in both directions.
+        std::env::set_var("ADOS_ATLAS_ENABLED", "1");
+        assert!(cfg_off.atlas_enabled(), "env=1 forces on over yaml=false");
+        std::env::set_var("ADOS_ATLAS_ENABLED", "false");
+        assert!(
+            !cfg_on.atlas_enabled(),
+            "env=false forces off over yaml=true"
+        );
+
+        // Restore the prior environment for the rest of the suite.
+        match prev {
+            Some(v) => std::env::set_var("ADOS_ATLAS_ENABLED", v),
+            None => std::env::remove_var("ADOS_ATLAS_ENABLED"),
+        }
     }
 
     #[test]

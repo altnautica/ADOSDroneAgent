@@ -192,6 +192,13 @@ async fn run_relay_or_receiver(
     let snap = mesh::MeshSnapshot::new(role_label, "bat0", "802.11s");
     tokio::spawn(mesh::run_poll_loop(snap, Some(ingest.clone())));
 
+    // Atlas world-model aux-lane relay (off the WFB aux stream onto the LAN). Inert
+    // unless this node is the relay role AND `ground_station.atlas.enabled` with a
+    // configured compute base URL. It shares the role shutdown `Notify`, so a
+    // SIGTERM/SIGINT tears it down with the rest of the relay. A non-Atlas ground
+    // station spawns nothing here and is byte-unchanged.
+    let atlas_task = maybe_spawn_atlas_relay(is_relay, shutdown.clone());
+
     let role_task = {
         let shutdown = shutdown.clone();
         let ingest = Some(ingest.clone());
@@ -214,8 +221,56 @@ async fn run_relay_or_receiver(
             shutdown.notify_waiters();
         }
     }
-    // Give the loop a moment to flush its down-state on signal-triggered exit.
+    // Give the loop a moment to flush its down-state on signal-triggered exit. The
+    // Atlas relay self-stops on the shared `Notify`; the abort is a no-op if it
+    // already returned, and reaps it on the role-task-exit path (no signal fired).
     tokio::time::sleep(Duration::from_millis(200)).await;
+    if let Some(t) = atlas_task {
+        t.abort();
+    }
+}
+
+/// Spawn the ground-station Atlas aux-lane relay when (and only when) this node is
+/// in the `relay` role and `ground_station.atlas.enabled` is set with a configured
+/// `compute_base_url`. Returns the task handle so the caller can reap it on
+/// teardown, or `None` when Atlas is disabled / not the relay role / no compute
+/// URL is configured. Inert by default → a non-Atlas ground station never reads
+/// the block and is byte-unchanged.
+///
+/// The relay reads the decoded WFB aux datagrams (the `wfb_rx` re-emit loopback
+/// port, `ground_station.atlas.listen_port`, default 5603) and re-POSTs each
+/// framed Atlas event onto the LAN into the compute node's event router, so the
+/// field RF lane reaches the same receiver the direct-LAN bearer uses.
+fn maybe_spawn_atlas_relay(
+    is_relay: bool,
+    shutdown: Arc<Notify>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if !is_relay {
+        return None;
+    }
+    let cfg =
+        ados_groundlink::GroundStationConfig::load_from(std::path::Path::new(CONFIG_YAML)).atlas;
+    if !cfg.enabled {
+        return None;
+    }
+    let Some(compute_url) = cfg.compute_base_url.filter(|u| !u.trim().is_empty()) else {
+        tracing::warn!(
+            "atlas relay enabled but ground_station.atlas.compute_base_url is unset; skipping"
+        );
+        return None;
+    };
+    let listen_port = cfg.listen_port;
+    tracing::info!(
+        listen_port,
+        compute_url = %compute_url,
+        "starting ground-station Atlas aux-lane relay"
+    );
+    Some(tokio::spawn(async move {
+        match ados_groundlink::run_atlas_relay(listen_port, compute_url, shutdown).await {
+            Ok(stats) => tracing::info!(?stats, "atlas relay exited"),
+            Err(e) => tracing::warn!(error = %e, "atlas relay failed to bind/run"),
+        }
+    }))
 }
 
 /// The standalone (`direct`) receive plane.

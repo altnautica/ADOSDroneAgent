@@ -17,12 +17,17 @@
 //! front). Discovery is best-effort: if mDNS is unavailable the daemon logs and
 //! degrades, and manual Add-a-Node by IP always works.
 
-use mdns_sd::{ServiceDaemon, ServiceInfo};
+use std::time::Duration;
+
+use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 
 /// The pairing service type the GCS browses for Add-a-Node discovery.
 const PAIRING_SERVICE: &str = "_ados._tcp.local.";
 /// The control front's pairing port — the node serves `/api/pairing/*` here.
 const PAIRING_PORT: u16 = 8080;
+/// The TXT `profile` value a compute node advertises (the post-rename profile).
+/// A resolver filters on this so it never targets a drone / ground-station node.
+const WORKSTATION_PROFILE: &str = "workstation";
 
 /// An active `_ados._tcp` advertisement for this compute node. Dropping it
 /// unregisters the record and shuts the mDNS daemon down (mirrors the Python
@@ -126,6 +131,71 @@ pub fn advertise_compute(node_id: &str, job_api_port: u16) -> Option<ComputeAdve
     Some(ComputeAdvert { daemon, fullname })
 }
 
+/// Browse `_ados._tcp` for up to `timeout` and resolve the first **compute
+/// node** — a service whose TXT carries `profile=workstation` — returning its
+/// `(host, job_api_port)` so a caller can build the LAN job-API base URL
+/// (`http://host:job_api_port`).
+///
+/// The job-API port rides the `jobApi` TXT key, NOT the SRV port: the SRV port
+/// is the `:8080` pairing front (where `/api/pairing/*` lives), while the job
+/// API serves on its own port. An IPv4 address is preferred for the host (a
+/// reqwest client dials it directly, with no second mDNS hostname lookup); the
+/// advertised hostname is the fallback. Returns `None` on timeout, when mDNS is
+/// unavailable, or when no workstation answers — the caller treats that as "no
+/// compute node on the LAN yet" and retries.
+///
+/// Mirrors `ados_groundlink::mdns::resolve_receiver` (same `mdns-sd` browse +
+/// `ServiceResolved` loop + bounded `tokio::time::timeout`); the difference is
+/// the accept predicate — a TXT `profile` match here vs a mesh-subnet match
+/// there — and that the returned port comes from a TXT key, not the SRV record.
+pub async fn resolve_compute(timeout: Duration) -> Option<(String, u16)> {
+    let daemon = ServiceDaemon::new().ok()?;
+    let rx = match daemon.browse(PAIRING_SERVICE) {
+        Ok(rx) => rx,
+        Err(e) => {
+            tracing::debug!(error = %e, "compute_mdns_browse_failed");
+            let _ = daemon.shutdown();
+            return None;
+        }
+    };
+
+    let result = tokio::time::timeout(timeout, async {
+        while let Ok(event) = rx.recv_async().await {
+            if let ServiceEvent::ServiceResolved(info) = event {
+                // Only a compute node — skip a drone / ground-station advert that
+                // shares `_ados._tcp` on the same LAN.
+                if info.get_property_val_str("profile") != Some(WORKSTATION_PROFILE) {
+                    continue;
+                }
+                // The job API rides the `jobApi` TXT key (the SRV port is the
+                // pairing front). A missing / zero / unparseable port is skipped.
+                let Some(port) = info
+                    .get_property_val_str("jobApi")
+                    .and_then(|p| p.parse::<u16>().ok())
+                    .filter(|p| *p != 0)
+                else {
+                    continue;
+                };
+                // Prefer a concrete IPv4 (dial it directly); else the hostname.
+                if let Some(v4) = info.get_addresses_v4().into_iter().next() {
+                    return Some((v4.to_string(), port));
+                }
+                let host = info.get_hostname().trim_end_matches('.').to_string();
+                if !host.is_empty() {
+                    return Some((host, port));
+                }
+            }
+        }
+        None
+    })
+    .await
+    .ok()
+    .flatten();
+
+    let _ = daemon.shutdown();
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,5 +219,28 @@ mod tests {
     #[test]
     fn hostname_is_never_empty() {
         assert!(!system_hostname().is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolve_compute_returns_none_when_no_workstation_answers() {
+        // No compute node advertises in the unit-test environment, so a short
+        // browse window resolves nothing (and if mDNS is unavailable in the
+        // sandbox the daemon fails to start, which also yields `None`). The
+        // function must return — not hang — within the timeout.
+        let got = tokio::time::timeout(
+            Duration::from_secs(5),
+            resolve_compute(Duration::from_millis(300)),
+        )
+        .await
+        .expect("resolve_compute must honour its own timeout and not hang");
+        match got {
+            None => {}
+            // Defensive against a stray real workstation on the dev LAN: a
+            // resolved node must at least carry a usable (non-zero) job-API port.
+            Some((host, port)) => {
+                assert!(!host.is_empty(), "a resolved node carries a host");
+                assert_ne!(port, 0, "a resolved node carries a non-zero job-API port");
+            }
+        }
     }
 }

@@ -28,8 +28,9 @@ pub mod watchdog;
 pub mod wfb_rx;
 
 pub use acquire::{AcquireState, ChannelAcquirer};
+pub use atlas_relay::{run_atlas_relay, AtlasRelayStats};
 pub use fanout::{run_default_fanout, run_fanout};
-pub use gs_config::GroundStationConfig;
+pub use gs_config::{AtlasRelayConfig, GroundStationConfig};
 pub use mesh::{get_current_role, MeshSnapshot};
 pub use pairing::{decrypt_invite, encrypt_invite, InviteBundle};
 pub use presence::GsPresenceCache;

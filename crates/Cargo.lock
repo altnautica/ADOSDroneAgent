@@ -77,6 +77,7 @@ name = "ados-cloud"
 version = "0.1.0"
 dependencies = [
  "ados-atlas-transport",
+ "ados-compute",
  "ados-plugin-host",
  "ados-protocol",
  "anyhow",
@@ -114,6 +115,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "serde_norway",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

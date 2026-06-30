@@ -18,9 +18,16 @@ path = "src/bin/ados-compute.rs"
 # `tracing-layer` pulls in the LogdLayer so the daemon's logs reach the durable
 # ados-logd Black Box store, not just journald (Rule 41).
 ados-protocol = { path = "../ados-protocol", features = ["tracing-layer"] }
+# The Atlas stream lane: the daemon mounts `atlas_event_router` to receive
+# keyframe + capture-state events a drone forwards, and drains them into the job
+# queue (the world-model receive side). The bearer half is the air/GS sender.
+ados-atlas-transport = { path = "../ados-atlas-transport" }
 rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# YAML reader for the `atlas.enabled` gate of /etc/ados/config.yaml, mirroring
+# the air-side `ados-atlas` reader's one canonical key (no `system.atlas`).
+serde_norway = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -46,7 +53,4 @@ mdns-sd = "0.13"
 tower = { workspace = true, features = ["util"] }
 # Temp pairing.json files for the auth-gate tests.
 tempfile = "3"
-# The SITL gate harness wires the transport lane (the bearer + the event router)
-# to the compute engine end-to-end in-process.
-ados-atlas-transport = { path = "../ados-atlas-transport" }
 axum = { workspace = true }

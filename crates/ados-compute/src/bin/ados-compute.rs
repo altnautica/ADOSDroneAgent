@@ -25,18 +25,33 @@
 //! - `ADOS_COMPUTE_RETENTION_S` terminal-job retention seconds (default `86400`)
 //! - `ADOS_PAIRING_JSON`      pairing.json path (default `/etc/ados/pairing.json`,
 //!   the same override the rest of the agent honours)
+//! - `ADOS_ATLAS_ENABLED`     overrides the `atlas.enabled` config gate (`1`/`true`
+//!   to mount the world-model event receiver); absent, the `atlas.enabled` key of
+//!   `/etc/ados/config.yaml` is read (default disabled, so a non-atlas node is
+//!   byte-unchanged)
+//! - `ADOS_CONFIG_YAML`       agent config path (default `/etc/ados/config.yaml`),
+//!   read only for the atlas gate
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use ados_atlas_transport::{atlas_event_router, AtlasEvent};
 use ados_compute::{
-    build_router, write_compute_heartbeat, Cluster, ComputeAuth, Engine, JobStore, MockDetector,
-    MockReconstructor, Prepared, Scheduler, DEFAULT_PAIRING_PATH,
+    build_router, write_compute_heartbeat, AtlasIngest, Cluster, ComputeAuth, Engine, JobStore,
+    MockDetector, MockReconstructor, Prepared, Scheduler, DEFAULT_PAIRING_PATH,
 };
 use tokio::net::TcpListener;
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex};
+
+/// Canonical agent config file the atlas gate reads (the air-side `ados-atlas`
+/// service reads the same path + key).
+const DEFAULT_CONFIG_YAML: &str = "/etc/ados/config.yaml";
+/// Bounded capacity of the Atlas event receive channel. When it fills, the event
+/// router returns `503` so the sender's failover ladder retries or drops — the
+/// reconstructor running behind never grows an unbounded in-memory queue.
+const ATLAS_EVENT_CHANNEL_CAP: usize = 256;
 
 fn init_logging() {
     use ados_protocol::logd::layer::LogdLayer;
@@ -104,6 +119,47 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// True when the world-model program is enabled for this node, mirroring the
+/// air-side `ados-atlas` gate. `ADOS_ATLAS_ENABLED` is the install-layer override
+/// (consistent with the daemon's other env-driven config); absent, the
+/// `atlas.enabled` key of the agent config is read. A missing / unparseable file
+/// reads disabled, so the receiver stays inert and a non-atlas node is
+/// byte-unchanged.
+fn atlas_enabled() -> bool {
+    if let Ok(v) = std::env::var("ADOS_ATLAS_ENABLED") {
+        return matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        );
+    }
+    atlas_enabled_in_yaml(&env_or("ADOS_CONFIG_YAML", DEFAULT_CONFIG_YAML))
+}
+
+/// Read the `atlas.enabled` boolean from the agent config at `path` (the one
+/// canonical key the air-side reader uses — no `system.atlas` alias). Pure (the
+/// path is injected) so the gate is unit-tested. Disabled on any read/parse
+/// error or an absent block.
+fn atlas_enabled_in_yaml(path: &str) -> bool {
+    #[derive(serde::Deserialize, Default)]
+    struct Raw {
+        #[serde(default)]
+        atlas: Option<AtlasSection>,
+    }
+    #[derive(serde::Deserialize, Default)]
+    struct AtlasSection {
+        #[serde(default)]
+        enabled: bool,
+    }
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    serde_norway::from_str::<Raw>(&text)
+        .ok()
+        .and_then(|r| r.atlas)
+        .map(|a| a.enabled)
+        .unwrap_or(false)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_logging();
@@ -161,7 +217,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "ADOS_PAIRING_JSON",
         DEFAULT_PAIRING_PATH,
     ))));
-    let router = build_router(state, auth);
+    let mut router = build_router(state.clone(), auth);
+
+    // Atlas world-model receiver. INERT unless atlas is enabled (Rule 46 single
+    // canonical gate): when on, mount POST /api/atlas/event alongside the compute
+    // job API on the same listener, and drain decoded events into the job queue
+    // (a bagged capture-state submits the reconstruct job the workers pick up).
+    // When off, neither the route nor the drain task exists, so a non-atlas
+    // workstation node is byte-unchanged.
+    if atlas_enabled() {
+        let (atlas_tx, atlas_rx) = mpsc::channel::<AtlasEvent>(ATLAS_EVENT_CHANNEL_CAP);
+        router = router.merge(atlas_event_router(atlas_tx));
+        let rs = state.clone();
+        tokio::spawn(async move { atlas_receiver_loop(atlas_rx, rs).await });
+        tracing::info!(
+            channel_cap = ATLAS_EVENT_CHANNEL_CAP,
+            "atlas enabled: world-model event receiver mounted at POST /api/atlas/event"
+        );
+    }
+
     let listener = TcpListener::bind(&bind).await?;
     tracing::info!(bind = %bind, workers, "compute job API listening (pairing-gated)");
     // Advertise on mDNS so the GCS Add-a-Node card auto-discovers this node for
@@ -258,9 +332,37 @@ async fn heartbeat_loop(state: Arc<Mutex<Engine>>) {
     }
 }
 
+/// Drain the Atlas event receiver into the job queue. One [`AtlasIngest`] lives
+/// for the task: it counts a capture session's keyframes (the received-side
+/// delivery proof) and, on the terminal `Bagged` state, submits the reconstruct
+/// job the worker loop picks up. The store write is brief, so the engine lock is
+/// held only for the `ingest` call (the same lock-briefly discipline the worker
+/// uses). A malformed frame is swallowed inside `ingest`; a real store fault is
+/// logged and the loop continues. The loop ends when the event channel closes
+/// (the receiver router dropped its senders), which only happens on shutdown.
+async fn atlas_receiver_loop(mut rx: mpsc::Receiver<AtlasEvent>, state: Arc<Mutex<Engine>>) {
+    let mut ingest = AtlasIngest::new();
+    while let Some(event) = rx.recv().await {
+        let outcome = {
+            let engine = state.lock().await;
+            ingest.ingest(&event, engine.scheduler().store(), now_ms())
+        };
+        match outcome {
+            Ok(Some(job_id)) => tracing::info!(
+                job = %job_id,
+                keyframes_received = ingest.keyframes_seen(),
+                "atlas capture bagged: reconstruct job enqueued"
+            ),
+            Ok(None) => {}
+            Err(e) => tracing::error!(error = %e, "atlas ingest failed"),
+        }
+    }
+    tracing::info!("atlas receiver loop ended (event channel closed)");
+}
+
 #[cfg(test)]
 mod tests {
-    use super::derive_node_id;
+    use super::{atlas_enabled_in_yaml, derive_node_id};
 
     #[test]
     fn node_id_prefers_the_env_override() {
@@ -283,5 +385,39 @@ mod tests {
         assert_eq!(derive_node_id(None, None), "compute-node");
         // A blank env / blank machine-id both fall through to the next source.
         assert_eq!(derive_node_id(Some("  ".to_string()), None), "compute-node");
+    }
+
+    fn write_cfg(yaml: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        (dir, path)
+    }
+
+    #[test]
+    fn atlas_gate_is_disabled_when_the_config_is_missing() {
+        // A missing file reads disabled so the receiver stays inert (byte-unchanged).
+        assert!(!atlas_enabled_in_yaml("/nonexistent/ados/config.yaml"));
+    }
+
+    #[test]
+    fn atlas_gate_reads_the_canonical_enabled_key() {
+        let (_d, p) = write_cfg("agent:\n  profile: workstation\natlas:\n  enabled: true\n");
+        assert!(atlas_enabled_in_yaml(p.to_str().unwrap()));
+    }
+
+    #[test]
+    fn atlas_gate_is_disabled_when_the_block_is_absent_or_false() {
+        let (_d1, absent) = write_cfg("agent:\n  profile: workstation\n");
+        assert!(!atlas_enabled_in_yaml(absent.to_str().unwrap()));
+        let (_d2, off) = write_cfg("atlas:\n  enabled: false\n");
+        assert!(!atlas_enabled_in_yaml(off.to_str().unwrap()));
+    }
+
+    #[test]
+    fn atlas_gate_is_disabled_on_a_malformed_config() {
+        // An unparseable file never enables the receiver (fail-closed).
+        let (_d, bad) = write_cfg("atlas: [this is not a map\n");
+        assert!(!atlas_enabled_in_yaml(bad.to_str().unwrap()));
     }
 }

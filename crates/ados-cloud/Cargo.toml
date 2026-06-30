@@ -24,6 +24,10 @@ ados-plugin-host = { path = "../ados-plugin-host" }
 # connection) implementing the lane crate's AtlasBearer trait. Layering points
 # the heavy cloud crate at the lean lane crate, never the reverse.
 ados-atlas-transport = { path = "../ados-atlas-transport" }
+# The Atlas forwarder browses for a compute node over mDNS
+# (`ados_compute::mdns::resolve_compute`) to build the direct-LAN bearer. A
+# one-way edge: ados-compute never depends on ados-cloud.
+ados-compute = { path = "../ados-compute" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # YAML config reader (/etc/ados/config.yaml), the same reader the other crates

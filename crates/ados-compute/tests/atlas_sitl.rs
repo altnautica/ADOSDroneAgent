@@ -10,7 +10,10 @@
 
 use std::sync::Arc;
 
-use ados_atlas_transport::{atlas_event_router, AtlasBearer, AtlasEvent, LanHttpBearer};
+use ados_atlas_transport::{
+    atlas_event_router, AtlasBearer, AtlasEvent, BearerKind, BearerLadder, LanHttpBearer,
+    LoopbackBearer,
+};
 use ados_compute::{
     AtlasIngest, Cluster, Engine, JobRecord, JobStore, MockDetector, MockReconstructor, Scheduler,
 };
@@ -97,6 +100,78 @@ async fn g0_single_camera_capture_reconstructs_to_a_splat_end_to_end() {
     );
     let outputs = engine.scheduler().store().outputs_for_job(&job_id).unwrap();
     assert!(outputs.iter().any(|o| o.kind == "splat"));
+}
+
+/// Integrated send-path gate: a drone publishes a capture's events over the
+/// in-process [`LoopbackBearer`] via the same [`BearerLadder`] the drone-side
+/// Atlas forwarder uses, and the compute node's receiver drain loop — the shape
+/// the `ados-compute` daemon's `atlas_receiver_loop` runs (`while let Some(ev) =
+/// rx.recv()`, terminating on channel close) — drains the bearer's channel,
+/// ingests each event, and enqueues a reconstruct job on the terminal `Bagged`
+/// state. Proves forwarder → bearer → receiver → [`AtlasIngest::ingest`] →
+/// enqueue composes in-process with no TCP, GPU, camera, or RF.
+#[tokio::test]
+async fn integrated_loopback_capture_drains_into_an_enqueued_reconstruct_job() {
+    let engine = engine();
+
+    // ── Drone side: a capture's events ride the bearer ladder; the in-process
+    //    loopback bearer is the local-first rung the ladder picks. ──
+    let (bearer, mut rx) = LoopbackBearer::channel();
+    let ladder = BearerLadder::new(vec![Box::new(bearer)]);
+
+    const N: usize = 5;
+    for i in 0..N {
+        assert_eq!(
+            ladder.send(&keyframe(i)).await.unwrap(),
+            BearerKind::Loopback,
+            "the keyframe rode the in-process loopback bearer"
+        );
+    }
+    assert_eq!(
+        ladder.send(&bagged(N as u64)).await.unwrap(),
+        BearerKind::Loopback,
+        "the bagged capture-state rode the loopback bearer"
+    );
+
+    // Drop the lane so the drain loop terminates on channel close, exactly as the
+    // daemon's receiver loop does on shutdown.
+    drop(ladder);
+
+    // ── Compute side: the receiver drain loop. One `AtlasIngest` for the session
+    //    counts keyframes and, on the `Bagged` state, submits the reconstruct job
+    //    the workers pick up (mirrors `atlas_receiver_loop`, run inline against
+    //    the engine's store). ──
+    let store = engine.scheduler().store();
+    let mut ingest = AtlasIngest::new();
+    let mut enqueued_job = None;
+    while let Some(event) = rx.recv().await {
+        if let Some(job_id) = ingest.ingest(&event, store, 200).unwrap() {
+            enqueued_job = Some(job_id);
+        }
+    }
+
+    // The bagged session enqueued exactly the reconstruct job, queued for a worker.
+    let job_id = enqueued_job.expect("the bagged capture enqueued a reconstruct job");
+    assert_eq!(
+        ingest.keyframes_seen(),
+        N as u64,
+        "every keyframe drained into the node"
+    );
+    let job = store
+        .get_job(&job_id)
+        .unwrap()
+        .expect("the enqueued job is in the store");
+    assert_eq!(job.kind, ComputeJobKind::Reconstruct);
+    assert_eq!(
+        job.state,
+        ComputeJobState::Queued,
+        "the reconstruct job is queued for a worker"
+    );
+    assert_eq!(
+        store.count_in_state(ComputeJobState::Queued).unwrap(),
+        1,
+        "the bagged session enqueued exactly one reconstruct job"
+    );
 }
 
 /// Perception-offload gate: an NPU-less drone offloads a frame; the node runs the

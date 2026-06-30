@@ -22,6 +22,14 @@ fn default_true() -> bool {
 fn default_bat_iface() -> String {
     "bat0".to_string()
 }
+fn default_atlas_listen_port() -> u16 {
+    // The loopback port the WFB aux receiver re-emits decoded application frames
+    // on (`wfb_rx -p 3 -u <aux_rx_port>`, `video.wfb.aux_rx_port`, default 5603).
+    // The drone radiates Atlas events on the aux tx ingress (5602); the GS reads
+    // the decoded side here. Kept distinct from the tx ingress so the relay can
+    // never feed back into the transmit path.
+    5603
+}
 
 /// Relay-role config (`ground_station.wfb_relay`).
 #[derive(Debug, Clone, Deserialize)]
@@ -79,6 +87,36 @@ impl Default for MeshConfig {
     }
 }
 
+/// Atlas world-model aux-lane relay config (`ground_station.atlas`).
+///
+/// Inert by default (`enabled = false`): the relay only spawns when a relay-role
+/// node has `enabled` set AND a configured `compute_base_url`. A non-Atlas ground
+/// station therefore reads the same defaults and behaves byte-identically.
+/// `listen_port` is the loopback port the WFB aux receiver delivers decoded Atlas
+/// datagrams to (`video.wfb.aux_rx_port`, default 5603); `compute_base_url` is the
+/// compute node's `atlas_event_router` base URL each decoded event is re-POSTed to
+/// (v1 is config-provided — mDNS auto-resolve of the `workstation` profile is a
+/// later wave).
+#[derive(Debug, Clone, Deserialize)]
+pub struct AtlasRelayConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_atlas_listen_port")]
+    pub listen_port: u16,
+    #[serde(default)]
+    pub compute_base_url: Option<String>,
+}
+
+impl Default for AtlasRelayConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen_port: default_atlas_listen_port(),
+            compute_base_url: None,
+        }
+    }
+}
+
 /// The `ground_station:` config subset the relay/receiver loops consume.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct GroundStationConfig {
@@ -88,6 +126,8 @@ pub struct GroundStationConfig {
     pub wfb_receiver: WfbReceiverConfig,
     #[serde(default)]
     pub mesh: MeshConfig,
+    #[serde(default)]
+    pub atlas: AtlasRelayConfig,
 }
 
 impl GroundStationConfig {
@@ -120,6 +160,34 @@ mod tests {
         assert_eq!(c.wfb_receiver.listen_port, 5800);
         assert!(c.wfb_receiver.accept_local_nic);
         assert_eq!(c.mesh.bat_iface, "bat0");
+        // Atlas relay is inert by default.
+        assert!(!c.atlas.enabled);
+        assert_eq!(c.atlas.listen_port, 5603);
+        assert!(c.atlas.compute_base_url.is_none());
+    }
+
+    #[test]
+    fn reads_atlas_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        std::fs::write(
+            &cfg,
+            "ground_station:\n  atlas:\n    enabled: true\n    listen_port: 5611\n    compute_base_url: http://10.0.0.9:8099\n",
+        )
+        .unwrap();
+        let c = GroundStationConfig::load_from(&cfg);
+        assert!(c.atlas.enabled);
+        assert_eq!(c.atlas.listen_port, 5611);
+        assert_eq!(
+            c.atlas.compute_base_url.as_deref(),
+            Some("http://10.0.0.9:8099")
+        );
+        // An atlas block with only `enabled` set falls back to the default port.
+        std::fs::write(&cfg, "ground_station:\n  atlas:\n    enabled: true\n").unwrap();
+        let c = GroundStationConfig::load_from(&cfg);
+        assert!(c.atlas.enabled);
+        assert_eq!(c.atlas.listen_port, 5603);
+        assert!(c.atlas.compute_base_url.is_none());
     }
 
     #[test]

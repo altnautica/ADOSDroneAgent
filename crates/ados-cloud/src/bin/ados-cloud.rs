@@ -26,7 +26,7 @@ use ados_plugin_host::{Paths, PluginSupervisor};
 use ados_cloud::config::CloudConfig;
 use ados_cloud::dispatch::install::DownloadSource;
 use ados_cloud::ground_station::{bridge as gs_bridge, CloudRelayBridge};
-use ados_cloud::loops::{beacon, command_poll, enrichment, heartbeat};
+use ados_cloud::loops::{atlas_forwarder, beacon, command_poll, enrichment, heartbeat};
 use ados_cloud::mqtt::transport::TransportConfig;
 use ados_cloud::mqtt::{MavlinkMqttRelay, WS_PATH};
 use ados_cloud::{dispatch, pairing::PairingState};
@@ -189,6 +189,12 @@ async fn main() -> Result<()> {
             convex_url.clone(),
             shutdown_rx.clone(),
         ),
+        // ── Atlas forwarder ────────────────────────────────────
+        // Subscribe to the local atlas bus and forward world-model events
+        // (keyframes / pose / capture state) to a compute node over the bearer
+        // ladder (direct LAN -> WFB relay -> opt-in cloud), local-first. INERT
+        // unless Atlas is enabled, so a non-Atlas agent is byte-unchanged.
+        tokio::spawn(atlas_forwarder::run(config.clone(), shutdown_rx.clone())),
     ];
 
     // Relay supervision. The MAVLink-over-MQTT relay runs a real

@@ -22,7 +22,11 @@ mod cluster;
 mod engine;
 mod heartbeat_sidecar;
 mod ingest;
-mod mdns;
+/// mDNS advertise (the compute node) + resolve (a drone-side caller browsing for
+/// a `profile=workstation` node). Public so a consumer crate can reach
+/// `ados_compute::mdns::resolve_compute` directly, mirroring
+/// `ados_groundlink::mdns`.
+pub mod mdns;
 mod offload;
 mod pipeline;
 mod reconstructor;
@@ -45,7 +49,7 @@ pub use heartbeat_sidecar::{
     COMPUTE_HEARTBEAT_SIDECAR,
 };
 pub use ingest::AtlasIngest;
-pub use mdns::{advertise_compute, ComputeAdvert};
+pub use mdns::{advertise_compute, resolve_compute, ComputeAdvert};
 pub use offload::{Detection, Detector, FrameRef, MockDetector};
 pub use pipeline::{stage_index_of, Pipeline, PipelineRunner, PipelineStage};
 pub use reconstructor::{MockReconstructor, ReconstructOutput, Reconstructor};
