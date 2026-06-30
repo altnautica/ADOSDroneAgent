@@ -11,18 +11,22 @@
 use std::sync::Arc;
 
 use ados_atlas_transport::{
-    atlas_event_router, AtlasBearer, AtlasEvent, BearerKind, BearerLadder, LanHttpBearer,
-    LoopbackBearer,
+    atlas_event_router, AtlasBearer, AtlasEvent, BearerKind, BearerLadder, DeltaBroadcaster,
+    LanHttpBearer, LoopbackBearer,
 };
 use ados_compute::{
-    AtlasIngest, Cluster, Engine, JobRecord, JobStore, MockDetector, MockReconstructor, Scheduler,
+    AtlasIngest, Cluster, Engine, JobRecord, JobStore, LiveSession, LiveSessionState,
+    MockDeltaProducer, MockDetector, MockReconstructor, RerunArchetype, RerunRecording, Scheduler,
 };
 use ados_protocol::atlas::{
-    CaptureState, CaptureStatus, VioHealth, ATLAS_CAPTURE_STATE_TOPIC, ATLAS_KEYFRAME_TOPIC,
+    CameraIntrinsics, CameraRole, CaptureState, CaptureStatus, Distortion, ImageEncoding,
+    ImuSample, KeyframeEnvelope, KeyframeFlags, KeyframeImage, KeyframeTier, Pose, PoseSource,
+    SplatDescriptor, VioHealth, ATLAS_CAPTURE_STATE_TOPIC, ATLAS_KEYFRAME_TOPIC,
+    PLUGIN_ATLAS_SPLAT_TOPIC,
 };
 use ados_protocol::compute::{ComputeJobKind, ComputeJobState, ComputeRole, SlaveDescriptor};
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 
 fn engine() -> Engine {
     let store = JobStore::open(":memory:").unwrap();
@@ -226,5 +230,438 @@ fn cluster_master_aggregates_a_registered_slave() {
         hb.cluster.aggregate_workers_idle,
         before + 4,
         "the slave's idle workers fold into the cluster capacity"
+    );
+}
+
+/// A full keyframe envelope for one `camera_id`, with an IMU sample so the
+/// camera subtree + the IMU scalars are both produced. Synthetic intrinsics +
+/// an identity pose translated along x by the keyframe id (no real camera).
+fn keyframe_env(camera_id: &str, kf_id: u64) -> KeyframeEnvelope {
+    KeyframeEnvelope {
+        session_id: "sitl".into(),
+        kf_id,
+        ts_unix_ms: 1000 + kf_id as i64,
+        camera_id: camera_id.into(),
+        camera_role: CameraRole::Primary,
+        tier: KeyframeTier::Full,
+        image: KeyframeImage {
+            encoding: ImageEncoding::Jpeg,
+            width: 1280,
+            height: 720,
+            bytes: vec![],
+        },
+        camera: CameraIntrinsics {
+            k: [900.0, 0.0, 640.0, 0.0, 900.0, 360.0, 0.0, 0.0, 1.0],
+            distortion: Distortion {
+                model: "radtan".into(),
+                params: vec![],
+            },
+        },
+        pose: Pose {
+            r: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            t: [kf_id as f64, 0.0, 0.0],
+            cov: None,
+        },
+        pose_source: PoseSource::LocalVio,
+        global_anchor: None,
+        imu_window: vec![ImuSample {
+            t_ms: 999,
+            gyro: [0.1, 0.2, 0.3],
+            accel: [0.0, 0.0, 9.81],
+        }],
+        flags: KeyframeFlags::default(),
+    }
+}
+
+/// Mirror the delta WS handler's per-device filter against one subscriber: a
+/// tuple tagged for another device is dropped from this device's view. The
+/// broadcast delivers the same tuple to every subscriber, so this receives
+/// exactly one and applies the `dev != device_id` filter, returning the event
+/// only when it belongs to `device_id`.
+async fn deliver_for(
+    rx: &mut broadcast::Receiver<(String, AtlasEvent)>,
+    device_id: &str,
+) -> Option<AtlasEvent> {
+    match rx.recv().await {
+        Ok((dev, event)) if dev == device_id => Some(event),
+        Ok(_) => None, // another drone's delta — not this view
+        Err(_) => None,
+    }
+}
+
+/// G1: the Rerun recording maps a multi-keyframe single-camera capture + the
+/// reconstructed splat onto the entity tree the GCS viewer renders — the camera
+/// subtree, the IMU scalars, a once-logged camera intrinsics across the run, and
+/// the verbatim wire discriminators (`Transform3D`, `SplatSlab`).
+#[tokio::test]
+async fn g1_rerun_recording_maps_keyframes_for_the_gcs_viewer() {
+    const N: usize = 4;
+    let mut rec = RerunRecording::new();
+    for i in 0..N {
+        rec.push_keyframe(&keyframe_env("cam-front", i as u64));
+    }
+    rec.push_splat(
+        &SplatDescriptor {
+            gaussian_count: 4800,
+            step: 200,
+            url: Some("spz://sitl".into()),
+            handle: None,
+        },
+        2000,
+    );
+
+    let paths: Vec<&str> = rec.entries.iter().map(|e| e.entity_path.as_str()).collect();
+    assert!(
+        paths.contains(&"world/camera/cam-front"),
+        "the camera has a subtree the viewer renders"
+    );
+    assert!(
+        paths.contains(&"world/camera/cam-front/rgb"),
+        "the camera's image rides world/camera/<id>/rgb"
+    );
+    assert!(
+        paths.contains(&"world/imu/accel/z"),
+        "the IMU window is logged as per-axis scalars"
+    );
+
+    // The camera's static intrinsics is logged exactly once across the N
+    // keyframes (the viewer needs the Pinhole once, not per frame)...
+    let pinholes = rec
+        .entries
+        .iter()
+        .filter(|e| matches!(e.archetype, RerunArchetype::Pinhole { .. }))
+        .count();
+    assert_eq!(
+        pinholes, 1,
+        "the camera intrinsics is logged once across the whole run"
+    );
+    // ...while every keyframe contributes its own pose transform.
+    let transforms = rec
+        .entries
+        .iter()
+        .filter(|e| matches!(e.archetype, RerunArchetype::Transform3D { .. }))
+        .count();
+    assert_eq!(transforms, N, "every keyframe contributes a pose transform");
+
+    // The serialized manifest carries the verbatim Rerun archetype names the
+    // GCS viewer maps (not snake_case digit-splits).
+    let json = rec.to_json().unwrap();
+    assert!(
+        json.contains("\"Transform3D\""),
+        "pose transform discriminator"
+    );
+    assert!(json.contains("\"SplatSlab\""), "splat slab discriminator");
+    assert!(!json.contains("transform3_d"), "no mangled discriminator");
+}
+
+/// G2: a captured bag rides a bearer into the receiver/ingest, drains into one
+/// reconstruct job, and — one step past the integrated-loopback gate, which
+/// stops at "queued" — the worker runs it to a delivered splat output.
+#[tokio::test]
+async fn g2_bag_pipeline_reconstructs_to_a_delivered_output() {
+    let engine = engine();
+
+    // The PostFlightBulk bearer is not implemented; the in-process loopback
+    // bearer stands in for the post-flight-bulk LAN lane here (identical
+    // AtlasEvent contract, no GPU / camera / RF).
+    let (bearer, mut rx) = LoopbackBearer::channel();
+    let ladder = BearerLadder::new(vec![Box::new(bearer)]);
+
+    const N: usize = 6;
+    for i in 0..N {
+        ladder.send(&keyframe(i)).await.unwrap();
+    }
+    ladder.send(&bagged(N as u64)).await.unwrap();
+    drop(ladder);
+
+    let store = engine.scheduler().store();
+    let mut ingest = AtlasIngest::new();
+    let mut job_id = None;
+    while let Some(ev) = rx.recv().await {
+        if let Some(id) = ingest.ingest(&ev, store, 200).unwrap() {
+            job_id = Some(id);
+        }
+    }
+    let job_id = job_id.expect("the bagged capture enqueued a reconstruct job");
+
+    // The dataset is a bag carrying the camera count + the received-keyframe
+    // proof (the drone's send is fire-and-forget, so only decoded frames count).
+    let job = store.get_job(&job_id).unwrap().expect("the enqueued job");
+    let dataset_id = job
+        .dataset_id
+        .clone()
+        .expect("the reconstruct job references a dataset");
+    let dataset = store
+        .get_dataset(&dataset_id)
+        .unwrap()
+        .expect("the bag dataset was inserted");
+    assert_eq!(dataset.kind, "bag");
+    assert_eq!(dataset.meta["cameras"], 1);
+    assert_eq!(dataset.meta["received_keyframes"], N as u64);
+
+    // Exactly one fused reconstruct job, queued for a worker.
+    assert_eq!(
+        store.count_in_state(ComputeJobState::Queued).unwrap(),
+        1,
+        "the bag enqueued exactly one reconstruct job"
+    );
+
+    // The worker runs it to a delivered splat output (past "queued").
+    let outcome = engine.tick(300).unwrap().expect("the queued job ran");
+    assert_eq!(outcome.job_id, job_id);
+    assert_eq!(outcome.state, ComputeJobState::Completed);
+    let outputs = store.outputs_for_job(&job_id).unwrap();
+    assert!(
+        outputs.iter().any(|o| o.kind == "splat"),
+        "the bag reconstructs to a delivered splat output"
+    );
+}
+
+/// G3: the shared-data delta lane isolates per device — one drone's world model
+/// never crosses into another drone's plugin view — and an NPU-less drone's
+/// perception offload runs the (mock) detector and returns a detection.
+#[tokio::test]
+async fn g3_plugin_data_share_isolates_per_device_and_offloads() {
+    let broadcaster = DeltaBroadcaster::new(16);
+    let mut rx_one = broadcaster.subscribe();
+    let mut rx_two = broadcaster.subscribe();
+    assert_eq!(broadcaster.subscriber_count(), 2);
+
+    // One drone's splat update is published for its device only.
+    let splat = AtlasEvent {
+        topic: PLUGIN_ATLAS_SPLAT_TOPIC.into(),
+        payload: vec![1, 2, 3],
+    };
+    broadcaster.publish("drone-1", splat);
+
+    // drone-1's plugin view receives it; drone-2's view filters it out.
+    let for_one = deliver_for(&mut rx_one, "drone-1").await;
+    let for_two = deliver_for(&mut rx_two, "drone-2").await;
+    assert_eq!(
+        for_one.as_ref().map(|e| e.topic.as_str()),
+        Some(PLUGIN_ATLAS_SPLAT_TOPIC),
+        "drone-1's plugin view receives its own world delta"
+    );
+    assert!(
+        for_two.is_none(),
+        "drone-2's plugin view never sees drone-1's world delta (device isolation)"
+    );
+
+    // The NPU-less offload path: the node runs the detector and returns a result.
+    let engine = engine();
+    engine
+        .scheduler()
+        .store()
+        .submit_job(&JobRecord {
+            id: "off-iso".into(),
+            kind: ComputeJobKind::PerceptionOffload,
+            dataset_id: None,
+            state: ComputeJobState::Queued,
+            progress: 0.0,
+            params: serde_json::json!({
+                "frame": { "camera_id": "front", "width": 640, "height": 640, "ts_ms": 100 }
+            }),
+            result_ref: None,
+            error: None,
+            created_ms: 100,
+            updated_ms: 100,
+        })
+        .unwrap();
+    let outcome = engine.tick(200).unwrap().expect("offload job claimed");
+    assert_eq!(outcome.state, ComputeJobState::Completed);
+    assert!(
+        !outcome.detections.is_empty(),
+        "the perception offload returns at least one detection"
+    );
+}
+
+/// G4: a live session walks pairing -> ready -> active, trains on each ingested
+/// keyframe (monotonic gaussian/step growth, SPZ-framed deltas), pauses to stop
+/// ingest, and every emitted delta fans out to the device's Live World
+/// subscriber over the delta broadcaster.
+#[tokio::test]
+async fn g4_live_stream_delta_fanout() {
+    let mut session = LiveSession::new("live-1", 0);
+    assert!(session.try_transition(LiveSessionState::Ready, 1));
+    assert!(session.try_transition(LiveSessionState::Active, 2));
+
+    let broadcaster = DeltaBroadcaster::new(64);
+    let mut rx = broadcaster.subscribe();
+
+    const N: u64 = 4;
+    let mut last_gaussians = 0u64;
+    let mut last_step = 0u64;
+    for i in 0..N {
+        let (desc, delta) = session
+            .ingest_keyframe(&MockDeltaProducer, None, 10 + i as i64)
+            .expect("an active session trains on each keyframe");
+        assert!(
+            desc.gaussian_count > last_gaussians,
+            "the trainer's gaussian count grows per keyframe"
+        );
+        assert!(
+            desc.step > last_step,
+            "the training step advances per keyframe"
+        );
+        assert_eq!(desc.gaussian_count, delta.gaussian_count);
+        assert_eq!(desc.step, delta.step);
+        last_gaussians = desc.gaussian_count;
+        last_step = desc.step;
+        // The delta frame carries the SPZ magic the Live World decoder reads.
+        assert_eq!(
+            &delta.bytes[0..4],
+            b"SPZ0",
+            "the delta carries the SPZ frame magic"
+        );
+        // Fan the delta out to the device's Live World subscriber.
+        broadcaster.publish(
+            "drone-live",
+            AtlasEvent {
+                topic: PLUGIN_ATLAS_SPLAT_TOPIC.into(),
+                payload: delta.bytes.clone(),
+            },
+        );
+    }
+
+    // A paused session drops ingest (produces no further delta).
+    assert!(session.try_transition(LiveSessionState::Paused, 100));
+    assert!(
+        session
+            .ingest_keyframe(&MockDeltaProducer, None, 101)
+            .is_none(),
+        "a paused session drops ingest"
+    );
+
+    // The broadcaster delivered exactly N deltas to the device's subscriber.
+    let mut delivered = 0u64;
+    for _ in 0..N {
+        let (dev, ev) = rx.recv().await.expect("each published delta is on the bus");
+        assert_eq!(dev, "drone-live");
+        assert_eq!(ev.topic, PLUGIN_ATLAS_SPLAT_TOPIC);
+        delivered += 1;
+    }
+    assert_eq!(
+        delivered, N,
+        "every live delta reached the device's subscriber"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "the paused ingest published nothing further"
+    );
+}
+
+/// G5: a multi-camera capture fuses into one world — N distinct cameras' frames
+/// drain into a single bag dataset whose camera count is N and a single
+/// reconstruct job (not one per camera), and the same frames map onto N distinct
+/// camera subtrees in the recording, each with its intrinsics logged exactly
+/// once (per-camera dedup at scale).
+#[tokio::test]
+async fn g5_multi_cam_fuses_into_one_world() {
+    let engine = engine();
+    const N: usize = 4;
+    const FRAMES_PER_CAM: usize = 2;
+
+    // The same keyframes feed both the ingest path and the viewer recording:
+    // each camera appears in FRAMES_PER_CAM frames, so the per-camera dedup has
+    // a repeat to drop.
+    let mut keyframes = Vec::new();
+    for round in 0..FRAMES_PER_CAM {
+        for i in 0..N {
+            keyframes.push(keyframe_env(&format!("cam-{i}"), (round * N + i) as u64));
+        }
+    }
+
+    let mut rec = RerunRecording::new();
+    let (bearer, mut rx) = LoopbackBearer::channel();
+    let ladder = BearerLadder::new(vec![Box::new(bearer)]);
+    for kf in &keyframes {
+        ladder
+            .send(&AtlasEvent {
+                topic: ATLAS_KEYFRAME_TOPIC.into(),
+                payload: kf.to_msgpack().unwrap(),
+            })
+            .await
+            .unwrap();
+        rec.push_keyframe(kf);
+    }
+    // The terminal bagged state declares N enabled cameras (the fusion key).
+    let status = CaptureStatus {
+        session_id: "multicam".into(),
+        state: CaptureState::Bagged,
+        keyframes: keyframes.len() as u64,
+        vio_health: VioHealth::Good,
+        camera_count: N as u32,
+        ingest_rate_hz: 9.0,
+    };
+    ladder
+        .send(&AtlasEvent {
+            topic: ATLAS_CAPTURE_STATE_TOPIC.into(),
+            payload: status.to_msgpack().unwrap(),
+        })
+        .await
+        .unwrap();
+    drop(ladder);
+
+    let store = engine.scheduler().store();
+    let mut ingest = AtlasIngest::new();
+    let mut job_id = None;
+    while let Some(ev) = rx.recv().await {
+        if let Some(id) = ingest.ingest(&ev, store, 200).unwrap() {
+            job_id = Some(id);
+        }
+    }
+    let job_id = job_id.expect("the multi-cam bag enqueued a reconstruct job");
+
+    // One fused dataset carrying all N cameras + every drained frame.
+    let job = store.get_job(&job_id).unwrap().expect("the enqueued job");
+    let dataset_id = job
+        .dataset_id
+        .clone()
+        .expect("the reconstruct job references a dataset");
+    let dataset = store
+        .get_dataset(&dataset_id)
+        .unwrap()
+        .expect("the multi-cam bag dataset");
+    assert_eq!(
+        dataset.meta["cameras"], N as u64,
+        "the fused dataset declares all N cameras"
+    );
+    assert_eq!(
+        dataset.meta["received_keyframes"],
+        (N * FRAMES_PER_CAM) as u64,
+        "every camera's frames drained into the one bag"
+    );
+    // A single fused reconstruct job, not one per camera.
+    assert_eq!(
+        store.count_in_state(ComputeJobState::Queued).unwrap(),
+        1,
+        "the multi-cam capture fuses into one reconstruct job"
+    );
+
+    // The recording carries N distinct camera subtrees, each Pinhole logged once.
+    for i in 0..N {
+        let cam = format!("world/camera/cam-{i}");
+        assert!(
+            rec.entries.iter().any(|e| e.entity_path == cam),
+            "camera {i} has its own subtree"
+        );
+    }
+    let mut pinhole_paths: Vec<&str> = rec
+        .entries
+        .iter()
+        .filter(|e| matches!(e.archetype, RerunArchetype::Pinhole { .. }))
+        .map(|e| e.entity_path.as_str())
+        .collect();
+    assert_eq!(
+        pinhole_paths.len(),
+        N,
+        "one intrinsics per distinct camera (per-camera dedup at scale)"
+    );
+    pinhole_paths.sort();
+    pinhole_paths.dedup();
+    assert_eq!(
+        pinhole_paths.len(),
+        N,
+        "the N intrinsics sit on N distinct camera paths"
     );
 }
