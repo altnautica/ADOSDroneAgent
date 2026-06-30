@@ -197,7 +197,7 @@ async fn run_relay_or_receiver(
     // configured compute base URL. It shares the role shutdown `Notify`, so a
     // SIGTERM/SIGINT tears it down with the rest of the relay. A non-Atlas ground
     // station spawns nothing here and is byte-unchanged.
-    let atlas_task = maybe_spawn_atlas_relay(is_relay, shutdown.clone());
+    let atlas_task = maybe_spawn_atlas_relay(is_relay, shutdown.clone(), Some(ingest.clone()));
 
     let role_task = {
         let shutdown = shutdown.clone();
@@ -245,6 +245,7 @@ async fn run_relay_or_receiver(
 fn maybe_spawn_atlas_relay(
     is_relay: bool,
     shutdown: Arc<Notify>,
+    ingest: Option<ados_protocol::logd::emitter::IngestEmitter>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     if !is_relay {
         return None;
@@ -268,7 +269,8 @@ fn maybe_spawn_atlas_relay(
                 );
                 loop {
                     if let Some(url) =
-                        ados_groundlink::mdns::resolve_compute_base_url(Duration::from_secs(5)).await
+                        ados_groundlink::mdns::resolve_compute_base_url(Duration::from_secs(5))
+                            .await
                     {
                         tracing::info!(compute_url = %url, "auto-resolved the compute node over mDNS");
                         break url;
@@ -285,7 +287,7 @@ fn maybe_spawn_atlas_relay(
             compute_url = %compute_url,
             "starting ground-station Atlas aux-lane relay"
         );
-        match ados_groundlink::run_atlas_relay(listen_port, compute_url, shutdown).await {
+        match ados_groundlink::run_atlas_relay(listen_port, compute_url, shutdown, ingest).await {
             Ok(stats) => tracing::info!(?stats, "atlas relay exited"),
             Err(e) => tracing::warn!(error = %e, "atlas relay failed to bind/run"),
         }

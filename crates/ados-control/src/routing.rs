@@ -128,6 +128,7 @@ fn native_routes() -> Vec<NativeRoute> {
         get("/api/v1/ground-station/status"),
         get("/api/v1/ground-station/wfb"),
         get("/api/v1/ground-station/wfb/relay/status"),
+        get("/api/v1/ground-station/wfb/atlas-relay/status"),
         get("/api/v1/ground-station/wfb/receiver/relays"),
         get("/api/v1/ground-station/wfb/receiver/combined"),
         // Ground-station mesh (profile-gated).
@@ -410,7 +411,7 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            113,
+            114,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);
@@ -435,6 +436,7 @@ mod tests {
             "/api/v1/ground-station/status",
             "/api/v1/ground-station/wfb",
             "/api/v1/ground-station/wfb/relay/status",
+            "/api/v1/ground-station/wfb/atlas-relay/status",
             "/api/v1/ground-station/wfb/receiver/relays",
             "/api/v1/ground-station/wfb/receiver/combined",
             "/api/v1/ground-station/role",

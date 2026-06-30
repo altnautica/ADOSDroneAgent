@@ -278,6 +278,10 @@ pub fn build_router(state: AppState, net_native: bool, hid_native: bool) -> Rout
             get(gs_status::get_wfb_relay_status),
         )
         .route(
+            "/api/v1/ground-station/wfb/atlas-relay/status",
+            get(gs_status::get_atlas_relay_status),
+        )
+        .route(
             "/api/v1/ground-station/wfb/receiver/relays",
             get(gs_status::get_wfb_receiver_relays),
         )

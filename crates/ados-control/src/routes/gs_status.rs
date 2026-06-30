@@ -118,6 +118,12 @@ fn wfb_relay_path() -> PathBuf {
     run_dir().join("wfb-relay.json")
 }
 
+/// The Atlas aux-lane relay sidecar (`/run/ados/atlas-relay.json`) the relay loop
+/// writes; the sidecar fallback for `/wfb/atlas-relay/status`.
+fn atlas_relay_path() -> PathBuf {
+    run_dir().join("atlas-relay.json")
+}
+
 /// The receiver-state sidecar (`/run/ados/wfb-receiver.json`) the receiver loop
 /// writes; the sidecar fallback for the two `/wfb/receiver/*` routes.
 fn wfb_receiver_path() -> PathBuf {
@@ -701,6 +707,29 @@ pub async fn get_wfb_relay_status(State(state): State<AppState>) -> Response {
         return Json(Value::Object(detail)).into_response();
     }
     Json(Value::Object(read_json_or_empty(&wfb_relay_path()))).into_response()
+}
+
+/// `GET /api/v1/ground-station/wfb/atlas-relay/status` → the Atlas aux-lane relay's
+/// forward counters.
+///
+/// `404` `E_WRONG_ROLE` off a relay node. On a relay, reads the store's most-recent
+/// `gs.atlas_relay` event (the relay loop ships the same body it writes to the
+/// sidecar), falling back to the `/run/ados/atlas-relay.json` sidecar. The body is
+/// the relay's `{up, datagrams_seen, forwarded, malformed, forward_failed,
+/// compute_url, listen_port, generated_at_ms}` snapshot; an absent store + sidecar
+/// degrade to the empty object, never a 500.
+pub async fn get_atlas_relay_status(State(state): State<AppState>) -> Response {
+    let role = match ground_station_role(&state) {
+        Some(r) => r,
+        None => return profile_mismatch(),
+    };
+    if role != "relay" {
+        return wrong_role("relay");
+    }
+    if let Some(detail) = latest_event_detail(&state, "gs.atlas_relay").await {
+        return Json(Value::Object(detail)).into_response();
+    }
+    Json(Value::Object(read_json_or_empty(&atlas_relay_path()))).into_response()
 }
 
 /// `GET /api/v1/ground-station/wfb/receiver/relays` → per-relay fragment counters.
