@@ -69,7 +69,9 @@ fn advert_fields(node_id: &str, job_api_port: u16) -> (String, Vec<(String, Stri
 
 /// Best-effort cross-platform hostname (the SRV target). Linux exposes it as a
 /// file; elsewhere fall back to the `hostname` command, then a stable default.
-fn system_hostname() -> String {
+/// Public so the daemon can derive an artifact URL host that matches the mDNS
+/// `.local` target this advert uses.
+pub fn system_hostname() -> String {
     std::fs::read_to_string("/proc/sys/kernel/hostname")
         .ok()
         .or_else(|| {

@@ -19,6 +19,38 @@ use std::sync::Arc;
 
 use crate::{ComputeError, Dataset, MockReconstructor, ReconstructOutput, Reconstructor};
 
+/// A reconstructor that picks the right backend per job (reading the `backend`
+/// param hint via [`select_reconstructor`]) and writes artifacts under one work
+/// root. The daemon holds one of these so a job hinting `brush` runs Brush when it
+/// is installed, falling back to the mock backend (CI / no-GPU) — without the
+/// scheduler having to choose a backend per job.
+pub struct SelectingReconstructor {
+    work_root: PathBuf,
+}
+
+impl SelectingReconstructor {
+    /// A selector that writes artifacts under `work_root`.
+    pub fn new(work_root: impl Into<PathBuf>) -> Self {
+        Self {
+            work_root: work_root.into(),
+        }
+    }
+}
+
+impl Reconstructor for SelectingReconstructor {
+    fn name(&self) -> &str {
+        "selecting"
+    }
+
+    fn reconstruct(
+        &self,
+        dataset: &Dataset,
+        params: &serde_json::Value,
+    ) -> Result<ReconstructOutput, ComputeError> {
+        select_reconstructor(params, &self.work_root).reconstruct(dataset, params)
+    }
+}
+
 /// The reconstruction tools the compute node can drive. Each maps to a program
 /// name, the artifact kind it produces, and the output file extension.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,12 +183,31 @@ impl CliReconstructor {
 
         let args: Vec<String> = match self.kind {
             ReconstructorKind::Brush => {
-                let mut a = vec![input_s, "--export".into(), output_s];
-                if let Some(steps) = params.get("steps").and_then(|v| v.as_u64()) {
-                    a.push("--total-steps".into());
-                    a.push(steps.to_string());
-                }
-                a
+                // Real Brush CLI (validated against `brush --help`): the dataset is
+                // a positional argument; training length is `--total-train-iters`;
+                // the artifact lands at `<--export-path>/<--export-name>`. Point the
+                // export at the absolute workdir with a literal filename so the .ply
+                // is written exactly at `output_path`, and set `--export-every` to
+                // the step count so a single final export is produced at the end.
+                let steps = params
+                    .get("steps")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(30000);
+                let export_name = output_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "output.ply".into());
+                vec![
+                    input_s,
+                    "--total-train-iters".into(),
+                    steps.to_string(),
+                    "--export-every".into(),
+                    steps.to_string(),
+                    "--export-path".into(),
+                    workdir.to_string_lossy().into_owned(),
+                    "--export-name".into(),
+                    export_name,
+                ]
             }
             ReconstructorKind::Nerfstudio => {
                 // ns-train splatfacto --data <input> ... (the export step is a
@@ -420,8 +471,14 @@ mod tests {
         assert_eq!(cmd.output_path, Path::new("/work/ds-1/output.ply"));
         assert_eq!(cmd.output_uri, "file:///work/ds-1/output.ply");
         assert!(cmd.args.contains(&"/data/ds-1".to_string()));
-        assert!(cmd.args.contains(&"--export".to_string()));
-        assert!(cmd.args.contains(&"--total-steps".to_string()));
+        assert!(cmd.args.contains(&"--total-train-iters".to_string()));
+        assert!(cmd.args.contains(&"--export-every".to_string()));
+        assert!(cmd.args.contains(&"--export-path".to_string()));
+        // export to the absolute workdir with a literal filename so the .ply
+        // lands exactly at output_path.
+        assert!(cmd.args.contains(&"/work/ds-1".to_string()));
+        assert!(cmd.args.contains(&"--export-name".to_string()));
+        assert!(cmd.args.contains(&"output.ply".to_string()));
         assert!(cmd.args.contains(&"30000".to_string()));
     }
 
@@ -522,6 +579,22 @@ mod tests {
         );
         // A bare path (no scheme) resolves unchanged.
         assert_eq!(file_uri_to_path("/plain/path"), Path::new("/plain/path"));
+    }
+
+    #[test]
+    fn selecting_reconstructor_falls_back_to_mock_with_no_real_backend() {
+        // With a backend hint that can never resolve a tool, the selector routes
+        // to the mock and produces its deterministic artifact, so the queue runs
+        // end to end on a node with no real backend (CI / no-GPU).
+        let r = SelectingReconstructor::new("/work");
+        let out = r
+            .reconstruct(
+                &dataset("ds-9", Some("/data/ds-9")),
+                &serde_json::json!({ "backend": "no-such-tool" }),
+            )
+            .unwrap();
+        assert_eq!(out.kind, "splat");
+        assert_eq!(out.uri, "mock://splat/ds-9");
     }
 
     #[test]

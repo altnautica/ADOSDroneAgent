@@ -15,6 +15,7 @@
 //! the backends.
 
 mod api;
+mod artifacts;
 mod auth;
 mod backends;
 mod client;
@@ -22,6 +23,7 @@ mod cluster;
 mod engine;
 mod heartbeat_sidecar;
 mod ingest;
+mod keyframe_persister;
 /// mDNS advertise (the compute node) + resolve (a drone-side caller browsing for
 /// a `profile=workstation` node). Public so a consumer crate can reach
 /// `ados_compute::mdns::resolve_compute` directly, mirroring
@@ -36,10 +38,14 @@ mod session;
 mod store;
 
 pub use api::{build_router, ApiState, CancelResponse, SubmitResponse};
+pub use artifacts::{
+    artifact_router, derive_public_base, resolve_under_root, rewrite_output_to_artifact_url,
+};
 pub use auth::{require_pairing, ComputeAuth, PairingGate, RateLimiter, DEFAULT_PAIRING_PATH};
 pub use backends::{
     file_uri_to_path, is_tool_available, parse_gaussian_count, path_to_file_uri,
     select_reconstructor, CliReconstructor, ReconstructCommand, ReconstructorKind,
+    SelectingReconstructor,
 };
 pub use client::{ClientError, ComputeClient};
 pub use cluster::Cluster;
@@ -48,10 +54,11 @@ pub use heartbeat_sidecar::{
     compute_heartbeat_path, write_compute_heartbeat, write_compute_heartbeat_to,
     ComputeHeartbeatSidecar, SlaveEntry, COMPUTE_HEARTBEAT_SIDECAR,
 };
-pub use ingest::AtlasIngest;
+pub use ingest::{submit_reconstruct_job, AtlasIngest};
+pub use keyframe_persister::{dataset_id_for, KeyframePersister};
 pub use mdns::{advertise_compute, resolve_compute, ComputeAdvert};
 pub use offload::{Detection, Detector, FrameRef, MockDetector};
-pub use pipeline::{stage_index_of, Pipeline, PipelineRunner, PipelineStage};
+pub use pipeline::{chain_input_uri, stage_index_of, Pipeline, PipelineRunner, PipelineStage};
 pub use reconstructor::{MockReconstructor, ReconstructOutput, Reconstructor};
 pub use rerun_log::{
     log_keyframe, log_mesh, log_occupancy, log_pointcloud, log_splat, RerunArchetype,

@@ -19,7 +19,13 @@
 //! Configuration is read from the environment so the install layer can set it
 //! without a config-file dependency:
 //! - `ADOS_COMPUTE_DB`        job store path (default `/var/ados/compute/jobs.db`)
+//! - `ADOS_COMPUTE_WORK`      dataset + artifact work root (default
+//!   `/var/ados/compute/work`); the persister writes keyframe datasets here, the
+//!   reconstructor writes artifacts here, and the artifact route serves from here
 //! - `ADOS_COMPUTE_BIND`      bind address (default `127.0.0.1:8092`, loopback)
+//! - `ADOS_COMPUTE_PUBLIC_URL` base URL the GCS fetches artifacts from (default
+//!   derived from the bind address, substituting the node hostname for a wildcard
+//!   bind); the artifact URL is `<public_url>/artifacts/<relpath>`
 //! - `ADOS_COMPUTE_NODE_ID`   this node's id (default `compute-node`)
 //! - `ADOS_COMPUTE_WORKERS`   worker slots (default `1`)
 //! - `ADOS_COMPUTE_RETENTION_S` terminal-job retention seconds (default `86400`)
@@ -39,8 +45,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ados_atlas_transport::{atlas_event_router, AtlasEvent};
 use ados_compute::{
-    build_router, write_compute_heartbeat, AtlasIngest, Cluster, ComputeAuth, Engine, JobStore,
-    MockDetector, MockReconstructor, Prepared, Scheduler, DEFAULT_PAIRING_PATH,
+    artifact_router, build_router, derive_public_base, rewrite_output_to_artifact_url,
+    submit_reconstruct_job, write_compute_heartbeat, AtlasIngest, Cluster, ComputeAuth, Engine,
+    JobStore, MockDetector, Prepared, Scheduler, SelectingReconstructor, DEFAULT_PAIRING_PATH,
 };
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex};
@@ -165,6 +172,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_logging();
 
     let db = env_or("ADOS_COMPUTE_DB", "/var/ados/compute/jobs.db");
+    let work_root = PathBuf::from(env_or("ADOS_COMPUTE_WORK", "/var/ados/compute/work"));
     let bind = env_or("ADOS_COMPUTE_BIND", "127.0.0.1:8092");
     let node_id = resolve_node_id();
     let workers: u32 = env_or("ADOS_COMPUTE_WORKERS", "1").parse().unwrap_or(1);
@@ -173,14 +181,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(86_400)
         .saturating_mul(1000);
 
+    // The base URL the GCS fetches artifacts from: the explicit override, else
+    // derived from the bind (the node hostname stands in for a wildcard bind so
+    // the URL is reachable off-box). The artifact host matches the mDNS target.
+    let public_base = derive_public_base(
+        &bind,
+        std::env::var("ADOS_COMPUTE_PUBLIC_URL").ok().as_deref(),
+        Some(&ados_compute::mdns::system_hostname()),
+    );
+
     if db != ":memory:" {
         if let Some(parent) = std::path::Path::new(&db).parent() {
             let _ = std::fs::create_dir_all(parent);
         }
     }
+    // The work root holds keyframe datasets and reconstruction artifacts.
+    let _ = std::fs::create_dir_all(&work_root);
 
     let store = JobStore::open(&db)?;
-    let scheduler = Scheduler::new(store, Arc::new(MockReconstructor), Arc::new(MockDetector));
+    // The reconstructor picks the real backend per job (Brush when installed),
+    // falling back to the mock (CI / no-GPU), and writes artifacts under work_root.
+    let scheduler = Scheduler::new(
+        store,
+        Arc::new(SelectingReconstructor::new(work_root.clone())),
+        Arc::new(MockDetector),
+    );
     let engine = Engine::new(scheduler, Cluster::new_master(node_id.clone()), workers);
     let state = Arc::new(Mutex::new(engine));
 
@@ -203,7 +228,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // responsive. A separate task runs retention on a fixed cadence.
     for _ in 0..workers.max(1) {
         let ws = state.clone();
-        tokio::spawn(async move { worker_loop(ws).await });
+        let wr = work_root.clone();
+        let pb = public_base.clone();
+        tokio::spawn(async move { worker_loop(ws, wr, pb).await });
     }
     let rs = state.clone();
     tokio::spawn(async move { retention_loop(rs, retention_ms).await });
@@ -217,7 +244,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "ADOS_PAIRING_JSON",
         DEFAULT_PAIRING_PATH,
     ))));
-    let mut router = build_router(state.clone(), auth);
+    // The artifact server hands reconstruction outputs (.ply / .rrd / .tif / .jpg)
+    // to the GCS over the LAN, path-jailed to the work root, on the same listener.
+    let mut router = build_router(state.clone(), auth).merge(artifact_router(work_root.clone()));
 
     // Atlas world-model receiver. INERT unless atlas is enabled (Rule 46 single
     // canonical gate): when on, mount POST /api/atlas/event alongside the compute
@@ -229,7 +258,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (atlas_tx, atlas_rx) = mpsc::channel::<AtlasEvent>(ATLAS_EVENT_CHANNEL_CAP);
         router = router.merge(atlas_event_router(atlas_tx));
         let rs = state.clone();
-        tokio::spawn(async move { atlas_receiver_loop(atlas_rx, rs).await });
+        let wr = work_root.clone();
+        tokio::spawn(async move { atlas_receiver_loop(atlas_rx, rs, wr).await });
         tracing::info!(
             channel_cap = ATLAS_EVENT_CHANNEL_CAP,
             "atlas enabled: world-model event receiver mounted at POST /api/atlas/event"
@@ -259,8 +289,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// One worker: claim a job under the lock, run the backend WITHOUT it, finalize
 /// under the lock. Idles 500 ms when the queue is empty. A cancel that lands
-/// during the backend run wins inside `finalize`.
-async fn worker_loop(state: Arc<Mutex<Engine>>) {
+/// during the backend run wins inside `finalize`. A real `file://` artifact under
+/// the work root is rewritten to a fetchable LAN URL (the GCS reads it as the
+/// output URL) before finalize, keeping the local path for any pipeline chaining.
+async fn worker_loop(state: Arc<Mutex<Engine>>, work_root: PathBuf, public_base: String) {
     loop {
         let (prepared, reconstructor, detector) = {
             let engine = state.lock().await;
@@ -270,8 +302,11 @@ async fn worker_loop(state: Arc<Mutex<Engine>>) {
         };
         match prepared {
             Ok(Prepared::Ready { job, input }) => {
-                let result =
+                let mut result =
                     Scheduler::run_backend(&*reconstructor, &*detector, &job, &input, now_ms());
+                for output in &mut result.outputs {
+                    rewrite_output_to_artifact_url(output, &work_root, &public_base);
+                }
                 let outcome = {
                     let engine = state.lock().await;
                     engine.scheduler().finalize(&job, result, now_ms())
@@ -333,28 +368,38 @@ async fn heartbeat_loop(state: Arc<Mutex<Engine>>) {
 }
 
 /// Drain the Atlas event receiver into the job queue. One [`AtlasIngest`] lives
-/// for the task: it counts a capture session's keyframes (the received-side
-/// delivery proof) and, on the terminal `Bagged` state, submits the reconstruct
-/// job the worker loop picks up. The store write is brief, so the engine lock is
-/// held only for the `ingest` call (the same lock-briefly discipline the worker
-/// uses). A malformed frame is swallowed inside `ingest`; a real store fault is
-/// logged and the loop continues. The loop ends when the event channel closes
-/// (the receiver router dropped its senders), which only happens on shutdown.
-async fn atlas_receiver_loop(mut rx: mpsc::Receiver<AtlasEvent>, state: Arc<Mutex<Engine>>) {
-    let mut ingest = AtlasIngest::new();
+/// for the task: it persists each keyframe's image to the work-root dataset (no
+/// store, no lock) and, on the terminal `Bagged` state, finalizes the dataset
+/// (writes `transforms.json`) and yields the reconstruct job. The disk writes run
+/// lock-free; the engine lock is held only briefly for the store submit (the same
+/// lock-briefly discipline the worker uses). A malformed frame is swallowed; a
+/// real filesystem or store fault is logged and the loop continues. The loop ends
+/// when the event channel closes (the receiver router dropped its senders), which
+/// only happens on shutdown.
+async fn atlas_receiver_loop(
+    mut rx: mpsc::Receiver<AtlasEvent>,
+    state: Arc<Mutex<Engine>>,
+    work_root: PathBuf,
+) {
+    let mut ingest = AtlasIngest::new(work_root);
     while let Some(event) = rx.recv().await {
-        let outcome = {
-            let engine = state.lock().await;
-            ingest.ingest(&event, engine.scheduler().store(), now_ms())
-        };
-        match outcome {
-            Ok(Some(job_id)) => tracing::info!(
-                job = %job_id,
-                keyframes_received = ingest.keyframes_seen(),
-                "atlas capture bagged: reconstruct job enqueued"
-            ),
+        match ingest.step(&event, now_ms()) {
+            Ok(Some((dataset, job))) => {
+                let submitted = {
+                    let engine = state.lock().await;
+                    submit_reconstruct_job(engine.scheduler().store(), &dataset, &job)
+                };
+                match submitted {
+                    Ok(job_id) => tracing::info!(
+                        job = %job_id,
+                        keyframes_received = ingest.keyframes_seen(),
+                        "atlas capture bagged: reconstruct job enqueued"
+                    ),
+                    Err(e) => tracing::error!(error = %e, "atlas reconstruct submit failed"),
+                }
+            }
             Ok(None) => {}
-            Err(e) => tracing::error!(error = %e, "atlas ingest failed"),
+            Err(e) => tracing::error!(error = %e, "atlas ingest disk write failed"),
         }
     }
     tracing::info!("atlas receiver loop ended (event channel closed)");

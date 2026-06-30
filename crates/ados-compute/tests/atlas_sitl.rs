@@ -15,8 +15,9 @@ use ados_atlas_transport::{
     LanHttpBearer, LoopbackBearer,
 };
 use ados_compute::{
-    AtlasIngest, Cluster, Engine, JobRecord, JobStore, LiveSession, LiveSessionState,
-    MockDeltaProducer, MockDetector, MockReconstructor, RerunArchetype, RerunRecording, Scheduler,
+    submit_reconstruct_job, AtlasIngest, Cluster, Engine, JobRecord, JobStore, LiveSession,
+    LiveSessionState, MockDeltaProducer, MockDetector, MockReconstructor, RerunArchetype,
+    RerunRecording, Scheduler,
 };
 use ados_protocol::atlas::{
     CameraIntrinsics, CameraRole, CaptureState, CaptureStatus, Distortion, ImageEncoding,
@@ -79,12 +80,14 @@ async fn g0_single_camera_capture_reconstructs_to_a_splat_end_to_end() {
     bearer.send(&bagged(N as u64)).await.unwrap();
 
     // The compute node ingests each received event; the bagged state submits a job.
-    let mut ingest = AtlasIngest::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let mut ingest = AtlasIngest::new(tmp.path());
     let mut job_id = None;
     for _ in 0..(N + 1) {
         let ev = rx.recv().await.expect("the bearer delivered the event");
-        if let Some(id) = ingest.ingest(&ev, engine.scheduler().store(), 200).unwrap() {
-            job_id = Some(id);
+        if let Some((dataset, job)) = ingest.step(&ev, 200).unwrap() {
+            job_id =
+                Some(submit_reconstruct_job(engine.scheduler().store(), &dataset, &job).unwrap());
         }
     }
     let job_id = job_id.expect("the bagged session submitted a reconstruct job");
@@ -146,11 +149,12 @@ async fn integrated_loopback_capture_drains_into_an_enqueued_reconstruct_job() {
     //    the workers pick up (mirrors `atlas_receiver_loop`, run inline against
     //    the engine's store). ──
     let store = engine.scheduler().store();
-    let mut ingest = AtlasIngest::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let mut ingest = AtlasIngest::new(tmp.path());
     let mut enqueued_job = None;
     while let Some(event) = rx.recv().await {
-        if let Some(job_id) = ingest.ingest(&event, store, 200).unwrap() {
-            enqueued_job = Some(job_id);
+        if let Some((dataset, job)) = ingest.step(&event, 200).unwrap() {
+            enqueued_job = Some(submit_reconstruct_job(store, &dataset, &job).unwrap());
         }
     }
 
@@ -375,11 +379,12 @@ async fn g2_bag_pipeline_reconstructs_to_a_delivered_output() {
     drop(ladder);
 
     let store = engine.scheduler().store();
-    let mut ingest = AtlasIngest::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let mut ingest = AtlasIngest::new(tmp.path());
     let mut job_id = None;
     while let Some(ev) = rx.recv().await {
-        if let Some(id) = ingest.ingest(&ev, store, 200).unwrap() {
-            job_id = Some(id);
+        if let Some((dataset, job)) = ingest.step(&ev, 200).unwrap() {
+            job_id = Some(submit_reconstruct_job(store, &dataset, &job).unwrap());
         }
     }
     let job_id = job_id.expect("the bagged capture enqueued a reconstruct job");
@@ -603,11 +608,12 @@ async fn g5_multi_cam_fuses_into_one_world() {
     drop(ladder);
 
     let store = engine.scheduler().store();
-    let mut ingest = AtlasIngest::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let mut ingest = AtlasIngest::new(tmp.path());
     let mut job_id = None;
     while let Some(ev) = rx.recv().await {
-        if let Some(id) = ingest.ingest(&ev, store, 200).unwrap() {
-            job_id = Some(id);
+        if let Some((dataset, job)) = ingest.step(&ev, 200).unwrap() {
+            job_id = Some(submit_reconstruct_job(store, &dataset, &job).unwrap());
         }
     }
     let job_id = job_id.expect("the multi-cam bag enqueued a reconstruct job");

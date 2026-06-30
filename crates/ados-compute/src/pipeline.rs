@@ -91,6 +91,18 @@ impl Pipeline {
     }
 }
 
+/// The local input a downstream stage chains on. The artifact server rewrites a
+/// completed output's `uri` to a fetchable HTTP URL for the GCS while preserving
+/// the original `file://` path as `meta.local_uri`; a pipeline stage must consume
+/// the local file, not the HTTP URL, so prefer `local_uri` when present.
+pub fn chain_input_uri(output: &Output) -> &str {
+    output
+        .meta
+        .get("local_uri")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&output.uri)
+}
+
 /// The stage index a job belongs to, read from its pipeline params. `None` for a
 /// job that is not part of a pipeline.
 pub fn stage_index_of(job: &JobRecord) -> Option<usize> {
@@ -136,7 +148,12 @@ impl<'a> PipelineRunner<'a> {
             return Ok(None);
         };
         let next = index + 1;
-        match pipeline.job_for_stage(next, Some(&output.uri), Some(&output.id), now_ms) {
+        match pipeline.job_for_stage(
+            next,
+            Some(chain_input_uri(output)),
+            Some(&output.id),
+            now_ms,
+        ) {
             Some(job) => {
                 self.store.submit_job(&job)?;
                 Ok(Some(job))
@@ -214,6 +231,28 @@ mod tests {
         // is finished — advance has no next stage to submit.
         let out1 = output("pl-1-s1-out", "pl-1-s1", "splat", "file:///w/train.ply", 40);
         assert!(runner.advance(&pipeline, &s1, &out1, 50).unwrap().is_none());
+    }
+
+    #[test]
+    fn advance_chains_on_the_local_uri_when_the_output_was_rewritten() {
+        // A completed output whose uri was rewritten to an HTTP artifact URL still
+        // chains the next stage on the preserved local file:// path.
+        let store = store_with_dataset("ds-1");
+        let runner = PipelineRunner::new(&store);
+        let pipeline = Pipeline::post_flight("pl-1", "ds-1");
+        let s0 = runner.start(&pipeline, 10).unwrap();
+
+        let mut out0 = output(
+            "pl-1-s0-out",
+            "pl-1-s0",
+            "pointcloud",
+            "http://node.local:8092/artifacts/ds-1/colmap",
+            20,
+        );
+        out0.meta = serde_json::json!({ "local_uri": "file:///w/ds-1/colmap" });
+        let s1 = runner.advance(&pipeline, &s0, &out0, 30).unwrap().unwrap();
+        // The train stage trains on the local file, not the HTTP URL.
+        assert_eq!(s1.params["input_uri"], "file:///w/ds-1/colmap");
     }
 
     #[test]
