@@ -103,6 +103,32 @@ pub struct CancelResponse {
     pub cancelled: bool,
 }
 
+/// A job as served over the REST API: every [`JobRecord`] field plus a top-level
+/// `session_id` lifted from the job's `params` (the capturing session a
+/// reconstruct job belongs to). The GCS correlates a world-model artifact to a
+/// drone's active session by `session_id` without re-parsing the opaque params or
+/// the dataset/job id format. Omitted when the job carries no session — an offload
+/// job, or a reconstruct job written by an agent before the session was tagged —
+/// so the surface stays backward-compatible.
+#[derive(Debug, Serialize)]
+struct JobView {
+    #[serde(flatten)]
+    job: JobRecord,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<String>,
+}
+
+impl JobView {
+    fn of(job: JobRecord) -> Self {
+        let session_id = job
+            .params
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        Self { job, session_id }
+    }
+}
+
 async fn status(State(state): State<ApiState>) -> Result<Response, ComputeError> {
     let engine = state.lock().await;
     Ok(Json(engine.heartbeat()?).into_response())
@@ -155,7 +181,8 @@ async fn submit_job(
 async fn list_jobs(State(state): State<ApiState>) -> Result<Response, ComputeError> {
     let engine = state.lock().await;
     let jobs = engine.scheduler().store().list_jobs()?;
-    Ok(Json(jobs).into_response())
+    let views: Vec<JobView> = jobs.into_iter().map(JobView::of).collect();
+    Ok(Json(views).into_response())
 }
 
 async fn job_status(
@@ -164,7 +191,7 @@ async fn job_status(
 ) -> Result<Response, ComputeError> {
     let engine = state.lock().await;
     match engine.scheduler().store().get_job(&id)? {
-        Some(job) => Ok(Json(job).into_response()),
+        Some(job) => Ok(Json(JobView::of(job)).into_response()),
         None => Err(ComputeError::NotFound(format!("job {id}"))),
     }
 }
@@ -357,6 +384,62 @@ mod tests {
         let outs: Vec<Output> = serde_json::from_value(outs).unwrap();
         assert_eq!(outs.len(), 1);
         assert_eq!(outs[0].kind, "detection");
+    }
+
+    #[tokio::test]
+    async fn job_api_surfaces_session_id_from_params() {
+        let router = build_router(test_state(), unpaired_auth());
+
+        // A reconstruct job tagged with its capturing session (the shape the
+        // capture ingest submits). The session must appear top-level on both the
+        // list and single-job reads so the GCS can correlate the artifact.
+        let (st, _) = send(
+            &router,
+            "POST",
+            "/api/compute/jobs",
+            serde_json::json!({ "job_id": "recon-s1", "kind": "reconstruct",
+                "dataset_id": "ds-s1", "params": { "session_id": "s1", "backend": "brush" } }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED);
+
+        let (_, jobs) = send(&router, "GET", "/api/compute/jobs", serde_json::Value::Null).await;
+        let arr = jobs.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["session_id"], "s1");
+        // The flattened JobRecord fields are still all present alongside it.
+        assert_eq!(arr[0]["id"], "recon-s1");
+        assert_eq!(arr[0]["state"], "queued");
+
+        let (_, job) = send(
+            &router,
+            "GET",
+            "/api/compute/jobs/recon-s1",
+            serde_json::Value::Null,
+        )
+        .await;
+        assert_eq!(job["session_id"], "s1");
+
+        // A job that carries no session (an offload job) omits the field entirely,
+        // so the surface stays backward-compatible.
+        send(
+            &router,
+            "POST",
+            "/api/compute/jobs",
+            serde_json::json!({ "job_id": "off-1", "kind": "perception_offload" }),
+        )
+        .await;
+        let (_, off) = send(
+            &router,
+            "GET",
+            "/api/compute/jobs/off-1",
+            serde_json::Value::Null,
+        )
+        .await;
+        assert!(
+            off.get("session_id").is_none(),
+            "a sessionless job omits session_id, got: {off}"
+        );
     }
 
     #[tokio::test]

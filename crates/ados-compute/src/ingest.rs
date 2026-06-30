@@ -237,7 +237,7 @@ impl AtlasIngest {
                 kind: "live_snapshot".into(),
                 created_ms: now_ms,
                 meta: serde_json::json!({
-                    "session_id": session_id,
+                    "session_id": session_id.clone(),
                     "input_path": snapshot_dir.to_string_lossy(),
                     "keyframes": keyframes,
                     "cameras": cameras,
@@ -251,7 +251,13 @@ impl AtlasIngest {
                 dataset_id: Some(cycle_dataset_id),
                 state: ComputeJobState::Queued,
                 progress: 0.0,
-                params: serde_json::json!({ "backend": DEFAULT_RECONSTRUCT_BACKEND }),
+                // The job carries its capturing session so the job API can surface
+                // it (the GCS correlates a world-model artifact to a drone's active
+                // session by `session_id`, not the opaque dataset/job id format).
+                params: serde_json::json!({
+                    "backend": DEFAULT_RECONSTRUCT_BACKEND,
+                    "session_id": session_id,
+                }),
                 result_ref: None,
                 error: None,
                 created_ms: now_ms,
@@ -296,7 +302,13 @@ impl AtlasIngest {
             dataset_id: Some(dataset_id),
             state: ComputeJobState::Queued,
             progress: 0.0,
-            params: serde_json::json!({ "backend": DEFAULT_RECONSTRUCT_BACKEND }),
+            // The job carries its capturing session so the job API can surface it
+            // (the GCS correlates a world-model artifact to a drone's active session
+            // by `session_id`, not the opaque dataset/job id format).
+            params: serde_json::json!({
+                "backend": DEFAULT_RECONSTRUCT_BACKEND,
+                "session_id": status.session_id.clone(),
+            }),
             result_ref: None,
             error: None,
             created_ms: now_ms,
