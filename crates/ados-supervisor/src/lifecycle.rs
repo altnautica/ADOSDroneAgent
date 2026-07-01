@@ -371,10 +371,13 @@ impl Supervisor {
 
     /// Detect connected hardware and start the matching units.
     async fn detect_and_start_hardware(&mut self) {
-        if self.config.video_enabled
-            && self.index_of("ados-video").is_some()
-            && crate::hardware::has_camera().await
-        {
+        // Start the video service when video is enabled and either a local
+        // camera node is present OR a network camera source is configured (the
+        // IP-camera case: the feed is an rtsp://… / http://… URL, so there is no
+        // /dev/video node to detect).
+        let has_video_source =
+            crate::hardware::has_camera().await || self.config.video_network_source.is_some();
+        if self.config.video_enabled && self.index_of("ados-video").is_some() && has_video_source {
             self.start_service("ados-video").await;
         } else if !self.config.video_enabled {
             tracing::info!("video service skipped (video.mode disabled)");
@@ -580,6 +583,7 @@ mod tests {
             profile_wire: profile_wire.to_string(),
             role: boot_role,
             video_enabled: true,
+            video_network_source: None,
             cloud_relay_enabled: false,
             configured_gs_role: "direct".to_string(),
             raw_agent_profile: Some(profile_wire.replace('-', "_")),

@@ -45,6 +45,17 @@ struct AgentSection {
 struct VideoSection {
     #[serde(default)]
     mode: Option<String>,
+    #[serde(default)]
+    camera: CameraSection,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CameraSection {
+    /// `video.camera.source`: a device hint (`csi`/`usb`/`ip`) or an explicit
+    /// `rtsp://…` / `http://…` network URL. The supervisor only reads it to
+    /// decide whether to start the video service without a local camera node.
+    #[serde(default)]
+    source: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -74,6 +85,11 @@ pub struct AgentConfig {
     pub role: Option<String>,
     /// `video.mode` is set and not `"disabled"`.
     pub video_enabled: bool,
+    /// An explicit network camera source (`video.camera.source` = `rtsp://…`
+    /// / `http://…`), or `None` for the local-camera path. When set, the
+    /// hardware-detect gate starts `ados-video` even with no local `/dev/video`
+    /// node — the IP-camera drone case, where the feed is a remote URL.
+    pub video_network_source: Option<String>,
     /// `server.mode` is a cloud posture (`cloud` / `self_hosted`), i.e. the
     /// cloud relay is configured. Default `local` → false. The WFB auto-pair
     /// loop only fails over to the cloud relay when this is true; a local-first
@@ -129,6 +145,15 @@ impl AgentConfig {
             .map(|m| m != "disabled")
             .unwrap_or(false);
 
+        let video_network_source = raw
+            .video
+            .camera
+            .source
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| s.starts_with("rtsp://") || s.starts_with("http://"))
+            .map(str::to_string);
+
         let cloud_relay_enabled = matches!(
             raw.server.mode.as_deref(),
             Some("cloud") | Some("self_hosted")
@@ -146,6 +171,7 @@ impl AgentConfig {
             profile_wire,
             role,
             video_enabled,
+            video_network_source,
             cloud_relay_enabled,
             configured_gs_role,
             raw_agent_profile,
@@ -311,6 +337,31 @@ mod tests {
         assert!(load("server:\n  mode: self_hosted\n"));
         // An unknown mode stays off (local-first).
         assert!(!load("server:\n  mode: weird\n"));
+    }
+
+    #[test]
+    fn video_network_source_parsed_only_for_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let pc = dir.path().join("profile.conf");
+        let role = dir.path().join("mesh/role");
+        let load = |body: &str| {
+            let cfg = dir.path().join("config.yaml");
+            write(&cfg, body);
+            AgentConfig::load_from(&cfg, &pc, &role).video_network_source
+        };
+        // A local-camera hint or device path is not a network source.
+        assert_eq!(load("video:\n  camera:\n    source: csi\n"), None);
+        assert_eq!(load("video:\n  camera:\n    source: /dev/video0\n"), None);
+        assert_eq!(load("agent:\n  profile: drone\n"), None);
+        // An explicit rtsp/http URL is picked up (trimmed).
+        assert_eq!(
+            load("video:\n  camera:\n    source: rtsp://host:8554/scene\n"),
+            Some("rtsp://host:8554/scene".to_string())
+        );
+        assert_eq!(
+            load("video:\n  camera:\n    source: \"  http://cam/stream  \"\n"),
+            Some("http://cam/stream".to_string())
+        );
     }
 
     #[test]
