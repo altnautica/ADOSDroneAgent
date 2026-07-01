@@ -57,6 +57,28 @@ jobs:
       - name: Clippy (host target, all features)
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      # Some crates carry bundled C (SQLite, zstd) and — via rerun's
+      # re_redap_client, pulled transitively through ados-compute — ring, whose
+      # build script needs an aarch64-linux-musl C compiler. zig cc is that
+      # compiler (the same tech cargo-zigbuild uses for the publish jobs);
+      # exposing it under the target-triple name cc-rs looks for lets the musl
+      # clippy build every crate's C without a per-crate exclude whack-a-mole.
+      - name: Install zig (musl C cross-compiler for clippy build scripts)
+        uses: mlugg/setup-zig@v2
+
+      - name: Expose zig as the aarch64-linux-musl C toolchain
+        run: |
+          set -eu
+          sudo tee /usr/local/bin/aarch64-linux-musl-gcc >/dev/null <<'EOF'
+          #!/bin/sh
+          exec zig cc -target aarch64-linux-musl "$@"
+          EOF
+          sudo tee /usr/local/bin/aarch64-linux-musl-ar >/dev/null <<'EOF'
+          #!/bin/sh
+          exec zig ar "$@"
+          EOF
+          sudo chmod +x /usr/local/bin/aarch64-linux-musl-gcc /usr/local/bin/aarch64-linux-musl-ar
+
       # The musl prebuilts ship default features. The onnx backend pulls ort,
       # which has no aarch64-musl prebuilt, so --all-features cannot target
       # musl; the host clippy above already covers the onnx path.
