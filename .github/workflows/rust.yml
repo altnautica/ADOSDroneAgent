@@ -70,11 +70,19 @@ jobs:
         run: |
           set -eu
           sudo tee /usr/local/bin/aarch64-linux-musl-gcc >/dev/null <<'EOF'
-          #!/bin/sh
-          exec zig cc -target aarch64-linux-musl "$@"
+          #!/usr/bin/env bash
+          # cc-rs passes --target=<rust-triple> (aarch64-unknown-linux-musl),
+          # which zig's clang driver rejects (it wants its own arch-os-abi form).
+          # Drop it; the -target below is the zig-form target for this cross build.
+          args=()
+          for a in "$@"; do
+            [[ "$a" == --target=* ]] && continue
+            args+=("$a")
+          done
+          exec zig cc -target aarch64-linux-musl "${args[@]}"
           EOF
           sudo tee /usr/local/bin/aarch64-linux-musl-ar >/dev/null <<'EOF'
-          #!/bin/sh
+          #!/usr/bin/env bash
           exec zig ar "$@"
           EOF
           sudo chmod +x /usr/local/bin/aarch64-linux-musl-gcc /usr/local/bin/aarch64-linux-musl-ar
