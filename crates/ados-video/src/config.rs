@@ -101,7 +101,7 @@ impl CameraConfig {
         let Ok(text) = std::fs::read_to_string(path) else {
             return CameraConfig::default();
         };
-        let raw: RawConfig = serde_norway::from_str(&text).unwrap_or_default();
+        let raw: RawConfig = ados_config::yaml_or_default(&text, "video");
         raw.video.camera
     }
 }
@@ -305,7 +305,7 @@ impl AgentVideoConfig {
         let Ok(text) = std::fs::read_to_string(path) else {
             return AgentVideoConfig::default();
         };
-        let raw: RawConfig = serde_norway::from_str(&text).unwrap_or_default();
+        let raw: RawConfig = ados_config::yaml_or_default(&text, "video");
         // `agent.profile` is canonical; `video.profile` is an optional override.
         let profile = raw.video.profile.or(raw.agent.profile);
         AgentVideoConfig {

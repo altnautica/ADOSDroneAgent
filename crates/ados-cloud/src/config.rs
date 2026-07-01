@@ -317,7 +317,7 @@ impl CloudConfig {
             Ok(t) => t,
             Err(_) => return CloudConfig::default(),
         };
-        serde_norway::from_str(&text).unwrap_or_default()
+        ados_config::yaml_or_default(&text, "cloud")
     }
 }
 

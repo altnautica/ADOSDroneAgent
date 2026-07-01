@@ -142,7 +142,7 @@ impl GroundStationConfig {
         let Ok(text) = std::fs::read_to_string(path) else {
             return GroundStationConfig::default();
         };
-        let raw: RawConfig = serde_norway::from_str(&text).unwrap_or_default();
+        let raw: RawConfig = ados_config::yaml_or_default(&text, "ground_station");
         raw.ground_station
     }
 }

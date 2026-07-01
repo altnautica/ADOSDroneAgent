@@ -19,6 +19,7 @@ path = "src/bin/ados-cloud.rs"
 # dispatcher will drive (path deps; the supervisor consumer wiring lands with
 # the command-dispatcher task).
 ados-protocol = { path = "../ados-protocol", features = ["tracing-layer"] }
+ados-config = { path = "../ados-config" }
 ados-plugin-host = { path = "../ados-plugin-host" }
 # The Atlas stream lane: this crate hosts the Cloud bearer (it owns the broker
 # connection) implementing the lane crate's AtlasBearer trait. Layering points

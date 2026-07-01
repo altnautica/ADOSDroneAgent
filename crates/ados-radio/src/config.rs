@@ -151,7 +151,7 @@ impl RegulatoryConfig {
         let Ok(text) = std::fs::read_to_string(path) else {
             return RegulatoryConfig::default();
         };
-        let raw: RawConfig = serde_norway::from_str(&text).unwrap_or_default();
+        let raw: RawConfig = ados_config::yaml_or_default(&text, "radio");
         raw.network
             .regulatory
             .map(RawRegulatory::resolve)
@@ -484,7 +484,7 @@ impl WfbConfig {
         let Ok(text) = std::fs::read_to_string(path) else {
             return WfbConfig::default();
         };
-        let raw: RawConfig = serde_norway::from_str(&text).unwrap_or_default();
+        let raw: RawConfig = ados_config::yaml_or_default(&text, "radio");
         let mut cfg = raw.video.wfb;
         cfg.guard_aux_ports();
         cfg

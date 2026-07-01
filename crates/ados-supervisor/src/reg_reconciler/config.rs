@@ -211,7 +211,7 @@ pub fn read_wanted_from(text: &str) -> WantedReg {
         #[serde(default)]
         domain: Option<String>,
     }
-    let raw = serde_norway::from_str::<Raw>(text).unwrap_or_default();
+    let raw: Raw = ados_config::yaml_or_default(text, "reg_reconciler");
 
     // A normalised, non-empty uppercase domain from an Option<String>, or None.
     let norm = |d: Option<String>| -> Option<String> {

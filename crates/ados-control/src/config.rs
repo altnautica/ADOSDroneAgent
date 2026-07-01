@@ -94,7 +94,7 @@ impl PairingConfig {
             Ok(t) => t,
             Err(_) => return PairingConfig::default(),
         };
-        serde_norway::from_str(&text).unwrap_or_default()
+        ados_config::yaml_or_default(&text, "control")
     }
 
     /// The radio peer's device id, or `None` when no peer is recorded or it is
@@ -164,7 +164,7 @@ impl ControlSecurityConfig {
             Ok(t) => t,
             Err(_) => return ControlSecurityConfig::default(),
         };
-        serde_norway::from_str(&text).unwrap_or_default()
+        ados_config::yaml_or_default(&text, "control")
     }
 
     /// The `security:` section.

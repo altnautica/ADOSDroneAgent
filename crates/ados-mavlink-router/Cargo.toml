@@ -8,6 +8,7 @@ description = "Owns the flight-controller serial link, fans MAVLink frames to th
 
 [dependencies]
 ados-protocol = { path = "../ados-protocol", features = ["mavlink", "tracing-layer"] }
+ados-config = { path = "../ados-config" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_norway = { workspace = true }

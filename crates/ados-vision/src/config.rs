@@ -293,7 +293,7 @@ impl VisionConfig {
         let Ok(text) = std::fs::read_to_string(path) else {
             return VisionConfig::default();
         };
-        let raw: RawConfig = serde_norway::from_str(&text).unwrap_or_default();
+        let raw: RawConfig = ados_config::yaml_or_default(&text, "vision");
         let Some(v) = raw.vision else {
             // No `vision:` block ⇒ disabled, but still carry the agent profile
             // so the ground-station gate is consistent.

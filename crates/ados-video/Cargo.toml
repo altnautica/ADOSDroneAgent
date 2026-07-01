@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 ados-protocol = { path = "../ados-protocol", features = ["tracing-layer"] }
+ados-config = { path = "../ados-config" }
 ados-hal-probe = { path = "../ados-hal-probe" }
 serde = { workspace = true }
 serde_json = { workspace = true }

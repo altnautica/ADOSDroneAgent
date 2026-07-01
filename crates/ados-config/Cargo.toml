@@ -1,0 +1,16 @@
+[package]
+name = "ados-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Loud-fail config loading for the agent services: parse a YAML config slice (or a JSON sidecar) and log the exact parser error on failure instead of silently defaulting, optionally handing the error back so a service can surface it on its status."
+
+[dependencies]
+serde = { workspace = true }
+serde_norway = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

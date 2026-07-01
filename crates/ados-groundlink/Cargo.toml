@@ -20,6 +20,7 @@ path = "src/main.rs"
 ados-radio = { path = "../ados-radio" }
 ados-supervisor = { path = "../ados-supervisor" }
 ados-protocol = { path = "../ados-protocol", features = ["tracing-layer"] }
+ados-config = { path = "../ados-config" }
 # The Atlas stream lane: the GS relay re-POSTs decoded WFB-aux datagrams into the
 # compute receiver via the LAN bearer.
 ados-atlas-transport = { path = "../ados-atlas-transport" }

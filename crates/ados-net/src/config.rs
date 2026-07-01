@@ -51,7 +51,7 @@ impl UplinkConfig {
             Ok(t) => t,
             Err(_) => return UplinkConfig::default(),
         };
-        serde_norway::from_str(&text).unwrap_or_default()
+        ados_config::yaml_or_default(&text, "net")
     }
 
     /// The configured share-uplink flag.

@@ -213,7 +213,7 @@ fn read_raw_config(path: &Path) -> RawConfig {
     let Ok(text) = std::fs::read_to_string(path) else {
         return RawConfig::default();
     };
-    serde_norway::from_str(&text).unwrap_or_default()
+    ados_config::yaml_or_default(&text, "supervisor")
 }
 
 /// Wire-contract profile string from a raw value. `"ground_station"` becomes

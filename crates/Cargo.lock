@@ -87,6 +87,7 @@ version = "0.1.0"
 dependencies = [
  "ados-atlas-transport",
  "ados-compute",
+ "ados-config",
  "ados-plugin-host",
  "ados-protocol",
  "anyhow",
@@ -138,9 +139,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ados-config"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "serde_norway",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "ados-control"
 version = "0.1.0"
 dependencies = [
+ "ados-config",
  "ados-hid",
  "ados-macpin",
  "ados-protocol",
@@ -227,6 +240,7 @@ name = "ados-groundlink"
 version = "0.1.0"
 dependencies = [
  "ados-atlas-transport",
+ "ados-config",
  "ados-protocol",
  "ados-radio",
  "ados-supervisor",
@@ -364,6 +378,7 @@ dependencies = [
 name = "ados-mavlink-router"
 version = "0.1.0"
 dependencies = [
+ "ados-config",
  "ados-protocol",
  "anyhow",
  "futures-util",
@@ -383,6 +398,7 @@ dependencies = [
 name = "ados-net"
 version = "0.1.0"
 dependencies = [
+ "ados-config",
  "ados-protocol",
  "anyhow",
  "async-trait",
@@ -465,6 +481,7 @@ dependencies = [
 name = "ados-radio"
 version = "0.1.0"
 dependencies = [
+ "ados-config",
  "ados-protocol",
  "anyhow",
  "async-trait",
@@ -507,6 +524,7 @@ dependencies = [
 name = "ados-supervisor"
 version = "0.1.0"
 dependencies = [
+ "ados-config",
  "ados-macpin",
  "ados-protocol",
  "anyhow",
@@ -541,6 +559,7 @@ dependencies = [
 name = "ados-video"
 version = "0.1.0"
 dependencies = [
+ "ados-config",
  "ados-hal-probe",
  "ados-protocol",
  "anyhow",
@@ -560,6 +579,7 @@ dependencies = [
 name = "ados-vision"
 version = "0.1.0"
 dependencies = [
+ "ados-config",
  "ados-protocol",
  "anyhow",
  "memmap2",

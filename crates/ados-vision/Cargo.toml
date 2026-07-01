@@ -28,6 +28,7 @@ reid = []
 
 [dependencies]
 ados-protocol = { path = "../ados-protocol", features = ["mavlink", "tracing-layer"] }
+ados-config = { path = "../ados-config" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
