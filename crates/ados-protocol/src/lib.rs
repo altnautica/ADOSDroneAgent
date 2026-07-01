@@ -45,5 +45,6 @@ pub mod pairing_posture;
 pub mod plugin;
 pub mod rest;
 pub mod state;
+pub mod tap;
 pub mod wfb_tables;
 pub mod ws_ticket;

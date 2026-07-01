@@ -23,9 +23,10 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use ados_protocol::framebus::FrameFormat;
+use ados_protocol::tap::{decode_tap_header, TAP_HEADER_LEN};
 use anyhow::{anyhow, Result};
 use serde::Deserialize;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
 
@@ -74,67 +75,9 @@ impl FrameSource for AnySource {
 
 // --- tap source -----------------------------------------------------------
 
-/// The little header the video pipeline writes before each tapped frame on the
-/// tap socket. 16 bytes, little-endian: a magic, the pixel format tag, the
-/// dimensions, and the payload length. Keeping it self-describing lets the
-/// engine size a ring without a side channel.
-///
-/// Layout: `magic:u32 | format:u8 | _pad:u8 | width:u16 | height:u16 | _pad:u16 | byte_len:u32`.
-const TAP_MAGIC: u32 = 0x4144_5654; // "ADVT"
-const TAP_HEADER_LEN: usize = 16;
-/// Cap a single tapped frame so a corrupt header cannot drive an unbounded
-/// allocation. 4K RGB24 is ~25 MiB; 64 MiB is a generous ceiling.
-const TAP_MAX_FRAME: usize = 64 * 1024 * 1024;
-
-fn format_tag(f: FrameFormat) -> u8 {
-    match f {
-        FrameFormat::Rgb24 => 0,
-        FrameFormat::Nv12 => 1,
-        FrameFormat::Yuv420p => 2,
-    }
-}
-
-fn format_from_tag(t: u8) -> Option<FrameFormat> {
-    match t {
-        0 => Some(FrameFormat::Rgb24),
-        1 => Some(FrameFormat::Nv12),
-        2 => Some(FrameFormat::Yuv420p),
-        _ => None,
-    }
-}
-
-/// Encode the tap frame header. Exposed so the video-pipeline tap writer can
-/// share the exact byte layout the reader expects.
-pub fn encode_tap_header(
-    format: FrameFormat,
-    width: u32,
-    height: u32,
-    byte_len: u32,
-) -> [u8; TAP_HEADER_LEN] {
-    let mut h = [0u8; TAP_HEADER_LEN];
-    h[0..4].copy_from_slice(&TAP_MAGIC.to_le_bytes());
-    h[4] = format_tag(format);
-    h[6..8].copy_from_slice(&(width as u16).to_le_bytes());
-    h[8..10].copy_from_slice(&(height as u16).to_le_bytes());
-    h[12..16].copy_from_slice(&byte_len.to_le_bytes());
-    h
-}
-
-/// Decode a tap frame header into `(format, width, height, byte_len)`.
-pub fn decode_tap_header(h: &[u8; TAP_HEADER_LEN]) -> Result<(FrameFormat, u32, u32, usize)> {
-    let magic = u32::from_le_bytes(h[0..4].try_into().unwrap());
-    if magic != TAP_MAGIC {
-        return Err(anyhow!("bad tap frame magic {magic:#x}"));
-    }
-    let format = format_from_tag(h[4]).ok_or_else(|| anyhow!("bad tap format tag {}", h[4]))?;
-    let width = u16::from_le_bytes(h[6..8].try_into().unwrap()) as u32;
-    let height = u16::from_le_bytes(h[8..10].try_into().unwrap()) as u32;
-    let byte_len = u32::from_le_bytes(h[12..16].try_into().unwrap()) as usize;
-    if byte_len > TAP_MAX_FRAME {
-        return Err(anyhow!("tap frame of {byte_len} bytes exceeds cap"));
-    }
-    Ok((format, width, height, byte_len))
-}
+// The tap wire contract (the ADVT header codec + the shared writer) lives in
+// `ados_protocol::tap` (Contract F) so the video-pipeline writer and this reader
+// build against one frozen definition. `TapSource` below is the reader half.
 
 /// Reads frames from the video pipeline's tap socket.
 pub struct TapSource {
@@ -176,7 +119,7 @@ impl FrameSource for TapSource {
             Ok(v) => v,
             Err(e) => {
                 self.stream = None;
-                return Err(e);
+                return Err(e.into());
             }
         };
         let stream = self.stream.as_mut().expect("still connected");
@@ -401,51 +344,9 @@ pub fn tap_socket_parent_exists(socket_path: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Write one tap frame to a connected stream (header + payload). Shared by the
-/// video-pipeline tap writer; lives here so the wire format has one owner.
-pub async fn write_tap_frame<W: AsyncWriteExt + Unpin>(
-    w: &mut W,
-    frame: &RawFrame,
-) -> std::io::Result<()> {
-    let header = encode_tap_header(
-        frame.format,
-        frame.width,
-        frame.height,
-        frame.data.len() as u32,
-    );
-    w.write_all(&header).await?;
-    if !frame.data.is_empty() {
-        w.write_all(&frame.data).await?;
-    }
-    w.flush().await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn tap_header_round_trips() {
-        let h = encode_tap_header(FrameFormat::Nv12, 640, 480, 460_800);
-        let (f, w, ht, n) = decode_tap_header(&h).unwrap();
-        assert_eq!(f, FrameFormat::Nv12);
-        assert_eq!(w, 640);
-        assert_eq!(ht, 480);
-        assert_eq!(n, 460_800);
-    }
-
-    #[test]
-    fn tap_header_rejects_bad_magic() {
-        let mut h = encode_tap_header(FrameFormat::Rgb24, 8, 8, 192);
-        h[0] ^= 0xFF;
-        assert!(decode_tap_header(&h).is_err());
-    }
-
-    #[test]
-    fn tap_header_rejects_oversized_len() {
-        let h = encode_tap_header(FrameFormat::Rgb24, 8, 8, u32::MAX);
-        assert!(decode_tap_header(&h).is_err());
-    }
 
     #[test]
     fn parse_discovery_reads_cameras() {
@@ -488,7 +389,15 @@ mod tests {
         let frame_clone = frame.clone();
         let writer = tokio::spawn(async move {
             let (mut s, _) = listener.accept().await.unwrap();
-            write_tap_frame(&mut s, &frame_clone).await.unwrap();
+            ados_protocol::tap::write_tap_frame(
+                &mut s,
+                frame_clone.format,
+                frame_clone.width,
+                frame_clone.height,
+                &frame_clone.data,
+            )
+            .await
+            .unwrap();
             // Keep the socket open briefly so the reader gets the frame.
             tokio::time::sleep(Duration::from_millis(50)).await;
         });
