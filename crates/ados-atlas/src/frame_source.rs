@@ -61,6 +61,9 @@ pub struct VisionFrameSource {
     /// ring name, new inode) or a ring recreate be detected so the dead mapping
     /// is dropped instead of frozen forever.
     mmaps: HashMap<String, (Mmap, u64, u64)>,
+    /// Camera ids we have already warned about dropping, so a persistent
+    /// vision↔atlas id mismatch is logged once per id, not on every frame.
+    warned_unmatched: HashSet<String>,
 }
 
 impl VisionFrameSource {
@@ -70,6 +73,7 @@ impl VisionFrameSource {
             enabled,
             stream: None,
             mmaps: HashMap::new(),
+            warned_unmatched: HashSet::new(),
         }
     }
 
@@ -173,6 +177,18 @@ impl VisionFrameSource {
                 Err(_) => continue,
             };
             if !self.enabled.is_empty() && !self.enabled.contains(&desc.camera_id) {
+                // A dropped frame must be visible, never silent: a mismatched
+                // camera id between the vision engine and the atlas config is the
+                // classic cause of `ingest_rate_hz: 0` with no error. Warn once
+                // per unexpected id so a real misconfig is one `ados logs` away.
+                if self.warned_unmatched.insert(desc.camera_id.clone()) {
+                    let enabled: Vec<&str> = self.enabled.iter().map(String::as_str).collect();
+                    tracing::warn!(
+                        camera_id = %desc.camera_id,
+                        enabled = ?enabled,
+                        "atlas dropping frames: camera id not in the enabled set (vision/atlas camera id mismatch)"
+                    );
+                }
                 continue;
             }
             if let Some(bytes) = self.read_frame_from_ring(&desc) {

@@ -194,7 +194,21 @@ impl AtlasRuntimeConfig {
         let Ok(text) = std::fs::read_to_string(path) else {
             return AtlasRuntimeConfig::default();
         };
-        let raw: RawConfig = serde_norway::from_str(&text).unwrap_or_default();
+        // A parse error must be LOUD, never a silent default-to-disabled: one bad
+        // enum (e.g. an unknown camera role) would otherwise swallow the whole
+        // block and leave a status surface reporting `enabled: false` with no
+        // reason. Log the exact serde error (it names the offending field) so the
+        // operator can see why atlas is off, then fall back to defaults.
+        let raw: RawConfig = match serde_norway::from_str(&text) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "atlas config parse failed; atlas stays disabled until the config is valid"
+                );
+                RawConfig::default()
+            }
+        };
         let Some(a) = raw.atlas else {
             return AtlasRuntimeConfig {
                 profile: raw.agent.profile,

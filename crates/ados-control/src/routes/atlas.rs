@@ -52,6 +52,12 @@ const ATLAS_UNIT: &str = "ados-atlas";
 /// `config.yaml` never carries a profile the capture service would fail to parse.
 const VALID_CAPTURE_PROFILES: [&str; 4] = ["orbit", "lawnmower", "freeform", "inspection"];
 
+/// The camera roles the capture service accepts, matching the `CameraRole` enum's
+/// serde repr (lowercase). An out-of-set role is rejected (400) rather than
+/// written verbatim: an unknown role fails the whole `atlas:` block's parse, which
+/// would silently default the block to disabled, so it is caught at the API edge.
+const VALID_CAMERA_ROLES: [&str; 7] = ["primary", "aux", "down", "left", "right", "back", "up"];
+
 /// The agent config path (`ADOS_CONFIG`, default `/etc/ados/config.yaml`), the
 /// same resolution the sibling write routes use.
 fn config_yaml_path() -> PathBuf {
@@ -201,20 +207,41 @@ pub struct AtlasConfigBody {
 
 /// `PUT /api/atlas/config` → surgically write the `atlas:` block + restart the
 /// capture service.
-pub async fn put_atlas_config(Json(body): Json<AtlasConfigBody>) -> Response {
-    // Reject an out-of-enum capture profile up front (400) so config.yaml never
-    // gets a value the capture service would fail to deserialize. An empty string
-    // is a no-op (write_atlas_block leaves the existing profile untouched).
+/// Validate the patch body before any write. Both the capture profile and every
+/// camera role must be a known enum value — an out-of-set value would fail the
+/// whole `atlas:` block's deserialize and silently default it to disabled (a
+/// status surface that lies), so it is caught here at the API edge. `Err` carries
+/// the 400 detail message; an absent/empty field is a no-op.
+fn validate_atlas_config_body(body: &AtlasConfigBody) -> Result<(), String> {
     if let Some(profile) = body.capture_profile.as_deref() {
         if !profile.is_empty() && !VALID_CAPTURE_PROFILES.contains(&profile) {
-            return detail(
-                StatusCode::BAD_REQUEST,
-                format!(
-                    "invalid capture_profile `{profile}` (expected one of {})",
-                    VALID_CAPTURE_PROFILES.join(" / ")
-                ),
-            );
+            return Err(format!(
+                "invalid capture_profile `{profile}` (expected one of {})",
+                VALID_CAPTURE_PROFILES.join(" / ")
+            ));
         }
+    }
+    if let Some(cameras) = body.cameras.as_ref().and_then(|c| c.as_array()) {
+        for cam in cameras {
+            if let Some(role) = cam.get("role") {
+                let ok = role
+                    .as_str()
+                    .is_some_and(|r| VALID_CAMERA_ROLES.contains(&r));
+                if !ok {
+                    return Err(format!(
+                        "invalid camera role {role} (expected one of {})",
+                        VALID_CAMERA_ROLES.join(" / ")
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+pub async fn put_atlas_config(Json(body): Json<AtlasConfigBody>) -> Response {
+    if let Err(msg) = validate_atlas_config_body(&body) {
+        return detail(StatusCode::BAD_REQUEST, msg);
     }
     let effective_enabled = match write_atlas_block(&config_yaml_path(), &body) {
         Ok(enabled) => enabled,
@@ -447,6 +474,55 @@ mod tests {
         }))
         .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn put_config_rejects_an_out_of_enum_camera_role() {
+        // "navigation" is not a CameraRole → 400 before any config write / restart.
+        // An unknown role would fail the whole atlas block's parse and silently
+        // default it to disabled, so it is caught at the API edge.
+        let resp = put_atlas_config(Json(AtlasConfigBody {
+            enabled: Some(true),
+            capture_profile: None,
+            cameras: Some(json!([{"id": "front", "role": "navigation", "enabled": true}])),
+        }))
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn validate_body_accepts_known_roles_and_rejects_unknown_or_non_string() {
+        // Every valid role passes.
+        let ok = AtlasConfigBody {
+            enabled: Some(true),
+            capture_profile: Some("orbit".into()),
+            cameras: Some(json!([{"id": "a", "role": "primary"}, {"id": "b", "role": "down"}])),
+        };
+        assert!(validate_atlas_config_body(&ok).is_ok());
+
+        // An unknown role is rejected.
+        let bad = AtlasConfigBody {
+            enabled: None,
+            capture_profile: None,
+            cameras: Some(json!([{"id": "a", "role": "navigation"}])),
+        };
+        assert!(validate_atlas_config_body(&bad).is_err());
+
+        // A non-string role is rejected, not written verbatim.
+        let non_string = AtlasConfigBody {
+            enabled: None,
+            capture_profile: None,
+            cameras: Some(json!([{"id": "a", "role": 7}])),
+        };
+        assert!(validate_atlas_config_body(&non_string).is_err());
+
+        // No role key at all is left to the schema (a partial patch).
+        let no_role = AtlasConfigBody {
+            enabled: None,
+            capture_profile: None,
+            cameras: Some(json!([{"id": "a", "enabled": true}])),
+        };
+        assert!(validate_atlas_config_body(&no_role).is_ok());
     }
 
     #[tokio::test]
