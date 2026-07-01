@@ -178,6 +178,19 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
         gate: Gate::Hard,
         profiles: DRONE,
     },
+    // The world-model capture service. Best-effort + opt-in: it runs behind the
+    // capture feature flag (inert by default), so a missing binary degrades only
+    // the opt-in capture path without aborting the install. Fetched + placed so
+    // enabling capture works on demand — and, crucially, so an upgrade keeps it in
+    // step with the vision engine it shares a shared-memory ring layout with.
+    PrebuiltBinary {
+        service: "ados-atlas",
+        asset: "ados-atlas-aarch64",
+        release_tag: "prebuilt-atlas",
+        dest: "/opt/ados/bin/ados-atlas",
+        gate: Gate::BestEffort,
+        profiles: DRONE,
+    },
     // The local logging and telemetry store. Best-effort: a missing store
     // degrades recordkeeping (the agent falls back to journald) without
     // aborting the install. The unit ships deployed-but-not-enabled, so the
@@ -256,8 +269,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_has_nineteen_entries() {
-        assert_eq!(PREBUILT.len(), 19);
+    fn catalog_has_twenty_entries() {
+        assert_eq!(PREBUILT.len(), 20);
+    }
+
+    #[test]
+    fn drone_profile_fetches_the_atlas_capture_service() {
+        let svcs: Vec<&str> = for_profile("drone").iter().map(|b| b.service).collect();
+        assert!(
+            svcs.contains(&"ados-atlas"),
+            "a drone install must fetch ados-atlas so an upgrade keeps the ring \
+             reader in step with the vision engine that writes the ring"
+        );
     }
 
     #[test]

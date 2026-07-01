@@ -642,6 +642,60 @@ jobs:
           name: "Prebuilt ados-compute (rolling)"
           files: crates/rel/*
 
+  publish-atlas:
+    needs: build-test
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (musl target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+
+      - name: Install zig
+        uses: mlugg/setup-zig@v2
+
+      - name: Install cargo-zigbuild
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
+      - name: Build static ados-atlas via zig
+        run: cargo zigbuild --release --target aarch64-unknown-linux-musl -p ados-atlas
+
+      - name: Stage artifacts + checksums
+        run: |
+          set -euo pipefail
+          mkdir -p rel
+          cp target/aarch64-unknown-linux-musl/release/ados-atlas rel/ados-atlas-aarch64
+          ( cd rel && sha256sum ados-atlas-aarch64 > ados-atlas-aarch64.sha256 )
+
+      - name: Sign artifacts (only when the signing key is present)
+        env:
+          SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SIGNING_KEY}" ]; then
+            echo "No ADOS_DRIVER_SIGNING_KEY set; publishing SHA256-only (dev posture)."
+            exit 0
+          fi
+          sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
+          printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
+          minisign -S -s /tmp/sign.key -m rel/ados-atlas-aarch64 -x rel/ados-atlas-aarch64.minisig
+          rm -f /tmp/sign.key
+
+      - name: Publish rolling prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: prebuilt-atlas
+          prerelease: true
+          name: "Prebuilt ados-atlas (rolling)"
+          files: crates/rel/*
+
   # Build the ground-station data-plane as a static arm64 binary and publish it
   # to a rolling prerelease the installer fetches. Static (musl) so one binary
   # runs on every supported board regardless of its glibc. Runs only on pushes
