@@ -296,6 +296,10 @@ impl Reconstructor for CliReconstructor {
             kind: self.kind.artifact_kind().into(),
             uri: cmd.output_uri,
             gaussian_count: parse_gaussian_count(&stdout),
+            // The concrete tool that produced this (brush / nerfstudio / colmap /
+            // webodm) so the client can tell a real reconstruction from the mock
+            // placeholder. Reuses ReconstructorKind::name(), never hardcoded.
+            backend: self.kind.name().into(),
         })
     }
 }
@@ -612,5 +616,81 @@ mod tests {
             ComputeError::Backend { backend, .. } => assert_eq!(backend, "brush"),
             other => panic!("expected Backend error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn real_reconstructor_kinds_expose_their_backend_names() {
+        // The `backend` a real reconstruction stamps onto its ReconstructOutput is
+        // exactly `ReconstructorKind::name()` (see CliReconstructor::reconstruct):
+        // a real world model NEVER carries `mock`, it carries its tool name, so a
+        // client can tell a placeholder from the real thing.
+        for (kind, name) in [
+            (ReconstructorKind::Brush, "brush"),
+            (ReconstructorKind::Nerfstudio, "nerfstudio"),
+            (ReconstructorKind::Colmap, "colmap"),
+            (ReconstructorKind::Webodm, "webodm"),
+        ] {
+            assert_eq!(kind.name(), name);
+            // The Reconstructor::name() the CliReconstructor reports is the same
+            // string it stamps into `ReconstructOutput.backend`.
+            assert_eq!(CliReconstructor::new(kind, "/w").name(), name);
+            // And none of them is the placeholder marker.
+            assert_ne!(kind.name(), "mock");
+        }
+    }
+
+    #[test]
+    fn real_backend_stamps_its_kind_on_the_output() {
+        // Exercise the success path of a REAL CliReconstructor end to end so the
+        // Ok(...) branch that stamps `backend` is covered, without depending on a
+        // heavyweight GPU tool: drop a trivial fake executable named after the
+        // kind's program onto a temp dir prepended to PATH, run, and assert the
+        // output carries the concrete backend name (not `mock`).
+        //
+        // We use `webodm` because no other test relies on it being absent
+        // (missing_program uses `brush`; is_tool_available checks `sh`/a bogus
+        // name), and we PREPEND (not replace) PATH and restore it BEFORE asserting
+        // so a panic can never leak a mutated PATH into a parallel test. std's
+        // internal env lock serializes this against other tests' env reads; the
+        // crate already mutates env in tests (heartbeat_sidecar).
+        let kind = ReconstructorKind::Webodm;
+        let base =
+            std::env::temp_dir().join(format!("ados-compute-real-backend-{}", std::process::id()));
+        let bin_dir = base.join("bin");
+        let work_root = base.join("work");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::create_dir_all(&work_root).unwrap();
+
+        // A fake tool that just exits 0. reconstruct() checks only the exit status
+        // and parses stdout; it does not require the output file to exist.
+        let fake = bin_dir.join(kind.program());
+        std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let old_path = std::env::var_os("PATH");
+        let mut search = vec![bin_dir.clone()];
+        if let Some(p) = &old_path {
+            search.extend(std::env::split_paths(p));
+        }
+        std::env::set_var("PATH", std::env::join_paths(&search).unwrap());
+
+        let r = CliReconstructor::new(kind, &work_root);
+        let result = r.reconstruct(&dataset("ds-real", None), &serde_json::json!({}));
+
+        // Restore PATH BEFORE asserting so a failure never leaves it mutated.
+        match old_path {
+            Some(p) => std::env::set_var("PATH", p),
+            None => std::env::remove_var("PATH"),
+        }
+        let _ = std::fs::remove_dir_all(&base);
+
+        let out = result.expect("fake webodm exits 0, reconstruct should succeed");
+        assert_eq!(out.backend, "webodm");
+        assert_ne!(out.backend, "mock");
+        assert_eq!(out.kind, "orthomosaic");
     }
 }

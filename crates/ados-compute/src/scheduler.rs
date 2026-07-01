@@ -185,6 +185,9 @@ impl Scheduler {
                 match reconstructor.reconstruct(dataset, &job.params) {
                     Ok(out) => {
                         let gaussian_count = out.gaussian_count;
+                        // Capture the honest backend name before `out` is moved
+                        // into the Output below; `mock` marks a placeholder.
+                        let backend = out.backend;
                         let mut output = Output::new(
                             format!("{}-out", job.id),
                             job.id.clone(),
@@ -192,8 +195,10 @@ impl Scheduler {
                             out.uri,
                             now_ms,
                         );
-                        // Surface the backend's result metadata to clients.
-                        output.meta = serde_json::json!({ "gaussian_count": gaussian_count });
+                        // Surface the backend's result metadata to clients. The
+                        // `backend` key lets the GCS badge a `mock` artifact as a
+                        // placeholder instead of a real world model.
+                        output.meta = serde_json::json!({ "gaussian_count": gaussian_count, "backend": backend });
                         BackendResult {
                             outputs: vec![output],
                             detections: Vec::new(),
@@ -441,9 +446,13 @@ mod tests {
         let outcome = s.run_one(200).unwrap().unwrap();
         // The backend's gaussian_count rides the output meta (the MockReconstructor reports 1000).
         assert_eq!(outcome.outputs[0].meta["gaussian_count"], 1000);
-        // And it persisted to the store, not just the in-memory outcome.
+        // The honest backend name rides the same meta so a client can badge a
+        // placeholder (the mock path here reports `mock`).
+        assert_eq!(outcome.outputs[0].meta["backend"], "mock");
+        // And both persisted to the store, not just the in-memory outcome.
         let outs = s.store().outputs_for_job("job-1").unwrap();
         assert_eq!(outs[0].meta["gaussian_count"], 1000);
+        assert_eq!(outs[0].meta["backend"], "mock");
     }
 
     #[test]

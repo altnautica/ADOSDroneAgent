@@ -16,6 +16,13 @@ pub struct ReconstructOutput {
     pub uri: String,
     /// Gaussian count for a splat (0 for non-splat artifacts).
     pub gaussian_count: u64,
+    /// The concrete backend that produced this artifact. `mock` is a
+    /// deterministic placeholder (no GPU, CI / no-backend node) and is NEVER a
+    /// real world model; a real reconstruction carries its tool name
+    /// (`brush` / `nerfstudio` / `colmap` / `webodm`). Stamped by the backend
+    /// that actually ran so it survives the selecting-reconstructor indirection
+    /// and reaches the client for an honest-placeholder badge.
+    pub backend: String,
 }
 
 /// A reconstruction backend. Implementations are `Send + Sync` so a worker
@@ -53,6 +60,7 @@ impl Reconstructor for MockReconstructor {
             kind: "splat".into(),
             uri: format!("mock://splat/{}", dataset.id),
             gaussian_count: 1000,
+            backend: "mock".into(),
         })
     }
 }
@@ -75,6 +83,9 @@ mod tests {
         assert_eq!(out.kind, "splat");
         assert_eq!(out.uri, "mock://splat/ds-7");
         assert_eq!(out.gaussian_count, 1000);
+        // The mock stamps its backend so a client can badge it as a placeholder,
+        // never mistaking the deterministic fake for a real world model.
+        assert_eq!(out.backend, "mock");
         assert_eq!(MockReconstructor.name(), "mock");
     }
 }
