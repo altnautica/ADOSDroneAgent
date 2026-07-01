@@ -77,6 +77,10 @@ export ADOS_PAIRING_JSON="$ADOS_HOME/pairing.json"
 export ADOS_CONTROL_SOCKET="$ADOS_HOME/run/control.sock"
 export ADOS_CONTROL_PORT=8080
 export ADOS_COMPUTE_DB="$ADOS_HOME/compute/jobs.db"
+# The dataset + artifact work root. Without this it defaults to the system path
+# /var/ados/compute/work, which is not writable on a dev laptop, so a reconstruct
+# job fails with "create workdir: Permission denied". Keep it under the dev home.
+export ADOS_COMPUTE_WORK="${ADOS_COMPUTE_WORK:-$ADOS_HOME/compute/work}"
 export ADOS_COMPUTE_BIND=0.0.0.0:8092
 export ADOS_ATLAS_ENABLED=1
 export ADOS_COMPUTE_NODE_ID="${ADOS_COMPUTE_NODE_ID:-${DEVICE_ID}}"
