@@ -38,6 +38,7 @@ fn engine() -> Engine {
 fn keyframe(i: usize) -> AtlasEvent {
     AtlasEvent {
         topic: ATLAS_KEYFRAME_TOPIC.into(),
+        device_id: None,
         payload: vec![i as u8; 64],
     }
 }
@@ -53,6 +54,7 @@ fn bagged(keyframes: u64) -> AtlasEvent {
     };
     AtlasEvent {
         topic: ATLAS_CAPTURE_STATE_TOPIC.into(),
+        device_id: None,
         payload: status.to_msgpack().unwrap(),
     }
 }
@@ -435,6 +437,7 @@ async fn g3_plugin_data_share_isolates_per_device_and_offloads() {
     // One drone's splat update is published for its device only.
     let splat = AtlasEvent {
         topic: PLUGIN_ATLAS_SPLAT_TOPIC.into(),
+        device_id: None,
         payload: vec![1, 2, 3],
     };
     broadcaster.publish("drone-1", splat);
@@ -506,6 +509,7 @@ async fn g4_live_session_periodic_reconstruct() {
     for kf in 0..3u64 {
         let ev = AtlasEvent {
             topic: ATLAS_KEYFRAME_TOPIC.into(),
+            device_id: None,
             payload: keyframe_env("cam-front", kf).to_msgpack().unwrap(),
         };
         assert!(ingest.step(&ev, 100).unwrap().is_none());
@@ -544,6 +548,7 @@ async fn g4_live_session_periodic_reconstruct() {
     for kf in 3..6u64 {
         let ev = AtlasEvent {
             topic: ATLAS_KEYFRAME_TOPIC.into(),
+            device_id: None,
             payload: keyframe_env("cam-front", kf).to_msgpack().unwrap(),
         };
         ingest.step(&ev, 400).unwrap();
@@ -615,6 +620,7 @@ async fn g5_multi_cam_fuses_into_one_world() {
         ladder
             .send(&AtlasEvent {
                 topic: ATLAS_KEYFRAME_TOPIC.into(),
+                device_id: None,
                 payload: kf.to_msgpack().unwrap(),
             })
             .await
@@ -633,6 +639,7 @@ async fn g5_multi_cam_fuses_into_one_world() {
     ladder
         .send(&AtlasEvent {
             topic: ATLAS_CAPTURE_STATE_TOPIC.into(),
+            device_id: None,
             payload: status.to_msgpack().unwrap(),
         })
         .await

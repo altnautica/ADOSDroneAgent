@@ -99,7 +99,8 @@ impl ComputeHeartbeatSidecar {
 
 /// Write `body` to `path` atomically: write a `.tmp` sibling then rename, so a
 /// reader never sees a half-written file. Creates the parent dir if absent.
-fn write_atomic(path: &Path, body: &[u8]) -> std::io::Result<()> {
+/// Shared with the sibling compute-jobs sidecar producer.
+pub(crate) fn write_atomic(path: &Path, body: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }

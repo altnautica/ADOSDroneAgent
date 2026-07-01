@@ -153,6 +153,7 @@ mod tests {
     fn event(topic: &str, payload: Vec<u8>) -> AtlasEvent {
         AtlasEvent {
             topic: topic.to_string(),
+            device_id: None,
             payload,
         }
     }

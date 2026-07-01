@@ -45,10 +45,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ados_atlas_transport::{atlas_event_router, AtlasEvent};
 use ados_compute::{
-    artifact_router, build_rerun_output, build_router, derive_public_base,
-    rewrite_output_to_artifact_url, submit_reconstruct_job, write_compute_heartbeat, AtlasIngest,
-    Cluster, ComputeAuth, ComputeJobState, Engine, JobStore, LiveReconstructConfig, MockDetector,
-    Prepared, PreparedInput, Scheduler, SelectingReconstructor, DEFAULT_PAIRING_PATH,
+    artifact_router, build_atlas_jobs_sidecar, build_rerun_output, build_router,
+    derive_public_base, rewrite_output_to_artifact_url, submit_reconstruct_job,
+    write_atlas_jobs_sidecar, write_compute_heartbeat, AtlasIngest, Cluster, ComputeAuth,
+    ComputeJobState, Engine, JobStore, LiveReconstructConfig, MockDetector, Prepared,
+    PreparedInput, Scheduler, SelectingReconstructor, DEFAULT_PAIRING_PATH,
 };
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex};
@@ -308,9 +309,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(async move { retention_loop(rs, retention_ms).await });
     // Publish the cluster + queue state to the heartbeat sidecar so the native
     // cloud relay can fold the compute fields into the agent heartbeat (RUST-
-    // first; the relay reads the file, no cross-crate coupling).
+    // first; the relay reads the file, no cross-crate coupling). On an atlas node
+    // it ALSO snapshots the reconstruct-job sidecar the relay forwards to
+    // cmd_atlasJobs (built here to reuse the same lock + cadence).
+    let atlas = atlas_enabled();
     let hs = state.clone();
-    tokio::spawn(async move { heartbeat_loop(hs).await });
+    tokio::spawn(async move { heartbeat_loop(hs, atlas).await });
 
     let auth = Arc::new(ComputeAuth::new(PathBuf::from(env_or(
         "ADOS_PAIRING_JSON",
@@ -326,7 +330,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // (a bagged capture-state submits the reconstruct job the workers pick up).
     // When off, neither the route nor the drain task exists, so a non-atlas
     // workstation node is byte-unchanged.
-    if atlas_enabled() {
+    if atlas {
         let live_config = live_reconstruct_config();
         let (atlas_tx, atlas_rx) = mpsc::channel::<AtlasEvent>(ATLAS_EVENT_CHANNEL_CAP);
         router = router.merge(atlas_event_router(atlas_tx));
@@ -455,23 +459,44 @@ async fn retention_loop(state: Arc<Mutex<Engine>>, retention_ms: i64) {
 /// all-null GPU block. Best-effort: a store or write error is logged, never fatal
 /// (the relay treats an absent/stale sidecar as "no compute state", the honest
 /// reading).
-async fn heartbeat_loop(state: Arc<Mutex<Engine>>) {
+async fn heartbeat_loop(state: Arc<Mutex<Engine>>, atlas: bool) {
     loop {
         tokio::time::sleep(Duration::from_secs(5)).await;
-        let hb = {
+        let now = now_ms();
+        // Snapshot the heartbeat AND (on an atlas node) the reconstruct-job sidecar
+        // under one lock, so a long backend run never contends with two acquisitions.
+        let (hb, jobs) = {
             let engine = state.lock().await;
-            engine.heartbeat()
+            let hb = engine.heartbeat();
+            let jobs = if atlas {
+                Some(build_atlas_jobs_sidecar(engine.scheduler().store(), now))
+            } else {
+                None
+            };
+            (hb, jobs)
         };
         match hb {
             Ok(hb) => {
                 let gpu = tokio::task::spawn_blocking(ados_compute::gpu::sample)
                     .await
                     .unwrap_or_default();
-                if let Err(e) = write_compute_heartbeat(&hb, gpu, now_ms()) {
+                if let Err(e) = write_compute_heartbeat(&hb, gpu, now) {
                     tracing::warn!(error = %e, "compute heartbeat sidecar write failed");
                 }
             }
             Err(e) => tracing::warn!(error = %e, "compute heartbeat snapshot failed"),
+        }
+        // The reconstruct-job sidecar the cloud relay forwards to cmd_atlasJobs.
+        // Atlas nodes only (a non-atlas node never creates the file, staying
+        // byte-unchanged). Best-effort: a build/write fault is logged, never fatal.
+        match jobs {
+            Some(Ok(sidecar)) => {
+                if let Err(e) = write_atlas_jobs_sidecar(&sidecar) {
+                    tracing::warn!(error = %e, "compute jobs sidecar write failed");
+                }
+            }
+            Some(Err(e)) => tracing::warn!(error = %e, "compute jobs snapshot failed"),
+            None => {}
         }
     }
 }

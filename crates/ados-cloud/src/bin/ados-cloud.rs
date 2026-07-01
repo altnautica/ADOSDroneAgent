@@ -26,7 +26,7 @@ use ados_plugin_host::{Paths, PluginSupervisor};
 use ados_cloud::config::CloudConfig;
 use ados_cloud::dispatch::install::DownloadSource;
 use ados_cloud::ground_station::{bridge as gs_bridge, CloudRelayBridge};
-use ados_cloud::loops::{atlas_forwarder, beacon, command_poll, enrichment, heartbeat};
+use ados_cloud::loops::{atlas_forwarder, atlas_jobs, beacon, command_poll, enrichment, heartbeat};
 use ados_cloud::mqtt::transport::TransportConfig;
 use ados_cloud::mqtt::{MavlinkMqttRelay, WS_PATH};
 use ados_cloud::{dispatch, pairing::PairingState};
@@ -195,6 +195,19 @@ async fn main() -> Result<()> {
         // ladder (direct LAN -> WFB relay -> opt-in cloud), local-first. INERT
         // unless Atlas is enabled, so a non-Atlas agent is byte-unchanged.
         tokio::spawn(atlas_forwarder::run(config.clone(), shutdown_rx.clone())),
+        // ── Atlas reconstruct-job cloud sync ───────────────────
+        // On a workstation/compute node, read the reconstruct-job sidecar
+        // ados-compute writes and POST each job to {convex}/agent/atlas-jobs so
+        // Mission Control's cmd_atlasJobs mirrors the node's world models (the
+        // secondary/remote path; the GCS reads them local-first over the LAN).
+        // INERT unless paired + a cloud posture is set + the sidecar is fresh, so
+        // a local-only / non-compute node forwards nothing.
+        spawn_atlas_jobs(
+            config.clone(),
+            http.clone(),
+            convex_url.clone(),
+            shutdown_rx.clone(),
+        ),
     ];
 
     // Relay supervision. The MAVLink-over-MQTT relay runs a real
@@ -322,6 +335,59 @@ fn spawn_heartbeat(
                     prev_cpu = next_cpu;
                     let body = heartbeat::build_payload(&base, Some(&enrich));
                     heartbeat::post_heartbeat(&http, &convex_url, api_key, &body).await;
+                }
+            }
+        }
+    })
+}
+
+/// Local epoch ms for the compute-jobs sidecar staleness gate.
+fn now_epoch_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Spawn the Atlas reconstruct-job cloud sync: when paired + a cloud posture is
+/// set, read the compute-jobs sidecar every [`atlas_jobs::ATLAS_JOBS_INTERVAL`]
+/// and POST each job to `{convex}/agent/atlas-jobs`. INERT unless the sidecar is
+/// present + fresh, so a non-compute / local-only node forwards nothing. The
+/// per-job body carries this node as BOTH poster (auth) and compute node
+/// (attribution); the capturing-drone id rides in from the sidecar.
+fn spawn_atlas_jobs(
+    config: Arc<CloudConfig>,
+    http: Arc<reqwest::Client>,
+    convex_url: String,
+    mut shutdown: watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(atlas_jobs::ATLAS_JOBS_INTERVAL);
+        loop {
+            tokio::select! {
+                _ = shutdown.changed() => {
+                    if *shutdown.borrow() { break; }
+                }
+                _ = tick.tick() => {
+                    let pairing = PairingState::load();
+                    let api_key = pairing.api_key();
+                    if !should_emit(api_key, &convex_url) {
+                        continue;
+                    }
+                    let api_key = api_key.expect("should_emit gates on api_key being Some");
+                    let Some(jobs) = atlas_jobs::read_jobs_sidecar_from(
+                        &atlas_jobs::compute_jobs_path(),
+                        now_epoch_ms(),
+                    ) else {
+                        continue;
+                    };
+                    for job in &jobs {
+                        if let Some(body) =
+                            atlas_jobs::build_atlas_job_post(job, &config.agent.device_id)
+                        {
+                            atlas_jobs::post_atlas_job(&http, &convex_url, api_key, &body).await;
+                        }
+                    }
                 }
             }
         }

@@ -63,6 +63,7 @@ mod tests {
     fn event() -> AtlasEvent {
         AtlasEvent {
             topic: "atlas.keyframe".into(),
+            device_id: None,
             payload: vec![9],
         }
     }

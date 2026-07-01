@@ -122,7 +122,7 @@ pub async fn run(config: Arc<CloudConfig>, mut shutdown: watch::Receiver<bool>) 
 
             match read {
                 Ok(Some(body)) => {
-                    match forward_event(&ladder, &body).await {
+                    match forward_event(&ladder, &body, &config.agent.device_id).await {
                         Forwarded::Decoded(carried) => {
                             if have_lan {
                                 if carried == Some(BearerKind::DirectLan) {
@@ -175,18 +175,27 @@ pub async fn run(config: Arc<CloudConfig>, mut shutdown: watch::Receiver<bool>) 
     tracing::info!("atlas forwarder stopped");
 }
 
-/// Decode one framed [`AtlasEvent`] body and send it over the ladder. Returns
-/// the bearer that carried it (`Some`), or that every bearer declined (`None`);
-/// a malformed body is logged and reported as a decode error (no send). Never
-/// panics, never propagates — a forward failure is logged and the loop continues.
-async fn forward_event(ladder: &BearerLadder, body: &[u8]) -> Forwarded {
-    let event = match AtlasEvent::from_msgpack(body) {
+/// Decode one framed [`AtlasEvent`] body, stamp the capturing drone's device id,
+/// and send it over the ladder. Returns the bearer that carried it (`Some`), or
+/// that every bearer declined (`None`); a malformed body is logged and reported
+/// as a decode error (no send). Never panics, never propagates — a forward
+/// failure is logged and the loop continues.
+///
+/// The device id is stamped HERE, the single egress choke point every bearer
+/// passes through, so the compute node can attribute the reconstruct job to the
+/// drone that captured it. An empty configured id leaves the event unstamped
+/// (never writes an empty attribution).
+async fn forward_event(ladder: &BearerLadder, body: &[u8], device_id: &str) -> Forwarded {
+    let mut event = match AtlasEvent::from_msgpack(body) {
         Ok(ev) => ev,
         Err(e) => {
             tracing::warn!(error = %e, "atlas forwarder dropped a malformed event");
             return Forwarded::DecodeError;
         }
     };
+    if !device_id.is_empty() {
+        event.device_id = Some(device_id.to_string());
+    }
     match ladder.send(&event).await {
         Ok(kind) => {
             tracing::debug!(
@@ -295,22 +304,26 @@ mod tests {
         let ladder = BearerLadder::new(vec![Box::new(bearer)]);
         let ev = AtlasEvent {
             topic: "atlas.keyframe".into(),
+            device_id: None,
             payload: vec![1, 2, 3],
         };
         let body = ev.to_msgpack().unwrap();
 
-        match forward_event(&ladder, &body).await {
+        match forward_event(&ladder, &body, "drone-7").await {
             Forwarded::Decoded(Some(BearerKind::Loopback)) => {}
             other => panic!(
                 "expected a loopback-carried event, got {:?}",
                 carried_kind(&other)
             ),
         }
-        // The exact envelope arrived on the bearer's channel.
+        // The event arrived stamped with the capturing drone's device id (added at
+        // the egress choke point), and is otherwise the exact envelope.
         let got = rx
             .try_recv()
             .expect("the loopback bearer carried the event");
-        assert_eq!(got, ev);
+        assert_eq!(got.topic, ev.topic);
+        assert_eq!(got.payload, ev.payload);
+        assert_eq!(got.device_id.as_deref(), Some("drone-7"));
     }
 
     #[tokio::test]
@@ -318,7 +331,7 @@ mod tests {
         let (bearer, mut rx) = LoopbackBearer::channel();
         let ladder = BearerLadder::new(vec![Box::new(bearer)]);
         // Not valid msgpack for an AtlasEvent.
-        match forward_event(&ladder, b"not-an-event").await {
+        match forward_event(&ladder, b"not-an-event", "drone-7").await {
             Forwarded::DecodeError => {}
             _ => panic!("a malformed body must be a decode error"),
         }
@@ -331,10 +344,11 @@ mod tests {
         let ladder = BearerLadder::new(vec![]);
         let ev = AtlasEvent {
             topic: "plugin.atlas.pose".into(),
+            device_id: None,
             payload: vec![9],
         };
         let body = ev.to_msgpack().unwrap();
-        match forward_event(&ladder, &body).await {
+        match forward_event(&ladder, &body, "drone-7").await {
             Forwarded::Decoded(None) => {}
             _ => panic!("an empty ladder carries nothing"),
         }

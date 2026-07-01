@@ -9,11 +9,16 @@
 //! and is INERT unless Atlas is enabled.
 
 pub mod atlas_forwarder;
+pub mod atlas_jobs;
 pub mod beacon;
 pub mod command_poll;
 pub mod enrichment;
 pub mod heartbeat;
 
+pub use atlas_jobs::{
+    build_atlas_job_post, compute_jobs_path, post_atlas_job, read_jobs_sidecar_from,
+    ATLAS_JOBS_INTERVAL,
+};
 pub use beacon::{beacon_enabled, build_beacon_body, BeaconInputs, DEFAULT_BEACON_INTERVAL};
 pub use command_poll::{build_ack, parse_commands, POLL_INTERVAL};
 pub use enrichment::{build_native_enrichment, CpuSample};

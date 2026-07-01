@@ -66,6 +66,7 @@ mod tests {
     fn event(topic: &str) -> AtlasEvent {
         AtlasEvent {
             topic: topic.into(),
+            device_id: None,
             payload: vec![1, 2, 3],
         }
     }

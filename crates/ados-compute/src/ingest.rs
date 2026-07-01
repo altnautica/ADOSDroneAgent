@@ -75,6 +75,13 @@ pub struct AtlasIngest {
     /// Per-session live state, keyed by session id. Empty when live reconstruction
     /// is disabled (the sessions are never tracked, so the path is byte-unchanged).
     sessions: HashMap<String, SessionLive>,
+    /// The capturing drone's device id, keyed by session id, learned from each
+    /// event's `device_id` (the drone-side forwarder stamps it on egress). Stamped
+    /// into the dataset + reconstruct job so the compute→cloud producer can
+    /// attribute the world model to the drone that captured it. Empty when no event
+    /// carried an id (a pre-attribution capture), and the job then omits it rather
+    /// than asserting a wrong one.
+    session_devices: HashMap<String, String>,
 }
 
 impl AtlasIngest {
@@ -98,6 +105,7 @@ impl AtlasIngest {
             persister: KeyframePersister::new(work_root),
             live_config,
             sessions: HashMap::new(),
+            session_devices: HashMap::new(),
         }
     }
 
@@ -123,30 +131,51 @@ impl AtlasIngest {
             ATLAS_KEYFRAME_TOPIC => {
                 self.keyframes_seen += 1;
                 match KeyframeEnvelope::from_msgpack(&event.payload) {
-                    Ok(kf) => match self.persister.persist(&kf) {
-                        Ok(()) => self.note_persisted(&kf, now_ms),
-                        Err(e) => tracing::warn!(error = %e, "atlas_keyframe_persist_failed"),
-                    },
+                    Ok(kf) => {
+                        self.note_device(&kf.session_id, event.device_id.as_deref());
+                        match self.persister.persist(&kf) {
+                            Ok(()) => self.note_persisted(&kf, now_ms),
+                            Err(e) => tracing::warn!(error = %e, "atlas_keyframe_persist_failed"),
+                        }
+                    }
                     Err(e) => tracing::debug!(error = %e, "atlas_keyframe_decode_failed"),
                 }
                 Ok(None)
             }
             ATLAS_CAPTURE_STATE_TOPIC => match CaptureStatus::from_msgpack(&event.payload) {
                 Ok(status) if status.state == CaptureState::Bagged => {
+                    self.note_device(&status.session_id, event.device_id.as_deref());
                     let result = self.bag(&status, now_ms)?;
-                    // The session is over: drop its live state. Any periodic cycle
-                    // still running finishes on its own in the worker; the final
+                    // The session is over: drop its live + device state. Any periodic
+                    // cycle still running finishes on its own in the worker; the final
                     // bag reconstruct is the authoritative full-set output.
                     self.sessions.remove(&status.session_id);
+                    self.session_devices.remove(&status.session_id);
                     Ok(Some(result))
                 }
-                Ok(_) => Ok(None),
+                Ok(status) => {
+                    self.note_device(&status.session_id, event.device_id.as_deref());
+                    Ok(None)
+                }
                 Err(e) => {
                     tracing::debug!(error = %e, "atlas_ingest_bad_capture_state");
                     Ok(None)
                 }
             },
             _ => Ok(None),
+        }
+    }
+
+    /// Record the capturing drone's device id for a session from an event's
+    /// `device_id`. A no-op for an absent or empty id, so a session is never
+    /// attributed to an empty drone (the job then omits `device_id` rather than
+    /// asserting a wrong one).
+    fn note_device(&mut self, session_id: &str, device_id: Option<&str>) {
+        if let Some(dev) = device_id {
+            if !dev.is_empty() {
+                self.session_devices
+                    .insert(session_id.to_string(), dev.to_string());
+            }
         }
     }
 
@@ -220,6 +249,9 @@ impl AtlasIngest {
                 // skip without arming a cycle.
                 continue;
             };
+            // Read the capturing drone before the mutable session borrow (disjoint
+            // fields; sequential keeps it obvious).
+            let device_id = self.session_devices.get(&session_id).cloned();
             let live = self
                 .sessions
                 .get_mut(&session_id)
@@ -232,18 +264,31 @@ impl AtlasIngest {
             let job_id = format!("recon-{session_id}-c{cycle}");
             live.in_flight_job = Some(job_id.clone());
 
+            let mut meta = serde_json::json!({
+                "session_id": session_id.clone(),
+                "input_path": snapshot_dir.to_string_lossy(),
+                "keyframes": keyframes,
+                "cameras": cameras,
+                "live": true,
+                "cycle": cycle,
+            });
+            // The job carries its capturing session AND the capturing drone so the
+            // compute→cloud producer can attribute the world model to the drone
+            // (`cmd_atlasJobs.deviceId`). Both stay absent when unknown rather than
+            // asserting a wrong id.
+            let mut params = serde_json::json!({
+                "backend": DEFAULT_RECONSTRUCT_BACKEND,
+                "session_id": session_id.clone(),
+            });
+            if let Some(dev) = &device_id {
+                meta["device_id"] = serde_json::Value::String(dev.clone());
+                params["device_id"] = serde_json::Value::String(dev.clone());
+            }
             let dataset = Dataset {
                 id: cycle_dataset_id.clone(),
                 kind: "live_snapshot".into(),
                 created_ms: now_ms,
-                meta: serde_json::json!({
-                    "session_id": session_id.clone(),
-                    "input_path": snapshot_dir.to_string_lossy(),
-                    "keyframes": keyframes,
-                    "cameras": cameras,
-                    "live": true,
-                    "cycle": cycle,
-                }),
+                meta,
             };
             let job = JobRecord {
                 id: job_id,
@@ -251,13 +296,7 @@ impl AtlasIngest {
                 dataset_id: Some(cycle_dataset_id),
                 state: ComputeJobState::Queued,
                 progress: 0.0,
-                // The job carries its capturing session so the job API can surface
-                // it (the GCS correlates a world-model artifact to a drone's active
-                // session by `session_id`, not the opaque dataset/job id format).
-                params: serde_json::json!({
-                    "backend": DEFAULT_RECONSTRUCT_BACKEND,
-                    "session_id": session_id,
-                }),
+                params,
                 result_ref: None,
                 error: None,
                 created_ms: now_ms,
@@ -280,6 +319,7 @@ impl AtlasIngest {
     ) -> std::io::Result<(Dataset, JobRecord)> {
         let dataset_id = dataset_id_for(&status.session_id);
         let input_path = self.persister.finalize(&dataset_id)?;
+        let device_id = self.session_devices.get(&status.session_id).cloned();
 
         let mut meta = serde_json::json!({
             "keyframes": status.keyframes,
@@ -288,6 +328,19 @@ impl AtlasIngest {
         });
         if let Some(path) = &input_path {
             meta["input_path"] = serde_json::Value::String(path.to_string_lossy().into_owned());
+        }
+
+        // The job carries its capturing session AND the capturing drone so the
+        // compute→cloud producer can attribute the world model to the drone
+        // (`cmd_atlasJobs.deviceId`). Both stay absent when unknown rather than
+        // asserting a wrong id.
+        let mut params = serde_json::json!({
+            "backend": DEFAULT_RECONSTRUCT_BACKEND,
+            "session_id": status.session_id.clone(),
+        });
+        if let Some(dev) = &device_id {
+            meta["device_id"] = serde_json::Value::String(dev.clone());
+            params["device_id"] = serde_json::Value::String(dev.clone());
         }
 
         let dataset = Dataset {
@@ -302,13 +355,7 @@ impl AtlasIngest {
             dataset_id: Some(dataset_id),
             state: ComputeJobState::Queued,
             progress: 0.0,
-            // The job carries its capturing session so the job API can surface it
-            // (the GCS correlates a world-model artifact to a drone's active session
-            // by `session_id`, not the opaque dataset/job id format).
-            params: serde_json::json!({
-                "backend": DEFAULT_RECONSTRUCT_BACKEND,
-                "session_id": status.session_id.clone(),
-            }),
+            params,
             result_ref: None,
             error: None,
             created_ms: now_ms,
@@ -384,8 +431,16 @@ mod tests {
         };
         AtlasEvent {
             topic: ATLAS_KEYFRAME_TOPIC.to_string(),
+            device_id: None,
             payload: kf.to_msgpack().unwrap(),
         }
+    }
+
+    /// A keyframe event stamped with a capturing-drone id (the egress shape).
+    fn keyframe_event_from(session: &str, kf_id: u64, device: &str) -> AtlasEvent {
+        let mut ev = real_keyframe_event(session, kf_id);
+        ev.device_id = Some(device.to_string());
+        ev
     }
 
     fn capture_state(session: &str, state: CaptureState, keyframes: u64) -> AtlasEvent {
@@ -399,8 +454,21 @@ mod tests {
         };
         AtlasEvent {
             topic: ATLAS_CAPTURE_STATE_TOPIC.to_string(),
+            device_id: None,
             payload: status.to_msgpack().unwrap(),
         }
+    }
+
+    /// A capture-state event stamped with a capturing-drone id (the egress shape).
+    fn capture_state_from(
+        session: &str,
+        state: CaptureState,
+        keyframes: u64,
+        device: &str,
+    ) -> AtlasEvent {
+        let mut ev = capture_state(session, state, keyframes);
+        ev.device_id = Some(device.to_string());
+        ev
     }
 
     #[test]
@@ -454,6 +522,60 @@ mod tests {
     }
 
     #[test]
+    fn the_capturing_drone_device_id_reaches_the_dataset_and_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ingest = AtlasIngest::new(dir.path());
+
+        // The stamped keyframe + bag events carry the drone id; it lands on both
+        // the dataset meta and the job params so the compute→cloud producer can
+        // attribute the world model to the capturing drone.
+        ingest
+            .step(&keyframe_event_from("sD", 0, "drone-42"), 100)
+            .unwrap();
+        let (dataset, job) = ingest
+            .step(
+                &capture_state_from("sD", CaptureState::Bagged, 1, "drone-42"),
+                200,
+            )
+            .unwrap()
+            .expect("bagged yields a dataset + job");
+        assert_eq!(dataset.meta["device_id"], "drone-42");
+        assert_eq!(job.params["device_id"], "drone-42");
+        assert_eq!(job.params["session_id"], "sD");
+    }
+
+    #[test]
+    fn an_unstamped_session_omits_the_device_id_never_asserting_a_wrong_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ingest = AtlasIngest::new(dir.path());
+        // No event carried a device id (a pre-attribution capture): the job omits
+        // device_id rather than writing an empty/wrong one.
+        ingest.step(&real_keyframe_event("sN", 0), 100).unwrap();
+        let (dataset, job) = ingest
+            .step(&capture_state("sN", CaptureState::Bagged, 1), 200)
+            .unwrap()
+            .unwrap();
+        assert!(dataset.meta.get("device_id").is_none());
+        assert!(job.params.get("device_id").is_none());
+    }
+
+    #[test]
+    fn the_live_cadence_stamps_the_capturing_drone_on_periodic_jobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ingest = AtlasIngest::with_live_config(dir.path(), live(3, 2));
+        for kf in 0..3 {
+            ingest
+                .step(&keyframe_event_from("sL", kf, "drone-9"), 100)
+                .unwrap();
+        }
+        let jobs = ingest.due_reconstructs(200).unwrap();
+        assert_eq!(jobs.len(), 1);
+        let (dataset, job) = &jobs[0];
+        assert_eq!(dataset.meta["device_id"], "drone-9");
+        assert_eq!(job.params["device_id"], "drone-9");
+    }
+
+    #[test]
     fn a_resent_bagged_submit_is_idempotent_not_an_error() {
         let dir = tempfile::tempdir().unwrap();
         let store = JobStore::open(":memory:").unwrap();
@@ -488,6 +610,7 @@ mod tests {
         let mut ingest = AtlasIngest::new(dir.path());
         let bad = AtlasEvent {
             topic: ATLAS_CAPTURE_STATE_TOPIC.to_string(),
+            device_id: None,
             payload: b"not msgpack".to_vec(),
         };
         assert!(ingest.step(&bad, 100).unwrap().is_none());
@@ -620,6 +743,7 @@ mod tests {
         // nothing is persisted, so a bag with only bad keyframes has no input_path.
         let bad = AtlasEvent {
             topic: ATLAS_KEYFRAME_TOPIC.to_string(),
+            device_id: None,
             payload: vec![0u8; 8],
         };
         assert!(ingest.step(&bad, 100).unwrap().is_none());

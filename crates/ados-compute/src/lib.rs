@@ -26,6 +26,7 @@ mod engine;
 pub mod gpu;
 mod heartbeat_sidecar;
 mod ingest;
+mod jobs_sidecar;
 mod keyframe_persister;
 /// mDNS advertise (the compute node) + resolve (a drone-side caller browsing for
 /// a `profile=workstation` node). Public so a consumer crate can reach
@@ -59,6 +60,10 @@ pub use heartbeat_sidecar::{
     ComputeHeartbeatSidecar, SlaveEntry, COMPUTE_HEARTBEAT_SIDECAR,
 };
 pub use ingest::{submit_reconstruct_job, AtlasIngest};
+pub use jobs_sidecar::{
+    build_atlas_jobs_sidecar, compute_jobs_path, write_atlas_jobs_sidecar, AtlasJobEntry,
+    AtlasJobsSidecar, COMPUTE_JOBS_SIDECAR,
+};
 pub use keyframe_persister::{dataset_id_for, KeyframePersister};
 pub use mdns::{advertise_compute, resolve_compute, ComputeAdvert};
 pub use offload::{Detection, Detector, FrameRef, MockDetector};

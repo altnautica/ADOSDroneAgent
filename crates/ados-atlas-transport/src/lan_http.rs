@@ -160,6 +160,7 @@ mod tests {
     fn keyframe_event() -> AtlasEvent {
         AtlasEvent {
             topic: "atlas.keyframe".into(),
+            device_id: None,
             payload: vec![1, 2, 3, 4],
         }
     }
@@ -194,6 +195,7 @@ mod tests {
         let bearer = LanHttpBearer::new(format!("http://{addr}"));
         let big = AtlasEvent {
             topic: "atlas.keyframe".into(),
+            device_id: None,
             payload: vec![0xAB; 5 * 1024 * 1024], // 5 MB
         };
         bearer.send(&big).await.unwrap(); // Ok(()) means a 2xx, not a 413

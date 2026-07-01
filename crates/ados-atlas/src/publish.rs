@@ -21,6 +21,9 @@ const ATLAS_QUEUE_DEPTH: usize = 16;
 pub fn encode_event_frame(topic: &str, payload: Vec<u8>) -> anyhow::Result<Vec<u8>> {
     let ev = AtlasEvent {
         topic: topic.to_string(),
+        // Unstamped on the local publish bus; the drone-side forwarder stamps the
+        // device id on egress (the single choke point every bearer passes through).
+        device_id: None,
         payload,
     };
     let body = ev

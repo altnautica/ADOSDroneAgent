@@ -295,6 +295,14 @@ pub struct MeshDescriptor {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AtlasEvent {
     pub topic: String,
+    /// The capturing drone's device id, stamped by the drone-side forwarder as
+    /// the event leaves the drone (the single choke point every bearer passes
+    /// through). The compute node reads it to attribute a reconstruct job to the
+    /// drone that captured it (the world-model job's `deviceId`). Additive +
+    /// optional: an event on the local publish bus (before egress) omits it, and
+    /// a receiver decoding an older frame defaults it to `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
     pub payload: Vec<u8>,
 }
 
@@ -458,6 +466,7 @@ mod tests {
         };
         let ev = AtlasEvent {
             topic: ATLAS_CAPTURE_STATE_TOPIC.into(),
+            device_id: None,
             payload: status.to_msgpack().unwrap(),
         };
         let back = AtlasEvent::from_msgpack(&ev.to_msgpack().unwrap()).unwrap();
@@ -465,6 +474,41 @@ mod tests {
         assert_eq!(back.topic, "atlas.capture.state");
         let inner = CaptureStatus::from_msgpack(&back.payload).unwrap();
         assert_eq!(inner, status);
+    }
+
+    #[test]
+    fn device_id_round_trips_and_is_skipped_when_absent() {
+        // Absent (the local publish-bus shape): the key is omitted on the wire and
+        // an old-frame decode defaults to None, so an unstamped event is
+        // byte-unchanged for a receiver that never reads it.
+        let bare = AtlasEvent {
+            topic: ATLAS_KEYFRAME_TOPIC.into(),
+            device_id: None,
+            payload: vec![1, 2, 3],
+        };
+        let bare_json = serde_json::to_value(&bare).unwrap();
+        assert!(
+            bare_json.get("device_id").is_none(),
+            "device_id is skipped when None"
+        );
+        assert_eq!(
+            AtlasEvent::from_msgpack(&bare.to_msgpack().unwrap()).unwrap(),
+            bare
+        );
+
+        // Stamped (the egress shape): the drone id round-trips on the wire so the
+        // compute node can attribute the job to the capturing drone.
+        let stamped = AtlasEvent {
+            topic: ATLAS_KEYFRAME_TOPIC.into(),
+            device_id: Some("drone-42".into()),
+            payload: vec![9],
+        };
+        let stamped_json = serde_json::to_value(&stamped).unwrap();
+        assert_eq!(stamped_json["device_id"], "drone-42");
+        assert_eq!(
+            AtlasEvent::from_msgpack(&stamped.to_msgpack().unwrap()).unwrap(),
+            stamped
+        );
     }
 
     #[test]
