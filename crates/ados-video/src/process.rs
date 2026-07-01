@@ -20,7 +20,7 @@
 use std::process::Stdio;
 use std::time::Duration;
 
-use tokio::process::{ChildStderr, Command};
+use tokio::process::{ChildStderr, ChildStdout, Command};
 
 /// A media subprocess (encoder bash pipeline, wfb_tee ffmpeg, cloud-push
 /// ffmpeg, mediamtx) running as its own process-group leader.
@@ -36,10 +36,30 @@ impl ManagedProcess {
     /// stderr is piped for the caller to drain (rate-limited). `label` is for
     /// log lines only.
     pub fn spawn(label: &str, program: &str, args: &[String]) -> std::io::Result<Self> {
+        Self::spawn_with(label, program, args, Stdio::null())
+    }
+
+    /// Like [`spawn`](Self::spawn) but pipes stdout so the caller can read it —
+    /// the vision-tap shim reads ffmpeg's rawvideo off stdout. Take the handle
+    /// with [`take_stdout`](Self::take_stdout).
+    pub fn spawn_capturing_stdout(
+        label: &str,
+        program: &str,
+        args: &[String],
+    ) -> std::io::Result<Self> {
+        Self::spawn_with(label, program, args, Stdio::piped())
+    }
+
+    fn spawn_with(
+        label: &str,
+        program: &str,
+        args: &[String],
+        stdout: Stdio,
+    ) -> std::io::Result<Self> {
         let mut cmd = Command::new(program);
         cmd.args(args)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            .stdout(stdout)
             .stderr(Stdio::piped())
             // Cross-platform single-PID backstop; the Linux killpg in Drop is
             // the real group backstop.
@@ -71,6 +91,12 @@ impl ManagedProcess {
             pgid,
             inner: child,
         })
+    }
+
+    /// Take the piped stdout handle (only present after
+    /// [`spawn_capturing_stdout`](Self::spawn_capturing_stdout)).
+    pub fn take_stdout(&mut self) -> Option<ChildStdout> {
+        self.inner.stdout.take()
     }
 
     /// The OS PID (for `/proc/<pid>/...` reads + liveness checks).

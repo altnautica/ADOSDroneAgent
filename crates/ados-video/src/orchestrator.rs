@@ -65,10 +65,14 @@ pub struct VideoOrchestrator {
     pub(crate) wfb_tee: Option<ManagedProcess>,
     pub(crate) cloud_push: Option<ManagedProcess>,
     pub(crate) sei_tap: Option<ManagedProcess>,
-    /// The decoupled vision frame tap (a third ffmpeg → rawvideo → sink).
+    /// The decoupled vision frame tap (a third ffmpeg → rawvideo → stdout).
     /// Spawned only when `video.vision.enabled` and `raw_tap` is off. Additive:
     /// a crash here never touches the encode or wfb path.
     pub(crate) vision_tap: Option<ManagedProcess>,
+    /// The in-process reframer that reads the vision tap's raw frames, ADVT-
+    /// headers them (Contract F), and serves the connecting vision engine.
+    /// Bound to the same lifetime as `vision_tap`; aborted on stop/restart.
+    pub(crate) vision_tap_reframer: Option<tokio::task::JoinHandle<()>>,
     /// Supervised-subprocess slot held for a future GStreamer air branch. It
     /// is never populated on the current bash path, so the teardown paths reap
     /// it for free if that branch is ever wired; there is no operator toggle
@@ -151,6 +155,7 @@ impl VideoOrchestrator {
             cloud_push: None,
             sei_tap: None,
             vision_tap: None,
+            vision_tap_reframer: None,
             gst_air: None,
             wfb_tee_progress: ProgressTracker::new(),
             vision_tap_progress: ProgressTracker::new(),

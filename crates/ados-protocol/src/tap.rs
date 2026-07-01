@@ -15,9 +15,9 @@
 //!
 //! Self-describing so a consumer can size a ring without a side channel. This
 //! module is the single definition both sides build against — freeze it here,
-//! change both sides in the same version bump (the Contract A–E discipline in
-//! `product/specs/ados-agent-rust-hybrid/02-wire-contracts.md`, now extended to
-//! the vision seams).
+//! change both sides in the same version bump (the same frozen-wire-contract
+//! discipline the mavlink, state, and plugin sockets already follow, now
+//! extended to the vision seam).
 
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;

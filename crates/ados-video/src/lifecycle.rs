@@ -292,16 +292,17 @@ impl VideoOrchestrator {
                 return;
             }
         }
+        // Abort a stale reframer from a prior (exited) tap before respawn.
+        if let Some(h) = self.vision_tap_reframer.take() {
+            h.abort();
+        }
         let v = &self.config.vision;
-        // Sweep any stale reader holding the sink before respawn.
-        kill_orphans(&tap::orphan_pattern(&v.sink)).await;
         let mut t = match spawn_vision_tap(
             self.mediamtx.rtsp_port(),
             v.fps,
             v.width,
             v.height,
             v.pixel_format(),
-            &v.sink,
         ) {
             Ok(p) => p,
             Err(e) => {
@@ -313,6 +314,29 @@ impl VideoOrchestrator {
         let tracker = ProgressTracker::new();
         if let Some(stderr) = t.take_stderr() {
             tokio::spawn(drain_wfb_tee_stderr(stderr, tracker.clone()));
+        }
+        // Bind the serving socket and start the reframer: read ffmpeg's raw
+        // frames off stdout, ADVT-header them (Contract F), and serve the
+        // connecting vision engine. A bind/stdout failure leaves the tap process
+        // up but with no consumer — surfaced loudly, never silent (Rule 44).
+        match (t.take_stdout(), tap::bind_vision_tap(&v.sink)) {
+            (Some(stdout), Ok(listener)) => {
+                let format = tap::frame_format_from_str(v.pixel_format());
+                let (w, h) = (v.width, v.height);
+                self.vision_tap_reframer = Some(tokio::spawn(tap::run_vision_tap_server(
+                    listener, stdout, format, w, h,
+                )));
+            }
+            (None, _) => {
+                tracing::error!("vision_tap_no_stdout; reframer not started");
+            }
+            (_, Err(e)) => {
+                tracing::error!(
+                    error = %e,
+                    sink = %v.sink,
+                    "vision_tap_bind_failed; reframer not started"
+                );
+            }
         }
         self.vision_tap_progress = tracker;
         self.vision_tap = Some(t);
@@ -329,11 +353,14 @@ impl VideoOrchestrator {
     /// Stop the decoupled vision frame tap. Mirrors
     /// [`stop_wfb_tee`](Self::stop_wfb_tee).
     pub async fn stop_vision_tap(&mut self) {
+        if let Some(h) = self.vision_tap_reframer.take() {
+            h.abort();
+        }
         if let Some(mut p) = self.vision_tap.take() {
             p.terminate(Duration::from_secs(5)).await;
         }
-        // Belt-and-suspenders orphan sweep for the sink.
-        kill_orphans(&tap::orphan_pattern(&self.config.vision.sink)).await;
+        // Remove the served socket so the next bind starts clean.
+        let _ = std::fs::remove_file(&self.config.vision.sink);
     }
 
     /// Spawn the headless SEI latency tap as a one-shot Python subprocess,
