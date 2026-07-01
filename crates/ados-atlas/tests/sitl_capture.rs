@@ -84,6 +84,9 @@ async fn sitl_capture_emits_keyframes_pose_and_state_end_to_end() {
     let session = CaptureSession::new(config);
     let cancel = Arc::new(Notify::new());
 
+    // No control commands in this run; the sender stays alive so the control
+    // channel remains open (the loop simply never receives a command).
+    let (_control_tx, control_rx) = tokio::sync::mpsc::channel(1);
     let loop_cancel = cancel.clone();
     let handle = tokio::spawn(async move {
         run_capture_loop(
@@ -93,6 +96,7 @@ async fn sitl_capture_emits_keyframes_pose_and_state_end_to_end() {
             session,
             runtime,
             "sess-sitl".into(),
+            control_rx,
             loop_cancel,
         )
         .await;
@@ -224,6 +228,7 @@ async fn sitl_capture_recovers_from_a_malformed_keyframe_frame() {
     };
     let session = CaptureSession::new(config);
     let cancel = Arc::new(Notify::new());
+    let (_control_tx, control_rx) = tokio::sync::mpsc::channel(1);
     let loop_cancel = cancel.clone();
     let handle = tokio::spawn(async move {
         run_capture_loop(
@@ -233,6 +238,7 @@ async fn sitl_capture_recovers_from_a_malformed_keyframe_frame() {
             session,
             runtime,
             "sess-mal".into(),
+            control_rx,
             loop_cancel,
         )
         .await;

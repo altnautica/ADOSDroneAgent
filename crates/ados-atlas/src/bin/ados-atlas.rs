@@ -11,14 +11,14 @@
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use ados_atlas::publish::AtlasPublisher;
 use ados_atlas::runtime::{select_pose_tier, AtlasRuntimeConfig, CONFIG_YAML};
 use ados_atlas::{
-    build_pose_provider, run_capture_loop, AtlasFrameSource, CaptureSession, VisionFrameSource,
+    build_pose_provider, new_session_id, run_capture_loop, serve_control, AtlasControlCmd,
+    AtlasFrameSource, CaptureSession, VisionFrameSource,
 };
-use tokio::sync::Notify;
+use tokio::sync::{mpsc, Notify};
 
 fn init_tracing() {
     use ados_protocol::logd::layer::LogdLayer;
@@ -46,16 +46,6 @@ fn init_tracing() {
         .with(tracing_subscriber::fmt::layer())
         .with(LogdLayer::new("ados-atlas"))
         .try_init();
-}
-
-/// A session id derived from the boot wall-clock, so each run's keyframes share
-/// one identifier a compute node groups by.
-fn new_session_id() -> String {
-    let ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    format!("atlas-{ms}")
 }
 
 #[tokio::main]
@@ -115,6 +105,20 @@ async fn main() {
     let session = CaptureSession::new(config.capture.clone());
     let cancel = Arc::new(Notify::new());
 
+    // The inbound control socket the GCS drives the session through (start / stop
+    // / pause / resume / status). A bind failure is non-fatal: the daemon still
+    // auto-captures, it just cannot be driven at runtime, so it is logged and the
+    // loop runs on.
+    let control_socket = config.control_socket_path();
+    let (control_tx, control_rx) = mpsc::channel::<AtlasControlCmd>(32);
+    if let Err(e) = serve_control(&control_socket, control_tx).await {
+        tracing::warn!(
+            error = %e,
+            path = %control_socket,
+            "ados-atlas control socket bind failed; runtime capture control disabled"
+        );
+    }
+
     tracing::info!("ados-atlas ready");
     let loop_cancel = cancel.clone();
     let mut handle = tokio::spawn(async move {
@@ -125,6 +129,7 @@ async fn main() {
             session,
             config,
             new_session_id(),
+            control_rx,
             loop_cancel,
         )
         .await;

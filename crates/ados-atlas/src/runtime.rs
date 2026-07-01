@@ -247,6 +247,17 @@ impl AtlasRuntimeConfig {
         format!("{}/atlas.sock", self.socket_dir.trim_end_matches('/'))
     }
 
+    /// The inbound control socket the capture service accepts start/stop/pause/
+    /// resume/status commands on (the GCS drives capture through the front, which
+    /// forwards to this socket). Resolved under the same `socket_dir` as the
+    /// atlas bus so both halves agree on `/run/ados` by default.
+    pub fn control_socket_path(&self) -> String {
+        format!(
+            "{}/atlas-control.sock",
+            self.socket_dir.trim_end_matches('/')
+        )
+    }
+
     /// True when the resolved profile is the ground station (the service exits:
     /// the air side owns the cameras).
     pub fn is_ground_station(&self) -> bool {
@@ -276,6 +287,7 @@ mod tests {
         assert_eq!(c.socket_dir, "/run/ados");
         assert_eq!(c.pose_tier, PoseTierConfig::Auto);
         assert_eq!(c.atlas_socket_path(), "/run/ados/atlas.sock");
+        assert_eq!(c.control_socket_path(), "/run/ados/atlas-control.sock");
         assert_eq!(c.frames_socket_path(), "/run/ados/vision-frames.sock");
         assert_eq!(c.state_socket_path(), "/run/ados/state.sock");
     }
@@ -330,6 +342,7 @@ atlas:
         assert_eq!(c.capture.enabled_camera_count(), 1);
         assert!((c.capture.selection.min_translation_m - 1.0).abs() < 1e-9);
         assert_eq!(c.atlas_socket_path(), "/tmp/run/atlas.sock");
+        assert_eq!(c.control_socket_path(), "/tmp/run/atlas-control.sock");
         // The configured intrinsics override is used for `front`.
         let k = c.intrinsics_for("front", 1280, 720);
         assert!((k.k[0] - 900.0).abs() < 1e-9);
