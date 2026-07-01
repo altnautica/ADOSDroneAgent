@@ -49,9 +49,20 @@ impl VideoOrchestrator {
 
         self.state = PipelineState::Starting;
 
-        // Discover cameras and persist the camera-state sidecar.
-        let discovery =
-            discover::discover(&self.python_executable, discover::DISCOVERY_TIMEOUT).await;
+        // Resolve the capture source. An explicit network source
+        // (`video.camera.source: rtsp://…` / `http://…`) streams from that URL
+        // directly — the IP-camera mode — so no local camera probe runs; the
+        // synthetic single-camera result flows through the exact same start
+        // sequence (primary → encoder detect → command build) as a discovered
+        // camera. Otherwise probe for a local V4L2/CSI camera as before.
+        let net_source = self.camera_cfg.network_source().map(str::to_string);
+        let discovery = match net_source {
+            Some(url) => {
+                tracing::info!(source = %url, "video_streaming_from_network_source");
+                discover::DiscoveryResult::for_network_source(&url)
+            }
+            None => discover::discover(&self.python_executable, discover::DISCOVERY_TIMEOUT).await,
+        };
         discover::persist_camera_state(&discovery);
         self.last_cameras = discovery;
 

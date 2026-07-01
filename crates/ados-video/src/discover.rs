@@ -90,6 +90,31 @@ impl DiscoveryResult {
         }
     }
 
+    /// A single-camera result standing in for an explicit network capture
+    /// source (`rtsp://…` / `http://…`), so the network path reuses the whole
+    /// discovery-driven start sequence unchanged: `primary_camera_info()` yields
+    /// an [`CameraType::Ip`] camera, the encoder detector picks the ffmpeg
+    /// network-input backend, and the camera-state sidecar reports the source as
+    /// the ready primary. No local V4L2/CSI probe runs.
+    pub fn for_network_source(url: &str) -> Self {
+        Self {
+            cameras: vec![DiscoveredCamera {
+                name: url.to_string(),
+                camera_type: "ip".to_string(),
+                device_path: url.to_string(),
+                width: 0,
+                height: 0,
+                capabilities: vec!["rtsp".to_string()],
+                hardware_role: "primary".to_string(),
+            }],
+            primary: Some(Primary {
+                device_path: url.to_string(),
+                name: url.to_string(),
+            }),
+            total_cameras: 1,
+        }
+    }
+
     /// The `CameraInfo` the encoder builder reads for the primary, if any.
     /// Resolves the primary's `device_path` against the full camera list so
     /// the encoder gets the capability list (which the `primary` block does
@@ -306,6 +331,23 @@ mod tests {
         // The capability list comes from the matched camera-list entry, not
         // the primary block (which carries none).
         assert_eq!(info.capabilities, vec!["h264", "mjpeg"]);
+    }
+
+    #[test]
+    fn for_network_source_is_a_ready_ip_primary() {
+        let url = "rtsp://10.0.0.9:554/live";
+        let r = DiscoveryResult::for_network_source(url);
+        assert_eq!(r.total_cameras, 1);
+        // The primary resolves to an IP camera pointed at the URL, so the
+        // encoder detector selects the ffmpeg network-input backend.
+        let info = r.primary_camera_info().expect("primary present");
+        assert_eq!(info.camera_type, CameraType::Ip);
+        assert_eq!(info.device_path, url);
+        // The camera-state sidecar reports the source as the ready primary.
+        let s = r.camera_state_snapshot();
+        assert_eq!(s.state, crate::camera_state::CameraState::Ready);
+        assert_eq!(s.primary_path.as_deref(), Some(url));
+        assert_eq!(s.total_cameras, 1);
     }
 
     #[test]

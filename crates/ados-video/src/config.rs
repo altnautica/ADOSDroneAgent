@@ -64,6 +64,26 @@ impl Default for CameraConfig {
 }
 
 impl CameraConfig {
+    /// An explicit network capture source (`rtsp://…` or `http://…`), or
+    /// `None` for the local-camera discovery path.
+    ///
+    /// When `source` is a network URL the pipeline streams from it directly
+    /// instead of probing for a local V4L2/CSI camera — the "ip camera" mode,
+    /// where the operator points the agent at a remote feed (an onboard IP
+    /// camera, an encoder box, a network RTSP source). The `"csi"` / `"usb"` /
+    /// `"ip"` hint strings and bare device paths return `None` so the existing
+    /// discovery path is unchanged (fully backward compatible). The URL is used
+    /// verbatim as the ffmpeg input; the `validate_source` allowlist in the
+    /// encoder still gates the characters that reach the argv.
+    pub fn network_source(&self) -> Option<&str> {
+        let s = self.source.trim();
+        if s.starts_with("rtsp://") || s.starts_with("http://") {
+            Some(s)
+        } else {
+            None
+        }
+    }
+
     /// Load from the `video.camera:` block in the agent config file. Returns
     /// the defaults when the file is missing or unparseable so config loading
     /// never blocks the pipeline.
@@ -363,6 +383,24 @@ mod tests {
         // Untouched fields fall back to defaults.
         assert_eq!(cfg.codec, "h264");
         assert_eq!(cfg.bitrate_kbps, 4000);
+    }
+
+    #[test]
+    fn network_source_detects_rtsp_and_http() {
+        let mut c = CameraConfig::default();
+        // The default hint is a local camera → discovery path.
+        assert_eq!(c.network_source(), None);
+        for hint in ["csi", "usb", "ip", "/dev/video0"] {
+            c.source = hint.to_string();
+            assert_eq!(c.network_source(), None, "{hint} is not a network source");
+        }
+        c.source = "rtsp://10.0.0.9:554/live".to_string();
+        assert_eq!(c.network_source(), Some("rtsp://10.0.0.9:554/live"));
+        c.source = "http://cam.local:8080/stream".to_string();
+        assert_eq!(c.network_source(), Some("http://cam.local:8080/stream"));
+        // Surrounding whitespace is trimmed.
+        c.source = "  rtsp://host/main  ".to_string();
+        assert_eq!(c.network_source(), Some("rtsp://host/main"));
     }
 
     // --- AgentVideoConfig ---------------------------------------------
