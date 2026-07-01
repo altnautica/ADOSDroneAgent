@@ -937,8 +937,10 @@ mod tests {
     fn listener_health_sidecar_round_trips_with_expected_keys() {
         // Redirect the run dir so the sidecar lands in a temp tree (no /run/ados
         // on a dev host, and no cross-test contention on the real path).
+        let _env = crate::paths::lock_run_dir_env();
         let dir = tempfile::tempdir().unwrap();
-        // SAFETY: single-threaded test; no other thread reads ADOS_RUN_DIR here.
+        // SAFETY: the run-dir env lock serializes this against every other
+        // ADOS_RUN_DIR test, so no other thread mutates the var concurrently.
         unsafe {
             std::env::set_var("ADOS_RUN_DIR", dir.path());
         }

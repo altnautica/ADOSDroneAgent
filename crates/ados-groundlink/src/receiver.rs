@@ -693,8 +693,10 @@ mod tests {
 
     #[test]
     fn receiver_state_write_honours_run_dir_override() {
+        let _env = crate::paths::lock_run_dir_env();
         let dir = tempfile::tempdir().unwrap();
-        // SAFETY: serialized within this single-threaded test.
+        // SAFETY: the run-dir env lock serializes this against every other
+        // ADOS_RUN_DIR test, so no other thread mutates the var concurrently.
         unsafe {
             std::env::set_var("ADOS_RUN_DIR", dir.path());
         }
@@ -719,10 +721,15 @@ mod tests {
         // The emitting write ships exactly one gs.receiver_state event with an
         // emitter and nothing with None, regardless of the best-effort file
         // write result. The on-disk file path is covered by
-        // `receiver_state_write_honours_run_dir_override`; this test avoids the
-        // process-wide ADOS_RUN_DIR mutation so it never races the other run-dir
-        // test under the parallel runner.
+        // `receiver_state_write_honours_run_dir_override`; the run-dir env lock
+        // + a private ADOS_RUN_DIR keep this test's best-effort write inside its
+        // own temp tree so it never lands in a concurrent setter's dir.
+        let _env = crate::paths::lock_run_dir_env();
         let dir = tempfile::tempdir().unwrap();
+        // SAFETY: serialized against every other ADOS_RUN_DIR test by the lock.
+        unsafe {
+            std::env::set_var("ADOS_RUN_DIR", dir.path());
+        }
         let mut s = ReceiverState {
             listen_port: 5800,
             up: true,
@@ -745,5 +752,9 @@ mod tests {
         let none_stats = none_emitter.stats();
         let _ = s.write_and_emit(None);
         assert_eq!(none_stats.enqueued(), 0);
+        // SAFETY: serialized against every other ADOS_RUN_DIR test by the lock.
+        unsafe {
+            std::env::remove_var("ADOS_RUN_DIR");
+        }
     }
 }

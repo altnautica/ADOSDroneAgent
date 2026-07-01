@@ -548,8 +548,10 @@ mod tests {
 
     #[test]
     fn relay_state_write_honours_run_dir_override() {
-        // SAFETY: serialized within this single-threaded test.
+        let _env = crate::paths::lock_run_dir_env();
         let dir = tempfile::tempdir().unwrap();
+        // SAFETY: the run-dir env lock serializes this against every other
+        // ADOS_RUN_DIR test, so no other thread mutates the var concurrently.
         unsafe {
             std::env::set_var("ADOS_RUN_DIR", dir.path());
         }
