@@ -25,16 +25,48 @@ use crate::publish::AtlasPublisher;
 use crate::runtime::AtlasRuntimeConfig;
 use crate::session::{CaptureSession, FrameInput};
 
-/// A session id derived from the boot wall-clock, so each run's keyframes share
-/// one identifier a compute node groups by. Shared by the daemon's initial
-/// auto-started session and each operator-initiated `start` so both mint an id
-/// the same way.
-pub fn new_session_id() -> String {
-    let ms = std::time::SystemTime::now()
+/// A globally-unique session id every run's keyframes share. Embeds the drone's
+/// device id so two drones streaming to ONE shared compute node never collide on
+/// a bare timestamp: the compute node keys its on-disk dataset, its in-memory
+/// session→device map, and the cloud `cmd_atlasJobs` row on this id, so a bare
+/// `atlas-{ms}` from two drones would corrupt one reconstruction and overwrite
+/// the other's job row. The device id is sanitized to id-safe chars (it becomes a
+/// dataset dir name and an upsert key). When the device id is genuinely
+/// unavailable a process + sub-millisecond-nanosecond nonce stands in so the id
+/// is never a bare millisecond two drones could mint identically. Shared by the
+/// daemon's initial auto-started session and each operator-initiated `start`.
+pub fn new_session_id(device_id: &str) -> String {
+    let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    format!("atlas-{ms}")
+        .unwrap_or_default();
+    let ms = now.as_millis();
+    let sanitized = sanitize_id(device_id);
+    if sanitized.is_empty() {
+        // No device id: a process id + the sub-millisecond nanos keep the id
+        // unique across concurrent drones even without an attribution — never a
+        // bare millisecond two drones could mint identically.
+        let nonce = format!("{}{}", std::process::id(), now.subsec_nanos());
+        format!("atlas-n{nonce}-{ms}")
+    } else {
+        format!("atlas-{sanitized}-{ms}")
+    }
+}
+
+/// Reduce a device id to id-safe chars (ASCII alphanumerics, `-`, `_`), mapping
+/// anything else to `-` and trimming leading/trailing separators, so the session
+/// id stays safe as a dataset directory name, a URL path, and an upsert key.
+fn sanitize_id(id: &str) -> String {
+    let mapped: String = id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    mapped.trim_matches('-').to_string()
 }
 
 /// What we publish capture state on a change of (so we re-publish only when the
@@ -120,7 +152,14 @@ pub async fn run_capture_loop(
 
         match step {
             LoopStep::Control(Some(cmd)) => {
-                handle_control(&mut session, &publisher, &mut last_key, cmd).await;
+                handle_control(
+                    &mut session,
+                    &publisher,
+                    &mut last_key,
+                    cmd,
+                    &runtime.device_id,
+                )
+                .await;
             }
             LoopStep::Control(None) => {
                 // The control channel closed (its sender was dropped). Stop
@@ -164,6 +203,7 @@ async fn handle_control(
     publisher: &AtlasPublisher,
     last_key: &mut StateKey,
     cmd: AtlasControlCmd,
+    device_id: &str,
 ) {
     let publish = match cmd {
         AtlasControlCmd::Status(reply) => {
@@ -171,7 +211,7 @@ async fn handle_control(
             false
         }
         AtlasControlCmd::Start => {
-            session.start(new_session_id());
+            session.start(new_session_id(device_id));
             true
         }
         AtlasControlCmd::Stop => stop_and_bag(session),
@@ -340,6 +380,39 @@ mod tests {
         fn latest(&self) -> Option<crate::pose_source::PoseSample> {
             None
         }
+    }
+
+    // ── new_session_id: globally-unique, device-scoped ───────────────────────
+
+    #[test]
+    fn session_id_embeds_the_sanitized_device_id() {
+        let id = new_session_id("drone-7");
+        assert!(id.starts_with("atlas-drone-7-"), "got {id}");
+        // The trailing segment is the millisecond stamp — a bare number.
+        let ms = id.rsplit('-').next().unwrap();
+        assert!(ms.chars().all(|c| c.is_ascii_digit()), "got {id}");
+    }
+
+    #[test]
+    fn session_id_sanitizes_unsafe_device_id_chars() {
+        // Slashes / spaces would break a dataset dir name / URL path — mapped to '-'.
+        let id = new_session_id("dr one/7:x");
+        assert!(id.starts_with("atlas-dr-one-7-x-"), "got {id}");
+    }
+
+    #[test]
+    fn session_id_falls_back_to_a_nonce_never_a_bare_ms() {
+        // An empty (or all-unsafe) device id must NOT yield a bare `atlas-{ms}` two
+        // drones could mint identically — a process+nanos nonce stands in.
+        let id = new_session_id("");
+        assert!(id.starts_with("atlas-n"), "got {id}");
+        assert!(!id.starts_with("atlas-n-"), "the nonce is non-empty: {id}");
+        assert!(new_session_id("---").starts_with("atlas-n"));
+    }
+
+    #[test]
+    fn two_devices_never_collide_on_a_session_id() {
+        assert_ne!(new_session_id("drone-a"), new_session_id("drone-b"));
     }
 
     // ── stop_and_bag: the shutdown / stop bag transition ──────────────────────

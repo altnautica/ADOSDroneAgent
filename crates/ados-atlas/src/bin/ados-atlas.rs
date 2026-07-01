@@ -122,13 +122,17 @@ async fn main() {
     tracing::info!("ados-atlas ready");
     let loop_cancel = cancel.clone();
     let mut handle = tokio::spawn(async move {
+        // Mint the initial session id from the device id BEFORE `config` moves into
+        // the loop (argument evaluation would otherwise borrow an already-moved
+        // value), so this run's keyframes carry a globally-unique, device-scoped id.
+        let session_id = new_session_id(&config.device_id);
         run_capture_loop(
             frames,
             pose,
             publisher,
             session,
             config,
-            new_session_id(),
+            session_id,
             control_rx,
             loop_cancel,
         )

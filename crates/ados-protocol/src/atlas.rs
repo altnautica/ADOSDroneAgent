@@ -52,6 +52,46 @@ pub const PLUGIN_ATLAS_SPLAT_TOPIC: &str = "plugin.atlas.splat";
 /// Shared-data: mesh descriptor (vertex / face count, handle / url).
 pub const PLUGIN_ATLAS_MESH_TOPIC: &str = "plugin.atlas.mesh";
 
+// --- Forwarder → capture-service handoff ----------------------------------
+
+/// Where the drone-side Atlas forwarder writes its transport status for the
+/// capture service to fold into the plugin-state sidecar.
+///
+/// The compute node, the active bearer, and the last-forwarded-keyframe time are
+/// facts only the egress forwarder (`ados-cloud`) knows — the capture service
+/// (`ados-atlas`) never sees the bearer ladder. Rather than race two processes on
+/// one file, the forwarder writes these facts here and the capture service reads
+/// them (freshness-gated) when it writes `atlas-state.json`, so the GCS Stream
+/// card reads real values on hardware. This lives OUTSIDE `/run/ados/plugins`, so
+/// the generic plugin-state readers never surface it as its own slice — it is a
+/// private handoff, not a plugin.
+pub const ATLAS_FORWARD_SIDECAR: &str = "/run/ados/atlas-forward.json";
+
+/// The forwarder → capture-service handoff payload (see [`ATLAS_FORWARD_SIDECAR`]).
+/// The bearer is already in the GCS vocabulary (`direct-lan` / `wfb-relay` /
+/// `cloud`) so the capture service folds it verbatim into the sidecar the GCS
+/// reads; every field is optional so a forwarder with no resolved node writes an
+/// honest "nothing yet".
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AtlasForwardStatus {
+    /// The resolved compute node's device id (the mDNS `deviceId`), or `None`
+    /// while no compute node is on the LAN.
+    #[serde(default)]
+    pub compute_node_id: Option<String>,
+    /// The bearer currently carrying the stream, in the GCS vocabulary
+    /// (`direct-lan` / `wfb-relay` / `cloud`), or `None` before anything has been
+    /// forwarded this run.
+    #[serde(default)]
+    pub bearer: Option<String>,
+    /// Epoch ms a keyframe was last forwarded toward the compute node, or `None`
+    /// if none has been forwarded yet this run.
+    #[serde(default)]
+    pub last_kf_at_ms: Option<i64>,
+    /// Local write time (epoch ms), for the reader's own freshness reasoning.
+    pub generated_at_ms: i64,
+}
+
 // --- Enums ----------------------------------------------------------------
 
 /// Which camera on the rig produced a keyframe. Camera count is configurable

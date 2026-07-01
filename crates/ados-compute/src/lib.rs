@@ -65,7 +65,7 @@ pub use jobs_sidecar::{
     AtlasJobsSidecar, COMPUTE_JOBS_SIDECAR,
 };
 pub use keyframe_persister::{dataset_id_for, KeyframePersister};
-pub use mdns::{advertise_compute, resolve_compute, ComputeAdvert};
+pub use mdns::{advertise_compute, resolve_compute, ComputeAdvert, ResolvedComputeNode};
 pub use offload::{Detection, Detector, FrameRef, MockDetector};
 pub use pipeline::{chain_input_uri, stage_index_of, Pipeline, PipelineRunner, PipelineStage};
 pub use reconstructor::{MockReconstructor, ReconstructOutput, Reconstructor};

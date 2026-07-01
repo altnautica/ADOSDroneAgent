@@ -133,24 +133,36 @@ pub fn advertise_compute(node_id: &str, job_api_port: u16) -> Option<ComputeAdve
     Some(ComputeAdvert { daemon, fullname })
 }
 
+/// A resolved compute node: where to reach its job API, and who it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedComputeNode {
+    /// The host to dial (a concrete IPv4 when advertised, else the `.local` name).
+    pub host: String,
+    /// The job-API port (the `jobApi` TXT value, not the SRV pairing port).
+    pub job_api_port: u16,
+    /// The node's device id (the `deviceId` TXT), empty when the advert omits it.
+    pub device_id: String,
+}
+
 /// Browse `_ados._tcp` for up to `timeout` and resolve the first **compute
-/// node** — a service whose TXT carries `profile=workstation` — returning its
-/// `(host, job_api_port)` so a caller can build the LAN job-API base URL
-/// (`http://host:job_api_port`).
+/// node** — a service whose TXT carries `profile=workstation` — returning where
+/// to reach its job API (`http://host:job_api_port`) plus its `device_id` (so a
+/// caller can attribute the stream to the node).
 ///
 /// The job-API port rides the `jobApi` TXT key, NOT the SRV port: the SRV port
 /// is the `:8080` pairing front (where `/api/pairing/*` lives), while the job
-/// API serves on its own port. An IPv4 address is preferred for the host (a
-/// reqwest client dials it directly, with no second mDNS hostname lookup); the
-/// advertised hostname is the fallback. Returns `None` on timeout, when mDNS is
-/// unavailable, or when no workstation answers — the caller treats that as "no
-/// compute node on the LAN yet" and retries.
+/// API serves on its own port. The device id rides the `deviceId` TXT key. An
+/// IPv4 address is preferred for the host (a reqwest client dials it directly,
+/// with no second mDNS hostname lookup); the advertised hostname is the fallback.
+/// Returns `None` on timeout, when mDNS is unavailable, or when no workstation
+/// answers — the caller treats that as "no compute node on the LAN yet" and
+/// retries.
 ///
 /// Mirrors `ados_groundlink::mdns::resolve_receiver` (same `mdns-sd` browse +
 /// `ServiceResolved` loop + bounded `tokio::time::timeout`); the difference is
 /// the accept predicate — a TXT `profile` match here vs a mesh-subnet match
 /// there — and that the returned port comes from a TXT key, not the SRV record.
-pub async fn resolve_compute(timeout: Duration) -> Option<(String, u16)> {
+pub async fn resolve_compute(timeout: Duration) -> Option<ResolvedComputeNode> {
     let daemon = ServiceDaemon::new().ok()?;
     let rx = match daemon.browse(PAIRING_SERVICE) {
         Ok(rx) => rx,
@@ -178,13 +190,26 @@ pub async fn resolve_compute(timeout: Duration) -> Option<(String, u16)> {
                 else {
                     continue;
                 };
+                // The node's own device id (attribution). Empty when unadvertised.
+                let device_id = info
+                    .get_property_val_str("deviceId")
+                    .unwrap_or_default()
+                    .to_string();
                 // Prefer a concrete IPv4 (dial it directly); else the hostname.
                 if let Some(v4) = info.get_addresses_v4().into_iter().next() {
-                    return Some((v4.to_string(), port));
+                    return Some(ResolvedComputeNode {
+                        host: v4.to_string(),
+                        job_api_port: port,
+                        device_id,
+                    });
                 }
                 let host = info.get_hostname().trim_end_matches('.').to_string();
                 if !host.is_empty() {
-                    return Some((host, port));
+                    return Some(ResolvedComputeNode {
+                        host,
+                        job_api_port: port,
+                        device_id,
+                    });
                 }
             }
         }
@@ -239,9 +264,12 @@ mod tests {
             None => {}
             // Defensive against a stray real workstation on the dev LAN: a
             // resolved node must at least carry a usable (non-zero) job-API port.
-            Some((host, port)) => {
-                assert!(!host.is_empty(), "a resolved node carries a host");
-                assert_ne!(port, 0, "a resolved node carries a non-zero job-API port");
+            Some(node) => {
+                assert!(!node.host.is_empty(), "a resolved node carries a host");
+                assert_ne!(
+                    node.job_api_port, 0,
+                    "a resolved node carries a non-zero job-API port"
+                );
             }
         }
     }

@@ -46,6 +46,12 @@ use crate::routes::wfb_pair_write::write_atomic;
 /// The unit that runs the capture service; restarting it applies a config change.
 const ATLAS_UNIT: &str = "ados-atlas";
 
+/// The capture profiles the service accepts, matching the `CaptureProfile` enum's
+/// serde repr in the capture crate (orbit / lawnmower / freeform / inspection).
+/// An out-of-set value is rejected (400) rather than written verbatim, so
+/// `config.yaml` never carries a profile the capture service would fail to parse.
+const VALID_CAPTURE_PROFILES: [&str; 4] = ["orbit", "lawnmower", "freeform", "inspection"];
+
 /// The agent config path (`ADOS_CONFIG`, default `/etc/ados/config.yaml`), the
 /// same resolution the sibling write routes use.
 fn config_yaml_path() -> PathBuf {
@@ -196,6 +202,20 @@ pub struct AtlasConfigBody {
 /// `PUT /api/atlas/config` → surgically write the `atlas:` block + restart the
 /// capture service.
 pub async fn put_atlas_config(Json(body): Json<AtlasConfigBody>) -> Response {
+    // Reject an out-of-enum capture profile up front (400) so config.yaml never
+    // gets a value the capture service would fail to deserialize. An empty string
+    // is a no-op (write_atlas_block leaves the existing profile untouched).
+    if let Some(profile) = body.capture_profile.as_deref() {
+        if !profile.is_empty() && !VALID_CAPTURE_PROFILES.contains(&profile) {
+            return detail(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "invalid capture_profile `{profile}` (expected one of {})",
+                    VALID_CAPTURE_PROFILES.join(" / ")
+                ),
+            );
+        }
+    }
     let effective_enabled = match write_atlas_block(&config_yaml_path(), &body) {
         Ok(enabled) => enabled,
         Err(msg) => return detail(StatusCode::INTERNAL_SERVER_ERROR, msg),
@@ -414,6 +434,19 @@ mod tests {
         assert!(!view.enabled);
         assert_eq!(view.cameras_configured, 0);
         assert_eq!(view.profile, "drone");
+    }
+
+    #[tokio::test]
+    async fn put_config_rejects_an_out_of_enum_capture_profile() {
+        // "balanced" is not in the capture-profile enum → 400, and no config
+        // write / unit restart happens (validation returns before both).
+        let resp = put_atlas_config(Json(AtlasConfigBody {
+            enabled: Some(true),
+            capture_profile: Some("balanced".into()),
+            cameras: None,
+        }))
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

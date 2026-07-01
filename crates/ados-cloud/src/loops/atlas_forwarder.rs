@@ -19,14 +19,16 @@
 //! ([`crate::config::CloudConfig::atlas_enabled`]), so a non-Atlas agent does no
 //! Atlas work and is byte-unchanged.
 
+use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::watch;
 
 use ados_atlas_transport::{
     AtlasBearer, AtlasEvent, BearerKind, BearerLadder, LanHttpBearer, WfbRelayBearer,
 };
+use ados_protocol::atlas::{AtlasForwardStatus, ATLAS_FORWARD_SIDECAR, ATLAS_KEYFRAME_TOPIC};
 use ados_protocol::frame::PLUGIN_MAX_FRAME;
 use ados_protocol::ipc::{connect_with_retry, read_length_prefixed};
 
@@ -57,15 +59,132 @@ const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(500);
 /// MAVLink relay's Rule-37 high ceiling — the publish path is the limit).
 const CLOUD_INFLIGHT: u16 = 1000;
 const CLOUD_KEEP_ALIVE: Duration = Duration::from_secs(30);
+/// While a compute node is resolved, re-write the forwarder handoff at least this
+/// often so its mtime stays fresh (the capture service drops a stale handoff so a
+/// gone node never lingers on the Stream card). Comfortably under the reader's
+/// staleness window.
+const FORWARD_REFRESH: Duration = Duration::from_secs(5);
 
 /// Outcome of one forward attempt.
 enum Forwarded {
-    /// The event decoded; `Some(kind)` carried it, `None` if every bearer
-    /// declined / errored (logged; the loop keeps draining the bus).
-    Decoded(Option<BearerKind>),
+    /// The event decoded; `carried` is `Some(kind)` if a bearer carried it (`None`
+    /// if every bearer declined / errored), and `keyframe` is whether it was a
+    /// keyframe (so the handoff can stamp the last-forwarded-keyframe time).
+    Decoded {
+        carried: Option<BearerKind>,
+        keyframe: bool,
+    },
     /// The framed body was not a valid event — logged, no send attempted (does
     /// NOT count as a transport miss, so it never re-resolves the node).
     DecodeError,
+}
+
+/// Epoch milliseconds.
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Map a bearer kind to the GCS Stream-card vocabulary the handoff carries.
+fn bearer_label(kind: BearerKind) -> &'static str {
+    match kind {
+        // Loopback / bulk are same-host LAN-direct-ish; the live ladder only ever
+        // carries over DirectLan / WfbRelay / Cloud on real hardware.
+        BearerKind::DirectLan | BearerKind::Loopback | BearerKind::PostFlightBulk => "direct-lan",
+        BearerKind::WfbRelay => "wfb-relay",
+        BearerKind::Cloud => "cloud",
+    }
+}
+
+/// The transport facts only the egress forwarder knows, written to the handoff
+/// file for the capture service to fold into `atlas-state.json` (so the GCS
+/// Stream card reads real values). Written on change, and periodically while a
+/// node is resolved so the reader's freshness gate never drops a live node.
+#[derive(Default)]
+struct ForwardStatus {
+    compute_node_id: Option<String>,
+    bearer: Option<String>,
+    last_kf_at_ms: Option<i64>,
+    last_write: Option<Instant>,
+}
+
+impl ForwardStatus {
+    /// Record the resolved compute node (or its loss). Returns whether it changed.
+    /// An empty advertised id counts as none; losing the node clears the bearer
+    /// (nothing is carrying anymore).
+    fn note_node(&mut self, node_id: Option<String>) -> bool {
+        let node_id = node_id.filter(|s| !s.is_empty());
+        if node_id == self.compute_node_id {
+            return false;
+        }
+        if node_id.is_none() {
+            self.bearer = None;
+        }
+        self.compute_node_id = node_id;
+        true
+    }
+
+    /// Record a forwarded event's carrying bearer (+ keyframe time). Returns
+    /// whether an operator-visible fact moved (the bearer changed, or a keyframe
+    /// was forwarded). A declined send (`carried = None`) keeps the last-known
+    /// bearer — a transient decline should not flicker it; a persistent one lets
+    /// the handoff age out.
+    fn note_carried(&mut self, bearer: Option<&'static str>, keyframe: bool, now_ms: i64) -> bool {
+        let mut changed = false;
+        if let Some(b) = bearer {
+            if self.bearer.as_deref() != Some(b) {
+                self.bearer = Some(b.to_string());
+                changed = true;
+            }
+        }
+        if keyframe {
+            self.last_kf_at_ms = Some(now_ms);
+            changed = true;
+        }
+        changed
+    }
+
+    /// Write the handoff when a fact changed, or periodically while a node is
+    /// resolved to keep the file's mtime fresh. Best-effort.
+    fn maybe_write(&mut self, dirty: bool) {
+        let due = self.compute_node_id.is_some()
+            && self
+                .last_write
+                .map(|t| t.elapsed() >= FORWARD_REFRESH)
+                .unwrap_or(true);
+        if !dirty && !due {
+            return;
+        }
+        write_forward_status(&AtlasForwardStatus {
+            compute_node_id: self.compute_node_id.clone(),
+            bearer: self.bearer.clone(),
+            last_kf_at_ms: self.last_kf_at_ms,
+            generated_at_ms: now_ms(),
+        });
+        self.last_write = Some(Instant::now());
+    }
+}
+
+/// Atomically write the forwarder handoff (`.tmp` + rename, so the capture
+/// service never reads a torn file). Best-effort: a write error is logged.
+fn write_forward_status(status: &AtlasForwardStatus) {
+    let path = Path::new(ATLAS_FORWARD_SIDECAR);
+    let body = match serde_json::to_vec(status) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(error = %e, "atlas_forward_encode_failed");
+            return;
+        }
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let tmp = path.with_extension("json.tmp");
+    if let Err(e) = std::fs::write(&tmp, &body).and_then(|()| std::fs::rename(&tmp, path)) {
+        tracing::debug!(error = %e, "atlas_forward_write_failed");
+    }
 }
 
 /// Run the Atlas forwarder until `shutdown` flips. INERT unless Atlas is enabled.
@@ -82,6 +201,11 @@ pub async fn run(config: Arc<CloudConfig>, mut shutdown: watch::Receiver<bool>) 
     // (a second session on the same client id would kick the first). `None`
     // until cloud relay is the posture AND the agent is paired.
     let mut cloud_transport: Option<Arc<RumqttcTransport>> = None;
+
+    // The forwarder handoff (compute node + bearer + last-keyframe time) the
+    // capture service folds into its plugin-state sidecar. Persists across bus
+    // reconnects so a blip never drops the resolved node from the Stream card.
+    let mut fwd = ForwardStatus::default();
 
     loop {
         if *shutdown.borrow() {
@@ -103,8 +227,12 @@ pub async fn run(config: Arc<CloudConfig>, mut shutdown: watch::Receiver<bool>) 
         tracing::info!(socket = ATLAS_SOCK, "atlas forwarder subscribed to the bus");
 
         // Resolve the compute node + build the ladder. `have_lan` tracks whether
-        // a direct-LAN bearer is currently present.
-        let (mut ladder, mut have_lan) = build_ladder(&config, &mut cloud_transport).await;
+        // a direct-LAN bearer is currently present; the resolved node id feeds the
+        // forwarder handoff so the Stream card names the reconstructor.
+        let (mut ladder, node_id) = build_ladder(&config, &mut cloud_transport).await;
+        let mut have_lan = node_id.is_some();
+        let node_changed = fwd.note_node(node_id);
+        fwd.maybe_write(node_changed);
         let mut lan_misses: u32 = 0;
         let mut last_resolve = Instant::now();
 
@@ -122,8 +250,9 @@ pub async fn run(config: Arc<CloudConfig>, mut shutdown: watch::Receiver<bool>) 
 
             match read {
                 Ok(Some(body)) => {
+                    let mut dirty = false;
                     match forward_event(&ladder, &body, &config.agent.device_id).await {
-                        Forwarded::Decoded(carried) => {
+                        Forwarded::Decoded { carried, keyframe } => {
                             if have_lan {
                                 if carried == Some(BearerKind::DirectLan) {
                                     lan_misses = 0;
@@ -131,6 +260,8 @@ pub async fn run(config: Arc<CloudConfig>, mut shutdown: watch::Receiver<bool>) 
                                     lan_misses += 1;
                                 }
                             }
+                            dirty |=
+                                fwd.note_carried(carried.map(bearer_label), keyframe, now_ms());
                         }
                         Forwarded::DecodeError => {}
                     }
@@ -147,15 +278,20 @@ pub async fn run(config: Arc<CloudConfig>, mut shutdown: watch::Receiver<bool>) 
                                 "atlas LAN bearer stopped carrying; re-resolving compute node"
                             );
                         }
-                        let (l, lan) = build_ladder(&config, &mut cloud_transport).await;
+                        let (l, node_id) = build_ladder(&config, &mut cloud_transport).await;
+                        let lan = node_id.is_some();
                         if lan && !have_lan {
                             tracing::info!("atlas forwarder discovered a compute node");
                         }
+                        dirty |= fwd.note_node(node_id);
                         ladder = l;
                         have_lan = lan;
                         lan_misses = 0;
                         last_resolve = Instant::now();
                     }
+
+                    // Persist the handoff (on change, or the periodic mtime refresh).
+                    fwd.maybe_write(dirty);
                 }
                 Ok(None) => {
                     tracing::debug!("atlas bus closed; reconnecting");
@@ -196,6 +332,7 @@ async fn forward_event(ladder: &BearerLadder, body: &[u8], device_id: &str) -> F
     if !device_id.is_empty() {
         event.device_id = Some(device_id.to_string());
     }
+    let keyframe = event.topic == ATLAS_KEYFRAME_TOPIC;
     match ladder.send(&event).await {
         Ok(kind) => {
             tracing::debug!(
@@ -204,7 +341,10 @@ async fn forward_event(ladder: &BearerLadder, body: &[u8], device_id: &str) -> F
                 bytes = event.payload.len(),
                 "atlas event forwarded"
             );
-            Forwarded::Decoded(Some(kind))
+            Forwarded::Decoded {
+                carried: Some(kind),
+                keyframe,
+            }
         }
         Err(e) => {
             tracing::debug!(
@@ -212,32 +352,36 @@ async fn forward_event(ladder: &BearerLadder, body: &[u8], device_id: &str) -> F
                 error = %e,
                 "atlas event not forwarded (all bearers declined)"
             );
-            Forwarded::Decoded(None)
+            Forwarded::Decoded {
+                carried: None,
+                keyframe,
+            }
         }
     }
 }
 
 /// Resolve the compute node and build the bearer ladder. Returns the ladder and
-/// whether a direct-LAN bearer is present (a compute node was resolved). The
-/// cloud transport is built at most once (the first time cloud relay is the
-/// posture AND the agent is paired) and reused on every rebuild.
+/// the resolved compute node's device id (`Some` iff a direct-LAN bearer is
+/// present — a compute node was resolved). The cloud transport is built at most
+/// once (the first time cloud relay is the posture AND the agent is paired) and
+/// reused on every rebuild.
 async fn build_ladder(
     config: &CloudConfig,
     cloud_transport: &mut Option<Arc<RumqttcTransport>>,
-) -> (BearerLadder, bool) {
+) -> (BearerLadder, Option<String>) {
     let mut bearers: Vec<Box<dyn AtlasBearer>> = Vec::new();
 
     // ── Direct LAN (first-class): a resolved compute node's job-API URL ──
-    let have_lan = match ados_compute::mdns::resolve_compute(RESOLVE_TIMEOUT).await {
-        Some((host, port)) => {
-            let base = format!("http://{host}:{port}");
-            tracing::info!(base = %base, "atlas forwarder resolved compute node");
+    let compute_node_id = match ados_compute::mdns::resolve_compute(RESOLVE_TIMEOUT).await {
+        Some(node) => {
+            let base = format!("http://{}:{}", node.host, node.job_api_port);
+            tracing::info!(base = %base, node = %node.device_id, "atlas forwarder resolved compute node");
             bearers.push(Box::new(LanHttpBearer::new(base)));
-            true
+            Some(node.device_id)
         }
         None => {
             tracing::debug!("atlas forwarder: no compute node on mDNS yet");
-            false
+            None
         }
     };
 
@@ -259,7 +403,7 @@ async fn build_ladder(
         }
     }
 
-    (BearerLadder::new(bearers), have_lan)
+    (BearerLadder::new(bearers), compute_node_id)
 }
 
 /// Build the dedicated Atlas cloud transport, or `None` while unpaired. It uses
@@ -303,16 +447,21 @@ mod tests {
         let (bearer, mut rx) = LoopbackBearer::channel();
         let ladder = BearerLadder::new(vec![Box::new(bearer)]);
         let ev = AtlasEvent {
-            topic: "atlas.keyframe".into(),
+            topic: ATLAS_KEYFRAME_TOPIC.into(),
             device_id: None,
             payload: vec![1, 2, 3],
         };
         let body = ev.to_msgpack().unwrap();
 
         match forward_event(&ladder, &body, "drone-7").await {
-            Forwarded::Decoded(Some(BearerKind::Loopback)) => {}
+            // A keyframe carried over the loopback bearer, flagged as a keyframe so
+            // the handoff can stamp the last-forwarded-keyframe time.
+            Forwarded::Decoded {
+                carried: Some(BearerKind::Loopback),
+                keyframe: true,
+            } => {}
             other => panic!(
-                "expected a loopback-carried event, got {:?}",
+                "expected a loopback-carried keyframe, got {:?}",
                 carried_kind(&other)
             ),
         }
@@ -349,7 +498,10 @@ mod tests {
         };
         let body = ev.to_msgpack().unwrap();
         match forward_event(&ladder, &body, "drone-7").await {
-            Forwarded::Decoded(None) => {}
+            Forwarded::Decoded {
+                carried: None,
+                keyframe: false,
+            } => {}
             _ => panic!("an empty ladder carries nothing"),
         }
     }
@@ -357,8 +509,51 @@ mod tests {
     /// Just for the panic message above — name the carried kind, if any.
     fn carried_kind(f: &Forwarded) -> Option<BearerKind> {
         match f {
-            Forwarded::Decoded(k) => *k,
+            Forwarded::Decoded { carried, .. } => *carried,
             Forwarded::DecodeError => None,
         }
+    }
+
+    #[test]
+    fn note_node_change_and_loss_clears_the_bearer() {
+        let mut fwd = ForwardStatus::default();
+        // First resolve → changed.
+        assert!(fwd.note_node(Some("rtx-box".into())));
+        // Same node → no change.
+        assert!(!fwd.note_node(Some("rtx-box".into())));
+        // A carry sets the bearer.
+        assert!(fwd.note_carried(Some("direct-lan"), false, 100));
+        assert_eq!(fwd.bearer.as_deref(), Some("direct-lan"));
+        // Losing the node changes state AND clears the (now meaningless) bearer.
+        assert!(fwd.note_node(None));
+        assert_eq!(fwd.compute_node_id, None);
+        assert_eq!(fwd.bearer, None);
+        // An empty advertised id is treated as no node.
+        assert!(!fwd.note_node(Some(String::new())));
+    }
+
+    #[test]
+    fn note_carried_tracks_bearer_change_and_keyframe_time() {
+        let mut fwd = ForwardStatus::default();
+        // A keyframe carry stamps the time and reports a change.
+        assert!(fwd.note_carried(Some("wfb-relay"), true, 1_700));
+        assert_eq!(fwd.bearer.as_deref(), Some("wfb-relay"));
+        assert_eq!(fwd.last_kf_at_ms, Some(1_700));
+        // Same bearer, no keyframe → nothing moved.
+        assert!(!fwd.note_carried(Some("wfb-relay"), false, 1_800));
+        assert_eq!(fwd.last_kf_at_ms, Some(1_700));
+        // A later keyframe advances the time.
+        assert!(fwd.note_carried(Some("wfb-relay"), true, 1_900));
+        assert_eq!(fwd.last_kf_at_ms, Some(1_900));
+        // A declined send (None) keeps the last-known bearer.
+        assert!(!fwd.note_carried(None, false, 2_000));
+        assert_eq!(fwd.bearer.as_deref(), Some("wfb-relay"));
+    }
+
+    #[test]
+    fn bearer_label_maps_to_the_gcs_vocabulary() {
+        assert_eq!(bearer_label(BearerKind::DirectLan), "direct-lan");
+        assert_eq!(bearer_label(BearerKind::WfbRelay), "wfb-relay");
+        assert_eq!(bearer_label(BearerKind::Cloud), "cloud");
     }
 }

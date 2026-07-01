@@ -127,6 +127,10 @@ pub fn default_intrinsics(width: u32, height: u32, hfov_deg: f64) -> CameraIntri
 pub struct AtlasRuntimeConfig {
     pub enabled: bool,
     pub profile: Option<String>,
+    /// The drone's device id (`agent.device_id`), used to mint a globally-unique
+    /// capture `session_id` so two drones on one shared compute node never
+    /// collide (empty when absent — the session id then falls back to a nonce).
+    pub device_id: String,
     pub socket_dir: String,
     pub capture: CaptureConfig,
     pub pose_tier: PoseTierConfig,
@@ -139,6 +143,7 @@ impl Default for AtlasRuntimeConfig {
         Self {
             enabled: false,
             profile: None,
+            device_id: String::new(),
             socket_dir: default_socket_dir(),
             capture: CaptureConfig::default(),
             pose_tier: PoseTierConfig::Auto,
@@ -163,6 +168,8 @@ impl AtlasRuntimeConfig {
         struct AgentSection {
             #[serde(default)]
             profile: Option<String>,
+            #[serde(default)]
+            device_id: String,
         }
         #[derive(Debug, Deserialize)]
         struct AtlasSection {
@@ -191,6 +198,7 @@ impl AtlasRuntimeConfig {
         let Some(a) = raw.atlas else {
             return AtlasRuntimeConfig {
                 profile: raw.agent.profile,
+                device_id: raw.agent.device_id,
                 ..AtlasRuntimeConfig::default()
             };
         };
@@ -199,6 +207,7 @@ impl AtlasRuntimeConfig {
             // `agent.profile` is the single canonical source (the capture service
             // is air-side; there is no atlas-specific profile override).
             profile: raw.agent.profile,
+            device_id: raw.agent.device_id,
             socket_dir: a.socket_dir,
             capture: CaptureConfig {
                 cameras: a.cameras,
@@ -299,6 +308,17 @@ mod tests {
         assert!(!c.enabled);
         assert_eq!(c.profile.as_deref(), Some("drone"));
         assert!(!c.is_ground_station());
+    }
+
+    #[test]
+    fn device_id_loads_from_the_agent_block() {
+        // The capture service reads `agent.device_id` to scope the session id.
+        let (_d, p) =
+            write_tmp("agent:\n  profile: drone\n  device_id: drone-42\natlas:\n  enabled: true\n");
+        assert_eq!(AtlasRuntimeConfig::load_from(&p).device_id, "drone-42");
+        // Absent → empty (the session id then uses a nonce, never a bare ms).
+        let (_d2, p2) = write_tmp("atlas:\n  enabled: true\n");
+        assert_eq!(AtlasRuntimeConfig::load_from(&p2).device_id, "");
     }
 
     #[test]
