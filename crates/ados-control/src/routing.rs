@@ -95,6 +95,14 @@ fn native_routes() -> Vec<NativeRoute> {
         get("/api/plugins/{plugin_id}/state"),
         // Compute-node cluster status (read from the heartbeat sidecar).
         get("/api/compute/status"),
+        // ADOS Atlas per-drone world-model capture: readiness read + the enable
+        // config write + the live capture-session controls.
+        get("/api/atlas/readiness"),
+        put("/api/atlas/config"),
+        post("/api/atlas/capture/start"),
+        post("/api/atlas/capture/stop"),
+        post("/api/atlas/capture/pause"),
+        post("/api/atlas/capture/resume"),
         // WebSocket auth ticket mint.
         post("/api/_ws/ticket"),
         // Params: the full list + the single-param read (a {name} template).
@@ -411,7 +419,7 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            114,
+            120,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);
@@ -460,6 +468,7 @@ mod tests {
             "/api/v1/network/mac/adapters",
             "/api/plugins/{plugin_id}/state",
             "/api/compute/status",
+            "/api/atlas/readiness",
         ] {
             assert!(has(Method::GET, p), "{p} must be in the native set");
         }
@@ -469,6 +478,12 @@ mod tests {
         // The CAN passthrough 501 stub is native (POST).
         assert!(has(Method::POST, "/api/can/passthrough"));
         assert!(has(Method::POST, "/api/services/{name}/restart"));
+        // The ADOS Atlas capture control writes.
+        assert!(has(Method::PUT, "/api/atlas/config"));
+        assert!(has(Method::POST, "/api/atlas/capture/start"));
+        assert!(has(Method::POST, "/api/atlas/capture/stop"));
+        assert!(has(Method::POST, "/api/atlas/capture/pause"));
+        assert!(has(Method::POST, "/api/atlas/capture/resume"));
         assert!(has(Method::POST, "/api/v1/system/restart-supervisor"));
         assert!(has(Method::POST, "/api/mavlink/signing/enroll-fc"));
         assert!(has(Method::POST, "/api/mavlink/signing/disable-on-fc"));

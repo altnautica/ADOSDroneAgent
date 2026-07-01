@@ -68,6 +68,7 @@ use serde_json::{json, Value};
 /// GS rig's Hardware tab can restart the receive WFB stack.
 const ALLOWED_UNITS: &[&str] = &[
     "ados-api",
+    "ados-atlas",
     "ados-buttons",
     "ados-cloud",
     "ados-discovery",

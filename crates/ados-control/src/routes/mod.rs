@@ -19,6 +19,7 @@
 //! set would be served with the auth SKIPPED. The `native_set_matches_router`
 //! test pins the full set so the two never drift.
 
+pub mod atlas;
 pub mod can;
 pub mod command;
 pub mod compute_status;
@@ -178,6 +179,18 @@ pub fn build_router(state: AppState, net_native: bool, hid_native: bool) -> Rout
         .route(
             "/api/compute/status",
             get(compute_status::get_compute_status),
+        )
+        // ADOS Atlas per-drone world-model capture: readiness (drone-local facts
+        // + live session state), the per-drone enable/config write, and the live
+        // capture-session controls forwarded to the capture service's socket.
+        .route("/api/atlas/readiness", get(atlas::get_atlas_readiness))
+        .route("/api/atlas/config", put(atlas::put_atlas_config))
+        .route("/api/atlas/capture/start", post(atlas::post_capture_start))
+        .route("/api/atlas/capture/stop", post(atlas::post_capture_stop))
+        .route("/api/atlas/capture/pause", post(atlas::post_capture_pause))
+        .route(
+            "/api/atlas/capture/resume",
+            post(atlas::post_capture_resume),
         )
         // WebSocket auth ticket mint: exchanges the pairing key (LAN-edge auth)
         // for a short-lived self-contained HMAC ticket a browser GCS hands to the

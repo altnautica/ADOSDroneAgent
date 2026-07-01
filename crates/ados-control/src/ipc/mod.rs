@@ -20,12 +20,14 @@
 //! the surface never probes the host itself. A missing store degrades the route
 //! to its zero-valued health default rather than failing it.
 
+pub mod atlas_control_client;
 pub mod logd_client;
 pub mod mavlink_client;
 pub mod plugin_control_client;
 pub mod state_client;
 pub mod vision_client;
 
+pub use atlas_control_client::{AtlasControlClient, AtlasControlError};
 pub use logd_client::LogdQueryClient;
 pub use mavlink_client::MavlinkIpcClient;
 pub use plugin_control_client::{PluginControlClient, PluginControlError};
