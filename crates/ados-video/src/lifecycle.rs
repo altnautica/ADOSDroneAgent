@@ -228,9 +228,17 @@ impl VideoOrchestrator {
         }
         // Optional additive vision frame tap. When raw_tap is on the frames are
         // already produced by the spliced encoder output, so no separate
-        // process is spawned; otherwise spawn the decoupled third ffmpeg.
+        // process is spawned; otherwise spawn the decoupled third ffmpeg — but,
+        // exactly like the wfb tee above, only once the encoder's RTSP publisher
+        // exists. Starting it against a missing `/main` makes ffmpeg's first
+        // DESCRIBE fail and exit in ~1-2 s, and the tap then death-loops; the
+        // health-check ladder brings it up when the path is ready.
         if self.vision_enabled() && !self.config.vision.raw_tap {
-            self.start_vision_tap().await;
+            if self.mediamtx.path_ready(MAIN_PATH).await {
+                self.start_vision_tap().await;
+            } else {
+                tracing::debug!("vision_tap_deferred: mediamtx path not ready at stream start");
+            }
         }
         true
     }
