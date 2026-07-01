@@ -218,39 +218,51 @@ pub async fn run_vision_tap_server<R>(
         }
     });
 
-    'accept: loop {
-        let mut engine = match listener.accept().await {
-            Ok((stream, _)) => {
-                tracing::info!("vision_tap_engine_connected");
-                stream
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "vision_tap_accept_failed");
-                // A broken listener is fatal; bail so the leg restarts clean.
-                break 'accept;
-            }
-        };
-        loop {
-            if rx.changed().await.is_err() {
-                // Reader ended (ffmpeg EOF) — the whole leg is done.
-                break 'accept;
-            }
-            let frame = rx.borrow_and_update().clone();
-            let Some(frame) = frame else { continue };
-            match timeout(
-                ENGINE_WRITE_TIMEOUT,
-                write_tap_frame(&mut engine, format, width, height, &frame),
-            )
-            .await
-            {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    tracing::warn!(error = %e, "vision_tap_engine_write_failed; dropping engine");
-                    continue 'accept;
+    // One engine at a time (the vision engine is the only consumer). Accepting
+    // and forwarding share a select so a fresh connection ALWAYS wins immediately:
+    // when the engine restarts it reconnects here and replaces the stale stream
+    // (dropping the old one closes it), instead of being starved in the listener
+    // backlog until the dead connection's write finally fails.
+    let mut engine: Option<tokio::net::UnixStream> = None;
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => {
+                match accepted {
+                    Ok((stream, _)) => {
+                        tracing::info!("vision_tap_engine_connected");
+                        engine = Some(stream);
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "vision_tap_accept_failed");
+                        // A broken listener is fatal; bail so the leg restarts clean.
+                        break;
+                    }
                 }
-                Err(_) => {
-                    tracing::warn!("vision_tap_engine_write_timeout; dropping engine");
-                    continue 'accept;
+            }
+            changed = rx.changed() => {
+                if changed.is_err() {
+                    // Reader ended (ffmpeg EOF) — the whole leg is done.
+                    break;
+                }
+                let frame = rx.borrow_and_update().clone();
+                let Some(frame) = frame else { continue };
+                if let Some(e) = engine.as_mut() {
+                    match timeout(
+                        ENGINE_WRITE_TIMEOUT,
+                        write_tap_frame(e, format, width, height, &frame),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(err)) => {
+                            tracing::warn!(error = %err, "vision_tap_engine_write_failed; dropping engine");
+                            engine = None;
+                        }
+                        Err(_) => {
+                            tracing::warn!("vision_tap_engine_write_timeout; dropping engine");
+                            engine = None;
+                        }
+                    }
                 }
             }
         }
