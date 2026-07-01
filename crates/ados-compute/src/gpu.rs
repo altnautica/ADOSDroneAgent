@@ -190,6 +190,9 @@ fn sample_gpu_residency() -> Option<f32> {
 /// --samplers gpu_power` block. Returns the residency percentage (the first
 /// number before `%` on that line), or `None` if the line is absent /
 /// unparseable. Pure (platform-agnostic) so it is unit-tested on any host.
+/// Only `sample_gpu_residency` (macOS) calls it in a non-test build, so off
+/// macOS it is exercised solely by the tests — allow dead_code there.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn parse_gpu_residency(text: &str) -> Option<f32> {
     for line in text.lines() {
         let lower = line.to_ascii_lowercase();
@@ -202,7 +205,9 @@ fn parse_gpu_residency(text: &str) -> Option<f32> {
 }
 
 /// Parse the first percentage in a string like `  12.50% (396 MHz: 12% …)`: the
-/// number up to the first `%`. `None` when it does not parse.
+/// number up to the first `%`. `None` when it does not parse. Reached only via
+/// `parse_gpu_residency` (macOS) or the tests, so allow dead_code off macOS.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn parse_first_percent(s: &str) -> Option<f32> {
     let pct = s.split('%').next()?.trim();
     pct.parse::<f32>().ok()
