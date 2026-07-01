@@ -16,7 +16,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ados_protocol::atlas::{GlobalAnchor, OffloadedPose, Pose, PoseSource, VioHealth};
 use ados_protocol::ipc::{connect_with_retry, read_length_prefixed, read_newline_line};
-use ados_protocol::state::STATE_V2_MAX_FRAME;
+use ados_protocol::state::{decode_v1_line, decode_v2, STATE_V2_MAX_FRAME};
+use tokio::io::AsyncReadExt;
 use tokio::task::JoinHandle;
 
 use crate::runtime::{AtlasRuntimeConfig, PoseTier};
@@ -104,11 +105,46 @@ impl StateSockPose {
                             continue;
                         }
                     };
-                // EOF / read error exits the while-let, dropping to the outer
-                // loop to reconnect.
-                while let Ok(Some(line)) = read_newline_line(&mut stream, STATE_V2_MAX_FRAME).await
-                {
-                    if let Some(sample) = parse_state_pose(&line, &anchor) {
+                // The state socket carries either v1 (newline JSON, first byte
+                // `{`) or v2 (length-prefixed msgpack, the hybrid-migration
+                // default — the first byte is the high byte of the 4-byte
+                // big-endian length). Read one byte to pick the framing so a v2
+                // producer is read, not mis-parsed as v1 (which silently yielded no
+                // pose). EOF / a read error breaks to the outer loop to reconnect.
+                loop {
+                    let mut first = [0u8; 1];
+                    if stream.read_exact(&mut first).await.is_err() {
+                        break;
+                    }
+                    let payload = if first[0] == b'{' {
+                        // v1: read the rest of the line and restore the leading `{`.
+                        match read_newline_line(&mut stream, STATE_V2_MAX_FRAME).await {
+                            Ok(Some(rest)) => {
+                                let mut line = Vec::with_capacity(rest.len() + 1);
+                                line.push(b'{');
+                                line.extend_from_slice(&rest);
+                                line
+                            }
+                            _ => break,
+                        }
+                    } else {
+                        // v2: `first` is length byte 0; read the other 3 + the body.
+                        let mut rest = [0u8; 3];
+                        if stream.read_exact(&mut rest).await.is_err() {
+                            break;
+                        }
+                        let len =
+                            u32::from_be_bytes([first[0], rest[0], rest[1], rest[2]]) as usize;
+                        if len == 0 || len > STATE_V2_MAX_FRAME {
+                            break;
+                        }
+                        let mut body = vec![0u8; len];
+                        if stream.read_exact(&mut body).await.is_err() {
+                            break;
+                        }
+                        body
+                    };
+                    if let Some(sample) = parse_state_pose(&payload, &anchor) {
                         *latest_t.lock().unwrap() = Some(sample);
                     }
                 }
@@ -135,8 +171,15 @@ impl PoseProvider for StateSockPose {
 
 /// Parse one state-socket JSON line into a local-frame pose, fixing the session
 /// anchor on the first valid fix.
-fn parse_state_pose(line: &[u8], anchor: &Arc<Mutex<Option<GlobalAnchor>>>) -> Option<PoseSample> {
-    let v: serde_json::Value = serde_json::from_slice(line).ok()?;
+fn parse_state_pose(
+    payload: &[u8],
+    anchor: &Arc<Mutex<Option<GlobalAnchor>>>,
+) -> Option<PoseSample> {
+    // Accept either wire form: a v1 JSON line or a v2 msgpack body. Both decode
+    // to the same field-addressed map, so the field access below is unchanged.
+    let v: serde_json::Value = decode_v1_line(payload)
+        .or_else(|_| decode_v2(payload))
+        .ok()?;
     let pos = v.get("position")?;
     let att = v.get("attitude")?;
     let lat = pos.get("lat")?.as_f64()?;
