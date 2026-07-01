@@ -143,8 +143,8 @@ fn total_memory_mb() -> Option<u64> {
     }
 }
 
-/// The board model identifier (macOS `hw.model`, e.g. `MacBookPro18,1`), else
-/// `None`.
+/// The board model identifier from macOS `hw.model` (a `Mac<family>,<variant>`
+/// style string), else `None`.
 fn host_model() -> Option<String> {
     sysctl_string("hw.model")
 }
