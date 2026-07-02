@@ -1,8 +1,9 @@
 //! The state-stream tap.
 //!
-//! Connects to the vehicle-state socket, reads the newline-terminated JSON
-//! snapshot stream, and turns each snapshot into durable rows on the same ingest
-//! channel the socket producers and the hardware collector feed:
+//! Connects to the vehicle-state socket, reads the vehicle-state snapshot stream
+//! (v1 newline JSON or v2 length-prefixed msgpack, auto-detected per frame by the
+//! shared state reader), and turns each snapshot into durable rows on the same
+//! ingest channel the socket producers and the hardware collector feed:
 //!
 //! - The scalar telemetry of interest (attitude, altitude, speed, battery, GPS,
 //!   link) becomes one [`TelemetryFrame`] per dotted metric key, so the full
@@ -26,21 +27,16 @@
 use std::path::Path;
 
 use serde_json::Value;
-use tokio::io::{AsyncBufRead, AsyncReadExt, BufReader};
+use tokio::io::{AsyncRead, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 
 use ados_protocol::logd::{EventFrame, IngestFrame, Level, TelemetryFrame};
-use ados_protocol::state::STATE_V2_MAX_FRAME;
+use ados_protocol::state::read_state_value;
 
 use super::backoff::ReconnectBackoff;
 use super::{Shutdown, SOURCE_STATE};
 use crate::writer::now_us;
-
-/// Cap on one newline-delimited snapshot line, matching the state contract's
-/// frame cap. A peer that never sends a newline cannot grow the read buffer
-/// without bound past this.
-const MAX_LINE_BYTES: usize = STATE_V2_MAX_FRAME;
 
 /// One numeric metric to lift out of a state snapshot: the dotted JSON path to
 /// the value and the dotted metric key it is stored under.
@@ -201,89 +197,43 @@ async fn connect(path: &Path) -> Option<UnixStream> {
     }
 }
 
-/// Consume a newline-delimited JSON snapshot stream to EOF (or until the writer
-/// channel closes or shutdown fires), emitting telemetry and transition frames.
+/// Consume the vehicle-state snapshot stream to EOF (or until the writer channel
+/// closes or shutdown fires), emitting telemetry and transition frames.
+///
+/// Each frame is read by the shared state reader, which auto-detects v1 newline
+/// JSON versus v2 length-prefixed msgpack per frame and skips a single
+/// malformed-but-frame-aligned snapshot internally, so one bad snapshot never
+/// ends the tap. A clean EOF at a frame boundary returns so the caller
+/// reconnects; an unrecoverable framing/IO error is logged and returns likewise.
 ///
 /// This is the injectable seam: `reader` is any async byte source, so a test
-/// feeds synthetic snapshot lines from a fixture file without a live socket.
+/// feeds synthetic snapshots from a fixture without a live socket.
 async fn process_stream<R>(
     mut reader: R,
     tx: &mpsc::Sender<IngestFrame>,
     prev: &mut PrevState,
     shutdown: &mut Shutdown,
 ) where
-    R: AsyncBufRead + Unpin,
+    R: AsyncRead + Unpin,
 {
-    let mut line: Vec<u8> = Vec::new();
     loop {
-        line.clear();
         let read = tokio::select! {
             biased;
             _ = shutdown.recv() => return,
-            r = read_capped_line(&mut reader, &mut line) => r,
+            r = read_state_value(&mut reader) => r,
         };
         match read {
-            Ok(0) => return, // clean EOF at a line boundary
-            Ok(_) => {
-                // The state stream is UTF-8 JSON; a non-UTF-8 line is malformed
-                // and skipped like any other bad snapshot.
-                let text = match std::str::from_utf8(&line) {
-                    Ok(t) => t.trim_end_matches(['\n', '\r']),
-                    Err(_) => {
-                        tracing::debug!("skipping a non-utf8 state line");
-                        continue;
-                    }
-                };
-                if text.is_empty() {
-                    continue;
-                }
-                match serde_json::from_str::<Value>(text) {
-                    Ok(snapshot) => {
-                        if emit_snapshot(&snapshot, prev, tx).await.is_err() {
-                            // The writer side is gone; stop.
-                            return;
-                        }
-                    }
-                    Err(e) => {
-                        // A malformed line is skipped, never fatal: a single bad
-                        // snapshot must not end the tap.
-                        tracing::debug!(error = %e, "skipping a malformed state snapshot");
-                    }
+            Ok(Some(snapshot)) => {
+                if emit_snapshot(&snapshot, prev, tx).await.is_err() {
+                    // The writer side is gone; stop.
+                    return;
                 }
             }
+            Ok(None) => return, // clean EOF at a frame boundary
             Err(e) => {
                 tracing::debug!(error = %e, "state stream read error");
                 return;
             }
-        }
-    }
-}
-
-/// Read one newline-delimited line into `out`, capped at [`MAX_LINE_BYTES`] so a
-/// peer that never sends a newline cannot grow the buffer without bound. Returns
-/// the number of bytes accumulated (zero at a clean EOF). A line that reaches the
-/// cap without a terminating newline is rejected so the caller reconnects rather
-/// than buffer a runaway producer. Bytes are accumulated raw and decoded by the
-/// caller so a multibyte UTF-8 sequence is never split.
-async fn read_capped_line<R>(reader: &mut R, out: &mut Vec<u8>) -> std::io::Result<usize>
-where
-    R: AsyncBufRead + Unpin,
-{
-    let mut byte = [0u8; 1];
-    loop {
-        let n = reader.read(&mut byte).await?;
-        if n == 0 {
-            return Ok(out.len()); // EOF
-        }
-        out.push(byte[0]);
-        if byte[0] == b'\n' {
-            return Ok(out.len());
-        }
-        if out.len() >= MAX_LINE_BYTES {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "state line exceeded the maximum length without a newline",
-            ));
         }
     }
 }
@@ -378,8 +328,15 @@ mod tests {
     /// Drive `process_stream` against an in-memory snapshot stream and collect
     /// every frame it emits. A never-firing shutdown lets the stream run to EOF.
     async fn run_against(lines: &str) -> Vec<IngestFrame> {
+        run_against_bytes(lines.to_string().into_bytes()).await
+    }
+
+    /// Byte-level sibling of [`run_against`] for wire frames that are not valid
+    /// UTF-8 (v2 length-prefixed msgpack), so a test can feed the exact on-wire
+    /// bytes through the same process/emit path.
+    async fn run_against_bytes(bytes: Vec<u8>) -> Vec<IngestFrame> {
         let (tx, mut rx) = mpsc::channel::<IngestFrame>(256);
-        let reader = BufReader::new(Cursor::new(lines.to_string().into_bytes()));
+        let reader = BufReader::new(Cursor::new(bytes));
         let mut prev = PrevState::default();
         let mut shutdown = Shutdown::never();
         process_stream(reader, &tx, &mut prev, &mut shutdown).await;
@@ -528,6 +485,38 @@ mod tests {
         assert!(metric(&frames, "gps.fix").is_none());
         // The malformed and empty lines produced no events.
         assert!(events(&frames, "state.arm").is_empty());
+    }
+
+    #[tokio::test]
+    async fn v2_msgpack_frames_drive_the_same_transitions_as_v1() {
+        use ados_protocol::state::{encode_v1, encode_v2};
+
+        // The same snapshot on either wire form must drive the identical arm
+        // event, mode.change, and voltage metric through the process/emit path.
+        // Since the installer already ships v2 msgpack, a v1-only reader would
+        // silently emit nothing here; this asserts v2 is now read too.
+        let snapshot = json!({"armed": true, "mode": "GUIDED", "battery": {"voltage": 16.0}});
+        let via_v1 = run_against_bytes(encode_v1(&snapshot).unwrap()).await;
+        let via_v2 = run_against_bytes(encode_v2(&snapshot).unwrap()).await;
+
+        for frames in [&via_v1, &via_v2] {
+            let arm = events(frames, "state.arm");
+            assert_eq!(arm.len(), 1, "one arm transition from the unknown state");
+            assert_eq!(
+                arm[0].detail.get("reason").and_then(|v| v.as_str()),
+                Some("arm")
+            );
+            let mode = events(frames, "mode.change");
+            assert_eq!(mode.len(), 1);
+            assert_eq!(
+                mode[0].detail.get("to").and_then(|v| v.as_str()),
+                Some("GUIDED")
+            );
+            assert_eq!(
+                metric(frames, "battery.voltage.v").map(|m| m.value),
+                Some(16.0)
+            );
+        }
     }
 
     #[tokio::test]
