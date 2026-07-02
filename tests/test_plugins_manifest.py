@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 import yaml
+from structlog.testing import capture_logs
 
 from ados.plugins.errors import ManifestError
 from ados.plugins.manifest import PluginManifest
@@ -215,15 +216,19 @@ def test_known_gcs_capability_does_not_warn(capsys) -> None:
     )
 
 
-def test_unknown_gcs_capability_warns_but_still_loads(capsys) -> None:
+def test_unknown_gcs_capability_warns_but_still_loads() -> None:
     raw = _good_manifest_dict()
     raw["gcs"]["permissions"] = ["ui.slot.fc-tab", "ui.slot.not-a-real-slot"]
-    m = PluginManifest.from_yaml_text(_yaml(raw))
     # Warn-only: the manifest still loads with the unknown permission, and
     # the unknown id is flagged in a warning rather than silently dropped.
+    # Capture via structlog's testing sink so the assertion does not depend on
+    # the global log config or the Python version's stdout/stderr routing.
+    with capture_logs() as logs:
+        m = PluginManifest.from_yaml_text(_yaml(raw))
     assert m.gcs is not None
     assert "ui.slot.not-a-real-slot" in {p.id for p in m.gcs.permissions}
-    captured = capsys.readouterr()
-    blob = captured.out + captured.err
-    assert "plugin_manifest_unknown_gcs_capability" in blob
-    assert "ui.slot.not-a-real-slot" in blob
+    warnings = [
+        e for e in logs if e.get("event") == "plugin_manifest_unknown_gcs_capability"
+    ]
+    assert warnings, "expected a plugin_manifest_unknown_gcs_capability warning"
+    assert any(e.get("capability") == "ui.slot.not-a-real-slot" for e in warnings)
