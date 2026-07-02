@@ -25,6 +25,9 @@
 //!   `[[method]]` section of `capabilities.toml`).
 //! - [`wfb_tables`] — the generated WFB adapter classification and
 //!   management-WiFi deny-set tables (source of truth is `wfb-adapters.toml`).
+//! - [`contracts`] — the generated IPC contract + sidecar version registry: the
+//!   single source of truth for every wire-contract version integer (source of
+//!   truth is `contracts.toml`; do not edit the generated file).
 //! - [`pairing_posture`] — the data-plane auth primitives (pairing-state read,
 //!   constant-time key compare, on-box loopback trust, access decision) shared
 //!   by the native HTTP control surface and the direct MAVLink WebSocket proxy.
@@ -32,6 +35,7 @@
 pub mod atlas;
 pub mod capabilities;
 pub mod compute;
+pub mod contracts;
 pub mod crypto;
 pub mod dispatch;
 pub mod frame;

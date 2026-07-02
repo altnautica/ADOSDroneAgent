@@ -6,12 +6,18 @@ on:
     paths:
       - "crates/**"
       - "src/ados/plugins/_capabilities_generated.py"
+      - "src/ados/plugins/_dispatch_generated.py"
+      - "src/ados/services/wfb/_wfb_tables_generated.py"
+      - "src/ados/core/_contracts_generated.py"
       - ".github/workflows/rust.yml"
   pull_request:
     branches: [main]
     paths:
       - "crates/**"
       - "src/ados/plugins/_capabilities_generated.py"
+      - "src/ados/plugins/_dispatch_generated.py"
+      - "src/ados/services/wfb/_wfb_tables_generated.py"
+      - "src/ados/core/_contracts_generated.py"
       - ".github/workflows/rust.yml"
 
 # Default to read-only so the build-test job (which runs on pull requests, i.e.
@@ -106,7 +112,7 @@ jobs:
       - name: Test (all features)
         run: cargo test --all-features
 
-      - name: Capability catalog drift check
+      - name: Capability catalog + contract registry drift check
         run: cargo run -q -p ados-capabilities-codegen -- --check
 
       - name: Release build (arm64)

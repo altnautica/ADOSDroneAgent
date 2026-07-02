@@ -1,0 +1,277 @@
+# ADOS IPC contract + sidecar version registry — single source of truth.
+#
+# Every inter-process wire contract and every on-disk state sidecar carries a
+# version integer. This file is the one place those versions live, so the Rust,
+# Python, and TypeScript sides can never disagree on a contract's version.
+#
+# Codegen (`cargo run -p ados-capabilities-codegen`) emits, from this file:
+#   - Rust:   crates/ados-protocol/src/contracts.rs
+#   - Python: src/ados/core/_contracts_generated.py
+#   - TS:     ADOSMissionControl/src/lib/plugins/contracts.generated.ts
+#
+# Two sections:
+#   [[contract]] — a versioned inter-process wire contract.
+#   [[sidecar]]  — a versioned on-disk state sidecar (a JSON file one service
+#                  writes and another reads).
+#
+# Fields:
+#   id          — stable contract/sidecar identifier.
+#   version     — the version integer. For `status = "metadata"` contracts this
+#                 is informational (0 = no registry-managed on-wire integer).
+#   wire        — the on-wire encoding (msgpack | json | binary | ...).
+#   transport   — how it travels (a socket kind, "shared-memory", the file path
+#                 for a sidecar, ...).
+#   status      — "active" (a live versioned contract), "sidecar" (a state
+#                 file), or "metadata" (a primitive / external / legacy surface
+#                 with no registry-managed on-wire integer).
+#   rust_const  — the Rust source-of-truth constant, for provenance (optional).
+#   description — one line on what the contract carries.
+#
+# The version integers here mirror the constants in crates/ados-protocol/src.
+# When a contract's on-wire shape changes, bump both the constant and this file
+# in the same change, and regenerate. Do not edit the generated files by hand.
+#
+# Note: the LCD render sidecars (lcd-state, lcd-page-request, lcd-video-tap) are
+# display-UI request/state files, not data contracts, and are intentionally not
+# registered here.
+
+# ===========================================================================
+# CONTRACTS — versioned inter-process wire contracts
+# ===========================================================================
+
+[[contract]]
+id = "plugin.rpc"
+version = 1
+wire = "msgpack"
+transport = "unix-stream"
+status = "active"
+rust_const = "ados_protocol::plugin::PROTOCOL_VERSION"
+description = "Plugin RPC envelope: msgpack short-key request/response plus a pipe-delimited HMAC-SHA256 capability token."
+
+[[contract]]
+id = "logd.ingest"
+version = 1
+wire = "msgpack"
+transport = "unix-socket"
+status = "active"
+rust_const = "ados_protocol::logd::WIRE_VERSION"
+description = "Black-box ingest frames: logs, telemetry, discrete events, and hardware snapshots."
+
+[[contract]]
+id = "logd.read"
+version = 1
+wire = "json"
+transport = "http"
+status = "active"
+rust_const = "ados_protocol::logd::ENVELOPE_VERSION"
+description = "Black-box read-API request and response envelope."
+
+[[contract]]
+id = "framebus.ring"
+version = 1
+wire = "binary"
+transport = "shared-memory"
+status = "active"
+rust_const = "ados_protocol::framebus::RingLayout::VERSION"
+description = "Shared-memory vision frame ring layout: a header plus seqlock-guarded slots."
+
+[[contract]]
+id = "framebus.descriptor"
+version = 1
+wire = "msgpack"
+transport = "event-bus"
+status = "active"
+description = "The small vision.frame descriptor naming a ring slot and its frame geometry."
+
+[[contract]]
+id = "tap.frame"
+version = 1
+wire = "binary"
+transport = "unix-stream"
+status = "active"
+rust_const = "ados_protocol::tap::TAP_CONTRACT_VERSION"
+description = "Vision-tap frame header (ADVT magic) between the video pipeline and the vision engine."
+
+[[contract]]
+id = "vision.detection"
+version = 1
+wire = "msgpack"
+transport = "event-bus"
+status = "active"
+description = "Structured detection batches published on the vision.detection topic."
+
+[[contract]]
+id = "atlas.envelope"
+version = 1
+wire = "msgpack"
+transport = "event-bus"
+status = "active"
+description = "Pose-tagged keyframe envelope carried on the atlas topics."
+
+[[contract]]
+id = "compute"
+version = 1
+wire = "msgpack"
+transport = "event-bus"
+status = "active"
+description = "Compute-offload job submit and read contract."
+
+[[contract]]
+id = "state.v2"
+version = 2
+wire = "msgpack"
+transport = "unix-stream"
+status = "active"
+description = "Length-prefixed msgpack vehicle-state frame (the current state-socket format)."
+
+[[contract]]
+id = "frame"
+version = 0
+wire = "binary"
+transport = "unix-stream"
+status = "metadata"
+description = "The 4-byte big-endian length transport primitive shared by plugin.rpc, the MAVLink socket, and state.v2. No version of its own."
+
+[[contract]]
+id = "mavlink.socket"
+version = 0
+wire = "binary"
+transport = "unix-stream"
+status = "metadata"
+description = "MAVLink frame broadcast socket; framing versioning defers to external MAVLink v1/v2."
+
+[[contract]]
+id = "rest.openapi"
+version = 0
+wire = "json"
+transport = "http"
+status = "metadata"
+description = "Native control-surface REST API; versioned by the OpenAPI info.version string, not a registry integer."
+
+[[contract]]
+id = "state.v1"
+version = 1
+wire = "newline-json"
+transport = "unix-stream"
+status = "metadata"
+description = "Legacy newline-terminated JSON vehicle-state frame; superseded by state.v2. No on-wire version integer."
+
+[[contract]]
+id = "ws_ticket"
+version = 1
+wire = "string"
+transport = "websocket-subprotocol"
+status = "metadata"
+rust_const = "ados_protocol::ws_ticket::TICKET_KEY_LABEL"
+description = "String-tagged (v1) HMAC-SHA256 WebSocket auth ticket; the version is a string tag, not a wire integer."
+
+# ===========================================================================
+# SIDECARS — versioned on-disk state files
+# ===========================================================================
+
+[[sidecar]]
+id = "atlas-state"
+version = 1
+path = "/run/ados/plugins/atlas-state.json"
+rust_const = "ados_atlas::state_sidecar::ATLAS_STATE_SIDECAR"
+description = "Atlas capture and world-model state for the GCS plugin panel."
+
+[[sidecar]]
+id = "atlas-forward"
+version = 1
+path = "/run/ados/atlas-forward.json"
+rust_const = "ados_protocol::atlas::ATLAS_FORWARD_SIDECAR"
+description = "Atlas forward-stream state the capture service folds into atlas-state."
+
+[[sidecar]]
+id = "compute-jobs"
+version = 1
+path = "/run/ados/compute-jobs.json"
+rust_const = "ados_compute::jobs_sidecar::COMPUTE_JOBS_SIDECAR"
+description = "Compute-node job queue snapshot."
+
+[[sidecar]]
+id = "compute-heartbeat"
+version = 1
+path = "/run/ados/compute-heartbeat.json"
+rust_const = "ados_compute::heartbeat_sidecar::COMPUTE_HEARTBEAT_SIDECAR"
+description = "Compute-node heartbeat folded into the agent heartbeat."
+
+[[sidecar]]
+id = "wfb-stats"
+version = 1
+path = "/run/ados/wfb-stats.json"
+rust_const = "ados_radio::paths::WFB_STATS_JSON"
+description = "WFB link statistics: RSSI, packet counters, and derived link state."
+
+[[sidecar]]
+id = "hop-supervisor"
+version = 1
+path = "/run/ados/hop-supervisor.json"
+rust_const = "ados_radio::paths::HOP_SUPERVISOR_JSON"
+description = "FHSS hop-supervisor state."
+
+[[sidecar]]
+id = "mgmt-link"
+version = 1
+path = "/run/ados/mgmt-link.json"
+description = "Management-link guardian state."
+
+[[sidecar]]
+id = "wfb_failover"
+version = 1
+path = "/run/ados/wfb_failover.json"
+description = "Local-bind to cloud-relay failover state."
+
+[[sidecar]]
+id = "bind-state"
+version = 1
+path = "/run/ados/bind-state.json"
+rust_const = "ados_radio::paths::BIND_STATE_SENTINEL"
+description = "WFB bind-session sentinel and precheck result."
+
+[[sidecar]]
+id = "mesh-state"
+version = 1
+path = "/run/ados/mesh-state.json"
+rust_const = "ados_groundlink::paths::MESH_STATE_JSON"
+description = "Mesh role and membership state."
+
+[[sidecar]]
+id = "camera-state"
+version = 1
+path = "/run/ados/camera-state.json"
+rust_const = "ados_video::camera_state::CAMERA_STATE_JSON"
+description = "Camera pipeline readiness state."
+
+[[sidecar]]
+id = "camera-usb-recovery"
+version = 1
+path = "/run/ados/camera-usb-recovery.json"
+description = "Camera USB-recovery reconciler state."
+
+[[sidecar]]
+id = "pic-state"
+version = 1
+path = "/run/ados/pic-state.json"
+rust_const = "ados_hid::paths::PIC_STATE_JSON"
+description = "Pilot-in-command arbiter state."
+
+[[sidecar]]
+id = "gpio-output"
+version = 1
+path = "/run/ados/gpio-output.json"
+rust_const = "ados_gpio::sidecar::GPIO_OUTPUT_PATH"
+description = "Driven GPIO output-line state."
+
+[[sidecar]]
+id = "board"
+version = 1
+path = "/run/ados/board.json"
+description = "Detected board fingerprint."
+
+[[sidecar]]
+id = "config-status"
+version = 1
+path = "/run/ados/config-status-<service>.json"
+description = "Per-service config-load status: a loud-fail record written when a service's config is malformed."
