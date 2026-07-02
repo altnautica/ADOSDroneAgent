@@ -867,7 +867,7 @@ mod tests {
 
     #[test]
     fn vision_deliver_routes_by_camera_id_and_wildcard() {
-        use ados_protocol::framebus::{FrameDescriptor, FrameFormat};
+        use ados_protocol::framebus::{FrameDescriptor, FrameFormat, FRAMEBUS_DESCRIPTOR_VERSION};
         use std::sync::atomic::{AtomicUsize, Ordering as O};
         let map: CallbackMap = Arc::new(Mutex::new(HashMap::new()));
         let exact = Arc::new(AtomicUsize::new(0));
@@ -899,6 +899,7 @@ mod tests {
         );
 
         let descriptor = FrameDescriptor {
+            v: FRAMEBUS_DESCRIPTOR_VERSION,
             camera_id: "uvc-0".into(),
             frame_id: 1,
             ts_ms: 0,

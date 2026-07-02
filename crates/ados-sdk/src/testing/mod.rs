@@ -37,7 +37,9 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use ados_protocol::framebus::{self, DetectionBatch, FrameDescriptor, FrameFormat, RingLayout};
+use ados_protocol::framebus::{
+    self, DetectionBatch, FrameDescriptor, FrameFormat, RingLayout, FRAMEBUS_DESCRIPTOR_VERSION,
+};
 
 use crate::vision::{Frame, FrameCallback};
 
@@ -177,6 +179,7 @@ impl FakeVisionEngine {
             .expect("synthetic frame fits a full-size slot");
 
         let descriptor = FrameDescriptor {
+            v: FRAMEBUS_DESCRIPTOR_VERSION,
             camera_id: self.camera_id.clone(),
             frame_id: seq,
             ts_ms: 1_700_000_000_000 + seq as i64,
@@ -288,6 +291,7 @@ mod tests {
     fn captures_published_detections() {
         let engine = FakeVisionEngine::new("uvc-0", 2, 2, FrameFormat::Rgb24);
         let batch = DetectionBatch {
+            v: ados_protocol::framebus::VISION_DETECTION_VERSION,
             model_id: "com.example.weeds".into(),
             camera_id: "uvc-0".into(),
             frame_id: 1,

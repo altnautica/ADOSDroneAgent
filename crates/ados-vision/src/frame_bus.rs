@@ -91,13 +91,14 @@ pub async fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ados_protocol::framebus::FrameFormat;
+    use ados_protocol::framebus::{FrameFormat, FRAMEBUS_DESCRIPTOR_VERSION};
     use ados_protocol::ipc::{connect_with_retry, read_length_prefixed};
     use std::time::Duration;
     use tokio::sync::Notify;
 
     fn sample_descriptor() -> FrameDescriptor {
         FrameDescriptor {
+            v: FRAMEBUS_DESCRIPTOR_VERSION,
             camera_id: "uvc-0".into(),
             frame_id: 7,
             ts_ms: 1_700_000_000_000,

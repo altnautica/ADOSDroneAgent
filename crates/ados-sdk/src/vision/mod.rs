@@ -25,6 +25,7 @@ use std::sync::{Arc, Mutex};
 
 use ados_protocol::framebus::{
     self, Detection, DetectionBatch, FrameDescriptor, ModelMetadata, RingLayout,
+    VISION_DETECTION_VERSION,
 };
 use rmpv::Value;
 
@@ -165,6 +166,7 @@ impl VisionClient {
         detection: Detection,
     ) -> Result<Value, ClientError> {
         let batch = DetectionBatch {
+            v: VISION_DETECTION_VERSION,
             model_id: model_id.to_string(),
             camera_id: frame.descriptor.camera_id.clone(),
             frame_id: frame.descriptor.frame_id,
@@ -298,6 +300,7 @@ mod tests {
 
     fn descriptor(shm_name: &str, slot: u32, seq: u64, byte_len: u32) -> FrameDescriptor {
         FrameDescriptor {
+            v: ados_protocol::framebus::FRAMEBUS_DESCRIPTOR_VERSION,
             camera_id: "uvc-0".into(),
             frame_id: seq,
             ts_ms: 1_700_000_000_000,

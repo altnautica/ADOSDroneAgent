@@ -174,6 +174,7 @@ fn frame_with(boxes: &[(BoundingBox, [u8; 3])]) -> Vec<u8> {
 
 fn desc(frame_id: u64) -> ados_protocol::framebus::FrameDescriptor {
     ados_protocol::framebus::FrameDescriptor {
+        v: ados_protocol::framebus::FRAMEBUS_DESCRIPTOR_VERSION,
         camera_id: "cam".into(),
         frame_id,
         ts_ms: frame_id as i64,

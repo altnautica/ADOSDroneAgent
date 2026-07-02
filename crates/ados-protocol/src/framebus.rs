@@ -107,11 +107,24 @@ impl FrameFormat {
     }
 }
 
+/// The current wire version of a [`FrameDescriptor`] on the `vision.frame`
+/// topic. Bumped whenever the descriptor's on-wire shape changes; a decode of a
+/// descriptor stamped with any other version fails loudly rather than silently
+/// mis-parsing. Mirrors the `framebus.descriptor` entry in the contract
+/// registry (`contracts.toml`).
+pub const FRAMEBUS_DESCRIPTOR_VERSION: u16 = 1;
+
 /// The small message published on `vision.frame`. It names the ring slot a
 /// consumer should read and carries the `seq` that the per-slot seqlock must
 /// still hold for the read to be valid.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameDescriptor {
+    /// Wire version, stamped on every descriptor and checked on decode. A
+    /// consumer that sees a version it does not speak rejects the frame instead
+    /// of mis-parsing it. Deliberately carries no serde default: a payload
+    /// missing this field fails to decode.
+    #[serde(rename = "v")]
+    pub v: u16,
     /// Source camera id (a UVC/CSI device the engine owns, or the FPV camera
     /// tapped from the video pipeline). Lets a consumer filter by camera.
     pub camera_id: String,
@@ -141,10 +154,28 @@ impl FrameDescriptor {
         rmp_serde::to_vec_named(self)
     }
 
-    /// Decode from a msgpack map.
-    pub fn from_msgpack(bytes: &[u8]) -> Result<Self, rmp_serde::decode::Error> {
-        rmp_serde::from_slice(bytes)
+    /// Decode from a msgpack map, rejecting a descriptor whose wire version this
+    /// build does not speak. A missing `v` field fails the msgpack decode; a
+    /// present-but-unknown `v` returns [`DescriptorError::Version`].
+    pub fn from_msgpack(bytes: &[u8]) -> Result<Self, DescriptorError> {
+        let desc: FrameDescriptor = rmp_serde::from_slice(bytes)?;
+        if desc.v != FRAMEBUS_DESCRIPTOR_VERSION {
+            return Err(DescriptorError::Version {
+                got: desc.v,
+                ours: FRAMEBUS_DESCRIPTOR_VERSION,
+            });
+        }
+        Ok(desc)
     }
+}
+
+/// Errors decoding a [`FrameDescriptor`] from its msgpack wire form.
+#[derive(Debug, Error)]
+pub enum DescriptorError {
+    #[error("msgpack decode error: {0}")]
+    Decode(#[from] rmp_serde::decode::Error),
+    #[error("unsupported vision.frame descriptor version {got} (this build speaks {ours})")]
+    Version { got: u16, ours: u16 },
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -534,10 +565,23 @@ pub struct Detection {
     pub lock_state: Option<LockState>,
 }
 
+/// The current wire version of a [`DetectionBatch`] on the `vision.detection`
+/// topic. Bumped whenever the batch's on-wire shape changes; a decode of a batch
+/// stamped with any other version fails loudly rather than silently mis-parsing.
+/// Mirrors the `vision.detection` entry in the contract registry
+/// (`contracts.toml`).
+pub const VISION_DETECTION_VERSION: u16 = 1;
+
 /// The payload on `vision.detection`, labelled by source model and frame so
 /// overlays and consumers can align boxes to the frame they came from.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DetectionBatch {
+    /// Wire version, stamped on every batch and checked on decode. A consumer
+    /// that sees a version it does not speak rejects the batch instead of
+    /// mis-parsing it. Deliberately carries no serde default: a payload missing
+    /// this field fails to decode.
+    #[serde(rename = "v")]
+    pub v: u16,
     pub model_id: String,
     pub camera_id: String,
     pub frame_id: u64,
@@ -549,9 +593,29 @@ impl DetectionBatch {
     pub fn to_msgpack(&self) -> Result<Vec<u8>, rmp_serde::encode::Error> {
         rmp_serde::to_vec_named(self)
     }
-    pub fn from_msgpack(bytes: &[u8]) -> Result<Self, rmp_serde::decode::Error> {
-        rmp_serde::from_slice(bytes)
+
+    /// Decode from a msgpack map, rejecting a batch whose wire version this build
+    /// does not speak. A missing `v` field fails the msgpack decode; a
+    /// present-but-unknown `v` returns [`DetectionBatchError::Version`].
+    pub fn from_msgpack(bytes: &[u8]) -> Result<Self, DetectionBatchError> {
+        let batch: DetectionBatch = rmp_serde::from_slice(bytes)?;
+        if batch.v != VISION_DETECTION_VERSION {
+            return Err(DetectionBatchError::Version {
+                got: batch.v,
+                ours: VISION_DETECTION_VERSION,
+            });
+        }
+        Ok(batch)
     }
+}
+
+/// Errors decoding a [`DetectionBatch`] from its msgpack wire form.
+#[derive(Debug, Error)]
+pub enum DetectionBatchError {
+    #[error("msgpack decode error: {0}")]
+    Decode(#[from] rmp_serde::decode::Error),
+    #[error("unsupported vision.detection version {got} (this build speaks {ours})")]
+    Version { got: u16, ours: u16 },
 }
 
 #[cfg(test)]
@@ -623,6 +687,7 @@ mod contract_tests {
     #[test]
     fn detection_batch_round_trips() {
         let b = DetectionBatch {
+            v: VISION_DETECTION_VERSION,
             model_id: "com.example.weeds".into(),
             camera_id: "uvc-0".into(),
             frame_id: 7,
@@ -643,6 +708,59 @@ mod contract_tests {
         };
         let bytes = b.to_msgpack().unwrap();
         assert_eq!(DetectionBatch::from_msgpack(&bytes).unwrap(), b);
+    }
+
+    #[test]
+    fn detection_version_matches_registry() {
+        assert_eq!(
+            VISION_DETECTION_VERSION,
+            crate::contracts::contract_version("vision.detection").unwrap()
+        );
+    }
+
+    #[test]
+    fn detection_rejects_a_future_version() {
+        // A batch stamped with a version this build does not speak must fail the
+        // decode loudly rather than silently mis-parse.
+        let batch = DetectionBatch {
+            v: VISION_DETECTION_VERSION + 1,
+            model_id: "m".into(),
+            camera_id: "c".into(),
+            frame_id: 1,
+            ts_ms: 0,
+            detections: vec![],
+        };
+        let bytes = batch.to_msgpack().unwrap();
+        assert!(matches!(
+            DetectionBatch::from_msgpack(&bytes),
+            Err(DetectionBatchError::Version { .. })
+        ));
+    }
+
+    #[test]
+    fn detection_missing_version_fails_decode() {
+        // A payload that predates the version field (no `v` key) must fail to
+        // decode: the field is required, with no serde default.
+        #[derive(Serialize)]
+        struct NoVersionBatch {
+            model_id: String,
+            camera_id: String,
+            frame_id: u64,
+            ts_ms: i64,
+            detections: Vec<Detection>,
+        }
+        let old = NoVersionBatch {
+            model_id: "m".into(),
+            camera_id: "c".into(),
+            frame_id: 1,
+            ts_ms: 0,
+            detections: vec![],
+        };
+        let bytes = rmp_serde::to_vec_named(&old).unwrap();
+        assert!(matches!(
+            DetectionBatch::from_msgpack(&bytes),
+            Err(DetectionBatchError::Decode(_))
+        ));
     }
 
     #[test]
@@ -760,6 +878,7 @@ mod tests {
     #[test]
     fn descriptor_round_trips_through_msgpack() {
         let d = FrameDescriptor {
+            v: FRAMEBUS_DESCRIPTOR_VERSION,
             camera_id: "uvc-0".into(),
             frame_id: 42,
             ts_ms: 1_700_000_000_000,
@@ -773,6 +892,82 @@ mod tests {
         };
         let bytes = d.to_msgpack().unwrap();
         assert_eq!(FrameDescriptor::from_msgpack(&bytes).unwrap(), d);
+    }
+
+    #[test]
+    fn descriptor_version_matches_registry() {
+        assert_eq!(
+            FRAMEBUS_DESCRIPTOR_VERSION,
+            crate::contracts::contract_version("framebus.descriptor").unwrap()
+        );
+    }
+
+    #[test]
+    fn ring_version_matches_registry() {
+        assert_eq!(
+            RingLayout::VERSION,
+            crate::contracts::contract_version("framebus.ring").unwrap()
+        );
+    }
+
+    #[test]
+    fn descriptor_rejects_a_future_version() {
+        // A descriptor stamped with a version this build does not speak must
+        // fail the decode loudly rather than silently mis-parse.
+        let d = FrameDescriptor {
+            v: FRAMEBUS_DESCRIPTOR_VERSION + 1,
+            camera_id: "uvc-0".into(),
+            frame_id: 1,
+            ts_ms: 0,
+            width: 8,
+            height: 8,
+            format: FrameFormat::Rgb24,
+            shm_name: "ados-vision-uvc-0".into(),
+            slot: 0,
+            seq: 1,
+            byte_len: 192,
+        };
+        let bytes = d.to_msgpack().unwrap();
+        assert!(matches!(
+            FrameDescriptor::from_msgpack(&bytes),
+            Err(DescriptorError::Version { .. })
+        ));
+    }
+
+    #[test]
+    fn descriptor_missing_version_fails_decode() {
+        // A payload that predates the version field (no `v` key) must fail to
+        // decode: the field is required, with no serde default.
+        #[derive(Serialize)]
+        struct NoVersionDescriptor {
+            camera_id: String,
+            frame_id: u64,
+            ts_ms: i64,
+            width: u32,
+            height: u32,
+            format: FrameFormat,
+            shm_name: String,
+            slot: u32,
+            seq: u64,
+            byte_len: u32,
+        }
+        let old = NoVersionDescriptor {
+            camera_id: "uvc-0".into(),
+            frame_id: 1,
+            ts_ms: 0,
+            width: 8,
+            height: 8,
+            format: FrameFormat::Rgb24,
+            shm_name: "ados-vision-uvc-0".into(),
+            slot: 0,
+            seq: 1,
+            byte_len: 192,
+        };
+        let bytes = rmp_serde::to_vec_named(&old).unwrap();
+        assert!(matches!(
+            FrameDescriptor::from_msgpack(&bytes),
+            Err(DescriptorError::Decode(_))
+        ));
     }
 
     #[test]

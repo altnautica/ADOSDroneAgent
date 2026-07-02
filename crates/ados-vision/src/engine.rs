@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use ados_protocol::framebus::{
     Detection, DetectionBatch, FrameDescriptor, FrameFormat, ModelExecution, ModelMetadata,
+    VISION_DETECTION_VERSION,
 };
 use anyhow::{anyhow, Result};
 use tokio::sync::{broadcast, Mutex, Semaphore};
@@ -307,6 +308,7 @@ impl VisionEngine {
             detections
         };
         let batch = DetectionBatch {
+            v: VISION_DETECTION_VERSION,
             model_id: model_id.to_string(),
             camera_id: desc.camera_id.clone(),
             frame_id: desc.frame_id,
@@ -644,6 +646,7 @@ mod tests {
         let e = engine();
         let mut rx = e.subscribe_detections();
         let batch = DetectionBatch {
+            v: VISION_DETECTION_VERSION,
             model_id: "m".into(),
             camera_id: "c".into(),
             frame_id: 1,
@@ -675,6 +678,7 @@ mod tests {
             .unwrap();
         let mut rx = e.subscribe_detections();
         let desc = FrameDescriptor {
+            v: ados_protocol::framebus::FRAMEBUS_DESCRIPTOR_VERSION,
             camera_id: "uvc-0".into(),
             frame_id: 9,
             ts_ms: 123,

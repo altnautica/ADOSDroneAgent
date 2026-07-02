@@ -95,13 +95,14 @@ pub async fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ados_protocol::framebus::{BoundingBox, Detection};
+    use ados_protocol::framebus::{BoundingBox, Detection, VISION_DETECTION_VERSION};
     use ados_protocol::ipc::{connect_with_retry, read_length_prefixed};
     use std::time::Duration;
     use tokio::sync::Notify;
 
     fn sample_batch() -> DetectionBatch {
         DetectionBatch {
+            v: VISION_DETECTION_VERSION,
             model_id: "com.example.weeds".into(),
             camera_id: "uvc-0".into(),
             frame_id: 7,

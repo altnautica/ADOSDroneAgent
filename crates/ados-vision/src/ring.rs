@@ -14,7 +14,9 @@
 
 use std::path::PathBuf;
 
-use ados_protocol::framebus::{write_slot, FrameDescriptor, FrameFormat, RingError, RingLayout};
+use ados_protocol::framebus::{
+    write_slot, FrameDescriptor, FrameFormat, RingError, RingLayout, FRAMEBUS_DESCRIPTOR_VERSION,
+};
 use thiserror::Error;
 
 /// The directory `/dev/shm` rings live under. Overridable for tests via
@@ -150,6 +152,7 @@ impl RingWriter {
         write_slot(self.region.as_mut_slice(), &self.layout, slot, seq, data)?;
         self.seq = self.seq.wrapping_add(1).max(1);
         Ok(FrameDescriptor {
+            v: FRAMEBUS_DESCRIPTOR_VERSION,
             camera_id: camera_id.to_string(),
             frame_id,
             ts_ms,

@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use ados_plugin_host::host::HostServices;
 use ados_plugin_host::{EventBus, PluginIpcServer};
-use ados_protocol::framebus::{FrameDescriptor, FrameFormat};
+use ados_protocol::framebus::{FrameDescriptor, FrameFormat, FRAMEBUS_DESCRIPTOR_VERSION};
 use ados_protocol::plugin::TokenIssuer;
 use ados_sdk::PluginIpcClient;
 use rmpv::Value;
@@ -84,6 +84,7 @@ async fn connect(h: &Harness, granted: &[&str]) -> Arc<PluginIpcClient> {
 
 fn descriptor(camera_id: &str, seq: u64) -> FrameDescriptor {
     FrameDescriptor {
+        v: FRAMEBUS_DESCRIPTOR_VERSION,
         camera_id: camera_id.into(),
         frame_id: seq,
         ts_ms: 1_700_000_000_000,

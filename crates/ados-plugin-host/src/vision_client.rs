@@ -306,6 +306,7 @@ mod tests {
     use ados_protocol::frame::encode_frame;
     use ados_protocol::framebus::FrameDescriptor;
     use ados_protocol::framebus::FrameFormat;
+    use ados_protocol::framebus::FRAMEBUS_DESCRIPTOR_VERSION;
     use ados_protocol::ipc::IpcBroadcast;
 
     fn temp_sock(name: &str) -> std::path::PathBuf {
@@ -364,6 +365,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         let descriptor = FrameDescriptor {
+            v: FRAMEBUS_DESCRIPTOR_VERSION,
             camera_id: "uvc-0".into(),
             frame_id: 1,
             ts_ms: 1,
@@ -402,7 +404,7 @@ mod tests {
 
     #[tokio::test]
     async fn detection_batches_fan_out_to_a_subscriber() {
-        use ados_protocol::framebus::DetectionBatch;
+        use ados_protocol::framebus::{DetectionBatch, VISION_DETECTION_VERSION};
         let path = temp_sock("det-fanout");
         let (server, _inbound) = IpcBroadcast::bind(&path, 256, false, None).await.unwrap();
 
@@ -411,6 +413,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         let batch = DetectionBatch {
+            v: VISION_DETECTION_VERSION,
             model_id: "m".into(),
             camera_id: "uvc-0".into(),
             frame_id: 1,

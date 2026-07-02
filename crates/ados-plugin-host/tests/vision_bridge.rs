@@ -19,6 +19,7 @@ use ados_plugin_host::{EventBus, PluginIpcServer};
 use ados_protocol::frame::{decode_len, HEADER_SIZE, PLUGIN_MAX_FRAME};
 use ados_protocol::framebus::{
     methods, BoundingBox, Detection, DetectionBatch, FrameDescriptor, FrameFormat,
+    FRAMEBUS_DESCRIPTOR_VERSION, VISION_DETECTION_VERSION,
 };
 use ados_protocol::plugin::{Envelope, TokenIssuer, PROTOCOL_VERSION};
 use rmpv::Value;
@@ -197,6 +198,7 @@ async fn connect(path: &std::path::Path) -> UnixStream {
 
 fn sample_descriptor() -> FrameDescriptor {
     FrameDescriptor {
+        v: FRAMEBUS_DESCRIPTOR_VERSION,
         camera_id: "uvc-0".into(),
         frame_id: 7,
         ts_ms: 1_700_000_000_000,
@@ -298,6 +300,7 @@ async fn second_subscribe_to_same_camera_reports_already_subscribed() {
 
 fn sample_batch(frame_id: u64) -> DetectionBatch {
     DetectionBatch {
+        v: VISION_DETECTION_VERSION,
         model_id: "com.example.det".into(),
         camera_id: "uvc-0".into(),
         frame_id,

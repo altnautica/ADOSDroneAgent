@@ -14,7 +14,9 @@ use std::collections::{HashMap, HashSet};
 use std::os::unix::fs::MetadataExt;
 use std::time::Duration;
 
-use ados_protocol::framebus::{read_slot, FrameDescriptor, FrameFormat, RingLayout};
+use ados_protocol::framebus::{
+    read_slot, DescriptorError, FrameDescriptor, FrameFormat, RingLayout,
+};
 use ados_protocol::ipc::{connect_with_retry, read_length_prefixed};
 use ados_protocol::state::STATE_V2_MAX_FRAME;
 use memmap2::Mmap;
@@ -64,6 +66,10 @@ pub struct VisionFrameSource {
     /// Camera ids we have already warned about dropping, so a persistent
     /// vision↔atlas id mismatch is logged once per id, not on every frame.
     warned_unmatched: HashSet<String>,
+    /// Whether we have already warned about a descriptor whose wire version this
+    /// build does not speak, so a persistent vision↔atlas version drift is logged
+    /// once (and loudly), not silently dropped on every frame.
+    warned_version: bool,
 }
 
 impl VisionFrameSource {
@@ -74,6 +80,7 @@ impl VisionFrameSource {
             stream: None,
             mmaps: HashMap::new(),
             warned_unmatched: HashSet::new(),
+            warned_version: false,
         }
     }
 
@@ -174,7 +181,23 @@ impl VisionFrameSource {
             };
             let desc = match FrameDescriptor::from_msgpack(&payload) {
                 Ok(d) => d,
-                Err(_) => continue,
+                // A version this build does not speak must be visible, never
+                // silent: a vision↔atlas agent-version drift is the exact cause
+                // of `ingest_rate_hz: 0` with no error. Warn once so a real drift
+                // is one `ados logs` away, then keep draining (a torn/partial
+                // frame is transient and stays quiet).
+                Err(DescriptorError::Version { got, ours }) => {
+                    if !self.warned_version {
+                        self.warned_version = true;
+                        tracing::warn!(
+                            got,
+                            ours,
+                            "atlas dropping frames: vision.frame descriptor version not understood (vision/atlas agent version drift)"
+                        );
+                    }
+                    continue;
+                }
+                Err(DescriptorError::Decode(_)) => continue,
             };
             if !self.enabled.is_empty() && !self.enabled.contains(&desc.camera_id) {
                 // A dropped frame must be visible, never silent: a mismatched

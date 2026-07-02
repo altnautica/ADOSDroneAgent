@@ -32,6 +32,7 @@ use std::sync::Arc;
 use ados_protocol::frame::{decode_len, HEADER_SIZE, PLUGIN_MAX_FRAME};
 use ados_protocol::framebus::{
     methods, BoundingBox, Detection, DetectionBatch, FrameDescriptor, FrameFormat, ModelMetadata,
+    VISION_DETECTION_VERSION,
 };
 use ados_protocol::plugin::{Envelope, PROTOCOL_VERSION};
 use anyhow::{anyhow, Result};
@@ -217,6 +218,7 @@ async fn handle_infer(engine: &Arc<VisionEngine>, args: &Value) -> Result<Value>
         .infer(&req.model_id, &frame, width, height, format)
         .await?;
     let batch = DetectionBatch {
+        v: VISION_DETECTION_VERSION,
         model_id: req.model_id.clone(),
         camera_id: req.camera_id.clone().unwrap_or_default(),
         frame_id: req.frame_id.unwrap_or(0),
@@ -235,6 +237,16 @@ async fn handle_infer(engine: &Arc<VisionEngine>, args: &Value) -> Result<Value>
 
 async fn handle_publish(engine: &Arc<VisionEngine>, args: &Value) -> Result<Value> {
     let batch: DetectionBatch = decode_args(args)?;
+    // decode_args is a generic deserialize (a missing `v` fails here because the
+    // field has no default, but a mismatched one would not), so re-check the
+    // contract version at this plugin ingress and reject a mis-versioned batch
+    // loudly rather than relaying it to be silently mis-read downstream.
+    if batch.v != VISION_DETECTION_VERSION {
+        return Err(anyhow!(
+            "detection batch version {} != supported {VISION_DETECTION_VERSION}",
+            batch.v
+        ));
+    }
     let reached = engine.publish_detection(batch);
     Ok(ok_map(&[("subscribers", Value::from(reached as u64))]))
 }
@@ -698,6 +710,7 @@ mod tests {
         let e = engine();
         let _rx = e.subscribe_detections();
         let batch = DetectionBatch {
+            v: VISION_DETECTION_VERSION,
             model_id: "m".into(),
             camera_id: "c".into(),
             frame_id: 1,
@@ -722,6 +735,7 @@ mod tests {
     #[test]
     fn deliver_frame_carries_descriptor_binary() {
         let desc = FrameDescriptor {
+            v: ados_protocol::framebus::FRAMEBUS_DESCRIPTOR_VERSION,
             camera_id: "uvc-0".into(),
             frame_id: 1,
             ts_ms: 1,
@@ -757,6 +771,7 @@ mod tests {
     #[test]
     fn deliver_detection_carries_batch_binary() {
         let batch = DetectionBatch {
+            v: VISION_DETECTION_VERSION,
             model_id: "m".into(),
             camera_id: "uvc-0".into(),
             frame_id: 9,
