@@ -26,11 +26,14 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
+use ados_protocol::state::read_state_value_blocking;
 use serde_json::{json, Map, Value};
 
 /// The state IPC socket the MAVLink router publishes the vehicle snapshot to
-/// (newline-JSON v1 at ~10 Hz). The FC-link extras (`fc_connected`/`fc_port`/
-/// `fc_baud`) ride on that snapshot. Overridable via `ADOS_STATE_SOCK` for tests.
+/// (~10 Hz). The wire form is v1 newline-JSON or v2 length-prefixed msgpack; the
+/// shared reader auto-detects per frame. The FC-link extras (`fc_connected`/
+/// `fc_port`/`fc_baud`) ride on that snapshot. Overridable via `ADOS_STATE_SOCK`
+/// for tests.
 pub const STATE_SOCK: &str = "/run/ados/state.sock";
 
 /// Max wall time to wait for one state-socket frame. The publisher streams ~10 Hz
@@ -300,7 +303,7 @@ pub fn parse_thermal_millidegrees(text: &str) -> Option<f64> {
 
 /// Fold the FC-link fields in from one bounded read of the state IPC socket. The
 /// router publishes the vehicle snapshot with `fc_connected` / `fc_port` /
-/// `fc_baud` extras; this connects, reads one newline-JSON frame, and lifts those
+/// `fc_baud` extras; this connects, reads one snapshot frame, and lifts those
 /// fields. On a timeout / absent socket / parse error the fields are omitted.
 fn fold_fc(obj: &mut Map<String, Value>) {
     let snap = match read_state_snapshot() {
@@ -351,41 +354,22 @@ fn fold_fc(obj: &mut Map<String, Value>) {
     }
 }
 
-/// Read one newline-JSON snapshot from the state IPC socket. The state socket
-/// replays its last buffer on connect, so a single frame arrives immediately;
-/// the read is wall-bounded by [`STATE_READ_TIMEOUT`] so a stalled or absent
-/// router never holds the heartbeat tick.
+/// Read one state snapshot from the state IPC socket. The state socket replays
+/// its last buffer on connect, so a single frame arrives immediately; the read
+/// is wall-bounded by [`STATE_READ_TIMEOUT`] so a stalled or absent router never
+/// holds the heartbeat tick. The shared reader auto-detects the state wire form
+/// per frame (v1 newline-JSON or v2 length-prefixed msgpack), so this reads a v2
+/// snapshot as well — the installer ships v2, and a v1-only read silently yields
+/// nothing against it.
 fn read_state_snapshot() -> Option<Value> {
     let path = std::env::var("ADOS_STATE_SOCK").unwrap_or_else(|_| STATE_SOCK.to_string());
-    let stream = UnixStream::connect(Path::new(&path)).ok()?;
+    let mut stream = UnixStream::connect(Path::new(&path)).ok()?;
     stream.set_read_timeout(Some(STATE_READ_TIMEOUT)).ok()?;
 
-    // Read until the first newline (one JSON line) or the timeout / EOF. The
-    // snapshot is a few KiB, so a small bounded buffer suffices; the cap guards
-    // against a producer that never sends a newline.
-    let mut reader = stream;
-    let mut buf = Vec::with_capacity(8192);
-    let mut byte = [0u8; 1];
-    const MAX_LINE: usize = 256 * 1024;
-    loop {
-        match reader.read(&mut byte) {
-            Ok(0) => break, // EOF before a newline.
-            Ok(_) => {
-                if byte[0] == b'\n' {
-                    break;
-                }
-                if buf.len() >= MAX_LINE {
-                    return None;
-                }
-                buf.push(byte[0]);
-            }
-            Err(_) => break, // Timeout or transport error.
-        }
-    }
-    if buf.is_empty() {
-        return None;
-    }
-    serde_json::from_slice(&buf).ok()
+    // One frame off the replayed buffer via the shared blocking reader. Any
+    // timeout / clean EOF / framing error collapses to `None` so a stalled or
+    // absent router never holds the tick (the same tolerance the byte-loop had).
+    read_state_value_blocking(&mut stream).ok().flatten()
 }
 
 /// Fold the `ados-*` service fleet in from one `systemctl list-units`. Omits the
@@ -691,39 +675,70 @@ ados-mavlink-router.service loaded active running ADOS MAVLink router
 
     #[test]
     fn read_state_snapshot_lifts_fc_fields_from_a_socket() {
-        // Stand up a one-shot Unix socket that replays a state line, point the
-        // enrichment at it, and assert the FC fields fold in.
-        let dir = std::env::temp_dir();
-        let sock = dir.join(format!("ados-enrich-state-{}.sock", std::process::id()));
-        let _ = std::fs::remove_file(&sock);
-        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
-        let sock_for_thread = sock.clone();
-        let handle = std::thread::spawn(move || {
-            if let Ok((mut stream, _)) = listener.accept() {
-                use std::io::Write;
-                let line = br#"{"armed":false,"fc_connected":true,"fc_port":"/dev/ttyACM0","fc_baud":115200,"transport_open":true,"mavlink_alive":true,"heartbeat_age_s":0.5,"fc_source":"serial","fc_link_hint":"none"}
-"#;
-                let _ = stream.write_all(line);
-                let _ = stream.flush();
-            }
-            let _ = std::fs::remove_file(&sock_for_thread);
+        // Stand up a one-shot Unix socket that replays a state frame, point the
+        // enrichment at it, and assert the FC fields fold in. Exercise BOTH wire
+        // forms — v1 newline-JSON and v2 length-prefixed msgpack — because the
+        // shared reader auto-detects per frame and the installer ships v2 (a
+        // v1-only read would silently lift nothing against a v2 producer).
+        let snap = json!({
+            "armed": false,
+            "fc_connected": true,
+            "fc_port": "/dev/ttyACM0",
+            "fc_baud": 115200,
+            "transport_open": true,
+            "mavlink_alive": true,
+            "heartbeat_age_s": 0.5,
+            "fc_source": "serial",
+            "fc_link_hint": "none"
         });
 
-        std::env::set_var("ADOS_STATE_SOCK", &sock);
-        let mut obj = Map::new();
-        fold_fc(&mut obj);
-        std::env::remove_var("ADOS_STATE_SOCK");
-        let _ = handle.join();
+        // Serve `wire` bytes on a fresh socket and return the folded enrichment.
+        let fold_over_wire = |tag: &str, wire: Vec<u8>| -> Map<String, Value> {
+            let dir = std::env::temp_dir();
+            let sock = dir.join(format!(
+                "ados-enrich-state-{}-{}.sock",
+                tag,
+                std::process::id()
+            ));
+            let _ = std::fs::remove_file(&sock);
+            let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+            let sock_for_thread = sock.clone();
+            let handle = std::thread::spawn(move || {
+                if let Ok((mut stream, _)) = listener.accept() {
+                    use std::io::Write;
+                    let _ = stream.write_all(&wire);
+                    let _ = stream.flush();
+                }
+                let _ = std::fs::remove_file(&sock_for_thread);
+            });
 
-        assert_eq!(obj.get("fcConnected"), Some(&json!(true)));
-        assert_eq!(obj.get("fcPort"), Some(&json!("/dev/ttyACM0")));
-        assert_eq!(obj.get("fcBaud"), Some(&json!(115200)));
-        // The gated-truth detail lifts alongside the connection triple.
-        assert_eq!(obj.get("transportOpen"), Some(&json!(true)));
-        assert_eq!(obj.get("mavlinkAlive"), Some(&json!(true)));
-        assert_eq!(obj.get("heartbeatAgeS"), Some(&json!(0.5)));
-        assert_eq!(obj.get("fcSource"), Some(&json!("serial")));
-        assert_eq!(obj.get("fcLinkHint"), Some(&json!("none")));
+            std::env::set_var("ADOS_STATE_SOCK", &sock);
+            let mut obj = Map::new();
+            fold_fc(&mut obj);
+            std::env::remove_var("ADOS_STATE_SOCK");
+            let _ = handle.join();
+            obj
+        };
+
+        let assert_fc = |obj: &Map<String, Value>| {
+            assert_eq!(obj.get("fcConnected"), Some(&json!(true)));
+            assert_eq!(obj.get("fcPort"), Some(&json!("/dev/ttyACM0")));
+            assert_eq!(obj.get("fcBaud"), Some(&json!(115200)));
+            // The gated-truth detail lifts alongside the connection triple.
+            assert_eq!(obj.get("transportOpen"), Some(&json!(true)));
+            assert_eq!(obj.get("mavlinkAlive"), Some(&json!(true)));
+            assert_eq!(obj.get("heartbeatAgeS"), Some(&json!(0.5)));
+            assert_eq!(obj.get("fcSource"), Some(&json!("serial")));
+            assert_eq!(obj.get("fcLinkHint"), Some(&json!("none")));
+        };
+
+        // v1 newline-JSON.
+        let v1 = ados_protocol::state::encode_v1(&snap).unwrap();
+        assert_fc(&fold_over_wire("v1", v1));
+
+        // v2 length-prefixed msgpack (the shipped wire form).
+        let v2 = ados_protocol::state::encode_v2(&snap).unwrap();
+        assert_fc(&fold_over_wire("v2", v2));
     }
 
     #[test]

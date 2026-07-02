@@ -715,9 +715,10 @@ fn now_ms() -> i64 {
 }
 
 /// A live vehicle-state reader over the state IPC socket (`/run/ados/state.sock`).
-/// Connects on demand, reads the newest newline-JSON snapshot, and caches it for
-/// the heartbeat. The reader holds the latest snapshot behind a mutex so the
-/// synchronous [`StateSnapshotSource::latest`] never blocks the heartbeat tick.
+/// Connects on demand, reads the newest state snapshot (auto-detecting the v1
+/// newline-JSON and v2 length-prefixed msgpack wire forms per frame), and caches
+/// it for the heartbeat. The reader holds the latest snapshot behind a mutex so
+/// the synchronous [`StateSnapshotSource::latest`] never blocks the heartbeat tick.
 pub struct StateIpcReader {
     latest: std::sync::Arc<std::sync::Mutex<Option<serde_json::Value>>>,
 }
@@ -737,24 +738,21 @@ impl StateIpcReader {
                 match tokio::net::UnixStream::connect(&path).await {
                     Ok(stream) => {
                         let mut reader = tokio::io::BufReader::new(stream);
-                        let mut line = String::new();
                         loop {
-                            use tokio::io::AsyncBufReadExt;
                             tokio::select! {
                                 _ = shutdown.changed() => { if *shutdown.borrow() { return; } }
-                                read = reader.read_line(&mut line) => {
+                                read = ados_protocol::state::read_state_value(&mut reader) => {
                                     match read {
-                                        Ok(0) => break, // socket closed; reconnect.
-                                        Ok(_) => {
-                                            if let Ok(v) =
-                                                ados_protocol::state::decode_v1_line(line.as_bytes())
-                                            {
-                                                if let Ok(mut g) = store.lock() {
-                                                    *g = Some(v);
-                                                }
+                                        // One decoded snapshot (v1 newline-JSON or
+                                        // v2 length-prefixed msgpack): cache it.
+                                        Ok(Some(v)) => {
+                                            if let Ok(mut g) = store.lock() {
+                                                *g = Some(v);
                                             }
-                                            line.clear();
                                         }
+                                        // Clean EOF at a frame boundary → reconnect.
+                                        Ok(None) => break,
+                                        // Unrecoverable framing/IO error → reconnect.
                                         Err(_) => break,
                                     }
                                 }
