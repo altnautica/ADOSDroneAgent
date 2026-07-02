@@ -127,6 +127,16 @@ where
 mod tests {
     use super::*;
 
+    /// The hand-written tap contract version must match the registry entry so a
+    /// future drift is a build-time test failure, not a silent mis-parse.
+    #[test]
+    fn version_matches_registry() {
+        assert_eq!(
+            TAP_CONTRACT_VERSION as u16,
+            crate::contracts::contract_version("tap.frame").unwrap()
+        );
+    }
+
     #[test]
     fn header_round_trips() {
         for (fmt, w, h) in [

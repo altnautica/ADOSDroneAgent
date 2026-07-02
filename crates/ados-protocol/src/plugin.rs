@@ -317,6 +317,16 @@ mod tests {
         items.iter().map(|s| s.to_string()).collect()
     }
 
+    /// The hand-written protocol version must match the contract registry entry
+    /// so a future drift is a build-time test failure, not a silent mis-parse.
+    #[test]
+    fn version_matches_registry() {
+        assert_eq!(
+            PROTOCOL_VERSION as u16,
+            crate::contracts::contract_version("plugin.rpc").unwrap()
+        );
+    }
+
     #[test]
     fn envelope_round_trips_through_msgpack() {
         let env = Envelope {

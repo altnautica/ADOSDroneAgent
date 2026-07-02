@@ -591,6 +591,20 @@ mod tests {
             .collect()
     }
 
+    /// The hand-written ingest and read-envelope versions must match the
+    /// contract registry entries so a future drift is a build-time test failure.
+    #[test]
+    fn version_matches_registry() {
+        assert_eq!(
+            WIRE_VERSION as u16,
+            crate::contracts::contract_version("logd.ingest").unwrap()
+        );
+        assert_eq!(
+            ENVELOPE_VERSION as u16,
+            crate::contracts::contract_version("logd.read").unwrap()
+        );
+    }
+
     #[test]
     fn log_frame_round_trips_through_an_ingest_frame() {
         let mut log = LogFrame::new(1_700_000_000_000_000, "ados-logd", Level::Warn, "hello");
