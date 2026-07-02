@@ -25,6 +25,8 @@ struct RawConfig {
     #[serde(default)]
     video: VideoSection,
     #[serde(default)]
+    vision: VisionSection,
+    #[serde(default)]
     ground_station: GroundStationSection,
     #[serde(default)]
     server: ServerSection,
@@ -59,6 +61,16 @@ struct CameraSection {
 }
 
 #[derive(Debug, Default, Deserialize)]
+struct VisionSection {
+    /// `vision.enabled`: opt-in for the onboard vision engine. The engine reads
+    /// the top-level `vision:` block (not `video:`); the supervisor mirrors that
+    /// key so it can decide whether to start `ados-vision` at boot instead of
+    /// leaving a configured engine silently dark.
+    #[serde(default)]
+    enabled: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
 struct GroundStationSection {
     #[serde(default)]
     role: Option<String>,
@@ -90,6 +102,14 @@ pub struct AgentConfig {
     /// hardware-detect gate starts `ados-video` even with no local `/dev/video`
     /// node — the IP-camera drone case, where the feed is a remote URL.
     pub video_network_source: Option<String>,
+    /// `vision.enabled` is set. The hardware-detect pass starts `ados-vision`
+    /// (drone-gated) when this is true and a camera source exists, so a
+    /// configured engine actually comes up instead of staying silently dark —
+    /// the engine self-gates on the same flag as a backstop. Without this the
+    /// unit is never started (it is not in any install-time enable set), so a
+    /// `vision.enabled: true` config would never bring the vision → world-model
+    /// pipeline up.
+    pub vision_enabled: bool,
     /// `server.mode` is a cloud posture (`cloud` / `self_hosted`), i.e. the
     /// cloud relay is configured. Default `local` → false. The WFB auto-pair
     /// loop only fails over to the cloud relay when this is true; a local-first
@@ -173,6 +193,8 @@ impl AgentConfig {
             .filter(|s| s.starts_with("rtsp://") || s.starts_with("http://"))
             .map(str::to_string);
 
+        let vision_enabled = raw.vision.enabled;
+
         let cloud_relay_enabled = matches!(
             raw.server.mode.as_deref(),
             Some("cloud") | Some("self_hosted")
@@ -191,6 +213,7 @@ impl AgentConfig {
             role,
             video_enabled,
             video_network_source,
+            vision_enabled,
             cloud_relay_enabled,
             configured_gs_role,
             raw_agent_profile,
@@ -385,6 +408,24 @@ mod tests {
             load("video:\n  camera:\n    source: \"  http://cam/stream  \"\n"),
             Some("http://cam/stream".to_string())
         );
+    }
+
+    #[test]
+    fn vision_enabled_follows_the_vision_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let pc = dir.path().join("profile.conf");
+        let role = dir.path().join("mesh/role");
+        let load = |body: &str| {
+            let cfg = dir.path().join("config.yaml");
+            write(&cfg, body);
+            AgentConfig::load_from(&cfg, &pc, &role).vision_enabled
+        };
+        // No vision block → disabled (the safe default on a rig without vision).
+        assert!(!load("agent:\n  profile: drone\n"));
+        // Explicit false → disabled.
+        assert!(!load("vision:\n  enabled: false\n"));
+        // Explicit true → enabled, matching the key the engine itself reads.
+        assert!(load("vision:\n  enabled: true\n"));
     }
 
     #[test]

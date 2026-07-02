@@ -383,6 +383,40 @@ impl Supervisor {
             tracing::info!("video service skipped (video.mode disabled)");
         }
 
+        // Start the vision engine when it is enabled and a camera source exists.
+        // The engine feeds the frame stream the follow / designate plugins and
+        // the world-model capture consume, so leaving it unstarted breaks that
+        // whole pipeline. It is not in any install-time enable set, so the
+        // supervisor is the ONLY thing that brings it up — without this branch a
+        // `vision.enabled: true` config would silently never start the engine.
+        //
+        // A vision-enabled config that never runs vision is a misconfiguration,
+        // not a silent no-op, so every reason the engine does NOT start is
+        // surfaced loudly rather than skipped in silence:
+        //   * profile/headless gate — vision runs on the drone profile only and
+        //     is excluded from the lean headless core, so on any other node the
+        //     unit's binary is absent; starting it would crash-loop. Report it
+        //     instead of leaving the operator's `vision.enabled: true` dark.
+        //   * no camera source — the engine has no frames to consume.
+        if self.config.vision_enabled {
+            if let Some(i) = self.index_of("ados-vision") {
+                if !gate_allows(&self.services[i], &self.config) {
+                    tracing::warn!(
+                        profile = %self.config.profile_wire,
+                        headless = self.config.headless_mode,
+                        "vision enabled but ados-vision is gated off for this node; \
+                         vision runs on the drone profile and is excluded from headless mode"
+                    );
+                } else if has_video_source {
+                    self.start_service("ados-vision").await;
+                } else {
+                    tracing::warn!(
+                        "vision enabled but no camera source configured; ados-vision not started"
+                    );
+                }
+            }
+        }
+
         // Start the right side of the radio pair for our profile. Gated on the
         // RAW config profile to match the Python supervisor: a ground station
         // starts ados-wfb-rx, anything else starts the drone-side ados-wfb.
@@ -584,6 +618,7 @@ mod tests {
             role: boot_role,
             video_enabled: true,
             video_network_source: None,
+            vision_enabled: false,
             cloud_relay_enabled: false,
             configured_gs_role: "direct".to_string(),
             raw_agent_profile: Some(profile_wire.replace('-', "_")),
@@ -829,6 +864,134 @@ mod tests {
                 "reset_failed:ados-mavlink",
                 "start:ados-mavlink",
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn vision_enabled_starts_the_vision_engine() {
+        // Regression: a `vision.enabled: true` config must actually bring the
+        // vision engine up. The unit is not in any install-time enable set and
+        // the monitor never starts a Stopped service, so the hardware-detect
+        // pass is the ONLY thing that starts it — if it does not, the vision →
+        // world-model pipeline silently never comes up.
+        let mock = Arc::new(MockProcessManager::new());
+        let bind = Arc::new(BindOrchestrator::new());
+        // Drone profile (the vision unit's profile gate) with vision enabled and
+        // a network camera source, so the camera-source precondition holds
+        // without a local /dev/video node (host-independent).
+        let mut config = cfg("drone");
+        config.vision_enabled = true;
+        config.video_network_source = Some("rtsp://cam/scene".to_string());
+        let mut sup = Supervisor::with_process_manager(config, bind, mock.clone());
+
+        sup.detect_and_start_hardware().await;
+
+        assert!(
+            mock.calls().iter().any(|c| c == "start:ados-vision"),
+            "vision.enabled=true must reach a start of ados-vision; calls={:?}",
+            mock.calls()
+        );
+    }
+
+    #[tokio::test]
+    async fn vision_disabled_does_not_start_the_vision_engine() {
+        // The mirror of the above: with vision off, the engine must stay down
+        // even though a camera source is present.
+        let mock = Arc::new(MockProcessManager::new());
+        let bind = Arc::new(BindOrchestrator::new());
+        let mut config = cfg("drone");
+        config.vision_enabled = false;
+        config.video_network_source = Some("rtsp://cam/scene".to_string());
+        let mut sup = Supervisor::with_process_manager(config, bind, mock.clone());
+
+        sup.detect_and_start_hardware().await;
+
+        assert!(
+            !mock.calls().iter().any(|c| c == "start:ados-vision"),
+            "ados-vision must not start when vision is disabled; calls={:?}",
+            mock.calls()
+        );
+    }
+
+    #[tokio::test]
+    async fn vision_enabled_without_a_camera_source_is_surfaced_not_started() {
+        // A genuine hard precondition: vision enabled but no camera source at
+        // all. The engine is not started (there are no frames to feed it); the
+        // code path logs a loud warning rather than skipping in silence.
+        //
+        // `has_video_source` = a local /dev/video node OR a configured network
+        // URL. This test forces the network URL absent; the assertion is only
+        // meaningful when the test host also has no local camera node, so it
+        // guards on the real probe rather than assuming the host state (a dev
+        // box with a webcam would legitimately have a source and start it).
+        if crate::hardware::has_camera().await {
+            return;
+        }
+        let mock = Arc::new(MockProcessManager::new());
+        let bind = Arc::new(BindOrchestrator::new());
+        let mut config = cfg("drone");
+        config.vision_enabled = true;
+        config.video_network_source = None;
+        let mut sup = Supervisor::with_process_manager(config, bind, mock.clone());
+
+        sup.detect_and_start_hardware().await;
+
+        assert!(
+            !mock.calls().iter().any(|c| c == "start:ados-vision"),
+            "ados-vision must not start without a camera source; calls={:?}",
+            mock.calls()
+        );
+    }
+
+    #[tokio::test]
+    async fn vision_enabled_on_a_non_drone_profile_is_gated_off_not_started() {
+        // A genuine hard precondition: vision runs on the drone profile only
+        // (the prebuilt catalog fetches the ados-vision binary there), so on any
+        // other profile the unit's binary is absent and starting it would
+        // crash-loop. Even with vision enabled AND a camera source present, the
+        // engine must NOT be started on a non-drone node. The detect pass
+        // surfaces the reason loudly; the behavioral contract locked here is that
+        // it never reaches a start of the gated-off unit.
+        let mock = Arc::new(MockProcessManager::new());
+        let bind = Arc::new(BindOrchestrator::new());
+        // Workstation profile (ados-vision gates off) with vision enabled and a
+        // network camera source, so the camera-source precondition is satisfied
+        // and the ONLY thing keeping the engine down is the profile gate.
+        let mut config = cfg("workstation");
+        config.vision_enabled = true;
+        config.video_network_source = Some("rtsp://cam/scene".to_string());
+        let mut sup = Supervisor::with_process_manager(config, bind, mock.clone());
+
+        sup.detect_and_start_hardware().await;
+
+        assert!(
+            !mock.calls().iter().any(|c| c == "start:ados-vision"),
+            "ados-vision must not start on a non-drone profile; calls={:?}",
+            mock.calls()
+        );
+    }
+
+    #[tokio::test]
+    async fn vision_enabled_headless_drone_is_gated_off_not_started() {
+        // The lean headless core excludes vision/AI (ados-vision is not in the
+        // KEEP set). Even on a drone with vision enabled and a camera source, a
+        // headless node must NOT start the engine — the headless gate is
+        // subtractive. Locks that the world-model capture path stays off in the
+        // zero-Python profile rather than crash-looping a binary the lean profile
+        // never provisions.
+        let mock = Arc::new(MockProcessManager::new());
+        let bind = Arc::new(BindOrchestrator::new());
+        let mut config = cfg_headless();
+        config.vision_enabled = true;
+        config.video_network_source = Some("rtsp://cam/scene".to_string());
+        let mut sup = Supervisor::with_process_manager(config, bind, mock.clone());
+
+        sup.detect_and_start_hardware().await;
+
+        assert!(
+            !mock.calls().iter().any(|c| c == "start:ados-vision"),
+            "ados-vision must not start on a headless node; calls={:?}",
+            mock.calls()
         );
     }
 }
