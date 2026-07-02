@@ -400,6 +400,12 @@
   "ip_ffmpeg_rtsp_rk": [
     "ffmpeg",
     "-y",
+    "-fflags",
+    "nobuffer",
+    "-flags",
+    "low_delay",
+    "-rtsp_transport",
+    "tcp",
     "-i",
     "rtsp://10.0.0.9:554/live",
     "-r",

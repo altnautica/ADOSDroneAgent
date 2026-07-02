@@ -401,7 +401,20 @@ fn build_ffmpeg_command(
     let mut cmd: Vec<String> = vec!["ffmpeg".into(), "-y".into()];
 
     if source.starts_with("rtsp://") || source.starts_with("http://") {
-        // Network / IP camera source.
+        // Network / IP camera source. Low-latency input; force TCP for RTSP so a
+        // lossy link cannot drop RTP packets and truncate frames. UDP is the
+        // ffmpeg default for RTSP and a single lost packet shreds an H.264 frame
+        // into macroblock garbage (the input transport must be set BEFORE -i;
+        // set after -i it would only bind the output muxer).
+        cmd.extend(
+            ["-fflags", "nobuffer", "-flags", "low_delay"]
+                .iter()
+                .map(|s| s.to_string()),
+        );
+        if source.starts_with("rtsp://") {
+            cmd.push("-rtsp_transport".into());
+            cmd.push("tcp".into());
+        }
         cmd.push("-i".into());
         cmd.push(source.to_string());
     } else {
