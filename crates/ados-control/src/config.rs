@@ -19,6 +19,11 @@ use serde::Deserialize;
 /// systemd unit sets — the same convention the sibling crates use.
 pub const CONFIG_YAML: &str = "/etc/ados/config.yaml";
 
+/// The installer-provisioned persistent device identity. Read as the fallback
+/// when `agent.device_id` is absent from config.yaml, so the identity survives a
+/// config the Python agent / setup webapp / GCS rewrote without echoing it.
+pub const DEVICE_ID_FILE: &str = "/etc/ados/device-id";
+
 /// The `agent:` section: the device identity the pairing-info route reports.
 /// Defaults mirror the Python `AgentConfig` field defaults so an absent section
 /// reads the same value the loaded Python config would (`name: "my-drone"`,
@@ -88,13 +93,22 @@ impl PairingConfig {
     }
 
     /// Load from an explicit path (testable). All-defaults on absence / parse
-    /// error.
+    /// error. When the loaded config carries no `agent.device_id`, the identity
+    /// is resolved from the persistent installer files so the pairing route
+    /// never reports an empty device id (which the GCS rejects as "missing
+    /// device_id") while a real identity is provisioned on disk.
     pub fn load_from(path: &Path) -> Self {
-        let text = match std::fs::read_to_string(path) {
-            Ok(t) => t,
-            Err(_) => return PairingConfig::default(),
+        let mut cfg = match std::fs::read_to_string(path) {
+            Ok(text) => ados_config::yaml_or_default(&text, "control"),
+            Err(_) => PairingConfig::default(),
         };
-        ados_config::yaml_or_default(&text, "control")
+        if cfg.agent.device_id.trim().is_empty() {
+            cfg.agent.device_id = device_id_from_identity(
+                Path::new(DEVICE_ID_FILE),
+                std::env::var("ADOS_DEVICE_ID").ok(),
+            );
+        }
+        cfg
     }
 
     /// The radio peer's device id, or `None` when no peer is recorded or it is
@@ -109,6 +123,27 @@ impl PairingConfig {
             .filter(|s| !s.is_empty())
             .cloned()
     }
+}
+
+/// Resolve the persistent device identity when `agent.device_id` is absent from
+/// config.yaml. The installer provisions the device-id file (and the matching
+/// `ADOS_DEVICE_ID` the unit exports); either is authoritative. Returns `""`
+/// only when no identity is provisioned at all, preserving the prior behavior
+/// on a truly fresh box.
+fn device_id_from_identity(file: &Path, env: Option<String>) -> String {
+    if let Ok(contents) = std::fs::read_to_string(file) {
+        let id = contents.trim();
+        if !id.is_empty() {
+            return id.to_string();
+        }
+    }
+    if let Some(env_id) = env {
+        let id = env_id.trim();
+        if !id.is_empty() {
+            return id.to_string();
+        }
+    }
+    String::new()
 }
 
 /// The `security.api:` slice the proxied-route auth gate reads. Only the
@@ -224,6 +259,26 @@ video:
         assert_eq!(cfg.agent.name, "test-drone");
         assert_eq!(cfg.agent.profile, "drone");
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn device_id_falls_back_to_the_identity_file_then_env() {
+        // The provisioned identity file wins (trimmed).
+        let f = temp_yaml("device-id", "630e079b69d6\n");
+        assert_eq!(
+            device_id_from_identity(&f, Some("env-id".to_string())),
+            "630e079b69d6"
+        );
+        let _ = std::fs::remove_file(&f);
+        // The env is used when the file is absent.
+        let missing = Path::new("/nonexistent/ados/device-id-xyz");
+        assert_eq!(
+            device_id_from_identity(missing, Some(" env-id \n".to_string())),
+            "env-id"
+        );
+        // Empty only when nothing is provisioned (preserves the fresh-box default).
+        assert_eq!(device_id_from_identity(missing, None), "");
+        assert_eq!(device_id_from_identity(missing, Some(String::new())), "");
     }
 
     #[test]
