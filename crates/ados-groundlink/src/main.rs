@@ -128,6 +128,12 @@ fn init_logging() {
 async fn main() -> Result<()> {
     init_logging();
 
+    // Publish this service's config-status sidecar so a malformed `ground_station:`
+    // config block surfaces on the remote Health view, not just in the log. Read
+    // once at startup; the role loops re-read the (unchanged) file as they consume
+    // it. Best-effort — never blocks startup.
+    ados_groundlink::GroundStationConfig::publish_config_status(std::path::Path::new(CONFIG_YAML));
+
     // Tell systemd we are up (reuses the orchestrator's notify shim).
     ados_supervisor::sdnotify::ready();
 

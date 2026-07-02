@@ -132,18 +132,37 @@ pub struct GroundStationConfig {
 
 impl GroundStationConfig {
     /// Load from the `ground_station:` block in the agent config file. A missing
-    /// or unparseable file yields the Python defaults.
+    /// or unparseable file yields the Python defaults. Does NOT publish the
+    /// config-status sidecar — the runtime consumers (relay / receiver / atlas)
+    /// and tests call this, so the write is confined to
+    /// [`publish_config_status`](Self::publish_config_status) at service startup.
     pub fn load_from(path: &std::path::Path) -> Self {
+        Self::load_reporting(path).0
+    }
+
+    /// Like [`load_from`](Self::load_from) but also returns the parse-error
+    /// message so the startup path can surface it. `None` on success or a
+    /// missing/unreadable file; `Some(msg)` on a present-but-malformed file.
+    pub fn load_reporting(path: &std::path::Path) -> (Self, Option<String>) {
         #[derive(Debug, Default, Deserialize)]
         struct RawConfig {
             #[serde(default)]
             ground_station: GroundStationConfig,
         }
         let Ok(text) = std::fs::read_to_string(path) else {
-            return GroundStationConfig::default();
+            return (GroundStationConfig::default(), None);
         };
-        let raw: RawConfig = ados_config::yaml_or_default(&text, "ground_station");
-        raw.ground_station
+        let (raw, error): (RawConfig, _) = ados_config::yaml_reporting(&text, "ground_station");
+        (raw.ground_station, error)
+    }
+
+    /// Read the config once at service startup and publish its config-status
+    /// sidecar (a null error when the block is valid) so a malformed
+    /// `ground_station:` block is visible on the remote Health surface, not only
+    /// in the log. Best-effort via `write_config_status`; never blocks startup.
+    pub fn publish_config_status(path: &std::path::Path) {
+        let (_, error) = Self::load_reporting(path);
+        ados_config::write_config_status("ground_station", error.as_deref());
     }
 }
 

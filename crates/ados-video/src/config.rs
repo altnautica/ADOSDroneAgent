@@ -305,7 +305,13 @@ impl AgentVideoConfig {
         let Ok(text) = std::fs::read_to_string(path) else {
             return AgentVideoConfig::default();
         };
-        let raw: RawConfig = ados_config::yaml_or_default(&text, "video");
+        let (raw, cfg_err) = ados_config::yaml_reporting::<RawConfig>(&text, "video");
+        // Publish the parse result so a malformed config surfaces on the fleet
+        // Health view, not just in the log (per-service status sidecar). This is
+        // the video service's broad startup config load (agent + video sections);
+        // the camera reader stays on the quiet-default helper so the two loads do
+        // not clobber each other's "video" status.
+        ados_config::write_config_status("video", cfg_err.as_deref());
         // `agent.profile` is canonical; `video.profile` is an optional override.
         let profile = raw.video.profile.or(raw.agent.profile);
         AgentVideoConfig {

@@ -51,7 +51,11 @@ impl UplinkConfig {
             Ok(t) => t,
             Err(_) => return UplinkConfig::default(),
         };
-        ados_config::yaml_or_default(&text, "net")
+        let (cfg, cfg_err) = ados_config::yaml_reporting::<UplinkConfig>(&text, "net");
+        // Publish the parse result so a malformed config surfaces on the fleet
+        // Health view, not just in the log (per-service status sidecar).
+        ados_config::write_config_status("net", cfg_err.as_deref());
+        cfg
     }
 
     /// The configured share-uplink flag.

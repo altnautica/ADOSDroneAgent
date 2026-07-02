@@ -116,18 +116,37 @@ pub struct AgentConfig {
 }
 
 impl AgentConfig {
-    /// Resolve using the canonical on-disk locations.
+    /// Resolve using the canonical on-disk locations. This is the real startup
+    /// entry, so it also publishes the config-status sidecar: a malformed config
+    /// surfaces on the remote Health view, not just in the log.
     pub fn load() -> Self {
-        Self::load_from(
+        Self::load_from_inner(
             Path::new(CONFIG_YAML),
             Path::new(PROFILE_CONF),
             Path::new(MESH_ROLE_PATH),
+            true,
         )
     }
 
-    /// Resolve from explicit paths (testable).
+    /// Resolve from explicit paths (testable). Does NOT publish the config-status
+    /// sidecar — only the real [`load`](Self::load) startup path does, so tests
+    /// never write to the run dir.
     pub fn load_from(config_yaml: &Path, profile_conf: &Path, mesh_role: &Path) -> Self {
-        let raw = read_raw_config(config_yaml);
+        Self::load_from_inner(config_yaml, profile_conf, mesh_role, false)
+    }
+
+    /// Shared resolver. When `publish` is set (the real startup path) the parse
+    /// error (or its absence) is written to the config-status sidecar.
+    fn load_from_inner(
+        config_yaml: &Path,
+        profile_conf: &Path,
+        mesh_role: &Path,
+        publish: bool,
+    ) -> Self {
+        let (raw, config_error) = read_raw_config(config_yaml);
+        if publish {
+            ados_config::write_config_status("supervisor", config_error.as_deref());
+        }
 
         let raw_agent_profile = raw.agent.profile.clone();
         let profile_wire = resolve_profile(raw_agent_profile.as_deref(), profile_conf);
@@ -209,11 +228,15 @@ impl AgentConfig {
     }
 }
 
-fn read_raw_config(path: &Path) -> RawConfig {
+/// Read + parse the raw agent config, returning the parse-error message
+/// alongside the config so the startup path can surface it on a config-status
+/// sidecar. `None` on success or a missing/unreadable file (a fresh node is not a
+/// fault); `Some(msg)` on a present-but-malformed file.
+fn read_raw_config(path: &Path) -> (RawConfig, Option<String>) {
     let Ok(text) = std::fs::read_to_string(path) else {
-        return RawConfig::default();
+        return (RawConfig::default(), None);
     };
-    ados_config::yaml_or_default(&text, "supervisor")
+    ados_config::yaml_reporting(&text, "supervisor")
 }
 
 /// Wire-contract profile string from a raw value. `"ground_station"` becomes

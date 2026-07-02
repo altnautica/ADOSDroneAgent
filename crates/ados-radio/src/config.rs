@@ -484,7 +484,12 @@ impl WfbConfig {
         let Ok(text) = std::fs::read_to_string(path) else {
             return WfbConfig::default();
         };
-        let raw: RawConfig = ados_config::yaml_or_default(&text, "radio");
+        let (raw, cfg_err) = ados_config::yaml_reporting::<RawConfig>(&text, "radio");
+        // Publish the parse result so a malformed config surfaces on the fleet
+        // Health view, not just in the log (per-service status sidecar). This is
+        // the radio service's single startup config load; the regulatory reader
+        // stays on the quiet-default helper (it also runs during radio bring-up).
+        ados_config::write_config_status("radio", cfg_err.as_deref());
         let mut cfg = raw.video.wfb;
         cfg.guard_aux_ports();
         cfg

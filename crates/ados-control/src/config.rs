@@ -164,7 +164,14 @@ impl ControlSecurityConfig {
             Ok(t) => t,
             Err(_) => return ControlSecurityConfig::default(),
         };
-        ados_config::yaml_or_default(&text, "control")
+        let (cfg, cfg_err) = ados_config::yaml_reporting::<ControlSecurityConfig>(&text, "control");
+        // Publish the parse result so a malformed config surfaces on the fleet
+        // Health view, not just in the log (per-service status sidecar). This is
+        // the control service's startup config load (built once at server init);
+        // the pairing reader stays on the quiet-default helper (it is on the hot
+        // per-request path).
+        ados_config::write_config_status("control", cfg_err.as_deref());
+        cfg
     }
 
     /// The `security:` section.

@@ -304,20 +304,33 @@ impl CloudConfig {
 impl CloudConfig {
     /// Load from the canonical path (or the `ADOS_CONFIG` override). A missing or
     /// unparseable file yields the all-defaults config rather than failing — the
-    /// relay must still start to report its own degraded state.
+    /// relay must still start to report its own degraded state. This is the real
+    /// startup entry, so it also publishes the config-status sidecar: a malformed
+    /// config surfaces on the remote Health view, not just in the log.
     pub fn load() -> Self {
         let path = std::env::var("ADOS_CONFIG").unwrap_or_else(|_| CONFIG_YAML.to_string());
-        Self::load_from(Path::new(&path))
+        let (config, error) = Self::load_reporting(Path::new(&path));
+        ados_config::write_config_status("cloud", error.as_deref());
+        config
     }
 
     /// Load from an explicit path (testable). All-defaults on absence / parse
-    /// error.
+    /// error. Does NOT publish the config-status sidecar — only the real
+    /// [`load`](Self::load) startup path does, so tests never write to the run dir.
     pub fn load_from(path: &Path) -> Self {
+        Self::load_reporting(path).0
+    }
+
+    /// Load from an explicit path, also returning the parse-error message so the
+    /// startup path can publish it. `None` on success or a missing/unreadable
+    /// file (a fresh node is not a fault); `Some(msg)` on a present-but-malformed
+    /// file.
+    fn load_reporting(path: &Path) -> (Self, Option<String>) {
         let text = match std::fs::read_to_string(path) {
             Ok(t) => t,
-            Err(_) => return CloudConfig::default(),
+            Err(_) => return (CloudConfig::default(), None),
         };
-        ados_config::yaml_or_default(&text, "cloud")
+        ados_config::yaml_reporting(&text, "cloud")
     }
 }
 

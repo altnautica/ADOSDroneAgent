@@ -115,24 +115,37 @@ impl Default for MavlinkConfig {
 
 impl MavlinkConfig {
     /// Load from the canonical path (or `ADOS_CONFIG` when set). A missing or
-    /// unreadable file yields the defaults, matching the Python loader.
+    /// unreadable file yields the defaults, matching the Python loader. This is the
+    /// real startup entry, so it also publishes the config-status sidecar: a
+    /// malformed config surfaces on the remote Health view, not just in the log.
     pub fn load() -> Self {
         let path = std::env::var("ADOS_CONFIG").unwrap_or_else(|_| CONFIG_YAML.to_string());
-        Self::load_from(Path::new(&path))
+        let (config, error) = Self::load_reporting(Path::new(&path));
+        ados_config::write_config_status("mavlink", error.as_deref());
+        config
     }
 
-    /// Load from an explicit path (testable).
+    /// Load from an explicit path (testable). Does NOT publish the config-status
+    /// sidecar — only the real [`load`](Self::load) startup path does, so tests
+    /// never write to the run dir.
     pub fn load_from(path: &Path) -> Self {
+        Self::load_reporting(path).0
+    }
+
+    /// Load from an explicit path, also returning the parse-error message so the
+    /// startup path can publish it. `None` on success or a missing/unreadable
+    /// file; `Some(msg)` on a present-but-malformed file.
+    fn load_reporting(path: &Path) -> (Self, Option<String>) {
         #[derive(Debug, Default, Deserialize)]
         struct RawConfig {
             #[serde(default)]
             mavlink: MavlinkConfig,
         }
         let Ok(text) = std::fs::read_to_string(path) else {
-            return MavlinkConfig::default();
+            return (MavlinkConfig::default(), None);
         };
-        let raw: RawConfig = ados_config::yaml_or_default(&text, "mavlink");
-        raw.mavlink
+        let (raw, error): (RawConfig, _) = ados_config::yaml_reporting(&text, "mavlink");
+        (raw.mavlink, error)
     }
 
     /// The first enabled WebSocket endpoint port, if any (the proxy bind port).
