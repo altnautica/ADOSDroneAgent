@@ -35,7 +35,7 @@ use ados_protocol::frame::PLUGIN_MAX_FRAME;
 use ados_protocol::ipc::{connect_with_retry, read_length_prefixed};
 
 use crate::atlas_bearer::CloudBearer;
-use crate::config::CloudConfig;
+use crate::config::{atlas_compute_addr, CloudConfig};
 use crate::mqtt::transport::{RumqttcTransport, TransportConfig};
 use crate::mqtt::WS_PATH;
 use crate::pairing::PairingState;
@@ -375,16 +375,26 @@ async fn build_ladder(
     let mut bearers: Vec<Box<dyn AtlasBearer>> = Vec::new();
 
     // ── Direct LAN (first-class): a resolved compute node's job-API URL ──
-    let compute_node_id = match ados_compute::mdns::resolve_compute(RESOLVE_TIMEOUT).await {
-        Some(node) => {
-            let base = format!("http://{}:{}", node.host, node.job_api_port);
-            tracing::info!(base = %base, node = %node.device_id, "atlas forwarder resolved compute node");
-            bearers.push(Box::new(LanHttpBearer::new(base)));
-            Some(node.device_id)
-        }
-        None => {
-            tracing::debug!("atlas forwarder: no compute node on mDNS yet");
-            None
+    // A static compute-node address (config `atlas.compute_node_addr` or the
+    // `ADOS_ATLAS_COMPUTE_ADDR` env) wins over mDNS, for segmented networks
+    // where multicast is not forwarded to the node. It carries `host:port`.
+    let compute_node_id = if let Some(addr) = atlas_compute_addr(config) {
+        let base = format!("http://{addr}");
+        tracing::info!(base = %base, "atlas forwarder using the static compute node address");
+        bearers.push(Box::new(LanHttpBearer::new(base)));
+        Some(addr)
+    } else {
+        match ados_compute::mdns::resolve_compute(RESOLVE_TIMEOUT).await {
+            Some(node) => {
+                let base = format!("http://{}:{}", node.host, node.job_api_port);
+                tracing::info!(base = %base, node = %node.device_id, "atlas forwarder resolved compute node");
+                bearers.push(Box::new(LanHttpBearer::new(base)));
+                Some(node.device_id)
+            }
+            None => {
+                tracing::debug!("atlas forwarder: no compute node on mDNS yet");
+                None
+            }
         }
     };
 

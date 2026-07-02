@@ -215,6 +215,13 @@ pub struct AtlasSection {
     /// `atlas.enabled` key the capture service reads.
     #[serde(default)]
     pub enabled: bool,
+    /// A static compute-node address (`host:port`) to forward to when mDNS
+    /// discovery is not available (a segmented / bridged network where multicast
+    /// does not cross to the compute node). When set, the forwarder builds the
+    /// direct-LAN bearer straight from it instead of browsing mDNS. Overridable
+    /// per-run via the `ADOS_ATLAS_COMPUTE_ADDR` env var.
+    #[serde(default)]
+    pub compute_node_addr: Option<String>,
 }
 
 /// The slice of the agent config the cloud relay reads. Every field defaults so
@@ -245,6 +252,26 @@ fn atlas_env_override() -> Option<bool> {
             "1" | "true" | "yes" | "on"
         )
     })
+}
+
+/// The static compute-node address (`host:port`) to forward Atlas events to when
+/// mDNS discovery cannot reach the node: the `ADOS_ATLAS_COMPUTE_ADDR` env var
+/// wins, else the `atlas.compute_node_addr` config field. Whitespace / empty is
+/// treated as unset (fall back to mDNS).
+pub fn atlas_compute_addr(config: &CloudConfig) -> Option<String> {
+    if let Ok(v) = std::env::var("ADOS_ATLAS_COMPUTE_ADDR") {
+        let t = v.trim();
+        if !t.is_empty() {
+            return Some(t.to_string());
+        }
+    }
+    config
+        .atlas
+        .compute_node_addr
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 impl CloudConfig {
@@ -439,6 +466,36 @@ server:
         match prev {
             Some(v) => std::env::set_var("ADOS_ATLAS_ENABLED", v),
             None => std::env::remove_var("ADOS_ATLAS_ENABLED"),
+        }
+    }
+
+    #[test]
+    fn atlas_compute_addr_prefers_env_then_config() {
+        // The env var is process-global; guard + restore it in one serial test.
+        let prev = std::env::var("ADOS_ATLAS_COMPUTE_ADDR").ok();
+        std::env::remove_var("ADOS_ATLAS_COMPUTE_ADDR");
+
+        let mut cfg = CloudConfig::default();
+        assert_eq!(atlas_compute_addr(&cfg), None);
+
+        // A whitespace-only config value is treated as unset.
+        cfg.atlas.compute_node_addr = Some("   ".to_string());
+        assert_eq!(atlas_compute_addr(&cfg), None);
+
+        // The config field is used when set.
+        cfg.atlas.compute_node_addr = Some("10.0.0.9:8092".to_string());
+        assert_eq!(atlas_compute_addr(&cfg), Some("10.0.0.9:8092".to_string()));
+
+        // The env var wins over the config field.
+        std::env::set_var("ADOS_ATLAS_COMPUTE_ADDR", "192.168.1.5:8092");
+        assert_eq!(
+            atlas_compute_addr(&cfg),
+            Some("192.168.1.5:8092".to_string())
+        );
+
+        match prev {
+            Some(v) => std::env::set_var("ADOS_ATLAS_COMPUTE_ADDR", v),
+            None => std::env::remove_var("ADOS_ATLAS_COMPUTE_ADDR"),
         }
     }
 
