@@ -20,6 +20,13 @@ use std::time::Duration;
 
 #[cfg(target_os = "linux")]
 pub(super) const SIDECAR_PATH: &str = "/run/ados/camera-usb-recovery.json";
+/// Schema version of the `camera-usb-recovery.json` sidecar. Bump on an
+/// incompatible field-set change; a reader compares it best-effort via
+/// `ados_protocol::sidecar::check_sidecar_version`. Kept in step with the
+/// registry in `contracts.toml`. Gated to the platforms that build the writer
+/// (Linux) or the version test.
+#[cfg(any(target_os = "linux", test))]
+pub(super) const CAMERA_USB_RECOVERY_SIDECAR_VERSION: u16 = 1;
 #[cfg(target_os = "linux")]
 const CAMERA_STATE_PATH: &str = "/run/ados/camera-state.json";
 #[cfg(target_os = "linux")]
@@ -117,6 +124,14 @@ async fn sysfs_write(path: &str, val: &str) -> std::io::Result<()> {
 pub(super) async fn read_camera_signals() -> Option<CameraSignals> {
     let txt = tokio::fs::read_to_string(CAMERA_STATE_PATH).await.ok()?;
     let v: serde_json::Value = serde_json::from_str(&txt).ok()?;
+    // Best-effort schema-drift signal: warn (never reject) when the camera-state
+    // sidecar was written by an agent with a different schema version. The
+    // writer const lives in the `ados-video` crate, so compare against the shared
+    // registry (the writer pins its const to the same value).
+    let got = v.get("version").and_then(|x| x.as_u64()).unwrap_or(0) as u16;
+    if let Some(ours) = ados_protocol::contracts::sidecar_version("camera-state") {
+        ados_protocol::sidecar::check_sidecar_version("camera-state", got, ours);
+    }
     let state = v.get("state")?.as_str()?.to_string();
     let primary_path = v
         .get("primary_path")
@@ -350,6 +365,16 @@ pub(super) fn write_json_atomic<T: serde::Serialize>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn camera_usb_recovery_sidecar_version_matches_registry() {
+        // The per-file const and the sidecar registry are the two sources of
+        // truth for this sidecar's schema version; a drift is caught here.
+        assert_eq!(
+            CAMERA_USB_RECOVERY_SIDECAR_VERSION,
+            ados_protocol::contracts::sidecar_version("camera-usb-recovery").unwrap()
+        );
+    }
 
     #[test]
     fn name_ancestors_synthesizes_from_bind_id() {

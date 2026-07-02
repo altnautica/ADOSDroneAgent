@@ -9,6 +9,12 @@ use serde::Serialize;
 
 use crate::paths::MESH_STATE_JSON;
 
+/// Schema version of the `mesh-state.json` sidecar. Bump on an incompatible
+/// field-set change; a reader compares it best-effort via
+/// `ados_protocol::sidecar::check_sidecar_version` and reads anyway on a
+/// mismatch. Kept in step with the registry in `contracts.toml`.
+pub const MESH_STATE_SIDECAR_VERSION: u16 = 1;
+
 /// One batman-adv neighbor (a row of `batctl n -H`).
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct MeshNeighbor {
@@ -31,6 +37,9 @@ pub struct MeshGateway {
 /// The live mesh snapshot the poll loop maintains and persists.
 #[derive(Debug, Clone, Serialize)]
 pub struct MeshSnapshot {
+    /// Sidecar schema version (best-effort drift signal for readers).
+    #[serde(default)]
+    pub version: u16,
     pub role: String,
     pub bat_iface: String,
     pub mesh_iface: String,
@@ -50,6 +59,7 @@ impl MeshSnapshot {
     /// bringup (matching the Python constructor defaults).
     pub fn new(role: &str, bat_iface: &str, carrier: &str) -> Self {
         Self {
+            version: MESH_STATE_SIDECAR_VERSION,
             role: role.to_string(),
             bat_iface: bat_iface.to_string(),
             mesh_iface: String::new(),
@@ -94,6 +104,16 @@ impl MeshSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mesh_state_sidecar_version_matches_registry() {
+        // The per-file const and the sidecar registry are the two sources of
+        // truth for this sidecar's schema version; a drift is caught here.
+        assert_eq!(
+            MESH_STATE_SIDECAR_VERSION,
+            ados_protocol::contracts::sidecar_version("mesh-state").unwrap()
+        );
+    }
 
     #[test]
     fn snapshot_json_shape_matches_python_keys() {

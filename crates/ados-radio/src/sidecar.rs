@@ -217,6 +217,9 @@ pub(crate) fn build_stats_value(
     // numbers agree.
     let measured = link.packets_received > 0;
     let v = json!({
+        // Sidecar schema version (best-effort drift signal for readers). Shared
+        // with the ground-station writer via the one const so both agree.
+        "version": ados_radio::paths::WFB_STATS_SIDECAR_VERSION,
         "state": state,
         // The state-machine state, surfaced under its own key so the panel can
         // show the recovery state directly. Mirrors `state` (the same wire

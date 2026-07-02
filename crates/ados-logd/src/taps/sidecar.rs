@@ -447,6 +447,16 @@ fn sample_fresh(
         Ok(v) => v,
         Err(_) => return None,
     };
+    // Best-effort schema-drift signal (never reject): if this sidecar is
+    // registered, warn when its on-disk `version` differs from the version this
+    // build expects, then sample anyway. Keyed on the shared registry (the file
+    // name minus `.json` is the sidecar id), so an unregistered snapshot with no
+    // version is silently skipped.
+    let sidecar_id = spec.name.strip_suffix(".json").unwrap_or(spec.name);
+    if let Some(ours) = ados_protocol::contracts::sidecar_version(sidecar_id) {
+        let got = json.get("version").and_then(Value::as_u64).unwrap_or(0) as u16;
+        ados_protocol::sidecar::check_sidecar_version(sidecar_id, got, ours);
+    }
     for s in spec.scalars {
         if let Some(value) = lookup_number(&json, s.path) {
             let mut frame = TelemetryFrame::new(now_us, s.key, value);

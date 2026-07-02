@@ -68,6 +68,14 @@ const DEFAULT_REPAIR_WINDOW_S: u64 = 600;
 #[cfg(target_os = "linux")]
 const SIDECAR_PATH: &str = "/run/ados/mgmt-link.json";
 
+/// Schema version of the `mgmt-link.json` sidecar. Bump on an incompatible
+/// field-set change; a reader compares it best-effort via
+/// `ados_protocol::sidecar::check_sidecar_version`. Kept in step with the
+/// registry in `contracts.toml`. Gated to the platforms that build the writer
+/// (Linux) or the version test.
+#[cfg(any(target_os = "linux", test))]
+const MGMT_LINK_SIDECAR_VERSION: u16 = 1;
+
 /// Configuration, read from `network.management_link_guardian`. Default-ON so a
 /// fresh board keeps its management link out of the box; an operator can disable
 /// it cleanly if a bespoke network setup ever conflicts.
@@ -421,6 +429,7 @@ impl MgmtLinkGuardian {
         repairs_in_window: u32,
     ) {
         let snap = MgmtLinkSidecar {
+            version: MGMT_LINK_SIDECAR_VERSION,
             state: ladder::verdict_str(verdict).to_string(),
             iface: managed.iface.clone(),
             transport: managed.transport.as_str().to_string(),
@@ -445,6 +454,8 @@ impl MgmtLinkGuardian {
 #[derive(serde::Serialize)]
 #[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
 struct MgmtLinkSidecar {
+    /// Sidecar schema version (best-effort drift signal for readers).
+    version: u16,
     state: String,
     iface: String,
     transport: String,
@@ -537,6 +548,16 @@ async fn run_output(cmd: &str, args: &[&str]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mgmt_link_sidecar_version_matches_registry() {
+        // The per-file const and the sidecar registry are the two sources of
+        // truth for this sidecar's schema version; a drift is caught here.
+        assert_eq!(
+            MGMT_LINK_SIDECAR_VERSION,
+            ados_protocol::contracts::sidecar_version("mgmt-link").unwrap()
+        );
+    }
 
     #[test]
     fn absent_section_is_enabled_with_defaults() {
@@ -654,6 +675,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mgmt-link.json");
         let snap = MgmtLinkSidecar {
+            version: MGMT_LINK_SIDECAR_VERSION,
             state: "degraded".to_string(),
             iface: "eth0".to_string(),
             transport: "ethernet".to_string(),

@@ -68,6 +68,11 @@ pub const PLUGIN_ATLAS_MESH_TOPIC: &str = "plugin.atlas.mesh";
 /// private handoff, not a plugin.
 pub const ATLAS_FORWARD_SIDECAR: &str = "/run/ados/atlas-forward.json";
 
+/// Schema version stamped on the [`ATLAS_FORWARD_SIDECAR`] file by its writer and
+/// checked (best-effort) by its reader. Held equal to the `atlas-forward` entry in
+/// the sidecar registry (see [`crate::contracts`]); a drift warns and reads on.
+pub const ATLAS_FORWARD_SIDECAR_VERSION: u16 = 1;
+
 /// The forwarder → capture-service handoff payload (see [`ATLAS_FORWARD_SIDECAR`]).
 /// The bearer is already in the GCS vocabulary (`direct-lan` / `wfb-relay` /
 /// `cloud`) so the capture service folds it verbatim into the sidecar the GCS
@@ -76,6 +81,11 @@ pub const ATLAS_FORWARD_SIDECAR: &str = "/run/ados/atlas-forward.json";
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AtlasForwardStatus {
+    /// Sidecar schema version, stamped [`ATLAS_FORWARD_SIDECAR_VERSION`] on write.
+    /// An older writer emitted no field, so a reader defaults it to `0` and warns
+    /// (best-effort, never rejects) on a drift.
+    #[serde(default)]
+    pub version: u16,
     /// The resolved compute node's device id (the mDNS `deviceId`), or `None`
     /// while no compute node is on the LAN.
     #[serde(default)]
@@ -696,6 +706,25 @@ mod tests {
             ATLAS_ENVELOPE_VERSION,
             crate::contracts::contract_version("atlas.envelope").unwrap()
         );
+    }
+
+    #[test]
+    fn atlas_forward_sidecar_version_matches_registry() {
+        // The per-file sidecar constant and the sidecar registry are the two
+        // sources of truth for the atlas-forward version; catch a drift here.
+        assert_eq!(
+            ATLAS_FORWARD_SIDECAR_VERSION,
+            crate::contracts::sidecar_version("atlas-forward").unwrap()
+        );
+    }
+
+    #[test]
+    fn atlas_forward_status_defaults_version_to_zero_for_an_old_file() {
+        // A file written before the field existed reads back as version 0 (the
+        // serde default), so the reader warns best-effort rather than failing.
+        let old: AtlasForwardStatus = serde_json::from_str(r#"{"generatedAtMs":5}"#).unwrap();
+        assert_eq!(old.version, 0);
+        assert_eq!(old.generated_at_ms, 5);
     }
 
     #[test]

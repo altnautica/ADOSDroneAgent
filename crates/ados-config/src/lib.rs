@@ -122,13 +122,18 @@ fn run_dir() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("/run/ados"))
 }
 
+/// The schema version this build writes for the config-status sidecar. The
+/// reader (the cloud heartbeat glob) checks it against this value. Must match the
+/// `config-status` entry in the shared contract registry.
+pub const CONFIG_STATUS_SIDECAR_VERSION: u16 = 1;
+
 /// Publish this service's config-status sidecar so a remote surface (the fleet
 /// Health view) can show a malformed-config fault instead of it hiding behind a
 /// silently-defaulted service. Writes `<run-dir>/config-status-<service>.json`
-/// (run dir per [`run_dir`]) with `{ "service", "error", "generated_at_ms" }`,
-/// where `error` is the exact parser message (from the `*_reporting` helpers) or
-/// `null` when the config is valid, and `generated_at_ms` is the epoch-ms write
-/// time.
+/// (run dir per [`run_dir`]) with `{ "version", "service", "error",
+/// "generated_at_ms" }`, where `error` is the exact parser message (from the
+/// `*_reporting` helpers) or `null` when the config is valid, and
+/// `generated_at_ms` is the epoch-ms write time.
 ///
 /// The write is atomic (temp file + rename) and TOTALLY best-effort: any IO or
 /// serialize failure is logged at most and swallowed, so a read-only or missing
@@ -155,6 +160,7 @@ fn try_write_config_status(service: &str, error: Option<&str>) -> std::io::Resul
         .unwrap_or(0);
 
     let body = serde_json::json!({
+        "version": CONFIG_STATUS_SIDECAR_VERSION,
         "service": service,
         "error": error,
         "generated_at_ms": generated_at_ms,
@@ -268,6 +274,11 @@ mod tests {
 
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert_eq!(
+            v["version"].as_u64(),
+            Some(CONFIG_STATUS_SIDECAR_VERSION as u64),
+            "the writer stamps the sidecar schema version"
+        );
         assert_eq!(v["service"], "video");
         assert_eq!(v["error"], msg);
         assert!(

@@ -21,16 +21,24 @@ use serde_json::{json, Value};
 
 use crate::pic::{PicState, PicStateSnapshot};
 
+/// The schema version this build reads and writes for the PIC-state sidecar. Sits
+/// alongside the arbiter fields as an additive `version` key. Must match the
+/// `pic-state` entry in the shared contract registry (asserted by a test).
+pub const PIC_STATE_SIDECAR_VERSION: u16 = 1;
+
 /// Render a [`PicStateSnapshot`] as the sidecar/`get_state` JSON value. The field
 /// set + order match `PicArbiter::get_state` (the IPC `state_to_json`, minus the
 /// transport `ok` flag) and the FastAPI `/pic` read: `state` as the lowercase
-/// wire string, then the holder / since / counter / primary-gamepad fields.
+/// wire string, then the holder / since / counter / primary-gamepad fields. A
+/// leading `version` key carries the sidecar schema version additively; readers
+/// that project specific fields ignore it.
 pub fn snapshot_to_json(snapshot: &PicStateSnapshot) -> Value {
     let state = match snapshot.state {
         PicState::Unclaimed => "unclaimed",
         PicState::Claimed => "claimed",
     };
     json!({
+        "version": PIC_STATE_SIDECAR_VERSION,
         "state": state,
         "claimed_by": snapshot.claimed_by,
         "claimed_since": snapshot.claimed_since,
@@ -53,7 +61,12 @@ pub fn write_snapshot(path: &Path, snapshot: &PicStateSnapshot) -> std::io::Resu
 /// projects directly (no struct round-trip needed by the consumers).
 pub fn read_snapshot(path: &Path) -> Option<Value> {
     let text = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&text).ok()
+    let value: Value = serde_json::from_str(&text).ok()?;
+    // Best-effort schema-drift signal: an older agent's file has no `version`
+    // key and reads back as 0, which warns but is still used. Never a reject.
+    let got = value.get("version").and_then(Value::as_u64).unwrap_or(0) as u16;
+    ados_protocol::sidecar::check_sidecar_version("pic-state", got, PIC_STATE_SIDECAR_VERSION);
+    Some(value)
 }
 
 /// Atomic tmp-sibling write, disambiguated by pid so two writers in the same
@@ -106,12 +119,21 @@ mod tests {
         assert_eq!(
             v,
             json!({
+                "version": PIC_STATE_SIDECAR_VERSION,
                 "state": "unclaimed",
                 "claimed_by": null,
                 "claimed_since": null,
                 "claim_counter": 0,
                 "primary_gamepad_id": null,
             })
+        );
+    }
+
+    #[test]
+    fn version_matches_registry() {
+        assert_eq!(
+            PIC_STATE_SIDECAR_VERSION,
+            ados_protocol::contracts::sidecar_version("pic-state").unwrap()
         );
     }
 

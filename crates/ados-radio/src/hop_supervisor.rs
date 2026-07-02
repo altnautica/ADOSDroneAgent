@@ -655,6 +655,9 @@ async fn write_hop_supervisor_json(
             serde_json::to_value(s.history()).unwrap_or_else(|_| serde_json::Value::Array(vec![]));
         let enabled: Vec<u8> = enabled_channels.iter().copied().collect();
         json!({
+            // Sidecar schema version (best-effort drift signal for readers).
+            // Shared with the ground-station hop persister via the one const.
+            "version": ados_radio::paths::HOP_SUPERVISOR_SIDECAR_VERSION,
             // `enabled` is the honest periodic-execution state, not the bare
             // `auto_hop_enabled`: a suppressed periodic path reports false plus a
             // reason. The reactive hop + the GS-coordinated follow run regardless.

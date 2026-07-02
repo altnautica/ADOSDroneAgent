@@ -28,6 +28,12 @@ use crate::{ComputeError, ComputeJobKind, ComputeJobState, JobRecord, JobStore};
 /// [`compute_jobs_path`] so `ADOS_RUN_DIR` redirects it on a dev / macOS run.
 pub const COMPUTE_JOBS_SIDECAR: &str = "/run/ados/compute-jobs.json";
 
+/// Schema version stamped on the [`COMPUTE_JOBS_SIDECAR`] file by its writer and
+/// checked (best-effort) by the cloud relay reader. Held equal to the
+/// `compute-jobs` entry in the sidecar registry (see [`ados_protocol::contracts`]);
+/// a drift warns and reads on.
+pub const COMPUTE_JOBS_SIDECAR_VERSION: u16 = 1;
+
 /// The sidecar filename, joined onto the resolved run dir.
 const COMPUTE_JOBS_FILE: &str = "compute-jobs.json";
 
@@ -76,6 +82,11 @@ pub struct AtlasJobEntry {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AtlasJobsSidecar {
+    /// Sidecar schema version, stamped [`COMPUTE_JOBS_SIDECAR_VERSION`] on write.
+    /// An older writer emitted no field, so a reader defaults it to `0` and warns
+    /// (best-effort, never rejects) on a drift.
+    #[serde(default)]
+    pub version: u16,
     pub jobs: Vec<AtlasJobEntry>,
     pub generated_at_ms: i64,
 }
@@ -200,6 +211,7 @@ pub fn build_atlas_jobs_sidecar(
     // Deterministic order (a stable POST order + deterministic tests).
     jobs.sort_by(|a, b| a.session_id.cmp(&b.session_id));
     Ok(AtlasJobsSidecar {
+        version: COMPUTE_JOBS_SIDECAR_VERSION,
         jobs,
         generated_at_ms: now_ms,
     })
@@ -317,6 +329,7 @@ mod tests {
         assert_eq!(job["status"], "running");
         assert_eq!(job["inputBag"], "ds-s1");
         assert_eq!(v["generatedAtMs"], 1);
+        assert_eq!(v["version"], COMPUTE_JOBS_SIDECAR_VERSION);
         // No output yet → no outputUrl key; backend falls back to the requested hint.
         assert!(job.get("outputUrl").is_none());
         assert_eq!(job["metadata"]["backend"], "brush");
@@ -404,5 +417,15 @@ mod tests {
         unsafe {
             std::env::remove_var("ADOS_RUN_DIR");
         }
+    }
+
+    #[test]
+    fn version_matches_registry() {
+        // The per-file constant and the sidecar registry are the two sources of
+        // truth for the compute-jobs version; catch a drift between them here.
+        assert_eq!(
+            COMPUTE_JOBS_SIDECAR_VERSION,
+            ados_protocol::contracts::sidecar_version("compute-jobs").unwrap()
+        );
     }
 }

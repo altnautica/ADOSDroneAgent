@@ -21,6 +21,13 @@ use crate::{ComputeGpu, ComputeRole};
 /// redirects it on a dev / macOS run.
 pub const COMPUTE_HEARTBEAT_SIDECAR: &str = "/run/ados/compute-heartbeat.json";
 
+/// Schema version stamped on the [`COMPUTE_HEARTBEAT_SIDECAR`] file by its writer
+/// and checked (best-effort) by its readers (the cloud relay fold + the local
+/// `/api/compute/status` route). Held equal to the `compute-heartbeat` entry in
+/// the sidecar registry (see [`ados_protocol::contracts`]); a drift warns, never
+/// rejects.
+pub const COMPUTE_HEARTBEAT_SIDECAR_VERSION: u16 = 1;
+
 /// The heartbeat sidecar filename, joined onto the resolved run dir.
 const COMPUTE_HEARTBEAT_FILE: &str = "compute-heartbeat.json";
 
@@ -50,6 +57,11 @@ pub struct SlaveEntry {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ComputeHeartbeatSidecar {
+    /// Sidecar schema version, stamped [`COMPUTE_HEARTBEAT_SIDECAR_VERSION`] on
+    /// write so a reader can detect a producer/reader drift. NOT a heartbeat
+    /// field — a consumer folding the sidecar onto the cloud heartbeat never
+    /// forwards it.
+    pub version: u16,
     /// `ComputeRole` serializes lowercase ("master" / "slave").
     pub compute_role: ComputeRole,
     pub compute_cluster_master_id: String,
@@ -74,6 +86,7 @@ impl ComputeHeartbeatSidecar {
     /// age-gate the file.
     pub fn from_heartbeat(hb: &ComputeHeartbeat, gpu: ComputeGpu, now_ms: i64) -> Self {
         Self {
+            version: COMPUTE_HEARTBEAT_SIDECAR_VERSION,
             generated_at_ms: now_ms,
             compute_role: hb.role,
             compute_cluster_master_id: hb.cluster.master_id.clone(),
@@ -182,6 +195,7 @@ mod tests {
         assert_eq!(v["computeWorkersIdle"], 4);
         assert_eq!(v["computeClusterAggregateWorkersIdle"], 6);
         assert_eq!(v["generatedAtMs"], 1700);
+        assert_eq!(v["version"], COMPUTE_HEARTBEAT_SIDECAR_VERSION);
         let slave = &v["computeClusterSlaves"][0];
         assert_eq!(slave["nodeId"], "node-slave-1");
         assert_eq!(slave["accelerators"][0], "cuda:0");
@@ -234,5 +248,15 @@ mod tests {
         // No leftover .tmp sibling.
         assert!(!dir.join("compute-heartbeat.json.tmp").exists());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn version_matches_registry() {
+        // The per-file constant and the sidecar registry are the two sources of
+        // truth for the compute-heartbeat version; catch a drift between them here.
+        assert_eq!(
+            COMPUTE_HEARTBEAT_SIDECAR_VERSION,
+            ados_protocol::contracts::sidecar_version("compute-heartbeat").unwrap()
+        );
     }
 }

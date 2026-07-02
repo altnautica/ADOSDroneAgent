@@ -16,6 +16,12 @@ use serde::Serialize;
 /// Canonical sidecar path (`core/paths.py` `CAMERA_STATE_JSON`).
 pub const CAMERA_STATE_JSON: &str = "/run/ados/camera-state.json";
 
+/// Schema version of the `camera-state.json` sidecar. Bump on an incompatible
+/// field-set change; a reader compares it best-effort via
+/// `ados_protocol::sidecar::check_sidecar_version` and reads anyway on a
+/// mismatch. Kept in step with the registry in `contracts.toml`.
+pub const CAMERA_STATE_SIDECAR_VERSION: u16 = 1;
+
 /// Discovery state. `error` is set by the caller on a discovery failure;
 /// the ready-gate only ever produces `ready` or `missing`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -30,6 +36,9 @@ pub enum CameraState {
 /// `_persist_camera_state` dict).
 #[derive(Debug, Clone, Serialize)]
 pub struct CameraStateSnapshot {
+    /// Sidecar schema version (best-effort drift signal for readers).
+    #[serde(default)]
+    pub version: u16,
     pub state: CameraState,
     pub primary_path: Option<String>,
     pub primary_name: Option<String>,
@@ -51,6 +60,7 @@ impl CameraStateSnapshot {
             _ => (CameraState::Missing, None, None),
         };
         Self {
+            version: CAMERA_STATE_SIDECAR_VERSION,
             state,
             primary_path,
             primary_name,
@@ -62,6 +72,7 @@ impl CameraStateSnapshot {
     /// A discovery-failure snapshot (`state="error"`, no primary).
     pub fn error(total_cameras: u32) -> Self {
         Self {
+            version: CAMERA_STATE_SIDECAR_VERSION,
             state: CameraState::Error,
             primary_path: None,
             primary_name: None,
@@ -109,6 +120,16 @@ fn now_unix() -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn camera_state_sidecar_version_matches_registry() {
+        // The per-file const and the sidecar registry are the two sources of
+        // truth for this sidecar's schema version; a drift is caught here.
+        assert_eq!(
+            CAMERA_STATE_SIDECAR_VERSION,
+            ados_protocol::contracts::sidecar_version("camera-state").unwrap()
+        );
+    }
 
     #[test]
     fn ready_gate_requires_a_primary_and_a_live_camera() {

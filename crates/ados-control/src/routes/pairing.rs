@@ -322,6 +322,14 @@ fn read_bind_state(paths: &PairingPaths) -> Value {
     let Some(obj) = sess.as_object() else {
         return Value::Null;
     };
+    // Best-effort schema-drift signal (never reject): warn when the sentinel was
+    // written by an agent with a different schema version, then read anyway. The
+    // writer const lives in the supervisor crate, so compare against the shared
+    // registry.
+    let got = obj.get("version").and_then(Value::as_u64).unwrap_or(0) as u16;
+    if let Some(ours) = ados_protocol::contracts::sidecar_version("bind-state") {
+        ados_protocol::sidecar::check_sidecar_version("bind-state", got, ours);
+    }
     // The FastAPI route only folds when `sess.get("state")` is truthy.
     let state_truthy = obj
         .get("state")

@@ -70,6 +70,13 @@ fn read_compute_status(path: &std::path::Path, now: SystemTime) -> Response {
     let Some(obj) = doc.as_object_mut() else {
         return not_found();
     };
+    // Best-effort drift signal: warn (never reject) on a producer/reader version
+    // mismatch, then serve the sidecar anyway. The registry is the source of truth
+    // for the expected version (this crate does not depend on the compute crate
+    // that owns the writer const).
+    let version = obj.get("version").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+    let expected = ados_protocol::contracts::sidecar_version("compute-heartbeat").unwrap_or(0);
+    ados_protocol::sidecar::check_sidecar_version("compute-heartbeat", version, expected);
     // Guarantee the host gpu block is present so the GCS compute card can always
     // read `gpu.*` (all-null when the producing node supplied none). The macOS
     // workstation daemon writes a populated block; this only fills an absent one.

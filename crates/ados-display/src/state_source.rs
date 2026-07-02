@@ -165,6 +165,16 @@ impl StateSource {
         let status = self.get_json("/api/v1/ground-station/status");
         let setup = self.get_json("/api/v1/setup/status");
         let hop = read_run_json(&self.hop_path);
+        // Best-effort schema-drift signal (never reject): warn when the
+        // hop-supervisor sidecar was written by an agent with a different schema
+        // version, then render anyway. The writer const lives in the radio crate,
+        // so compare against the shared registry.
+        if let Some(v) = hop.as_ref() {
+            let got = v.get("version").and_then(Value::as_u64).unwrap_or(0) as u16;
+            if let Some(ours) = ados_protocol::contracts::sidecar_version("hop-supervisor") {
+                ados_protocol::sidecar::check_sidecar_version("hop-supervisor", got, ours);
+            }
+        }
         let health = read_run_json(&self.health_path);
         self.compose(
             status.as_ref(),

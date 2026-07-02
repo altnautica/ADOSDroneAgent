@@ -405,6 +405,8 @@ impl CameraUsbRecovery {
     fn write_sidecar(&self, attempts: u32, max_attempts: u32) {
         #[derive(serde::Serialize)]
         struct Snap<'a> {
+            /// Sidecar schema version (best-effort drift signal for readers).
+            version: u16,
             camera_usb_recovery_state: &'a str,
             case: &'a str,
             attempts: u32,
@@ -429,6 +431,7 @@ impl CameraUsbRecovery {
         // recovery is in flight, so the drop can be diagnosed as contention.
         let contention_active = self.power_contention && self.state != "idle";
         let snap = Snap {
+            version: os::CAMERA_USB_RECOVERY_SIDECAR_VERSION,
             camera_usb_recovery_state: &self.state,
             case: &self.case,
             attempts,

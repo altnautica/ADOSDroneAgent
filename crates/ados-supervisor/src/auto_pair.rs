@@ -47,6 +47,12 @@ pub const MAX_LOCAL_BIND_ATTEMPTS: u32 = 10;
 /// validates the value, so only the key + value strings are load-bearing.
 const FAILOVER_STATE_PATH: &str = "/run/ados/wfb_failover.json";
 
+/// Schema version of the `wfb_failover.json` sidecar. Bump on an incompatible
+/// field-set change; a reader compares it best-effort via
+/// `ados_protocol::sidecar::check_sidecar_version`. Kept in step with the
+/// registry in `contracts.toml`.
+const WFB_FAILOVER_SIDECAR_VERSION: u16 = 1;
+
 /// Whether auto-pair should attempt a bind this tick. Pure for testing.
 pub fn should_attempt(armed: bool, already_paired: bool) -> bool {
     armed && !already_paired
@@ -142,9 +148,14 @@ impl FailoverWriter {
         if self.last == Some(state) {
             return false;
         }
-        // Two-space indent + no trailing newline keeps the body byte-identical
-        // to the previous writer's output for the same value.
-        let body = format!("{{\n  \"state\": \"{}\"\n}}", state.as_str());
+        // Two-space indent + no trailing newline, matching the prior writer's
+        // shape. The additive `version` field is a best-effort schema-drift
+        // signal for readers; `state` stays the load-bearing value.
+        let body = format!(
+            "{{\n  \"version\": {},\n  \"state\": \"{}\"\n}}",
+            WFB_FAILOVER_SIDECAR_VERSION,
+            state.as_str()
+        );
         match crate::bind::keys::atomic_write(&self.path, body.as_bytes(), 0o644) {
             Ok(()) => {
                 self.last = Some(state);
@@ -354,6 +365,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn wfb_failover_sidecar_version_matches_registry() {
+        // The per-file const and the sidecar registry are the two sources of
+        // truth for this sidecar's schema version; a drift is caught here.
+        assert_eq!(
+            WFB_FAILOVER_SIDECAR_VERSION,
+            ados_protocol::contracts::sidecar_version("wfb_failover").unwrap()
+        );
+    }
+
+    #[test]
     fn should_attempt_gate() {
         assert!(should_attempt(true, false));
         assert!(!should_attempt(false, false)); // disarmed
@@ -559,10 +580,18 @@ mod tests {
         assert!(w.sync(FailoverState::Local));
         assert!(path.is_file());
         let body = std::fs::read_to_string(&path).unwrap();
-        // Body shape the API reader parses: {"state": "local"} (two-space indent).
-        assert_eq!(body, "{\n  \"state\": \"local\"\n}");
+        // Body shape the API reader parses: the additive schema `version` plus the
+        // load-bearing `state` (two-space indent).
+        assert_eq!(
+            body,
+            format!(
+                "{{\n  \"version\": {},\n  \"state\": \"local\"\n}}",
+                WFB_FAILOVER_SIDECAR_VERSION
+            )
+        );
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(parsed["state"], "local");
+        assert_eq!(parsed["version"], WFB_FAILOVER_SIDECAR_VERSION);
         // Mode is 0o644 so the API process (different user context) can read it.
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o644);
@@ -573,7 +602,13 @@ mod tests {
         // Transition to cloud_relay → write.
         assert!(w.sync(FailoverState::CloudRelay));
         let body = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(body, "{\n  \"state\": \"cloud_relay\"\n}");
+        assert_eq!(
+            body,
+            format!(
+                "{{\n  \"version\": {},\n  \"state\": \"cloud_relay\"\n}}",
+                WFB_FAILOVER_SIDECAR_VERSION
+            )
+        );
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(parsed["state"], "cloud_relay");
 

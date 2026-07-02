@@ -488,6 +488,14 @@ async fn read_wfb_signals() -> Option<WfbSignals> {
     }
     let txt = tokio::fs::read_to_string(WFB_STATS_PATH).await.ok()?;
     let v: serde_json::Value = serde_json::from_str(&txt).ok()?;
+    // Best-effort schema-drift signal: warn (never reject) when the wfb-stats
+    // sidecar was written by an agent with a different schema version. The writer
+    // const lives in the `ados-radio` crate (shared with the ground-station
+    // writer), so compare against the shared registry.
+    let got = v.get("version").and_then(|x| x.as_u64()).unwrap_or(0) as u16;
+    if let Some(ours) = ados_protocol::contracts::sidecar_version("wfb-stats") {
+        ados_protocol::sidecar::check_sidecar_version("wfb-stats", got, ours);
+    }
     let iface = v.get("interface")?.as_str()?.to_string();
     if iface.is_empty() {
         return None;

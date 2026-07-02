@@ -13,6 +13,11 @@ use crate::Level;
 /// on reboot, which is correct — a fresh boot drives no line until commanded).
 pub const GPIO_OUTPUT_PATH: &str = "/run/ados/gpio-output.json";
 
+/// The schema version this build reads and writes for the GPIO-output sidecar.
+/// Must match the `gpio-output` entry in the shared contract registry (asserted
+/// by a test).
+pub const GPIO_OUTPUT_SIDECAR_VERSION: u16 = 1;
+
 /// One driven line's reported state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LineState {
@@ -26,12 +31,29 @@ pub struct LineState {
 
 /// The full `gpio-output.json` payload: the set of lines the service is driving.
 /// An empty list means the service is up but has driven nothing yet (the
-/// safe-by-default state).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// safe-by-default state). The leading `version` carries the sidecar schema
+/// version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GpioOutputState {
+    /// The sidecar schema version. `#[serde(default)]` makes an older file that
+    /// predates the field read back as `0` (a drift signal) rather than fail.
+    #[serde(default)]
+    pub version: u16,
     /// The driven lines, in a stable order.
     #[serde(default)]
     pub lines: Vec<LineState>,
+}
+
+impl Default for GpioOutputState {
+    /// A fresh state stamps the current schema version so the empty
+    /// safe-by-default snapshot the service writes at startup is a v1 file, not a
+    /// version-0 one that would look stale to a reader.
+    fn default() -> Self {
+        Self {
+            version: GPIO_OUTPUT_SIDECAR_VERSION,
+            lines: Vec::new(),
+        }
+    }
 }
 
 impl GpioOutputState {
@@ -39,6 +61,7 @@ impl GpioOutputState {
     /// snapshot yields.
     pub fn from_snapshot(snapshot: &[(u32, u32, Level)]) -> Self {
         Self {
+            version: GPIO_OUTPUT_SIDECAR_VERSION,
             lines: snapshot
                 .iter()
                 .map(|(chip, pin, level)| LineState {
@@ -54,7 +77,15 @@ impl GpioOutputState {
     /// malformed; the caller then treats the service as having driven nothing.
     pub fn load(path: &Path) -> Option<GpioOutputState> {
         let text = std::fs::read_to_string(path).ok()?;
-        serde_json::from_str(&text).ok()
+        let state: GpioOutputState = serde_json::from_str(&text).ok()?;
+        // Best-effort schema-drift signal: an older file (version 0) warns but is
+        // still used. Never a reject.
+        ados_protocol::sidecar::check_sidecar_version(
+            "gpio-output",
+            state.version,
+            GPIO_OUTPUT_SIDECAR_VERSION,
+        );
+        Some(state)
     }
 
     /// Atomically persist the state to `path` (tmp sibling + fsync + rename),
@@ -154,5 +185,27 @@ mod tests {
     #[test]
     fn path_constant_is_under_the_run_dir() {
         assert_eq!(GPIO_OUTPUT_PATH, "/run/ados/gpio-output.json");
+    }
+
+    #[test]
+    fn written_state_stamps_the_schema_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gpio-output.json");
+        GpioOutputState::from_snapshot(&[(0, 17, Level::High)])
+            .save(&path)
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            v["version"].as_u64(),
+            Some(GPIO_OUTPUT_SIDECAR_VERSION as u64)
+        );
+    }
+
+    #[test]
+    fn version_matches_registry() {
+        assert_eq!(
+            GPIO_OUTPUT_SIDECAR_VERSION,
+            ados_protocol::contracts::sidecar_version("gpio-output").unwrap()
+        );
     }
 }

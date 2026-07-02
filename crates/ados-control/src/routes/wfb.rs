@@ -286,6 +286,14 @@ fn build_status_from_stats_file(cfg: &StatusConfig) -> Value {
         Err(_) => return finalize_base(base),
     };
 
+    // Best-effort schema-drift signal (never reject): warn when the sidecar was
+    // written by an agent with a different schema version, then read anyway. The
+    // writer const lives in the radio crate, so compare against the shared registry.
+    let got = payload.get("version").and_then(Value::as_u64).unwrap_or(0) as u16;
+    if let Some(ours) = ados_protocol::contracts::sidecar_version("wfb-stats") {
+        ados_protocol::sidecar::check_sidecar_version("wfb-stats", got, ours);
+    }
+
     let mut merged = base;
     for (k, v) in payload {
         merged.insert(k, v);
@@ -677,11 +685,18 @@ pub async fn get_failover_status(State(state): State<AppState>) -> Json<Value> {
     }
     let state_str = match std::fs::read_to_string(&path) {
         Ok(text) => match serde_json::from_str::<Value>(&text) {
-            Ok(Value::Object(map)) => map
-                .get("state")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .unwrap_or_else(|| "local".to_string()),
+            Ok(Value::Object(map)) => {
+                // Best-effort schema-drift signal (never reject): warn on a
+                // producer/reader version mismatch, then read anyway.
+                let got = map.get("version").and_then(Value::as_u64).unwrap_or(0) as u16;
+                if let Some(ours) = ados_protocol::contracts::sidecar_version("wfb_failover") {
+                    ados_protocol::sidecar::check_sidecar_version("wfb_failover", got, ours);
+                }
+                map.get("state")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| "local".to_string())
+            }
             // A well-formed-but-non-object body → "local", matching the Python
             // `data.get(...) if isinstance(data, dict) else "local"`.
             Ok(_) => "local".to_string(),

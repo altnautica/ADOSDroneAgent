@@ -21,11 +21,18 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ados_protocol::atlas::{
     AtlasForwardStatus, CaptureState, CaptureStatus, VioHealth, ATLAS_FORWARD_SIDECAR,
+    ATLAS_FORWARD_SIDECAR_VERSION,
 };
+use ados_protocol::sidecar::check_sidecar_version;
 use serde::Serialize;
 
 /// Where the Atlas capture slice is written.
 pub const ATLAS_STATE_SIDECAR: &str = "/run/ados/plugins/atlas-state.json";
+
+/// Schema version stamped on the [`ATLAS_STATE_SIDECAR`] file. Held equal to the
+/// `atlas-state` entry in the sidecar registry (see [`ados_protocol::contracts`]);
+/// a reader (the GCS Atlas plugin) uses it to detect a producer/reader drift.
+pub const ATLAS_STATE_SIDECAR_VERSION: u16 = 1;
 
 /// A forwarder handoff not re-written within this window is treated as absent, so
 /// a dead forwarder never keeps a stale compute node / bearer on the Stream card
@@ -39,6 +46,9 @@ const FORWARD_STALE: Duration = Duration::from_secs(15);
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AtlasStateSlice<'a> {
+    /// Sidecar schema version, stamped [`ATLAS_STATE_SIDECAR_VERSION`] on write so
+    /// a reader can detect a producer/reader drift.
+    version: u16,
     /// Local write time; the producer also mtime-gates the file, this is for the
     /// consumer's own freshness reasoning.
     generated_at_ms: i64,
@@ -85,7 +95,15 @@ fn read_fresh_forward_status(path: &Path, now: SystemTime) -> Option<AtlasForwar
         }
     }
     let text = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str::<AtlasForwardStatus>(&text).ok()
+    let status = serde_json::from_str::<AtlasForwardStatus>(&text).ok()?;
+    // Best-effort drift signal: warn (never reject) if the handoff was written by
+    // a differently-versioned forwarder, then fold it in anyway.
+    check_sidecar_version(
+        "atlas-forward",
+        status.version,
+        ATLAS_FORWARD_SIDECAR_VERSION,
+    );
+    Some(status)
 }
 
 /// Map the capture status to the slice and write the sidecar (atomic .tmp +
@@ -108,6 +126,7 @@ pub fn write_atlas_state_sidecar_to(
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
     let slice = AtlasStateSlice {
+        version: ATLAS_STATE_SIDECAR_VERSION,
         generated_at_ms: now_ms,
         state: &status.state,
         session_id: &status.session_id,
@@ -158,6 +177,7 @@ mod tests {
         assert_eq!(v["ingestRateHz"], 9.5);
         assert_eq!(v["cameraCount"], 3);
         assert_eq!(v["vioHealth"], "good");
+        assert_eq!(v["version"], ATLAS_STATE_SIDECAR_VERSION);
         assert!(v["generatedAtMs"].as_i64().is_some());
         // With no forwarder handoff, the transport fields are omitted (not null).
         assert!(v.get("computeNodeId").is_none());
@@ -173,6 +193,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("atlas-state.json");
         let forward = AtlasForwardStatus {
+            version: ATLAS_FORWARD_SIDECAR_VERSION,
             compute_node_id: Some("rtx-box".into()),
             bearer: Some("direct-lan".into()),
             last_kf_at_ms: Some(1_700),
@@ -194,6 +215,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let fwd_path = dir.join("atlas-forward.json");
         let forward = AtlasForwardStatus {
+            version: ATLAS_FORWARD_SIDECAR_VERSION,
             compute_node_id: Some("rtx-box".into()),
             bearer: Some("wfb-relay".into()),
             last_kf_at_ms: Some(9),
@@ -214,6 +236,35 @@ mod tests {
 
         // A missing file → None (no handoff yet).
         assert!(read_fresh_forward_status(&dir.join("nope.json"), SystemTime::now()).is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn version_matches_registry() {
+        // The per-file constant and the sidecar registry are the two sources of
+        // truth for the atlas-state version; catch a drift between them here.
+        assert_eq!(
+            ATLAS_STATE_SIDECAR_VERSION,
+            ados_protocol::contracts::sidecar_version("atlas-state").unwrap()
+        );
+    }
+
+    #[test]
+    fn an_older_version_less_forward_handoff_still_folds_in() {
+        // A handoff written by an older forwarder (no `version` field → 0) must
+        // still be read best-effort: the version check warns, never rejects.
+        let dir = std::env::temp_dir().join(format!("ados-atlas-oldfwd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fwd_path = dir.join("atlas-forward.json");
+        std::fs::write(
+            &fwd_path,
+            r#"{"computeNodeId":"rtx-box","bearer":"direct-lan","generatedAtMs":1}"#,
+        )
+        .unwrap();
+        let read = read_fresh_forward_status(&fwd_path, SystemTime::now())
+            .expect("a version-less handoff still reads");
+        assert_eq!(read.version, 0);
+        assert_eq!(read.bearer.as_deref(), Some("direct-lan"));
         std::fs::remove_dir_all(&dir).ok();
     }
 }

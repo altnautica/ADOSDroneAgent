@@ -79,6 +79,12 @@ pub const SETUP_COMPLETE_PATH: &str = "/var/lib/ados/setup-complete";
 /// answer `is_bind_active()` without an in-process singleton.
 pub const BIND_STATE_SENTINEL: &str = "/run/ados/bind-state.json";
 
+/// Schema version of the `bind-state.json` sentinel sidecar. Bump on an
+/// incompatible field-set change; a reader compares it best-effort via
+/// `ados_protocol::sidecar::check_sidecar_version`. Kept in step with the
+/// registry in `contracts.toml`.
+pub const BIND_STATE_SIDECAR_VERSION: u16 = 1;
+
 // ── Timeouts (mirror the Python constants exactly). ─────────────────────────
 /// Tunnel bring-up budget (`OPENING_TUNNEL`).
 pub const TUNNEL_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -192,6 +198,16 @@ pub fn on_path(bin: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bind_state_sidecar_version_matches_registry() {
+        // The per-file const and the sidecar registry are the two sources of
+        // truth for this sidecar's schema version; a drift is caught here.
+        assert_eq!(
+            BIND_STATE_SIDECAR_VERSION,
+            ados_protocol::contracts::sidecar_version("bind-state").unwrap()
+        );
+    }
 
     #[test]
     fn role_round_trips_and_maps_units() {

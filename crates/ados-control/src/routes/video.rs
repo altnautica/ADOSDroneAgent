@@ -423,7 +423,16 @@ pub async fn get_video_config() -> Json<Value> {
 
     // hopping: the supervisor snapshot, or a config-seeded stub when absent.
     let hopping = match read_state_file(&hop_supervisor_path()) {
-        Some(snap) => Value::Object(snap),
+        Some(snap) => {
+            // Best-effort schema-drift signal (never reject): warn on a
+            // producer/reader version mismatch, then read anyway. The writer const
+            // lives in the radio crate, so compare against the shared registry.
+            let got = snap.get("version").and_then(Value::as_u64).unwrap_or(0) as u16;
+            if let Some(ours) = ados_protocol::contracts::sidecar_version("hop-supervisor") {
+                ados_protocol::sidecar::check_sidecar_version("hop-supervisor", got, ours);
+            }
+            Value::Object(snap)
+        }
         None => json!({
             "enabled": wfb.auto_hop_enabled,
             "band": wfb.band,
@@ -465,6 +474,13 @@ fn link_snapshot(config_channel: i64, stats_path: &Path) -> Value {
         link.insert(f.to_string(), Value::Null);
     }
     if let Some(status) = read_state_file(stats_path) {
+        // Best-effort schema-drift signal (never reject): warn on a producer/reader
+        // version mismatch, then read anyway. The writer const lives in the radio
+        // crate, so compare against the shared registry.
+        let got = status.get("version").and_then(Value::as_u64).unwrap_or(0) as u16;
+        if let Some(ours) = ados_protocol::contracts::sidecar_version("wfb-stats") {
+            ados_protocol::sidecar::check_sidecar_version("wfb-stats", got, ours);
+        }
         for f in FIELDS {
             if let Some(v) = status.get(f) {
                 if !v.is_null() {

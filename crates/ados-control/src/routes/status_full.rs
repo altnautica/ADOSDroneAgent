@@ -671,6 +671,14 @@ fn build_status_from_stats_file(cfg: &WfbStatusConfig) -> Value {
         Err(_) => return Value::Object(base),
     };
 
+    // Best-effort schema-drift signal (never reject): warn when the sidecar was
+    // written by an agent with a different schema version, then read anyway. The
+    // writer const lives in the radio crate, so compare against the shared registry.
+    let got = payload.get("version").and_then(Value::as_u64).unwrap_or(0) as u16;
+    if let Some(ours) = ados_protocol::contracts::sidecar_version("wfb-stats") {
+        ados_protocol::sidecar::check_sidecar_version("wfb-stats", got, ours);
+    }
+
     let mut merged = base;
     for (k, v) in payload {
         merged.insert(k, v);
@@ -1257,6 +1265,14 @@ fn build_mesh_block_at(
 
     if role == "relay" || role == "receiver" {
         if let Some(snap) = read_sidecar_object(mesh_state_path) {
+            // Best-effort schema-drift signal (never reject): warn when the
+            // mesh-state sidecar was written by an agent with a different schema
+            // version, then read anyway. The writer const lives in the groundlink
+            // crate, so compare against the shared registry.
+            let got = snap.get("version").and_then(Value::as_u64).unwrap_or(0) as u16;
+            if let Some(ours) = ados_protocol::contracts::sidecar_version("mesh-state") {
+                ados_protocol::sidecar::check_sidecar_version("mesh-state", got, ours);
+            }
             mesh.insert(
                 "up".to_string(),
                 json!(snap.get("up").map(json_truthy).unwrap_or(false)),
@@ -1357,6 +1373,13 @@ fn read_camera_status_in(run_dir: &Path, now: f64) -> Vec<(String, Value)> {
     let mut out: Vec<(String, Value)> = Vec::new();
 
     if let Some(camera) = read_sidecar_object(&run_dir.join("camera-state.json")) {
+        // Best-effort schema-drift signal (never reject): warn on a producer/reader
+        // version mismatch, then read anyway. The writer const lives in the
+        // ados-video crate, so compare against the shared registry.
+        let got = camera.get("version").and_then(Value::as_u64).unwrap_or(0) as u16;
+        if let Some(ours) = ados_protocol::contracts::sidecar_version("camera-state") {
+            ados_protocol::sidecar::check_sidecar_version("camera-state", got, ours);
+        }
         if sidecar_fresh(&camera, now, CAMERA_STATE_FRESH_S) {
             if let Some(state) = camera.get("state").and_then(Value::as_str) {
                 if matches!(state, "ready" | "missing" | "error") {
@@ -1367,6 +1390,13 @@ fn read_camera_status_in(run_dir: &Path, now: f64) -> Vec<(String, Value)> {
     }
 
     if let Some(rec) = read_sidecar_object(&run_dir.join("camera-usb-recovery.json")) {
+        // Best-effort schema-drift signal (never reject): warn on a producer/reader
+        // version mismatch, then read anyway. The writer const lives in the
+        // ados-supervisor crate, so compare against the shared registry.
+        let got = rec.get("version").and_then(Value::as_u64).unwrap_or(0) as u16;
+        if let Some(ours) = ados_protocol::contracts::sidecar_version("camera-usb-recovery") {
+            ados_protocol::sidecar::check_sidecar_version("camera-usb-recovery", got, ours);
+        }
         if sidecar_fresh(&rec, now, CAMERA_RECOVERY_FRESH_S) {
             let state = rec.get("camera_usb_recovery_state").and_then(Value::as_str);
             if let Some(state) = state {

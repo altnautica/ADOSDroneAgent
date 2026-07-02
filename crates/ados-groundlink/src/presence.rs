@@ -634,6 +634,12 @@ pub fn hop_supervisor_payload(snap: &HopSnapshot) -> serde_json::Value {
     let mut v = serde_json::to_value(snap).unwrap_or_else(|_| serde_json::json!({}));
     if let Some(obj) = v.as_object_mut() {
         obj.insert("wall_time_unix".to_string(), serde_json::json!(now_unix()));
+        // Sidecar schema version (best-effort drift signal for readers). Shared
+        // with the drone-side hop supervisor via the one const.
+        obj.insert(
+            "version".to_string(),
+            serde_json::json!(ados_radio::paths::HOP_SUPERVISOR_SIDECAR_VERSION),
+        );
     }
     v
 }

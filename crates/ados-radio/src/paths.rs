@@ -7,6 +7,19 @@
 pub const WFB_STATS_JSON: &str = "/run/ados/wfb-stats.json";
 pub const HOP_SUPERVISOR_JSON: &str = "/run/ados/hop-supervisor.json";
 pub const PEER_PRESENCE_JSON: &str = "/run/ados/peer-presence.json";
+
+/// Schema version of the `wfb-stats.json` sidecar. Both the drone radio and the
+/// ground-station receiver write this file, so both reference this one const
+/// (they must agree on the schema version). Bump when the field set changes
+/// incompatibly; a reader compares it best-effort via
+/// `ados_protocol::sidecar::check_sidecar_version` and reads anyway on a
+/// mismatch. Kept in step with the registry in `contracts.toml`.
+pub const WFB_STATS_SIDECAR_VERSION: u16 = 1;
+
+/// Schema version of the `hop-supervisor.json` sidecar. Written by both the
+/// drone hop supervisor and the ground-station hop-follow persister, so both
+/// reference this one const. Bump on an incompatible field-set change.
+pub const HOP_SUPERVISOR_SIDECAR_VERSION: u16 = 1;
 /// In-memory channel hint (no file, but this is the path if we ever write one).
 pub const WFB_LOCKED_CHANNEL: &str = "/run/ados/wfb-locked-channel";
 
@@ -88,6 +101,13 @@ pub fn read_bind_sentinel_active() -> bool {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
         return false;
     };
+    // Best-effort schema-drift signal: warn (never reject) when the sentinel was
+    // written by an agent with a different schema version. The writer const lives
+    // in the supervisor crate, so compare against the shared registry.
+    let got = value.get("version").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+    if let Some(ours) = ados_protocol::contracts::sidecar_version("bind-state") {
+        ados_protocol::sidecar::check_sidecar_version("bind-state", got, ours);
+    }
     value
         .as_object()
         .and_then(|obj| obj.get("active"))
@@ -103,6 +123,24 @@ mod tests {
     fn env_guard() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    #[test]
+    fn wfb_stats_sidecar_version_matches_registry() {
+        // The per-file const and the sidecar registry are the two sources of
+        // truth for this sidecar's schema version; a drift is caught here.
+        assert_eq!(
+            WFB_STATS_SIDECAR_VERSION,
+            ados_protocol::contracts::sidecar_version("wfb-stats").unwrap()
+        );
+    }
+
+    #[test]
+    fn hop_supervisor_sidecar_version_matches_registry() {
+        assert_eq!(
+            HOP_SUPERVISOR_SIDECAR_VERSION,
+            ados_protocol::contracts::sidecar_version("hop-supervisor").unwrap()
+        );
     }
 
     #[test]

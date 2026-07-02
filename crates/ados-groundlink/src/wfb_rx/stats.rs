@@ -122,6 +122,9 @@ pub fn build_gs_stats(
     video_inbound_bytes_per_s: f64,
 ) -> serde_json::Value {
     serde_json::json!({
+        // Sidecar schema version (best-effort drift signal for readers). Shared
+        // with the drone-side writer via the one const so both rigs agree.
+        "version": ados_radio::paths::WFB_STATS_SIDECAR_VERSION,
         // Top-level lifecycle string, mirroring the drone-side sidecar so the GS
         // heartbeat reads a real state instead of null.
         "state": state,

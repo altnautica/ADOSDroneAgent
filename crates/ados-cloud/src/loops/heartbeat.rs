@@ -41,6 +41,9 @@ const COMPUTE_SIDECAR_STALE_MS: i64 = 20_000;
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ComputeSidecar {
+    /// The producer's sidecar schema version (absent ⇒ `0` from an older writer).
+    #[serde(default)]
+    version: u16,
     /// The producer's write time; absent/stale ⇒ the sidecar is treated as gone.
     generated_at_ms: Option<i64>,
     compute_role: Option<String>,
@@ -60,7 +63,16 @@ fn read_compute_sidecar_from(path: &std::path::Path, now_ms: i64) -> Option<Comp
     let text = std::fs::read_to_string(path).ok()?;
     let sidecar: ComputeSidecar = serde_json::from_str(&text).ok()?;
     match sidecar.generated_at_ms {
-        Some(gen) if now_ms.saturating_sub(gen) <= COMPUTE_SIDECAR_STALE_MS => Some(sidecar),
+        Some(gen) if now_ms.saturating_sub(gen) <= COMPUTE_SIDECAR_STALE_MS => {
+            // Best-effort drift signal: warn (never reject) on a producer/reader
+            // version mismatch, then fold the sidecar in anyway.
+            ados_protocol::sidecar::check_sidecar_version(
+                "compute-heartbeat",
+                sidecar.version,
+                ados_compute::COMPUTE_HEARTBEAT_SIDECAR_VERSION,
+            );
+            Some(sidecar)
+        }
         _ => None,
     }
 }
@@ -159,6 +171,11 @@ fn config_status_dir() -> std::path::PathBuf {
 /// its current error.
 #[derive(Debug, Default, serde::Deserialize)]
 struct ConfigStatusSidecar {
+    /// The sidecar schema version. `#[serde(default)]` makes a file written by an
+    /// older agent (no `version` key) read back as `0`, a best-effort drift
+    /// signal rather than a parse failure.
+    #[serde(default)]
+    version: u16,
     service: Option<String>,
     error: Option<String>,
 }
@@ -192,6 +209,13 @@ fn read_config_error_sidecars_from(dir: &std::path::Path) -> Vec<ConfigErrorEntr
         let Ok(status) = serde_json::from_str::<ConfigStatusSidecar>(&text) else {
             continue;
         };
+        // Best-effort schema-drift signal: an older file (version 0) warns but is
+        // still used. Never a reject.
+        ados_protocol::sidecar::check_sidecar_version(
+            "config-status",
+            status.version,
+            ados_config::CONFIG_STATUS_SIDECAR_VERSION,
+        );
         if let (Some(service), Some(error)) = (status.service, status.error) {
             out.push(ConfigErrorEntry { service, error });
         }
@@ -576,6 +600,16 @@ mod tests {
     fn an_absent_config_status_dir_is_an_empty_list() {
         let dir = std::env::temp_dir().join("ados-cloud-cfgstatus-nope-does-not-exist");
         assert!(read_config_error_sidecars_from(&dir).is_empty());
+    }
+
+    #[test]
+    fn config_status_version_matches_registry() {
+        // The const lives in the writer crate (ados-config); this reader crate
+        // sees both it and the shared registry, so the drift gate lives here.
+        assert_eq!(
+            ados_config::CONFIG_STATUS_SIDECAR_VERSION,
+            ados_protocol::contracts::sidecar_version("config-status").unwrap()
+        );
     }
 
     #[test]

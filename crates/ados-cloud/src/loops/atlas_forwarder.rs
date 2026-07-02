@@ -28,7 +28,9 @@ use tokio::sync::watch;
 use ados_atlas_transport::{
     AtlasBearer, AtlasEvent, BearerKind, BearerLadder, LanHttpBearer, WfbRelayBearer,
 };
-use ados_protocol::atlas::{AtlasForwardStatus, ATLAS_FORWARD_SIDECAR, ATLAS_KEYFRAME_TOPIC};
+use ados_protocol::atlas::{
+    AtlasForwardStatus, ATLAS_FORWARD_SIDECAR, ATLAS_FORWARD_SIDECAR_VERSION, ATLAS_KEYFRAME_TOPIC,
+};
 use ados_protocol::frame::PLUGIN_MAX_FRAME;
 use ados_protocol::ipc::{connect_with_retry, read_length_prefixed};
 
@@ -158,6 +160,7 @@ impl ForwardStatus {
             return;
         }
         write_forward_status(&AtlasForwardStatus {
+            version: ATLAS_FORWARD_SIDECAR_VERSION,
             compute_node_id: self.compute_node_id.clone(),
             bearer: self.bearer.clone(),
             last_kf_at_ms: self.last_kf_at_ms,

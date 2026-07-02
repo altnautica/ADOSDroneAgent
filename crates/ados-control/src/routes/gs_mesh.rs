@@ -282,7 +282,18 @@ fn mesh_state_path() -> PathBuf {
 fn read_json_object_or_empty(path: &Path) -> Map<String, Value> {
     match std::fs::read_to_string(path) {
         Ok(text) => match serde_json::from_str::<Value>(&text) {
-            Ok(Value::Object(map)) => map,
+            Ok(Value::Object(map)) => {
+                // This helper reads only the `mesh-state.json` sidecar in this
+                // module. Best-effort schema-drift signal (never reject): warn on a
+                // producer/reader version mismatch, then read anyway. The writer
+                // const lives in the groundlink crate, so compare against the
+                // shared registry.
+                let got = map.get("version").and_then(Value::as_u64).unwrap_or(0) as u16;
+                if let Some(ours) = ados_protocol::contracts::sidecar_version("mesh-state") {
+                    ados_protocol::sidecar::check_sidecar_version("mesh-state", got, ours);
+                }
+                map
+            }
             _ => Map::new(),
         },
         Err(_) => Map::new(),

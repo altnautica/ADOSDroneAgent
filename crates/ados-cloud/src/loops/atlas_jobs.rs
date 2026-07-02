@@ -56,6 +56,15 @@ pub fn read_jobs_sidecar_from(path: &Path, now_ms: i64) -> Option<Vec<serde_json
     if now_ms.saturating_sub(generated) > COMPUTE_JOBS_STALE_MS {
         return None;
     }
+    // Best-effort drift signal: warn (never reject) if the producer's sidecar
+    // schema version differs from what this build expects (an older writer emits
+    // no field ⇒ 0), then read the jobs anyway.
+    let version = value.get("version").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+    ados_protocol::sidecar::check_sidecar_version(
+        "compute-jobs",
+        version,
+        ados_compute::COMPUTE_JOBS_SIDECAR_VERSION,
+    );
     let jobs = value.get("jobs")?.as_array()?;
     Some(jobs.clone())
 }

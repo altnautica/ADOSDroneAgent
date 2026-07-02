@@ -256,6 +256,10 @@ async fn main() -> Result<()> {
 /// "unknown", even before the Python enrichment producer's first write.
 const BOARD_SIDECAR: &str = "/run/ados/board.json";
 
+/// The schema version this build reads for the board sidecar. Must match the
+/// `board` entry in the shared contract registry (asserted by a test).
+const BOARD_SIDECAR_VERSION: u16 = 1;
+
 /// Board identity for the heartbeat base, read from [`BOARD_SIDECAR`]. Falls back
 /// to "unknown"/0/"" when the file is absent or malformed — the same degraded
 /// shape the loop emitted before, but truthful whenever the board has been
@@ -264,6 +268,15 @@ fn board_base() -> (String, i64, String, String) {
     let parsed: Option<serde_json::Value> = std::fs::read_to_string(BOARD_SIDECAR)
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok());
+    // Best-effort schema-drift signal: an older/foreign board file with no
+    // `version` key reads back as 0 and warns, but is still used. Never a reject.
+    if let Some(v) = parsed.as_ref() {
+        let got = v
+            .get("version")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0) as u16;
+        ados_protocol::sidecar::check_sidecar_version("board", got, BOARD_SIDECAR_VERSION);
+    }
     let obj = parsed.as_ref().and_then(|v| v.as_object());
     let s = |k: &str| {
         obj.and_then(|o| o.get(k))
@@ -846,6 +859,14 @@ mod tests {
         Arc::new(Mutex::new(PluginSupervisor::new(
             paths, false, None, "1.0.0",
         )))
+    }
+
+    #[test]
+    fn board_sidecar_version_matches_registry() {
+        assert_eq!(
+            BOARD_SIDECAR_VERSION,
+            ados_protocol::contracts::sidecar_version("board").unwrap()
+        );
     }
 
     #[test]

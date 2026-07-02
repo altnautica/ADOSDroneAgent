@@ -380,6 +380,14 @@ fn link_view_from(path: &Path) -> Value {
         Err(_) => return Value::Object(base),
     };
 
+    // Best-effort schema-drift signal (never reject): warn when the sidecar was
+    // written by an agent with a different schema version, then read anyway. The
+    // writer const lives in the radio crate, so compare against the shared registry.
+    let got = payload.get("version").and_then(Value::as_u64).unwrap_or(0) as u16;
+    if let Some(ours) = ados_protocol::contracts::sidecar_version("wfb-stats") {
+        ados_protocol::sidecar::check_sidecar_version("wfb-stats", got, ours);
+    }
+
     // Live snapshot wins. `bitrate_mbps` is derived from `bitrate_kbps`;
     // `fec_lost`/`fec_failed` both mirror the payload `fec_failed`; the channel
     // from the file wins over the (null) config. Mirrors the Python merge exactly.
@@ -686,6 +694,14 @@ fn mesh_block_from_sidecar(path: &Path) -> Value {
         return json!({});
     }
     let snap = read_json_or_empty(path);
+    // Best-effort schema-drift signal (never reject): warn when the mesh-state
+    // sidecar was written by an agent with a different schema version, then read
+    // anyway. The writer const lives in the groundlink crate, so compare against
+    // the shared registry.
+    let got = snap.get("version").and_then(Value::as_u64).unwrap_or(0) as u16;
+    if let Some(ours) = ados_protocol::contracts::sidecar_version("mesh-state") {
+        ados_protocol::sidecar::check_sidecar_version("mesh-state", got, ours);
+    }
     mesh_block_from_snapshot(&snap)
 }
 

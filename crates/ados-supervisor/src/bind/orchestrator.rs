@@ -922,6 +922,11 @@ fn write_sentinel(snap: Option<&BindSession>) {
     let active = snap.map(|s| s.state.is_active()).unwrap_or(false);
     if let Some(obj) = v.as_object_mut() {
         obj.insert("active".to_string(), json!(active));
+        // Sidecar schema version (best-effort drift signal for readers).
+        obj.insert(
+            "version".to_string(),
+            json!(super::BIND_STATE_SIDECAR_VERSION),
+        );
     }
     if let Ok(body) = serde_json::to_vec(&v) {
         if let Err(e) = keys::atomic_write(Path::new(super::BIND_STATE_SENTINEL), &body, 0o644) {
@@ -934,11 +939,21 @@ fn write_sentinel(snap: Option<&BindSession>) {
 /// the radio service + hop supervisor (separate processes from the supervisor
 /// that owns the FSM). Absent/garbled sentinel → `false`.
 pub fn read_sentinel_active() -> bool {
-    std::fs::read_to_string(super::BIND_STATE_SENTINEL)
-        .ok()
-        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-        .and_then(|v| v.get("active").and_then(Value::as_bool))
-        .unwrap_or(false)
+    let Ok(text) = std::fs::read_to_string(super::BIND_STATE_SENTINEL) else {
+        return false;
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&text) else {
+        return false;
+    };
+    // Best-effort schema-drift signal (never reject): warn when the sentinel was
+    // written by an agent with a different schema version, then read anyway.
+    let got = v.get("version").and_then(Value::as_u64).unwrap_or(0) as u16;
+    ados_protocol::sidecar::check_sidecar_version(
+        "bind-state",
+        got,
+        super::BIND_STATE_SIDECAR_VERSION,
+    );
+    v.get("active").and_then(Value::as_bool).unwrap_or(false)
 }
 
 /// The per-iface result of preparing one injection adapter for monitor mode.

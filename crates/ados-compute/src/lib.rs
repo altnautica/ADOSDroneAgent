@@ -58,11 +58,12 @@ pub use engine::{ComputeHeartbeat, Engine};
 pub use heartbeat_sidecar::{
     compute_heartbeat_path, write_compute_heartbeat, write_compute_heartbeat_to,
     ComputeHeartbeatSidecar, SlaveEntry, COMPUTE_HEARTBEAT_SIDECAR,
+    COMPUTE_HEARTBEAT_SIDECAR_VERSION,
 };
 pub use ingest::{submit_reconstruct_job, AtlasIngest};
 pub use jobs_sidecar::{
     build_atlas_jobs_sidecar, compute_jobs_path, write_atlas_jobs_sidecar, AtlasJobEntry,
-    AtlasJobsSidecar, COMPUTE_JOBS_SIDECAR,
+    AtlasJobsSidecar, COMPUTE_JOBS_SIDECAR, COMPUTE_JOBS_SIDECAR_VERSION,
 };
 pub use keyframe_persister::{dataset_id_for, KeyframePersister};
 pub use mdns::{advertise_compute, resolve_compute, ComputeAdvert, ResolvedComputeNode};
