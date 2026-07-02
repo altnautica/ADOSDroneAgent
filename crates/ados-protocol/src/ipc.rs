@@ -653,14 +653,20 @@ mod tests {
         drop(client);
 
         // A request longer than the cap (16) with no newline closes the
-        // connection with no response: the client observes a clean EOF.
+        // connection with no response. The client then reads no reply: on
+        // some platforms that is a clean EOF (`Ok(None)`), on others the
+        // server closing with unread data resets the connection (`Err`).
+        // Both mean "closed without a reply".
         let mut over = connect_with_retry(&path, 10, Duration::from_millis(20))
             .await
             .unwrap();
         let _ = over.write_all(&[b'x'; 64]).await;
         let _ = over.flush().await;
-        let line = read_newline_line(&mut over, 256).await.unwrap();
-        assert_eq!(line, None);
+        let outcome = read_newline_line(&mut over, 256).await;
+        assert!(
+            matches!(outcome, Ok(None) | Err(_)),
+            "over-cap request must get no reply, got {outcome:?}"
+        );
 
         server.abort();
         let _ = std::fs::remove_file(&path);
