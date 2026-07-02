@@ -171,7 +171,7 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
         fc_source = getattr(app._fc_connection, "source", "auto") or "auto"
 
     # Board info from detection
-    board = getattr(app, "_board", None)
+    board = getattr(app, "board", None)
     board_tier = board.tier if board else 0
     board_soc = board.soc if board else ""
     board_arch = board.arch if board else ""

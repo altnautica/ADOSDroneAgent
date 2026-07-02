@@ -831,7 +831,7 @@ async def _deliver_plugin_models(sup: PluginSupervisor, plugin_id: str) -> None:
     mm = getattr(app, "model_manager", None)
     if mm is None:
         return
-    board = getattr(app, "_board", None)
+    board = getattr(app, "board", None)
     board_hint = " ".join(
         str(x)
         for x in (
