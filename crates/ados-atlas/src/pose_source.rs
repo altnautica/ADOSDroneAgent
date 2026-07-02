@@ -15,9 +15,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ados_protocol::atlas::{GlobalAnchor, OffloadedPose, Pose, PoseSource, VioHealth};
-use ados_protocol::ipc::{connect_with_retry, read_length_prefixed, read_newline_line};
-use ados_protocol::state::{decode_v1_line, decode_v2, STATE_V2_MAX_FRAME};
-use tokio::io::AsyncReadExt;
+use ados_protocol::ipc::{connect_with_retry, read_length_prefixed};
+use ados_protocol::state::{read_state_value, STATE_V2_MAX_FRAME};
 use tokio::task::JoinHandle;
 
 use crate::runtime::{AtlasRuntimeConfig, PoseTier};
@@ -105,46 +104,17 @@ impl StateSockPose {
                             continue;
                         }
                     };
-                // The state socket carries either v1 (newline JSON, first byte
-                // `{`) or v2 (length-prefixed msgpack, the hybrid-migration
-                // default — the first byte is the high byte of the 4-byte
-                // big-endian length). Read one byte to pick the framing so a v2
-                // producer is read, not mis-parsed as v1 (which silently yielded no
-                // pose). EOF / a read error breaks to the outer loop to reconnect.
-                loop {
-                    let mut first = [0u8; 1];
-                    if stream.read_exact(&mut first).await.is_err() {
-                        break;
-                    }
-                    let payload = if first[0] == b'{' {
-                        // v1: read the rest of the line and restore the leading `{`.
-                        match read_newline_line(&mut stream, STATE_V2_MAX_FRAME).await {
-                            Ok(Some(rest)) => {
-                                let mut line = Vec::with_capacity(rest.len() + 1);
-                                line.push(b'{');
-                                line.extend_from_slice(&rest);
-                                line
-                            }
-                            _ => break,
-                        }
-                    } else {
-                        // v2: `first` is length byte 0; read the other 3 + the body.
-                        let mut rest = [0u8; 3];
-                        if stream.read_exact(&mut rest).await.is_err() {
-                            break;
-                        }
-                        let len =
-                            u32::from_be_bytes([first[0], rest[0], rest[1], rest[2]]) as usize;
-                        if len == 0 || len > STATE_V2_MAX_FRAME {
-                            break;
-                        }
-                        let mut body = vec![0u8; len];
-                        if stream.read_exact(&mut body).await.is_err() {
-                            break;
-                        }
-                        body
-                    };
-                    if let Some(sample) = parse_state_pose(&payload, &anchor) {
+                // Read decoded state snapshots off the socket. The shared reader
+                // auto-detects v1 (newline JSON) vs v2 (length-prefixed msgpack)
+                // per frame, so a v2 producer is read correctly rather than
+                // mis-parsed as v1 (which silently yielded no pose). Clean EOF or
+                // an unrecoverable framing/IO error breaks to the outer loop to
+                // reconnect.
+                // The loop ends on the first non-`Ok(Some)` (clean EOF or an
+                // unrecoverable framing/IO error), dropping to the outer
+                // reconnect.
+                while let Ok(Some(v)) = read_state_value(&mut stream).await {
+                    if let Some(sample) = parse_state_pose(&v, &anchor) {
                         *latest_t.lock().unwrap() = Some(sample);
                     }
                 }
@@ -169,17 +139,13 @@ impl PoseProvider for StateSockPose {
     }
 }
 
-/// Parse one state-socket JSON line into a local-frame pose, fixing the session
-/// anchor on the first valid fix.
+/// Convert one decoded state snapshot into a local-frame pose, fixing the
+/// session anchor on the first valid fix. The caller decodes the wire frame
+/// (v1 JSON or v2 msgpack) into a field-addressed value first.
 fn parse_state_pose(
-    payload: &[u8],
+    v: &serde_json::Value,
     anchor: &Arc<Mutex<Option<GlobalAnchor>>>,
 ) -> Option<PoseSample> {
-    // Accept either wire form: a v1 JSON line or a v2 msgpack body. Both decode
-    // to the same field-addressed map, so the field access below is unchanged.
-    let v: serde_json::Value = decode_v1_line(payload)
-        .or_else(|_| decode_v2(payload))
-        .ok()?;
     let pos = v.get("position")?;
     let att = v.get("attitude")?;
     let lat = pos.get("lat")?.as_f64()?;
@@ -398,23 +364,32 @@ mod tests {
     #[test]
     fn parse_state_pose_fixes_anchor_and_builds_pose() {
         let anchor = Arc::new(Mutex::new(None));
-        let line = br#"{"position":{"lat":12.97,"lon":77.59,"alt_msl":900.0,"alt_rel":10.0,"heading":0.0},"attitude":{"roll":0.0,"pitch":0.0,"yaw":0.0},"gps":{"fix_type":3}}"#;
-        let s = parse_state_pose(line, &anchor).expect("a pose");
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"position":{"lat":12.97,"lon":77.59,"alt_msl":900.0,"alt_rel":10.0,"heading":0.0},"attitude":{"roll":0.0,"pitch":0.0,"yaw":0.0},"gps":{"fix_type":3}}"#,
+        )
+        .unwrap();
+        let s = parse_state_pose(&v, &anchor).expect("a pose");
         assert_eq!(s.source, PoseSource::LocalVio);
         assert_eq!(s.health, VioHealth::Good);
         assert!(s.anchor.is_some(), "anchor fixed on the first 3D fix");
         assert_eq!(s.pose.t, [0.0, 0.0, 10.0], "at the anchor, up = alt_rel");
         // A second sample moved north reuses the anchor (non-zero north offset).
-        let line2 = br#"{"position":{"lat":12.971,"lon":77.59,"alt_msl":900.0,"alt_rel":10.0,"heading":0.0},"attitude":{"roll":0.0,"pitch":0.0,"yaw":0.0},"gps":{"fix_type":3}}"#;
-        let s2 = parse_state_pose(line2, &anchor).unwrap();
+        let v2: serde_json::Value = serde_json::from_str(
+            r#"{"position":{"lat":12.971,"lon":77.59,"alt_msl":900.0,"alt_rel":10.0,"heading":0.0},"attitude":{"roll":0.0,"pitch":0.0,"yaw":0.0},"gps":{"fix_type":3}}"#,
+        )
+        .unwrap();
+        let s2 = parse_state_pose(&v2, &anchor).unwrap();
         assert!(s2.pose.t[1] > 100.0, "moved north in the same frame");
     }
 
     #[test]
     fn parse_state_pose_without_fix_is_degraded_origin() {
         let anchor = Arc::new(Mutex::new(None));
-        let line = br#"{"position":{"lat":0.0,"lon":0.0,"alt_msl":0.0,"alt_rel":2.0,"heading":0.0},"attitude":{"roll":0.0,"pitch":0.0,"yaw":0.0},"gps":{"fix_type":0}}"#;
-        let s = parse_state_pose(line, &anchor).unwrap();
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"position":{"lat":0.0,"lon":0.0,"alt_msl":0.0,"alt_rel":2.0,"heading":0.0},"attitude":{"roll":0.0,"pitch":0.0,"yaw":0.0},"gps":{"fix_type":0}}"#,
+        )
+        .unwrap();
+        let s = parse_state_pose(&v, &anchor).unwrap();
         assert_eq!(s.health, VioHealth::Degraded);
         assert!(s.anchor.is_none());
         assert_eq!(s.pose.t, [0.0, 0.0, 2.0]);
