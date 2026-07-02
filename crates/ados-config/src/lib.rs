@@ -14,6 +14,10 @@
 //! sidecars (serde_json). The `load_*` variants read the file first: a MISSING
 //! file is the normal fresh-node case (a quiet debug line, no surfaced error); a
 //! PRESENT-but-malformed file is the loud one.
+//!
+//! `write_config_status` publishes a service's surfaced error (or its absence) to
+//! a per-service status sidecar so a remote Health surface can show a malformed
+//! config, not just the log.
 
 use std::fmt::Display;
 use std::path::Path;
@@ -110,6 +114,69 @@ pub fn load_json_or_default<T: DeserializeOwned + Default>(path: &Path, what: &s
     }
 }
 
+/// Resolve the directory the status sidecars live in, honoring the `ADOS_RUN_DIR`
+/// override used across the agent's services and their tests (default `/run/ados`).
+fn run_dir() -> std::path::PathBuf {
+    std::env::var_os("ADOS_RUN_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/run/ados"))
+}
+
+/// Publish this service's config-status sidecar so a remote surface (the fleet
+/// Health view) can show a malformed-config fault instead of it hiding behind a
+/// silently-defaulted service. Writes `<run-dir>/config-status-<service>.json`
+/// (run dir per [`run_dir`]) with `{ "service", "error", "generated_at_ms" }`,
+/// where `error` is the exact parser message (from the `*_reporting` helpers) or
+/// `null` when the config is valid, and `generated_at_ms` is the epoch-ms write
+/// time.
+///
+/// The write is atomic (temp file + rename) and TOTALLY best-effort: any IO or
+/// serialize failure is logged at most and swallowed, so a read-only or missing
+/// run dir never panics and never blocks service startup.
+pub fn write_config_status(service: &str, error: Option<&str>) {
+    if let Err(e) = try_write_config_status(service, error) {
+        tracing::warn!(
+            service = service,
+            error = %e,
+            "could not publish config-status sidecar; continuing"
+        );
+    }
+}
+
+fn try_write_config_status(service: &str, error: Option<&str>) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    let dir = run_dir();
+    std::fs::create_dir_all(&dir)?;
+
+    let generated_at_ms: i64 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+
+    let body = serde_json::json!({
+        "service": service,
+        "error": error,
+        "generated_at_ms": generated_at_ms,
+    });
+    let text = serde_json::to_string(&body)?;
+
+    let final_path = dir.join(format!("config-status-{service}.json"));
+    // A pid-tagged temp sibling keeps concurrent writers from clobbering each
+    // other's partial file; the rename onto the final path is atomic for readers.
+    let tmp_path = dir.join(format!(
+        "config-status-{service}.json.tmp.{}",
+        std::process::id()
+    ));
+
+    {
+        let mut f = std::fs::File::create(&tmp_path)?;
+        f.write_all(text.as_bytes())?;
+    }
+    std::fs::rename(&tmp_path, &final_path)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,5 +250,41 @@ mod tests {
         );
         let bad: Sample = json_or_default("{not json", "test");
         assert_eq!(bad, Sample::default());
+    }
+
+    #[test]
+    fn write_config_status_publishes_the_sidecar_and_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        // This is the only test in the crate that touches ADOS_RUN_DIR, so no
+        // other thread mutates it concurrently; point it at a private temp dir so
+        // the best-effort write never lands in the real /run/ados.
+        std::env::set_var("ADOS_RUN_DIR", dir.path());
+
+        let msg = "invalid type: string, expected u32 for field `count`";
+        write_config_status("video", Some(msg));
+
+        let p = dir.path().join("config-status-video.json");
+        assert!(p.exists(), "the sidecar file should exist");
+
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert_eq!(v["service"], "video");
+        assert_eq!(v["error"], msg);
+        assert!(
+            v["generated_at_ms"].is_i64() || v["generated_at_ms"].is_u64(),
+            "generated_at_ms is an epoch-ms integer"
+        );
+
+        // The healthy (valid-config) case writes an explicit null error.
+        write_config_status("video", None);
+        let v2: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert_eq!(v2["service"], "video");
+        assert!(
+            v2["error"].is_null(),
+            "a valid config publishes a null error"
+        );
+
+        std::env::remove_var("ADOS_RUN_DIR");
     }
 }
