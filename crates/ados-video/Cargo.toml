@@ -33,3 +33,6 @@ tracing-journald = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+# Integration-test only: drive the real vision-engine tap reader against this
+# crate's tap server. No cycle — ados-vision does not depend on ados-video.
+ados-vision = { path = "../ados-vision" }

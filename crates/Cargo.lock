@@ -38,6 +38,7 @@ name = "ados-atlas"
 version = "0.1.0"
 dependencies = [
  "ados-protocol",
+ "ados-vision",
  "anyhow",
  "image",
  "memmap2",
@@ -562,6 +563,7 @@ dependencies = [
  "ados-config",
  "ados-hal-probe",
  "ados-protocol",
+ "ados-vision",
  "anyhow",
  "nix 0.29.0",
  "serde",

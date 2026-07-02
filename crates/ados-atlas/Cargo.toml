@@ -38,3 +38,8 @@ image = { workspace = true, features = ["jpeg"] }
 
 [dev-dependencies]
 tempfile = "3"
+# The vision engine is the upstream half of the frame seam the integration test
+# drives end to end (its frame-descriptor bus + shared-memory ring feed the atlas
+# reader). Dev-dependency only, and no dependency cycle: ados-vision does not
+# depend on ados-atlas.
+ados-vision = { path = "../ados-vision" }
