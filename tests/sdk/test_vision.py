@@ -146,6 +146,7 @@ def test_detection_batch_msgpack_field_names_match_rust():
     )
     raw = _unpack(b.to_msgpack())
     assert set(raw.keys()) == {
+        "v",
         "model_id",
         "camera_id",
         "frame_id",

@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING, Any
 
 import msgpack
 
+from ados.core.contracts import contract_version
 from ados.core.logging import get_logger
 from ados.services.mavlink.encoders import (
     encode_odometry,
@@ -55,6 +56,13 @@ VISION_FRAME_TOPIC = "vision.frame"
 
 # Topic detections are published on, labelled by model id.
 VISION_DETECTION_TOPIC = "vision.detection"
+
+# On-wire version of the detection-batch contract, sourced from the shared
+# registry (crates/ados-protocol/contracts.toml) so the Python producer stamps
+# the same integer the Rust ingress checks — a mismatch is rejected loudly at
+# the host rather than silently mis-parsed.
+_DETECTION_WIRE_VERSION = contract_version("vision.detection")
+assert _DETECTION_WIRE_VERSION is not None, "vision.detection missing from the contract registry"
 
 # Plugin RPC method names for the vision surface. The plugin host gates each on
 # the matching capability before routing to the vision engine.
@@ -571,9 +579,11 @@ class DetectionBatch:
     frame_id: int
     ts_ms: int
     detections: list[Detection] = field(default_factory=list)
+    v: int = _DETECTION_WIRE_VERSION
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "v": self.v,
             "model_id": self.model_id,
             "camera_id": self.camera_id,
             "frame_id": int(self.frame_id),
@@ -584,6 +594,7 @@ class DetectionBatch:
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> DetectionBatch:
         return cls(
+            v=int(raw.get("v", _DETECTION_WIRE_VERSION)),
             model_id=str(raw["model_id"]),
             camera_id=str(raw["camera_id"]),
             frame_id=int(raw["frame_id"]),
