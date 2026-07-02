@@ -25,8 +25,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           # ground-station extra carries Pillow + luma, which the OLED/LCD/
-          # widget UI test modules import at collection time.
-          pip install -e ".[dev,ground-station]"
+          # widget UI test modules import at collection time. The vision extra
+          # carries numpy, which the detection-decode test imports at collection
+          # time (it is a pure numpy test; the sidecar's device runtime stays
+          # lazy so no on-device inference package is needed here).
+          pip install -e ".[dev,ground-station,vision]"
 
       - name: Lint with ruff
         run: ruff check src/ tests/
