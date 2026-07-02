@@ -23,7 +23,9 @@
 
 use std::time::Duration;
 
-use crate::heartbeat::{ClusterSlave, HeartbeatPayload, RadioBlock, RemoteAccess};
+use crate::heartbeat::{
+    ClusterSlave, ConfigErrorEntry, HeartbeatPayload, RadioBlock, RemoteAccess,
+};
 
 /// The compute-node heartbeat sidecar written by `ados-compute`
 /// (`/run/ados/compute-heartbeat.json`). Absent on a non-compute node — then
@@ -141,6 +143,67 @@ fn read_plugin_state_sidecars() -> serde_json::Map<String, serde_json::Value> {
     )
 }
 
+/// The directory services publish their config-status sidecar into
+/// (`config-status-<service>.json`) at startup. Honors the `ADOS_RUN_DIR`
+/// override (default `/run/ados`), matching the `ados_config::write_config_status`
+/// writer, so a redirected runtime layout (a non-root dev host or a test) reads
+/// the same dir it wrote.
+fn config_status_dir() -> std::path::PathBuf {
+    std::env::var_os("ADOS_RUN_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/run/ados"))
+}
+
+/// The readable slice of a `config-status-<service>.json` sidecar. The writer
+/// also stamps `generated_at_ms`; the heartbeat only needs the service label and
+/// its current error.
+#[derive(Debug, Default, serde::Deserialize)]
+struct ConfigStatusSidecar {
+    service: Option<String>,
+    error: Option<String>,
+}
+
+/// Read every `config-status-<service>.json` sidecar in `dir` and collect the
+/// ones whose current error is non-null into a `{service, error}` list. A service
+/// with a valid config publishes `error: null` and is omitted, so the list
+/// carries only LIVE config faults. The atomic writer's `.json.tmp.<pid>` staging
+/// files do not end in `.json`, so they are skipped, as is any unrelated file.
+/// The result is sorted by service so the wire is deterministic (`read_dir` order
+/// is unspecified). An absent dir (a node with no config-status sidecars) yields
+/// an empty vec.
+fn read_config_error_sidecars_from(dir: &std::path::Path) -> Vec<ConfigErrorEntry> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_status = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.starts_with("config-status-") && n.ends_with(".json"))
+            .unwrap_or(false);
+        if !is_status {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(status) = serde_json::from_str::<ConfigStatusSidecar>(&text) else {
+            continue;
+        };
+        if let (Some(service), Some(error)) = (status.service, status.error) {
+            out.push(ConfigErrorEntry { service, error });
+        }
+    }
+    out.sort_by(|a, b| a.service.cmp(&b.service));
+    out
+}
+
+fn read_config_error_sidecars() -> Vec<ConfigErrorEntry> {
+    read_config_error_sidecars_from(&config_status_dir())
+}
+
 /// Heartbeat cadence. Mirrors the Python loop's 5 s base sleep.
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -219,6 +282,16 @@ fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
             None
         } else {
             Some(slices)
+        }
+    };
+    // Surface any LIVE service config-parse fault from the config-status sidecars
+    // (empty ⇒ omitted, so a healthy node's wire is unchanged).
+    let config_errors = {
+        let errs = read_config_error_sidecars();
+        if errs.is_empty() {
+            None
+        } else {
+            Some(errs)
         }
     };
     HeartbeatPayload {
@@ -304,6 +377,7 @@ fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
         compute_cluster_aggregate_workers_idle: compute.compute_cluster_aggregate_workers_idle,
         compute_cluster_slaves: compute.compute_cluster_slaves,
         plugin_state,
+        config_errors,
     }
 }
 
@@ -454,6 +528,54 @@ mod tests {
     fn an_absent_plugin_dir_is_an_empty_map() {
         let dir = std::env::temp_dir().join("ados-cloud-plugins-nope-does-not-exist");
         assert!(read_plugin_state_sidecars_from(&dir, std::time::SystemTime::now()).is_empty());
+    }
+
+    #[test]
+    fn config_status_sidecars_surface_only_live_errors_sorted_by_service() {
+        let dir = std::env::temp_dir().join(format!("ados-cloud-cfgstatus-{}", std::process::id()));
+        // Two faulty services (unsorted on disk), one healthy (null error → skip).
+        write_named(
+            &dir,
+            "config-status-mavlink.json",
+            r#"{"service":"mavlink","error":"invalid type: string, expected u32","generated_at_ms":1}"#,
+        );
+        write_named(
+            &dir,
+            "config-status-cloud.json",
+            r#"{"service":"cloud","error":"unknown field `bogus`","generated_at_ms":2}"#,
+        );
+        write_named(
+            &dir,
+            "config-status-supervisor.json",
+            r#"{"service":"supervisor","error":null,"generated_at_ms":3}"#,
+        );
+        // Non-matching + staging + malformed files are ignored, never the read.
+        write_named(&dir, "config-status-bad.json", "{ not json");
+        write_named(
+            &dir,
+            "config-status-ground_station.json.tmp.999",
+            r#"{"service":"ground_station","error":"x"}"#,
+        );
+        write_named(&dir, "notes.txt", "unrelated");
+
+        let out = read_config_error_sidecars_from(&dir);
+        // Only the two live errors, sorted by service (cloud before mavlink).
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].service, "cloud");
+        assert_eq!(out[0].error, "unknown field `bogus`");
+        assert_eq!(out[1].service, "mavlink");
+        // The healthy (null-error) service and the staging/malformed/other files
+        // are absent.
+        assert!(!out.iter().any(|e| e.service == "supervisor"));
+        assert!(!out.iter().any(|e| e.service == "ground_station"));
+        assert!(!out.iter().any(|e| e.service == "bad"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_absent_config_status_dir_is_an_empty_list() {
+        let dir = std::env::temp_dir().join("ados-cloud-cfgstatus-nope-does-not-exist");
+        assert!(read_config_error_sidecars_from(&dir).is_empty());
     }
 
     #[test]

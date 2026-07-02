@@ -94,6 +94,7 @@ fn base_payload() -> HeartbeatPayload {
         compute_cluster_aggregate_workers_idle: None,
         compute_cluster_slaves: None,
         plugin_state: None,
+        config_errors: None,
     }
 }
 

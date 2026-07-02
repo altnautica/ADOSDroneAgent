@@ -359,6 +359,15 @@ pub struct HeartbeatPayload {
     // slice; each plugin owns its shape. Omitted when no plugin reports state.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plugin_state: Option<serde_json::Map<String, serde_json::Value>>,
+
+    // --- Service config faults (any profile) ---
+    // Each entry is a service whose on-box config file currently fails to parse
+    // (its config-status sidecar carries a non-null error). Folded from the
+    // `config-status-<service>.json` sidecars every service publishes at startup.
+    // Omitted entirely when every service's config is valid, so a healthy node's
+    // wire is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_errors: Option<Vec<ConfigErrorEntry>>,
 }
 
 /// One compute slave node's capacity, as folded onto the heartbeat under
@@ -371,6 +380,20 @@ pub struct ClusterSlave {
     pub accelerators: Vec<String>,
     pub workers_idle: i64,
     pub queue_depth: i64,
+}
+
+/// One service's live config-parse fault, surfaced from its config-status
+/// sidecar onto the heartbeat under `configErrors`. `service` is the sidecar's
+/// service label (e.g. `"cloud"`, `"mavlink"`), `error` the exact parser
+/// message. Both keys are single words so the casing is identical; the rename is
+/// explicit for consistency with the other nested wire structs. Present only for
+/// services whose current config is malformed — a valid config publishes a null
+/// error and is omitted.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigErrorEntry {
+    pub service: String,
+    pub error: String,
 }
 
 /// One FC CAN bus entry. The block is omitted from the payload when no CAN
@@ -527,6 +550,7 @@ mod tests {
             compute_cluster_aggregate_workers_idle: None,
             compute_cluster_slaves: None,
             plugin_state: None,
+            config_errors: None,
         }
     }
 }
