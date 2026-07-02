@@ -19,6 +19,7 @@ import asyncio
 import json
 import os
 import struct
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -70,6 +71,12 @@ STATE_QUEUE_DEPTH = 32
 # gets its own cap.
 STATE_MAX_FRAME_SIZE = 1024 * 1024
 
+# A v2 (length-prefixed msgpack) frame begins with a 4-byte big-endian length.
+# A state snapshot is always far under 16 MB, so the most-significant length
+# byte (the first byte on the wire) is always 0x00 — the discriminant a reader
+# uses to tell a v2 frame apart from a v1 JSON object (which starts with '{').
+STATE_FRAME_V2_MARKER = b"\x00"
+
 
 def _encode_state_frame(state: dict) -> bytes:
     """Encode a state snapshot for the wire.
@@ -82,6 +89,107 @@ def _encode_state_frame(state: dict) -> bytes:
         body = _msgpack.packb(state, use_bin_type=True)
         return struct.pack("!I", len(body)) + body
     return json.dumps(state).encode() + b"\n"
+
+
+def _decode_state_v2_body(body: bytes) -> dict | None:
+    """Decode a v2 (length-prefixed msgpack) state body.
+
+    Returns None when msgpack is unavailable or the body fails to decode, so
+    the caller can tolerate a single malformed frame.
+    """
+    if _msgpack is None:
+        return None
+    try:
+        return _msgpack.unpackb(body, raw=False)
+    except Exception:  # noqa: BLE001 — tolerate a malformed frame
+        return None
+
+
+def _decode_state_v1_line(line: bytes) -> dict | None:
+    """Decode a v1 (newline-terminated JSON) state line. None on parse failure."""
+    try:
+        return json.loads(line)
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+
+async def _read_state_frame(reader: asyncio.StreamReader) -> dict | None:
+    """Read and decode one state snapshot from an asyncio stream.
+
+    The wire is self-describing (see ``StateIPCServer.publish``): a v2 frame is
+    a 4-byte big-endian length prefix + msgpack body whose leading length byte
+    is always ``0x00``; a v1 frame is a newline-terminated JSON object whose
+    first byte is ``{``. Sniffing that first byte lets the encoder flag
+    (``ADOS_STATE_IPC_MSGPACK``) flip across a deployment without lock-stepping
+    every consumer restart.
+
+    Returns the decoded snapshot dict, or None when the frame could not be
+    decoded (bad length, or an undecodable body) so the caller can skip a
+    single malformed frame. Propagates ``asyncio.IncompleteReadError`` /
+    ``OSError`` on EOF or a transport error so the caller can reconnect.
+    """
+    first = await reader.readexactly(1)
+    if first == STATE_FRAME_V2_MARKER:
+        rest = await reader.readexactly(HEADER_SIZE - 1)
+        (length,) = struct.unpack("!I", first + rest)
+        if length == 0 or length > STATE_MAX_FRAME_SIZE:
+            log.warning("state_ipc_bad_frame_length", length=length)
+            return None
+        body = await reader.readexactly(length)
+        return _decode_state_v2_body(body)
+    # v1: newline-terminated JSON; ``first`` is the opening byte.
+    rest = await reader.readline()
+    return _decode_state_v1_line(first + rest)
+
+
+def _read_state_frame_from_socket(sock, deadline: float) -> dict | None:
+    """Read and decode one state snapshot from a blocking unix socket.
+
+    The synchronous sibling of :func:`_read_state_frame` for a caller that owns
+    a plain blocking socket with an overall time budget (see
+    ``ados.bootstrap.profile_detect.probe_fc_heartbeat``). All reads are bounded
+    by ``deadline`` (a ``time.monotonic()`` value). Same wire sniff and decode
+    as the async helper; returns the decoded dict, or None on no data / timeout
+    / bad length / an undecodable body.
+    """
+
+    def _recv_exact(n: int) -> bytes | None:
+        """Read exactly n bytes before the deadline, else None."""
+        chunk = bytearray()
+        while len(chunk) < n and time.monotonic() < deadline:
+            sock.settimeout(max(0.05, deadline - time.monotonic()))
+            part = sock.recv(n - len(chunk))
+            if not part:
+                return None
+            chunk.extend(part)
+        return bytes(chunk) if len(chunk) == n else None
+
+    first = _recv_exact(1)
+    if first == STATE_FRAME_V2_MARKER:
+        rest = _recv_exact(HEADER_SIZE - 1)
+        if rest is None:
+            return None
+        (length,) = struct.unpack("!I", first + rest)
+        if length == 0 or length > STATE_MAX_FRAME_SIZE:
+            return None
+        body = _recv_exact(length)
+        if body is None:
+            return None
+        return _decode_state_v2_body(body)
+    if not first:
+        return None
+    # v1: newline-terminated JSON; ``first`` is the opening byte.
+    buf = bytearray(first)
+    while time.monotonic() < deadline and b"\n" not in buf:
+        sock.settimeout(max(0.05, deadline - time.monotonic()))
+        part = sock.recv(4096)
+        if not part:
+            break
+        buf.extend(part)
+    line, _, _ = bytes(buf).partition(b"\n")
+    if not line:
+        return None
+    return _decode_state_v1_line(line)
 
 
 def _ensure_run_dir(path: Path | None = None) -> None:
@@ -548,21 +656,13 @@ class StateIPCClient:
         self._reader = None
 
     async def read_loop(self) -> None:
-        """Read state updates, auto-detecting the wire format per frame.
+        """Read state updates and dispatch to the handler until disconnect.
 
-        The frame is self-describing, so a reader decodes either format no
-        matter which one the producer is currently emitting:
-
-        - **v2** is a 4-byte big-endian length prefix + msgpack body. A state
-          snapshot is far smaller than 16 MB, so the most-significant length
-          byte (the first byte on the wire) is always ``0x00``.
-        - **v1** is a newline-terminated JSON object, which always starts with
-          ``{`` (``0x7B``).
-
-        Sniffing that first byte means the encoder flag
-        (``ADOS_STATE_IPC_MSGPACK``) can be flipped across a deployment without
-        lock-stepping every consumer restart: a producer-v2 / consumer-just-
-        restarted-on-v1 window decodes correctly either way.
+        Each frame is decoded by :func:`_read_state_frame`, which auto-detects
+        the wire format (v1 JSON / v2 length-prefixed msgpack) per frame, so the
+        encoder flag (``ADOS_STATE_IPC_MSGPACK``) can be flipped across a
+        deployment without lock-stepping every consumer restart: a producer-v2 /
+        consumer-just-restarted-on-v1 window decodes correctly either way.
         """
         if not self._reader:
             raise RuntimeError("Not connected")
@@ -572,33 +672,13 @@ class StateIPCClient:
                 reader = self._reader
                 if reader is None:
                     break
-                first = await reader.readexactly(1)
-                if first == b"\x00":
-                    # v2: length-prefixed msgpack (leading length byte is 0x00).
-                    rest = await reader.readexactly(HEADER_SIZE - 1)
-                    (length,) = struct.unpack("!I", first + rest)
-                    if length == 0 or length > STATE_MAX_FRAME_SIZE:
-                        log.warning("state_ipc_bad_frame_length", length=length)
-                        break
-                    body = await reader.readexactly(length)
-                    if _msgpack is None:
-                        log.warning("state_ipc_msgpack_unavailable")
-                        break
-                    try:
-                        self._state = _msgpack.unpackb(body, raw=False)
-                        if self._on_state:
-                            self._on_state(self._state)
-                    except Exception:  # noqa: BLE001 — tolerate a bad frame
-                        pass
-                else:
-                    # v1: newline-terminated JSON; `first` is the opening byte.
-                    rest = await reader.readline()
-                    try:
-                        self._state = json.loads(first + rest)
-                        if self._on_state:
-                            self._on_state(self._state)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
+                state = await _read_state_frame(reader)
+                if state is None:
+                    # Malformed / undecodable frame — skip it and keep reading.
+                    continue
+                self._state = state
+                if self._on_state:
+                    self._on_state(state)
         except (asyncio.IncompleteReadError, ConnectionResetError, OSError):
             pass
         except AttributeError:
