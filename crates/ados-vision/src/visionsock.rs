@@ -26,7 +26,6 @@
 //! an error sets the envelope `error` field, which the host surfaces to the
 //! plugin verbatim.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use ados_protocol::frame::{decode_len, HEADER_SIZE, PLUGIN_MAX_FRAME};
@@ -38,7 +37,7 @@ use ados_protocol::plugin::{Envelope, PROTOCOL_VERSION};
 use anyhow::{anyhow, Result};
 use rmpv::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::UnixStream;
 
 use crate::engine::VisionEngine;
 
@@ -48,14 +47,10 @@ pub async fn serve(
     socket_path: &str,
     cancel: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
-    if let Some(parent) = Path::new(socket_path).parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-    let _ = std::fs::remove_file(socket_path);
-    let listener = UnixListener::bind(socket_path)?;
-    // The host connects as a peer; 0o660 keeps the socket off the world while
-    // still reachable by the agent group (matches the plugin socket policy).
-    set_socket_perms(socket_path);
+    // The shared helper owns the create-dir / remove-stale / bind / chmod
+    // hygiene. 0o660 keeps the socket off the world while still reachable by the
+    // agent group (the host connects as a peer; matches the plugin socket policy).
+    let listener = ados_protocol::ipc::bind_command_socket(socket_path, 0o660)?;
     tracing::info!(path = %socket_path, "vision_sock_listening");
 
     loop {
@@ -83,15 +78,6 @@ pub async fn serve(
     let _ = std::fs::remove_file(socket_path);
     Ok(())
 }
-
-#[cfg(target_os = "linux")]
-fn set_socket_perms(path: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660));
-}
-
-#[cfg(not(target_os = "linux"))]
-fn set_socket_perms(_path: &str) {}
 
 /// Serve one client connection. Reads request envelopes, dispatches each, and
 /// writes the response. A `subscribe_frames` request additionally spawns a push

@@ -298,19 +298,13 @@ pub fn tcp_app(router: Router, pairing: Arc<PairingState>, proxied: Arc<ProxiedA
 /// Bind the Unix listener, removing a stale socket and tightening the mode to
 /// `0o660` on Linux so only the agent group can reach the trusted plane.
 pub fn bind_unix(path: &Path) -> std::io::Result<UnixListener> {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::remove_file(path);
-    let listener = UnixListener::bind(path)?;
+    // The shared helper owns the create-dir / remove-stale / bind / chmod
+    // (0o660) hygiene; group-owning to `ados` afterward keeps the mode's
+    // group-rw grant reaching a non-root operator (a chown does not clear the rw
+    // bits, so the final owner+group+mode state is unchanged).
+    let listener = ados_protocol::ipc::bind_command_socket(path, 0o660)?;
     #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        // Group-own to `ados` first, then set the mode: the 0o660 grant only
-        // reaches a non-root operator once the group owns the socket.
-        crate::set_ados_group(path);
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660));
-    }
+    crate::set_ados_group(path);
     Ok(listener)
 }
 

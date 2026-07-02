@@ -19,7 +19,7 @@ use ados_protocol::frame::{decode_len, HEADER_SIZE, PLUGIN_MAX_FRAME};
 use ados_protocol::plugin::{CapabilityToken, Envelope, TokenIssuer, PROTOCOL_VERSION};
 use rmpv::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::UnixStream;
 use tokio::task::JoinHandle;
 
 use crate::dispatch::{gate, Gate, Method};
@@ -87,12 +87,12 @@ impl<H: HostServices> PluginIpcServer<H> {
     /// path and a handle to the accept task. Mirrors `start_for_plugin`:
     /// create the dir, unlink any stale socket, bind, then set mode 0o660.
     pub fn serve_plugin(&self, plugin_id: &str) -> Result<(PathBuf, JoinHandle<()>), ServerError> {
-        std::fs::create_dir_all(&self.socket_dir).ok();
         let path = self.socket_path(plugin_id);
-        // Replace any stale socket from a previous run.
-        let _ = std::fs::remove_file(&path);
-        let listener = UnixListener::bind(&path)?;
-        set_socket_mode(&path)?;
+        // The shared helper owns the create-dir / remove-stale / bind / chmod
+        // hygiene: the socket's parent is the per-plugin socket dir, so binding it
+        // ensures the dir. 0o660 keeps the socket owner+group rw, matching
+        // `os.chmod(sock_path, 0o660)` in the Python server.
+        let listener = ados_protocol::ipc::bind_command_socket(&path, 0o660)?;
 
         let plugin_id = plugin_id.to_string();
         let token_issuer = self.token_issuer.clone();
@@ -872,27 +872,6 @@ async fn send_error<W: AsyncWriteExt + Unpin>(
         error: Some(message.to_string()),
     };
     write_frame(write_half, &env).await
-}
-
-/// Set the bound socket file mode to 0o660. Mirrors `os.chmod(sock_path,
-/// 0o660)`. Linux-only; a no-op elsewhere so the core builds and tests on a
-/// non-Linux dev host.
-#[cfg(target_os = "linux")]
-fn set_socket_mode(path: &Path) -> Result<(), ServerError> {
-    use nix::sys::stat::{fchmodat, FchmodatFlags, Mode};
-    fchmodat(
-        None,
-        path,
-        Mode::from_bits_truncate(0o660),
-        FchmodatFlags::FollowSymlink,
-    )
-    .map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
-    Ok(())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn set_socket_mode(_path: &Path) -> Result<(), ServerError> {
-    Ok(())
 }
 
 #[cfg(test)]

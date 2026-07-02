@@ -145,19 +145,13 @@ impl IngestSocket {
     /// group can write frames.
     pub fn bind(path: impl AsRef<Path>) -> std::io::Result<Self> {
         let path = path.as_ref().to_path_buf();
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::remove_file(&path);
-        let listener = UnixListener::bind(&path)?;
+        // The shared helper owns the create-dir / remove-stale / bind / chmod
+        // (0o660) hygiene; group-owning to `ados` afterward keeps the mode's
+        // group-rw grant reaching a non-root member (a chown does not clear the
+        // rw bits, so the final owner+group+mode state is unchanged).
+        let listener = ados_protocol::ipc::bind_command_socket(&path, 0o660)?;
         #[cfg(target_os = "linux")]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            // Group-own to `ados` first, then set the mode: the 0o660 grant only
-            // reaches a non-root group member once the group owns the socket.
-            crate::set_ados_group(&path);
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660));
-        }
+        crate::set_ados_group(&path);
         Ok(Self { listener, path })
     }
 

@@ -15,10 +15,9 @@
 //! status reply always reflects the post-mutation state.
 
 use std::io;
-use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
 
 use ados_protocol::atlas::CaptureStatus;
+use ados_protocol::ipc::bind_command_socket;
 use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -86,14 +85,13 @@ pub async fn serve_control(
     socket_path: &str,
     tx: mpsc::Sender<AtlasControlCmd>,
 ) -> io::Result<JoinHandle<()>> {
-    let path = Path::new(socket_path).to_path_buf();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-    // Clear a stale socket so bind does not fail with EADDRINUSE.
-    let _ = std::fs::remove_file(&path);
-    let listener = tokio::net::UnixListener::bind(&path)?;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666))?;
+    // The shared helper owns the create-dir / remove-stale / bind / chmod hygiene
+    // (mode 0o666, world-accessible, matching the atlas bus). The accept loop and
+    // per-connection handler stay bespoke below: this socket's reply is
+    // conditional — a command that arrives after the capture loop has gone closes
+    // with NO response — which the uniform-response `serve_rpc` helper cannot
+    // express, so only the bind hygiene is shared here.
+    let listener = bind_command_socket(socket_path, 0o666)?;
     tracing::info!(path = %socket_path, "atlas_control_listening");
 
     let handle = tokio::spawn(async move {

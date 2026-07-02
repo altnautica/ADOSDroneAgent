@@ -32,10 +32,9 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use ados_protocol::ipc::{bind_command_socket, serve_rpc};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 
 use crate::config::WfbConfig;
@@ -61,68 +60,25 @@ struct Request {
     op: String,
 }
 
-/// Bind the aux command socket and serve requests until the listener errors. Run
-/// as its own task from the service main loop. Removes a stale socket first and
-/// chmods it 0660 (root-owned; the api/plugin host runs as root on target).
-/// Returns only on a bind error; the accept loop never exits on the happy path.
+/// Bind the aux command socket and serve one-shot requests until the listener
+/// errors. Run as its own task from the service main loop. The shared helper owns
+/// the create-dir / remove-stale / bind / chmod (0660; root-owned, the api/plugin
+/// host runs as root on target) hygiene. Each connection is one newline-terminated
+/// request -> one newline-terminated response (the trailing newline is added by
+/// the shared serve loop; the handler returns the response body).
 pub async fn serve(state: AuxCmdState, sock_path: &Path) -> std::io::Result<()> {
-    // A stale socket from a prior run makes bind() fail with EADDRINUSE.
-    let _ = std::fs::remove_file(sock_path);
-    if let Some(parent) = sock_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let listener = UnixListener::bind(sock_path)?;
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(sock_path, std::fs::Permissions::from_mode(0o660));
-    }
+    let listener = bind_command_socket(sock_path, 0o660)?;
     tracing::info!(path = %sock_path.display(), "aux command socket listening");
 
-    loop {
-        match listener.accept().await {
-            Ok((stream, _addr)) => {
-                let state = state.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = handle_conn(stream, state).await {
-                        tracing::debug!(error = %e, "aux command conn error");
-                    }
-                });
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "aux command accept failed");
-                // Brief backoff so a persistent accept error can't hot-spin.
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            }
+    serve_rpc(listener, MAX_REQUEST_BYTES, move |req: Vec<u8>| {
+        let state = state.clone();
+        async move {
+            let resp = dispatch(&req, &state).await;
+            serde_json::to_vec(&resp)
+                .unwrap_or_else(|_| br#"{"ok":false,"error":"E_ENCODE"}"#.to_vec())
         }
-    }
-}
-
-/// Read one newline-terminated request, dispatch it, write one newline-
-/// terminated response. Matches the operator command socket's framing.
-async fn handle_conn(mut stream: UnixStream, state: AuxCmdState) -> std::io::Result<()> {
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 1024];
-    loop {
-        let n = stream.read(&mut chunk).await?;
-        if n == 0 {
-            break; // EOF before newline — dispatch whatever we have.
-        }
-        buf.extend_from_slice(&chunk[..n]);
-        if buf.contains(&b'\n') || buf.len() > MAX_REQUEST_BYTES {
-            break;
-        }
-    }
-    let line = match buf.iter().position(|&b| b == b'\n') {
-        Some(i) => &buf[..i],
-        None => &buf[..],
-    };
-    let resp = dispatch(line, &state).await;
-    let mut body = serde_json::to_vec(&resp)
-        .unwrap_or_else(|_| br#"{"ok":false,"error":"E_ENCODE"}"#.to_vec());
-    body.push(b'\n');
-    stream.write_all(&body).await?;
-    stream.flush().await?;
+    })
+    .await;
     Ok(())
 }
 

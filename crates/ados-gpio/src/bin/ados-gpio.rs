@@ -32,14 +32,13 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use serde_json::{json, Value};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{signal, SignalKind};
 #[cfg(target_os = "linux")]
 use tokio::sync::Mutex;
 
 use ados_gpio::sidecar::{GpioOutputState, GPIO_OUTPUT_PATH};
 use ados_gpio::{beep_schedule, parse_command, Command, GPIO_CMD_SOCK};
+use ados_protocol::ipc::{bind_command_socket, serve_rpc};
 
 /// Cap on a single request line so a malformed client can't grow the buffer.
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
@@ -150,35 +149,30 @@ async fn persist_state(state: &State) {
     }
 }
 
-/// Bind the command socket and serve requests until the listener errors. Removes
-/// a stale socket first and chmods it 0660, group-owned to `ados` so a non-root
-/// operator (the API service) and the plugin host can write it. Returns only on
-/// a bind error.
+/// Bind the command socket and serve requests until the listener errors. The
+/// shared helper removes a stale socket first and chmods it 0660; `set_socket_perms`
+/// then group-owns it to `ados` so a non-root operator (the API service) and the
+/// plugin host can write it. Each connection is one newline-terminated JSON
+/// request → one newline-terminated JSON response, then close. Returns only on a
+/// bind error.
 async fn serve(state: State, sock_path: &Path) -> std::io::Result<()> {
-    let _ = std::fs::remove_file(sock_path);
-    if let Some(parent) = sock_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let listener = UnixListener::bind(sock_path)?;
+    let listener = bind_command_socket(sock_path, 0o660)?;
+    // bind_command_socket already applied 0o660; set_socket_perms re-applies it
+    // (harmless) and additionally group-owns the socket to `ados`, which the
+    // shared helper does not do.
     set_socket_perms(sock_path);
     tracing::info!(path = %sock_path.display(), "gpio command socket listening");
 
-    loop {
-        match listener.accept().await {
-            Ok((stream, _addr)) => {
-                let state = state.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = handle_conn(stream, state).await {
-                        tracing::debug!(error = %e, "gpio command conn error");
-                    }
-                });
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "gpio command accept failed");
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            }
+    serve_rpc(listener, MAX_REQUEST_BYTES, move |req: Vec<u8>| {
+        let state = state.clone();
+        async move {
+            let resp = dispatch(&req, &state).await;
+            serde_json::to_vec(&resp)
+                .unwrap_or_else(|_| br#"{"ok":false,"error":"E_ENCODE"}"#.to_vec())
         }
-    }
+    })
+    .await;
+    Ok(())
 }
 
 /// 0o660 + group-own to `ados` so a non-root operator in that group can reach the
@@ -201,35 +195,6 @@ fn set_socket_perms(sock_path: &Path) {
 
 #[cfg(not(target_os = "linux"))]
 fn set_socket_perms(_sock_path: &Path) {}
-
-/// Read one newline-terminated request, dispatch it, write one newline-terminated
-/// response. Bounded read so a client that never sends a newline can't grow the
-/// buffer past the cap.
-async fn handle_conn(mut stream: UnixStream, state: State) -> std::io::Result<()> {
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 1024];
-    loop {
-        let n = stream.read(&mut chunk).await?;
-        if n == 0 {
-            break;
-        }
-        buf.extend_from_slice(&chunk[..n]);
-        if buf.contains(&b'\n') || buf.len() > MAX_REQUEST_BYTES {
-            break;
-        }
-    }
-    let line = match buf.iter().position(|&b| b == b'\n') {
-        Some(i) => &buf[..i],
-        None => &buf[..],
-    };
-    let resp = dispatch(line, &state).await;
-    let mut body = serde_json::to_vec(&resp)
-        .unwrap_or_else(|_| br#"{"ok":false,"error":"E_ENCODE"}"#.to_vec());
-    body.push(b'\n');
-    stream.write_all(&body).await?;
-    stream.flush().await?;
-    Ok(())
-}
 
 /// Parse + route one request. The parse half is pure (covered by the lib tests);
 /// the apply half drives real lines, so it is exercised on-rig.

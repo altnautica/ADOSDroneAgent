@@ -22,8 +22,6 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
 
 use super::orchestrator::{BindOrchestrator, BindStartError};
 use super::BindRole;
@@ -49,64 +47,26 @@ struct Request {
 /// its own task from the supervisor main loop. Removes a stale socket first and
 /// chmods it 0660 (root-owned; the api + cloud services run as root on target).
 /// Returns only on a bind error; the accept loop never exits on the happy path.
+///
+/// The wire is one newline-JSON request → one newline-JSON response per
+/// connection, so the shared one-shot RPC server owns the accept loop and the
+/// framing; this module supplies only the parse + route via [`dispatch`]. A
+/// blocking `start_bind` runs on its connection's own task, so a concurrent
+/// `cancel_bind` on a separate connection is still accepted and handled.
 pub async fn serve(orch: Arc<BindOrchestrator>, sock_path: &Path) -> std::io::Result<()> {
-    // A stale socket from a prior run makes bind() fail with EADDRINUSE.
-    let _ = std::fs::remove_file(sock_path);
-    if let Some(parent) = sock_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let listener = UnixListener::bind(sock_path)?;
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(sock_path, std::fs::Permissions::from_mode(0o660));
-    }
+    // The shared helper owns the create-dir / remove-stale / bind / chmod hygiene
+    // (0660, root-owned; the api + cloud services run as root on target).
+    let listener = ados_protocol::ipc::bind_command_socket(sock_path, 0o660)?;
     tracing::info!(path = %sock_path.display(), "supervisor control socket listening");
-
-    loop {
-        match listener.accept().await {
-            Ok((stream, _addr)) => {
-                let orch = orch.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = handle_conn(stream, orch).await {
-                        tracing::debug!(error = %e, "control conn error");
-                    }
-                });
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "control accept failed");
-                // Brief backoff so a persistent accept error can't hot-spin.
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            }
+    ados_protocol::ipc::serve_rpc(listener, MAX_REQUEST_BYTES, move |req: Vec<u8>| {
+        let orch = orch.clone();
+        async move {
+            let resp = dispatch(&req, &orch).await;
+            serde_json::to_vec(&resp)
+                .unwrap_or_else(|_| br#"{"ok":false,"error":"E_ENCODE"}"#.to_vec())
         }
-    }
-}
-
-/// Read one newline-terminated request, dispatch it, write one newline-
-/// terminated response.
-async fn handle_conn(mut stream: UnixStream, orch: Arc<BindOrchestrator>) -> std::io::Result<()> {
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 1024];
-    loop {
-        let n = stream.read(&mut chunk).await?;
-        if n == 0 {
-            break; // EOF before newline — dispatch whatever we have.
-        }
-        buf.extend_from_slice(&chunk[..n]);
-        if buf.contains(&b'\n') || buf.len() > MAX_REQUEST_BYTES {
-            break;
-        }
-    }
-    let line = match buf.iter().position(|&b| b == b'\n') {
-        Some(i) => &buf[..i],
-        None => &buf[..],
-    };
-    let resp = dispatch(line, &orch).await;
-    let mut body = serde_json::to_vec(&resp)
-        .unwrap_or_else(|_| br#"{"ok":false,"error":"E_ENCODE"}"#.to_vec());
-    body.push(b'\n');
-    stream.write_all(&body).await?;
-    stream.flush().await?;
+    })
+    .await;
     Ok(())
 }
 
@@ -150,6 +110,8 @@ async fn dispatch(line: &[u8], orch: &Arc<BindOrchestrator>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::UnixStream;
 
     #[tokio::test]
     async fn dispatch_status_when_idle_is_null_session() {

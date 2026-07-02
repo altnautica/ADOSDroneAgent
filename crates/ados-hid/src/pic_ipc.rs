@@ -42,10 +42,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use ados_protocol::ipc::bind_command_socket;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 
 use crate::eventbus::{ButtonEventBus, PicEventKind};
@@ -102,17 +103,12 @@ pub async fn serve(
     sock_path: &Path,
     sidecar_path: Option<Arc<PathBuf>>,
 ) -> std::io::Result<()> {
-    // A stale socket from a prior run makes bind() fail with EADDRINUSE.
-    let _ = std::fs::remove_file(sock_path);
-    if let Some(parent) = sock_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let listener = UnixListener::bind(sock_path)?;
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(sock_path, std::fs::Permissions::from_mode(0o660));
-    }
+    // The shared helper owns the create-dir / remove-stale / bind / chmod (0660;
+    // root-owned, the api service runs as root on target) hygiene. This socket is
+    // NOT a plain one-shot request/response: the subscribe ops stream events and
+    // one-shot ops mirror the state sidecar after dispatch, so it keeps its own
+    // accept loop below and adopts only the shared bind.
+    let listener = bind_command_socket(sock_path, 0o660)?;
     tracing::info!(path = %sock_path.display(), "pic control socket listening");
 
     // Seed the sidecar with the current (unclaimed) snapshot at startup so a

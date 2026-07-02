@@ -24,7 +24,7 @@ use ados_protocol::frame::{decode_len, HEADER_SIZE, PLUGIN_MAX_FRAME};
 use ados_protocol::plugin::{Envelope, PROTOCOL_VERSION};
 use rmpv::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::UnixStream;
 use tokio::task::JoinHandle;
 
 /// The control socket file name under the per-plugin socket dir. The leading
@@ -166,11 +166,12 @@ pub fn serve_control<H: ConfigControl + 'static>(
     host: Arc<H>,
     socket_dir: PathBuf,
 ) -> std::io::Result<(PathBuf, JoinHandle<()>)> {
-    std::fs::create_dir_all(&socket_dir).ok();
     let path = control_socket_path(&socket_dir);
-    let _ = std::fs::remove_file(&path);
-    let listener = UnixListener::bind(&path)?;
-    set_control_socket_mode(&path)?;
+    // The shared helper owns the create-dir / remove-stale / bind / chmod
+    // hygiene: the control socket's parent is the per-plugin socket dir, so
+    // binding it ensures the dir. 0o660 is the same owner+group mode the
+    // per-plugin sockets use, so an `ados`-group on-box service can connect.
+    let listener = ados_protocol::ipc::bind_command_socket(&path, 0o660)?;
 
     let task = tokio::spawn(async move {
         loop {
@@ -185,19 +186,6 @@ pub fn serve_control<H: ConfigControl + 'static>(
         }
     });
     Ok((path, task))
-}
-
-/// Set the control socket to owner+group rw (0o660), the same mode the per-plugin
-/// sockets use, so an `ados`-group on-box service (`ados-control`) can connect.
-#[cfg(unix)]
-fn set_control_socket_mode(path: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))
-}
-
-#[cfg(not(unix))]
-fn set_control_socket_mode(_path: &Path) -> std::io::Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]
