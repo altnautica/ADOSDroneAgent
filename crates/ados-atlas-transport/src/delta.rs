@@ -95,7 +95,7 @@ async fn forward_deltas(
                     if dev != device_id {
                         continue; // another drone's delta — not this view
                     }
-                    let Ok(bytes) = event.to_msgpack() else {
+                    let Ok(bytes) = event.encode() else {
                         continue;
                     };
                     if socket.send(Message::Binary(bytes)).await.is_err() {
@@ -124,11 +124,7 @@ mod tests {
     use futures_util::StreamExt;
 
     fn delta(topic: &str) -> AtlasEvent {
-        AtlasEvent {
-            topic: topic.into(),
-            device_id: None,
-            payload: vec![7, 7, 7],
-        }
+        AtlasEvent::new(topic, None, vec![7, 7, 7])
     }
 
     #[tokio::test]
@@ -187,7 +183,7 @@ mod tests {
         broadcaster.publish("drone-1", delta("plugin.atlas.splat"));
 
         let msg = ws.next().await.unwrap().unwrap();
-        let event = AtlasEvent::from_msgpack(&msg.into_data()).unwrap();
+        let event = AtlasEvent::decode(&msg.into_data()).unwrap();
         assert_eq!(event.topic, "plugin.atlas.splat"); // not the drone-2 mesh
         assert_eq!(event.payload, vec![7, 7, 7]);
     }

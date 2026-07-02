@@ -116,7 +116,7 @@ async fn sitl_capture_emits_keyframes_pose_and_state_end_to_end() {
                 Ok(Some(p)) => p,
                 _ => break,
             };
-            let ev = AtlasEvent::from_msgpack(&payload).expect("atlas event");
+            let ev = AtlasEvent::decode(&payload).expect("atlas event");
             match ev.topic.as_str() {
                 ATLAS_KEYFRAME_TOPIC => {
                     keyframes.push(KeyframeEnvelope::from_msgpack(&ev.payload).unwrap())
@@ -254,7 +254,7 @@ async fn sitl_capture_recovers_from_a_malformed_keyframe_frame() {
                 Ok(Some(p)) => p,
                 _ => break,
             };
-            let ev = AtlasEvent::from_msgpack(&payload).unwrap();
+            let ev = AtlasEvent::decode(&payload).unwrap();
             match ev.topic.as_str() {
                 ATLAS_KEYFRAME_TOPIC => keyframes += 1,
                 PLUGIN_ATLAS_POSE_TOPIC => poses += 1,

@@ -64,11 +64,7 @@ mod tests {
     use super::*;
 
     fn event(topic: &str) -> AtlasEvent {
-        AtlasEvent {
-            topic: topic.into(),
-            device_id: None,
-            payload: vec![1, 2, 3],
-        }
+        AtlasEvent::new(topic, None, vec![1, 2, 3])
     }
 
     #[tokio::test]

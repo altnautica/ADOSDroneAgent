@@ -19,6 +19,7 @@
 //! (full-resolution image bytes plus the IMU window) is a LAN-bulk artifact.
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 // --- Topics ---------------------------------------------------------------
 
@@ -325,6 +326,25 @@ pub struct MeshDescriptor {
     pub handle: Option<String>,
 }
 
+/// The on-wire version stamped on every [`AtlasEvent`] envelope. Every atlas
+/// message crosses as an envelope, and the inner topic structs are decoded from
+/// its `payload` only after the envelope decodes, so versioning the envelope
+/// gates the whole contract. Kept in lockstep with the `atlas.envelope` entry in
+/// the contract registry (see [`crate::contracts`]).
+pub const ATLAS_ENVELOPE_VERSION: u16 = 1;
+
+/// Errors raised decoding an [`AtlasEvent`] envelope.
+#[derive(Debug, Error)]
+pub enum AtlasError {
+    /// The msgpack body did not decode into an envelope (also fires when the
+    /// required version field is absent).
+    #[error("msgpack decode error: {0}")]
+    Decode(#[from] rmp_serde::decode::Error),
+    /// The envelope carried a version this build does not speak.
+    #[error("unsupported atlas envelope version {got} (this build speaks {ours})")]
+    Version { got: u16, ours: u16 },
+}
+
 /// One framed message on the agent's local atlas bus. The capture service binds
 /// a single broadcast socket and tags every message with the topic it belongs to
 /// (one of the `atlas.*` / `plugin.atlas.*` constants above) so a subscriber can
@@ -334,6 +354,13 @@ pub struct MeshDescriptor {
 /// so the wrapper stays agnostic to which struct it carries.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AtlasEvent {
+    /// On-wire envelope version, the first field. A decoder that sees a version
+    /// it does not speak rejects the frame in [`AtlasEvent::decode`] rather than
+    /// silently mis-parsing the payload; a frame missing this field also fails to
+    /// decode (no serde default). Stamped by [`AtlasEvent::new`]; held equal to
+    /// [`ATLAS_ENVELOPE_VERSION`].
+    #[serde(rename = "v")]
+    pub v: u16,
     pub topic: String,
     /// The capturing drone's device id, stamped by the drone-side forwarder as
     /// the event leaves the drone (the single choke point every bearer passes
@@ -344,6 +371,40 @@ pub struct AtlasEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_id: Option<String>,
     pub payload: Vec<u8>,
+}
+
+impl AtlasEvent {
+    /// Build an envelope stamped with the current [`ATLAS_ENVELOPE_VERSION`].
+    /// `device_id` is `None` on the local publish bus and `Some(..)` once the
+    /// drone-side forwarder stamps it on egress.
+    pub fn new(topic: impl Into<String>, device_id: Option<String>, payload: Vec<u8>) -> Self {
+        Self {
+            v: ATLAS_ENVELOPE_VERSION,
+            topic: topic.into(),
+            device_id,
+            payload,
+        }
+    }
+
+    /// Encode as a msgpack map with named keys (the version field rides as `v`).
+    pub fn encode(&self) -> Result<Vec<u8>, rmp_serde::encode::Error> {
+        rmp_serde::to_vec_named(self)
+    }
+
+    /// Decode a msgpack envelope, rejecting a frame whose version this build does
+    /// not speak (and a frame missing the version field). Decoding the envelope
+    /// gates the whole atlas contract: a subscriber only reads the inner topic
+    /// struct out of `payload` once this succeeds.
+    pub fn decode(bytes: &[u8]) -> Result<Self, AtlasError> {
+        let event: AtlasEvent = rmp_serde::from_slice(bytes)?;
+        if event.v != ATLAS_ENVELOPE_VERSION {
+            return Err(AtlasError::Version {
+                got: event.v,
+                ours: ATLAS_ENVELOPE_VERSION,
+            });
+        }
+        Ok(event)
+    }
 }
 
 macro_rules! impl_msgpack {
@@ -370,7 +431,6 @@ impl_msgpack!(
     OccupancyDescriptor,
     SplatDescriptor,
     MeshDescriptor,
-    AtlasEvent,
 );
 
 #[cfg(test)]
@@ -504,12 +564,12 @@ mod tests {
             camera_count: 2,
             ingest_rate_hz: 9.5,
         };
-        let ev = AtlasEvent {
-            topic: ATLAS_CAPTURE_STATE_TOPIC.into(),
-            device_id: None,
-            payload: status.to_msgpack().unwrap(),
-        };
-        let back = AtlasEvent::from_msgpack(&ev.to_msgpack().unwrap()).unwrap();
+        let ev = AtlasEvent::new(
+            ATLAS_CAPTURE_STATE_TOPIC,
+            None,
+            status.to_msgpack().unwrap(),
+        );
+        let back = AtlasEvent::decode(&ev.encode().unwrap()).unwrap();
         assert_eq!(back, ev);
         assert_eq!(back.topic, "atlas.capture.state");
         let inner = CaptureStatus::from_msgpack(&back.payload).unwrap();
@@ -521,32 +581,26 @@ mod tests {
         // Absent (the local publish-bus shape): the key is omitted on the wire and
         // an old-frame decode defaults to None, so an unstamped event is
         // byte-unchanged for a receiver that never reads it.
-        let bare = AtlasEvent {
-            topic: ATLAS_KEYFRAME_TOPIC.into(),
-            device_id: None,
-            payload: vec![1, 2, 3],
-        };
+        let bare = AtlasEvent::new(ATLAS_KEYFRAME_TOPIC, None, vec![1, 2, 3]);
         let bare_json = serde_json::to_value(&bare).unwrap();
+        assert_eq!(
+            bare_json["v"], ATLAS_ENVELOPE_VERSION,
+            "the envelope version rides on the wire as `v`"
+        );
         assert!(
             bare_json.get("device_id").is_none(),
             "device_id is skipped when None"
         );
-        assert_eq!(
-            AtlasEvent::from_msgpack(&bare.to_msgpack().unwrap()).unwrap(),
-            bare
-        );
+        assert_eq!(AtlasEvent::decode(&bare.encode().unwrap()).unwrap(), bare);
 
         // Stamped (the egress shape): the drone id round-trips on the wire so the
         // compute node can attribute the job to the capturing drone.
-        let stamped = AtlasEvent {
-            topic: ATLAS_KEYFRAME_TOPIC.into(),
-            device_id: Some("drone-42".into()),
-            payload: vec![9],
-        };
+        let stamped = AtlasEvent::new(ATLAS_KEYFRAME_TOPIC, Some("drone-42".into()), vec![9]);
         let stamped_json = serde_json::to_value(&stamped).unwrap();
+        assert_eq!(stamped_json["v"], ATLAS_ENVELOPE_VERSION);
         assert_eq!(stamped_json["device_id"], "drone-42");
         assert_eq!(
-            AtlasEvent::from_msgpack(&stamped.to_msgpack().unwrap()).unwrap(),
+            AtlasEvent::decode(&stamped.encode().unwrap()).unwrap(),
             stamped
         );
     }
@@ -632,5 +686,34 @@ mod tests {
             pose_desc,
             PoseDescriptor::from_msgpack(&pose_desc.to_msgpack().unwrap()).unwrap()
         );
+    }
+
+    #[test]
+    fn version_matches_registry() {
+        // The constant and the contract registry are the two sources of truth for
+        // this contract's version; a drift between them is caught here.
+        assert_eq!(
+            ATLAS_ENVELOPE_VERSION,
+            crate::contracts::contract_version("atlas.envelope").unwrap()
+        );
+    }
+
+    #[test]
+    fn rejects_a_future_envelope_version() {
+        // A future producer stamps a higher version; this build must refuse it at
+        // decode rather than silently mis-parse the payload (the pose-bug class).
+        let future = AtlasEvent {
+            v: ATLAS_ENVELOPE_VERSION + 1,
+            topic: ATLAS_KEYFRAME_TOPIC.into(),
+            device_id: None,
+            payload: vec![1, 2, 3],
+        };
+        let bytes = future.encode().unwrap();
+        let err = AtlasEvent::decode(&bytes).unwrap_err();
+        assert!(matches!(
+            err,
+            AtlasError::Version { got, ours }
+                if got == ATLAS_ENVELOPE_VERSION + 1 && ours == ATLAS_ENVELOPE_VERSION
+        ));
     }
 }

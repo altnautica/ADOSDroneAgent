@@ -429,11 +429,7 @@ mod tests {
             imu_window: Vec::new(),
             flags: KeyframeFlags::default(),
         };
-        AtlasEvent {
-            topic: ATLAS_KEYFRAME_TOPIC.to_string(),
-            device_id: None,
-            payload: kf.to_msgpack().unwrap(),
-        }
+        AtlasEvent::new(ATLAS_KEYFRAME_TOPIC, None, kf.to_msgpack().unwrap())
     }
 
     /// A keyframe event stamped with a capturing-drone id (the egress shape).
@@ -452,11 +448,11 @@ mod tests {
             camera_count: 1,
             ingest_rate_hz: 9.0,
         };
-        AtlasEvent {
-            topic: ATLAS_CAPTURE_STATE_TOPIC.to_string(),
-            device_id: None,
-            payload: status.to_msgpack().unwrap(),
-        }
+        AtlasEvent::new(
+            ATLAS_CAPTURE_STATE_TOPIC,
+            None,
+            status.to_msgpack().unwrap(),
+        )
     }
 
     /// A capture-state event stamped with a capturing-drone id (the egress shape).
@@ -608,11 +604,7 @@ mod tests {
     fn a_malformed_capture_state_is_dropped_not_an_error() {
         let dir = tempfile::tempdir().unwrap();
         let mut ingest = AtlasIngest::new(dir.path());
-        let bad = AtlasEvent {
-            topic: ATLAS_CAPTURE_STATE_TOPIC.to_string(),
-            device_id: None,
-            payload: b"not msgpack".to_vec(),
-        };
+        let bad = AtlasEvent::new(ATLAS_CAPTURE_STATE_TOPIC, None, b"not msgpack".to_vec());
         assert!(ingest.step(&bad, 100).unwrap().is_none());
     }
 
@@ -741,11 +733,7 @@ mod tests {
         let mut ingest = AtlasIngest::new(dir.path());
         // An undecodable keyframe payload still counts as a received delivery, but
         // nothing is persisted, so a bag with only bad keyframes has no input_path.
-        let bad = AtlasEvent {
-            topic: ATLAS_KEYFRAME_TOPIC.to_string(),
-            device_id: None,
-            payload: vec![0u8; 8],
-        };
+        let bad = AtlasEvent::new(ATLAS_KEYFRAME_TOPIC, None, vec![0u8; 8]);
         assert!(ingest.step(&bad, 100).unwrap().is_none());
         assert_eq!(ingest.keyframes_seen(), 1);
 

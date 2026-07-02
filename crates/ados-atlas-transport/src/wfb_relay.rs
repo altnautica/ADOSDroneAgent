@@ -169,7 +169,7 @@ impl AtlasBearer for WfbRelayBearer {
 
     async fn send(&self, event: &AtlasEvent) -> Result<(), TransportError> {
         // Frame first so an oversized event is rejected before opening anything.
-        let body = event.to_msgpack()?;
+        let body = event.encode()?;
         if body.len() > self.max_datagram {
             // Retriable: a fatter downstream lane may carry it (the ladder
             // declines WFB by its cap and falls over).
@@ -203,11 +203,7 @@ mod tests {
     use tokio::net::UnixListener;
 
     fn event(topic: &str, payload: Vec<u8>) -> AtlasEvent {
-        AtlasEvent {
-            topic: topic.to_string(),
-            device_id: None,
-            payload,
-        }
+        AtlasEvent::new(topic, None, payload)
     }
 
     #[tokio::test]
@@ -224,7 +220,7 @@ mod tests {
 
         let mut buf = vec![0u8; 2048];
         let (n, _) = rx.recv_from(&mut buf).await.unwrap();
-        let got = AtlasEvent::from_msgpack(&buf[..n]).unwrap();
+        let got = AtlasEvent::decode(&buf[..n]).unwrap();
         assert_eq!(got.topic, "atlas.pose");
         assert_eq!(got.payload, vec![1, 2, 3, 4]);
         assert!(bearer.is_available().await, "an open bearer is available");
@@ -294,7 +290,7 @@ mod tests {
 
         let mut buf = vec![0u8; 256];
         let (n, _) = egress.recv_from(&mut buf).await.unwrap();
-        let got = AtlasEvent::from_msgpack(&buf[..n]).unwrap();
+        let got = AtlasEvent::decode(&buf[..n]).unwrap();
         assert_eq!(got.topic, "atlas.occupancy");
         server.abort();
     }

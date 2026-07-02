@@ -103,7 +103,7 @@ impl AtlasBearer for LanHttpBearer {
     }
 
     async fn send(&self, event: &AtlasEvent) -> Result<(), TransportError> {
-        let body = event.to_msgpack()?;
+        let body = event.encode()?;
         let resp = self
             .client
             .post(format!("{}{EVENT_PATH}", self.base_url))
@@ -138,7 +138,7 @@ async fn health() -> StatusCode {
 }
 
 async fn receive_event(State(sink): State<Sender<AtlasEvent>>, body: Bytes) -> StatusCode {
-    match AtlasEvent::from_msgpack(&body) {
+    match AtlasEvent::decode(&body) {
         Ok(event) => match sink.try_send(event) {
             Ok(()) => StatusCode::ACCEPTED,
             // Full = the reconstructor is behind (backpressure); Closed = the
@@ -158,11 +158,7 @@ mod tests {
     use tokio::sync::mpsc::{channel, Receiver};
 
     fn keyframe_event() -> AtlasEvent {
-        AtlasEvent {
-            topic: "atlas.keyframe".into(),
-            device_id: None,
-            payload: vec![1, 2, 3, 4],
-        }
+        AtlasEvent::new("atlas.keyframe", None, vec![1, 2, 3, 4])
     }
 
     async fn spawn_server() -> (std::net::SocketAddr, Receiver<AtlasEvent>) {
@@ -193,11 +189,7 @@ mod tests {
         // default 2 MB limit; the raised limit must accept it on the primary path.
         let (addr, mut rx) = spawn_server().await;
         let bearer = LanHttpBearer::new(format!("http://{addr}"));
-        let big = AtlasEvent {
-            topic: "atlas.keyframe".into(),
-            device_id: None,
-            payload: vec![0xAB; 5 * 1024 * 1024], // 5 MB
-        };
+        let big = AtlasEvent::new("atlas.keyframe", None, vec![0xAB; 5 * 1024 * 1024]); // 5 MB
         bearer.send(&big).await.unwrap(); // Ok(()) means a 2xx, not a 413
         let got = rx.recv().await.unwrap();
         assert_eq!(got.payload.len(), 5 * 1024 * 1024);
@@ -244,7 +236,7 @@ mod tests {
     async fn a_gone_ingest_channel_is_service_unavailable() {
         let (sink, rx) = channel(4);
         drop(rx); // the ingest loop is gone
-        let body = Bytes::from(keyframe_event().to_msgpack().unwrap());
+        let body = Bytes::from(keyframe_event().encode().unwrap());
         let status = receive_event(State(sink), body).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     }
@@ -253,7 +245,7 @@ mod tests {
     async fn a_full_ingest_channel_backpressures_with_503() {
         let (sink, _rx) = channel(1);
         // Fill the one slot (never drained), then the next event is refused.
-        let body = Bytes::from(keyframe_event().to_msgpack().unwrap());
+        let body = Bytes::from(keyframe_event().encode().unwrap());
         assert_eq!(
             receive_event(State(sink.clone()), body.clone()).await,
             StatusCode::ACCEPTED

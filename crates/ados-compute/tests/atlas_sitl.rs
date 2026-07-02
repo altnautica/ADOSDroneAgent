@@ -36,11 +36,7 @@ fn engine() -> Engine {
 }
 
 fn keyframe(i: usize) -> AtlasEvent {
-    AtlasEvent {
-        topic: ATLAS_KEYFRAME_TOPIC.into(),
-        device_id: None,
-        payload: vec![i as u8; 64],
-    }
+    AtlasEvent::new(ATLAS_KEYFRAME_TOPIC, None, vec![i as u8; 64])
 }
 
 fn bagged(keyframes: u64) -> AtlasEvent {
@@ -52,11 +48,11 @@ fn bagged(keyframes: u64) -> AtlasEvent {
         camera_count: 1,
         ingest_rate_hz: 9.0,
     };
-    AtlasEvent {
-        topic: ATLAS_CAPTURE_STATE_TOPIC.into(),
-        device_id: None,
-        payload: status.to_msgpack().unwrap(),
-    }
+    AtlasEvent::new(
+        ATLAS_CAPTURE_STATE_TOPIC,
+        None,
+        status.to_msgpack().unwrap(),
+    )
 }
 
 /// G0: a simulated single-camera capture flows drone→compute over the LAN bearer,
@@ -435,11 +431,7 @@ async fn g3_plugin_data_share_isolates_per_device_and_offloads() {
     assert_eq!(broadcaster.subscriber_count(), 2);
 
     // One drone's splat update is published for its device only.
-    let splat = AtlasEvent {
-        topic: PLUGIN_ATLAS_SPLAT_TOPIC.into(),
-        device_id: None,
-        payload: vec![1, 2, 3],
-    };
+    let splat = AtlasEvent::new(PLUGIN_ATLAS_SPLAT_TOPIC, None, vec![1, 2, 3]);
     broadcaster.publish("drone-1", splat);
 
     // drone-1's plugin view receives it; drone-2's view filters it out.
@@ -507,11 +499,11 @@ async fn g4_live_session_periodic_reconstruct() {
 
     // Three keyframes from one moving camera; a keyframe never bags.
     for kf in 0..3u64 {
-        let ev = AtlasEvent {
-            topic: ATLAS_KEYFRAME_TOPIC.into(),
-            device_id: None,
-            payload: keyframe_env("cam-front", kf).to_msgpack().unwrap(),
-        };
+        let ev = AtlasEvent::new(
+            ATLAS_KEYFRAME_TOPIC,
+            None,
+            keyframe_env("cam-front", kf).to_msgpack().unwrap(),
+        );
         assert!(ingest.step(&ev, 100).unwrap().is_none());
     }
 
@@ -546,11 +538,11 @@ async fn g4_live_session_periodic_reconstruct() {
     // Skip-while-running: more keyframes arrive, but the cadence coalesces while
     // the cycle's guard is held, so no second job piles up on top.
     for kf in 3..6u64 {
-        let ev = AtlasEvent {
-            topic: ATLAS_KEYFRAME_TOPIC.into(),
-            device_id: None,
-            payload: keyframe_env("cam-front", kf).to_msgpack().unwrap(),
-        };
+        let ev = AtlasEvent::new(
+            ATLAS_KEYFRAME_TOPIC,
+            None,
+            keyframe_env("cam-front", kf).to_msgpack().unwrap(),
+        );
         ingest.step(&ev, 400).unwrap();
     }
     assert!(
@@ -618,11 +610,11 @@ async fn g5_multi_cam_fuses_into_one_world() {
     let ladder = BearerLadder::new(vec![Box::new(bearer)]);
     for kf in &keyframes {
         ladder
-            .send(&AtlasEvent {
-                topic: ATLAS_KEYFRAME_TOPIC.into(),
-                device_id: None,
-                payload: kf.to_msgpack().unwrap(),
-            })
+            .send(&AtlasEvent::new(
+                ATLAS_KEYFRAME_TOPIC,
+                None,
+                kf.to_msgpack().unwrap(),
+            ))
             .await
             .unwrap();
         rec.push_keyframe(kf);
@@ -637,11 +629,11 @@ async fn g5_multi_cam_fuses_into_one_world() {
         ingest_rate_hz: 9.0,
     };
     ladder
-        .send(&AtlasEvent {
-            topic: ATLAS_CAPTURE_STATE_TOPIC.into(),
-            device_id: None,
-            payload: status.to_msgpack().unwrap(),
-        })
+        .send(&AtlasEvent::new(
+            ATLAS_CAPTURE_STATE_TOPIC,
+            None,
+            status.to_msgpack().unwrap(),
+        ))
         .await
         .unwrap();
     drop(ladder);

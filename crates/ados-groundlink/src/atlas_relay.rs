@@ -108,7 +108,7 @@ impl AtlasRelaySidecar {
 /// a non-decoding frame is counted as malformed and dropped.
 async fn forward_datagram(bearer: &LanHttpBearer, buf: &[u8], stats: &mut AtlasRelayStats) {
     stats.datagrams_seen += 1;
-    match AtlasEvent::from_msgpack(buf) {
+    match AtlasEvent::decode(buf) {
         Ok(event) => match bearer.send(&event).await {
             Ok(()) => stats.forwarded += 1,
             Err(e) => {
@@ -202,11 +202,7 @@ mod tests {
     }
 
     fn event(topic: &str, payload: Vec<u8>) -> AtlasEvent {
-        AtlasEvent {
-            topic: topic.to_string(),
-            device_id: None,
-            payload,
-        }
+        AtlasEvent::new(topic, None, payload)
     }
 
     #[tokio::test]
@@ -216,7 +212,7 @@ mod tests {
         let mut stats = AtlasRelayStats::default();
 
         let ev = event("atlas.occupancy", vec![1, 2, 3]);
-        forward_datagram(&bearer, &ev.to_msgpack().unwrap(), &mut stats).await;
+        forward_datagram(&bearer, &ev.encode().unwrap(), &mut stats).await;
 
         let got = rx.recv().await.unwrap();
         assert_eq!(got, ev);
@@ -257,7 +253,7 @@ mod tests {
         let tx = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         tx.connect(("127.0.0.1", listen_port)).await.unwrap();
         let ev = event("atlas.pose", vec![7]);
-        tx.send(&ev.to_msgpack().unwrap()).await.unwrap();
+        tx.send(&ev.encode().unwrap()).await.unwrap();
 
         let got = rx.recv().await.unwrap();
         assert_eq!(got, ev);

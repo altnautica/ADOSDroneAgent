@@ -19,15 +19,11 @@ const ATLAS_QUEUE_DEPTH: usize = 16;
 /// Encode an [`AtlasEvent`] as a complete broadcast frame: a 4-byte big-endian
 /// length prefix followed by the msgpack body.
 pub fn encode_event_frame(topic: &str, payload: Vec<u8>) -> anyhow::Result<Vec<u8>> {
-    let ev = AtlasEvent {
-        topic: topic.to_string(),
-        // Unstamped on the local publish bus; the drone-side forwarder stamps the
-        // device id on egress (the single choke point every bearer passes through).
-        device_id: None,
-        payload,
-    };
+    // Unstamped on the local publish bus; the drone-side forwarder stamps the
+    // device id on egress (the single choke point every bearer passes through).
+    let ev = AtlasEvent::new(topic, None, payload);
     let body = ev
-        .to_msgpack()
+        .encode()
         .map_err(|e| anyhow::anyhow!("encode atlas event: {e}"))?;
     encode_frame(&body, PLUGIN_MAX_FRAME)
         .map_err(|e: FrameError| anyhow::anyhow!("frame atlas event ({} bytes): {e}", body.len()))
@@ -104,7 +100,7 @@ mod tests {
             encode_event_frame(ATLAS_CAPTURE_STATE_TOPIC, status.to_msgpack().unwrap()).unwrap();
         let len = u32::from_be_bytes(frame[..4].try_into().unwrap()) as usize;
         assert_eq!(len, frame.len() - 4);
-        let ev = AtlasEvent::from_msgpack(&frame[4..]).unwrap();
+        let ev = AtlasEvent::decode(&frame[4..]).unwrap();
         assert_eq!(ev.topic, ATLAS_CAPTURE_STATE_TOPIC);
         let back = CaptureStatus::from_msgpack(&ev.payload).unwrap();
         assert_eq!(back, status);

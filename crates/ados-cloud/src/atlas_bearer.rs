@@ -115,11 +115,11 @@ impl AtlasBearer for CloudBearer {
         if !self.connected.load(Ordering::Relaxed) {
             return Err(TransportError::Unavailable);
         }
-        // Publish the WHOLE envelope (event.to_msgpack()), the identical wire the
+        // Publish the WHOLE envelope (event.encode()), the identical wire the
         // LAN receiver (atlas_event_router) decodes, so the off-LAN consumer uses
         // the same decode path. Never publish event.payload alone.
         let body = event
-            .to_msgpack()
+            .encode()
             .map_err(|e| TransportError::Encode(e.to_string()))?;
         // Descriptors only: decline a multi-MB artifact (retriable) so the ladder
         // offers it to a fatter lane instead of backing up the shared connection.
@@ -151,11 +151,7 @@ mod tests {
     use crate::mqtt::transport::test_support::FakeTransport;
 
     fn event(topic: &str, payload: Vec<u8>) -> AtlasEvent {
-        AtlasEvent {
-            topic: topic.to_string(),
-            device_id: None,
-            payload,
-        }
+        AtlasEvent::new(topic, None, payload)
     }
 
     #[test]
@@ -200,7 +196,7 @@ mod tests {
         assert_eq!(topic, "ados/dev1/atlas/occupancy");
         assert_eq!(*qos, MqttQos::AtLeastOnce);
         // The full envelope, decodable by the same path the LAN receiver uses.
-        assert_eq!(AtlasEvent::from_msgpack(payload).unwrap(), ev);
+        assert_eq!(AtlasEvent::decode(payload).unwrap(), ev);
     }
 
     #[tokio::test]

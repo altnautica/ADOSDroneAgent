@@ -322,7 +322,7 @@ pub async fn run(config: Arc<CloudConfig>, mut shutdown: watch::Receiver<bool>) 
 /// drone that captured it. An empty configured id leaves the event unstamped
 /// (never writes an empty attribution).
 async fn forward_event(ladder: &BearerLadder, body: &[u8], device_id: &str) -> Forwarded {
-    let mut event = match AtlasEvent::from_msgpack(body) {
+    let mut event = match AtlasEvent::decode(body) {
         Ok(ev) => ev,
         Err(e) => {
             tracing::warn!(error = %e, "atlas forwarder dropped a malformed event");
@@ -446,12 +446,8 @@ mod tests {
     async fn forward_event_carries_a_decoded_event_over_the_ladder() {
         let (bearer, mut rx) = LoopbackBearer::channel();
         let ladder = BearerLadder::new(vec![Box::new(bearer)]);
-        let ev = AtlasEvent {
-            topic: ATLAS_KEYFRAME_TOPIC.into(),
-            device_id: None,
-            payload: vec![1, 2, 3],
-        };
-        let body = ev.to_msgpack().unwrap();
+        let ev = AtlasEvent::new(ATLAS_KEYFRAME_TOPIC, None, vec![1, 2, 3]);
+        let body = ev.encode().unwrap();
 
         match forward_event(&ladder, &body, "drone-7").await {
             // A keyframe carried over the loopback bearer, flagged as a keyframe so
@@ -491,12 +487,8 @@ mod tests {
     #[tokio::test]
     async fn forward_event_reports_no_bearer_when_the_ladder_is_empty() {
         let ladder = BearerLadder::new(vec![]);
-        let ev = AtlasEvent {
-            topic: "plugin.atlas.pose".into(),
-            device_id: None,
-            payload: vec![9],
-        };
-        let body = ev.to_msgpack().unwrap();
+        let ev = AtlasEvent::new("plugin.atlas.pose", None, vec![9]);
+        let body = ev.encode().unwrap();
         match forward_event(&ladder, &body, "drone-7").await {
             Forwarded::Decoded {
                 carried: None,

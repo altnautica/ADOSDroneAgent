@@ -460,7 +460,7 @@ mod tests {
                     .await
                     .expect("read")
                     .expect("frame");
-                let ev = AtlasEvent::from_msgpack(&payload).expect("event");
+                let ev = AtlasEvent::decode(&payload).expect("event");
                 if ev.topic == ATLAS_CAPTURE_STATE_TOPIC {
                     return CaptureStatus::from_msgpack(&ev.payload).expect("status");
                 }
