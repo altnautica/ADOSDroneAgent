@@ -28,6 +28,9 @@
 //! - [`contracts`] — the generated IPC contract + sidecar version registry: the
 //!   single source of truth for every wire-contract version integer (source of
 //!   truth is `contracts.toml`; do not edit the generated file).
+//! - [`sidecar`] — the best-effort helper for checking an on-disk state
+//!   sidecar's schema version against the value this build expects: warns (never
+//!   fails) on a drift so a stale sidecar from an older agent still reads.
 //! - [`pairing_posture`] — the data-plane auth primitives (pairing-state read,
 //!   constant-time key compare, on-box loopback trust, access decision) shared
 //!   by the native HTTP control surface and the direct MAVLink WebSocket proxy.
@@ -48,6 +51,7 @@ pub mod mavlink;
 pub mod pairing_posture;
 pub mod plugin;
 pub mod rest;
+pub mod sidecar;
 pub mod state;
 pub mod tap;
 pub mod wfb_tables;
