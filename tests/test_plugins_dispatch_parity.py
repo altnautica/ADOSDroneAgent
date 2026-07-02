@@ -70,6 +70,11 @@ EXPECTED: dict[str, str | None] = {
     "flight.guided_setpoint.send": "flight.guided_setpoint",
     "radio.aux_stream.open": "radio.aux_stream",
     "radio.aux_stream.close": "radio.aux_stream",
+    "compute.job.submit": "compute.job.submit",
+    "compute.job.read": "compute.job.read",
+    "compute.job.cancel": "compute.job.submit",
+    "compute.job.outputs": "compute.job.read",
+    "compute.dataset.write": "compute.dataset.write",
 }
 
 
