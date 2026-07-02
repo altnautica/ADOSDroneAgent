@@ -153,14 +153,13 @@ fn venv_pip_works() -> bool {
 
 /// True when the venv interpreter can import `msgpack`.
 ///
-/// The state IPC wire defaults to length-prefixed msgpack (v2): the env file
-/// sets `ADOS_STATE_IPC_MSGPACK=1` and the native state producer emits v2
-/// frames. The Python state consumer needs `msgpack` to decode those frames; if
-/// the module is absent it cannot read state at all. `msgpack` is a declared
-/// agent dependency, so a clean `pip install` of the agent package always pulls
-/// it in — but a venv rebuilt off a broken index or a partial wheel cache can
-/// silently land without it. This probe is the post-provision assertion that
-/// turns that silent gap into a loud install failure.
+/// The state IPC wire is length-prefixed msgpack (v2): the native state producer
+/// always emits v2 frames. The Python state consumer needs `msgpack` to decode
+/// those frames; if the module is absent it cannot read state at all. `msgpack`
+/// is a declared agent dependency, so a clean `pip install` of the agent package
+/// always pulls it in — but a venv rebuilt off a broken index or a partial wheel
+/// cache can silently land without it. This probe is the post-provision
+/// assertion that turns that silent gap into a loud install failure.
 fn venv_msgpack_importable() -> bool {
     exec::run_ok(&venv_python(), &["-c", "import msgpack"])
 }
@@ -371,14 +370,13 @@ impl Step for VenvAgent {
             }
         };
 
-        // (4) Post-provision dependency health gate. The state IPC wire defaults
-        // to msgpack v2 (the env file sets ADOS_STATE_IPC_MSGPACK=1 and the
-        // native producer emits v2 frames), so the Python state consumer must be
-        // able to import `msgpack` or it reads no state at all — a silent,
-        // self-heal-free state blindness. `msgpack` is a declared dependency, so
-        // a clean install always has it; assert it here so a venv that landed
-        // without it (a broken index, a partial wheel cache) fails the install
-        // loudly at provision time instead of going dark at runtime.
+        // (4) Post-provision dependency health gate. The state IPC wire is
+        // msgpack v2 (the native producer always emits v2 frames), so the Python
+        // state consumer must be able to import `msgpack` or it reads no state at
+        // all — a silent, self-heal-free state blindness. `msgpack` is a declared
+        // dependency, so a clean install always has it; assert it here so a venv
+        // that landed without it (a broken index, a partial wheel cache) fails
+        // the install loudly at provision time instead of going dark at runtime.
         if !venv_msgpack_importable() {
             return StepOutcome::Failed(
                 "the agent venv cannot import `msgpack`, which the default state \

@@ -127,9 +127,11 @@ fn state_v2_decodes_python_msgpack() {
     let f = fixtures();
     let s = &f["state_v2"];
 
-    // The Python agent's v2 wire body is msgpack(state); the Rust state hub
-    // must decode it to the same snapshot. (body_hex is the frame payload
-    // without the 4-byte length prefix.)
+    // The Python agent's v2 wire body is the versioned map
+    // msgpack({"v": 2, "s": state}); the Rust state hub must decode it to the
+    // same inner snapshot. (body_hex is the frame payload without the 4-byte
+    // length prefix.)
+    assert_eq!(s["version"].as_u64().unwrap(), 2);
     let body = hex::decode(s["body_hex"].as_str().unwrap()).unwrap();
     let decoded = state::decode_v2(&body).unwrap();
     assert_eq!(decoded, s["state"]);

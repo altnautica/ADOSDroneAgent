@@ -213,14 +213,19 @@ def test_fc_heartbeat_probe_reads_state_socket_v2_msgpack(
 ) -> None:
     """The probe also decodes the length-prefixed msgpack (v2) state wire.
 
-    A v2 frame is `struct.pack("!I", len) + msgpack_body`; the leading
-    length byte is 0x00, which is how the probe tells it apart from the
-    v1 JSON line (leading `{`).
+    A v2 frame is `struct.pack("!I", len) + msgpack({"v": <version>, "s": state})`;
+    the leading length byte is 0x00, which is how the probe tells it apart from
+    the v1 JSON line (leading `{`).
     """
     import struct
 
     msgpack = pytest.importorskip("msgpack")
-    body = msgpack.packb({"fc_connected": fc_connected}, use_bin_type=True)
+    from ados.core.contracts import contract_version
+
+    version = contract_version("state.v2")
+    body = msgpack.packb(
+        {"v": version, "s": {"fc_connected": fc_connected}}, use_bin_type=True
+    )
     payload = struct.pack("!I", len(body)) + body
 
     class _FakeSocket:

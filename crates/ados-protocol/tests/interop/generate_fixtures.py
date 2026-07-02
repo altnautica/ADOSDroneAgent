@@ -19,6 +19,7 @@ from pathlib import Path
 
 import msgpack
 
+from ados.core.contracts import contract_version
 from ados.plugins.rpc import CapabilityToken, Envelope, TokenIssuer, encode_frame
 
 # Fixed inputs so the output is deterministic and reproducible.
@@ -99,10 +100,13 @@ def state_v1_fixture() -> dict:
 
 
 def state_v2_fixture() -> dict:
-    # Mirrors core/ipc.py _encode_state_frame (v2) body: msgpack, use_bin_type.
+    # Mirrors core/ipc.py _encode_state_frame (v2) body: the msgpack map
+    # {"v": <version>, "s": state} (use_bin_type). The Rust decoder unwraps it
+    # back to the inner state. Version sourced from the shared contract registry.
     state = _sample_state()
-    body = msgpack.packb(state, use_bin_type=True)
-    return {"state": state, "body_hex": body.hex()}
+    version = contract_version("state.v2")
+    body = msgpack.packb({"v": version, "s": state}, use_bin_type=True)
+    return {"state": state, "version": version, "body_hex": body.hex()}
 
 
 def main() -> None:

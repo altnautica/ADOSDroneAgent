@@ -9,7 +9,6 @@ receiving every frame.
 from __future__ import annotations
 
 import asyncio
-import json
 import struct
 import tempfile
 from pathlib import Path
@@ -237,7 +236,13 @@ async def test_state_publish_slow_consumer_disconnected(tmp_sock_dir):
 
 @pytest.mark.asyncio
 async def test_state_publish_round_trip(tmp_sock_dir):
-    """Round-trip JSON snapshot via the client read_loop."""
+    """Round-trip a snapshot from the server through the self-describing reader.
+
+    The producer emits v2 (length-prefixed msgpack ``{"v", "s"}``), so the frame
+    is decoded with the shared reader rather than assuming a v1 newline line.
+    """
+    from ados.core.ipc import _read_state_frame
+
     sock = tmp_sock_dir / "state.sock"
     server = StateIPCServer(sock_path=sock)
     await server.start()
@@ -248,8 +253,8 @@ async def test_state_publish_round_trip(tmp_sock_dir):
         snap = {"alt": 12.5, "armed": True, "name": "test"}
         server.publish(snap)
 
-        line = await asyncio.wait_for(reader.readline(), timeout=1.0)
-        assert json.loads(line.decode()) == snap
+        decoded = await asyncio.wait_for(_read_state_frame(reader), timeout=1.0)
+        assert decoded == snap
 
         writer.close()
     finally:
@@ -257,19 +262,12 @@ async def test_state_publish_round_trip(tmp_sock_dir):
 
 
 @pytest.mark.asyncio
-async def test_state_client_sniffs_v2_msgpack(tmp_sock_dir, monkeypatch):
-    """With the msgpack encoder enabled the sniffing client decodes v2 frames.
+async def test_state_client_sniffs_v2_msgpack(tmp_sock_dir):
+    """The client decodes the v2 (length-prefixed msgpack) frames the server emits.
 
-    The client never reads the encoder flag itself, so it must detect the
-    length-prefixed msgpack frame purely from the wire.
+    The client never inspects the wire format up front, so it must detect the
+    length-prefixed msgpack frame purely from the leading byte.
     """
-    import ados.core.ipc as ipc_mod
-
-    if ipc_mod._msgpack is None:
-        pytest.skip("msgpack not installed")
-    # Flip the server-side encoder to v2 for this test only.
-    monkeypatch.setattr(ipc_mod, "_USE_MSGPACK", True)
-
     sock = tmp_sock_dir / "state.sock"
     server = StateIPCServer(sock_path=sock)
     await server.start()
@@ -298,48 +296,56 @@ async def test_state_client_sniffs_v2_msgpack(tmp_sock_dir, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_state_client_sniffs_v1_after_v2(tmp_sock_dir, monkeypatch):
-    """A single client read_loop decodes a v2 frame then a v1 frame on one wire.
+async def test_reader_decodes_a_v1_frame_after_a_v2_frame():
+    """The self-describing reader decodes a v2 frame then a stray v1 frame.
 
-    Proves the per-frame sniff survives an encoder flip mid-stream (the
-    deployment-flip window), not just a uniform stream.
+    The producer only ever emits v2, but the reader must still consume a stray
+    v1 frame on the same wire (the migration-window guarantee), so the per-frame
+    sniff is exercised directly against a hand-built mixed stream.
     """
     import ados.core.ipc as ipc_mod
 
-    if ipc_mod._msgpack is None:
-        pytest.skip("msgpack not installed")
+    reader = asyncio.StreamReader()
+    reader.feed_data(ipc_mod._encode_state_frame({"wire": "v2", "n": 1}))
+    reader.feed_data(ipc_mod._encode_state_frame_v1({"wire": "v1", "n": 2}))
+    reader.feed_eof()
 
-    sock = tmp_sock_dir / "state.sock"
-    server = StateIPCServer(sock_path=sock)
-    await server.start()
-    try:
-        client = StateIPCClient(sock_path=sock)
-        await client.connect(retries=5, delay=0.1)
-        states: list[dict] = []
-        client.set_state_handler(states.append)
-        loop_task = asyncio.create_task(client.read_loop())
+    first = await ipc_mod._read_state_frame(reader)
+    second = await ipc_mod._read_state_frame(reader)
 
-        # First publish a v2 (msgpack) frame, then flip the encoder to v1
-        # (JSON) and publish again, all on the same connection.
-        monkeypatch.setattr(ipc_mod, "_USE_MSGPACK", True)
-        server.publish({"wire": "v2", "n": 1})
-        for _ in range(20):
-            await asyncio.sleep(0.05)
-            if any(s.get("wire") == "v2" for s in states):
-                break
-        monkeypatch.setattr(ipc_mod, "_USE_MSGPACK", False)
-        server.publish({"wire": "v1", "n": 2})
-        for _ in range(20):
-            await asyncio.sleep(0.05)
-            if any(s.get("wire") == "v1" for s in states):
-                break
+    assert first == {"wire": "v2", "n": 1}
+    assert second == {"wire": "v1", "n": 2}
 
-        wires = {s.get("wire") for s in states}
-        assert "v2" in wires and "v1" in wires
 
-        await client.disconnect()
-        loop_task.cancel()
-        with pytest.raises((asyncio.CancelledError, BaseException)):
-            await loop_task
-    finally:
-        await server.stop()
+def test_encode_state_frame_wraps_v2_with_version():
+    """The v2 producer wraps state as {"v": <registry version>, "s": state}."""
+    import msgpack
+
+    import ados.core.ipc as ipc_mod
+    from ados.core.contracts import contract_version
+
+    state = {"mode": "GUIDED", "n": 3}
+    frame = ipc_mod._encode_state_frame(state)
+    # 0x00 discriminant (the length prefix's high byte) then the msgpack map.
+    assert frame[0] == 0x00
+    (length,) = struct.unpack("!I", frame[:HEADER_SIZE])
+    body = frame[HEADER_SIZE:]
+    assert len(body) == length
+    decoded = msgpack.unpackb(body, raw=False)
+    assert decoded == {"v": contract_version("state.v2"), "s": state}
+
+
+def test_decode_state_v2_body_skips_a_version_mismatch():
+    """A v2 body carrying an unexpected version decodes to None (a skipped frame)."""
+    import msgpack
+
+    import ados.core.ipc as ipc_mod
+
+    good = msgpack.packb(
+        {"v": ipc_mod.STATE_V2_VERSION, "s": {"n": 1}}, use_bin_type=True
+    )
+    bad_version = msgpack.packb(
+        {"v": ipc_mod.STATE_V2_VERSION + 1, "s": {"n": 2}}, use_bin_type=True
+    )
+    assert ipc_mod._decode_state_v2_body(good) == {"n": 1}
+    assert ipc_mod._decode_state_v2_body(bad_version) is None

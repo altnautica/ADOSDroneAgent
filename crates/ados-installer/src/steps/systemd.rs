@@ -483,17 +483,15 @@ HandleSuspendKey=ignore\n"
         .to_string()
 }
 
-/// Build the `/etc/ados/env` file body (pure). Mirrors 07-systemd.sh:110-118,
-/// including the `ADOS_STATE_IPC_MSGPACK=1` selector. `device_id` is read from
-/// `/etc/ados/device-id`; empty when not yet minted (it is, by this step).
+/// Build the `/etc/ados/env` file body (pure). `device_id` is read from
+/// `/etc/ados/device-id`; empty when not yet minted (it is, by this step). The
+/// state IPC wire is unconditionally msgpack (v2), so no selector env var is
+/// written.
 pub fn env_file_body(device_id: &str) -> String {
     format!(
         "ADOS_DEVICE_ID={device_id}\n\
 ADOS_CONFIG={CONFIG_DIR}/config.yaml\n\
-ADOS_RUN_DIR=/run/ados\n\
-# State IPC wire: length-prefixed msgpack (v2). The reader auto-detects the\n\
-# format per frame, so this only selects which encoding the producer emits.\n\
-ADOS_STATE_IPC_MSGPACK=1\n"
+ADOS_RUN_DIR=/run/ados\n"
     )
 }
 
@@ -1414,13 +1412,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn env_file_carries_the_msgpack_selector() {
+    fn env_file_carries_the_core_paths() {
         let body = env_file_body("abcd1234abcd");
         assert!(body.contains("ADOS_DEVICE_ID=abcd1234abcd"));
         assert!(body.contains(&format!("ADOS_CONFIG={CONFIG_DIR}/config.yaml")));
         assert!(body.contains("ADOS_RUN_DIR=/run/ados"));
-        // The load-bearing IPC selector must be present (07-systemd.sh:116).
-        assert!(body.contains("ADOS_STATE_IPC_MSGPACK=1"));
+        // The state IPC wire is unconditionally v2; no selector env var is
+        // written (the reader auto-detects the format per frame).
+        assert!(!body.contains("ADOS_STATE_IPC_MSGPACK"));
     }
 
     #[test]

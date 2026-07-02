@@ -23,29 +23,21 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
+import msgpack as _msgpack
 import structlog
 
 from ados.core import paths as _paths
+from ados.core.contracts import contract_version
 
 log = structlog.get_logger()
 
-# Optional msgpack encoder for the state channel. Kept as an optional import
-# so the agent runs unchanged on systems that do not have msgpack installed.
-# The env flag is read once at import time. Wiring the actual encode path is
-# deferred until the wire framing migration is planned, since switching from
-# newline-terminated JSON to length-prefixed binary is a breaking change for
-# any consumer that reads the state socket.
-try:
-    import msgpack as _msgpack  # type: ignore[import-not-found]
-
-    _MSGPACK_AVAILABLE = True
-except ImportError:
-    _msgpack = None  # type: ignore[assignment]
-    _MSGPACK_AVAILABLE = False
-
-_USE_MSGPACK = (
-    os.environ.get("ADOS_STATE_IPC_MSGPACK") == "1" and _MSGPACK_AVAILABLE
-)
+# The state socket speaks v2: a length-prefixed msgpack frame whose body is the
+# map {"v": <version>, "s": <state>}. msgpack is a hard dependency (declared in
+# pyproject), so a missing import is a loud ImportError at startup, never a
+# silent downgrade to the legacy JSON wire. The version integer is sourced from
+# the shared contract registry so Rust, Python, and TypeScript cannot drift.
+STATE_V2_VERSION = contract_version("state.v2")
+assert STATE_V2_VERSION is not None, "state.v2 contract version missing from registry"
 
 # Allow tests and dev rigs to override the runtime root via env var.
 # Defaults to the canonical /run/ados/ from `ados.core.paths`.
@@ -64,11 +56,8 @@ MAVLINK_QUEUE_DEPTH = 256
 STATE_QUEUE_DEPTH = 32
 
 # State v2 wire: length-prefixed msgpack (the same 4-byte big-endian frame the
-# MAVLink socket uses). Gated by ADOS_STATE_IPC_MSGPACK so it lands inert; when
-# the flag is set, every service in a deployment must agree (server + clients),
-# otherwise the state socket stays newline-terminated JSON (v1). A state
-# snapshot with the full parameter dict is larger than a MAVLink frame, so it
-# gets its own cap.
+# MAVLink socket uses). A state snapshot with the full parameter dict is larger
+# than a MAVLink frame, so it gets its own cap.
 STATE_MAX_FRAME_SIZE = 1024 * 1024
 
 # A v2 (length-prefixed msgpack) frame begins with a 4-byte big-endian length.
@@ -79,30 +68,50 @@ STATE_FRAME_V2_MARKER = b"\x00"
 
 
 def _encode_state_frame(state: dict) -> bytes:
-    """Encode a state snapshot for the wire.
+    """Encode a state snapshot as a v2 wire frame.
 
-    Length-prefixed msgpack when ``_USE_MSGPACK`` is set (v2), else
-    newline-terminated JSON (v1). Both halves of a deployment switch together
-    via the ``ADOS_STATE_IPC_MSGPACK`` env flag.
+    The v2 body is the msgpack map ``{"v": <version>, "s": <state>}`` (version
+    sourced from the ``state.v2`` contract registry), length-prefixed with a
+    4-byte big-endian header — the same framing the MAVLink socket uses. This is
+    the only format the producer emits; :func:`_encode_state_frame_v1` is kept
+    for the migration reader and the interop tests, not for production output.
     """
-    if _USE_MSGPACK:
-        body = _msgpack.packb(state, use_bin_type=True)
-        return struct.pack("!I", len(body)) + body
+    body = _msgpack.packb({"v": STATE_V2_VERSION, "s": state}, use_bin_type=True)
+    return struct.pack("!I", len(body)) + body
+
+
+def _encode_state_frame_v1(state: dict) -> bytes:
+    """Encode a state snapshot in the legacy v1 wire (newline-terminated JSON).
+
+    Retained so the reader can be exercised against a stray v1 frame and for the
+    interop/round-trip tests. The producer always emits v2.
+    """
     return json.dumps(state).encode() + b"\n"
 
 
 def _decode_state_v2_body(body: bytes) -> dict | None:
     """Decode a v2 (length-prefixed msgpack) state body.
 
-    Returns None when msgpack is unavailable or the body fails to decode, so
-    the caller can tolerate a single malformed frame.
+    The body is the map ``{"v": <version>, "s": <state>}``. Returns the inner
+    state on success, or None (a skippable frame) when the body fails to decode,
+    is not the expected shape, or carries a version this build does not
+    understand — mirroring the Rust reader, which turns a version mismatch into a
+    skipped frame rather than a mis-read.
     """
-    if _msgpack is None:
-        return None
     try:
-        return _msgpack.unpackb(body, raw=False)
+        decoded = _msgpack.unpackb(body, raw=False)
     except Exception:  # noqa: BLE001 — tolerate a malformed frame
         return None
+    if not isinstance(decoded, dict):
+        return None
+    version = decoded.get("v")
+    if version != STATE_V2_VERSION:
+        log.warning("state_ipc_v2_version_skew", got=version, ours=STATE_V2_VERSION)
+        return None
+    state = decoded.get("s")
+    if not isinstance(state, dict):
+        return None
+    return state
 
 
 def _decode_state_v1_line(line: bytes) -> dict | None:
@@ -119,9 +128,8 @@ async def _read_state_frame(reader: asyncio.StreamReader) -> dict | None:
     The wire is self-describing (see ``StateIPCServer.publish``): a v2 frame is
     a 4-byte big-endian length prefix + msgpack body whose leading length byte
     is always ``0x00``; a v1 frame is a newline-terminated JSON object whose
-    first byte is ``{``. Sniffing that first byte lets the encoder flag
-    (``ADOS_STATE_IPC_MSGPACK``) flip across a deployment without lock-stepping
-    every consumer restart.
+    first byte is ``{``. Sniffing that first byte keeps the reader compatible
+    with a stray v1 frame even though the producer only ever emits v2.
 
     Returns the decoded snapshot dict, or None when the frame could not be
     decoded (bad length, or an undecodable body) so the caller can skip a
@@ -558,12 +566,10 @@ class StateIPCServer:
     def publish(self, state: dict) -> None:
         """Broadcast state snapshot to all clients (non-blocking).
 
-        The encoder is chosen by ``_USE_MSGPACK`` (the ``ADOS_STATE_IPC_MSGPACK``
-        env flag): length-prefixed msgpack (v2, ~3-5x cheaper to serialize on
-        Pi-class hardware) when set, else newline-terminated JSON (v1). The
-        flag can be flipped across a deployment without lock-stepping consumer
-        restarts because the reader (``StateIPCClient.read_loop``) is
-        self-describing and decodes either format per frame.
+        The wire is v2: a length-prefixed msgpack ``{"v", "s"}`` frame (~3-5x
+        cheaper to serialize on Pi-class hardware than JSON). The reader
+        (``StateIPCClient.read_loop``) is self-describing and still accepts a
+        stray v1 frame per frame, but the producer only ever emits v2.
         """
         self._last_state = state
         if not self._clients:
@@ -659,10 +665,9 @@ class StateIPCClient:
         """Read state updates and dispatch to the handler until disconnect.
 
         Each frame is decoded by :func:`_read_state_frame`, which auto-detects
-        the wire format (v1 JSON / v2 length-prefixed msgpack) per frame, so the
-        encoder flag (``ADOS_STATE_IPC_MSGPACK``) can be flipped across a
-        deployment without lock-stepping every consumer restart: a producer-v2 /
-        consumer-just-restarted-on-v1 window decodes correctly either way.
+        the wire format (v1 JSON / v2 length-prefixed msgpack) per frame, so a
+        stray v1 frame is still read correctly even though the producer only
+        ever emits v2.
         """
         if not self._reader:
             raise RuntimeError("Not connected")

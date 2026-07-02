@@ -1,18 +1,20 @@
 //! Vehicle-state codec for the state socket (Contract B).
 //!
 //! The state is a JSON telemetry snapshot (attitude, position, GPS, battery,
-//! mode, armed, link stats). The agent currently broadcasts it as
-//! newline-terminated JSON (v1). The hybrid migration upgrades the socket to
-//! length-prefixed msgpack (v2) for lower serialization overhead on Pi-class
-//! hardware.
+//! mode, armed, link stats). The producer broadcasts it as length-prefixed
+//! msgpack (v2): a 4-byte big-endian length followed by a versioned map body
+//! `{"v": <version>, "s": <state>}`. The `v` integer lets a reader reject a
+//! frame it does not understand rather than mis-decode it.
 //!
-//! This module carries both: the v1 reader for the migration window and the v2
-//! codec for the Rust state hub. The state is kept as an open
+//! This module also keeps the legacy v1 reader (newline-terminated JSON) so a
+//! stray v1 frame still decodes; the auto-detect reader picks the format per
+//! frame off the leading byte. The state is kept as an open
 //! [`serde_json::Value`] map rather than a fixed struct so new telemetry fields
 //! round-trip without a schema change.
 
 use std::io;
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -22,6 +24,12 @@ use crate::frame;
 /// Maximum v2 state frame payload. State snapshots are small (a few KiB); the
 /// cap is generous headroom and guards against a runaway producer.
 pub const STATE_V2_MAX_FRAME: usize = 1024 * 1024;
+
+/// The on-wire version integer carried in the v2 frame body's `v` field. Kept in
+/// lock-step with the contract registry (`state.v2`) — a test asserts they are
+/// equal so the wire and the registry can never silently diverge. A reader
+/// rejects any frame whose `v` does not match this.
+pub const STATE_WIRE_VERSION: u16 = 2;
 
 #[derive(Debug, Error)]
 pub enum StateError {
@@ -33,6 +41,8 @@ pub enum StateError {
     Decode(#[from] rmp_serde::decode::Error),
     #[error("framing error: {0}")]
     Frame(#[from] frame::FrameError),
+    #[error("state wire version mismatch: got {got}, expected {ours}")]
+    Version { got: u16, ours: u16 },
 }
 
 /// Encode a state snapshot in the v1 wire format: compact JSON terminated by a
@@ -50,16 +60,53 @@ pub fn decode_v1_line(line: &[u8]) -> Result<Value, StateError> {
     Ok(serde_json::from_slice(trimmed)?)
 }
 
-/// Encode a state snapshot as a complete v2 frame: 4-byte big-endian length +
-/// msgpack body.
+/// The v2 frame body: a versioned msgpack map `{"v": <version>, "s": <state>}`.
+/// `to_vec_named` emits string map keys, byte-for-byte matching the Python
+/// producer's `msgpack.packb({"v": version, "s": state}, use_bin_type=True)`.
+/// This owned form is the decode target; the borrowed [`StateFrameV2Ref`] is the
+/// encode form, which avoids cloning the (potentially large — e.g. the full
+/// param blob) snapshot on the 10 Hz publish path.
+#[derive(Debug, Serialize, Deserialize)]
+struct StateFrameV2 {
+    #[serde(rename = "v")]
+    v: u16,
+    #[serde(rename = "s")]
+    s: Value,
+}
+
+/// Borrowed encode-side sibling of [`StateFrameV2`]. Serializes byte-identical
+/// output (`&Value` serializes the same as `Value`) without taking ownership.
+#[derive(Serialize)]
+struct StateFrameV2Ref<'a> {
+    #[serde(rename = "v")]
+    v: u16,
+    #[serde(rename = "s")]
+    s: &'a Value,
+}
+
+/// Encode a state snapshot as a complete v2 frame: a 4-byte big-endian length
+/// followed by the msgpack body `{"v": STATE_WIRE_VERSION, "s": state}`.
 pub fn encode_v2(state: &Value) -> Result<Vec<u8>, StateError> {
-    let body = rmp_serde::to_vec(state)?;
+    let body = rmp_serde::to_vec_named(&StateFrameV2Ref {
+        v: STATE_WIRE_VERSION,
+        s: state,
+    })?;
     Ok(frame::encode_frame(&body, STATE_V2_MAX_FRAME)?)
 }
 
-/// Decode a v2 msgpack body (the frame payload, without the length prefix).
+/// Decode a v2 msgpack body (the frame payload, without the length prefix) into
+/// its inner state snapshot. Reads the version integer first and returns
+/// [`StateError::Version`] if it is not [`STATE_WIRE_VERSION`], so a newer /
+/// unknown frame is rejected rather than mis-read as the current shape.
 pub fn decode_v2(body: &[u8]) -> Result<Value, StateError> {
-    Ok(rmp_serde::from_slice(body)?)
+    let frame: StateFrameV2 = rmp_serde::from_slice(body)?;
+    if frame.v != STATE_WIRE_VERSION {
+        return Err(StateError::Version {
+            got: frame.v,
+            ours: STATE_WIRE_VERSION,
+        });
+    }
+    Ok(frame.s)
 }
 
 /// One frame off the wire: a decoded snapshot, or a single malformed-but-frame-
@@ -287,8 +334,41 @@ mod tests {
         let frame_bytes = encode_v2(&state).unwrap();
         // Strip the 4-byte length prefix before decoding the body.
         let body = &frame_bytes[frame::HEADER_SIZE..];
+        // The body is the versioned wrapper map {"v": 2, "s": <state>}; the raw
+        // deserialize proves the shape, and decode_v2 returns the inner state.
+        let raw: StateFrameV2 = rmp_serde::from_slice(body).unwrap();
+        assert_eq!(raw.v, STATE_WIRE_VERSION);
+        assert_eq!(raw.s, state);
         let back = decode_v2(body).unwrap();
         assert_eq!(state, back);
+    }
+
+    #[test]
+    fn version_matches_registry() {
+        // The wire version and the contract registry must never silently
+        // diverge; if the registry bumps state.v2, this const must move with it.
+        assert_eq!(
+            STATE_WIRE_VERSION,
+            crate::contracts::contract_version("state.v2").unwrap()
+        );
+    }
+
+    #[test]
+    fn decode_v2_rejects_a_future_version() {
+        // A frame tagged with a version this build does not speak is rejected,
+        // not mis-decoded as the current shape.
+        let body = rmp_serde::to_vec_named(&StateFrameV2Ref {
+            v: STATE_WIRE_VERSION + 1,
+            s: &sample(),
+        })
+        .unwrap();
+        match decode_v2(&body) {
+            Err(StateError::Version { got, ours }) => {
+                assert_eq!(got, STATE_WIRE_VERSION + 1);
+                assert_eq!(ours, STATE_WIRE_VERSION);
+            }
+            other => panic!("expected a Version error, got {other:?}"),
+        }
     }
 
     #[test]

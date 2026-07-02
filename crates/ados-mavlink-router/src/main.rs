@@ -4,16 +4,16 @@
 //! direct-GCS TCP/UDP proxies. Mirrors the Python `ados-mavlink` service
 //! (`python -m ados.services.mavlink`): the IPC servers, the FC connection, the
 //! 1 Hz companion heartbeat, the 10 Hz state publish, the adaptive stream
-//! cadence, and the parameter sweep. The state-socket encoding (v1 newline-JSON
-//! vs v2 length-prefixed msgpack) is selected by `ADOS_STATE_IPC_MSGPACK`, the
-//! same flag the Python producer honours.
+//! cadence, and the parameter sweep. The state socket is published as
+//! length-prefixed msgpack (v2), the versioned wire the shared reader
+//! auto-detects.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ados_protocol::frame::{encode_frame, MAVLINK_MAX_FRAME};
 use ados_protocol::ipc::IpcBroadcast;
-use ados_protocol::state::{encode_v1, encode_v2};
+use ados_protocol::state::encode_v2;
 use serde_json::{json, Map, Value};
 use tokio::sync::{Mutex, Notify};
 
@@ -30,10 +30,6 @@ const UDP_PROXY_PORTS: &[u16] = &[14550, 14551];
 
 fn run_dir() -> String {
     std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string())
-}
-
-fn use_msgpack() -> bool {
-    std::env::var("ADOS_STATE_IPC_MSGPACK").ok().as_deref() == Some("1")
 }
 
 /// Demo mode: drive synthetic telemetry instead of opening a serial FC. Enabled
@@ -246,7 +242,6 @@ async fn main() {
         let state_ipc = state_ipc.clone();
         let mavlink_ipc_stats = mavlink_ipc.clone();
         let cancel = cancel.clone();
-        let msgpack = use_msgpack();
         tasks.push(tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_millis(100));
             // Last reported eviction counts, so a fresh eviction logs once
@@ -285,7 +280,7 @@ async fn main() {
                         )
                         .await;
                         let wire = { state.lock().await.to_wire_with(&extras) };
-                        let encoded = if msgpack { encode_v2(&wire) } else { encode_v1(&wire) };
+                        let encoded = encode_v2(&wire);
                         match encoded {
                             Ok(bytes) => state_ipc.broadcast(bytes).await,
                             Err(e) => tracing::warn!(error = %e, "state_encode_failed"),
