@@ -93,13 +93,13 @@ enum NetCmd {
 /// unreachable socket / a read error / an unparseable or non-object reply all
 /// yield [`NetCmd::Unavailable`] so the caller can take the front's no-fallback
 /// 503 posture. The read is bounded so a runaway reply cannot exhaust memory.
-async fn wifi_cmd(request: &Value) -> NetCmd {
+async fn wifi_cmd(sock: &std::path::Path, request: &Value) -> NetCmd {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     /// A manager reply is a few hundred bytes; bound the read to guard a runaway.
     const MAX_REPLY_BYTES: usize = 64 * 1024;
 
-    let mut stream = match tokio::net::UnixStream::connect(wifi_cmd_sock()).await {
+    let mut stream = match tokio::net::UnixStream::connect(sock).await {
         Ok(s) => s,
         Err(_) => return NetCmd::Unavailable,
     };
@@ -227,13 +227,20 @@ pub struct WifiJoinRequest {
 /// field defaulting to false/null when absent). An unreachable socket → 503; an
 /// `ok:false` reply → the FastAPI `E_WIFI_JOIN_FAILED` 500.
 pub async fn put_client_join(Json(req): Json<WifiJoinRequest>) -> Response {
+    put_client_join_at(&wifi_cmd_sock(), req).await
+}
+
+/// The path-injectable core of [`put_client_join`]: forward against an explicit
+/// command-socket path. Threaded so a test drives it against a tempdir without
+/// mutating the process-global `ADOS_RUN_DIR`.
+async fn put_client_join_at(sock: &std::path::Path, req: WifiJoinRequest) -> Response {
     let request = json!({
         "op": "wifi_join",
         "ssid": req.ssid,
         "passphrase": req.passphrase,
         "force": req.force.unwrap_or(false),
     });
-    let reply = match wifi_cmd(&request).await {
+    let reply = match wifi_cmd(sock, &request).await {
         NetCmd::Reply(r) => r,
         NetCmd::Error(msg) => {
             return wifi_error(StatusCode::INTERNAL_SERVER_ERROR, "E_WIFI_JOIN_FAILED", msg);
@@ -290,7 +297,12 @@ fn join_response(reply: &Map<String, Value>) -> Value {
 /// reply verbatim (the `ok` flag already stripped). An unreachable socket → 503;
 /// an `ok:false` reply → the FastAPI `E_WIFI_LEAVE_FAILED` 500.
 pub async fn delete_client() -> Response {
-    match wifi_cmd(&json!({"op": "wifi_leave"})).await {
+    delete_client_at(&wifi_cmd_sock()).await
+}
+
+/// The path-injectable core of [`delete_client`], for tests.
+async fn delete_client_at(sock: &std::path::Path) -> Response {
+    match wifi_cmd(sock, &json!({"op": "wifi_leave"})).await {
         NetCmd::Reply(r) => Json(Value::Object(r)).into_response(),
         NetCmd::Error(msg) => wifi_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -313,7 +325,12 @@ pub async fn delete_client() -> Response {
 /// reply's `error`); a `forgot:true` reply is returned verbatim. An unreachable
 /// socket → 503; an `ok:false` reply → the FastAPI `E_WIFI_FORGET_FAILED` 500.
 pub async fn delete_client_configured(Path(name): Path<String>) -> Response {
-    let reply = match wifi_cmd(&json!({"op": "wifi_forget", "name": name})).await {
+    delete_client_configured_at(&wifi_cmd_sock(), name).await
+}
+
+/// The path-injectable core of [`delete_client_configured`], for tests.
+async fn delete_client_configured_at(sock: &std::path::Path, name: String) -> Response {
+    let reply = match wifi_cmd(sock, &json!({"op": "wifi_forget", "name": name})).await {
         NetCmd::Reply(r) => r,
         NetCmd::Error(msg) => {
             return wifi_error(
@@ -368,9 +385,18 @@ pub async fn put_client_autoconnect(
     Path(name): Path<String>,
     Json(req): Json<AutoconnectRequest>,
 ) -> Response {
+    put_client_autoconnect_at(&wifi_cmd_sock(), name, req).await
+}
+
+/// The path-injectable core of [`put_client_autoconnect`], for tests.
+async fn put_client_autoconnect_at(
+    sock: &std::path::Path,
+    name: String,
+    req: AutoconnectRequest,
+) -> Response {
     let enabled = req.enabled.unwrap_or(false);
     let request = json!({"op": "wifi_autoconnect", "name": name, "enabled": enabled});
-    let reply = match wifi_cmd(&request).await {
+    let reply = match wifi_cmd(sock, &request).await {
         NetCmd::Reply(r) => r,
         NetCmd::Error(msg) => {
             return wifi_error(
@@ -431,17 +457,18 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
-    /// Spin a one-shot Wi-Fi command socket at `/run/ados/wifi-cmd.sock` (under a
-    /// temp `ADOS_RUN_DIR`) that reads one request line and replies with `reply`,
-    /// then runs the handler `run`. Returns `{request, status, body}` so the test
-    /// can assert both the op forwarded and the response. Callers serialize behind
-    /// the crate-wide env lock because the `ADOS_RUN_DIR` override is process-wide.
-    async fn with_socket<F>(reply: Value, run: F) -> Value
+    /// Spin a one-shot Wi-Fi command socket under a tempdir that reads one request
+    /// line and replies with `reply`, then runs the handler produced by `run` (which
+    /// receives the socket path so it can drive the handler `_at` core directly).
+    /// Returns `{request, status, body}` so the test can assert both the op
+    /// forwarded and the response. The socket path is threaded in, so the test never
+    /// mutates the process-global `ADOS_RUN_DIR`.
+    async fn with_socket<F, Fut>(reply: Value, run: F) -> Value
     where
-        F: std::future::Future<Output = Response>,
+        F: FnOnce(std::path::PathBuf) -> Fut,
+        Fut: std::future::Future<Output = Response>,
     {
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("ADOS_RUN_DIR", dir.path());
         let sock = dir.path().join("wifi-cmd.sock");
         let listener = UnixListener::bind(&sock).unwrap();
 
@@ -468,9 +495,8 @@ mod tests {
             request
         });
 
-        let resp = run.await;
+        let resp = run(sock.clone()).await;
         let request = server.await.unwrap();
-        std::env::remove_var("ADOS_RUN_DIR");
         let status = resp.status().as_u16();
         let body = body_json(resp).await;
         // The temp dir + listener drop here, closing the socket.
@@ -573,22 +599,23 @@ mod tests {
 
     // ── the handlers against a no-socket seam (the 503 path) ─────────────────
     //
-    // These set the process-wide ADOS_RUN_DIR, so they serialize behind the
-    // crate-wide env lock (held across the handler's await for the whole run).
+    // Each threads an absent socket path (under a tempdir) into the handler `_at`
+    // core, so no test mutates the process-global ADOS_RUN_DIR.
 
     #[tokio::test]
     async fn join_with_no_socket_is_a_503() {
-        let _guard = crate::lock_env().await;
-        // Point ADOS_RUN_DIR at an empty dir → the connect fails fast → 503.
+        // An absent socket path → the connect fails fast → 503.
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("ADOS_RUN_DIR", dir.path());
-        let resp = put_client_join(Json(WifiJoinRequest {
-            ssid: "Net".to_string(),
-            passphrase: Some("pw".to_string()),
-            force: None,
-        }))
+        let sock = dir.path().join("wifi-cmd.sock");
+        let resp = put_client_join_at(
+            &sock,
+            WifiJoinRequest {
+                ssid: "Net".to_string(),
+                passphrase: Some("pw".to_string()),
+                force: None,
+            },
+        )
         .await;
-        std::env::remove_var("ADOS_RUN_DIR");
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         let body = body_json(resp).await;
         assert_eq!(body["detail"]["error"]["code"], json!("E_WIFI_JOIN_FAILED"));
@@ -596,11 +623,9 @@ mod tests {
 
     #[tokio::test]
     async fn leave_with_no_socket_is_a_503() {
-        let _guard = crate::lock_env().await;
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("ADOS_RUN_DIR", dir.path());
-        let resp = delete_client().await;
-        std::env::remove_var("ADOS_RUN_DIR");
+        let sock = dir.path().join("wifi-cmd.sock");
+        let resp = delete_client_at(&sock).await;
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         let body = body_json(resp).await;
         assert_eq!(
@@ -611,11 +636,9 @@ mod tests {
 
     #[tokio::test]
     async fn forget_with_no_socket_is_a_503() {
-        let _guard = crate::lock_env().await;
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("ADOS_RUN_DIR", dir.path());
-        let resp = delete_client_configured(Path("Net".to_string())).await;
-        std::env::remove_var("ADOS_RUN_DIR");
+        let sock = dir.path().join("wifi-cmd.sock");
+        let resp = delete_client_configured_at(&sock, "Net".to_string()).await;
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         let body = body_json(resp).await;
         assert_eq!(
@@ -628,14 +651,19 @@ mod tests {
 
     #[tokio::test]
     async fn join_forwards_a_wifi_join_op_and_returns_the_success_body() {
-        let _guard = crate::lock_env().await;
         let out = with_socket(
             json!({"ok": true, "joined": true, "ip": "10.0.0.5", "gateway": "10.0.0.1", "error": null}),
-            put_client_join(Json(WifiJoinRequest {
-                ssid: "HomeNet".to_string(),
-                passphrase: Some("secret".to_string()),
-                force: Some(true),
-            })),
+            |sock| async move {
+                put_client_join_at(
+                    &sock,
+                    WifiJoinRequest {
+                        ssid: "HomeNet".to_string(),
+                        passphrase: Some("secret".to_string()),
+                        force: Some(true),
+                    },
+                )
+                .await
+            },
         )
         .await;
         // The exact op + fields forwarded to the daemon.
@@ -653,14 +681,19 @@ mod tests {
 
     #[tokio::test]
     async fn join_maps_the_ap_busy_result_to_a_409() {
-        let _guard = crate::lock_env().await;
         let out = with_socket(
             json!({"ok": true, "joined": false, "error": "wlan0_busy_ap_active"}),
-            put_client_join(Json(WifiJoinRequest {
-                ssid: "HomeNet".to_string(),
-                passphrase: None,
-                force: None,
-            })),
+            |sock| async move {
+                put_client_join_at(
+                    &sock,
+                    WifiJoinRequest {
+                        ssid: "HomeNet".to_string(),
+                        passphrase: None,
+                        force: None,
+                    },
+                )
+                .await
+            },
         )
         .await;
         // The default force is forwarded as false.
@@ -680,14 +713,19 @@ mod tests {
 
     #[tokio::test]
     async fn join_surfaces_an_ok_false_reply_as_a_500() {
-        let _guard = crate::lock_env().await;
         let out = with_socket(
             json!({"ok": false, "error": "E_MISSING_SSID"}),
-            put_client_join(Json(WifiJoinRequest {
-                ssid: "x".to_string(),
-                passphrase: None,
-                force: None,
-            })),
+            |sock| async move {
+                put_client_join_at(
+                    &sock,
+                    WifiJoinRequest {
+                        ssid: "x".to_string(),
+                        passphrase: None,
+                        force: None,
+                    },
+                )
+                .await
+            },
         )
         .await;
         assert_eq!(out["status"], json!(500));
@@ -703,10 +741,9 @@ mod tests {
 
     #[tokio::test]
     async fn leave_forwards_a_wifi_leave_op_and_returns_the_reply() {
-        let _guard = crate::lock_env().await;
         let out = with_socket(
             json!({"ok": true, "left": true, "previous_ssid": "HomeNet"}),
-            delete_client(),
+            |sock| async move { delete_client_at(&sock).await },
         )
         .await;
         assert_eq!(out["request"]["op"], json!("wifi_leave"));
@@ -720,10 +757,9 @@ mod tests {
 
     #[tokio::test]
     async fn forget_forwards_a_wifi_forget_op_and_returns_the_reply() {
-        let _guard = crate::lock_env().await;
         let out = with_socket(
             json!({"ok": true, "forgot": true, "name": "HomeNet", "error": null}),
-            delete_client_configured(Path("HomeNet".to_string())),
+            |sock| async move { delete_client_configured_at(&sock, "HomeNet".to_string()).await },
         )
         .await;
         assert_eq!(out["request"]["op"], json!("wifi_forget"));
@@ -737,10 +773,9 @@ mod tests {
 
     #[tokio::test]
     async fn forget_maps_a_failed_forget_to_a_400() {
-        let _guard = crate::lock_env().await;
         let out = with_socket(
             json!({"ok": true, "forgot": false, "name": "HomeNet", "error": "nmcli_failed"}),
-            delete_client_configured(Path("HomeNet".to_string())),
+            |sock| async move { delete_client_configured_at(&sock, "HomeNet".to_string()).await },
         )
         .await;
         assert_eq!(out["status"], json!(400));
@@ -767,17 +802,17 @@ mod tests {
 
     #[tokio::test]
     async fn autoconnect_with_no_socket_is_a_503() {
-        let _guard = crate::lock_env().await;
+        // An absent socket path → the connect fails fast → 503.
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("ADOS_RUN_DIR", dir.path());
-        let resp = put_client_autoconnect(
-            Path("HomeNet".to_string()),
-            Json(AutoconnectRequest {
+        let sock = dir.path().join("wifi-cmd.sock");
+        let resp = put_client_autoconnect_at(
+            &sock,
+            "HomeNet".to_string(),
+            AutoconnectRequest {
                 enabled: Some(true),
-            }),
+            },
         )
         .await;
-        std::env::remove_var("ADOS_RUN_DIR");
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         let body = body_json(resp).await;
         assert_eq!(
@@ -788,15 +823,18 @@ mod tests {
 
     #[tokio::test]
     async fn autoconnect_forwards_the_op_and_returns_the_reply() {
-        let _guard = crate::lock_env().await;
         let out = with_socket(
             json!({"ok": true, "autoconnect": true, "name": "HomeNet", "error": null}),
-            put_client_autoconnect(
-                Path("HomeNet".to_string()),
-                Json(AutoconnectRequest {
-                    enabled: Some(true),
-                }),
-            ),
+            |sock| async move {
+                put_client_autoconnect_at(
+                    &sock,
+                    "HomeNet".to_string(),
+                    AutoconnectRequest {
+                        enabled: Some(true),
+                    },
+                )
+                .await
+            },
         )
         .await;
         // The exact op + fields forwarded to the daemon.
@@ -813,13 +851,16 @@ mod tests {
 
     #[tokio::test]
     async fn autoconnect_defaults_a_missing_enabled_to_false() {
-        let _guard = crate::lock_env().await;
         let out = with_socket(
             json!({"ok": true, "autoconnect": false, "name": "HomeNet", "error": null}),
-            put_client_autoconnect(
-                Path("HomeNet".to_string()),
-                Json(AutoconnectRequest { enabled: None }),
-            ),
+            |sock| async move {
+                put_client_autoconnect_at(
+                    &sock,
+                    "HomeNet".to_string(),
+                    AutoconnectRequest { enabled: None },
+                )
+                .await
+            },
         )
         .await;
         // A missing `enabled` forwards as false (Python `bool(body.get("enabled"))`).
@@ -829,15 +870,18 @@ mod tests {
 
     #[tokio::test]
     async fn autoconnect_maps_a_manager_error_to_a_400() {
-        let _guard = crate::lock_env().await;
         let out = with_socket(
             json!({"ok": true, "autoconnect": true, "name": "Nope", "error": "unknown connection 'Nope'"}),
-            put_client_autoconnect(
-                Path("Nope".to_string()),
-                Json(AutoconnectRequest {
-                    enabled: Some(true),
-                }),
-            ),
+            |sock| async move {
+                put_client_autoconnect_at(
+                    &sock,
+                    "Nope".to_string(),
+                    AutoconnectRequest {
+                        enabled: Some(true),
+                    },
+                )
+                .await
+            },
         )
         .await;
         // A truthy `error` on the reply → the FastAPI 400 carrying the message.
@@ -854,15 +898,18 @@ mod tests {
 
     #[tokio::test]
     async fn autoconnect_surfaces_an_ok_false_reply_as_a_500() {
-        let _guard = crate::lock_env().await;
         let out = with_socket(
             json!({"ok": false, "error": "E_MISSING_NAME"}),
-            put_client_autoconnect(
-                Path("".to_string()),
-                Json(AutoconnectRequest {
-                    enabled: Some(true),
-                }),
-            ),
+            |sock| async move {
+                put_client_autoconnect_at(
+                    &sock,
+                    "".to_string(),
+                    AutoconnectRequest {
+                        enabled: Some(true),
+                    },
+                )
+                .await
+            },
         )
         .await;
         assert_eq!(out["status"], json!(500));

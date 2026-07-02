@@ -111,41 +111,16 @@ pub fn run_path(name: &str) -> String {
     format!("{}/{}", run_dir(), name)
 }
 
-/// Serialize every test that mutates the process-global `ADOS_RUN_DIR`.
-/// `cargo test` runs a crate's tests on many threads, so without this one
-/// test's `set_var`/`remove_var` races another's `run_path`-resolving write and
-/// the write lands on `/run/ados` (absent off-box → `NotFound`) or the wrong
-/// temp dir. Every `ADOS_RUN_DIR` test holds this guard for its whole body; the
-/// poison is recovered so one panicking test never wedges the rest.
-#[cfg(test)]
-pub(crate) fn lock_run_dir_env() -> std::sync::MutexGuard<'static, ()> {
-    static RUN_DIR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    RUN_DIR_ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn run_path_honours_env_override() {
-        let _env = super::lock_run_dir_env();
-        // SAFETY: the run-dir env lock serializes this against every other
-        // ADOS_RUN_DIR test, so no other thread mutates the var concurrently.
-        unsafe {
-            std::env::set_var("ADOS_RUN_DIR", "/tmp/ados-test-run");
-        }
-        assert_eq!(
-            run_path("wfb-stats.json"),
-            "/tmp/ados-test-run/wfb-stats.json"
-        );
-        unsafe {
-            std::env::remove_var("ADOS_RUN_DIR");
-        }
-        assert_eq!(run_path("wfb-stats.json"), "/run/ados/wfb-stats.json");
-    }
+    // The `ADOS_RUN_DIR` env-override read path is exercised by the dedicated
+    // `tests/run_dir_env.rs` integration binary, which runs in its own process so
+    // its `set_var`/`remove_var` cannot race any other test thread. Every other
+    // sidecar test threads an explicit path (the `write_to` / `emit_to` seams)
+    // instead of mutating the process-global run dir, so no cross-test lock is
+    // needed here.
 
     #[test]
     fn contract_constants_match_python_layout() {

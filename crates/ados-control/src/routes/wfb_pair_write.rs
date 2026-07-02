@@ -114,7 +114,19 @@ struct PairStatus {
 /// hyphen-wire form (`"drone"` / `"ground-station"`); the role is `"drone"` only
 /// when the profile is exactly `"drone"`, else `"gs"`.
 fn current_role(config_profile: &str) -> String {
-    let (profile, _role) = crate::profile::current_profile_and_role(config_profile);
+    current_role_at(
+        config_profile,
+        &crate::profile::profile_conf_path(),
+        &crate::profile::mesh_role_path(),
+    )
+}
+
+/// The path-injectable core of [`current_role`]: resolve the bind-protocol role off
+/// an explicit profile.conf + role-sentinel path. Threaded so a test drives it
+/// against a tempdir without mutating the process environment.
+fn current_role_at(config_profile: &str, profile_conf: &Path, role_path: &Path) -> String {
+    let (profile, _role) =
+        crate::profile::current_profile_and_role_at(config_profile, profile_conf, role_path);
     if profile == "drone" {
         "drone".to_string()
     } else {
@@ -627,17 +639,18 @@ mod tests {
 
     #[test]
     fn role_is_drone_only_for_the_drone_profile() {
-        let _env = crate::lock_env_blocking();
         let dir = tempfile::tempdir().unwrap();
-        // No profile.conf / mesh role sentinels around.
-        std::env::set_var("ADOS_PROFILE_CONF", dir.path().join("absent.conf"));
-        std::env::set_var("ADOS_MESH_ROLE", dir.path().join("absent.role"));
-        assert_eq!(current_role("drone"), "drone");
-        assert_eq!(current_role("ground_station"), "gs");
+        // No profile.conf / mesh role sentinels around; the paths are threaded in
+        // explicitly so the test never mutates the process environment.
+        let profile_conf = dir.path().join("absent.conf");
+        let role_path = dir.path().join("absent.role");
+        assert_eq!(current_role_at("drone", &profile_conf, &role_path), "drone");
+        assert_eq!(
+            current_role_at("ground_station", &profile_conf, &role_path),
+            "gs"
+        );
         // auto/empty with no sentinel falls back to drone → "drone".
-        assert_eq!(current_role("auto"), "drone");
-        std::env::remove_var("ADOS_PROFILE_CONF");
-        std::env::remove_var("ADOS_MESH_ROLE");
+        assert_eq!(current_role_at("auto", &profile_conf, &role_path), "drone");
     }
 
     // ── the disable path (enabled=false): always persists ─────────────────────

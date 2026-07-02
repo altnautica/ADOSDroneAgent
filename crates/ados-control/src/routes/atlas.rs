@@ -153,13 +153,26 @@ fn capture_state_str(state: CaptureState) -> &'static str {
 }
 
 /// `GET /api/atlas/readiness` → the drone-local capture readiness + live state.
+///
+/// Resolves the config path + the live capture status (the control socket, which
+/// errors to `None` = idle when the service is down) and hands both to the pure
+/// [`build_atlas_readiness`] core, so the projection is testable with an explicit
+/// config path and an injected status — no env and no live socket.
 pub async fn get_atlas_readiness() -> Response {
-    let view = read_atlas_config_view(&config_yaml_path());
-
     // The live session state comes from the capture service's control socket. If
     // it is unreachable, the service is not running (atlas disabled, or no
     // cameras), so the session is idle.
     let live = AtlasControlClient::default_socket().status().await.ok();
+    build_atlas_readiness(&config_yaml_path(), live)
+}
+
+/// The pure core of [`get_atlas_readiness`]: project the drone-local `atlas:`
+/// config view + the (optional) live capture status into the readiness body. Path-
+/// and status-injectable so tests exercise it deterministically without touching
+/// `ADOS_CONFIG` / `ADOS_RUN_DIR` or standing up a control socket.
+fn build_atlas_readiness(config_path: &Path, live: Option<CaptureStatus>) -> Response {
+    let view = read_atlas_config_view(config_path);
+
     let (service_running, capturing, state, session_id, camera_count, keyframes, ingest_rate_hz) =
         match &live {
             Some(s) => (
@@ -527,18 +540,20 @@ mod tests {
 
     #[tokio::test]
     async fn readiness_reports_idle_when_the_service_is_down() {
-        // Point the control client at an absent socket so status() errors; the
-        // route must degrade to a not-running / idle reading, never fail.
+        // A `None` live status is the "control socket unreachable → service not
+        // running" case; the route must degrade to a not-running / idle reading,
+        // never fail. Both the config path and the live status are threaded in
+        // explicitly (no env mutation, no live socket), so the reading is
+        // deterministic and this test cannot race any other test.
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("ADOS_RUN_DIR", dir.path());
-        std::env::set_var("ADOS_CONFIG", dir.path().join("config.yaml"));
+        let cfg = dir.path().join("config.yaml");
         std::fs::write(
-            dir.path().join("config.yaml"),
+            &cfg,
             "atlas:\n  enabled: true\n  cameras:\n    - id: front\n      enabled: true\n",
         )
         .unwrap();
 
-        let resp = get_atlas_readiness().await;
+        let resp = build_atlas_readiness(&cfg, None);
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
@@ -550,8 +565,5 @@ mod tests {
         assert_eq!(body["capturing"], json!(false));
         assert_eq!(body["state"], json!("idle"));
         assert!(body["session_id"].is_null());
-
-        std::env::remove_var("ADOS_RUN_DIR");
-        std::env::remove_var("ADOS_CONFIG");
     }
 }

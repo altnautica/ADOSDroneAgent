@@ -896,6 +896,8 @@ mod tests {
             pairing_json,
             wfb_key_dir: dir.path().join("wfb"),
             bind_state: dir.path().join("bind-state.json"),
+            profile_conf: dir.path().join("profile.conf"),
+            mesh_role: dir.path().join("mesh-role"),
         };
         let state = AppState::new(
             pairing,

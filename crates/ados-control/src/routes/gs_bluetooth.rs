@@ -361,24 +361,36 @@ async fn forget_bluetooth(mac: &str) -> Value {
 /// non-matching primary / unreachable daemon socket is a clean no-op (the forget
 /// already removed the device; the primary clearing is a follow-on side effect).
 async fn clear_primary_if_matches(device_id: &str) {
-    let primary =
-        ados_hid::sidecar::GroundStationInput::load(&gs_input_json()).and_then(|g| g.primary);
+    clear_primary_if_matches_at(device_id, &gs_input_json(), &hid_cmd_sock()).await;
+}
+
+/// The path-injectable core of [`clear_primary_if_matches`]: read the persisted
+/// primary off an explicit sidecar path and forward to an explicit command socket.
+/// Threaded so a test drives it against a tempdir without mutating the process
+/// environment.
+async fn clear_primary_if_matches_at(
+    device_id: &str,
+    gs_input: &std::path::Path,
+    hid_sock: &std::path::Path,
+) {
+    let primary = ados_hid::sidecar::GroundStationInput::load(gs_input).and_then(|g| g.primary);
     if primary.as_deref() != Some(device_id) {
         return;
     }
     let request = json!({"op": "clear_primary"});
     // Best-effort forward; a missing socket is fine (the persisted record is the
     // durable mirror, and the next daemon restart rehydrates from it).
-    let _ = forward_hid_cmd(&request).await;
+    let _ = forward_hid_cmd_to(hid_sock, &request).await;
 }
 
-/// One newline-terminated JSON request to the input command socket, draining the
-/// one-line reply. Best-effort: any IO error is swallowed (the caller treats it
-/// as a no-op).
-async fn forward_hid_cmd(request: &Value) -> std::io::Result<()> {
+/// One newline-terminated JSON request to the input command socket at an explicit
+/// path, draining the one-line reply. Best-effort: any IO error is swallowed (the
+/// caller treats it as a no-op). The socket path is threaded in (the caller
+/// resolves `hid_cmd_sock()` once) so a test drives it against a tempdir.
+async fn forward_hid_cmd_to(sock: &std::path::Path, request: &Value) -> std::io::Result<()> {
     use tokio::io::AsyncReadExt;
 
-    let mut stream = tokio::net::UnixStream::connect(hid_cmd_sock()).await?;
+    let mut stream = tokio::net::UnixStream::connect(sock).await?;
     let mut line = serde_json::to_vec(request)?;
     line.push(b'\n');
     stream.write_all(&line).await?;
@@ -598,18 +610,15 @@ mod tests {
 
     #[tokio::test]
     async fn clear_primary_skips_when_persisted_primary_does_not_match() {
-        let _guard = crate::lock_env().await;
         let dir = tempfile::tempdir().unwrap();
         // A persisted primary that is a USB device, not the bt device being forgotten.
         let sidecar = dir.path().join("ground-station-input.json");
         std::fs::write(&sidecar, r#"{"primary":"usb:045e:028e:event3"}"#).unwrap();
-        std::env::set_var("ADOS_GS_INPUT", &sidecar);
-        std::env::set_var("ADOS_RUN_DIR", dir.path());
         // No hid-cmd.sock exists; the helper must be a clean no-op (no panic, no
-        // hang) because the persisted primary does not match the device.
-        clear_primary_if_matches("bt:aa:bb:cc:dd:ee:ff").await;
-        std::env::remove_var("ADOS_GS_INPUT");
-        std::env::remove_var("ADOS_RUN_DIR");
+        // hang) because the persisted primary does not match the device. Every path
+        // is threaded in, so the test never mutates the process environment.
+        let hid_sock = dir.path().join("hid-cmd.sock");
+        clear_primary_if_matches_at("bt:aa:bb:cc:dd:ee:ff", &sidecar, &hid_sock).await;
     }
 
     #[test]

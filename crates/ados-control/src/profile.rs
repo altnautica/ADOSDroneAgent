@@ -87,13 +87,18 @@ fn read_role(path: &Path) -> String {
     "direct".to_string()
 }
 
-fn profile_conf_path() -> PathBuf {
+/// The profile-source sentinel path, honouring `ADOS_PROFILE_CONF` for tests.
+/// `pub(crate)` so a profile-gated route can resolve the live path once and hand
+/// it to a path-injectable gate core (a test passes a tempdir path instead).
+pub(crate) fn profile_conf_path() -> PathBuf {
     std::env::var("ADOS_PROFILE_CONF")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(PROFILE_CONF))
 }
 
-fn mesh_role_path() -> PathBuf {
+/// The ground-station role sentinel path, honouring `ADOS_MESH_ROLE` for tests.
+/// `pub(crate)` for the same reason as [`profile_conf_path`].
+pub(crate) fn mesh_role_path() -> PathBuf {
     std::env::var("ADOS_MESH_ROLE")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(MESH_ROLE_PATH))

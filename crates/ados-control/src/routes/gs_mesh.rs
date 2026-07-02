@@ -73,19 +73,31 @@ fn all_mesh_units() -> Vec<&'static str> {
     ]
 }
 
-/// The resolved profile for the gate. The native surface resolves the profile the
-/// same way the heartbeat does (`crate::profile`), so a node installed with
-/// `profile: auto` that resolves to `ground-station` passes the gate even though
-/// its raw config field is `"auto"`. Mirrors the FastAPI `is_ground_station`.
-fn resolved_profile() -> String {
-    let config_profile = config_agent_profile();
-    let (profile, _role) = crate::profile::current_profile_and_role(&config_profile);
+/// Resolve the wire profile off explicit config + profile.conf + role-sentinel
+/// paths. The native surface resolves the profile the same way the heartbeat does
+/// (`crate::profile`), so a node installed with `profile: auto` that resolves to
+/// `ground-station` passes the gate even though its raw config field is `"auto"`.
+/// Threaded so a test drives the gate against a tempdir without mutating the
+/// process environment. Mirrors the FastAPI `is_ground_station`.
+fn resolved_profile_at(config: &Path, profile_conf: &Path, role_path: &Path) -> String {
+    let config_profile = config_agent_profile_at(config);
+    let (profile, _role) =
+        crate::profile::current_profile_and_role_at(&config_profile, profile_conf, role_path);
     profile
 }
 
 /// True when the node's resolved profile is a ground station.
 fn is_ground_station() -> bool {
-    resolved_profile() == "ground-station"
+    is_ground_station_at(
+        &config_path(),
+        &crate::profile::profile_conf_path(),
+        &crate::profile::mesh_role_path(),
+    )
+}
+
+/// The path-injectable core of [`is_ground_station`], for tests.
+fn is_ground_station_at(config: &Path, profile_conf: &Path, role_path: &Path) -> bool {
+    resolved_profile_at(config, profile_conf, role_path) == "ground-station"
 }
 
 /// The FastAPI profile-mismatch error: a 404 whose `detail` is the nested
@@ -123,10 +135,11 @@ fn config_path() -> PathBuf {
     PathBuf::from(raw)
 }
 
-/// The raw `agent.profile` value from the config, defaulting to `"auto"` when the
-/// section/field is absent — the same default the Python `AgentConfig.profile`
-/// carries, so the profile resolver sees the identical input.
-fn config_agent_profile() -> String {
+/// The raw `agent.profile` value from an explicit config path, defaulting to
+/// `"auto"` when the section/field is absent — the same default the Python
+/// `AgentConfig.profile` carries, so the profile resolver sees the identical input.
+/// Threaded so a test drives it against a tempdir without touching the environment.
+fn config_agent_profile_at(config: &Path) -> String {
     #[derive(Debug, Clone, Deserialize)]
     struct AgentSection {
         #[serde(default = "default_profile")]
@@ -140,7 +153,7 @@ fn config_agent_profile() -> String {
         #[serde(default)]
         agent: Option<AgentSection>,
     }
-    let cfg: ProfileConfig = std::fs::read_to_string(config_path())
+    let cfg: ProfileConfig = std::fs::read_to_string(config)
         .ok()
         .and_then(|text| serde_norway::from_str(&text).ok())
         .unwrap_or_default();
@@ -224,7 +237,13 @@ impl MeshRouteConfig {
     /// unparseable file yields the all-defaults slice, so both the role and
     /// mesh-config routes still answer a usable body.
     fn load() -> Self {
-        std::fs::read_to_string(config_path())
+        Self::load_from(&config_path())
+    }
+
+    /// The path-injectable core of [`load`], for tests: read the slice from an
+    /// explicit config path without touching the process environment.
+    fn load_from(config: &Path) -> Self {
+        std::fs::read_to_string(config)
             .ok()
             .and_then(|text| serde_norway::from_str(&text).ok())
             .unwrap_or_default()
@@ -247,7 +266,14 @@ fn mesh_role_path() -> PathBuf {
 /// missing, unreadable, or carries an unknown value. Mirrors the Python
 /// `role_manager.get_current_role`.
 fn current_role() -> String {
-    if let Ok(text) = std::fs::read_to_string(mesh_role_path()) {
+    current_role_at(&mesh_role_path())
+}
+
+/// The path-injectable core of [`current_role`]: read the role sentinel at an
+/// explicit path. Threaded so a test drives it against a tempdir without mutating
+/// the process environment.
+fn current_role_at(role_path: &Path) -> String {
+    if let Ok(text) = std::fs::read_to_string(role_path) {
         let value = text.trim();
         if VALID_ROLES.contains(&value) {
             return value.to_string();
@@ -626,43 +652,33 @@ fn percent_encode(s: &str) -> String {
 mod tests {
     use super::*;
 
-    /// Point the config + role + run-dir seams at a tempdir so the gating helpers
-    /// read fixtures, not the live host. Holds the env lock + the tempdir for the
-    /// test's lifetime; dropping it clears the env vars.
+    /// A tempdir wired with a config + role sentinel + the resolved seam paths, so
+    /// the gating helpers read fixtures via the path-injectable cores. No process
+    /// env is mutated, so the test cannot race a sibling test.
     struct Env {
         _dir: tempfile::TempDir,
-        _guard: tokio::sync::MutexGuard<'static, ()>,
-    }
-
-    impl Drop for Env {
-        fn drop(&mut self) {
-            std::env::remove_var("ADOS_CONFIG");
-            std::env::remove_var("ADOS_PROFILE_CONF");
-            std::env::remove_var("ADOS_MESH_ROLE");
-            std::env::remove_var("ADOS_RUN_DIR");
-        }
+        config: PathBuf,
+        profile_conf: PathBuf,
+        role_path: PathBuf,
     }
 
     fn with_env(role: Option<&str>, config_body: &str) -> Env {
-        // The crate-wide env lock, recovered even if a prior test panicked.
-        let guard = crate::lock_env_blocking();
         let dir = tempfile::tempdir().unwrap();
-        let cfg = dir.path().join("config.yaml");
-        std::fs::write(&cfg, config_body).unwrap();
-        std::env::set_var("ADOS_CONFIG", &cfg);
+        let config = dir.path().join("config.yaml");
+        std::fs::write(&config, config_body).unwrap();
         // The profile resolver reads profile.conf only when the config field is
         // "auto"/empty; an explicit profile in config_body wins, so point the
         // sentinel at an absent path to keep the resolver deterministic.
-        std::env::set_var("ADOS_PROFILE_CONF", dir.path().join("absent.conf"));
+        let profile_conf = dir.path().join("absent.conf");
         let role_path = dir.path().join("role");
         if let Some(r) = role {
             std::fs::write(&role_path, format!("{r}\n")).unwrap();
         }
-        std::env::set_var("ADOS_MESH_ROLE", &role_path);
-        std::env::set_var("ADOS_RUN_DIR", dir.path());
         Env {
             _dir: dir,
-            _guard: guard,
+            config,
+            profile_conf,
+            role_path,
         }
     }
 
@@ -695,23 +711,31 @@ mod tests {
 
     #[test]
     fn drone_profile_does_not_pass_the_gate() {
-        let _env = with_env(None, "agent:\n  profile: drone\n");
-        assert!(!is_ground_station());
+        let env = with_env(None, "agent:\n  profile: drone\n");
+        assert!(!is_ground_station_at(
+            &env.config,
+            &env.profile_conf,
+            &env.role_path
+        ));
     }
 
     #[test]
     fn ground_station_profile_passes_the_gate() {
-        let _env = with_env(Some("direct"), "agent:\n  profile: ground_station\n");
-        assert!(is_ground_station());
+        let env = with_env(Some("direct"), "agent:\n  profile: ground_station\n");
+        assert!(is_ground_station_at(
+            &env.config,
+            &env.profile_conf,
+            &env.role_path
+        ));
     }
 
     #[test]
     fn current_role_reads_the_sentinel_and_defaults_direct() {
-        let _env = with_env(Some("relay"), "agent:\n  profile: ground_station\n");
-        assert_eq!(current_role(), "relay");
+        let env = with_env(Some("relay"), "agent:\n  profile: ground_station\n");
+        assert_eq!(current_role_at(&env.role_path), "relay");
         // An absent sentinel defaults to direct.
-        std::env::set_var("ADOS_MESH_ROLE", "/nonexistent/role");
-        assert_eq!(current_role(), "direct");
+        let absent = env.role_path.parent().unwrap().join("nonexistent-role");
+        assert_eq!(current_role_at(&absent), "direct");
     }
 
     /// The golden role body the GCS reads on a relay-role ground station with an
@@ -743,16 +767,16 @@ mod tests {
 
     #[test]
     fn role_config_default_is_direct_when_section_absent() {
-        let _env = with_env(Some("direct"), "agent:\n  profile: ground_station\n");
-        let cfg = MeshRouteConfig::load();
+        let env = with_env(Some("direct"), "agent:\n  profile: ground_station\n");
+        let cfg = MeshRouteConfig::load_from(&env.config);
         assert_eq!(cfg.ground_station.role, "direct");
     }
 
     #[test]
     fn mesh_config_defaults_match_the_model_when_the_section_is_absent() {
         // A config with no ground_station section reads the MeshConfig defaults.
-        let _env = with_env(Some("direct"), "agent:\n  profile: ground_station\n");
-        let mesh = MeshRouteConfig::load().ground_station.mesh;
+        let env = with_env(Some("direct"), "agent:\n  profile: ground_station\n");
+        let mesh = MeshRouteConfig::load_from(&env.config).ground_station.mesh;
         let body = json!({
             "mesh_id": mesh.mesh_id,
             "carrier": mesh.carrier,
@@ -773,8 +797,8 @@ mod tests {
     #[test]
     fn mesh_config_reads_the_configured_values() {
         let body = "ground_station:\n  mesh:\n    mesh_id: site-a\n    carrier: ibss\n    channel: 6\n    bat_iface: bat1\n    interface_override: wlan2\n";
-        let _env = with_env(Some("direct"), body);
-        let mesh = MeshRouteConfig::load().ground_station.mesh;
+        let env = with_env(Some("direct"), body);
+        let mesh = MeshRouteConfig::load_from(&env.config).ground_station.mesh;
         let got = json!({
             "mesh_id": mesh.mesh_id,
             "carrier": mesh.carrier,

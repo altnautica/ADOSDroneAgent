@@ -52,7 +52,7 @@ use axum::Json;
 use serde_json::{json, Value};
 
 use crate::config::PairingConfig;
-use crate::profile::current_profile_and_role;
+use crate::profile::{current_profile_and_role_at, mesh_role_path, profile_conf_path};
 
 /// The pairing daemon's Unix socket basename under the runtime dir. Mirrors the
 /// Python `PAIRING_SOCK` (`ADOS_RUN_DIR / "pairing.sock"`).
@@ -86,13 +86,14 @@ fn pairing_via_daemon() -> bool {
 /// True when an env var holds one of the Python-truthy strings (`1`/`true`/`yes`,
 /// case-insensitive), matching the Python `use_daemon` membership check.
 fn truthy_env(name: &str) -> bool {
-    matches!(
-        std::env::var(name)
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-            .as_str(),
-        "1" | "true" | "yes"
-    )
+    is_truthy_str(&std::env::var(name).unwrap_or_default())
+}
+
+/// The pure truthiness rule the `use_daemon` check applies: a value is truthy when
+/// it is `1`/`true`/`yes` (case-insensitive). Split from [`truthy_env`] so the
+/// membership rule is tested without mutating the process environment.
+fn is_truthy_str(value: &str) -> bool {
+    matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes")
 }
 
 /// `true` when the node's RESOLVED profile (read from `config_path` + the on-disk
@@ -100,15 +101,16 @@ fn truthy_env(name: &str) -> bool {
 /// `is_ground_station` gate: an explicit config value wins, `"auto"`/empty falls
 /// back to `/etc/ados/profile.conf`.
 fn is_ground_station() -> bool {
-    is_ground_station_at(&config_path())
+    is_ground_station_at(&config_path(), &profile_conf_path(), &mesh_role_path())
 }
 
-/// The path-injectable core of the profile gate: resolve the wire profile off an
-/// explicit config path (plus the profile/role sentinels `current_profile_and_role`
-/// reads via their own env overrides) and return whether it is a ground station.
-fn is_ground_station_at(config: &Path) -> bool {
+/// The path-injectable core of the profile gate: resolve the wire profile off
+/// explicit config + profile.conf + role-sentinel paths and return whether it is a
+/// ground station. Every path is threaded in, so a test drives it against a
+/// tempdir without mutating the process environment.
+fn is_ground_station_at(config: &Path, profile_conf: &Path, role_path: &Path) -> bool {
     let cfg = PairingConfig::load_from(config);
-    let (profile, _role) = current_profile_and_role(&cfg.agent.profile);
+    let (profile, _role) = current_profile_and_role_at(&cfg.agent.profile, profile_conf, role_path);
     profile == "ground-station"
 }
 
@@ -278,7 +280,14 @@ fn pic_default_state() -> Value {
 /// after the profile gate it returns the same `403 E_CAPTIVE_ONLY` the residual
 /// returns for every request reaching it over its Unix socket.
 pub async fn get_captive_token() -> Response {
-    if !is_ground_station() {
+    captive_token_at(&config_path(), &profile_conf_path(), &mesh_role_path())
+}
+
+/// The path-injectable core of [`get_captive_token`]: the profile gate off explicit
+/// config + sentinel paths, then the fixed `403 E_CAPTIVE_ONLY`. Threading the
+/// paths lets a test drive the gate + response shape without touching the env.
+fn captive_token_at(config: &Path, profile_conf: &Path, role_path: &Path) -> Response {
+    if !is_ground_station_at(config, profile_conf, role_path) {
         return profile_mismatch();
     }
 
@@ -320,23 +329,33 @@ mod tests {
     fn drone_profile_is_not_a_ground_station() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = config_with_profile(dir.path(), "drone");
-        assert!(!is_ground_station_at(&cfg));
+        assert!(!is_ground_station_at(
+            &cfg,
+            &dir.path().join("absent.conf"),
+            &dir.path().join("absent.role"),
+        ));
     }
 
     #[test]
     fn ground_station_profile_is_a_ground_station() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = config_with_profile(dir.path(), "ground_station");
-        assert!(is_ground_station_at(&cfg));
+        assert!(is_ground_station_at(
+            &cfg,
+            &dir.path().join("absent.conf"),
+            &dir.path().join("absent.role"),
+        ));
     }
 
     #[test]
     fn an_absent_config_is_not_a_ground_station() {
         // A missing config loads the all-defaults (`profile: auto`); with no
         // profile.conf, `auto` falls back to the drone default → not a GS.
-        assert!(!is_ground_station_at(Path::new(
-            "/nonexistent/ados/config.yaml"
-        )));
+        assert!(!is_ground_station_at(
+            Path::new("/nonexistent/ados/config.yaml"),
+            Path::new("/nonexistent/ados/profile.conf"),
+            Path::new("/nonexistent/ados/mesh-role"),
+        ));
     }
 
     // -------------------------------------------------------------------
@@ -444,18 +463,18 @@ mod tests {
     // mints a token of its own.
     // -------------------------------------------------------------------
 
-    /// Drive the real handler with `ADOS_CONFIG` pointed at a config that carries
-    /// an explicit `agent.profile`, which resolves straight to the wire profile
-    /// without consulting profile.conf. `ADOS_CONFIG` is process-global and set by
-    /// other modules' tests too, so hold the crate-wide env lock across the
-    /// set→await→clear span.
+    /// Drive the captive-token core against a config that carries an explicit
+    /// `agent.profile` (which resolves straight to the wire profile without
+    /// consulting profile.conf). Every path is threaded into the core, so the test
+    /// never mutates the process environment and cannot race a sibling test.
     async fn captive_token_with_profile(profile: &str) -> (StatusCode, Value) {
-        let _env = crate::lock_env().await;
         let dir = tempfile::tempdir().unwrap();
         let cfg = config_with_profile(dir.path(), profile);
-        std::env::set_var("ADOS_CONFIG", &cfg);
-        let resp = get_captive_token().await;
-        std::env::remove_var("ADOS_CONFIG");
+        let resp = captive_token_at(
+            &cfg,
+            &dir.path().join("absent.conf"),
+            &dir.path().join("absent.role"),
+        );
         body_json(resp).await
     }
 
@@ -485,15 +504,15 @@ mod tests {
     }
 
     #[test]
-    fn truthy_env_reads_the_python_truthy_set() {
-        let _env = crate::lock_env_blocking();
-        std::env::set_var("ADOS_TEST_TRUTHY", "yes");
-        assert!(truthy_env("ADOS_TEST_TRUTHY"));
-        std::env::set_var("ADOS_TEST_TRUTHY", "TRUE");
-        assert!(truthy_env("ADOS_TEST_TRUTHY"));
-        std::env::set_var("ADOS_TEST_TRUTHY", "0");
-        assert!(!truthy_env("ADOS_TEST_TRUTHY"));
-        std::env::remove_var("ADOS_TEST_TRUTHY");
-        assert!(!truthy_env("ADOS_TEST_TRUTHY"));
+    fn truthy_str_reads_the_python_truthy_set() {
+        // The membership rule `truthy_env` applies to the env value, tested pure
+        // (no env mutation): `1`/`true`/`yes` case-insensitive are truthy.
+        assert!(is_truthy_str("yes"));
+        assert!(is_truthy_str("TRUE"));
+        assert!(is_truthy_str("1"));
+        assert!(is_truthy_str("Yes"));
+        assert!(!is_truthy_str("0"));
+        assert!(!is_truthy_str(""));
+        assert!(!is_truthy_str("no"));
     }
 }

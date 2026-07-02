@@ -86,11 +86,26 @@ impl AtlasRelaySidecar {
     /// Atomically write the snapshot to the Contract-E sidecar AND ship the same
     /// body to the logging store as a single `gs.atlas_relay` event. Best-effort:
     /// a failed file write is logged and dropped, and an absent logging daemon
-    /// drops the event without disturbing the relay loop. Honours `ADOS_RUN_DIR`
-    /// via [`crate::paths::run_path`].
+    /// drops the event without disturbing the relay loop. The run-dir path
+    /// resolves via [`crate::paths::run_path`] (honouring `ADOS_RUN_DIR`); the
+    /// write is delegated to `write_and_emit_to` so tests can target an explicit
+    /// temp path without mutating process-global env.
     fn write_and_emit(&self, ingest: Option<&ados_protocol::logd::emitter::IngestEmitter>) {
-        let path = crate::paths::run_path("atlas-relay.json");
-        if let Err(e) = crate::sidecars::write_json_atomic(Path::new(&path), self, 0o644) {
+        self.write_and_emit_to(
+            Path::new(&crate::paths::run_path("atlas-relay.json")),
+            ingest,
+        );
+    }
+
+    /// [`write_and_emit`](Self::write_and_emit) against an explicit sidecar path.
+    /// The path seam that keeps a test's best-effort write inside its own temp
+    /// tree without mutating the process-global `ADOS_RUN_DIR`.
+    fn write_and_emit_to(
+        &self,
+        path: &Path,
+        ingest: Option<&ados_protocol::logd::emitter::IngestEmitter>,
+    ) {
+        if let Err(e) = crate::sidecars::write_json_atomic(path, self, 0o644) {
             tracing::debug!(error = %e, "atlas_relay_sidecar_write_failed");
         }
         if let Some(em) = ingest {
@@ -305,9 +320,11 @@ mod tests {
         // The emitting write ships exactly one gs.atlas_relay event when an
         // emitter is supplied and nothing with None, regardless of whether the
         // best-effort file write succeeds. The emitter records every enqueue
-        // independent of a listening daemon. This avoids the process-wide
-        // ADOS_RUN_DIR mutation so it never races the run-dir tests.
+        // independent of a listening daemon. The temp path is threaded in
+        // explicitly (no `ADOS_RUN_DIR` mutation) so the write lands in this
+        // test's own temp tree and cannot race a sibling test.
         let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("atlas-relay.json");
         let stats = AtlasRelayStats {
             datagrams_seen: 3,
             forwarded: 2,
@@ -321,7 +338,7 @@ mod tests {
             dir.path().join("ingest.sock"),
         );
         let em_stats = emitter.stats();
-        s.write_and_emit(Some(&emitter));
+        s.write_and_emit_to(&path, Some(&emitter));
         assert_eq!(em_stats.enqueued(), 1);
 
         let none_emitter = ados_protocol::logd::emitter::IngestEmitter::with_socket(
@@ -329,7 +346,7 @@ mod tests {
             dir.path().join("ingest2.sock"),
         );
         let none_stats = none_emitter.stats();
-        s.write_and_emit(None);
+        s.write_and_emit_to(&path, None);
         assert_eq!(none_stats.enqueued(), 0);
     }
 }

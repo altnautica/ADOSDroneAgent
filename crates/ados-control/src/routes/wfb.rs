@@ -266,16 +266,22 @@ const STALE_AGE_US: i64 = 10_000_000;
 /// domain, and finalizes. An absent / unparseable / non-object file degrades to
 /// the bare base block. Mirrors the Python `_build_status_from_stats_file`.
 fn build_status_from_stats_file(cfg: &StatusConfig) -> Value {
+    build_status_from_stats_file_at(cfg, &wfb_stats_path())
+}
+
+/// The path-injectable core of [`build_status_from_stats_file`]: compose the body
+/// from an explicit stats-file path. Threaded so a test drives the absent-file
+/// degrade against a tempdir without mutating the process-global `ADOS_RUN_DIR`.
+fn build_status_from_stats_file_at(cfg: &StatusConfig, path: &std::path::Path) -> Value {
     let base = base_block(cfg);
-    let path = wfb_stats_path();
 
     // The mtime drives the staleness flip; compute the file age in seconds.
-    let age_s = match std::fs::metadata(&path).and_then(|m| m.modified()) {
+    let age_s = match std::fs::metadata(path).and_then(|m| m.modified()) {
         Ok(mtime) => mtime.elapsed().map(|d| d.as_secs_f64()).unwrap_or(0.0),
         Err(_) => return finalize_base(base),
     };
 
-    let payload = match std::fs::read_to_string(&path) {
+    let payload = match std::fs::read_to_string(path) {
         Ok(text) => match serde_json::from_str::<Value>(&text) {
             Ok(Value::Object(map)) => map,
             // A well-formed-but-non-object body returns the bare base, matching the
@@ -1325,20 +1331,18 @@ mod tests {
     #[test]
     fn build_status_from_an_absent_sidecar_is_the_finalized_base() {
         // With no wfb-stats.json the route returns the base block (the FastAPI
-        // `except: return base` path returns the bare base, no finalize). Point
-        // the run dir at an empty tempdir so the file is absent. ADOS_RUN_DIR is
-        // process-global, so hold the crate-wide env lock for the set→clear span.
-        let _env = crate::lock_env_blocking();
+        // `except: return base` path returns the bare base, no finalize). The
+        // stats path is threaded in explicitly (an absent file under a tempdir), so
+        // the test never mutates the process-global `ADOS_RUN_DIR`.
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("ADOS_RUN_DIR", dir.path());
+        let stats = dir.path().join("wfb-stats.json");
         let cfg = StatusConfig::default();
-        let out = build_status_from_stats_file(&cfg);
+        let out = build_status_from_stats_file_at(&cfg, &stats);
         // The bare base carries the 27 keys with no `bitrate_mbps` shim (the
         // FastAPI absent-file path skips finalize).
         assert_eq!(out["state"], json!("disabled"));
         assert_eq!(out["channel"], json!(0));
         assert!(out.get("bitrate_mbps").is_none());
-        std::env::remove_var("ADOS_RUN_DIR");
     }
 
     #[test]

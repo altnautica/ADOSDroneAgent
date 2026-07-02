@@ -1032,10 +1032,43 @@ const MEDIAMTX_WEBRTC_PORT: u16 = 8889;
 ///
 /// The recording block is always empty (no in-process recorder on this daemon).
 /// Mirrors the FastAPI `pipeline is None` branch exactly.
+///
+/// This resolves the live mediamtx readiness once (the real loopback probes) and
+/// hands it to the pure [`build_video_block_with`] core, so the block-shape logic
+/// is testable with an injected readiness and no live port.
 async fn build_video_block(
     resolved_profile: &str,
     wfb_status: &Option<Map<String, Value>>,
     host: &str,
+) -> Value {
+    build_video_block_with(
+        resolved_profile,
+        wfb_status,
+        host,
+        resolve_mediamtx_ready().await,
+    )
+}
+
+/// Resolve whether the local mediamtx has a ready stream: the management-API
+/// probe (`/v3/paths/list`) with the WHEP-liveness fallback for the credentialed
+/// ground-station mediamtx. Split out from the block builder so the builder is a
+/// pure function of an injected readiness (no live TCP port in unit tests).
+async fn resolve_mediamtx_ready() -> bool {
+    let mut mtx = probe_mediamtx().await;
+    if mtx.as_ref().map(|m| !mtx_ready(m)).unwrap_or(true) {
+        mtx = probe_mediamtx_via_whep().await.or(mtx);
+    }
+    mtx.as_ref().map(mtx_ready).unwrap_or(false)
+}
+
+/// The mediamtx-readiness-injectable core of [`build_video_block`]. Pure over
+/// `mediamtx_ready` (the resolved probe outcome), so tests exercise every branch
+/// deterministically without a live loopback port.
+fn build_video_block_with(
+    resolved_profile: &str,
+    wfb_status: &Option<Map<String, Value>>,
+    host: &str,
+    mediamtx_ready: bool,
 ) -> Value {
     // Default: not initialised, no playable endpoint.
     let default = json!({
@@ -1046,37 +1079,27 @@ async fn build_video_block(
         "recording_started_at": null,
     });
 
+    let running = || {
+        json!({
+            "state": "running",
+            "whep_url": format!("http://{host}:{MEDIAMTX_WEBRTC_PORT}/main/whep"),
+            "recording": false,
+            "recording_filename": null,
+            "recording_started_at": null,
+        })
+    };
+
     if resolved_profile == "drone" {
-        let mut mtx = probe_mediamtx().await;
-        if mtx.as_ref().map(|m| !mtx_ready(m)).unwrap_or(true) {
-            mtx = probe_mediamtx_via_whep().await.or(mtx);
-        }
-        if mtx.as_ref().map(mtx_ready).unwrap_or(false) {
-            return json!({
-                "state": "running",
-                "whep_url": format!("http://{host}:{MEDIAMTX_WEBRTC_PORT}/main/whep"),
-                "recording": false,
-                "recording_filename": null,
-                "recording_started_at": null,
-            });
+        if mediamtx_ready {
+            return running();
         }
         return default;
     }
 
     // Ground-station path: gate on the receive link actually delivering video.
     if gs_video_delivering(wfb_status.as_ref()) {
-        let mut mtx = probe_mediamtx().await;
-        if mtx.as_ref().map(|m| !mtx_ready(m)).unwrap_or(true) {
-            mtx = probe_mediamtx_via_whep().await.or(mtx);
-        }
-        if mtx.as_ref().map(mtx_ready).unwrap_or(false) {
-            return json!({
-                "state": "running",
-                "whep_url": format!("http://{host}:{MEDIAMTX_WEBRTC_PORT}/main/whep"),
-                "recording": false,
-                "recording_filename": null,
-                "recording_started_at": null,
-            });
+        if mediamtx_ready {
+            return running();
         }
         // Link delivering frames but WHEP not yet serving — still coming up.
         return json!({
@@ -1977,22 +2000,45 @@ mod tests {
         assert!(gs_video_delivering(Some(&connected)));
     }
 
-    #[tokio::test]
-    async fn video_block_with_no_mediamtx_is_default_on_drone() {
-        // No mediamtx running (the unit-test host) → not_initialized, no whep.
-        let v = build_video_block("drone", &None, "localhost").await;
+    #[test]
+    fn video_block_with_no_mediamtx_is_default_on_drone() {
+        // mediamtx absent (readiness injected false) → not_initialized, no whep.
+        // The readiness is threaded in explicitly, so the assertion holds
+        // deterministically regardless of whatever answers 9997/8889 on the host.
+        let v = build_video_block_with("drone", &None, "localhost", false);
         assert_eq!(v["state"], json!("not_initialized"));
         assert_eq!(v["whep_url"], Value::Null);
         assert_eq!(v["recording"], json!(false));
         assert_eq!(v["recording_filename"], Value::Null);
     }
 
-    #[tokio::test]
-    async fn video_block_on_gs_without_a_live_link_is_stopped() {
+    #[test]
+    fn video_block_on_drone_with_ready_mediamtx_is_running() {
+        // mediamtx ready (readiness injected true) → running + a WHEP URL.
+        let v = build_video_block_with("drone", &None, "example-host", true);
+        assert_eq!(v["state"], json!("running"));
+        assert_eq!(v["whep_url"], json!("http://example-host:8889/main/whep"));
+    }
+
+    #[test]
+    fn video_block_on_gs_without_a_live_link_is_stopped() {
         // A ground station whose WFB link is not delivering reports stopped, no
-        // whep — regardless of mediamtx reachability (the gate is the link).
-        let v = build_video_block("ground-station", &None, "localhost").await;
+        // whep — regardless of mediamtx reachability (the gate is the link). Inject
+        // mediamtx ready=true to prove the link gate dominates even then.
+        let v = build_video_block_with("ground-station", &None, "localhost", true);
         assert_eq!(v["state"], json!("stopped"));
+        assert_eq!(v["whep_url"], Value::Null);
+    }
+
+    #[test]
+    fn video_block_on_gs_delivering_but_no_mediamtx_is_connecting() {
+        // Link delivering frames but mediamtx WHEP not yet serving → connecting.
+        let wfb = Some(signals(&[
+            ("state", json!("active")),
+            ("valid_rx_packets_per_s", json!(120.0)),
+        ]));
+        let v = build_video_block_with("ground-station", &wfb, "localhost", false);
+        assert_eq!(v["state"], json!("connecting"));
         assert_eq!(v["whep_url"], Value::Null);
     }
 

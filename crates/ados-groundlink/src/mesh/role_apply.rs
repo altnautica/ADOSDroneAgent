@@ -20,7 +20,7 @@
 //! contract), so a partial transition still completes on a node where one unit is
 //! temporarily stuck.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ados_supervisor::process_manager::select;
 
@@ -72,7 +72,14 @@ fn role_file() -> PathBuf {
 /// `role_manager.get_current_role` (which the sibling reader also implements; a
 /// local copy keeps this module self-contained against its own sentinel seam).
 pub fn current_role() -> String {
-    if let Ok(text) = std::fs::read_to_string(role_file()) {
+    current_role_at(&role_file())
+}
+
+/// The path-injectable core of [`current_role`]: read the sentinel at an explicit
+/// path. Threaded so a test drives it against a tempdir without mutating the
+/// process-global `ADOS_MESH_ROLE`.
+pub(crate) fn current_role_at(path: &Path) -> String {
+    if let Ok(text) = std::fs::read_to_string(path) {
         let value = text.trim();
         if VALID_ROLES.contains(&value) {
             return value.to_string();
@@ -81,12 +88,13 @@ pub fn current_role() -> String {
     "direct".to_string()
 }
 
-/// Atomically write the role sentinel (0o644, owner-writable). Mirrors
-/// `role_manager._write_role_file`: write a `.tmp` sibling, chmod 0644, rename.
-fn write_role_file(role: &str) -> std::io::Result<()> {
+/// Atomically write the role sentinel at an explicit path (0o644, owner-writable).
+/// Mirrors `role_manager._write_role_file`: write a `.tmp` sibling, chmod 0644,
+/// rename. The path is threaded in (the caller resolves `role_file()` once) so a
+/// test drives it against a tempdir without mutating the process environment.
+fn write_role_file_at(path: &Path, role: &str) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    let path = role_file();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -102,7 +110,7 @@ fn write_role_file(role: &str) -> std::io::Result<()> {
         f.sync_all()?;
     }
     std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644))?;
-    std::fs::rename(&tmp, &path)
+    std::fs::rename(&tmp, path)
 }
 
 /// Wall-clock unix milliseconds (the transition timestamp basis), matching the
@@ -133,11 +141,22 @@ pub struct RoleResult {
 /// (`Err(target)`), mirroring the Python `ValueError`; systemctl failures never
 /// fail the transition.
 pub async fn apply_role(target: &str, reason: &str) -> Result<RoleResult, String> {
+    apply_role_at(&role_file(), target, reason).await
+}
+
+/// The path-injectable core of [`apply_role`]: read/flip the role sentinel at an
+/// explicit path. Threaded so a test drives the noop/error branches against a
+/// tempdir without mutating the process-global `ADOS_MESH_ROLE`.
+pub(crate) async fn apply_role_at(
+    role_file: &Path,
+    target: &str,
+    reason: &str,
+) -> Result<RoleResult, String> {
     if !VALID_ROLES.contains(&target) {
         return Err(target.to_string());
     }
 
-    let current = current_role();
+    let current = current_role_at(role_file);
     let ts_ms = now_ms();
 
     if current == target {
@@ -187,7 +206,7 @@ pub async fn apply_role(target: &str, reason: &str) -> Result<RoleResult, String
 
     // Flip the sentinel BEFORE starting new units so their ConditionPathExists
     // checks pass.
-    if let Err(e) = write_role_file(target) {
+    if let Err(e) = write_role_file_at(role_file, target) {
         tracing::error!(error = %e, "role_file_write_failed");
     }
 
@@ -229,12 +248,6 @@ pub async fn apply_role(target: &str, reason: &str) -> Result<RoleResult, String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    // `ADOS_MESH_ROLE` is process-global; the env-mutating tests serialize on
-    // this lock so the multi-threaded test runner cannot interleave their
-    // set/remove of the var.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn role_units_match_the_python_mapping() {
@@ -265,68 +278,53 @@ mod tests {
 
     #[test]
     fn current_role_reads_the_sentinel_and_defaults_direct() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // The sentinel path is threaded in explicitly, so the test never mutates
+        // the process-global `ADOS_MESH_ROLE`.
         let dir = tempfile::tempdir().unwrap();
         let role_path = dir.path().join("role");
         std::fs::write(&role_path, "relay\n").unwrap();
-        // SAFETY: the env lock is held.
-        unsafe { std::env::set_var("ADOS_MESH_ROLE", &role_path) };
-        assert_eq!(current_role(), "relay");
+        assert_eq!(current_role_at(&role_path), "relay");
         // An absent sentinel defaults to direct.
-        unsafe { std::env::set_var("ADOS_MESH_ROLE", dir.path().join("absent")) };
-        assert_eq!(current_role(), "direct");
+        assert_eq!(current_role_at(&dir.path().join("absent")), "direct");
         // An unknown value also defaults to direct.
         let bad = dir.path().join("bad");
         std::fs::write(&bad, "bogus\n").unwrap();
-        unsafe { std::env::set_var("ADOS_MESH_ROLE", &bad) };
-        assert_eq!(current_role(), "direct");
-        unsafe { std::env::remove_var("ADOS_MESH_ROLE") };
+        assert_eq!(current_role_at(&bad), "direct");
     }
 
     #[test]
     fn write_role_file_round_trips_with_0644() {
         use std::os::unix::fs::PermissionsExt;
-        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let role_path = dir.path().join("mesh/role");
-        // SAFETY: the env lock is held.
-        unsafe { std::env::set_var("ADOS_MESH_ROLE", &role_path) };
-        write_role_file("receiver").unwrap();
+        write_role_file_at(&role_path, "receiver").unwrap();
         assert_eq!(std::fs::read_to_string(&role_path).unwrap(), "receiver\n");
         let mode = std::fs::metadata(&role_path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o644);
-        unsafe { std::env::remove_var("ADOS_MESH_ROLE") };
     }
 
     #[tokio::test]
     async fn unknown_target_is_rejected_before_any_side_effect() {
         // An unknown role returns Err(target) and touches nothing — the Python
-        // ValueError path. (No env redirect needed: the guard fires first.)
-        let err = apply_role("bogus", "test").await;
+        // ValueError path. (The guard fires first; the threaded path is never read.)
+        let dir = tempfile::tempdir().unwrap();
+        let err = apply_role_at(&dir.path().join("role"), "bogus", "test").await;
         assert_eq!(err, Err("bogus".to_string()));
     }
 
-    // The env lock is held across the single `apply_role` await so the
-    // `ADOS_MESH_ROLE` override the test set cannot be cleared by a sibling test
-    // mid-call. The awaited future never yields to another task that takes this
-    // lock (a noop transition does no I/O), so holding it is safe here.
-    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn noop_when_already_in_the_target_role() {
         // current == target → a noop transition with empty unit lists and the
-        // noop flag set, never touching systemd.
-        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // noop flag set, never touching systemd. The sentinel path is threaded in,
+        // so the test never mutates the process environment.
         let dir = tempfile::tempdir().unwrap();
         let role_path = dir.path().join("role");
         std::fs::write(&role_path, "direct\n").unwrap();
-        // SAFETY: the env lock is held.
-        unsafe { std::env::set_var("ADOS_MESH_ROLE", &role_path) };
-        let res = apply_role("direct", "test").await.unwrap();
+        let res = apply_role_at(&role_path, "direct", "test").await.unwrap();
         assert!(res.noop);
         assert_eq!(res.role, "direct");
         assert_eq!(res.previous, "direct");
         assert!(res.units_started.is_empty());
         assert!(res.units_stopped.is_empty());
-        unsafe { std::env::remove_var("ADOS_MESH_ROLE") };
     }
 }

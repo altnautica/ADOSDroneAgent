@@ -26,31 +26,6 @@ pub mod routing;
 pub mod serve;
 pub mod state;
 
-/// Serializes tests that mutate process-global env vars (`ADOS_CONFIG`,
-/// `ADOS_RUN_DIR`, `ADOS_MESH_ROLE`, `ADOS_PROFILE_CONF`, ...). The process
-/// environment is shared by every test thread in the binary, and these tests set
-/// a var, run a handler, then clear it; with only per-module locks a parallel
-/// test in another module clobbers the var mid-flight. A `tokio` Mutex so the
-/// guard is held cleanly across an `.await` in the async tests, and dropped in a
-/// sync RAII `Drop` to clear the vars; the sync (no-runtime) `#[test]` sites lock
-/// it with [`lock_env_blocking`].
-#[cfg(test)]
-pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-/// Acquire [`ENV_LOCK`] from an async test, holding it across the handler await.
-#[cfg(test)]
-pub(crate) async fn lock_env() -> tokio::sync::MutexGuard<'static, ()> {
-    ENV_LOCK.lock().await
-}
-
-/// Acquire [`ENV_LOCK`] from a synchronous `#[test]` with no runtime active
-/// (`blocking_lock` panics if called inside a runtime, so this is for the plain
-/// `#[test]` env sites only — never an async test).
-#[cfg(test)]
-pub(crate) fn lock_env_blocking() -> tokio::sync::MutexGuard<'static, ()> {
-    ENV_LOCK.blocking_lock()
-}
-
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -118,6 +93,12 @@ pub struct DaemonPaths {
     /// The WFB bind-session sentinel (`/run/ados/bind-state.json`) the
     /// pairing-info route folds into `bind_state`. Injectable for tests.
     pub bind_state_path: PathBuf,
+    /// The profile-source sentinel (`/etc/ados/profile.conf`) the pairing-info
+    /// profile resolver falls back to. Injectable for tests.
+    pub profile_conf_path: PathBuf,
+    /// The ground-station role sentinel (`/etc/ados/mesh/role`) the pairing-info
+    /// profile resolver reads for a ground station. Injectable for tests.
+    pub mesh_role_path: PathBuf,
 }
 
 impl Default for DaemonPaths {
@@ -160,6 +141,11 @@ impl Default for DaemonPaths {
         // The board sidecar resolves under `ADOS_RUN_DIR`, defaulting to
         // `/run/ados/board.json` (the detector persists the HAL board dict there).
         let board_path = Path::new(&run_dir).join("board.json");
+        // The profile/role sentinels honour `ADOS_PROFILE_CONF` / `ADOS_MESH_ROLE`
+        // (the same overrides `crate::profile` resolves under), defaulting to
+        // `/etc/ados/profile.conf` + `/etc/ados/mesh/role`.
+        let profile_conf_path = crate::profile::profile_conf_path();
+        let mesh_role_path = crate::profile::mesh_role_path();
         Self {
             control_socket,
             control_tcp_port,
@@ -171,6 +157,8 @@ impl Default for DaemonPaths {
             config_path,
             wfb_key_dir,
             bind_state_path,
+            profile_conf_path,
+            mesh_role_path,
         }
     }
 }
@@ -249,6 +237,8 @@ where
         pairing_json: paths.pairing_path.clone(),
         wfb_key_dir: paths.wfb_key_dir.clone(),
         bind_state: paths.bind_state_path.clone(),
+        profile_conf: paths.profile_conf_path.clone(),
+        mesh_role: paths.mesh_role_path.clone(),
     };
     let state = AppState::new(
         Arc::clone(&pairing),
@@ -268,7 +258,12 @@ where
     // residual; registering them natively there would 503 instead of proxying.
     let is_ground_station = {
         let cfg = crate::config::PairingConfig::load_from(&paths.config_path);
-        crate::profile::current_profile_and_role(&cfg.agent.profile).0 == "ground-station"
+        crate::profile::current_profile_and_role_at(
+            &cfg.agent.profile,
+            &paths.profile_conf_path,
+            &paths.mesh_role_path,
+        )
+        .0 == "ground-station"
     };
     let net_native = is_ground_station;
     let hid_native = is_ground_station;

@@ -133,12 +133,19 @@ enum PicReply {
 /// caller can take the front's no-arbiter `500` posture. The read is bounded so a
 /// runaway reply cannot exhaust memory.
 async fn pic_request(request: &Value) -> PicReply {
+    pic_request_at(&pic_sock(), request).await
+}
+
+/// The path-injectable core of [`pic_request`]: round-trip against an explicit
+/// control-socket path. Threaded so a test drives the socket seam against a
+/// tempdir without mutating the process-global `ADOS_RUN_DIR`.
+async fn pic_request_at(sock: &std::path::Path, request: &Value) -> PicReply {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     /// An arbiter reply is a few hundred bytes; bound the read to guard a runaway.
     const MAX_REPLY_BYTES: usize = 64 * 1024;
 
-    let mut stream = match tokio::net::UnixStream::connect(pic_sock()).await {
+    let mut stream = match tokio::net::UnixStream::connect(sock).await {
         Ok(s) => s,
         Err(_) => return PicReply::Unavailable,
     };
@@ -525,17 +532,18 @@ mod tests {
         v.as_object().unwrap().clone()
     }
 
-    /// Spin a one-shot PIC control socket at `/run/ados/pic.sock` (under a temp
-    /// `ADOS_RUN_DIR`) that reads one request line and replies with `reply`, then
-    /// runs the handler `run`. Returns `{request, status, body}` so the test can
-    /// assert both the op forwarded and the response. Serializes behind the
-    /// crate-wide env lock (the `ADOS_RUN_DIR` override is process-wide).
-    async fn with_socket<F>(reply: Value, run: F) -> Value
+    /// Spin a one-shot PIC control socket under a tempdir that reads one request
+    /// line and replies with `reply`, then runs the handler produced by `run` (which
+    /// receives the socket path so it can drive [`pic_request_at`] directly).
+    /// Returns `{request, status, body}` so the test can assert both the op
+    /// forwarded and the response. The socket path is threaded in, so the test never
+    /// mutates the process-global `ADOS_RUN_DIR`.
+    async fn with_socket<F, Fut>(reply: Value, run: F) -> Value
     where
-        F: std::future::Future<Output = Response>,
+        F: FnOnce(std::path::PathBuf) -> Fut,
+        Fut: std::future::Future<Output = Response>,
     {
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("ADOS_RUN_DIR", dir.path());
         let sock = dir.path().join("pic.sock");
         let listener = UnixListener::bind(&sock).unwrap();
 
@@ -562,9 +570,8 @@ mod tests {
             request
         });
 
-        let resp = run.await;
+        let resp = run(sock.clone()).await;
         let request = server.await.unwrap();
-        std::env::remove_var("ADOS_RUN_DIR");
         let status = resp.status().as_u16();
         let body = body_json(resp).await;
         drop(dir);
@@ -732,19 +739,18 @@ mod tests {
 
     // ── the no-socket degrade arms (the 500 path) ────────────────────────────
     //
-    // These set the process-wide ADOS_RUN_DIR, so they serialize behind the
-    // crate-wide env lock held across the handler's await for the whole run. They
-    // exercise the unavailable path WITHOUT the profile gate (the gate reads the
-    // real config and would 404 on a dev host); each calls pic_request directly so
-    // the socket seam is covered independent of the gate.
+    // These thread an explicit socket path into pic_request_at, so no test mutates
+    // the process-global ADOS_RUN_DIR. They exercise the unavailable path WITHOUT
+    // the profile gate (the gate reads the real config and would 404 on a dev
+    // host); each calls pic_request_at directly so the socket seam is covered
+    // independent of the gate.
 
     #[tokio::test]
     async fn pic_request_with_no_socket_is_unavailable() {
-        let _guard = crate::lock_env().await;
+        // An absent socket path under a tempdir → the connect fails → Unavailable.
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("ADOS_RUN_DIR", dir.path());
-        let out = pic_request(&json!({"op": "claim", "client_id": "op-a"})).await;
-        std::env::remove_var("ADOS_RUN_DIR");
+        let sock = dir.path().join("pic.sock");
+        let out = pic_request_at(&sock, &json!({"op": "claim", "client_id": "op-a"})).await;
         assert!(matches!(out, PicReply::Unavailable));
     }
 
@@ -752,11 +758,10 @@ mod tests {
     async fn pic_request_treats_ok_false_as_unavailable() {
         // A transport ok:false (a malformed-request error from the dispatch) is
         // not an arbiter outcome; the route surfaces it as the 500, never a body.
-        let _guard = crate::lock_env().await;
         let out = with_socket(
             json!({"ok": false, "error": "E_MISSING_CLIENT_ID"}),
-            async {
-                match pic_request(&json!({"op": "claim"})).await {
+            |sock| async move {
+                match pic_request_at(&sock, &json!({"op": "claim"})).await {
                     PicReply::Unavailable => {
                         pic_error(StatusCode::INTERNAL_SERVER_ERROR, "E_PIC_CLAIM_FAILED", "x")
                     }
@@ -776,13 +781,12 @@ mod tests {
 
     #[tokio::test]
     async fn claim_forwards_the_op_and_returns_the_fresh_body() {
-        let _guard = crate::lock_env().await;
         let out = with_socket(
             json!({"ok": true, "claimed": true, "mode": "fresh", "claimed_by": "op-a", "claim_counter": 1}),
-            async {
+            |sock| async move {
                 // Drive the socket seam + translation directly (the profile gate
                 // reads the real config and would 404 on a dev host).
-                match pic_request(&json!({
+                match pic_request_at(&sock, &json!({
                     "op": "claim", "client_id": "op-a", "confirm_token": null, "force": false
                 }))
                 .await
@@ -806,20 +810,24 @@ mod tests {
 
     #[tokio::test]
     async fn confirm_token_returns_token_and_fixed_ttl() {
-        let _guard = crate::lock_env().await;
-        let out = with_socket(json!({"ok": true, "token": "a".repeat(32)}), async {
-            match pic_request(&json!({"op": "confirm_token", "client_id": "op-b"})).await {
-                PicReply::Obj(reply) => {
-                    let token = reply
-                        .get("token")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string();
-                    Json(json!({"token": token, "ttl_seconds": 2})).into_response()
+        let out = with_socket(
+            json!({"ok": true, "token": "a".repeat(32)}),
+            |sock| async move {
+                match pic_request_at(&sock, &json!({"op": "confirm_token", "client_id": "op-b"}))
+                    .await
+                {
+                    PicReply::Obj(reply) => {
+                        let token = reply
+                            .get("token")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
+                        Json(json!({"token": token, "ttl_seconds": 2})).into_response()
+                    }
+                    PicReply::Unavailable => Json(json!({"unavailable": true})).into_response(),
                 }
-                PicReply::Unavailable => Json(json!({"unavailable": true})).into_response(),
-            }
-        })
+            },
+        )
         .await;
         assert_eq!(out["request"]["op"], json!("confirm_token"));
         assert_eq!(out["status"], json!(200));

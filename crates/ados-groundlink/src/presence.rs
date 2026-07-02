@@ -399,9 +399,22 @@ struct ListenerHealth {
 
 /// Persist the listener-health snapshot to the GS sidecar. Best-effort: an I/O
 /// error is logged and discarded so sidecar trouble never stalls the supervisor.
+/// The run-dir path resolves via `run_path` (honouring the `ADOS_RUN_DIR`
+/// override); the write is delegated to `write_listener_health_to` so tests can
+/// target an explicit temp path without mutating process-global env.
 fn write_listener_health(health: &ListenerHealth) {
-    let path = crate::paths::run_path(PRESENCE_LISTENER_SIDECAR_NAME);
-    if let Err(e) = crate::sidecars::write_json_atomic(std::path::Path::new(&path), health, 0o644) {
+    write_listener_health_to(
+        std::path::Path::new(&crate::paths::run_path(PRESENCE_LISTENER_SIDECAR_NAME)),
+        health,
+    );
+}
+
+/// Persist the listener-health snapshot to an explicit sidecar path. The path
+/// seam that lets a test write into its own temp dir without touching
+/// `ADOS_RUN_DIR`. Best-effort with the same swallow-and-log contract as
+/// [`write_listener_health`].
+fn write_listener_health_to(path: &std::path::Path, health: &ListenerHealth) {
+    if let Err(e) = crate::sidecars::write_json_atomic(path, health, 0o644) {
         tracing::debug!(error = %e, "ground_presence_listener_sidecar_failed");
     }
 }
@@ -941,15 +954,11 @@ mod tests {
 
     #[test]
     fn listener_health_sidecar_round_trips_with_expected_keys() {
-        // Redirect the run dir so the sidecar lands in a temp tree (no /run/ados
-        // on a dev host, and no cross-test contention on the real path).
-        let _env = crate::paths::lock_run_dir_env();
+        // Write the sidecar into a temp tree via the explicit-path seam. No env
+        // mutation: the temp path is threaded in directly, so this test cannot
+        // race any other test under the parallel runner.
         let dir = tempfile::tempdir().unwrap();
-        // SAFETY: the run-dir env lock serializes this against every other
-        // ADOS_RUN_DIR test, so no other thread mutates the var concurrently.
-        unsafe {
-            std::env::set_var("ADOS_RUN_DIR", dir.path());
-        }
+        let path = dir.path().join(PRESENCE_LISTENER_SIDECAR_NAME);
 
         let health = ListenerHealth {
             starts: 3,
@@ -958,19 +967,14 @@ mod tests {
             last_exit: "panic: task panicked".to_string(),
             started_at_unix: now_unix(),
         };
-        write_listener_health(&health);
+        write_listener_health_to(&path, &health);
 
-        let path = dir.path().join(PRESENCE_LISTENER_SIDECAR_NAME);
         let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(v["starts"], 3);
         assert_eq!(v["restarts"], 2);
         assert_eq!(v["panics"], 1);
         assert_eq!(v["last_exit"], "panic: task panicked");
         assert!(v["started_at_unix"].as_f64().unwrap() > 0.0);
-
-        unsafe {
-            std::env::remove_var("ADOS_RUN_DIR");
-        }
     }
 
     #[tokio::test]

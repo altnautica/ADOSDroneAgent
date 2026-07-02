@@ -319,6 +319,8 @@ mod tests {
             pairing_json: dir.join("pairing.json"),
             wfb_key_dir: dir.join("wfb"),
             bind_state: dir.join("bind-state.json"),
+            profile_conf: dir.join("profile.conf"),
+            mesh_role: dir.join("mesh-role"),
         };
         AppState::new(
             pairing,
@@ -579,6 +581,8 @@ mod tests {
             pairing_json: dir.path().join("pairing.json"),
             wfb_key_dir: dir.path().join("wfb"),
             bind_state: dir.path().join("bind-state.json"),
+            profile_conf: dir.path().join("profile.conf"),
+            mesh_role: dir.path().join("mesh-role"),
         };
         let state = AppState::new(
             pairing,

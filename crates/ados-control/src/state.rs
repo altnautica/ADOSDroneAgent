@@ -163,6 +163,13 @@ pub struct PairingPaths {
     /// The WFB bind-session sentinel (`/run/ados/bind-state.json`) the info route
     /// folds into `bind_state`.
     pub bind_state: PathBuf,
+    /// The profile-source sentinel (`/etc/ados/profile.conf`) the profile resolver
+    /// falls back to when `agent.profile` is `auto`/empty. Threaded so the resolve
+    /// is path-injectable (a test points it at a tempdir).
+    pub profile_conf: PathBuf,
+    /// The ground-station role sentinel (`/etc/ados/mesh/role`) the profile resolver
+    /// reads for a ground station. Threaded so the resolve is path-injectable.
+    pub mesh_role: PathBuf,
 }
 
 /// State shared across all routes. Cloned per connection by the axum router, so

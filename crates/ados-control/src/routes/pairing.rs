@@ -35,7 +35,7 @@ use serde_json::{json, Value};
 
 use crate::config::PairingConfig;
 use crate::pairing_store::{self, PairingDoc};
-use crate::profile::current_profile_and_role;
+use crate::profile::current_profile_and_role_at;
 use crate::routes::detail;
 use crate::state::{AppState, PairingPaths};
 
@@ -61,7 +61,8 @@ pub async fn get_pairing_info(State(state): State<AppState>) -> Json<Value> {
     } else {
         cfg.agent.name.clone()
     };
-    let (profile, role) = current_profile_and_role(&cfg.agent.profile);
+    let (profile, role) =
+        current_profile_and_role_at(&cfg.agent.profile, &paths.profile_conf, &paths.mesh_role);
     let radio_peer_device_id = cfg.radio_peer_device_id();
 
     let short_id = short_device_id(&device_id);
@@ -505,6 +506,8 @@ mod tests {
             pairing_json: dir.join("pairing.json"),
             wfb_key_dir: dir.join("wfb"),
             bind_state: dir.join("bind-state.json"),
+            profile_conf: dir.join("profile.conf"),
+            mesh_role: dir.join("mesh-role"),
         }
     }
 }

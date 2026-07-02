@@ -110,6 +110,11 @@ async fn start_full(
         // paths.
         logd_query_socket: dir.join("logd-query.sock"),
         board_path: dir.join("board.json"),
+        // The pairing-info profile resolver's sentinels, in the same temp dir.
+        // Absent by default → the resolver falls back to the config's explicit
+        // profile; a test seeds `mesh-role` to exercise a ground-station role.
+        profile_conf_path: dir.join("profile.conf"),
+        mesh_role_path: dir.join("mesh-role"),
     };
     let (stop_tx, stop_rx) = oneshot::channel::<()>();
     let join = tokio::spawn(run_with_paths(paths, async move {
@@ -1041,14 +1046,11 @@ async fn pairing_info_reads_the_fc_triple_radio_peer_and_bind_state() {
 async fn pairing_info_ground_station_reports_the_profile_and_role() {
     let dir = tempfile::tempdir().unwrap();
     seed_config(dir.path(), "abcdef1234567890", "gs-node", "ground_station");
-    // A ground-station agent reads its role from the mesh role sentinel. The
-    // pairing route resolves it via ADOS_MESH_ROLE; point it at a temp file.
-    let role_path = dir.path().join("mesh-role");
-    std::fs::write(&role_path, "relay\n").unwrap();
-    // SAFETY: the test sets a process-global env var the profile resolver reads.
-    // It is restored before the assertions that depend on it run within this
-    // single-threaded test.
-    std::env::set_var("ADOS_MESH_ROLE", &role_path);
+    // A ground-station agent reads its role from the mesh role sentinel. The daemon
+    // resolves it via the threaded `mesh_role_path` (`<dir>/mesh-role`, wired in
+    // `start_full`), so the test seeds the file rather than mutating the process
+    // environment.
+    std::fs::write(dir.path().join("mesh-role"), "relay\n").unwrap();
 
     let h = start_with_state(
         dir.path(),
@@ -1063,7 +1065,6 @@ async fn pairing_info_ground_station_reports_the_profile_and_role() {
     assert_eq!(got["profile"], serde_json::json!("ground-station"));
     assert_eq!(got["role"], serde_json::json!("relay"));
 
-    std::env::remove_var("ADOS_MESH_ROLE");
     h.stop().await;
 }
 

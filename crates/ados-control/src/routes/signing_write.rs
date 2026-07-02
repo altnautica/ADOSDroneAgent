@@ -645,6 +645,8 @@ mod tests {
             pairing_json: dir.join("pairing.json"),
             wfb_key_dir: dir.join("wfb"),
             bind_state: dir.join("bind-state.json"),
+            profile_conf: dir.join("profile.conf"),
+            mesh_role: dir.join("mesh-role"),
         };
         AppState::new(
             Arc::new(PairingState::with_path(dir.join("pairing.json"))),

@@ -80,11 +80,18 @@ impl Default for ReceiverState {
 }
 
 impl ReceiverState {
-    /// Atomically write the state to `wfb-receiver.json` (Contract-E path).
-    /// Honours the `ADOS_RUN_DIR` test override via `run_path`.
+    /// Atomically write the state to `wfb-receiver.json` (Contract-E path). The
+    /// run-dir path resolves via `run_path` (honouring the `ADOS_RUN_DIR`
+    /// override); the write itself is delegated to `write_to` so tests can target
+    /// an explicit temp path without mutating process-global env.
     pub fn write(&self) -> std::io::Result<()> {
-        let path = crate::paths::run_path("wfb-receiver.json");
-        crate::sidecars::write_json_atomic(Path::new(&path), self, 0o644)
+        self.write_to(Path::new(&crate::paths::run_path("wfb-receiver.json")))
+    }
+
+    /// Atomically write the state to an explicit sidecar path. The path seam that
+    /// lets a test write into its own temp dir without touching `ADOS_RUN_DIR`.
+    pub fn write_to(&self, path: &Path) -> std::io::Result<()> {
+        crate::sidecars::write_json_atomic(path, self, 0o644)
     }
 
     /// Write the state file AND ship the same body to the logging store as a
@@ -98,8 +105,21 @@ impl ReceiverState {
         &self,
         ingest: Option<&ados_protocol::logd::emitter::IngestEmitter>,
     ) -> std::io::Result<()> {
-        let path = crate::paths::run_path("wfb-receiver.json");
-        let res = crate::sidecars::write_json_atomic(Path::new(&path), self, 0o644);
+        self.write_and_emit_to(
+            Path::new(&crate::paths::run_path("wfb-receiver.json")),
+            ingest,
+        )
+    }
+
+    /// [`write_and_emit`](Self::write_and_emit) against an explicit sidecar path.
+    /// The path seam that keeps a test's best-effort write inside its own temp
+    /// tree without mutating the process-global `ADOS_RUN_DIR`.
+    pub fn write_and_emit_to(
+        &self,
+        path: &Path,
+        ingest: Option<&ados_protocol::logd::emitter::IngestEmitter>,
+    ) -> std::io::Result<()> {
+        let res = crate::sidecars::write_json_atomic(path, self, 0o644);
         if let Some(em) = ingest {
             let v = serde_json::to_value(self).unwrap_or(serde_json::Value::Null);
             em.emit_event(
@@ -692,28 +712,23 @@ mod tests {
     }
 
     #[test]
-    fn receiver_state_write_honours_run_dir_override() {
-        let _env = crate::paths::lock_run_dir_env();
+    fn receiver_state_write_to_writes_the_sidecar() {
+        // The write seam persists the state to the given path. No env mutation:
+        // the temp path is threaded in explicitly, so this test cannot race any
+        // other test under the parallel runner.
         let dir = tempfile::tempdir().unwrap();
-        // SAFETY: the run-dir env lock serializes this against every other
-        // ADOS_RUN_DIR test, so no other thread mutates the var concurrently.
-        unsafe {
-            std::env::set_var("ADOS_RUN_DIR", dir.path());
-        }
         let mut s = ReceiverState {
             listen_port: 5800,
             up: true,
             ..Default::default()
         };
         upsert_relays(&mut s, &["aa:bb:cc:dd:ee:ff".into()], 42);
-        s.write().unwrap();
-        let written = std::fs::read_to_string(dir.path().join("wfb-receiver.json")).unwrap();
+        let path = dir.path().join("wfb-receiver.json");
+        s.write_to(&path).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
         let v: serde_json::Value = serde_json::from_str(&written).unwrap();
         assert_eq!(v["up"], true);
         assert_eq!(v["relays"][0]["mac"], "aa:bb:cc:dd:ee:ff");
-        unsafe {
-            std::env::remove_var("ADOS_RUN_DIR");
-        }
     }
 
     #[tokio::test]
@@ -721,28 +736,24 @@ mod tests {
         // The emitting write ships exactly one gs.receiver_state event with an
         // emitter and nothing with None, regardless of the best-effort file
         // write result. The on-disk file path is covered by
-        // `receiver_state_write_honours_run_dir_override`; the run-dir env lock
-        // + a private ADOS_RUN_DIR keep this test's best-effort write inside its
-        // own temp tree so it never lands in a concurrent setter's dir.
-        let _env = crate::paths::lock_run_dir_env();
+        // `receiver_state_write_to_writes_the_sidecar`; this test threads the
+        // temp path in explicitly (no `ADOS_RUN_DIR` mutation) so the best-effort
+        // write stays inside its own temp tree and cannot race a sibling test.
         let dir = tempfile::tempdir().unwrap();
-        // SAFETY: serialized against every other ADOS_RUN_DIR test by the lock.
-        unsafe {
-            std::env::set_var("ADOS_RUN_DIR", dir.path());
-        }
         let mut s = ReceiverState {
             listen_port: 5800,
             up: true,
             ..Default::default()
         };
         upsert_relays(&mut s, &["aa:bb:cc:dd:ee:ff".into()], 42);
+        let path = dir.path().join("wfb-receiver.json");
 
         let emitter = ados_protocol::logd::emitter::IngestEmitter::with_socket(
             "ados-groundlink",
             dir.path().join("ingest.sock"),
         );
         let stats = emitter.stats();
-        let _ = s.write_and_emit(Some(&emitter));
+        let _ = s.write_and_emit_to(&path, Some(&emitter));
         assert_eq!(stats.enqueued(), 1);
 
         let none_emitter = ados_protocol::logd::emitter::IngestEmitter::with_socket(
@@ -750,11 +761,7 @@ mod tests {
             dir.path().join("ingest2.sock"),
         );
         let none_stats = none_emitter.stats();
-        let _ = s.write_and_emit(None);
+        let _ = s.write_and_emit_to(&path, None);
         assert_eq!(none_stats.enqueued(), 0);
-        // SAFETY: serialized against every other ADOS_RUN_DIR test by the lock.
-        unsafe {
-            std::env::remove_var("ADOS_RUN_DIR");
-        }
     }
 }

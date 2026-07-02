@@ -44,13 +44,12 @@ pub enum PairError {
     Io(String),
 }
 
-/// The tx/rx key paths (`/etc/ados/wfb/{tx,rx}.key`), honouring `ADOS_WFB_KEY_DIR`
-/// for tests. Mirrors `key_mgr.get_key_paths`.
-fn key_paths() -> (PathBuf, PathBuf) {
-    let base = std::env::var("ADOS_WFB_KEY_DIR")
+/// The wfb key directory (`/etc/ados/wfb`), honouring `ADOS_WFB_KEY_DIR` for
+/// tests. Mirrors `key_mgr.get_key_paths`' base.
+fn key_dir() -> PathBuf {
+    std::env::var("ADOS_WFB_KEY_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(ados_radio::paths::WFB_KEY_DIR));
-    (base.join("tx.key"), base.join("rx.key"))
+        .unwrap_or_else(|_| PathBuf::from(ados_radio::paths::WFB_KEY_DIR))
 }
 
 /// The config path the pair-state persist round-trips, honouring `ADOS_CONFIG`.
@@ -65,6 +64,38 @@ fn setup_complete_path() -> PathBuf {
     std::env::var("ADOS_SETUP_COMPLETE")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(SETUP_COMPLETE_PATH))
+}
+
+/// The on-disk paths the pair/unpair flow touches, resolved once from the env
+/// seams and threaded into the path-injectable cores. A test builds one pointing at
+/// a tempdir, so no test mutates the process environment.
+struct PairPaths {
+    /// The agent config the pair-state persist round-trips.
+    config: PathBuf,
+    /// The wfb key directory holding `tx.key` / `rx.key`.
+    wfb_key_dir: PathBuf,
+    /// The setup-complete sentinel dropped on a successful pair.
+    setup_complete: PathBuf,
+}
+
+impl PairPaths {
+    /// The drone-side (tx) key file path.
+    fn tx_key(&self) -> PathBuf {
+        self.wfb_key_dir.join("tx.key")
+    }
+    /// The ground-station (rx) key file path.
+    fn rx_key(&self) -> PathBuf {
+        self.wfb_key_dir.join("rx.key")
+    }
+}
+
+/// Resolve the pair paths from the live env seams (the production layout).
+fn pair_paths() -> PairPaths {
+    PairPaths {
+        config: config_path(),
+        wfb_key_dir: key_dir(),
+        setup_complete: setup_complete_path(),
+    }
 }
 
 /// Compute the 16-hex public-key fingerprint of a key file, or `None` when the
@@ -135,6 +166,17 @@ pub async fn apply_keypair_gs(
     blob_b64: &str,
     peer_device_id: Option<&str>,
 ) -> Result<Value, PairError> {
+    apply_keypair_gs_at(&pair_paths(), blob_b64, peer_device_id).await
+}
+
+/// The path-injectable core of [`apply_keypair_gs`]: every on-disk seam is threaded
+/// in via `paths`, so a test drives the full install against a tempdir without
+/// mutating the process environment.
+async fn apply_keypair_gs_at(
+    paths: &PairPaths,
+    blob_b64: &str,
+    peer_device_id: Option<&str>,
+) -> Result<Value, PairError> {
     let blob = base64::engine::general_purpose::STANDARD
         .decode(blob_b64.as_bytes())
         .map_err(|e| PairError::BadBase64(e.to_string()))?;
@@ -145,18 +187,19 @@ pub async fn apply_keypair_gs(
         )));
     }
 
-    let (_tx, rx) = key_paths();
+    let rx = paths.rx_key();
     atomic_write(&rx, &blob, 0o600).map_err(PairError::Io)?;
     let fingerprint = read_public_fingerprint(&rx);
     let paired_at = iso_now();
 
     // A real pair: disarm auto_pair regardless of whether a peer device-id was
     // exchanged (the local radio-bind protocol carries no device-id).
-    persist_pair_state(peer_device_id, Some(&paired_at), Some(false)).map_err(PairError::Io)?;
+    persist_pair_state_at(&paths.config, peer_device_id, Some(&paired_at), Some(false))
+        .map_err(PairError::Io)?;
 
     // Drop the setup-complete sentinel so captive DNS stands down (best-effort).
     if let Err(e) = atomic_write(
-        &setup_complete_path(),
+        &paths.setup_complete,
         format!("{paired_at}\n").as_bytes(),
         0o644,
     ) {
@@ -183,7 +226,13 @@ pub async fn apply_keypair_gs(
 /// `PairManager.unpair("gs")`: leaves `auto_pair_enabled=false`, restarts the
 /// receive unit, returns `{paired: false, role: "gs"}`.
 pub async fn unpair_gs() -> Result<Value, String> {
-    let (tx, rx) = key_paths();
+    unpair_gs_at(&pair_paths()).await
+}
+
+/// The path-injectable core of [`unpair_gs`], for tests.
+async fn unpair_gs_at(paths: &PairPaths) -> Result<Value, String> {
+    let tx = paths.tx_key();
+    let rx = paths.rx_key();
     for path in [&tx, &rx] {
         if path.is_file() {
             if let Err(e) = std::fs::remove_file(path) {
@@ -191,7 +240,7 @@ pub async fn unpair_gs() -> Result<Value, String> {
             }
         }
     }
-    persist_pair_state(None, None, Some(false))?;
+    persist_pair_state_at(&paths.config, None, None, Some(false))?;
     let pm = select();
     let _ = pm.restart(WFB_GS_UNIT).await;
     tracing::warn!(role = "gs", "unpair_complete");
@@ -203,15 +252,15 @@ pub async fn unpair_gs() -> Result<Value, String> {
 /// `pair_manager._persist_pair_state` for `role == "gs"`. A `None` peer/paired-at
 /// clears the field; `auto_pair_enabled` is set when supplied. The merge
 /// preserves every other config key and is atomic (tmp + rename), 0600.
-fn persist_pair_state(
+fn persist_pair_state_at(
+    path: &Path,
     peer_device_id: Option<&str>,
     paired_at: Option<&str>,
     auto_pair_enabled: Option<bool>,
 ) -> Result<(), String> {
     use serde_norway::Value as Yaml;
 
-    let path = config_path();
-    let mut data: Yaml = match std::fs::read_to_string(&path) {
+    let mut data: Yaml = match std::fs::read_to_string(path) {
         Ok(text) => match serde_norway::from_str::<Yaml>(&text) {
             Ok(v) if v.is_mapping() => v,
             _ => Yaml::Mapping(serde_norway::Mapping::new()),
@@ -241,7 +290,7 @@ fn persist_pair_state(
         }
     }
 
-    write_config_atomic(&path, &data)
+    write_config_atomic(path, &data)
 }
 
 /// Set a string field, or remove it when the value is `None`. Mirrors the
@@ -304,53 +353,25 @@ fn write_config_atomic(path: &Path, data: &serde_norway::Value) -> Result<(), St
 }
 
 #[cfg(test)]
-// The async tests hold the `Env` guard (which owns the process-wide env lock)
-// across `.await`s so the `ADOS_*` overrides cannot be cleared by a sibling test
-// mid-call. The awaited futures do file + best-effort `systemctl` work and never
-// yield to a task that takes this lock, so holding it across the await is safe.
-#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::{Mutex, MutexGuard};
 
-    // The `ADOS_*` path overrides are process-global, so the env-mutating tests
-    // serialize on this lock (cargo runs the test binary multi-threaded). The
-    // guard is held inside `Env` and released on Drop after the vars are cleared.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    /// Point the config + key + sentinel seams at a tempdir for the test, holding
-    /// the process-wide env lock for the test's lifetime.
+    /// A tempdir wired as a [`PairPaths`] pointing the config + key-dir + sentinel
+    /// seams into it. Every path is threaded into the `_at` cores, so no test
+    /// mutates the process environment and none can race a sibling test.
     struct Env {
         _dir: tempfile::TempDir,
-        _guard: MutexGuard<'static, ()>,
-    }
-    impl Drop for Env {
-        fn drop(&mut self) {
-            // SAFETY: the env lock is held, so no other test thread reads/writes
-            // these vars concurrently.
-            unsafe {
-                std::env::remove_var("ADOS_CONFIG");
-                std::env::remove_var("ADOS_WFB_KEY_DIR");
-                std::env::remove_var("ADOS_SETUP_COMPLETE");
-                std::env::remove_var("ADOS_AP_PASSPHRASE");
-            }
-        }
+        paths: PairPaths,
     }
     fn env() -> Env {
-        let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let dir = tempfile::tempdir().unwrap();
-        // SAFETY: the env lock is held for the test's lifetime.
-        unsafe {
-            std::env::set_var("ADOS_CONFIG", dir.path().join("config.yaml"));
-            std::env::set_var("ADOS_WFB_KEY_DIR", dir.path().join("wfb"));
-            std::env::set_var("ADOS_SETUP_COMPLETE", dir.path().join("setup-complete"));
-            std::env::set_var("ADOS_AP_PASSPHRASE", dir.path().join("ap-passphrase"));
-        }
-        Env {
-            _dir: dir,
-            _guard: guard,
-        }
+        let paths = PairPaths {
+            config: dir.path().join("config.yaml"),
+            wfb_key_dir: dir.path().join("wfb"),
+            setup_complete: dir.path().join("setup-complete"),
+        };
+        Env { _dir: dir, paths }
     }
 
     fn b64_64_bytes(byte: u8) -> String {
@@ -387,16 +408,16 @@ mod tests {
 
     #[tokio::test]
     async fn apply_keypair_rejects_bad_base64() {
-        let _e = env();
-        let err = apply_keypair_gs("!!!not-base64!!!", None).await;
+        let e = env();
+        let err = apply_keypair_gs_at(&e.paths, "!!!not-base64!!!", None).await;
         assert!(matches!(err, Err(PairError::BadBase64(_))));
     }
 
     #[tokio::test]
     async fn apply_keypair_rejects_a_wrong_size_blob() {
-        let _e = env();
+        let e = env();
         let short = base64::engine::general_purpose::STANDARD.encode([0u8; 32]);
-        let err = apply_keypair_gs(&short, None).await;
+        let err = apply_keypair_gs_at(&e.paths, &short, None).await;
         match err {
             Err(PairError::BadBlob(msg)) => assert!(msg.contains("32 bytes")),
             other => panic!("expected BadBlob, got {other:?}"),
@@ -405,8 +426,8 @@ mod tests {
 
     #[tokio::test]
     async fn apply_keypair_writes_the_key_0600_and_persists_state() {
-        let _e = env();
-        let reply = apply_keypair_gs(&b64_64_bytes(9), Some("drone-7"))
+        let e = env();
+        let reply = apply_keypair_gs_at(&e.paths, &b64_64_bytes(9), Some("drone-7"))
             .await
             .unwrap();
         // The reply shape matches the Python apply_keypair return.
@@ -417,14 +438,14 @@ mod tests {
         assert!(reply["paired_at"].as_str().is_some());
 
         // rx.key written 0600 with the 64 bytes.
-        let (_tx, rx) = key_paths();
+        let rx = e.paths.rx_key();
         let mode = std::fs::metadata(&rx).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
         assert_eq!(std::fs::read(&rx).unwrap(), vec![9u8; 64]);
 
         // The pair state persisted under video.wfb + ground_station.
         let cfg: serde_norway::Value =
-            serde_norway::from_str(&std::fs::read_to_string(config_path()).unwrap()).unwrap();
+            serde_norway::from_str(&std::fs::read_to_string(&e.paths.config).unwrap()).unwrap();
         let wfb = cfg.get("video").and_then(|v| v.get("wfb")).unwrap();
         assert_eq!(
             wfb.get("paired_with_device_id").and_then(|v| v.as_str()),
@@ -441,28 +462,29 @@ mod tests {
         );
 
         // The setup-complete sentinel was dropped.
-        assert!(setup_complete_path().is_file());
+        assert!(e.paths.setup_complete.is_file());
     }
 
     #[tokio::test]
     async fn unpair_wipes_keys_and_clears_state() {
-        let _e = env();
+        let e = env();
         // Pair first.
-        apply_keypair_gs(&b64_64_bytes(3), Some("drone-x"))
+        apply_keypair_gs_at(&e.paths, &b64_64_bytes(3), Some("drone-x"))
             .await
             .unwrap();
-        let (tx, rx) = key_paths();
+        let tx = e.paths.tx_key();
+        let rx = e.paths.rx_key();
         // Drop a stray tx.key too, to prove unpair wipes both.
         std::fs::write(&tx, vec![0u8; 64]).unwrap();
 
-        let reply = unpair_gs().await.unwrap();
+        let reply = unpair_gs_at(&e.paths).await.unwrap();
         assert_eq!(reply, json!({"paired": false, "role": "gs"}));
         assert!(!rx.is_file());
         assert!(!tx.is_file());
 
         // The persisted pair state is cleared.
         let cfg: serde_norway::Value =
-            serde_norway::from_str(&std::fs::read_to_string(config_path()).unwrap()).unwrap();
+            serde_norway::from_str(&std::fs::read_to_string(&e.paths.config).unwrap()).unwrap();
         let wfb = cfg.get("video").and_then(|v| v.get("wfb")).unwrap();
         assert!(wfb.get("paired_with_device_id").is_none());
         assert_eq!(
@@ -475,15 +497,17 @@ mod tests {
 
     #[tokio::test]
     async fn persist_preserves_unrelated_config_keys() {
-        let _e = env();
+        let e = env();
         std::fs::write(
-            config_path(),
+            &e.paths.config,
             "agent:\n  name: gs-1\nvideo:\n  wfb:\n    channel: 149\n",
         )
         .unwrap();
-        apply_keypair_gs(&b64_64_bytes(2), None).await.unwrap();
+        apply_keypair_gs_at(&e.paths, &b64_64_bytes(2), None)
+            .await
+            .unwrap();
         let cfg: serde_norway::Value =
-            serde_norway::from_str(&std::fs::read_to_string(config_path()).unwrap()).unwrap();
+            serde_norway::from_str(&std::fs::read_to_string(&e.paths.config).unwrap()).unwrap();
         // The unrelated agent.name + the existing channel survive.
         assert_eq!(
             cfg.get("agent")
