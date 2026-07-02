@@ -156,7 +156,7 @@ impl VisionFrameSource {
         }
     }
 
-    async fn next(&mut self) -> Option<CapturedFrame> {
+    pub async fn next(&mut self) -> Option<CapturedFrame> {
         if !self.ensure_connected().await {
             return None;
         }
