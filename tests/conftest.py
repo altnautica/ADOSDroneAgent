@@ -10,6 +10,34 @@ from ados.core.config import ADOSConfig
 from ados.services.mavlink.ipc_state import IpcVehicleState
 
 
+@pytest.fixture(autouse=True)
+def _isolate_agent_globals(tmp_path, monkeypatch):
+    """Isolate the process-global state that leaks across tests.
+
+    Two module-globals otherwise make test outcomes order-dependent:
+
+    * ``ados.api.deps._agent_app`` — the agent-app singleton ``create_app`` /
+      ``set_agent_app`` populate. Reset it so it never leaks between tests.
+    * ``ados.core.profile.PROFILE_CONF`` — the profile gate resolves an
+      ``auto`` node by reading ``/etc/ados/profile.conf``. Building an app in a
+      test triggers first-boot profile detection that WRITES that real path
+      (as ``ground_station`` on a generic board with no FC), which then flips
+      every later ``auto`` client's resolved profile. Point the reader at a
+      fresh per-test file so one test's write can never reach another.
+    """
+    import ados.api.deps as deps
+    import ados.core.profile as profile
+
+    # Force the singleton empty around each test (raw, not monkeypatch-restore,
+    # so a value leaked by a prior test can never be restored back).
+    deps._agent_app = None
+    # Point the profile-conf reader at a fresh per-test file (monkeypatch
+    # restores the real path afterward).
+    monkeypatch.setattr(profile, "PROFILE_CONF", tmp_path / "profile.conf")
+    yield
+    deps._agent_app = None
+
+
 @pytest.fixture
 def default_config() -> ADOSConfig:
     """A default ADOSConfig with no file loaded."""
