@@ -27,10 +27,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ados_protocol::frame::HEADER_SIZE;
-use ados_protocol::state::{decode_v1_line, decode_v2, STATE_V2_MAX_FRAME};
+use ados_protocol::state::read_state_value;
 use serde_json::Value;
-use tokio::io::{AsyncReadExt, BufReader};
+use tokio::io::BufReader;
 use tokio::net::UnixStream;
 use tokio::sync::oneshot;
 
@@ -185,107 +184,16 @@ async fn process_stream<R>(
     R: tokio::io::AsyncRead + Unpin,
 {
     loop {
-        // Sniff the leading byte to pick the wire format. A clean EOF here is the
-        // normal end of a connection.
-        let mut first = [0u8; 1];
-        let read = tokio::select! {
+        let frame = tokio::select! {
             biased;
             _ = &mut **stop => return,
-            r = reader.read_exact(&mut first) => r,
+            r = read_state_value(&mut reader) => r,
         };
-        match read {
-            Ok(_) => {}
-            Err(_) => return, // EOF or error at a frame boundary
-        }
-
-        let decoded = if first[0] == 0x00 {
-            // v2: 0x00 is the top length byte of a 4-byte big-endian prefix.
-            read_v2_frame(&mut reader, first[0]).await
-        } else {
-            // v1: a newline-terminated JSON object; `first[0]` is the opening byte.
-            read_v1_line(&mut reader, first[0]).await
-        };
-
-        match decoded {
-            FrameOutcome::Snapshot(value) => {
+        match frame {
+            Ok(Some(value)) => {
                 *snapshot.lock().unwrap_or_else(|p| p.into_inner()) = Some(value);
             }
-            // A single bad frame is skipped, never fatal.
-            FrameOutcome::Skip => {}
-            FrameOutcome::Eof => return,
-        }
-    }
-}
-
-/// The result of attempting to read one frame.
-enum FrameOutcome {
-    /// A decoded snapshot to publish.
-    Snapshot(Value),
-    /// A malformed frame to skip without ending the stream.
-    Skip,
-    /// The stream ended or a framing error means the connection is unusable.
-    Eof,
-}
-
-/// Read the rest of a v2 length-prefixed msgpack frame given its already-consumed
-/// leading length byte. Reads the remaining 3 length bytes, bounds-checks the
-/// length, then reads and decodes the msgpack body.
-async fn read_v2_frame<R>(reader: &mut R, first_len_byte: u8) -> FrameOutcome
-where
-    R: tokio::io::AsyncRead + Unpin,
-{
-    let mut rest = [0u8; HEADER_SIZE - 1];
-    if reader.read_exact(&mut rest).await.is_err() {
-        return FrameOutcome::Eof;
-    }
-    let len_bytes = [first_len_byte, rest[0], rest[1], rest[2]];
-    let length = u32::from_be_bytes(len_bytes) as usize;
-    if length == 0 || length > STATE_V2_MAX_FRAME {
-        tracing::warn!(length, "state client bad v2 frame length");
-        return FrameOutcome::Eof;
-    }
-    let mut body = vec![0u8; length];
-    if reader.read_exact(&mut body).await.is_err() {
-        return FrameOutcome::Eof;
-    }
-    match decode_v2(&body) {
-        Ok(value) => FrameOutcome::Snapshot(value),
-        Err(e) => {
-            tracing::debug!(error = %e, "skipping a malformed v2 state frame");
-            FrameOutcome::Skip
-        }
-    }
-}
-
-/// Read the rest of a v1 newline-terminated JSON object given its already-consumed
-/// opening byte. Accumulates bytes until a newline (bounded by the frame cap),
-/// then decodes the JSON.
-async fn read_v1_line<R>(reader: &mut R, first_byte: u8) -> FrameOutcome
-where
-    R: tokio::io::AsyncRead + Unpin,
-{
-    let mut line: Vec<u8> = Vec::with_capacity(512);
-    line.push(first_byte);
-    let mut byte = [0u8; 1];
-    loop {
-        match reader.read_exact(&mut byte).await {
-            Ok(_) => {}
-            Err(_) => return FrameOutcome::Eof, // EOF mid-line
-        }
-        if byte[0] == b'\n' {
-            break;
-        }
-        line.push(byte[0]);
-        if line.len() >= STATE_V2_MAX_FRAME {
-            tracing::warn!("state client v1 line exceeded the frame cap without a newline");
-            return FrameOutcome::Eof;
-        }
-    }
-    match decode_v1_line(&line) {
-        Ok(value) => FrameOutcome::Snapshot(value),
-        Err(e) => {
-            tracing::debug!(error = %e, "skipping a malformed v1 state snapshot");
-            FrameOutcome::Skip
+            Ok(None) | Err(_) => return,
         }
     }
 }
