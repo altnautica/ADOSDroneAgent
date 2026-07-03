@@ -42,7 +42,7 @@ mod scheduler;
 mod session;
 mod store;
 
-pub use api::{build_router, ApiState, CancelResponse, SubmitResponse};
+pub use api::{build_router, build_router_with_base, ApiState, CancelResponse, SubmitResponse};
 pub use artifacts::{
     artifact_router, derive_public_base, resolve_under_root, rewrite_output_to_artifact_url,
 };

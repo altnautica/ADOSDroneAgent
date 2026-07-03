@@ -45,7 +45,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ados_atlas_transport::{atlas_event_router, AtlasEvent};
 use ados_compute::{
-    artifact_router, build_atlas_jobs_sidecar, build_rerun_output, build_router,
+    artifact_router, build_atlas_jobs_sidecar, build_rerun_output, build_router_with_base,
     derive_public_base, rewrite_output_to_artifact_url, submit_reconstruct_job,
     write_atlas_jobs_sidecar, write_compute_heartbeat, AtlasIngest, Cluster, ComputeAuth,
     ComputeJobState, Engine, JobStore, LiveReconstructConfig, MockDetector, Prepared,
@@ -322,7 +322,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ))));
     // The artifact server hands reconstruction outputs (.ply / .rrd / .tif / .jpg)
     // to the GCS over the LAN, path-jailed to the work root, on the same listener.
-    let mut router = build_router(state.clone(), auth).merge(artifact_router(work_root.clone()));
+    let mut router = build_router_with_base(
+        state.clone(),
+        auth,
+        std::sync::Arc::from(public_base.as_str()),
+    )
+    .merge(artifact_router(work_root.clone()));
 
     // Atlas world-model receiver. INERT unless atlas is enabled (Rule 46 single
     // canonical gate): when on, mount POST /api/atlas/event alongside the compute

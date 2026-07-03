@@ -143,6 +143,23 @@ pub fn rewrite_output_to_artifact_url(output: &mut Output, work_root: &Path, pub
     }
 }
 
+/// Rewrite the host of a stored `<base>/artifacts/<relpath>` URL to the current
+/// `public_base`. The relpath is stable, so a URL frozen at an earlier daemon
+/// run's hostname (which drifts, and may be an unreachable mDNS name) is served
+/// under the live base on every read — self-healing against hostname drift.
+/// A URL with no `/artifacts/` segment (a `mock://` placeholder, an empty ref)
+/// passes through unchanged.
+pub fn rewrite_artifact_host(uri: &str, public_base: &str) -> String {
+    match uri.find("/artifacts/") {
+        Some(idx) => format!(
+            "{}/artifacts/{}",
+            public_base.trim_end_matches('/'),
+            &uri[idx + "/artifacts/".len()..]
+        ),
+        None => uri.to_string(),
+    }
+}
+
 /// True for a bind host that is not a reachable URL host (the wildcard / any
 /// address), so the public base falls back to the node hostname.
 fn is_unspecified_host(host: &str) -> bool {
@@ -368,6 +385,31 @@ mod tests {
         assert_eq!(
             derive_public_base("0.0.0.0:8092", Some("http://compute.example:9000/"), None),
             "http://compute.example:9000"
+        );
+    }
+
+    #[test]
+    fn rewrite_artifact_host_swaps_the_host_and_keeps_the_relpath() {
+        // A URL frozen at an earlier hostname is re-served under the live base.
+        assert_eq!(
+            rewrite_artifact_host(
+                "http://stale-host.local:8092/artifacts/recon-1/output.ply",
+                "http://192.168.1.5:8092",
+            ),
+            "http://192.168.1.5:8092/artifacts/recon-1/output.ply"
+        );
+        // A trailing slash on the base is normalised.
+        assert_eq!(
+            rewrite_artifact_host(
+                "http://x/artifacts/ds-9/output.rrd",
+                "http://192.168.1.5:8092/",
+            ),
+            "http://192.168.1.5:8092/artifacts/ds-9/output.rrd"
+        );
+        // Non-artifact URLs pass through unchanged.
+        assert_eq!(
+            rewrite_artifact_host("mock://splat/ds-1", "http://192.168.1.5:8092"),
+            "mock://splat/ds-1"
         );
     }
 

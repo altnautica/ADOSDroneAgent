@@ -84,6 +84,13 @@ export ADOS_COMPUTE_WORK="${ADOS_COMPUTE_WORK:-$ADOS_HOME/compute/work}"
 export ADOS_COMPUTE_BIND=0.0.0.0:8092
 export ADOS_ATLAS_ENABLED=1
 export ADOS_COMPUTE_NODE_ID="${ADOS_COMPUTE_NODE_ID:-${DEVICE_ID}}"
+# Pin a browser-reachable artifact base (this host's LAN IPv4, derived at
+# runtime) so reconstruction artifact URLs use a resolvable address instead of
+# the drifting mDNS .local hostname the browser cannot resolve.
+if [ -z "${ADOS_COMPUTE_PUBLIC_URL:-}" ]; then
+  _lan_ip="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || echo 127.0.0.1)"
+  export ADOS_COMPUTE_PUBLIC_URL="http://${_lan_ip}:8092"
+fi
 
 # --- Launch both, tear both down on exit/signal. -----------------------------
 CONTROL_PID=""

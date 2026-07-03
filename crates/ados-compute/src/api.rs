@@ -14,10 +14,11 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
+use crate::artifacts::rewrite_artifact_host;
 use crate::auth::{require_pairing, ComputeAuth};
 use crate::{ComputeError, ComputeJobKind, ComputeJobState, Dataset, Engine, JobRecord};
 
@@ -31,7 +32,19 @@ pub type ApiState = Arc<Mutex<Engine>>;
 /// on-box ⇒ open, paired + off-box ⇒ `X-ADOS-Key` required, with an off-box rate
 /// limiter. The peer address the gate reads comes from `ConnectInfo`, so the
 /// daemon serves the router with `into_make_service_with_connect_info::<SocketAddr>()`.
+/// Build the router with a default public base (loopback). The daemon uses
+/// [`build_router_with_base`] with its live base; this shorthand is for callers
+/// (the on-box control-front mount, tests) where artifact-host rewriting is a
+/// no-op on the URLs they exercise.
 pub fn build_router(state: ApiState, auth: Arc<ComputeAuth>) -> Router {
+    build_router_with_base(state, auth, Arc::from("http://127.0.0.1:8092"))
+}
+
+pub fn build_router_with_base(
+    state: ApiState,
+    auth: Arc<ComputeAuth>,
+    public_base: Arc<str>,
+) -> Router {
     Router::new()
         .route("/api/compute/status", get(status))
         .route("/api/compute/datasets", post(create_dataset))
@@ -40,6 +53,9 @@ pub fn build_router(state: ApiState, auth: Arc<ComputeAuth>) -> Router {
         .route("/api/compute/jobs/:id/cancel", post(cancel_job))
         .route("/api/compute/jobs/:id/outputs", get(job_outputs))
         .layer(axum::middleware::from_fn_with_state(auth, require_pairing))
+        // The live public base rewrites each stored artifact URL's host on read,
+        // so a URL frozen at an earlier (drifting) hostname stays reachable.
+        .layer(Extension(public_base))
         .with_state(state)
 }
 
@@ -178,20 +194,35 @@ async fn submit_job(
         .into_response())
 }
 
-async fn list_jobs(State(state): State<ApiState>) -> Result<Response, ComputeError> {
+/// Rewrite a job record's `result_ref` artifact host to the live public base.
+fn rehost_job(mut job: JobRecord, public_base: &str) -> JobRecord {
+    if let Some(r) = job.result_ref.take() {
+        job.result_ref = Some(rewrite_artifact_host(&r, public_base));
+    }
+    job
+}
+
+async fn list_jobs(
+    State(state): State<ApiState>,
+    Extension(public_base): Extension<Arc<str>>,
+) -> Result<Response, ComputeError> {
     let engine = state.lock().await;
     let jobs = engine.scheduler().store().list_jobs()?;
-    let views: Vec<JobView> = jobs.into_iter().map(JobView::of).collect();
+    let views: Vec<JobView> = jobs
+        .into_iter()
+        .map(|job| JobView::of(rehost_job(job, &public_base)))
+        .collect();
     Ok(Json(views).into_response())
 }
 
 async fn job_status(
     State(state): State<ApiState>,
+    Extension(public_base): Extension<Arc<str>>,
     Path(id): Path<String>,
 ) -> Result<Response, ComputeError> {
     let engine = state.lock().await;
     match engine.scheduler().store().get_job(&id)? {
-        Some(job) => Ok(Json(JobView::of(job)).into_response()),
+        Some(job) => Ok(Json(JobView::of(rehost_job(job, &public_base))).into_response()),
         None => Err(ComputeError::NotFound(format!("job {id}"))),
     }
 }
@@ -207,10 +238,14 @@ async fn cancel_job(
 
 async fn job_outputs(
     State(state): State<ApiState>,
+    Extension(public_base): Extension<Arc<str>>,
     Path(id): Path<String>,
 ) -> Result<Response, ComputeError> {
     let engine = state.lock().await;
-    let outputs = engine.scheduler().store().outputs_for_job(&id)?;
+    let mut outputs = engine.scheduler().store().outputs_for_job(&id)?;
+    for o in &mut outputs {
+        o.uri = rewrite_artifact_host(&o.uri, &public_base);
+    }
     Ok(Json(outputs).into_response())
 }
 
