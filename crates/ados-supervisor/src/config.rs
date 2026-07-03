@@ -263,12 +263,14 @@ fn read_raw_config(path: &Path) -> (RawConfig, Option<String>) {
 }
 
 /// Wire-contract profile string from a raw value. `"ground_station"` becomes
-/// the hyphen form; `"workstation"` stays as-is (a workstation node); `"drone"`/`"auto"`
-/// /empty/unknown collapse to `"drone"`.
+/// the hyphen form; `"workstation"` (the operator's console) and `"compute"` (a
+/// lean engine-only worker) stay as-is; `"drone"`/`"auto"`/empty/unknown collapse
+/// to `"drone"`.
 pub fn normalize_profile(raw: Option<&str>) -> String {
     match raw {
         Some("ground_station") | Some("ground-station") => "ground-station".to_string(),
         Some("workstation") => "workstation".to_string(),
+        Some("compute") => "compute".to_string(),
         _ => "drone".to_string(),
     }
 }
@@ -302,7 +304,7 @@ pub fn read_profile_conf_value(path: &Path) -> Option<String> {
             let v = value.trim().trim_matches(|c| c == '"' || c == '\'');
             if matches!(
                 v,
-                "drone" | "ground_station" | "ground-station" | "workstation"
+                "drone" | "ground_station" | "ground-station" | "workstation" | "compute"
             ) {
                 return Some(v.replace('-', "_"));
             }
@@ -491,6 +493,33 @@ mod tests {
         let pc = dir.path().join("profile.conf");
         write(&pc, "profile=drone\n");
         assert_eq!(read_profile_conf_value(&pc).as_deref(), Some("drone"));
+    }
+
+    #[test]
+    fn workstation_and_compute_profiles_resolve_and_never_collapse_to_drone() {
+        // Both the operator's workstation and a lean engine-only compute worker must
+        // survive profile resolution (a `compute` value used to fall through to
+        // `drone`, which never started the compute engine). The wire form is the
+        // same token for both, so `profile_gate()` matches the `workstation|compute`
+        // engine gate and the reconstruction pipeline runs on either node.
+        let dir = tempfile::tempdir().unwrap();
+        let role = dir.path().join("mesh/role");
+        let no_conf = dir.path().join("nope.conf");
+        let load = |profile: &str| {
+            let cfg = dir.path().join("config.yaml");
+            write(&cfg, &format!("agent:\n  profile: {profile}\n"));
+            AgentConfig::load_from(&cfg, &no_conf, &role)
+        };
+        let ws = load("workstation");
+        assert_eq!(ws.profile_wire, "workstation");
+        assert_eq!(ws.profile_gate(), "workstation");
+        let compute = load("compute");
+        assert_eq!(compute.profile_wire, "compute");
+        assert_eq!(compute.profile_gate(), "compute");
+        // The profile.conf (auto-config) path recognizes `compute` too.
+        let pc = dir.path().join("profile.conf");
+        write(&pc, "profile: compute\n");
+        assert_eq!(read_profile_conf_value(&pc).as_deref(), Some("compute"));
     }
 
     #[test]

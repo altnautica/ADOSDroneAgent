@@ -151,13 +151,14 @@ pub const SERVICE_REGISTRY: &[ServiceDef] = &[
     // no-op until provisioning enables it. NOT in the headless KEEP set:
     // world-model capture is excluded from the lean headless core.
     def("ados-atlas", Hardware, Some("drone"), None),
-    // The workstation engine: the job store, the scheduler, and the REST job
-    // API. Profile-gated to `workstation` so it runs only on a workstation node
-    // (a GPU box, a Mac, or any spare box), never on a drone or ground station.
-    // It serves the local-first job API a drone or GCS submits reconstruction
-    // and offload work to. NOT in the headless KEEP set: the workstation profile
-    // is heavy, not the lean headless core.
-    def("ados-compute", Core, Some("workstation"), None),
+    // The compute engine: the job store, the scheduler, and the REST job API.
+    // Profile-gated to `workstation|compute` so it runs on the operator's
+    // workstation (a GPU box, a Mac, or any spare box that also carries the UI)
+    // AND on a lean headless `compute` worker (engine-only, a cluster slave),
+    // never on a drone or ground station. It serves the local-first job API a
+    // drone or GCS submits reconstruction and offload work to. NOT in the headless
+    // KEEP set: the compute profile is heavy, not the lean drone headless core.
+    def("ados-compute", Core, Some("workstation|compute"), None),
     // On-demand.
     def("ados-ota", OnDemand, None, None),
     def("ados-discovery", OnDemand, None, None),
@@ -319,10 +320,10 @@ mod tests {
                 "ados-compute"
             ]
         );
-        // The compute engine is the Core service of the workstation profile and is
-        // NOT in the headless keep set (the workstation profile is heavy).
+        // The compute engine is a Core service of the workstation + compute
+        // profiles and is NOT in the headless keep set (the compute profile is heavy).
         let compute = specs.iter().find(|s| s.name == "ados-compute").unwrap();
-        assert_eq!(compute.profile_gate, Some("workstation"));
+        assert_eq!(compute.profile_gate, Some("workstation|compute"));
         assert_eq!(compute.category, Category::Core);
         assert!(!compute.headless_keep);
         // The drone TX manager is drone-gated; the GS RX is role-gated to direct.
