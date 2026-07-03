@@ -1,9 +1,14 @@
-//! Dashboard data model: extract the fields the dashboard renders from the
-//! `/api/v1/setup/status` JSON. Mirrors `_render_dashboard` in the Python CLI
-//! so the Rust terminal UI shows the identical information.
+//! Dashboard data model: extract the fields the terminal dashboard renders from
+//! the `/api/v1/setup/status` JSON.
+//!
+//! Everything the UI shows is a typed field pulled straight out of the payload,
+//! so the screen only ever renders values that are actually present. No metric
+//! is synthesised. The health verdict and the reach-ordering live here so they
+//! can be unit-tested without a terminal.
 
 use serde_json::Value;
 
+/// A single advertised way to reach the agent.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AccessUrl {
     pub label: String,
@@ -11,10 +16,39 @@ pub struct AccessUrl {
     pub primary: bool,
 }
 
+/// A setup-wizard step with its raw state (e.g. `complete`, `needs_action`).
 #[derive(Debug, Clone, PartialEq)]
-pub struct Row {
+pub struct Step {
     pub label: String,
-    pub value: String,
+    pub state: String,
+}
+
+/// The overall one-word health verdict, computed only from verified inputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Health {
+    Healthy,
+    Degraded,
+    Setup,
+}
+
+impl Health {
+    /// The status glyph shown before the word.
+    pub fn dot(self) -> &'static str {
+        match self {
+            Health::Healthy => "●",
+            Health::Degraded => "▲",
+            Health::Setup => "●",
+        }
+    }
+
+    /// The verdict word.
+    pub fn label(self) -> &'static str {
+        match self {
+            Health::Healthy => "HEALTHY",
+            Health::Degraded => "DEGRADED",
+            Health::Setup => "SETUP",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -25,16 +59,36 @@ pub struct Dashboard {
     pub paired: bool,
     pub pairing_code: Option<String>,
     pub access_urls: Vec<AccessUrl>,
-    pub steps: Vec<Row>,
-    pub status_rows: Vec<Row>,
-    pub telemetry: Vec<Row>,
-    pub telemetry_empty: bool,
+
+    pub steps: Vec<Step>,
+    pub has_steps: bool,
+    pub steps_all_complete: bool,
+
+    pub mavlink_connected: bool,
+
+    pub video_state: String,
+    pub video_viewer: Option<String>,
+
+    pub cloud_relay: String,
+    pub cloud_mode: String,
+    pub cloud_paired: bool,
+    pub cloud_configured: bool,
+    pub remote_status: String,
+    pub hotspot: String,
+
+    pub mode: Option<String>,
+    pub armed: Option<bool>,
+    pub battery: Option<f64>,
+    pub gps_fix: Option<String>,
+    pub satellites: Option<i64>,
+    pub alt: Option<f64>,
+
     pub services_running: usize,
     pub services_total: usize,
     pub next_action: String,
 }
 
-/// Map a setup-step state to its display label (matches Python `_state_label`).
+/// Map a setup-step state to its display label.
 pub fn state_label(value: &str) -> String {
     match value {
         "complete" => "ready".to_string(),
@@ -43,8 +97,8 @@ pub fn state_label(value: &str) -> String {
     }
 }
 
-/// Derive the browser viewer URL from a WHEP URL (matches Python
-/// `_viewer_url_from_whep`): strip a trailing `/whep`, then end with `/`.
+/// Derive the browser viewer URL from a WHEP URL: strip a trailing `/whep`,
+/// then end with `/`.
 pub fn viewer_url_from_whep(whep_url: Option<&str>) -> Option<String> {
     let whep = whep_url?;
     if whep.is_empty() {
@@ -57,6 +111,60 @@ pub fn viewer_url_from_whep(whep_url: Option<&str>) -> Option<String> {
     Some(format!("{base}/"))
 }
 
+/// The lowercased host of a URL, with the scheme, path, and port stripped.
+fn url_host(url: &str) -> String {
+    let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let host_port = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    let host = if let Some(rest) = host_port.strip_prefix('[') {
+        // Bracketed IPv6 literal, e.g. `[::1]:8080`.
+        rest.split(']').next().unwrap_or(rest)
+    } else {
+        host_port
+            .rsplit_once(':')
+            .map(|(host, _)| host)
+            .unwrap_or(host_port)
+    };
+    host.to_ascii_lowercase()
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    host == "localhost" || host == "::1" || host.starts_with("127.")
+}
+
+fn is_ipv4(host: &str) -> bool {
+    let octets: Vec<&str> = host.split('.').collect();
+    octets.len() == 4
+        && octets.iter().all(|part| {
+            !part.is_empty()
+                && part.chars().all(|c| c.is_ascii_digit())
+                && part.parse::<u16>().is_ok_and(|n| n <= 255)
+        })
+}
+
+/// Reach priority for a URL, lowest first: mDNS `.local` (0), LAN IP (1),
+/// other hostname / tunnel (2), loopback (3). The operator is almost always
+/// on another machine, so `localhost` is the least useful and sorts last.
+pub fn reach_rank(url: &str) -> u8 {
+    let host = url_host(url);
+    if is_loopback_host(&host) {
+        3
+    } else if host.ends_with(".local") {
+        0
+    } else if is_ipv4(&host) {
+        1
+    } else {
+        2
+    }
+}
+
+/// True when the URL points at the local loopback (useless over SSH).
+pub fn is_loopback_url(url: &str) -> bool {
+    is_loopback_host(&url_host(url))
+}
+
 fn s(v: &Value, key: &str, default: &str) -> String {
     v.get(key)
         .and_then(Value::as_str)
@@ -64,17 +172,15 @@ fn s(v: &Value, key: &str, default: &str) -> String {
         .to_string()
 }
 
-fn title_case(s: &str) -> String {
-    s.split(' ')
-        .map(|word| {
-            let mut chars = word.chars();
-            match chars.next() {
-                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-                None => String::new(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+/// Render a JSON scalar to a string (for fields that may arrive as a string or
+/// a number, e.g. `gps_fix`).
+fn scalar_str(v: &Value) -> Option<String> {
+    match v {
+        Value::String(text) => Some(text.clone()),
+        Value::Bool(b) => Some(b.to_string()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
 }
 
 impl Dashboard {
@@ -109,106 +215,62 @@ impl Dashboard {
         // Setup steps.
         if let Some(steps) = data.get("steps").and_then(Value::as_array) {
             for step in steps {
-                dash.steps.push(Row {
+                dash.steps.push(Step {
                     label: s(step, "label", ""),
-                    value: state_label(&s(step, "state", "")),
+                    state: s(step, "state", ""),
                 });
             }
         }
+        dash.has_steps = !dash.steps.is_empty();
+        dash.steps_all_complete =
+            dash.has_steps && dash.steps.iter().all(|step| step.state == "complete");
 
-        // Status rows, in the same order the Python dashboard renders them.
+        // MAVLink.
         let mavlink = data.get("mavlink").cloned().unwrap_or(Value::Null);
+        dash.mavlink_connected = mavlink
+            .get("connected")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+        // Video.
         let video = data.get("video").cloned().unwrap_or(Value::Null);
+        dash.video_state = s(&video, "state", "unknown");
+        dash.video_viewer = viewer_url_from_whep(video.get("whep_url").and_then(Value::as_str));
+
+        // Network + cloud relay + remote access.
         let network = data.get("network").cloned().unwrap_or(Value::Null);
         let remote = data.get("remote_access").cloned().unwrap_or(Value::Null);
         let cloud = data.get("cloud_choice").cloned().unwrap_or(Value::Null);
 
-        let mavlink_connected = mavlink
-            .get("connected")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        dash.status_rows.push(Row {
-            label: "MAVLink FC".into(),
-            value: if mavlink_connected {
-                "connected".into()
-            } else {
-                "not connected".into()
-            },
-        });
-        if let Some(tcp) = mavlink.get("tcp_url").and_then(Value::as_str) {
-            dash.status_rows.push(Row {
-                label: "MAVLink TCP".into(),
-                value: tcp.to_string(),
-            });
-        }
-        if let Some(ws) = mavlink.get("websocket_url").and_then(Value::as_str) {
-            dash.status_rows.push(Row {
-                label: "MAVLink WS".into(),
-                value: ws.to_string(),
-            });
-        }
+        dash.hotspot = s(&network, "hotspot_ssid", "");
+        dash.remote_status = s(&remote, "status", "disabled");
 
-        let video_state = s(&video, "state", "unknown");
-        match viewer_url_from_whep(video.get("whep_url").and_then(Value::as_str)) {
-            Some(viewer) => dash.status_rows.push(Row {
-                label: "Video viewer".into(),
-                value: format!("{video_state}  {viewer}"),
-            }),
-            None => dash.status_rows.push(Row {
-                label: "Video".into(),
-                value: video_state,
-            }),
-        }
-
-        dash.status_rows.push(Row {
-            label: "Hotspot".into(),
-            value: s(&network, "hotspot_ssid", ""),
-        });
-
-        // Cloud relay, four cases (matches Python).
-        let cloud_paired = cloud
+        dash.cloud_paired = cloud
             .get("paired")
             .and_then(Value::as_bool)
             .unwrap_or(false);
         let backend_url = s(&cloud, "backend_url", "");
-        let cloud_mode = s(&cloud, "mode", "");
-        let cloud_relay = if cloud_paired && !backend_url.is_empty() {
+        dash.cloud_mode = s(&cloud, "mode", "");
+        dash.cloud_configured = !backend_url.is_empty() && dash.cloud_mode != "local";
+        dash.cloud_relay = if dash.cloud_paired && !backend_url.is_empty() {
             format!("paired ({backend_url})")
-        } else if !backend_url.is_empty() && cloud_mode != "local" {
+        } else if dash.cloud_configured {
             format!("configured ({backend_url})")
-        } else if cloud_mode == "local" {
+        } else if dash.cloud_mode == "local" {
             "disabled (local mode)".to_string()
         } else {
             "not configured".to_string()
         };
-        dash.status_rows.push(Row {
-            label: "Cloud relay".into(),
-            value: cloud_relay,
-        });
-        dash.status_rows.push(Row {
-            label: "Cloudflare".into(),
-            value: s(&remote, "status", "disabled"),
-        });
 
-        // Telemetry rows in the Python key order.
-        if let Some(telemetry) = data.get("telemetry").and_then(Value::as_object) {
-            for key in [
-                "mode",
-                "armed",
-                "battery_remaining",
-                "gps_fix",
-                "satellites",
-                "alt",
-            ] {
-                if let Some(val) = telemetry.get(key) {
-                    dash.telemetry.push(Row {
-                        label: title_case(&key.replace('_', " ")),
-                        value: value_to_display(val),
-                    });
-                }
-            }
+        // Telemetry (typed; only the fields the payload carries).
+        if let Some(tel) = data.get("telemetry").and_then(Value::as_object) {
+            dash.mode = tel.get("mode").and_then(Value::as_str).map(str::to_string);
+            dash.armed = tel.get("armed").and_then(Value::as_bool);
+            dash.battery = tel.get("battery_remaining").and_then(Value::as_f64);
+            dash.gps_fix = tel.get("gps_fix").and_then(scalar_str);
+            dash.satellites = tel.get("satellites").and_then(Value::as_i64);
+            dash.alt = tel.get("alt").and_then(Value::as_f64);
         }
-        dash.telemetry_empty = dash.telemetry.is_empty();
 
         // Services count.
         if let Some(services) = data.get("services").and_then(Value::as_array) {
@@ -223,34 +285,98 @@ impl Dashboard {
         dash
     }
 
-    /// The header title line.
-    pub fn header_line(&self) -> String {
-        let mut line = format!(
-            "ADOS Drone Agent  v{}  {} / {}",
-            self.version, self.device_name, self.profile
-        );
-        if self.paired {
-            line.push_str("  paired");
-        } else if let Some(code) = &self.pairing_code {
-            line.push_str(&format!("  code {code}"));
+    /// Access URLs reordered so the most useful reach path comes first: mDNS
+    /// `.local`, then LAN IPs, then other hosts, then loopback last. The sort is
+    /// stable, so the producer's order is preserved within each tier.
+    pub fn reach_urls(&self) -> Vec<AccessUrl> {
+        let mut urls = self.access_urls.clone();
+        urls.sort_by_key(|item| reach_rank(&item.url));
+        urls
+    }
+
+    /// The overall health verdict, from verified inputs only.
+    pub fn health(&self) -> Health {
+        let services_all_running =
+            self.services_total > 0 && self.services_running == self.services_total;
+        let services_failed =
+            self.services_total > 0 && self.services_running < self.services_total;
+        let is_ground_station = self.profile == "ground_station";
+        let mavlink_ok = self.mavlink_connected || is_ground_station;
+        let configured = self.paired || (self.has_steps && self.steps_all_complete);
+
+        if services_failed {
+            Health::Degraded
+        } else if configured && !mavlink_ok {
+            // A set-up drone that has lost its flight controller.
+            Health::Degraded
+        } else if services_all_running && configured && mavlink_ok {
+            Health::Healthy
+        } else {
+            Health::Setup
         }
-        line
+    }
+
+    /// The pairing / link mode used for the verdict sub-line.
+    fn link_mode(&self) -> &'static str {
+        let remote = self.remote_status.as_str();
+        if !matches!(remote, "" | "disabled" | "off" | "stopped" | "unknown") {
+            "cloudflare"
+        } else if self.cloud_paired || self.cloud_configured {
+            "cloud relay"
+        } else {
+            "local mode"
+        }
+    }
+
+    /// The dim sub-line under the verdict, e.g. `paired · local mode`.
+    pub fn status_summary(&self) -> String {
+        let pairing = if self.paired {
+            "paired".to_string()
+        } else if let Some(code) = &self.pairing_code {
+            format!("code {code}")
+        } else {
+            "not paired".to_string()
+        };
+        format!("{pairing} · {}", self.link_mode())
+    }
+
+    /// The device-and-profile identity shown in the header, e.g.
+    /// `ados-e996786c · ground_station`. The word-mark and version are styled
+    /// separately by the renderer.
+    pub fn ident(&self) -> String {
+        format!("{} · {}", self.device_name, self.profile)
     }
 }
 
-/// Render a JSON scalar the way Python's `str()` would for the telemetry grid.
-fn value_to_display(v: &Value) -> String {
-    match v {
-        Value::Bool(b) => {
-            // Python str(True) -> "True"
-            if *b {
-                "True".to_string()
-            } else {
-                "False".to_string()
-            }
+/// How many polled samples the trend sparklines retain.
+pub const HISTORY_CAP: usize = 30;
+
+/// A small ring buffer of verified telemetry values for the trend sparklines.
+/// A value is recorded only when it is actually present in the payload, so the
+/// trend is always real data.
+#[derive(Debug, Clone, Default)]
+pub struct History {
+    pub battery: Vec<f64>,
+    pub alt: Vec<f64>,
+}
+
+fn push_cap(buffer: &mut Vec<f64>, value: f64) {
+    buffer.push(value);
+    if buffer.len() > HISTORY_CAP {
+        let overflow = buffer.len() - HISTORY_CAP;
+        buffer.drain(0..overflow);
+    }
+}
+
+impl History {
+    /// Record the present telemetry values from one poll.
+    pub fn record(&mut self, dash: &Dashboard) {
+        if let Some(battery) = dash.battery {
+            push_cap(&mut self.battery, battery);
         }
-        Value::String(s) => s.clone(),
-        other => other.to_string(),
+        if let Some(alt) = dash.alt {
+            push_cap(&mut self.alt, alt);
+        }
     }
 }
 
@@ -260,7 +386,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn state_label_matches_python() {
+    fn state_label_matches_states() {
         assert_eq!(state_label("complete"), "ready");
         assert_eq!(state_label("needs_action"), "needs action");
         assert_eq!(state_label("in_progress"), "in progress");
@@ -282,89 +408,196 @@ mod tests {
     }
 
     #[test]
-    fn cloud_relay_local_mode() {
-        let data = json!({"cloud_choice": {"mode": "local"}});
-        let dash = Dashboard::from_status(&data);
-        let relay = dash
-            .status_rows
-            .iter()
-            .find(|r| r.label == "Cloud relay")
-            .unwrap();
-        assert_eq!(relay.value, "disabled (local mode)");
+    fn ident_is_device_and_profile() {
+        let dash = Dashboard {
+            device_name: "ados-e996786c".into(),
+            profile: "ground_station".into(),
+            ..Dashboard::default()
+        };
+        assert_eq!(dash.ident(), "ados-e996786c · ground_station");
     }
 
     #[test]
-    fn full_status_extracts_expected_fields() {
+    fn reach_rank_classifies_hosts() {
+        assert_eq!(reach_rank("http://ados-abc.local:8080/setup"), 0);
+        assert_eq!(reach_rank("http://192.168.1.5:8080/setup"), 1);
+        assert_eq!(reach_rank("https://tunnel.example.com/setup"), 2);
+        assert_eq!(reach_rank("http://localhost:8080/setup"), 3);
+        assert_eq!(reach_rank("http://127.0.0.1:8080/setup"), 3);
+        assert_eq!(reach_rank("http://[::1]:8080/setup"), 3);
+    }
+
+    #[test]
+    fn is_loopback_url_detects_loopback() {
+        assert!(is_loopback_url("http://localhost:8080/"));
+        assert!(is_loopback_url("http://127.0.0.1:8080/"));
+        assert!(!is_loopback_url("http://ados-abc.local:8080/"));
+        assert!(!is_loopback_url("http://192.168.1.5:8080/"));
+    }
+
+    #[test]
+    fn reach_urls_order_mdns_then_lan_then_loopback() {
+        let data = json!({
+            "access_urls": [
+                {"label": "local", "url": "http://localhost:8080/setup"},
+                {"label": "lan", "url": "http://192.168.1.5:8080/setup"},
+                {"label": "mdns", "url": "http://ados-abc.local:8080/setup", "primary": true},
+                {"label": "lan2", "url": "http://10.0.0.9:8080/setup"}
+            ]
+        });
+        let dash = Dashboard::from_status(&data);
+        let urls = dash.reach_urls();
+        let labels: Vec<&str> = urls.iter().map(|u| u.label.as_str()).collect();
+        // mDNS first, LAN IPs next (in producer order), loopback last.
+        assert_eq!(labels, vec!["mdns", "lan", "lan2", "local"]);
+    }
+
+    #[test]
+    fn health_healthy_when_configured_connected_and_all_running() {
+        let data = json!({
+            "profile": "drone",
+            "paired": true,
+            "mavlink": {"connected": true},
+            "services": [{"state": "running"}, {"state": "running"}],
+            "steps": [{"label": "Profile", "state": "complete"}]
+        });
+        assert_eq!(Dashboard::from_status(&data).health(), Health::Healthy);
+    }
+
+    #[test]
+    fn health_degraded_when_a_service_is_down() {
+        let data = json!({
+            "profile": "drone",
+            "paired": true,
+            "mavlink": {"connected": true},
+            "services": [{"state": "running"}, {"state": "stopped"}],
+            "steps": [{"label": "Profile", "state": "complete"}]
+        });
+        assert_eq!(Dashboard::from_status(&data).health(), Health::Degraded);
+    }
+
+    #[test]
+    fn health_degraded_when_configured_drone_loses_fc() {
+        let data = json!({
+            "profile": "drone",
+            "paired": true,
+            "mavlink": {"connected": false},
+            "services": [{"state": "running"}]
+        });
+        assert_eq!(Dashboard::from_status(&data).health(), Health::Degraded);
+    }
+
+    #[test]
+    fn health_setup_when_unpaired_and_steps_incomplete() {
+        let data = json!({
+            "profile": "drone",
+            "paired": false,
+            "mavlink": {"connected": false},
+            "services": [{"state": "running"}],
+            "steps": [{"label": "Profile", "state": "pending"}]
+        });
+        assert_eq!(Dashboard::from_status(&data).health(), Health::Setup);
+    }
+
+    #[test]
+    fn health_healthy_for_ground_station_without_fc() {
+        let data = json!({
+            "profile": "ground_station",
+            "paired": true,
+            "mavlink": {"connected": false},
+            "services": [{"state": "running"}]
+        });
+        assert_eq!(Dashboard::from_status(&data).health(), Health::Healthy);
+    }
+
+    #[test]
+    fn status_summary_combines_pairing_and_link() {
+        let paired_local = Dashboard {
+            paired: true,
+            cloud_mode: "local".into(),
+            ..Dashboard::default()
+        };
+        assert_eq!(paired_local.status_summary(), "paired · local mode");
+
+        let code_relay = Dashboard {
+            paired: false,
+            pairing_code: Some("AB12".into()),
+            cloud_configured: true,
+            ..Dashboard::default()
+        };
+        assert_eq!(code_relay.status_summary(), "code AB12 · cloud relay");
+    }
+
+    #[test]
+    fn cloud_relay_local_mode() {
+        let data = json!({"cloud_choice": {"mode": "local"}});
+        let dash = Dashboard::from_status(&data);
+        assert_eq!(dash.cloud_relay, "disabled (local mode)");
+    }
+
+    #[test]
+    fn full_status_extracts_typed_fields() {
         let data = json!({
             "version": "0.46.12",
             "device_name": "ados-e996786c",
-            "profile": "ground_station",
+            "profile": "drone",
             "paired": false,
             "pairing_code": "WM325P",
             "access_urls": [
-                {"label": "Setup", "url": "http://x:8080/setup", "primary": true}
+                {"label": "Setup", "url": "http://ados-x.local:8080/setup", "primary": true}
             ],
             "steps": [{"label": "Profile", "state": "complete"}],
-            "mavlink": {"connected": false, "tcp_url": "tcp://x:5760"},
+            "mavlink": {"connected": true, "tcp_url": "tcp://x:5760"},
             "video": {"state": "running", "whep_url": "http://x:8889/main/whep"},
             "network": {"hotspot_ssid": "ADOS-AP"},
             "remote_access": {"status": "disabled"},
             "cloud_choice": {"mode": "local"},
-            "telemetry": {"mode": "STABILIZE", "armed": false, "satellites": 14},
+            "telemetry": {"mode": "STABILIZE", "armed": false, "battery_remaining": 82, "satellites": 14},
             "services": [{"state": "running"}, {"state": "running"}, {"state": "stopped"}],
             "next_action": "Open Mission Control"
         });
         let dash = Dashboard::from_status(&data);
 
-        assert_eq!(
-            dash.header_line(),
-            "ADOS Drone Agent  v0.46.12  ados-e996786c / ground_station  code WM325P"
-        );
-        assert_eq!(dash.access_urls.len(), 1);
+        assert_eq!(dash.version, "0.46.12");
+        assert_eq!(dash.device_name, "ados-e996786c");
+        assert_eq!(dash.pairing_code.as_deref(), Some("WM325P"));
         assert!(dash.access_urls[0].primary);
-        assert_eq!(dash.steps[0].value, "ready");
-
-        let labels: Vec<&str> = dash.status_rows.iter().map(|r| r.label.as_str()).collect();
-        assert_eq!(
-            labels,
-            vec![
-                "MAVLink FC",
-                "MAVLink TCP",
-                "Video viewer",
-                "Hotspot",
-                "Cloud relay",
-                "Cloudflare"
-            ]
-        );
-        let video = dash
-            .status_rows
-            .iter()
-            .find(|r| r.label == "Video viewer")
-            .unwrap();
-        assert_eq!(video.value, "running  http://x:8889/main/");
-
-        // Telemetry: title-cased labels, Python-style bool, key order preserved.
-        let tel: Vec<(&str, &str)> = dash
-            .telemetry
-            .iter()
-            .map(|r| (r.label.as_str(), r.value.as_str()))
-            .collect();
-        assert_eq!(
-            tel,
-            vec![
-                ("Mode", "STABILIZE"),
-                ("Armed", "False"),
-                ("Satellites", "14")
-            ]
-        );
+        assert!(dash.steps_all_complete);
+        assert!(dash.mavlink_connected);
+        assert_eq!(dash.video_state, "running");
+        assert_eq!(dash.video_viewer.as_deref(), Some("http://x:8889/main/"));
+        assert_eq!(dash.hotspot, "ADOS-AP");
+        assert_eq!(dash.mode.as_deref(), Some("STABILIZE"));
+        assert_eq!(dash.armed, Some(false));
+        assert_eq!(dash.battery, Some(82.0));
+        assert_eq!(dash.satellites, Some(14));
         assert_eq!((dash.services_running, dash.services_total), (2, 3));
         assert_eq!(dash.next_action, "Open Mission Control");
     }
 
     #[test]
-    fn empty_telemetry_flagged() {
+    fn empty_status_has_no_telemetry() {
         let dash = Dashboard::from_status(&json!({}));
-        assert!(dash.telemetry_empty);
+        assert!(dash.mode.is_none());
+        assert!(dash.battery.is_none());
+        assert!(dash.alt.is_none());
         assert_eq!(dash.version, "?");
+    }
+
+    #[test]
+    fn history_records_present_values_and_caps() {
+        let mut history = History::default();
+        for i in 0..(HISTORY_CAP + 5) {
+            let dash = Dashboard {
+                battery: Some(i as f64),
+                alt: None,
+                ..Dashboard::default()
+            };
+            history.record(&dash);
+        }
+        // Battery capped at HISTORY_CAP, oldest dropped; alt never recorded.
+        assert_eq!(history.battery.len(), HISTORY_CAP);
+        assert_eq!(*history.battery.first().unwrap(), 5.0);
+        assert!(history.alt.is_empty());
     }
 }

@@ -22,7 +22,7 @@ use ratatui::crossterm::{execute, ExecutableCommand};
 use ratatui::Terminal;
 use serde_json::Value;
 
-use crate::model::Dashboard;
+use crate::model::{Dashboard, History};
 
 /// Where the agent stores the pairing key (matches `ados.core.paths.PAIRING_JSON`).
 const PAIRING_JSON: &str = "/etc/ados/pairing.json";
@@ -98,6 +98,8 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, client: &RestClient) -
     let mut error: Option<String> = None;
     let mut refreshed = now_hms();
     let mut last_fetch: Option<Instant> = None;
+    // Trend buffers of verified telemetry, one sample per successful poll.
+    let mut history = History::default();
 
     loop {
         // Fetch immediately on first iteration, then every POLL_INTERVAL.
@@ -108,6 +110,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, client: &RestClient) -
         if due {
             match client.setup_status() {
                 Ok(v) => {
+                    history.record(&Dashboard::from_status(&v));
                     data = Some(v);
                     error = None;
                 }
@@ -118,7 +121,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, client: &RestClient) -
         }
 
         let dash = data.as_ref().map(Dashboard::from_status);
-        terminal.draw(|f| ui::render(f, dash.as_ref(), &refreshed, error.as_deref()))?;
+        terminal.draw(|f| ui::render(f, dash.as_ref(), &history, &refreshed, error.as_deref()))?;
 
         if event::poll(TICK)? {
             if let Event::Key(key) = event::read()? {
