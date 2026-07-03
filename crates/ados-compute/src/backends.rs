@@ -56,7 +56,13 @@ impl Reconstructor for SelectingReconstructor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReconstructorKind {
     /// Brush: Rust gaussian-splat trainer (Metal / Vulkan / wgpu, no CUDA).
+    /// Portable — the universal fallback; random-inits so it trains from a
+    /// pose-only dataset. Slower than a native-GPU trainer (wgpu overhead).
     Brush,
+    /// msplat: native-Metal gaussian-splat trainer for Apple Silicon (~10x faster
+    /// than Brush on an M-series GPU). Inits from the COLMAP SfM point cloud, so
+    /// its dataset must be COLMAP format with a `sparse/` model (not pose-only).
+    Msplat,
     /// nerfstudio / splatfacto: high-quality gaussian splat (Python, CUDA/MPS).
     Nerfstudio,
     /// COLMAP: structure-from-motion poses + a sparse point cloud (the pre-pass).
@@ -70,6 +76,7 @@ impl ReconstructorKind {
     pub fn from_hint(hint: &str) -> Option<Self> {
         match hint.to_ascii_lowercase().as_str() {
             "brush" => Some(Self::Brush),
+            "msplat" => Some(Self::Msplat),
             "nerfstudio" | "splatfacto" => Some(Self::Nerfstudio),
             "colmap" => Some(Self::Colmap),
             "webodm" => Some(Self::Webodm),
@@ -81,6 +88,7 @@ impl ReconstructorKind {
     pub fn program(self) -> &'static str {
         match self {
             Self::Brush => "brush",
+            Self::Msplat => "msplat",
             Self::Nerfstudio => "ns-train",
             Self::Colmap => "colmap",
             Self::Webodm => "webodm",
@@ -91,6 +99,7 @@ impl ReconstructorKind {
     pub fn name(self) -> &'static str {
         match self {
             Self::Brush => "brush",
+            Self::Msplat => "msplat",
             Self::Nerfstudio => "nerfstudio",
             Self::Colmap => "colmap",
             Self::Webodm => "webodm",
@@ -100,7 +109,7 @@ impl ReconstructorKind {
     /// The artifact kind this tool produces (matches the world-model topics).
     pub fn artifact_kind(self) -> &'static str {
         match self {
-            Self::Brush | Self::Nerfstudio => "splat",
+            Self::Brush | Self::Msplat | Self::Nerfstudio => "splat",
             Self::Colmap => "pointcloud",
             Self::Webodm => "orthomosaic",
         }
@@ -109,7 +118,7 @@ impl ReconstructorKind {
     /// The output file extension the artifact lands as.
     pub fn output_ext(self) -> &'static str {
         match self {
-            Self::Brush | Self::Nerfstudio => "ply",
+            Self::Brush | Self::Msplat | Self::Nerfstudio => "ply",
             Self::Colmap => "ply",
             Self::Webodm => "tif",
         }
@@ -233,6 +242,31 @@ impl CliReconstructor {
                     workdir.to_string_lossy().into_owned(),
                     "--export-name".into(),
                     export_name,
+                ]
+            }
+            ReconstructorKind::Msplat => {
+                // msplat (native Metal): dataset positional; -n iters, -o output
+                // .ply, --sh-degree. It inits from the COLMAP SfM points, so
+                // `input` must be a COLMAP-format dir (sparse/ + images), NOT a
+                // pose-only transforms.json. No splat cap — msplat bounds its own
+                // count via densification thresholds.
+                let steps = params
+                    .get("steps")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(30000);
+                let sh_degree = params
+                    .get("sh_degree")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(3)
+                    .min(4);
+                vec![
+                    input_s,
+                    "-n".into(),
+                    steps.to_string(),
+                    "--sh-degree".into(),
+                    sh_degree.to_string(),
+                    "-o".into(),
+                    output_s,
                 ]
             }
             ReconstructorKind::Nerfstudio => {
@@ -572,6 +606,25 @@ mod tests {
         assert_eq!(
             arg_val(&cmd.args, "--growth-stop-iter").as_deref(),
             Some("5000")
+        );
+    }
+
+    #[test]
+    fn msplat_command_maps_dataset_steps_and_sh() {
+        let r = CliReconstructor::new(ReconstructorKind::Msplat, "/work");
+        let cmd = r.command(
+            &dataset("ds", Some("/colmap")),
+            &serde_json::json!({ "steps": 7000, "sh_degree": 2 }),
+        );
+        assert_eq!(cmd.program, "msplat");
+        assert_eq!(cmd.output_path, Path::new("/work/ds/output.ply"));
+        // COLMAP dataset dir is the positional input (msplat inits from its points).
+        assert_eq!(cmd.args.first().map(|s| s.as_str()), Some("/colmap"));
+        assert_eq!(arg_val(&cmd.args, "-n").as_deref(), Some("7000"));
+        assert_eq!(arg_val(&cmd.args, "--sh-degree").as_deref(), Some("2"));
+        assert_eq!(
+            arg_val(&cmd.args, "-o").as_deref(),
+            Some("/work/ds/output.ply")
         );
     }
 
