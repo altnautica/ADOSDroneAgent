@@ -83,6 +83,7 @@ fn config_yaml_path() -> PathBuf {
 struct AtlasConfigView {
     enabled: bool,
     capture_profile: String,
+    reconstruct_steps: u32,
     cameras_configured: u32,
     pose_tier: String,
     profile: String,
@@ -118,6 +119,15 @@ fn read_atlas_config_view(config_path: &Path) -> AtlasConfigView {
         .and_then(|v| v.as_str())
         .unwrap_or("freeform")
         .to_string();
+    // The default reconstruction detail level (Brush training steps) commissioned
+    // from this drone's tab. Consumed by the GCS at reconstruct-submit time, not
+    // by the capture service; defaults to the full-quality baseline.
+    let reconstruct_steps = atlas
+        .and_then(|a| a.get("reconstruct_steps"))
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32)
+        .filter(|n| *n > 0)
+        .unwrap_or(30000);
     let pose_tier = atlas
         .and_then(|a| a.get("pose_tier"))
         .and_then(|v| v.as_str())
@@ -136,6 +146,7 @@ fn read_atlas_config_view(config_path: &Path) -> AtlasConfigView {
     AtlasConfigView {
         enabled,
         capture_profile,
+        reconstruct_steps,
         cameras_configured,
         pose_tier,
         profile,
@@ -243,6 +254,7 @@ fn build_atlas_readiness(
         "enabled": view.enabled,
         "profile": view.profile,
         "capture_profile": view.capture_profile,
+        "reconstruct_steps": view.reconstruct_steps,
         "cameras_configured": view.cameras_configured,
         "pose_source": pose_source_for(&view.pose_tier),
         "service_running": service_running,
@@ -266,6 +278,9 @@ pub struct AtlasConfigBody {
     pub enabled: Option<bool>,
     /// `orbit` / `lawnmower` / `freeform` / `inspection`.
     pub capture_profile: Option<String>,
+    /// Default reconstruction detail level, in Brush training steps. Read by the
+    /// GCS at reconstruct-submit time; the capture service does not consume it.
+    pub reconstruct_steps: Option<u32>,
     /// The camera set (1..N), each `{id, role, enabled, reconstruct}`. Written
     /// verbatim when supplied; absent leaves the existing cameras untouched.
     pub cameras: Option<Value>,
@@ -284,6 +299,13 @@ fn validate_atlas_config_body(body: &AtlasConfigBody) -> Result<(), String> {
             return Err(format!(
                 "invalid capture_profile `{profile}` (expected one of {})",
                 VALID_CAPTURE_PROFILES.join(" / ")
+            ));
+        }
+    }
+    if let Some(steps) = body.reconstruct_steps {
+        if !(1000..=200_000).contains(&steps) {
+            return Err(format!(
+                "invalid reconstruct_steps `{steps}` (expected 1000..=200000)"
             ));
         }
     }
@@ -363,6 +385,10 @@ fn write_atlas_block(config_path: &Path, body: &AtlasConfigBody) -> Result<bool,
                 Yaml::String(profile.to_string()),
             );
         }
+        if let Some(steps) = body.reconstruct_steps {
+            let yaml_steps = serde_norway::to_value(steps).map_err(|e| e.to_string())?;
+            atlas.insert(Yaml::String("reconstruct_steps".into()), yaml_steps);
+        }
         if let Some(cameras) = &body.cameras {
             let yaml_cams = serde_norway::to_value(cameras).map_err(|e| e.to_string())?;
             atlas.insert(Yaml::String("cameras".into()), yaml_cams);
@@ -429,6 +455,7 @@ mod tests {
         let body = AtlasConfigBody {
             enabled: Some(true),
             capture_profile: Some("orbit".into()),
+            reconstruct_steps: None,
             cameras: None,
         };
         let effective = write_atlas_block(&cfg, &body).unwrap();
@@ -472,6 +499,7 @@ mod tests {
         let body = AtlasConfigBody {
             enabled: Some(false),
             capture_profile: None,
+            reconstruct_steps: None,
             cameras: None,
         };
         let effective = write_atlas_block(&cfg, &body).unwrap();
@@ -496,6 +524,7 @@ mod tests {
         let body = AtlasConfigBody {
             enabled: Some(true),
             capture_profile: None,
+            reconstruct_steps: None,
             cameras: Some(json!([
                 {"id": "front", "role": "primary", "enabled": true, "reconstruct": true},
                 {"id": "down", "role": "down", "enabled": false, "reconstruct": false}
@@ -529,6 +558,55 @@ mod tests {
         assert_eq!(view.profile, "drone");
     }
 
+    #[test]
+    fn reconstruct_steps_round_trips_and_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        std::fs::write(&cfg, "atlas:\n  enabled: true\n").unwrap();
+
+        // Absent → the full-quality default.
+        assert_eq!(read_atlas_config_view(&cfg).reconstruct_steps, 30000);
+
+        // A written value round-trips through the config view.
+        write_atlas_block(
+            &cfg,
+            &AtlasConfigBody {
+                enabled: None,
+                capture_profile: None,
+                reconstruct_steps: Some(7000),
+                cameras: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(read_atlas_config_view(&cfg).reconstruct_steps, 7000);
+
+        // A later patch that omits reconstruct_steps preserves it (patch semantics).
+        write_atlas_block(
+            &cfg,
+            &AtlasConfigBody {
+                enabled: Some(false),
+                capture_profile: None,
+                reconstruct_steps: None,
+                cameras: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(read_atlas_config_view(&cfg).reconstruct_steps, 7000);
+    }
+
+    #[tokio::test]
+    async fn put_config_rejects_out_of_range_reconstruct_steps() {
+        // Below the accepted 1000..=200000 band → 400 before any write / restart.
+        let resp = put_atlas_config(Json(AtlasConfigBody {
+            enabled: None,
+            capture_profile: None,
+            reconstruct_steps: Some(500),
+            cameras: None,
+        }))
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
     #[tokio::test]
     async fn put_config_rejects_an_out_of_enum_capture_profile() {
         // "balanced" is not in the capture-profile enum → 400, and no config
@@ -536,6 +614,7 @@ mod tests {
         let resp = put_atlas_config(Json(AtlasConfigBody {
             enabled: Some(true),
             capture_profile: Some("balanced".into()),
+            reconstruct_steps: None,
             cameras: None,
         }))
         .await;
@@ -550,6 +629,7 @@ mod tests {
         let resp = put_atlas_config(Json(AtlasConfigBody {
             enabled: Some(true),
             capture_profile: None,
+            reconstruct_steps: None,
             cameras: Some(json!([{"id": "front", "role": "navigation", "enabled": true}])),
         }))
         .await;
@@ -562,6 +642,7 @@ mod tests {
         let ok = AtlasConfigBody {
             enabled: Some(true),
             capture_profile: Some("orbit".into()),
+            reconstruct_steps: None,
             cameras: Some(json!([{"id": "a", "role": "primary"}, {"id": "b", "role": "down"}])),
         };
         assert!(validate_atlas_config_body(&ok).is_ok());
@@ -570,6 +651,7 @@ mod tests {
         let bad = AtlasConfigBody {
             enabled: None,
             capture_profile: None,
+            reconstruct_steps: None,
             cameras: Some(json!([{"id": "a", "role": "navigation"}])),
         };
         assert!(validate_atlas_config_body(&bad).is_err());
@@ -578,6 +660,7 @@ mod tests {
         let non_string = AtlasConfigBody {
             enabled: None,
             capture_profile: None,
+            reconstruct_steps: None,
             cameras: Some(json!([{"id": "a", "role": 7}])),
         };
         assert!(validate_atlas_config_body(&non_string).is_err());
@@ -586,6 +669,7 @@ mod tests {
         let no_role = AtlasConfigBody {
             enabled: None,
             capture_profile: None,
+            reconstruct_steps: None,
             cameras: Some(json!([{"id": "a", "enabled": true}])),
         };
         assert!(validate_atlas_config_body(&no_role).is_ok());

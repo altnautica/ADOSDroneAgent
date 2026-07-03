@@ -85,6 +85,10 @@ class AtlasConfig(BaseModel):
     # variants exactly (strict serde enums on the Rust side); Literal rejects an
     # invalid value here rather than letting it silently disable the Rust service.
     capture_profile: Literal["orbit", "lawnmower", "freeform", "inspection"] = "freeform"
+    # The default reconstruction detail level, in Brush training steps, set from
+    # the drone tab. Consumed by the GCS at reconstruct-submit time (mirrors the
+    # Rust atlas: block so the YAML round-trips through both halves).
+    reconstruct_steps: int = 30000
     selection: AtlasSelectionParams = AtlasSelectionParams()
     pose_tier: Literal["auto", "local", "offload", "hybrid"] = "auto"
     hfov_deg: float = 70.0
