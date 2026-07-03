@@ -193,6 +193,26 @@ impl CliReconstructor {
                     .get("steps")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(30000);
+                // Bound densification. Without these, per-step cost blows up: Brush
+                // defaults `--growth-stop-iter` to 15000 (so any run <=30k densifies
+                // the WHOLE time) and `--max-splats` to 10M (no real cap), which grew
+                // a small scene to 3.45M gaussians and made each step progressively
+                // slower (hours). Stop growth before the last step (leaving a
+                // refine-only tail) and cap the count. Both are overridable per job;
+                // the detail-level preset supplies max_splats + sh_degree.
+                let growth_stop = params
+                    .get("growth_stop_iter")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or_else(|| (steps / 2).min(10_000));
+                let max_splats = params
+                    .get("max_splats")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(1_500_000);
+                let sh_degree = params
+                    .get("sh_degree")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(3)
+                    .min(4);
                 let export_name = output_path
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
@@ -201,6 +221,12 @@ impl CliReconstructor {
                     input_s,
                     "--total-train-iters".into(),
                     steps.to_string(),
+                    "--growth-stop-iter".into(),
+                    growth_stop.to_string(),
+                    "--max-splats".into(),
+                    max_splats.to_string(),
+                    "--sh-degree".into(),
+                    sh_degree.to_string(),
                     "--export-every".into(),
                     steps.to_string(),
                     "--export-path".into(),
@@ -484,6 +510,69 @@ mod tests {
         assert!(cmd.args.contains(&"--export-name".to_string()));
         assert!(cmd.args.contains(&"output.ply".to_string()));
         assert!(cmd.args.contains(&"30000".to_string()));
+        // Densification must be bounded (else a small scene grows to millions of
+        // gaussians and each step slows to a crawl).
+        assert!(cmd.args.contains(&"--growth-stop-iter".to_string()));
+        assert!(cmd.args.contains(&"--max-splats".to_string()));
+        assert!(cmd.args.contains(&"--sh-degree".to_string()));
+    }
+
+    /// Value that follows `flag` in an arg vec, if present.
+    fn arg_val(args: &[String], flag: &str) -> Option<String> {
+        args.iter()
+            .position(|a| a == flag)
+            .and_then(|i| args.get(i + 1).cloned())
+    }
+
+    #[test]
+    fn brush_command_bounds_densification_and_honors_overrides() {
+        let r = CliReconstructor::new(ReconstructorKind::Brush, "/work");
+
+        // Defaults derived from steps: growth stops at steps/2 (capped 10k), a real
+        // splat cap, sh-degree 3.
+        let cmd = r.command(
+            &dataset("ds", Some("/d")),
+            &serde_json::json!({ "steps": 7000 }),
+        );
+        assert_eq!(
+            arg_val(&cmd.args, "--growth-stop-iter").as_deref(),
+            Some("3500")
+        );
+        assert_eq!(
+            arg_val(&cmd.args, "--max-splats").as_deref(),
+            Some("1500000")
+        );
+        assert_eq!(arg_val(&cmd.args, "--sh-degree").as_deref(), Some("3"));
+
+        // growth-stop is capped at 10k for long runs.
+        let cmd = r.command(
+            &dataset("ds", Some("/d")),
+            &serde_json::json!({ "steps": 30000 }),
+        );
+        assert_eq!(
+            arg_val(&cmd.args, "--growth-stop-iter").as_deref(),
+            Some("10000")
+        );
+
+        // A bare job (no steps) is still bounded (the bug was an unbounded default).
+        let cmd = r.command(&dataset("ds", Some("/d")), &serde_json::json!({}));
+        assert!(cmd.args.contains(&"--max-splats".to_string()));
+        assert!(cmd.args.contains(&"--growth-stop-iter".to_string()));
+
+        // Per-job overrides win (the detail-level preset drives these).
+        let cmd = r.command(
+            &dataset("ds", Some("/d")),
+            &serde_json::json!({ "steps": 15000, "max_splats": 600000, "sh_degree": 2, "growth_stop_iter": 5000 }),
+        );
+        assert_eq!(
+            arg_val(&cmd.args, "--max-splats").as_deref(),
+            Some("600000")
+        );
+        assert_eq!(arg_val(&cmd.args, "--sh-degree").as_deref(), Some("2"));
+        assert_eq!(
+            arg_val(&cmd.args, "--growth-stop-iter").as_deref(),
+            Some("5000")
+        );
     }
 
     #[test]
