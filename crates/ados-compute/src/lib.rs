@@ -39,6 +39,7 @@ mod reconstructor;
 mod rerun_log;
 mod rerun_world;
 mod scheduler;
+mod seed;
 mod session;
 mod store;
 
@@ -48,9 +49,9 @@ pub use artifacts::{
 };
 pub use auth::{require_pairing, ComputeAuth, PairingGate, RateLimiter, DEFAULT_PAIRING_PATH};
 pub use backends::{
-    file_uri_to_path, is_tool_available, parse_gaussian_count, path_to_file_uri,
+    file_uri_to_path, is_apple_silicon, is_tool_available, parse_gaussian_count, path_to_file_uri,
     select_reconstructor, CliReconstructor, ReconstructCommand, ReconstructorKind,
-    SelectingReconstructor,
+    SeededSplatReconstructor, SelectingReconstructor,
 };
 pub use client::{ClientError, ComputeClient};
 pub use cluster::Cluster;
@@ -76,6 +77,7 @@ pub use rerun_log::{
 };
 pub use rerun_world::{build_rerun_output, build_world_recording, RERUN_OUTPUT_FILE};
 pub use scheduler::{BackendResult, JobOutcome, Prepared, PreparedInput, Scheduler};
+pub use seed::{colmap_available, seed_points, SeedError, MIN_SEED_POINTS};
 pub use session::{LiveReconstructConfig, LiveReconstructDriver};
 pub use store::{Dataset, JobRecord, JobStore, Output};
 

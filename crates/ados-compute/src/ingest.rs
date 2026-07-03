@@ -30,11 +30,13 @@ use crate::session::{LiveReconstructConfig, LiveReconstructDriver};
 use crate::store::{Dataset, JobRecord, JobStore};
 use crate::ComputeError;
 
-/// The reconstruct backend a captured session defaults to. The keyframes carry
-/// VIO / FC poses, so the gaussian-splat trainer trains directly on the written
-/// `transforms.json` with no structure-from-motion pre-pass. The hint resolves to
-/// the real tool when it is installed, else the mock backend (CI / no-GPU).
-const DEFAULT_RECONSTRUCT_BACKEND: &str = "brush";
+/// The reconstruct backend a captured session defaults to. `auto` lets the
+/// compute node pick per host: the seamless COLMAP-seed → native-Metal `msplat`
+/// path on Apple Silicon, a CUDA trainer or the portable Brush trainer elsewhere,
+/// and the mock backend on a node with no trainer (CI / no-GPU). The keyframes
+/// carry VIO / FC poses, so a node without a COLMAP seed still trains directly on
+/// the written `transforms.json` (Brush random-init, no pose search).
+const DEFAULT_RECONSTRUCT_BACKEND: &str = "auto";
 
 /// The default gaussian-splat training length (`steps` job param) when nothing
 /// overrides it. A splat trainer's quality-vs-time knob; the backend reads it as
@@ -531,7 +533,7 @@ mod tests {
             .unwrap()
             .expect("bagged yields a dataset + job");
         assert_eq!(job.id, "recon-sess1");
-        assert_eq!(job.params["backend"], "brush");
+        assert_eq!(job.params["backend"], "auto");
         assert_eq!(ingest.keyframes_seen(), 3);
 
         // The dataset carries input_path pointing at the written dataset dir, and
@@ -701,7 +703,7 @@ mod tests {
         assert_eq!(job.id, "recon-live-c0");
         assert_eq!(job.kind, ComputeJobKind::Reconstruct);
         assert_eq!(job.dataset_id.as_deref(), Some("ds-live-c0"));
-        assert_eq!(job.params["backend"], "brush");
+        assert_eq!(job.params["backend"], "auto");
 
         // The cycle is in flight (skip-while-running armed).
         assert_eq!(

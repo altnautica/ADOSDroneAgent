@@ -452,20 +452,149 @@ fn is_executable(path: &Path) -> bool {
     path.is_file()
 }
 
-/// Pick a reconstructor for a job. Reads the `backend` param hint; if it names a
-/// known tool that is installed, returns a [`CliReconstructor`] for it, else
-/// falls back to the [`MockReconstructor`] so the job still completes with a
-/// deterministic artifact (CI, a node with no GPU). `work_root` is where a real
-/// backend writes artifacts.
+/// True on an Apple-Silicon Mac, where the native-Metal `msplat` trainer is the
+/// fast path. A compile-time fact (no runtime probe), matching the platform idiom
+/// in `gpu.rs`.
+pub fn is_apple_silicon() -> bool {
+    cfg!(target_os = "macos") && cfg!(target_arch = "aarch64")
+}
+
+/// The seamless accurate reconstruction path: a COLMAP posed-triangulation seed
+/// (reusing the manifest's known poses, no pose search) followed by the
+/// native-Metal `msplat` trainer initialized from the real points. When COLMAP is
+/// absent or the seed is too sparse it falls back to the portable random-init
+/// trainer (Brush), which trains from the poses alone; with neither trainer
+/// installed it falls back to the mock (CI / no-GPU). Whichever tool actually ran
+/// is stamped on the output (`msplat` / `brush` / `mock`), so the honesty badge
+/// (Rule 44) is always accurate — this wrapper's own name is never the backend.
+pub struct SeededSplatReconstructor {
+    work_root: PathBuf,
+}
+
+impl SeededSplatReconstructor {
+    /// A seeded-splat reconstructor writing artifacts (and the seed scratch) under
+    /// `work_root`.
+    pub fn new(work_root: impl Into<PathBuf>) -> Self {
+        Self {
+            work_root: work_root.into(),
+        }
+    }
+
+    /// The dataset directory holding `transforms.json` + `images/`: the chained
+    /// stage input (`params.input_uri`) when present, else the dataset's
+    /// `input_path`. `None` when neither is set (a seed cannot run).
+    fn input_dir(dataset: &Dataset, params: &serde_json::Value) -> Option<PathBuf> {
+        params
+            .get("input_uri")
+            .and_then(|v| v.as_str())
+            .map(file_uri_to_path)
+            .or_else(|| {
+                dataset
+                    .meta
+                    .get("input_path")
+                    .and_then(|v| v.as_str())
+                    .map(PathBuf::from)
+            })
+    }
+
+    /// Attempt the COLMAP seed for `dir`; true when a usable point cloud now sits
+    /// next to the manifest. Every negative outcome (COLMAP absent, too few points,
+    /// a COLMAP fault) is logged and yields false, so the caller trains with the
+    /// portable random-init trainer instead.
+    fn try_seed(dir: &Path, params: &serde_json::Value) -> bool {
+        if !crate::seed::colmap_available() {
+            tracing::info!("reconstruct_seed_skipped: colmap not installed; training from poses");
+            return false;
+        }
+        match crate::seed::seed_points(dir, params) {
+            Ok(n) if n >= crate::seed::MIN_SEED_POINTS => {
+                tracing::info!(points = n, "reconstruct_seeded: colmap posed triangulation");
+                true
+            }
+            Ok(n) => {
+                tracing::warn!(points = n, "reconstruct_seed_sparse: falling back to brush");
+                false
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "reconstruct_seed_failed: falling back to brush");
+                false
+            }
+        }
+    }
+}
+
+impl Reconstructor for SeededSplatReconstructor {
+    fn name(&self) -> &str {
+        "seeded-splat"
+    }
+
+    fn reconstruct(
+        &self,
+        dataset: &Dataset,
+        params: &serde_json::Value,
+    ) -> Result<ReconstructOutput, ComputeError> {
+        let seeded = Self::input_dir(dataset, params)
+            .map(|dir| Self::try_seed(&dir, params))
+            .unwrap_or(false);
+        if seeded && is_tool_available(ReconstructorKind::Msplat.program()) {
+            return CliReconstructor::new(ReconstructorKind::Msplat, &self.work_root)
+                .reconstruct(dataset, params);
+        }
+        if is_tool_available(ReconstructorKind::Brush.program()) {
+            return CliReconstructor::new(ReconstructorKind::Brush, &self.work_root)
+                .reconstruct(dataset, params);
+        }
+        MockReconstructor.reconstruct(dataset, params)
+    }
+}
+
+/// Pick a reconstructor for a job. The default hint is `auto` (also used when a
+/// job carries no `backend`): on Apple Silicon with `msplat` installed it returns
+/// the seamless [`SeededSplatReconstructor`] (COLMAP seed → msplat, Brush
+/// fallback); else it uses `ns-train` (CUDA) or Brush when installed, falling back
+/// to the [`MockReconstructor`] (CI / no-GPU). An explicit `backend` hint pins the
+/// tool: `msplat` still runs through the seeded path (it needs points), any other
+/// installed tool runs directly, and an unknown or uninstalled tool falls back to
+/// the mock. `work_root` is where a real backend writes artifacts + the seed
+/// scratch.
 pub fn select_reconstructor(
     params: &serde_json::Value,
     work_root: impl Into<PathBuf>,
 ) -> Arc<dyn Reconstructor> {
-    let hint = params.get("backend").and_then(|v| v.as_str());
-    if let Some(kind) = hint.and_then(ReconstructorKind::from_hint) {
-        if is_tool_available(kind.program()) {
-            return Arc::new(CliReconstructor::new(kind, work_root));
+    let work_root = work_root.into();
+    let hint = params
+        .get("backend")
+        .and_then(|v| v.as_str())
+        .unwrap_or("auto");
+    if hint == "auto" {
+        return auto_reconstructor(work_root);
+    }
+    match ReconstructorKind::from_hint(hint) {
+        // An explicit msplat pin still seeds (msplat cannot init without points).
+        Some(ReconstructorKind::Msplat) => Arc::new(SeededSplatReconstructor::new(work_root)),
+        Some(kind) if is_tool_available(kind.program()) => {
+            Arc::new(CliReconstructor::new(kind, work_root))
         }
+        // A pinned-but-uninstalled tool, or an unknown hint, falls back to the mock
+        // so the job still completes deterministically (CI / no-GPU).
+        _ => Arc::new(MockReconstructor),
+    }
+}
+
+/// The `auto` backend policy: prefer the native-Metal seeded-splat path on Apple
+/// Silicon, then a CUDA trainer, then the portable trainer, then the mock.
+fn auto_reconstructor(work_root: PathBuf) -> Arc<dyn Reconstructor> {
+    if is_apple_silicon() && is_tool_available(ReconstructorKind::Msplat.program()) {
+        return Arc::new(SeededSplatReconstructor::new(work_root));
+    }
+    if is_tool_available(ReconstructorKind::Nerfstudio.program()) {
+        return Arc::new(CliReconstructor::new(
+            ReconstructorKind::Nerfstudio,
+            work_root,
+        ));
+    }
+    if is_tool_available(ReconstructorKind::Brush.program()) {
+        return Arc::new(CliReconstructor::new(ReconstructorKind::Brush, work_root));
     }
     Arc::new(MockReconstructor)
 }
@@ -674,14 +803,44 @@ mod tests {
     }
 
     #[test]
-    fn select_falls_back_to_mock_when_no_real_backend() {
-        // An unknown backend hint can never resolve a tool, so it always falls
-        // back to the mock regardless of what is on PATH (PATH-independent).
+    fn select_falls_back_to_mock_for_an_unknown_or_uninstalled_backend() {
+        // An unknown backend hint can never resolve a tool, so it always falls back
+        // to the mock regardless of what is on PATH (PATH-independent). (An absent
+        // hint resolves to `auto`, whose result depends on what is installed, so it
+        // is exercised by the daemon path + P6, not this pure PATH-independent test.)
         let r = select_reconstructor(&serde_json::json!({ "backend": "no-such-tool" }), "/work");
         assert_eq!(r.name(), "mock");
-        // No hint -> mock.
-        let r2 = select_reconstructor(&serde_json::json!({}), "/work");
-        assert_eq!(r2.name(), "mock");
+    }
+
+    #[test]
+    fn an_explicit_msplat_hint_routes_through_the_seeded_path() {
+        // Pinning msplat always selects the seeded-splat reconstructor (msplat needs
+        // a point cloud to initialize); the seed-vs-fallback decision happens at run
+        // time, so this is PATH-independent.
+        let r = select_reconstructor(&serde_json::json!({ "backend": "msplat" }), "/work");
+        assert_eq!(r.name(), "seeded-splat");
+    }
+
+    #[test]
+    fn seeded_input_dir_prefers_input_uri_then_meta_then_none() {
+        // The chained stage input (input_uri) wins; else the dataset's input_path;
+        // else None (nothing to seed → the caller trains from poses).
+        let d = dataset("ds", Some("/data/ds"));
+        assert_eq!(
+            SeededSplatReconstructor::input_dir(
+                &d,
+                &serde_json::json!({ "input_uri": "file:///w/ds/colmap" })
+            ),
+            Some(PathBuf::from("/w/ds/colmap"))
+        );
+        assert_eq!(
+            SeededSplatReconstructor::input_dir(&d, &serde_json::json!({})),
+            Some(PathBuf::from("/data/ds"))
+        );
+        assert_eq!(
+            SeededSplatReconstructor::input_dir(&dataset("ds", None), &serde_json::json!({})),
+            None
+        );
     }
 
     #[test]
