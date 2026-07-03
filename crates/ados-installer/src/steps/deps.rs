@@ -77,6 +77,15 @@ pub fn ground_station_core_packages() -> &'static [&'static str] {
     ]
 }
 
+/// Core workstation / compute apt packages (REQUIRED for the reconstruction
+/// engine's accurate path). `colmap` runs the posed-triangulation seed that
+/// initializes the native gaussian-splat trainer from real points; without it the
+/// engine falls back to the portable random-init trainer (a working, lower-quality
+/// path), so this keeps the accurate path zero-manual-steps on a compute node.
+pub fn workstation_core_packages() -> &'static [&'static str] {
+    &["colmap"]
+}
+
 /// Assemble the REQUIRED package set for a profile (pure). The drone profile
 /// gets the cross-profile core; the ground_station profile additionally gets
 /// the AP/kiosk core. Deduped + insertion-stable.
@@ -84,6 +93,13 @@ pub fn required_packages(profile: &str) -> Vec<&'static str> {
     let mut pkgs: Vec<&'static str> = core_packages().to_vec();
     if profile == "ground_station" {
         for p in ground_station_core_packages() {
+            if !pkgs.contains(p) {
+                pkgs.push(p);
+            }
+        }
+    }
+    if profile == "workstation" || profile == "compute" {
+        for p in workstation_core_packages() {
             if !pkgs.contains(p) {
                 pkgs.push(p);
             }
@@ -358,6 +374,20 @@ mod tests {
             len_before,
             "required package set must be unique"
         );
+    }
+
+    #[test]
+    fn workstation_and_compute_add_the_seed_toolchain() {
+        // The reconstruction seed (colmap) is provisioned on both compute profiles
+        // and never on a drone / ground-station node.
+        for profile in ["workstation", "compute"] {
+            assert!(
+                required_packages(profile).contains(&"colmap"),
+                "{profile} deps must include colmap"
+            );
+        }
+        assert!(!required_packages("drone").contains(&"colmap"));
+        assert!(!required_packages("ground_station").contains(&"colmap"));
     }
 
     #[test]
