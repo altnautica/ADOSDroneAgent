@@ -386,8 +386,18 @@ async fn worker_loop(state: Arc<Mutex<Engine>>, work_root: PathBuf, public_base:
         };
         match prepared {
             Ok(Prepared::Ready { job, input }) => {
-                let mut result =
-                    Scheduler::run_backend(&*reconstructor, &*detector, &job, &input, now_ms());
+                // Run the (real, possibly minutes-long) backend off the async
+                // runtime thread so a long reconstruction never starves the HTTP
+                // surface. The owned job + input move into the blocking task and
+                // back out (PreparedInput is not Clone, and both are needed after
+                // the run — input for the rerun/world-model write, job for finalize).
+                let now = now_ms();
+                let (mut result, job, input) = tokio::task::spawn_blocking(move || {
+                    let r = Scheduler::run_backend(&*reconstructor, &*detector, &job, &input, now);
+                    (r, job, input)
+                })
+                .await
+                .expect("reconstruct worker task panicked");
                 // Write the Rerun world-model .rrd from the real capture + the
                 // reconstruction geometry so the GCS World viewer renders real data
                 // (camera trajectory + the reconstructed point cloud). Reconstruct

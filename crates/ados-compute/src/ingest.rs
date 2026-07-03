@@ -36,6 +36,22 @@ use crate::ComputeError;
 /// the real tool when it is installed, else the mock backend (CI / no-GPU).
 const DEFAULT_RECONSTRUCT_BACKEND: &str = "brush";
 
+/// The default gaussian-splat training length (`steps` job param) when nothing
+/// overrides it. A splat trainer's quality-vs-time knob; the backend reads it as
+/// `--total-train-iters` (Brush) / `--max-num-iterations` (nerfstudio).
+const DEFAULT_TRAIN_ITERS: u64 = 30_000;
+
+/// Resolve the reconstruct training length: the `ADOS_COMPUTE_TRAIN_ITERS`
+/// override when set to a valid `u64`, else [`DEFAULT_TRAIN_ITERS`]. Read once at
+/// ingest-construction time (the daemon builds one `AtlasIngest`), so a shorter
+/// training run for a fast node is a single env var, not a per-job edit.
+fn default_train_iters() -> u64 {
+    std::env::var("ADOS_COMPUTE_TRAIN_ITERS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_TRAIN_ITERS)
+}
+
 /// Per-session live-reconstruction state: the cadence driver plus the in-flight
 /// cycle's job id (so the caller can poll the store and release the
 /// skip-while-running guard) and the distinct cameras seen (for the snapshot's
@@ -82,6 +98,10 @@ pub struct AtlasIngest {
     /// carried an id (a pre-attribution capture), and the job then omits it rather
     /// than asserting a wrong one.
     session_devices: HashMap<String, String>,
+    /// The training length stamped onto every reconstruct job's `steps` param, so
+    /// the backend trains for a configurable number of iterations instead of the
+    /// hardcoded default. Resolved once from [`default_train_iters`].
+    train_iters: u64,
 }
 
 impl AtlasIngest {
@@ -106,6 +126,7 @@ impl AtlasIngest {
             live_config,
             sessions: HashMap::new(),
             session_devices: HashMap::new(),
+            train_iters: default_train_iters(),
         }
     }
 
@@ -145,13 +166,16 @@ impl AtlasIngest {
             ATLAS_CAPTURE_STATE_TOPIC => match CaptureStatus::from_msgpack(&event.payload) {
                 Ok(status) if status.state == CaptureState::Bagged => {
                     self.note_device(&status.session_id, event.device_id.as_deref());
+                    // `bag` yields `None` for a session that persisted zero
+                    // keyframes (no reconstruct to run); the Option propagates.
                     let result = self.bag(&status, now_ms)?;
-                    // The session is over: drop its live + device state. Any periodic
-                    // cycle still running finishes on its own in the worker; the final
-                    // bag reconstruct is the authoritative full-set output.
+                    // The session is over: drop its live + device state regardless of
+                    // whether a job was produced. Any periodic cycle still running
+                    // finishes on its own in the worker; the final bag reconstruct is
+                    // the authoritative full-set output.
                     self.sessions.remove(&status.session_id);
                     self.session_devices.remove(&status.session_id);
-                    Ok(Some(result))
+                    Ok(result)
                 }
                 Ok(status) => {
                     self.note_device(&status.session_id, event.device_id.as_deref());
@@ -279,6 +303,7 @@ impl AtlasIngest {
             let mut params = serde_json::json!({
                 "backend": DEFAULT_RECONSTRUCT_BACKEND,
                 "session_id": session_id.clone(),
+                "steps": self.train_iters,
             });
             if let Some(dev) = &device_id {
                 meta["device_id"] = serde_json::Value::String(dev.clone());
@@ -308,17 +333,27 @@ impl AtlasIngest {
     }
 
     /// Finalize a bagged session: write `transforms.json` and build the dataset +
-    /// reconstruct job. The dataset carries `input_path` when at least one
-    /// keyframe was persisted, so the backend trains on the real images; an empty
-    /// session still submits a job (it fails honestly at the backend rather than
-    /// silently vanishing).
+    /// reconstruct job. Returns `None` when the session persisted zero keyframes —
+    /// there is nothing to reconstruct, so no job is enqueued (a reconstruct over
+    /// an empty dataset only dies at the backend with a "no such directory" error).
+    /// When at least one keyframe was persisted the dataset carries `input_path` so
+    /// the backend trains on the real images.
     fn bag(
         &mut self,
         status: &CaptureStatus,
         now_ms: i64,
-    ) -> std::io::Result<(Dataset, JobRecord)> {
+    ) -> std::io::Result<Option<(Dataset, JobRecord)>> {
         let dataset_id = dataset_id_for(&status.session_id);
         let input_path = self.persister.finalize(&dataset_id)?;
+        // No keyframes persisted → no dataset on disk → no reconstruct to run. Skip
+        // enqueueing a job that would only fail at the backend with a missing input.
+        if input_path.is_none() {
+            tracing::info!(
+                session = %status.session_id,
+                "atlas capture bagged with no keyframes; skipping reconstruct"
+            );
+            return Ok(None);
+        }
         let device_id = self.session_devices.get(&status.session_id).cloned();
 
         let mut meta = serde_json::json!({
@@ -337,6 +372,7 @@ impl AtlasIngest {
         let mut params = serde_json::json!({
             "backend": DEFAULT_RECONSTRUCT_BACKEND,
             "session_id": status.session_id.clone(),
+            "steps": self.train_iters,
         });
         if let Some(dev) = &device_id {
             meta["device_id"] = serde_json::Value::String(dev.clone());
@@ -361,7 +397,7 @@ impl AtlasIngest {
             created_ms: now_ms,
             updated_ms: now_ms,
         };
-        Ok((dataset, job))
+        Ok(Some((dataset, job)))
     }
 }
 
@@ -732,18 +768,35 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut ingest = AtlasIngest::new(dir.path());
         // An undecodable keyframe payload still counts as a received delivery, but
-        // nothing is persisted, so a bag with only bad keyframes has no input_path.
+        // nothing is persisted. A bag over a session with zero persisted keyframes
+        // has no dataset to reconstruct, so it yields NO job (rather than enqueuing
+        // one that would only die at the backend with a missing input directory).
         let bad = AtlasEvent::new(ATLAS_KEYFRAME_TOPIC, None, vec![0u8; 8]);
         assert!(ingest.step(&bad, 100).unwrap().is_none());
         assert_eq!(ingest.keyframes_seen(), 1);
 
-        let (dataset, job) = ingest
-            .step(&capture_state("badkf", CaptureState::Bagged, 1), 200)
+        assert!(
+            ingest
+                .step(&capture_state("badkf", CaptureState::Bagged, 1), 200)
+                .unwrap()
+                .is_none(),
+            "an empty bag (no keyframes persisted) enqueues no reconstruct job"
+        );
+    }
+
+    #[test]
+    fn a_bagged_reconstruct_job_carries_the_default_train_iters() {
+        // With ADOS_COMPUTE_TRAIN_ITERS unset (the CI default), a bagged
+        // reconstruct job stamps the default training length onto its `steps`
+        // param so the backend trains for a real, configurable number of
+        // iterations instead of an implicit backend fallback.
+        let dir = tempfile::tempdir().unwrap();
+        let mut ingest = AtlasIngest::new(dir.path());
+        ingest.step(&real_keyframe_event("sT", 0), 100).unwrap();
+        let (_dataset, job) = ingest
+            .step(&capture_state("sT", CaptureState::Bagged, 1), 200)
             .unwrap()
-            .unwrap();
-        assert_eq!(job.id, "recon-badkf");
-        // No frame persisted -> no input_path (the backend fails honestly later).
-        assert!(dataset.meta.get("input_path").is_none());
-        assert_eq!(dataset.meta["received_keyframes"], 1);
+            .expect("a session with a persisted keyframe yields a job");
+        assert_eq!(job.params["steps"], 30000);
     }
 }

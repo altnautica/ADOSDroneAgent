@@ -35,8 +35,17 @@ fn engine() -> Engine {
     Engine::new(scheduler, Cluster::new_master("compute-sitl"), 1)
 }
 
+/// A real, persistable single-camera keyframe for session `g0` (the session the
+/// [`bagged`] helper closes), so a simulated capture actually writes a dataset the
+/// bag can finalize into a reconstruct job — the pipeline the G0 / G2 / loopback
+/// gates prove. A keyframe whose bytes never decode would count as received but
+/// persist nothing, and an empty bag enqueues no job.
 fn keyframe(i: usize) -> AtlasEvent {
-    AtlasEvent::new(ATLAS_KEYFRAME_TOPIC, None, vec![i as u8; 64])
+    AtlasEvent::new(
+        ATLAS_KEYFRAME_TOPIC,
+        None,
+        keyframe_env("g0", "front", i as u64).to_msgpack().unwrap(),
+    )
 }
 
 fn bagged(keyframes: u64) -> AtlasEvent {
@@ -235,12 +244,15 @@ fn cluster_master_aggregates_a_registered_slave() {
     );
 }
 
-/// A full keyframe envelope for one `camera_id`, with an IMU sample so the
-/// camera subtree + the IMU scalars are both produced. Synthetic intrinsics +
-/// an identity pose translated along x by the keyframe id (no real camera).
-fn keyframe_env(camera_id: &str, kf_id: u64) -> KeyframeEnvelope {
+/// A full keyframe envelope for `session_id` / `camera_id`, with an IMU sample so
+/// the camera subtree + the IMU scalars are both produced. Synthetic intrinsics +
+/// an identity pose translated along x by the keyframe id (no real camera). The
+/// session is a parameter so a capture's keyframes and its terminal bag carry the
+/// SAME session — the persister keys the dataset by it, so a mismatch would leave
+/// the bag with nothing to reconstruct.
+fn keyframe_env(session_id: &str, camera_id: &str, kf_id: u64) -> KeyframeEnvelope {
     KeyframeEnvelope {
-        session_id: "sitl".into(),
+        session_id: session_id.into(),
         kf_id,
         ts_unix_ms: 1000 + kf_id as i64,
         camera_id: camera_id.into(),
@@ -300,7 +312,7 @@ async fn g1_rerun_recording_maps_keyframes_for_the_gcs_viewer() {
     const N: usize = 4;
     let mut rec = RerunRecording::new();
     for i in 0..N {
-        rec.push_keyframe(&keyframe_env("cam-front", i as u64));
+        rec.push_keyframe(&keyframe_env("g1", "cam-front", i as u64));
     }
     rec.push_splat(
         &SplatDescriptor {
@@ -502,7 +514,7 @@ async fn g4_live_session_periodic_reconstruct() {
         let ev = AtlasEvent::new(
             ATLAS_KEYFRAME_TOPIC,
             None,
-            keyframe_env("cam-front", kf).to_msgpack().unwrap(),
+            keyframe_env("sitl", "cam-front", kf).to_msgpack().unwrap(),
         );
         assert!(ingest.step(&ev, 100).unwrap().is_none());
     }
@@ -541,7 +553,7 @@ async fn g4_live_session_periodic_reconstruct() {
         let ev = AtlasEvent::new(
             ATLAS_KEYFRAME_TOPIC,
             None,
-            keyframe_env("cam-front", kf).to_msgpack().unwrap(),
+            keyframe_env("sitl", "cam-front", kf).to_msgpack().unwrap(),
         );
         ingest.step(&ev, 400).unwrap();
     }
@@ -601,7 +613,13 @@ async fn g5_multi_cam_fuses_into_one_world() {
     let mut keyframes = Vec::new();
     for round in 0..FRAMES_PER_CAM {
         for i in 0..N {
-            keyframes.push(keyframe_env(&format!("cam-{i}"), (round * N + i) as u64));
+            // The capture's session matches the terminal bag ("multicam") so the
+            // persisted per-camera frames finalize into the one fused dataset.
+            keyframes.push(keyframe_env(
+                "multicam",
+                &format!("cam-{i}"),
+                (round * N + i) as u64,
+            ));
         }
     }
 
