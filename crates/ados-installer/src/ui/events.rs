@@ -71,6 +71,10 @@ pub struct SummaryData {
     pub hostname: String,
     /// The on-box setup URL.
     pub setup_url: String,
+    /// Non-loopback IPv4 addresses the box owns, in interface order. The
+    /// success card lists one reach URL per entry so the console stays
+    /// reachable even when `<host>.local` mDNS does not resolve.
+    pub lan_ips: Vec<String>,
     /// Whether the agent has pairing material on disk.
     pub paired: bool,
     /// Every step that did not succeed.

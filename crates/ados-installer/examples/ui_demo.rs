@@ -78,6 +78,7 @@ fn summary(status: &str, required: &[&str]) -> SummaryData {
         device_id: "17bf646b".to_string(),
         hostname: "skynode".to_string(),
         setup_url: "http://skynode.local:8080/setup".to_string(),
+        lan_ips: vec!["192.168.1.42".to_string(), "10.0.0.7".to_string()],
         paired: true,
         failed_steps: required.iter().map(|s| s.to_string()).collect(),
         required_failures: required.iter().map(|s| s.to_string()).collect(),

@@ -140,25 +140,36 @@ def _access_urls(
     config: Any,
     mission_control_url: str,
 ) -> list[SetupAccessUrl]:
-    urls = [
+    # The "Setup webapp" entry echoes whatever host the caller dialed (often
+    # ``localhost`` when the request came from the box itself), so it is built
+    # without a ``primary`` flag. The final ``_prioritize_access_urls`` pass
+    # promotes the mDNS ``.local`` name (or the first LAN IP) to primary instead,
+    # so a consumer never leads with a localhost URL a remote operator can't reach.
+    urls: list[SetupAccessUrl] = [
         SetupAccessUrl(
             kind="setup",
             label="Setup webapp",
             url=_setup_path(base_url),
             source="local",
-            primary=True,
         ),
-        SetupAccessUrl(
-            kind="setup",
-            label="mDNS setup",
-            url=_setup_path(f"http://{mdns_host}:{port}"),
-            source="mdns",
-        ),
+    ]
+    if mdns_host:
+        urls.append(
+            SetupAccessUrl(
+                kind="setup",
+                label="mDNS setup",
+                url=_setup_path(f"http://{mdns_host}:{port}"),
+                source="mdns",
+            )
+        )
+    urls.append(
         SetupAccessUrl(
             kind="setup", label="Hotspot setup", url=_setup_path(_HOTSPOT_URL), source="hotspot"
-        ),
-        SetupAccessUrl(kind="api", label="Local API", url=f"{base_url}/api", source="local"),
-    ]
+        )
+    )
+    urls.append(
+        SetupAccessUrl(kind="api", label="Local API", url=f"{base_url}/api", source="local")
+    )
     # Only advertise the USB gadget URL when the agent actually serves on
     # that IP (i.e., the gadget service has been brought up).
     if _USB_GADGET_IP in local_ips:
@@ -240,7 +251,7 @@ def _access_urls(
         )
     for url in remote.public_urls:
         urls.append(SetupAccessUrl(kind="cloud", label="Remote access", url=url, source="cloud"))
-    return _dedupe_urls(urls)
+    return _prioritize_access_urls(_dedupe_urls(urls))
 
 
 def _dedupe_urls(urls: list[SetupAccessUrl]) -> list[SetupAccessUrl]:
@@ -254,6 +265,71 @@ def _dedupe_urls(urls: list[SetupAccessUrl]) -> list[SetupAccessUrl]:
     return unique
 
 
+def _url_host(url: str) -> str:
+    """Return the lowercased host of a URL, sans scheme, port, and path."""
+    rest = url.split("://", 1)[-1]
+    hostport = rest.split("/", 1)[0]
+    host = hostport.rsplit(":", 1)[0] if ":" in hostport else hostport
+    return host.strip().lower()
+
+
+def _is_localhost_url(url: str) -> bool:
+    """True when the URL points at the loopback interface (unreachable from
+    any other machine on the LAN)."""
+    host = _url_host(url)
+    return host in ("localhost", "127.0.0.1") or host.startswith("127.")
+
+
+# Sort priority for setup URLs by source. Lower sorts earlier, so the mDNS
+# ``.local`` name leads, then per-NIC LAN IPs, then the hotspot / USB / tunnel
+# fallbacks. A localhost entry is demoted below all of these regardless of kind.
+_SETUP_SOURCE_BAND = {
+    "mdns": 0,
+    "local": 1,
+    "hotspot": 3,
+    "usb": 4,
+    "cloud": 5,
+}
+_LOCALHOST_BAND = 90
+_NON_SETUP_BAND = 50
+
+
+def _url_band(item: SetupAccessUrl) -> int:
+    """The sort band for one access URL (lower = earlier)."""
+    if _is_localhost_url(item.url):
+        return _LOCALHOST_BAND
+    if item.kind == "setup":
+        return _SETUP_SOURCE_BAND.get(item.source, 6)
+    return _NON_SETUP_BAND
+
+
+def _prioritize_access_urls(urls: list[SetupAccessUrl]) -> list[SetupAccessUrl]:
+    """Order the access URLs so a consumer can lead with a reachable address.
+
+    Priority: mDNS ``.local`` first, then per-NIC LAN IP, then the other
+    reachable fallbacks, with any ``localhost`` / ``127.0.0.1`` entry demoted to
+    last. The ``primary`` flag is (re)assigned to the first non-localhost setup
+    URL (the ``.local`` name when present, else the first LAN IP) and never
+    points at localhost when a LAN host exists. The sort is stable, so entries
+    within a band keep their construction order.
+    """
+    ordered = sorted(urls, key=_url_band)
+    for item in ordered:
+        item.primary = False
+    primary = next(
+        (u for u in ordered if u.kind == "setup" and not _is_localhost_url(u.url)),
+        None,
+    )
+    if primary is None:
+        # No LAN-reachable setup URL at all (no mDNS name, no routable IPv4) —
+        # fall back to the first setup entry so the payload still carries a
+        # primary the consumer can render.
+        primary = next((u for u in ordered if u.kind == "setup"), None)
+    if primary is not None:
+        primary.primary = True
+    return ordered
+
+
 __all__ = [
     "_video_access",
     "_mission_control_url",
@@ -261,4 +337,7 @@ __all__ = [
     "_usb_setup_url",
     "_access_urls",
     "_dedupe_urls",
+    "_prioritize_access_urls",
+    "_is_localhost_url",
+    "_url_band",
 ]

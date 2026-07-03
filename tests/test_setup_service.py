@@ -87,6 +87,111 @@ def test_safe_host_for_first_value_wins_in_chain() -> None:
     assert _safe_host_for("10.0.0.5:8080, attacker.example.com", hosts) == "10.0.0.5:8080"
 
 
+# --- access-URL ordering + primary flag --------------------------------------
+
+from ados.setup.models import (  # noqa: E402
+    MavlinkAccess as _MavAccess,
+)
+from ados.setup.models import (
+    RemoteAccessStatus as _RemoteAccess,
+)
+from ados.setup.models import (
+    VideoAccess as _VideoAccess,
+)
+from ados.setup.service import _access_urls  # noqa: E402
+from ados.setup.service._access_urls import _is_localhost_url  # noqa: E402
+
+
+class _AccessCloudflare:
+    setup_url = ""
+
+
+class _AccessRemote:
+    cloudflare = _AccessCloudflare()
+
+
+class _AccessCfg:
+    remote_access = _AccessRemote()
+
+
+def _build_access_urls(*, mdns_host: str, local_ips: list[str], base_host: str = "localhost"):
+    """Compose access URLs the way the status builder does, with the caller
+    dialing ``base_host`` (defaults to localhost, the on-box webapp case)."""
+    return _access_urls(
+        base_url=f"http://{base_host}:8080",
+        host_name=base_host,
+        port=8080,
+        mdns_host=mdns_host,
+        local_ips=local_ips,
+        video=_VideoAccess(),
+        mavlink=_MavAccess(),
+        remote=_RemoteAccess(),
+        config=_AccessCfg(),
+        mission_control_url="",
+    )
+
+
+def test_is_localhost_url_flags_loopback_only() -> None:
+    assert _is_localhost_url("http://localhost:8080/setup") is True
+    assert _is_localhost_url("http://127.0.0.1:8080/setup") is True
+    assert _is_localhost_url("http://127.1.2.3:8080") is True
+    assert _is_localhost_url("http://192.168.1.42:8080/setup") is False
+    assert _is_localhost_url("http://ados-abc.local:8080/setup") is False
+
+
+def test_access_urls_order_mdns_then_lan_then_localhost() -> None:
+    urls = _build_access_urls(
+        mdns_host="ados-abc123.local", local_ips=["192.168.1.42", "10.0.0.7"]
+    )
+
+    def first_index(pred):
+        return next(i for i, u in enumerate(urls) if pred(u))
+
+    mdns_i = first_index(lambda u: "ados-abc123.local" in u.url)
+    lan_i = first_index(lambda u: "192.168.1.42" in u.url)
+    localhost_i = first_index(lambda u: _is_localhost_url(u.url))
+    # mDNS `.local` leads, then the LAN IP, then the localhost entry.
+    assert mdns_i < lan_i < localhost_i
+    # The primary points at the `.local` name, never at localhost.
+    primary = next(u for u in urls if u.primary)
+    assert "ados-abc123.local" in primary.url
+    assert not _is_localhost_url(primary.url)
+    # Exactly one primary is emitted.
+    assert sum(1 for u in urls if u.primary) == 1
+
+
+def test_access_urls_primary_is_first_lan_ip_when_no_mdns() -> None:
+    urls = _build_access_urls(mdns_host="", local_ips=["192.168.1.42", "10.0.0.7"])
+    # No mDNS entry is emitted for an empty mdns_host.
+    assert not any(u.source == "mdns" for u in urls)
+    # The first LAN IP becomes primary, never localhost.
+    primary = next(u for u in urls if u.primary)
+    assert "192.168.1.42" in primary.url
+    assert not _is_localhost_url(primary.url)
+
+
+def test_access_urls_demote_every_localhost_entry_to_the_end() -> None:
+    urls = _build_access_urls(mdns_host="ados.local", local_ips=["192.168.1.42"])
+    localhost_positions = [i for i, u in enumerate(urls) if _is_localhost_url(u.url)]
+    other_positions = [i for i, u in enumerate(urls) if not _is_localhost_url(u.url)]
+    # There is at least one of each (localhost base_url + LAN/mDNS reach URLs).
+    assert localhost_positions and other_positions
+    # Every localhost entry sorts after every reachable one.
+    assert min(localhost_positions) > max(other_positions)
+
+
+def test_access_urls_caller_on_lan_still_primaries_mdns_not_the_lan_base() -> None:
+    # Even when the caller dialed a LAN IP (so base_url is reachable), the
+    # mDNS `.local` name stays primary for a stable, resolvable lead address.
+    urls = _build_access_urls(
+        mdns_host="ados-abc123.local",
+        local_ips=["192.168.1.42"],
+        base_host="192.168.1.42",
+    )
+    primary = next(u for u in urls if u.primary)
+    assert "ados-abc123.local" in primary.url
+
+
 # --- Mission Control URL omission --------------------------------------------
 
 

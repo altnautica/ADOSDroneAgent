@@ -9,19 +9,49 @@ use std::collections::VecDeque;
 use crate::ui::events::SummaryData;
 use crate::ui::theme::Theme;
 
-/// The next-step commands shown after a successful install. Product-facing copy
-/// only — no internal tags.
-pub fn next_steps(s: &SummaryData) -> Vec<String> {
-    vec![
-        "ados status".to_string(),
-        "journalctl -t ados-installer".to_string(),
-        format!(
-            "Add this node in Mission Control by host: {}.local",
-            s.hostname
-        ),
-        format!("Setup: {}", s.setup_url),
-        "Docs:  https://docs.altnautica.com".to_string(),
-    ]
+/// The curated next-step commands shown after a successful install, each with a
+/// short plain-language description. Product-facing copy only — no internal
+/// tags. Ordered from "learn everything" to "remove".
+pub const NEXT_STEPS: &[(&str, &str)] = &[
+    ("ados help", "see all commands"),
+    ("ados", "live dashboard"),
+    ("ados pair", "connect to Mission Control"),
+    ("ados status", "status at a glance"),
+    ("ados uninstall", "remove"),
+];
+
+/// The local-mode caveat + docs pointer shown in the Notes section.
+const NOTE_LOCAL_MODE: &str = "Running in LOCAL mode. Pair over the LAN, no cloud needed.";
+const NOTE_DOCS: &str = "Docs: docs.altnautica.com";
+
+/// The reach URLs for the console, most-resolvable first: the `<host>.local`
+/// mDNS name, then one `http://<ip>:8080` per discovered LAN address. A bare
+/// `localhost` is never emitted — it is useless to an operator on another box.
+fn console_urls(s: &SummaryData) -> Vec<String> {
+    let mut urls = Vec::new();
+    if let Some(host) = mdns_host(&s.hostname) {
+        urls.push(format!("http://{host}:8080"));
+    }
+    for ip in &s.lan_ips {
+        urls.push(format!("http://{ip}:8080"));
+    }
+    urls
+}
+
+/// The `<host>.local` mDNS form for the reach block, or `None` when the
+/// hostname is unusable (empty, `localhost`, or a raw loopback address). A
+/// hostname that already carries a dot is treated as a full DNS name and used
+/// verbatim. Mirrors the server-side `_best_lan_host` preference.
+fn mdns_host(hostname: &str) -> Option<String> {
+    let name = hostname.trim().trim_end_matches('.');
+    if name.is_empty() || name == "localhost" || name.starts_with("127.") {
+        return None;
+    }
+    if name.contains('.') {
+        Some(name.to_string())
+    } else {
+        Some(format!("{name}.local"))
+    }
 }
 
 /// The headline for the summary, e.g. `ADOS Drone Agent 0.51.4 installed`.
@@ -57,12 +87,34 @@ pub fn plain_lines(s: &SummaryData) -> Vec<String> {
     if s.status == "degraded" && !s.failed_steps.is_empty() {
         out.push(format!("  warnings: {}", s.failed_steps.join(", ")));
     }
+
+    out.push(String::new());
+    out.push("Open the console:".to_string());
+    for url in console_urls(s) {
+        out.push(format!("  {url}"));
+    }
+
     out.push(String::new());
     out.push("Next steps:".to_string());
-    for cmd in next_steps(s) {
-        out.push(format!("  {cmd}"));
+    let cmd_w = next_step_cmd_width();
+    for &(cmd, desc) in NEXT_STEPS {
+        out.push(format!("  {cmd:<cmd_w$}   {desc}"));
     }
+
+    out.push(String::new());
+    out.push(NOTE_LOCAL_MODE.to_string());
+    out.push(NOTE_DOCS.to_string());
     out
+}
+
+/// The command-column width used to align the next-step descriptions (the
+/// longest command name).
+fn next_step_cmd_width() -> usize {
+    NEXT_STEPS
+        .iter()
+        .map(|(cmd, _)| cmd.chars().count())
+        .max()
+        .unwrap_or(0)
 }
 
 /// Which border color a frame uses.
@@ -84,24 +136,73 @@ pub fn rich_lines(s: &SummaryData, theme: &Theme, logs: &VecDeque<String>) -> Ve
 }
 
 fn success_card(s: &SummaryData, theme: &Theme, width: usize) -> Vec<String> {
-    let title = format!("{} {}", theme.glyph_ok(), headline(s));
-    let mut body = vec![
-        format!("profile: {}    board: {}", s.profile, s.board),
-        format!(
-            "device:  {}    {}",
-            s.device_id,
-            if s.paired { "paired" } else { "not paired" }
-        ),
-    ];
+    let installed = if s.status == "degraded" {
+        "installed with warnings"
+    } else {
+        "installed"
+    };
+    let title = format!("{} ADOS Drone Agent {installed}", theme.glyph_ok());
+
+    let mut body = Vec::new();
+    // Dim meta lines: version + profile, then board + device + pairing.
+    body.push(theme.dim(&format!("v{} · profile: {}", s.version, s.profile)));
+    body.push(theme.dim(&format!(
+        "board: {} · device: {} · {}",
+        s.board,
+        s.device_id,
+        if s.paired { "paired" } else { "not paired" }
+    )));
     if s.status == "degraded" && !s.failed_steps.is_empty() {
-        body.push(format!("warnings: {}", s.failed_steps.join(", ")));
+        body.push(theme.warn(&format!("warnings: {}", s.failed_steps.join(", "))));
     }
+
+    // Reach block: mDNS `.local` host first, then one LAN IP per line.
     body.push(String::new());
-    body.push("Next steps".to_string());
-    for cmd in next_steps(s) {
-        body.push(format!("  {cmd}"));
+    body.push(section(theme, "Open the console"));
+    for url in console_urls(s) {
+        body.push(format!("{}  {}", theme.accent(arrow(theme)), url));
     }
+
+    // Curated primitive commands: command in accent, description dimmed.
+    body.push(String::new());
+    body.push(section(theme, "Next steps"));
+    let cmd_w = next_step_cmd_width();
+    for &(cmd, desc) in NEXT_STEPS {
+        let padded = format!("{cmd:<cmd_w$}");
+        body.push(format!("  {}  {}", theme.accent(&padded), theme.dim(desc)));
+    }
+
+    // Notes: local-mode caveat + docs pointer.
+    body.push(String::new());
+    body.push(section(theme, "Notes"));
+    body.push(theme.dim(NOTE_LOCAL_MODE));
+    body.push(theme.dim(NOTE_DOCS));
+
     frame(theme, Border::Ok, &title, &body, width)
+}
+
+/// An accent section marker + bold label: `▌ Open the console`. This minimal
+/// `▌` word-mark is the only logo in the card — no block ASCII art.
+fn section(theme: &Theme, label: &str) -> String {
+    format!("{} {}", theme.accent(marker(theme)), theme.bold(label))
+}
+
+/// The section marker glyph (`▌`), with an ASCII fallback.
+fn marker(theme: &Theme) -> &'static str {
+    if theme.ascii {
+        "#"
+    } else {
+        "▌"
+    }
+}
+
+/// The reach arrow glyph (`➜`), with an ASCII fallback.
+fn arrow(theme: &Theme) -> &'static str {
+    if theme.ascii {
+        "->"
+    } else {
+        "➜"
+    }
 }
 
 fn failure_panel(
@@ -143,7 +244,7 @@ fn frame(theme: &Theme, border: Border, title: &str, body: &[String], width: usi
     out.push(paint_border(theme, &border, &top));
     let v = paint_border(theme, &border, bc.v);
     for line in body {
-        out.push(format!("{v} {} {v}", pad_to(line, body_w)));
+        out.push(format!("{v} {} {v}", fit_to(line, body_w)));
     }
     out.push(paint_border(
         theme,
@@ -189,6 +290,57 @@ fn pad_to(s: &str, w: usize) -> String {
     format!("{t}{}", " ".repeat(pad))
 }
 
+/// Right-pad `s` to `w` *visible* columns, ignoring embedded ANSI SGR escapes
+/// so a colored body line still aligns to the box border. A line whose visible
+/// content overflows `w` is stripped of styling and hard-truncated so the right
+/// border never drifts.
+fn fit_to(s: &str, w: usize) -> String {
+    let vis = visible_width(s);
+    if vis <= w {
+        format!("{s}{}", " ".repeat(w - vis))
+    } else {
+        pad_to(&strip_ansi(s), w)
+    }
+}
+
+/// The number of display columns `s` occupies, skipping ANSI SGR escape
+/// sequences (`\x1b[...m`, as emitted by the color helpers).
+fn visible_width(s: &str) -> usize {
+    let mut width = 0;
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            // Consume the CSI parameters up to (and including) the terminator.
+            for nc in chars.by_ref() {
+                if nc == 'm' {
+                    break;
+                }
+            }
+        } else {
+            width += 1;
+        }
+    }
+    width
+}
+
+/// Drop ANSI SGR escape sequences, leaving the visible text.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            for nc in chars.by_ref() {
+                if nc == 'm' {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,6 +354,7 @@ mod tests {
             device_id: "17bf646b".to_string(),
             hostname: "skynode".to_string(),
             setup_url: "http://skynode.local:8080/setup".to_string(),
+            lan_ips: vec!["192.168.1.42".to_string()],
             paired: true,
             failed_steps: vec![],
             required_failures: vec![],
@@ -209,12 +362,66 @@ mod tests {
     }
 
     #[test]
-    fn ok_summary_has_next_steps_and_host_hint() {
+    fn ok_summary_leads_with_mdns_and_lan_ip_and_new_steps() {
         let lines = plain_lines(&sample("ok"));
         assert!(lines[0].contains("0.51.4 installed"));
-        assert!(lines.iter().any(|l| l.contains("Next steps:")));
-        assert!(lines.iter().any(|l| l.contains("skynode.local")));
-        assert!(lines.iter().any(|l| l.contains("ados status")));
+        // Reach block carries the `.local` mDNS host AND the LAN IP so the
+        // console is reachable even when mDNS does not resolve.
+        assert!(lines.iter().any(|l| l.contains("Open the console:")));
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("http://skynode.local:8080")));
+        assert!(lines.iter().any(|l| l.contains("http://192.168.1.42:8080")));
+        // The `.local` host comes before the LAN IP in the reach block.
+        let mdns_at = lines.iter().position(|l| l.contains("skynode.local:8080"));
+        let ip_at = lines.iter().position(|l| l.contains("192.168.1.42:8080"));
+        assert!(mdns_at < ip_at, "mDNS host must lead the reach block");
+        // The curated next-step commands, including the new `ados help`.
+        assert!(lines.iter().any(|l| l.contains("ados help")));
+        assert!(lines.iter().any(|l| l.contains("ados uninstall")));
+        // No bare localhost reach line, and journalctl is off the success path.
+        assert!(!lines.iter().any(|l| l.contains("localhost")));
+        assert!(!lines.iter().any(|l| l.contains("journalctl")));
+    }
+
+    #[test]
+    fn rich_card_reach_block_has_mdns_and_lan_ip_but_never_localhost() {
+        let theme = Theme {
+            color: false,
+            ascii: false,
+        };
+        let logs = VecDeque::new();
+        let joined = rich_lines(&sample("ok"), &theme, &logs).join("\n");
+        assert!(joined.contains("skynode.local:8080"));
+        assert!(joined.contains("192.168.1.42:8080"));
+        assert!(joined.contains("ados help"));
+        assert!(!joined.contains("localhost"));
+    }
+
+    #[test]
+    fn mdns_host_skips_unusable_hostnames() {
+        assert_eq!(mdns_host("skynode"), Some("skynode.local".to_string()));
+        assert_eq!(mdns_host("box.lan"), Some("box.lan".to_string()));
+        assert_eq!(mdns_host("localhost"), None);
+        assert_eq!(mdns_host("127.0.0.1"), None);
+        assert_eq!(mdns_host("  "), None);
+    }
+
+    #[test]
+    fn console_urls_drops_the_mdns_line_when_only_ips_resolve() {
+        let mut s = sample("ok");
+        s.hostname = "localhost".to_string();
+        let urls = console_urls(&s);
+        assert_eq!(urls, vec!["http://192.168.1.42:8080".to_string()]);
+    }
+
+    #[test]
+    fn visible_width_ignores_ansi_escapes() {
+        // A colored string measures by its visible glyphs, not its escape bytes.
+        let colored = "\u{1b}[36m➜\u{1b}[39m";
+        assert_eq!(visible_width(colored), 1);
+        assert_eq!(strip_ansi(colored), "➜");
+        assert_eq!(visible_width("plain"), 5);
     }
 
     #[test]

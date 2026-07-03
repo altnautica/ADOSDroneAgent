@@ -244,10 +244,116 @@ fn build_summary(status: &str, ctx: &Ctx) -> ui::SummaryData {
         device_id: read_device_id(),
         hostname,
         setup_url,
+        lan_ips: probe_lan_ips(),
         paired: pairing_present(),
         failed_steps: ctx.failures.failed.clone(),
         required_failures: ctx.failures.required.clone(),
     }
+}
+
+/// The box's non-loopback IPv4 addresses, for the success-card reach block.
+/// Prefers `ip -o -4 addr show` (per-interface, so bridge/container NICs are
+/// filtered by name) and falls back to `hostname -I`. Both are parsed by the
+/// pure helpers below; the returned list preserves discovery order and is
+/// de-duplicated. Empty when the box has no routable IPv4 (the card then leads
+/// with the `<host>.local` mDNS name alone).
+fn probe_lan_ips() -> Vec<String> {
+    let res = exec::run("ip", &["-o", "-4", "addr", "show"]);
+    if res.success() {
+        let ips = parse_ip_o_4(&res.stdout);
+        if !ips.is_empty() {
+            return ips;
+        }
+    }
+    let res = exec::run("hostname", &["-I"]);
+    if res.success() {
+        return parse_hostname_i(&res.stdout);
+    }
+    Vec::new()
+}
+
+/// Parse `ip -o -4 addr show` output into a de-duplicated list of routable
+/// IPv4 addresses, skipping loopback and virtual (bridge/container/VPN)
+/// interfaces by name. Each line looks like:
+/// `2: eth0    inet 192.168.1.42/24 brd ... scope global eth0\ ...`.
+fn parse_ip_o_4(output: &str) -> Vec<String> {
+    let mut ips = Vec::new();
+    for line in output.lines() {
+        let mut fields = line.split_whitespace();
+        // fields: <idx:> <iface> ... inet <ip/cidr> ...
+        let _idx = fields.next();
+        let iface = match fields.next() {
+            Some(i) => i,
+            None => continue,
+        };
+        if is_virtual_iface(iface) {
+            continue;
+        }
+        // Find the `inet` token, take the following `ip/cidr`.
+        let mut rest = fields;
+        while let Some(tok) = rest.next() {
+            if tok == "inet" {
+                if let Some(cidr) = rest.next() {
+                    let ip = cidr.split('/').next().unwrap_or("");
+                    push_routable_ipv4(&mut ips, ip);
+                }
+                break;
+            }
+        }
+    }
+    ips
+}
+
+/// Parse `hostname -I` output (a space-separated address list, IPv4 + IPv6)
+/// into a de-duplicated list of routable IPv4 addresses. No interface names are
+/// available here, so filtering is by address form only.
+fn parse_hostname_i(output: &str) -> Vec<String> {
+    let mut ips = Vec::new();
+    for tok in output.split_whitespace() {
+        push_routable_ipv4(&mut ips, tok);
+    }
+    ips
+}
+
+/// Push `ip` onto `ips` when it is a routable (non-loopback, non-empty) IPv4
+/// dotted-quad and not already present.
+fn push_routable_ipv4(ips: &mut Vec<String>, ip: &str) {
+    if is_routable_ipv4(ip) && !ips.iter().any(|existing| existing == ip) {
+        ips.push(ip.to_string());
+    }
+}
+
+/// True for a dotted-quad IPv4 that is neither empty nor loopback (`127.x`).
+fn is_routable_ipv4(ip: &str) -> bool {
+    if ip.is_empty() || ip.starts_with("127.") {
+        return false;
+    }
+    let octets: Vec<&str> = ip.split('.').collect();
+    octets.len() == 4
+        && octets
+            .iter()
+            .all(|o| !o.is_empty() && o.len() <= 3 && o.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// True for interface names that are loopback or virtual (bridge, container,
+/// VPN, mesh) and should not appear in the operator's reach block.
+fn is_virtual_iface(iface: &str) -> bool {
+    const VIRTUAL_PREFIXES: &[&str] = &[
+        "lo",
+        "docker",
+        "br-",
+        "veth",
+        "virbr",
+        "tailscale",
+        "zt",
+        "cni",
+        "flannel",
+        "kube",
+        "podman",
+        "cali",
+        "wg",
+    ];
+    VIRTUAL_PREFIXES.iter().any(|p| iface.starts_with(p))
 }
 
 /// Hostname for the `<host>.local` hint + setup URL: `/etc/hostname`, then
@@ -464,6 +570,53 @@ mod tests {
         assert!(validate_pair_code(None).is_err());
         assert!(validate_pair_code(Some("")).is_err());
         assert!(validate_pair_code(Some("   ")).is_err());
+    }
+
+    #[test]
+    fn parse_ip_o_4_keeps_lan_and_drops_loopback_and_virtual() {
+        let out = "\
+1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever preferred_lft forever
+2: end0    inet 192.168.1.42/24 brd 192.168.1.255 scope global end0\\       valid_lft forever
+3: docker0    inet 172.17.0.1/16 brd 172.17.255.255 scope global docker0\\       valid_lft forever
+4: wlan1    inet 10.0.0.7/24 brd 10.0.0.255 scope global wlan1\\       valid_lft forever
+";
+        let ips = parse_ip_o_4(out);
+        assert_eq!(
+            ips,
+            vec!["192.168.1.42".to_string(), "10.0.0.7".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_hostname_i_keeps_ipv4_and_drops_ipv6_and_loopback() {
+        // `hostname -I` yields a space-separated mix of v4 + v6; keep only the
+        // routable dotted-quads, de-duplicated in order.
+        let ips = parse_hostname_i("192.168.1.42 fe80::1 10.0.0.7 192.168.1.42 127.0.0.1\n");
+        assert_eq!(
+            ips,
+            vec!["192.168.1.42".to_string(), "10.0.0.7".to_string()]
+        );
+    }
+
+    #[test]
+    fn is_routable_ipv4_rejects_loopback_and_non_dotted_quads() {
+        assert!(is_routable_ipv4("192.168.0.1"));
+        assert!(!is_routable_ipv4("127.0.0.1"));
+        assert!(!is_routable_ipv4(""));
+        assert!(!is_routable_ipv4("fe80::1"));
+        assert!(!is_routable_ipv4("192.168.0"));
+        assert!(!is_routable_ipv4("1.2.3.4.5"));
+    }
+
+    #[test]
+    fn is_virtual_iface_flags_bridge_and_container_nics() {
+        assert!(is_virtual_iface("lo"));
+        assert!(is_virtual_iface("docker0"));
+        assert!(is_virtual_iface("br-abc123"));
+        assert!(is_virtual_iface("veth9f2"));
+        assert!(!is_virtual_iface("eth0"));
+        assert!(!is_virtual_iface("end0"));
+        assert!(!is_virtual_iface("wlan1"));
     }
 
     #[test]
