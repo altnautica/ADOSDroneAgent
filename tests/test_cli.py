@@ -61,23 +61,25 @@ def test_help_shows_only_public_commands() -> None:
     result = runner.invoke(cli, ["--help"])
     assert result.exit_code == 0
     names = _help_command_names(result.output)
-    # The full public operator surface: every command listed in `ados --help`.
-    expected = {
+    # The primitive operator surface listed in `ados --help`.
+    expected = {"status", "update", "uninstall", "logs", "pair", "unpair", "help"}
+    assert expected <= names, f"missing public commands: {expected - names}"
+    # Advanced groups + install + demo are hidden from the primary surface
+    # (they still work); legacy names never existed publicly.
+    for hidden in (
         "hardware",
-        "install",
-        "logs",
         "network",
         "plugin",
         "profile",
         "radio",
-        "status",
-        "uninstall",
-        "update",
-    }
-    assert expected <= names, f"missing public commands: {expected - names}"
-    # demo is the only hidden command; legacy names never existed publicly.
-    for hidden in ("demo", "tui", "config", "gs"):
-        assert hidden not in names
+        "rust",
+        "install",
+        "demo",
+        "tui",
+        "config",
+        "gs",
+    ):
+        assert hidden not in names, f"'{hidden}' must be hidden from --help"
 
 
 def test_status_prints_setup_summary() -> None:
@@ -85,8 +87,9 @@ def test_status_prints_setup_summary() -> None:
         result = runner.invoke(cli, ["status"])
     assert result.exit_code == 0
     assert "bench-agent" in result.output
-    assert "Open setup: http://127.0.0.1:8080" in result.output
-    assert "Video:      running" in result.output
+    assert "Reach this agent" in result.output
+    assert "127.0.0.1:8080" in result.output
+    assert "running" in result.output
 
 
 def test_status_json_outputs_full_payload() -> None:
@@ -100,7 +103,7 @@ def test_root_command_falls_back_to_plain_status_in_non_tty() -> None:
     with patch("ados.cli.main._setup_status", return_value=_setup_payload()):
         result = runner.invoke(cli, [])
     assert result.exit_code == 0
-    assert "Open setup:" in result.output
+    assert "Reach this agent" in result.output
 
 
 def test_update_check_only_does_not_install() -> None:
@@ -153,10 +156,14 @@ def test_demo_uses_user_writable_pairing_state(tmp_path) -> None:
     assert config.pairing.convex_url == ""
 
 
-def test_install_command_is_registered() -> None:
+def test_install_command_is_hidden_but_registered() -> None:
     result = runner.invoke(cli, ["--help"])
     assert result.exit_code == 0
-    assert "install" in result.output
+    # Hidden from the primary help surface, but still fully invokable.
+    assert "install" not in _help_command_names(result.output)
+    detail = runner.invoke(cli, ["install", "--help"])
+    assert detail.exit_code == 0
+    assert "--status" in detail.output
 
 
 def test_install_help_documents_status_and_resume() -> None:

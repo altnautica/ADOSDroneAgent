@@ -15,6 +15,7 @@ from typing import Any
 import click
 import httpx
 
+from ados.cli import _ansi
 from ados.core.paths import PAIRING_JSON
 
 API_BASE = "http://localhost:8080"
@@ -82,76 +83,98 @@ def _viewer_url_from_whep(whep_url: str | None) -> str | None:
     return base + "/"
 
 
+def _console_reach_urls(data: dict[str, Any]) -> list[str]:
+    """Browser console URLs to open, best (LAN / mDNS) first.
+
+    Prefers the server-composed setup/console URLs, then the resolved LAN host,
+    with a constructed ``localhost`` only when nothing else is known. The
+    reach-block renderer drops ``localhost`` as noise whenever a routable
+    address is present, so a remote operator always sees a usable line first.
+    """
+    network = data.get("network", {}) or {}
+    port = int(network.get("api_port", 8080) or 8080)
+    urls: list[str] = []
+
+    def _add_base(raw: str) -> None:
+        # Normalize any console URL to its bare http://host:port form so every
+        # reach line is consistent (the web UI at the root handles routing).
+        if not raw.startswith("http"):
+            return
+        hostport = raw.split("//", 1)[1].split("/", 1)[0]
+        base = f"http://{hostport}"
+        if base not in urls:
+            urls.append(base)
+
+    for entry in data.get("access_urls") or []:
+        raw = str(entry.get("url", ""))
+        if raw and (entry.get("primary") or "/setup" in raw) and f":{port}" in raw:
+            _add_base(raw)
+    lan_host = data.get("lan_host") or network.get("mdns_host") or network.get("hostname")
+    if lan_host and not _ansi.is_localhost(str(lan_host)):
+        _add_base(f"http://{lan_host}:{port}")
+    if not urls:
+        _add_base(f"http://localhost:{port}")
+    return urls
+
+
 def _plain_status(data: dict[str, Any]) -> None:
-    click.echo(f"ADOS Drone Agent {data.get('version', '?')}")
-    click.echo(f"Device:  {data.get('device_name', '?')} ({data.get('device_id', '?')})")
-    click.echo(f"Profile: {data.get('profile', '?')}")
-    click.echo(f"Setup:   {data.get('completion_percent', 0)}%")
+    theme = _ansi.detect_theme()
+    device = data.get("device_name", "?")
+    profile = data.get("profile", "?")
+    version = data.get("version", "?")
+    click.echo(f"{_ansi.marker(theme, f'ADOS  {device} · {profile}')}   {theme.dim(f'v{version}')}")
 
     paired = bool(data.get("paired", False))
     code = data.get("pairing_code")
     if paired:
-        click.echo("Pair:    paired")
+        pair_txt = f"{_ansi.dot(theme, 'ok')} {theme.ok('paired')}"
     elif code:
-        click.echo(f"Pair:    code {code}  (enter this in Mission Control)")
+        pair_txt = (
+            f"{_ansi.dot(theme, 'warn')} code {theme.bold(str(code))} "
+            f"{theme.dim('(enter in Mission Control)')}"
+        )
     else:
-        click.echo("Pair:    not paired")
+        pair_txt = f"{_ansi.dot(theme, 'pending')} {theme.dim('not paired')}"
+    click.echo(f"  {theme.dim('setup')} {data.get('completion_percent', 0)}%    {pair_txt}")
     click.echo("")
 
-    # Open-setup URL. Prefer a LAN-routable form so the line is paste-
-    # ready from a separate workstation.
-    network = data.get("network", {})
-    lan_host = data.get("lan_host") or network.get("mdns_host") or network.get(
-        "hostname", ""
-    )
-    api_port = int(network.get("api_port", 8080) or 8080)
-    if lan_host:
-        click.echo(f"Open setup: http://{lan_host}:{api_port}/setup")
-    else:
-        urls = data.get("access_urls", [])
-        primary = next((u.get("url") for u in urls if u.get("primary")), None)
-        click.echo(f"Open setup: {primary or 'http://localhost:8080/setup'}")
+    for line in _ansi.reach_block(theme, _console_reach_urls(data)):
+        click.echo(line)
+    click.echo("")
 
     mavlink = data.get("mavlink", {})
-    fc_connected = bool(mavlink.get("connected"))
-    click.echo(
-        "MAVLink FC: "
-        + ("connected" if fc_connected else "not connected")
-        + (f"  ({mavlink.get('port')})" if mavlink.get("port") else "")
-    )
+    fc = "connected" if mavlink.get("connected") else "not connected"
+    port = mavlink.get("port")
+    click.echo(_ansi.kv(theme, "MAVLink FC", fc + (f"  ({port})" if port else "")))
     if mavlink.get("tcp_url"):
-        click.echo(f"MAVLink TCP: {mavlink.get('tcp_url')}")
+        click.echo(_ansi.kv(theme, "MAVLink TCP", str(mavlink.get("tcp_url"))))
     if mavlink.get("websocket_url"):
-        click.echo(f"MAVLink WS:  {mavlink.get('websocket_url')}")
+        click.echo(_ansi.kv(theme, "MAVLink WS", str(mavlink.get("websocket_url"))))
 
     video = data.get("video", {})
-    whep_url = video.get("whep_url")
-    viewer_url = _viewer_url_from_whep(whep_url)
+    viewer_url = _viewer_url_from_whep(video.get("whep_url"))
     state = video.get("state", "unknown")
-    if viewer_url:
-        click.echo(f"Video:      {state}  viewer {viewer_url}")
-    else:
-        click.echo(f"Video:      {state}")
+    click.echo(_ansi.kv(theme, "Video", state + (f"  {viewer_url}" if viewer_url else "")))
 
     cloud_choice = data.get("cloud_choice", {}) or {}
     cloud_paired = bool(cloud_choice.get("paired"))
     backend_url = str(cloud_choice.get("backend_url", "") or "")
     cloud_mode = str(cloud_choice.get("mode", "") or "")
     if cloud_paired and backend_url:
-        click.echo(f"Cloud relay: paired ({backend_url})")
+        cloud_txt = f"paired ({backend_url})"
     elif backend_url and cloud_mode != "local":
-        click.echo(f"Cloud relay: configured ({backend_url}, awaiting pair)")
+        cloud_txt = f"configured ({backend_url}, awaiting pair)"
     elif cloud_mode == "local":
-        click.echo("Cloud relay: disabled (local mode)")
+        cloud_txt = "disabled (local mode)"
     else:
-        click.echo("Cloud relay: not configured")
+        cloud_txt = "not configured"
+    click.echo(_ansi.kv(theme, "Cloud relay", cloud_txt))
 
     remote = data.get("remote_access", {}) or {}
-    cloudflare_status = remote.get("status", "disabled")
-    click.echo(f"Cloudflare: {cloudflare_status}")
+    click.echo(_ansi.kv(theme, "Cloudflare", str(remote.get("status", "disabled"))))
 
     click.echo("")
-    click.echo(f"Next: {data.get('next_action', 'Open setup in a browser')}")
+    click.echo(theme.dim(f"Next: {data.get('next_action', 'Open setup in a browser')}"))
 
 
 def _tui_binary() -> str | None:
@@ -306,7 +329,7 @@ def _checkpoint_state() -> tuple[list[str], list[str]]:
     return done, missing
 
 
-@cli.command(name="install")
+@cli.command(name="install", hidden=True)
 @click.option(
     "--status",
     "show_status",
@@ -513,28 +536,45 @@ def _uninstall_macos(*, yes: bool) -> None:
     if not yes:
         click.confirm("Uninstall ados-drone-agent from this system?", abort=True)
     pkg = "ados-drone-agent"
-    installer = "pip"
-    for candidate, cmd in (
-        ("pipx", ["pipx", "list", "--short"]),
-        ("uv", ["uv", "tool", "list"]),
-    ):
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-            if result.returncode == 0 and pkg in result.stdout:
-                installer = candidate
-                break
-        except FileNotFoundError:
-            pass
-    cmd = {
-        "pipx": ["pipx", "uninstall", pkg],
-        "uv": ["uv", "tool", "uninstall", pkg],
-        "pip": [sys.executable, "-m", "pip", "uninstall", "-y", pkg],
-    }[installer]
-    click.echo(f"Running: {' '.join(cmd)}")
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise click.ClickException(result.stderr.strip() or "Uninstall failed")
-    click.echo("ADOS Drone Agent uninstalled.")
+
+    def _remove() -> str:
+        installer = "pip"
+        for candidate, probe in (
+            ("pipx", ["pipx", "list", "--short"]),
+            ("uv", ["uv", "tool", "list"]),
+        ):
+            try:
+                probed = subprocess.run(probe, capture_output=True, text=True, timeout=10)
+                if probed.returncode == 0 and pkg in probed.stdout:
+                    installer = candidate
+                    break
+            except FileNotFoundError:
+                pass
+        cmd = {
+            "pipx": ["pipx", "uninstall", pkg],
+            "uv": ["uv", "tool", "uninstall", pkg],
+            "pip": [sys.executable, "-m", "pip", "uninstall", "-y", pkg],
+        }[installer]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or "uninstall failed")
+        return f"via {installer}"
+
+    theme = _ansi.detect_theme()
+    results = _ansi.run_steps(
+        theme,
+        [("Remove ados-drone-agent", _remove)],
+        title="Uninstalling ADOS",
+        interactive=sys.stderr.isatty(),
+    )
+    result = results[0]
+    if result.ok:
+        _ansi.print_card(
+            theme, True, [f"{theme.glyph_ok()} ADOS Drone Agent removed", result.detail]
+        )
+    else:
+        _ansi.print_card(theme, False, [f"{theme.glyph_fail()} Uninstall failed", result.detail])
+        raise click.ClickException("uninstall failed")
 
 
 def _uninstall_linux(*, purge: bool, yes: bool) -> None:
@@ -631,79 +671,110 @@ def _uninstall_linux(*, purge: bool, yes: bool) -> None:
     if not yes:
         click.confirm("Proceed with uninstall?", abort=True)
 
-    # Stop + disable + remove each unit. systemctl disable on a unit
-    # that was never enabled is harmless.
-    for unit_file in unit_files:
-        unit_name = unit_file.name
-        if unit_name.endswith(".service"):
-            _stop_service_with_kill_fallback(unit_name[: -len(".service")])
-            try:
-                subprocess.run(
-                    ["systemctl", "disable", unit_name],
-                    capture_output=True,
-                    timeout=10,
-                )
-            except (subprocess.TimeoutExpired, OSError) as exc:
-                click.echo(f"  warn: disable {unit_name} skipped: {exc}", err=True)
-        else:
-            # .slice, .target, .timer — stop best-effort.
-            try:
-                subprocess.run(
-                    ["systemctl", "stop", unit_name],
-                    capture_output=True,
-                    timeout=10,
-                )
-            except (subprocess.TimeoutExpired, OSError) as exc:
-                click.echo(f"  warn: stop {unit_name} skipped: {exc}", err=True)
-        unit_file.unlink(missing_ok=True)
-
-    for wants_dir in wants_dirs:
-        shutil.rmtree(wants_dir, ignore_errors=True)
-    for link in target_wants_links:
-        try:
-            link.unlink(missing_ok=True)
-        except OSError as exc:
-            click.echo(f"  warn: removing {link} failed: {exc}", err=True)
-    for dropin in dropin_files:
-        if dropin.exists() or dropin.is_symlink():
-            dropin.unlink(missing_ok=True)
-
-    if shutil.which("systemctl"):
-        for cmd in (["daemon-reload"], ["reset-failed"]):
-            try:
-                subprocess.run(
-                    ["systemctl", *cmd], capture_output=True, timeout=10
-                )
-            except (subprocess.TimeoutExpired, OSError) as exc:
-                click.echo(f"  warn: systemctl {' '.join(cmd)} skipped: {exc}", err=True)
-    if shutil.which("udevadm"):
-        try:
-            subprocess.run(
-                ["udevadm", "control", "--reload-rules"],
-                capture_output=True,
-                timeout=10,
-            )
-        except (subprocess.TimeoutExpired, OSError) as exc:
-            click.echo(f"  warn: udevadm reload skipped: {exc}", err=True)
-
-    for path in symlinks:
-        if path.exists() or path.is_symlink():
-            path.unlink(missing_ok=True)
-    # Always wipe install + data + state + log dirs. /var/lib/ados and
-    # /var/log/ados are created by setup_state_dirs at every install, so
-    # removing them here is symmetric. Config is gated by --purge below.
-    for path in (install_dir, data_dir, state_dir, log_dir):
-        if path.exists():
-            shutil.rmtree(path, ignore_errors=True)
-    # /run/ados is tmpfs; best-effort.
+    # Execute the teardown as a live checklist so a slow `systemctl stop`
+    # (up to a minute for a stubborn unit) never looks frozen. Each step is
+    # best-effort: failures are swallowed so the cleanup always continues,
+    # matching the historical behavior. /var/lib/ados and /var/log/ados are
+    # created at every install, so removing them here is symmetric; /run/ados
+    # is tmpfs; config is gated by --purge.
     run_dir = Path("/run/ados")
-    if run_dir.exists():
-        shutil.rmtree(run_dir, ignore_errors=True)
-    if motd_file.exists():
-        motd_file.unlink(missing_ok=True)
-    if purge and config_dir.exists():
+
+    def _stop_services() -> str:
+        for unit_file in unit_files:
+            unit_name = unit_file.name
+            if unit_name.endswith(".service"):
+                _stop_service_with_kill_fallback(unit_name[: -len(".service")])
+                try:
+                    subprocess.run(
+                        ["systemctl", "disable", unit_name], capture_output=True, timeout=10
+                    )
+                except (subprocess.TimeoutExpired, OSError):
+                    pass
+            else:
+                # .slice, .target, .timer — stop best-effort.
+                try:
+                    subprocess.run(
+                        ["systemctl", "stop", unit_name], capture_output=True, timeout=10
+                    )
+                except (subprocess.TimeoutExpired, OSError):
+                    pass
+        return f"{len(unit_files)} units"
+
+    def _remove_units() -> str:
+        for unit_file in unit_files:
+            unit_file.unlink(missing_ok=True)
+        for wants_dir in wants_dirs:
+            shutil.rmtree(wants_dir, ignore_errors=True)
+        for link in target_wants_links:
+            try:
+                link.unlink(missing_ok=True)
+            except OSError:
+                pass
+        for dropin in dropin_files:
+            if dropin.exists() or dropin.is_symlink():
+                dropin.unlink(missing_ok=True)
+        return ""
+
+    def _reload_systemd() -> str:
+        if shutil.which("systemctl"):
+            for cmd in (["daemon-reload"], ["reset-failed"]):
+                try:
+                    subprocess.run(["systemctl", *cmd], capture_output=True, timeout=10)
+                except (subprocess.TimeoutExpired, OSError):
+                    pass
+        if shutil.which("udevadm"):
+            try:
+                subprocess.run(
+                    ["udevadm", "control", "--reload-rules"], capture_output=True, timeout=10
+                )
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+        return ""
+
+    def _remove_command() -> str:
+        for path in symlinks:
+            if path.exists() or path.is_symlink():
+                path.unlink(missing_ok=True)
+        return ""
+
+    def _remove_files() -> str:
+        for path in (install_dir, data_dir, state_dir, log_dir):
+            if path.exists():
+                shutil.rmtree(path, ignore_errors=True)
+        if run_dir.exists():
+            shutil.rmtree(run_dir, ignore_errors=True)
+        if motd_file.exists():
+            motd_file.unlink(missing_ok=True)
+        return ""
+
+    def _purge_config() -> str:
         shutil.rmtree(config_dir, ignore_errors=True)
-    click.echo("ADOS Drone Agent uninstalled.")
+        return ""
+
+    steps: list[_ansi.Step] = [
+        ("Stop ados services", _stop_services),
+        ("Remove systemd units", _remove_units),
+        ("Reload systemd and udev", _reload_systemd),
+        ("Remove ados command", _remove_command),
+        ("Remove files", _remove_files),
+    ]
+    if purge and config_dir.exists():
+        steps.append(("Purge config", _purge_config))
+
+    theme = _ansi.detect_theme()
+    results = _ansi.run_steps(
+        theme, steps, title="Uninstalling ADOS", interactive=sys.stderr.isatty()
+    )
+    ok = all(r.ok for r in results)
+    done = sum(1 for r in results if r.ok)
+    glyph = theme.glyph_ok() if ok else theme.glyph_fail()
+    summary = [
+        f"{glyph} ADOS Drone Agent {'removed' if ok else 'removal finished with warnings'}",
+        f"{done}/{len(results)} steps",
+    ]
+    if not purge:
+        summary.append(f"config kept: {config_dir}  (--purge to remove)")
+    _ansi.print_card(theme, ok, summary)
 
 
 def _resolve_router_bin() -> str | None:
@@ -782,20 +853,26 @@ def demo(port: int) -> None:
 # Wire subcommand groups. Done at import time so the entry point in
 # pyproject.toml (ados = ados.cli.main:cli) sees the full command tree.
 from ados.cli.hardware import hardware_group  # noqa: E402
+from ados.cli.help import help_command  # noqa: E402
 from ados.cli.logs import logs_group  # noqa: E402
 from ados.cli.network import network_group  # noqa: E402
+from ados.cli.pair import pair, unpair  # noqa: E402
 from ados.cli.plugin import plugin_group  # noqa: E402
 from ados.cli.profile import profile_group  # noqa: E402
 from ados.cli.radio import radio_group  # noqa: E402
 from ados.cli.rust import rust_group  # noqa: E402
 
-cli.add_command(hardware_group)
+# Primitive operator commands stay on the primary help surface. The advanced
+# groups keep working (log RCA, service toggles, plugins, …) but are hidden so
+# the common path is uncluttered; `ados help` lists the primitives.
+cli.add_command(pair)
+cli.add_command(unpair)
+cli.add_command(help_command)
 cli.add_command(logs_group)
-cli.add_command(network_group)
-cli.add_command(plugin_group)
-cli.add_command(profile_group)
-cli.add_command(radio_group)
-cli.add_command(rust_group)
+
+for _group in (hardware_group, network_group, plugin_group, profile_group, radio_group, rust_group):
+    _group.hidden = True
+    cli.add_command(_group)
 
 
 if __name__ == "__main__":

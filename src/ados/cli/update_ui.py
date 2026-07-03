@@ -1,21 +1,16 @@
 """Interactive renderer for ``ados update``.
 
-Mirrors the look of the installer's progress UI (rounded box, braille spinner,
-green/red + cyan accent, ASCII fallback) but in Python, since the OTA self-update
-is a client-driven flow against the running agent rather than the Rust installer.
-
-No new dependency: a small ANSI "sticky block" drawn to stderr, render-only
-(only ever writes, never reads input), so it is safe over SSH and degrades to
-plain line output when stderr is not a terminal. The agent already tracks the
-update phase (``GET /api/ota`` ``state``) and a live download fraction
-(``download`` block), so the install POST runs in a background thread while the
-main thread polls + renders.
+A live phase checklist + download bar + closing card drawn with the shared CLI
+house style (``_ansi``): a rounded box, a braille spinner, green/red + a cyan
+accent, ASCII + ``NO_COLOR`` fallbacks. Render-only (writes to stderr, never
+reads input), so it is safe over SSH and degrades to plain line output when
+stderr is not a terminal. The agent tracks the update phase (``GET /api/ota``
+``state``) and a live download fraction (``download`` block), so the install
+POST runs in a background thread while the main thread polls + renders.
 """
 
 from __future__ import annotations
 
-import os
-import sys
 import threading
 import time
 from collections.abc import Callable
@@ -23,6 +18,28 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import click
+
+from ados.cli._ansi import (
+    Sticky as _Sticky,
+)
+from ados.cli._ansi import (
+    Theme as _Theme,
+)
+from ados.cli._ansi import (
+    bar as _bar,
+)
+from ados.cli._ansi import (
+    detect_theme as _detect_theme,
+)
+from ados.cli._ansi import (
+    print_card as _print_card,
+)
+from ados.cli._ansi import (
+    term_width as _term_width,
+)
+from ados.cli._ansi import (
+    vlen as _vlen,
+)
 
 # Ordered phases the operator sees, mapped from the agent's UpdateState.
 PHASES = ("Download", "Verify", "Install", "Restart")
@@ -33,59 +50,6 @@ _STATE_PHASE = {
     "installing": 2,
     "restarting": 3,
 }
-_SPIN_UNICODE = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-_SPIN_ASCII = "-\\|/"
-
-
-@dataclass
-class _Theme:
-    color: bool
-    ascii: bool
-
-    def paint(self, s: str, code: str) -> str:
-        return f"\x1b[{code}m{s}\x1b[0m" if self.color else s
-
-    def ok(self, s: str) -> str:
-        return self.paint(s, "32")  # green
-
-    def fail(self, s: str) -> str:
-        return self.paint(s, "31")  # red
-
-    def accent(self, s: str) -> str:
-        return self.paint(s, "36")  # cyan
-
-    def dim(self, s: str) -> str:
-        return self.paint(s, "90")  # bright-black / grey
-
-    def spinner(self, frame: int) -> str:
-        seq = _SPIN_ASCII if self.ascii else _SPIN_UNICODE
-        return seq[frame % len(seq)]
-
-    def glyph_ok(self) -> str:
-        return "+" if self.ascii else "✓"
-
-    def glyph_fail(self) -> str:
-        return "x" if self.ascii else "✗"
-
-    def glyph_pending(self) -> str:
-        return "." if self.ascii else "•"
-
-    def box(self) -> tuple[str, str, str, str, str, str]:
-        if self.ascii:
-            return ("+", "+", "+", "+", "-", "|")
-        return ("╭", "╮", "╰", "╯", "─", "│")
-
-
-def _locale_is_utf8() -> bool:
-    for key in ("LC_ALL", "LC_CTYPE", "LANG"):
-        val = os.environ.get(key)
-        if val:
-            return "utf-8" in val.lower() or "utf8" in val.lower()
-    return True
-
-
-def _detect_theme() -> _Theme:
-    return _Theme(color="NO_COLOR" not in os.environ, ascii=not _locale_is_utf8())
 
 
 @dataclass
@@ -107,21 +71,6 @@ class _Model:
         if idx is not None:
             self.active = idx
             self.done_through = max(self.done_through, idx - 1)
-
-
-def _term_width() -> int:
-    try:
-        return max(40, min(os.get_terminal_size(sys.stderr.fileno()).columns - 2, 64))
-    except OSError:
-        return 58
-
-
-def _bar(theme: _Theme, percent: float) -> str:
-    cells = 8
-    filled = max(0, min(cells, round(percent / 100 * cells)))
-    if theme.ascii:
-        return "[" + "#" * filled + "." * (cells - filled) + "]"
-    return "▕" + "█" * filled + "░" * (cells - filled) + "▏"
 
 
 def _phase_detail(theme: _Theme, model: _Model, idx: int) -> str:
@@ -162,61 +111,6 @@ def _block_lines(theme: _Theme, model: _Model, spinner: int, width: int) -> list
 
     bottom = theme.accent(f"{bl}{h * content_w}{br}")
     return [top, *rows, bottom]
-
-
-def _vlen(s: str) -> int:
-    """Visible length: chars excluding ANSI escapes (our plain inputs have none)."""
-    return len(s)
-
-
-class _Sticky:
-    """A render-only ANSI sticky block on stderr."""
-
-    def __init__(self) -> None:
-        self.height = 0
-        self.out = sys.stderr
-
-    def hide_cursor(self) -> None:
-        self.out.write("\x1b[?25l")
-        self.out.flush()
-
-    def show_cursor(self) -> None:
-        self.out.write("\x1b[?25h")
-        self.out.flush()
-
-    def draw(self, lines: list[str]) -> None:
-        buf = []
-        if self.height:
-            buf.append(f"\x1b[{self.height}F")
-        buf.append("\x1b[J")
-        for line in lines:
-            buf.append(line + "\n")
-        self.out.write("".join(buf))
-        self.out.flush()
-        self.height = len(lines)
-
-    def erase(self) -> None:
-        if self.height:
-            self.out.write(f"\x1b[{self.height}F\x1b[J")
-            self.out.flush()
-            self.height = 0
-
-
-def _print_card(theme: _Theme, ok: bool, lines: list[str]) -> None:
-    tl, tr, bl, br, h, v = theme.box()
-    paint = theme.ok if ok else theme.fail
-    width = _term_width()
-    content_w = width - 2
-    body_w = content_w - 2
-    title = lines[0]
-    lead = f"{h} {title[: content_w - 4]} "
-    dashes = max(1, content_w - _vlen(lead))
-    sys.stderr.write(paint(f"{tl}{lead}{h * dashes}{tr}") + "\n")
-    for body in lines[1:]:
-        clipped = body[:body_w]
-        sys.stderr.write(f"{paint(v)} {clipped}{' ' * (body_w - len(clipped))} {paint(v)}\n")
-    sys.stderr.write(paint(f"{bl}{h * content_w}{br}") + "\n")
-    sys.stderr.flush()
 
 
 def run(

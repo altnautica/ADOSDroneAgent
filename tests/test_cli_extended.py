@@ -138,7 +138,8 @@ def test_status_plain_uses_lan_host_when_available() -> None:
     with patch("ados.cli.main._setup_status", return_value=payload):
         result = runner.invoke(cli, ["status"])
     assert result.exit_code == 0
-    assert "Open setup: http://ados-abc123.local:8080/setup" in result.output
+    assert "Reach this agent" in result.output
+    assert "ados-abc123.local:8080" in result.output
 
 
 def test_status_plain_falls_back_to_primary_access_url() -> None:
@@ -148,7 +149,7 @@ def test_status_plain_falls_back_to_primary_access_url() -> None:
     with patch("ados.cli.main._setup_status", return_value=payload):
         result = runner.invoke(cli, ["status"])
     assert result.exit_code == 0
-    assert "Open setup: http://127.0.0.1:8080" in result.output
+    assert "127.0.0.1:8080" in result.output
 
 
 def test_status_plain_shows_pair_code_when_unpaired() -> None:
