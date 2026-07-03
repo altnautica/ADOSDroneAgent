@@ -2,8 +2,8 @@
 //!
 //! Each backend is a thin integration over a third-party tool the compute node
 //! shells out to: Brush (a Rust gaussian-splat trainer, Metal/Vulkan/wgpu, no
-//! CUDA), nerfstudio/splatfacto (Python, CUDA or MPS), COLMAP (SfM poses +
-//! sparse cloud), and WebODM (orthomosaic / dense cloud). The tool itself is not
+//! CUDA), nerfstudio/splatfacto (Python, CUDA or MPS), and COLMAP (SfM poses +
+//! sparse cloud, the seed pre-pass). The tool itself is not
 //! Altnautica code; this module owns the COMMAND it runs (program + args derived
 //! from the dataset + params), the output-URI convention, and the result parse.
 //!
@@ -67,8 +67,6 @@ pub enum ReconstructorKind {
     Nerfstudio,
     /// COLMAP: structure-from-motion poses + a sparse point cloud (the pre-pass).
     Colmap,
-    /// WebODM: orthomosaic + dense cloud (photogrammetry).
-    Webodm,
 }
 
 impl ReconstructorKind {
@@ -79,7 +77,6 @@ impl ReconstructorKind {
             "msplat" => Some(Self::Msplat),
             "nerfstudio" | "splatfacto" => Some(Self::Nerfstudio),
             "colmap" => Some(Self::Colmap),
-            "webodm" => Some(Self::Webodm),
             _ => None,
         }
     }
@@ -91,7 +88,6 @@ impl ReconstructorKind {
             Self::Msplat => "msplat",
             Self::Nerfstudio => "ns-train",
             Self::Colmap => "colmap",
-            Self::Webodm => "webodm",
         }
     }
 
@@ -102,7 +98,6 @@ impl ReconstructorKind {
             Self::Msplat => "msplat",
             Self::Nerfstudio => "nerfstudio",
             Self::Colmap => "colmap",
-            Self::Webodm => "webodm",
         }
     }
 
@@ -111,7 +106,6 @@ impl ReconstructorKind {
         match self {
             Self::Brush | Self::Msplat | Self::Nerfstudio => "splat",
             Self::Colmap => "pointcloud",
-            Self::Webodm => "orthomosaic",
         }
     }
 
@@ -120,7 +114,6 @@ impl ReconstructorKind {
         match self {
             Self::Brush | Self::Msplat | Self::Nerfstudio => "ply",
             Self::Colmap => "ply",
-            Self::Webodm => "tif",
         }
     }
 }
@@ -293,14 +286,6 @@ impl CliReconstructor {
                 "--workspace_path".into(),
                 output_s,
             ],
-            ReconstructorKind::Webodm => {
-                vec![
-                    "--project-path".into(),
-                    input_s,
-                    "--output".into(),
-                    output_s,
-                ]
-            }
         };
 
         ReconstructCommand {
@@ -356,8 +341,8 @@ impl Reconstructor for CliReconstructor {
             kind: self.kind.artifact_kind().into(),
             uri: cmd.output_uri,
             gaussian_count: parse_gaussian_count(&stdout),
-            // The concrete tool that produced this (brush / nerfstudio / colmap /
-            // webodm) so the client can tell a real reconstruction from the mock
+            // The concrete tool that produced this (brush / msplat / nerfstudio /
+            // colmap) so the client can tell a real reconstruction from the mock
             // placeholder. Reuses ReconstructorKind::name(), never hardcoded.
             backend: self.kind.name().into(),
         })
@@ -517,8 +502,8 @@ mod tests {
             Some(ReconstructorKind::Colmap)
         );
         assert_eq!(
-            ReconstructorKind::from_hint("webodm"),
-            Some(ReconstructorKind::Webodm)
+            ReconstructorKind::from_hint("msplat"),
+            Some(ReconstructorKind::Msplat)
         );
         assert_eq!(ReconstructorKind::from_hint("nope"), None);
     }
@@ -656,7 +641,7 @@ mod tests {
     }
 
     #[test]
-    fn nerfstudio_and_webodm_command_shapes() {
+    fn nerfstudio_command_shape() {
         let ns = CliReconstructor::new(ReconstructorKind::Nerfstudio, "/w");
         let nc = ns.command(
             &dataset("d", Some("/imgs")),
@@ -666,12 +651,6 @@ mod tests {
         assert_eq!(nc.args.first().map(String::as_str), Some("splatfacto"));
         assert!(nc.args.iter().any(|a| a == "--max-num-iterations"));
         assert!(nc.args.iter().any(|a| a == "7000"));
-
-        let wo = CliReconstructor::new(ReconstructorKind::Webodm, "/w");
-        let wc = wo.command(&dataset("d", Some("/imgs")), &serde_json::json!({}));
-        assert_eq!(wc.program, "webodm");
-        assert_eq!(wc.output_path, Path::new("/w/d/output.tif"));
-        assert_eq!(wo.kind().artifact_kind(), "orthomosaic");
     }
 
     #[test]
@@ -768,9 +747,9 @@ mod tests {
         // client can tell a placeholder from the real thing.
         for (kind, name) in [
             (ReconstructorKind::Brush, "brush"),
+            (ReconstructorKind::Msplat, "msplat"),
             (ReconstructorKind::Nerfstudio, "nerfstudio"),
             (ReconstructorKind::Colmap, "colmap"),
-            (ReconstructorKind::Webodm, "webodm"),
         ] {
             assert_eq!(kind.name(), name);
             // The Reconstructor::name() the CliReconstructor reports is the same
@@ -789,13 +768,14 @@ mod tests {
         // kind's program onto a temp dir prepended to PATH, run, and assert the
         // output carries the concrete backend name (not `mock`).
         //
-        // We use `webodm` because no other test relies on it being absent
+        // We use `colmap` because no other test relies on it being absent
         // (missing_program uses `brush`; is_tool_available checks `sh`/a bogus
-        // name), and we PREPEND (not replace) PATH and restore it BEFORE asserting
+        // name; the selection tests are pure and never probe `colmap` on the real
+        // PATH), and we PREPEND (not replace) PATH and restore it BEFORE asserting
         // so a panic can never leak a mutated PATH into a parallel test. std's
         // internal env lock serializes this against other tests' env reads; the
         // crate already mutates env in tests (heartbeat_sidecar).
-        let kind = ReconstructorKind::Webodm;
+        let kind = ReconstructorKind::Colmap;
         let base =
             std::env::temp_dir().join(format!("ados-compute-real-backend-{}", std::process::id()));
         let bin_dir = base.join("bin");
@@ -830,9 +810,9 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&base);
 
-        let out = result.expect("fake webodm exits 0, reconstruct should succeed");
-        assert_eq!(out.backend, "webodm");
+        let out = result.expect("fake colmap exits 0, reconstruct should succeed");
+        assert_eq!(out.backend, "colmap");
         assert_ne!(out.backend, "mock");
-        assert_eq!(out.kind, "orthomosaic");
+        assert_eq!(out.kind, "pointcloud");
     }
 }

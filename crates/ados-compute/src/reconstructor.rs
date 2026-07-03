@@ -1,6 +1,6 @@
 //! The reconstructor backend: turns a keyframe-bag dataset into a world-model
 //! artifact (gaussian splat / point cloud / mesh). Real backends shell out to
-//! third-party tools (Brush / nerfstudio / COLMAP / WebODM); the mock keeps the
+//! third-party tools (Brush / msplat / nerfstudio / COLMAP); the mock keeps the
 //! engine testable with no GPU.
 
 use serde::{Deserialize, Serialize};
@@ -19,7 +19,7 @@ pub struct ReconstructOutput {
     /// The concrete backend that produced this artifact. `mock` is a
     /// deterministic placeholder (no GPU, CI / no-backend node) and is NEVER a
     /// real world model; a real reconstruction carries its tool name
-    /// (`brush` / `nerfstudio` / `colmap` / `webodm`). Stamped by the backend
+    /// (`brush` / `msplat` / `nerfstudio` / `colmap`). Stamped by the backend
     /// that actually ran so it survives the selecting-reconstructor indirection
     /// and reaches the client for an honest-placeholder badge.
     pub backend: String,
