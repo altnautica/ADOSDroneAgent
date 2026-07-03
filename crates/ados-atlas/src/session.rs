@@ -136,6 +136,19 @@ impl CaptureSession {
         self.config.enabled_camera_count()
     }
 
+    /// Whether the session has reached its configured session-wide keyframe cap.
+    /// A cap of `0` means unlimited. This is a SESSION-level gate: the per-camera
+    /// selector is count-blind and would keep re-crossing its motion/time
+    /// thresholds on a repeating flight path (an orbit revisits the same viewpoints
+    /// every lap), so an uncapped session on a loop accumulates keyframes without
+    /// bound. Both [`would_select`](Self::would_select) and
+    /// [`on_frame`](Self::on_frame) consult this before the per-camera decision so
+    /// the peek and the commit can never disagree.
+    fn at_keyframe_cap(&self) -> bool {
+        let cap = self.config.selection.max_keyframes;
+        cap > 0 && self.kf_count >= cap
+    }
+
     /// A snapshot of the capture status for the state topic.
     pub fn status(&self) -> CaptureStatus {
         CaptureStatus {
@@ -155,6 +168,10 @@ impl CaptureSession {
     /// the frame would only contribute to the pose stream. Records nothing.
     pub fn would_select(&self, camera_id: &str, pose: &Pose, ts_ms: i64) -> bool {
         if self.state != CaptureState::Capturing {
+            return false;
+        }
+        // Session-wide keyframe cap reached: no camera selects again this session.
+        if self.at_keyframe_cap() {
             return false;
         }
         let enabled = self
@@ -206,12 +223,18 @@ impl CaptureSession {
             ts_ms,
         };
 
-        // Per-camera keyframe selection.
-        let selected = self
-            .selectors
-            .entry(camera_id.to_string())
-            .or_default()
-            .should_select(&frame.pose, ts_ms, &self.config.selection);
+        // Per-camera keyframe selection, gated by the session-wide cap first so it
+        // mirrors `would_select`. Once at the cap we short-circuit BEFORE touching
+        // the per-camera selector: the pose stream and Capturing state continue
+        // (the live-capture model is preserved), only keyframe selection stops.
+        let selected = if self.at_keyframe_cap() {
+            false
+        } else {
+            self.selectors
+                .entry(camera_id.to_string())
+                .or_default()
+                .should_select(&frame.pose, ts_ms, &self.config.selection)
+        };
 
         let keyframe = if selected {
             let is_first = self.kf_count == 0;
@@ -476,5 +499,60 @@ mod tests {
         assert!(s.on_frame("front", frame_at([0.0, 0.0, 0.0]), 0).is_none());
         s.mark_bagged();
         assert_eq!(s.state(), CaptureState::Bagged);
+    }
+
+    #[test]
+    fn session_wide_keyframe_cap_stops_selecting_past_the_cap() {
+        // A capped session stops laying down keyframes once the cap is reached,
+        // even as more frames arrive that would each cross the motion threshold —
+        // the fix for a looping flight (an orbit revisits the same viewpoints each
+        // lap) that would otherwise re-cross the per-camera thresholds forever and
+        // bloat the dataset without bound.
+        let capped = CaptureConfig {
+            cameras: vec![cam("front", CameraRole::Primary, true)],
+            profile: CaptureProfile::Orbit,
+            selection: SelectionParams {
+                max_keyframes: 3,
+                ..SelectionParams::default()
+            },
+        };
+        let mut s = CaptureSession::new(capped);
+        s.start("sess-cap".into());
+
+        // Ten frames, each 1.0 m past the last (well over the 0.5 m threshold) so
+        // the per-camera selector would otherwise fire on every one.
+        for i in 0..10 {
+            s.on_frame("front", frame_at([i as f64, 0.0, 0.0]), i * 100);
+        }
+        // Exactly the cap, never more, no matter how many frames arrive.
+        assert_eq!(s.status().keyframes, 3);
+
+        // The pose stream keeps flowing past the cap (the live-capture model is
+        // preserved): an eleventh frame still yields an output, just no keyframe.
+        let out = s
+            .on_frame("front", frame_at([11.0, 0.0, 0.0]), 1100)
+            .unwrap();
+        assert!(out.keyframe.is_none());
+        // The peek agrees with the commit: at the cap it never selects.
+        assert!(!s.would_select("front", &frame_at([12.0, 0.0, 0.0]).pose, 1200));
+        assert_eq!(s.status().keyframes, 3);
+    }
+
+    #[test]
+    fn zero_keyframe_cap_is_unlimited() {
+        // The default cap of 0 preserves today's behaviour: no session-wide bound,
+        // so every moving frame past the first still lays down a keyframe.
+        let uncapped = CaptureConfig {
+            cameras: vec![cam("front", CameraRole::Primary, true)],
+            profile: CaptureProfile::Orbit,
+            selection: SelectionParams::default(), // max_keyframes == 0
+        };
+        assert_eq!(uncapped.selection.max_keyframes, 0);
+        let mut s = CaptureSession::new(uncapped);
+        s.start("sess-unlimited".into());
+        for i in 0..50 {
+            s.on_frame("front", frame_at([i as f64, 0.0, 0.0]), i * 100);
+        }
+        assert_eq!(s.status().keyframes, 50);
     }
 }

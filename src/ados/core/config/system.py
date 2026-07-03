@@ -52,6 +52,7 @@ class AtlasSelectionParams(BaseModel):
     min_translation_m: float = 0.5
     min_rotation_rad: float = 0.26  # ~15 degrees
     max_interval_ms: int = 2000
+    max_keyframes: int = 0  # 0 = unlimited; a session-wide cap on selected keyframes
 
 
 class AtlasIntrinsicsOverride(BaseModel):

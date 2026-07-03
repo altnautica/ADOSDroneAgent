@@ -63,6 +63,10 @@ fn default_min_rotation_rad() -> f64 {
 fn default_max_interval_ms() -> i64 {
     2000
 }
+/// 0 = unlimited (the historical behaviour — no session-wide cap).
+fn default_max_keyframes() -> u64 {
+    0
+}
 
 /// Thresholds the [`crate::KeyframeSelector`] uses to decide when the camera has
 /// moved enough to be worth a new keyframe. A frame is selected when it crosses
@@ -84,6 +88,14 @@ pub struct SelectionParams {
     /// hovering drone still lays down a heartbeat keyframe.
     #[serde(default = "default_max_interval_ms")]
     pub max_interval_ms: i64,
+    /// Session-wide upper bound on the total keyframes a single capture session
+    /// records, across all cameras. Enforced by [`crate::CaptureSession`], not by
+    /// the per-camera selector (which is count-blind and would re-cross its
+    /// motion/time thresholds forever on a repeating flight path, e.g. an orbit,
+    /// bloating a dataset past what a reconstructor can chew). `0` means unlimited
+    /// so an unset config keeps today's behaviour.
+    #[serde(default = "default_max_keyframes")]
+    pub max_keyframes: u64,
 }
 
 impl Default for SelectionParams {
@@ -92,6 +104,7 @@ impl Default for SelectionParams {
             min_translation_m: default_min_translation_m(),
             min_rotation_rad: default_min_rotation_rad(),
             max_interval_ms: default_max_interval_ms(),
+            max_keyframes: default_max_keyframes(),
         }
     }
 }
@@ -187,6 +200,8 @@ mod tests {
         assert!((p.min_translation_m - 0.5).abs() < 1e-12);
         assert!((p.min_rotation_rad - 0.26).abs() < 1e-12);
         assert_eq!(p.max_interval_ms, 2000);
+        // 0 = unlimited: an unset config never caps the session.
+        assert_eq!(p.max_keyframes, 0);
     }
 
     #[test]

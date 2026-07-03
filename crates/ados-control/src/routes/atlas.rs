@@ -7,9 +7,12 @@
 //!   whether this drone can build a world model and whether it is capturing now:
 //!   `enabled` + `cameras_configured` + `capture_profile` + `pose_source` from the
 //!   agent config, plus the live `state` / `capturing` / `session_id` /
-//!   `service_running` read from the capture service's control socket.
-//!   Compute-node reachability is the GCS's own concern (it already knows its
-//!   paired workstation nodes), so it is deliberately not probed here.
+//!   `service_running` read from the capture service's control socket, plus the
+//!   `compute_node_id` the egress forwarder is actively streaming to (folded from
+//!   its handoff sidecar, freshness-gated so a dead forwarder never lingers).
+//!   Compute-node reachability probing is the GCS's own concern (it already knows
+//!   its paired workstation nodes), so it is not re-probed here — only the node the
+//!   forwarder resolved is surfaced.
 //! - **`PUT /api/atlas/config`** — enable/disable capture on this drone plus the
 //!   capture profile and camera set. Writes the `atlas:` block into
 //!   `/etc/ados/config.yaml` with a surgical merge that preserves every other key
@@ -29,6 +32,7 @@
 //! the same native posture as the compute-status read.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -36,7 +40,11 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use ados_protocol::atlas::{CaptureState, CaptureStatus};
+use ados_protocol::atlas::{
+    AtlasForwardStatus, CaptureState, CaptureStatus, ATLAS_FORWARD_SIDECAR,
+    ATLAS_FORWARD_SIDECAR_VERSION,
+};
+use ados_protocol::sidecar::check_sidecar_version;
 
 use crate::ipc::atlas_control_client::{AtlasControlClient, AtlasControlError};
 use crate::routes::detail;
@@ -57,6 +65,11 @@ const VALID_CAPTURE_PROFILES: [&str; 4] = ["orbit", "lawnmower", "freeform", "in
 /// written verbatim: an unknown role fails the whole `atlas:` block's parse, which
 /// would silently default the block to disabled, so it is caught at the API edge.
 const VALID_CAMERA_ROLES: [&str; 7] = ["primary", "aux", "down", "left", "right", "back", "up"];
+
+/// A forwarder handoff not re-written within this window is treated as absent, so a
+/// dead forwarder never keeps a stale compute node on the readiness surface
+/// (operating rule 44). Comfortably larger than the forwarder's refresh cadence.
+const FORWARD_STALE: Duration = Duration::from_secs(15);
 
 /// The agent config path (`ADOS_CONFIG`, default `/etc/ados/config.yaml`), the
 /// same resolution the sibling write routes use.
@@ -152,25 +165,57 @@ fn capture_state_str(state: CaptureState) -> &'static str {
     }
 }
 
+/// Read the forwarder handoff at `path` if it exists AND was written within
+/// [`FORWARD_STALE`] of `now`. A stale file (a dead forwarder whose tmpfs file
+/// persists) is treated as absent so the readiness surface never reports a compute
+/// node that is gone (operating rule 44). A future/unreadable mtime counts as
+/// fresh. Best-effort: any I/O or parse error yields `None`.
+fn read_fresh_forward_status(path: &Path, now: SystemTime) -> Option<AtlasForwardStatus> {
+    let meta = std::fs::metadata(path).ok()?;
+    if let Ok(mtime) = meta.modified() {
+        if let Ok(age) = now.duration_since(mtime) {
+            if age > FORWARD_STALE {
+                return None;
+            }
+        }
+    }
+    let text = std::fs::read_to_string(path).ok()?;
+    let status = serde_json::from_str::<AtlasForwardStatus>(&text).ok()?;
+    // Best-effort drift signal: warn (never reject) if the handoff was written by a
+    // differently-versioned forwarder, then fold it in anyway.
+    check_sidecar_version(
+        "atlas-forward",
+        status.version,
+        ATLAS_FORWARD_SIDECAR_VERSION,
+    );
+    Some(status)
+}
+
 /// `GET /api/atlas/readiness` → the drone-local capture readiness + live state.
 ///
-/// Resolves the config path + the live capture status (the control socket, which
-/// errors to `None` = idle when the service is down) and hands both to the pure
-/// [`build_atlas_readiness`] core, so the projection is testable with an explicit
-/// config path and an injected status — no env and no live socket.
+/// Resolves the config path, the live capture status (the control socket, which
+/// errors to `None` = idle when the service is down), and the forwarder handoff
+/// sidecar, and hands all three to the pure [`build_atlas_readiness`] core, so the
+/// projection is testable with an explicit config path, an injected status, and an
+/// explicit sidecar path — no env and no live socket.
 pub async fn get_atlas_readiness() -> Response {
     // The live session state comes from the capture service's control socket. If
     // it is unreachable, the service is not running (atlas disabled, or no
     // cameras), so the session is idle.
     let live = AtlasControlClient::default_socket().status().await.ok();
-    build_atlas_readiness(&config_yaml_path(), live)
+    build_atlas_readiness(&config_yaml_path(), live, Path::new(ATLAS_FORWARD_SIDECAR))
 }
 
 /// The pure core of [`get_atlas_readiness`]: project the drone-local `atlas:`
-/// config view + the (optional) live capture status into the readiness body. Path-
-/// and status-injectable so tests exercise it deterministically without touching
-/// `ADOS_CONFIG` / `ADOS_RUN_DIR` or standing up a control socket.
-fn build_atlas_readiness(config_path: &Path, live: Option<CaptureStatus>) -> Response {
+/// config view + the (optional) live capture status + the forwarder handoff into
+/// the readiness body. Config-, status-, and sidecar-path-injectable so tests
+/// exercise it deterministically without touching `ADOS_CONFIG` / `ADOS_RUN_DIR`
+/// or standing up a control socket.
+fn build_atlas_readiness(
+    config_path: &Path,
+    live: Option<CaptureStatus>,
+    forward_sidecar_path: &Path,
+) -> Response {
     let view = read_atlas_config_view(config_path);
 
     let (service_running, capturing, state, session_id, camera_count, keyframes, ingest_rate_hz) =
@@ -187,6 +232,13 @@ fn build_atlas_readiness(config_path: &Path, live: Option<CaptureStatus>) -> Res
             None => (false, false, "idle", None, view.cameras_configured, 0, 0.0),
         };
 
+    // The compute node the egress forwarder is actively streaming to is known only
+    // by the forwarder, which writes it to the handoff sidecar. Surface it here
+    // (freshness-gated) so the GCS shows the real node rather than null while a
+    // capture is forwarding; a stale/absent handoff yields `null`.
+    let compute_node_id = read_fresh_forward_status(forward_sidecar_path, SystemTime::now())
+        .and_then(|f| f.compute_node_id);
+
     Json(json!({
         "enabled": view.enabled,
         "profile": view.profile,
@@ -200,6 +252,7 @@ fn build_atlas_readiness(config_path: &Path, live: Option<CaptureStatus>) -> Res
         "camera_count": camera_count,
         "keyframes": keyframes,
         "ingest_rate_hz": ingest_rate_hz,
+        "compute_node_id": compute_node_id,
     }))
     .into_response()
 }
@@ -538,13 +591,21 @@ mod tests {
         assert!(validate_atlas_config_body(&no_role).is_ok());
     }
 
+    async fn readiness_body(resp: Response) -> Value {
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
     #[tokio::test]
     async fn readiness_reports_idle_when_the_service_is_down() {
         // A `None` live status is the "control socket unreachable → service not
         // running" case; the route must degrade to a not-running / idle reading,
-        // never fail. Both the config path and the live status are threaded in
-        // explicitly (no env mutation, no live socket), so the reading is
-        // deterministic and this test cannot race any other test.
+        // never fail. The config path, the live status, and the forwarder sidecar
+        // path are threaded in explicitly (no env mutation, no live socket), so the
+        // reading is deterministic and this test cannot race any other test.
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.yaml");
         std::fs::write(
@@ -553,17 +614,72 @@ mod tests {
         )
         .unwrap();
 
-        let resp = build_atlas_readiness(&cfg, None);
-        assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        // No forwarder handoff on disk → compute_node_id is null.
+        let resp = build_atlas_readiness(&cfg, None, &dir.path().join("atlas-forward.json"));
+        let body = readiness_body(resp).await;
         assert_eq!(body["enabled"], json!(true));
         assert_eq!(body["cameras_configured"], json!(1));
         assert_eq!(body["service_running"], json!(false));
         assert_eq!(body["capturing"], json!(false));
         assert_eq!(body["state"], json!("idle"));
         assert!(body["session_id"].is_null());
+        assert!(body["compute_node_id"].is_null());
+    }
+
+    #[tokio::test]
+    async fn readiness_surfaces_the_forwarders_compute_node() {
+        // A fresh forwarder handoff carrying a compute node → readiness surfaces it,
+        // so the GCS shows the node the stream is going to instead of null (the bug:
+        // readiness read only the capture status, which never carries this).
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        std::fs::write(&cfg, "atlas:\n  enabled: true\n").unwrap();
+
+        let fwd_path = dir.path().join("atlas-forward.json");
+        let forward = AtlasForwardStatus {
+            version: ATLAS_FORWARD_SIDECAR_VERSION,
+            compute_node_id: Some("workstation-01".into()),
+            bearer: Some("direct-lan".into()),
+            last_kf_at_ms: Some(1_700),
+            generated_at_ms: 1_699,
+        };
+        std::fs::write(&fwd_path, serde_json::to_vec(&forward).unwrap()).unwrap();
+
+        let resp = build_atlas_readiness(&cfg, None, &fwd_path);
+        let body = readiness_body(resp).await;
+        assert_eq!(body["compute_node_id"], json!("workstation-01"));
+    }
+
+    #[test]
+    fn a_stale_forward_handoff_is_dropped_so_no_dead_node_lingers() {
+        // A handoff older than the freshness window is treated as absent (rule 44):
+        // a dead forwarder must not keep reporting a compute node that is gone.
+        let dir = tempfile::tempdir().unwrap();
+        let fwd_path = dir.path().join("atlas-forward.json");
+        let forward = AtlasForwardStatus {
+            version: ATLAS_FORWARD_SIDECAR_VERSION,
+            compute_node_id: Some("workstation-01".into()),
+            bearer: Some("wfb-relay".into()),
+            last_kf_at_ms: Some(9),
+            generated_at_ms: 9,
+        };
+        std::fs::write(&fwd_path, serde_json::to_vec(&forward).unwrap()).unwrap();
+
+        // Fresh now → read back.
+        let fresh = read_fresh_forward_status(&fwd_path, SystemTime::now());
+        assert_eq!(
+            fresh.and_then(|f| f.compute_node_id).as_deref(),
+            Some("workstation-01")
+        );
+
+        // A "now" far past the write time makes the file older than the window →
+        // dropped, so readiness would surface null.
+        let future = SystemTime::now() + Duration::from_secs(3600);
+        assert!(read_fresh_forward_status(&fwd_path, future).is_none());
+
+        // A missing handoff file → None (no forwarder has run yet).
+        assert!(
+            read_fresh_forward_status(&dir.path().join("nope.json"), SystemTime::now()).is_none()
+        );
     }
 }
