@@ -16,6 +16,14 @@ pub struct AccessUrl {
     pub primary: bool,
 }
 
+/// A console reach endpoint: the agent's web UI as a bare `host:port`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReachHost {
+    pub host_port: String,
+    pub primary: bool,
+    pub loopback: bool,
+}
+
 /// A setup-wizard step with its raw state (e.g. `complete`, `needs_action`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Step {
@@ -128,6 +136,16 @@ fn url_host(url: &str) -> String {
             .unwrap_or(host_port)
     };
     host.to_ascii_lowercase()
+}
+
+/// The `host:port` authority of a URL, with the scheme and path stripped.
+fn url_host_port(url: &str) -> String {
+    let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme)
+        .to_string()
 }
 
 fn is_loopback_host(host: &str) -> bool {
@@ -285,13 +303,35 @@ impl Dashboard {
         dash
     }
 
-    /// Access URLs reordered so the most useful reach path comes first: mDNS
-    /// `.local`, then LAN IPs, then other hosts, then loopback last. The sort is
-    /// stable, so the producer's order is preserved within each tier.
-    pub fn reach_urls(&self) -> Vec<AccessUrl> {
-        let mut urls = self.access_urls.clone();
-        urls.sort_by_key(|item| reach_rank(&item.url));
-        urls
+    /// The console addresses to open in a browser (the agent's own web UI),
+    /// best first: mDNS `.local`, then LAN IPs, then other hosts, with loopback
+    /// last and shown only when no routable address exists. Filtered to the
+    /// setup/console pages (not video / MAVLink / Mission Control) and reduced to
+    /// a de-duplicated bare `host:port`, so the narrow panel never has to wrap a
+    /// long URL.
+    pub fn console_reach(&self) -> Vec<ReachHost> {
+        let mut sorted = self.access_urls.clone();
+        sorted.sort_by_key(|item| reach_rank(&item.url));
+        let mut out: Vec<ReachHost> = Vec::new();
+        for item in &sorted {
+            if !item.url.contains("/setup") {
+                continue; // the agent console only, not video / MAVLink / Mission Control
+            }
+            let host_port = url_host_port(&item.url);
+            if host_port.is_empty() || out.iter().any(|r| r.host_port == host_port) {
+                continue;
+            }
+            out.push(ReachHost {
+                host_port,
+                primary: item.primary,
+                loopback: is_loopback_url(&item.url),
+            });
+        }
+        // A remote operator cannot reach loopback: drop it once anything else exists.
+        if out.iter().any(|r| !r.loopback) {
+            out.retain(|r| !r.loopback);
+        }
+        out
     }
 
     /// The overall health verdict, from verified inputs only.
@@ -436,20 +476,45 @@ mod tests {
     }
 
     #[test]
-    fn reach_urls_order_mdns_then_lan_then_loopback() {
+    fn console_reach_orders_dedupes_and_drops_loopback_and_non_console() {
         let data = json!({
             "access_urls": [
                 {"label": "local", "url": "http://localhost:8080/setup"},
                 {"label": "lan", "url": "http://192.168.1.5:8080/setup"},
                 {"label": "mdns", "url": "http://ados-abc.local:8080/setup", "primary": true},
-                {"label": "lan2", "url": "http://10.0.0.9:8080/setup"}
+                {"label": "lan2", "url": "http://10.0.0.9:8080/setup"},
+                {"label": "lan-dup", "url": "http://192.168.1.5:8080/setup"},
+                {"label": "video", "url": "http://ados-abc.local:8889/main/"},
+                {"label": "mc", "url": "http://localhost:4000"}
             ]
         });
         let dash = Dashboard::from_status(&data);
-        let urls = dash.reach_urls();
-        let labels: Vec<&str> = urls.iter().map(|u| u.label.as_str()).collect();
-        // mDNS first, LAN IPs next (in producer order), loopback last.
-        assert_eq!(labels, vec!["mdns", "lan", "lan2", "local"]);
+        let hosts: Vec<String> = dash
+            .console_reach()
+            .into_iter()
+            .map(|r| r.host_port)
+            .collect();
+        // mDNS first, then LAN IPs (deduped, producer order); loopback + non-/setup dropped.
+        assert_eq!(
+            hosts,
+            vec!["ados-abc.local:8080", "192.168.1.5:8080", "10.0.0.9:8080"]
+        );
+        // The mDNS entry is the primary and none of the survivors are loopback.
+        let reach = dash.console_reach();
+        assert!(reach[0].primary);
+        assert!(reach.iter().all(|r| !r.loopback));
+    }
+
+    #[test]
+    fn console_reach_keeps_loopback_only_when_nothing_else() {
+        let data = json!({
+            "access_urls": [{"label": "local", "url": "http://localhost:8080/setup", "primary": true}]
+        });
+        let dash = Dashboard::from_status(&data);
+        let reach = dash.console_reach();
+        assert_eq!(reach.len(), 1);
+        assert_eq!(reach[0].host_port, "localhost:8080");
+        assert!(reach[0].loopback);
     }
 
     #[test]

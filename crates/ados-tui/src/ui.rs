@@ -11,7 +11,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Gauge, Paragraph, Sparkline, Wrap};
 use ratatui::Frame;
 
-use crate::model::{self, state_label, Dashboard, Health, History};
+use crate::model::{state_label, Dashboard, Health, History};
 
 /// The single screen accent.
 const ACCENT: Color = Color::Cyan;
@@ -249,37 +249,49 @@ fn reach_panel(frame: &mut Frame, area: Rect, dash: &Dashboard) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let urls = dash.reach_urls();
+    let hosts = dash.console_reach();
     let mut lines: Vec<Line> = Vec::new();
-    if urls.is_empty() {
+    if hosts.is_empty() {
         lines.push(Line::from(Span::styled(
             "no access URLs advertised yet",
             dim(),
         )));
     } else {
-        for item in &urls {
-            let loopback = model::is_loopback_url(&item.url);
-            let arrow_style = if loopback {
-                dim()
+        lines.push(Line::from(Span::styled("open in a browser", dim())));
+        // Each host sits on one line, truncated to fit — never wrapped mid-URL.
+        let host_w = (inner.width as usize).saturating_sub(6);
+        for host in &hosts {
+            let (arrow_style, host_style) = if host.loopback {
+                (dim(), dim())
             } else {
-                Style::default().fg(ACCENT)
+                (Style::default().fg(ACCENT), bright())
             };
-            let url_style = if loopback { dim() } else { bright() };
             let mut spans = vec![
                 Span::styled("➜  ", arrow_style),
-                Span::styled(item.url.clone(), url_style),
+                Span::styled(truncate(&host.host_port, host_w), host_style),
             ];
-            if item.primary {
+            if host.primary && !host.loopback {
                 spans.push(Span::styled("  ●", Style::default().fg(ACCENT)));
             }
             lines.push(Line::from(spans));
-            lines.push(Line::from(Span::styled(
-                format!("   {}", item.label),
-                dim(),
-            )));
         }
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("add in Mission Control", dim())));
     }
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+/// Truncate to `max` columns with a trailing ellipsis when clipped.
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let mut out: String = s.chars().take(max - 1).collect();
+    out.push('…');
+    out
 }
 
 fn autopilot_panel(frame: &mut Frame, area: Rect, dash: &Dashboard, history: &History) {
