@@ -249,10 +249,14 @@ impl Tty {
                     }
                     return self.read_decoded();
                 }
-                // A signal (a SIGWINCH resize) interrupted the wait.
+                // A signal interrupted the wait. If it was a SIGWINCH resize,
+                // surface it so the caller repaints; otherwise (a SIGCHLD when a
+                // spawned child — nmcli, lsusb, the hardware probe — exits) it is
+                // spurious, so re-poll rather than returning a phantom resize.
                 Err(Errno::EINTR) => {
-                    take_resized();
-                    return Ok(KeyEvent::Resize);
+                    if take_resized() {
+                        return Ok(KeyEvent::Resize);
+                    }
                 }
                 Err(e) => return Err(std::io::Error::from_raw_os_error(e as i32)),
             }
