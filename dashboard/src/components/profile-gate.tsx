@@ -56,8 +56,8 @@ function ProfileMismatchPanel({
         . Switch profiles from{" "}
         <Link to="/settings/profile" className="underline">
           Settings &rarr; Profile
-        </Link>{" "}
-        or re-run the setup wizard.
+        </Link>
+        .
       </p>
       <Button asChild variant="outline" size="sm">
         <Link to="/">Back to Home</Link>
@@ -85,11 +85,10 @@ export function ProfileGate({ allow, roles, children }: ProfileGateProps) {
     return <LoadingPlaceholder />;
   }
 
-  // Pre-finalize (profile=auto) and unknown profiles are transitional:
-  // the operator is still walking the setup wizard or running on a fresh
-  // image. Don't gate during this phase — let them explore every screen
-  // so the wizard can show them what's available. Gating only kicks in
-  // once a concrete profile is committed.
+  // Pre-detect (profile=auto) and unknown profiles are transitional:
+  // the agent is running on a fresh image before the profile is
+  // committed. Don't gate during this phase — let the operator explore
+  // every screen. Gating only kicks in once a concrete profile is set.
   if (profile === "auto" || profile === "unknown") {
     return <>{children}</>;
   }

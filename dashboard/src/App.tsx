@@ -31,13 +31,10 @@ import { ProfileSettings } from "@/routes/settings/profile-settings";
 import { RegionSettings } from "@/routes/settings/region-settings";
 import { VideoRoute } from "@/routes/video-route";
 
-// Code-split heavy routes. The wizard (4 steps + form state) is only
-// hit on first boot; the telemetry page pulls in @tanstack/react-virtual
-// + ~600 params; the plugins route pulls in the install-dialog +
-// risk-badge bundle. Splitting them keeps the main chunk small.
-const SetupRoute = lazy(() =>
-  import("@/routes/setup-route").then((m) => ({ default: m.SetupRoute })),
-);
+// Code-split heavy routes. The telemetry page pulls in
+// @tanstack/react-virtual + ~600 params; the plugins route pulls in the
+// install-dialog + risk-badge bundle. Splitting them keeps the main
+// chunk small.
 const TelemetryRoute = lazy(() =>
   import("@/routes/telemetry-route").then((m) => ({
     default: m.TelemetryRoute,
@@ -69,7 +66,6 @@ export function App() {
               <Route element={<AppShell />}>
                 <Route index element={<IndexRedirect />} />
                 <Route path="/home" element={<HomeRoute />} />
-                <Route path="/setup" element={<SetupRoute />} />
                 <Route path="/pairing" element={<PairingRoute />} />
                 <Route
                   path="/receive"

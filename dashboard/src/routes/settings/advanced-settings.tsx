@@ -234,7 +234,7 @@ export function AdvancedSettings() {
           <>
             This wipes pairing, Wi-Fi credentials, cloud posture, and any
             staged state on the next reboot. There is no undo. The agent
-            will reboot into the setup wizard.
+            will reboot into a fresh, unconfigured state.
           </>
         }
         confirmLabel="Queue reset"

@@ -17,6 +17,7 @@ pub mod plain;
 pub mod rich;
 pub mod summary;
 pub mod theme;
+pub mod tty;
 
 use std::io::{IsTerminal, Write};
 use std::sync::mpsc::{self, Receiver, Sender};

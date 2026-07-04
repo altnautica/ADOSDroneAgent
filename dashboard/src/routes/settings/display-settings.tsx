@@ -1,9 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Monitor } from "lucide-react";
-import { Link } from "react-router-dom";
 
 import { RiskBadge } from "@/components/settings/risk-badge";
-import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { apiFetch } from "@/lib/api";
 
@@ -41,9 +39,10 @@ export function DisplaySettings() {
           </div>
           <p className="text-xs text-muted-foreground">
             HDMI and SPI displays for the local kiosk renderer. Installing an
-            overlay edits the boot config and requires a reboot, so the
-            actual install is driven by the setup wizard's display step
-            (with live progress).
+            overlay edits the boot config and requires a reboot, so the actual
+            install is driven from the CLI with{" "}
+            <code className="text-xs">ados display install</code> (with live
+            progress).
           </p>
 
           <div className="rounded-md border border-border bg-muted/40 px-3 py-2 text-sm">
@@ -89,11 +88,6 @@ export function DisplaySettings() {
             </p>
           )}
 
-          <div className="flex justify-end pt-2">
-            <Button variant="outline" asChild>
-              <Link to="/setup">Open setup wizard</Link>
-            </Button>
-          </div>
         </CardContent>
       </Card>
     </div>

@@ -33,6 +33,14 @@ pub struct Ctx {
     /// Release channel selector (default `edge` — clone + build from source,
     /// matching the predecessor installer's default).
     pub channel: String,
+    /// Pinned operating region (ISO 3166-1 alpha-2), or `None` for the default
+    /// unrestricted radio posture. Set by the onboarding wizard; the config step
+    /// writes the matching `network.regulatory` block.
+    pub region_pinned: Option<String>,
+    /// The operator asked to reach this device from anywhere (cloud relay on).
+    /// Default `false` keeps it local-first; the config step writes `server.mode`
+    /// accordingly.
+    pub cloud_from_anywhere: bool,
     /// The cloned source repo the install ran from. `venv_agent` records the
     /// path it cloned (edge channel) so the downstream steps (`systemd`,
     /// `config_identity`, `dkms`) can find `data/systemd`, `data/udev`, and
@@ -62,6 +70,8 @@ impl Ctx {
             profile,
             install_rtl8812eu,
             channel,
+            region_pinned: None,
+            cloud_from_anywhere: false,
             source_dir: None,
             progress: ProgressSink::default(),
         }

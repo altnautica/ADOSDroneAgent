@@ -25,3 +25,4 @@ pub mod steps;
 pub mod ui;
 pub mod uninstall;
 pub mod verify;
+pub mod wizard;

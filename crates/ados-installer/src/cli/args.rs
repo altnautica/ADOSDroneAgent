@@ -47,6 +47,12 @@ pub struct Args {
     /// `--no-rtl-driver` — skip building the RTL8812EU WFB radio driver (a node
     /// with no long-range radio, e.g. workstation/compute, does not need it).
     pub no_rtl_driver: bool,
+    /// `--yes` / `-y` — accept the auto-detected defaults and skip the
+    /// interactive onboarding wizard (the trust-the-defaults fast path).
+    pub yes: bool,
+    /// `--non-interactive` — never open the terminal for the onboarding wizard;
+    /// force the silent, flag-driven install.
+    pub non_interactive: bool,
     /// `--help` — print usage and exit.
     pub help: bool,
 }
@@ -91,6 +97,8 @@ impl Args {
                 "--no-color" => args.no_color = true,
                 "--ascii" => args.ascii = true,
                 "--no-rtl-driver" => args.no_rtl_driver = true,
+                "--yes" | "-y" => args.yes = true,
+                "--non-interactive" => args.non_interactive = true,
                 "--help" | "-h" => args.help = true,
                 "--profile" => args.profile = Some(take_value(&tokens, &mut i, "--profile")?),
                 "--name" => args.name = Some(take_value(&tokens, &mut i, "--name")?),
@@ -205,6 +213,18 @@ mod tests {
     fn no_rtl_driver_flag_parses() {
         assert!(Args::parse(["--no-rtl-driver"]).unwrap().no_rtl_driver);
         assert!(!Args::default().no_rtl_driver);
+    }
+
+    #[test]
+    fn wizard_gate_flags_parse() {
+        let y = Args::parse(["--yes"]).unwrap();
+        assert!(y.yes);
+        assert!(Args::parse(["-y"]).unwrap().yes);
+        let ni = Args::parse(["--non-interactive"]).unwrap();
+        assert!(ni.non_interactive);
+        // Neither is set by default.
+        assert!(!Args::default().yes);
+        assert!(!Args::default().non_interactive);
     }
 
     #[test]

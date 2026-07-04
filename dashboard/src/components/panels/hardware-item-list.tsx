@@ -1,5 +1,5 @@
-// Per-item hardware list. Used by the wizard's connectivity step
-// and by the home-page hardware panel. Rendering is deliberately
+// Per-item hardware list. Used by the home-page hardware panel and
+// the status tiles. Rendering is deliberately
 // compact: one row per item, severity dot, label, detail line, and
 // an optional fix-hint chip when the item is not OK. Click a row
 // to expand and see the raw item record (id, profile-required, raw

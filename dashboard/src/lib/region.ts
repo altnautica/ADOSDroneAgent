@@ -1,7 +1,7 @@
 // Shared helpers for the operating-region (RF regulatory) surfaces:
-// the setup wizard step, the post-setup Region settings page, and the
-// Home chip. The agent defaults to an unrestricted RF posture; an
-// operator opts into a single region to re-enable the strict gate.
+// the Region settings page and the Home chip. The agent defaults to an
+// unrestricted RF posture; an operator opts into a single region to
+// re-enable the strict gate.
 
 import type { RegulatoryInfo, RegulatoryMode } from "./types";
 

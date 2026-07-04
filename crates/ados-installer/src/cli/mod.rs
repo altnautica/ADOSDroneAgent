@@ -35,5 +35,15 @@ OPTIONS:
     --json                             Machine output on stdout; no progress UI
     --no-color                         Disable color in the progress UI
     --ascii                            ASCII glyph fallback
+    -y, --yes                          Accept the detected defaults; skip the
+                                       interactive setup and install right away
+    --non-interactive                  Never prompt; run the silent, flag-driven
+                                       install (the identity flags above are the
+                                       automation surface)
     -h, --help                         Print this help and exit
+
+On a fresh, interactive install with none of the identity flags set, an
+onboarding wizard walks you through the setup. It is skipped automatically
+whenever a decisive flag is given, in --json/--quiet/CI, or when no terminal
+is attached.
 ";

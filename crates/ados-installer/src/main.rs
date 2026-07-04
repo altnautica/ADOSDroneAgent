@@ -23,6 +23,7 @@ use ados_installer::result::{now_iso8601_utc, FailureAccumulator, InstallResult}
 use ados_installer::steps::full_install_chain;
 use ados_installer::ui;
 use ados_installer::uninstall;
+use ados_installer::wizard::{self, WizardControl};
 
 #[tokio::main]
 async fn main() -> Result<ExitCode> {
@@ -86,7 +87,29 @@ async fn main() -> Result<ExitCode> {
 }
 
 /// Drive the install step chain and write the result contract.
-fn run_install(args: Args, mode: RunMode) -> Result<ExitCode> {
+fn run_install(mut args: Args, mode: RunMode) -> Result<ExitCode> {
+    // Interactive onboarding: only on a fresh, interactive install where the
+    // operator has not already pinned the answers with flags. It collects the
+    // choices into `args` + `wizard_extras`, then the install proceeds exactly
+    // as the flag-driven path would. When the terminal is unavailable or a
+    // decisive flag was passed, the wizard stays out and the silent
+    // auto-detected install runs unchanged (a fresh box still comes up with
+    // zero follow-up commands).
+    let mut wizard_extras: Option<wizard::WizardExtras> = None;
+    if mode == RunMode::FreshInstall && wizard::should_run(&args) {
+        match wizard::run(&mut args) {
+            Ok(WizardControl::Completed(extras)) => wizard_extras = Some(extras),
+            Ok(WizardControl::Skipped) => {}
+            Ok(WizardControl::Canceled) => {
+                eprintln!("Setup canceled.");
+                return Ok(ExitCode::from(130));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "onboarding wizard failed; continuing non-interactive")
+            }
+        }
+    }
+
     // Start the live progress UI before any work so the operator sees feedback
     // immediately. The mode is chosen from stderr + the environment.
     let render_mode = ui::detect_mode(&args);
@@ -107,6 +130,11 @@ fn run_install(args: Args, mode: RunMode) -> Result<ExitCode> {
 
     let mut ctx = Ctx::from_args(args, env, checkpoint);
     ctx.progress = sink.clone();
+    // Carry the wizard's region + cloud-posture choices into the config step.
+    if let Some(extras) = wizard_extras {
+        ctx.region_pinned = extras.region_pinned;
+        ctx.cloud_from_anywhere = extras.cloud_from_anywhere;
+    }
 
     let reports = run_graph(full_install_chain(), &mut ctx);
     let status = ctx.failures.derive_status();

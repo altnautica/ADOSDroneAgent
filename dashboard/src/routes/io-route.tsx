@@ -111,7 +111,7 @@ export function IoRoute() {
           <CardContent>
             {!disp || disp.installed === false ? (
               <p className="text-sm text-muted-foreground">
-                No display panel configured. Use the setup wizard or{" "}
+                No display panel configured. Run{" "}
                 <code className="text-xs">ados display install</code> to install
                 a panel driver.
               </p>
