@@ -60,8 +60,9 @@ pub enum ReconstructorKind {
     /// pose-only dataset. Slower than a native-GPU trainer (wgpu overhead).
     Brush,
     /// msplat: native-Metal gaussian-splat trainer for Apple Silicon (~10x faster
-    /// than Brush on an M-series GPU). Inits from the COLMAP SfM point cloud, so
-    /// its dataset must be COLMAP format with a `sparse/` model (not pose-only).
+    /// than Brush on an M-series GPU). Inits from a `points3D.ply` sitting next to
+    /// the Nerfstudio `transforms.json` (its own reader; no COLMAP binary), so the
+    /// seed step writes that cloud first.
     Msplat,
     /// nerfstudio / splatfacto: high-quality gaussian splat (Python, CUDA/MPS).
     Nerfstudio,
@@ -239,10 +240,10 @@ impl CliReconstructor {
             }
             ReconstructorKind::Msplat => {
                 // msplat (native Metal): dataset positional; -n iters, -o output
-                // .ply, --sh-degree. It inits from the COLMAP SfM points, so
-                // `input` must be a COLMAP-format dir (sparse/ + images), NOT a
-                // pose-only transforms.json. No splat cap — msplat bounds its own
-                // count via densification thresholds.
+                // .ply, --sh-degree. It inits from a points3D.ply next to
+                // transforms.json (written by the seed step; its own reader, no
+                // COLMAP binary). No splat cap — msplat bounds its own count via
+                // densification thresholds.
                 let steps = params
                     .get("steps")
                     .and_then(|v| v.as_u64())
@@ -459,14 +460,14 @@ pub fn is_apple_silicon() -> bool {
     cfg!(target_os = "macos") && cfg!(target_arch = "aarch64")
 }
 
-/// The seamless accurate reconstruction path: a COLMAP posed-triangulation seed
-/// (reusing the manifest's known poses, no pose search) followed by the
-/// native-Metal `msplat` trainer initialized from the real points. When COLMAP is
-/// absent or the seed is too sparse it falls back to the portable random-init
-/// trainer (Brush), which trains from the poses alone; with neither trainer
-/// installed it falls back to the mock (CI / no-GPU). Whichever tool actually ran
-/// is stamped on the output (`msplat` / `brush` / `mock`), so the honesty badge
-/// (Rule 44) is always accurate — this wrapper's own name is never the backend.
+/// The seamless reconstruction path: write a native point-cloud seed co-framed
+/// with the manifest's poses (no COLMAP binary), then run the native-Metal
+/// `msplat` trainer initialized from it. When the seed can't be written (no
+/// manifest / too few poses) it falls back to the portable random-init trainer
+/// (Brush), which trains from the poses alone; with neither trainer installed it
+/// falls back to the mock (CI / no-GPU). Whichever tool actually ran is stamped on
+/// the output (`msplat` / `brush` / `mock`), so the honesty badge (Rule 44) is
+/// always accurate — this wrapper's own name is never the backend.
 pub struct SeededSplatReconstructor {
     work_root: PathBuf,
 }
@@ -497,18 +498,14 @@ impl SeededSplatReconstructor {
             })
     }
 
-    /// Attempt the COLMAP seed for `dir`; true when a usable point cloud now sits
-    /// next to the manifest. Every negative outcome (COLMAP absent, too few points,
-    /// a COLMAP fault) is logged and yields false, so the caller trains with the
-    /// portable random-init trainer instead.
+    /// Write a native point-cloud seed next to `dir`'s manifest; true when a usable
+    /// cloud now sits there. Every negative outcome (no manifest, too few poses) is
+    /// logged and yields false, so the caller trains with the portable random-init
+    /// trainer (Brush) instead.
     fn try_seed(dir: &Path, params: &serde_json::Value) -> bool {
-        if !crate::seed::colmap_available() {
-            tracing::info!("reconstruct_seed_skipped: colmap not installed; training from poses");
-            return false;
-        }
         match crate::seed::seed_points(dir, params) {
             Ok(n) if n >= crate::seed::MIN_SEED_POINTS => {
-                tracing::info!(points = n, "reconstruct_seeded: colmap posed triangulation");
+                tracing::info!(points = n, "reconstruct_seeded: native point cloud");
                 true
             }
             Ok(n) => {
