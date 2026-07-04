@@ -122,10 +122,22 @@ fn xml_escape(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// Optional job log redirection for a rendered plist. launchd defaults a job's
+/// stdout/stderr to `/dev/null`; pointing them at a file is what makes a
+/// background agent inspectable after the fact.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PlistLogPaths<'a> {
+    /// Absolute path for the job's stdout (`StandardOutPath`), or `None`.
+    pub stdout: Option<&'a str>,
+    /// Absolute path for the job's stderr (`StandardErrorPath`), or `None`.
+    pub stderr: Option<&'a str>,
+}
+
 /// Render a launchd property list for a managed service.
 ///
 /// Emits `ProgramArguments` (the `program` as argv[0] followed by `args`),
-/// `EnvironmentVariables` (when any are given), `RunAtLoad` true, and — when
+/// `EnvironmentVariables` (when any are given), `StandardOutPath` /
+/// `StandardErrorPath` (when a log path is given), `RunAtLoad` true, and — when
 /// `keep_alive` — a `KeepAlive` dict requesting a restart only on a crash
 /// (`Crashed` true). The output is a complete, well-formed plist document.
 pub fn render_plist(
@@ -134,6 +146,7 @@ pub fn render_plist(
     args: &[String],
     env: &[(String, String)],
     keep_alive: bool,
+    logs: PlistLogPaths<'_>,
 ) -> String {
     let mut out = String::new();
     out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
@@ -163,6 +176,15 @@ pub fn render_plist(
             out.push_str(&format!("\t\t<string>{}</string>\n", xml_escape(v)));
         }
         out.push_str("\t</dict>\n");
+    }
+
+    if let Some(path) = logs.stdout {
+        out.push_str("\t<key>StandardOutPath</key>\n");
+        out.push_str(&format!("\t<string>{}</string>\n", xml_escape(path)));
+    }
+    if let Some(path) = logs.stderr {
+        out.push_str("\t<key>StandardErrorPath</key>\n");
+        out.push_str(&format!("\t<string>{}</string>\n", xml_escape(path)));
     }
 
     out.push_str("\t<key>RunAtLoad</key>\n");
@@ -204,6 +226,7 @@ mod tests {
             &["--profile".to_string(), "compute".to_string()],
             &[("ADOS_HOME".to_string(), "/var/ados".to_string())],
             true,
+            PlistLogPaths::default(),
         );
         // Document framing.
         assert!(plist.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"));
@@ -228,12 +251,41 @@ mod tests {
 
     #[test]
     fn render_plist_omits_keepalive_and_env_when_unset() {
-        let plist = render_plist("co.ados.logd", "/opt/ados/bin/ados-logd", &[], &[], false);
+        let plist = render_plist(
+            "co.ados.logd",
+            "/opt/ados/bin/ados-logd",
+            &[],
+            &[],
+            false,
+            PlistLogPaths::default(),
+        );
         assert!(!plist.contains("KeepAlive"));
         assert!(!plist.contains("EnvironmentVariables"));
+        // No log paths were given, so neither redirection key is emitted.
+        assert!(!plist.contains("StandardOutPath"));
+        assert!(!plist.contains("StandardErrorPath"));
         // The program is still the sole ProgramArguments entry.
         assert!(plist.contains("<string>/opt/ados/bin/ados-logd</string>"));
         assert!(plist.contains("<key>RunAtLoad</key>"));
+    }
+
+    #[test]
+    fn render_plist_emits_log_redirection_when_given() {
+        let plist = render_plist(
+            "co.ados.control",
+            "/Users/op/.ados/bin/ados-control",
+            &[],
+            &[],
+            true,
+            PlistLogPaths {
+                stdout: Some("/Users/op/.ados/log/control.out.log"),
+                stderr: Some("/Users/op/.ados/log/control.err.log"),
+            },
+        );
+        assert!(plist.contains("<key>StandardOutPath</key>"));
+        assert!(plist.contains("<string>/Users/op/.ados/log/control.out.log</string>"));
+        assert!(plist.contains("<key>StandardErrorPath</key>"));
+        assert!(plist.contains("<string>/Users/op/.ados/log/control.err.log</string>"));
     }
 
     #[test]
@@ -244,6 +296,7 @@ mod tests {
             &["a < b & c > d".to_string()],
             &[("K".to_string(), "v&<>".to_string())],
             false,
+            PlistLogPaths::default(),
         );
         assert!(plist.contains("a &lt; b &amp; c &gt; d"));
         assert!(plist.contains("v&amp;&lt;&gt;"));

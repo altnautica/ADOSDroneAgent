@@ -12,7 +12,7 @@ mod launchd;
 mod select;
 mod systemd;
 
-pub use launchd::{render_plist, unit_to_label, LaunchdManager};
+pub use launchd::{render_plist, unit_to_label, LaunchdManager, PlistLogPaths};
 pub use select::{select, NullManager};
 pub use systemd::SystemdManager;
 

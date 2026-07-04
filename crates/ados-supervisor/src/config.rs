@@ -139,11 +139,23 @@ impl AgentConfig {
     /// Resolve using the canonical on-disk locations. This is the real startup
     /// entry, so it also publishes the config-status sidecar: a malformed config
     /// surfaces on the remote Health view, not just in the log.
+    ///
+    /// The three canonical paths honour the same `ADOS_CONFIG` / `ADOS_PROFILE_CONF`
+    /// / `ADOS_MESH_ROLE` overrides the sibling daemons (`ados-control`,
+    /// `ados-compute`) already read, so a rootless per-user install (macOS
+    /// workstation under `$HOME/.ados`) resolves its `workstation` profile from
+    /// the same config file the rest of the node reads. Unset (the SBC default) →
+    /// the `/etc/ados` FHS paths, unchanged.
     pub fn load() -> Self {
+        let config_yaml = std::env::var("ADOS_CONFIG").unwrap_or_else(|_| CONFIG_YAML.to_string());
+        let profile_conf =
+            std::env::var("ADOS_PROFILE_CONF").unwrap_or_else(|_| PROFILE_CONF.to_string());
+        let mesh_role =
+            std::env::var("ADOS_MESH_ROLE").unwrap_or_else(|_| MESH_ROLE_PATH.to_string());
         Self::load_from_inner(
-            Path::new(CONFIG_YAML),
-            Path::new(PROFILE_CONF),
-            Path::new(MESH_ROLE_PATH),
+            Path::new(&config_yaml),
+            Path::new(&profile_conf),
+            Path::new(&mesh_role),
             true,
         )
     }

@@ -14,13 +14,92 @@
 set -eu
 
 REL_BASE="https://github.com/altnautica/ADOSDroneAgent/releases/download/prebuilt-installer"
+# Source clone location for the macOS build-from-source path (kept for --upgrade).
+GIT_URL="https://github.com/altnautica/ADOSDroneAgent.git"
 
-# 1. Root requirement (Linux). macOS is a dev host — keep minimal parity with
-#    the monolith's dev branch and point the developer at cargo.
+# ── macOS: rootless per-user workstation install ─────────────────────────────
+# There is no prebuilt Mach-O installer asset for a Mac, so the installer runs
+# from source. This bootstrap ensures the Rust toolchain, resolves the source
+# tree (a local checkout, else a shallow clone under $HOME/.ados/src), and runs
+# `cargo run -p ados-installer` with the workstation profile. No root: the Rust
+# installer registers per-user LaunchAgents under $HOME/.ados.
+macos_install() {
+    if [ "$(id -u)" -eq 0 ]; then
+        echo "ERROR: on macOS run WITHOUT sudo — the ADOS workstation installs as" >&2
+        echo "       per-user LaunchAgents under \$HOME/.ados." >&2
+        return 2
+    fi
+
+    # The install builds the service binaries from source; cargo is required.
+    if ! command -v cargo >/dev/null 2>&1 && [ -f "$HOME/.cargo/env" ]; then
+        # shellcheck disable=SC1091
+        . "$HOME/.cargo/env"
+    fi
+    if ! command -v cargo >/dev/null 2>&1; then
+        echo "ERROR: cargo not found. Install the Rust toolchain (https://rustup.rs)" >&2
+        echo "       and re-run — the macOS workstation builds its binaries from source." >&2
+        return 1
+    fi
+    if ! command -v git >/dev/null 2>&1; then
+        echo "ERROR: git not found. Install the Xcode Command Line Tools" >&2
+        echo "       (xcode-select --install) and re-run." >&2
+        return 1
+    fi
+
+    # Which branch to clone on a fresh checkout (default main).
+    branch="main"
+    prev=""
+    for a in "$@"; do
+        [ "$prev" = "--branch" ] && branch="$a"
+        prev="$a"
+    done
+
+    # Resolve the source tree: a local checkout this script sits inside, else a
+    # shallow clone under $HOME/.ados/src.
+    repo=""
+    script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || true)"
+    if [ -n "$script_dir" ] && [ -f "$script_dir/../crates/ados-installer/Cargo.toml" ]; then
+        repo="$(CDPATH= cd -- "$script_dir/.." && pwd)"
+    fi
+    if [ -z "$repo" ]; then
+        src="$HOME/.ados/src"
+        if [ -d "$src/.git" ]; then
+            echo "Updating ADOS source at $src (branch $branch) …"
+            git -C "$src" fetch --depth 1 origin "$branch" >/dev/null 2>&1 || true
+            git -C "$src" checkout "$branch" >/dev/null 2>&1 || true
+            git -C "$src" reset --hard "origin/$branch" >/dev/null 2>&1 \
+                || git -C "$src" pull --ff-only >/dev/null 2>&1 || true
+        else
+            echo "Cloning ADOS source to $src (branch $branch) …"
+            mkdir -p "$(dirname -- "$src")"
+            git clone --depth 1 --branch "$branch" "$GIT_URL" "$src" \
+                || { echo "ERROR: git clone failed" >&2; return 1; }
+        fi
+        repo="$src"
+    fi
+
+    # Default to the workstation profile unless the operator pinned one.
+    has_profile=0
+    for a in "$@"; do
+        [ "$a" = "--profile" ] && has_profile=1
+    done
+
+    echo "Running the ADOS installer from source ($repo/crates) …"
+    ( cd "$repo/crates" \
+        && if [ "$has_profile" -eq 1 ]; then
+               ADOS_SOURCE_DIR="$repo" cargo run --quiet -p ados-installer -- "$@"
+           else
+               ADOS_SOURCE_DIR="$repo" cargo run --quiet -p ados-installer -- --profile workstation "$@"
+           fi )
+}
+
 if [ "$(uname -s)" = "Darwin" ]; then
-    echo "macOS dev host — use: cargo run -p ados-installer -- $*" >&2
-    exit 0
+    macos_install "$@"
+    exit $?
 fi
+
+# 1. Root requirement (Linux). Every later step writes under /opt, /etc, and
+#    /etc/systemd/system, so a non-root run cannot proceed.
 if [ "$(id -u)" -ne 0 ]; then
     echo "ERROR: run with sudo (root required)" >&2
     exit 1

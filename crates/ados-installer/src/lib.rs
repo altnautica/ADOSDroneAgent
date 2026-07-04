@@ -19,6 +19,7 @@ pub mod env;
 pub mod exec;
 pub mod graph;
 pub mod journal;
+pub mod macos;
 pub mod net;
 pub mod result;
 pub mod steps;

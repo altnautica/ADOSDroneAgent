@@ -12,6 +12,11 @@ path = "src/main.rs"
 
 [dependencies]
 ados-macpin = { path = "../ados-macpin" }
+# Reused for the launchd plist renderer (`render_plist`) + the reverse-DNS
+# label mapper (`unit_to_label`) the macOS workstation install writes into
+# `~/Library/LaunchAgents`; the runtime `LaunchdManager` in the same module
+# then manages those jobs.
+ados-supervisor = { path = "../ados-supervisor" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

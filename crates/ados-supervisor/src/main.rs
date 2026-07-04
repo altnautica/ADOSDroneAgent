@@ -96,9 +96,16 @@ async fn main() -> Result<()> {
     // bind.
     {
         let bind_orch = bind_orch.clone();
+        // The control socket lives under the run dir, honouring `ADOS_RUN_DIR`
+        // (the same override the sibling daemons read) so a rootless per-user
+        // install lands it under `$HOME/.ados/run` instead of the root-owned
+        // `/run/ados`. Unset (the SBC default) → the canonical path, unchanged.
+        let sock_path = match std::env::var_os("ADOS_RUN_DIR") {
+            Some(dir) => std::path::PathBuf::from(dir).join("supervisor.sock"),
+            None => std::path::PathBuf::from(bind::control::SUPERVISOR_SOCK),
+        };
         tokio::spawn(async move {
-            let path = std::path::Path::new(bind::control::SUPERVISOR_SOCK);
-            if let Err(e) = bind::control::serve(bind_orch, path).await {
+            if let Err(e) = bind::control::serve(bind_orch, &sock_path).await {
                 tracing::error!(error = %e, "bind control socket exited");
             }
         });

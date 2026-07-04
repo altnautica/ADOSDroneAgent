@@ -310,6 +310,7 @@ name = "ados-installer"
 version = "0.1.0"
 dependencies = [
  "ados-macpin",
+ "ados-supervisor",
  "anyhow",
  "getrandom 0.2.17",
  "hex",

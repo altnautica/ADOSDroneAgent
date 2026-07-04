@@ -50,6 +50,21 @@ async fn main() -> Result<ExitCode> {
     let mode = RunMode::resolve(&args, already_installed);
     tracing::info!(?mode, already_installed, "resolved install run-mode");
 
+    // macOS is a rootless per-user launchd node: the install builds the
+    // workstation binaries from source and registers LaunchAgents under
+    // `$HOME/.ados`, and the uninstall boots them out — neither touches the Linux
+    // systemd / apt / venv / FHS paths the shared handlers below assume. Dispatch
+    // those two modes to the dedicated path; Status / PairOnly fall through to the
+    // shared handling (harmless read-only reporting on macOS).
+    #[cfg(target_os = "macos")]
+    match mode {
+        RunMode::Uninstall => return ados_installer::macos::uninstall(args.force),
+        RunMode::FreshInstall | RunMode::Upgrade | RunMode::ForceReinstall => {
+            return ados_installer::macos::run(&args)
+        }
+        _ => {}
+    }
+
     match mode {
         RunMode::Status => {
             print_status(&args);
