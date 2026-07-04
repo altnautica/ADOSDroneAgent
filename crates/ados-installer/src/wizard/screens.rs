@@ -1074,7 +1074,10 @@ mod tests {
         for l in labels {
             assert!(joined.contains(l), "lost label {l}");
         }
-        assert!(lines.len() > 1, "should wrap into multiple lines at width 30");
+        assert!(
+            lines.len() > 1,
+            "should wrap into multiple lines at width 30"
+        );
         // A single label longer than the width still emits (not dropped).
         assert_eq!(pack_labels(&["a-very-long-single-label"], 5).len(), 1);
         assert!(pack_labels(&[], 40).is_empty());

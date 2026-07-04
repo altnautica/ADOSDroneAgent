@@ -254,11 +254,10 @@ pub fn detect(cat: &HwCategory, sys: &SysProbe) -> Detection {
         return Detection::Supported;
     }
     match cat.id {
-        "fc" => opt(hw::pick_first_serial(
-            &sys.dev_names,
-            &["ttyACM", "ttyAMA", "ttyUSB"],
-        )
-        .map(|n| format!("/dev/{n}"))),
+        "fc" => opt(
+            hw::pick_first_serial(&sys.dev_names, &["ttyACM", "ttyAMA", "ttyUSB"])
+                .map(|n| format!("/dev/{n}")),
+        ),
         "camera" => opt(hw::pick_lowest_video(&sys.dev_names).map(|n| format!("/dev/{n}"))),
         "gps" => flag(hw::lsusb_has_gps(&sys.lsusb), "USB GNSS"),
         "modem" => flag(hw::lsusb_has_modem(&sys.lsusb), "USB modem"),
@@ -337,7 +336,10 @@ mod tests {
         // A Now category that falls through to the `_ => Missing` arm would be a
         // silent bug; assert each Now id is one the detect() match handles.
         let empty = SysProbe::default();
-        for cat in CATALOG.iter().filter(|c| c.availability == Availability::Now) {
+        for cat in CATALOG
+            .iter()
+            .filter(|c| c.availability == Availability::Now)
+        {
             // On an empty snapshot every Now probe returns Missing (never
             // Supported — Supported is Planned-only), proving the arm exists.
             assert_eq!(

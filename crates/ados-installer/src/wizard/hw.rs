@@ -355,7 +355,9 @@ mod tests {
         assert!(lsusb_has_radio(
             "Bus 001 Device 004: ID 0bda:8812 Realtek Semiconductor Corp."
         ));
-        assert!(lsusb_has_radio("Bus 002 Device 003: ID 0bda:b812 Realtek 8812EU"));
+        assert!(lsusb_has_radio(
+            "Bus 002 Device 003: ID 0bda:b812 Realtek 8812EU"
+        ));
         assert!(!lsusb_has_radio(
             "Bus 001 Device 002: ID 0bda:0411 Realtek USB hub"
         ));
@@ -377,10 +379,10 @@ mod tests {
 
     #[test]
     fn gps_and_modem_vendor_matching() {
-        assert!(lsusb_has_gps(
-            "Bus 001 Device 006: ID 1546:01a8 U-Blox AG"
+        assert!(lsusb_has_gps("Bus 001 Device 006: ID 1546:01a8 U-Blox AG"));
+        assert!(!lsusb_has_gps(
+            "Bus 001 Device 006: ID 1546:9999 U-Blox other"
         ));
-        assert!(!lsusb_has_gps("Bus 001 Device 006: ID 1546:9999 U-Blox other"));
         assert!(lsusb_has_modem(
             "Bus 002 Device 003: ID 2c7c:0125 Quectel EC25"
         ));
