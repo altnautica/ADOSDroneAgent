@@ -45,6 +45,8 @@ pub fn parse_profile_conf(body: &str) -> Option<String> {
         let normalized = match val {
             "ground-station" | "ground_station" => "ground_station",
             "drone" => "drone",
+            "workstation" => "workstation",
+            "compute" => "compute",
             // `auto` resolves at runtime; treat it as "no on-disk preference".
             _ => continue,
         };
@@ -201,6 +203,20 @@ mod tests {
     fn parse_strips_quotes_and_ignores_comments() {
         let body = "# a comment\nprofile: \"ground_station\"\n";
         assert_eq!(parse_profile_conf(body).as_deref(), Some("ground_station"));
+    }
+
+    #[test]
+    fn parse_recognizes_workstation_and_compute() {
+        // A re-install of a workstation/compute node must keep its profile from
+        // profile.conf rather than collapsing to drone.
+        assert_eq!(
+            parse_profile_conf("profile: workstation\n").as_deref(),
+            Some("workstation")
+        );
+        assert_eq!(
+            parse_profile_conf("profile=compute").as_deref(),
+            Some("compute")
+        );
     }
 
     #[test]

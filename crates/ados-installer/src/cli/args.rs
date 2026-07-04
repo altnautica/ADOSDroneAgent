@@ -9,7 +9,8 @@
 /// Parsed command-line arguments.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Args {
-    /// `--profile <v>` — `drone` | `ground_station` (normalized).
+    /// `--profile <v>` — `drone` | `ground_station` | `workstation` | `compute`
+    /// (the ground-station spelling is normalized; others pass through).
     pub profile: Option<String>,
     /// `--name <v>` — mDNS hostname to set.
     pub name: Option<String>,
