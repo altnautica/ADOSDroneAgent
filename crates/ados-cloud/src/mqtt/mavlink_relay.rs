@@ -7,8 +7,7 @@
 //! * GCS->FC: payloads received on `ados/{id}/mavlink/rx` (q0) are written back
 //!   to the IPC socket toward the flight controller.
 //!
-//! The hot path's design is load-bearing and ported exactly from
-//! `src/ados/services/cloud/mavlink_relay.py`. A synchronous per-frame publish
+//! The hot path's design is load-bearing. A synchronous per-frame publish
 //! that blocks when the broker/tunnel is slow would stall the IPC reader, push
 //! back through the kernel TCP buffer, stop the serial FC read, overrun the FC
 //! transmit buffer, and freeze telemetry. The fix is a bounded queue with a

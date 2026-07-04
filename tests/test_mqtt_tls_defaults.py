@@ -1,10 +1,9 @@
 """Regression tests for secure MQTT/TLS defaults across the cloud relay.
 
 The broker transport moved to the native ``ados-cloud`` crate (rumqttc
-over WSS + rustls); the surviving Python paths (the in-process MQTT
-gateway and the MAVLink relay the ground-station bridge spawns) still
-build a paho client with certificate verification. Both halves must
-refuse to disable TLS verification.
+over WSS + rustls); the surviving Python path (the in-process MQTT
+gateway) still builds a paho client with certificate verification. It
+must refuse to disable TLS verification.
 """
 
 from __future__ import annotations
@@ -13,10 +12,7 @@ import ssl
 from pathlib import Path
 
 # Python paths that still construct a paho MQTT client with a TLS context.
-_PY_TLS_SOURCES = (
-    Path("src/ados/services/cloud/mavlink_relay.py"),
-    Path("src/ados/services/mqtt/gateway.py"),
-)
+_PY_TLS_SOURCES = (Path("src/ados/services/mqtt/gateway.py"),)
 
 # The native broker transport and its shared rustls config.
 _RUST_TLS_CONFIG = Path("crates/ados-cloud/src/tls.rs")
