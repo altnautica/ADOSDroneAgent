@@ -1,8 +1,7 @@
 """WFB-ng link quality monitoring and statistics parsing.
 
 Parses the stdout stream that ``wfb_rx -l 1000`` emits once per second.
-Upstream wfb-ng v26.4 prints a TAB-separated, colon-delimited format
-(see ``referenceCode/fpv-video-link/wfb-ng/src/rx.cpp:495-508``):
+Upstream wfb-ng v26.4 prints a TAB-separated, colon-delimited format:
 
     <ts_ms>\\tRX_ANT\\t<freq>:<mcs>:<bw>\\t<ant_id_hex>\\t<count>:<rssi_min>:<rssi_avg>:<rssi_max>:<snr_min>:<snr_avg>:<snr_max>
     <ts_ms>\\tPKT\\t<all_pkts>:<all_bytes>:<dec_err>:<session>:<data>:<uniq>:<fec_recovered>:<lost>:<bad>:<outgoing>:<bytes_outgoing>

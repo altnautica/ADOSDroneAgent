@@ -1,9 +1,8 @@
 """Tests for the upstream-format wfb-ng v26.4 stats parser.
 
 The samples below are real strings captured live via ``strace`` on a
-running ``wfb_rx -l 1000 ... wlan1`` on the GS rig 2026-05-10. The
-upstream emit code is at
-``referenceCode/fpv-video-link/wfb-ng/src/rx.cpp:495-508``:
+running ``wfb_rx -l 1000 ... wlan1`` on a ground-station rig. The
+upstream emit format is:
 
     IPC_MSG("%llu\\tRX_ANT\\t%u:%u:%u\\t%llx\\t%d:%d:%d:%d:%d:%d:%d\\n", ...);
     IPC_MSG("%llu\\tPKT\\t%u:%u:%u:%u:%u:%u:%u:%u:%u:%u:%u\\n", ...);
