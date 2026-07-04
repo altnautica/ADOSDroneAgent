@@ -121,6 +121,10 @@ MGMT_LINK_JSON = ADOS_RUN_DIR / "mgmt-link.json"
 # Management-link reach-back mode, written by the supervisor's heartbeat-failover
 # reconciler: primary / wifi_heartbeat / none when the wired primary is down.
 MGMT_FAILOVER_JSON = ADOS_RUN_DIR / "mgmt-failover.json"
+# WiFi power-save runtime reconciler state, written by the supervisor each tick:
+# per-station-interface power-save on/off, re-assert counts, and link signal, so
+# the heartbeat can prove the onboard link is not being idle-dropped by the driver.
+WIFI_POWERSAVE_JSON = ADOS_RUN_DIR / "wifi-powersave.json"
 # USB-rehome self-heal state, written by the supervisor's USB-rehome reconciler:
 # the recovery state + attempt count for a slow-port, not-radiating WFB adapter.
 USB_REHOME_JSON = ADOS_RUN_DIR / "usb-rehome.json"

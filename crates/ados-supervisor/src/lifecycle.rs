@@ -87,6 +87,15 @@ pub struct Supervisor {
     /// both profiles from the monitor tick; a cheap no-op when the domain is in
     /// sync. The reactive WiFi self-heal above stays as the backstop.
     reg_reconciler: crate::reg_reconciler::RegReconciler,
+    /// WiFi power-save runtime reconciler. The FullMAC onboard-WiFi drivers bring
+    /// the station interface up with 802.11 power-save enabled (and re-enable it
+    /// after an NM reconnect / hotplug / driver reload), which drops unicast
+    /// frames on an idle link so the box falls off the LAN when it goes quiet.
+    /// This re-asserts `power_save off` on every station interface from the
+    /// monitor tick and records the verified per-interface state to
+    /// /run/ados/wifi-powersave.json. Cheap (one `iw get` per iface; a `set` only
+    /// on a real drift); the install/boot-time provisioning is the one-shot half.
+    wifi_powersave: crate::wifi_powersave::WifiPowersaveReconciler,
     /// Management-link guardian: the stack-agnostic backstop for the operator's
     /// whole management link (the default-route interface, never the WFB
     /// injection adapter). Detects a dead data path (no carrier / no lease /
@@ -148,6 +157,9 @@ impl Supervisor {
                 ados_protocol::logd::emitter::EventEmitter::new("ados-supervisor"),
             ),
             reg_reconciler: crate::reg_reconciler::RegReconciler::new(
+                ados_protocol::logd::emitter::EventEmitter::new("ados-supervisor"),
+            ),
+            wifi_powersave: crate::wifi_powersave::WifiPowersaveReconciler::new(
                 ados_protocol::logd::emitter::EventEmitter::new("ados-supervisor"),
             ),
             mgmt_guardian: crate::mgmt_link_guardian::MgmtLinkGuardian::new(
@@ -540,6 +552,14 @@ impl Supervisor {
         // reactive self-heal so a freshly-reconciled domain heads off the break
         // the self-heal would otherwise have to repair.
         self.reg_reconciler.tick().await;
+
+        // WiFi power-save runtime reconcile (PREVENTION): the FullMAC onboard-WiFi
+        // driver re-enables 802.11 power-save after an NM reconnect / hotplug /
+        // driver reload, which drops unicast frames on an idle link so the box
+        // silently falls off the LAN. Re-assert `power_save off` on every station
+        // interface and record the verified per-interface state for the heartbeat.
+        // Cheap (one `iw get` per iface; a `set` only on a real drift).
+        self.wifi_powersave.tick().await;
 
         // Reactive network self-heal: detect + rebuild an onboard managed-WiFi
         // link whose data path died under the radio bring-up, so the box keeps a

@@ -648,6 +648,34 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
                 "repairsInWindow": mgmt.get("repairs_in_window", 0),
             }
 
+    # WiFi power-save runtime state — sourced cross-process from
+    # /run/ados/wifi-powersave.json, written by the supervisor's WiFi power-save
+    # reconciler each tick. Surfaces, per onboard station interface, whether
+    # 802.11 power-save is currently off (the reliable state), how many times the
+    # reconciler has had to re-assert it off (a driver that keeps re-enabling it),
+    # and the link signal, so the GCS can prove the onboard link is not being
+    # idle-dropped. Absent (no sidecar) means the reconciler has not run yet.
+    from ados.core.paths import WIFI_POWERSAVE_JSON
+    try:
+        wps = _json.loads(WIFI_POWERSAVE_JSON.read_text())
+    except (OSError, ValueError):
+        wps = None
+    if isinstance(wps, dict) and isinstance(wps.get("interfaces"), dict):
+        payload["wifiPowersave"] = {
+            "interfaces": [
+                {
+                    "iface": name,
+                    "powersaveOn": bool(info.get("powersave_on", False)),
+                    "reasserts": int(info.get("reasserts", 0) or 0),
+                    "lastReassert": info.get("last_reassert"),
+                    "signalDbm": info.get("signal_dbm"),
+                    "linkState": info.get("link_state"),
+                }
+                for name, info in wps["interfaces"].items()
+                if isinstance(info, dict)
+            ]
+        }
+
     # Management-link reach-back mode — sourced cross-process from
     # /run/ados/mgmt-failover.json, written by the supervisor's heartbeat
     # failover reconciler. "wifi_heartbeat" means the wired primary is down and

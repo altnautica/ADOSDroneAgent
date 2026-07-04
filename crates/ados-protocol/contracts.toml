@@ -218,6 +218,12 @@ path = "/run/ados/mgmt-link.json"
 description = "Management-link guardian state."
 
 [[sidecar]]
+id = "wifi-powersave"
+version = 1
+path = "/run/ados/wifi-powersave.json"
+description = "WiFi power-save runtime reconciler state per station interface."
+
+[[sidecar]]
 id = "wfb_failover"
 version = 1
 path = "/run/ados/wfb_failover.json"

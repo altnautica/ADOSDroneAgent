@@ -47,6 +47,7 @@ pub const SIDECARS: &[ContractMeta] = &[
     ContractMeta { id: "wfb-stats", version: 1, wire: "json", transport: "/run/ados/wfb-stats.json", status: "sidecar", description: "WFB link statistics: RSSI, packet counters, and derived link state." },  // ados_radio::paths::WFB_STATS_JSON
     ContractMeta { id: "hop-supervisor", version: 1, wire: "json", transport: "/run/ados/hop-supervisor.json", status: "sidecar", description: "FHSS hop-supervisor state." },  // ados_radio::paths::HOP_SUPERVISOR_JSON
     ContractMeta { id: "mgmt-link", version: 1, wire: "json", transport: "/run/ados/mgmt-link.json", status: "sidecar", description: "Management-link guardian state." },
+    ContractMeta { id: "wifi-powersave", version: 1, wire: "json", transport: "/run/ados/wifi-powersave.json", status: "sidecar", description: "WiFi power-save runtime reconciler state per station interface." },
     ContractMeta { id: "wfb_failover", version: 1, wire: "json", transport: "/run/ados/wfb_failover.json", status: "sidecar", description: "Local-bind to cloud-relay failover state." },
     ContractMeta { id: "bind-state", version: 1, wire: "json", transport: "/run/ados/bind-state.json", status: "sidecar", description: "WFB bind-session sentinel and precheck result." },  // ados_radio::paths::BIND_STATE_SENTINEL
     ContractMeta { id: "mesh-state", version: 1, wire: "json", transport: "/run/ados/mesh-state.json", status: "sidecar", description: "Mesh role and membership state." },  // ados_groundlink::paths::MESH_STATE_JSON
