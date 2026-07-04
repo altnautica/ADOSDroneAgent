@@ -10,17 +10,30 @@
 //! version-divergent (brew-4.x enforces it, apt-3.x does not), and it is
 //! unnecessary because we already have accurate FC-GPS/VIO-fused poses.
 //!
-//! This module writes a uniform-random cloud filling the box the cameras
-//! surround. It is deterministic (seeded) and dependency-free. Crucially it is
-//! built from the camera CENTERS (the pose translation, which is INVARIANT to the
-//! OpenGL/OpenCV basis convention), so the cloud is co-framed with the poses on
-//! either convention — there is no coordinate flip to get wrong. This is a
-//! measured floor for gaussian-splat init: with accurate poses + many views +
-//! densification it trains to near-SfM quality (arXiv:2404.12547, which motivates
-//! exactly the fused-inertial/GPS-pose case), and it always works. A
-//! monocular-depth or triangulated seed is a quality follow-up.
+//! Two seed tiers, selectable per job via the `seed` param:
+//!
+//! - `random` — a uniform-random cloud filling the box the cameras surround.
+//!   Deterministic (seeded) and dependency-free. Built from the camera CENTERS
+//!   (the pose translation, INVARIANT to the OpenGL/OpenCV basis convention), so
+//!   the cloud is co-framed with the poses on either convention — there is no
+//!   coordinate flip to get wrong. A measured floor for gaussian-splat init:
+//!   with accurate poses + many views + densification it trains to near-SfM
+//!   quality (arXiv:2404.12547, which motivates exactly the fused-inertial/
+//!   GPS-pose case), and it always works.
+//!
+//! - `depth` — a monocular-depth back-projection cloud: a small Python step
+//!   (an ML-inference layer) runs a metric-depth model per keyframe and
+//!   back-projects the depth maps into world points on the ACTUAL surfaces the
+//!   cameras saw, colored from the images. A far better geometric prior than the
+//!   random box, so densification starts near the real geometry. It needs the ML
+//!   stack (torch + transformers), so when it is unavailable or fails, seeding
+//!   falls back CLEANLY to `random` — a job is never blocked on the depth path.
+//!
+//! Default `auto` picks `depth` when the ML step is available on this node, else
+//! `random`.
 
 use std::path::Path;
+use std::process::Command;
 
 /// The Nerfstudio manifest a captured dataset carries (written by the keyframe
 /// persister).
@@ -257,11 +270,91 @@ pub fn seed_points(dataset_dir: &Path, params: &serde_json::Value) -> Result<u64
         .and_then(|v| v.as_u64())
         .filter(|v| *v >= MIN_SEED_POINTS)
         .unwrap_or(DEFAULT_SEED_POINTS);
+    let path = dataset_dir.join(POINTS_FILE);
+
+    // Seed tier: `auto` (default) and `depth` try the monocular-depth
+    // back-projection first; `random` skips it. The depth path is a Python ML
+    // step, so any unavailability (no interpreter, ML stack absent, module or
+    // runtime error, unusable output) falls back CLEANLY to the random box — a
+    // job is never blocked on the depth path.
+    let kind = params
+        .get("seed")
+        .and_then(|v| v.as_str())
+        .unwrap_or("auto");
+    if matches!(kind, "auto" | "depth") {
+        match depth_seed_via_python(dataset_dir, &path, n) {
+            Ok(count) => {
+                tracing::info!(points = count, "seed: monocular-depth back-projection");
+                return Ok(count);
+            }
+            Err(e) => tracing::info!(
+                reason = %e,
+                "seed: depth unavailable, using the random-box floor"
+            ),
+        }
+    }
 
     let (lo, hi) = inflated_aabb(&centers, inflate);
-    let path = dataset_dir.join(POINTS_FILE);
     std::fs::write(&path, random_ply_bytes(lo, hi, n, RNG_SEED))?;
     Ok(n)
+}
+
+/// Resolve a Python interpreter that can import `ados.compute.depth_seed`:
+/// prefer `$ADOS_PYTHON`, then the agent virtualenv, then `python3` on `PATH`.
+/// On a Rust-only node (e.g. a Mac workstation with no agent venv) this returns
+/// the bare `python3`, whose module import then fails and the caller falls back.
+fn resolve_python() -> String {
+    if let Ok(p) = std::env::var("ADOS_PYTHON") {
+        if !p.trim().is_empty() {
+            return p;
+        }
+    }
+    for cand in ["/opt/ados/venv/bin/python3", "/opt/ados/venv/bin/python"] {
+        if Path::new(cand).is_file() {
+            return cand.to_string();
+        }
+    }
+    "python3".to_string()
+}
+
+/// Run the monocular-depth back-projection seed (a Python ML step) and return
+/// the written point count. Every failure path — no interpreter, the `ados`
+/// package or ML stack absent, a module/runtime error, or an unusable output —
+/// is an `Err` so the caller falls back to the random-box seed. The Python
+/// module writes the same `points3D.ply` the random path would; the count is
+/// verified from the file so a partial/corrupt write is treated as a failure.
+fn depth_seed_via_python(dataset_dir: &Path, out: &Path, budget: u64) -> Result<u64, SeedError> {
+    let py = resolve_python();
+    let output = Command::new(&py)
+        .args([
+            "-m",
+            "ados.compute.depth_seed",
+            &dataset_dir.to_string_lossy(),
+            "--out",
+            &out.to_string_lossy(),
+            "--budget",
+            &budget.to_string(),
+            "--quiet",
+        ])
+        .output()
+        .map_err(|e| SeedError::Manifest(format!("depth seed: spawn {py} failed: {e}")))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stdout);
+        let detail = detail.trim();
+        let detail = if detail.is_empty() {
+            String::from_utf8_lossy(&output.stderr).trim().to_string()
+        } else {
+            detail.to_string()
+        };
+        return Err(SeedError::Manifest(format!("depth seed failed: {detail}")));
+    }
+    let count = ply_vertex_count(out);
+    if count < MIN_SEED_POINTS {
+        return Err(SeedError::Manifest(format!(
+            "depth seed produced too few points ({count})"
+        )));
+    }
+    Ok(count)
 }
 
 #[cfg(test)]
@@ -350,6 +443,44 @@ mod tests {
         let a = random_ply_bytes([0.0; 3], [1.0; 3], 100, RNG_SEED);
         let b = random_ply_bytes([0.0; 3], [1.0; 3], 100, RNG_SEED);
         assert_eq!(a, b, "same seed → identical cloud");
+    }
+
+    fn write_manifest(dir: &Path, centers: &[[f64; 3]]) {
+        std::fs::write(
+            dir.join(TRANSFORMS_FILE),
+            serde_json::to_vec(&manifest(centers)).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn seed_points_random_kind_writes_a_valid_cloud() {
+        let dir = tempfile::tempdir().unwrap();
+        write_manifest(
+            dir.path(),
+            &[[0.0, 0.0, 0.0], [10.0, 0.0, 2.0], [5.0, 5.0, 1.0]],
+        );
+        let params = serde_json::json!({ "seed": "random", "seed_points": 200 });
+        let n = seed_points(dir.path(), &params).unwrap();
+        assert_eq!(n, 200);
+        assert!(dir.path().join(POINTS_FILE).is_file());
+    }
+
+    #[test]
+    fn seed_points_depth_falls_back_to_random_when_ml_absent() {
+        // The `ados.compute.depth_seed` module is not importable from the test
+        // host (no agent venv, no ML stack), so the depth path fails and the seed
+        // falls back CLEANLY to the random box — the job is never blocked and a
+        // valid seed is produced either way.
+        let dir = tempfile::tempdir().unwrap();
+        write_manifest(
+            dir.path(),
+            &[[0.0, 0.0, 0.0], [10.0, 0.0, 2.0], [5.0, 5.0, 1.0]],
+        );
+        let params = serde_json::json!({ "seed": "depth", "seed_points": 150 });
+        let n = seed_points(dir.path(), &params).unwrap();
+        assert!(n >= MIN_SEED_POINTS);
+        assert!(dir.path().join(POINTS_FILE).is_file());
     }
 
     #[test]
