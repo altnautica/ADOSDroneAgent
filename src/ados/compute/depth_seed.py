@@ -47,7 +47,6 @@ import struct
 import sys
 import time
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 
@@ -104,7 +103,7 @@ class DepthModel:
         self._model = model
 
     @classmethod
-    def load(cls, model_id: str) -> "DepthModel":
+    def load(cls, model_id: str) -> DepthModel:
         torch, AutoImageProcessor, AutoModelForDepthEstimation = _import_ml()
         device = _pick_device(torch)
         proc = AutoImageProcessor.from_pretrained(model_id)
@@ -397,7 +396,7 @@ def _cmd_check() -> int:
     return 0
 
 
-def main(argv: Optional[list] = None) -> int:
+def main(argv: list | None = None) -> int:
     parser = argparse.ArgumentParser(description="Monocular-depth back-projection seed.")
     parser.add_argument("dataset_dir", nargs="?", help="dir holding transforms.json + images/")
     parser.add_argument("--out", default=None, help="output PLY (default <dataset_dir>/points3D.ply)")

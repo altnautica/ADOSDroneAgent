@@ -57,9 +57,9 @@ macos_install() {
     # Resolve the source tree: a local checkout this script sits inside, else a
     # shallow clone under $HOME/.ados/src.
     repo=""
-    script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || true)"
+    script_dir="$(CDPATH='' cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || true)"
     if [ -n "$script_dir" ] && [ -f "$script_dir/../crates/ados-installer/Cargo.toml" ]; then
-        repo="$(CDPATH= cd -- "$script_dir/.." && pwd)"
+        repo="$(CDPATH='' cd -- "$script_dir/.." && pwd)"
     fi
     if [ -z "$repo" ]; then
         src="$HOME/.ados/src"
