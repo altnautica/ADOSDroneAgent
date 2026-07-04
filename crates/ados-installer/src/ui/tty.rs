@@ -4,21 +4,39 @@
 //! The onboarding wizard needs keystrokes, but `stdin` under the install
 //! one-liner is the shell script being piped in, not the keyboard. The fix is
 //! to open `/dev/tty` directly (which still resolves to the operator's terminal
-//! under `sudo`), put it in raw mode, and hand-roll the render + read loop. This
-//! matches `rich.rs`'s render-only philosophy: write ANSI to a file descriptor,
-//! reuse [`crate::ui::theme`] for every glyph and color, and never depend on a
-//! crossterm event source that would read the piped stdin.
+//! under `sudo`), put it in raw mode, switch to the alternate screen, and
+//! hand-roll the render + read loop. It never depends on a crossterm event
+//! source that would read the piped stdin.
 //!
-//! Raw mode + the exact original terminal settings are restored on `Drop` for
-//! the normal, error, and Ctrl-C paths. Release builds abort on panic (so `Drop`
-//! does not run); a panic hook resets the terminal to a sane cooked mode as a
-//! backstop. On a non-Linux host there is no SBC to install, so [`Tty::open`]
-//! returns `Ok(None)` and the caller proceeds with the silent, flag-driven path.
+//! Rendering is full-screen: [`Tty::render`] centers a body panel between a
+//! header, a progress rail, and a footer, building the whole frame with
+//! [`crate::wizard::frame`] (a pure, host-independent compositor) and writing
+//! it in one syscall with absolute cursor placement. Only the actual
+//! `/dev/tty` open, raw mode, and the poll-based read loop are Linux-gated, so
+//! the frame builder is snapshot-tested on any host.
+//!
+//! Raw mode, the alternate screen, and the exact original terminal settings are
+//! all restored on `Drop`. Release builds abort on panic (so `Drop` does not
+//! run); a panic hook resets the terminal, leaves the alternate screen, and
+//! shows the cursor as a backstop. On a non-Linux host there is no SBC to
+//! install, so [`Tty::open`] returns `Ok(None)` and the caller proceeds with
+//! the silent, flag-driven path.
 
 use std::fs::File;
 #[cfg(target_os = "linux")]
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
+
+use crate::ui::theme::Theme;
+use crate::wizard::frame::{self, Chrome, Screen, TermSize};
+
+/// Enter the alternate screen, clear it, and hide the cursor. Written only by
+/// the Linux `open`; the non-Linux build never drives a terminal.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const ENTER_ALT: &str = "\x1b[?1049h\x1b[2J\x1b[?25l";
+/// Reset attributes, show the cursor, and leave the alternate screen. Emitted
+/// on every restore path so a full-screen session never strands the terminal.
+const LEAVE_ALT: &str = "\x1b[0m\x1b[?25h\x1b[?1049l";
 
 /// A single decoded key event read off the terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,9 +52,18 @@ pub enum KeyEvent {
     Tab,
     CtrlC,
     Char(char),
+    /// The terminal was resized; the caller should repaint at the new size.
+    Resize,
     /// A byte sequence we do not act on (an unrecognized escape, a stray
     /// control byte). Widgets ignore it.
     Unknown,
+}
+
+/// The outcome of a timed read: a decoded key, or a tick when the timeout
+/// elapsed with no key (so an animated spinner can advance).
+pub enum Input {
+    Key(KeyEvent),
+    Tick,
 }
 
 /// Decode a raw byte burst read off the terminal into a [`KeyEvent`]. Pure so it
@@ -80,37 +107,37 @@ pub fn parse_key(bytes: &[u8]) -> KeyEvent {
     }
 }
 
-/// The terminal box width the wizard cards draw to: terminal columns clamped to
-/// the same tidy range as the install progress board (`rich.rs`). Pure over the
-/// probed column count.
-pub fn box_width_from(cols: u16) -> usize {
-    (cols as usize).saturating_sub(2).clamp(40, 64)
+/// Probe the terminal size (via the stdout ioctl, which is the operator terminal
+/// under `curl … | sudo bash`), falling back to a sane 80x24.
+pub fn probe_size() -> TermSize {
+    match ratatui::crossterm::terminal::size() {
+        Ok((c, r)) => TermSize {
+            cols: usize::from(c.max(1)),
+            rows: usize::from(r.max(1)),
+        },
+        Err(_) => TermSize { cols: 80, rows: 24 },
+    }
 }
 
-/// Probe the terminal column count (via the stdout ioctl, which is the operator
-/// terminal under `curl … | sudo bash`), falling back to 80.
-fn probe_cols() -> u16 {
-    ratatui::crossterm::terminal::size()
-        .map(|(c, _)| c)
-        .unwrap_or(80)
-}
-
-/// A raw, restore-on-drop handle to the controlling terminal (`/dev/tty`).
+/// A raw, restore-on-drop handle to the controlling terminal (`/dev/tty`),
+/// drawn to as a full-screen alternate-screen app.
 pub struct Tty {
     /// Read + write handle to `/dev/tty`.
     file: File,
-    /// Lines drawn in the current in-place frame (for the rewind on repaint).
-    painted: usize,
+    /// The chrome (step of steps + label) drawn around the current screen.
+    chrome: Chrome,
+    /// The size the last frame was drawn for; a change triggers a full clear.
+    last_size: Option<TermSize>,
     /// The terminal settings captured before raw mode, restored on `Drop`.
     #[cfg(target_os = "linux")]
     original: nix::sys::termios::Termios,
 }
 
 impl Tty {
-    /// Open `/dev/tty`, snapshot its settings, and put it in raw mode. Returns
-    /// `Ok(None)` when there is no usable controlling terminal (CI, a fully
-    /// piped run, or a non-Linux host) so the caller falls back to the silent,
-    /// flag-driven install.
+    /// Open `/dev/tty`, snapshot its settings, put it in raw mode, and switch to
+    /// the alternate screen. Returns `Ok(None)` when there is no usable
+    /// controlling terminal (CI, a fully piped run, or a non-Linux host) so the
+    /// caller falls back to the silent, flag-driven install.
     #[cfg(target_os = "linux")]
     pub fn open() -> std::io::Result<Option<Tty>> {
         use nix::sys::termios::{cfmakeraw, tcgetattr, tcsetattr, SetArg};
@@ -131,12 +158,15 @@ impl Tty {
             return Ok(None);
         }
         install_panic_reset();
+        install_winch_handler();
         let mut tty = Tty {
             file,
-            painted: 0,
+            chrome: Chrome::default(),
+            last_size: None,
             original,
         };
-        tty.hide_cursor();
+        let _ = tty.file.write_all(ENTER_ALT.as_bytes());
+        let _ = tty.file.flush();
         Ok(Some(tty))
     }
 
@@ -162,40 +192,112 @@ impl Tty {
         false
     }
 
-    /// The card box width for the current terminal size.
-    pub fn cols(&self) -> usize {
-        box_width_from(probe_cols())
+    /// The current terminal size.
+    pub fn size(&self) -> TermSize {
+        probe_size()
     }
 
-    /// Repaint a frame in place: rewind over the previous frame, clear below,
-    /// then print each line. Mirrors `rich.rs`'s move-up + clear-down mechanic,
-    /// so a card redraws with no flicker and no alternate screen.
-    pub fn paint(&mut self, lines: &[String]) {
-        let mut out = String::new();
-        if self.painted > 0 {
-            // Cursor Previous Line: move to column 0 of the top block line.
-            out.push_str(&format!("\x1b[{}F", self.painted));
-        }
-        // Clear from the cursor to the end of the screen.
-        out.push_str("\x1b[0J");
-        for l in lines {
-            out.push_str(l);
-            out.push_str("\r\n");
-        }
-        self.painted = lines.len();
+    /// The inner text width a widget's body lines have (so a widget can build a
+    /// full-width selection bar). Derived from the current terminal size.
+    pub fn body_width(&self) -> usize {
+        crate::wizard::render::panel_body_width(frame::panel_width(probe_size().cols))
+    }
+
+    /// Set the chrome (progress rail) for the screens that follow. A `total` of
+    /// zero hides the rail (the welcome screen).
+    pub fn set_chrome(&mut self, step: usize, total: usize, label: &str) {
+        self.chrome = Chrome {
+            step,
+            total,
+            label: label.to_string(),
+        };
+    }
+
+    /// Draw a full-screen frame: the header + progress rail + the centered body
+    /// panel (labeled `section`) + the footer key-hint. The whole frame is built
+    /// once and written in a single syscall; the cursor stays hidden. The screen
+    /// is cleared on the first paint and after a resize, and otherwise
+    /// overwritten in place so an idle repaint does not flicker.
+    pub fn render(&mut self, theme: &Theme, section: &str, body: &[String], footer: &str) {
+        let size = probe_size();
+        let cleared = self.last_size != Some(size);
+        let screen = Screen {
+            section,
+            body,
+            footer,
+        };
+        let grid = frame::compose(theme, &self.chrome, &screen, size);
+        let out = frame::to_ansi(&grid, cleared, theme);
         let _ = self.file.write_all(out.as_bytes());
         let _ = self.file.flush();
+        self.last_size = Some(size);
     }
 
-    /// Freeze the current frame into the scrollback: the next `paint` starts a
-    /// fresh block below it instead of rewinding over it. Called when a step is
-    /// confirmed so the operator keeps a clean transcript of their answers.
-    pub fn commit(&mut self) {
-        self.painted = 0;
-    }
-
-    /// Block for one key press and decode it.
+    /// Block for one key press and decode it. A terminal resize wakes the wait
+    /// and returns [`KeyEvent::Resize`] so the caller repaints at the new size.
+    #[cfg(target_os = "linux")]
     pub fn read_key(&mut self) -> std::io::Result<KeyEvent> {
+        use nix::errno::Errno;
+        use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
+        use std::os::fd::AsFd;
+        loop {
+            let mut fds = [PollFd::new(self.file.as_fd(), PollFlags::POLLIN)];
+            match poll(&mut fds, PollTimeout::NONE) {
+                Ok(_) => {
+                    if take_resized() {
+                        return Ok(KeyEvent::Resize);
+                    }
+                    return self.read_decoded();
+                }
+                // A signal (a SIGWINCH resize) interrupted the wait.
+                Err(Errno::EINTR) => {
+                    take_resized();
+                    return Ok(KeyEvent::Resize);
+                }
+                Err(e) => return Err(std::io::Error::from_raw_os_error(e as i32)),
+            }
+        }
+    }
+
+    /// Block up to `ms` for a key press. On timeout returns [`Input::Tick`] so an
+    /// animated spinner can advance; a resize returns [`Input::Key`] with
+    /// [`KeyEvent::Resize`].
+    #[cfg(target_os = "linux")]
+    pub fn read_input(&mut self, ms: u64) -> Input {
+        use nix::errno::Errno;
+        use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
+        use std::os::fd::AsFd;
+        let timeout = PollTimeout::try_from(std::time::Duration::from_millis(ms))
+            .unwrap_or(PollTimeout::ZERO);
+        let mut fds = [PollFd::new(self.file.as_fd(), PollFlags::POLLIN)];
+        match poll(&mut fds, timeout) {
+            Ok(0) => {
+                if take_resized() {
+                    Input::Key(KeyEvent::Resize)
+                } else {
+                    Input::Tick
+                }
+            }
+            Ok(_) => {
+                if take_resized() {
+                    return Input::Key(KeyEvent::Resize);
+                }
+                match self.read_decoded() {
+                    Ok(k) => Input::Key(k),
+                    Err(_) => Input::Tick,
+                }
+            }
+            Err(Errno::EINTR) => {
+                take_resized();
+                Input::Key(KeyEvent::Resize)
+            }
+            Err(_) => Input::Tick,
+        }
+    }
+
+    /// Read one already-ready burst off the terminal and decode it.
+    #[cfg(target_os = "linux")]
+    fn read_decoded(&mut self) -> std::io::Result<KeyEvent> {
         let mut buf = [0u8; 8];
         let n = self.file.read(&mut buf)?;
         if n == 0 {
@@ -205,22 +307,27 @@ impl Tty {
         Ok(parse_key(&buf[..n]))
     }
 
-    /// Hide the cursor for a stable card render.
-    pub fn hide_cursor(&mut self) {
-        let _ = self.file.write_all(b"\x1b[?25l");
-        let _ = self.file.flush();
+    /// A plain blocking read for non-Linux builds (never reached: the wizard
+    /// only opens a `Tty` on Linux, but the method must compile).
+    #[cfg(not(target_os = "linux"))]
+    pub fn read_key(&mut self) -> std::io::Result<KeyEvent> {
+        let mut buf = [0u8; 8];
+        let n = self.file.read(&mut buf)?;
+        if n == 0 {
+            return Ok(KeyEvent::CtrlC);
+        }
+        Ok(parse_key(&buf[..n]))
     }
 
-    /// Show the cursor again.
-    pub fn show_cursor(&mut self) {
-        let _ = self.file.write_all(b"\x1b[?25h");
-        let _ = self.file.flush();
+    #[cfg(not(target_os = "linux"))]
+    pub fn read_input(&mut self, _ms: u64) -> Input {
+        Input::Tick
     }
 }
 
 impl Drop for Tty {
     fn drop(&mut self) {
-        self.show_cursor();
+        let _ = self.file.write_all(LEAVE_ALT.as_bytes());
         #[cfg(target_os = "linux")]
         {
             use std::os::fd::AsFd;
@@ -234,10 +341,50 @@ impl Drop for Tty {
     }
 }
 
-/// Install a one-shot panic hook that resets the terminal to a sane cooked mode.
-/// Release builds abort on panic (so `Drop` never runs); this is the only chance
-/// to un-raw the terminal, and it computes a sane mode from a fresh `/dev/tty`
-/// open so it needs no captured state. The previous hook is chained.
+/// The pending-resize flag, set by the `SIGWINCH` handler (async-signal-safe:
+/// it only stores to an atomic) and consumed by the read loop.
+#[cfg(target_os = "linux")]
+static RESIZED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Read and clear the pending-resize flag.
+#[cfg(target_os = "linux")]
+fn take_resized() -> bool {
+    RESIZED.swap(false, std::sync::atomic::Ordering::SeqCst)
+}
+
+/// The `SIGWINCH` signal handler: record that the terminal was resized. Only an
+/// atomic store, which is async-signal-safe.
+#[cfg(target_os = "linux")]
+extern "C" fn handle_winch(_: i32) {
+    RESIZED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Install the `SIGWINCH` handler once, WITHOUT `SA_RESTART` so that a resize
+/// interrupts a blocking `poll` (returns `EINTR`) and the read loop can repaint.
+#[cfg(target_os = "linux")]
+fn install_winch_handler() {
+    use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
+    use std::sync::OnceLock;
+    static ONCE: OnceLock<()> = OnceLock::new();
+    if ONCE.set(()).is_err() {
+        return;
+    }
+    let action = SigAction::new(
+        SigHandler::Handler(handle_winch),
+        SaFlags::empty(),
+        SigSet::empty(),
+    );
+    // Best-effort: if this fails the UI simply repaints on the next keystroke.
+    unsafe {
+        let _ = sigaction(Signal::SIGWINCH, &action);
+    }
+}
+
+/// Install a one-shot panic hook that resets the terminal to a sane cooked mode,
+/// leaves the alternate screen, and shows the cursor. Release builds abort on
+/// panic (so `Drop` never runs); this is the only chance to un-raw the terminal
+/// and leave the alternate screen, and it computes a sane mode from a fresh
+/// `/dev/tty` open so it needs no captured state. The previous hook is chained.
 #[cfg(target_os = "linux")]
 fn install_panic_reset() {
     use std::sync::OnceLock;
@@ -252,8 +399,9 @@ fn install_panic_reset() {
     }));
 }
 
-/// Re-enable canonical mode + echo on the controlling terminal and show the
-/// cursor. Best-effort — a failure here only leaves the operator to run `reset`.
+/// Re-enable canonical mode + echo on the controlling terminal, leave the
+/// alternate screen, and show the cursor. Best-effort — a failure here only
+/// leaves the operator to run `reset`.
 #[cfg(target_os = "linux")]
 fn sane_reset() {
     use nix::sys::termios::{tcgetattr, tcsetattr, InputFlags, LocalFlags, OutputFlags, SetArg};
@@ -267,7 +415,10 @@ fn sane_reset() {
             let _ = tcsetattr(f.as_fd(), SetArg::TCSANOW, &t);
         }
         let mut w = f;
-        let _ = w.write_all(b"\x1b[?25h\r\n");
+        // Leave the alternate screen and show the cursor as well, so a panic in
+        // a full-screen frame never strands the operator in a blank buffer.
+        let _ = w.write_all(LEAVE_ALT.as_bytes());
+        let _ = w.write_all(b"\r\n");
     }
 }
 
@@ -319,9 +470,25 @@ mod tests {
     }
 
     #[test]
-    fn box_width_clamps_to_the_tidy_range() {
-        assert_eq!(box_width_from(20), 40); // tiny terminal → floor
-        assert_eq!(box_width_from(200), 64); // huge terminal → ceiling
-        assert_eq!(box_width_from(60), 58); // 60 - 2, inside the range
+    fn probe_size_is_never_zero() {
+        let s = probe_size();
+        assert!(s.cols >= 1 && s.rows >= 1, "probed size must be usable");
+    }
+
+    #[test]
+    fn leave_alt_screen_shows_cursor_and_resets() {
+        // The restore string emitted on both Drop and the panic hook must leave
+        // the alternate screen, show the cursor, and reset attributes, so a
+        // release-build panic never strands the terminal in a blank buffer.
+        assert!(
+            LEAVE_ALT.contains("\x1b[?1049l"),
+            "must leave the alt screen"
+        );
+        assert!(LEAVE_ALT.contains("\x1b[?25h"), "must show the cursor");
+        assert!(LEAVE_ALT.contains("\x1b[0m"), "must reset attributes");
+        assert!(
+            ENTER_ALT.contains("\x1b[?1049h"),
+            "open must enter the alt screen"
+        );
     }
 }

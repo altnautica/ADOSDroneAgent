@@ -59,7 +59,7 @@ tracing-journald = "0.3"
 # the orphaned-wfb_tx bug class. Linux-only; consuming crates target-gate it.
 # `term` adds sys::termios so the installer's onboarding wizard can put the
 # controlling terminal (/dev/tty) into raw mode and restore it on exit.
-nix = { version = "0.29", default-features = false, features = ["process", "signal", "fs", "user", "term"] }
+nix = { version = "0.29", default-features = false, features = ["process", "signal", "fs", "user", "term", "poll"] }
 # /dev/shm frame-ring mapping for the vision engine. Operates on the byte
 # region the framebus contract defines; the contract itself stays OS-free.
 memmap2 = "0.9"

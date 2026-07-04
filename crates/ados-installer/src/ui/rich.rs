@@ -293,8 +293,8 @@ mod tests {
 
     fn theme() -> Theme {
         Theme {
-            color: false,
             ascii: false,
+            tier: crate::ui::theme::ColorTier::None,
         }
     }
 

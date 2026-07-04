@@ -11,13 +11,12 @@ use crate::cli::Args;
 use crate::steps::config_identity::slugify_hostname;
 use crate::ui::theme::Theme;
 use crate::ui::tty::Tty;
-use crate::wizard::render::wordmark;
 use crate::wizard::widgets::{
     self, ack_card, checklist, confirm_card, insert_hostname_char, insert_pair_char,
     insert_region_char, insert_ssid_char, paint_board, password_input, select_list, summary_select,
-    Ack, BoardItem, CheckItem, Choice, Flow, ItemState, WifiPick, WifiRow,
+    Ack, BoardItem, CheckItem, Choice, Flow, ItemState, Spin, WifiPick, WifiRow,
 };
-use crate::wizard::{hw, wifi, WizardExtras};
+use crate::wizard::{catalog, hw, wifi, WizardExtras};
 
 /// Cross-stage collected state that is not an `Args` field (the joined Wi-Fi
 /// SSID, for the review summary).
@@ -44,23 +43,72 @@ const SETUP: &str = "setup";
 /// The card section label for the Wi-Fi sub-flow.
 const WIFI: &str = "Wi-Fi";
 
-/// Print the one-time greeting above the first card.
-pub fn greet(tty: &mut Tty, theme: &Theme) {
+/// The one-time welcome screen. Returns `false` if the operator cancels here.
+pub fn greet(tty: &mut Tty, theme: &Theme) -> bool {
+    tty.set_chrome(0, 0, "");
     let intro = vec![
-        format!(
-            "{}  {}",
-            theme.accent(wordmark(theme)),
-            theme.bold("Welcome to ADOS")
-        ),
-        theme.dim("Let's set up this device. It takes about 3 minutes."),
+        theme.heading("Welcome to ADOS"),
         String::new(),
+        theme.dim("Let's set up this device. It takes about 3 minutes."),
+        theme.dim("Use the arrow keys to move and Enter to choose."),
     ];
-    tty.paint(&intro);
-    tty.commit();
+    !matches!(widgets::welcome(tty, theme, &intro), Flow::Abort)
 }
 
-/// Walk the stages in order with Back navigation. Returns when the operator
-/// finishes at the review screen or cancels.
+/// One step in the wizard spine. The visible set is profile-dependent
+/// ([`visible_steps`]) so a workstation never walks a pairing screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Step {
+    Profile,
+    Hardware,
+    Components,
+    Wifi,
+    Name,
+    Pair,
+    Review,
+}
+
+impl Step {
+    /// The rail label for this step.
+    fn label(self) -> &'static str {
+        match self {
+            Step::Profile => "Role",
+            Step::Hardware => "Hardware",
+            Step::Components => "Features",
+            Step::Wifi => "Wi-Fi",
+            Step::Name => "Name",
+            Step::Pair => "Pairing",
+            Step::Review => "Review",
+        }
+    }
+}
+
+/// The steps shown for the chosen profile, in order. Pairing is drone /
+/// ground-station only — a workstation runs Mission Control, it does not pair to
+/// it — so it is absent from the walk and from the rail count for that profile.
+fn visible_steps(args: &Args) -> Vec<Step> {
+    let local_only = matches!(
+        args.profile.as_deref(),
+        Some("workstation") | Some("compute")
+    );
+    let mut steps = vec![
+        Step::Profile,
+        Step::Hardware,
+        Step::Components,
+        Step::Wifi,
+        Step::Name,
+    ];
+    if !local_only {
+        steps.push(Step::Pair);
+    }
+    steps.push(Step::Review);
+    steps
+}
+
+/// Walk the visible steps with Back navigation. The visible set is recomputed
+/// each turn from the current profile, so choosing a profile reshapes the rail
+/// and the remaining steps. Returns when the operator finishes at review or
+/// cancels.
 pub fn run_stages(
     tty: &mut Tty,
     theme: &Theme,
@@ -69,26 +117,45 @@ pub fn run_stages(
     extras: &mut WizardExtras,
     collected: &mut Collected,
 ) -> Outcome {
-    // Stage indices: 0 profile, 1 hardware, 2 components, 3 wifi, 4 name,
-    // 5 pair, 6 review.
-    let last = 6usize;
     let mut i = 0usize;
     loop {
-        let nav = match i {
-            0 => profile_stage(tty, theme, args),
-            1 => hardware_stage(tty, theme, hw),
-            2 => components_stage(tty, theme, args, hw, extras),
-            3 => wifi_stage(tty, theme, collected),
-            4 => name_stage(tty, theme, args),
-            5 => pair_stage(tty, theme, args),
-            _ => match review_stage(tty, theme, args, extras, collected) {
+        let steps = visible_steps(args);
+        // Re-clamp in case a profile change shrank the list under the cursor.
+        if i >= steps.len() {
+            i = steps.len() - 1;
+        }
+        let step = steps[i];
+        tty.set_chrome(i + 1, steps.len(), step.label());
+        // Review is terminal-ish: it finishes, cancels, steps back, or jumps to
+        // any earlier answer.
+        if step == Step::Review {
+            match review_stage(tty, theme, args, extras, collected) {
                 ReviewNav::Finish => return Outcome::Completed,
-                ReviewNav::Back => Nav::Back,
-                ReviewNav::Abort => Nav::Abort,
-            },
+                ReviewNav::Abort => return Outcome::Canceled,
+                ReviewNav::Back => i = i.saturating_sub(1),
+                ReviewNav::JumpTo(target) => {
+                    if let Some(pos) = steps.iter().position(|s| *s == target) {
+                        i = pos;
+                    }
+                }
+            }
+            continue;
+        }
+        let nav = match step {
+            Step::Profile => profile_stage(tty, theme, args),
+            Step::Hardware => hardware_stage(tty, theme, args, hw),
+            Step::Components => components_stage(tty, theme, args, hw, extras),
+            Step::Wifi => wifi_stage(tty, theme, collected),
+            Step::Name => name_stage(tty, theme, args),
+            Step::Pair => pair_stage(tty, theme, args),
+            Step::Review => unreachable!("review is handled above"),
         };
         match nav {
-            Nav::Next => i = (i + 1).min(last),
+            Nav::Next => {
+                if i + 1 < steps.len() {
+                    i += 1;
+                }
+            }
             Nav::Back => i = i.saturating_sub(1),
             Nav::Abort => return Outcome::Canceled,
         }
@@ -139,22 +206,23 @@ fn profile_stage(tty: &mut Tty, theme: &Theme, args: &mut Args) -> Nav {
 
 // ── stage: hardware check ──────────────────────────────────────────────────
 
-fn hardware_stage(tty: &mut Tty, theme: &Theme, hw: &mut hw::HardwareProbe) -> Nav {
+fn hardware_stage(tty: &mut Tty, theme: &Theme, args: &Args, hw: &mut hw::HardwareProbe) -> Nav {
+    let profile = catalog::Profile::from_id(args.profile.as_deref().unwrap_or("drone"));
     loop {
-        let body = vec![
-            hw_row(
-                theme,
-                "Flight controller",
-                hw.fc.is_some(),
-                hw.fc.as_deref(),
-            ),
-            hw_row(theme, "Long-range radio", hw.radio, None),
-            hw_row(theme, "Camera", hw.camera.is_some(), hw.camera.as_deref()),
-        ];
-        match ack_card(tty, theme, SETUP, "Checking the hardware", &body, true) {
+        let body = catalog_body(theme, profile, &hw.sys);
+        match ack_card(tty, theme, SETUP, "What's connected", &body, true) {
             Flow::Value(Ack::Continue) => return Nav::Next,
             Flow::Value(Ack::Rescan) => {
-                *hw = hw::probe();
+                // Re-sweep with a live spinner rather than freezing the screen.
+                let board = [BoardItem {
+                    label: "Scanning for hardware…".into(),
+                    state: ItemState::Active,
+                    detail: None,
+                }];
+                match widgets::run_with_spinner(tty, theme, SETUP, &board, hw::probe) {
+                    Spin::Done(fresh) => *hw = fresh,
+                    Spin::Aborted => return Nav::Abort,
+                }
             }
             Flow::Back => return Nav::Back,
             Flow::Abort => return Nav::Abort,
@@ -162,20 +230,71 @@ fn hardware_stage(tty: &mut Tty, theme: &Theme, hw: &mut hw::HardwareProbe) -> N
     }
 }
 
-/// One hardware-check row: a green tick or a dim dash, a fixed-width label, and
-/// a dim detail (`found on <path>` / `found` / `not detected`).
-fn hw_row(theme: &Theme, label: &str, present: bool, path: Option<&str>) -> String {
-    let mark = if present {
-        theme.ok(theme.glyph_ok())
-    } else {
-        theme.dim(if theme.ascii { "-" } else { "—" })
+/// Build the hardware-scan body for a profile: the detected-today categories as
+/// individual status rows, then a subheading and the roadmap categories packed
+/// compactly (several per line) so a comprehensive catalog still fits a small
+/// console. Only the categories tagged for this profile appear, so a ground
+/// station is never shown a flight controller.
+fn catalog_body(theme: &Theme, profile: catalog::Profile, sys: &hw::SysProbe) -> Vec<String> {
+    let mut body = Vec::new();
+    let mut planned: Vec<&'static str> = Vec::new();
+    for cat in catalog::catalog_for(profile) {
+        if cat.availability == catalog::Availability::Planned {
+            planned.push(cat.label);
+        } else {
+            body.push(catalog_row(theme, cat, &catalog::detect(cat, sys)));
+        }
+    }
+    if !planned.is_empty() {
+        body.push(String::new());
+        body.push(theme.dim("Also supported — plug it in and rescan:"));
+        for line in pack_labels(&planned, 54) {
+            body.push(format!("   {}", theme.dim(&line)));
+        }
+    }
+    body
+}
+
+/// Pack a list of short labels into comma-joined lines no wider than `width`
+/// display columns each (pure). Keeps the roadmap list a few lines rather than
+/// one row per item.
+fn pack_labels(labels: &[&str], width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut cur = String::new();
+    for &label in labels {
+        let piece = if cur.is_empty() {
+            label.to_string()
+        } else {
+            format!(", {label}")
+        };
+        if !cur.is_empty() && cur.chars().count() + piece.chars().count() > width {
+            lines.push(std::mem::take(&mut cur));
+            cur.push_str(label);
+        } else {
+            cur.push_str(&piece);
+        }
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    lines
+}
+
+/// One catalog row: a status glyph, the fixed-width label, and a dim detail.
+/// Found → a green tick + the path/id; a probed-but-absent Now category → a dim
+/// dash + "not detected".
+fn catalog_row(theme: &Theme, cat: &catalog::HwCategory, det: &catalog::Detection) -> String {
+    let (mark, detail) = match det {
+        catalog::Detection::Found(d) => (theme.ok(theme.glyph_ok()), format!("found · {d}")),
+        catalog::Detection::Missing => (
+            theme.dim(if theme.ascii { "-" } else { "—" }),
+            "not detected".to_string(),
+        ),
+        // A Now row never carries Supported (that is the Planned-only state,
+        // rendered compactly above), so nothing else reaches here.
+        catalog::Detection::Supported => (theme.dim("·"), cat.note.to_string()),
     };
-    let detail = match (present, path) {
-        (true, Some(p)) => format!("found on {p}"),
-        (true, None) => "found".to_string(),
-        (false, _) => "not detected".to_string(),
-    };
-    format!(" {mark} {:<18}{}", label, theme.dim(&detail))
+    format!(" {mark} {:<26}{}", cat.label, theme.dim(&detail))
 }
 
 // ── stage: components ──────────────────────────────────────────────────────
@@ -188,16 +307,31 @@ fn components_stage(
     extras: &mut WizardExtras,
 ) -> Nav {
     let profile = args.profile.clone().unwrap_or_else(|| "drone".to_string());
-    let radio_default = profile == "drone" || profile == "ground_station" || hw.radio;
+    let is_drone = profile == "drone";
+    let is_ground = profile == "ground_station";
+    let is_workstation = profile == "workstation" || profile == "compute";
 
-    let mut items = vec![CheckItem {
-        id: "radio".into(),
-        label: "Long-range radio link".into(),
-        benefit: "Fly and stream far past Wi-Fi range.".into(),
-        checked: radio_default,
-        locked: false,
-    }];
-    if profile == "drone" {
+    // The feature list is profile-shaped: a drone/ground station needs the radio
+    // driver (required for those profiles); a workstation has no long-range radio
+    // and no onboard camera/display, so it is offered only the internet-reach
+    // option. The radio row is LOCKED on for drone/ground because those profiles
+    // do not work without it.
+    // A workstation has no long-range radio, so it must not install the RTL
+    // driver; the drone/ground path below re-affirms the driver via the locked
+    // radio item's result.
+    args.no_rtl_driver = is_workstation;
+
+    let mut items = Vec::new();
+    if is_drone || is_ground {
+        items.push(CheckItem {
+            id: "radio".into(),
+            label: "Long-range radio link".into(),
+            benefit: "Fly and stream far past Wi-Fi range.".into(),
+            checked: true,
+            locked: true,
+        });
+    }
+    if is_drone {
         items.push(CheckItem {
             id: "camera".into(),
             label: "Camera video".into(),
@@ -206,17 +340,23 @@ fn components_stage(
             locked: false,
         });
     }
-    items.push(CheckItem {
-        id: "display".into(),
-        label: "Onboard screen".into(),
-        benefit: "Show status on a small attached display.".into(),
-        checked: profile == "ground_station",
-        locked: false,
-    });
+    if is_ground {
+        items.push(CheckItem {
+            id: "display".into(),
+            label: "Status screen".into(),
+            benefit: "Show link and status on a small attached display.".into(),
+            checked: hw.sys.i2c_addrs.contains(&0x3c) || hw.sys.i2c_addrs.contains(&0x3d),
+            locked: false,
+        });
+    }
     items.push(CheckItem {
         id: "cloud".into(),
         label: "Reach it from anywhere".into(),
-        benefit: "Connect over the internet, not just at home.".into(),
+        benefit: if is_workstation {
+            "Sign in to your account from this computer.".into()
+        } else {
+            "Connect over the internet, not just at home.".into()
+        },
         checked: false,
         locked: false,
     });
@@ -316,19 +456,19 @@ fn wifi_stage(tty: &mut Tty, theme: &Theme, collected: &mut Collected) -> Nav {
     };
 
     loop {
-        // Scan with a one-line live board.
-        paint_board(
-            tty,
-            theme,
-            WIFI,
-            &[BoardItem {
-                label: "Looking for Wi-Fi networks…".into(),
-                state: ItemState::Active,
-                detail: None,
-            }],
-            0,
-        );
-        let nets = wifi::scan(&iface);
+        // Scan with an animated one-line live board.
+        let scan_board = [BoardItem {
+            label: "Looking for Wi-Fi networks…".into(),
+            state: ItemState::Active,
+            detail: None,
+        }];
+        let scan_iface = iface.clone();
+        let nets = match widgets::run_with_spinner(tty, theme, WIFI, &scan_board, move || {
+            wifi::scan(&scan_iface)
+        }) {
+            Spin::Done(n) => n,
+            Spin::Aborted => return Nav::Abort,
+        };
 
         if nets.is_empty() {
             match ack_card(
@@ -369,7 +509,10 @@ fn wifi_stage(tty: &mut Tty, theme: &Theme, collected: &mut Collected) -> Nav {
         };
 
         let password = if secured {
-            match password_input(tty, theme, WIFI, &format!("Password for  {ssid}"), 8) {
+            // Require a non-empty key but do not impose the 8-char WPA2 floor —
+            // WEP (5/13) and other short keys are valid, and nmcli validates the
+            // real key on connect (a bad one lands on the retry path).
+            match password_input(tty, theme, WIFI, &format!("Password for  {ssid}"), 1) {
                 Flow::Value(p) => Some(p),
                 Flow::Back => continue,
                 Flow::Abort => return Nav::Abort,
@@ -446,9 +589,18 @@ fn join_flow(
             detail: None,
         },
     ];
-    paint_board(tty, theme, WIFI, &items, 0);
-
-    if let Err(e) = wifi::connect(iface, ssid, password, hidden) {
+    // Connect with an animated board.
+    let c_iface = iface.to_string();
+    let c_ssid = ssid.to_string();
+    let c_pw = password.map(str::to_string);
+    let connect_res: Result<(), String> =
+        match widgets::run_with_spinner(tty, theme, WIFI, &items, move || {
+            wifi::connect(&c_iface, &c_ssid, c_pw.as_deref(), hidden)
+        }) {
+            Spin::Done(r) => r,
+            Spin::Aborted => return JoinOutcome::Abort,
+        };
+    if let Err(e) = connect_res {
         items[0].state = ItemState::Failed;
         items[0].detail = Some(short_reason(&e));
         paint_board(tty, theme, WIFI, &items, 0);
@@ -457,13 +609,22 @@ fn join_flow(
     items[0].state = ItemState::Ok;
     items[0].detail = Some(format!("on {iface}"));
     items[1].state = ItemState::Active;
-    paint_board(tty, theme, WIFI, &items, 0);
 
-    let reach = wifi::verify_lan_reachable(iface);
+    // Verify LAN reachability with an animated board.
+    let v_iface = iface.to_string();
+    let reach = match widgets::run_with_spinner(tty, theme, WIFI, &items, move || {
+        wifi::verify_lan_reachable(&v_iface)
+    }) {
+        Spin::Done(r) => r,
+        Spin::Aborted => return JoinOutcome::Abort,
+    };
     if !reach.reachable {
         items[1].state = ItemState::Failed;
         items[1].detail = Some("could not reach your network".into());
         paint_board(tty, theme, WIFI, &items, 0);
+        // The join associated but the LAN did not answer; tear down the profile
+        // nmcli just saved so a dead network is not left to auto-reconnect.
+        wifi::forget(ssid);
         return retry_prompt(tty, theme);
     }
     items[1].state = ItemState::Ok;
@@ -634,6 +795,26 @@ enum ReviewNav {
     Finish,
     Back,
     Abort,
+    /// Jump straight to a chosen earlier step to change its answer.
+    JumpTo(Step),
+}
+
+/// Let the operator pick any earlier answer to change, instead of stepping back
+/// one screen at a time. Returns the chosen step, or `None` if they backed out
+/// of the picker.
+fn change_answer(tty: &mut Tty, theme: &Theme, args: &Args) -> Option<Step> {
+    let steps: Vec<Step> = visible_steps(args)
+        .into_iter()
+        .filter(|s| *s != Step::Review)
+        .collect();
+    let choices: Vec<Choice> = steps
+        .iter()
+        .map(|s| Choice::new(s.label(), s.label(), None))
+        .collect();
+    match select_list(tty, theme, "review", "Which answer to change?", &choices, 0) {
+        Flow::Value(i) => steps.get(i).copied(),
+        Flow::Back | Flow::Abort => None,
+    }
 }
 
 fn review_stage(
@@ -643,13 +824,22 @@ fn review_stage(
     extras: &mut WizardExtras,
     collected: &Collected,
 ) -> ReviewNav {
+    // The operating-region control only makes sense on a profile that transmits
+    // (drone / ground station); a workstation has no long-range radio, so it is
+    // omitted from the review actions.
+    let has_radio = !matches!(
+        args.profile.as_deref(),
+        Some("workstation") | Some("compute")
+    );
     loop {
         let summary = review_summary(theme, args, extras, collected);
-        let choices = vec![
+        let mut choices = vec![
             Choice::new("finish", "Finish and set up", None),
             Choice::new("change", "Change an answer", None),
-            Choice::new("region", "Operating region (advanced)", None),
         ];
+        if has_radio {
+            choices.push(Choice::new("region", "Operating region (advanced)", None));
+        }
         match summary_select(
             tty,
             theme,
@@ -660,7 +850,10 @@ fn review_stage(
             0,
         ) {
             Flow::Value(0) => return ReviewNav::Finish,
-            Flow::Value(1) => return ReviewNav::Back,
+            Flow::Value(1) => match change_answer(tty, theme, args) {
+                Some(step) => return ReviewNav::JumpTo(step),
+                None => continue,
+            },
             Flow::Value(_) => match region_advanced(tty, theme, extras) {
                 Flow::Abort => return ReviewNav::Abort,
                 _ => continue,
@@ -679,20 +872,31 @@ fn review_summary(
     collected: &Collected,
 ) -> Vec<String> {
     let profile = args.profile.clone().unwrap_or_else(|| "drone".to_string());
+    let is_drone = profile == "drone";
+    let is_ground = profile == "ground_station";
+    let has_radio = is_drone || is_ground;
     let name = args.name.clone().unwrap_or_else(|| default_name(&profile));
-    let mut rows = vec![
-        kv(
-            theme,
-            "Device",
-            &format!("{name}   ({})", friendly_profile(&profile)),
-        ),
-        kv(theme, "Radio", onoff(!args.no_rtl_driver)),
-    ];
-    if profile == "drone" {
+    let mut rows = vec![kv(
+        theme,
+        "Device",
+        &format!("{name}   ({})", friendly_profile(&profile)),
+    )];
+    // Radio / camera / display rows only for the profiles that have them.
+    if has_radio {
+        rows.push(kv(theme, "Radio", onoff(!args.no_rtl_driver)));
+    }
+    if is_drone {
         rows.push(kv(
             theme,
             "Camera",
             onoff(args.camera.as_deref() == Some("auto")),
+        ));
+    }
+    if is_ground {
+        rows.push(kv(
+            theme,
+            "Screen",
+            onoff(args.display.as_deref() == Some("auto")),
         ));
     }
     rows.push(kv(
@@ -709,20 +913,23 @@ fn review_summary(
             "On my network"
         },
     ));
-    rows.push(kv(
-        theme,
-        "Region",
-        extras.region_pinned.as_deref().unwrap_or("Unrestricted"),
-    ));
-    rows.push(kv(
-        theme,
-        "Pairing",
-        if args.pair.is_some() {
-            "code entered"
-        } else {
-            "add later in Mission Control"
-        },
-    ));
+    // Region + pairing are radio-profile concerns; a workstation shows neither.
+    if has_radio {
+        rows.push(kv(
+            theme,
+            "Region",
+            extras.region_pinned.as_deref().unwrap_or("Unrestricted"),
+        ));
+        rows.push(kv(
+            theme,
+            "Pairing",
+            if args.pair.is_some() {
+                "code entered"
+            } else {
+                "add later in Mission Control"
+            },
+        ));
+    }
     rows
 }
 
@@ -845,6 +1052,62 @@ mod tests {
         let long = "x".repeat(80);
         let out = short_reason(&long);
         assert!(out.chars().count() <= 49, "reason not bounded: {out}");
+    }
+
+    #[test]
+    fn pack_labels_wraps_within_width_and_covers_all() {
+        let labels = [
+            "Camera gimbal",
+            "Distance sensor",
+            "Optical flow",
+            "LiDAR",
+            "mmWave radar",
+            "RTK GNSS",
+        ];
+        let lines = pack_labels(&labels, 30);
+        // Every line is within the width.
+        for l in &lines {
+            assert!(l.chars().count() <= 30, "line too wide: {l:?}");
+        }
+        // Every label survives, in order, across the joined lines.
+        let joined = lines.join(", ");
+        for l in labels {
+            assert!(joined.contains(l), "lost label {l}");
+        }
+        assert!(lines.len() > 1, "should wrap into multiple lines at width 30");
+        // A single label longer than the width still emits (not dropped).
+        assert_eq!(pack_labels(&["a-very-long-single-label"], 5).len(), 1);
+        assert!(pack_labels(&[], 40).is_empty());
+    }
+
+    #[test]
+    fn visible_steps_omit_pairing_for_a_workstation() {
+        let drone = Args {
+            profile: Some("drone".into()),
+            ..Args::default()
+        };
+        assert!(
+            visible_steps(&drone).contains(&Step::Pair),
+            "a drone should walk the pairing step"
+        );
+        let gs = Args {
+            profile: Some("ground_station".into()),
+            ..Args::default()
+        };
+        assert!(visible_steps(&gs).contains(&Step::Pair));
+        for p in ["workstation", "compute"] {
+            let ws = Args {
+                profile: Some(p.into()),
+                ..Args::default()
+            };
+            let steps = visible_steps(&ws);
+            assert!(
+                !steps.contains(&Step::Pair),
+                "{p} must not walk the pairing step"
+            );
+            // Review is always the terminal step.
+            assert_eq!(steps.last(), Some(&Step::Review));
+        }
     }
 
     #[test]

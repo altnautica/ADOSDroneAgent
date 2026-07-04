@@ -1,13 +1,16 @@
 //! Reusable interactive widgets for the onboarding wizard.
 //!
-//! Each widget renders a [`crate::wizard::render::card`] and drives a small,
-//! pure state model from [`crate::ui::tty::Tty`] key events. The pure movement
-//! and edit logic is factored out so it is unit-tested without a terminal; the
-//! widget functions themselves are thin render+read loops.
+//! Each widget builds a body (a `Vec<String>` of pre-styled lines) plus a
+//! footer key-hint and hands them to [`crate::ui::tty::Tty::render`], which
+//! centers the body in a panel on the full screen with the header, progress
+//! rail, and footer around it. The pure movement and edit logic is factored out
+//! so it is unit-tested without a terminal; the widget functions themselves are
+//! thin build + read loops. A terminal resize returns [`KeyEvent::Resize`],
+//! which the loops ignore and so repaint at the new size.
 
 use crate::ui::theme::Theme;
-use crate::ui::tty::{KeyEvent, Tty};
-use crate::wizard::render::{self, card, cursor_glyph, dot, wordmark};
+use crate::ui::tty::{Input, KeyEvent, Tty};
+use crate::wizard::render::{self, cursor_glyph, dot};
 
 /// The outcome of one widget: a value, a request to go back a step, or an abort
 /// (Ctrl-C / terminal closed) that unwinds the whole wizard.
@@ -80,6 +83,12 @@ pub struct BoardItem {
     pub label: String,
     pub state: ItemState,
     pub detail: Option<String>,
+}
+
+/// The result of a spinner-animated background task.
+pub enum Spin<T> {
+    Done(T),
+    Aborted,
 }
 
 // ── pure movement + edit logic (unit-tested) ─────────────────────────────
@@ -157,12 +166,7 @@ pub fn insert_region_char(raw: &mut String, ch: char) {
 
 // ── interactive widgets ──────────────────────────────────────────────────
 
-/// The card title text (`▌ ADOS · <section>`); the card border colors it.
-fn title(theme: &Theme, section: &str) -> String {
-    format!("{} ADOS {} {section}", wordmark(theme), dot(theme))
-}
-
-/// A dim, ASCII-safe key hint joined by dot separators.
+/// A dim, ASCII-safe key hint joined by dot separators (the footer bar text).
 fn hint(theme: &Theme, parts: &[&str]) -> String {
     parts.join(&format!(" {} ", dot(theme)))
 }
@@ -183,12 +187,14 @@ fn left_right(theme: &Theme) -> String {
     }
 }
 
-/// Gutter for the cursor row (accent arrow) or a plain row (two spaces).
-fn gutter(theme: &Theme, selected: bool) -> String {
+/// One selectable choice row. The selected row is a full-width solid-amber bar
+/// with dark text and a filled dot; an unselected row is default text with an
+/// empty dot. `inner` is the panel's inner text width.
+fn choice_row(theme: &Theme, label: &str, selected: bool, inner: usize) -> String {
     if selected {
-        theme.accent(cursor_glyph(theme))
+        theme.selection_bar(&format!(" {} {label}", theme.dot_filled()), inner)
     } else {
-        " ".to_string()
+        format!(" {} {label}", theme.dim(theme.dot_empty()))
     }
 }
 
@@ -214,27 +220,19 @@ pub fn confirm_card(
         if !detail.is_empty() {
             body.push(String::new());
         }
-        body.push(theme.bold(question));
+        body.push(theme.heading(question));
         body.push(String::new());
         body.push(options_row(theme, yes_label, no_label, yes));
-        let lines = card(
+        tty.render(
             theme,
-            &title(theme, section),
+            section,
             &body,
             &hint(theme, &[&left_right(theme), "Enter to confirm"]),
-            tty.cols(),
         );
-        tty.paint(&lines);
         match tty.read_key() {
             Ok(KeyEvent::Left) | Ok(KeyEvent::Right) | Ok(KeyEvent::Tab) => yes = !yes,
-            Ok(KeyEvent::Enter) => {
-                tty.commit();
-                return Flow::Value(yes);
-            }
-            Ok(KeyEvent::Esc) => {
-                tty.commit();
-                return Flow::Back;
-            }
+            Ok(KeyEvent::Enter) => return Flow::Value(yes),
+            Ok(KeyEvent::Esc) => return Flow::Back,
             Ok(KeyEvent::CtrlC) => return Flow::Abort,
             _ => {}
         }
@@ -276,45 +274,33 @@ pub fn select_list(
 ) -> Flow<usize> {
     let mut cursor = default_idx.min(choices.len().saturating_sub(1));
     loop {
-        let mut body = vec![theme.bold(prompt), String::new()];
+        let inner = tty.body_width();
+        let mut body = vec![theme.heading(prompt), String::new()];
         for (i, c) in choices.iter().enumerate() {
             let sel = i == cursor;
-            let label = if sel {
-                theme.bold(&c.label)
-            } else {
-                c.label.clone()
-            };
-            body.push(format!(" {} {label}", gutter(theme, sel)));
+            body.push(choice_row(theme, &c.label, sel, inner));
             if let Some(h) = &c.hint {
                 body.push(format!("     {}", theme.dim(h)));
             }
         }
-        let lines = card(
+        tty.render(
             theme,
-            &title(theme, section),
+            section,
             &body,
             &hint(theme, &[&arrows_move(theme), "Enter to choose"]),
-            tty.cols(),
         );
-        tty.paint(&lines);
         match tty.read_key() {
             Ok(KeyEvent::Up) => cursor = nav_up(cursor),
             Ok(KeyEvent::Down) => cursor = nav_down(cursor, choices.len()),
-            Ok(KeyEvent::Enter) => {
-                tty.commit();
-                return Flow::Value(cursor);
-            }
-            Ok(KeyEvent::Esc) => {
-                tty.commit();
-                return Flow::Back;
-            }
+            Ok(KeyEvent::Enter) => return Flow::Value(cursor),
+            Ok(KeyEvent::Esc) => return Flow::Back,
             Ok(KeyEvent::CtrlC) => return Flow::Abort,
             _ => {}
         }
     }
 }
 
-/// One-of-N with a leading read-only summary block: a bold header, the summary
+/// One-of-N with a leading read-only summary block: a heading, the summary
 /// lines (each already styled), then the selectable choices. Used by the review
 /// screen so the operator sees every answer above the finish/change actions.
 pub fn summary_select(
@@ -328,40 +314,28 @@ pub fn summary_select(
 ) -> Flow<usize> {
     let mut cursor = default_idx.min(choices.len().saturating_sub(1));
     loop {
-        let mut body = vec![theme.bold(header), String::new()];
+        let inner = tty.body_width();
+        let mut body = vec![theme.heading(header), String::new()];
         body.extend(summary.iter().cloned());
         body.push(String::new());
         for (i, c) in choices.iter().enumerate() {
             let sel = i == cursor;
-            let label = if sel {
-                theme.bold(&c.label)
-            } else {
-                c.label.clone()
-            };
-            body.push(format!(" {} {label}", gutter(theme, sel)));
+            body.push(choice_row(theme, &c.label, sel, inner));
             if let Some(h) = &c.hint {
                 body.push(format!("     {}", theme.dim(h)));
             }
         }
-        let lines = card(
+        tty.render(
             theme,
-            &title(theme, section),
+            section,
             &body,
             &hint(theme, &[&arrows_move(theme), "Enter to choose"]),
-            tty.cols(),
         );
-        tty.paint(&lines);
         match tty.read_key() {
             Ok(KeyEvent::Up) => cursor = nav_up(cursor),
             Ok(KeyEvent::Down) => cursor = nav_down(cursor, choices.len()),
-            Ok(KeyEvent::Enter) => {
-                tty.commit();
-                return Flow::Value(cursor);
-            }
-            Ok(KeyEvent::Esc) => {
-                tty.commit();
-                return Flow::Back;
-            }
+            Ok(KeyEvent::Enter) => return Flow::Value(cursor),
+            Ok(KeyEvent::Esc) => return Flow::Back,
             Ok(KeyEvent::CtrlC) => return Flow::Abort,
             _ => {}
         }
@@ -369,7 +343,8 @@ pub fn summary_select(
 }
 
 /// Multi-of-N. Up/Down move, Space toggles, Enter confirms. Recommended rows
-/// arrive checked so an Enter-through installs them.
+/// arrive checked so an Enter-through installs them. A checked box is a filled
+/// amber square; the cursor row is accented.
 pub fn checklist(
     tty: &mut Tty,
     theme: &Theme,
@@ -379,15 +354,17 @@ pub fn checklist(
 ) -> Flow<Vec<CheckItem>> {
     let mut cursor = 0usize;
     loop {
-        let mut body = vec![theme.bold(prompt), String::new()];
+        let mut body = vec![theme.heading(prompt), String::new()];
         for (i, item) in items.iter().enumerate() {
             let sel = i == cursor;
             let checkbox = if item.checked {
-                theme.ok(&format!("[{}]", theme.glyph_ok()))
+                theme.accent(theme.box_checked())
             } else {
-                theme.dim("[ ]")
+                theme.dim(theme.box_unchecked())
             };
-            let mut label = if sel {
+            let mut label = if item.checked {
+                theme.heading(&item.label)
+            } else if sel {
                 theme.bold(&item.label)
             } else {
                 item.label.clone()
@@ -398,34 +375,35 @@ pub fn checklist(
             body.push(format!(" {} {checkbox} {label}", gutter(theme, sel)));
             body.push(format!("       {}", theme.dim(&item.benefit)));
         }
-        let lines = card(
+        tty.render(
             theme,
-            &title(theme, section),
+            section,
             &body,
             &hint(
                 theme,
                 &[&arrows_move(theme), "Space toggle", "Enter continue"],
             ),
-            tty.cols(),
         );
-        tty.paint(&lines);
         match tty.read_key() {
             Ok(KeyEvent::Up) => cursor = nav_up(cursor),
             Ok(KeyEvent::Down) => cursor = nav_down(cursor, items.len()),
             Ok(KeyEvent::Space) => {
                 toggle_check(&mut items, cursor);
             }
-            Ok(KeyEvent::Enter) => {
-                tty.commit();
-                return Flow::Value(items);
-            }
-            Ok(KeyEvent::Esc) => {
-                tty.commit();
-                return Flow::Back;
-            }
+            Ok(KeyEvent::Enter) => return Flow::Value(items),
+            Ok(KeyEvent::Esc) => return Flow::Back,
             Ok(KeyEvent::CtrlC) => return Flow::Abort,
             _ => {}
         }
+    }
+}
+
+/// Gutter for the cursor row (accent arrow) or a plain row (two spaces).
+fn gutter(theme: &Theme, selected: bool) -> String {
+    if selected {
+        theme.accent(cursor_glyph(theme))
+    } else {
+        " ".to_string()
     }
 }
 
@@ -454,12 +432,13 @@ where
     loop {
         let cursor_bar = if theme.ascii { "_" } else { "▏" };
         let mut body = vec![
-            theme.bold(prompt),
+            theme.heading(prompt),
             String::new(),
             format!(
-                " {} {raw}{}",
+                " {} {}{}",
                 theme.accent(cursor_glyph(theme)),
-                theme.dim(cursor_bar)
+                theme.bold(&raw),
+                theme.accent(cursor_bar)
             ),
             String::new(),
         ];
@@ -473,14 +452,12 @@ where
         if let Some(e) = &error {
             body.push(theme.warn(e));
         }
-        let lines = card(
+        tty.render(
             theme,
-            &title(theme, section),
+            section,
             &body,
             &hint(theme, &["type a value", "Enter to confirm"]),
-            tty.cols(),
         );
-        tty.paint(&lines);
         match tty.read_key() {
             Ok(KeyEvent::Char(c)) => {
                 sanitize(&mut raw, c);
@@ -495,16 +472,10 @@ where
                 error = None;
             }
             Ok(KeyEvent::Enter) => match validate(&raw) {
-                None => {
-                    tty.commit();
-                    return Flow::Value(raw);
-                }
+                None => return Flow::Value(raw),
                 Some(reason) => error = Some(reason),
             },
-            Ok(KeyEvent::Esc) => {
-                tty.commit();
-                return Flow::Back;
-            }
+            Ok(KeyEvent::Esc) => return Flow::Back,
             Ok(KeyEvent::CtrlC) => return Flow::Abort,
             _ => {}
         }
@@ -536,23 +507,22 @@ pub fn password_input(
             "(Tab to show)"
         };
         let body = vec![
-            theme.bold(prompt),
+            theme.heading(prompt),
             String::new(),
             format!(
-                " {} {shown}{}   {}",
+                " {} {}{}   {}",
                 theme.accent(cursor_glyph(theme)),
-                theme.dim(cursor_bar),
+                theme.bold(&shown),
+                theme.accent(cursor_bar),
                 theme.dim(toggle)
             ),
         ];
-        let lines = card(
+        tty.render(
             theme,
-            &title(theme, section),
+            section,
             &body,
             &hint(theme, &["type the password", "Enter to connect"]),
-            tty.cols(),
         );
-        tty.paint(&lines);
         match tty.read_key() {
             Ok(KeyEvent::Char(c)) => raw.push(c),
             Ok(KeyEvent::Space) => raw.push(' '),
@@ -562,14 +532,10 @@ pub fn password_input(
             Ok(KeyEvent::Tab) => reveal = !reveal,
             Ok(KeyEvent::Enter) => {
                 if raw.chars().count() >= min_len {
-                    tty.commit();
                     return Flow::Value(raw);
                 }
             }
-            Ok(KeyEvent::Esc) => {
-                tty.commit();
-                return Flow::Back;
-            }
+            Ok(KeyEvent::Esc) => return Flow::Back,
             Ok(KeyEvent::CtrlC) => return Flow::Abort,
             _ => {}
         }
@@ -583,7 +549,7 @@ pub fn wifi_picker(tty: &mut Tty, theme: &Theme, rows: &[WifiRow]) -> Flow<WifiP
     let total = rows.len() + 1;
     let mut cursor = 0usize;
     loop {
-        let mut body = vec![theme.bold("Choose a Wi-Fi network"), String::new()];
+        let mut body = vec![theme.heading("Choose a Wi-Fi network"), String::new()];
         for (i, row) in rows.iter().enumerate() {
             let sel = i == cursor;
             // Pad the name to a fixed column so the signal bars and the
@@ -620,23 +586,19 @@ pub fn wifi_picker(tty: &mut Tty, theme: &Theme, rows: &[WifiRow]) -> Flow<WifiP
             theme.dim(hidden_label)
         };
         body.push(format!(" {} {hidden}", gutter(theme, hidden_sel)));
-        let lines = card(
+        tty.render(
             theme,
-            &title(theme, "Wi-Fi"),
+            "Wi-Fi",
             &body,
             &hint(theme, &[&arrows_move(theme), "Enter select", "r rescan"]),
-            tty.cols(),
         );
-        tty.paint(&lines);
         match tty.read_key() {
             Ok(KeyEvent::Up) => cursor = nav_up(cursor),
             Ok(KeyEvent::Down) => cursor = nav_down(cursor, total),
             Ok(KeyEvent::Char('r')) | Ok(KeyEvent::Char('R')) => {
-                tty.commit();
-                return Flow::Value(WifiPick::Rescan);
+                return Flow::Value(WifiPick::Rescan)
             }
             Ok(KeyEvent::Enter) => {
-                tty.commit();
                 if cursor < rows.len() {
                     let row = &rows[cursor];
                     return Flow::Value(WifiPick::Network {
@@ -646,10 +608,7 @@ pub fn wifi_picker(tty: &mut Tty, theme: &Theme, rows: &[WifiRow]) -> Flow<WifiP
                 }
                 return Flow::Value(WifiPick::Hidden);
             }
-            Ok(KeyEvent::Esc) => {
-                tty.commit();
-                return Flow::Back;
-            }
+            Ok(KeyEvent::Esc) => return Flow::Back,
             Ok(KeyEvent::CtrlC) => return Flow::Abort,
             _ => {}
         }
@@ -683,44 +642,43 @@ pub fn ack_card(
         vec!["Enter continue"]
     };
     loop {
-        let mut body = vec![theme.bold(prompt), String::new()];
+        let mut body = vec![theme.heading(prompt), String::new()];
         body.extend(body_lines.iter().cloned());
-        let lines = card(
-            theme,
-            &title(theme, section),
-            &body,
-            &hint(theme, &hint_parts),
-            tty.cols(),
-        );
-        tty.paint(&lines);
+        tty.render(theme, section, &body, &hint(theme, &hint_parts));
         match tty.read_key() {
-            Ok(KeyEvent::Enter) => {
-                tty.commit();
-                return Flow::Value(Ack::Continue);
-            }
+            Ok(KeyEvent::Enter) => return Flow::Value(Ack::Continue),
             Ok(KeyEvent::Char('r')) | Ok(KeyEvent::Char('R')) if allow_rescan => {
-                tty.commit();
-                return Flow::Value(Ack::Rescan);
+                return Flow::Value(Ack::Rescan)
             }
-            Ok(KeyEvent::Esc) => {
-                tty.commit();
-                return Flow::Back;
-            }
+            Ok(KeyEvent::Esc) => return Flow::Back,
             Ok(KeyEvent::CtrlC) => return Flow::Abort,
             _ => {}
         }
     }
 }
 
-/// Build the live status board lines for the current item states (`spin` selects
+/// A single-key welcome splash (no progress rail). Any key or Enter proceeds;
+/// Ctrl-C aborts.
+pub fn welcome(tty: &mut Tty, theme: &Theme, body_lines: &[String]) -> Flow<()> {
+    loop {
+        tty.render(
+            theme,
+            "welcome",
+            body_lines,
+            &hint(theme, &["Enter to begin", "Ctrl-C to cancel"]),
+        );
+        match tty.read_key() {
+            Ok(KeyEvent::CtrlC) => return Flow::Abort,
+            Ok(KeyEvent::Resize) | Ok(KeyEvent::Unknown) => {}
+            Ok(_) => return Flow::Value(()),
+            Err(_) => return Flow::Abort,
+        }
+    }
+}
+
+/// Build the live status board body for the current item states (`spin` selects
 /// the spinner frame on the active row).
-pub fn board_lines(
-    theme: &Theme,
-    section: &str,
-    items: &[BoardItem],
-    spin: usize,
-    cols: usize,
-) -> Vec<String> {
+pub fn board_body(theme: &Theme, items: &[BoardItem], spin: usize) -> Vec<String> {
     let mut body = Vec::new();
     for item in items {
         let (glyph, label) = match item.state {
@@ -736,22 +694,55 @@ pub fn board_lines(
             .unwrap_or_default();
         body.push(format!(" {glyph} {label}{detail}"));
     }
-    card(theme, &title(theme, section), &body, "", cols)
+    body
 }
 
-/// Paint one frame of a live status board on the tty (no rewind-commit).
+/// Paint one frame of a live status board on the tty.
 pub fn paint_board(tty: &mut Tty, theme: &Theme, section: &str, items: &[BoardItem], spin: usize) {
-    let lines = board_lines(theme, section, items, spin, tty.cols());
-    tty.paint(&lines);
+    let body = board_body(theme, items, spin);
+    tty.render(theme, section, &body, "");
 }
 
-// This keeps `render` used even when only a subset of helpers are referenced.
-#[allow(unused_imports)]
-use render as _render;
+/// Run `worker` on a background thread while animating the board's active row,
+/// returning the worker's result. Ctrl-C aborts (after the worker finishes). A
+/// resize repaints. This is what makes the braille spinner actually animate
+/// while a blocking probe (a Wi-Fi scan, a network join) runs.
+pub fn run_with_spinner<T, F>(
+    tty: &mut Tty,
+    theme: &Theme,
+    section: &str,
+    items: &[BoardItem],
+    worker: F,
+) -> Spin<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let handle = std::thread::spawn(worker);
+    let mut spin = 0usize;
+    loop {
+        paint_board(tty, theme, section, items, spin);
+        if handle.is_finished() {
+            return match handle.join() {
+                Ok(v) => Spin::Done(v),
+                Err(_) => Spin::Aborted,
+            };
+        }
+        match tty.read_input(90) {
+            Input::Key(KeyEvent::CtrlC) => {
+                let _ = handle.join();
+                return Spin::Aborted;
+            }
+            Input::Key(KeyEvent::Resize) => {}
+            Input::Tick | Input::Key(_) => spin = spin.wrapping_add(1),
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::theme::ColorTier;
 
     #[test]
     fn cursor_nav_clamps_at_both_ends() {
@@ -856,10 +847,10 @@ mod tests {
     }
 
     #[test]
-    fn board_lines_render_each_state() {
+    fn board_body_renders_each_state() {
         let theme = Theme {
-            color: false,
             ascii: true,
+            tier: ColorTier::None,
         };
         let items = vec![
             BoardItem {
@@ -883,14 +874,34 @@ mod tests {
                 detail: None,
             },
         ];
-        let lines = board_lines(&theme, "Wi-Fi", &items, 0, 50);
-        let joined = lines.join("\n");
+        let body = board_body(&theme, &items, 0);
+        assert_eq!(body.len(), items.len());
+        let joined = body.join("\n");
         assert!(joined.contains("Connected"));
         assert!(joined.contains("gateway"));
-        // Every line is exactly the box width (color off, ASCII tier).
-        for l in &lines {
-            assert_eq!(l.chars().count(), 50);
-        }
+    }
+
+    #[test]
+    fn choice_row_selected_is_a_full_width_amber_bar() {
+        let theme = Theme {
+            ascii: false,
+            tier: ColorTier::Truecolor,
+        };
+        let bar = choice_row(&theme, "This flies (Drone)", true, 40);
+        assert!(
+            bar.contains("\x1b[48;2;235;193;87m"),
+            "selected row not an amber bar"
+        );
+        assert!(bar.contains('●'), "selected row missing the filled dot");
+        let plain_row = choice_row(&theme, "This flies (Drone)", false, 40);
+        assert!(
+            !plain_row.contains("\x1b[48;2;235;193;87m"),
+            "unselected row barred"
+        );
+        assert!(
+            plain_row.contains('○'),
+            "unselected row missing the empty dot"
+        );
     }
 
     #[test]

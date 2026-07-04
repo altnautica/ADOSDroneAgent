@@ -225,6 +225,15 @@ pub fn connect(
     }
 }
 
+/// Delete the NetworkManager connection profile named after `ssid` (best-effort).
+/// `connect` creates a saved profile the moment it associates; if the link then
+/// fails the LAN-reachability check, that profile would otherwise linger and
+/// auto-reconnect to a dead network on the next boot. Tearing it down keeps a
+/// connected-but-unreachable attempt from being saved.
+pub fn forget(ssid: &str) {
+    let _ = exec::run("nmcli", &["connection", "delete", ssid]);
+}
+
 /// Verify the joined link reaches the LAN (its default gateway answers a single
 /// ping), NOT the internet. A link with an address but no working data path
 /// fails this, so it can never read as connected.

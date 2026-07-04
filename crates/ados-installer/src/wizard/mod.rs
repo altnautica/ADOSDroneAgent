@@ -13,9 +13,11 @@
 //! those cases the install proceeds silently with the auto-detected defaults —
 //! a fresh box still comes up fully installed with zero follow-up commands.
 
+pub mod frame;
 pub mod render;
 pub mod widgets;
 
+mod catalog;
 mod hw;
 mod screens;
 mod wifi;
@@ -94,7 +96,9 @@ pub fn run(args: &mut Args) -> anyhow::Result<WizardControl> {
     let mut extras = WizardExtras::default();
     let mut collected = screens::Collected::default();
 
-    screens::greet(&mut tty, &theme);
+    if !screens::greet(&mut tty, &theme) {
+        return Ok(WizardControl::Canceled);
+    }
     match screens::run_stages(&mut tty, &theme, args, &mut hw, &mut extras, &mut collected) {
         screens::Outcome::Completed => Ok(WizardControl::Completed(extras)),
         screens::Outcome::Canceled => Ok(WizardControl::Canceled),

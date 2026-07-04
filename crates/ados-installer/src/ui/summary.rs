@@ -387,8 +387,8 @@ mod tests {
     #[test]
     fn rich_card_reach_block_has_mdns_and_lan_ip_but_never_localhost() {
         let theme = Theme {
-            color: false,
             ascii: false,
+            tier: crate::ui::theme::ColorTier::None,
         };
         let logs = VecDeque::new();
         let joined = rich_lines(&sample("ok"), &theme, &logs).join("\n");
