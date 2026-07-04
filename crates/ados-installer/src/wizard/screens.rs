@@ -1055,6 +1055,68 @@ mod tests {
     }
 
     #[test]
+    fn hardware_frame_fits_and_is_context_aware_per_profile() {
+        use crate::ui::theme::Theme;
+        use crate::wizard::frame::{compose, Chrome, Screen, TermSize};
+
+        let theme = Theme::detect(true, true); // no color, ASCII — readable + portable
+        let sys = hw::SysProbe::default(); // nothing attached: every Now row reads "not detected"
+        let size = TermSize { cols: 90, rows: 30 };
+        for (profile, id, want, forbid) in [
+            (
+                catalog::Profile::Drone,
+                "drone",
+                "Flight controller",
+                "HDMI output",
+            ),
+            (
+                catalog::Profile::GroundStation,
+                "ground_station",
+                "Long-range radio",
+                "Flight controller",
+            ),
+            (
+                catalog::Profile::Workstation,
+                "workstation",
+                "This computer",
+                "Long-range radio",
+            ),
+        ] {
+            let body = catalog_body(&theme, profile, &sys);
+            let screen = Screen {
+                section: SETUP,
+                body: &body,
+                footer: "Enter to continue",
+            };
+            let chrome = Chrome {
+                step: 2,
+                total: 6,
+                label: "Hardware".to_string(),
+            };
+            let grid = compose(&theme, &chrome, &screen, size);
+            // Every row fits the terminal width exactly (no overflow off-screen).
+            for (i, line) in grid.iter().enumerate() {
+                assert_eq!(
+                    line.chars().count(),
+                    90,
+                    "{id}: row {i} not 90 cols: {line:?}"
+                );
+            }
+            let joined = grid.join("\n");
+            // The whole body lands on screen (nothing clipped past the footer): the
+            // last catalog label must be present.
+            assert!(joined.contains(want), "{id}: missing expected {want:?}");
+            // Context-awareness: the other profile's hardware must not appear.
+            assert!(
+                !joined.contains(forbid),
+                "{id}: leaked another profile's {forbid:?}"
+            );
+            // Uncomment locally to eyeball the layout: `cargo test hardware_frame -- --nocapture`.
+            // eprintln!("\n==== {id} ====\n{joined}");
+        }
+    }
+
+    #[test]
     fn pack_labels_wraps_within_width_and_covers_all() {
         let labels = [
             "Camera gimbal",
