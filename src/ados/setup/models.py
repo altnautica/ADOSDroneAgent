@@ -206,13 +206,14 @@ class RegulatoryApplyRequest(BaseModel):
 class AdvancedApplyRequest(BaseModel):
     """Advanced section of the batch-apply payload.
 
-    ``factory_reset`` queues a reset that takes effect on the next
-    reboot; this iteration of the route does not actually wipe state.
-    ``board_override`` and ``log_level`` are validated here and
-    persisted by the corresponding setter.
+    ``log_level`` is validated and written to ``config.logging.level``,
+    then saved to disk (it applies on the next service restart).
+    ``board_override`` is validated and written to the
+    ``/etc/ados/board_override`` file the HAL detector reads; an empty
+    value clears it. Both fields are optional so the caller sends only
+    the slice they changed.
     """
 
-    factory_reset: bool | None = None
     board_override: str | None = None
     log_level: str | None = None
 

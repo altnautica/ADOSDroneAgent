@@ -54,7 +54,7 @@ const SECTIONS: SectionLink[] = [
     to: "/settings/advanced",
     label: "Advanced",
     icon: Cpu,
-    blurb: "Log level, board override, factory reset.",
+    blurb: "Log level and board override.",
   },
 ];
 
@@ -67,7 +67,7 @@ export function SettingsLayout() {
           <h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
           <p className="text-sm text-muted-foreground mt-1">
             Live agent configuration. Risky changes (passwords, profile switches,
-            factory reset) require explicit Save and a confirm prompt.
+            board override) require explicit Save and a confirm prompt.
           </p>
         </div>
       </header>

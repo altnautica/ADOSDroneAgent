@@ -28,6 +28,14 @@ async def get_config():
     """Current config (sanitized, no secrets)."""
     app = get_agent_app()
     data = app.config.model_dump()
+    # Surface the forced-board slug the HAL detector reads from the
+    # /etc/ados/board_override file. It is a file, not a config field, so
+    # it is not in model_dump(); expose it under agent.board_override so a
+    # UI that sets it can read it back. Empty string = auto-detect.
+    from ados.setup.advanced import read_board_override
+
+    if isinstance(data.get("agent"), dict):
+        data["agent"]["board_override"] = read_board_override()
     # Redact secrets
     if "security" in data:
         sec = data["security"]

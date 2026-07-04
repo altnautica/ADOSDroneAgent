@@ -2,10 +2,19 @@
 
 from __future__ import annotations
 
+import pytest
 from click.testing import CliRunner
 
 from ados.cli import rust as rust_mod
 from ados.cli.rust import _SERVICES, _SVC_NAMES, rust_group
+
+
+@pytest.fixture(autouse=True)
+def _force_linux(monkeypatch):
+    """The native-vs-packaged cutover only applies to a systemd-managed agent,
+    so pin the platform to Linux to exercise that path regardless of the host the
+    tests run on (on macOS the commands short-circuit with a not-applicable note)."""
+    monkeypatch.setattr(rust_mod.platform, "system", lambda: "Linux")
 
 
 def test_service_map_is_well_formed():

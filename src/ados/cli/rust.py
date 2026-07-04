@@ -21,6 +21,7 @@ they require root. ``status`` is read-only and runs as any user.
 from __future__ import annotations
 
 import os
+import platform
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -28,6 +29,23 @@ from dataclasses import dataclass
 import click
 
 from ados.core.paths import ADOS_ETC_DIR
+
+
+def _reject_on_macos() -> bool:
+    """True (with a clear message) when this is a macOS node, where the
+    native-vs-packaged cutover does not apply.
+
+    macOS runs a Rust-only workstation node under launchd (no systemd, no
+    packaged Python services), so there is nothing to switch. The command must
+    say so plainly instead of writing a marker and reporting a no-op success.
+    """
+    if platform.system() == "Darwin":
+        click.echo(
+            "  not applicable on macOS (Rust-only workstation node): the "
+            "native-vs-packaged cutover only applies to a systemd-managed agent."
+        )
+        return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -222,6 +240,8 @@ def rust_group() -> None:
 
 @rust_group.command("status", help="Show the native-vs-packaged state per service.")
 def rust_status() -> None:
+    if _reject_on_macos():
+        return
     name_w = max(len(n) for n in _SVC_NAMES)
     click.echo(
         click.style(f"  {'service':<{name_w}}  {'mode':<22}  flag      binary   units", bold=True)
@@ -367,6 +387,8 @@ def _apply(svc: _Service, *, enable: bool) -> None:
 @rust_group.command("enable", help="Run the native implementation for one or more services.")
 @click.argument("services", nargs=-1, required=True, type=click.Choice(_FLIP_NAMES))
 def rust_enable(services: tuple[str, ...]) -> None:
+    if _reject_on_macos():
+        return
     _require_root()
     for name in services:
         if name == _FRONT:
@@ -401,6 +423,8 @@ def rust_enable(services: tuple[str, ...]) -> None:
 @rust_group.command("disable", help="Fall back to the packaged service for one or more services.")
 @click.argument("services", nargs=-1, required=True, type=click.Choice(_FLIP_NAMES))
 def rust_disable(services: tuple[str, ...]) -> None:
+    if _reject_on_macos():
+        return
     _require_root()
     for name in services:
         if name == _FRONT:

@@ -19,9 +19,10 @@
 //! runs without a single `sudo` and with zero follow-up commands (the agents
 //! `RunAtLoad` and `KeepAlive` on crash, so a reboot brings the node back).
 
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 
@@ -29,6 +30,7 @@ use ados_supervisor::process_manager::{render_plist, unit_to_label, PlistLogPath
 
 use crate::cli::Args;
 use crate::exec;
+use crate::result::{now_iso8601_utc, InstallResult};
 use crate::steps::config_identity::pairing_json;
 
 /// The control surface's LAN port. The plist pins `ADOS_CONTROL_PORT=8080` so the
@@ -130,6 +132,52 @@ impl Paths {
         })
     }
 
+    /// The config/identity dir the native control surface reads via `ADOS_ETC_DIR`
+    /// (Linux `/etc/ados`). Rooted at `$HOME/.ados` so the Rust installer's
+    /// top-level `config.yaml` / `pairing.json` / `device-id` / `profile.conf`
+    /// resolve to the same files the Python CLI reads, with the ground-station
+    /// side-files + secrets landing beside them (writable, never root-owned).
+    fn etc_dir(&self) -> PathBuf {
+        self.ados_home.clone()
+    }
+
+    /// The vision models dir (`ADOS_MODELS_DIR`, Linux `/opt/ados/models/vision`).
+    fn models_dir(&self) -> PathBuf {
+        self.ados_home.join("models")
+    }
+
+    /// The recordings dir (`ADOS_RECORDINGS_DIR`, Linux `/var/ados/recordings`).
+    fn recordings_dir(&self) -> PathBuf {
+        self.ados_home.join("recordings")
+    }
+
+    /// The WFB key dir (`ADOS_WFB_KEY_DIR`, Linux `/etc/ados/wfb`).
+    fn wfb_key_dir(&self) -> PathBuf {
+        self.ados_home.join("wfb-keys")
+    }
+
+    /// The owner-only secrets dir (holds the setup token under `ADOS_SETUP_TOKEN_PATH`).
+    fn secrets_dir(&self) -> PathBuf {
+        self.ados_home.join("secrets")
+    }
+
+    /// The setup token path (`ADOS_SETUP_TOKEN_PATH`, Linux `/etc/ados/secrets/setup-token`).
+    fn setup_token(&self) -> PathBuf {
+        self.secrets_dir().join("setup-token")
+    }
+
+    /// The logging store's parent dir (the DB lands at `logd/logs.db`).
+    fn logd_dir(&self) -> PathBuf {
+        self.ados_home.join("logd")
+    }
+
+    /// The install-result contract path (`ADOS_INSTALL_RESULT`, Linux
+    /// `/var/lib/ados/install-result.json`). The control surface reads its version
+    /// from here; `ados status` and the CLI read it for the recorded outcome.
+    fn install_result(&self) -> PathBuf {
+        self.ados_home.join("install-result.json")
+    }
+
     /// Create the directories the install writes into.
     fn ensure_dirs(&self) -> Result<()> {
         for dir in [
@@ -140,10 +188,23 @@ impl Paths {
             &self.compute.join("work"),
             &self.log,
             &self.launch_agents,
+            // The logging store's DB dir, created explicitly so a create failure
+            // surfaces here rather than being swallowed by the daemon's own
+            // best-effort `create_dir_all`.
+            &self.logd_dir(),
+            // The remaining home-rooted dirs the native control surface reads via
+            // their ADOS_* overrides, so no route falls back to a root-owned Linux
+            // path (`/opt/ados/models`, `/var/ados/recordings`, `/etc/ados/wfb`).
+            &self.models_dir(),
+            &self.recordings_dir(),
+            &self.wfb_key_dir(),
+            &self.secrets_dir(),
         ] {
             std::fs::create_dir_all(dir)
                 .with_context(|| format!("create {} failed", dir.display()))?;
         }
+        // The secrets dir holds owner-only material; lock it down.
+        set_mode(&self.secrets_dir(), 0o700);
         Ok(())
     }
 }
@@ -176,6 +237,7 @@ pub fn run(args: &Args) -> Result<ExitCode> {
     // 2. Build the workstation binaries from source and place them under the
     //    per-user bin dir. Hard-fail: without the daemons there is no node.
     let source = resolve_source_dir()?;
+    let agent_version = agent_version_from_source(&source);
     build_and_install_binaries(&source, &paths)?;
 
     // 3. Identity + operator config + optional pairing material.
@@ -183,14 +245,24 @@ pub fn run(args: &Args) -> Result<ExitCode> {
 
     // 4. Render + bootstrap the LaunchAgents.
     let uid = current_uid();
-    let env = build_env(&paths, &device_id);
+    let env = build_env(&paths, &device_id, &agent_version);
     register_launch_agents(&paths, &env, uid)?;
 
-    // 5. Wait for the control surface to answer.
-    let up = health_poll(CONTROL_PORT);
+    // 5. Prove every daemon came up (not just that the control port answers).
+    let report = health_poll(uid);
 
-    print_summary(&paths, &device_id, uid, up);
-    Ok(ExitCode::SUCCESS)
+    // 6. Record the outcome so the control surface can serve the real version and
+    //    `ados status` / the CLI can read the recorded result.
+    write_macos_install_result(&paths, &profile, &agent_version, &report);
+
+    print_summary(&paths, &device_id, uid, &report);
+    // Mirror the Linux path: a failed health gate exits non-zero so the operator
+    // (and any curl-bash caller checking `$?`) sees the install did not come up.
+    if report.up {
+        Ok(ExitCode::SUCCESS)
+    } else {
+        Ok(ExitCode::from(1))
+    }
 }
 
 /// Tear down a macOS workstation install: bootout every LaunchAgent, remove the
@@ -220,6 +292,93 @@ pub fn uninstall(purge: bool) -> Result<ExitCode> {
         );
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Report the install state of a macOS workstation node. Reads the per-user
+/// `$HOME/.ados` layout (not the Linux FHS the shared `print_status` reads): the
+/// recorded install-result contract, the operator config + resolved profile, and
+/// the per-binary presence + live launchd state for the daemon set.
+pub fn status(args: &Args) -> Result<ExitCode> {
+    let paths = Paths::resolve()?;
+    if !paths.ados_home.is_dir() {
+        println!(
+            "ADOS Workstation: not installed (no {})",
+            paths.ados_home.display()
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+    println!("ADOS Workstation (macOS) — {}", paths.ados_home.display());
+
+    // 1. The install-result contract (honour ADOS_INSTALL_RESULT so a test /
+    //    operator override redirects it, else the per-user default).
+    let result_path = std::env::var_os("ADOS_INSTALL_RESULT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| paths.install_result());
+    match std::fs::read_to_string(&result_path) {
+        Ok(body) => {
+            println!("\ninstall-result ({}):", result_path.display());
+            print!("{body}");
+            if !body.ends_with('\n') {
+                println!();
+            }
+        }
+        Err(_) => {
+            println!(
+                "\ninstall-result: none at {} (no install recorded yet)",
+                result_path.display()
+            );
+        }
+    }
+
+    // 2. Config presence + resolved profile.
+    let profile = status_profile(args, &paths);
+    let cfg = if paths.config.is_file() {
+        "present"
+    } else {
+        "absent"
+    };
+    println!("\nconfig : {} ({cfg})", paths.config.display());
+    println!("profile: {profile}");
+
+    // 3. Per-binary presence + launchd running-state for the daemon set. `ados-tui`
+    //    is installed but not a LaunchAgent, so it shows presence only.
+    let uid = current_uid();
+    println!("\nworkstation binaries ({}):", paths.bin.display());
+    for name in WORKSTATION_BINARIES {
+        let present = paths.bin.join(name).is_file();
+        let mark = if present { "[x]" } else { "[ ]" };
+        if DAEMONS.iter().any(|d| d.name == *name) {
+            let run = match daemon_pid(uid, &label_for(name)) {
+                Some(pid) => format!("running (pid {pid})"),
+                None => "stopped".to_string(),
+            };
+            println!("  {mark} {name:<16} {run}");
+        } else {
+            println!("  {mark} {name:<16} (interactive, not a daemon)");
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Resolve the profile for `--status`: the `--profile` flag, else the persisted
+/// `profile.conf` (`profile: <name>`), else `workstation`.
+fn status_profile(args: &Args, paths: &Paths) -> String {
+    if let Some(p) = args.profile.as_deref() {
+        if !p.is_empty() {
+            return p.to_string();
+        }
+    }
+    if let Ok(body) = std::fs::read_to_string(&paths.profile_conf) {
+        for line in body.lines() {
+            if let Some(rest) = line.trim().strip_prefix("profile:") {
+                let v = rest.trim().trim_matches('"');
+                if !v.is_empty() {
+                    return v.to_string();
+                }
+            }
+        }
+    }
+    "workstation".to_string()
 }
 
 /// Resolve the install profile. macOS runs only the operator's `workstation`
@@ -481,11 +640,12 @@ enabled: true\n"
 /// contract (`scripts/dev/run-compute-node-macos.sh`) so the LAN-paired GCS
 /// reaches `ados-control` on `:8080` and the compute card reads the heartbeat
 /// sidecar under the per-user run dir — every path pinned under `$HOME/.ados`.
-fn build_env(paths: &Paths, device_id: &str) -> Vec<(String, String)> {
+fn build_env(paths: &Paths, device_id: &str, agent_version: &str) -> Vec<(String, String)> {
     let run = paths.run.to_string_lossy().to_string();
     let config = paths.config.to_string_lossy().to_string();
     let node_id = format!("mac-{}", hostname_slug());
     let public_url = format!("http://{}:{COMPUTE_PORT}", lan_ipv4());
+    let path = |p: PathBuf| p.to_string_lossy().to_string();
     vec![
         ("HOME".into(), paths.home.to_string_lossy().to_string()),
         ("PATH".into(), launchd_path()),
@@ -494,6 +654,20 @@ fn build_env(paths: &Paths, device_id: &str) -> Vec<(String, String)> {
             "ADOS_HOME".into(),
             paths.ados_home.to_string_lossy().to_string(),
         ),
+        // The agent version the control surface reports on `/api/status` (it reads
+        // ADOS_AGENT_VERSION first). A Rust-only workstation has no pip package to
+        // read `ados.__version__` from, so thread the source-tree version here.
+        ("ADOS_AGENT_VERSION".into(), agent_version.to_string()),
+        // The config/identity + data dirs the native control surface reads, rooted
+        // under the writable per-user home so no route falls back to a root-owned
+        // Linux path (`/etc/ados`, `/opt/ados/models`, `/var/ados/recordings`,
+        // `/etc/ados/wfb`, `/var/lib/ados`, `/etc/ados/secrets`).
+        ("ADOS_ETC_DIR".into(), path(paths.etc_dir())),
+        ("ADOS_MODELS_DIR".into(), path(paths.models_dir())),
+        ("ADOS_RECORDINGS_DIR".into(), path(paths.recordings_dir())),
+        ("ADOS_WFB_KEY_DIR".into(), path(paths.wfb_key_dir())),
+        ("ADOS_INSTALL_RESULT".into(), path(paths.install_result())),
+        ("ADOS_SETUP_TOKEN_PATH".into(), path(paths.setup_token())),
         // The logging store's durable DB. Linux roots it at `/var/ados`, which a
         // rootless per-user install cannot create; point it at the writable home.
         (
@@ -615,12 +789,156 @@ fn label_for(name: &str) -> String {
     unit_to_label(name)
 }
 
-/// Poll the control surface until it answers on `port`, up to a bounded window.
-/// Returns true once a completed HTTP response comes back (any status code proves
-/// the daemon is listening); false if it never came up inside the window.
-fn health_poll(port: u16) -> bool {
+/// The outcome of the health gate: whether the node is up, plus the human-readable
+/// reasons any daemon failed (used both for the summary and the recorded
+/// install-result's failed-step list).
+struct HealthReport {
+    up: bool,
+    failures: Vec<String>,
+}
+
+/// Prove the whole workstation node came up, not merely that the control port
+/// answers. Every one of the five daemons must be loaded + running under launchd
+/// AND stay running across a re-sample (a `ados-logd` that crash-loops on its DB —
+/// the original silent-failure class — is caught by the pid changing / vanishing),
+/// `ados-control` must return a 2xx from `/api/status` (not just any HTTP code),
+/// and `ados-compute` must actually be listening on its job-API port.
+fn health_poll(uid: u32) -> HealthReport {
+    // The control surface is the slowest to answer (it builds its full router), so
+    // waiting for its 2xx also gives the other daemons time to reach steady state
+    // before the launchd re-sample below.
+    let control_ok = wait_control_2xx(CONTROL_PORT);
+    let compute_ok = wait_port_open(COMPUTE_PORT);
+
+    // Wait for each launchd daemon to reach STEADY STATE — the same running pid
+    // held across several consecutive samples. A fresh KeepAlive job commonly
+    // restarts once or twice while it initializes (it waits on a socket, a
+    // dependency, or its DB before it settles), so a single before/after snapshot
+    // is too fragile: it false-fails a healthy node that merely settled during the
+    // 2s window (a Rule-44 lying surface — a false "down" is as bad as a false
+    // "up"). Instead each daemon gets a settle window to stop restarting. Only a
+    // daemon that never holds a stable pid within the window — a genuine
+    // crash-loop, e.g. `ados-logd` on an unwritable DB path, which exits on
+    // startup and never accumulates the streak — or one that is never running
+    // fails the gate.
+    let labels: Vec<(&str, String)> = DAEMONS
+        .iter()
+        .map(|d| (d.name, label_for(d.name)))
+        .collect();
+
+    let mut failures = Vec::new();
+    for (name, label) in &labels {
+        match wait_daemon_steady(uid, label) {
+            SteadyOutcome::Stable => {
+                // Combine the launchd steady-state proof with the functional proof
+                // for the two daemons that have one.
+                if *name == "ados-control" && !control_ok {
+                    failures.push(format!(
+                        "{name}: not returning 2xx on :{CONTROL_PORT}/api/status"
+                    ));
+                } else if *name == "ados-compute" && !compute_ok {
+                    failures.push(format!("{name}: not listening on :{COMPUTE_PORT}"));
+                }
+            }
+            SteadyOutcome::CrashLooping => failures.push(format!(
+                "{name}: still restarting after {}s, crash-looping",
+                STEADY_DEADLINE.as_secs()
+            )),
+            SteadyOutcome::NeverRunning => {
+                failures.push(format!("{name}: not running under launchd"))
+            }
+        }
+    }
+
+    if failures.is_empty() {
+        println!(
+            "  health: all {} daemons up (control 2xx, compute :{COMPUTE_PORT}, launchd running+stable)",
+            DAEMONS.len()
+        );
+    } else {
+        println!("  health: FAILED");
+        for f in &failures {
+            println!("    - {f}");
+        }
+    }
+    HealthReport {
+        up: failures.is_empty(),
+        failures,
+    }
+}
+
+/// Consecutive identical running-pid samples that prove a daemon has settled.
+/// At the sample cadence below this is ~2.4s of no restart — long enough that an
+/// immediately-crash-looping daemon (which exits within ms and is throttled by
+/// launchd to a ≥10s respawn interval) can never accumulate the streak, while a
+/// daemon that restarted once during init reaches it quickly.
+const STEADY_SAMPLES: u32 = 4;
+/// The gap between pid samples while waiting for steady state.
+const STEADY_SAMPLE_GAP: Duration = Duration::from_millis(600);
+/// The per-daemon settle deadline. Comfortably longer than launchd's default
+/// ≥10s respawn throttle so a crash-looping daemon shows at least one not-running
+/// gap (which resets the streak) within the window; a healthy daemon settles in
+/// ~2.4s so the common case returns fast.
+const STEADY_DEADLINE: Duration = Duration::from_secs(20);
+
+/// The outcome of waiting for one launchd daemon to reach steady state.
+enum SteadyOutcome {
+    /// Held the same running pid across `STEADY_SAMPLES` consecutive samples.
+    Stable,
+    /// Was seen running at least once but never held a stable pid before the
+    /// deadline — a crash-loop.
+    CrashLooping,
+    /// Never seen running under launchd before the deadline.
+    NeverRunning,
+}
+
+/// Poll a daemon's launchd pid until it holds steady (`STEADY_SAMPLES` consecutive
+/// identical running pids) or the settle deadline elapses. A changed or vanished
+/// pid resets the streak, so only a daemon that stops restarting passes.
+fn wait_daemon_steady(uid: u32, label: &str) -> SteadyOutcome {
+    let start = Instant::now();
+    let mut last: Option<i64> = None;
+    let mut streak: u32 = 0;
+    let mut ever_running = false;
+    loop {
+        match daemon_pid(uid, label) {
+            Some(pid) => {
+                ever_running = true;
+                if last == Some(pid) {
+                    streak += 1;
+                } else {
+                    last = Some(pid);
+                    streak = 1;
+                }
+                if streak >= STEADY_SAMPLES {
+                    return SteadyOutcome::Stable;
+                }
+            }
+            None => {
+                // Not currently running — between KeepAlive respawns, or never
+                // started. Either way the settle streak breaks.
+                last = None;
+                streak = 0;
+            }
+        }
+        if start.elapsed() >= STEADY_DEADLINE {
+            return if ever_running {
+                SteadyOutcome::CrashLooping
+            } else {
+                SteadyOutcome::NeverRunning
+            };
+        }
+        std::thread::sleep(STEADY_SAMPLE_GAP);
+    }
+}
+
+/// Poll `GET /api/status` until it returns a 2xx (bounded ~30s). A 2xx — not just
+/// any completed HTTP code — is the proof the control surface is actually serving,
+/// so a `500`/`502` from a control daemon that came up but cannot answer does not
+/// pass the gate. Connection-refused (daemon not listening) exits curl non-zero.
+fn wait_control_2xx(port: u16) -> bool {
     let url = format!("http://127.0.0.1:{port}/api/status");
-    print!("  health: waiting for ados-control on :{port} ");
+    print!("  health: waiting for ados-control (2xx) on :{port} ");
     use std::io::Write;
     let _ = std::io::stdout().flush();
     for _ in 0..40 {
@@ -637,13 +955,10 @@ fn health_poll(port: u16) -> bool {
                 &url,
             ],
         );
-        // curl exits 0 for a completed HTTP request regardless of the status
-        // code (no `-f`), and prints a 3-digit code; a connection refused exits
-        // non-zero. Either a 2xx or an auth/404 proves the port is up.
         if res.success() {
             if let Ok(code) = res.stdout.trim().parse::<u16>() {
-                if code > 0 {
-                    println!("✓ (HTTP {code})");
+                if (200..300).contains(&code) {
+                    println!("ok (HTTP {code})");
                     return true;
                 }
             }
@@ -652,21 +967,148 @@ fn health_poll(port: u16) -> bool {
         let _ = std::io::stdout().flush();
         std::thread::sleep(Duration::from_millis(750));
     }
-    println!(" (not yet answering)");
+    println!(" (no 2xx)");
     false
 }
 
+/// Poll a loopback TCP port until a connection is accepted (bounded ~20s). Proves
+/// the daemon that should own the port (`ados-compute` on its job-API port) is
+/// actually listening, not merely loaded under launchd.
+fn wait_port_open(port: u16) -> bool {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    for _ in 0..20 {
+        if TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    false
+}
+
+/// The running pid of a launchd job, or `None` when it is not loaded or not
+/// currently running. `launchctl print gui/<uid>/<label>` exits zero while the job
+/// is loaded and prints the job's own `state = running` + `pid = N` in its header
+/// block while its process is alive; a crash-looping job shows a changing pid (or a
+/// not-running state) across samples, which is how the health gate catches it.
+///
+/// The job's `state`/`pid` are the FIRST such lines in the header. The rest of the
+/// output nests sub-dictionaries (endpoints, sockets, spawn env) that carry their
+/// OWN `state = active`/`state = inactive` lines — reading every `state =` line
+/// would let a trailing nested `state = active` clobber the job's `running` flag to
+/// `false` and make a healthy daemon read as down (a Rule-44 lying surface). So take
+/// only the first occurrence of each.
+fn daemon_pid(uid: u32, label: &str) -> Option<i64> {
+    let target = format!("gui/{uid}/{label}");
+    let res = exec::run("launchctl", &["print", &target]);
+    if !res.success() {
+        return None;
+    }
+    parse_daemon_state(&res.stdout)
+}
+
+/// Parse the running pid out of `launchctl print` output: the first `state =`
+/// (the job's own state) must be `running`, and the first `pid =` is the job pid.
+/// Split out so the nested-`state`-clobber regression is unit-testable without a
+/// live launchd.
+fn parse_daemon_state(stdout: &str) -> Option<i64> {
+    let mut running: Option<bool> = None;
+    let mut pid: Option<i64> = None;
+    for line in stdout.lines() {
+        let t = line.trim();
+        if running.is_none() {
+            if let Some(v) = t.strip_prefix("state = ") {
+                running = Some(v.trim() == "running");
+                continue;
+            }
+        }
+        if pid.is_none() {
+            if let Some(v) = t.strip_prefix("pid = ") {
+                pid = v.trim().parse::<i64>().ok();
+            }
+        }
+    }
+    if running == Some(true) {
+        pid
+    } else {
+        None
+    }
+}
+
+/// Parse the agent version out of the source tree's `src/ados/__init__.py`
+/// (`__version__ = "x.y.z"`). This is the version of the codebase the workstation
+/// binaries were built from — the honest value to record + report, since a
+/// Rust-only Mac node has no installed pip package to read it from. `unknown` when
+/// the file is absent or carries no parseable version.
+fn agent_version_from_source(source: &Path) -> String {
+    let init = source.join("src/ados/__init__.py");
+    if let Ok(body) = std::fs::read_to_string(&init) {
+        for line in body.lines() {
+            let t = line.trim();
+            if t.starts_with("__version__") {
+                if let Some(rest) = t.split_once('=').map(|(_, r)| r) {
+                    let v = rest.trim().trim_matches(['"', '\'']);
+                    if !v.is_empty() {
+                        return v.to_string();
+                    }
+                }
+            }
+        }
+    }
+    "unknown".to_string()
+}
+
+/// Write the install-result contract to `$HOME/.ados/install-result.json` so the
+/// control surface serves the real version and `ados status` reports the outcome.
+/// Health failures are recorded as required failures so the status is `failed`
+/// when a daemon did not come up.
+fn write_macos_install_result(paths: &Paths, profile: &str, version: &str, report: &HealthReport) {
+    let status = if report.up { "ok" } else { "failed" };
+    let result = InstallResult {
+        status: status.to_string(),
+        version: version.to_string(),
+        profile: profile.to_string(),
+        board: format!("macos-{}", std::env::consts::ARCH),
+        kernel_release: kernel_release(),
+        wfb_module_source: String::new(),
+        failed_steps: report.failures.clone(),
+        required_failures: report.failures.clone(),
+        ts: now_iso8601_utc(),
+    };
+    let path = paths.install_result();
+    if let Err(e) = result.write_atomic(&path) {
+        tracing::warn!(error = %e, path = %path.display(), "failed to write macOS install result");
+    } else {
+        println!("  result: wrote {}", path.display());
+    }
+}
+
+/// `uname -r` (the Darwin kernel release), or `unknown` on any failure.
+fn kernel_release() -> String {
+    let res = exec::run("uname", &["-r"]);
+    let v = res.stdout.trim();
+    if res.success() && !v.is_empty() {
+        v.to_string()
+    } else {
+        "unknown".to_string()
+    }
+}
+
 /// Print the closing summary: how to reach the node, and how to tear it down.
-fn print_summary(paths: &Paths, device_id: &str, uid: u32, up: bool) {
+fn print_summary(paths: &Paths, device_id: &str, uid: u32, report: &HealthReport) {
     let ip = lan_ipv4();
     println!();
-    if up {
+    if report.up {
         println!("ADOS Workstation is UP.");
     } else {
         println!(
-            "ADOS Workstation installed; the control surface has not answered yet \
-             (launchd keeps retrying — check the logs below)."
+            "ADOS Workstation install did NOT come up cleanly ({} daemon issue{}):",
+            report.failures.len(),
+            if report.failures.len() == 1 { "" } else { "s" }
         );
+        for f in &report.failures {
+            println!("  - {f}");
+        }
+        println!("launchd keeps retrying the KeepAlive daemons — check the logs below.");
     }
     println!("  device id     : {device_id}");
     println!("  control (GCS) : http://127.0.0.1:{CONTROL_PORT}   http://{ip}:{CONTROL_PORT}");
@@ -765,6 +1207,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parse_daemon_state_ignores_nested_endpoint_state_lines() {
+        // Real `launchctl print` shape: the job's own `state = running` + `pid`
+        // come first, then nested sub-dictionaries carry their own `state =`
+        // lines. Reading every `state =` line let a trailing nested
+        // `state = active` clobber the job flag to false and read a healthy
+        // daemon as down. The parser must take only the first of each.
+        let out = "\
+gui/501/co.ados.control = {
+\tactive count = 1
+\tstate = running
+\tprogram = /Users/x/.ados/bin/ados-control
+\tpid = 82787
+\tendpoints = {
+\t\t\"co.ados.control.socket\" = {
+\t\t\tport = 8080
+\t\t\tstate = active
+\t\t}
+\t}
+\tsockets = {
+\t\t\"listener\" = {
+\t\t\tstate = active
+\t\t}
+\t}
+}";
+        assert_eq!(parse_daemon_state(out), Some(82787));
+
+        // A genuinely stopped job (state not running) reads as None even when a
+        // stale pid line is present.
+        let stopped = "\
+gui/501/co.ados.logd = {
+\tstate = not running
+\tpid = 999
+\tendpoints = {
+\t\tx = { state = active }
+\t}
+}";
+        assert_eq!(parse_daemon_state(stopped), None);
+
+        // No state line at all (job not loaded) reads as None.
+        assert_eq!(parse_daemon_state("gui/501/co.ados.x = {\n}"), None);
+    }
+
+    #[test]
     fn profile_defaults_to_workstation_and_rejects_sbc_profiles() {
         let ws = Args::default();
         assert_eq!(resolve_profile(&ws).unwrap(), "workstation");
@@ -829,7 +1314,7 @@ mod tests {
             ados_home: home.join(".ados"),
             home,
         };
-        let env = build_env(&paths, "0011aabbccdd");
+        let env = build_env(&paths, "0011aabbccdd", "1.2.3");
         let get = |k: &str| env.iter().find(|(kk, _)| kk == k).map(|(_, v)| v.clone());
         assert_eq!(get("ADOS_CONTROL_PORT").as_deref(), Some("8080"));
         assert_eq!(
@@ -851,6 +1336,31 @@ mod tests {
             get("ADOS_CONFIG_YAML").as_deref(),
             Some("/Users/tester/.ados/config.yaml")
         );
+        // The version the control surface reports for a Rust-only Mac node.
+        assert_eq!(get("ADOS_AGENT_VERSION").as_deref(), Some("1.2.3"));
+        // The etc/data dirs the control surface reads, all home-rooted so no route
+        // falls back to a root-owned Linux path.
+        assert_eq!(get("ADOS_ETC_DIR").as_deref(), Some("/Users/tester/.ados"));
+        assert_eq!(
+            get("ADOS_MODELS_DIR").as_deref(),
+            Some("/Users/tester/.ados/models")
+        );
+        assert_eq!(
+            get("ADOS_RECORDINGS_DIR").as_deref(),
+            Some("/Users/tester/.ados/recordings")
+        );
+        assert_eq!(
+            get("ADOS_WFB_KEY_DIR").as_deref(),
+            Some("/Users/tester/.ados/wfb-keys")
+        );
+        assert_eq!(
+            get("ADOS_INSTALL_RESULT").as_deref(),
+            Some("/Users/tester/.ados/install-result.json")
+        );
+        assert_eq!(
+            get("ADOS_SETUP_TOKEN_PATH").as_deref(),
+            Some("/Users/tester/.ados/secrets/setup-token")
+        );
         // The launchd PATH must carry the Homebrew prefixes so a daemon finds
         // ffmpeg/colmap/git.
         assert!(get("PATH").unwrap().contains("/opt/homebrew/bin"));
@@ -861,6 +1371,101 @@ mod tests {
         let id = mint_device_id();
         assert_eq!(id.len(), 12);
         assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn agent_version_parses_dunder_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let init = dir.path().join("src/ados/__init__.py");
+        std::fs::create_dir_all(init.parent().unwrap()).unwrap();
+        std::fs::write(
+            &init,
+            "\"\"\"doc\"\"\"\n\n__version__ = \"0.99.86\"\n\nfoo = 1\n",
+        )
+        .unwrap();
+        assert_eq!(agent_version_from_source(dir.path()), "0.99.86");
+
+        // A tree with no package version reads as unknown, never a panic.
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(agent_version_from_source(empty.path()), "unknown");
+    }
+
+    #[test]
+    fn install_result_records_health_and_lands_at_home() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().to_path_buf();
+        let paths = Paths {
+            bin: home.join(".ados/bin"),
+            run: home.join(".ados/run"),
+            compute: home.join(".ados/compute"),
+            log: home.join(".ados/log"),
+            config: home.join(".ados/config.yaml"),
+            profile_conf: home.join(".ados/profile.conf"),
+            device_id_file: home.join(".ados/device-id"),
+            pairing: home.join(".ados/pairing.json"),
+            launch_agents: home.join("Library/LaunchAgents"),
+            ados_home: home.join(".ados"),
+            home,
+        };
+        std::fs::create_dir_all(&paths.ados_home).unwrap();
+
+        // A clean install records status ok with no failed steps.
+        let ok = HealthReport {
+            up: true,
+            failures: vec![],
+        };
+        write_macos_install_result(&paths, "workstation", "1.2.3", &ok);
+        let body = std::fs::read_to_string(paths.install_result()).unwrap();
+        assert!(body.contains("\"status\": \"ok\""));
+        assert!(body.contains("\"version\": \"1.2.3\""));
+        assert!(body.contains("\"profile\": \"workstation\""));
+        assert!(body.contains("\"failedSteps\": []"));
+
+        // A failed health gate records status failed and carries the reasons as
+        // both failed + required steps (so the recorded status is `failed`).
+        let bad = HealthReport {
+            up: false,
+            failures: vec!["ados-logd: restarting".to_string()],
+        };
+        write_macos_install_result(&paths, "workstation", "1.2.3", &bad);
+        let body = std::fs::read_to_string(paths.install_result()).unwrap();
+        assert!(body.contains("\"status\": \"failed\""));
+        assert!(body.contains("ados-logd: restarting"));
+    }
+
+    #[test]
+    fn status_profile_prefers_flag_then_conf_then_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().to_path_buf();
+        let paths = Paths {
+            bin: home.join(".ados/bin"),
+            run: home.join(".ados/run"),
+            compute: home.join(".ados/compute"),
+            log: home.join(".ados/log"),
+            config: home.join(".ados/config.yaml"),
+            profile_conf: home.join(".ados/profile.conf"),
+            device_id_file: home.join(".ados/device-id"),
+            pairing: home.join(".ados/pairing.json"),
+            launch_agents: home.join("Library/LaunchAgents"),
+            ados_home: home.join(".ados"),
+            home,
+        };
+        std::fs::create_dir_all(&paths.ados_home).unwrap();
+
+        // No flag, no conf → the default.
+        let none = Args::default();
+        assert_eq!(status_profile(&none, &paths), "workstation");
+
+        // profile.conf wins when no flag.
+        std::fs::write(&paths.profile_conf, "profile: compute\n").unwrap();
+        assert_eq!(status_profile(&none, &paths), "compute");
+
+        // An explicit flag wins over the conf.
+        let flagged = Args {
+            profile: Some("workstation".to_string()),
+            ..Args::default()
+        };
+        assert_eq!(status_profile(&flagged, &paths), "workstation");
     }
 
     #[test]

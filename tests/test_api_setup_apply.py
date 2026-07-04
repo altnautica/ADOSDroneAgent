@@ -181,17 +181,52 @@ def test_apply_network_writes_to_live_config(client, agent_app) -> None:
     assert agent_app.config.network.hotspot.enabled is False
 
 
-def test_apply_advanced_factory_reset_is_queued_only(client) -> None:
+def test_apply_advanced_log_level_persists_to_logging_config(
+    client, agent_app
+) -> None:
+    # The log level lands on config.logging.level (the field every service
+    # reads at start), not a phantom agent.log_level, and is reported changed.
+    assert agent_app.config.logging.level != "debug"
     resp = client.post(
         "/api/v1/setup/apply",
-        json={"advanced": {"factory_reset": True}},
+        json={"advanced": {"log_level": "debug"}},
     )
     assert resp.status_code == 200
     data = resp.json()
     assert data["overall"] is True
     section = data["sections"]["advanced"]
     assert section["ok"] is True
-    assert section["data"].get("factory_reset_queued") is True
+    assert "log_level" in section["data"]["fields"]
+    assert agent_app.config.logging.level == "debug"
+
+
+def test_apply_advanced_board_override_writes_file(
+    client, monkeypatch, tmp_path
+) -> None:
+    # A valid slug is written to the board_override file the HAL detector
+    # reads (honoring the ADOS_ETC_DIR sandbox override), not silently
+    # acknowledged. Clearing it removes the file.
+    monkeypatch.setenv("ADOS_ETC_DIR", str(tmp_path))
+    from ados.setup.advanced import board_override_path, read_board_override
+
+    resp = client.post(
+        "/api/v1/setup/apply",
+        json={"advanced": {"board_override": "rpi4b"}},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["sections"]["advanced"]["ok"] is True
+    assert board_override_path().exists()
+    assert read_board_override() == "rpi4b"
+
+    # Clearing writes nothing back and removes the file.
+    resp = client.post(
+        "/api/v1/setup/apply",
+        json={"advanced": {"board_override": ""}},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["sections"]["advanced"]["ok"] is True
+    assert not board_override_path().exists()
+    assert read_board_override() == ""
 
 
 def test_apply_advanced_rejects_bad_board_override(client) -> None:
@@ -258,3 +293,59 @@ def test_apply_ui_then_failing_advanced_rolls_back_theme(
     # The succeeded ui section must be reverted in reverse order.
     assert "ui" in data["rolled_back"]
     assert agent_app.config.ui.theme == prior_theme
+
+
+class _FailingSaveRuntime:
+    """Minimal runtime whose save_config reports the given persist outcome.
+
+    Lets the setter unit tests exercise the loud-fail path: a save that
+    returns False (or raises) must surface ok=False, never a phantom
+    success.
+    """
+
+    def __init__(self, config, *, save_result=True, raise_on_save=False) -> None:
+        self.config = config
+        self._save_result = save_result
+        self._raise_on_save = raise_on_save
+        self.raw_runtime = self
+
+    def save_config(self):
+        if self._raise_on_save:
+            raise OSError("disk full")
+        return self._save_result
+
+
+def test_apply_network_surfaces_a_failed_persist() -> None:
+    from ados.core.config import ADOSConfig
+    from ados.setup.models import NetworkApplyRequest
+    from ados.setup.network import apply_network
+
+    req = NetworkApplyRequest(hotspot_enabled=True)
+
+    # A save that returns falsy must surface ok=False, not a phantom success.
+    runtime = _FailingSaveRuntime(ADOSConfig(), save_result=False)
+    result = apply_network(runtime, req)
+    assert result.ok is False
+    assert "not saved" in result.message.lower()
+
+    # A save that raises must also surface ok=False.
+    runtime = _FailingSaveRuntime(ADOSConfig(), raise_on_save=True)
+    result = apply_network(runtime, NetworkApplyRequest(hotspot_enabled=True))
+    assert result.ok is False
+
+    # A successful save reports ok=True and the persisted change.
+    runtime = _FailingSaveRuntime(ADOSConfig(), save_result=True)
+    result = apply_network(runtime, NetworkApplyRequest(hotspot_enabled=True))
+    assert result.ok is True
+    assert "hotspot_enabled" in result.data["fields"]
+
+
+def test_apply_advanced_surfaces_a_failed_log_level_persist() -> None:
+    from ados.core.config import ADOSConfig
+    from ados.setup.advanced import apply_advanced
+    from ados.setup.models import AdvancedApplyRequest
+
+    runtime = _FailingSaveRuntime(ADOSConfig(), save_result=False)
+    result = apply_advanced(runtime, AdvancedApplyRequest(log_level="debug"))
+    assert result.ok is False
+    assert "not saved" in result.message.lower()

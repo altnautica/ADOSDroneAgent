@@ -12,6 +12,7 @@ One screen covers both connection planes:
 
 from __future__ import annotations
 
+import platform
 import re
 import sys
 from typing import Any
@@ -103,8 +104,31 @@ def _wfb_section(theme: _ansi.Theme) -> list[str]:
     return lines
 
 
+def _pair_status() -> tuple[int, dict[str, Any]]:
+    """Read the connection info the pair screen needs.
+
+    On a Rust-only node (the macOS workstation) the proxied setup facade is
+    absent, so read the native ``/api/pairing/info`` route and shape it into the
+    small subset ``_show_pair_info`` + ``_node_hosts`` consume; elsewhere read the
+    setup facade directly.
+    """
+    if platform.system() == "Darwin":
+        code, info = _req("GET", "/api/pairing/info")
+        if code == 0:
+            return code, info
+        mdns_host = str(info.get("mdns_host") or "")
+        return code, {
+            "paired": bool(info.get("paired")),
+            "pairing_code": info.get("pairing_code"),
+            "lan_host": mdns_host,
+            "network": {"api_port": 8080, "mdns_host": mdns_host, "hostname": mdns_host},
+            "access_urls": [],
+        }
+    return _req("GET", "/api/v1/setup/status")
+
+
 def _show_pair_info(theme: _ansi.Theme) -> None:
-    scode, status = _req("GET", "/api/v1/setup/status")
+    scode, status = _pair_status()
     if scode == 0:
         raise click.ClickException("Agent is not running on this host.")
 

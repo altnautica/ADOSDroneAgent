@@ -110,7 +110,10 @@ arch="$(uname -m)"
 case "$arch" in
     aarch64|arm64) asset="ados-installer-aarch64" ;;
     *)
-        echo "ERROR: no prebuilt ados-installer for ${arch}; build from source: cargo build -p ados-installer" >&2
+        echo "ERROR: ${arch} Linux is not supported. The Linux agent ships prebuilt" >&2
+        echo "       aarch64 binaries only. Use an aarch64 Linux host, or run on macOS" >&2
+        echo "       (which builds from source). A non-aarch64 Linux build-from-source" >&2
+        echo "       path is not yet supported." >&2
         exit 1
         ;;
 esac

@@ -47,7 +47,12 @@ def test_pair_info_shows_host_code_and_radio() -> None:
             return 200, {"paired": True, "role": "drone", "fingerprint": "42d004b0"}
         return 404, {}
 
-    with patch("ados.cli.pair._req", side_effect=fake_req):
+    # The pair screen reads the setup facade off a systemd-managed agent; pin the
+    # platform to Linux so the test exercises that path on any host (on macOS it
+    # composes from the native /api/pairing/info route instead).
+    with patch("ados.cli.pair.platform.system", return_value="Linux"), patch(
+        "ados.cli.pair._req", side_effect=fake_req
+    ):
         result = runner.invoke(cli, ["pair"])
     assert result.exit_code == 0
     assert "Connect to Mission Control" in result.output

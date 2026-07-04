@@ -21,6 +21,12 @@ from ados.core.paths import PAIRING_JSON
 API_BASE = "http://localhost:8080"
 PAIRING_STATE_PATH = PAIRING_JSON
 
+# macOS runs a rootless, Rust-only workstation node: the control surface serves
+# the native routes (/api/status, /api/pairing/*) but NOT the proxied setup
+# facade (/api/v1/setup/status has no Python upstream there). The CLI reads the
+# native routes on macOS.
+IS_MACOS = platform.system() == "Darwin"
+
 
 def _load_api_key() -> str | None:
     try:
@@ -63,7 +69,50 @@ def _request(method: str, path: str, **kwargs: Any) -> dict[str, Any]:
         raise click.ClickException(str(exc)) from exc
 
 
+def _native_status() -> dict[str, Any]:
+    """Compose the status dict from the native control-surface routes.
+
+    On a Rust-only node (the macOS workstation) the proxied setup facade is
+    absent, so build the same shape ``_plain_status`` consumes out of the native
+    ``/api/status`` + ``/api/pairing/info`` routes (both guaranteed-200). Fields
+    a workstation does not have (an FC, a local video pipeline, a cloud relay)
+    report honestly rather than being faked.
+    """
+    status = _request("GET", "/api/status")
+    info = _request("GET", "/api/pairing/info")
+
+    mdns_host = str(info.get("mdns_host") or "")
+    paired = bool(info.get("paired"))
+    fc_connected = status.get("fc_connected", info.get("fc_connected"))
+    fc_port = status.get("fc_port") or info.get("fc_port")
+    return {
+        "device_name": info.get("name") or "ADOS",
+        "profile": info.get("profile") or "workstation",
+        "version": status.get("version") or info.get("version") or "?",
+        "paired": paired,
+        "pairing_code": info.get("pairing_code"),
+        # A node that answers is installed + configured; "setup" is a drone
+        # onboarding concept, not a workstation one, so report it complete.
+        "completion_percent": 100,
+        "network": {"api_port": 8080, "mdns_host": mdns_host, "hostname": mdns_host},
+        "lan_host": mdns_host,
+        "access_urls": [],
+        "mavlink": {"connected": bool(fc_connected), "port": fc_port},
+        "video": {"state": "n/a"},
+        # The workstation config sets server.mode=local, so cloud relay is off.
+        "cloud_choice": {"mode": "local"},
+        "remote_access": {"status": "disabled"},
+        "next_action": (
+            "This node is connected to Mission Control."
+            if paired
+            else "In Mission Control, open Add a Node and enter this host."
+        ),
+    }
+
+
 def _setup_status() -> dict[str, Any]:
+    if IS_MACOS:
+        return _native_status()
     return _request("GET", "/api/v1/setup/status")
 
 
@@ -474,7 +523,7 @@ def uninstall(purge: bool, yes: bool) -> None:
         raise click.ClickException(f"Unsupported platform: {platform.system()}")
 
     if is_mac:
-        _uninstall_macos(yes=yes)
+        _uninstall_macos(purge=purge, yes=yes)
         return
     _uninstall_linux(purge=purge, yes=yes)
 
@@ -532,12 +581,69 @@ def _stop_service_with_kill_fallback(service: str) -> None:
         click.echo(f"  warn: post-kill stop {service} failed: {exc}", err=True)
 
 
-def _uninstall_macos(*, yes: bool) -> None:
+# The macOS workstation daemons registered as per-user LaunchAgents by the
+# installer (macos.rs). `ados-tui` is installed but is not a daemon, so it has no
+# LaunchAgent to boot out. The reverse-DNS labels are `co.ados.<tail>`.
+_MACOS_DAEMONS = ("supervisor", "control", "compute", "cloud", "logd")
+
+
+def _macos_ados_home() -> Path:
+    """The per-user install root the macOS installer wrote (``$HOME/.ados``),
+    honouring ``ADOS_HOME`` the same way the installer + paths module do."""
+    override = os.environ.get("ADOS_HOME")
+    if override:
+        return Path(override)
+    return Path.home() / ".ados"
+
+
+def _uninstall_macos(*, purge: bool, yes: bool) -> None:
+    """Tear down a macOS workstation node: boot every LaunchAgent out of the
+    user's GUI domain, remove the plists, drop ``$HOME/.ados`` when purging, and
+    (best-effort) pip-uninstall the CLI if it was pip-installed. Mirrors the
+    installer's ``macos.rs`` uninstall so nothing is left running."""
+    ados_home = _macos_ados_home()
+    launch_agents = Path.home() / "Library" / "LaunchAgents"
+    uid = os.getuid()
+
     if not yes:
-        click.confirm("Uninstall ados-drone-agent from this system?", abort=True)
+        click.confirm("Uninstall ADOS from this Mac?", abort=True)
+        # Mirror the Linux prompt: offer to purge identity + config when the
+        # operator did not pass an explicit flag.
+        if not purge and ados_home.exists():
+            click.echo(f"  Config + identity live under {ados_home}.")
+            click.echo("  Keep them for a re-install, or purge for a clean slate.")
+            purge = click.confirm("Also remove ~/.ados?", default=False)
+
     pkg = "ados-drone-agent"
 
-    def _remove() -> str:
+    def _stop_agents() -> str:
+        stopped = 0
+        for tail in _MACOS_DAEMONS:
+            label = f"co.ados.{tail}"
+            target = f"gui/{uid}/{label}"
+            # Only boot out a genuinely-loaded job so a stale one does not error.
+            probe = subprocess.run(
+                ["launchctl", "print", target], capture_output=True, text=True
+            )
+            if probe.returncode == 0:
+                subprocess.run(
+                    ["launchctl", "bootout", target], capture_output=True, text=True
+                )
+                stopped += 1
+        return f"{stopped} LaunchAgent{'s' if stopped != 1 else ''}"
+
+    def _remove_plists() -> str:
+        removed = 0
+        if launch_agents.is_dir():
+            for plist in sorted(launch_agents.glob("co.ados.*.plist")):
+                try:
+                    plist.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+        return f"{removed} plist{'s' if removed != 1 else ''}"
+
+    def _pip_remove() -> str:
         installer = "pip"
         for candidate, probe in (
             ("pipx", ["pipx", "list", "--short"]),
@@ -556,25 +662,41 @@ def _uninstall_macos(*, yes: bool) -> None:
             "pip": [sys.executable, "-m", "pip", "uninstall", "-y", pkg],
         }[installer]
         result = subprocess.run(cmd, capture_output=True, text=True)
+        # Not installed via a package manager (the installer builds from source
+        # and does not pip-install) is fine — the node is already torn down.
         if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip() or "uninstall failed")
+            return "not package-managed (skipped)"
         return f"via {installer}"
+
+    def _purge_home() -> str:
+        if ados_home.exists():
+            shutil.rmtree(ados_home, ignore_errors=True)
+        return str(ados_home)
+
+    steps: list[_ansi.Step] = [
+        ("Stop ADOS LaunchAgents", _stop_agents),
+        ("Remove LaunchAgent plists", _remove_plists),
+        ("Remove ados CLI package", _pip_remove),
+    ]
+    if purge:
+        steps.append(("Purge ~/.ados", _purge_home))
 
     theme = _ansi.detect_theme()
     results = _ansi.run_steps(
-        theme,
-        [("Remove ados-drone-agent", _remove)],
-        title="Uninstalling ADOS",
-        interactive=sys.stderr.isatty(),
+        theme, steps, title="Uninstalling ADOS", interactive=sys.stderr.isatty()
     )
-    result = results[0]
-    if result.ok:
-        _ansi.print_card(
-            theme, True, [f"{theme.glyph_ok()} ADOS Drone Agent removed", result.detail]
-        )
-    else:
-        _ansi.print_card(theme, False, [f"{theme.glyph_fail()} Uninstall failed", result.detail])
-        raise click.ClickException("uninstall failed")
+    ok = all(r.ok for r in results)
+    done = sum(1 for r in results if r.ok)
+    glyph = theme.glyph_ok() if ok else theme.glyph_fail()
+    summary = [
+        f"{glyph} ADOS Workstation {'removed' if ok else 'removal finished with warnings'}",
+        f"{done}/{len(results)} steps",
+    ]
+    if not purge:
+        summary.append(f"kept: {ados_home}  (--purge to remove)")
+    _ansi.print_card(theme, ok, summary)
+    if not ok:
+        raise click.ClickException("uninstall finished with warnings")
 
 
 def _uninstall_linux(*, purge: bool, yes: bool) -> None:

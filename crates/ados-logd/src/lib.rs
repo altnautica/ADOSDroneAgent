@@ -70,6 +70,25 @@ pub mod paths {
     pub fn query_socket() -> String {
         format!("{}/logd-query.sock", run_dir().trim_end_matches('/'))
     }
+
+    /// The runtime dir the tap sockets + JSON sidecars live under, resolved under
+    /// `ADOS_RUN_DIR` (else `/run/ados`). On a `$HOME`-rooted install (the macOS
+    /// workstation) this is `~/.ados/run`, where the other services actually write
+    /// their `state.sock`/`mavlink.sock`/sidecars — so the taps read the real
+    /// runtime dir instead of a nonexistent `/run/ados`.
+    pub fn tap_root() -> String {
+        run_dir().trim_end_matches('/').to_string()
+    }
+
+    /// The vehicle-state stream socket, resolved under `ADOS_RUN_DIR`.
+    pub fn state_socket() -> String {
+        format!("{}/state.sock", tap_root())
+    }
+
+    /// The raw-frame broadcast socket, resolved under `ADOS_RUN_DIR`.
+    pub fn mavlink_socket() -> String {
+        format!("{}/mavlink.sock", tap_root())
+    }
 }
 
 /// Hand a freshly-bound socket to the `ados` group so a non-root operator in that

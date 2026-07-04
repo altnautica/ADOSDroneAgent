@@ -14,16 +14,81 @@ Three top-level directories are used:
 
 This module is a leaf: it imports nothing from other ``ados.*``
 modules and is safe to import from anywhere.
+
+Base-directory resolution
+-------------------------
+The three top-level bases resolve through :func:`_run_base`, :func:`_etc_base`,
+and :func:`_var_base`. On Linux with no environment override they are the fixed
+FHS paths above, unchanged. Two things shift them:
+
+* an explicit ``ADOS_RUN_DIR`` / ``ADOS_ETC_DIR`` / ``ADOS_VAR_DIR`` override
+  (the same variables the Rust services read), and
+* macOS, where the agent runs rootless under ``$HOME/.ados`` (the layout the
+  installer's ``macos.rs`` writes), so the CLI (``ados logs`` / ``status`` /
+  ``pair`` / ``unpair``) resolves the per-user paths without the operator
+  exporting anything.
+
+``PAIRING_JSON`` and ``INSTALL_RESULT`` additionally honour their own
+``ADOS_PAIRING_JSON`` / ``ADOS_INSTALL_RESULT`` overrides (the exact variables
+the workstation daemons are launched with).
 """
 
+import os
+import platform
 from pathlib import Path
+
+_IS_MACOS = platform.system() == "Darwin"
+
+
+def _ados_home() -> Path:
+    """The rootless per-user install root used on macOS (``$HOME/.ados``).
+
+    Mirrors the installer's ``macos.rs`` layout. Honours ``ADOS_HOME`` when the
+    workstation daemons exported it; otherwise ``$HOME/.ados``. Unused on Linux,
+    where the FHS bases below are the default.
+    """
+    override = os.environ.get("ADOS_HOME")
+    if override:
+        return Path(override)
+    home = os.environ.get("HOME") or str(Path.home())
+    return Path(home) / ".ados"
+
+
+def _run_base() -> Path:
+    """Runtime dir: ``ADOS_RUN_DIR`` override, else ``~/.ados/run`` on macOS, else
+    the Linux FHS ``/run/ados`` (Linux default unchanged)."""
+    override = os.environ.get("ADOS_RUN_DIR")
+    if override:
+        return Path(override)
+    return _ados_home() / "run" if _IS_MACOS else Path("/run/ados")
+
+
+def _etc_base() -> Path:
+    """Config/identity dir: ``ADOS_ETC_DIR`` override, else ``~/.ados`` on macOS
+    (the installer writes ``config.yaml`` / ``pairing.json`` / ``device-id`` /
+    ``profile.conf`` directly under ``~/.ados``), else ``/etc/ados`` (Linux
+    default unchanged)."""
+    override = os.environ.get("ADOS_ETC_DIR")
+    if override:
+        return Path(override)
+    return _ados_home() if _IS_MACOS else Path("/etc/ados")
+
+
+def _var_base() -> Path:
+    """Agent-owned data dir: ``ADOS_VAR_DIR`` override, else ``~/.ados/var`` on
+    macOS, else the Linux FHS ``/var/ados`` (Linux default unchanged)."""
+    override = os.environ.get("ADOS_VAR_DIR")
+    if override:
+        return Path(override)
+    return _ados_home() / "var" if _IS_MACOS else Path("/var/ados")
+
 
 # ---------------------------------------------------------------------------
 # Runtime directory: /run/ados/
 # Sockets, pid files, ephemeral state. Wiped on reboot by tmpfs.
 # ---------------------------------------------------------------------------
 
-ADOS_RUN_DIR = Path("/run/ados")
+ADOS_RUN_DIR = _run_base()
 
 # IPC sockets
 MAVLINK_SOCK = ADOS_RUN_DIR / "mavlink.sock"
@@ -208,12 +273,19 @@ AIR_PIPELINE_STATS_PATH = ADOS_RUN_DIR / "air-pipeline.json"
 # the pairing flow, and the REST API.
 # ---------------------------------------------------------------------------
 
-ADOS_ETC_DIR = Path("/etc/ados")
+ADOS_ETC_DIR = _etc_base()
 
 # Top-level config + identity
 CONFIG_YAML = ADOS_ETC_DIR / "config.yaml"
 DEVICE_ID_PATH = ADOS_ETC_DIR / "device-id"
-PAIRING_JSON = ADOS_ETC_DIR / "pairing.json"
+# The pairing document. Honours ``ADOS_PAIRING_JSON`` (the exact variable the
+# workstation daemons are launched with) first, so the CLI reads the same file
+# the control surface writes; else it lands beside the other identity files.
+PAIRING_JSON = (
+    Path(os.environ["ADOS_PAIRING_JSON"])
+    if os.environ.get("ADOS_PAIRING_JSON")
+    else ADOS_ETC_DIR / "pairing.json"
+)
 PROFILE_CONF = ADOS_ETC_DIR / "profile.conf"
 BOARD_OVERRIDE_PATH = ADOS_ETC_DIR / "board_override"
 DISPLAY_CONF_PATH = ADOS_ETC_DIR / "display.conf"
@@ -296,7 +368,7 @@ WFB_RX_KEY_PUB_PATH = WFB_KEY_DIR / "rx.key.pub"
 # Agent-owned persistent data. Recordings, OTA state, logs, downloads.
 # ---------------------------------------------------------------------------
 
-ADOS_VAR_DIR = Path("/var/ados")
+ADOS_VAR_DIR = _var_base()
 
 # Recordings + media
 RECORDINGS_DIR = ADOS_VAR_DIR / "recordings"
@@ -335,10 +407,16 @@ PLUGIN_STATE_PATH = STATE_DIR / "plugin-state.json"
 # camera-expectation arms across reboots.
 CAMERA_LAST_GOOD_JSON = ADOS_VAR_DIR / "camera-last-good.json"
 
-# Install-result record. Written atomically by the install pipeline at
-# /var/lib/ados/install-result.json with the outcome of the last
-# install/upgrade (status, version, profile, board, kernel release,
-# radio-module source, failed and required-failure step lists). The
-# heartbeat surfaces install health so the GCS can flag a degraded or
-# failed install without an SSH session. Absent on older installs.
-INSTALL_RESULT = Path("/var/lib/ados/install-result.json")
+# Install-result record. Written atomically by the install pipeline with the
+# outcome of the last install/upgrade (status, version, profile, board, kernel
+# release, radio-module source, failed and required-failure step lists). The
+# heartbeat surfaces install health so the GCS can flag a degraded or failed
+# install without an SSH session. Absent on older installs. Honours
+# ``ADOS_INSTALL_RESULT`` (the variable the workstation daemons + Linux env file
+# carry); default is the Linux FHS path, or ``~/.ados/install-result.json`` on
+# macOS (where the installer records it).
+INSTALL_RESULT = (
+    Path(os.environ["ADOS_INSTALL_RESULT"])
+    if os.environ.get("ADOS_INSTALL_RESULT")
+    else (_ados_home() / "install-result.json" if _IS_MACOS else Path("/var/lib/ados/install-result.json"))
+)

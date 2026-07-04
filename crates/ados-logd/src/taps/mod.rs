@@ -105,20 +105,16 @@ pub struct TapPaths {
 
 impl Default for TapPaths {
     fn default() -> Self {
+        // Resolve under `ADOS_RUN_DIR` (the same override the producers write
+        // their sockets/sidecars under) so a `$HOME`-rooted install — the macOS
+        // workstation — taps `~/.ados/run` instead of a nonexistent `/run/ados`.
         Self {
-            state_socket: PathBuf::from(DEFAULT_STATE_SOCKET),
-            mavlink_socket: PathBuf::from(DEFAULT_MAVLINK_SOCKET),
-            sidecar_root: PathBuf::from(DEFAULT_SIDECAR_ROOT),
+            state_socket: PathBuf::from(crate::paths::state_socket()),
+            mavlink_socket: PathBuf::from(crate::paths::mavlink_socket()),
+            sidecar_root: PathBuf::from(crate::paths::tap_root()),
         }
     }
 }
-
-/// The canonical vehicle-state stream socket.
-pub const DEFAULT_STATE_SOCKET: &str = "/run/ados/state.sock";
-/// The canonical raw-frame broadcast socket.
-pub const DEFAULT_MAVLINK_SOCKET: &str = "/run/ados/mavlink.sock";
-/// The canonical runtime directory the JSON sidecars live under.
-pub const DEFAULT_SIDECAR_ROOT: &str = "/run/ados";
 
 /// Spawn all three taps as tokio tasks. Each task owns a clone of `ingest_tx`
 /// and a fresh [`Shutdown`] subscribed to `shutdownable`, so one fire stops them

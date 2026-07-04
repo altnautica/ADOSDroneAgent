@@ -8,7 +8,8 @@ module:
 1. Polls `/sys/class/net/eth0/carrier` every 5 s.
 2. Emits EthernetEvent{kind, link_up, ip, timestamp_ms} on state change.
 3. Exposes status + enable/disable for the uplink router.
-4. Configure-static is a stub; DHCP is the default path.
+4. Applies static or DHCP IPv4 config via nmcli on the primary Ethernet
+   connection (`configure_static` / `configure_dhcp`); DHCP is the default.
 
 Normally this manager runs embedded inside the uplink_router process.
 A standalone `main()` is provided for bench testing and for the case

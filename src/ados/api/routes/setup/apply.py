@@ -211,8 +211,8 @@ def _capture_section_snapshot(runtime, name: str) -> dict[str, object]:
                 snap["ack_operator"] = getattr(reg, "ack_operator", None)
                 snap["ack_at"] = getattr(reg, "ack_at", None)
         elif name == "advanced":
-            agent = getattr(config, "agent", None)
-            snap["log_level"] = str(getattr(agent, "log_level", "") or "")
+            logging_cfg = getattr(config, "logging", None)
+            snap["log_level"] = str(getattr(logging_cfg, "level", "") or "")
     except Exception as exc:  # noqa: BLE001 (defensive)
         log.warning("snapshot_failed", section=name, error=str(exc))
     return snap

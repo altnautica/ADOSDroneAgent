@@ -192,16 +192,33 @@ where
     };
     let tcp_app = build_router(state).layer(middleware::from_fn_with_state(edge, tcp_edge));
 
-    // Bind both listeners up front so a bind failure surfaces here rather than
-    // inside a spawned task.
+    // The on-box Unix query socket is the PRIMARY, always-required read plane
+    // (`ados logs query` prefers it, and it works with the network down). Bind it
+    // up front and hard-fail if it cannot bind.
     let unix_listener = bind_unix(&query_socket)
         .with_context(|| format!("bind query socket {}", query_socket.display()))?;
-    let tcp_listener = TcpListener::bind(("0.0.0.0", tcp_port))
-        .await
-        .with_context(|| format!("bind query TCP port {tcp_port}"))?;
+
+    // The LAN TCP edge is an OPTIONAL convenience for off-box `ados logs query`.
+    // A TCP bind failure — most commonly the port already taken by an unrelated
+    // local app (e.g. another service that grabbed this port) — must NOT take the
+    // Unix plane down with it: coupling them means one port collision silently
+    // kills ALL local log queries while the daemon is up, exactly the Rule-44
+    // lying surface where `ados logs` says "is ados-logd running?" and it is.
+    // Bind it best-effort: warn and serve Unix-only on failure.
+    let tcp_listener = match TcpListener::bind(("0.0.0.0", tcp_port)).await {
+        Ok(l) => Some(l),
+        Err(e) => {
+            tracing::warn!(
+                tcp_port,
+                error = %e,
+                "query LAN TCP port unavailable; serving the on-box Unix query socket only"
+            );
+            None
+        }
+    };
     tracing::info!(
         socket = %query_socket.display(),
-        tcp_port,
+        tcp_port = tcp_listener.as_ref().map(|_| tcp_port),
         "query API listening"
     );
 
@@ -215,10 +232,14 @@ where
     });
 
     let unix = tokio::spawn(serve_unix(unix_listener, unix_app, unix_stop_rx));
-    let tcp = tokio::spawn(serve_tcp(tcp_listener, tcp_app, tcp_stop_rx));
+    // Only serve the TCP edge when it actually bound; when it did not, the stop
+    // receiver is dropped with the closure and its unused sender send is ignored.
+    let tcp = tcp_listener.map(|l| tokio::spawn(serve_tcp(l, tcp_app, tcp_stop_rx)));
 
     let _ = unix.await;
-    let _ = tcp.await;
+    if let Some(tcp) = tcp {
+        let _ = tcp.await;
+    }
 
     // tmpfs cleanup: a stale socket path confuses a probing reader on restart.
     let _ = std::fs::remove_file(&query_socket);

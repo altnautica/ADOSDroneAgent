@@ -241,10 +241,15 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
         gate: Gate::BestEffort,
         profiles: BOTH,
     },
-    // The compute reconstructor/offload daemon. Best-effort so a workstation host
-    // whose CPU arch the prebuilt pipeline does not cover (a GPU box / Mac is
-    // typically x86_64/arm64-macOS, while the catalog ships aarch64) degrades +
-    // reports rather than failing the install; that host builds from source.
+    // The compute reconstructor/offload daemon. Best-effort so a workstation
+    // host that cannot use this aarch64 prebuilt degrades + reports rather
+    // than failing the install. How a workstation gets the daemon by host:
+    //   - macOS (any arch): the macOS install path builds every service from
+    //     source, so this catalog entry is not consulted there.
+    //   - aarch64 Linux: this prebuilt is fetched.
+    //   - non-aarch64 Linux (e.g. an x86_64 GPU box): NOT yet supported — the
+    //     preflight arch gate stops the Linux install before any fetch, and a
+    //     Linux build-from-source path is a scoped follow-up.
     PrebuiltBinary {
         service: "ados-compute",
         asset: "ados-compute-aarch64",

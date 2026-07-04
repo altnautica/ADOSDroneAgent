@@ -108,10 +108,17 @@ impl Step for Preflight {
             );
         }
 
-        // 2. arch — the prebuilt binaries target aarch64 only.
+        // 2. arch — the prebuilt Linux binaries target aarch64 only. A
+        // non-aarch64 Linux host (including a workstation on an x86_64 GPU
+        // box) is not yet supported: there are no prebuilt binaries and no
+        // Linux build-from-source path (that is a scoped follow-up). macOS
+        // hosts take the separate build-from-source install path instead.
         if !env::is_supported_arch() {
             return StepOutcome::Failed(format!(
-                "unsupported architecture {}; the prebuilt agent binaries target aarch64",
+                "unsupported architecture {}; the Linux agent ships prebuilt \
+                 aarch64 binaries only. Use an aarch64 Linux host, or a macOS \
+                 host (which builds from source). A non-aarch64 Linux \
+                 build-from-source path is not yet supported.",
                 ctx.env.arch
             ));
         }

@@ -66,9 +66,11 @@ def restore_ui(runtime, snap: dict[str, object]) -> None:
 
 def restore_advanced(runtime, snap: dict[str, object]) -> None:
     config = runtime.config
-    agent = getattr(config, "agent", None)
-    if agent is not None and hasattr(agent, "log_level") and "log_level" in snap:
-        agent.log_level = str(snap.get("log_level") or "")
+    logging_cfg = getattr(config, "logging", None)
+    if logging_cfg is not None and "log_level" in snap:
+        prior = str(snap.get("log_level") or "")
+        if prior:
+            logging_cfg.level = prior
 
 
 def restore_regulatory(runtime, snap: dict[str, object]) -> None:

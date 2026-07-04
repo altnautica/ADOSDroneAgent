@@ -38,7 +38,6 @@ export const cloudSectionSchema = z.object({
 });
 
 export const advancedSectionSchema = z.object({
-  factory_reset: z.boolean().optional(),
   board_override: z
     .string()
     .max(64)

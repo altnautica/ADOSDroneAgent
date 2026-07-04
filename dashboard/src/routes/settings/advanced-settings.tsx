@@ -16,20 +16,19 @@ type LogLevel = (typeof LOG_LEVELS)[number];
 export function AdvancedSettings() {
   const config = useConfig();
 
-  const initialLevel = (config.data?.agent?.log_level?.toLowerCase() as LogLevel) ?? "info";
+  const initialLevel = (config.data?.logging?.level?.toLowerCase() as LogLevel) ?? "info";
   const initialOverride = config.data?.agent?.board_override ?? "";
 
   const [logLevel, setLogLevel] = useState<LogLevel>(initialLevel);
   const [boardOverride, setBoardOverride] = useState(initialOverride);
 
-  const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
   const [overrideConfirmOpen, setOverrideConfirmOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
 
   useEffect(() => {
     if (config.data) {
-      setLogLevel((config.data.agent?.log_level?.toLowerCase() as LogLevel) ?? "info");
+      setLogLevel((config.data.logging?.level?.toLowerCase() as LogLevel) ?? "info");
       setBoardOverride(config.data.agent?.board_override ?? "");
     }
   }, [config.data]);
@@ -62,23 +61,6 @@ export function AdvancedSettings() {
       if (res.overall && section?.ok) {
         toast.ok(section.message || "Board override saved.");
         config.refetch();
-      } else {
-        toast.err(section?.message ?? "Apply failed.");
-      }
-    } catch (err) {
-      toastFromError(err, "Apply failed.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function applyFactoryReset() {
-    setBusy(true);
-    try {
-      const res = await postApply({ advanced: { factory_reset: true } });
-      const section = res.sections.advanced;
-      if (res.overall && section?.ok) {
-        toast.ok(section.message || "Factory reset queued.", "Reboot to apply.");
       } else {
         toast.err(section?.message ?? "Apply failed.");
       }
@@ -183,29 +165,6 @@ export function AdvancedSettings() {
         </CardContent>
       </Card>
 
-      <Card>
-        <CardContent className="pt-5 pb-5 space-y-3">
-          <div className="flex items-center gap-2 text-sm font-semibold text-destructive">
-            Factory reset
-            <RiskBadge tone="manual" />
-          </div>
-          <p className="text-xs text-muted-foreground">
-            Queues a full reset that takes effect on the next reboot.
-            Pairing keys, network credentials, and cloud posture all get
-            wiped. The agent re-runs setup from scratch.
-          </p>
-          <div className="flex justify-end">
-            <Button
-              variant="destructive"
-              disabled={busy}
-              onClick={() => setResetConfirmOpen(true)}
-            >
-              Queue factory reset
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-
       <ConfirmDialog
         open={overrideConfirmOpen}
         onOpenChange={setOverrideConfirmOpen}
@@ -224,22 +183,6 @@ export function AdvancedSettings() {
         confirmLabel="Apply override"
         destructive
         onConfirm={applyOverride}
-      />
-
-      <ConfirmDialog
-        open={resetConfirmOpen}
-        onOpenChange={setResetConfirmOpen}
-        title="Queue a factory reset?"
-        description={
-          <>
-            This wipes pairing, Wi-Fi credentials, cloud posture, and any
-            staged state on the next reboot. There is no undo. The agent
-            will reboot into a fresh, unconfigured state.
-          </>
-        }
-        confirmLabel="Queue reset"
-        destructive
-        onConfirm={applyFactoryReset}
       />
     </div>
   );

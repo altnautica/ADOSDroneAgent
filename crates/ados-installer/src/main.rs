@@ -54,11 +54,13 @@ async fn main() -> Result<ExitCode> {
     // workstation binaries from source and registers LaunchAgents under
     // `$HOME/.ados`, and the uninstall boots them out — neither touches the Linux
     // systemd / apt / venv / FHS paths the shared handlers below assume. Dispatch
-    // those two modes to the dedicated path; Status / PairOnly fall through to the
-    // shared handling (harmless read-only reporting on macOS).
+    // those modes (plus Status, which must read `$HOME/.ados` not the Linux FHS)
+    // to the dedicated path; PairOnly falls through to the shared re-pair handler
+    // (it writes pairing.json, which is harmless on macOS).
     #[cfg(target_os = "macos")]
     match mode {
         RunMode::Uninstall => return ados_installer::macos::uninstall(args.force),
+        RunMode::Status => return ados_installer::macos::status(&args),
         RunMode::FreshInstall | RunMode::Upgrade | RunMode::ForceReinstall => {
             return ados_installer::macos::run(&args)
         }

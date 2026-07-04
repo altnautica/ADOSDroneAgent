@@ -1,10 +1,11 @@
 //! The install steps.
 //!
 //! Each step is a unit struct implementing [`crate::graph::Step`] with the
-//! correct id / requires / checkpoint / kind. The `run` bodies are stubs in
-//! this scaffold (they return `Ok`); the real OS work lands in later phases.
-//! The dependency edges encoded here ARE the contract: the graph engine relies
-//! on them to guarantee the install ordering invariant.
+//! correct id / requires / checkpoint / kind. Each `run` body does the real
+//! OS work for its stage (apt/DKMS/systemctl, venv provisioning, binary
+//! fetch/verify, config write, health check). The dependency edges encoded
+//! here ARE the contract: the graph engine relies on them to guarantee the
+//! install ordering invariant.
 //!
 //! The dependency chain (→ means "must run after"):
 //!

@@ -8,8 +8,12 @@ import { apiFetch } from "@/lib/api";
 export interface AgentConfig {
   agent?: {
     profile?: string;
-    log_level?: string;
+    // Injected by GET /api/config from the /etc/ados/board_override file the
+    // HAL detector reads; empty string = auto-detect.
     board_override?: string;
+  };
+  logging?: {
+    level?: string;
   };
   ground_station?: {
     role?: string;

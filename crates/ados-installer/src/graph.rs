@@ -46,8 +46,10 @@ pub trait Step {
     fn checkpoint(&self) -> Option<&str>;
     /// Whether a failure is Required (fatal) or Optional (degrading).
     fn kind(&self) -> StepKind;
-    /// Do the work. Real OS logic lands in later phases; the scaffold stubs
-    /// return [`StepOutcome::Ok`].
+    /// Do the step's work, returning [`StepOutcome::Ok`] on success,
+    /// [`StepOutcome::Skipped`] when there is nothing to do (already
+    /// checkpointed or not applicable to this profile), or
+    /// [`StepOutcome::Failed`] with a reason.
     fn run(&self, ctx: &mut Ctx) -> StepOutcome;
 }
 
