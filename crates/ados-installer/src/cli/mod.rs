@@ -14,8 +14,10 @@ USAGE:
     ados-installer [OPTIONS] [PAIR_CODE]
 
 OPTIONS:
-    --profile <drone|ground_station>   Agent profile to install
+    --profile <drone|ground_station|workstation|compute>
+                                       Agent profile to install
     --name <hostname>                  mDNS hostname to set
+    --no-rtl-driver                    Skip the RTL8812EU WFB radio driver build
     --pair <code>                      Pairing code (or pass it positionally).
                                        On an already-installed box a bare code
                                        does a fast re-pair, not a reinstall.

@@ -24,8 +24,12 @@ pub struct Ctx {
     pub failures: FailureAccumulator,
     /// Whether checkpoints are bypassed this run (`--force`).
     pub force: bool,
-    /// Resolved agent profile (`drone` | `ground_station`).
+    /// Resolved agent profile (`drone` | `ground_station` | `workstation` | `compute`).
     pub profile: String,
+    /// Whether to build + install the RTL8812EU WFB radio driver. Default on;
+    /// `--no-rtl-driver` opts out (a workstation/compute node or a rig with no
+    /// long-range radio does not need it). The `dkms` step honours this.
+    pub install_rtl8812eu: bool,
     /// Release channel selector (default `edge` — clone + build from source,
     /// matching the predecessor installer's default).
     pub channel: String,
@@ -48,6 +52,7 @@ impl Ctx {
         let force = args.force;
         let profile = args.profile.clone().unwrap_or_else(|| "drone".to_string());
         let channel = args.channel.clone().unwrap_or_else(|| "edge".to_string());
+        let install_rtl8812eu = !args.no_rtl_driver;
         Ctx {
             args,
             env,
@@ -55,6 +60,7 @@ impl Ctx {
             failures: FailureAccumulator::new(),
             force,
             profile,
+            install_rtl8812eu,
             channel,
             source_dir: None,
             progress: ProgressSink::default(),

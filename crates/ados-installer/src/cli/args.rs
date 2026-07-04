@@ -44,6 +44,9 @@ pub struct Args {
     pub no_color: bool,
     /// `--ascii` — ASCII glyph fallback (no Unicode box/spinner).
     pub ascii: bool,
+    /// `--no-rtl-driver` — skip building the RTL8812EU WFB radio driver (a node
+    /// with no long-range radio, e.g. workstation/compute, does not need it).
+    pub no_rtl_driver: bool,
     /// `--help` — print usage and exit.
     pub help: bool,
 }
@@ -87,6 +90,7 @@ impl Args {
                 "--json" => args.json = true,
                 "--no-color" => args.no_color = true,
                 "--ascii" => args.ascii = true,
+                "--no-rtl-driver" => args.no_rtl_driver = true,
                 "--help" | "-h" => args.help = true,
                 "--profile" => args.profile = Some(take_value(&tokens, &mut i, "--profile")?),
                 "--name" => args.name = Some(take_value(&tokens, &mut i, "--name")?),
@@ -195,6 +199,12 @@ mod tests {
         assert!(a.upgrade);
         assert!(a.force);
         assert!(!a.uninstall);
+    }
+
+    #[test]
+    fn no_rtl_driver_flag_parses() {
+        assert!(Args::parse(["--no-rtl-driver"]).unwrap().no_rtl_driver);
+        assert!(!Args::default().no_rtl_driver);
     }
 
     #[test]

@@ -58,6 +58,15 @@ impl Step for Dkms {
         StepKind::Optional
     }
     fn run(&self, ctx: &mut Ctx) -> StepOutcome {
+        // Opt-out: a node with no long-range radio (workstation / compute) or an
+        // explicit operator choice skips the driver build. Returning Skipped keeps
+        // the rtl_regulatory dependency satisfied; because the graph marks the
+        // `radio-driver` checkpoint on a skip too, a later opt-IN re-run needs
+        // `--upgrade`/`--force` (both clear checkpoints).
+        if !ctx.install_rtl8812eu {
+            tracing::info!("RTL8812EU driver install skipped (--no-rtl-driver)");
+            return StepOutcome::Skipped;
+        }
         // Resolve the driver script under the source tree the clone recorded.
         let source = match env::resolve_source_dir(ctx.source_dir.as_deref()) {
             Some(s) => s,
@@ -121,4 +130,26 @@ fn ensure_module_source_sentinel() {
         let _ = std::fs::create_dir_all(parent);
     }
     let _ = std::fs::write(path, "dkms\n");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::checkpoint::Checkpoint;
+    use crate::cli::Args;
+    use crate::env::EnvInfo;
+
+    #[test]
+    fn opt_out_skips_the_driver_build() {
+        // `--no-rtl-driver` makes the step return Skipped before touching the
+        // source tree, so the rtl_regulatory dependency stays satisfied and no
+        // driver is built on a node with no long-range radio.
+        let args = Args {
+            no_rtl_driver: true,
+            ..Args::default()
+        };
+        let mut ctx = Ctx::from_args(args, EnvInfo::probe(), Checkpoint::new());
+        assert!(!ctx.install_rtl8812eu);
+        assert_eq!(Dkms.run(&mut ctx), StepOutcome::Skipped);
+    }
 }
