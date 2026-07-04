@@ -39,6 +39,37 @@ pub mod paths {
     pub const QUERY_SOCKET: &str = "/run/ados/logd-query.sock";
     /// TCP port for the LAN read plane (authenticated, rate-limited).
     pub const QUERY_TCP_PORT: u16 = 8090;
+
+    /// The runtime socket directory. Honours `ADOS_RUN_DIR` — the same override
+    /// every other service resolves its `/run/ados` sockets under — else the
+    /// `/run/ados` default.
+    fn run_dir() -> String {
+        std::env::var("ADOS_RUN_DIR")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "/run/ados".to_string())
+    }
+
+    /// Resolve the on-disk store path. Honours `ADOS_LOGD_DB` (an absolute
+    /// override a rootless / `$HOME`-rooted install — e.g. the macOS workstation
+    /// — sets so the store lives under a writable home instead of the root-owned
+    /// `/var/ados`), else the `DB_PATH` default.
+    pub fn db_path() -> String {
+        std::env::var("ADOS_LOGD_DB")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| DB_PATH.to_string())
+    }
+
+    /// The ingest socket, resolved under `ADOS_RUN_DIR` (else `/run/ados`).
+    pub fn ingest_socket() -> String {
+        format!("{}/logd.sock", run_dir().trim_end_matches('/'))
+    }
+
+    /// The query socket, resolved under `ADOS_RUN_DIR` (else `/run/ados`).
+    pub fn query_socket() -> String {
+        format!("{}/logd-query.sock", run_dir().trim_end_matches('/'))
+    }
 }
 
 /// Hand a freshly-bound socket to the `ados` group so a non-root operator in that

@@ -83,9 +83,9 @@ pub struct DaemonPaths {
 impl Default for DaemonPaths {
     fn default() -> Self {
         Self {
-            db: PathBuf::from(crate::paths::DB_PATH),
-            ingest_socket: PathBuf::from(crate::paths::INGEST_SOCKET),
-            query_socket: PathBuf::from(crate::paths::QUERY_SOCKET),
+            db: PathBuf::from(crate::paths::db_path()),
+            ingest_socket: PathBuf::from(crate::paths::ingest_socket()),
+            query_socket: PathBuf::from(crate::paths::query_socket()),
             query_tcp_port: crate::paths::QUERY_TCP_PORT,
             pairing_path: PathBuf::from(crate::query::auth::DEFAULT_PAIRING_PATH),
             hw_root: PathBuf::from(crate::hw::DEFAULT_ROOT),

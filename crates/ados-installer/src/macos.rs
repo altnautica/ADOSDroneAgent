@@ -494,6 +494,16 @@ fn build_env(paths: &Paths, device_id: &str) -> Vec<(String, String)> {
             "ADOS_HOME".into(),
             paths.ados_home.to_string_lossy().to_string(),
         ),
+        // The logging store's durable DB. Linux roots it at `/var/ados`, which a
+        // rootless per-user install cannot create; point it at the writable home.
+        (
+            "ADOS_LOGD_DB".into(),
+            paths
+                .ados_home
+                .join("logd/logs.db")
+                .to_string_lossy()
+                .to_string(),
+        ),
         ("ADOS_RUN_DIR".into(), run.clone()),
         ("ADOS_CONFIG".into(), config.clone()),
         ("ADOS_CONFIG_YAML".into(), config),
@@ -560,9 +570,16 @@ fn register_launch_agents(paths: &Paths, env: &[(String, String)], uid: u32) -> 
 
         let target = format!("gui/{uid}/{label}");
         let domain = format!("gui/{uid}");
-        // Idempotent teardown of a prior instance (best-effort — first install
-        // has nothing to boot out).
-        let _ = exec::run("launchctl", &["bootout", &target]);
+        // Idempotent teardown of a prior instance. `launchctl bootout` is
+        // asynchronous — it returns before launchd has finished unloading the
+        // job — so a `bootstrap` fired immediately after can race the teardown,
+        // fail, and leave the service unloaded (kickstart then has nothing to
+        // spawn). Only boot out a genuinely-loaded prior instance, and wait for
+        // the label to disappear before re-bootstrapping.
+        if exec::run("launchctl", &["print", &target]).success() {
+            let _ = exec::run("launchctl", &["bootout", &target]);
+            wait_label_gone(&target);
+        }
         // Load + (RunAtLoad) start.
         let plist_s = plist_path.to_string_lossy().to_string();
         let boot = exec::run("launchctl", &["bootstrap", &domain, &plist_s]);
@@ -578,6 +595,18 @@ fn register_launch_agents(paths: &Paths, env: &[(String, String)], uid: u32) -> 
         println!("  launchd: {label} → {}", program.display());
     }
     Ok(())
+}
+
+/// Poll until a launchd label is no longer loaded (bounded ~5s), so a
+/// re-bootstrap does not race launchd's asynchronous `bootout`. `launchctl
+/// print <target>` exits zero while the job is loaded, non-zero once it is gone.
+fn wait_label_gone(target: &str) {
+    for _ in 0..50 {
+        if !exec::run("launchctl", &["print", target]).success() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 }
 
 /// `co.ados.<tail>` label for an `ados-<tail>` service name (reuses the runtime
@@ -813,6 +842,10 @@ mod tests {
         );
         assert_eq!(get("ADOS_DEVICE_ID").as_deref(), Some("0011aabbccdd"));
         assert_eq!(get("ADOS_ATLAS_ENABLED").as_deref(), Some("1"));
+        assert_eq!(
+            get("ADOS_LOGD_DB").as_deref(),
+            Some("/Users/tester/.ados/logd/logs.db")
+        );
         // The compute config path uses the compute-specific env var name.
         assert_eq!(
             get("ADOS_CONFIG_YAML").as_deref(),

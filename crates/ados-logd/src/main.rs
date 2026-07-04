@@ -48,8 +48,8 @@ fn init_logging() {
 async fn main() -> Result<()> {
     init_logging();
     tracing::info!(
-        db = ados_logd::paths::DB_PATH,
-        ingest = ados_logd::paths::INGEST_SOCKET,
+        db = %ados_logd::paths::db_path(),
+        ingest = %ados_logd::paths::ingest_socket(),
         "logging store starting"
     );
     match ados_logd::daemon::run_daemon().await {
