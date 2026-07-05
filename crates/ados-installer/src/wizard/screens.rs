@@ -311,14 +311,12 @@ fn components_stage(
     let is_ground = profile == "ground_station";
     let is_workstation = profile == "workstation" || profile == "compute";
 
-    // The feature list is profile-shaped: a drone/ground station needs the radio
-    // driver (required for those profiles); a workstation has no long-range radio
-    // and no onboard camera/display, so it is offered only the internet-reach
-    // option. The radio row is LOCKED on for drone/ground because those profiles
-    // do not work without it.
-    // A workstation has no long-range radio, so it must not install the RTL
-    // driver; the drone/ground path below re-affirms the driver via the locked
-    // radio item's result.
+    // The feature list is profile-shaped: a drone / ground station is offered the
+    // long-range radio (default on, but OPTIONAL — a Wi-Fi-indoor or a future
+    // LoRa build can turn it off); a workstation has no long-range radio and no
+    // onboard camera/display, so it is offered only the internet-reach option.
+    // A workstation never installs the RTL driver; for drone/ground the radio
+    // item's result below decides `no_rtl_driver`.
     args.no_rtl_driver = is_workstation;
 
     let mut items = Vec::new();
@@ -326,16 +324,18 @@ fn components_stage(
         items.push(CheckItem {
             id: "radio".into(),
             label: "Long-range radio link".into(),
-            benefit: "Fly and stream far past Wi-Fi range.".into(),
+            benefit: "HD video and telemetry over an RTL8812EU WFB radio.".into(),
             checked: true,
-            locked: true,
+            // Optional: a drone can fly on Wi-Fi indoors, or a future LoRa link,
+            // so the operator can turn the RTL8812EU radio stack off.
+            locked: false,
         });
     }
     if is_drone {
         items.push(CheckItem {
             id: "camera".into(),
             label: "Camera video".into(),
-            benefit: "See a live picture from the drone.".into(),
+            benefit: "H.264/H.265 video from a USB or CSI camera.".into(),
             checked: hw.camera.is_some(),
             locked: false,
         });
@@ -344,7 +344,7 @@ fn components_stage(
         items.push(CheckItem {
             id: "display".into(),
             label: "Status screen".into(),
-            benefit: "Show link and status on a small attached display.".into(),
+            benefit: "Link + status on an attached I2C/SPI OLED or LCD.".into(),
             checked: hw.sys.i2c_addrs.contains(&0x3c) || hw.sys.i2c_addrs.contains(&0x3d),
             locked: false,
         });
@@ -353,9 +353,9 @@ fn components_stage(
         id: "cloud".into(),
         label: "Reach it from anywhere".into(),
         benefit: if is_workstation {
-            "Sign in to your account from this computer.".into()
+            "Sign in to your account over the cloud relay.".into()
         } else {
-            "Connect over the internet, not just at home.".into()
+            "Internet reach via the cloud relay (MQTT + WebRTC).".into()
         },
         checked: false,
         locked: false,

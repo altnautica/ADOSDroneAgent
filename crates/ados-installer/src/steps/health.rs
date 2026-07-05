@@ -371,15 +371,19 @@ impl Step for Health {
         // 6. The native WFB binary the profile's units now exec by default must
         // be present + executable, or the unit would crash-loop. Its catalog gate
         // is best-effort for the fetch step, but the cutover makes its on-disk
-        // presence a required precondition for a working install.
-        if let Some(dest) =
-            missing_default_radio_binary(&ctx.profile, |d| is_executable(Path::new(d)))
-        {
-            let svc = Path::new(dest)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(dest);
-            misses.push(format!("binary-missing:{svc}"));
+        // presence a required precondition for a working install. Only asserted
+        // when the long-range radio is installed — a LoRa / Wi-Fi-only rig opts
+        // out of the RTL8812EU WFB stack, so its absence is expected there.
+        if ctx.install_rtl8812eu {
+            if let Some(dest) =
+                missing_default_radio_binary(&ctx.profile, |d| is_executable(Path::new(d)))
+            {
+                let svc = Path::new(dest)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(dest);
+                misses.push(format!("binary-missing:{svc}"));
+            }
         }
 
         // 6b. The MAVLink router (the sole C2 path, no packaged fallback) must be
@@ -414,10 +418,15 @@ impl Step for Health {
             misses.push(format!("binary-missing:{svc}"));
         }
 
-        // 8. The radio stack is on disk (both drone + ground station need it):
-        // without the wfb-ng binaries, the bind artifacts, or the service
-        // template a fresh rig cannot auto-pair, so each is a required miss.
-        misses.extend(missing_radio_stack());
+        // 8. The radio stack is on disk (the wfb-ng binaries, the bind artifacts,
+        // the service template): without it a fresh rig cannot auto-pair over the
+        // RTL8812EU WFB link, so each is a required miss — but ONLY when the
+        // operator installed the radio. A LoRa / Wi-Fi-only drone (radio toggle
+        // off) has no RTL8812EU WFB stack by design, so asserting it would fail an
+        // install that is working exactly as chosen.
+        if ctx.install_rtl8812eu {
+            misses.extend(missing_radio_stack());
+        }
 
         // 9. mediamtx is best-effort (the video relay). A missing one degrades
         // streaming but must not abort an otherwise-working install, so record

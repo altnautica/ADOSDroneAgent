@@ -67,14 +67,16 @@ impl Step for WfbNg {
         StepKind::Required
     }
     fn run(&self, ctx: &mut Ctx) -> StepOutcome {
-        // A workstation / compute node is an operator console with no long-range
-        // radio, so it never needs the wfb-ng userspace stack + bind artifacts.
-        // Skip the build there; the radio profiles (drone / ground_station /
-        // relay / receiver) still hard-require it.
-        if matches!(ctx.profile.as_str(), "workstation" | "compute") {
+        // Skip the wfb-ng userspace build when this device has no long-range
+        // radio: a workstation / compute console never has one, and a drone /
+        // ground station whose operator turned the radio off (a LoRa or
+        // Wi-Fi-only build) opts out of the whole RTL8812EU WFB stack. WFB runs
+        // on the RTL8812EU, so with no radio the userspace build is dead weight.
+        if matches!(ctx.profile.as_str(), "workstation" | "compute") || !ctx.install_rtl8812eu {
             tracing::info!(
                 profile = %ctx.profile,
-                "wfb-ng build skipped (profile has no long-range radio)"
+                radio = ctx.install_rtl8812eu,
+                "wfb-ng build skipped (no long-range radio for this device)"
             );
             return StepOutcome::Skipped;
         }
@@ -160,7 +162,7 @@ mod tests {
     }
 
     #[test]
-    fn radio_profiles_build_but_workstation_and_compute_skip() {
+    fn no_radio_devices_skip_the_build() {
         use crate::checkpoint::Checkpoint;
         use crate::cli::Args;
         use crate::env::EnvInfo;
@@ -179,5 +181,20 @@ mod tests {
                 "{profile} must skip the radio build"
             );
         }
+
+        // A drone with the radio turned off (a LoRa / Wi-Fi-only build) also
+        // skips the build — the radio is now an optional capability.
+        let args = Args {
+            profile: Some("drone".to_string()),
+            no_rtl_driver: true,
+            ..Args::default()
+        };
+        let mut ctx = Ctx::from_args(args, EnvInfo::probe(), Checkpoint::new());
+        assert!(!ctx.install_rtl8812eu);
+        assert_eq!(
+            WfbNg.run(&mut ctx),
+            StepOutcome::Skipped,
+            "a radio-off drone must skip the radio build"
+        );
     }
 }
