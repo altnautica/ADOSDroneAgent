@@ -129,6 +129,7 @@ pub fn render(
     dash: Option<&Dashboard>,
     history: &History,
     refreshed: &str,
+    stale: bool,
     error: Option<&str>,
 ) {
     // Paint the charcoal base once per frame on tiers that can show it; widgets
@@ -147,7 +148,7 @@ pub fn render(
     ])
     .split(frame.area());
 
-    header(frame, rows[0], dash, refreshed);
+    header(frame, rows[0], dash, refreshed, stale);
     verdict(frame, rows[1], dash);
     footer(frame, rows[3]);
 
@@ -168,7 +169,7 @@ pub fn render(
     }
 }
 
-fn header(frame: &mut Frame, area: Rect, dash: Option<&Dashboard>, refreshed: &str) {
+fn header(frame: &mut Frame, area: Rect, dash: Option<&Dashboard>, refreshed: &str, stale: bool) {
     let ident = match dash {
         Some(d) => Span::styled(d.ident(), bright()),
         None => Span::styled("connecting", dim()),
@@ -177,24 +178,32 @@ fn header(frame: &mut Frame, area: Rect, dash: Option<&Dashboard>, refreshed: &s
         Span::styled("▌ ", Style::default().fg(theme::accent())),
         Span::styled(
             "ADOS",
-            Style::default().fg(theme::accent()).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme::accent())
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw("   "),
         ident,
     ]);
-    let right = match dash {
-        Some(d) => format!("v{}  ·  refreshed {}", d.version, refreshed),
-        None => format!("refreshed {refreshed}"),
-    };
 
-    let cols = Layout::horizontal([
-        Constraint::Fill(1),
-        Constraint::Length(right.chars().count() as u16 + 1),
-    ])
-    .split(area);
+    let mut right: Vec<Span> = Vec::new();
+    if let Some(d) = dash {
+        right.push(Span::styled(format!("v{}  ·  ", d.version), dim()));
+    }
+    right.push(Span::styled(format!("refreshed {refreshed} UTC"), dim()));
+    if stale {
+        right.push(Span::styled(
+            "  stale",
+            Style::default().fg(theme::warning()),
+        ));
+    }
+    let right_w: usize = right.iter().map(|s| s.content.chars().count()).sum();
+
+    let cols = Layout::horizontal([Constraint::Fill(1), Constraint::Length(right_w as u16 + 1)])
+        .split(area);
     frame.render_widget(Paragraph::new(left), cols[0]);
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(right, dim()))).alignment(Alignment::Right),
+        Paragraph::new(Line::from(right)).alignment(Alignment::Right),
         cols[1],
     );
 }

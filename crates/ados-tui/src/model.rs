@@ -190,15 +190,19 @@ fn s(v: &Value, key: &str, default: &str) -> String {
         .to_string()
 }
 
-/// Render a JSON scalar to a string (for fields that may arrive as a string or
-/// a number, e.g. `gps_fix`).
-fn scalar_str(v: &Value) -> Option<String> {
-    match v {
-        Value::String(text) => Some(text.clone()),
-        Value::Bool(b) => Some(b.to_string()),
-        Value::Number(n) => Some(n.to_string()),
-        _ => None,
+/// A MAVLink `GPS_FIX_TYPE` integer as a short human label.
+pub fn fix_label(fix_type: i64) -> String {
+    match fix_type {
+        0 => "no GPS",
+        1 => "no fix",
+        2 => "2D",
+        3 => "3D",
+        4 => "DGPS",
+        5 => "RTK float",
+        6 => "RTK fixed",
+        _ => "unknown",
     }
+    .to_string()
 }
 
 impl Dashboard {
@@ -260,7 +264,18 @@ impl Dashboard {
         let remote = data.get("remote_access").cloned().unwrap_or(Value::Null);
         let cloud = data.get("cloud_choice").cloned().unwrap_or(Value::Null);
 
-        dash.hotspot = s(&network, "hotspot_ssid", "");
+        // Only show the hotspot SSID when the hotspot is actually enabled: the
+        // config SSID is always populated, so reading it alone shows the row as
+        // broadcasting even when the hotspot is off.
+        let hotspot_on = network
+            .get("hotspot_enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        dash.hotspot = if hotspot_on {
+            s(&network, "hotspot_ssid", "")
+        } else {
+            String::new()
+        };
         dash.remote_status = s(&remote, "status", "disabled");
 
         dash.cloud_paired = cloud
@@ -280,14 +295,40 @@ impl Dashboard {
             "not configured".to_string()
         };
 
-        // Telemetry (typed; only the fields the payload carries).
-        if let Some(tel) = data.get("telemetry").and_then(Value::as_object) {
-            dash.mode = tel.get("mode").and_then(Value::as_str).map(str::to_string);
+        // Flight telemetry. The router snapshot is nested (battery / gps /
+        // position sub-objects); mode + armed are the only flat top-level keys.
+        // It is read only when the FC link is live, so the empty snapshot's
+        // zeros (and the -1 "unknown" battery) never render as a real reading on
+        // a disconnected drone.
+        if dash.mavlink_connected {
+            let tel = data.get("telemetry").cloned().unwrap_or(Value::Null);
+            dash.mode = tel
+                .get("mode")
+                .and_then(Value::as_str)
+                .filter(|m| !m.is_empty())
+                .map(str::to_string);
             dash.armed = tel.get("armed").and_then(Value::as_bool);
-            dash.battery = tel.get("battery_remaining").and_then(Value::as_f64);
-            dash.gps_fix = tel.get("gps_fix").and_then(scalar_str);
-            dash.satellites = tel.get("satellites").and_then(Value::as_i64);
-            dash.alt = tel.get("alt").and_then(Value::as_f64);
+            // battery.remaining is a percent, or -1 until the FC reports one.
+            dash.battery = tel
+                .get("battery")
+                .and_then(|b| b.get("remaining"))
+                .and_then(Value::as_f64)
+                .filter(|v| *v >= 0.0);
+            // gps.fix_type is a MAVLink GPS_FIX_TYPE int rendered as a label.
+            dash.gps_fix = tel
+                .get("gps")
+                .and_then(|g| g.get("fix_type"))
+                .and_then(Value::as_i64)
+                .map(fix_label);
+            dash.satellites = tel
+                .get("gps")
+                .and_then(|g| g.get("satellites"))
+                .and_then(Value::as_i64);
+            // Altitude relative to home is the operator-meaningful number.
+            dash.alt = tel
+                .get("position")
+                .and_then(|p| p.get("alt_rel"))
+                .and_then(Value::as_f64);
         }
 
         // Services count.
@@ -614,10 +655,15 @@ mod tests {
             "steps": [{"label": "Profile", "state": "complete"}],
             "mavlink": {"connected": true, "tcp_url": "tcp://x:5760"},
             "video": {"state": "running", "whep_url": "http://x:8889/main/whep"},
-            "network": {"hotspot_ssid": "ADOS-AP"},
+            "network": {"hotspot_enabled": true, "hotspot_ssid": "ADOS-AP"},
             "remote_access": {"status": "disabled"},
             "cloud_choice": {"mode": "local"},
-            "telemetry": {"mode": "STABILIZE", "armed": false, "battery_remaining": 82, "satellites": 14},
+            "telemetry": {
+                "mode": "STABILIZE", "armed": false,
+                "battery": {"remaining": 82},
+                "gps": {"fix_type": 3, "satellites": 14},
+                "position": {"alt_rel": 12.5}
+            },
             "services": [{"state": "running"}, {"state": "running"}, {"state": "stopped"}],
             "next_action": "Open Mission Control"
         });
@@ -635,7 +681,9 @@ mod tests {
         assert_eq!(dash.mode.as_deref(), Some("STABILIZE"));
         assert_eq!(dash.armed, Some(false));
         assert_eq!(dash.battery, Some(82.0));
+        assert_eq!(dash.gps_fix.as_deref(), Some("3D"));
         assert_eq!(dash.satellites, Some(14));
+        assert_eq!(dash.alt, Some(12.5));
         assert_eq!((dash.services_running, dash.services_total), (2, 3));
         assert_eq!(dash.next_action, "Open Mission Control");
     }
@@ -647,6 +695,54 @@ mod tests {
         assert!(dash.battery.is_none());
         assert!(dash.alt.is_none());
         assert_eq!(dash.version, "?");
+    }
+
+    #[test]
+    fn fix_label_maps_gps_fix_types() {
+        assert_eq!(fix_label(0), "no GPS");
+        assert_eq!(fix_label(1), "no fix");
+        assert_eq!(fix_label(3), "3D");
+        assert_eq!(fix_label(6), "RTK fixed");
+        assert_eq!(fix_label(99), "unknown");
+    }
+
+    #[test]
+    fn flight_telemetry_hidden_when_fc_disconnected() {
+        // The empty snapshot carries all-zero nested telemetry even with the FC
+        // down; none of it may render, or a disconnected drone reads live.
+        let data = json!({
+            "profile": "drone",
+            "mavlink": {"connected": false},
+            "telemetry": {
+                "mode": "", "armed": false,
+                "battery": {"remaining": -1},
+                "gps": {"fix_type": 0, "satellites": 0},
+                "position": {"alt_rel": 0.0}
+            }
+        });
+        let dash = Dashboard::from_status(&data);
+        assert!(dash.mode.is_none());
+        assert!(dash.battery.is_none());
+        assert!(dash.gps_fix.is_none());
+        assert!(dash.satellites.is_none());
+        assert!(dash.alt.is_none());
+    }
+
+    #[test]
+    fn battery_unknown_when_negative() {
+        let data = json!({
+            "mavlink": {"connected": true},
+            "telemetry": {"battery": {"remaining": -1}}
+        });
+        assert!(Dashboard::from_status(&data).battery.is_none());
+    }
+
+    #[test]
+    fn hotspot_hidden_when_disabled() {
+        let off = json!({"network": {"hotspot_enabled": false, "hotspot_ssid": "ADOS-AP"}});
+        assert_eq!(Dashboard::from_status(&off).hotspot, "");
+        let on = json!({"network": {"hotspot_enabled": true, "hotspot_ssid": "ADOS-AP"}});
+        assert_eq!(Dashboard::from_status(&on).hotspot, "ADOS-AP");
     }
 
     #[test]

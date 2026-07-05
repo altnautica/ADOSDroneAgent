@@ -30,6 +30,9 @@ const PAIRING_JSON: &str = "/etc/ados/pairing.json";
 
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 const TICK: Duration = Duration::from_millis(100);
+/// Past this age with no successful poll, the shown snapshot is flagged stale so
+/// a departed agent never keeps reading live under a moving clock.
+const STALE_AFTER: Duration = Duration::from_secs(6);
 
 fn load_api_key() -> Option<String> {
     let text = std::fs::read_to_string(PAIRING_JSON).ok()?;
@@ -99,6 +102,9 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, client: &RestClient) -
     let mut error: Option<String> = None;
     let mut refreshed = now_hms();
     let mut last_fetch: Option<Instant> = None;
+    // When the last successful poll landed (distinct from the per-attempt
+    // `refreshed` clock, which advances even on a failed fetch).
+    let mut last_success: Option<Instant> = None;
     // Trend buffers of verified telemetry, one sample per successful poll.
     let mut history = History::default();
 
@@ -114,6 +120,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, client: &RestClient) -
                     history.record(&Dashboard::from_status(&v));
                     data = Some(v);
                     error = None;
+                    last_success = Some(Instant::now());
                 }
                 Err(e) => error = Some(format!("Agent unreachable: {e}")),
             }
@@ -121,8 +128,12 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, client: &RestClient) -
             last_fetch = Some(Instant::now());
         }
 
+        // The snapshot is stale when the last success is older than STALE_AFTER
+        // (the fetch is erroring while an old snapshot is still on screen).
+        let stale = last_success.is_some_and(|t| t.elapsed() > STALE_AFTER);
         let dash = data.as_ref().map(Dashboard::from_status);
-        terminal.draw(|f| ui::render(f, dash.as_ref(), &history, &refreshed, error.as_deref()))?;
+        terminal
+            .draw(|f| ui::render(f, dash.as_ref(), &history, &refreshed, stale, error.as_deref()))?;
 
         if event::poll(TICK)? {
             if let Event::Key(key) = event::read()? {
