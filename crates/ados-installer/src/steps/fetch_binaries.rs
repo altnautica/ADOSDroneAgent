@@ -30,7 +30,7 @@ const RELEASE_BASE: &str = "https://github.com/altnautica/ADOSDroneAgent/release
 /// dev-tolerant (signature skipped, SHA256-only); on `stable` the `.minisig` is
 /// mandatory and verified against this key. Verification is dormant until CI is
 /// signing (no `.minisig` published → SHA256-only) and activates automatically
-/// once a signed release exists.
+/// once a signed release exists. Key id `8DEB4E827E9D083F` (rotated 2026-07).
 const ADOS_BINARY_PUBKEY: &str = "RWQ/CJ1+gk7rjVfGSoy6MOL50e8TmO30KD/J+goaEj+WMI1uzEf92rHN";
 
 /// What to do with one binary's fetch-or-verify outcome, keyed off its catalog
