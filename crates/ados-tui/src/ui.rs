@@ -33,7 +33,9 @@ fn panel(title: &str) -> Block<'_> {
         .border_style(dim())
         .title(Span::styled(
             format!(" ▌ {title} "),
-            Style::default().fg(theme::accent()).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme::accent())
+                .add_modifier(Modifier::BOLD),
         ))
 }
 

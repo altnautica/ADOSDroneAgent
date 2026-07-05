@@ -348,7 +348,10 @@ impl Dashboard {
         dash.mavlink_ws_url = opt_str(&mavlink, "websocket_url");
         dash.mavlink_public_ws_url = opt_str(&mavlink, "public_websocket_url");
         dash.fc_port = opt_str(&mavlink, "port");
-        dash.fc_baud = mavlink.get("baud").and_then(Value::as_i64).filter(|b| *b > 0);
+        dash.fc_baud = mavlink
+            .get("baud")
+            .and_then(Value::as_i64)
+            .filter(|b| *b > 0);
 
         // Video.
         let video = data.get("video").cloned().unwrap_or(Value::Null);
@@ -499,7 +502,10 @@ impl Dashboard {
         // Video: project the advertised viewer URL (or the WHEP viewer) onto
         // every LAN host, plus any advertised tunnel viewer.
         let mut vid: Vec<LinkRow> = Vec::new();
-        if let Some(tmpl) = self.best_url(&["video"]).or_else(|| self.video_viewer.clone()) {
+        if let Some(tmpl) = self
+            .best_url(&["video"])
+            .or_else(|| self.video_viewer.clone())
+        {
             for h in &hosts {
                 vid.push(LinkRow {
                     url: swap_host(&tmpl, &h.host),
@@ -783,14 +789,23 @@ mod tests {
         let titles: Vec<&str> = groups.iter().map(|g| g.title).collect();
         assert_eq!(
             titles,
-            vec!["Console", "Ground control", "Video", "Mission Control", "Remote"]
+            vec![
+                "Console",
+                "Ground control",
+                "Video",
+                "Mission Control",
+                "Remote"
+            ]
         );
 
         // Console shows both the mDNS and the LAN-IP full URLs, loopback dropped.
         let console: Vec<&str> = groups[0].rows.iter().map(|r| r.url.as_str()).collect();
         assert_eq!(
             console,
-            vec!["http://ados-x.local:8080/setup", "http://192.168.1.5:8080/setup"]
+            vec![
+                "http://ados-x.local:8080/setup",
+                "http://192.168.1.5:8080/setup"
+            ]
         );
 
         // Ground control synthesises tcp + ws on both LAN hosts.
@@ -848,7 +863,10 @@ mod tests {
             swap_host("http://ados-x.local:8889/main/", "192.168.1.5"),
             "http://192.168.1.5:8889/main/"
         );
-        assert_eq!(swap_host("ws://ados-x.local:8765/", "10.0.0.9"), "ws://10.0.0.9:8765/");
+        assert_eq!(
+            swap_host("ws://ados-x.local:8765/", "10.0.0.9"),
+            "ws://10.0.0.9:8765/"
+        );
     }
 
     #[test]

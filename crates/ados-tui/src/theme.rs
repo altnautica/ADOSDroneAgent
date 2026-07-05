@@ -135,7 +135,10 @@ mod tests {
 
     #[test]
     fn resolve_tier_reads_the_ladder() {
-        assert_eq!(resolve_tier(true, "xterm-256color", "truecolor"), Tier::None);
+        assert_eq!(
+            resolve_tier(true, "xterm-256color", "truecolor"),
+            Tier::None
+        );
         assert_eq!(resolve_tier(false, "dumb", "truecolor"), Tier::None);
         assert_eq!(resolve_tier(false, "xterm", "truecolor"), Tier::Truecolor);
         assert_eq!(resolve_tier(false, "xterm", "24bit"), Tier::Truecolor);
