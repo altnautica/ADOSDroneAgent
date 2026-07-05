@@ -693,7 +693,6 @@ fn build_env(paths: &Paths, device_id: &str, agent_version: &str) -> Vec<(String
     let run = paths.run.to_string_lossy().to_string();
     let config = paths.config.to_string_lossy().to_string();
     let node_id = format!("mac-{}", hostname_slug());
-    let public_url = format!("http://{}:{COMPUTE_PORT}", lan_ipv4());
     let path = |p: PathBuf| p.to_string_lossy().to_string();
     vec![
         ("HOME".into(), paths.home.to_string_lossy().to_string()),
@@ -749,12 +748,19 @@ fn build_env(paths: &Paths, device_id: &str, agent_version: &str) -> Vec<(String
             "ADOS_COMPUTE_WORK".into(),
             paths.compute.join("work").to_string_lossy().to_string(),
         ),
+        // The compute job API binds the LAN (0.0.0.0), not loopback: a drone
+        // forwards capture keyframes to it and the GCS fetches the reconstructed
+        // world models from it, both off-box (loopback would break Atlas). The
+        // pairing gate is the auth boundary — an off-box caller needs the pairing
+        // key. ADOS_COMPUTE_PUBLIC_URL is deliberately left unset so the daemon
+        // derives the artifact base from its mDNS `<hostname>.local` name, the
+        // same path a Linux node uses — so both platforms advertise a consistent,
+        // DHCP-stable URL rather than macOS baking in a LAN IP that can change.
         (
             "ADOS_COMPUTE_BIND".into(),
             format!("0.0.0.0:{COMPUTE_PORT}"),
         ),
         ("ADOS_COMPUTE_NODE_ID".into(), node_id),
-        ("ADOS_COMPUTE_PUBLIC_URL".into(), public_url),
         ("ADOS_ATLAS_ENABLED".into(), "1".into()),
     ]
 }
@@ -1161,7 +1167,9 @@ fn print_summary(paths: &Paths, device_id: &str, uid: u32, report: &HealthReport
     }
     println!("  device id     : {device_id}");
     println!("  control (GCS) : http://127.0.0.1:{CONTROL_PORT}   http://{ip}:{CONTROL_PORT}");
-    println!("  compute       : http://127.0.0.1:{COMPUTE_PORT}");
+    println!(
+        "  compute       : http://127.0.0.1:{COMPUTE_PORT}   ·   serves the fleet on your LAN (pairing-gated)"
+    );
     println!("  logs          : {}/", paths.log.display());
     println!(
         "  agents        : {}/co.ados.*.plist",
