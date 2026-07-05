@@ -203,6 +203,9 @@ fn paint_completion(tty: &mut Tty, theme: &Theme, s: &SummaryData, journal: &Vec
 fn present_completion(tty: &mut Tty, theme: &Theme, s: &SummaryData, journal: &VecDeque<String>) {
     const AUTO_DISMISS: Duration = Duration::from_secs(120);
     let deadline = Instant::now() + AUTO_DISMISS;
+    // Drop any keystrokes typed during the install so the card holds until a
+    // fresh keypress instead of a buffered byte dismissing it instantly.
+    tty.flush_input();
     paint_completion(tty, theme, s, journal);
     loop {
         match tty.read_input(200) {

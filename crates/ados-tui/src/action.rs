@@ -28,8 +28,8 @@ pub const ACTIONS: &[Action] = &[
     Action {
         key: Some('d'),
         short: "driver",
-        label: "Install / repair RTL driver",
-        desc: "Build the RTL8812EU WFB kernel driver",
+        label: "Install RTL driver",
+        desc: "Build the RTL8812EU WFB kernel driver if missing",
         confirm: true,
         program: "ados",
         args: &["radio", "install-driver"],

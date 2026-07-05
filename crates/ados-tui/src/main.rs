@@ -98,6 +98,13 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<Stdout>>, action: &Action
     }
 
     restore_terminal();
+    // The terminal is now in cooked mode (Ctrl-C raises SIGINT). Ignore SIGINT +
+    // SIGQUIT in this process for the duration of the action so a Ctrl-C used to
+    // stop a streaming child (e.g. `ados logs tail`, whose only exit IS Ctrl-C)
+    // exits the child, not the whole cockpit. `spawn_action` resets them to
+    // default in the child so it still receives them. Restored on return (RAII).
+    #[cfg(unix)]
+    let _signals = SignalGuard::ignore();
 
     if action.confirm {
         print!("\n{} — proceed? [y/N] ", action.label);
@@ -108,10 +115,7 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<Stdout>>, action: &Action
     }
 
     println!("\n$ {} {}\n", action.program, action.args.join(" "));
-    match std::process::Command::new(action.program)
-        .args(action.args)
-        .status()
-    {
+    match spawn_action(action.program, action.args) {
         Ok(status) if !status.success() => {
             println!("\n[exited with status {}]", status.code().unwrap_or(-1));
         }
@@ -122,6 +126,59 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<Stdout>>, action: &Action
     let _ = std::io::stdout().flush();
     let _ = read_line();
     restore(terminal)
+}
+
+/// Spawn a quick-action child inheriting this terminal, resetting SIGINT/SIGQUIT
+/// to their default disposition in the child (they are ignored in the parent for
+/// the child's duration) so a Ctrl-C reaches the child but not this cockpit.
+fn spawn_action(program: &str, args: &[&str]) -> std::io::Result<std::process::ExitStatus> {
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(args);
+    #[cfg(unix)]
+    // SAFETY: the pre_exec closure runs in the forked child before exec and only
+    // calls the async-signal-safe `signal(2)` to restore default dispositions.
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            nix::libc::signal(nix::libc::SIGINT, nix::libc::SIG_DFL);
+            nix::libc::signal(nix::libc::SIGQUIT, nix::libc::SIG_DFL);
+            Ok(())
+        });
+    }
+    cmd.status()
+}
+
+/// Ignores SIGINT + SIGQUIT in this process for its lifetime and restores the
+/// previous dispositions on drop (the POSIX `system(3)` pattern).
+#[cfg(unix)]
+struct SignalGuard {
+    int: nix::libc::sighandler_t,
+    quit: nix::libc::sighandler_t,
+}
+
+#[cfg(unix)]
+impl SignalGuard {
+    fn ignore() -> Self {
+        // SAFETY: `signal(2)` just swaps the disposition and returns the prior
+        // one, which Drop restores.
+        unsafe {
+            SignalGuard {
+                int: nix::libc::signal(nix::libc::SIGINT, nix::libc::SIG_IGN),
+                quit: nix::libc::signal(nix::libc::SIGQUIT, nix::libc::SIG_IGN),
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for SignalGuard {
+    fn drop(&mut self) {
+        // SAFETY: restoring the dispositions captured in `ignore`.
+        unsafe {
+            nix::libc::signal(nix::libc::SIGINT, self.int);
+            nix::libc::signal(nix::libc::SIGQUIT, self.quit);
+        }
+    }
 }
 
 fn main() -> Result<()> {

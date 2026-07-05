@@ -255,6 +255,21 @@ impl Tty {
         self.last_size = None;
     }
 
+    /// Discard any queued (type-ahead) terminal input. The write-only install
+    /// phase never reads `/dev/tty`, so keystrokes the operator makes during the
+    /// install pile up in the kernel input queue; flushing them before the
+    /// completion card is presented stops a stray byte from dismissing it
+    /// instantly (it should hold until a fresh keypress).
+    #[cfg(target_os = "linux")]
+    pub fn flush_input(&mut self) {
+        use nix::sys::termios::{tcflush, FlushArg};
+        use std::os::fd::AsFd;
+        let _ = tcflush(self.file.as_fd(), FlushArg::TCIFLUSH);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn flush_input(&mut self) {}
+
     /// Re-enable the terminal signal keys (`ISIG`) while keeping the rest of raw
     /// mode. The wizard reads keys itself so it runs with `ISIG` off; the
     /// write-only install phase wants Ctrl-C to raise `SIGINT` instead, which
