@@ -44,6 +44,11 @@ pub enum ProgressEvent {
     /// Incremental sub-progress for a step that reports a fraction (the
     /// component download). `done`/`total` are in the step's own units.
     SubProgress { id: String, done: u64, total: u64 },
+    /// A curated one-line headline for the running step ("installing ffmpeg",
+    /// "compiling radio stack") — the accent line in the live-detail pane.
+    Activity { id: String, message: String },
+    /// One raw subprocess line for the running step's dim scrolling log tail.
+    SubLog { id: String, line: String },
     /// A forwarded log line (from the tracing layer) to scroll above the block.
     Log { level: tracing::Level, line: String },
     /// The terminal summary: render the success card / failure panel.

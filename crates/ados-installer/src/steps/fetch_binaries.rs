@@ -260,7 +260,11 @@ impl Step for FetchBinaries {
         for (i, b) in bins.into_iter().enumerate() {
             let ok = match install_one_with_retry(b, &tmp_dir, channel) {
                 Ok(()) => {
-                    tracing::info!(
+                    // Kept at debug: the live-detail pane names each component as
+                    // it lands, so an info line here would just repeat "installed
+                    // prebuilt binary" N times in the scroll-back. The journal
+                    // still records it.
+                    tracing::debug!(
                         service = b.service,
                         dest = b.dest,
                         "installed prebuilt binary"

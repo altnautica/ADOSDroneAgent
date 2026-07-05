@@ -163,9 +163,12 @@ install_wfb_ng_from_vendor() {
     # at runtime (the bind drives wfb-server, not the RTSP demo), so on a
     # librga-less build, build everything else and stub wfb_rtsp so setup.py's
     # data_files copy still succeeds. The bind protocol works either way.
-    if ! ( cd "${VENDOR_DIR}" && make all_bin wfb_rtsp gs.key >/tmp/wfb-ng-build.log 2>&1 ); then
+    # `tee` (with pipefail) so the compile output both reaches the installer's
+    # live-detail pane on stdout AND is preserved in the log the failure message
+    # points at. pipefail keeps the exit status the make's, not tee's.
+    if ! ( set -o pipefail; cd "${VENDOR_DIR}" && make all_bin wfb_rtsp gs.key 2>&1 | tee /tmp/wfb-ng-build.log ); then
         log "wfb-ng full build failed (librga / gstreamer-rtsp deps); retrying without wfb_rtsp"
-        if ! ( cd "${VENDOR_DIR}" && make all_bin gs.key >/tmp/wfb-ng-build.log 2>&1 ); then
+        if ! ( set -o pipefail; cd "${VENDOR_DIR}" && make all_bin gs.key 2>&1 | tee /tmp/wfb-ng-build.log ); then
             warn "wfb-ng minimal build also failed; see /tmp/wfb-ng-build.log."
             return 0
         fi
@@ -182,14 +185,14 @@ install_wfb_ng_from_vendor() {
     _epoch="$(  printf '%s\n' "${_env}" | awk -F= '/^SOURCE_DATE_EPOCH=/{print $2; exit}' )"
     : "${_ver:=0.0.0}"; : "${_commit:=release}"; : "${_epoch:=$(date +%s)}"
     log "wfb-ng version=${_ver} commit=${_commit:0:8}"
-    if ! ( cd "${VENDOR_DIR}" && \
+    if ! ( set -o pipefail; cd "${VENDOR_DIR}" && \
            VERSION="${_ver}" COMMIT="${_commit}" SOURCE_DATE_EPOCH="${_epoch}" \
-           /usr/bin/python3 setup.py install --root=/ --install-layout=deb >/tmp/wfb-ng-install.log 2>&1 ); then
+           /usr/bin/python3 setup.py install --root=/ --install-layout=deb 2>&1 | tee /tmp/wfb-ng-install.log ); then
         # Fall back to a plain install when --install-layout=deb is unavailable
         # (debian helpers absent on some BSP images).
-        if ! ( cd "${VENDOR_DIR}" && \
+        if ! ( set -o pipefail; cd "${VENDOR_DIR}" && \
                VERSION="${_ver}" COMMIT="${_commit}" SOURCE_DATE_EPOCH="${_epoch}" \
-               /usr/bin/python3 setup.py install >/tmp/wfb-ng-install.log 2>&1 ); then
+               /usr/bin/python3 setup.py install 2>&1 | tee /tmp/wfb-ng-install.log ); then
             warn "wfb-ng install failed; see /tmp/wfb-ng-install.log."
             return 0
         fi

@@ -57,6 +57,14 @@ pub fn run(rx: Receiver<ProgressEvent>, theme: Theme, header: String) {
                 model.set_sub(&id, done, total);
                 draw_block(&mut w, &model, &theme, spinner, &mut height);
             }
+            Ok(ProgressEvent::Activity { message, .. }) => {
+                push_log(&mut logs, message.clone());
+                emit_log(&mut w, &message, &model, &theme, spinner, &mut height);
+            }
+            Ok(ProgressEvent::SubLog { line, .. }) => {
+                push_log(&mut logs, line.clone());
+                emit_log(&mut w, &line, &model, &theme, spinner, &mut height);
+            }
             Ok(ProgressEvent::Log { line, .. }) => {
                 push_log(&mut logs, line.clone());
                 emit_log(&mut w, &line, &model, &theme, spinner, &mut height);

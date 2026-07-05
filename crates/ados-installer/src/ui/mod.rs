@@ -11,6 +11,7 @@
 //! stderr is the operator's terminal) and degrades to plain text in CI / piped
 //! / `TERM=dumb` contexts.
 
+pub mod activity;
 pub mod events;
 pub mod model;
 pub mod plain;
@@ -101,6 +102,22 @@ impl ProgressSink {
             id: id.to_string(),
             done,
             total,
+        });
+    }
+
+    /// Set the curated headline for the running step's live-detail pane.
+    pub fn activity(&self, id: &str, message: String) {
+        self.send(ProgressEvent::Activity {
+            id: id.to_string(),
+            message,
+        });
+    }
+
+    /// Emit one raw subprocess line into the running step's log tail.
+    pub fn sub_log(&self, id: &str, line: &str) {
+        self.send(ProgressEvent::SubLog {
+            id: id.to_string(),
+            line: line.to_string(),
         });
     }
 

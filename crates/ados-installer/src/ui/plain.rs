@@ -33,8 +33,11 @@ pub fn run(rx: Receiver<ProgressEvent>, quiet: bool, header: String) {
                 model.set_sub(&id, done, total);
             }
             // Detailed logs always go to the journal; the plain stream stays the
-            // clean per-group transition log, so Log events are not echoed here.
-            ProgressEvent::Log { .. } => {}
+            // clean per-group transition log, so live-detail + Log events are not
+            // echoed here.
+            ProgressEvent::Activity { .. }
+            | ProgressEvent::SubLog { .. }
+            | ProgressEvent::Log { .. } => {}
             ProgressEvent::Summary(s) => {
                 for line in summary::plain_lines(&s) {
                     eprintln!("{line}");

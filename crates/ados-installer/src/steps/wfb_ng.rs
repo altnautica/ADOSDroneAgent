@@ -21,6 +21,7 @@ use crate::ctx::Ctx;
 use crate::env;
 use crate::exec;
 use crate::graph::{Step, StepKind, StepOutcome};
+use crate::ui::activity;
 
 /// The userspace binaries the bind protocol + radio services need on PATH.
 const REQUIRED_BINS: &[&str] = &["wfb_tx", "wfb_rx", "wfb_keygen", "wfb-server"];
@@ -83,7 +84,14 @@ impl Step for WfbNg {
         }
 
         tracing::info!("building + provisioning wfb-ng (delegated)");
-        let res = exec::run("bash", &[&script.to_string_lossy()]);
+        let sink = ctx.progress.clone();
+        let script_s = script.to_string_lossy();
+        let res = exec::run_streamed("bash", &[script_s.as_ref()], |line| {
+            sink.sub_log("wfb_ng", line);
+            if let Some(a) = activity::wfb_activity(line) {
+                sink.activity("wfb_ng", a);
+            }
+        });
         if !res.spawned {
             return StepOutcome::Failed(
                 "bash not available to run the wfb-ng installer".to_string(),

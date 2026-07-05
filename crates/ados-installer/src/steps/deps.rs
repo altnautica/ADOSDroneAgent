@@ -9,6 +9,7 @@
 use crate::ctx::Ctx;
 use crate::exec;
 use crate::graph::{Step, StepKind, StepOutcome};
+use crate::ui::{activity, ProgressSink};
 
 /// The cross-profile core apt package set (REQUIRED). Ported verbatim from
 /// `install_system_deps` in 02-deps.sh: Python venv + native-extension build
@@ -112,17 +113,24 @@ pub fn required_packages(profile: &str) -> Vec<&'static str> {
 /// environment so a package that ships a debconf prompt (or upgrades a service
 /// mid-install) can never block the unattended installer on stdin. We route
 /// through `env` rather than the process environment so the setting is explicit
-/// and local to the apt shell-outs. `apt-get` args follow.
-fn apt(args: &[&str]) -> exec::CmdResult {
+/// and local to the apt shell-outs, and stream each line to the live-detail
+/// pane (no `-qq`, so the real fetch/unpack/configure activity is visible).
+/// `apt-get` args follow.
+fn apt(args: &[&str], sink: &ProgressSink) -> exec::CmdResult {
     let mut argv: Vec<&str> = vec!["DEBIAN_FRONTEND=noninteractive", "apt-get"];
     argv.extend_from_slice(args);
-    exec::run("env", &argv)
+    exec::run_streamed("env", &argv, |line| {
+        sink.sub_log("deps", line);
+        if let Some(a) = activity::apt_activity(line) {
+            sink.activity("deps", a);
+        }
+    })
 }
 
 /// `apt-get update`, surfacing failure. Errors propagate so the caller fails
 /// the step (a stale index breaks every install below).
-fn apt_update() -> anyhow::Result<()> {
-    let res = apt(&["update", "-qq"]);
+fn apt_update(sink: &ProgressSink) -> anyhow::Result<()> {
+    let res = apt(&["update"], sink);
     if res.success() {
         Ok(())
     } else if !res.spawned {
@@ -134,13 +142,13 @@ fn apt_update() -> anyhow::Result<()> {
 
 /// Install a package set in one `apt-get install` invocation. `required`
 /// controls whether a non-zero exit is fatal (Err) or tolerated (warn).
-fn apt_install(pkgs: &[&str], required: bool) -> anyhow::Result<()> {
+fn apt_install(pkgs: &[&str], required: bool, sink: &ProgressSink) -> anyhow::Result<()> {
     if pkgs.is_empty() {
         return Ok(());
     }
-    let mut argv: Vec<&str> = vec!["install", "-y", "-qq"];
+    let mut argv: Vec<&str> = vec!["install", "-y"];
     argv.extend_from_slice(pkgs);
-    let res = apt(&argv);
+    let res = apt(&argv, sink);
     if res.success() {
         return Ok(());
     }
@@ -251,17 +259,18 @@ impl Step for Deps {
         StepKind::Required
     }
     fn run(&self, ctx: &mut Ctx) -> StepOutcome {
-        if let Err(e) = apt_update() {
+        let sink = ctx.progress.clone();
+        if let Err(e) = apt_update(&sink) {
             return StepOutcome::Failed(e.to_string());
         }
 
         let required = required_packages(&ctx.profile);
-        if let Err(e) = apt_install(&required, true) {
+        if let Err(e) = apt_install(&required, true, &sink) {
             return StepOutcome::Failed(e.to_string());
         }
 
         // Optional headers tolerate failure (wfb_rtsp demo target only).
-        if let Err(e) = apt_install(optional_packages(), false) {
+        if let Err(e) = apt_install(optional_packages(), false, &sink) {
             tracing::warn!(error = %e, "optional dev headers not installed; wfb_rtsp build skipped");
         }
 
@@ -270,7 +279,7 @@ impl Step for Deps {
         // build for the SoC at hand; elsewhere it is simply absent and we fall
         // through to software/V4L2 decode, so a failure here is tolerated.
         if is_rockchip_board() {
-            if let Err(e) = apt_install(&["gstreamer1.0-rockchip-mpp"], false) {
+            if let Err(e) = apt_install(&["gstreamer1.0-rockchip-mpp"], false, &sink) {
                 tracing::warn!(error = %e, "hardware MPP plugin not available; software decode will be used");
             }
         }
@@ -278,7 +287,11 @@ impl Step for Deps {
         // Cellular hardware is opt-in: a board with no modem should not pull the
         // ModemManager + QMI/MBIM stack. Gated on ADOS_ENABLE_MODEM=1.
         if std::env::var("ADOS_ENABLE_MODEM").as_deref() == Ok("1") {
-            if let Err(e) = apt_install(&["modemmanager", "libqmi-utils", "libmbim-utils"], false) {
+            if let Err(e) = apt_install(
+                &["modemmanager", "libqmi-utils", "libmbim-utils"],
+                false,
+                &sink,
+            ) {
                 tracing::warn!(error = %e, "modem stack not installed");
             }
         }
@@ -287,7 +300,7 @@ impl Step for Deps {
         // iptables-persistent when the operator asks for it. Gated on
         // ADOS_ENABLE_SHARE_UPLINK=1.
         if std::env::var("ADOS_ENABLE_SHARE_UPLINK").as_deref() == Ok("1") {
-            if let Err(e) = apt_install(&["iptables-persistent"], false) {
+            if let Err(e) = apt_install(&["iptables-persistent"], false, &sink) {
                 tracing::warn!(error = %e, "iptables-persistent not installed; uplink sharing will use the nftables fallback when available");
             }
         }

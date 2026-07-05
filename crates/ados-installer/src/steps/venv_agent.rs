@@ -26,7 +26,28 @@ use crate::env;
 use crate::exec;
 use crate::graph::{Step, StepKind, StepOutcome};
 use crate::net;
+use crate::ui::{activity, ProgressSink};
 use crate::verify;
+
+/// Stream a git clone's output to the `venv_agent` live-detail pane.
+fn on_git_line(sink: &ProgressSink) -> impl FnMut(&str) + '_ {
+    move |line: &str| {
+        sink.sub_log("venv_agent", line);
+        if let Some(a) = activity::git_activity(line) {
+            sink.activity("venv_agent", a);
+        }
+    }
+}
+
+/// Stream a pip install's output to the `venv_agent` live-detail pane.
+fn on_pip_line(sink: &ProgressSink) -> impl FnMut(&str) + '_ {
+    move |line: &str| {
+        sink.sub_log("venv_agent", line);
+        if let Some(a) = activity::pip_activity(line) {
+            sink.activity("venv_agent", a);
+        }
+    }
+}
 
 /// The agent's git repo URL (edge channel clones from here, honoring --branch).
 const REPO_URL: &str = "https://github.com/altnautica/ADOSDroneAgent.git";
@@ -59,24 +80,17 @@ pub fn venv_create_args(venv_dir: &str) -> Vec<String> {
 }
 
 /// Build the `pip install` args for the edge (source) channel (pure). `source`
-/// is the local cloned repo path (preferred) or a `git+<url>` spec.
+/// is the local cloned repo path (preferred) or a `git+<url>` spec. No
+/// `--quiet`: the resolve/build/install lines stream to the live-detail pane.
 pub fn pip_install_edge_args(source: &str) -> Vec<String> {
-    vec![
-        "install".to_string(),
-        source.to_string(),
-        "--quiet".to_string(),
-    ]
+    vec!["install".to_string(), source.to_string()]
 }
 
 /// Build the `pip install` args for the stable (wheel) channel (pure). The arg
 /// is a local wheel file path (not `-e <repo>` / a URL), so pip installs the
 /// already-downloaded, already-verified wheel from disk.
 pub fn pip_install_wheel_args(wheel_path: &str) -> Vec<String> {
-    vec![
-        "install".to_string(),
-        wheel_path.to_string(),
-        "--quiet".to_string(),
-    ]
+    vec!["install".to_string(), wheel_path.to_string()]
 }
 
 /// Normalize a `--version` value to the bare `X.Y.Z` form (pure). The operator
@@ -108,7 +122,7 @@ pub fn git_clone_args(dest: &str, branch: Option<&str>) -> Vec<String> {
         "1".to_string(),
         "--recurse-submodules".to_string(),
         "--shallow-submodules".to_string(),
-        "--quiet".to_string(),
+        "--progress".to_string(),
     ];
     if let Some(b) = branch {
         args.push("--branch".to_string());
@@ -196,6 +210,7 @@ fn ensure_venv_pip(python: &str) -> anyhow::Result<()> {
 /// (mirrors the bash installer persisting the tree to `/opt/ados/source`); a
 /// reinstall re-clones over it after wiping.
 fn install_agent_edge(ctx: &Ctx) -> anyhow::Result<PathBuf> {
+    let sink = ctx.progress.clone();
     let repo = clone_dest()?;
     let repo_s = repo.to_string_lossy().into_owned();
 
@@ -205,7 +220,7 @@ fn install_agent_edge(ctx: &Ctx) -> anyhow::Result<PathBuf> {
 
     let clone = git_clone_args(&repo_s, ctx.args.branch.as_deref());
     let clone_argv: Vec<&str> = clone.iter().map(String::as_str).collect();
-    let clone_res = exec::run("git", &clone_argv);
+    let clone_res = exec::run_streamed("git", &clone_argv, on_git_line(&sink));
     if !clone_res.success() {
         if !clone_res.spawned {
             anyhow::bail!("git is not installed");
@@ -215,7 +230,7 @@ fn install_agent_edge(ctx: &Ctx) -> anyhow::Result<PathBuf> {
 
     let pip = pip_install_edge_args(&repo_s);
     let pip_argv: Vec<&str> = pip.iter().map(String::as_str).collect();
-    let pip_res = exec::run(&venv_pip(), &pip_argv);
+    let pip_res = exec::run_streamed(&venv_pip(), &pip_argv, on_pip_line(&sink));
     if pip_res.success() {
         Ok(repo)
     } else {
@@ -246,6 +261,7 @@ fn install_agent_stable(ctx: &Ctx) -> anyhow::Result<()> {
     let wheel_path = dir.join(wheel_filename(&version));
     let sha_path = sidecar(&wheel_path, "sha256");
 
+    let sink = ctx.progress.clone();
     let outcome = (|| {
         net::fetch(&url, &wheel_path)?;
         net::fetch(&format!("{url}.sha256"), &sha_path)?;
@@ -256,7 +272,7 @@ fn install_agent_stable(ctx: &Ctx) -> anyhow::Result<()> {
         let wheel_s = wheel_path.to_string_lossy().into_owned();
         let pip = pip_install_wheel_args(&wheel_s);
         let pip_argv: Vec<&str> = pip.iter().map(String::as_str).collect();
-        let pip_res = exec::run(&venv_pip(), &pip_argv);
+        let pip_res = exec::run_streamed(&venv_pip(), &pip_argv, on_pip_line(&sink));
         if pip_res.success() {
             Ok(())
         } else if !pip_res.spawned {
@@ -416,21 +432,18 @@ mod tests {
     }
 
     #[test]
-    fn pip_edge_args_install_quietly() {
+    fn pip_edge_args_install_the_source() {
+        // No `--quiet`: the install lines stream to the live-detail pane.
         let args = pip_install_edge_args("/tmp/repo");
-        assert_eq!(args, vec!["install", "/tmp/repo", "--quiet"]);
+        assert_eq!(args, vec!["install", "/tmp/repo"]);
     }
 
     #[test]
-    fn pip_wheel_args_install_a_local_file_quietly() {
+    fn pip_wheel_args_install_a_local_file() {
         let args = pip_install_wheel_args("/tmp/ados_drone_agent-0.93.0-py3-none-any.whl");
         assert_eq!(
             args,
-            vec![
-                "install",
-                "/tmp/ados_drone_agent-0.93.0-py3-none-any.whl",
-                "--quiet"
-            ]
+            vec!["install", "/tmp/ados_drone_agent-0.93.0-py3-none-any.whl"]
         );
     }
 

@@ -18,6 +18,7 @@ use crate::ctx::Ctx;
 use crate::env;
 use crate::exec;
 use crate::graph::{Step, StepKind, StepOutcome};
+use crate::ui::activity;
 
 /// The RTL8812EU module name the driver build exposes.
 const MODULE_NAME: &str = "8812eu";
@@ -91,7 +92,13 @@ impl Step for Dkms {
         // wfb-module-source sentinel on success. We do not pass extra env.
         let script_s = script.to_string_lossy();
         tracing::info!("running RTL8812EU DKMS installer");
-        let res = exec::run("bash", &[&script_s]);
+        let sink = ctx.progress.clone();
+        let res = exec::run_streamed("bash", &[script_s.as_ref()], |line| {
+            sink.sub_log("dkms", line);
+            if let Some(a) = activity::dkms_activity(line) {
+                sink.activity("dkms", a);
+            }
+        });
         if !res.spawned {
             return StepOutcome::Failed("bash not available to run the driver script".to_string());
         }
