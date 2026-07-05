@@ -385,6 +385,57 @@ def _run_upgrade() -> None:
         raise click.ClickException(f"Update finished with exit code {completed.returncode}.")
 
 
+def _run_uninstall_via_installer(purge: bool, yes: bool) -> bool:
+    """Confirm, then run the full-screen uninstall via the canonical install.sh.
+
+    The Rust installer's `--uninstall` mode drives the same full-screen progress
+    UI the install uses, so `ados uninstall` delegates to it (mirroring how
+    `ados update` re-runs install.sh). Returns True when the installer actually
+    ran; returns False when it could not be fetched or launched (offline), so the
+    caller falls back to the in-process teardown. Raises `click.Abort` if the
+    operator declines the confirmation.
+    """
+    if not yes:
+        click.confirm("Uninstall the ADOS Drone Agent from this device?", abort=True)
+    try:
+        with httpx.Client(timeout=30.0, follow_redirects=True) as client:
+            resp = client.get(INSTALL_SH_URL)
+            resp.raise_for_status()
+    except httpx.HTTPError:
+        # Offline / unreachable: let the caller fall back to the local teardown.
+        return False
+
+    fd, script = tempfile.mkstemp(suffix="-ados-uninstall.sh")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(resp.text)
+        # `--force` is how the installer requests a config purge on uninstall.
+        argv = ["bash", script, "--uninstall"]
+        if purge:
+            argv.append("--force")
+        if os.geteuid() != 0:
+            if shutil.which("sudo") is None:
+                raise click.ClickException(
+                    "Uninstall needs root on Linux. Re-run as: sudo ados uninstall"
+                )
+            argv = ["sudo", *argv]
+        try:
+            completed = subprocess.run(argv, check=False)  # noqa: S603
+        except OSError:
+            return False
+    finally:
+        try:
+            os.unlink(script)
+        except OSError:
+            pass
+
+    if completed.returncode != 0:
+        raise click.ClickException(
+            f"Uninstall finished with exit code {completed.returncode}."
+        )
+    return True
+
+
 @cli.command()
 @click.option("--check-only", is_flag=True, help="Report the current + latest version, don't install.")
 @click.option("--yes", "-y", is_flag=True, help="Update without an interactive prompt.")
@@ -619,7 +670,15 @@ def uninstall(purge: bool, yes: bool) -> None:
     if is_mac:
         _uninstall_macos(purge=purge, yes=yes)
         return
-    _uninstall_linux(purge=purge, yes=yes)
+    # Prefer the full-screen installer-driven uninstall (the Rust `--uninstall`
+    # mode renders the same live progress as the install); fall back to the
+    # in-process teardown when the installer cannot be fetched/run (offline).
+    # The delegation confirms + sudo-elevates itself, so the fallback runs with
+    # yes=True to avoid a second prompt.
+    if _run_uninstall_via_installer(purge=purge, yes=yes):
+        return
+    click.echo("Full-screen uninstaller unavailable; removing locally…", err=True)
+    _uninstall_linux(purge=purge, yes=True)
 
 
 def _stop_service_with_kill_fallback(service: str) -> None:

@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 
 use crate::env;
 use crate::exec;
+use crate::graph::StepOutcome;
+use crate::ui::ProgressSink;
 
 /// The systemd directory all ados units + dropins live under.
 const SYSTEMD_DIR: &str = "/etc/systemd/system";
@@ -155,14 +157,17 @@ fn remove_path(path: &Path) -> std::io::Result<()> {
     }
 }
 
-/// Run the uninstall. `purge` additionally removes `/etc/ados` (device id,
-/// pairing, config) for a from-clean reinstall.
-pub fn run_uninstall(purge: bool) -> anyhow::Result<()> {
-    // ── 1. Units: stop + disable + remove ──
+/// Run the uninstall, emitting progress through `sink` so the live UI shows each
+/// teardown phase (the ids match [`crate::ui::UNINSTALL_GROUPS`]). `purge`
+/// additionally removes `/etc/ados` (device id, pairing, config) for a
+/// from-clean reinstall.
+pub fn run_uninstall(purge: bool, sink: &ProgressSink) -> anyhow::Result<()> {
+    // Stop + disable + remove every ados unit, its `.wants` dropin
+    // dirs + `multi-user.target.wants` links, and the system dropins outside
+    // /opt/ados.
+    sink.step_started("stop_units");
     let units = discover_unit_files();
     remove_units(&units);
-
-    // ── 2. Dropin .wants dirs + target enable links ──
     for wants in discover_wants_dirs() {
         let _ = std::fs::remove_dir_all(&wants);
     }
@@ -171,26 +176,29 @@ pub fn run_uninstall(purge: bool) -> anyhow::Result<()> {
             tracing::warn!(link = %link.display(), error = %e, "removing target link failed");
         }
     }
-
-    // ── 3. System dropins outside /opt/ados ──
     for dropin in dropin_files() {
         let _ = remove_path(Path::new(dropin));
     }
+    sink.step_result("stop_units", &StepOutcome::Ok);
 
-    // ── 4. Reload systemd + udev so the removed units/rules are forgotten ──
+    // Reload systemd + udev so the removed units/rules are forgotten.
+    sink.step_started("reload");
     let _ = exec::run("systemctl", &["daemon-reload"]);
     let _ = exec::run("systemctl", &["reset-failed"]);
     let _ = exec::run("udevadm", &["control", "--reload-rules"]);
+    sink.step_result("reload", &StepOutcome::Ok);
 
-    // ── 5. Global symlinks ──
+    // The global `/usr/local/bin/ados*` commands.
+    sink.step_started("commands");
     for link in symlinks() {
         let _ = remove_path(Path::new(link));
     }
+    sink.step_result("commands", &StepOutcome::Ok);
 
-    // ── 6. State + data + install + log + runtime trees (always) ──
-    // `/var/ados` (mutable data) and `/var/log/ados` are not in the env path
-    // constants; the canonical CLI removal list names them as literals, so we
-    // do the same here.
+    // The install + state + data + log + runtime trees, the MOTD, and
+    // (only on --purge) the config. `/var/ados` and `/var/log/ados` are not in
+    // the env path constants; the canonical removal list names them literally.
+    sink.step_started("files");
     for dir in [
         env::INSTALL_DIR,
         "/var/ados",
@@ -201,14 +209,15 @@ pub fn run_uninstall(purge: bool) -> anyhow::Result<()> {
         let _ = std::fs::remove_dir_all(dir);
     }
     let _ = remove_path(Path::new(MOTD_FILE));
-
-    // ── 7. Config (only on --purge) ──
     if purge {
         let _ = std::fs::remove_dir_all(env::CONFIG_DIR);
     }
+    sink.step_result("files", &StepOutcome::Ok);
 
-    // ── 8. Residue reversion so a GS→drone flip leaves a clean box ──
+    // Revert residue so a GS→drone flip leaves a clean box.
+    sink.step_started("cleanup");
     crate::steps::purge_residue::revert_residue();
+    sink.step_result("cleanup", &StepOutcome::Ok);
 
     tracing::info!(purge, "ADOS Drone Agent uninstalled");
     Ok(())

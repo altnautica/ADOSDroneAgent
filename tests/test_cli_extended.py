@@ -277,6 +277,7 @@ def test_uninstall_linux_purge_dry_run_calls_systemctl_and_cleanup(
         rmtree_calls.append(Path(path))
 
     with patch.object(cli_main.platform, "system", return_value="Linux"), \
+         patch.object(cli_main, "_run_uninstall_via_installer", return_value=False), \
          patch.object(cli_main.os, "geteuid", return_value=0), \
          patch.object(cli_main.shutil, "which", return_value="/bin/systemctl"), \
          patch.object(cli_main.subprocess, "run", side_effect=_fake_run), \
@@ -318,6 +319,29 @@ def test_uninstall_linux_purge_dry_run_calls_systemctl_and_cleanup(
     assert "etc-ados" in rmtree_strs
 
 
+def test_uninstall_linux_prefers_the_full_screen_installer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the installer-driven uninstall runs, the local teardown is skipped."""
+    monkeypatch.setattr(cli_main.platform, "system", lambda: "Linux")
+    called: dict[str, object] = {}
+
+    def _delegate(**kwargs: object) -> bool:
+        called.update(kwargs)
+        return True
+
+    monkeypatch.setattr(cli_main, "_run_uninstall_via_installer", _delegate)
+
+    def _boom(**_kw: object) -> None:
+        raise AssertionError("local teardown must not run when delegation succeeds")
+
+    monkeypatch.setattr(cli_main, "_uninstall_linux", _boom)
+
+    result = runner.invoke(cli, ["uninstall", "--yes", "--purge"])
+    assert result.exit_code == 0, result.output
+    assert called == {"purge": True, "yes": True}
+
+
 # ---------------------------------------------------------------------------
 # Error paths
 # ---------------------------------------------------------------------------
@@ -332,8 +356,11 @@ def test_uninstall_unsupported_platform_raises() -> None:
 
 
 def test_uninstall_linux_requires_root(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Linux uninstall without root must refuse before touching anything."""
+    """The offline local-teardown fallback without root must refuse cleanly."""
     monkeypatch.setattr(cli_main.platform, "system", lambda: "Linux")
+    # Force the offline fallback (no installer fetch) so the local teardown's
+    # own root check is the gate under test.
+    monkeypatch.setattr(cli_main, "_run_uninstall_via_installer", lambda **_kw: False)
     # Force a non-root geteuid even on macOS CI hosts (where the attr exists).
     monkeypatch.setattr(cli_main.os, "geteuid", lambda: 1000, raising=False)
     result = runner.invoke(cli, ["uninstall", "--yes"])
@@ -346,6 +373,7 @@ def test_uninstall_nothing_installed_is_a_clean_noop(
 ) -> None:
     """If install dir and config dir are missing, the command exits cleanly."""
     monkeypatch.setattr(cli_main.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(cli_main, "_run_uninstall_via_installer", lambda **_kw: False)
     monkeypatch.setattr(cli_main.os, "geteuid", lambda: 0, raising=False)
     monkeypatch.setattr(cli_main.shutil, "which", lambda _bin: None)
 

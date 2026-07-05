@@ -7,16 +7,16 @@
 
 use std::sync::mpsc::Receiver;
 
-use crate::ui::events::ProgressEvent;
+use crate::ui::events::{GroupMap, ProgressEvent};
 use crate::ui::model::{fmt_dur, GStatus, Group, Model};
 use crate::ui::summary;
 
 /// Run the plain renderer to completion. Consumes events until `Finished`.
-pub fn run(rx: Receiver<ProgressEvent>, quiet: bool, header: String) {
+pub fn run(rx: Receiver<ProgressEvent>, quiet: bool, header: String, groups: GroupMap) {
     if !quiet {
         eprintln!("{header}");
     }
-    let mut model = Model::new();
+    let mut model = Model::new(groups);
     while let Ok(ev) = rx.recv() {
         match ev {
             ProgressEvent::StepStarted { id } => {

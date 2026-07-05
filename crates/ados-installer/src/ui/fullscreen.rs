@@ -19,7 +19,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use crate::ui::activity;
-use crate::ui::events::{group_index_for_step, ProgressEvent, SummaryData};
+use crate::ui::events::{GroupMap, ProgressEvent, SummaryData};
 use crate::ui::model::{fmt_dur, GStatus, Group, Model};
 use crate::ui::summary;
 use crate::ui::theme::Theme;
@@ -39,6 +39,7 @@ const JOURNAL_CAP: usize = 12;
 /// Everything the compositor needs for one frame.
 struct View<'a> {
     title: &'a str,
+    footer: &'a str,
     model: &'a Model,
     active: Option<usize>,
     logs: &'a VecDeque<String>,
@@ -62,9 +63,9 @@ struct State {
 }
 
 impl State {
-    fn new() -> Self {
+    fn new(groups: GroupMap) -> Self {
         State {
-            model: Model::new(),
+            model: Model::new(groups),
             active: None,
             logs: VecDeque::with_capacity(LOG_CAP),
             journal: VecDeque::with_capacity(JOURNAL_CAP),
@@ -88,7 +89,7 @@ impl State {
                 if self.started.is_none() {
                     self.started = Some(Instant::now());
                 }
-                self.focus(group_index_for_step(&id));
+                self.focus(self.model.group_index(&id));
                 self.model.start(&id);
             }
             ProgressEvent::StepResult { id, outcome } => {
@@ -101,7 +102,7 @@ impl State {
                 self.model.set_activity(&id, message);
             }
             ProgressEvent::SubLog { id, line } => {
-                self.focus(group_index_for_step(&id));
+                self.focus(self.model.group_index(&id));
                 push(&mut self.logs, line, LOG_CAP);
             }
             ProgressEvent::ByteProgress {
@@ -123,17 +124,24 @@ impl State {
 
 /// Run the full-screen renderer to completion, then leave the alternate screen
 /// and print the summary card on the primary screen.
-pub fn run(mut tty: Tty, rx: Receiver<ProgressEvent>, theme: Theme, header: String) {
+pub fn run(
+    mut tty: Tty,
+    rx: Receiver<ProgressEvent>,
+    theme: Theme,
+    header: String,
+    groups: GroupMap,
+    footer: &'static str,
+) {
     let title = title_from_header(&header);
-    let mut st = State::new();
+    let mut st = State::new(groups);
     let mut spinner = 0usize;
     let mut interrupted = false;
 
     tty.force_clear_next();
-    // The install is write-only, so let Ctrl-C raise SIGINT (the wizard ran with
-    // it off); the handler sets a flag we observe below and exit cleanly.
+    // The run is write-only, so let Ctrl-C raise SIGINT (the wizard ran with it
+    // off); the handler sets a flag we observe below and exit cleanly.
     tty.enable_signals();
-    paint(&mut tty, &theme, &title, &st, spinner);
+    paint(&mut tty, &theme, &title, footer, &st, spinner);
 
     while !st.finished {
         match rx.recv_timeout(Duration::from_millis(TICK_MS)) {
@@ -152,7 +160,7 @@ pub fn run(mut tty: Tty, rx: Receiver<ProgressEvent>, theme: Theme, header: Stri
             interrupted = true;
             break;
         }
-        paint(&mut tty, &theme, &title, &st, spinner);
+        paint(&mut tty, &theme, &title, footer, &st, spinner);
     }
 
     // Leave the alt screen + restore the terminal (RAII), then print the summary
@@ -181,9 +189,10 @@ fn push(ring: &mut VecDeque<String>, line: String, cap: usize) {
     ring.push_back(line);
 }
 
-fn paint(tty: &mut Tty, theme: &Theme, title: &str, st: &State, spinner: usize) {
+fn paint(tty: &mut Tty, theme: &Theme, title: &str, footer: &str, st: &State, spinner: usize) {
     let view = View {
         title,
+        footer,
         model: &st.model,
         active: st.active,
         logs: &st.logs,
@@ -206,7 +215,7 @@ fn compose(theme: &Theme, v: &View, size: TermSize) -> Vec<String> {
     grid[0] = header_line(theme, v.title, v.elapsed, cols);
     grid[1] = render::fit_to(&theme.dim(&theme.box_chars().h.repeat(cols)), cols);
     let footer_row = rows - 1;
-    grid[footer_row] = footer_line(theme, cols);
+    grid[footer_row] = footer_line(theme, v.footer, cols);
 
     let body_top = 2;
     let body_count = footer_row.saturating_sub(body_top);
@@ -272,11 +281,8 @@ fn header_line(theme: &Theme, title: &str, elapsed: Option<Duration>, cols: usiz
     )
 }
 
-fn footer_line(theme: &Theme, cols: usize) -> String {
-    render::center(
-        &theme.dim("First install can take a few minutes — safe to leave running."),
-        cols,
-    )
+fn footer_line(theme: &Theme, footer: &str, cols: usize) -> String {
+    render::center(&theme.dim(footer), cols)
 }
 
 /// The ten checklist rows, each fit to `width`, padded to `height`.
@@ -472,6 +478,7 @@ fn too_small(theme: &Theme, cols: usize, rows: usize) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::graph::StepOutcome;
+    use crate::ui::events::{group_index_for_step, INSTALL_GROUPS};
     use crate::ui::theme::ColorTier;
 
     fn plain() -> Theme {
@@ -484,6 +491,7 @@ mod tests {
     fn view<'a>(m: &'a Model, logs: &'a VecDeque<String>, active: Option<usize>) -> View<'a> {
         View {
             title: "Installing · ADOS Drone Agent (drone)",
+            footer: "First install can take a few minutes. Safe to leave running.",
             model: m,
             active,
             logs,
@@ -494,7 +502,7 @@ mod tests {
 
     #[test]
     fn every_line_is_exactly_cols_wide_across_sizes_and_tiers() {
-        let mut m = Model::new();
+        let mut m = Model::new(INSTALL_GROUPS);
         m.record("deps", &StepOutcome::Ok);
         m.set_bytes(
             "fetch_binaries",
@@ -506,7 +514,7 @@ mod tests {
         let mut logs = VecDeque::new();
         logs.push_back("✓ ados-supervisor 6.1 MB".to_string());
         logs.push_back("verifying ados-control sha256".to_string());
-        let active = group_index_for_step("fetch_binaries");
+        let active = group_index_for_step(INSTALL_GROUPS, "fetch_binaries");
 
         for tier in [ColorTier::None, ColorTier::Truecolor, ColorTier::Basic] {
             for ascii in [false, true] {
@@ -529,7 +537,7 @@ mod tests {
 
     #[test]
     fn below_floor_shows_resize_message() {
-        let m = Model::new();
+        let m = Model::new(INSTALL_GROUPS);
         let logs = VecDeque::new();
         let v = view(&m, &logs, None);
         let grid = compose(&plain(), &v, TermSize { cols: 70, rows: 18 });
@@ -538,10 +546,14 @@ mod tests {
 
     #[test]
     fn split_shows_checklist_and_detail() {
-        let mut m = Model::new();
+        let mut m = Model::new(INSTALL_GROUPS);
         m.set_activity("fetch_binaries", "installing ados-control".into());
         let logs = VecDeque::new();
-        let v = view(&m, &logs, group_index_for_step("fetch_binaries"));
+        let v = view(
+            &m,
+            &logs,
+            group_index_for_step(INSTALL_GROUPS, "fetch_binaries"),
+        );
         let joined = compose(
             &plain(),
             &v,

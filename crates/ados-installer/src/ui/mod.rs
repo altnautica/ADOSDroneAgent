@@ -31,7 +31,10 @@ use tracing::{Event, Subscriber};
 use tracing_subscriber::layer::{Context, Layer};
 
 use crate::graph::StepOutcome;
-pub use events::{ProgressEvent, SummaryData};
+pub use events::{
+    GroupMap, ProgressEvent, SummaryData, INSTALL_FOOTER, INSTALL_GROUPS, UNINSTALL_FOOTER,
+    UNINSTALL_GROUPS,
+};
 pub use theme::Theme;
 use tty::Tty;
 
@@ -200,6 +203,8 @@ pub fn start(
     header: String,
     theme: Theme,
     tty: Option<Tty>,
+    groups: GroupMap,
+    footer: &'static str,
 ) -> (ProgressSink, RenderHandle) {
     if mode == RenderMode::Json {
         return (ProgressSink::default(), RenderHandle::none());
@@ -216,7 +221,7 @@ pub fn start(
             let tty = tty.expect("Fullscreen render mode requires a Tty");
             std::thread::Builder::new()
                 .name("ados-installer-ui".to_string())
-                .spawn(move || fullscreen::run(tty, rx, theme, header))
+                .spawn(move || fullscreen::run(tty, rx, theme, header, groups, footer))
                 .ok()
         }
         RenderMode::Rich => {
@@ -227,21 +232,26 @@ pub fn start(
             let _ = LOG_TX.set(tx);
             std::thread::Builder::new()
                 .name("ados-installer-ui".to_string())
-                .spawn(move || rich::run(rx, theme, header))
+                .spawn(move || rich::run(rx, theme, header, groups))
                 .ok()
         }
-        RenderMode::Quiet => spawn_plain(rx, true, header),
+        RenderMode::Quiet => spawn_plain(rx, true, header, groups),
         // Plain (and any future fallback) → the escape-free line renderer.
-        _ => spawn_plain(rx, false, header),
+        _ => spawn_plain(rx, false, header, groups),
     };
     (sink, RenderHandle { join })
 }
 
 /// Spawn the plain renderer thread.
-fn spawn_plain(rx: Receiver<ProgressEvent>, quiet: bool, header: String) -> Option<JoinHandle<()>> {
+fn spawn_plain(
+    rx: Receiver<ProgressEvent>,
+    quiet: bool,
+    header: String,
+    groups: GroupMap,
+) -> Option<JoinHandle<()>> {
     std::thread::Builder::new()
         .name("ados-installer-ui".to_string())
-        .spawn(move || plain::run(rx, quiet, header))
+        .spawn(move || plain::run(rx, quiet, header, groups))
         .ok()
 }
 

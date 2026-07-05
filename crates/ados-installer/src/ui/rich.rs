@@ -18,7 +18,7 @@ use ratatui::crossterm::{
     terminal::{Clear, ClearType},
 };
 
-use crate::ui::events::{ProgressEvent, SummaryData};
+use crate::ui::events::{GroupMap, ProgressEvent, SummaryData};
 use crate::ui::model::{fmt_dur, GStatus, Group, Model};
 use crate::ui::summary;
 use crate::ui::theme::Theme;
@@ -28,14 +28,14 @@ const TICK_MS: u64 = 120;
 const LOG_RING_CAP: usize = 12;
 
 /// Run the rich renderer to completion. Consumes events until `Finished`.
-pub fn run(rx: Receiver<ProgressEvent>, theme: Theme, header: String) {
+pub fn run(rx: Receiver<ProgressEvent>, theme: Theme, header: String, groups: GroupMap) {
     let stderr = io::stderr();
     let mut w = stderr.lock();
     let _ = cursor_hide(&mut w);
     let _ = writeln!(w, "{}", theme.accent(&header));
     let _ = w.flush();
 
-    let mut model = Model::new();
+    let mut model = Model::new(groups);
     let mut spinner = 0usize;
     let mut height = 0usize;
     let mut logs: VecDeque<String> = VecDeque::with_capacity(LOG_RING_CAP);
@@ -311,7 +311,7 @@ mod tests {
 
     #[test]
     fn block_lines_count_is_groups_plus_borders() {
-        let m = Model::new();
+        let m = Model::new(crate::ui::events::INSTALL_GROUPS);
         let lines = block_lines(&m, &theme(), 0, 58);
         assert_eq!(lines.len(), m.groups.len() + 2);
     }
@@ -319,7 +319,7 @@ mod tests {
     #[test]
     fn rows_fit_the_width_when_color_is_off() {
         // With color off there are no SGR escapes, so chars() == display width.
-        let mut m = Model::new();
+        let mut m = Model::new(crate::ui::events::INSTALL_GROUPS);
         m.record("deps", &StepOutcome::Ok);
         let width = 58;
         for line in block_lines(&m, &theme(), 0, width) {

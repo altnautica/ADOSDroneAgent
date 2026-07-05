@@ -36,7 +36,14 @@ fn main() {
     let header = "Installing the ADOS Drone Agent (drone)…".to_string();
     // Preview the full-screen renderer when a controlling terminal is reachable.
     let (mode, tty) = ui::resolve_live_mode(RenderMode::Rich, None);
-    let (sink, render) = ui::start(mode, header, theme, tty);
+    let (sink, render) = ui::start(
+        mode,
+        header,
+        theme,
+        tty,
+        ui::INSTALL_GROUPS,
+        ui::INSTALL_FOOTER,
+    );
 
     // Checking system: preflight runs, purge_residue is a cached no-op.
     step(&sink, "preflight", 250);

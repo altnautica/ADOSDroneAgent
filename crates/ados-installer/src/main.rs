@@ -76,11 +76,29 @@ async fn main() -> Result<ExitCode> {
             // `--force` doubles as the purge flag here (remove /etc/ados too)
             // so a `--uninstall --force` wipes identity for a from-clean reinstall.
             let purge = args.force;
-            match uninstall::run_uninstall(purge) {
+            // Drive the same full-screen (or fallback) progress UI the install
+            // uses, over the uninstall group set.
+            let base = ui::detect_mode(&args);
+            let theme = ui::Theme::detect(args.no_color, args.ascii);
+            let (render_mode, tty) = ui::resolve_live_mode(base, None);
+            let header = "Removing the ADOS Drone Agent…".to_string();
+            let (sink, render) = ui::start(
+                render_mode,
+                header,
+                theme,
+                tty,
+                ui::UNINSTALL_GROUPS,
+                ui::UNINSTALL_FOOTER,
+            );
+            let res = uninstall::run_uninstall(purge, &sink);
+            sink.finish();
+            render.finish();
+            match res {
                 Ok(()) => {
                     println!(
-                        "uninstall: done{}",
-                        if purge { " (purged /etc/ados)" } else { "" }
+                        "{} ADOS Drone Agent removed{}",
+                        theme.ok(theme.glyph_ok()),
+                        if purge { " (config purged)" } else { "" }
                     );
                     Ok(ExitCode::SUCCESS)
                 }
@@ -142,7 +160,14 @@ fn run_install(mut args: Args, mode: RunMode) -> Result<ExitCode> {
     let (render_mode, live_tty) = ui::resolve_live_mode(base_mode, carried_tty);
     let profile_hint = args.profile.clone().unwrap_or_else(|| "drone".to_string());
     let header = format!("Installing the ADOS Drone Agent ({profile_hint})…");
-    let (sink, render) = ui::start(render_mode, header, theme, live_tty);
+    let (sink, render) = ui::start(
+        render_mode,
+        header,
+        theme,
+        live_tty,
+        ui::INSTALL_GROUPS,
+        ui::INSTALL_FOOTER,
+    );
 
     let env = EnvInfo::probe();
     let checkpoint = Checkpoint::new();

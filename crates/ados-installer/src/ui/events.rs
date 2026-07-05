@@ -8,10 +8,14 @@
 
 use crate::graph::StepOutcome;
 
-/// The friendly checklist groups, in display order. Each maps to one or more of
-/// the technical step ids in the install chain. Every step in the chain appears
-/// in exactly one group.
-pub const GROUPS: &[(&str, &[&str])] = &[
+/// A checklist group set: friendly labels (in display order) each mapping to one
+/// or more technical step ids. The renderer is generic over this so it drives
+/// both the install and the uninstall flows.
+pub type GroupMap = &'static [(&'static str, &'static [&'static str])];
+
+/// The install checklist groups. Each maps to one or more of the technical step
+/// ids in the install chain; every chain step appears in exactly one group.
+pub const INSTALL_GROUPS: GroupMap = &[
     ("Checking system", &["preflight", "purge_residue"]),
     ("Installing dependencies", &["deps"]),
     ("Agent runtime", &["venv_agent"]),
@@ -27,9 +31,24 @@ pub const GROUPS: &[(&str, &[&str])] = &[
     ("Verifying", &["health"]),
 ];
 
-/// The display group index a step belongs to, if any.
-pub fn group_index_for_step(step_id: &str) -> Option<usize> {
-    GROUPS
+/// The uninstall checklist groups (one per teardown phase; see
+/// [`crate::uninstall::run_uninstall`]).
+pub const UNINSTALL_GROUPS: GroupMap = &[
+    ("Stopping services", &["stop_units"]),
+    ("Reloading systemd", &["reload"]),
+    ("Removing commands", &["commands"]),
+    ("Removing files", &["files"]),
+    ("Cleaning up", &["cleanup"]),
+];
+
+/// The full-screen footer reassurance line for the install flow.
+pub const INSTALL_FOOTER: &str = "First install can take a few minutes. Safe to leave running.";
+/// The full-screen footer line for the uninstall flow.
+pub const UNINSTALL_FOOTER: &str = "Removing the ADOS Drone Agent. This only takes a moment.";
+
+/// The display group index a step belongs to within `groups`, if any.
+pub fn group_index_for_step(groups: GroupMap, step_id: &str) -> Option<usize> {
+    groups
         .iter()
         .position(|(_, steps)| steps.contains(&step_id))
 }
@@ -120,14 +139,14 @@ mod tests {
             "health",
         ];
         for step in chain {
-            let hits = GROUPS
+            let hits = INSTALL_GROUPS
                 .iter()
                 .filter(|(_, steps)| steps.contains(&step))
                 .count();
             assert_eq!(hits, 1, "step {step} must map to exactly one group");
         }
         // And no group references a step outside the chain.
-        for (_, steps) in GROUPS {
+        for (_, steps) in INSTALL_GROUPS {
             for s in *steps {
                 assert!(chain.contains(s), "group references unknown step {s}");
             }
@@ -136,8 +155,14 @@ mod tests {
 
     #[test]
     fn group_lookup_resolves() {
-        assert_eq!(group_index_for_step("deps"), Some(1));
-        assert_eq!(group_index_for_step("health"), Some(GROUPS.len() - 1));
-        assert_eq!(group_index_for_step("nope"), None);
+        assert_eq!(group_index_for_step(INSTALL_GROUPS, "deps"), Some(1));
+        assert_eq!(
+            group_index_for_step(INSTALL_GROUPS, "health"),
+            Some(INSTALL_GROUPS.len() - 1)
+        );
+        assert_eq!(group_index_for_step(INSTALL_GROUPS, "nope"), None);
+        // Uninstall groups resolve against their own map.
+        assert_eq!(group_index_for_step(UNINSTALL_GROUPS, "cleanup"), Some(4));
+        assert_eq!(group_index_for_step(UNINSTALL_GROUPS, "deps"), None);
     }
 }
