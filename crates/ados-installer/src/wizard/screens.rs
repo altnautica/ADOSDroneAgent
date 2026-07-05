@@ -414,22 +414,34 @@ fn wifi_stage(tty: &mut Tty, theme: &Theme, collected: &mut Collected) -> Nav {
 
     let on_wifi = wifi::currently_on_wifi();
     let detail = if on_wifi {
-        vec![theme.dim("You're already on Wi-Fi. You can switch networks if you want.")]
+        vec![
+            theme.dim("You're already on Wi-Fi, so this step is optional."),
+            theme.dim("A network keeps the device reachable for indoor and"),
+            theme.dim("bench testing, or off a phone hotspot in the field."),
+            theme.dim("You can also set Wi-Fi up later from the dashboard."),
+        ]
     } else {
-        vec![theme.dim("Connect to Wi-Fi so the device keeps working after you unplug the cable.")]
+        vec![
+            theme.dim("Connect to Wi-Fi so the device stays reachable after"),
+            theme.dim("you unplug the cable: indoor and bench testing, or"),
+            theme.dim("off a phone hotspot in the field. Optional for now."),
+        ]
     };
+    // Skip is listed first; it is the default once the box is already on Wi-Fi
+    // (the common case here), otherwise the card nudges toward setting it up so a
+    // wired-only device is not stranded when the cable comes out.
     match confirm_card(
         tty,
         theme,
         WIFI,
         "Set up Wi-Fi now?",
         &detail,
-        "Set up Wi-Fi",
         "Skip",
-        !on_wifi,
+        "Set up Wi-Fi",
+        on_wifi,
     ) {
-        Flow::Value(false) => return Nav::Next,
-        Flow::Value(true) => {}
+        Flow::Value(true) => return Nav::Next,
+        Flow::Value(false) => {}
         Flow::Back => return Nav::Back,
         Flow::Abort => return Nav::Abort,
     }
@@ -744,21 +756,26 @@ fn default_name(profile: &str) -> String {
 
 fn pair_stage(tty: &mut Tty, theme: &Theme, args: &mut Args) -> Nav {
     loop {
+        // Later is listed first and is the default: pairing is completely
+        // optional, since the device can be added by name or reached by its
+        // URL/IP once setup finishes, and paired anytime with `ados pair`.
         match confirm_card(
             tty,
             theme,
             SETUP,
-            "Connect this to Mission Control now?",
+            "Connect to Mission Control now?",
             &[
-                theme.dim("Add it in Mission Control by its name, no code needed."),
-                theme.dim("Or enter a pairing code now. You can also pair later: ados pair"),
+                theme.dim("Optional. You can connect anytime later."),
+                theme.dim("Add it in Mission Control by its name (no code needed),"),
+                theme.dim("or just open its URL or IP once setup finishes."),
+                theme.dim("To pair from the terminal later, run: ados pair"),
             ],
-            "Enter a code",
             "Later",
-            false,
+            "Enter a code",
+            true,
         ) {
-            Flow::Value(false) => return Nav::Next,
-            Flow::Value(true) => match widgets::text_input(
+            Flow::Value(true) => return Nav::Next,
+            Flow::Value(false) => match widgets::text_input(
                 tty,
                 theme,
                 SETUP,
