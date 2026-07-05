@@ -4,11 +4,12 @@
 //! `/api/v1/setup/status` endpoint every two seconds and renders the same
 //! information the previous Python `rich` dashboard showed. Read-only.
 
+mod action;
 mod model;
 mod theme;
 mod ui;
 
-use std::io::Stdout;
+use std::io::{Stdout, Write};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ados_protocol::rest::RestClient;
@@ -23,6 +24,7 @@ use ratatui::crossterm::{execute, ExecutableCommand};
 use ratatui::Terminal;
 use serde_json::Value;
 
+use crate::action::{Action, ACTIONS};
 use crate::model::{Dashboard, History};
 
 /// Where the agent stores the pairing key (matches `ados.core.paths.PAIRING_JSON`).
@@ -77,6 +79,51 @@ fn install_panic_hook() {
     }));
 }
 
+/// Run a quick action by shelling out to the real terminal (Pattern A). The
+/// cockpit leaves the alt screen so the command's own output — and any sudo
+/// prompt or the command's own confirmation — is visible, optionally confirms
+/// first, then restores the cockpit. The command shells an existing `ados` (or
+/// `systemctl`) verb, so no write path to the agent is opened here.
+fn run_action(terminal: &mut Terminal<CrosstermBackend<Stdout>>, action: &Action) -> Result<()> {
+    fn restore(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+        enable_raw_mode()?;
+        std::io::stdout().execute(EnterAlternateScreen)?;
+        terminal.clear()?;
+        Ok(())
+    }
+    fn read_line() -> String {
+        let mut buf = String::new();
+        let _ = std::io::stdin().read_line(&mut buf);
+        buf
+    }
+
+    restore_terminal();
+
+    if action.confirm {
+        print!("\n{} — proceed? [y/N] ", action.label);
+        let _ = std::io::stdout().flush();
+        if !read_line().trim().eq_ignore_ascii_case("y") {
+            return restore(terminal);
+        }
+    }
+
+    println!("\n$ {} {}\n", action.program, action.args.join(" "));
+    match std::process::Command::new(action.program)
+        .args(action.args)
+        .status()
+    {
+        Ok(status) if !status.success() => {
+            println!("\n[exited with status {}]", status.code().unwrap_or(-1));
+        }
+        Err(e) => println!("\n[could not run {}: {e}]", action.program),
+        _ => {}
+    }
+    print!("\nPress Enter to return to the dashboard… ");
+    let _ = std::io::stdout().flush();
+    let _ = read_line();
+    restore(terminal)
+}
+
 fn main() -> Result<()> {
     let mut client = RestClient::local();
     if let Some(key) = load_api_key() {
@@ -108,6 +155,8 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, client: &RestClient) -
     // Best-effort snapshot from the native `/api/status` route, merged for the
     // richer FC-link truth (port-open-but-silent). Absent → the gated boolean.
     let mut fc_status: Option<Value> = None;
+    // `Some(i)` while the quick-actions overlay is open, with row `i` selected.
+    let mut actions_selected: Option<usize> = None;
     // Trend buffers of verified telemetry, one sample per successful poll.
     let mut history = History::default();
 
@@ -144,18 +193,58 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, client: &RestClient) -
             }
             d
         });
-        terminal
-            .draw(|f| ui::render(f, dash.as_ref(), &history, &refreshed, stale, error.as_deref()))?;
+        terminal.draw(|f| {
+            ui::render(
+                f,
+                dash.as_ref(),
+                &history,
+                &refreshed,
+                stale,
+                error.as_deref(),
+                actions_selected,
+            )
+        })?;
 
         if event::poll(TICK)? {
             if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    let quit = matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q'))
-                        || (key.code == KeyCode::Char('c')
-                            && key.modifiers.contains(KeyModifiers::CONTROL));
-                    if quit {
-                        return Ok(());
-                    }
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+                // Ctrl-C always quits, from any screen.
+                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                    return Ok(());
+                }
+                match actions_selected {
+                    // The actions overlay is open.
+                    Some(sel) => match key.code {
+                        KeyCode::Esc | KeyCode::Char('q') => actions_selected = None,
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            actions_selected = Some(sel.saturating_sub(1));
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            actions_selected = Some((sel + 1).min(ACTIONS.len() - 1));
+                        }
+                        KeyCode::Enter => {
+                            actions_selected = None;
+                            run_action(terminal, &ACTIONS[sel])?;
+                            last_fetch = None; // refresh right after returning
+                        }
+                        _ => {}
+                    },
+                    // The dashboard.
+                    None => match key.code {
+                        KeyCode::Char('q') | KeyCode::Char('Q') => return Ok(()),
+                        KeyCode::Char('a') | KeyCode::Char('A') => actions_selected = Some(0),
+                        KeyCode::Char('r') | KeyCode::Char('R') => last_fetch = None,
+                        KeyCode::Char(c) => {
+                            let c = c.to_ascii_lowercase();
+                            if let Some(action) = ACTIONS.iter().find(|a| a.key == Some(c)) {
+                                run_action(terminal, action)?;
+                                last_fetch = None;
+                            }
+                        }
+                        _ => {}
+                    },
                 }
             }
         }

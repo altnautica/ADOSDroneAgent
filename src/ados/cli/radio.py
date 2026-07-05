@@ -15,6 +15,9 @@ GCS sees.
 from __future__ import annotations
 
 import json
+import os
+import platform
+import shutil
 import subprocess
 import time
 from typing import Any
@@ -25,6 +28,51 @@ import httpx
 from ados.core.paths import PAIRING_JSON
 
 API_BASE = "http://localhost:8080"
+
+# The RTL8812EU (WFB) kernel module name and the vendored DKMS installer that the
+# agent installer persists under the source tree (edge channel clones with
+# submodules to /opt/ados/source; the OS steps read scripts/ + vendor/ there).
+_RTL_MODULE = "8812eu"
+_DRIVER_SCRIPT = "scripts/drivers/install-rtl8812eu.sh"
+_SOURCE_DIRS = ("/opt/ados/source", "/opt/ados/repo")
+
+
+def _rtl_module_present() -> bool:
+    """True when the RTL8812EU kernel module is loaded or built on disk."""
+    try:
+        lsmod = subprocess.run(  # noqa: S603, S607
+            ["lsmod"], capture_output=True, text=True, check=False
+        )
+        if lsmod.returncode == 0 and any(
+            line.split(" ")[0] == _RTL_MODULE for line in lsmod.stdout.splitlines()
+        ):
+            return True
+    except OSError:
+        pass
+    # Resolvable on disk even if not currently loaded.
+    try:
+        return (
+            subprocess.run(  # noqa: S603, S607
+                ["modinfo", _RTL_MODULE], capture_output=True, check=False
+            ).returncode
+            == 0
+        )
+    except OSError:
+        return False
+
+
+def _resolve_driver_script() -> str | None:
+    """The DKMS installer path under the persisted source tree, or None."""
+    roots: list[str] = []
+    env_dir = os.environ.get("ADOS_SOURCE_DIR")
+    if env_dir:
+        roots.append(env_dir)
+    roots.extend(_SOURCE_DIRS)
+    for root in roots:
+        candidate = os.path.join(root, _DRIVER_SCRIPT)
+        if os.path.isfile(candidate):
+            return candidate
+    return None
 
 
 def _load_api_key() -> str | None:
@@ -650,3 +698,53 @@ def pair_auto_off() -> None:
         raise_for_status=False,
     )
     click.echo("Auto-pair disabled.")
+
+
+@radio_group.command(
+    "install-driver",
+    help="Build and install the RTL8812EU (WFB) kernel driver if it is missing.",
+)
+@click.option("--force", is_flag=True, help="Rebuild even if the module is present.")
+def radio_install_driver(force: bool) -> None:
+    """Install the vendored RTL8812EU DKMS driver.
+
+    Runs the idempotent driver script from the persisted source tree. The script
+    needs root, so it is run under sudo when the CLI is not already root. When no
+    source tree is present (a wheel-only install), the operator is pointed at
+    ``ados update``, which refetches the source and builds the driver.
+    """
+    if platform.system() != "Linux":
+        click.echo("The RTL8812EU driver only applies on a Linux SBC.")
+        raise click.exceptions.Exit(code=1)
+
+    if not force and _rtl_module_present():
+        click.echo("RTL8812EU driver already installed. Use --force to rebuild.")
+        return
+
+    script = _resolve_driver_script()
+    if script is None:
+        click.echo(
+            "Driver source not found on this device. Run `ados update` to fetch "
+            "the source and build the driver."
+        )
+        raise click.exceptions.Exit(code=1)
+
+    argv = ["bash", script]
+    if os.geteuid() != 0:
+        if shutil.which("sudo") is None:
+            click.echo(
+                "Installing the driver needs root. Re-run as: "
+                "sudo ados radio install-driver"
+            )
+            raise click.exceptions.Exit(code=1)
+        argv = ["sudo", *argv]
+
+    try:
+        completed = subprocess.run(argv, check=False)  # noqa: S603
+    except OSError as exc:
+        raise click.ClickException(f"Failed to run the driver installer: {exc}") from exc
+    if completed.returncode != 0:
+        raise click.ClickException(
+            f"Driver install finished with exit code {completed.returncode}."
+        )
+    click.echo("RTL8812EU driver installed.")

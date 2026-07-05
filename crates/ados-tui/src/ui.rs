@@ -8,9 +8,10 @@
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Gauge, Paragraph, Sparkline, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Gauge, Paragraph, Sparkline, Wrap};
 use ratatui::Frame;
 
+use crate::action::ACTIONS;
 use crate::model::{state_label, Dashboard, FcLink, Health, History};
 use crate::theme;
 
@@ -131,6 +132,7 @@ pub fn render(
     refreshed: &str,
     stale: bool,
     error: Option<&str>,
+    actions_selected: Option<usize>,
 ) {
     // Paint the charcoal base once per frame on tiers that can show it; widgets
     // rendered on top keep it unless they set their own background (only the
@@ -166,6 +168,10 @@ pub fn render(
                 inner,
             );
         }
+    }
+
+    if let Some(sel) = actions_selected {
+        actions_overlay(frame, sel);
     }
 }
 
@@ -233,14 +239,76 @@ fn verdict(frame: &mut Frame, area: Rect, dash: Option<&Dashboard>) {
     frame.render_widget(Paragraph::new(vec![line1, line2]), area);
 }
 
+/// An amber `[key] label` hint pair for the bottom action bar.
+fn key_hint(key: &str, label: &str) -> [Span<'static>; 2] {
+    [
+        Span::styled(format!("[{key}] "), Style::default().fg(theme::accent())),
+        Span::styled(format!("{label}  "), dim()),
+    ]
+}
+
 fn footer(frame: &mut Frame, area: Rect) {
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            "ados help · ados pair · ados logs · q quit",
-            dim(),
-        ))),
-        area,
-    );
+    let mut spans: Vec<Span> = Vec::new();
+    for action in ACTIONS.iter() {
+        if let Some(key) = action.key {
+            spans.extend(key_hint(&key.to_string(), action.short));
+        }
+    }
+    spans.extend(key_hint("a", "actions"));
+    spans.extend(key_hint("r", "refresh"));
+    spans.extend(key_hint("q", "quit"));
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// A rect `pct_x`% wide and `height` tall, centered in `area`.
+fn centered_rect(pct_x: u16, height: u16, area: Rect) -> Rect {
+    let w = (area.width * pct_x / 100).min(area.width);
+    let h = height.min(area.height);
+    Rect {
+        x: area.x + area.width.saturating_sub(w) / 2,
+        y: area.y + area.height.saturating_sub(h) / 2,
+        width: w,
+        height: h,
+    }
+}
+
+fn actions_overlay(frame: &mut Frame, selected: usize) {
+    let height = ACTIONS.len() as u16 + 4; // list + border + blank + hint
+    let area = centered_rect(60, height, frame.area());
+    frame.render_widget(Clear, area);
+    let block = panel("Actions");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, action) in ACTIONS.iter().enumerate() {
+        let is_selected = i == selected;
+        let (marker, label_style) = if is_selected {
+            (
+                "› ",
+                Style::default()
+                    .fg(theme::accent())
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            ("  ", bright())
+        };
+        let mut spans = vec![
+            Span::styled(marker, Style::default().fg(theme::accent())),
+            Span::styled(format!("{:<27}", action.label), label_style),
+            Span::styled(action.desc, dim()),
+        ];
+        if action.confirm {
+            spans.push(Span::styled("  (confirm)", dim()));
+        }
+        lines.push(Line::from(spans));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "↑↓ select · Enter run · Esc close",
+        dim(),
+    )));
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn body(frame: &mut Frame, area: Rect, dash: &Dashboard, history: &History) {
