@@ -12,16 +12,16 @@ use ratatui::widgets::{Block, BorderType, Borders, Gauge, Paragraph, Sparkline, 
 use ratatui::Frame;
 
 use crate::model::{state_label, Dashboard, Health, History};
-
-/// The single screen accent.
-const ACCENT: Color = Color::Cyan;
+use crate::theme;
 
 fn dim() -> Style {
-    Style::default().fg(Color::DarkGray)
+    Style::default().fg(theme::muted())
 }
 
 fn bright() -> Style {
-    Style::default().add_modifier(Modifier::BOLD)
+    Style::default()
+        .fg(theme::heading())
+        .add_modifier(Modifier::BOLD)
 }
 
 /// A rounded, dim-bordered panel titled with the `▌ ` accent word-mark marker.
@@ -32,7 +32,7 @@ fn panel(title: &str) -> Block<'_> {
         .border_style(dim())
         .title(Span::styled(
             format!(" ▌ {title} "),
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme::accent()).add_modifier(Modifier::BOLD),
         ))
 }
 
@@ -45,7 +45,7 @@ fn kv(label: &str, value: Span<'static>) -> Line<'static> {
 fn pill(text: &str, color: Color) -> Span<'static> {
     Span::styled(
         format!(" {text} "),
-        Style::default().fg(Color::Black).bg(color),
+        Style::default().fg(theme::on_amber()).bg(color),
     )
 }
 
@@ -87,7 +87,7 @@ fn render_cells(frame: &mut Frame, inner: Rect, cells: Vec<Cell>) {
                 Gauge::default()
                     .gauge_style(Style::default().fg(color))
                     .ratio(ratio.clamp(0.0, 1.0))
-                    .label(Span::styled(label, Style::default().fg(Color::Black))),
+                    .label(Span::styled(label, Style::default().fg(theme::on_amber()))),
                 rect,
             ),
             Cell::Spark { data, max, color } => {
@@ -131,6 +131,14 @@ pub fn render(
     refreshed: &str,
     error: Option<&str>,
 ) {
+    // Paint the charcoal base once per frame on tiers that can show it; widgets
+    // rendered on top keep it unless they set their own background (only the
+    // chips and gauge do), because a default `Style` leaves `bg` unset.
+    if let Some(bg) = theme::background() {
+        let area = frame.area();
+        frame.buffer_mut().set_style(area, Style::default().bg(bg));
+    }
+
     let rows = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(2),
@@ -152,7 +160,7 @@ pub fn render(
             let msg = error.unwrap_or("Connecting to the agent…");
             frame.render_widget(
                 Paragraph::new(msg.to_string())
-                    .style(Style::default().fg(Color::Yellow))
+                    .style(Style::default().fg(theme::warning()))
                     .wrap(Wrap { trim: false }),
                 inner,
             );
@@ -166,10 +174,10 @@ fn header(frame: &mut Frame, area: Rect, dash: Option<&Dashboard>, refreshed: &s
         None => Span::styled("connecting", dim()),
     };
     let left = Line::from(vec![
-        Span::styled("▌ ", Style::default().fg(ACCENT)),
+        Span::styled("▌ ", Style::default().fg(theme::accent())),
         Span::styled(
             "ADOS",
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme::accent()).add_modifier(Modifier::BOLD),
         ),
         Span::raw("   "),
         ident,
@@ -201,8 +209,8 @@ fn verdict(frame: &mut Frame, area: Rect, dash: Option<&Dashboard>) {
     };
     let health = d.health();
     let color = match health {
-        Health::Healthy => Color::Green,
-        Health::Degraded | Health::Setup => Color::Yellow,
+        Health::Healthy => theme::success(),
+        Health::Degraded | Health::Setup => theme::warning(),
     };
     let word_style = match health {
         Health::Setup => Style::default().fg(color),
@@ -264,14 +272,14 @@ fn reach_panel(frame: &mut Frame, area: Rect, dash: &Dashboard) {
             let (arrow_style, host_style) = if host.loopback {
                 (dim(), dim())
             } else {
-                (Style::default().fg(ACCENT), bright())
+                (Style::default().fg(theme::accent()), bright())
             };
             let mut spans = vec![
                 Span::styled("➜  ", arrow_style),
                 Span::styled(truncate(&host.host_port, host_w), host_style),
             ];
             if host.primary && !host.loopback {
-                spans.push(Span::styled("  ●", Style::default().fg(ACCENT)));
+                spans.push(Span::styled("  ●", Style::default().fg(theme::accent())));
             }
             lines.push(Line::from(spans));
         }
@@ -315,9 +323,9 @@ fn autopilot_panel(frame: &mut Frame, area: Rect, dash: &Dashboard, history: &Hi
 
     // Flight-controller link + mode/armed chips.
     let (dot_color, dot_text) = if dash.mavlink_connected {
-        (Color::Green, "FC connected")
+        (theme::success(), "FC connected")
     } else {
-        (Color::Red, "FC not connected")
+        (theme::danger(), "FC not connected")
     };
     let mut fc = vec![
         Span::styled("● ", Style::default().fg(dot_color)),
@@ -325,14 +333,14 @@ fn autopilot_panel(frame: &mut Frame, area: Rect, dash: &Dashboard, history: &Hi
     ];
     if let Some(mode) = &dash.mode {
         fc.push(Span::raw("  "));
-        fc.push(pill(mode, ACCENT));
+        fc.push(pill(mode, theme::accent()));
     }
     if let Some(armed) = dash.armed {
         fc.push(Span::raw(" "));
         fc.push(if armed {
-            pill("ARMED", Color::Red)
+            pill("ARMED", theme::danger())
         } else {
-            pill("DISARMED", Color::Green)
+            pill("DISARMED", theme::success())
         });
     }
     cells.push(Cell::Line(Line::from(fc)));
@@ -340,11 +348,11 @@ fn autopilot_panel(frame: &mut Frame, area: Rect, dash: &Dashboard, history: &Hi
     // Battery gauge + trend.
     if let Some(battery) = dash.battery {
         let color = if battery > 50.0 {
-            Color::Green
+            theme::success()
         } else if battery > 20.0 {
-            Color::Yellow
+            theme::warning()
         } else {
-            Color::Red
+            theme::danger()
         };
         cells.push(Cell::Gauge {
             ratio: battery / 100.0,
@@ -388,7 +396,7 @@ fn autopilot_panel(frame: &mut Frame, area: Rect, dash: &Dashboard, history: &Hi
             cells.push(Cell::Spark {
                 data: bars,
                 max: None,
-                color: ACCENT,
+                color: theme::accent(),
             });
         }
     }
@@ -403,11 +411,11 @@ fn video_panel(frame: &mut Frame, area: Rect, dash: &Dashboard) {
 
     let running = matches!(dash.video_state.as_str(), "running" | "streaming");
     let dot_color = if running {
-        Color::Green
+        theme::success()
     } else if matches!(dash.video_state.as_str(), "" | "unknown") {
-        Color::DarkGray
+        theme::muted()
     } else {
-        Color::Yellow
+        theme::warning()
     };
     let mut lines = vec![Line::from(vec![
         Span::styled("● ", Style::default().fg(dot_color)),
@@ -415,7 +423,7 @@ fn video_panel(frame: &mut Frame, area: Rect, dash: &Dashboard) {
     ])];
     match &dash.video_viewer {
         Some(url) => lines.push(Line::from(vec![
-            Span::styled("➜  ", Style::default().fg(ACCENT)),
+            Span::styled("➜  ", Style::default().fg(theme::accent())),
             Span::styled(url.clone(), dim()),
         ])),
         None => lines.push(Line::from(Span::styled("no viewer URL", dim()))),
@@ -452,7 +460,7 @@ fn services_panel(frame: &mut Frame, area: Rect, dash: &Dashboard) {
     let mut lines = vec![Line::from(vec![
         Span::styled(
             format!("● {} running", dash.services_running),
-            Style::default().fg(Color::Green),
+            Style::default().fg(theme::success()),
         ),
         Span::raw("   "),
         Span::styled(format!("○ {stopped} stopped"), dim()),
@@ -479,11 +487,11 @@ fn services_panel(frame: &mut Frame, area: Rect, dash: &Dashboard) {
 /// Colour the cloud-relay display string by its state.
 fn cloud_span(value: &str) -> Span<'static> {
     let color = if value.starts_with("paired") {
-        Color::Green
+        theme::success()
     } else if value.starts_with("configured") {
-        Color::Yellow
+        theme::warning()
     } else {
-        Color::DarkGray
+        theme::muted()
     };
     Span::styled(value.to_string(), Style::default().fg(color))
 }
@@ -491,9 +499,9 @@ fn cloud_span(value: &str) -> Span<'static> {
 /// Colour the remote-access status string by its state.
 fn remote_span(value: &str) -> Span<'static> {
     let color = match value {
-        "running" | "connected" | "enabled" | "up" => Color::Green,
-        "" | "disabled" | "off" | "stopped" | "unknown" => Color::DarkGray,
-        _ => Color::Yellow,
+        "running" | "connected" | "enabled" | "up" => theme::success(),
+        "" | "disabled" | "off" | "stopped" | "unknown" => theme::muted(),
+        _ => theme::warning(),
     };
     Span::styled(value.to_string(), Style::default().fg(color))
 }
@@ -501,9 +509,9 @@ fn remote_span(value: &str) -> Span<'static> {
 /// Glyph and colour for a setup-step state.
 fn step_dot(state: &str) -> (&'static str, Color) {
     match state {
-        "complete" => ("●", Color::Green),
-        "in_progress" => ("◐", ACCENT),
-        "needs_action" => ("▲", Color::Yellow),
-        _ => ("○", Color::DarkGray),
+        "complete" => ("●", theme::success()),
+        "in_progress" => ("◐", theme::accent()),
+        "needs_action" => ("▲", theme::warning()),
+        _ => ("○", theme::muted()),
     }
 }

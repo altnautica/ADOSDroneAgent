@@ -5,6 +5,7 @@
 //! information the previous Python `rich` dashboard showed. Read-only.
 
 mod model;
+mod theme;
 mod ui;
 
 use std::io::Stdout;
