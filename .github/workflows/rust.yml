@@ -121,7 +121,7 @@ jobs:
   # Build the terminal dashboard as a static arm64 binary and publish it to a
   # rolling prerelease the installer fetches. Static (musl) so one binary runs
   # on every supported board regardless of its glibc. Runs only on pushes to
-  # main, not pull requests. Artifact carries a SHA256; signing is not wired.
+  # main, not pull requests. Artifact carries a SHA256; a minisign .minisig is signed when ADOS_DRIVER_SIGNING_KEY is set.
   publish-tui:
     needs: build-test
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
@@ -174,7 +174,7 @@ jobs:
   # Build the orchestrator as a static arm64 binary and publish it to a rolling
   # prerelease the installer fetches. Static (musl) so one binary runs on every
   # supported board regardless of its glibc. Runs only on pushes to main, not
-  # pull requests. Artifact carries a SHA256; signing is not wired.
+  # pull requests. Artifact carries a SHA256; a minisign .minisig is signed when ADOS_DRIVER_SIGNING_KEY is set.
   publish-supervisor:
     needs: build-test
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
@@ -976,7 +976,7 @@ jobs:
   # Build the installer as a static arm64 binary and publish it to a rolling
   # prerelease the bootstrap fetches. Static (musl) so one binary runs on every
   # supported board regardless of its glibc. Runs only on pushes to main, not
-  # pull requests. Artifact carries a SHA256; signing is not wired.
+  # pull requests. Artifact carries a SHA256; a minisign .minisig is signed when ADOS_DRIVER_SIGNING_KEY is set.
   publish-installer:
     needs: build-test
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}

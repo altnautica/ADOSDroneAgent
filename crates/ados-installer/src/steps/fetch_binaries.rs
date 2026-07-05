@@ -23,6 +23,16 @@ use crate::verify::{self, Channel};
 /// `<base>/<release_tag>/<asset>` (plus `.sha256` / `.minisig` sidecars).
 const RELEASE_BASE: &str = "https://github.com/altnautica/ADOSDroneAgent/releases/download";
 
+/// The trust anchor for prebuilt-binary signatures: the public half of the
+/// keypair CI signs each asset's `.minisig` with (the private half is the
+/// `ADOS_DRIVER_SIGNING_KEY` CI secret). EMBEDDED, not fetched, so a MITM on the
+/// release host cannot swap the key. The default `edge` channel stays
+/// dev-tolerant (signature skipped, SHA256-only); on `stable` the `.minisig` is
+/// mandatory and verified against this key. Verification is dormant until CI is
+/// signing (no `.minisig` published → SHA256-only) and activates automatically
+/// once a signed release exists.
+const ADOS_BINARY_PUBKEY: &str = "RWQ/CJ1+gk7rjVfGSoy6MOL50e8TmO30KD/J+goaEj+WMI1uzEf92rHN";
+
 /// What to do with one binary's fetch-or-verify outcome, keyed off its catalog
 /// gate. Pure: a Hard gate's failure aborts the install; a BestEffort gate's
 /// failure degrades it.
@@ -99,8 +109,15 @@ fn install_one(
         net::fetch(&format!("{asset_url}.sha256"), &dl_sha)?;
         let _ = net::fetch(&format!("{asset_url}.minisig"), &dl_sig);
 
-        // Verify the downloaded temp BEFORE it is placed at the live path.
-        verify::verify_artifact(&dl_bin, None, channel, allow_unsigned_for(channel))?;
+        // Verify the downloaded temp BEFORE it is placed at the live path. Edge
+        // stays SHA256-only (allow_unsigned short-circuits before the key is
+        // used); stable checks the `.minisig` against the vendored trust anchor.
+        verify::verify_artifact(
+            &dl_bin,
+            Some(ADOS_BINARY_PUBKEY),
+            channel,
+            allow_unsigned_for(channel),
+        )?;
 
         // Name what landed (with its size) in the running step's log tail — this
         // replaces the old repeated generic "installed prebuilt binary" line.

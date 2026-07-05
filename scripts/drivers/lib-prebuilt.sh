@@ -41,12 +41,12 @@ command -v warn >/dev/null 2>&1 || warn() { printf '[WARN]  %s\n' "$*" >&2; }
 ADOS_PREBUILT_BASE_URL="${ADOS_PREBUILT_BASE_URL:-https://github.com/altnautica/ADOSDroneAgent/releases/download/prebuilt-drivers}"
 
 # minisign public-key STRING (verify.sh passes it to `minisign -P`, so this is
-# the key itself, not a file path). Empty in the dev/test posture, where
-# ADOS_PREBUILT_ALLOW_UNSIGNED=1 makes verification SHA256-only. A self-hoster
-# (or our prod release) sets ADOS_DRIVER_PUBKEY to a real key and flips
-# ALLOW_UNSIGNED off to require signatures.
+# the key itself, not a file path). Defaults to the vendored public half of the
+# ADOS_DRIVER_SIGNING_KEY keypair; an operator can override it with their own
+# key, and ADOS_PREBUILT_ALLOW_UNSIGNED=1 forces SHA256-only. When a signed
+# .minisig exists (CI signs once the secret is set) it is verified against this.
 _pb_pubkey() {
-    printf '%s\n' "${ADOS_DRIVER_PUBKEY:-}"
+    printf '%s\n' "${ADOS_DRIVER_PUBKEY:-RWQ/CJ1+gk7rjVfGSoy6MOL50e8TmO30KD/J+goaEj+WMI1uzEf92rHN}"
 }
 
 # Running kernel's vermagic, read from a currently-loaded in-tree module so we

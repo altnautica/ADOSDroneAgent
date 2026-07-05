@@ -157,6 +157,12 @@ get() {
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp" 2>/dev/null || true' EXIT
 
+# Trust anchor for the prebuilt installer binary: the vendored public half of
+# the ADOS_DRIVER_SIGNING_KEY minisign keypair. An operator may override it with
+# their own key. When a signed .minisig exists (CI signs once the secret is set)
+# it is verified below; until then the mandatory sha256 is the only gate.
+: "${ADOS_INSTALLER_PUBKEY:=RWQ/CJ1+gk7rjVfGSoy6MOL50e8TmO30KD/J+goaEj+WMI1uzEf92rHN}"
+
 # A line of feedback for the short pre-binary window; the installer renders its
 # own live progress once it execs below.
 echo "Fetching ADOS installer…" >&2
