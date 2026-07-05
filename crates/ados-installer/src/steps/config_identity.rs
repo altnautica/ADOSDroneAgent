@@ -330,6 +330,13 @@ fn set_hostname(name: &str) {
         );
         return;
     }
+    // Idempotent: if the box is already this hostname, do nothing. A wizard
+    // "Keep the current name" choice re-passes the existing hostname, and it
+    // must not churn hostnamectl or restart avahi for a no-op rename.
+    if crate::env::read_hostname() == slug {
+        tracing::info!(slug = %slug, "hostname already set; leaving it unchanged");
+        return;
+    }
     // hostnamectl is the canonical setter; fall back to /etc/hostname.
     if !exec::run_ok("hostnamectl", &["set-hostname", &slug]) {
         tracing::warn!(slug = %slug, "hostnamectl failed; writing /etc/hostname directly");

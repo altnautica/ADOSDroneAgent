@@ -59,6 +59,43 @@ pub fn resolve_source_dir(recorded: Option<&std::path::Path>) -> Option<std::pat
     candidates.into_iter().find(|p| p.is_dir())
 }
 
+/// The device's current hostname: `/etc/hostname`, then `uname -n`, else `ados`.
+/// Used for the `<host>.local` setup URL and to pre-fill the name prompt.
+pub fn read_hostname() -> String {
+    if let Ok(s) = std::fs::read_to_string("/etc/hostname") {
+        let v = s.trim();
+        if !v.is_empty() {
+            return v.to_string();
+        }
+    }
+    let res = crate::exec::run("uname", &["-n"]);
+    if res.success() {
+        let v = res.stdout.trim();
+        if !v.is_empty() {
+            return v.to_string();
+        }
+    }
+    "ados".to_string()
+}
+
+/// The current hostname when it is a real, usable mDNS name (not empty,
+/// `localhost`, a loopback literal, or the bare `ados` read-failure fallback),
+/// for pre-filling the device-name prompt. `None` → use a synthesized default.
+pub fn current_hostname() -> Option<String> {
+    let h = read_hostname();
+    let lower = h.to_ascii_lowercase();
+    if h.is_empty()
+        || lower == "ados"
+        || lower == "localhost"
+        || lower == "localhost.localdomain"
+        || h.starts_with("127.")
+    {
+        None
+    } else {
+        Some(h)
+    }
+}
+
 /// The on-disk markers that, taken together, mean "the agent is already
 /// installed on this box". Used by the install-presence probe so a bare
 /// `--pair CODE` on an installed agent can run a fast re-pair instead of the

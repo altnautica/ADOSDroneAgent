@@ -288,7 +288,7 @@ fn set_pairing_mode(_path: &Path) {}
 
 /// Assemble the renderer's closing-summary payload from the resolved context.
 fn build_summary(status: &str, ctx: &Ctx) -> ui::SummaryData {
-    let hostname = read_hostname();
+    let hostname = env::read_hostname();
     let setup_url = format!("http://{hostname}.local:8080/setup");
     ui::SummaryData {
         status: status.to_string(),
@@ -408,25 +408,6 @@ fn is_virtual_iface(iface: &str) -> bool {
         "wg",
     ];
     VIRTUAL_PREFIXES.iter().any(|p| iface.starts_with(p))
-}
-
-/// Hostname for the `<host>.local` hint + setup URL: `/etc/hostname`, then
-/// `uname -n`, else `ados`.
-fn read_hostname() -> String {
-    if let Ok(s) = std::fs::read_to_string("/etc/hostname") {
-        let v = s.trim();
-        if !v.is_empty() {
-            return v.to_string();
-        }
-    }
-    let res = exec::run("uname", &["-n"]);
-    if res.success() {
-        let v = res.stdout.trim();
-        if !v.is_empty() {
-            return v.to_string();
-        }
-    }
-    "ados".to_string()
 }
 
 /// The 12-hex device id, or `unknown`.

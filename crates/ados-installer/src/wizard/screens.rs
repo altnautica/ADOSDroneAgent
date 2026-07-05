@@ -8,6 +8,7 @@
 //! ASCII terminals.
 
 use crate::cli::Args;
+use crate::env;
 use crate::steps::config_identity::slugify_hostname;
 use crate::ui::theme::Theme;
 use crate::ui::tty::Tty;
@@ -706,7 +707,39 @@ fn short_reason(reason: &str) -> String {
 
 fn name_stage(tty: &mut Tty, theme: &Theme, args: &mut Args) -> Nav {
     let profile = args.profile.clone().unwrap_or_else(|| "drone".to_string());
-    let seed = default_name(&profile);
+    // Pre-fill from the device's real current hostname so the "reachable at
+    // <host>.local" line reflects reality; fall back to a synthesized default
+    // only when there is no usable hostname.
+    let current = env::current_hostname();
+    let seed = current.clone().unwrap_or_else(|| default_name(&profile));
+
+    // When the box already has a real hostname, keeping it is the default: it's
+    // reachable at that name right now and setup ran over it. Offer a quick
+    // Keep, or Rename to pick a friendlier one.
+    if let Some(host) = &current {
+        match confirm_card(
+            tty,
+            theme,
+            SETUP,
+            "Name this device",
+            &[
+                theme.dim(&format!("It's reachable now at {host}.local.")),
+                theme.dim("Keep this name, or pick a friendlier one."),
+            ],
+            &format!("Keep {host}"),
+            "Rename",
+            true,
+        ) {
+            Flow::Value(true) => {
+                args.name = Some(host.clone());
+                return Nav::Next;
+            }
+            Flow::Value(false) => {}
+            Flow::Back => return Nav::Back,
+            Flow::Abort => return Nav::Abort,
+        }
+    }
+
     match widgets::text_input(
         tty,
         theme,
@@ -892,7 +925,11 @@ fn review_summary(
     let is_drone = profile == "drone";
     let is_ground = profile == "ground_station";
     let has_radio = is_drone || is_ground;
-    let name = args.name.clone().unwrap_or_else(|| default_name(&profile));
+    let name = args
+        .name
+        .clone()
+        .or_else(env::current_hostname)
+        .unwrap_or_else(|| default_name(&profile));
     let mut rows = vec![kv(
         theme,
         "Device",
