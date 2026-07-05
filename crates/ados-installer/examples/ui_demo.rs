@@ -19,26 +19,73 @@ fn step(sink: &ProgressSink, id: &str, ms: u64) {
     sink.step_result(id, &StepOutcome::Ok);
 }
 
+/// A step that streams a few headline + raw-log lines to preview the live pane.
+fn step_streamed(sink: &ProgressSink, id: &str, lines: &[&str], ms: u64) {
+    sink.step_started(id);
+    for l in lines {
+        sink.activity(id, l.to_string());
+        sink.sub_log(id, l);
+        sleep(Duration::from_millis(ms));
+    }
+    sink.step_result(id, &StepOutcome::Ok);
+}
+
 fn main() {
     let fail = std::env::args().any(|a| a == "--fail");
     let theme = Theme::detect(false, false);
     let header = "Installing the ADOS Drone Agent (drone)…".to_string();
-    let (sink, render) = ui::start(RenderMode::Rich, header, theme);
+    // Preview the full-screen renderer when a controlling terminal is reachable.
+    let (mode, tty) = ui::resolve_live_mode(RenderMode::Rich, None);
+    let (sink, render) = ui::start(mode, header, theme, tty);
 
     // Checking system: preflight runs, purge_residue is a cached no-op.
     step(&sink, "preflight", 250);
     sink.step_result("purge_residue", &StepOutcome::Skipped);
 
-    step(&sink, "deps", 1300);
-    step(&sink, "venv_agent", 900);
-    step(&sink, "wfb_ng", 800);
+    step_streamed(
+        &sink,
+        "deps",
+        &[
+            "unpacking gstreamer1.0-tools",
+            "unpacking ffmpeg",
+            "configuring avahi-daemon",
+        ],
+        300,
+    );
+    step_streamed(
+        &sink,
+        "venv_agent",
+        &["cloning repository", "building agent package"],
+        400,
+    );
+    step_streamed(
+        &sink,
+        "wfb_ng",
+        &["compiling radio stack", "installing radio stack"],
+        350,
+    );
 
-    // Downloading components: a determinate k-of-N bar.
+    // Downloading components: a determinate k-of-N bar with per-file byte
+    // progress + named components in the detail pane.
     sink.step_started("fetch_binaries");
-    let total = 15u64;
-    for i in 0..=total {
-        sink.sub_progress("fetch_binaries", i, total);
-        sleep(Duration::from_millis(110));
+    let services = [
+        "ados-supervisor",
+        "ados-mavlink-router",
+        "ados-video",
+        "ados-cloud",
+        "ados-vision",
+        "mediamtx",
+    ];
+    let total = services.len() as u64;
+    let bytes = 8_388_608u64;
+    for (i, svc) in services.iter().enumerate() {
+        sink.activity("fetch_binaries", format!("installing {svc}"));
+        for s in 0..=8u64 {
+            sink.byte_progress("fetch_binaries", bytes * s / 8, bytes, svc);
+            sleep(Duration::from_millis(70));
+        }
+        sink.sub_log("fetch_binaries", &format!("✓ {svc} 8.0 MB"));
+        sink.sub_progress("fetch_binaries", (i as u64) + 1, total);
     }
     sink.step_result("fetch_binaries", &StepOutcome::Ok);
 

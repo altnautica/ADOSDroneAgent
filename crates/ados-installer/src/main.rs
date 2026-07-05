@@ -113,11 +113,17 @@ fn run_install(mut args: Args, mode: RunMode) -> Result<ExitCode> {
     // auto-detected install runs unchanged (a fresh box still comes up with
     // zero follow-up commands).
     let mut wizard_extras: Option<wizard::WizardExtras> = None;
+    // The wizard hands back its still-open `/dev/tty` on completion so the
+    // install progress renders in the SAME alternate-screen session.
+    let mut carried_tty: Option<ui::tty::Tty> = None;
     if mode == RunMode::FreshInstall && wizard::should_run(&args) {
         match wizard::run(&mut args) {
-            Ok(WizardControl::Completed(extras)) => wizard_extras = Some(extras),
-            Ok(WizardControl::Skipped) => {}
-            Ok(WizardControl::Canceled) => {
+            Ok((WizardControl::Completed(extras), tty)) => {
+                wizard_extras = Some(extras);
+                carried_tty = tty;
+            }
+            Ok((WizardControl::Skipped, _)) => {}
+            Ok((WizardControl::Canceled, _)) => {
                 eprintln!("Setup canceled.");
                 return Ok(ExitCode::from(130));
             }
@@ -128,12 +134,15 @@ fn run_install(mut args: Args, mode: RunMode) -> Result<ExitCode> {
     }
 
     // Start the live progress UI before any work so the operator sees feedback
-    // immediately. The mode is chosen from stderr + the environment.
-    let render_mode = ui::detect_mode(&args);
+    // immediately. The base mode is chosen from stderr + the environment;
+    // `resolve_live_mode` upgrades it to the full-screen renderer when a
+    // controlling terminal is reachable (a carried wizard tty, or a fresh open).
+    let base_mode = ui::detect_mode(&args);
     let theme = ui::Theme::detect(args.no_color, args.ascii);
+    let (render_mode, live_tty) = ui::resolve_live_mode(base_mode, carried_tty);
     let profile_hint = args.profile.clone().unwrap_or_else(|| "drone".to_string());
     let header = format!("Installing the ADOS Drone Agent ({profile_hint})…");
-    let (sink, render) = ui::start(render_mode, header, theme);
+    let (sink, render) = ui::start(render_mode, header, theme, live_tty);
 
     let env = EnvInfo::probe();
     let checkpoint = Checkpoint::new();

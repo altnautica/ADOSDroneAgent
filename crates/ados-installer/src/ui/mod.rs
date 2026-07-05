@@ -13,6 +13,7 @@
 
 pub mod activity;
 pub mod events;
+pub mod fullscreen;
 pub mod model;
 pub mod plain;
 pub mod rich;
@@ -32,6 +33,7 @@ use tracing_subscriber::layer::{Context, Layer};
 use crate::graph::StepOutcome;
 pub use events::{ProgressEvent, SummaryData};
 pub use theme::Theme;
+use tty::Tty;
 
 /// Set once a log-forwarding renderer (rich) is running. The tracing
 /// [`ChannelLayer`] forwards log lines here; until it is set, forwarding is a
@@ -41,7 +43,11 @@ static LOG_TX: OnceLock<Sender<ProgressEvent>> = OnceLock::new();
 /// Which renderer to drive, decided once at startup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderMode {
-    /// Live dashboard with color + spinner (stderr is an interactive terminal).
+    /// Full-screen split dashboard over `/dev/tty` (a controlling terminal is
+    /// reachable — the primary interactive path, incl. under `curl | sudo bash`).
+    Fullscreen,
+    /// Inline sticky-block dashboard on stderr (stderr is a terminal but no
+    /// `/dev/tty` is openable — the fallback that keeps the box UX).
     Rich,
     /// Clean escape-free line transitions (non-tty / CI / `--plain`).
     Plain,
@@ -67,6 +73,30 @@ pub fn detect_mode(args: &crate::cli::Args) -> RenderMode {
         return RenderMode::Plain;
     }
     RenderMode::Rich
+}
+
+/// Resolve the live render mode + terminal, upgrading `Rich` to `Fullscreen`
+/// when a controlling terminal is reachable. `carried` is the wizard's still-open
+/// `Tty` (the wizard→install handoff keeps one alt-screen session); when it is
+/// `None` but the base mode is `Rich`, a fresh `/dev/tty` is opened (the wizard
+/// was skipped by a flag but a terminal exists). Plain / Quiet / Json drop any
+/// carried `Tty` (leaving the alt screen) and keep the base line/quiet renderer.
+pub fn resolve_live_mode(base: RenderMode, carried: Option<Tty>) -> (RenderMode, Option<Tty>) {
+    match base {
+        RenderMode::Rich => {
+            if let Some(t) = carried {
+                (RenderMode::Fullscreen, Some(t))
+            } else if let Ok(Some(t)) = Tty::open() {
+                (RenderMode::Fullscreen, Some(t))
+            } else {
+                (RenderMode::Rich, None)
+            }
+        }
+        other => {
+            drop(carried);
+            (other, None)
+        }
+    }
 }
 
 /// A cheap, clonable handle the install engine emits events through. A sink with
@@ -162,8 +192,15 @@ impl RenderHandle {
 }
 
 /// Create the progress sink + spawn the renderer thread for `mode`. `header` is
-/// the one-line banner the renderer prints first.
-pub fn start(mode: RenderMode, header: String, theme: Theme) -> (ProgressSink, RenderHandle) {
+/// the one-line banner the renderer prints first. `tty` is the controlling
+/// terminal for `Fullscreen` (from [`resolve_live_mode`]); the other modes ignore
+/// it (it is dropped, leaving the alt screen if one was carried).
+pub fn start(
+    mode: RenderMode,
+    header: String,
+    theme: Theme,
+    tty: Option<Tty>,
+) -> (ProgressSink, RenderHandle) {
     if mode == RenderMode::Json {
         return (ProgressSink::default(), RenderHandle::none());
     }
@@ -172,6 +209,16 @@ pub fn start(mode: RenderMode, header: String, theme: Theme) -> (ProgressSink, R
         tx: Some(tx.clone()),
     };
     let join = match mode {
+        RenderMode::Fullscreen => {
+            // The `Tty`'s own panic-reset hook (installed by `Tty::open`) leaves
+            // the alt screen + un-raws on a panic, so no stderr cursor hook here.
+            let _ = LOG_TX.set(tx);
+            let tty = tty.expect("Fullscreen render mode requires a Tty");
+            std::thread::Builder::new()
+                .name("ados-installer-ui".to_string())
+                .spawn(move || fullscreen::run(tty, rx, theme, header))
+                .ok()
+        }
         RenderMode::Rich => {
             // The renderer hides the cursor; a panic (release builds abort) must
             // still restore it, so install the hook before drawing.

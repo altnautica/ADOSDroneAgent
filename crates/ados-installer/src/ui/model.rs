@@ -45,6 +45,12 @@ pub struct Group {
     any_failed: bool,
     /// Sub-progress `(done, total)` for a step that reports a fraction.
     pub sub: Option<(u64, u64)>,
+    /// The current curated activity headline (e.g. "installing ffmpeg"), shown
+    /// in the full-screen detail pane while the group runs.
+    pub activity: Option<String>,
+    /// Byte-level download progress `(done, total, label)` for the running
+    /// file; `total` is 0 when unknown.
+    pub bytes: Option<(u64, u64, String)>,
 }
 
 impl Group {
@@ -82,6 +88,8 @@ impl Model {
                 any_ran: false,
                 any_failed: false,
                 sub: None,
+                activity: None,
+                bytes: None,
             })
             .collect();
         Model { groups }
@@ -124,6 +132,8 @@ impl Model {
             };
             g.elapsed = g.started.map(|s| s.elapsed());
             g.sub = None;
+            g.activity = None;
+            g.bytes = None;
             Some(idx)
         } else {
             None
@@ -139,6 +149,36 @@ impl Model {
             g.started = Some(Instant::now());
         }
         g.sub = Some((done, total));
+        Some(idx)
+    }
+
+    /// Set a group's curated activity headline. Marks it running if still pending.
+    pub fn set_activity(&mut self, step_id: &str, message: String) -> Option<usize> {
+        let idx = group_index_for_step(step_id)?;
+        let g = &mut self.groups[idx];
+        if g.status == GStatus::Pending {
+            g.status = GStatus::Running;
+            g.started = Some(Instant::now());
+        }
+        g.activity = Some(message);
+        Some(idx)
+    }
+
+    /// Set a group's byte-level download progress. Marks it running if pending.
+    pub fn set_bytes(
+        &mut self,
+        step_id: &str,
+        done: u64,
+        total: u64,
+        label: String,
+    ) -> Option<usize> {
+        let idx = group_index_for_step(step_id)?;
+        let g = &mut self.groups[idx];
+        if g.status == GStatus::Pending {
+            g.status = GStatus::Running;
+            g.started = Some(Instant::now());
+        }
+        g.bytes = Some((done, total, label));
         Some(idx)
     }
 

@@ -159,6 +159,7 @@ impl Tty {
         }
         install_panic_reset();
         install_winch_handler();
+        install_int_handler();
         let mut tty = Tty {
             file,
             chrome: Chrome::default(),
@@ -232,6 +233,45 @@ impl Tty {
         let _ = self.file.flush();
         self.last_size = Some(size);
     }
+
+    /// Present a pre-composed full-screen grid (one full-width line per row),
+    /// clearing on the first paint and after a resize. Unlike [`Tty::render`]
+    /// (the wizard's centered-panel layout) this writes a caller-built grid, so
+    /// the install progress can own its own split layout while reusing the same
+    /// single-syscall ANSI writer and `/dev/tty` handle.
+    pub fn present(&mut self, grid: &[String], theme: &Theme) {
+        let size = probe_size();
+        let cleared = self.last_size != Some(size);
+        let out = frame::to_ansi(grid, cleared, theme);
+        let _ = self.file.write_all(out.as_bytes());
+        let _ = self.file.flush();
+        self.last_size = Some(size);
+    }
+
+    /// Force the next [`Tty::present`] / [`Tty::render`] to fully clear the
+    /// screen. Called once at the wizard→install handoff so the first install
+    /// frame overwrites the wizard's last frame in the shared alternate screen.
+    pub fn force_clear_next(&mut self) {
+        self.last_size = None;
+    }
+
+    /// Re-enable the terminal signal keys (`ISIG`) while keeping the rest of raw
+    /// mode. The wizard reads keys itself so it runs with `ISIG` off; the
+    /// write-only install phase wants Ctrl-C to raise `SIGINT` instead, which
+    /// the handler installed by [`Tty::open`] turns into a clean interrupt the
+    /// render loop observes via [`take_interrupt`].
+    #[cfg(target_os = "linux")]
+    pub fn enable_signals(&mut self) {
+        use nix::sys::termios::{tcgetattr, tcsetattr, LocalFlags, SetArg};
+        use std::os::fd::AsFd;
+        if let Ok(mut t) = tcgetattr(self.file.as_fd()) {
+            t.local_flags |= LocalFlags::ISIG;
+            let _ = tcsetattr(self.file.as_fd(), SetArg::TCSANOW, &t);
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn enable_signals(&mut self) {}
 
     /// Block for one key press and decode it. A terminal resize wakes the wait
     /// and returns [`KeyEvent::Resize`] so the caller repaints at the new size.
@@ -361,6 +401,49 @@ fn take_resized() -> bool {
 #[cfg(target_os = "linux")]
 extern "C" fn handle_winch(_: i32) {
     RESIZED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The pending-interrupt flag, set by the `SIGINT` handler. The render loop
+/// checks it each tick and exits cleanly (leaving the alt screen via `Drop`)
+/// rather than the process being killed mid-frame with the terminal stranded.
+#[cfg(target_os = "linux")]
+static INTERRUPTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Read and clear the pending-interrupt flag. `false` on non-Linux hosts.
+#[cfg(target_os = "linux")]
+pub fn take_interrupt() -> bool {
+    INTERRUPTED.swap(false, std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn take_interrupt() -> bool {
+    false
+}
+
+/// The `SIGINT` handler: record the interrupt. Async-signal-safe (only an atomic
+/// store); the render loop does the terminal cleanup off the signal path.
+#[cfg(target_os = "linux")]
+extern "C" fn handle_int(_: i32) {
+    INTERRUPTED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Install the `SIGINT` handler once (no `SA_RESTART`, so a blocking wait wakes).
+#[cfg(target_os = "linux")]
+fn install_int_handler() {
+    use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
+    use std::sync::OnceLock;
+    static ONCE: OnceLock<()> = OnceLock::new();
+    if ONCE.set(()).is_err() {
+        return;
+    }
+    let action = SigAction::new(
+        SigHandler::Handler(handle_int),
+        SaFlags::empty(),
+        SigSet::empty(),
+    );
+    unsafe {
+        let _ = sigaction(Signal::SIGINT, &action);
+    }
 }
 
 /// Install the `SIGWINCH` handler once, WITHOUT `SA_RESTART` so that a resize

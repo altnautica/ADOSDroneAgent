@@ -83,13 +83,18 @@ fn env_allows_interactive() -> bool {
 
 /// Run the wizard, collecting the operator's choices into `args` and returning
 /// the extra (region / cloud) choices. Opens `/dev/tty`; returns
-/// [`WizardControl::Skipped`] when it cannot (the caller then installs
-/// silently). The terminal is always restored on return (RAII on the `Tty`).
-pub fn run(args: &mut Args) -> anyhow::Result<WizardControl> {
+/// [`WizardControl::Skipped`] when it cannot (the caller then installs silently).
+///
+/// On [`WizardControl::Completed`] the still-open `Tty` is handed back so the
+/// install progress renders in the SAME alternate-screen session (one seamless
+/// full-screen flow from onboarding into the install). On `Skipped` / `Canceled`
+/// the `Tty` is dropped here, leaving the alt screen so a cancel message prints
+/// on the normal terminal.
+pub fn run(args: &mut Args) -> anyhow::Result<(WizardControl, Option<Tty>)> {
     let theme = Theme::detect(args.no_color, args.ascii);
     let mut tty = match Tty::open()? {
         Some(t) => t,
-        None => return Ok(WizardControl::Skipped),
+        None => return Ok((WizardControl::Skipped, None)),
     };
 
     let mut hw = hw::probe();
@@ -97,11 +102,11 @@ pub fn run(args: &mut Args) -> anyhow::Result<WizardControl> {
     let mut collected = screens::Collected::default();
 
     if !screens::greet(&mut tty, &theme) {
-        return Ok(WizardControl::Canceled);
+        return Ok((WizardControl::Canceled, None));
     }
     match screens::run_stages(&mut tty, &theme, args, &mut hw, &mut extras, &mut collected) {
-        screens::Outcome::Completed => Ok(WizardControl::Completed(extras)),
-        screens::Outcome::Canceled => Ok(WizardControl::Canceled),
+        screens::Outcome::Completed => Ok((WizardControl::Completed(extras), Some(tty))),
+        screens::Outcome::Canceled => Ok((WizardControl::Canceled, None)),
     }
 }
 
