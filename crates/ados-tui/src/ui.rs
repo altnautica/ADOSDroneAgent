@@ -244,13 +244,14 @@ fn footer(frame: &mut Frame, area: Rect) {
 }
 
 fn body(frame: &mut Frame, area: Rect, dash: &Dashboard, history: &History) {
+    // Left: every reachable link (wide enough for a full URL). Right: live state.
     let cols =
-        Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).split(area);
-    reach_panel(frame, cols[0], dash);
+        Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).split(area);
+    links_panel(frame, cols[0], dash);
 
     let cockpit = Layout::vertical([
         Constraint::Length(9),
-        Constraint::Length(4),
+        Constraint::Length(3),
         Constraint::Length(5),
         Constraint::Min(4),
     ])
@@ -261,54 +262,44 @@ fn body(frame: &mut Frame, area: Rect, dash: &Dashboard, history: &History) {
     services_panel(frame, cockpit[3], dash);
 }
 
-fn reach_panel(frame: &mut Frame, area: Rect, dash: &Dashboard) {
-    let block = panel("Reach this agent");
+fn links_panel(frame: &mut Frame, area: Rect, dash: &Dashboard) {
+    let block = panel("Links");
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let hosts = dash.console_reach();
+    let groups = dash.reach_links();
+    if groups.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Span::styled("no links advertised yet", dim())),
+            inner,
+        );
+        return;
+    }
+
     let mut lines: Vec<Line> = Vec::new();
-    if hosts.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "no access URLs advertised yet",
-            dim(),
-        )));
-    } else {
-        lines.push(Line::from(Span::styled("open in a browser", dim())));
-        // Each host sits on one line, truncated to fit — never wrapped mid-URL.
-        let host_w = (inner.width as usize).saturating_sub(6);
-        for host in &hosts {
-            let (arrow_style, host_style) = if host.loopback {
+    for (gi, group) in groups.iter().enumerate() {
+        if gi > 0 {
+            lines.push(Line::from(""));
+        }
+        lines.push(Line::from(Span::styled(group.title, dim())));
+        for row in &group.rows {
+            let (arrow, url_style) = if row.loopback {
                 (dim(), dim())
             } else {
                 (Style::default().fg(theme::accent()), bright())
             };
             let mut spans = vec![
-                Span::styled("➜  ", arrow_style),
-                Span::styled(truncate(&host.host_port, host_w), host_style),
+                Span::styled("➜ ", arrow),
+                Span::styled(row.url.clone(), url_style),
             ];
-            if host.primary && !host.loopback {
+            if row.primary && !row.loopback {
                 spans.push(Span::styled("  ●", Style::default().fg(theme::accent())));
             }
             lines.push(Line::from(spans));
         }
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled("add in Mission Control", dim())));
     }
+    // Full URLs wrap instead of truncating, so they stay copyable.
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
-}
-
-/// Truncate to `max` columns with a trailing ellipsis when clipped.
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    if max == 0 {
-        return String::new();
-    }
-    let mut out: String = s.chars().take(max - 1).collect();
-    out.push('…');
-    out
 }
 
 fn autopilot_panel(frame: &mut Frame, area: Rect, dash: &Dashboard, history: &History) {
@@ -426,18 +417,17 @@ fn video_panel(frame: &mut Frame, area: Rect, dash: &Dashboard) {
     } else {
         theme::warning()
     };
-    let mut lines = vec![Line::from(vec![
+    let state = if dash.video_state.is_empty() {
+        "unknown".to_string()
+    } else {
+        dash.video_state.clone()
+    };
+    let line = Line::from(vec![
         Span::styled("● ", Style::default().fg(dot_color)),
-        Span::styled(dash.video_state.clone(), bright()),
-    ])];
-    match &dash.video_viewer {
-        Some(url) => lines.push(Line::from(vec![
-            Span::styled("➜  ", Style::default().fg(theme::accent())),
-            Span::styled(url.clone(), dim()),
-        ])),
-        None => lines.push(Line::from(Span::styled("no viewer URL", dim()))),
-    }
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+        Span::styled(state, bright()),
+    ]);
+    // The viewer URL lives in the Links panel; this panel shows live state only.
+    frame.render_widget(Paragraph::new(line), inner);
 }
 
 fn link_panel(frame: &mut Frame, area: Rect, dash: &Dashboard) {

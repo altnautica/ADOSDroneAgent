@@ -13,15 +13,26 @@ use serde_json::Value;
 pub struct AccessUrl {
     pub label: String,
     pub url: String,
+    /// The kind of endpoint: `setup`, `api`, `mission_control`, `video`,
+    /// `mavlink`, or `cloud`.
+    pub kind: String,
     pub primary: bool,
 }
 
-/// A console reach endpoint: the agent's web UI as a bare `host:port`.
+/// One openable link in the Links panel: a full URL, its primacy, and whether
+/// it points at the (remotely useless) loopback.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ReachHost {
-    pub host_port: String,
+pub struct LinkRow {
+    pub url: String,
     pub primary: bool,
     pub loopback: bool,
+}
+
+/// A titled group of links, e.g. `Console` or `Ground control`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinkGroup {
+    pub title: &'static str,
+    pub rows: Vec<LinkRow>,
 }
 
 /// A setup-wizard step with its raw state (e.g. `complete`, `needs_action`).
@@ -73,6 +84,16 @@ pub struct Dashboard {
     pub steps_all_complete: bool,
 
     pub mavlink_connected: bool,
+    pub mavlink_tcp_url: Option<String>,
+    pub mavlink_ws_url: Option<String>,
+    pub mavlink_public_ws_url: Option<String>,
+    pub fc_port: Option<String>,
+    pub fc_baud: Option<i64>,
+    // Richer FC-link truth, merged from the native `/api/status` route when it
+    // is reachable (absent → the `mavlink_connected` gated boolean stands).
+    pub transport_open: Option<bool>,
+    pub mavlink_alive: Option<bool>,
+    pub fc_link_hint: Option<String>,
 
     pub video_state: String,
     pub video_viewer: Option<String>,
@@ -138,14 +159,25 @@ fn url_host(url: &str) -> String {
     host.to_ascii_lowercase()
 }
 
-/// The `host:port` authority of a URL, with the scheme and path stripped.
-fn url_host_port(url: &str) -> String {
-    let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
-    after_scheme
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or(after_scheme)
-        .to_string()
+/// A reachable host used to project per-host service URLs (mDNS name or LAN IP).
+struct HostRef {
+    host: String,
+    primary: bool,
+}
+
+/// De-duplicate rows by URL (first wins) and drop loopback rows once any
+/// routable row exists.
+fn dedup_drop_loopback(rows: Vec<LinkRow>) -> Vec<LinkRow> {
+    let mut out: Vec<LinkRow> = Vec::new();
+    for row in rows {
+        if !out.iter().any(|r| r.url == row.url) {
+            out.push(row);
+        }
+    }
+    if out.iter().any(|r| !r.loopback) {
+        out.retain(|r| !r.loopback);
+    }
+    out
 }
 
 fn is_loopback_host(host: &str) -> bool {
@@ -190,6 +222,53 @@ fn s(v: &Value, key: &str, default: &str) -> String {
         .to_string()
 }
 
+/// A non-empty string field as `Option<String>`.
+fn opt_str(v: &Value, key: &str) -> Option<String> {
+    v.get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// The port number in a URL authority, e.g. `8765` from `ws://host:8765/`.
+fn port_of(url: &str) -> Option<u16> {
+    let authority = url
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(url)
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("");
+    let after = authority.rsplit(']').next().unwrap_or(authority); // past an IPv6 literal
+    after.rsplit_once(':').and_then(|(_, p)| p.parse().ok())
+}
+
+/// Replace the host in a URL, preserving the scheme, port, and path. Used to
+/// project a service URL (advertised on one best host) onto every reachable
+/// host so the operator sees both the mDNS name and the LAN IP.
+fn swap_host(url: &str, host: &str) -> String {
+    let (scheme, rest) = match url.split_once("://") {
+        Some((s, r)) => (Some(s), r),
+        None => (None, url),
+    };
+    let (authority, tail) = match rest.find(['/', '?', '#']) {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, ""),
+    };
+    // Keep the `:port` suffix of the old authority (skip an IPv6 literal).
+    let port = authority
+        .rsplit(']')
+        .next()
+        .unwrap_or(authority)
+        .rsplit_once(':')
+        .map(|(_, p)| format!(":{p}"))
+        .unwrap_or_default();
+    match scheme {
+        Some(scheme) => format!("{scheme}://{host}{port}{tail}"),
+        None => format!("{host}{port}{tail}"),
+    }
+}
+
 /// A MAVLink `GPS_FIX_TYPE` integer as a short human label.
 pub fn fix_label(fix_type: i64) -> String {
     match fix_type {
@@ -226,6 +305,7 @@ impl Dashboard {
                 dash.access_urls.push(AccessUrl {
                     label: s(item, "label", "URL"),
                     url: s(item, "url", ""),
+                    kind: s(item, "kind", ""),
                     primary: item
                         .get("primary")
                         .and_then(Value::as_bool)
@@ -253,6 +333,11 @@ impl Dashboard {
             .get("connected")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        dash.mavlink_tcp_url = opt_str(&mavlink, "tcp_url");
+        dash.mavlink_ws_url = opt_str(&mavlink, "websocket_url");
+        dash.mavlink_public_ws_url = opt_str(&mavlink, "public_websocket_url");
+        dash.fc_port = opt_str(&mavlink, "port");
+        dash.fc_baud = mavlink.get("baud").and_then(Value::as_i64).filter(|b| *b > 0);
 
         // Video.
         let video = data.get("video").cloned().unwrap_or(Value::Null);
@@ -344,35 +429,137 @@ impl Dashboard {
         dash
     }
 
-    /// The console addresses to open in a browser (the agent's own web UI),
-    /// best first: mDNS `.local`, then LAN IPs, then other hosts, with loopback
-    /// last and shown only when no routable address exists. Filtered to the
-    /// setup/console pages (not video / MAVLink / Mission Control) and reduced to
-    /// a de-duplicated bare `host:port`, so the narrow panel never has to wrap a
-    /// long URL.
-    pub fn console_reach(&self) -> Vec<ReachHost> {
-        let mut sorted = self.access_urls.clone();
-        sorted.sort_by_key(|item| reach_rank(&item.url));
-        let mut out: Vec<ReachHost> = Vec::new();
-        for item in &sorted {
-            if !item.url.contains("/setup") {
-                continue; // the agent console only, not video / MAVLink / Mission Control
+    /// Every advertised link, grouped for the Links panel: Console (the setup
+    /// webapp), Ground control (MAVLink tcp + ws), Video, Mission Control, and
+    /// Remote. Each link is a full URL. The MAVLink and video endpoints, which
+    /// the agent advertises on one best host, are projected onto every reachable
+    /// LAN host so the operator sees both the mDNS name and the LAN IP. Loopback
+    /// is dropped from a group once it has any routable link.
+    pub fn reach_links(&self) -> Vec<LinkGroup> {
+        let hosts = self.lan_hosts();
+        let mut out: Vec<LinkGroup> = Vec::new();
+
+        // Console: the setup webapp, already advertised per host.
+        out.push(LinkGroup {
+            title: "Console",
+            rows: self.rows_for(&["setup"]),
+        });
+
+        // Ground control: a tcp + ws endpoint on every reachable LAN host (both
+        // are bound on 0.0.0.0), plus any advertised tunnel endpoint.
+        let tcp_port = self
+            .mavlink_tcp_url
+            .as_deref()
+            .and_then(port_of)
+            .unwrap_or(5760);
+        let ws_port = self
+            .mavlink_ws_url
+            .as_deref()
+            .and_then(port_of)
+            .unwrap_or(8765);
+        let mut gc: Vec<LinkRow> = Vec::new();
+        if self.mavlink_tcp_url.is_some() || self.mavlink_ws_url.is_some() {
+            for h in &hosts {
+                gc.push(LinkRow {
+                    url: format!("tcp://{}:{tcp_port}", h.host),
+                    primary: h.primary,
+                    loopback: false,
+                });
+                gc.push(LinkRow {
+                    url: format!("ws://{}:{ws_port}/", h.host),
+                    primary: false,
+                    loopback: false,
+                });
             }
-            let host_port = url_host_port(&item.url);
-            if host_port.is_empty() || out.iter().any(|r| r.host_port == host_port) {
-                continue;
-            }
-            out.push(ReachHost {
-                host_port,
-                primary: item.primary,
-                loopback: is_loopback_url(&item.url),
+        }
+        if let Some(pub_ws) = &self.mavlink_public_ws_url {
+            gc.push(LinkRow {
+                url: pub_ws.clone(),
+                primary: false,
+                loopback: false,
             });
         }
-        // A remote operator cannot reach loopback: drop it once anything else exists.
-        if out.iter().any(|r| !r.loopback) {
-            out.retain(|r| !r.loopback);
+        gc.extend(self.rows_for(&["mavlink"])); // e.g. the tunnel MAVLink WS
+        out.push(LinkGroup {
+            title: "Ground control",
+            rows: dedup_drop_loopback(gc),
+        });
+
+        // Video: project the advertised viewer URL (or the WHEP viewer) onto
+        // every LAN host, plus any advertised tunnel viewer.
+        let mut vid: Vec<LinkRow> = Vec::new();
+        if let Some(tmpl) = self.best_url(&["video"]).or_else(|| self.video_viewer.clone()) {
+            for h in &hosts {
+                vid.push(LinkRow {
+                    url: swap_host(&tmpl, &h.host),
+                    primary: h.primary,
+                    loopback: false,
+                });
+            }
+        }
+        vid.extend(self.rows_for(&["video"]));
+        out.push(LinkGroup {
+            title: "Video",
+            rows: dedup_drop_loopback(vid),
+        });
+
+        // Mission Control + Remote: as advertised.
+        out.push(LinkGroup {
+            title: "Mission Control",
+            rows: self.rows_for(&["mission_control"]),
+        });
+        out.push(LinkGroup {
+            title: "Remote",
+            rows: self.rows_for(&["cloud"]),
+        });
+
+        out.retain(|g| !g.rows.is_empty());
+        out
+    }
+
+    /// The reachable LAN hosts (mDNS `.local` first, then LAN IPs) taken from
+    /// the advertised access URLs. Loopback and non-LAN (tunnel) hosts are
+    /// excluded — those ride their own advertised entries.
+    fn lan_hosts(&self) -> Vec<HostRef> {
+        let mut sorted = self.access_urls.clone();
+        sorted.sort_by_key(|item| reach_rank(&item.url));
+        let mut out: Vec<HostRef> = Vec::new();
+        for item in &sorted {
+            if reach_rank(&item.url) > 1 {
+                continue; // 0 = .local, 1 = LAN IP; skip tunnel/other/loopback
+            }
+            let host = url_host(&item.url);
+            if host.is_empty() || out.iter().any(|h| h.host == host) {
+                continue;
+            }
+            out.push(HostRef {
+                host,
+                primary: item.primary,
+            });
         }
         out
+    }
+
+    /// The rows for the given kinds, ordered best-first, deduped, loopback
+    /// dropped once a routable link exists.
+    fn rows_for(&self, kinds: &[&str]) -> Vec<LinkRow> {
+        let mut sorted = self.access_urls.clone();
+        sorted.sort_by_key(|item| reach_rank(&item.url));
+        let rows = sorted
+            .iter()
+            .filter(|item| kinds.contains(&item.kind.as_str()) && !item.url.is_empty())
+            .map(|item| LinkRow {
+                url: item.url.clone(),
+                primary: item.primary,
+                loopback: is_loopback_url(&item.url),
+            })
+            .collect();
+        dedup_drop_loopback(rows)
+    }
+
+    /// The best (most reachable, non-loopback) advertised URL of the given kinds.
+    fn best_url(&self, kinds: &[&str]) -> Option<String> {
+        self.rows_for(kinds).into_iter().next().map(|r| r.url)
     }
 
     /// The overall health verdict, from verified inputs only.
@@ -517,45 +704,66 @@ mod tests {
     }
 
     #[test]
-    fn console_reach_orders_dedupes_and_drops_loopback_and_non_console() {
+    fn reach_links_groups_all_kinds_full_url_mdns_and_ip() {
         let data = json!({
             "access_urls": [
-                {"label": "local", "url": "http://localhost:8080/setup"},
-                {"label": "lan", "url": "http://192.168.1.5:8080/setup"},
-                {"label": "mdns", "url": "http://ados-abc.local:8080/setup", "primary": true},
-                {"label": "lan2", "url": "http://10.0.0.9:8080/setup"},
-                {"label": "lan-dup", "url": "http://192.168.1.5:8080/setup"},
-                {"label": "video", "url": "http://ados-abc.local:8889/main/"},
-                {"label": "mc", "url": "http://localhost:4000"}
-            ]
+                {"kind": "setup", "label": "mDNS setup", "url": "http://ados-x.local:8080/setup", "primary": true},
+                {"kind": "setup", "label": "LAN setup", "url": "http://192.168.1.5:8080/setup"},
+                {"kind": "setup", "label": "local", "url": "http://localhost:8080/setup"},
+                {"kind": "video", "label": "Local video viewer", "url": "http://ados-x.local:8889/main/"},
+                {"kind": "mavlink", "label": "MAVLink WebSocket", "url": "ws://ados-x.local:8765/"},
+                {"kind": "mission_control", "label": "Mission Control", "url": "https://command.example.com"},
+                {"kind": "cloud", "label": "Remote access", "url": "https://tunnel.example.com/setup"}
+            ],
+            "mavlink": {"connected": true, "tcp_url": "tcp://ados-x.local:5760", "websocket_url": "ws://ados-x.local:8765/"}
         });
-        let dash = Dashboard::from_status(&data);
-        let hosts: Vec<String> = dash
-            .console_reach()
-            .into_iter()
-            .map(|r| r.host_port)
-            .collect();
-        // mDNS first, then LAN IPs (deduped, producer order); loopback + non-/setup dropped.
+        let groups = Dashboard::from_status(&data).reach_links();
+        let titles: Vec<&str> = groups.iter().map(|g| g.title).collect();
         assert_eq!(
-            hosts,
-            vec!["ados-abc.local:8080", "192.168.1.5:8080", "10.0.0.9:8080"]
+            titles,
+            vec!["Console", "Ground control", "Video", "Mission Control", "Remote"]
         );
-        // The mDNS entry is the primary and none of the survivors are loopback.
-        let reach = dash.console_reach();
-        assert!(reach[0].primary);
-        assert!(reach.iter().all(|r| !r.loopback));
+
+        // Console shows both the mDNS and the LAN-IP full URLs, loopback dropped.
+        let console: Vec<&str> = groups[0].rows.iter().map(|r| r.url.as_str()).collect();
+        assert_eq!(
+            console,
+            vec!["http://ados-x.local:8080/setup", "http://192.168.1.5:8080/setup"]
+        );
+
+        // Ground control synthesises tcp + ws on both LAN hosts.
+        let gc: Vec<&str> = groups[1].rows.iter().map(|r| r.url.as_str()).collect();
+        assert!(gc.contains(&"tcp://ados-x.local:5760"));
+        assert!(gc.contains(&"ws://ados-x.local:8765/"));
+        assert!(gc.contains(&"tcp://192.168.1.5:5760"));
+        assert!(gc.contains(&"ws://192.168.1.5:8765/"));
+
+        // Video is projected onto both LAN hosts too.
+        let vid: Vec<&str> = groups[2].rows.iter().map(|r| r.url.as_str()).collect();
+        assert!(vid.contains(&"http://ados-x.local:8889/main/"));
+        assert!(vid.contains(&"http://192.168.1.5:8889/main/"));
     }
 
     #[test]
-    fn console_reach_keeps_loopback_only_when_nothing_else() {
+    fn reach_links_drops_empty_groups() {
         let data = json!({
-            "access_urls": [{"label": "local", "url": "http://localhost:8080/setup", "primary": true}]
+            "access_urls": [{"kind": "setup", "url": "http://ados-x.local:8080/setup", "primary": true}]
         });
-        let dash = Dashboard::from_status(&data);
-        let reach = dash.console_reach();
-        assert_eq!(reach.len(), 1);
-        assert_eq!(reach[0].host_port, "localhost:8080");
-        assert!(reach[0].loopback);
+        let groups = Dashboard::from_status(&data).reach_links();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].title, "Console");
+    }
+
+    #[test]
+    fn port_of_and_swap_host() {
+        assert_eq!(port_of("ws://host:8765/"), Some(8765));
+        assert_eq!(port_of("tcp://192.168.1.5:5760"), Some(5760));
+        assert_eq!(port_of("http://host/no-port"), None);
+        assert_eq!(
+            swap_host("http://ados-x.local:8889/main/", "192.168.1.5"),
+            "http://192.168.1.5:8889/main/"
+        );
+        assert_eq!(swap_host("ws://ados-x.local:8765/", "10.0.0.9"), "ws://10.0.0.9:8765/");
     }
 
     #[test]
