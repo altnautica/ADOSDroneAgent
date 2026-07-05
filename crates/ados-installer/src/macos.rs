@@ -1168,13 +1168,21 @@ fn print_summary(paths: &Paths, device_id: &str, uid: u32, report: &HealthReport
         paths.launch_agents.display()
     );
     println!();
+    // The everyday `ados` commands — the same curated list the Linux summary and
+    // `ados help` render, so all three surfaces agree.
+    println!("  Useful commands:");
+    for (cmd, desc) in crate::ui::summary::NEXT_STEPS {
+        println!("    {cmd:<16} {desc}");
+    }
+    println!();
     println!("  Manage:");
     println!(
         "    launchctl print gui/{uid}/co.ados.control      # inspect the control surface job"
     );
     println!("    tail -f {}/ados-control.err.log", paths.log.display());
     println!();
-    println!("  Tear down:");
+    // Fallback teardown if the `ados` CLI did not install (best-effort on macOS).
+    println!("  Tear down (or: ados uninstall --purge):");
     println!("    for s in supervisor control compute cloud logd; do launchctl bootout gui/{uid}/co.ados.$s 2>/dev/null; done");
     println!("    rm {}/co.ados.*.plist", paths.launch_agents.display());
     println!("    rm -rf {}", paths.ados_home.display());

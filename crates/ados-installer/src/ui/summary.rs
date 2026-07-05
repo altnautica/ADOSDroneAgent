@@ -11,13 +11,17 @@ use crate::ui::theme::Theme;
 
 /// The curated next-step commands shown after a successful install, each with a
 /// short plain-language description. Product-facing copy only — no internal
-/// tags. Ordered from "learn everything" to "remove".
+/// tags. Ordered from "learn everything" to "remove". Kept in sync with the CLI's
+/// own `ados help` overview (`src/ados/cli/help.py`); both the Linux summary
+/// (plain + rich) and the macOS summary render this one list.
 pub const NEXT_STEPS: &[(&str, &str)] = &[
     ("ados help", "see all commands"),
-    ("ados", "live dashboard"),
-    ("ados pair", "connect to Mission Control"),
+    ("ados", "live status dashboard"),
     ("ados status", "status at a glance"),
-    ("ados uninstall", "remove"),
+    ("ados pair", "connect to Mission Control"),
+    ("ados update", "update the agent"),
+    ("ados logs", "view agent logs"),
+    ("ados uninstall", "remove the agent"),
 ];
 
 /// The local-mode caveat + docs pointer shown in the Notes section.
@@ -376,8 +380,11 @@ mod tests {
         let mdns_at = lines.iter().position(|l| l.contains("skynode.local:8080"));
         let ip_at = lines.iter().position(|l| l.contains("192.168.1.42:8080"));
         assert!(mdns_at < ip_at, "mDNS host must lead the reach block");
-        // The curated next-step commands, including the new `ados help`.
+        // The curated next-step commands, including `ados help`, `ados update`,
+        // and `ados logs`.
         assert!(lines.iter().any(|l| l.contains("ados help")));
+        assert!(lines.iter().any(|l| l.contains("ados update")));
+        assert!(lines.iter().any(|l| l.contains("ados logs")));
         assert!(lines.iter().any(|l| l.contains("ados uninstall")));
         // No bare localhost reach line, and journalctl is off the success path.
         assert!(!lines.iter().any(|l| l.contains("localhost")));
