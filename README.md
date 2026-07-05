@@ -100,7 +100,7 @@ Python stays where it earns its place: AI and vision inference, the plugin runti
 
 ## Architecture at a glance
 
-`ados-control`, a native Rust HTTP front, owns port `:8080`. It serves the control, telemetry, pairing, parameter, fleet, and ground-station routes natively, and reverse-proxies a small Python feature service on an internal socket for the parts that stay in Python: AI and vision inference, the plugin runtime, the setup webapp, OTA, and WHEP video.
+`ados-control`, a native Rust HTTP front, owns port `:8080`. It serves the control, telemetry, pairing, parameter, fleet, and ground-station routes natively, and reverse-proxies a small Python feature service on an internal socket for the parts that stay in Python: AI and vision inference, the plugin runtime, the setup webapp, and WHEP video.
 
 ```
               ┌────────────────────────────────────┐
@@ -119,7 +119,7 @@ Python stays where it earns its place: AI and vision inference, the plugin runti
   (serial / USB)      ffmpeg · mediamtx       (Python + C)
 
   Python feature service: AI + vision inference · plugin runtime ·
-                          setup webapp · OTA · WHEP video
+                          setup webapp · WHEP video
 ```
 
 On a device the agent installs as a set of systemd services plus a Python virtualenv, both placed by the prebuilt Rust installer. Routes read FC status, telemetry, video, radio, and parameter state through named accessors, so the control surface stays independent of service internals.
@@ -151,8 +151,8 @@ The public everyday CLI is intentionally small. Run `ados --help` for the curren
 | `ados` | Open the read-only terminal status page, or plain status when not attached to a TTY |
 | `ados status` | Print setup, MAVLink, video, network, remote-access, and service status |
 | `ados status --json` | Print the full setup facade payload for scripts |
-| `ados update` | Check for and install an agent update |
-| `ados update --check-only` | Check without installing |
+| `ados update` | Update the agent to the latest version (re-runs the installer upgrade) |
+| `ados update --check-only` | Report the current and latest version without installing |
 | `ados uninstall` | Remove the agent from the system |
 | `ados uninstall --purge --yes` | Remove services, package files, and config without prompts |
 
@@ -162,7 +162,7 @@ Grouped subcommands cover the deeper surfaces: `ados plugin` (install and manage
 
 ## REST API
 
-Served by the native Rust front (`ados-control`) on `:8080`. The control and telemetry routes are native; AI/vision, plugin, setup, OTA, and WHEP routes are proxied to the Python feature service. Full reference at [docs.altnautica.com](https://docs.altnautica.com).
+Served by the native Rust front (`ados-control`) on `:8080`. The control and telemetry routes are native; AI/vision, plugin, setup, and WHEP routes are proxied to the Python feature service. Full reference at [docs.altnautica.com](https://docs.altnautica.com).
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
@@ -182,7 +182,6 @@ Served by the native Rust front (`ados-control`) on `:8080`. The control and tel
 | `/api/pairing/*` | GET / POST | GCS pairing management |
 | `/api/mavlink/signing/*` | GET / POST | Signing capability detection and one-shot FC enrollment |
 | `/api/system` | GET / POST | System info, reboot, shutdown |
-| `/api/ota` | GET / POST | Update check, upgrade, rollback |
 | `/api/v1/ground-station/*` | GET / PUT / POST / DELETE | Ground-station profile only. Role, mesh, pairing, WFB-ng relay/receiver, uplinks, physical UI |
 
 ```bash
@@ -251,7 +250,7 @@ ADOS is local-first. The primary path between Mission Control and the agent is y
 | Cloud relay (Convex HTTP + MQTT) | Working |
 | GCS pairing (local-first over LAN, cloud relay optional) | Working |
 | MAVLink v2 signing pass-through | Working |
-| OTA updates (upgrade + rollback) | Working |
+| Agent updates (`ados update`) | Working |
 | Video pipeline (RTSP, WebRTC/WHEP, WFB-ng) | Working |
 | WFB-ng long-range link (5.8 GHz, FEC, auto-bind) | Working |
 | On-device vision host (frame bus, detectors) | Working |
