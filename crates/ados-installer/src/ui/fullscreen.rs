@@ -23,7 +23,7 @@ use crate::ui::events::{GroupMap, ProgressEvent, SummaryData};
 use crate::ui::model::{fmt_dur, GStatus, Group, Model};
 use crate::ui::summary;
 use crate::ui::theme::Theme;
-use crate::ui::tty::Tty;
+use crate::ui::tty::{Input, KeyEvent, Tty};
 use crate::wizard::frame::{self, TermSize};
 use crate::wizard::render;
 
@@ -131,6 +131,7 @@ pub fn run(
     header: String,
     groups: GroupMap,
     footer: &'static str,
+    interactive: bool,
 ) {
     let title = title_from_header(&header);
     let mut st = State::new(groups);
@@ -163,8 +164,19 @@ pub fn run(
         paint(&mut tty, &theme, &title, footer, &st, spinner);
     }
 
+    // On an interactive success, show the closing summary full-screen inside the
+    // alt screen and wait for the operator to dismiss it, before leaving.
+    if interactive && !interrupted {
+        if let Some(s) = st.summary.as_deref() {
+            if s.status != "failed" {
+                present_completion(&mut tty, &theme, s, &st.journal);
+            }
+        }
+    }
+
     // Leave the alt screen + restore the terminal (RAII), then print the summary
-    // on the primary buffer where the pre-install output lived.
+    // on the primary buffer where the pre-install output lived, so the reach URLs
+    // persist in scrollback after the shell returns.
     drop(tty);
     if interrupted {
         eprintln!("\nInstall interrupted.");
@@ -173,6 +185,34 @@ pub fn run(
     if let Some(s) = st.summary {
         for line in summary::rich_lines(&s, &theme, &st.journal) {
             eprintln!("{line}");
+        }
+    }
+}
+
+/// Paint the closing summary as a full-screen frame (centered on the charcoal
+/// background) on the still-open alt screen.
+fn paint_completion(tty: &mut Tty, theme: &Theme, s: &SummaryData, journal: &VecDeque<String>) {
+    let size = tty.size();
+    let grid = summary::fullscreen_grid(s, theme, journal, size.cols, size.rows);
+    tty.present(&grid, theme);
+}
+
+/// Show the closing summary full-screen and block until the operator dismisses
+/// it (Enter / any key / Ctrl-C), repainting on a resize. A generous auto-dismiss
+/// deadline means an unattended-but-interactive session still returns to a shell.
+fn present_completion(tty: &mut Tty, theme: &Theme, s: &SummaryData, journal: &VecDeque<String>) {
+    const AUTO_DISMISS: Duration = Duration::from_secs(120);
+    let deadline = Instant::now() + AUTO_DISMISS;
+    paint_completion(tty, theme, s, journal);
+    loop {
+        match tty.read_input(200) {
+            Input::Key(KeyEvent::Resize) => paint_completion(tty, theme, s, journal),
+            Input::Key(_) => break,
+            Input::Tick => {
+                if crate::ui::tty::take_interrupt() || Instant::now() >= deadline {
+                    break;
+                }
+            }
         }
     }
 }

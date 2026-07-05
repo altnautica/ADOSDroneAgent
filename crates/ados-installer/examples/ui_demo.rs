@@ -43,6 +43,7 @@ fn main() {
         tty,
         ui::INSTALL_GROUPS,
         ui::INSTALL_FOOTER,
+        true,
     );
 
     // Checking system: preflight runs, purge_residue is a cached no-op.

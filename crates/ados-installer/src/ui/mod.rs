@@ -205,6 +205,7 @@ pub fn start(
     tty: Option<Tty>,
     groups: GroupMap,
     footer: &'static str,
+    interactive: bool,
 ) -> (ProgressSink, RenderHandle) {
     if mode == RenderMode::Json {
         return (ProgressSink::default(), RenderHandle::none());
@@ -221,7 +222,7 @@ pub fn start(
             let tty = tty.expect("Fullscreen render mode requires a Tty");
             std::thread::Builder::new()
                 .name("ados-installer-ui".to_string())
-                .spawn(move || fullscreen::run(tty, rx, theme, header, groups, footer))
+                .spawn(move || fullscreen::run(tty, rx, theme, header, groups, footer, interactive))
                 .ok()
         }
         RenderMode::Rich => {

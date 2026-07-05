@@ -139,6 +139,45 @@ pub fn rich_lines(s: &SummaryData, theme: &Theme, logs: &VecDeque<String>) -> Ve
     }
 }
 
+/// The closing card centered full-screen on a `cols × rows` charcoal field,
+/// with a dismiss hint below it. The full-screen renderer draws this inside the
+/// alternate screen (the plain and rich renderers print [`rich_lines`] /
+/// [`plain_lines`] inline instead). Every returned line is exactly `cols`
+/// visible columns so the caller's background paint fills the whole screen.
+pub fn fullscreen_grid(
+    s: &SummaryData,
+    theme: &Theme,
+    journal: &VecDeque<String>,
+    cols: usize,
+    rows: usize,
+) -> Vec<String> {
+    let card = rich_lines(s, theme, journal);
+    let hint = theme.dim("Press Enter to finish");
+
+    // The centered block is the card, a blank spacer, and the hint line.
+    let card_w = card.iter().map(|l| visible_width(l)).max().unwrap_or(0);
+    let block_h = card.len() + 2;
+    let top = rows.saturating_sub(block_h) / 2;
+    let card_left = cols.saturating_sub(card_w) / 2;
+    let hint_left = cols.saturating_sub(visible_width(&hint)) / 2;
+
+    let mut grid = vec![" ".repeat(cols); rows];
+    for (i, line) in card.iter().enumerate() {
+        place(&mut grid, top + i, card_left, line, cols);
+    }
+    place(&mut grid, top + card.len() + 1, hint_left, &hint, cols);
+    grid
+}
+
+/// Write `line` into `grid[row]`, left-padded by `left` and fitted to `cols`
+/// visible columns. A row past the grid is a no-op (the card is clipped, not a
+/// panic, on a short terminal).
+fn place(grid: &mut [String], row: usize, left: usize, line: &str, cols: usize) {
+    if let Some(slot) = grid.get_mut(row) {
+        *slot = fit_to(&format!("{}{}", " ".repeat(left), line), cols);
+    }
+}
+
 fn success_card(s: &SummaryData, theme: &Theme, width: usize) -> Vec<String> {
     let installed = if s.status == "degraded" {
         "installed with warnings"
@@ -403,6 +442,24 @@ mod tests {
         assert!(joined.contains("192.168.1.42:8080"));
         assert!(joined.contains("ados help"));
         assert!(!joined.contains("localhost"));
+    }
+
+    #[test]
+    fn fullscreen_grid_centers_the_card_full_screen() {
+        let theme = Theme {
+            ascii: false,
+            tier: crate::ui::theme::ColorTier::None,
+        };
+        let journal = VecDeque::new();
+        let grid = fullscreen_grid(&sample("ok"), &theme, &journal, 100, 30);
+        // Exactly one full-width line per row so the background fills the screen.
+        assert_eq!(grid.len(), 30);
+        assert!(grid.iter().all(|l| visible_width(l) == 100));
+        // Carries the card content + the dismiss hint.
+        let joined = grid.join("\n");
+        assert!(joined.contains("ADOS Drone Agent"));
+        assert!(joined.contains("skynode.local:8080"));
+        assert!(joined.contains("Press Enter to finish"));
     }
 
     #[test]

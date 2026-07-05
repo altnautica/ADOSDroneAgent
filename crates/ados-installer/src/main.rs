@@ -89,6 +89,7 @@ async fn main() -> Result<ExitCode> {
                 tty,
                 ui::UNINSTALL_GROUPS,
                 ui::UNINSTALL_FOOTER,
+                false,
             );
             let res = uninstall::run_uninstall(purge, &sink);
             sink.finish();
@@ -157,6 +158,10 @@ fn run_install(mut args: Args, mode: RunMode) -> Result<ExitCode> {
     // controlling terminal is reachable (a carried wizard tty, or a fresh open).
     let base_mode = ui::detect_mode(&args);
     let theme = ui::Theme::detect(args.no_color, args.ascii);
+    // The onboarding wizard ran (and carried its tty) only on an interactive
+    // install; that gates the full-screen "installed" completion + key wait so
+    // an automated install never blocks. Capture it before the tty is consumed.
+    let interactive = carried_tty.is_some();
     let (render_mode, live_tty) = ui::resolve_live_mode(base_mode, carried_tty);
     let profile_hint = args.profile.clone().unwrap_or_else(|| "drone".to_string());
     let header = format!("Installing the ADOS Drone Agent ({profile_hint})…");
@@ -167,6 +172,7 @@ fn run_install(mut args: Args, mode: RunMode) -> Result<ExitCode> {
         live_tty,
         ui::INSTALL_GROUPS,
         ui::INSTALL_FOOTER,
+        interactive,
     );
 
     let env = EnvInfo::probe();
