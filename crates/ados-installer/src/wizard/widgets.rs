@@ -357,7 +357,11 @@ pub fn checklist(
         let mut body = vec![theme.heading(prompt), String::new()];
         for (i, item) in items.iter().enumerate() {
             let sel = i == cursor;
-            let checkbox = if item.checked {
+            let checkbox = if item.locked {
+                // A locked capability is not a choice: show a fixed filled dot,
+                // never a checkbox, so it does not read as a toggleable option.
+                theme.accent(theme.dot_filled())
+            } else if item.checked {
                 theme.accent(theme.box_checked())
             } else {
                 theme.dim(theme.box_unchecked())

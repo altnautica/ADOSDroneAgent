@@ -67,6 +67,17 @@ impl Step for WfbNg {
         StepKind::Required
     }
     fn run(&self, ctx: &mut Ctx) -> StepOutcome {
+        // A workstation / compute node is an operator console with no long-range
+        // radio, so it never needs the wfb-ng userspace stack + bind artifacts.
+        // Skip the build there; the radio profiles (drone / ground_station /
+        // relay / receiver) still hard-require it.
+        if matches!(ctx.profile.as_str(), "workstation" | "compute") {
+            tracing::info!(
+                profile = %ctx.profile,
+                "wfb-ng build skipped (profile has no long-range radio)"
+            );
+            return StepOutcome::Skipped;
+        }
         let source = match env::resolve_source_dir(ctx.source_dir.as_deref()) {
             Some(s) => s,
             None => {
@@ -146,5 +157,27 @@ mod tests {
         assert!(REQUIRED_BINS.contains(&"wfb-server"));
         assert!(REQUIRED_BINS.contains(&"wfb_keygen"));
         assert!(BIND_ARTIFACTS.contains(&"/etc/bind.key"));
+    }
+
+    #[test]
+    fn radio_profiles_build_but_workstation_and_compute_skip() {
+        use crate::checkpoint::Checkpoint;
+        use crate::cli::Args;
+        use crate::env::EnvInfo;
+        // A console profile with no long-range radio skips the wfb-ng build
+        // before it touches the source tree, so a laptop / GPU box never has to
+        // compile the radio stack it will not use.
+        for profile in ["workstation", "compute"] {
+            let args = Args {
+                profile: Some(profile.to_string()),
+                ..Args::default()
+            };
+            let mut ctx = Ctx::from_args(args, EnvInfo::probe(), Checkpoint::new());
+            assert_eq!(
+                WfbNg.run(&mut ctx),
+                StepOutcome::Skipped,
+                "{profile} must skip the radio build"
+            );
+        }
     }
 }
