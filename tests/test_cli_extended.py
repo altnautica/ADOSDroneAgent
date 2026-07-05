@@ -166,68 +166,60 @@ def test_status_plain_shows_pair_code_when_unpaired() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_update_check_only_already_up_to_date_path() -> None:
-    """When the check returns up_to_date the install endpoint must NOT fire."""
-    calls: list[tuple[str, str]] = []
-
-    def fake_request(method: str, path: str, **_kwargs):
-        calls.append((method, path))
-        if path == "/api/ota":
-            return {"current_version": "0.10.0"}
-        return {"status": "up_to_date"}
-
-    with patch("ados.cli.main._request", side_effect=fake_request):
-        result = runner.invoke(cli, ["update", "--check-only"])
+def test_update_already_up_to_date_skips_upgrade() -> None:
+    """When main is at the installed version, the upgrade must NOT run."""
+    with (
+        patch("ados.cli.main._installed_version", return_value="0.10.0"),
+        patch("ados.cli.main._latest_main_version", return_value="0.10.0"),
+        patch("ados.cli.main._run_upgrade") as upgrade,
+    ):
+        result = runner.invoke(cli, ["update"])
     assert result.exit_code == 0
     assert "Already up to date." in result.output
-    assert ("POST", "/api/ota/install") not in calls
+    upgrade.assert_not_called()
 
 
-def test_update_check_only_json_envelope_shape() -> None:
-    """``--json`` emits both the current state and the check result."""
-    def fake_request(method: str, path: str, **_kwargs):
-        if path == "/api/ota":
-            return {"current_version": "0.10.0", "state": "idle"}
-        return {"status": "update_available", "version": "0.10.1"}
-
-    with patch("ados.cli.main._request", side_effect=fake_request):
-        result = runner.invoke(cli, ["update", "--check-only", "--json"])
+def test_update_json_envelope_shape() -> None:
+    """``--json`` emits current + latest + update_available."""
+    with (
+        patch("ados.cli.main._installed_version", return_value="0.10.0"),
+        patch("ados.cli.main._latest_main_version", return_value="0.10.1"),
+    ):
+        result = runner.invoke(cli, ["update", "--json"])
     assert result.exit_code == 0
     parsed = json.loads(result.output)
-    assert set(parsed.keys()) == {"current", "check"}
-    assert parsed["current"]["current_version"] == "0.10.0"
-    assert parsed["check"]["status"] == "update_available"
-    assert parsed["check"]["version"] == "0.10.1"
+    assert set(parsed.keys()) == {"current_version", "latest_version", "update_available"}
+    assert parsed["current_version"] == "0.10.0"
+    assert parsed["latest_version"] == "0.10.1"
+    assert parsed["update_available"] is True
 
 
-def test_update_check_only_skips_install_call() -> None:
-    """``--check-only`` short-circuits before any install/restart RPC."""
-    calls: list[tuple[str, str]] = []
-
-    def fake_request(method: str, path: str, **_kwargs):
-        calls.append((method, path))
-        if path == "/api/ota":
-            return {"current_version": "0.10.0"}
-        return {"status": "update_available", "version": "0.10.5"}
-
-    with patch("ados.cli.main._request", side_effect=fake_request):
+def test_update_check_only_skips_upgrade() -> None:
+    """``--check-only`` reports versions and never runs the upgrade."""
+    with (
+        patch("ados.cli.main._installed_version", return_value="0.10.0"),
+        patch("ados.cli.main._latest_main_version", return_value="0.10.5"),
+        patch("ados.cli.main._run_upgrade") as upgrade,
+    ):
         result = runner.invoke(cli, ["update", "--check-only"])
-
     assert result.exit_code == 0
-    assert ("POST", "/api/ota/install") not in calls
-    assert ("POST", "/api/ota/restart") not in calls
+    upgrade.assert_not_called()
     assert "0.10.5" in result.output
 
 
-def test_update_transport_error_surfaces_as_click_exception() -> None:
-    """Connection-refused on the API endpoint becomes a friendly error."""
-    def fake_request(method: str, path: str, **_kwargs):
-        raise click.ClickException("Agent is not running.")
-
-    with patch("ados.cli.main._request", side_effect=fake_request):
-        result = runner.invoke(cli, ["update", "--check-only"])
+def test_update_upgrade_failure_surfaces_as_click_exception() -> None:
+    """A failure fetching/running the installer surfaces as a friendly error."""
+    with (
+        patch("ados.cli.main._installed_version", return_value="0.10.0"),
+        patch("ados.cli.main._latest_main_version", return_value="0.10.1"),
+        patch(
+            "ados.cli.main._run_upgrade",
+            side_effect=click.ClickException("Could not fetch the installer"),
+        ),
+    ):
+        result = runner.invoke(cli, ["update", "--yes"])
     assert result.exit_code != 0
-    assert "Agent is not running." in result.output
+    assert "Could not fetch the installer" in result.output
 
 
 # ---------------------------------------------------------------------------

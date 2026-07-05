@@ -1,4 +1,4 @@
-"""System-level service configuration (OTA, vision, atlas, logging, pairing, discovery, swarm, UI)."""
+"""System-level service configuration (vision, atlas, logging, pairing, discovery, swarm, UI)."""
 
 from __future__ import annotations
 
@@ -7,15 +7,6 @@ from typing import Literal
 from pydantic import BaseModel
 
 from ados.core.paths import FLIGHT_LOGS_DIR, PAIRING_JSON
-
-
-class OtaConfig(BaseModel):
-    channel: str = "stable"
-    check_interval: int = 24
-    auto_install: bool = False
-    github_repo: str = "altnautica/ADOSDroneAgent"
-    pip_path: str = "/opt/ados/venv/bin/pip"
-    service_name: str = "ados-supervisor"
 
 
 class VisionConfig(BaseModel):

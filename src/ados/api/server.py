@@ -20,7 +20,6 @@ from ados.api.routes import (
     logs,
     network,
     observability,
-    ota,
     pairing,
     peripherals,
     peripherals_v1,
@@ -93,7 +92,6 @@ def create_app(agent: Any) -> FastAPI:
     app.include_router(observability.router, prefix="/api")
     app.include_router(video.router, prefix="/api")
     app.include_router(wfb.router, prefix="/api")
-    app.include_router(ota.router, prefix="/api")
     app.include_router(pairing.router, prefix="/api")
     app.include_router(setup.router, prefix="/api")
     app.include_router(dashboard.router, prefix="/api")

@@ -1,6 +1,6 @@
 """Ed25519 signature verification and revocation list for plugins.
 
-Reuses the OTA-side primitives in :mod:`ados.services.ota.verifier`.
+Reuses the detached-signature primitives in :mod:`ados.services.signing`.
 The signing model:
 
 * Signing payload: SHA-256 of the canonical archive contents minus the
@@ -24,7 +24,7 @@ from pathlib import Path
 from ados.core.logging import get_logger
 from ados.core.paths import PLUGIN_KEYS_DIR, PLUGIN_REVOCATIONS_PATH
 from ados.plugins.errors import SignatureError
-from ados.services.ota.verifier import verify_signature
+from ados.services.signing import verify_signature
 
 log = get_logger("plugins.signing")
 
@@ -139,8 +139,8 @@ Maintained in code rather than via filesystem prefix-matching so a
 malicious actor with write access to ``/etc/ados/plugin-keys/`` cannot
 plant a key file with the right prefix and impersonate first-party
 status. Rotate by adding the new signer id and dropping the retired
-one in a deliberate code change. Coordinated with the OTA signing key
-rotation in :mod:`ados.services.ota`.
+one in a deliberate code change, coordinated with the detached-signature
+verifier in :mod:`ados.services.signing`.
 """
 
 

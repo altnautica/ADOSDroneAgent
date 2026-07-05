@@ -19,7 +19,6 @@ class ApiRuntime(Protocol):
     discovery_service: Any
     board_name: str
     demo: bool
-    ota_updater: Any
     model_manager: Any
 
     @property
@@ -75,10 +74,6 @@ class ApiRuntimeFacade:
     @property
     def demo(self) -> bool:
         return self._runtime.demo
-
-    @property
-    def ota_updater(self) -> Any:
-        return getattr(self._runtime, "ota_updater", None)
 
     @property
     def model_manager(self) -> Any:
@@ -226,7 +221,6 @@ class StandaloneApiRuntime:
         self.video_pipeline_handle = None
         self.wfb_manager_handle = None
         self.signing_observer = None
-        self.ota_updater = None
         self.discovery_service = None
         self.board_name = "unknown"
         self.health = HealthMonitor()

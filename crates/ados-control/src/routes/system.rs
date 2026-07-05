@@ -42,7 +42,9 @@ pub const CAPABILITIES: [&str; 16] = [
     // GCS may key a fallback path on its presence or absence, so the token is
     // never renamed or removed once shipped.
     "scripts.runtime",
-    // /api/ota/* over-the-air updater.
+    // Retired capability: the /api/ota endpoint no longer ships (updates now
+    // run the installer), but the token stays for the append-only capability
+    // contract — an older GCS may key a fallback path on its presence.
     "ota.updater",
     // /api/pairing/* device-link mnemonic + token rotation.
     "pairing.mnemonic",

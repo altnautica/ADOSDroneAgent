@@ -160,7 +160,6 @@ pub const SERVICE_REGISTRY: &[ServiceDef] = &[
     // KEEP set: the compute profile is heavy, not the lean drone headless core.
     def("ados-compute", Core, Some("workstation|compute"), None),
     // On-demand.
-    def("ados-ota", OnDemand, None, None),
     def("ados-discovery", OnDemand, None, None),
     // The native HTTP control surface. Cross-profile and on-demand: it ships
     // disabled (the GCS uses the FastAPI surface) and only runs when the operator
@@ -299,7 +298,7 @@ mod tests {
     #[test]
     fn registry_has_expected_shape() {
         let specs = build_specs();
-        assert_eq!(specs.len(), 33, "service count drifted from the catalog");
+        assert_eq!(specs.len(), 32, "service count drifted from the catalog");
         // Core tier members. ados-mavlink/api/cloud/health are the cross-profile
         // always-on core (the single cloud unit serves the gateway + heartbeat on
         // both profiles, spawning the ground-station bridge when the role resolves

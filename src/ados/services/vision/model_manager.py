@@ -349,8 +349,7 @@ class ModelManager:
     async def download_model(self, model_id: str) -> str:
         """Download a model, selecting the best variant for this board.
 
-        Uses HTTP range-resume for interrupted downloads (same pattern as
-        the OTA downloader in src/ados/services/ota/downloader.py).
+        Uses HTTP range-resume for interrupted downloads.
 
         Returns the final file path on success.
         """

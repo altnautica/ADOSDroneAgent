@@ -17,7 +17,6 @@ from .system import (
     AtlasConfig,
     DiscoveryConfig,
     LoggingConfig,
-    OtaConfig,
     PairingConfig,
     SwarmConfig,
     UiConfig,
@@ -35,7 +34,6 @@ class ADOSConfig(BaseModel):
     remote_access: RemoteAccessConfig = RemoteAccessConfig()
     security: SecurityConfig = SecurityConfig()
     api: ApiConfig = ApiConfig()
-    ota: OtaConfig = OtaConfig()
     logging: LoggingConfig = LoggingConfig()
     pairing: PairingConfig = PairingConfig()
     discovery: DiscoveryConfig = DiscoveryConfig()

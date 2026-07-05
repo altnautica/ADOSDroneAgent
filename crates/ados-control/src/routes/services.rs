@@ -243,7 +243,6 @@ fn short_name_to_unit(name: &str) -> Option<&'static str> {
         "agent-heartbeat" => Some("ados-cloud.service"),
         "pairing-beacon" => Some("ados-cloud.service"),
         "pairing-heartbeat" => Some("ados-cloud.service"),
-        "ota-updater" => Some("ados-ota.service"),
         _ => None,
     }
 }
@@ -443,9 +442,9 @@ mod tests {
 
     #[test]
     fn parses_an_inactive_service_row() {
-        let row = "ados-ota.service loaded inactive dead ADOS OTA updater";
+        let row = "ados-discovery.service loaded inactive dead ADOS discovery";
         let svc = parse_unit_line(row).unwrap();
-        assert_eq!(svc["name"], json!("ados-ota"));
+        assert_eq!(svc["name"], json!("ados-discovery"));
         assert_eq!(svc["active"], json!(false));
         assert_eq!(svc["state"], json!("inactive"));
         assert_eq!(svc["sub_state"], json!("dead"));
@@ -531,7 +530,7 @@ mod tests {
         // absent unit. The field is always present.
         let mut services = vec![
             json!({"name": "ados-video", "active": true, "state": "active"}),
-            json!({"name": "ados-ota", "active": false, "state": "inactive"}),
+            json!({"name": "ados-discovery", "active": false, "state": "inactive"}),
         ];
         attach_service_memory(&mut services);
         for svc in &services {

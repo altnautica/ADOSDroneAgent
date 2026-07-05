@@ -60,7 +60,6 @@ _SHORT_NAME_TO_UNIT: dict[str, str] = {
     "agent-heartbeat": "ados-cloud.service",
     "pairing-beacon": "ados-cloud.service",
     "pairing-heartbeat": "ados-cloud.service",
-    "ota-updater": "ados-ota.service",
 }
 
 

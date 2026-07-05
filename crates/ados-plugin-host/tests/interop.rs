@@ -3,7 +3,7 @@
 //!
 //! `tests/interop/fixtures.json` is generated from the live Python agent code
 //! (`tests/interop/generate_fixtures.py` imports `ados.plugins.archive` for the
-//! canonical payload hash and `ados.services.ota.verifier` for the Ed25519
+//! canonical payload hash and `ados.services.signing` for the Ed25519
 //! verifier). These tests assert the Rust `ados-plugin-host` crate computes the
 //! exact same canonical hash and verifies a signature the agent produced, plus
 //! the tampered / revoked / unknown-signer reject paths. This is the regression

@@ -24,7 +24,6 @@ class ApiRuntimeTestDouble:
         param_cache: Any | None = None,
         video_pipeline: Any | None = None,
         wfb_manager: Any | None = None,
-        ota_updater: Any | None = None,
     ) -> None:
         self.config = config or ADOSConfig()
         self.health = HealthMonitor()
@@ -38,7 +37,6 @@ class ApiRuntimeTestDouble:
         self.video_pipeline_handle = video_pipeline
         self.wfb_manager_handle = wfb_manager
         self.signing_observer = None
-        self.ota_updater = ota_updater
         self.discovery_service = None
         self.board_name = "test"
         self.demo = False

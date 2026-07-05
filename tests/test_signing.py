@@ -1,4 +1,4 @@
-"""Tests for OTA cryptographic verification."""
+"""Tests for detached-signature + sha256 verification (ados.services.signing)."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from cryptography.hazmat.primitives.serialization import (
     PublicFormat,
 )
 
-from ados.services.ota.verifier import (
+from ados.services.signing import (
     load_update_public_key,
     verify_sha256,
     verify_signature,

@@ -107,19 +107,16 @@ def test_root_command_falls_back_to_plain_status_in_non_tty() -> None:
 
 
 def test_update_check_only_does_not_install() -> None:
-    calls: list[tuple[str, str]] = []
-
-    def fake_request(method: str, path: str, **_kwargs):
-        calls.append((method, path))
-        if path == "/api/ota":
-            return {"current_version": "0.10.0"}
-        return {"status": "update_available", "version": "0.10.1"}
-
-    with patch("ados.cli.main._request", side_effect=fake_request):
+    with (
+        patch("ados.cli.main._installed_version", return_value="0.10.0"),
+        patch("ados.cli.main._latest_main_version", return_value="0.10.1"),
+        patch("ados.cli.main._run_upgrade") as upgrade,
+    ):
         result = runner.invoke(cli, ["update", "--check-only"])
     assert result.exit_code == 0
-    assert "Update available: 0.10.1" in result.output
-    assert ("POST", "/api/ota/install") not in calls
+    assert "Current version: 0.10.0" in result.output
+    assert "Latest (main):   0.10.1" in result.output
+    upgrade.assert_not_called()
 
 
 def test_demo_uses_user_writable_pairing_state(tmp_path) -> None:

@@ -240,6 +240,11 @@ pub fn run(args: &Args) -> Result<ExitCode> {
     let agent_version = agent_version_from_source(&source);
     build_and_install_binaries(&source, &paths)?;
 
+    // 2b. Install the `ados` management CLI so `ados update` / `status` / `logs`
+    //     work on the workstation (the Rust node ships no `ados` command of its
+    //     own). Best-effort: the daemons + the GCS work without it.
+    install_cli(&source);
+
     // 3. Identity + operator config + optional pairing material.
     let device_id = write_identity_and_config(args, &paths, &profile)?;
 
@@ -455,6 +460,50 @@ fn install_brew_deps() {
         println!(
             "  deps: colmap not installed; the reconstruction engine uses its \
              random-init path (run `brew install colmap` for the accurate seed)"
+        );
+    }
+}
+
+/// Install the `ados` management CLI (a Python console script) from the source
+/// tree so `ados update` / `ados status` / `ados logs` / `ados uninstall` work on
+/// the workstation — the Rust node ships no `ados` command of its own. Runs on
+/// every upgrade so the CLI tracks the agent. Best-effort: the daemons and the
+/// GCS work without it, so a missing python3/pip or a pip failure warns loudly
+/// with the manual command rather than failing the whole install.
+fn install_cli(source: &Path) {
+    if !exec::run_ok("sh", &["-c", "command -v python3"]) {
+        println!(
+            "  cli: python3 not found — the `ados` command was not installed. \
+             Install Python 3, then run: python3 -m pip install {}",
+            source.display()
+        );
+        return;
+    }
+    if !exec::run_ok("python3", &["-m", "pip", "--version"]) {
+        println!(
+            "  cli: pip is unavailable under python3 — the `ados` command was not \
+             installed. Install pip, then run: python3 -m pip install {}",
+            source.display()
+        );
+        return;
+    }
+    println!("  cli: installing the ados command (pip) …");
+    let src = source.to_string_lossy().to_string();
+    let res = exec::run("python3", &["-m", "pip", "install", "--upgrade", &src]);
+    if res.success() {
+        println!("  cli: ados command ready");
+    } else {
+        let why = res
+            .stderr
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("")
+            .trim();
+        println!("  cli: could not install the `ados` command automatically ({why}).");
+        println!(
+            "       Run it by hand: python3 -m pip install {}",
+            source.display()
         );
     }
 }

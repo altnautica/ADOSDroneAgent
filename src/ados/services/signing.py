@@ -1,4 +1,10 @@
-"""Cryptographic verification for OTA update packages."""
+"""Generic detached-signature and file-hash verification primitives.
+
+Ed25519 detached-signature verification plus streaming SHA-256 file hashing.
+Self-contained (base64 + hashlib + ``cryptography``), with no dependency on any
+particular consumer. The plugin signing layer (:mod:`ados.plugins.signing`)
+verifies plugin-archive signatures with these helpers.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +14,7 @@ from pathlib import Path
 
 from ados.core.logging import get_logger
 
-log = get_logger("ota-verifier")
+log = get_logger("signing-verifier")
 
 HASH_CHUNK_SIZE = 65536
 

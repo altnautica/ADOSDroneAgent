@@ -245,16 +245,15 @@ fn native_routes() -> Vec<NativeRoute> {
 }
 
 /// The path prefixes the agent keeps in Python by design — the ecosystem-bound
-/// features (vision/AI, the plugin runtime, the setup facade, OTA, peripherals,
+/// features (vision/AI, the plugin runtime, the setup facade, peripherals,
 /// the WebRTC playback endpoint, the LCD/OLED display surface, calibration). A
 /// request under one of these is a known feature that has not migrated, NOT an
 /// unknown path: when the residual upstream is gone (the zero-Python headless
 /// profile), the proxy answers `501` for these rather than `404`.
-pub const PERMANENT_PYTHON_PREFIXES: [&str; 8] = [
+pub const PERMANENT_PYTHON_PREFIXES: [&str; 7] = [
     "/api/vision",
     "/api/plugins",
     "/api/setup",
-    "/api/ota",
     "/api/peripherals",
     "/whep",
     "/api/display",

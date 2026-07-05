@@ -16,7 +16,7 @@ per-domain files alongside this barrel:
 * ``security.py`` — :class:`SecurityConfig` and friends, plus
   :data:`DEFAULT_CORS_ORIGINS`
 * ``api.py`` — :class:`ApiConfig`, :class:`RestApiConfig`
-* ``system.py`` — :class:`OtaConfig`, :class:`VisionConfig`,
+* ``system.py`` — :class:`VisionConfig`,
   :class:`LoggingConfig`, :class:`PairingConfig`, :class:`DiscoveryConfig`,
   :class:`SwarmConfig`, :class:`LoraConfig`,
   :class:`WifiDirectConfig`, :class:`UiConfig`
@@ -76,7 +76,6 @@ from .system import (
     DiscoveryConfig,
     LoggingConfig,
     LoraConfig,
-    OtaConfig,
     PairingConfig,
     SwarmConfig,
     UiConfig,
@@ -126,7 +125,6 @@ __all__ = [
     "DiscoveryConfig",
     "LoggingConfig",
     "LoraConfig",
-    "OtaConfig",
     "PairingConfig",
     "SwarmConfig",
     "UiConfig",

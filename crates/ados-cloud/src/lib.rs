@@ -1,10 +1,9 @@
 //! Cloud relay for the ADOS Drone Agent.
 //!
 //! The cloud relay bridges the agent to Mission Control's cloud backend: it
-//! pushes a periodic status heartbeat, polls a command queue, relays MAVLink and
-//! WebRTC signaling, and polls for software updates. This crate ports those
-//! pieces from `src/ados/services/cloud/` + the update poller from
-//! `src/ados/services/ota/`, keeping the wire contracts byte-identical so the
+//! pushes a periodic status heartbeat, polls a command queue, and relays MAVLink
+//! and WebRTC signaling. This crate ports those pieces from
+//! `src/ados/services/cloud/`, keeping the wire contracts byte-identical so the
 //! move to Rust is invisible to the receiver.
 //!
 //! This layer carries the frozen heartbeat wire model, the config + pairing
@@ -14,10 +13,6 @@
 //! dispatcher (idempotent, plugin lifecycle over the frozen supervisor), the
 //! ground-station relay bridge (uplink-aware MQTT supervision + data-cap
 //! downshift + GS status heartbeat).
-//!
-//! The software-update path stays in the Python agent (`/api/ota` +
-//! updater/downloader/rollback back the GCS and the `ados update` CLI): it is
-//! API-coupled and not hot/safety-critical, so it is not ported here.
 //!
 //! Modules:
 //! - [`heartbeat`] — the frozen `agent/status` wire model (camelCase root,

@@ -179,7 +179,7 @@ pub fn verify_archive_signature(
 }
 
 /// Verify a base64 Ed25519 signature over `data` with `key`. Any decode or
-/// length failure verifies as `false`, mirroring the Python OTA verifier's
+/// length failure verifies as `false`, mirroring the Python signing verifier's
 /// catch-all-and-return-false posture (the caller maps a `false` to the
 /// `invalid` kind).
 pub fn verify_ed25519(data: &[u8], signature_b64: &str, key: &VerifyingKey) -> bool {

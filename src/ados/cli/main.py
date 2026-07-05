@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -298,41 +300,133 @@ def version() -> None:
     click.echo(__version__)
 
 
+# The canonical install one-liner drives updates too: `ados update` re-runs it
+# in upgrade mode, which is the ONE path that actually updates the agent (the
+# Rust daemons + the CLI). On Linux it refetches the prebuilt installer and
+# re-runs the full chain; on macOS it git-pulls the source and rebuilds. Both
+# preserve identity/config. This deliberately replaces the old pip-wheel OTA,
+# which only ever updated a Python wheel, not the Rust agent.
+INSTALL_SH_URL = "https://raw.githubusercontent.com/altnautica/ADOSDroneAgent/main/scripts/install.sh"
+REMOTE_VERSION_URL = (
+    "https://raw.githubusercontent.com/altnautica/ADOSDroneAgent/main/src/ados/__init__.py"
+)
+
+
+def _installed_version() -> str:
+    """The version this agent reports, preferring the running agent, then the
+    recorded install result, then the CLI package."""
+    try:
+        data = _request("GET", "/api/version", timeout=4.0)
+        v = data.get("version") or data.get("agent_version")
+        if isinstance(v, str) and v:
+            return v
+    except click.ClickException:
+        pass
+    result = _read_install_result()
+    if result and isinstance(result.get("version"), str):
+        return str(result["version"])
+    try:
+        from ados import __version__
+
+        return __version__
+    except Exception:  # noqa: BLE001 - version display only, never fatal
+        return "unknown"
+
+
+def _latest_main_version() -> str | None:
+    """The `__version__` on the tip of `main`, or None if it can't be fetched."""
+    try:
+        with httpx.Client(timeout=15.0, follow_redirects=True) as client:
+            resp = client.get(REMOTE_VERSION_URL)
+            resp.raise_for_status()
+        match = re.search(r'__version__\s*=\s*"([^"]+)"', resp.text)
+        return match.group(1) if match else None
+    except (httpx.HTTPError, ValueError):
+        return None
+
+
+def _run_upgrade() -> None:
+    """Fetch the canonical install.sh (latest main) and run it in upgrade mode.
+
+    Linux needs root (the systemd install writes under /opt and /etc), so
+    elevate with sudo when not already root; macOS installs per-user (build
+    from source), so no sudo. The installer runs inline so its live progress
+    stays attached to this terminal.
+    """
+    try:
+        with httpx.Client(timeout=30.0, follow_redirects=True) as client:
+            resp = client.get(INSTALL_SH_URL)
+            resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise click.ClickException(f"Could not fetch the installer: {exc}") from exc
+
+    fd, script = tempfile.mkstemp(suffix="-ados-install.sh")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(resp.text)
+        argv = ["bash", script, "--upgrade"]
+        if platform.system() == "Linux" and os.geteuid() != 0:
+            if shutil.which("sudo") is None:
+                raise click.ClickException(
+                    "Updating needs root on Linux. Re-run as: sudo ados update"
+                )
+            argv = ["sudo", *argv]
+        try:
+            completed = subprocess.run(argv, check=False)  # noqa: S603
+        except OSError as exc:
+            raise click.ClickException(f"Failed to launch the installer: {exc}") from exc
+    finally:
+        try:
+            os.unlink(script)
+        except OSError:
+            pass
+
+    if completed.returncode != 0:
+        raise click.ClickException(f"Update finished with exit code {completed.returncode}.")
+
+
 @cli.command()
-@click.option("--check-only", is_flag=True, help="Check for updates without installing.")
-@click.option("--yes", "-y", is_flag=True, help="Install without an interactive prompt.")
+@click.option("--check-only", is_flag=True, help="Report the current + latest version, don't install.")
+@click.option("--yes", "-y", is_flag=True, help="Update without an interactive prompt.")
 @click.option("--json", "as_json", is_flag=True, help="Output JSON for scripts.")
 def update(check_only: bool, yes: bool, as_json: bool) -> None:
-    """Check for and optionally install an agent update."""
-    current = _request("GET", "/api/ota")
-    checked = _request("POST", "/api/ota/check", timeout=30.0)
+    """Update the agent to the latest and restart it."""
+    current = _installed_version()
+    latest = _latest_main_version()
+    available = bool(latest and latest != current)
+
     if as_json:
-        click.echo(json.dumps({"current": current, "check": checked}, indent=2))
+        click.echo(
+            json.dumps(
+                {
+                    "current_version": current,
+                    "latest_version": latest,
+                    "update_available": available,
+                },
+                indent=2,
+            )
+        )
         return
 
-    version = current.get("current_version", current.get("version", "?"))
-    click.echo(f"Current version: {version}")
-    if checked.get("status") != "update_available":
+    click.echo(f"Current version: {current}")
+    if latest:
+        click.echo(f"Latest (main):   {latest}")
+    else:
+        click.echo("Latest version:  could not check — updating to the latest main anyway.")
+
+    if check_only:
+        return
+
+    if latest is not None and not available:
         click.echo("Already up to date.")
         return
 
-    new_version = checked.get("version", "?")
-    click.echo(f"Update available: {new_version}")
-    if check_only:
-        return
     if not yes:
-        click.confirm(f"Install {new_version} now?", abort=True)
+        click.confirm("Update the agent to the latest now?", abort=True)
 
-    from ados.cli import update_ui
-
-    # Interactive (a live phase checklist + download bar + closing card) when
-    # stderr is a terminal; plain line output when piped / `--json`.
-    update_ui.run(
-        _request,
-        current_version=str(version),
-        new_version=str(new_version),
-        interactive=sys.stderr.isatty() and not as_json,
-    )
+    click.echo("Updating — this rebuilds and restarts the agent…")
+    _run_upgrade()
+    click.echo("Update complete.")
 
 
 # Install orchestration contract paths. The installer writes a machine

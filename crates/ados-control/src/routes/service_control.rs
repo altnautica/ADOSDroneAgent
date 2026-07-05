@@ -80,7 +80,6 @@ const ALLOWED_UNITS: &[&str] = &[
     "ados-mediamtx-gs",
     "ados-mesh-pairing",
     "ados-oled",
-    "ados-ota",
     "ados-peripherals",
     "ados-pic",
     "ados-uplink-router",

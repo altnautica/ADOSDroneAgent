@@ -16,7 +16,6 @@ def test_default_config():
     assert cfg.mavlink.baud_rate == 57600
     assert cfg.mavlink.system_id == 1
     assert cfg.mavlink.component_id == 191
-    assert cfg.ota.service_name == "ados-supervisor"
     assert cfg.logging.level == "info"
     assert cfg.swarm.enabled is False
 

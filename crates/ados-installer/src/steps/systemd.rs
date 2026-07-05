@@ -833,7 +833,7 @@ fn reconcile_front_unit() {
 /// telemetry / params / services / fleet / signing / wfb / video / ground-station
 /// read + control routes are served by `ados-control` and have been removed from
 /// the residual FastAPI (which keeps only the permanent-Python features —
-/// vision, plugins, setup, OTA, WHEP, display — behind the front's proxy). So the
+/// vision, plugins, setup, WHEP, display — behind the front's proxy). So the
 /// front is the only LAN surface that answers those routes: a fresh box, and an
 /// upgrade from a pre-removal release, must come up with `ados-control` owning
 /// :8080 or the migrated routes would 404 on FastAPI. Write the marker the two

@@ -67,8 +67,6 @@ class AgentApp:
         # can surface the previous value as `mavlinkWsUrlPrev` for one tick
         # whenever the URL rotates (e.g. config reload, tunnel re-issue).
         self._last_mavlink_ws_url: str | None = None
-        # Public attribute: accessed by OTA API routes via get_agent_app().ota_updater
-        self.ota_updater: Any = None
         # Vision model registry + cache, populated by service_registry.
         self.model_manager: Any = None
 

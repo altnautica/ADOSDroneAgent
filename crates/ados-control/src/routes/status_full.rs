@@ -446,7 +446,6 @@ fn unit_for_service(name: &str) -> Option<String> {
         "agent-heartbeat" => Some("ados-cloud.service".to_string()),
         "pairing-beacon" => Some("ados-cloud.service".to_string()),
         "pairing-heartbeat" => Some("ados-cloud.service".to_string()),
-        "ota-updater" => Some("ados-ota.service".to_string()),
         _ => None,
     }
 }
@@ -1827,9 +1826,9 @@ mod tests {
     #[test]
     fn fallback_line_maps_a_dead_unit_state_to_its_substate() {
         // A non-running sub-state surfaces verbatim (e.g. "dead"); task_done true.
-        let row = "ados-ota.service loaded inactive dead ADOS OTA updater";
+        let row = "ados-discovery.service loaded inactive dead ADOS discovery";
         let svc = parse_fallback_line(row).unwrap();
-        assert_eq!(svc["name"], json!("ados-ota"));
+        assert_eq!(svc["name"], json!("ados-discovery"));
         assert_eq!(svc["state"], json!("dead"));
         assert_eq!(svc["status"], json!("dead"));
         assert_eq!(svc["task_done"], json!(true));

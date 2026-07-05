@@ -4,8 +4,8 @@ A dependency-free house style — rounded boxes, a braille spinner, a green/red
 palette with a cyan accent, and ASCII + ``NO_COLOR`` fallbacks — used across the
 operator-facing ``ados`` surfaces: the plain status one-pager, ``ados help``,
 ``ados pair`` / ``ados unpair``, and the ``ados uninstall`` progress checklist.
-``ados update`` (``update_ui.py``) shares the same ``Theme`` / ``Sticky`` / ``bar``
-/ ``print_card`` primitives, re-imported from here.
+The interactive CLI commands share the same ``Theme`` / ``Sticky`` / ``bar`` /
+``print_card`` primitives, re-imported from here.
 
 Render-only: content goes to stdout, the sticky progress block goes to stderr,
 and nothing ever reads input, so every surface is safe over SSH and degrades to

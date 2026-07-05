@@ -2,7 +2,7 @@
 """Generate cross-language plugin-lifecycle fixtures from the live agent code.
 
 This imports the live ``ados.plugins.archive`` canonical-hash function and the
-``ados.services.ota.verifier`` Ed25519 verifier, builds a real ``.adosplug``
+``ados.services.signing`` Ed25519 verifier, builds a real ``.adosplug``
 zip, computes the canonical payload hash the way the agent signs it, signs that
 hash with a fresh Ed25519 keypair, and writes everything the Rust
 ``ados-plugin-host`` crate needs to assert byte-for-byte parity:
@@ -35,7 +35,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from ados.plugins.archive import parse_archive_bytes
-from ados.services.ota.verifier import verify_signature
+from ados.services.signing import verify_signature
 
 SIGNER_ID = "altnautica-2026-A"
 

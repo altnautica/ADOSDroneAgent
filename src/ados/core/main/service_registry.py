@@ -176,23 +176,6 @@ async def register_services(app: AgentApp) -> None:  # noqa: C901
         app._wfb_manager = DemoWfbManager()
         app._start_service("wfb-link", app._wfb_manager.run())
 
-    # Start OTA Updater
-    if app.demo:
-        from ados.services.ota.demo import DemoOtaUpdater
-        app.ota_updater = DemoOtaUpdater()
-        app._start_service("ota-updater", app.ota_updater.run())
-    else:
-        from ados.services.ota.checker import UpdateChecker
-        from ados.services.ota.downloader import UpdateDownloader
-        from ados.services.ota.updater import OtaUpdater
-        checker = UpdateChecker(app.config.ota)
-        downloader = UpdateDownloader()
-        app.ota_updater = OtaUpdater(
-            app.config.ota, checker, downloader,
-            current_version=__version__,
-        )
-        app._start_service("ota-updater", app.ota_updater.run())
-
     # Health monitor loop
     app._start_service("health-monitor", app._health_loop())
 
