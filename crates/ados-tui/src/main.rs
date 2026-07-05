@@ -105,6 +105,9 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, client: &RestClient) -
     // When the last successful poll landed (distinct from the per-attempt
     // `refreshed` clock, which advances even on a failed fetch).
     let mut last_success: Option<Instant> = None;
+    // Best-effort snapshot from the native `/api/status` route, merged for the
+    // richer FC-link truth (port-open-but-silent). Absent → the gated boolean.
+    let mut fc_status: Option<Value> = None;
     // Trend buffers of verified telemetry, one sample per successful poll.
     let mut history = History::default();
 
@@ -124,6 +127,9 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, client: &RestClient) -
                 }
                 Err(e) => error = Some(format!("Agent unreachable: {e}")),
             }
+            // Best-effort: the native status route carries the FC transport /
+            // heartbeat split. A failure here leaves the gated boolean standing.
+            fc_status = client.status().ok();
             refreshed = now_hms();
             last_fetch = Some(Instant::now());
         }
@@ -131,7 +137,13 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, client: &RestClient) -
         // The snapshot is stale when the last success is older than STALE_AFTER
         // (the fetch is erroring while an old snapshot is still on screen).
         let stale = last_success.is_some_and(|t| t.elapsed() > STALE_AFTER);
-        let dash = data.as_ref().map(Dashboard::from_status);
+        let dash = data.as_ref().map(|v| {
+            let mut d = Dashboard::from_status(v);
+            if let Some(fc) = &fc_status {
+                d.merge_fc_status(fc);
+            }
+            d
+        });
         terminal
             .draw(|f| ui::render(f, dash.as_ref(), &history, &refreshed, stale, error.as_deref()))?;
 

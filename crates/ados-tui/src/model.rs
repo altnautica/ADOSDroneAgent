@@ -50,6 +50,17 @@ pub enum Health {
     Setup,
 }
 
+/// The flight-controller link state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FcLink {
+    /// Transport open and a fresh HEARTBEAT — the gated "connected" truth.
+    Connected,
+    /// Transport open but no HEARTBEAT decoded (e.g. an MSP FC, or wrong baud).
+    PortOpen,
+    /// No FC link.
+    Down,
+}
+
 impl Health {
     /// The status glyph shown before the word.
     pub fn dot(self) -> &'static str {
@@ -562,6 +573,57 @@ impl Dashboard {
         self.rows_for(kinds).into_iter().next().map(|r| r.url)
     }
 
+    /// Merge the richer FC-link truth from the native `/api/status` route. The
+    /// setup-status `mavlink.connected` is the gated boolean; the transport-open-
+    /// but-silent distinction lives here. Best-effort: called only when the
+    /// route was reachable this poll.
+    pub fn merge_fc_status(&mut self, status: &Value) {
+        self.transport_open = status.get("transportOpen").and_then(Value::as_bool);
+        self.mavlink_alive = status.get("mavlinkAlive").and_then(Value::as_bool);
+        self.fc_link_hint = status
+            .get("fcLinkHint")
+            .and_then(Value::as_str)
+            .filter(|h| !h.is_empty() && *h != "none")
+            .map(str::to_string);
+        // Fall back to /api/status port/baud only when setup-status lacked them.
+        if self.fc_port.is_none() {
+            self.fc_port = opt_str(status, "fc_port");
+        }
+        if self.fc_baud.is_none() {
+            self.fc_baud = status
+                .get("fc_baud")
+                .and_then(Value::as_i64)
+                .filter(|b| *b > 0);
+        }
+    }
+
+    /// The FC-link state: the gated `connected` truth, refined by the
+    /// `/api/status` transport/heartbeat split into a "port open · no MAVLink"
+    /// case when that detail is available.
+    pub fn fc_link(&self) -> FcLink {
+        if self.mavlink_connected {
+            FcLink::Connected
+        } else if self.transport_open == Some(true) && self.mavlink_alive == Some(false) {
+            FcLink::PortOpen
+        } else {
+            FcLink::Down
+        }
+    }
+
+    /// A short link hint (e.g. `msp detected`), when the router reports one.
+    pub fn fc_hint(&self) -> Option<String> {
+        self.fc_link_hint.as_ref().map(|h| h.replace('_', " "))
+    }
+
+    /// The FC serial detail, e.g. `ttyS0 · 921600`, when a port is known.
+    pub fn fc_endpoint(&self) -> Option<String> {
+        let port = self.fc_port.as_ref()?;
+        Some(match self.fc_baud {
+            Some(baud) => format!("{port} · {baud}"),
+            None => port.clone(),
+        })
+    }
+
     /// The overall health verdict, from verified inputs only.
     pub fn health(&self) -> Health {
         let services_all_running =
@@ -752,6 +814,29 @@ mod tests {
         let groups = Dashboard::from_status(&data).reach_links();
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].title, "Console");
+    }
+
+    #[test]
+    fn fc_link_refines_with_api_status() {
+        // The gated boolean wins when connected.
+        let connected = Dashboard {
+            mavlink_connected: true,
+            ..Dashboard::default()
+        };
+        assert_eq!(connected.fc_link(), FcLink::Connected);
+
+        // Transport open but no heartbeat (from /api/status) reads port-open.
+        let mut port_open = Dashboard::default();
+        port_open.merge_fc_status(&json!({
+            "transportOpen": true, "mavlinkAlive": false,
+            "fcLinkHint": "msp_detected", "fc_port": "ttyS0", "fc_baud": 921600
+        }));
+        assert_eq!(port_open.fc_link(), FcLink::PortOpen);
+        assert_eq!(port_open.fc_hint().as_deref(), Some("msp detected"));
+        assert_eq!(port_open.fc_endpoint().as_deref(), Some("ttyS0 · 921600"));
+
+        // No transport detail at all → down.
+        assert_eq!(Dashboard::default().fc_link(), FcLink::Down);
     }
 
     #[test]

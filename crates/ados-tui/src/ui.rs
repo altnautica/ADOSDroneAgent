@@ -11,7 +11,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Gauge, Paragraph, Sparkline, Wrap};
 use ratatui::Frame;
 
-use crate::model::{state_label, Dashboard, Health, History};
+use crate::model::{state_label, Dashboard, FcLink, Health, History};
 use crate::theme;
 
 fn dim() -> Style {
@@ -322,10 +322,10 @@ fn autopilot_panel(frame: &mut Frame, area: Rect, dash: &Dashboard, history: &Hi
     let mut cells: Vec<Cell> = Vec::new();
 
     // Flight-controller link + mode/armed chips.
-    let (dot_color, dot_text) = if dash.mavlink_connected {
-        (theme::success(), "FC connected")
-    } else {
-        (theme::danger(), "FC not connected")
+    let (dot_color, dot_text) = match dash.fc_link() {
+        FcLink::Connected => (theme::success(), "FC connected"),
+        FcLink::PortOpen => (theme::warning(), "port open · no MAVLink"),
+        FcLink::Down => (theme::danger(), "FC not connected"),
     };
     let mut fc = vec![
         Span::styled("● ", Style::default().fg(dot_color)),
@@ -344,6 +344,21 @@ fn autopilot_panel(frame: &mut Frame, area: Rect, dash: &Dashboard, history: &Hi
         });
     }
     cells.push(Cell::Line(Line::from(fc)));
+
+    // FC serial endpoint + link hint, e.g. `ttyS0 · 921600   msp detected`.
+    let mut detail: Vec<Span> = Vec::new();
+    if let Some(ep) = dash.fc_endpoint() {
+        detail.push(Span::styled(ep, dim()));
+    }
+    if let Some(hint) = dash.fc_hint() {
+        if !detail.is_empty() {
+            detail.push(Span::raw("   "));
+        }
+        detail.push(Span::styled(hint, dim()));
+    }
+    if !detail.is_empty() {
+        cells.push(Cell::Line(Line::from(detail)));
+    }
 
     // Battery gauge + trend.
     if let Some(battery) = dash.battery {
