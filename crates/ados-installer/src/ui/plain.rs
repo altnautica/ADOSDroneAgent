@@ -37,6 +37,7 @@ pub fn run(rx: Receiver<ProgressEvent>, quiet: bool, header: String) {
             // echoed here.
             ProgressEvent::Activity { .. }
             | ProgressEvent::SubLog { .. }
+            | ProgressEvent::ByteProgress { .. }
             | ProgressEvent::Log { .. } => {}
             ProgressEvent::Summary(s) => {
                 for line in summary::plain_lines(&s) {

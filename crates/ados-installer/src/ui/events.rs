@@ -49,6 +49,15 @@ pub enum ProgressEvent {
     Activity { id: String, message: String },
     /// One raw subprocess line for the running step's dim scrolling log tail.
     SubLog { id: String, line: String },
+    /// Byte-level download progress for the running step's current file.
+    /// `total` is 0 when the size is unknown. `label` names the file (e.g. the
+    /// service being fetched) so the detail pane reads "ados-control 4.2/8.1 MB".
+    ByteProgress {
+        id: String,
+        done: u64,
+        total: u64,
+        label: String,
+    },
     /// A forwarded log line (from the tracing layer) to scroll above the block.
     Log { level: tracing::Level, line: String },
     /// The terminal summary: render the success card / failure panel.

@@ -16,6 +16,7 @@ use crate::ctx::Ctx;
 use crate::env;
 use crate::graph::{Step, StepKind, StepOutcome};
 use crate::net;
+use crate::ui::{activity, ProgressSink};
 use crate::verify::{self, Channel};
 
 /// GitHub release-download base; each prebuilt asset hangs off
@@ -66,7 +67,12 @@ fn allow_unsigned_for(channel: Channel) -> bool {
 /// binary itself — the binary is fetched to a `.dl` sibling of the real dest so
 /// the final placement is a same-filesystem `rename` (see [`place_binary`]); the
 /// dir is retained for callers that want a scratch root and for symmetry.
-fn install_one(b: &PrebuiltBinary, _tmp_dir: &Path, channel: Channel) -> anyhow::Result<()> {
+fn install_one(
+    b: &PrebuiltBinary,
+    _tmp_dir: &Path,
+    channel: Channel,
+    sink: &ProgressSink,
+) -> anyhow::Result<()> {
     let asset_url = format!("{RELEASE_BASE}/{}/{}", b.release_tag, b.asset);
     let dest = Path::new(b.dest);
 
@@ -86,12 +92,23 @@ fn install_one(b: &PrebuiltBinary, _tmp_dir: &Path, channel: Channel) -> anyhow:
     let dl_sig = sidecar_path(&dl_bin, "minisig");
 
     let outcome = (|| {
-        net::fetch(&asset_url, &dl_bin)?;
+        // Stream byte progress so the live pane shows "<service> 4.2/8.1 MB".
+        net::fetch_with_progress(&asset_url, &dl_bin, |done, total| {
+            sink.byte_progress("fetch_binaries", done, total, b.service);
+        })?;
         net::fetch(&format!("{asset_url}.sha256"), &dl_sha)?;
         let _ = net::fetch(&format!("{asset_url}.minisig"), &dl_sig);
 
         // Verify the downloaded temp BEFORE it is placed at the live path.
         verify::verify_artifact(&dl_bin, None, channel, allow_unsigned_for(channel))?;
+
+        // Name what landed (with its size) in the running step's log tail — this
+        // replaces the old repeated generic "installed prebuilt binary" line.
+        let size = std::fs::metadata(&dl_bin).map(|m| m.len()).unwrap_or(0);
+        sink.sub_log(
+            "fetch_binaries",
+            &format!("✓ {} {}", b.service, activity::fmt_bytes(size)),
+        );
 
         // chmod the temp, then atomically swap it over the (possibly running)
         // destination. A live process keeps its old inode through the rename.
@@ -121,11 +138,12 @@ fn install_one_with_retry(
     b: &PrebuiltBinary,
     tmp_dir: &Path,
     channel: Channel,
+    sink: &ProgressSink,
 ) -> anyhow::Result<()> {
     const MAX_ATTEMPTS: u32 = 3;
     let mut backoff = std::time::Duration::from_secs(1);
     for attempt in 1..=MAX_ATTEMPTS {
-        match install_one(b, tmp_dir, channel) {
+        match install_one(b, tmp_dir, channel, sink) {
             Ok(()) => return Ok(()),
             Err(e) if attempt < MAX_ATTEMPTS => {
                 tracing::warn!(
@@ -254,11 +272,13 @@ impl Step for FetchBinaries {
         };
 
         // Drive the determinate "Downloading components" bar: k of N binaries.
+        let sink = ctx.progress.clone();
         let bins = binaries::for_profile(&ctx.profile);
         let total = bins.len() as u64;
-        ctx.progress.sub_progress(self.id(), 0, total);
+        sink.sub_progress(self.id(), 0, total);
         for (i, b) in bins.into_iter().enumerate() {
-            let ok = match install_one_with_retry(b, &tmp_dir, channel) {
+            sink.activity(self.id(), format!("installing {}", b.service));
+            let ok = match install_one_with_retry(b, &tmp_dir, channel, &sink) {
                 Ok(()) => {
                     // Kept at debug: the live-detail pane names each component as
                     // it lands, so an info line here would just repeat "installed
@@ -284,7 +304,7 @@ impl Step for FetchBinaries {
                     b.service
                 ));
             }
-            ctx.progress.sub_progress(self.id(), (i as u64) + 1, total);
+            sink.sub_progress(self.id(), (i as u64) + 1, total);
         }
 
         let _ = std::fs::remove_dir_all(&tmp_dir);

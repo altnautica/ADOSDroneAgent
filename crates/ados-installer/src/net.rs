@@ -8,6 +8,7 @@
 //! connect timeout. Bounded retries; never hangs (curl `--max-time`).
 
 use std::path::Path;
+use std::time::Duration;
 
 use crate::exec;
 
@@ -99,34 +100,117 @@ pub fn fetch(url: &str, dest: &Path) -> anyhow::Result<()> {
     // Download to a temp sibling so a partial/failed transfer never leaves a
     // truncated file at the real destination (a later verify would mis-read it).
     let tmp = tmp_sibling(dest);
-
-    let force_first = !has_ipv6_default_route();
-    let first = curl_to(url, &tmp, force_first);
-    let result = match first {
-        Ok(()) => Ok(()),
-        Err(_) if !force_first => {
-            // Dual-stack attempt failed and we have not yet forced v4 — retry
-            // with `-4` (present-but-broken IPv6 default route).
-            tracing::warn!(url, "fetch failed on dual-stack; retrying with -4");
-            curl_to(url, &tmp, true)
-        }
-        Err(e) => Err(e),
-    };
-
-    match result {
-        Ok(()) => {
-            std::fs::rename(&tmp, dest).map_err(|e| {
-                let _ = std::fs::remove_file(&tmp);
-                anyhow::anyhow!("rename {} -> {} failed: {e}", tmp.display(), dest.display())
-            })?;
-            Ok(())
-        }
+    match download_to_tmp(url, &tmp) {
+        Ok(()) => finalize(&tmp, dest),
         Err(e) => {
             // Clean up the partial temp file on the way out.
             let _ = std::fs::remove_file(&tmp);
             Err(e)
         }
     }
+}
+
+/// Fetch `url` into `dest` like [`fetch`], reporting byte progress via
+/// `on_bytes(downloaded, total)` as the transfer runs. `total` is the HTTP
+/// `Content-Length` (0 when the server does not advertise one — the caller then
+/// shows an indeterminate size). The download runs on a background thread while
+/// this thread polls the temp file's on-disk length; `on_bytes` runs on the
+/// caller thread (no `Send` bound). Used by the component-download step so the
+/// live pane shows "ados-control 4.2/8.1 MB" instead of a bare spinner.
+pub fn fetch_with_progress<F: FnMut(u64, u64)>(
+    url: &str,
+    dest: &Path,
+    mut on_bytes: F,
+) -> anyhow::Result<()> {
+    let total = head_content_length(url).unwrap_or(0);
+    let tmp = tmp_sibling(dest);
+    // A stale partial from a prior run would make `--continue-at -` resume the
+    // wrong bytes; start clean.
+    let _ = std::fs::remove_file(&tmp);
+
+    let url_owned = url.to_string();
+    let tmp_dl = tmp.clone();
+    let handle = std::thread::spawn(move || download_to_tmp(&url_owned, &tmp_dl));
+
+    while !handle.is_finished() {
+        if let Ok(m) = std::fs::metadata(&tmp) {
+            on_bytes(m.len(), total);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // Final size (the poll may have missed the last chunk before completion).
+    if let Ok(m) = std::fs::metadata(&tmp) {
+        on_bytes(m.len(), total);
+    }
+
+    let result = handle
+        .join()
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("download thread panicked")));
+    match result {
+        Ok(()) => finalize(&tmp, dest),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
+/// Download `url` to `tmp` (no rename), IPv4-resilient with the same dual-stack
+/// → `-4` fallback [`fetch`] uses. Shared by [`fetch`] and
+/// [`fetch_with_progress`].
+fn download_to_tmp(url: &str, tmp: &Path) -> anyhow::Result<()> {
+    let force_first = !has_ipv6_default_route();
+    match curl_to(url, tmp, force_first) {
+        Ok(()) => Ok(()),
+        Err(_) if !force_first => {
+            // Dual-stack attempt failed and we have not yet forced v4 — retry
+            // with `-4` (present-but-broken IPv6 default route).
+            tracing::warn!(url, "fetch failed on dual-stack; retrying with -4");
+            curl_to(url, tmp, true)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Atomically move the completed temp download to its destination.
+fn finalize(tmp: &Path, dest: &Path) -> anyhow::Result<()> {
+    std::fs::rename(tmp, dest).map_err(|e| {
+        let _ = std::fs::remove_file(tmp);
+        anyhow::anyhow!("rename {} -> {} failed: {e}", tmp.display(), dest.display())
+    })
+}
+
+/// Best-effort `Content-Length` for `url` via a `curl -sIL` HEAD (follows
+/// redirects). `None` when the HEAD fails or advertises no length; the caller
+/// treats that as an unknown total.
+fn head_content_length(url: &str) -> Option<u64> {
+    let mut args: Vec<&str> = vec!["-sIL", "--max-time", "15"];
+    if !has_ipv6_default_route() {
+        args.push("-4");
+    }
+    args.push(url);
+    let res = exec::run("curl", &args);
+    if !res.success() {
+        return None;
+    }
+    parse_content_length(&res.stdout)
+}
+
+/// Parse the `Content-Length` from a block of HTTP response headers (pure).
+/// Takes the LAST occurrence so a redirect chain's final (real) response wins
+/// over an intermediate 302's length. Case-insensitive on the header name.
+pub fn parse_content_length(headers: &str) -> Option<u64> {
+    headers
+        .lines()
+        .filter_map(|l| {
+            let (k, v) = l.trim().split_once(':')?;
+            if k.trim().eq_ignore_ascii_case("content-length") {
+                v.trim().parse::<u64>().ok()
+            } else {
+                None
+            }
+        })
+        .next_back()
 }
 
 /// `<dest>.tmp` sibling path used for the atomic download.
@@ -174,5 +258,21 @@ mod tests {
     fn tmp_sibling_appends_tmp() {
         let t = tmp_sibling(Path::new("/opt/ados/bin/ados-video"));
         assert_eq!(t.to_str().unwrap(), "/opt/ados/bin/ados-video.tmp");
+    }
+
+    #[test]
+    fn parse_content_length_takes_the_final_hop() {
+        // A redirect chain: the 302 has no body length, the final 200 does.
+        let headers = "HTTP/2 302\r\nlocation: https://cdn/x\r\ncontent-length: 0\r\n\r\n\
+                       HTTP/2 200\r\nContent-Length: 8523776\r\ncontent-type: application/octet-stream\r\n";
+        assert_eq!(parse_content_length(headers), Some(8_523_776));
+    }
+
+    #[test]
+    fn parse_content_length_none_when_absent() {
+        assert_eq!(
+            parse_content_length("HTTP/2 200\r\ncontent-type: x\r\n"),
+            None
+        );
     }
 }

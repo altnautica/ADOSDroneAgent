@@ -65,6 +65,9 @@ pub fn run(rx: Receiver<ProgressEvent>, theme: Theme, header: String) {
                 push_log(&mut logs, line.clone());
                 emit_log(&mut w, &line, &model, &theme, spinner, &mut height);
             }
+            // The k-of-N `SubProgress` already drives this fallback tier's bar;
+            // the byte-level detail is a full-screen-only refinement.
+            Ok(ProgressEvent::ByteProgress { .. }) => {}
             Ok(ProgressEvent::Log { line, .. }) => {
                 push_log(&mut logs, line.clone());
                 emit_log(&mut w, &line, &model, &theme, spinner, &mut height);

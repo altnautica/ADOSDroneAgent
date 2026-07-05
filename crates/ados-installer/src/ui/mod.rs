@@ -121,6 +121,16 @@ impl ProgressSink {
         });
     }
 
+    /// Byte-level download progress for the running step's current file.
+    pub fn byte_progress(&self, id: &str, done: u64, total: u64, label: &str) {
+        self.send(ProgressEvent::ByteProgress {
+            id: id.to_string(),
+            done,
+            total,
+            label: label.to_string(),
+        });
+    }
+
     /// The terminal summary (success card / failure panel).
     pub fn summary(&self, s: SummaryData) {
         self.send(ProgressEvent::Summary(Box::new(s)));
