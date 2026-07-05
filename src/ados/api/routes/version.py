@@ -41,10 +41,6 @@ CAPABILITIES: list[str] = [
     # an older GCS may key a fallback path on its presence or absence, so
     # the token is never renamed or removed once shipped.
     "scripts.runtime",
-    # Retired capability: the /api/ota endpoint no longer ships (updates now
-    # run the installer), but the token stays for the append-only capability
-    # contract — an older GCS may key a fallback path on its presence.
-    "ota.updater",
     # /api/pairing/* device-link mnemonic + token rotation.
     "pairing.mnemonic",
     # /api/pairing/info carries a folded bind_state + radio snapshot.

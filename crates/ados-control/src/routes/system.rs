@@ -26,7 +26,7 @@ pub const API_VERSION: &str = "1";
 /// list is the canonical surface contract between the agent and the GCS, kept in
 /// lock-step with the Python `CAPABILITIES` list (order included, since it is
 /// emitted as a JSON array).
-pub const CAPABILITIES: [&str; 16] = [
+pub const CAPABILITIES: [&str; 15] = [
     // /api/status/full consolidated endpoint (fewer round-trips).
     "status.full",
     // /api/version endpoint (this one). Trivially true.
@@ -42,10 +42,6 @@ pub const CAPABILITIES: [&str; 16] = [
     // GCS may key a fallback path on its presence or absence, so the token is
     // never renamed or removed once shipped.
     "scripts.runtime",
-    // Retired capability: the /api/ota endpoint no longer ships (updates now
-    // run the installer), but the token stays for the append-only capability
-    // contract — an older GCS may key a fallback path on its presence.
-    "ota.updater",
     // /api/pairing/* device-link mnemonic + token rotation.
     "pairing.mnemonic",
     // /api/pairing/info carries a folded bind_state + radio snapshot.
