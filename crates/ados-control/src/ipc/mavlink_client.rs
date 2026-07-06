@@ -23,10 +23,11 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
-use ados_protocol::frame::{encode_frame, MAVLINK_MAX_FRAME};
+use ados_protocol::frame::{decode_len, encode_frame, HEADER_SIZE, MAVLINK_MAX_FRAME};
 use thiserror::Error;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 
@@ -155,6 +156,103 @@ impl MavlinkIpcClient {
         }
         Ok(())
     }
+
+    /// Open a fresh, dedicated connection for a correlated command exchange.
+    ///
+    /// The MAVLink socket is bidirectional: the router forwards every frame a
+    /// client writes to the FC, and broadcasts every FC frame back to every
+    /// connected client. A command that wants to read its own `COMMAND_ACK`
+    /// therefore writes the command AND reads the broadcast stream on the same
+    /// connection. This uses a NEW connection rather than the shared
+    /// fire-and-forget one so its reads never race the shared writer, and so it
+    /// only ever sees frames broadcast after it connected (the MAVLink socket
+    /// does not replay a backlog, so there is no stale ACK from an earlier
+    /// command). An absent socket returns [`SendError::Io`], which the route
+    /// maps to the same 503 (no FC link) the plain send path does.
+    pub async fn open_ack_stream(&self) -> Result<AckStream, SendError> {
+        let stream = UnixStream::connect(&self.socket_path).await.map_err(|e| {
+            tracing::debug!(
+                path = %self.socket_path.display(),
+                error = %e,
+                "mavlink ack-stream connect failed"
+            );
+            e
+        })?;
+        Ok(AckStream { stream })
+    }
+}
+
+/// The outcome of one bounded read on an [`AckStream`].
+#[derive(Debug)]
+pub enum FrameRead {
+    /// A complete raw MAVLink frame payload (the bytes after the length prefix),
+    /// ready to parse.
+    Frame(Vec<u8>),
+    /// No frame arrived within the read budget. The caller decides whether to
+    /// keep waiting, resend, or give up.
+    Timeout,
+    /// The connection closed (or a read/framing error ended it). No more frames
+    /// will arrive on this stream.
+    Eof,
+}
+
+/// A dedicated MAVLink-socket connection used to send a command and read the
+/// FC frame stream back to correlate its `COMMAND_ACK`.
+///
+/// One connection carries both directions: [`write_frame`](Self::write_frame)
+/// forwards a raw MAVLink frame to the FC, and [`read_frame`](Self::read_frame)
+/// pulls the next broadcast FC frame under a bounded budget. The stream is owned
+/// (not shared), so its reads are exclusive and it is dropped when the exchange
+/// ends.
+#[derive(Debug)]
+pub struct AckStream {
+    stream: UnixStream,
+}
+
+impl AckStream {
+    /// Write one raw MAVLink v2 frame to the FC, framed with the 4-byte
+    /// big-endian length prefix the router reads (the same `ados.core.ipc`
+    /// contract [`MavlinkIpcClient::send`] uses). A write failure means the link
+    /// dropped; the caller maps it to a 503.
+    pub async fn write_frame(&mut self, frame: &[u8]) -> Result<(), SendError> {
+        let wire = encode_frame(frame, MAVLINK_MAX_FRAME)?;
+        self.stream.write_all(&wire).await?;
+        self.stream.flush().await?;
+        Ok(())
+    }
+
+    /// Read the next raw MAVLink frame from the broadcast stream, bounded by
+    /// `budget`. Returns [`FrameRead::Frame`] with the payload (the bytes after
+    /// the length prefix), [`FrameRead::Timeout`] if nothing arrived in time, or
+    /// [`FrameRead::Eof`] if the connection closed or a framing error ended it.
+    /// A read error is never surfaced as an `Err`: the command was already sent,
+    /// so a broken read stream just ends the correlation window (the route then
+    /// reports an honest "no ack observed"), it does not fail the request.
+    pub async fn read_frame(&mut self, budget: Duration) -> FrameRead {
+        let mut header = [0u8; HEADER_SIZE];
+        match tokio::time::timeout(budget, self.stream.read_exact(&mut header)).await {
+            Err(_elapsed) => return FrameRead::Timeout,
+            Ok(Err(_io)) => return FrameRead::Eof,
+            Ok(Ok(_)) => {}
+        }
+        let len = match decode_len(header, MAVLINK_MAX_FRAME, false) {
+            Ok(n) => n,
+            // A garbled prefix means the framing desynced; end the window rather
+            // than trying to resync a byte stream we cannot re-align.
+            Err(_) => return FrameRead::Eof,
+        };
+        if len == 0 {
+            // A zero-length frame carries no MAVLink message; skip it by
+            // reporting an empty payload the caller's parse will simply ignore.
+            return FrameRead::Frame(Vec::new());
+        }
+        let mut payload = vec![0u8; len];
+        match tokio::time::timeout(budget, self.stream.read_exact(&mut payload)).await {
+            Err(_elapsed) => FrameRead::Timeout,
+            Ok(Err(_io)) => FrameRead::Eof,
+            Ok(Ok(_)) => FrameRead::Frame(payload),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -257,5 +355,110 @@ mod tests {
     fn default_socket_honours_the_run_dir_override() {
         let p = default_mavlink_socket();
         assert!(p.ends_with("mavlink.sock"));
+    }
+
+    /// The ack stream writes a length-prefixed command to the server and reads a
+    /// length-prefixed frame the server broadcasts back, recovering the exact
+    /// payload bytes.
+    #[tokio::test]
+    async fn ack_stream_writes_a_command_and_reads_a_broadcast_frame() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mavlink.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+
+        let command = b"\xfd\x01\x02command".to_vec();
+        let broadcast = b"\xfd\x03\x04ack-frame".to_vec();
+
+        let b_clone = broadcast.clone();
+        let c_clone = command.clone();
+        let server = tokio::spawn(async move {
+            let (mut conn, _addr) = listener.accept().await.unwrap();
+            // Read the client's command frame.
+            let mut header = [0u8; HEADER_SIZE];
+            conn.read_exact(&mut header).await.unwrap();
+            let len = decode_len(header, MAVLINK_MAX_FRAME, false).unwrap();
+            let mut body = vec![0u8; len];
+            conn.read_exact(&mut body).await.unwrap();
+            assert_eq!(body, c_clone, "server reads the exact command frame");
+            // Broadcast one frame back, length-prefixed like the router does.
+            let framed = encode_frame(&b_clone, MAVLINK_MAX_FRAME).unwrap();
+            conn.write_all(&framed).await.unwrap();
+            conn.flush().await.unwrap();
+            // Hold the connection open briefly so the client can read.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        });
+
+        let client = MavlinkIpcClient::new(path.clone());
+        let mut stream = client.open_ack_stream().await.expect("stream opens");
+        stream.write_frame(&command).await.expect("write succeeds");
+        match stream.read_frame(Duration::from_secs(1)).await {
+            FrameRead::Frame(payload) => {
+                assert_eq!(payload, broadcast, "reads back the exact broadcast frame");
+            }
+            other => panic!("expected a frame, got {other:?}"),
+        }
+        server.await.unwrap();
+    }
+
+    /// A read with no frame on the wire times out (not a panic, not an error).
+    #[tokio::test]
+    async fn ack_stream_read_times_out_when_idle() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mavlink.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        // Accept and hold the connection open but send nothing.
+        let server = tokio::spawn(async move {
+            let (_conn, _addr) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        });
+
+        let client = MavlinkIpcClient::new(path.clone());
+        let mut stream = client.open_ack_stream().await.expect("stream opens");
+        assert!(
+            matches!(
+                stream.read_frame(Duration::from_millis(40)).await,
+                FrameRead::Timeout
+            ),
+            "an idle stream reports Timeout"
+        );
+        server.await.unwrap();
+    }
+
+    /// A closed connection reports EOF on the next read.
+    #[tokio::test]
+    async fn ack_stream_read_reports_eof_after_close() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mavlink.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = tokio::spawn(async move {
+            let (conn, _addr) = listener.accept().await.unwrap();
+            drop(conn); // close immediately
+        });
+
+        let client = MavlinkIpcClient::new(path.clone());
+        let mut stream = client.open_ack_stream().await.expect("stream opens");
+        // Give the server time to close.
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(
+            matches!(
+                stream.read_frame(Duration::from_millis(200)).await,
+                FrameRead::Eof
+            ),
+            "a closed stream reports Eof"
+        );
+        server.await.unwrap();
+    }
+
+    /// Opening an ack stream against an absent socket is an I/O error (mapped to
+    /// a 503 by the route), not a panic.
+    #[tokio::test]
+    async fn open_ack_stream_absent_socket_is_an_io_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = MavlinkIpcClient::new(dir.path().join("absent.sock"));
+        let err = client.open_ack_stream().await.unwrap_err();
+        assert!(
+            matches!(err, SendError::Io(_)),
+            "expected Io error: {err:?}"
+        );
     }
 }

@@ -29,7 +29,7 @@ pub mod vision_client;
 
 pub use atlas_control_client::{AtlasControlClient, AtlasControlError};
 pub use logd_client::LogdQueryClient;
-pub use mavlink_client::MavlinkIpcClient;
+pub use mavlink_client::{AckStream, FrameRead, MavlinkIpcClient};
 pub use plugin_control_client::{PluginControlClient, PluginControlError};
 pub use state_client::StateIpcClient;
 pub use vision_client::VisionIpcClient;

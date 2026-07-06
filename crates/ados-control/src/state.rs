@@ -261,6 +261,22 @@ impl AppState {
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false)
     }
+
+    /// The autopilot family the FC advertises, read from the live state
+    /// snapshot's `autopilot` field (the `HEARTBEAT.autopilot` wire value the
+    /// MAVLink service records). The command route uses it to pick the mode
+    /// encoding: `12` is PX4 (its own packed `(main, sub)` scheme), anything else
+    /// is treated as ArduPilot (the copter mode table). An absent snapshot or a
+    /// missing field reads `0` (unknown → the ArduPilot default path).
+    pub fn autopilot(&self) -> i64 {
+        self.state
+            .snapshot()
+            .as_ref()
+            .and_then(serde_json::Value::as_object)
+            .and_then(|m| m.get("autopilot"))
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0)
+    }
 }
 
 #[cfg(test)]
