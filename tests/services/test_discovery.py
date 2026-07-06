@@ -77,9 +77,22 @@ def test_service_type_constant() -> None:
     assert SERVICE_TYPE == "_ados._tcp.local."
 
 
-def test_mdns_hostname_uses_short_device_id() -> None:
+def test_mdns_hostname_uses_the_real_system_hostname() -> None:
+    # The reported reach name must be the resolvable system hostname that
+    # avahi actually publishes, never a constructed `ados-<id>.local` that
+    # nothing publishes as an A-record.
     svc = DiscoveryService(device_id=_DEVICE_ID)
-    assert svc.mdns_hostname == f"ados-{_EXPECTED_SHORT}.local"
+    with patch("ados.services.discovery.socket.gethostname", return_value="drone-rig"):
+        assert svc.mdns_hostname == "drone-rig.local"
+
+
+def test_mdns_hostname_falls_back_to_device_id_when_hostname_unusable() -> None:
+    # Only an unusable hostname (empty / localhost / loopback literal) falls
+    # back to the device-id form.
+    svc = DiscoveryService(device_id=_DEVICE_ID)
+    for bad in ("", "localhost", "127.0.0.1"):
+        with patch("ados.services.discovery.socket.gethostname", return_value=bad):
+            assert svc.mdns_hostname == f"ados-{_EXPECTED_SHORT}.local"
 
 
 def test_default_port_and_name() -> None:
