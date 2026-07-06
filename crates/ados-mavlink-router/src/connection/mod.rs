@@ -80,6 +80,13 @@ pub struct FcConnection {
     state: std::sync::Arc<Mutex<VehicleState>>,
     params: std::sync::Arc<Mutex<ParamCache>>,
     frame_tx: broadcast::Sender<Vec<u8>>,
+    /// Raw FC->host byte lane. Populated only for an MSP FC (Betaflight/iNav),
+    /// whose FC->host bytes are MSP responses, not MAVLink frames, so they never
+    /// appear on `frame_tx` (extract_frames yields nothing). Empty for a MAVLink
+    /// FC. The direct-GCS proxies subscribe to both lanes and forward whichever
+    /// carries bytes, so a polling MSP GCS receives the FC's responses while the
+    /// MAVLink frame path stays byte-unchanged.
+    raw_tx: broadcast::Sender<Vec<u8>>,
     writer: Mutex<Option<BoxedWriteHalf>>,
     /// Raised by a write/flush failure to ask the run loop to tear down the
     /// current link and re-open it (installing a fresh writer). A transient FC
@@ -138,11 +145,13 @@ impl FcConnection {
         params: std::sync::Arc<Mutex<ParamCache>>,
     ) -> std::sync::Arc<Self> {
         let (frame_tx, _) = broadcast::channel(FRAME_CHANNEL_CAP);
+        let (raw_tx, _) = broadcast::channel(FRAME_CHANNEL_CAP);
         std::sync::Arc::new(Self {
             cfg,
             state,
             params,
             frame_tx,
+            raw_tx,
             writer: Mutex::new(None),
             reconnect: tokio::sync::Notify::new(),
             seq: AtomicU8::new(0),
@@ -169,6 +178,11 @@ impl FcConnection {
     /// Subscribe to the raw inbound frame stream (the MAVLink socket + proxies).
     pub fn subscribe(&self) -> broadcast::Receiver<Vec<u8>> {
         self.frame_tx.subscribe()
+    }
+
+    /// Subscribe to the raw inbound FC byte lane (populated only for an MSP FC).
+    pub fn subscribe_raw(&self) -> broadcast::Receiver<Vec<u8>> {
+        self.raw_tx.subscribe()
     }
 
     /// Whether the FC transport is open: the serial node / network socket has
@@ -467,6 +481,13 @@ impl FcConnection {
     }
 
     async fn read_loop(&self, mut reader: BoxedReadHalf) {
+        // An MSP FC (identified by its USB descriptor at open) speaks MSP, not
+        // MAVLink, on FC->host, so extract_frames yields nothing and its responses
+        // never reach a GCS proxy on the frame lane. The variant is fixed for this
+        // read loop (set before it starts, cleared only after it returns), so
+        // capture it once and forward the raw bytes below. A MAVLink FC captures
+        // false here, so the frame path is byte-unchanged.
+        let is_msp = self.fc_variant.lock().await.is_some();
         let mut buf: Vec<u8> = Vec::with_capacity(4096);
         let mut chunk = [0u8; 2048];
         let mut since_save = Instant::now();
@@ -479,6 +500,18 @@ impl FcConnection {
                 Ok(n) => n,
                 Err(_) => return,
             };
+            // An MSP FC speaks MSP (not MAVLink) on FC->host: forward the raw chunk
+            // verbatim so a polling MSP GCS receives the FC's responses, and skip
+            // MAVLink framing entirely. extract_frames does no CRC check and would
+            // carve garbage "frames" from MSP payload bytes that contain 0xFD/0xFE,
+            // so running it for an MSP FC would fan corrupt bytes onto the frame
+            // lane alongside the raw ones. is_msp is false for a MAVLink FC, so the
+            // framing path below is byte-unchanged; the MSP link hint comes from the
+            // USB-descriptor variant, so the MSP-start sniff is unnecessary here too.
+            if is_msp {
+                let _ = self.raw_tx.send(chunk[..n].to_vec());
+                continue;
+            }
             buf.extend_from_slice(&chunk[..n]);
             // Cap the reassembly buffer so a stream of junk cannot grow it.
             if buf.len() > 1 << 20 {
@@ -880,5 +913,174 @@ mod liveness_tests {
 
     fn conn_source(cfg: MavlinkConfig) -> &'static str {
         conn_with(cfg).source()
+    }
+}
+
+#[cfg(test)]
+mod passthrough_tests {
+    //! Transparent MSP passthrough: for an MSP FC (Betaflight/iNav) the raw
+    //! FC->host bytes travel on the raw lane so a polling MSP GCS receives the
+    //! FC's responses, while a MAVLink FC's frame path stays byte-unchanged and
+    //! never touches the raw lane.
+    use super::*;
+    use crate::param_cache::ParamCache;
+    use crate::state::VehicleState;
+    use ados_protocol::mavlink::ardupilotmega::{
+        MavAutopilot, MavModeFlag, MavState, MavType, HEARTBEAT_DATA,
+    };
+    use tokio::sync::broadcast::error::TryRecvError;
+
+    fn conn() -> std::sync::Arc<FcConnection> {
+        let state = std::sync::Arc::new(Mutex::new(VehicleState::default()));
+        let params = std::sync::Arc::new(Mutex::new(ParamCache::new(
+            "/tmp/ados-passthrough-params.json",
+        )));
+        FcConnection::new(MavlinkConfig::default(), state, params)
+    }
+
+    /// A real MAVLink v2 HEARTBEAT frame (same constructor as the framing tests).
+    fn heartbeat_frame() -> Vec<u8> {
+        let msg = MavMessage::HEARTBEAT(HEARTBEAT_DATA {
+            custom_mode: 0,
+            mavtype: MavType::MAV_TYPE_QUADROTOR,
+            autopilot: MavAutopilot::MAV_AUTOPILOT_ARDUPILOTMEGA,
+            base_mode: MavModeFlag::empty(),
+            system_status: MavState::MAV_STATE_STANDBY,
+            mavlink_version: 3,
+        });
+        mavlink::serialize_v2(
+            MavHeader {
+                system_id: 1,
+                component_id: 1,
+                sequence: 0,
+            },
+            &msg,
+        )
+        .unwrap()
+    }
+
+    /// A reader that yields its pre-set chunks one poll at a time, then EOF. Lets
+    /// a test drive `read_loop` with a frame split across two reads to exercise
+    /// the reassembly path.
+    struct ChunkReader {
+        chunks: std::collections::VecDeque<Vec<u8>>,
+    }
+    impl ChunkReader {
+        fn new(chunks: Vec<Vec<u8>>) -> Self {
+            Self {
+                chunks: chunks.into_iter().collect(),
+            }
+        }
+    }
+    impl tokio::io::AsyncRead for ChunkReader {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            let this = self.get_mut();
+            if let Some(chunk) = this.chunks.pop_front() {
+                let n = chunk.len().min(buf.remaining());
+                buf.put_slice(&chunk[..n]);
+                if n < chunk.len() {
+                    this.chunks.push_front(chunk[n..].to_vec());
+                }
+            }
+            // No chunk left (or a zero-remaining buffer): 0 bytes filled reads as
+            // EOF, so `read_loop` returns rather than hanging.
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn msp_fc_raw_bytes_reach_the_raw_lane_and_not_the_frame_lane() {
+        let c = conn();
+        // As fc_variant_for_port would set it at open for a Betaflight board.
+        *c.fc_variant.lock().await = Some("betaflight".into());
+        let mut raw_rx = c.subscribe_raw();
+        let mut frame_rx = c.subscribe();
+        // A representative MSP `$M>` response with no MAVLink magic (0xFD/0xFE).
+        let msp = b"\x24\x4d\x3e\x02\x64\x01\x02\x67".to_vec();
+        c.read_loop(Box::pin(std::io::Cursor::new(msp.clone())))
+            .await;
+        // The exact raw bytes are forwarded on the raw lane...
+        assert_eq!(raw_rx.try_recv().unwrap(), msp);
+        // ...and the frame lane stays silent (MSP yields no MAVLink frame).
+        assert!(matches!(frame_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn mavlink_fc_frame_path_is_unchanged_and_raw_lane_is_silent() {
+        let c = conn();
+        // A MAVLink FC has no USB-descriptor variant → is_msp is false.
+        assert!(c.fc_variant.lock().await.is_none());
+        let mut raw_rx = c.subscribe_raw();
+        let mut frame_rx = c.subscribe();
+        let frame = heartbeat_frame();
+        c.read_loop(Box::pin(std::io::Cursor::new(frame.clone())))
+            .await;
+        // The exact frame bytes, verbatim, no re-encode.
+        assert_eq!(frame_rx.try_recv().unwrap(), frame);
+        // The raw lane never fires for a MAVLink FC.
+        assert!(matches!(raw_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn a_mavlink_frame_split_across_two_reads_lands_once_on_the_frame_lane() {
+        let c = conn();
+        let mut raw_rx = c.subscribe_raw();
+        let mut frame_rx = c.subscribe();
+        let frame = heartbeat_frame();
+        let split = frame.len() / 2;
+        let reader = ChunkReader::new(vec![frame[..split].to_vec(), frame[split..].to_vec()]);
+        c.read_loop(Box::pin(reader)).await;
+        // Reassembled across the two reads into exactly one frame.
+        assert_eq!(frame_rx.try_recv().unwrap(), frame);
+        assert!(
+            matches!(frame_rx.try_recv(), Err(TryRecvError::Empty)),
+            "exactly one frame, not duplicated"
+        );
+        assert!(matches!(raw_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn an_msp_chunk_with_an_embedded_frame_start_is_forwarded_verbatim_once() {
+        let c = conn();
+        *c.fc_variant.lock().await = Some("inav".into());
+        let mut raw_rx = c.subscribe_raw();
+        // A chunk that embeds a stray `$M>` mid-stream is still forwarded whole.
+        let chunk = b"\x01\x02\x24\x4d\x3e\x05\x06".to_vec();
+        c.read_loop(Box::pin(std::io::Cursor::new(chunk.clone())))
+            .await;
+        assert_eq!(raw_rx.try_recv().unwrap(), chunk);
+        assert!(
+            matches!(raw_rx.try_recv(), Err(TryRecvError::Empty)),
+            "exactly one raw chunk"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_msp_chunk_containing_a_mavlink_magic_byte_never_carves_a_garbage_frame() {
+        let c = conn();
+        *c.fc_variant.lock().await = Some("betaflight".into());
+        let mut raw_rx = c.subscribe_raw();
+        let mut frame_rx = c.subscribe();
+        // An MSP response whose payload contains the MAVLink v2 magic 0xFD
+        // followed by a plausible length byte. extract_frames does NO CRC check,
+        // so without the MSP fast-path it would carve a garbage "frame" from
+        // these bytes and fan it onto the frame lane alongside the raw copy,
+        // corrupting the MSP stream a GCS sees. The frame lane MUST stay silent.
+        let mut msp = b"\x24\x4d\x3e\x08\xfd\x00\x00".to_vec();
+        msp.extend(std::iter::repeat_n(0xAA, 20));
+        c.read_loop(Box::pin(std::io::Cursor::new(msp.clone())))
+            .await;
+        // The full MSP chunk is forwarded once, verbatim, on the raw lane.
+        assert_eq!(raw_rx.try_recv().unwrap(), msp);
+        assert!(matches!(raw_rx.try_recv(), Err(TryRecvError::Empty)));
+        // No garbage frame is ever carved onto the frame lane for an MSP FC.
+        assert!(
+            matches!(frame_rx.try_recv(), Err(TryRecvError::Empty)),
+            "an MSP FC must never emit a MAVLink frame, even when its payload contains 0xFD/0xFE"
+        );
     }
 }

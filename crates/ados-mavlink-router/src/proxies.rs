@@ -237,18 +237,28 @@ pub async fn run_tcp_proxy(fc: Arc<FcConnection>, port: u16, cancel: Arc<Notify>
 async fn handle_tcp_client(fc: Arc<FcConnection>, stream: tokio::net::TcpStream) {
     let (mut rd, mut wr) = stream.into_split();
     let mut rx = fc.subscribe();
+    let mut raw_rx = fc.subscribe_raw();
 
     // FC -> client.
     let writer = tokio::spawn(async move {
         loop {
-            match rx.recv().await {
-                Ok(frame) => {
-                    if wr.write_all(&frame).await.is_err() {
-                        break;
-                    }
-                }
-                Err(RecvError::Lagged(_)) => continue,
-                Err(RecvError::Closed) => break,
+            // Forward whichever lane produces bytes: the MAVLink frame lane for a
+            // MAVLink FC, the raw byte lane for an MSP FC. Exactly one lane is
+            // populated for a given FC, so there is no duplication.
+            let bytes = tokio::select! {
+                r = rx.recv() => match r {
+                    Ok(frame) => frame,
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => break,
+                },
+                r = raw_rx.recv() => match r {
+                    Ok(raw) => raw,
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => break,
+                },
+            };
+            if wr.write_all(&bytes).await.is_err() {
+                break;
             }
         }
     });
@@ -285,23 +295,33 @@ pub async fn run_udp_proxy(fc: Arc<FcConnection>, port: u16, cancel: Arc<Notify>
     let send_sock = sock.clone();
     let send_peers = peers.clone();
     let mut rx = fc.subscribe();
+    let mut raw_rx = fc.subscribe_raw();
     let sender = tokio::spawn(async move {
         loop {
-            match rx.recv().await {
-                Ok(frame) => {
-                    // Evict peers that have gone quiet, then fan the frame out
-                    // only to the survivors.
-                    let targets: Vec<SocketAddr> = {
-                        let mut map = send_peers.lock().await;
-                        evict_stale_peers(&mut map, Instant::now());
-                        map.keys().copied().collect()
-                    };
-                    for peer in targets {
-                        let _ = send_sock.send_to(&frame, peer).await;
-                    }
-                }
-                Err(RecvError::Lagged(_)) => continue,
-                Err(RecvError::Closed) => break,
+            // Forward whichever lane produces bytes: the MAVLink frame lane for a
+            // MAVLink FC, the raw byte lane for an MSP FC. Exactly one lane is
+            // populated for a given FC, so there is no duplication.
+            let frame = tokio::select! {
+                r = rx.recv() => match r {
+                    Ok(f) => f,
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => break,
+                },
+                r = raw_rx.recv() => match r {
+                    Ok(b) => b,
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => break,
+                },
+            };
+            // Evict peers that have gone quiet, then fan the frame out
+            // only to the survivors.
+            let targets: Vec<SocketAddr> = {
+                let mut map = send_peers.lock().await;
+                evict_stale_peers(&mut map, Instant::now());
+                map.keys().copied().collect()
+            };
+            for peer in targets {
+                let _ = send_sock.send_to(&frame, peer).await;
             }
         }
     });
@@ -477,18 +497,28 @@ async fn handle_ws_client(
     };
     let (mut write, mut read) = ws.split();
     let mut rx = fc.subscribe();
+    let mut raw_rx = fc.subscribe_raw();
 
     // FC -> client (binary frames).
     let writer = tokio::spawn(async move {
         loop {
-            match rx.recv().await {
-                Ok(frame) => {
-                    if write.send(Message::Binary(frame)).await.is_err() {
-                        break;
-                    }
-                }
-                Err(RecvError::Lagged(_)) => continue,
-                Err(RecvError::Closed) => break,
+            // Forward whichever lane produces bytes: the MAVLink frame lane for a
+            // MAVLink FC, the raw byte lane for an MSP FC. Exactly one lane is
+            // populated for a given FC, so there is no duplication.
+            let bytes = tokio::select! {
+                r = rx.recv() => match r {
+                    Ok(frame) => frame,
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => break,
+                },
+                r = raw_rx.recv() => match r {
+                    Ok(raw) => raw,
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => break,
+                },
+            };
+            if write.send(Message::Binary(bytes)).await.is_err() {
+                break;
             }
         }
     });
