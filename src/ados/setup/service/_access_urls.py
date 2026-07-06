@@ -17,7 +17,7 @@ from ados.setup.models import (
     VideoAccess,
 )
 
-from ._constants import _HOTSPOT_URL, _USB_GADGET_IP
+from ._constants import _HOTSPOT_IP, _HOTSPOT_URL, _USB_GADGET_IP
 
 
 async def _video_access(runtime: Any, host_name: str) -> VideoAccess:
@@ -162,11 +162,15 @@ def _access_urls(
                 source="mdns",
             )
         )
-    urls.append(
-        SetupAccessUrl(
-            kind="setup", label="Hotspot setup", url=_setup_path(_HOTSPOT_URL), source="hotspot"
+    # Only advertise the hotspot AP URL when the hotspot is actually up (the AP
+    # IP is present locally). Advertised unconditionally, `192.168.4.1` is a dead
+    # link whenever the hotspot is off — the same guard the USB gadget URL uses.
+    if _HOTSPOT_IP in local_ips:
+        urls.append(
+            SetupAccessUrl(
+                kind="setup", label="Hotspot setup", url=_setup_path(_HOTSPOT_URL), source="hotspot"
+            )
         )
-    )
     urls.append(
         SetupAccessUrl(kind="api", label="Local API", url=f"{base_url}/api", source="local")
     )

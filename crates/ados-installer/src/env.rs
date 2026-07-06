@@ -96,6 +96,33 @@ pub fn current_hostname() -> Option<String> {
     }
 }
 
+/// The device's routable LAN IPv4 addresses (from `ip -o -4 addr show`),
+/// excluding loopback and the hotspot AP gateway (192.168.4.1). Used to show a
+/// reach IP alongside the `.local` name — the IP works everywhere, including a
+/// hosted GCS, while `.local` (mDNS) needs a desktop/localhost app.
+pub fn lan_ips() -> Vec<String> {
+    let res = crate::exec::run("ip", &["-o", "-4", "addr", "show"]);
+    if !res.success() {
+        return Vec::new();
+    }
+    let mut out: Vec<String> = Vec::new();
+    for line in res.stdout.lines() {
+        let mut it = line.split_whitespace();
+        while let Some(tok) = it.next() {
+            if tok == "inet" {
+                if let Some(cidr) = it.next() {
+                    let ip = cidr.split('/').next().unwrap_or(cidr).to_string();
+                    if !ip.starts_with("127.") && ip != "192.168.4.1" && !out.contains(&ip) {
+                        out.push(ip);
+                    }
+                }
+                break;
+            }
+        }
+    }
+    out
+}
+
 /// The on-disk markers that, taken together, mean "the agent is already
 /// installed on this box". Used by the install-presence probe so a bare
 /// `--pair CODE` on an installed agent can run a fast re-pair instead of the

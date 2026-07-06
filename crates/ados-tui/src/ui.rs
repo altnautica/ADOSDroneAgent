@@ -351,7 +351,13 @@ fn links_panel(frame: &mut Frame, area: Rect, dash: &Dashboard) {
         if gi > 0 {
             lines.push(Line::from(""));
         }
-        lines.push(Line::from(Span::styled(group.title, dim())));
+        lines.push(Line::from(Span::styled(
+            group.title,
+            Style::default().fg(theme::heading()),
+        )));
+        if !group.desc.is_empty() {
+            lines.push(Line::from(Span::styled(group.desc, dim())));
+        }
         for row in &group.rows {
             let (arrow, url_style) = if row.loopback {
                 (dim(), dim())
@@ -368,6 +374,17 @@ fn links_panel(frame: &mut Frame, area: Rect, dash: &Dashboard) {
             lines.push(Line::from(spans));
         }
     }
+    // Reachability guidance: the LAN IP always works (incl. from the hosted GCS),
+    // while the .local mDNS name resolves only from a desktop / localhost app.
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Direct IP is most reliable. It works from command.altnautica.com too.",
+        dim(),
+    )));
+    lines.push(Line::from(Span::styled(
+        "The .local (mDNS) name needs a desktop app on the LAN.",
+        dim(),
+    )));
     // Full URLs wrap instead of truncating, so they stay copyable.
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
@@ -393,9 +410,16 @@ fn autopilot_panel(frame: &mut Frame, area: Rect, dash: &Dashboard, history: &Hi
 
     // Flight-controller link + mode/armed chips.
     let (dot_color, dot_text) = match dash.fc_link() {
-        FcLink::Connected => (theme::success(), "FC connected"),
-        FcLink::PortOpen => (theme::warning(), "port open · no MAVLink"),
-        FcLink::Down => (theme::danger(), "FC not connected"),
+        FcLink::Connected => (theme::success(), "FC connected".to_string()),
+        FcLink::Msp => (
+            theme::accent(),
+            format!(
+                "FC: {} (MSP)",
+                dash.fc_variant_label().unwrap_or_else(|| "MSP".to_string())
+            ),
+        ),
+        FcLink::PortOpen => (theme::warning(), "port open · no MAVLink".to_string()),
+        FcLink::Down => (theme::danger(), "FC not connected".to_string()),
     };
     let mut fc = vec![
         Span::styled("● ", Style::default().fg(dot_color)),
@@ -415,16 +439,22 @@ fn autopilot_panel(frame: &mut Frame, area: Rect, dash: &Dashboard, history: &Hi
     }
     cells.push(Cell::Line(Line::from(fc)));
 
-    // FC serial endpoint + link hint, e.g. `ttyS0 · 921600   msp detected`.
+    // FC serial endpoint + an honest sub-line (the link hint, or — for an MSP
+    // FC — that MAVLink telemetry does not apply to it).
     let mut detail: Vec<Span> = Vec::new();
     if let Some(ep) = dash.fc_endpoint() {
         detail.push(Span::styled(ep, dim()));
     }
-    if let Some(hint) = dash.fc_hint() {
+    let sub = if dash.fc_link() == FcLink::Msp {
+        Some("MSP flight controller · MAVLink telemetry N/A".to_string())
+    } else {
+        dash.fc_hint()
+    };
+    if let Some(sub) = sub {
         if !detail.is_empty() {
             detail.push(Span::raw("   "));
         }
-        detail.push(Span::styled(hint, dim()));
+        detail.push(Span::styled(sub, dim()));
     }
     if !detail.is_empty() {
         cells.push(Cell::Line(Line::from(detail)));

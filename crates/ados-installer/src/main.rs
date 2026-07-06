@@ -343,16 +343,25 @@ fn build_summary(status: &str, ctx: &Ctx) -> ui::SummaryData {
 /// de-duplicated. Empty when the box has no routable IPv4 (the card then leads
 /// with the `<host>.local` mDNS name alone).
 fn probe_lan_ips() -> Vec<String> {
+    // The hotspot AP gateway is not a real LAN reach — drop it so it never shows
+    // as a reach IP (the agent gates its hotspot URL the same way).
+    const HOTSPOT_AP_IP: &str = "192.168.4.1";
     let res = exec::run("ip", &["-o", "-4", "addr", "show"]);
     if res.success() {
-        let ips = parse_ip_o_4(&res.stdout);
+        let ips: Vec<String> = parse_ip_o_4(&res.stdout)
+            .into_iter()
+            .filter(|ip| ip != HOTSPOT_AP_IP)
+            .collect();
         if !ips.is_empty() {
             return ips;
         }
     }
     let res = exec::run("hostname", &["-I"]);
     if res.success() {
-        return parse_hostname_i(&res.stdout);
+        return parse_hostname_i(&res.stdout)
+            .into_iter()
+            .filter(|ip| ip != HOTSPOT_AP_IP)
+            .collect();
     }
     Vec::new()
 }

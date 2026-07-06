@@ -32,6 +32,8 @@ pub struct LinkRow {
 #[derive(Debug, Clone, PartialEq)]
 pub struct LinkGroup {
     pub title: &'static str,
+    /// A one-line description of what this group's links are for (empty = none).
+    pub desc: &'static str,
     pub rows: Vec<LinkRow>,
 }
 
@@ -55,7 +57,10 @@ pub enum Health {
 pub enum FcLink {
     /// Transport open and a fresh HEARTBEAT — the gated "connected" truth.
     Connected,
-    /// Transport open but no HEARTBEAT decoded (e.g. an MSP FC, or wrong baud).
+    /// An MSP flight controller (Betaflight/iNav) identified by its USB
+    /// descriptor: attached + recognised, but MAVLink telemetry does not apply.
+    Msp,
+    /// Transport open but no HEARTBEAT decoded (wrong baud, or a booting FC).
     PortOpen,
     /// No FC link.
     Down,
@@ -105,6 +110,9 @@ pub struct Dashboard {
     pub transport_open: Option<bool>,
     pub mavlink_alive: Option<bool>,
     pub fc_link_hint: Option<String>,
+    /// FC firmware family from the USB descriptor (`betaflight`/`inav`), merged
+    /// from `/api/status`; drives the MSP badge.
+    pub fc_variant: Option<String>,
 
     pub video_state: String,
     pub video_viewer: Option<String>,
@@ -456,6 +464,7 @@ impl Dashboard {
         // Console: the setup webapp, already advertised per host.
         out.push(LinkGroup {
             title: "Console",
+            desc: "Setup & dashboard in a browser, on this LAN.",
             rows: self.rows_for(&["setup"]),
         });
 
@@ -496,6 +505,7 @@ impl Dashboard {
         gc.extend(self.rows_for(&["mavlink"])); // e.g. the tunnel MAVLink WS
         out.push(LinkGroup {
             title: "Ground control",
+            desc: "Connect a GCS — tcp://…:5760 for a desktop app (QGC / Mission Planner), ws://…:8765/ for a browser GCS.",
             rows: dedup_drop_loopback(gc),
         });
 
@@ -517,16 +527,19 @@ impl Dashboard {
         vid.extend(self.rows_for(&["video"]));
         out.push(LinkGroup {
             title: "Video",
+            desc: "Live camera in a browser (WHEP viewer).",
             rows: dedup_drop_loopback(vid),
         });
 
         // Mission Control + Remote: as advertised.
         out.push(LinkGroup {
             title: "Mission Control",
+            desc: "Open Mission Control on your computer.",
             rows: self.rows_for(&["mission_control"]),
         });
         out.push(LinkGroup {
             title: "Remote",
+            desc: "Reach this device from anywhere via the cloud tunnel.",
             rows: self.rows_for(&["cloud"]),
         });
 
@@ -591,6 +604,7 @@ impl Dashboard {
             .and_then(Value::as_str)
             .filter(|h| !h.is_empty() && *h != "none")
             .map(str::to_string);
+        self.fc_variant = opt_str(status, "fcVariant");
         // Fall back to /api/status port/baud only when setup-status lacked them.
         if self.fc_port.is_none() {
             self.fc_port = opt_str(status, "fc_port");
@@ -609,11 +623,30 @@ impl Dashboard {
     pub fn fc_link(&self) -> FcLink {
         if self.mavlink_connected {
             FcLink::Connected
+        } else if self.fc_variant.is_some() {
+            // An MSP FC identified by its USB descriptor: attached + recognised
+            // (it never sends a MAVLink heartbeat), so not a "not connected".
+            FcLink::Msp
         } else if self.transport_open == Some(true) && self.mavlink_alive == Some(false) {
             FcLink::PortOpen
         } else {
             FcLink::Down
         }
+    }
+
+    /// The display label for an identified MSP FC, e.g. `Betaflight` / `iNav`.
+    pub fn fc_variant_label(&self) -> Option<String> {
+        self.fc_variant.as_deref().map(|v| match v {
+            "betaflight" => "Betaflight".to_string(),
+            "inav" => "iNav".to_string(),
+            other => {
+                let mut c = other.chars();
+                match c.next() {
+                    Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                    None => other.to_string(),
+                }
+            }
+        })
     }
 
     /// A short link hint (e.g. `msp detected`), when the router reports one.
@@ -849,6 +882,17 @@ mod tests {
         assert_eq!(port_open.fc_link(), FcLink::PortOpen);
         assert_eq!(port_open.fc_hint().as_deref(), Some("msp detected"));
         assert_eq!(port_open.fc_endpoint().as_deref(), Some("ttyS0 · 921600"));
+
+        // An MSP FC identified by the agent (fcVariant present) reads as MSP,
+        // not "port open" and not "not connected".
+        let mut msp = Dashboard::default();
+        msp.merge_fc_status(&json!({
+            "transportOpen": true, "mavlinkAlive": false,
+            "fcLinkHint": "msp_detected", "fcVariant": "betaflight",
+            "fc_port": "ttyACM0", "fc_baud": 57600
+        }));
+        assert_eq!(msp.fc_link(), FcLink::Msp);
+        assert_eq!(msp.fc_variant_label().as_deref(), Some("Betaflight"));
 
         // No transport detail at all → down.
         assert_eq!(Dashboard::default().fc_link(), FcLink::Down);

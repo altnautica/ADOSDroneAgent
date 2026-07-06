@@ -45,9 +45,16 @@ async def build_setup_status(  # noqa: C901
     config = runtime.config
     port = int(getattr(config.api.rest, "port", 8080))
     local_ips = _local_ips()
-    mdns_host = "ados.local"
-    if config.agent.device_id:
-        mdns_host = f"ados-{config.agent.device_id}.local"
+    # The advertised mDNS reach name must be the system hostname avahi actually
+    # publishes and that RESOLVES. A constructed `ados-<device_id>.local` is
+    # never published by anything, so it never resolves (verified on-rig) — do
+    # not advertise it. Empty when the hostname is unusable (then only the LAN
+    # IPs are advertised, which always work).
+    _host_name = (_hostname() or "").strip().rstrip(".")
+    if _host_name and _host_name.lower() != "localhost" and not _host_name.startswith("127."):
+        mdns_host = _host_name if "." in _host_name else f"{_host_name}.local"
+    else:
+        mdns_host = ""
     known_hosts = _build_known_hosts(
         local_ips=local_ips, mdns_host=mdns_host, config=config
     )

@@ -39,7 +39,7 @@ use crate::state::AppState;
 /// uptime + the FC-liveness detail (transport_open / mavlink_alive /
 /// heartbeat_age_s / fc_source / fc_link_hint). Mirrors the Python
 /// `_ipc_only_keys` set.
-const IPC_ONLY_KEYS: [&str; 9] = [
+const IPC_ONLY_KEYS: [&str; 10] = [
     "fc_connected",
     "fc_port",
     "fc_baud",
@@ -49,6 +49,7 @@ const IPC_ONLY_KEYS: [&str; 9] = [
     "heartbeat_age_s",
     "fc_source",
     "fc_link_hint",
+    "fc_variant",
 ];
 
 /// External binaries the video pipeline may use, checked by presence on `PATH`.
@@ -128,6 +129,7 @@ pub async fn get_status(State(state): State<AppState>) -> Json<Value> {
         "heartbeatAgeS": liveness.heartbeat_age_s,
         "fcSource": liveness.fc_source,
         "fcLinkHint": liveness.fc_link_hint,
+        "fcVariant": liveness.fc_variant,
         "dependencies": Value::Object(dependencies),
     });
 
@@ -343,6 +345,9 @@ pub(crate) struct FcLiveness {
     /// The not-alive diagnostic hint: `msp_detected` (the FC speaks MSP, not
     /// MAVLink, on this port), `no_heartbeat` (open but silent), or `none`.
     pub fc_link_hint: Value,
+    /// The FC firmware family from the USB descriptor (`betaflight`/`inav`), or
+    /// null for a MAVLink/unknown FC. Lets the GCS badge an MSP FC honestly.
+    pub fc_variant: Value,
 }
 
 /// Read the FC-liveness extras out of a snapshot. An absent snapshot or absent
@@ -375,6 +380,11 @@ pub(crate) fn fc_liveness_from_snapshot(snapshot: Option<&Value>) -> FcLiveness 
             .cloned()
             .filter(|v| !v.is_null())
             .unwrap_or_else(|| json!("none")),
+        fc_variant: obj
+            .and_then(|m| m.get("fc_variant"))
+            .cloned()
+            .filter(|v| !v.is_null())
+            .unwrap_or(Value::Null),
     }
 }
 

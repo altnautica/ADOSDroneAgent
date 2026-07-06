@@ -377,6 +377,16 @@ async fn build_extras(
     // A human-actionable hint for the not-alive case: msp_detected (the FC speaks
     // MSP, not MAVLink, on this port), no_heartbeat (open but silent), or none.
     extras.insert("fc_link_hint".into(), json!(fc.link_hint().await));
+    // The FC firmware family identified from the port's USB descriptor
+    // (betaflight/inav), or null for a MAVLink/unknown FC — lets a consumer
+    // badge "Betaflight (MSP)" instead of a misleading "not connected".
+    extras.insert(
+        "fc_variant".into(),
+        fc.fc_variant()
+            .await
+            .map(|v| json!(v))
+            .unwrap_or(Value::Null),
+    );
     extras.insert("fc_port".into(), json!(fc.port().await));
     extras.insert("fc_baud".into(), json!(fc.baud()));
     extras.insert(

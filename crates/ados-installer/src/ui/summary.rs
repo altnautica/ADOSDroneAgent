@@ -27,6 +27,10 @@ pub const NEXT_STEPS: &[(&str, &str)] = &[
 /// The local-mode caveat + docs pointer shown in the Notes section.
 const NOTE_LOCAL_MODE: &str = "Running in LOCAL mode. Pair over the LAN, no cloud needed.";
 const NOTE_DOCS: &str = "Docs: docs.altnautica.com";
+/// Reachability guidance: the LAN IP is the most reliable reach and works from
+/// the hosted GCS; the `.local` (mDNS) name resolves only from a desktop app.
+const NOTE_DIRECT_IP: &str = "Direct IP is most reliable; it works from the hosted GCS too.";
+const NOTE_MDNS: &str = "The .local (mDNS) name needs a desktop app on the LAN.";
 
 /// The reach URLs for the console, most-resolvable first: the `<host>.local`
 /// mDNS name, then one `http://<ip>:8080` per discovered LAN address. A bare
@@ -107,6 +111,8 @@ pub fn plain_lines(s: &SummaryData) -> Vec<String> {
 
     out.push(String::new());
     out.push(NOTE_LOCAL_MODE.to_string());
+    out.push(NOTE_DIRECT_IP.to_string());
+    out.push(NOTE_MDNS.to_string());
     out.push(NOTE_DOCS.to_string());
     out
 }
@@ -219,6 +225,8 @@ fn success_card(s: &SummaryData, theme: &Theme, width: usize) -> Vec<String> {
     body.push(String::new());
     body.push(section(theme, "Notes"));
     body.push(theme.dim(NOTE_LOCAL_MODE));
+    body.push(theme.dim(NOTE_DIRECT_IP));
+    body.push(theme.dim(NOTE_MDNS));
     body.push(theme.dim(NOTE_DOCS));
 
     frame(theme, Border::Ok, &title, &body, width)

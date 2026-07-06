@@ -33,6 +33,15 @@ class DiscoveryService:
 
     @property
     def mdns_hostname(self) -> str:
+        # The RESOLVABLE mDNS reach name is the system hostname that avahi
+        # publishes, NOT a constructed `ados-<short_id>.local` — nothing
+        # publishes that as an A-record, so it never resolves (verified on-rig).
+        # Report the real hostname; fall back to the device-id form only when the
+        # hostname is unusable. (The zeroconf `_ados._tcp` browse record + its IP
+        # are unaffected — this only changes the reachable name reported.)
+        name = (socket.gethostname() or "").strip().rstrip(".")
+        if name and name.lower() != "localhost" and not name.startswith("127."):
+            return name if "." in name else f"{name}.local"
         return f"ados-{self._short_id}.local"
 
     def _get_local_ip(self) -> str:

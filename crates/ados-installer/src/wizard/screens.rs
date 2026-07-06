@@ -717,15 +717,24 @@ fn name_stage(tty: &mut Tty, theme: &Theme, args: &mut Args) -> Nav {
     // reachable at that name right now and setup ran over it. Offer a quick
     // Keep, or Rename to pick a friendlier one.
     if let Some(host) = &current {
+        // Show the LAN IP alongside the .local name: the IP works everywhere
+        // (including the hosted GCS), while the .local name needs a desktop app.
+        let ip = env::lan_ips().into_iter().next();
+        let reach = match &ip {
+            Some(ip) => format!("It's reachable now at {host}.local or {ip}."),
+            None => format!("It's reachable now at {host}.local."),
+        };
+        let mut body: Vec<String> = vec![theme.dim(&reach)];
+        if ip.is_some() {
+            body.push(theme.dim("Direct IP is most reliable; .local needs a desktop app."));
+        }
+        body.push(theme.dim("Keep this name, or pick a friendlier one."));
         match confirm_card(
             tty,
             theme,
             SETUP,
             "Name this device",
-            &[
-                theme.dim(&format!("It's reachable now at {host}.local.")),
-                theme.dim("Keep this name, or pick a friendlier one."),
-            ],
+            &body,
             &format!("Keep {host}"),
             "Rename",
             true,

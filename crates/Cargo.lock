@@ -553,6 +553,7 @@ version = "0.1.0"
 dependencies = [
  "ados-protocol",
  "anyhow",
+ "nix 0.29.0",
  "ratatui",
  "serde_json",
 ]

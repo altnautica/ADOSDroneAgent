@@ -38,8 +38,8 @@ use crate::state::VehicleState;
 use framing::{count_msp_frame_starts, extract_frames};
 use send_scheduler::STREAM_DEFAULT;
 use transport::{
-    is_candidate_port, now_iso, open_serial, parse_net_spec, persist_params, probe_baud,
-    split_serial, BoxedReadHalf, BoxedWriteHalf, NetSpec, ProbeOutcome, UdpAdapter,
+    fc_variant_for_port, is_candidate_port, now_iso, open_serial, parse_net_spec, persist_params,
+    probe_baud, split_serial, BoxedReadHalf, BoxedWriteHalf, NetSpec, ProbeOutcome, UdpAdapter,
     BAUD_CANDIDATES, BAUD_FALLBACK,
 };
 
@@ -95,6 +95,13 @@ pub struct FcConnection {
     /// the minimum, while a port that opens but never accepts a write backs off.
     wrote_since_open: AtomicBool,
     port: Mutex<String>,
+    /// The FC firmware family identified from the opened port's USB descriptor
+    /// (`betaflight` / `inav`), or `None` for a MAVLink / unknown FC. An MSP FC
+    /// (Betaflight/iNav) is silent over USB until polled, so it never emits the
+    /// heartbeat the alive gate needs; the USB product string is the passive,
+    /// reliable signal that the attached FC is an MSP board. Recomputed on every
+    /// open, cleared on teardown.
+    fc_variant: Mutex<Option<String>>,
     baud: AtomicU32,
     last_msg_at: Mutex<Instant>,
     /// Monotonic clock of the last decoded HEARTBEAT, distinct from
@@ -143,6 +150,7 @@ impl FcConnection {
             connected: AtomicBool::new(false),
             wrote_since_open: AtomicBool::new(false),
             port: Mutex::new(String::new()),
+            fc_variant: Mutex::new(None),
             baud: AtomicU32::new(0),
             last_msg_at: Mutex::new(Instant::now()),
             last_heartbeat_at: Mutex::new(None),
@@ -223,6 +231,13 @@ impl FcConnection {
         if !self.transport_open() {
             return "none";
         }
+        // A Betaflight/iNav FC identified by its USB descriptor speaks MSP, not
+        // MAVLink, and is silent until polled — so it never trips the passive
+        // byte sniff below. The descriptor is the reliable signal that "no
+        // heartbeat" is really "this is an MSP FC", not a broken link.
+        if self.fc_variant.lock().await.is_some() {
+            return "msp_detected";
+        }
         let msp_recent = self
             .last_msp_at
             .lock()
@@ -234,6 +249,12 @@ impl FcConnection {
         } else {
             "no_heartbeat"
         }
+    }
+
+    /// The FC firmware family identified from the opened port's USB descriptor
+    /// (`betaflight` / `inav`), or `None` for a MAVLink / unknown FC.
+    pub async fn fc_variant(&self) -> Option<String> {
+        self.fc_variant.lock().await.clone()
     }
     pub async fn port(&self) -> String {
         self.port.lock().await.clone()
@@ -315,6 +336,10 @@ impl FcConnection {
                 continue;
             };
             *self.port.lock().await = port.clone();
+            // Identify an MSP FC (Betaflight/iNav) by the opened port's USB
+            // descriptor — the passive signal that survives the silent-until-
+            // polled blind spot of the byte sniff.
+            *self.fc_variant.lock().await = fc_variant_for_port(&port);
             self.baud.store(baud, Ordering::Relaxed);
             *self.writer.lock().await = Some(write_half);
             self.connected.store(true, Ordering::Relaxed);
@@ -345,6 +370,7 @@ impl FcConnection {
             self.connected.store(false, Ordering::Relaxed);
             *self.last_heartbeat_at.lock().await = None;
             *self.last_msp_at.lock().await = None;
+            *self.fc_variant.lock().await = None;
             self.msp_warned.store(false, Ordering::Relaxed);
             *self.writer.lock().await = None;
             self.param_priming.store(false, Ordering::Relaxed);

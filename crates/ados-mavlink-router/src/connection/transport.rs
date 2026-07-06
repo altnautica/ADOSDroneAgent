@@ -113,6 +113,43 @@ pub(crate) fn is_candidate_port(port_type: &SerialPortType, name: &str) -> bool 
         || SERIAL_PREFIXES.iter().any(|pre| name.starts_with(pre))
 }
 
+/// Identify an MSP flight controller (Betaflight / iNav) from the USB descriptor
+/// of an opened serial port, by reading the device's `product`/`manufacturer`
+/// strings out of sysfs. Returns `Some("betaflight")` / `Some("inav")` for a
+/// recognised MSP board, else `None` (a MAVLink or unknown FC). This is the
+/// passive signal that a Betaflight-over-USB board is attached even though it
+/// emits nothing until polled (so the byte sniff never sees it). A `udp:`/`tcp:`
+/// network FC or a non-USB serial node has no descriptor and returns `None`.
+#[cfg(target_os = "linux")]
+pub(crate) fn fc_variant_for_port(path: &str) -> Option<String> {
+    let node = std::path::Path::new(path).file_name()?.to_str()?;
+    // `/sys/class/tty/<node>/device` points at the USB *interface*; the
+    // product/manufacturer strings live one or more levels up on the USB device.
+    let mut cur = std::fs::canonicalize(format!("/sys/class/tty/{node}/device")).ok()?;
+    for _ in 0..6 {
+        let product = std::fs::read_to_string(cur.join("product")).unwrap_or_default();
+        let manufacturer = std::fs::read_to_string(cur.join("manufacturer")).unwrap_or_default();
+        let hay = format!("{product} {manufacturer}").to_ascii_lowercase();
+        if !hay.trim().is_empty() {
+            // Reached the USB device level (it carries the strings).
+            if hay.contains("betaflight") {
+                return Some("betaflight".to_string());
+            }
+            if hay.contains("inav") {
+                return Some("inav".to_string());
+            }
+            return None;
+        }
+        cur = cur.parent()?.to_path_buf();
+    }
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn fc_variant_for_port(_path: &str) -> Option<String> {
+    None
+}
+
 /// Write the full buffer and flush it, surfacing the first io error so the
 /// caller can log it. Split out from `send_bytes` so a writer can be swapped
 /// for a fault-injecting one in tests.

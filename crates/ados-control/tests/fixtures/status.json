@@ -22,6 +22,7 @@
   "fc_port": "",
   "fcSource": "auto",
   "fcLinkHint": "none",
+  "fcVariant": null,
   "heartbeatAgeS": null,
   "mavlinkAlive": false,
   "transportOpen": false,
