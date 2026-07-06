@@ -82,12 +82,56 @@ const ROVER_MODES: &[(u32, &str)] = &[
     (15, "GUIDED"),
 ];
 
-/// Select the mode table for a vehicle type, then resolve the custom mode. The
-/// type is matched by its MAV_TYPE wire value (stable across dialect revisions)
-/// rather than an enum variant name. The plane table covers fixed-wing (1) and
-/// the VTOL types (20, 21). An unmapped type or mode falls back to `MODE_<n>`,
-/// matching the Python `mode_map.get(type, {}).get(custom_mode, f"MODE_{custom_mode}")`.
-fn mode_name(mav_type: i64, custom_mode: u32) -> String {
+/// PX4 `(main_mode, sub_mode)` -> mode name. PX4 packs the mode into
+/// `custom_mode` differently from ArduPilot (a `(main << 16) | (sub << 24)`
+/// union, mavros `px4_custom_mode.h`), so it needs its own decode path keyed on
+/// `HEARTBEAT.autopilot == MAV_AUTOPILOT_PX4`, not on MAV_TYPE. `sub` is 0 for
+/// the manual/assisted modes and non-zero only under AUTO.
+const PX4_MODES: &[(u8, u8, &str)] = &[
+    (1, 0, "MANUAL"),
+    (2, 0, "ALTCTL"),
+    (3, 0, "POSCTL"),
+    (5, 0, "ACRO"),
+    (6, 0, "OFFBOARD"),
+    (7, 0, "STABILIZED"),
+    (8, 0, "RATTITUDE"),
+    (4, 1, "AUTO.READY"),
+    (4, 2, "AUTO.TAKEOFF"),
+    (4, 3, "AUTO.LOITER"),
+    (4, 4, "AUTO.MISSION"),
+    (4, 5, "AUTO.RTL"),
+    (4, 6, "AUTO.LAND"),
+    (4, 7, "AUTO.RTGS"),
+    (4, 8, "AUTO.FOLLOW_TARGET"),
+    (4, 9, "AUTO.PRECLAND"),
+];
+
+/// Decode a PX4 `custom_mode` (main in bits 16-23, sub in bits 24-31). Falls
+/// back to the main-mode name when the sub-mode is unmapped, then to `MODE_<n>`.
+fn px4_mode_name(custom_mode: u32) -> String {
+    let main = ((custom_mode >> 16) & 0xff) as u8;
+    let sub = ((custom_mode >> 24) & 0xff) as u8;
+    if let Some((_, _, name)) = PX4_MODES.iter().find(|(m, s, _)| *m == main && *s == sub) {
+        return (*name).to_string();
+    }
+    // Unmapped sub under a known main: report the main mode.
+    if let Some((_, _, name)) = PX4_MODES.iter().find(|(m, s, _)| *m == main && *s == 0) {
+        return (*name).to_string();
+    }
+    format!("MODE_{custom_mode}")
+}
+
+/// Select the mode table for a vehicle, then resolve the custom mode. PX4 is
+/// decoded by its packed-union scheme (keyed on `autopilot`); ArduPilot is keyed
+/// on MAV_TYPE by its wire value (stable across dialect revisions). The plane
+/// table covers fixed-wing (1) and the VTOL types (20, 21). An unmapped
+/// type/mode falls back to `MODE_<n>`, matching the Python
+/// `mode_map.get(type, {}).get(custom_mode, f"MODE_{custom_mode}")`.
+fn mode_name(autopilot: i64, mav_type: i64, custom_mode: u32) -> String {
+    // MAV_AUTOPILOT_PX4 = 12.
+    if autopilot == 12 {
+        return px4_mode_name(custom_mode);
+    }
     let table: Option<&[(u32, &str)]> = match mav_type {
         // QUADROTOR, HEXAROTOR, OCTOROTOR, HELICOPTER, TRICOPTER, COAXIAL
         2 | 13 | 14 | 4 | 15 | 3 => Some(COPTER_MODES),
@@ -240,7 +284,7 @@ impl VehicleState {
                 self.system_status = m.system_status as i64;
                 self.armed = (m.base_mode.bits() & 128) != 0;
                 self.last_heartbeat = now_iso.to_string();
-                self.mode = mode_name(m.mavtype as i64, m.custom_mode);
+                self.mode = mode_name(m.autopilot as i64, m.mavtype as i64, m.custom_mode);
                 None
             }
             MavMessage::GLOBAL_POSITION_INT(m) => {
@@ -457,6 +501,64 @@ mod tests {
         s.update_from_message(&heartbeat(MavType::MAV_TYPE_QUADROTOR, 99, false), TS);
         assert_eq!(s.mode, "MODE_99");
         assert!(!s.armed);
+    }
+
+    fn heartbeat_px4(mavtype: MavType, custom_mode: u32) -> MavMessage {
+        MavMessage::HEARTBEAT(HEARTBEAT_DATA {
+            custom_mode,
+            mavtype,
+            autopilot: MavAutopilot::MAV_AUTOPILOT_PX4,
+            base_mode: MavModeFlag::empty(),
+            system_status: MavState::MAV_STATE_STANDBY,
+            mavlink_version: 3,
+        })
+    }
+
+    /// PX4 packs the mode differently (main bits 16-23, sub bits 24-31), so an
+    /// AUTO submode must decode via the PX4 path, not the ArduCopter table.
+    fn px4_custom(main: u32, sub: u32) -> u32 {
+        (sub << 24) | (main << 16)
+    }
+
+    #[test]
+    fn px4_heartbeat_decodes_base_and_auto_submodes() {
+        let mut s = VehicleState::default();
+        // POSCTL (main=3, sub=0).
+        s.update_from_message(
+            &heartbeat_px4(MavType::MAV_TYPE_QUADROTOR, px4_custom(3, 0)),
+            TS,
+        );
+        assert_eq!(s.mode, "POSCTL");
+        // AUTO.MISSION (main=4, sub=4) -> 0x04040000, wrong on the copter table.
+        s.update_from_message(
+            &heartbeat_px4(MavType::MAV_TYPE_QUADROTOR, px4_custom(4, 4)),
+            TS,
+        );
+        assert_eq!(s.mode, "AUTO.MISSION");
+        // AUTO.RTL (main=4, sub=5).
+        s.update_from_message(
+            &heartbeat_px4(MavType::MAV_TYPE_QUADROTOR, px4_custom(4, 5)),
+            TS,
+        );
+        assert_eq!(s.mode, "AUTO.RTL");
+        // A PX4 fixed-wing still uses the PX4 path (keyed on autopilot, not type).
+        s.update_from_message(
+            &heartbeat_px4(MavType::MAV_TYPE_FIXED_WING, px4_custom(4, 4)),
+            TS,
+        );
+        assert_eq!(s.mode, "AUTO.MISSION");
+    }
+
+    #[test]
+    fn px4_unmapped_submode_falls_back_to_mode_number() {
+        let mut s = VehicleState::default();
+        // AUTO main (4) with an unmapped sub (99). There is no (4, 0) entry to
+        // fall back to, so the mode degrades to MODE_<custom_mode>.
+        s.update_from_message(
+            &heartbeat_px4(MavType::MAV_TYPE_QUADROTOR, px4_custom(4, 99)),
+            TS,
+        );
+        assert_eq!(s.mode, format!("MODE_{}", px4_custom(4, 99)));
     }
 
     #[test]
