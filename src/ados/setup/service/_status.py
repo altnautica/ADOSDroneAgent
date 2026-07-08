@@ -127,7 +127,7 @@ async def build_setup_status(  # noqa: C901
         ground_role=ground_role,
     )
     persisted = read_state()
-    mission_control_url = _mission_control_url(host_name=host_name, config=config)
+    mission_control_url = _mission_control_url(config=config)
     access_urls = _access_urls(
         base_url=base_url,
         host_name=host_name,

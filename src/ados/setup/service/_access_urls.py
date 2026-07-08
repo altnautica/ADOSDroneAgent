@@ -69,22 +69,20 @@ async def _video_access(runtime: Any, host_name: str) -> VideoAccess:
     return VideoAccess(state="not_initialized")
 
 
-def _mission_control_url(*, host_name: str, config: Any) -> str:
+def _mission_control_url(*, config: Any) -> str:
     """Choose a Mission Control URL to advertise.
 
     Priority:
-    1. ``config.api.mission_control_url`` if the operator set one.
-    2. ``http://localhost:4000`` only when the request itself came from
-       localhost / 127.0.0.1 (operator on the same machine).
-    3. Empty string. The setup webapp will then say "Open Mission Control
-       on your computer" rather than show a useless link.
+    1. ``config.api.mission_control_url`` if the operator set one (e.g. a
+       self-hosted build at ``http://localhost:4000`` or their own domain).
+    2. The hosted Mission Control at ``https://command.altnautica.com`` — the
+       canonical GCS, reachable from anywhere the drone is (a direct IP works
+       there too). We never assume the operator runs a local build on :4000.
     """
     explicit = str(getattr(config.api, "mission_control_url", "") or "")
     if explicit:
         return explicit
-    if host_name in {"localhost", "127.0.0.1"}:
-        return "http://localhost:4000"
-    return ""
+    return "https://command.altnautica.com"
 
 
 def _viewer_url_from_whep(whep_url: str | None) -> str:
@@ -190,7 +188,11 @@ def _access_urls(
                 kind="mission_control",
                 label="Mission Control",
                 url=mission_control_url,
-                source="local" if host_name in {"localhost", "127.0.0.1"} else "configured",
+                source=(
+                    "local"
+                    if ("localhost" in mission_control_url or "127.0.0.1" in mission_control_url)
+                    else "configured"
+                ),
             )
         )
     for ip in local_ips:

@@ -229,16 +229,27 @@ def _setup_steps(
         )
 
     if is_drone:
+        # When the FC is not connected, surface WHY from the hardware-check FC
+        # item (no serial device / serial present but silent) plus the fix,
+        # instead of the generic "connect or configure" line.
+        fc_item = next((it for it in hardware_check.items if it.id == "fc"), None)
+        if mavlink.connected:
+            fc_detail = "MAVLink telemetry is live."
+        elif fc_item is not None and fc_item.detail:
+            fc_detail = fc_item.detail
+            if fc_item.fix_hint:
+                fc_detail = f"{fc_detail} {fc_item.fix_hint}"
+        else:
+            fc_detail = (
+                "No flight controller detected on USB/serial. "
+                "Connect the FC over USB and re-check."
+            )
         steps.append(
             SetupStep(
                 id="mavlink",
                 label="Flight controller",
                 state="complete" if mavlink.connected else "needs_action",
-                detail=(
-                    "MAVLink telemetry is live"
-                    if mavlink.connected
-                    else "Connect or configure the flight controller"
-                ),
+                detail=fc_detail,
                 action_label="Open MAVLink",
                 href="/mavlink.html",
             )
@@ -276,7 +287,11 @@ def _setup_steps(
                 id="ground_receiver",
                 label="Ground receiver",
                 state="complete" if video.state == "running" else "needs_action",
-                detail="WFB receiver and mesh role configuration",
+                detail=(
+                    "Receiving WFB video."
+                    if video.state == "running"
+                    else "Configure the WFB receiver and mesh role, then bind to a drone."
+                ),
                 action_label="Open Ground station",
                 href="/ground.html",
             )
@@ -305,9 +320,9 @@ def _setup_steps(
             label="Remote access",
             state="complete" if remote.status == "running" else "optional",
             detail=(
-                "Cloudflare tunnel is running"
+                "Cloudflare tunnel is running."
                 if remote.status == "running"
-                else "Optional cloud or tunnel link"
+                else "Optional — reach this device beyond the LAN via a Cloudflare tunnel."
             ),
             action_label="Open Remote access",
             href="/remote.html",

@@ -203,24 +203,16 @@ class _MCCfg:
     api = _Api()
 
 
-def test_mission_control_url_returns_localhost_when_caller_is_localhost() -> None:
-    assert _mission_control_url(host_name="localhost", config=_MCCfg()) == "http://localhost:4000"
-    assert _mission_control_url(host_name="127.0.0.1", config=_MCCfg()) == "http://localhost:4000"
-
-
-def test_mission_control_url_is_empty_for_remote_callers() -> None:
-    # Phone on the hotspot / LAN: no useful localhost link.
-    assert _mission_control_url(host_name="192.168.4.1", config=_MCCfg()) == ""
-    assert _mission_control_url(host_name="10.0.0.5", config=_MCCfg()) == ""
+def test_mission_control_url_defaults_to_hosted_gcs() -> None:
+    # The canonical GCS is hosted; never assume a local build on :4000.
+    assert _mission_control_url(config=_MCCfg()) == "https://command.altnautica.com"
 
 
 def test_mission_control_url_honours_explicit_config() -> None:
+    # A self-hoster can point it at their own build (or domain).
     cfg = _MCCfg()
-    cfg.api.mission_control_url = "https://command.altnautica.com"
-    assert (
-        _mission_control_url(host_name="10.0.0.5", config=cfg)
-        == "https://command.altnautica.com"
-    )
+    cfg.api.mission_control_url = "http://localhost:4000"
+    assert _mission_control_url(config=cfg) == "http://localhost:4000"
 
 
 # --- cloud-choice -------------------------------------------------------------
