@@ -3,7 +3,8 @@
 // and against the real agent at runtime. JSON in, JSON out, throws on
 // non-2xx with a useful message.
 
-import { getApiKey, setApiKey } from "./api-key";
+import { getApiKey } from "./api-key";
+import { clearSession, getSession } from "./session";
 
 export class ApiError extends Error {
   status: number;
@@ -20,65 +21,21 @@ interface FetchOptions {
   method?: "GET" | "POST" | "PUT" | "DELETE";
   body?: unknown;
   signal?: AbortSignal;
-  // Internal: set once a request has already retried after a key prompt, so a
-  // still-401 response (wrong key / unpaired) does not loop.
-  retriedAfterKeyPrompt?: boolean;
+  // Set by the access gate's own probe so a 401 there does NOT re-notify the
+  // gate (which would recurse). Panel fetches leave this unset so a mid-session
+  // 401 hands the UI back to the gate.
+  skipAuthSignal?: boolean;
 }
 
-// A paired agent requires the API key on its data routes. The dashboard reads
-// it from localStorage; on a direct LAN visit it is empty and every panel fetch
-// 401s. Rather than make the operator SSH in and grab the key, the agent's own
-// webapp is first-party and reachable over the LAN — which is the local-first
-// pairing trust boundary — so it acquires the key by CLAIMING locally. The
-// claim is idempotent on an already-paired agent (it returns the live key and
-// never rotates), so this never disturbs the GCS or other clients. Only if the
-// local claim fails do we fall back to a manual key prompt. Single-flight so a
-// burst of concurrent 401s triggers exactly one acquisition.
-let keyAcquireInFlight: Promise<boolean> | null = null;
+// The access gate registers a handler here. On a data-plane 401 (a paired agent
+// reached off-box with no/expired/revoked credential) `apiFetch` drops the stale
+// session and notifies the gate, which shows the branded PIN splash instead of a
+// blank dashboard. Replaces the old raw-key `window.prompt`.
+type AuthRequiredHandler = () => void;
+let authRequiredHandler: AuthRequiredHandler | null = null;
 
-function acquireApiKey(): Promise<boolean> {
-  if (!keyAcquireInFlight) {
-    keyAcquireInFlight = (async () => {
-      // Local claim: the agent serves this webapp, so a same-origin POST to its
-      // public pairing-claim endpoint returns the current key with no SSH.
-      try {
-        const resp = await fetch("/api/pairing/claim", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ user_id: "ados-dashboard" }),
-        });
-        if (resp.ok) {
-          const data = (await resp.json()) as { api_key?: string };
-          const key = data.api_key?.trim();
-          if (key) {
-            setApiKey(key);
-            return true;
-          }
-        }
-      } catch {
-        // Network/route failure — fall through to the manual prompt.
-      }
-      // Fallback only: claim unavailable. Ask for the key, or point at the
-      // Mission Control path that passes it automatically (?ados_key=).
-      const entered = window.prompt(
-        "This agent is paired. Enter its API key (shown by `ados status`),\n" +
-          "or open this dashboard from Mission Control to connect automatically.",
-      );
-      const key = entered?.trim();
-      if (key) {
-        setApiKey(key);
-        return true;
-      }
-      return false;
-    })().finally(() => {
-      // Release the single-flight latch on the next tick so a later 401 (e.g. a
-      // wrong key) can retry acquisition.
-      setTimeout(() => {
-        keyAcquireInFlight = null;
-      }, 0);
-    });
-  }
-  return keyAcquireInFlight;
+export function setAuthRequiredHandler(fn: AuthRequiredHandler | null): void {
+  authRequiredHandler = fn;
 }
 
 export async function apiFetch<T = unknown>(
@@ -87,9 +44,12 @@ export async function apiFetch<T = unknown>(
 ): Promise<T> {
   const headers: Record<string, string> = { Accept: "application/json" };
 
-  // A paired agent requires the key on its data routes. Send the stored key
-  // when present; a 401 below drives an in-band key-entry prompt + retry so a
-  // directly-visited dashboard is not left blank.
+  // A paired agent requires a data-plane credential off-box. Prefer the
+  // dashboard session (minted by the PIN gate); also send the API key when one
+  // is stored (the Mission Control `?ados_key=` deep-link + Settings → Cloud
+  // path still works untouched).
+  const session = getSession();
+  if (session) headers["X-ADOS-Dashboard-Session"] = session;
   const storedKey = getApiKey();
   if (storedKey) headers["X-ADOS-Key"] = storedKey;
 
@@ -106,14 +66,13 @@ export async function apiFetch<T = unknown>(
 
   const res = await fetch(path, init);
 
-  // Direct-visit auth: a 401 on a paired agent means we have no (or a stale)
-  // key. Acquire it (claim locally over the LAN, prompt only as a fallback) and
-  // retry the request a single time.
-  if (res.status === 401 && !opts.retriedAfterKeyPrompt && !opts.signal?.aborted) {
-    const acquired = await acquireApiKey();
-    if (acquired) {
-      return apiFetch<T>(path, { ...opts, retriedAfterKeyPrompt: true });
-    }
+  // Direct-visit auth: a 401 on a paired agent means the credential is missing,
+  // expired, or revoked. Drop the stale session and hand the UI to the access
+  // gate (which shows the PIN splash). The gate's own probe passes
+  // `skipAuthSignal` so it resolves its 401 itself without recursing.
+  if (res.status === 401 && !opts.signal?.aborted) {
+    clearSession();
+    if (!opts.skipAuthSignal) authRequiredHandler?.();
   }
 
   let body: unknown = null;

@@ -1,6 +1,7 @@
 import { lazy, Suspense } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 
+import { DashboardAccessGate } from "@/components/access/DashboardAccessGate";
 import { ErrorBoundary } from "@/components/error-boundary";
 import { AppShell } from "@/components/layout/app-shell";
 import { SettingsLayout } from "@/components/layout/settings-layout";
@@ -61,8 +62,9 @@ export function App() {
     <ThemeProvider>
       <TooltipProvider delayDuration={200}>
         <ErrorBoundary>
-          <Suspense fallback={<RouteFallback />}>
-            <Routes>
+          <DashboardAccessGate>
+            <Suspense fallback={<RouteFallback />}>
+              <Routes>
               <Route element={<AppShell />}>
                 <Route index element={<IndexRedirect />} />
                 <Route path="/home" element={<HomeRoute />} />
@@ -154,8 +156,9 @@ export function App() {
                 />
               </Route>
               <Route path="*" element={<Navigate to="/" replace />} />
-            </Routes>
-          </Suspense>
+              </Routes>
+            </Suspense>
+          </DashboardAccessGate>
         </ErrorBoundary>
       </TooltipProvider>
     </ThemeProvider>
