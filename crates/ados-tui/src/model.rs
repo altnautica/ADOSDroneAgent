@@ -42,6 +42,9 @@ pub struct LinkGroup {
 pub struct Step {
     pub label: String,
     pub state: String,
+    /// A human-readable description of the step, or why it needs action. Empty
+    /// when the agent advertised none.
+    pub detail: String,
 }
 
 /// The overall one-word health verdict, computed only from verified inputs.
@@ -288,6 +291,21 @@ fn swap_host(url: &str, host: &str) -> String {
     }
 }
 
+/// The scheme + authority of a URL, dropping the path/query/fragment, e.g.
+/// `http://host:8080/setup` → `http://host:8080`. Turns the per-host setup URLs
+/// into the bare base address to paste into Mission Control's Add-a-Node card.
+fn base_url(url: &str) -> String {
+    let (scheme, rest) = match url.split_once("://") {
+        Some((s, r)) => (Some(s), r),
+        None => (None, url),
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    match scheme {
+        Some(scheme) => format!("{scheme}://{authority}"),
+        None => authority.to_string(),
+    }
+}
+
 /// A MAVLink `GPS_FIX_TYPE` integer as a short human label.
 pub fn fix_label(fix_type: i64) -> String {
     match fix_type {
@@ -339,6 +357,7 @@ impl Dashboard {
                 dash.steps.push(Step {
                     label: s(step, "label", ""),
                     state: s(step, "state", ""),
+                    detail: s(step, "detail", ""),
                 });
             }
         }
@@ -452,7 +471,8 @@ impl Dashboard {
     }
 
     /// Every advertised link, grouped for the Links panel: Console (the setup
-    /// webapp), Ground control (MAVLink tcp + ws), Video, Mission Control, and
+    /// webapp), Connect to GCS (the bare base address to add into Mission
+    /// Control), Ground control (MAVLink tcp + ws), Video, Mission Control, and
     /// Remote. Each link is a full URL. The MAVLink and video endpoints, which
     /// the agent advertises on one best host, are projected onto every reachable
     /// LAN host so the operator sees both the mDNS name and the LAN IP. Loopback
@@ -466,6 +486,23 @@ impl Dashboard {
             title: "Console",
             desc: "Setup & dashboard in a browser, on this LAN.",
             rows: self.rows_for(&["setup"]),
+        });
+
+        // Connect to GCS: the bare base address (no /setup) to paste into
+        // Mission Control's Add-a-Node card to pair this drone over the LAN.
+        let gcs: Vec<LinkRow> = self
+            .rows_for(&["setup"])
+            .into_iter()
+            .map(|r| LinkRow {
+                url: base_url(&r.url),
+                primary: r.primary,
+                loopback: r.loopback,
+            })
+            .collect();
+        out.push(LinkGroup {
+            title: "Connect to GCS",
+            desc: "Add this drone to Mission Control — paste one of these into the Add-a-Node card (LAN pairing).",
+            rows: dedup_drop_loopback(gcs),
         });
 
         // Ground control: a tcp + ws endpoint on every reachable LAN host (both
@@ -505,7 +542,7 @@ impl Dashboard {
         gc.extend(self.rows_for(&["mavlink"])); // e.g. the tunnel MAVLink WS
         out.push(LinkGroup {
             title: "Ground control",
-            desc: "Connect a GCS — tcp://…:5760 for a desktop app (QGC / Mission Planner), ws://…:8765/ for a browser GCS.",
+            desc: "Conventional MAVLink over TCP / WebSocket for a third-party GCS — tcp://…:5760 (QGC / Mission Planner desktop), ws://…:8765/ (browser GCS).",
             rows: dedup_drop_loopback(gc),
         });
 
@@ -534,7 +571,7 @@ impl Dashboard {
         // Mission Control + Remote: as advertised.
         out.push(LinkGroup {
             title: "Mission Control",
-            desc: "Open Mission Control on your computer.",
+            desc: "Open Mission Control to fly this drone. Hosted at command.altnautica.com; a local or self-hosted build runs wherever you serve it (e.g. http://localhost:4000).",
             rows: self.rows_for(&["mission_control"]),
         });
         out.push(LinkGroup {
@@ -649,9 +686,20 @@ impl Dashboard {
         })
     }
 
-    /// A short link hint (e.g. `msp detected`), when the router reports one.
+    /// A full, actionable link-hint sentence for the FC sub-line, expanded from
+    /// the router's short token (`no_heartbeat` / `msp_detected`) so the operator
+    /// knows what to check. An unknown token degrades to its spaced form.
     pub fn fc_hint(&self) -> Option<String> {
-        self.fc_link_hint.as_ref().map(|h| h.replace('_', " "))
+        self.fc_link_hint.as_ref().map(|h| match h.as_str() {
+            "no_heartbeat" => {
+                "Serial device found but no MAVLink heartbeat — check the FC baud rate, power, and wiring."
+                    .to_string()
+            }
+            "msp_detected" => {
+                "FC is speaking MSP, not MAVLink — set the FC's serial protocol to MAVLink.".to_string()
+            }
+            other => other.replace('_', " "),
+        })
     }
 
     /// The FC serial detail, e.g. `ttyS0 · 921600`, when a port is known.
@@ -824,6 +872,7 @@ mod tests {
             titles,
             vec![
                 "Console",
+                "Connect to GCS",
                 "Ground control",
                 "Video",
                 "Mission Control",
@@ -841,15 +890,22 @@ mod tests {
             ]
         );
 
+        // Connect to GCS strips /setup to the bare base address, both hosts.
+        let gcs: Vec<&str> = groups[1].rows.iter().map(|r| r.url.as_str()).collect();
+        assert_eq!(
+            gcs,
+            vec!["http://ados-x.local:8080", "http://192.168.1.5:8080"]
+        );
+
         // Ground control synthesises tcp + ws on both LAN hosts.
-        let gc: Vec<&str> = groups[1].rows.iter().map(|r| r.url.as_str()).collect();
+        let gc: Vec<&str> = groups[2].rows.iter().map(|r| r.url.as_str()).collect();
         assert!(gc.contains(&"tcp://ados-x.local:5760"));
         assert!(gc.contains(&"ws://ados-x.local:8765/"));
         assert!(gc.contains(&"tcp://192.168.1.5:5760"));
         assert!(gc.contains(&"ws://192.168.1.5:8765/"));
 
         // Video is projected onto both LAN hosts too.
-        let vid: Vec<&str> = groups[2].rows.iter().map(|r| r.url.as_str()).collect();
+        let vid: Vec<&str> = groups[3].rows.iter().map(|r| r.url.as_str()).collect();
         assert!(vid.contains(&"http://ados-x.local:8889/main/"));
         assert!(vid.contains(&"http://192.168.1.5:8889/main/"));
     }
@@ -860,8 +916,11 @@ mod tests {
             "access_urls": [{"kind": "setup", "url": "http://ados-x.local:8080/setup", "primary": true}]
         });
         let groups = Dashboard::from_status(&data).reach_links();
-        assert_eq!(groups.len(), 1);
+        // Console and its derived Connect-to-GCS base survive; the rest are empty.
+        assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].title, "Console");
+        assert_eq!(groups[1].title, "Connect to GCS");
+        assert_eq!(groups[1].rows[0].url, "http://ados-x.local:8080");
     }
 
     #[test]
@@ -880,7 +939,10 @@ mod tests {
             "fcLinkHint": "msp_detected", "fc_port": "ttyS0", "fc_baud": 921600
         }));
         assert_eq!(port_open.fc_link(), FcLink::PortOpen);
-        assert_eq!(port_open.fc_hint().as_deref(), Some("msp detected"));
+        assert_eq!(
+            port_open.fc_hint().as_deref(),
+            Some("FC is speaking MSP, not MAVLink — set the FC's serial protocol to MAVLink.")
+        );
         assert_eq!(port_open.fc_endpoint().as_deref(), Some("ttyS0 · 921600"));
 
         // An MSP FC identified by the agent (fcVariant present) reads as MSP,
@@ -910,6 +972,46 @@ mod tests {
         assert_eq!(
             swap_host("ws://ados-x.local:8765/", "10.0.0.9"),
             "ws://10.0.0.9:8765/"
+        );
+    }
+
+    #[test]
+    fn base_url_strips_path() {
+        assert_eq!(
+            base_url("http://ados-x.local:8080/setup"),
+            "http://ados-x.local:8080"
+        );
+        assert_eq!(
+            base_url("http://192.168.1.5:8080/setup"),
+            "http://192.168.1.5:8080"
+        );
+        assert_eq!(base_url("http://host:8080"), "http://host:8080");
+        assert_eq!(base_url("https://host/a/b?c#d"), "https://host");
+    }
+
+    #[test]
+    fn fc_hint_expands_no_heartbeat_token() {
+        let mut d = Dashboard::default();
+        d.merge_fc_status(
+            &json!({"transportOpen": true, "mavlinkAlive": false, "fcLinkHint": "no_heartbeat"}),
+        );
+        assert_eq!(
+            d.fc_hint().as_deref(),
+            Some("Serial device found but no MAVLink heartbeat — check the FC baud rate, power, and wiring.")
+        );
+    }
+
+    #[test]
+    fn steps_carry_detail() {
+        let data = json!({
+            "steps": [
+                {"label": "Flight controller", "state": "needs_action", "detail": "No flight controller detected on USB/serial."}
+            ]
+        });
+        let dash = Dashboard::from_status(&data);
+        assert_eq!(
+            dash.steps[0].detail,
+            "No flight controller detected on USB/serial."
         );
     }
 

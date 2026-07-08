@@ -8,6 +8,7 @@ mod action;
 mod model;
 mod theme;
 mod ui;
+mod update;
 
 use std::io::{Stdout, Write};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -24,7 +25,7 @@ use ratatui::crossterm::{execute, ExecutableCommand};
 use ratatui::Terminal;
 use serde_json::Value;
 
-use crate::action::{Action, ACTIONS};
+use crate::action::{Action, ACTIONS, UPDATE_NOW};
 use crate::model::{Dashboard, History};
 
 /// Where the agent stores the pairing key (matches `ados.core.paths.PAIRING_JSON`).
@@ -217,6 +218,13 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, client: &RestClient) -
     // Trend buffers of verified telemetry, one sample per successful poll.
     let mut history = History::default();
 
+    // One-shot background "newer version available?" check (pings GitHub via
+    // curl off-thread; never blocks the loop). The launch splash is shown once,
+    // then dismissed for the session; the footer badge stays as the reminder.
+    let latest_slot = update::spawn_check();
+    let mut update_splash = false;
+    let mut update_splash_done = false;
+
     loop {
         // Fetch immediately on first iteration, then every POLL_INTERVAL.
         let due = match last_fetch {
@@ -250,6 +258,19 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, client: &RestClient) -
             }
             d
         });
+
+        // The latest version from the background check (None until it lands).
+        let latest = latest_slot.lock().ok().and_then(|g| g.clone());
+        let update_available = matches!(
+            (latest.as_deref(), dash.as_ref()),
+            (Some(l), Some(d)) if update::is_newer(l, &d.version)
+        );
+        // Raise the launch splash once, the first time an update is seen (never
+        // over the actions overlay).
+        if update_available && !update_splash_done && actions_selected.is_none() {
+            update_splash = true;
+        }
+
         terminal.draw(|f| {
             ui::render(
                 f,
@@ -259,6 +280,8 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, client: &RestClient) -
                 stale,
                 error.as_deref(),
                 actions_selected,
+                latest.as_deref(),
+                update_splash,
             )
         })?;
 
@@ -270,6 +293,21 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, client: &RestClient) -
                 // Ctrl-C always quits, from any screen.
                 if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     return Ok(());
+                }
+                // The launch update splash takes precedence: any key dismisses it
+                // for the session; [u]/Enter runs the update first (reusing the
+                // installer's full-screen UI via `ados update`).
+                if update_splash {
+                    update_splash = false;
+                    update_splash_done = true;
+                    if matches!(
+                        key.code,
+                        KeyCode::Char('u') | KeyCode::Char('U') | KeyCode::Enter
+                    ) {
+                        run_action(terminal, &UPDATE_NOW)?;
+                        last_fetch = None;
+                    }
+                    continue;
                 }
                 match actions_selected {
                     // The actions overlay is open.
@@ -293,6 +331,17 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, client: &RestClient) -
                         KeyCode::Char('q') | KeyCode::Char('Q') => return Ok(()),
                         KeyCode::Char('a') | KeyCode::Char('A') => actions_selected = Some(0),
                         KeyCode::Char('r') | KeyCode::Char('R') => last_fetch = None,
+                        // `[u] update` (shown in the footer only when a newer
+                        // version is available) runs the agent update, y/N-gated.
+                        KeyCode::Char('u') | KeyCode::Char('U') if update_available => {
+                            if let Some(action) = ACTIONS
+                                .iter()
+                                .find(|a| a.args.first().copied() == Some("update"))
+                            {
+                                run_action(terminal, action)?;
+                                last_fetch = None;
+                            }
+                        }
                         KeyCode::Char(c) => {
                             let c = c.to_ascii_lowercase();
                             if let Some(action) = ACTIONS.iter().find(|a| a.key == Some(c)) {

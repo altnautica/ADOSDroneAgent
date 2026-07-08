@@ -127,6 +127,7 @@ fn alt_bars(history: &[f64]) -> Vec<u64> {
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     frame: &mut Frame,
     dash: Option<&Dashboard>,
@@ -135,6 +136,10 @@ pub fn render(
     stale: bool,
     error: Option<&str>,
     actions_selected: Option<usize>,
+    // The latest agent version fetched from GitHub, once known (drives the footer
+    // badge + the launch splash). `None` while the check is pending / offline.
+    update_latest: Option<&str>,
+    show_update_splash: bool,
 ) {
     // Paint the charcoal base once per frame on tiers that can show it; widgets
     // rendered on top keep it unless they set their own background (only the
@@ -154,7 +159,7 @@ pub fn render(
 
     header(frame, rows[0], dash, refreshed, stale);
     verdict(frame, rows[1], dash);
-    footer(frame, rows[3]);
+    footer(frame, rows[3], dash, update_latest);
 
     match dash {
         Some(d) => body(frame, rows[2], d, history),
@@ -174,6 +179,11 @@ pub fn render(
 
     if let Some(sel) = actions_selected {
         actions_overlay(frame, sel);
+    }
+    if show_update_splash {
+        if let (Some(d), Some(latest)) = (dash, update_latest) {
+            update_splash_overlay(frame, &d.version, latest);
+        }
     }
 }
 
@@ -249,17 +259,52 @@ fn key_hint(key: &str, label: &str) -> [Span<'static>; 2] {
     ]
 }
 
-fn footer(frame: &mut Frame, area: Rect) {
-    let mut spans: Vec<Span> = Vec::new();
+fn footer(frame: &mut Frame, area: Rect, dash: Option<&Dashboard>, update_latest: Option<&str>) {
+    // Is a newer agent version available? (installed = the polled version).
+    let update_available = matches!(
+        (dash, update_latest),
+        (Some(d), Some(l)) if crate::update::is_newer(l, &d.version)
+    );
+
+    // Left: the key hints. `[u] update` appears only when an update is available.
+    let mut left: Vec<Span> = Vec::new();
     for action in ACTIONS.iter() {
         if let Some(key) = action.key {
-            spans.extend(key_hint(&key.to_string(), action.short));
+            left.extend(key_hint(&key.to_string(), action.short));
         }
     }
-    spans.extend(key_hint("a", "actions"));
-    spans.extend(key_hint("r", "refresh"));
-    spans.extend(key_hint("q", "quit"));
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    if update_available {
+        left.extend(key_hint("u", "update"));
+    }
+    left.extend(key_hint("a", "actions"));
+    left.extend(key_hint("r", "refresh"));
+    left.extend(key_hint("q", "quit"));
+
+    // Right: the version + update state (bottom-right, right-aligned like the
+    // header). Silent until the background check reports a latest version.
+    let mut right: Vec<Span> = Vec::new();
+    if let Some(d) = dash {
+        right.push(Span::styled(format!("v{}", d.version), dim()));
+        if update_latest.is_some() {
+            if update_available {
+                right.push(Span::styled(
+                    "  ·  update available → ados update",
+                    Style::default().fg(theme::warning()),
+                ));
+            } else {
+                right.push(Span::styled("  ·  up to date", dim()));
+            }
+        }
+    }
+    let right_w: usize = right.iter().map(|s| s.content.chars().count()).sum();
+
+    let cols = Layout::horizontal([Constraint::Fill(1), Constraint::Length(right_w as u16 + 1)])
+        .split(area);
+    frame.render_widget(Paragraph::new(Line::from(left)), cols[0]);
+    frame.render_widget(
+        Paragraph::new(Line::from(right)).alignment(Alignment::Right),
+        cols[1],
+    );
 }
 
 /// A rect `pct_x`% wide and `height` tall, centered in `area`.
@@ -311,6 +356,34 @@ fn actions_overlay(frame: &mut Frame, selected: usize) {
         dim(),
     )));
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// A centered, dismissible splash prompting an agent update, shown once on
+/// launch when the background check finds a newer version. `[u]` runs the
+/// update (reusing the installer's full-screen UI via `ados update`); any other
+/// key drops into the cockpit, where the footer badge stays as a reminder.
+fn update_splash_overlay(frame: &mut Frame, installed: &str, latest: &str) {
+    let area = centered_rect(60, 7, frame.area());
+    frame.render_widget(Clear, area);
+    let block = panel("Update available");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(format!("v{installed}"), dim()),
+            Span::styled("  →  ", Style::default().fg(theme::accent())),
+            Span::styled(format!("v{latest}"), bright()),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("[u] ", Style::default().fg(theme::accent())),
+            Span::styled("update now", bright()),
+            Span::styled("      any key: later", dim()),
+        ]),
+    ];
+    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
 }
 
 fn body(frame: &mut Frame, area: Rect, dash: &Dashboard, history: &History) {
@@ -445,10 +518,15 @@ fn autopilot_panel(frame: &mut Frame, area: Rect, dash: &Dashboard, history: &Hi
     if let Some(ep) = dash.fc_endpoint() {
         detail.push(Span::styled(ep, dim()));
     }
-    let sub = if dash.fc_link() == FcLink::Msp {
-        Some("MSP flight controller · MAVLink telemetry N/A".to_string())
-    } else {
-        dash.fc_hint()
+    let sub = match dash.fc_link() {
+        FcLink::Msp => Some("MSP flight controller · MAVLink telemetry N/A".to_string()),
+        // No serial FC device found at all — say so, and what to check, instead
+        // of a bare "FC not connected" with no explanation.
+        FcLink::Down => Some(
+            "No flight controller detected on USB/serial — connect the FC over USB, then [r] refresh (or [l] logs)."
+                .to_string(),
+        ),
+        _ => dash.fc_hint(),
     };
     if let Some(sub) = sub {
         if !detail.is_empty() {
@@ -590,8 +668,23 @@ fn services_panel(frame: &mut Frame, area: Rect, dash: &Dashboard) {
                 Span::raw("  "),
                 Span::styled(state_label(&step.state), dim()),
             ]));
+            // A dim sub-line explaining a step that still needs attention (the
+            // agent's per-step detail — why it needs action / what it is).
+            if step.state != "complete" && !step.detail.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    format!("    {}", step.detail),
+                    dim(),
+                )));
+            }
         }
-        if !dash.next_action.is_empty() {
+        // The "next action" summary, unless it just repeats a step's detail
+        // already shown above.
+        if !dash.next_action.is_empty()
+            && !dash
+                .steps
+                .iter()
+                .any(|st| st.state != "complete" && st.detail == dash.next_action)
+        {
             lines.push(Line::from(Span::styled(dash.next_action.clone(), dim())));
         }
     }
@@ -627,5 +720,106 @@ fn step_dot(state: &str) -> (&'static str, Color) {
         "in_progress" => ("◐", theme::accent()),
         "needs_action" => ("▲", theme::warning()),
         _ => ("○", theme::muted()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Dashboard;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use serde_json::json;
+
+    /// Render one frame to an off-screen backend and return every cell's symbol,
+    /// row by row, so a test can assert a rendered string is present.
+    fn buffer_text(dash: Option<&Dashboard>, update_latest: Option<&str>, splash: bool) -> String {
+        let backend = TestBackend::new(120, 50);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let history = History::default();
+        terminal
+            .draw(|f| {
+                render(
+                    f,
+                    dash,
+                    &history,
+                    "12:00:00",
+                    false,
+                    None,
+                    None,
+                    update_latest,
+                    splash,
+                )
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let area = buf.area;
+        let mut out = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    /// A drone with no FC and an incomplete step, exercising every new surface.
+    fn sample() -> Dashboard {
+        let data = json!({
+            "version": "0.99.108",
+            "device_name": "skynodepi",
+            "profile": "drone",
+            "paired": true,
+            "access_urls": [
+                {"kind": "setup", "label": "mDNS setup", "url": "http://ados-x.local:8080/setup", "primary": true},
+                {"kind": "setup", "label": "LAN setup", "url": "http://192.168.1.5:8080/setup"},
+                {"kind": "mission_control", "label": "Mission Control", "url": "https://command.altnautica.com"},
+                {"kind": "video", "label": "viewer", "url": "http://ados-x.local:8889/main/"},
+                {"kind": "mavlink", "label": "MAVLink WS", "url": "ws://ados-x.local:8765/"}
+            ],
+            "mavlink": {"connected": false},
+            "steps": [
+                {"label": "Flight controller", "state": "needs_action", "detail": "Connect the FC and re-check."},
+                {"label": "Profile", "state": "complete", "detail": "Confirmed as drone"}
+            ],
+            "services": [{"state": "running"}]
+        });
+        Dashboard::from_status(&data)
+    }
+
+    #[test]
+    fn renders_links_fc_and_update_badge() {
+        let text = buffer_text(Some(&sample()), Some("0.99.200"), false);
+        // The new Connect-to-GCS section + its bare base address (the `  ●`
+        // primary marker distinguishes it from the Console `…/setup` row).
+        assert!(text.contains("Connect to GCS"), "{text}");
+        assert!(text.contains("http://ados-x.local:8080  ●"), "{text}");
+        // Reworded Ground control + hosted Mission Control.
+        assert!(text.contains("Conventional MAVLink"), "{text}");
+        assert!(text.contains("command.altnautica.com"), "{text}");
+        // FC-down diagnostic sub-line (Autopilot cell).
+        assert!(
+            text.contains("No flight controller detected on USB/serial"),
+            "{text}"
+        );
+        // The agent's per-step detail is surfaced in the Services cell.
+        assert!(text.contains("Connect the FC and re-check."), "{text}");
+        // Footer bottom-right update badge.
+        assert!(text.contains("update available"), "{text}");
+    }
+
+    #[test]
+    fn renders_update_splash() {
+        let text = buffer_text(Some(&sample()), Some("0.99.200"), true);
+        assert!(text.contains("Update available"), "{text}");
+        assert!(text.contains("update now"), "{text}");
+    }
+
+    #[test]
+    fn no_update_badge_when_up_to_date() {
+        let text = buffer_text(Some(&sample()), Some("0.99.108"), false);
+        assert!(!text.contains("update available"), "{text}");
+        assert!(text.contains("up to date"), "{text}");
     }
 }

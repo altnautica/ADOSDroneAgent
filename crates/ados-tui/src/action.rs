@@ -23,6 +23,19 @@ pub struct Action {
     pub args: &'static [&'static str],
 }
 
+/// Run the agent update non-interactively — used by the launch update splash,
+/// whose `[u]` press is itself the confirmation, so it skips the y/N prompt and
+/// passes `--yes`. `ados update` re-runs the installer's full-screen upgrade UI.
+pub const UPDATE_NOW: Action = Action {
+    key: None,
+    short: "",
+    label: "Update agent",
+    desc: "Update the agent to the latest",
+    confirm: false,
+    program: "ados",
+    args: &["update", "--yes"],
+};
+
 /// The quick actions, in overlay order. The first three carry direct hotkeys.
 pub const ACTIONS: &[Action] = &[
     Action {
