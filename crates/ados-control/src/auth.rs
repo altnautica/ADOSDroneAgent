@@ -144,6 +144,15 @@ pub fn is_public(path: &str) -> bool {
             | "/api/pairing/code"
             | "/api/pairing/claim"
             | "/api/version"
+            // Dashboard-access PIN gate: an off-box paired browser must reach the
+            // status read + the verify (login) + the set (trust-on-first-use)
+            // before it holds any credential. `set` authorizes IN THE HANDLER;
+            // `verify` is rate-limited + lockout-throttled in the store. `clear`
+            // is deliberately NOT here — it stays behind the normal gate so only
+            // an on-box or key-bearing caller resets the PIN.
+            | "/api/dashboard/pin/status"
+            | "/api/dashboard/pin/verify"
+            | "/api/dashboard/pin/set"
             | "/api/v1/ground-station/ws/uplink"
             | "/api/v1/ground-station/pic/events"
             | "/api/v1/ground-station/ws/mesh"
@@ -262,6 +271,10 @@ mod tests {
             "/api/pairing/info",
             "/api/pairing/code",
             "/api/pairing/claim",
+            // The dashboard-PIN gate a keyless off-box browser must reach.
+            "/api/dashboard/pin/status",
+            "/api/dashboard/pin/verify",
+            "/api/dashboard/pin/set",
             // The ground-station WebSocket relays: the upgrade bypasses the HTTP
             // key gate, so the handler does its own ticket/header auth.
             "/api/v1/ground-station/ws/uplink",
@@ -275,6 +288,8 @@ mod tests {
             "/api/status",
             "/api/command",
             "/api/pairing/unpair",
+            // PIN reset is NOT public — it stays behind the normal on-box/key gate.
+            "/api/dashboard/pin/clear",
             "/v1/openapi.json",
         ] {
             assert!(!is_public(p), "{p} should NOT be public");

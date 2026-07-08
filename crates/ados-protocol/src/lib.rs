@@ -34,12 +34,16 @@
 //! - [`pairing_posture`] — the data-plane auth primitives (pairing-state read,
 //!   constant-time key compare, on-box loopback trust, access decision) shared
 //!   by the native HTTP control surface and the direct MAVLink WebSocket proxy.
+//! - [`dashboard_session`] — self-contained HMAC session tokens the dashboard
+//!   PIN gate mints, keyed off the pairing key + the PIN salt so a reset revokes
+//!   every live session; accepted as an alternative data-plane credential.
 
 pub mod atlas;
 pub mod capabilities;
 pub mod compute;
 pub mod contracts;
 pub mod crypto;
+pub mod dashboard_session;
 pub mod dispatch;
 pub mod frame;
 pub mod framebus;

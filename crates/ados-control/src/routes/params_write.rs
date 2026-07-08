@@ -329,6 +329,9 @@ mod tests {
             logd,
             dir.join("board.json"),
             pairing_paths,
+            std::sync::Arc::new(crate::dashboard_pin::DashboardPin::with_path(
+                dir.join("dashboard-pin.json"),
+            )),
         )
     }
 
@@ -591,6 +594,9 @@ mod tests {
             logd,
             dir.path().join("board.json"),
             pairing_paths,
+            std::sync::Arc::new(crate::dashboard_pin::DashboardPin::with_path(
+                dir.path().join("dashboard-pin.json"),
+            )),
         );
 
         let resp = set_param(

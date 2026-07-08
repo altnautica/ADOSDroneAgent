@@ -47,8 +47,10 @@ use crate::routes::detail;
 /// check, so the residual Python (which does not see the TCP peer) can honour the
 /// same on-box trust the native edge applies. It is STRIPPED from every inbound
 /// request first, then set only when the front's own check passes, so a value
-/// arriving from off-box can never be spoofed in. See [`tcp_edge`].
-const ONBOX_HEADER: &str = "x-ados-onbox";
+/// arriving from off-box can never be spoofed in. See [`tcp_edge`]. Public so a
+/// native handler (e.g. the dashboard-PIN set route) can read the trustworthy
+/// on-box signal the edge stamped.
+pub const ONBOX_HEADER: &str = "x-ados-onbox";
 
 /// The peer address of the accepted connection, attached to each LAN-edge
 /// request as an extension so the auth middleware can apply on-box loopback
@@ -65,6 +67,9 @@ struct EdgeAuth {
     /// The proxied-route auth decision, run on every forwarded request before
     /// it reaches the residual surface (the front is the single authenticator).
     proxied: Arc<ProxiedAuth>,
+    /// The dashboard-access PIN store: consulted only on a would-be-401 to accept
+    /// a valid dashboard session token as an alternative data-plane credential.
+    dashboard_pin: Arc<crate::dashboard_pin::DashboardPin>,
 }
 
 /// The TCP-edge middleware: trustworthy on-box header stamping, then (for native
@@ -121,6 +126,7 @@ async fn tcp_edge(State(edge): State<EdgeAuth>, mut request: Request, next: Next
         return proxied_auth_then_forward(
             edge.proxied.clone(),
             edge.pairing.clone(),
+            edge.dashboard_pin.clone(),
             on_box,
             request,
             next,
@@ -154,12 +160,28 @@ async fn tcp_edge(State(edge): State<EdgeAuth>, mut request: Request, next: Next
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
     if !edge.pairing.authorize(&path, presented.as_deref()) {
-        // Match the FastAPI message so a GCS that surfaces the body reads the
-        // same text against either surface.
-        return detail(
-            StatusCode::UNAUTHORIZED,
-            "Missing X-ADOS-Key header. This agent is paired and requires authentication.",
-        );
+        // Before rejecting, accept a valid dashboard session token (minted by the
+        // PIN gate) as an alternative data-plane credential. This is the ONLY
+        // place the PIN record is read on the native path, and only on a
+        // would-be-401 — an on-box or key-bearing request already passed above, so
+        // an authenticated dashboard poll does not stat the record every request.
+        let session_ok = request
+            .headers()
+            .get(crate::dashboard_pin::DASHBOARD_SESSION_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .map(|tok| {
+                edge.dashboard_pin
+                    .session_valid_for(&edge.pairing.current(), tok)
+            })
+            .unwrap_or(false);
+        if !session_ok {
+            // Match the FastAPI message so a GCS that surfaces the body reads the
+            // same text against either surface.
+            return detail(
+                StatusCode::UNAUTHORIZED,
+                "Missing X-ADOS-Key header. This agent is paired and requires authentication.",
+            );
+        }
     }
     next.run(request).await
 }
@@ -173,6 +195,7 @@ async fn tcp_edge(State(edge): State<EdgeAuth>, mut request: Request, next: Next
 async fn proxied_auth_then_forward(
     proxied: Arc<ProxiedAuth>,
     pairing_state: Arc<PairingState>,
+    dashboard_pin: Arc<crate::dashboard_pin::DashboardPin>,
     on_box: bool,
     request: Request,
     next: Next,
@@ -185,14 +208,24 @@ async fn proxied_auth_then_forward(
     let pairing = pairing_state.current();
 
     // The API-key gate first (the same order the Python middleware stack runs:
-    // ApiKeyAuthMiddleware sits outside SecurityMiddleware).
+    // ApiKeyAuthMiddleware sits outside SecurityMiddleware). A rejection is
+    // reversed only by a valid dashboard session token — the SPA also hits
+    // proxied routes (setup status, WHEP, etc.), so the session must be an
+    // alternative credential here too, symmetric with the native edge.
     if let Decision::Reject {
         status,
         field,
         message,
     } = proxied.decide_api_key(&method, &path, &headers, on_box, &pairing)
     {
-        return reject_response(status, field, message);
+        let session_ok = headers
+            .x_ados_dashboard_session
+            .as_deref()
+            .map(|tok| dashboard_pin.session_valid_for(&pairing, tok))
+            .unwrap_or(false);
+        if !session_ok {
+            return reject_response(status, field, message);
+        }
     }
 
     // The HMAC gate. Only here do we touch the body, and only when the gate is
@@ -245,6 +278,7 @@ fn collect_headers(map: &axum::http::HeaderMap) -> RequestHeaders {
         host: get("host"),
         x_ados_key: get("x-ados-key"),
         x_ados_setup_token: get("x-ados-setup-token"),
+        x_ados_dashboard_session: get(crate::dashboard_pin::DASHBOARD_SESSION_HEADER),
         x_timestamp: get("x-timestamp"),
         x_nonce: get("x-nonce"),
         x_hmac_signature: get("x-hmac-signature"),
@@ -272,12 +306,20 @@ pub fn unix_app(router: Router) -> Router {
 
 /// Build the LAN-edge app: the same Router wrapped with the rate-limit + auth
 /// layer keyed on the shared pairing reader. `proxied` carries the ported
-/// proxied-route auth decision the front runs on every forwarded request.
-pub fn tcp_app(router: Router, pairing: Arc<PairingState>, proxied: Arc<ProxiedAuth>) -> Router {
+/// proxied-route auth decision the front runs on every forwarded request;
+/// `dashboard_pin` lets the edge accept a valid dashboard session token as an
+/// alternative to `X-ADOS-Key`.
+pub fn tcp_app(
+    router: Router,
+    pairing: Arc<PairingState>,
+    proxied: Arc<ProxiedAuth>,
+    dashboard_pin: Arc<crate::dashboard_pin::DashboardPin>,
+) -> Router {
     let edge = EdgeAuth {
         pairing,
         rate: Arc::new(RateLimiter::default_control()),
         proxied,
+        dashboard_pin,
     };
     // CORS wraps OUTSIDE the auth layer (ServiceBuilder applies the first layer
     // outermost). A browser cross-origin call to this LAN edge sends a custom

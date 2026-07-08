@@ -105,6 +105,12 @@ fn native_routes() -> Vec<NativeRoute> {
         post("/api/atlas/capture/resume"),
         // WebSocket auth ticket mint.
         post("/api/_ws/ticket"),
+        // Dashboard-access PIN gate (status/verify/set public-exempt at the edge,
+        // clear normally-gated; see routes/dashboard_pin.rs + auth::is_public).
+        get("/api/dashboard/pin/status"),
+        post("/api/dashboard/pin/verify"),
+        post("/api/dashboard/pin/set"),
+        post("/api/dashboard/pin/clear"),
         // Params: the full list + the single-param read (a {name} template).
         get("/api/params"),
         get("/api/params/{name}"),
@@ -418,7 +424,7 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            120,
+            124,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);
@@ -556,6 +562,13 @@ mod tests {
         assert!(has(Method::GET, "/api/mavlink/ports"));
         // The WS-ticket mint is native (replaces the proxied Python route).
         assert!(has(Method::POST, "/api/_ws/ticket"));
+        // The dashboard-access PIN gate: the status read + the verify/set/clear
+        // writes. status/verify/set are public-exempt at the edge; all four are
+        // native (else the writes would be auth-skipped).
+        assert!(has(Method::GET, "/api/dashboard/pin/status"));
+        assert!(has(Method::POST, "/api/dashboard/pin/verify"));
+        assert!(has(Method::POST, "/api/dashboard/pin/set"));
+        assert!(has(Method::POST, "/api/dashboard/pin/clear"));
         // The plugin per-drone config write is native (a control-plane write, so
         // it stays off the residual Python plugin surface).
         assert!(has(Method::PUT, "/api/plugins/{plugin_id}/config"));

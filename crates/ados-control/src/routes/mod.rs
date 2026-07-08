@@ -23,6 +23,7 @@ pub mod atlas;
 pub mod can;
 pub mod command;
 pub mod compute_status;
+pub mod dashboard_pin;
 pub mod diagnostics;
 pub mod fleet;
 pub mod gs_bluetooth;
@@ -196,6 +197,19 @@ pub fn build_router(state: AppState, net_native: bool, hid_native: bool) -> Rout
         // for a short-lived self-contained HMAC ticket a browser GCS hands to the
         // MAVLink WS proxy through the subprotocol list.
         .route("/api/_ws/ticket", post(ws_ticket::mint_ws_ticket))
+        // Dashboard-access PIN: the off-box browser gate. status + verify + set
+        // are public at the edge (an off-box paired visitor must reach them);
+        // set authorizes in the handler (on-box / key / session / trust-on-first-
+        // use / current-PIN), and clear stays behind the normal gate (on-box or a
+        // valid credential). A correct PIN mints a session the front accepts as an
+        // alternative data-plane credential to X-ADOS-Key.
+        .route(
+            "/api/dashboard/pin/status",
+            get(dashboard_pin::get_pin_status),
+        )
+        .route("/api/dashboard/pin/verify", post(dashboard_pin::verify_pin))
+        .route("/api/dashboard/pin/set", post(dashboard_pin::set_pin))
+        .route("/api/dashboard/pin/clear", post(dashboard_pin::clear_pin))
         // Params: the full cached FC parameter list, plus the single-param read +
         // write sharing one path (a path-param route; the write builds a PARAM_SET
         // frame and sends it to the FC, the read projects the one cached param).

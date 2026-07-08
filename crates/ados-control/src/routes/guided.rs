@@ -216,6 +216,9 @@ mod tests {
                 profile_conf: dir.join("profile.conf"),
                 mesh_role: dir.join("mesh-role"),
             },
+            Arc::new(crate::dashboard_pin::DashboardPin::with_path(
+                dir.join("dashboard-pin.json"),
+            )),
         )
     }
 

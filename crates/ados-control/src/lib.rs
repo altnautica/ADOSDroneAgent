@@ -15,6 +15,7 @@
 
 pub mod auth;
 pub mod config;
+pub mod dashboard_pin;
 pub mod hw_local;
 pub mod ipc;
 pub mod pairing_store;
@@ -71,6 +72,10 @@ pub struct DaemonPaths {
     /// The agent pairing-state file the LAN-edge auth reads AND the pairing
     /// routes read + write. Injectable so a test points it at a tempdir.
     pub pairing_path: PathBuf,
+    /// The dashboard-access PIN record the `pin/*` routes read + write and the
+    /// LAN-edge auth reads a session salt from. Injectable so a test points it at
+    /// a tempdir.
+    pub dashboard_pin_path: PathBuf,
     /// The vehicle-state socket the status + telemetry routes read. Injectable so
     /// a test points it at a mock-IPC socket in a tempdir.
     pub state_socket: PathBuf,
@@ -117,6 +122,12 @@ impl Default for DaemonPaths {
         let pairing_path = std::env::var("ADOS_PAIRING_JSON")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from(auth::DEFAULT_PAIRING_PATH));
+        // The dashboard-PIN record honours `ADOS_DASHBOARD_PIN_JSON` (the same
+        // override the store's own `DashboardPin::new` reads), defaulting to
+        // `/etc/ados/dashboard-pin.json`.
+        let dashboard_pin_path = std::env::var("ADOS_DASHBOARD_PIN_JSON")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from(dashboard_pin::DEFAULT_DASHBOARD_PIN_PATH));
         // The state socket resolves under `ADOS_RUN_DIR` (the same override the
         // Python `ados.core.ipc` honours), defaulting to `/run/ados/state.sock`.
         let state_socket = default_state_socket();
@@ -150,6 +161,7 @@ impl Default for DaemonPaths {
             control_socket,
             control_tcp_port,
             pairing_path,
+            dashboard_pin_path,
             state_socket,
             mavlink_socket,
             logd_query_socket,
@@ -240,6 +252,13 @@ where
         profile_conf: paths.profile_conf_path.clone(),
         mesh_role: paths.mesh_role_path.clone(),
     };
+    // The dashboard-access PIN store, shared (one `Arc`) between the routes
+    // (set/verify/clear/status) and the LAN-edge auth (which accepts a valid
+    // dashboard session token as an alternative credential), so both read one
+    // record.
+    let dashboard_pin = Arc::new(crate::dashboard_pin::DashboardPin::with_path(
+        paths.dashboard_pin_path.clone(),
+    ));
     let state = AppState::new(
         Arc::clone(&pairing),
         state_client,
@@ -247,6 +266,7 @@ where
         logd_client,
         paths.board_path.clone(),
         pairing_paths,
+        Arc::clone(&dashboard_pin),
     );
 
     // Native-vs-residual gates for the profile-conditional route groups, resolved
@@ -287,6 +307,7 @@ where
         build_router(state, net_native, hid_native),
         Arc::clone(&pairing),
         Arc::clone(&proxied_auth),
+        Arc::clone(&dashboard_pin),
     );
 
     // Bind every listener up front so a bind failure surfaces here. The LAN front

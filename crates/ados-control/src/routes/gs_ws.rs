@@ -906,6 +906,9 @@ mod tests {
             crate::ipc::LogdQueryClient::new(dir.path().join("logd-query.sock")),
             dir.path().join("board.json"),
             paths,
+            std::sync::Arc::new(crate::dashboard_pin::DashboardPin::with_path(
+                dir.path().join("dashboard-pin.json"),
+            )),
         );
         (dir, state)
     }

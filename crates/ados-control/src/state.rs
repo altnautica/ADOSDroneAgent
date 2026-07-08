@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::auth::PairingState;
+use crate::dashboard_pin::DashboardPin;
 use crate::ipc::{LogdQueryClient, MavlinkIpcClient, StateIpcClient};
 use crate::routes::status::process_uptime_seconds;
 
@@ -199,6 +200,10 @@ pub struct AppState {
     pub board_path: PathBuf,
     /// The on-disk paths the pairing routes read + write.
     pub pairing_paths: PairingPaths,
+    /// The dashboard-access PIN store the `pin/*` routes read + write, and the
+    /// `pairing-info` route reads `pin_set` from. Shared (same `Arc`) with the
+    /// LAN-edge auth so the routes and the gate read one record.
+    pub dashboard_pin: Arc<DashboardPin>,
     /// When this daemon started, the status route's uptime fallback when the
     /// state snapshot carries no `service_uptime`.
     started: Instant,
@@ -218,6 +223,7 @@ impl AppState {
         logd: LogdQueryClient,
         board_path: PathBuf,
         pairing_paths: PairingPaths,
+        dashboard_pin: Arc<DashboardPin>,
     ) -> Self {
         Self {
             pairing,
@@ -226,6 +232,7 @@ impl AppState {
             logd,
             board_path,
             pairing_paths,
+            dashboard_pin,
             started: Instant::now(),
         }
     }

@@ -96,6 +96,7 @@ async fn start_full(
         control_socket: socket.clone(),
         control_tcp_port: port,
         pairing_path: pairing_path.clone(),
+        dashboard_pin_path: dir.join("dashboard-pin.json"),
         state_socket,
         mavlink_socket,
         // Point the pairing-route reads at the same temp dir so a test can seed a

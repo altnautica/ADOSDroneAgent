@@ -266,7 +266,9 @@ pub fn write_new_code(path: &Path, now: f64) -> std::io::Result<String> {
 /// Atomic 0600 write: temp sibling + write + flush + fsync + rename, mirroring
 /// the Python `atomic_write_bytes(mode=0o600)`. The mode is set on the temp file
 /// before the rename so the final file is owner-only the instant it appears.
-fn atomic_write_0600(path: &Path, body: &[u8]) -> std::io::Result<()> {
+/// Shared with [`crate::dashboard_pin`], which persists its record with the same
+/// atomic-0600 hygiene.
+pub(crate) fn atomic_write_0600(path: &Path, body: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }

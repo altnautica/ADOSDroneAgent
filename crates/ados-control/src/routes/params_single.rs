@@ -94,6 +94,9 @@ mod tests {
             logd,
             dir.join("board.json"),
             pairing_paths,
+            std::sync::Arc::new(crate::dashboard_pin::DashboardPin::with_path(
+                dir.join("dashboard-pin.json"),
+            )),
         )
     }
 

@@ -118,6 +118,11 @@ pub struct RequestHeaders {
     pub host: Option<String>,
     pub x_ados_key: Option<String>,
     pub x_ados_setup_token: Option<String>,
+    /// The dashboard-access session token (`X-ADOS-Dashboard-Session`). Not read
+    /// by [`ProxiedAuth::decide_api_key`] itself — the serve edge consults it to
+    /// reverse a rejection, so the session is an alternative credential on proxied
+    /// routes too.
+    pub x_ados_dashboard_session: Option<String>,
     pub x_timestamp: Option<String>,
     pub x_nonce: Option<String>,
     pub x_hmac_signature: Option<String>,
