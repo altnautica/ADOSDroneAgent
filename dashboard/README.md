@@ -54,8 +54,20 @@ npm run build      # outputs to dist/
 npm run preview    # serves dist/ on a local port for sanity check
 ```
 
-CI builds the dist on every push and bakes it into the agent wheel via
-`src/ados/dashboard/dist/`. `dist/` is never committed.
+The agent serves the **committed** bundle at `src/ados/dashboard/static/`
+(packaged into the wheel and served by the HTTP front). That bundle is NOT
+built at install time and NOT auto-committed by CI — the `dashboard-build`
+workflow only *verifies* that the SPA compiles. So whenever you change
+anything under `dashboard/src/`, you MUST regenerate and commit the served
+bundle in the same change:
+
+```
+scripts/build-dashboard.sh   # builds dist/ and copies it into src/ados/dashboard/static/
+git add ../src/ados/dashboard/static
+```
+
+If you commit source without rebuilding `static/`, `ados update` reinstalls
+the agent with the OLD UI even though the version bumped.
 
 ## Profiles
 
