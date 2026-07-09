@@ -18,11 +18,13 @@
 
 pub mod gateway;
 pub mod mavlink_relay;
+pub mod msp_relay;
 pub mod transport;
 pub mod webrtc_signaling;
 
 pub use gateway::{MqttGateway, StatusDoc};
 pub use mavlink_relay::{BoundedPublishQueue, MavlinkMqttRelay, INFLIGHT_LIMIT, QUEUE_MAXSIZE};
+pub use msp_relay::MspMqttRelay;
 pub use transport::{
     IncomingMessage, MqttQos, MqttTransport, RumqttcTransport, TransportConfig, TransportError,
 };
@@ -52,6 +54,14 @@ pub fn topic_mavlink_tx(device_id: &str) -> String {
 }
 pub fn topic_mavlink_rx(device_id: &str) -> String {
     format!("ados/{device_id}/mavlink/rx")
+}
+/// The MSP byte plane topics (FC->GCS tx / GCS->FC rx) for an MSP FC. The sibling
+/// of the `mavlink/{tx,rx}` frame plane; the relay bridges raw MSP bytes here.
+pub fn topic_msp_tx(device_id: &str) -> String {
+    format!("ados/{device_id}/msp/tx")
+}
+pub fn topic_msp_rx(device_id: &str) -> String {
+    format!("ados/{device_id}/msp/rx")
 }
 pub fn topic_webrtc_offer(device_id: &str) -> String {
     format!("ados/{device_id}/webrtc/offer")
@@ -95,6 +105,8 @@ mod tests {
         assert_eq!(topic_status("d"), "ados/d/status");
         assert_eq!(topic_mavlink_tx("d"), "ados/d/mavlink/tx");
         assert_eq!(topic_mavlink_rx("d"), "ados/d/mavlink/rx");
+        assert_eq!(topic_msp_tx("d"), "ados/d/msp/tx");
+        assert_eq!(topic_msp_rx("d"), "ados/d/msp/rx");
         assert_eq!(topic_webrtc_offer("d"), "ados/d/webrtc/offer");
         assert_eq!(topic_webrtc_answer("d"), "ados/d/webrtc/answer");
     }

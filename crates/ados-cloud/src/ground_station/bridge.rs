@@ -16,7 +16,7 @@ use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
 use crate::mqtt::transport::TransportConfig;
-use crate::mqtt::MavlinkMqttRelay;
+use crate::mqtt::{MavlinkMqttRelay, MspMqttRelay};
 
 /// The active-uplink sidecar the `ados-net` uplink router writes. Presence ==
 /// an active uplink; the body carries the live uplink + reachability + data-cap
@@ -26,6 +26,10 @@ pub const UPLINK_ACTIVE_FLAG: &str = "/run/ados/uplink-active";
 
 /// The MAVLink IPC socket the relay bridges FC frames over.
 pub const MAVLINK_SOCK: &str = "/run/ados/mavlink.sock";
+
+/// The MSP IPC socket the relay bridges raw MSP bytes over. The byte plane for an
+/// MSP FC (Betaflight/iNav), sibling to the MAVLink frame plane above.
+pub const MSP_SOCK: &str = "/run/ados/msp.sock";
 
 /// The vehicle-state IPC socket the GS heartbeat enriches from.
 pub const STATE_SOCK: &str = "/run/ados/state.sock";
@@ -223,6 +227,7 @@ pub struct CloudRelayBridge {
     relay_transport: TransportConfig,
     flag_path: PathBuf,
     mavlink_sock: PathBuf,
+    msp_sock: PathBuf,
     state_source: Option<std::sync::Arc<dyn StateSnapshotSource>>,
 
     // Live reconciliation state.
@@ -250,6 +255,10 @@ pub struct CloudRelayBridge {
     // The earliest time a fresh relay may be spawned. Set from the backoff ladder
     // after a fast exit so a broken seam does not hot-loop the respawn.
     relay_retry_at: Option<std::time::Instant>,
+    // The MSP byte-plane relay task, spawned alongside the MAVLink relay and torn
+    // down with it (both share the MAVLink relay's shutdown watch; this handle is
+    // the belt-and-braces abort for a wedged publisher). `None` while no relay is up.
+    msp_relay_task: Option<tokio::task::JoinHandle<()>>,
     // When this bridge was constructed, the source of the heartbeat's
     // `uptimeSeconds` (the status mutation requires it, the same as a drone).
     started: std::time::Instant,
@@ -275,6 +284,7 @@ impl CloudRelayBridge {
             relay_transport,
             flag_path: PathBuf::from(UPLINK_ACTIVE_FLAG),
             mavlink_sock: PathBuf::from(MAVLINK_SOCK),
+            msp_sock: PathBuf::from(MSP_SOCK),
             state_source: None,
             current_uplink: None,
             internet_reachable: false,
@@ -285,6 +295,7 @@ impl CloudRelayBridge {
             backoff: Backoff::new(),
             relay_started_at: None,
             relay_retry_at: None,
+            msp_relay_task: None,
             started: std::time::Instant::now(),
         }
     }
@@ -568,6 +579,7 @@ impl CloudRelayBridge {
         }
 
         teardown_relay(&mut relay_task, &mut relay_shutdown).await;
+        self.mark_relay_down();
         info!("cloud_relay.stop");
     }
 
@@ -599,13 +611,26 @@ impl CloudRelayBridge {
         let (conn_tx, conn_rx) = watch::channel::<Option<Arc<AtomicBool>>>(None);
         let relay = MavlinkMqttRelay::new(self.device_id.clone(), self.relay_transport.clone());
         let sock = self.mavlink_sock.clone();
+        // The MSP byte plane runs alongside the MAVLink frame plane over the same
+        // broker so a cloud GCS reaches an MSP FC (Betaflight/iNav) too. It shares
+        // the MAVLink relay's shutdown watch (a second receiver) and is aborted on
+        // teardown by mark_relay_down, so it never outlives its MAVLink sibling.
+        let msp_shutdown = tx.subscribe();
+        let msp_relay = MspMqttRelay::new(self.device_id.clone(), self.relay_transport.clone());
+        let msp_sock = self.msp_sock.clone();
         let handle = tokio::spawn(async move {
             if let Err(e) = relay.run_observed(&sock, rx, Some(&conn_tx)).await {
                 warn!(error = %e, "cloud_relay.relay_exited");
             }
         });
+        let msp_handle = tokio::spawn(async move {
+            if let Err(e) = msp_relay.run(&msp_sock, msp_shutdown).await {
+                warn!(error = %e, "cloud_relay.msp_relay_exited");
+            }
+        });
         *relay_task = Some(handle);
         *relay_shutdown = Some(tx);
+        self.msp_relay_task = Some(msp_handle);
         // The relay is starting but the broker is NOT confirmed connected yet;
         // mqtt_connected stays false until the transport reports a ConnAck (read
         // each poll tick from the connection flag).
@@ -637,11 +662,16 @@ impl CloudRelayBridge {
     }
 
     /// Mark the relay down: clear the confirmed-connection state so the next
-    /// heartbeat cannot report a stale broker session after a teardown/reap.
+    /// heartbeat cannot report a stale broker session after a teardown/reap, and
+    /// abort the MSP byte-plane relay that was spawned alongside the MAVLink one so
+    /// a wedged publisher cannot outlive its sibling and keep writing to the FC.
     fn mark_relay_down(&mut self) {
         self.mqtt_connected = false;
         self.relay_connected_flag = None;
         self.relay_conn_rx = None;
+        if let Some(handle) = self.msp_relay_task.take() {
+            handle.abort();
+        }
     }
 
     /// POST the GS status heartbeat. Best-effort; a non-2xx / transport error is

@@ -1083,4 +1083,124 @@ mod passthrough_tests {
             "an MSP FC must never emit a MAVLink frame, even when its payload contains 0xFD/0xFE"
         );
     }
+
+    /// End-to-end over the two byte-lane IPC sockets the router serves: an MSP FC's
+    /// FC->host bytes reach a client on the MSP socket (via the raw lane producer),
+    /// while a client on the MAVLink socket stays silent (the frame lane never
+    /// fires for an MSP FC). Stands up both sockets, wires the two producers exactly
+    /// as the router's `main()`, drives a real MSP `read_loop`, and observes both.
+    #[tokio::test]
+    async fn the_msp_socket_carries_raw_bytes_while_the_mavlink_socket_stays_silent() {
+        use ados_protocol::frame::{encode_frame, MAVLINK_MAX_FRAME};
+        use ados_protocol::ipc::{connect_with_retry, read_length_prefixed, IpcBroadcast};
+
+        let dir = std::env::temp_dir();
+        let msp_path = dir.join(format!("ados-mspplane-{}.sock", std::process::id()));
+        let mav_path = dir.join(format!("ados-mavplane-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&msp_path);
+        let _ = std::fs::remove_file(&mav_path);
+
+        // Both sockets as the router binds them: length-prefixed, 256-deep, with an
+        // inbound channel (unused here — this test exercises only the FC->client path).
+        let (msp_ipc, _msp_inbound) = IpcBroadcast::bind(&msp_path, 256, false, Some(256))
+            .await
+            .unwrap();
+        let msp_ipc = std::sync::Arc::new(msp_ipc);
+        let (mav_ipc, _mav_inbound) = IpcBroadcast::bind(&mav_path, 256, false, Some(256))
+            .await
+            .unwrap();
+        let mav_ipc = std::sync::Arc::new(mav_ipc);
+
+        // An MSP FC, so the read loop routes FC->host bytes onto the raw lane.
+        let c = conn();
+        *c.fc_variant.lock().await = Some("betaflight".into());
+
+        let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
+
+        // Raw lane -> MSP socket (the new producer, verbatim from `main()`).
+        {
+            let msp_ipc = msp_ipc.clone();
+            let cancel = cancel.clone();
+            let mut raw_rx = c.subscribe_raw();
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        chunk = raw_rx.recv() => match chunk {
+                            Ok(bytes) => {
+                                if let Ok(framed) = encode_frame(&bytes, MAVLINK_MAX_FRAME) {
+                                    msp_ipc.broadcast(framed).await;
+                                }
+                            }
+                            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(broadcast::error::RecvError::Closed) => break,
+                        },
+                        _ = cancel.notified() => break,
+                    }
+                }
+            });
+        }
+        // Frame lane -> MAVLink socket (the existing producer, verbatim from `main()`).
+        {
+            let mav_ipc = mav_ipc.clone();
+            let cancel = cancel.clone();
+            let mut frame_rx = c.subscribe();
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        frame = frame_rx.recv() => match frame {
+                            Ok(f) => {
+                                if let Ok(framed) = encode_frame(&f, MAVLINK_MAX_FRAME) {
+                                    mav_ipc.broadcast(framed).await;
+                                }
+                            }
+                            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(broadcast::error::RecvError::Closed) => break,
+                        },
+                        _ = cancel.notified() => break,
+                    }
+                }
+            });
+        }
+
+        // A client on each socket, registered before any broadcast fires.
+        let mut msp_client = connect_with_retry(&msp_path, 20, Duration::from_millis(20))
+            .await
+            .unwrap();
+        let mut mav_client = connect_with_retry(&mav_path, 20, Duration::from_millis(20))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Drive the MSP FC: read_loop forwards the raw chunk onto the raw lane.
+        let msp = b"\x24\x4d\x3e\x02\x64\x01\x02\x67".to_vec();
+        c.read_loop(Box::pin(std::io::Cursor::new(msp.clone())))
+            .await;
+
+        // The MSP socket client receives the exact MSP bytes (length-prefixed on the
+        // wire, de-framed back to the original chunk).
+        let got = tokio::time::timeout(
+            Duration::from_secs(1),
+            read_length_prefixed(&mut msp_client, MAVLINK_MAX_FRAME, false),
+        )
+        .await
+        .expect("the msp client read must not time out")
+        .unwrap();
+        assert_eq!(got.as_deref(), Some(&msp[..]));
+
+        // The MAVLink socket client stays silent: an MSP FC never puts a frame on
+        // the frame lane, so nothing is ever broadcast to it.
+        let silent = tokio::time::timeout(
+            Duration::from_millis(200),
+            read_length_prefixed(&mut mav_client, MAVLINK_MAX_FRAME, false),
+        )
+        .await;
+        assert!(
+            silent.is_err(),
+            "the mavlink socket must stay silent for an MSP FC"
+        );
+
+        cancel.notify_waiters();
+        let _ = std::fs::remove_file(&msp_path);
+        let _ = std::fs::remove_file(&mav_path);
+    }
 }

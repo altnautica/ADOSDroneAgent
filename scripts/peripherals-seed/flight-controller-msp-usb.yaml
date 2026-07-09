@@ -1,0 +1,11 @@
+id: ados.flight-controller-msp-usb
+display_name: "Flight controller (MSP over USB)"
+transport: serial
+match:
+  regex: "^/dev/serial/by-id/usb-(Betaflight|iNav|SpeedyBee).*$"
+capabilities:
+  - msp
+  - fc
+extra:
+  description: "Auto-detected MSP flight controller. Betaflight, iNav, SpeedyBee."
+  category: fc

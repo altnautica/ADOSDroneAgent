@@ -47,6 +47,7 @@ fn base_payload() -> HeartbeatPayload {
         heartbeat_age_s: None,
         fc_source: None,
         fc_link_hint: None,
+        fc_variant: None,
         services: Some(vec![]),
         last_ip: "127.0.0.1".to_string(),
         mdns_host: String::new(),

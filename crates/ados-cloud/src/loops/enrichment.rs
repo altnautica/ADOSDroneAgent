@@ -352,6 +352,13 @@ fn fold_fc(obj: &mut Map<String, Value>) {
             obj.insert("fcLinkHint".to_string(), json!(hint));
         }
     }
+    // The FC firmware family (betaflight/inav) from the USB descriptor, so a
+    // cloud-relay GCS can badge an MSP FC instead of showing "not connected".
+    if let Some(variant) = map.get("fc_variant").and_then(Value::as_str) {
+        if !variant.is_empty() {
+            obj.insert("fcVariant".to_string(), json!(variant));
+        }
+    }
 }
 
 /// Read one state snapshot from the state IPC socket. The state socket replays
@@ -689,7 +696,8 @@ ados-mavlink-router.service loaded active running ADOS MAVLink router
             "mavlink_alive": true,
             "heartbeat_age_s": 0.5,
             "fc_source": "serial",
-            "fc_link_hint": "none"
+            "fc_link_hint": "none",
+            "fc_variant": "betaflight"
         });
 
         // Serve `wire` bytes on a fresh socket and return the folded enrichment.
@@ -730,6 +738,7 @@ ados-mavlink-router.service loaded active running ADOS MAVLink router
             assert_eq!(obj.get("heartbeatAgeS"), Some(&json!(0.5)));
             assert_eq!(obj.get("fcSource"), Some(&json!("serial")));
             assert_eq!(obj.get("fcLinkHint"), Some(&json!("none")));
+            assert_eq!(obj.get("fcVariant"), Some(&json!("betaflight")));
         };
 
         // v1 newline-JSON.

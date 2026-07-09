@@ -28,7 +28,7 @@ use ados_cloud::dispatch::install::DownloadSource;
 use ados_cloud::ground_station::{bridge as gs_bridge, CloudRelayBridge};
 use ados_cloud::loops::{atlas_forwarder, atlas_jobs, beacon, command_poll, enrichment, heartbeat};
 use ados_cloud::mqtt::transport::TransportConfig;
-use ados_cloud::mqtt::{MavlinkMqttRelay, WS_PATH};
+use ados_cloud::mqtt::{MavlinkMqttRelay, MspMqttRelay, WS_PATH};
 use ados_cloud::{dispatch, pairing::PairingState};
 
 /// The shared, single-instance plugin supervisor handle. Its lifecycle methods
@@ -755,11 +755,26 @@ fn spawn_drone_relay(
             // Unpaired: nothing to relay; the loop polls for a pair transition.
             if let Some(api_key) = pairing.api_key() {
                 let transport = build_relay_transport(&config, api_key);
+                // The MSP byte plane runs alongside the MAVLink frame plane so a
+                // cloud GCS reaches an MSP FC (Betaflight/iNav) too; both bridge the
+                // same broker. It shares the loop's shutdown watch and is stopped
+                // when the MAVLink relay returns so each iteration spawns a clean pair.
+                let msp_relay =
+                    MspMqttRelay::new(config.agent.device_id.clone(), transport.clone());
+                let msp_shutdown = shutdown.clone();
+                let msp_task = tokio::spawn(async move {
+                    if let Err(e) = msp_relay.run(gs_bridge::MSP_SOCK, msp_shutdown).await {
+                        tracing::warn!(error = %e, "drone msp relay exited");
+                    }
+                });
                 let relay = MavlinkMqttRelay::new(config.agent.device_id.clone(), transport);
                 tracing::info!("drone mavlink relay connecting");
                 if let Err(e) = relay.run(gs_bridge::MAVLINK_SOCK, shutdown.clone()).await {
                     tracing::warn!(error = %e, "drone mavlink relay exited");
                 }
+                // The MAVLink relay returned (shutdown or exit): stop the MSP relay
+                // too so a fresh loop iteration spawns a clean pair.
+                msp_task.abort();
             }
             // Restart / re-poll after a short settle, unless shutting down.
             tokio::select! {

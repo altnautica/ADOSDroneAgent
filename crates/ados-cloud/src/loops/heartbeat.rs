@@ -354,6 +354,9 @@ fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
         heartbeat_age_s: None,
         fc_source: None,
         fc_link_hint: None,
+        // The FC variant is the enrichment producer's to lift from the state
+        // snapshot; the native base leaves it absent (honest "unknown").
+        fc_variant: None,
         services: None,
         last_ip: String::new(),
         mdns_host: String::new(),

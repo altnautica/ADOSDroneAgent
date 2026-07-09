@@ -110,6 +110,7 @@ async fn main() {
 
     let dir = run_dir();
     let mavlink_sock = format!("{dir}/mavlink.sock");
+    let msp_sock = format!("{dir}/msp.sock");
     let state_sock = format!("{dir}/state.sock");
 
     // MAVLink socket: fan FC frames out (256-deep), accept client commands inbound.
@@ -129,6 +130,30 @@ async fn main() {
     };
     let mavlink_ipc = Arc::new(mavlink_ipc);
     let mut inbound = inbound.expect("inbound channel requested");
+
+    // MSP socket: the sibling byte plane for an MSP FC (Betaflight/iNav), whose
+    // FC->host bytes are raw MSP responses rather than MAVLink frames. The MAVLink
+    // socket is fed only by the parsed frame lane, so it stays legitimately silent
+    // for such an FC; this socket carries the raw byte lane instead so a downstream
+    // consumer (the cloud relay) reaches a polling MSP GCS the same way it reaches
+    // a MAVLink one. Length-prefixed both ways (256-deep), accepting protocol-
+    // agnostic client commands inbound. Never parses the byte stream.
+    let (msp_ipc, msp_inbound) = match IpcBroadcast::bind(
+        &msp_sock,
+        MAVLINK_QUEUE_DEPTH,
+        false,
+        Some(MAVLINK_QUEUE_DEPTH),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(path = %msp_sock, error = %e, "msp_sock_bind_failed");
+            return;
+        }
+    };
+    let msp_ipc = Arc::new(msp_ipc);
+    let mut msp_inbound = msp_inbound.expect("msp inbound channel requested");
 
     // State socket: replay last snapshot on connect (32-deep), no inbound.
     let (state_ipc, _) = match IpcBroadcast::bind(&state_sock, STATE_QUEUE_DEPTH, true, None).await
@@ -225,6 +250,52 @@ async fn main() {
             loop {
                 tokio::select! {
                     cmd = inbound.recv() => match cmd {
+                        Some(data) => fc.send_bytes(&data).await,
+                        None => break,
+                    },
+                    _ = cancel.notified() => break,
+                }
+            }
+        }));
+    }
+
+    // FC raw MSP bytes -> MSP socket clients. An MSP FC's FC->host bytes travel
+    // the raw byte lane (the frame lane stays silent for it), so length-prefix each
+    // chunk exactly like the MAVLink socket and fan it to the MSP clients. A ≤2 KB
+    // MSP response fits the 64 KB frame cap; the byte stream is never parsed here
+    // (transparent passthrough). The `RecvError::Lagged`/`Closed` handling mirrors
+    // the MAVLink frame producer above.
+    {
+        let msp_ipc = msp_ipc.clone();
+        let cancel = cancel.clone();
+        let mut raw_rx = fc.subscribe_raw();
+        tasks.push(tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    chunk = raw_rx.recv() => match chunk {
+                        Ok(bytes) => match encode_frame(&bytes, MAVLINK_MAX_FRAME) {
+                            Ok(framed) => msp_ipc.broadcast(framed).await,
+                            Err(e) => tracing::warn!(error = %e, "msp_chunk_encode_failed"),
+                        },
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    },
+                    _ = cancel.notified() => break,
+                }
+            }
+        }));
+    }
+
+    // MSP socket client commands -> FC. The GCS->FC path is protocol-agnostic, so
+    // the received bytes are written verbatim to the FC (no MSP parse), identical
+    // to the MAVLink socket's inbound path.
+    {
+        let fc = fc.clone();
+        let cancel = cancel.clone();
+        tasks.push(tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    cmd = msp_inbound.recv() => match cmd {
                         Some(data) => fc.send_bytes(&data).await,
                         None => break,
                     },

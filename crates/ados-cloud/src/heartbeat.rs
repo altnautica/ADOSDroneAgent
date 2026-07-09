@@ -243,6 +243,13 @@ pub struct HeartbeatPayload {
     pub fc_source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fc_link_hint: Option<String>,
+    // The FC firmware family from the port's USB descriptor (betaflight/inav), or
+    // absent for a MAVLink/unknown FC. Lifted by the enrichment producer from the
+    // state snapshot so a cloud-relay GCS can badge "Betaflight (MSP)" instead of a
+    // misleading "not connected" (an MSP FC never emits the HEARTBEAT the alive gate
+    // needs). Optional + skip so absence reads as honest "unknown" (operating rule 37).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fc_variant: Option<String>,
 
     // --- services + URLs ---
     // The service list comes from the enrichment producer (the API process owns
@@ -503,6 +510,7 @@ mod tests {
             heartbeat_age_s: None,
             fc_source: None,
             fc_link_hint: None,
+            fc_variant: None,
             services: Some(vec![]),
             last_ip: "127.0.0.1".to_string(),
             mdns_host: String::new(),
