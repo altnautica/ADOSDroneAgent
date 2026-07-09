@@ -359,6 +359,14 @@ fn fold_fc(obj: &mut Map<String, Value>) {
             obj.insert("fcVariant".to_string(), json!(variant));
         }
     }
+    // The canonical firmware family (ardupilot/px4/betaflight/inav), so a
+    // cloud-relay GCS can badge the family — including ArduPilot vs PX4, which
+    // fcVariant cannot distinguish. Omit the "unknown"/empty non-badge states.
+    if let Some(firmware) = map.get("fc_firmware").and_then(Value::as_str) {
+        if !firmware.is_empty() && firmware != "unknown" {
+            obj.insert("fcFirmware".to_string(), json!(firmware));
+        }
+    }
 }
 
 /// Read one state snapshot from the state IPC socket. The state socket replays
@@ -697,7 +705,8 @@ ados-mavlink-router.service loaded active running ADOS MAVLink router
             "heartbeat_age_s": 0.5,
             "fc_source": "serial",
             "fc_link_hint": "none",
-            "fc_variant": "betaflight"
+            "fc_variant": "betaflight",
+            "fc_firmware": "betaflight"
         });
 
         // Serve `wire` bytes on a fresh socket and return the folded enrichment.
@@ -739,6 +748,7 @@ ados-mavlink-router.service loaded active running ADOS MAVLink router
             assert_eq!(obj.get("fcSource"), Some(&json!("serial")));
             assert_eq!(obj.get("fcLinkHint"), Some(&json!("none")));
             assert_eq!(obj.get("fcVariant"), Some(&json!("betaflight")));
+            assert_eq!(obj.get("fcFirmware"), Some(&json!("betaflight")));
         };
 
         // v1 newline-JSON.
