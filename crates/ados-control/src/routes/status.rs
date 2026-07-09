@@ -39,7 +39,7 @@ use crate::state::AppState;
 /// uptime + the FC-liveness detail (transport_open / mavlink_alive /
 /// heartbeat_age_s / fc_source / fc_link_hint). Mirrors the Python
 /// `_ipc_only_keys` set.
-const IPC_ONLY_KEYS: [&str; 10] = [
+const IPC_ONLY_KEYS: [&str; 11] = [
     "fc_connected",
     "fc_port",
     "fc_baud",
@@ -50,6 +50,7 @@ const IPC_ONLY_KEYS: [&str; 10] = [
     "fc_source",
     "fc_link_hint",
     "fc_variant",
+    "fc_firmware",
 ];
 
 /// External binaries the video pipeline may use, checked by presence on `PATH`.
@@ -115,6 +116,11 @@ pub async fn get_status(State(state): State<AppState>) -> Json<Value> {
     // fcSource reflects the picker choice. Present alongside the legacy snake
     // fc_connected (which is now the gated truth, not transport-open).
     let liveness = fc_liveness_from_snapshot(snapshot.as_ref());
+    // Honest reachability: true for a live MAVLink FC OR a detected MSP FC on an
+    // open transport (an MSP FC is present + reachable but never heartbeats, so
+    // fc_connected is correctly false for it). Read before the liveness fields
+    // are moved into the body below.
+    let fc_reachable = derive_fc_reachable(&liveness);
 
     let mut body = json!({
         "version": state.agent_version(),
@@ -130,6 +136,8 @@ pub async fn get_status(State(state): State<AppState>) -> Json<Value> {
         "fcSource": liveness.fc_source,
         "fcLinkHint": liveness.fc_link_hint,
         "fcVariant": liveness.fc_variant,
+        "fcFirmware": liveness.fc_firmware,
+        "fcReachable": fc_reachable,
         "dependencies": Value::Object(dependencies),
     });
 
@@ -348,6 +356,12 @@ pub(crate) struct FcLiveness {
     /// The FC firmware family from the USB descriptor (`betaflight`/`inav`), or
     /// null for a MAVLink/unknown FC. Lets the GCS badge an MSP FC honestly.
     pub fc_variant: Value,
+    /// The canonical FC firmware family: `ardupilot`/`px4` (MAVLink, from the
+    /// decoded HEARTBEAT.autopilot discriminator) or `betaflight`/`inav` (MSP,
+    /// from the USB descriptor), or `unknown` when no verified FC identity is
+    /// available. Unlike `fc_variant` it distinguishes the MAVLink pair
+    /// ArduPilot vs PX4, so a consumer can badge all four families.
+    pub fc_firmware: Value,
 }
 
 /// Read the FC-liveness extras out of a snapshot. An absent snapshot or absent
@@ -385,7 +399,27 @@ pub(crate) fn fc_liveness_from_snapshot(snapshot: Option<&Value>) -> FcLiveness 
             .cloned()
             .filter(|v| !v.is_null())
             .unwrap_or(Value::Null),
+        // Always a concrete family string; an absent snapshot / field is
+        // honestly `unknown`, never guessed.
+        fc_firmware: obj
+            .and_then(|m| m.get("fc_firmware"))
+            .cloned()
+            .filter(|v| !v.is_null())
+            .unwrap_or_else(|| json!("unknown")),
     }
+}
+
+/// A truthful "the FC is reachable" signal. Unlike the heartbeat-gated
+/// `fc_connected`, this is also true for a detected MSP FC on an open transport:
+/// a Betaflight/iNav board never emits a MAVLink heartbeat, yet it is present
+/// and reachable over the byte-pipe (identified by its USB descriptor or a
+/// recent MSP frame sniff). It is false when the port is open but no FC is
+/// evidenced (no heartbeat and no MSP), and when there is no transport at all —
+/// it never claims a link that is not there.
+pub(crate) fn derive_fc_reachable(liveness: &FcLiveness) -> bool {
+    liveness.mavlink_alive
+        || (liveness.transport_open
+            && (!liveness.fc_variant.is_null() || liveness.fc_link_hint == json!("msp_detected")))
 }
 
 /// True when `name` is found as an executable on `PATH`. Mirrors
@@ -492,6 +526,9 @@ mod tests {
         assert_eq!(l.heartbeat_age_s, Value::Null);
         assert_eq!(l.fc_source, json!("auto"));
         assert_eq!(l.fc_link_hint, json!("none"));
+        assert_eq!(l.fc_variant, Value::Null);
+        // The firmware family is always a concrete string, defaulting to unknown.
+        assert_eq!(l.fc_firmware, json!("unknown"));
     }
 
     #[test]
@@ -502,6 +539,8 @@ mod tests {
             "heartbeat_age_s": 7.5,
             "fc_source": "serial",
             "fc_link_hint": "msp_detected",
+            "fc_variant": "betaflight",
+            "fc_firmware": "betaflight",
         });
         let l = fc_liveness_from_snapshot(Some(&snap));
         // The exact bug it guards: transport open but MAVLink not alive.
@@ -510,6 +549,56 @@ mod tests {
         assert_eq!(l.heartbeat_age_s, json!(7.5));
         assert_eq!(l.fc_source, json!("serial"));
         assert_eq!(l.fc_link_hint, json!("msp_detected"));
+        assert_eq!(l.fc_variant, json!("betaflight"));
+        assert_eq!(l.fc_firmware, json!("betaflight"));
+    }
+
+    #[test]
+    fn fc_reachable_is_true_for_a_live_mavlink_fc() {
+        let l = fc_liveness_from_snapshot(Some(&json!({
+            "transport_open": true,
+            "mavlink_alive": true,
+            "fc_firmware": "ardupilot",
+        })));
+        assert!(derive_fc_reachable(&l));
+    }
+
+    #[test]
+    fn fc_reachable_is_true_for_a_detected_msp_fc_on_an_open_port() {
+        // Betaflight/iNav never heartbeats, but it is present + reachable: an
+        // open transport plus the USB-descriptor variant is positive evidence.
+        let by_variant = fc_liveness_from_snapshot(Some(&json!({
+            "transport_open": true,
+            "mavlink_alive": false,
+            "fc_link_hint": "msp_detected",
+            "fc_variant": "betaflight",
+            "fc_firmware": "betaflight",
+        })));
+        assert!(derive_fc_reachable(&by_variant));
+
+        // Or an unrecognised-descriptor MSP board evidenced by the frame sniff
+        // alone (fc_variant null, hint msp_detected).
+        let by_sniff = fc_liveness_from_snapshot(Some(&json!({
+            "transport_open": true,
+            "mavlink_alive": false,
+            "fc_link_hint": "msp_detected",
+        })));
+        assert!(derive_fc_reachable(&by_sniff));
+    }
+
+    #[test]
+    fn fc_reachable_is_false_for_a_silent_open_port_and_for_no_transport() {
+        // Port open, no heartbeat, no MSP evidence: nothing proves an FC is
+        // there, so reachability must not be claimed.
+        let silent = fc_liveness_from_snapshot(Some(&json!({
+            "transport_open": true,
+            "mavlink_alive": false,
+            "fc_link_hint": "no_heartbeat",
+        })));
+        assert!(!derive_fc_reachable(&silent));
+
+        // No transport at all.
+        assert!(!derive_fc_reachable(&fc_liveness_from_snapshot(None)));
     }
 
     #[test]

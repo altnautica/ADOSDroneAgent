@@ -483,7 +483,15 @@ fn autopilot_panel(frame: &mut Frame, area: Rect, dash: &Dashboard, history: &Hi
 
     // Flight-controller link + mode/armed chips.
     let (dot_color, dot_text) = match dash.fc_link() {
-        FcLink::Connected => (theme::success(), "FC connected".to_string()),
+        FcLink::Connected => (
+            theme::success(),
+            // Name the MAVLink family (ArduPilot / PX4) when it is verified;
+            // fall back to a generic label when the family is unknown.
+            format!(
+                "{} connected",
+                dash.fc_family_label().unwrap_or_else(|| "FC".to_string())
+            ),
+        ),
         FcLink::Msp => (
             theme::accent(),
             format!(

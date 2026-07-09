@@ -21,7 +21,7 @@ use ados_mavlink_router::config::MavlinkConfig;
 use ados_mavlink_router::connection::FcConnection;
 use ados_mavlink_router::param_cache::ParamCache;
 use ados_mavlink_router::proxies::{run_tcp_proxy, run_udp_proxy, run_ws_proxy, WsProxyAuth};
-use ados_mavlink_router::state::VehicleState;
+use ados_mavlink_router::state::{firmware_family, VehicleState};
 
 const MAVLINK_QUEUE_DEPTH: usize = 256;
 const STATE_QUEUE_DEPTH: usize = 32;
@@ -421,7 +421,13 @@ async fn build_extras(
     state_drops: u64,
 ) -> Map<String, Value> {
     let cached = params.lock().await.count();
-    let expected = state.lock().await.param_count;
+    // The expected param count and the decoded autopilot code, read under one
+    // lock. `autopilot` is the already-decoded HEARTBEAT discriminator (3 =
+    // ArduPilot, 12 = PX4) used to name the MAVLink firmware family below.
+    let (expected, autopilot) = {
+        let s = state.lock().await;
+        (s.param_count, s.autopilot)
+    };
     let params_blob = params.lock().await.get_all();
     let mut extras = Map::new();
     // The gated truth: fc_connected = transport_open && mavlink_alive. A port
@@ -451,12 +457,22 @@ async fn build_extras(
     // The FC firmware family identified from the port's USB descriptor
     // (betaflight/inav), or null for a MAVLink/unknown FC — lets a consumer
     // badge "Betaflight (MSP)" instead of a misleading "not connected".
+    let fc_variant = fc.fc_variant().await;
     extras.insert(
         "fc_variant".into(),
-        fc.fc_variant()
-            .await
-            .map(|v| json!(v))
-            .unwrap_or(Value::Null),
+        fc_variant.as_ref().map(|v| json!(v)).unwrap_or(Value::Null),
+    );
+    // The canonical firmware family (ardupilot/px4/betaflight/inav/unknown):
+    // the MSP variant above, or — for a MAVLink FC — the live-heartbeat
+    // autopilot code that names ArduPilot vs PX4 (which fc_variant cannot).
+    // Read-only classification of already-decoded signals; no payload parsed.
+    extras.insert(
+        "fc_firmware".into(),
+        json!(firmware_family(
+            fc_variant.as_deref(),
+            mavlink_alive,
+            autopilot
+        )),
     );
     extras.insert("fc_port".into(), json!(fc.port().await));
     extras.insert("fc_baud".into(), json!(fc.baud()));

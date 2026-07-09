@@ -150,6 +150,36 @@ fn mode_name(autopilot: i64, mav_type: i64, custom_mode: u32) -> String {
         .unwrap_or_else(|| format!("MODE_{custom_mode}"))
 }
 
+/// The canonical FC firmware family, derived only from the verified signals the
+/// router already holds — never guessed. An MSP FC is named by its
+/// USB-descriptor variant (`betaflight` / `inav`); a MAVLink FC is named, only
+/// while its heartbeat is live, by the decoded `HEARTBEAT.autopilot`
+/// discriminator (3 = ArduPilot, 12 = PX4). Anything without a verified
+/// identity — an MSP board with an unrecognised descriptor, a MAVLink FC whose
+/// link is not alive (so the last autopilot code is stale), or an unrecognised
+/// autopilot code — reports `unknown`. No FC payload is parsed: the inputs are
+/// the same passive signals the byte-pipe already captures.
+pub fn firmware_family(
+    msp_variant: Option<&str>,
+    mavlink_alive: bool,
+    autopilot: i64,
+) -> &'static str {
+    match msp_variant {
+        Some("betaflight") => "betaflight",
+        Some("inav") => "inav",
+        // An MSP board whose USB descriptor names no known family.
+        Some(_) => "unknown",
+        // A MAVLink FC: trust the autopilot code only while the link is live, so
+        // a stale heartbeat after link loss never keeps claiming a family.
+        None if mavlink_alive => match autopilot {
+            3 => "ardupilot",
+            12 => "px4",
+            _ => "unknown",
+        },
+        None => "unknown",
+    }
+}
+
 /// The unified vehicle state. Field set and defaults mirror the Python
 /// dataclass; only the fields the wire snapshot needs are surfaced by
 /// [`VehicleState::to_wire`].
@@ -782,5 +812,23 @@ mod tests {
         assert_eq!(s.rc_channels[0], 1500);
         assert_eq!(s.rc_channels[17], 14);
         assert_eq!(s.rc_rssi, 200);
+    }
+
+    #[test]
+    fn firmware_family_maps_only_verified_signals() {
+        // MSP families come from the USB descriptor variant, regardless of the
+        // (absent) heartbeat.
+        assert_eq!(firmware_family(Some("betaflight"), false, 0), "betaflight");
+        assert_eq!(firmware_family(Some("inav"), false, 0), "inav");
+        // A MAVLink FC is named by the autopilot code, but ONLY while alive.
+        assert_eq!(firmware_family(None, true, 3), "ardupilot");
+        assert_eq!(firmware_family(None, true, 12), "px4");
+        // Not alive → the autopilot code is stale, so never claim a family.
+        assert_eq!(firmware_family(None, false, 3), "unknown");
+        assert_eq!(firmware_family(None, false, 12), "unknown");
+        // Alive but an unrecognised autopilot code, and an unrecognised MSP
+        // descriptor, both stay honest.
+        assert_eq!(firmware_family(None, true, 0), "unknown");
+        assert_eq!(firmware_family(Some("cleanflight"), false, 0), "unknown");
     }
 }

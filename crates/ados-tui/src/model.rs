@@ -116,6 +116,10 @@ pub struct Dashboard {
     /// FC firmware family from the USB descriptor (`betaflight`/`inav`), merged
     /// from `/api/status`; drives the MSP badge.
     pub fc_variant: Option<String>,
+    /// The canonical FC firmware family (`ardupilot`/`px4`/`betaflight`/`inav`),
+    /// merged from `/api/status`; names ArduPilot vs PX4 for a MAVLink FC, which
+    /// `fc_variant` cannot. `None` when the family is unknown / unverified.
+    pub fc_firmware: Option<String>,
 
     pub video_state: String,
     pub video_viewer: Option<String>,
@@ -642,6 +646,9 @@ impl Dashboard {
             .filter(|h| !h.is_empty() && *h != "none")
             .map(str::to_string);
         self.fc_variant = opt_str(status, "fcVariant");
+        // The canonical family; drop the honest `unknown` sentinel so the label
+        // helper falls back to a generic "FC" rather than naming "Unknown".
+        self.fc_firmware = opt_str(status, "fcFirmware").filter(|f| f != "unknown");
         // Fall back to /api/status port/baud only when setup-status lacked them.
         if self.fc_port.is_none() {
             self.fc_port = opt_str(status, "fc_port");
@@ -669,6 +676,19 @@ impl Dashboard {
         } else {
             FcLink::Down
         }
+    }
+
+    /// The display name of the identified FC firmware family, e.g. `ArduPilot`
+    /// / `PX4` / `Betaflight` / `iNav`. `None` when the family is unknown, so a
+    /// caller falls back to a generic label rather than naming a guess.
+    pub fn fc_family_label(&self) -> Option<String> {
+        self.fc_firmware.as_deref().and_then(|f| match f {
+            "ardupilot" => Some("ArduPilot".to_string()),
+            "px4" => Some("PX4".to_string()),
+            "betaflight" => Some("Betaflight".to_string()),
+            "inav" => Some("iNav".to_string()),
+            _ => None,
+        })
     }
 
     /// The display label for an identified MSP FC, e.g. `Betaflight` / `iNav`.
@@ -958,6 +978,41 @@ mod tests {
 
         // No transport detail at all → down.
         assert_eq!(Dashboard::default().fc_link(), FcLink::Down);
+    }
+
+    #[test]
+    fn merge_names_the_mavlink_firmware_family() {
+        // A live ArduPilot FC is named ArduPilot, not a generic "FC connected".
+        let mut ap = Dashboard {
+            mavlink_connected: true,
+            ..Dashboard::default()
+        };
+        ap.merge_fc_status(&json!({
+            "transportOpen": true, "mavlinkAlive": true, "fcFirmware": "ardupilot"
+        }));
+        assert_eq!(ap.fc_link(), FcLink::Connected);
+        assert_eq!(ap.fc_family_label().as_deref(), Some("ArduPilot"));
+
+        // PX4 the same.
+        let mut px4 = Dashboard {
+            mavlink_connected: true,
+            ..Dashboard::default()
+        };
+        px4.merge_fc_status(&json!({
+            "transportOpen": true, "mavlinkAlive": true, "fcFirmware": "px4"
+        }));
+        assert_eq!(px4.fc_family_label().as_deref(), Some("PX4"));
+
+        // The honest `unknown` sentinel yields no name (falls back to "FC").
+        let mut unknown = Dashboard {
+            mavlink_connected: true,
+            ..Dashboard::default()
+        };
+        unknown.merge_fc_status(&json!({
+            "transportOpen": true, "mavlinkAlive": true, "fcFirmware": "unknown"
+        }));
+        assert_eq!(unknown.fc_firmware, None);
+        assert_eq!(unknown.fc_family_label(), None);
     }
 
     #[test]

@@ -23,6 +23,8 @@
   "fcSource": "auto",
   "fcLinkHint": "none",
   "fcVariant": null,
+  "fcFirmware": "unknown",
+  "fcReachable": false,
   "heartbeatAgeS": null,
   "mavlinkAlive": false,
   "transportOpen": false,
