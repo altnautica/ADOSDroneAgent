@@ -493,7 +493,10 @@ fn autopilot_panel(frame: &mut Frame, area: Rect, dash: &Dashboard, history: &Hi
             ),
         ),
         FcLink::Msp => (
-            theme::accent(),
+            // An identified, reachable MSP FC is a good state — render it green
+            // like a connected FC, not the amber accent (which reads as caution
+            // next to the warning colour).
+            theme::success(),
             format!(
                 "FC: {} (MSP)",
                 dash.fc_variant_label().unwrap_or_else(|| "MSP".to_string())
@@ -521,13 +524,17 @@ fn autopilot_panel(frame: &mut Frame, area: Rect, dash: &Dashboard, history: &Hi
     cells.push(Cell::Line(Line::from(fc)));
 
     // FC serial endpoint + an honest sub-line (the link hint, or — for an MSP
-    // FC — that MAVLink telemetry does not apply to it).
+    // FC — where its live telemetry actually flows). Rendered dim (neutral), not
+    // a warning colour: an MSP FC is a byte-pipe through the daemon by design.
     let mut detail: Vec<Span> = Vec::new();
     if let Some(ep) = dash.fc_endpoint() {
         detail.push(Span::styled(ep, dim()));
     }
     let sub = match dash.fc_link() {
-        FcLink::Msp => Some("MSP flight controller · MAVLink telemetry N/A".to_string()),
+        // Honest per the daemon's role: it does not decode MSP telemetry (it is a
+        // transparent byte-pipe), so live attitude/battery/GPS show in the
+        // dashboard / Mission Control over MSP, not here. Not a fault.
+        FcLink::Msp => Some("reachable over MSP · live telemetry in the dashboard / GCS".to_string()),
         // No serial FC device found at all — say so, and what to check, instead
         // of a bare "FC not connected" with no explanation.
         FcLink::Down => Some(
