@@ -6,6 +6,7 @@ import { Link } from "react-router-dom";
 
 import { BitmaskModal } from "@/components/fc/bitmask-modal";
 import { EnumSelect } from "@/components/fc/enum-select";
+import { MspSensorsView } from "@/components/fc/msp-sensors-view";
 import { MspSettingsTab } from "@/components/fc/msp-settings-tab";
 import { PageShell } from "@/components/page-shell";
 import { ConfirmDialog } from "@/components/settings/confirm-dialog";
@@ -580,6 +581,20 @@ function MavlinkParams() {
 }
 
 function SensorsTab() {
+  // Route by FC family. A Betaflight/iNav FC speaks MSP: the agent decodes no
+  // MSP telemetry (it is a byte-pipe), so the browser polls the FC directly over
+  // the transparent proxy for live attitude/battery/GPS/RC/sensors. ArduPilot /
+  // PX4 sensors come from the agent's MAVLink vehicle-state snapshot.
+  const hb = useHeartbeat();
+  const snap = useSnapshot();
+  const firmwareType = resolveFirmwareType(hb.data?.fcFirmware, snap.data?.fc?.vehicle);
+  if (firmwareType === "betaflight" || firmwareType === "inav") {
+    return <MspSensorsView firmware={firmwareType} />;
+  }
+  return <MavlinkSensors />;
+}
+
+function MavlinkSensors() {
   const snap = useSnapshot();
   const sensors = snap.data?.sensors ?? [];
 
