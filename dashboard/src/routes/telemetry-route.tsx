@@ -4,6 +4,8 @@ import { Radio, RotateCcw, Save, Search } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
+import { BitmaskModal } from "@/components/fc/bitmask-modal";
+import { EnumSelect } from "@/components/fc/enum-select";
 import { PageShell } from "@/components/page-shell";
 import { ConfirmDialog } from "@/components/settings/confirm-dialog";
 import { Button } from "@/components/ui/button";
@@ -28,10 +30,20 @@ import { toast } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { useParamsStore } from "@/stores/params-store";
 
-/** Current value with its enum label appended, when the metadata names it. */
+/** Current value decorated with its enum label or set bitmask flags, when
+ *  the metadata names them. */
 function displayValue(value: number, m?: ParamMetadata): string {
-  const label = m?.values?.get(value);
-  return label ? `${formatParamValue(value)} · ${label}` : formatParamValue(value);
+  if (m?.values) {
+    const label = m.values.get(value);
+    if (label) return `${formatParamValue(value)} · ${label}`;
+  }
+  if (m?.bitmask && m.bitmask.size > 0) {
+    const set = [...m.bitmask.entries()]
+      .filter(([bit]) => (value & (1 << bit)) !== 0)
+      .map(([, label]) => label);
+    return `${formatParamValue(value)} · ${set.length ? set.join(", ") : "none"}`;
+  }
+  return formatParamValue(value);
 }
 
 interface ParamsResponse {
@@ -114,6 +126,11 @@ function ParametersTab() {
   const [category, setCategory] = useState<string | null>(null);
   const [modifiedOnly, setModifiedOnly] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [bitmaskTarget, setBitmaskTarget] = useState<{
+    name: string;
+    original: number;
+    current: number;
+  } | null>(null);
   const [saveProgress, setSaveProgress] = useState<{
     total: number;
     done: number;
@@ -431,17 +448,41 @@ function ParametersTab() {
                       <span className="text-muted-foreground w-40 text-right truncate tabular-nums" title={displayValue(row.value, m)}>
                         {displayValue(row.value, m)}
                       </span>
-                      <Input
-                        type="number"
-                        step="any"
-                        value={draft ? draft.draft : row.value}
-                        onChange={(e) => {
-                          const v = parseFloat(e.target.value);
-                          if (!Number.isFinite(v)) return;
-                          setDraft(row.name, row.value, v);
-                        }}
-                        className="w-28 h-7 text-xs"
-                      />
+                      {m?.values && m.values.size > 0 ? (
+                        <EnumSelect
+                          values={m.values}
+                          value={draft ? draft.draft : row.value}
+                          onChange={(v) => setDraft(row.name, row.value, v)}
+                          className="w-28"
+                        />
+                      ) : m?.bitmask && m.bitmask.size > 0 ? (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="w-28 h-7 justify-start text-xs font-mono"
+                          onClick={() =>
+                            setBitmaskTarget({
+                              name: row.name,
+                              original: row.value,
+                              current: draft ? draft.draft : row.value,
+                            })
+                          }
+                        >
+                          Set bits…
+                        </Button>
+                      ) : (
+                        <Input
+                          type="number"
+                          step="any"
+                          value={draft ? draft.draft : row.value}
+                          onChange={(e) => {
+                            const v = parseFloat(e.target.value);
+                            if (!Number.isFinite(v)) return;
+                            setDraft(row.name, row.value, v);
+                          }}
+                          className="w-28 h-7 text-xs"
+                        />
+                      )}
                       <span className="text-muted-foreground/70 w-24 shrink-0 truncate text-[10px]" title={hint}>
                         {hint}
                       </span>
@@ -481,6 +522,26 @@ function ParametersTab() {
         destructive
         onConfirm={saveAll}
       />
+
+      {bitmaskTarget &&
+        (() => {
+          const bm = meta?.get(bitmaskTarget.name)?.bitmask;
+          if (!bm) return null;
+          return (
+            <BitmaskModal
+              open
+              onOpenChange={(o) => {
+                if (!o) setBitmaskTarget(null);
+              }}
+              name={bitmaskTarget.name}
+              bitmask={bm}
+              value={bitmaskTarget.current}
+              onApply={(next) =>
+                setDraft(bitmaskTarget.name, bitmaskTarget.original, next)
+              }
+            />
+          );
+        })()}
     </div>
   );
 }
