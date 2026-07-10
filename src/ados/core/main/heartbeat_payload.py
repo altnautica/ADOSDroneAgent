@@ -158,6 +158,14 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
     mavlink_alive = False
     heartbeat_age_s: float | None = None
     fc_source = "auto"
+    # FC firmware identity so the cloud GCS can badge an MSP FC (Betaflight/iNav)
+    # as connected. Without these the cloud path dropped the variant entirely and
+    # rendered a healthy MSP board as "no FC". fc_reachable is the honest
+    # connected-or-MSP signal (mirrors the Rust /api/status derive_fc_reachable).
+    fc_variant: str | None = None
+    fc_firmware: str | None = None
+    fc_link_hint: str | None = None
+    fc_reachable = False
     if app._fc_connection:
         fc_connected = getattr(app._fc_connection, "connected", False)
         # Prefer the live port/baud the router reports on the snapshot over the
@@ -169,6 +177,12 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
         mavlink_alive = getattr(app._fc_connection, "mavlink_alive", False)
         heartbeat_age_s = getattr(app._fc_connection, "heartbeat_age_s", None)
         fc_source = getattr(app._fc_connection, "source", "auto") or "auto"
+        fc_variant = getattr(app._fc_connection, "fc_variant", None)
+        fc_firmware = getattr(app._fc_connection, "fc_firmware", None)
+        fc_link_hint = getattr(app._fc_connection, "fc_link_hint", None)
+        fc_reachable = getattr(
+            app._fc_connection, "reachable", bool(fc_connected)
+        )
 
     # Board info from detection
     board = getattr(app, "board", None)
@@ -194,7 +208,11 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
             return s
         if name == "fc-connection":
             fc = getattr(app, "_fc_connection", None)
-            if fc and not getattr(fc, "connected", False):
+            # An MSP FC (Betaflight/iNav) never sets fc.connected (it emits no
+            # MAVLink heartbeat) but is reachable + drivable over the MSP proxy —
+            # that is a healthy link, not degraded. Prefer the honest reachability
+            # signal, falling back to connected on an older handle.
+            if fc and not getattr(fc, "reachable", getattr(fc, "connected", False)):
                 return "degraded"
         elif name == "video-pipeline":
             if getattr(app.config.video, "mode", "disabled") == "disabled":
@@ -407,6 +425,10 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
         "mavlinkAlive": mavlink_alive,
         "heartbeatAgeS": heartbeat_age_s,
         "fcSource": fc_source,
+        "fcVariant": fc_variant,
+        "fcFirmware": fc_firmware,
+        "fcLinkHint": fc_link_hint,
+        "fcReachable": fc_reachable,
         "services": service_list,
         "lastIp": local_ip,
         "mdnsHost": mdns_host,

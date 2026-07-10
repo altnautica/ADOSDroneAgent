@@ -34,6 +34,25 @@ class FcStatus:
     port: Any = None
     baud: Any = None
     uptime_seconds: float | None = None
+    transport_open: bool = False
+    mavlink_alive: bool = False
+    fc_variant: str | None = None
+    fc_firmware: str | None = None
+    fc_link_hint: str | None = None
+
+    @property
+    def reachable(self) -> bool:
+        """Honest FC reachability, mirroring the Rust /api/status derive_fc_reachable.
+
+        True for a live MAVLink link OR an identified/MSP FC on an open transport.
+        An MSP FC (Betaflight/iNav) is reachable and drivable even though it never
+        emits a MAVLink heartbeat, so it must not read as a broken link.
+        """
+        if self.mavlink_alive:
+            return True
+        if not self.transport_open:
+            return False
+        return bool(self.fc_variant) or self.fc_link_hint == "msp_detected"
 
 
 class ApiRuntimeFacade:
@@ -136,6 +155,14 @@ class ApiRuntimeFacade:
         port = state.get("fc_port")
         baud = state.get("fc_baud")
         uptime = state.get("service_uptime")
+        # The router publishes the FC identity + gated-truth siblings alongside
+        # fc_connected, so an MSP FC (which never sets fc_connected) is still
+        # honestly described by transport_open + fc_variant.
+        transport_open = state.get("transport_open", False)
+        mavlink_alive = state.get("mavlink_alive", False)
+        fc_variant = state.get("fc_variant")
+        fc_firmware = state.get("fc_firmware")
+        fc_link_hint = state.get("fc_link_hint")
 
         # Prefer the live connection's truth when a handle is present.
         # The IPC snapshot can lag a physical FC unplug (it only changes
@@ -149,12 +176,26 @@ class ApiRuntimeFacade:
             connected = getattr(fc, "connected", False)
             port = getattr(fc, "port", None)
             baud = getattr(fc, "baud", None)
+            transport_open = getattr(fc, "transport_open", transport_open)
+            mavlink_alive = getattr(fc, "mavlink_alive", mavlink_alive)
+            fc_variant = getattr(fc, "fc_variant", fc_variant)
+            fc_firmware = getattr(fc, "fc_firmware", fc_firmware)
+            fc_link_hint = getattr(fc, "fc_link_hint", fc_link_hint)
 
         return FcStatus(
             connected=bool(connected),
             port=port,
             baud=baud,
             uptime_seconds=uptime,
+            transport_open=bool(transport_open),
+            mavlink_alive=bool(mavlink_alive),
+            fc_variant=(str(fc_variant) if fc_variant else None),
+            fc_firmware=(
+                str(fc_firmware)
+                if fc_firmware and fc_firmware != "unknown"
+                else None
+            ),
+            fc_link_hint=(str(fc_link_hint) if fc_link_hint else None),
         )
 
     def vehicle_state(self) -> Any:

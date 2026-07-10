@@ -77,51 +77,81 @@ def _check_board() -> HardwareCheckItem:
         )
 
 
+_FIRMWARE_NAMES = {
+    "px4": "PX4",
+    "betaflight": "Betaflight",
+    "inav": "iNav",
+}
+
+
+def _fc_firmware_name(token: str | None) -> str | None:
+    """Human FC firmware name from a family/variant token, or None."""
+    if not token:
+        return None
+    t = str(token).strip().lower()
+    if t.startswith("ardupilot"):
+        return "ArduPilot"
+    return _FIRMWARE_NAMES.get(t)
+
+
+def _fc_label(firmware: str | None, variant: str | None) -> str:
+    """A firmware-neutral flight-controller label, e.g. "Flight controller ·
+    Betaflight (MSP)" or "Flight controller · ArduPilot"."""
+    name = _fc_firmware_name(firmware) or _fc_firmware_name(variant)
+    if not name:
+        return "Flight controller"
+    is_msp = bool(variant) or firmware in ("betaflight", "inav")
+    return f"Flight controller · {name}{' (MSP)' if is_msp else ''}"
+
+
 def _check_fc(runtime: Any) -> HardwareCheckItem:
-    """Flight controller presence + (best-effort) heartbeat read."""
+    """Flight controller presence + link/reachability read (firmware-neutral)."""
     fc = runtime.fc_status() if runtime else None
     connected = bool(getattr(fc, "connected", False))
-    if connected:
-        port = str(getattr(fc, "port", "") or "")
-        baud = getattr(fc, "baud", None)
-        autopilot = getattr(fc, "autopilot_type", "") or "MAVLink"
-        version = getattr(fc, "firmware_version", "") or ""
-        bits = [autopilot]
-        if version:
-            bits.append(str(version))
+    reachable = bool(getattr(fc, "reachable", False))
+    variant = getattr(fc, "fc_variant", None) if fc else None
+    firmware = getattr(fc, "fc_firmware", None) if fc else None
+    port = str(getattr(fc, "port", "") or "") if fc else ""
+    baud = getattr(fc, "baud", None) if fc else None
+
+    if connected or reachable:
+        # A connected MAVLink FC (ArduPilot/PX4) OR a reachable MSP FC
+        # (Betaflight/iNav), which is drivable over the MSP proxy even though it
+        # never emits a MAVLink heartbeat. Both are a healthy flight controller.
+        bits = ["MSP" if variant else "MAVLink"]
         if port:
             bits.append(f"on {port}")
         if baud:
             bits.append(f"@ {baud} baud")
         return HardwareCheckItem(
             id="fc",
-            label="Flight controller (MAVLink)",
+            label=_fc_label(firmware, variant),
             required=True,
             state="ok",
             detail=" ".join(bits),
         )
 
     # Fall back to serial-presence probe so the operator at least sees that
-    # a candidate device exists even before MAVLink lock.
+    # a candidate device exists even before the link is up.
     from ados.bootstrap.profile_detect import probe_mavlink_serial
 
     _g, _a, has_serial = probe_mavlink_serial()
     if has_serial:
         return HardwareCheckItem(
             id="fc",
-            label="Flight controller (MAVLink)",
+            label="Flight controller",
             required=True,
             state="warning",
-            detail="Serial device present but MAVLink heartbeat not yet detected.",
-            fix_hint="Confirm baud rate and that the FC is powered.",
+            detail="Serial device present but the flight controller is not responding yet.",
+            fix_hint="Confirm the FC is powered and the baud rate is correct.",
         )
     return HardwareCheckItem(
         id="fc",
-        label="Flight controller (MAVLink)",
+        label="Flight controller",
         required=True,
         state="missing",
         detail="No flight controller serial device detected.",
-        fix_hint="Connect FC USB cable to the companion and re-check.",
+        fix_hint="Connect the FC USB cable to the companion and re-check.",
     )
 
 

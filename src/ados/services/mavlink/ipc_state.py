@@ -297,5 +297,39 @@ class IpcFcConnection:
     def baud(self):
         return self._vs.snapshot.get("fc_baud")
 
+    @property
+    def fc_variant(self) -> str | None:
+        """The MSP FC family the router identified off the USB descriptor
+        ("betaflight" | "inav"), or None for a MAVLink / unidentified FC."""
+        value = self._vs.snapshot.get("fc_variant")
+        return str(value) if value else None
+
+    @property
+    def fc_firmware(self) -> str | None:
+        """Canonical FC firmware family ("ardupilot" | "px4" | "betaflight" |
+        "inav" | "unknown"), or None when absent/unknown."""
+        value = self._vs.snapshot.get("fc_firmware")
+        return str(value) if value and value != "unknown" else None
+
+    @property
+    def fc_link_hint(self) -> str | None:
+        """Diagnostic link hint ("none" | "msp_detected" | "no_heartbeat")."""
+        value = self._vs.snapshot.get("fc_link_hint")
+        return str(value) if value else None
+
+    @property
+    def reachable(self) -> bool:
+        """Honest FC reachability, mirroring the Rust /api/status derive_fc_reachable.
+
+        True for a live MAVLink link OR an identified/MSP FC on an open transport.
+        An MSP FC (Betaflight/iNav) is reachable and drivable even though it never
+        emits a MAVLink heartbeat, so it must not read as a broken link.
+        """
+        if self.mavlink_alive:
+            return True
+        if not self.transport_open:
+            return False
+        return bool(self.fc_variant) or self.fc_link_hint == "msp_detected"
+
 
 __all__ = ["IpcVehicleState", "IpcParamCache", "IpcFcConnection"]

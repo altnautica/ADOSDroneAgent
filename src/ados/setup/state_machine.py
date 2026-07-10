@@ -233,8 +233,16 @@ def _setup_steps(
         # item (no serial device / serial present but silent) plus the fix,
         # instead of the generic "connect or configure" line.
         fc_item = next((it for it in hardware_check.items if it.id == "fc"), None)
+        # The FC step is complete when the flight controller is REACHABLE — a
+        # live MAVLink link OR a detected MSP FC (Betaflight/iNav), which the
+        # hardware check reports as state="ok" even though it emits no MAVLink
+        # heartbeat. Gating on mavlink.connected alone left an MSP rig stuck at
+        # "needs action" forever.
+        fc_ok = fc_item is not None and fc_item.state == "ok"
         if mavlink.connected:
             fc_detail = "MAVLink telemetry is live."
+        elif fc_ok:
+            fc_detail = fc_item.detail or "Flight controller detected."
         elif fc_item is not None and fc_item.detail:
             fc_detail = fc_item.detail
             if fc_item.fix_hint:
@@ -248,7 +256,7 @@ def _setup_steps(
             SetupStep(
                 id="mavlink",
                 label="Flight controller",
-                state="complete" if mavlink.connected else "needs_action",
+                state="complete" if (mavlink.connected or fc_ok) else "needs_action",
                 detail=fc_detail,
                 action_label="Open MAVLink",
                 href="/mavlink.html",
