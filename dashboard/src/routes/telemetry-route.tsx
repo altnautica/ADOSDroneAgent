@@ -121,6 +121,7 @@ function ParametersTab() {
       <MspSettingsTab
         firmware={firmwareType}
         firmwareVersion={snap.data?.fc?.firmware ?? undefined}
+        armed={snap.data?.fc?.armed ?? false}
       />
     );
   }
@@ -141,6 +142,9 @@ function MavlinkParams() {
     enabled: firmwareType !== "unknown",
     staleTime: Infinity,
   }).data;
+
+  const armed = snap.data?.fc?.armed ?? false;
+  const isPx4 = firmwareType === "px4";
 
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
@@ -311,7 +315,7 @@ function MavlinkParams() {
           </Button>
           <Button
             size="sm"
-            disabled={dirtyCount === 0 || !!saveProgress}
+            disabled={dirtyCount === 0 || !!saveProgress || armed}
             onClick={() => setConfirmOpen(true)}
           >
             <Save className="h-3.5 w-3.5" />
@@ -320,6 +324,12 @@ function MavlinkParams() {
               : `Save ${dirtyCount || ""}`}
           </Button>
         </div>
+
+        {armed && (
+          <p className="text-xs text-warn">
+            Vehicle is armed — parameter writes are blocked. Disarm to save changes.
+          </p>
+        )}
 
         {params.isLoading && (
           <p className="text-sm text-muted-foreground">loading parameters…</p>
@@ -530,8 +540,10 @@ function MavlinkParams() {
           <div className="space-y-2">
             <p>
               The agent will write each parameter to the FC and wait for a
-              PARAM_VALUE ack (up to 2s per param). ArduPilot saves to
-              EEPROM on receipt — there's no separate flash step.
+              PARAM_VALUE ack (up to 2s per param).{" "}
+              {isPx4
+                ? "PX4 stores the parameter on write — there's no separate flash step."
+                : "ArduPilot saves to EEPROM on receipt — there's no separate flash step."}
             </p>
             <p className="text-xs text-muted-foreground">
               Bad parameter values can affect flight behaviour. Test on a
