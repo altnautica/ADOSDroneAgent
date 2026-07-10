@@ -289,6 +289,12 @@ export interface AgentHeartbeat {
   fcFirmware?: string;
   /** Detected FC firmware variant for MSP FCs: "betaflight" | "inav". */
   fcVariant?: string;
+  /** Short link hint: "none" | "no_heartbeat" | "msp_detected". */
+  fcLinkHint?: string;
+  /** Honest FC reachability: MAVLink alive, or a serial FC identified over MSP.
+   *  An MSP FC (Betaflight/iNav) never emits a MAVLink heartbeat, so `fc_connected`
+   *  stays false while `fcReachable` is true. */
+  fcReachable?: boolean;
 }
 
 // /api/v1/network/client/* — Wi-Fi client surface

@@ -6,7 +6,9 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { useHeartbeat } from "@/hooks/use-heartbeat";
 import { useSnapshot } from "@/hooks/use-snapshot";
+import { mspVariant, mspVariantLabel } from "@/lib/fc-firmware";
 import { fmtNum, fmtPercent, fmtVoltage } from "@/lib/format";
 
 function Row({
@@ -28,6 +30,7 @@ function Row({
 
 export function FcPanel() {
   const snap = useSnapshot();
+  const hb = useHeartbeat();
   const fc = snap.data?.fc;
 
   if (!snap.data) {
@@ -41,6 +44,31 @@ export function FcPanel() {
         </CardHeader>
         <CardContent>
           <p className="text-xs text-muted-foreground">connecting…</p>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  // A Betaflight/iNav FC speaks MSP, never a MAVLink heartbeat, so `fc.connected`
+  // stays false even though the agent has identified it over the serial link.
+  // Render it as a connected FC (identity now; live values on the Sensors tab
+  // once the browser MSP poller is running).
+  const variant = mspVariant(hb.data?.fcVariant);
+  if (!fc?.connected && variant) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Plane className="h-3.5 w-3.5" />
+            Flight Controller
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-0">
+          <Row label="firmware" value={mspVariantLabel(variant)} mono={false} />
+          <Row label="telemetry" value="via MSP" mono={false} />
+          {fc?.fc_port ? (
+            <Row label="port" value={`${fc.fc_port} @ ${fc.fc_baud}`} />
+          ) : null}
         </CardContent>
       </Card>
     );

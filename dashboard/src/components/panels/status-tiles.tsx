@@ -9,8 +9,10 @@ import {
 } from "lucide-react";
 
 import { summarizeHardware } from "@/components/panels/hardware-item-list";
+import { useHeartbeat } from "@/hooks/use-heartbeat";
 import { useSnapshot } from "@/hooks/use-snapshot";
 import { useStatus } from "@/hooks/use-status";
+import { mspVariant } from "@/lib/fc-firmware";
 import { fmtBitrate, severityClasses, severityFromState } from "@/lib/format";
 import type { Severity } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -27,31 +29,47 @@ interface Tile {
 function tiles(
   snap: ReturnType<typeof useSnapshot>,
   status: ReturnType<typeof useStatus>,
+  heartbeat: ReturnType<typeof useHeartbeat>,
 ): Tile[] {
   const s = snap.data;
   const cfg = status.data;
 
-  // MAV — tile reflects MAVLink health. Sats render as the primary
-  // value once GPS reports something; before that the tile shows the
-  // FC link state so a connected-but-unlocked rig does not look dead.
+  // FC — tile reflects the flight-controller link. A MAVLink FC shows sats
+  // once GPS reports; before that the link state so a connected-but-unlocked
+  // rig doesn't look dead. A Betaflight/iNav FC speaks MSP (no MAVLink
+  // heartbeat), so `fc.connected` is false while the agent has identified it —
+  // read the variant off the heartbeat and show it as linked (live values
+  // arrive on the Sensors tab via the browser MSP poller).
   const fcConnected = s?.fc.connected ?? false;
+  const variant = mspVariant(heartbeat.data?.fcVariant);
   const sats = s?.fc.gps.satellites_visible ?? null;
-  const mav: Tile = {
-    label: "MAV",
-    icon: Radio,
-    value:
-      sats != null && sats > 0
-        ? String(sats)
-        : fcConnected
-          ? "linked"
-          : "off",
-    sub: fcConnected
-      ? sats != null && sats > 0
-        ? "sats"
-        : "waiting for fix"
-      : "no fc",
-    severity: fcConnected ? "ok" : "idle",
-  };
+  let mav: Tile;
+  if (!fcConnected && variant) {
+    mav = {
+      label: "FC",
+      icon: Radio,
+      value: "linked",
+      sub: variant === "betaflight" ? "betaflight · msp" : "inav · msp",
+      severity: "ok",
+    };
+  } else {
+    mav = {
+      label: "MAV",
+      icon: Radio,
+      value:
+        sats != null && sats > 0
+          ? String(sats)
+          : fcConnected
+            ? "linked"
+            : "off",
+      sub: fcConnected
+        ? sats != null && sats > 0
+          ? "sats"
+          : "waiting for fix"
+        : "no fc",
+      severity: fcConnected ? "ok" : "idle",
+    };
+  }
 
   // HW — required-component summary from /api/v1/setup/status
   const hwItems = cfg?.hardware_check?.items ?? [];
@@ -191,8 +209,9 @@ function StatusTile({ tile, isLoading }: { tile: Tile; isLoading: boolean }) {
 export function StatusTiles() {
   const snap = useSnapshot();
   const status = useStatus();
+  const heartbeat = useHeartbeat();
   const isLoading = snap.isLoading && !snap.data;
-  const ts = tiles(snap, status);
+  const ts = tiles(snap, status, heartbeat);
 
   return (
     <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
