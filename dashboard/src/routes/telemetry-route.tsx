@@ -6,6 +6,7 @@ import { Link } from "react-router-dom";
 
 import { BitmaskModal } from "@/components/fc/bitmask-modal";
 import { EnumSelect } from "@/components/fc/enum-select";
+import { MspSettingsTab } from "@/components/fc/msp-settings-tab";
 import { PageShell } from "@/components/page-shell";
 import { ConfirmDialog } from "@/components/settings/confirm-dialog";
 import { Button } from "@/components/ui/button";
@@ -107,6 +108,26 @@ export function TelemetryRoute() {
 }
 
 function ParametersTab() {
+  // Route by FC family. Betaflight and iNav have no `/api/params` cache (the
+  // agent is a byte-pipe for MSP), so they read settings from the FC directly
+  // over the transparent MSP proxy; ArduPilot / PX4 use the agent's parameter
+  // cache. The dispatch component reads only the identity so its hooks stay
+  // unconditional.
+  const hb = useHeartbeat();
+  const snap = useSnapshot();
+  const firmwareType = resolveFirmwareType(hb.data?.fcFirmware, snap.data?.fc?.vehicle);
+  if (firmwareType === "betaflight" || firmwareType === "inav") {
+    return (
+      <MspSettingsTab
+        firmware={firmwareType}
+        firmwareVersion={snap.data?.fc?.firmware ?? undefined}
+      />
+    );
+  }
+  return <MavlinkParams />;
+}
+
+function MavlinkParams() {
   const params = useResource<ParamsResponse>("params", "/api/params", 10000);
   const { drafts, setDraft, clearAll } = useParamsStore();
 
