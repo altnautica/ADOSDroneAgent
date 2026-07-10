@@ -716,7 +716,9 @@ impl Dashboard {
                     .to_string()
             }
             "msp_detected" => {
-                "FC is speaking MSP, not MAVLink — set the FC's serial protocol to MAVLink.".to_string()
+                // MSP is the native, terminal protocol for Betaflight/iNav — a
+                // valid link, not a misconfiguration to fix.
+                "Flight controller speaking MSP (Betaflight/iNav) — a valid native link.".to_string()
             }
             other => other.replace('_', " "),
         })
@@ -961,7 +963,7 @@ mod tests {
         assert_eq!(port_open.fc_link(), FcLink::PortOpen);
         assert_eq!(
             port_open.fc_hint().as_deref(),
-            Some("FC is speaking MSP, not MAVLink — set the FC's serial protocol to MAVLink.")
+            Some("Flight controller speaking MSP (Betaflight/iNav) — a valid native link.")
         );
         assert_eq!(port_open.fc_endpoint().as_deref(), Some("ttyS0 · 921600"));
 

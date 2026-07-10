@@ -588,7 +588,7 @@ def _check_gps() -> HardwareCheckItem:
         id="gps",
         label="GPS receiver",
         state="warning",
-        detail="GPS auto-detection is best-effort. Trust MAVLink GPS_RAW once FC is connected.",
+        detail="GPS auto-detection is best-effort. The FC reports GPS fix/sats over its own telemetry once connected.",
     )
 
 
