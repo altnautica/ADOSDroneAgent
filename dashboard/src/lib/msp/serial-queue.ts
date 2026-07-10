@@ -122,7 +122,13 @@ export class MspSerialQueue {
       this.clearTimeout();
       const req = this.active;
       this.active = null;
-      req.resolve(frame);
+      // An MSP error frame ($X!/$M!) means the FC rejected the command — reject
+      // the request so a failed setting write surfaces instead of reading as saved.
+      if (frame.direction === 'error') {
+        req.reject(new Error(`MSP error for command ${frame.command}`));
+      } else {
+        req.resolve(frame);
+      }
       this.processNext();
     }
     // Non-matching frames are ignored (could be unsolicited telemetry)

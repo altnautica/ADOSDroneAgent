@@ -103,11 +103,17 @@ export function useMspSettings(
       try {
         const res = await client.apply(changes);
         if (res.ok) {
-          let list = await client.enumerate();
-          if (firmware === "betaflight") {
-            list = await overlayBetaflightMeta(list, firmwareVersion);
+          // Re-read to reflect the FC, but never let a refresh failure flip an
+          // already-successful save into a reported failure.
+          try {
+            let list = await client.enumerate();
+            if (firmware === "betaflight") {
+              list = await overlayBetaflightMeta(list, firmwareVersion);
+            }
+            setSettings(list);
+          } catch {
+            // keep the current view; the write itself succeeded
           }
-          setSettings(list);
         }
         return res;
       } catch (err) {
