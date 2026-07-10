@@ -1,3 +1,4 @@
+import { useQuery } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { Radio, RotateCcw, Save, Search } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -9,9 +10,12 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { useDirtyGuard } from "@/hooks/use-dirty-guard";
+import { useHeartbeat } from "@/hooks/use-heartbeat";
 import { useResource } from "@/hooks/use-resource";
 import { useSnapshot } from "@/hooks/use-snapshot";
 import { ApiError, apiFetch } from "@/lib/api";
+import { resolveFirmwareType } from "@/lib/fc-firmware";
+import { loadParamMetadata, type ParamMetadata } from "@/lib/param-metadata";
 import {
   buildRows,
   categoryCounts,
@@ -23,6 +27,12 @@ import {
 import { toast } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { useParamsStore } from "@/stores/params-store";
+
+/** Current value with its enum label appended, when the metadata names it. */
+function displayValue(value: number, m?: ParamMetadata): string {
+  const label = m?.values?.get(value);
+  return label ? `${formatParamValue(value)} · ${label}` : formatParamValue(value);
+}
 
 interface ParamsResponse {
   params: Record<string, number>;
@@ -87,6 +97,17 @@ export function TelemetryRoute() {
 function ParametersTab() {
   const params = useResource<ParamsResponse>("params", "/api/params", 10000);
   const { drafts, setDraft, clearAll } = useParamsStore();
+
+  // FC identity → the offline metadata catalog (enum labels, ranges, units).
+  const hb = useHeartbeat();
+  const snap = useSnapshot();
+  const firmwareType = resolveFirmwareType(hb.data?.fcFirmware, snap.data?.fc?.vehicle);
+  const meta = useQuery({
+    queryKey: ["param-metadata", firmwareType],
+    queryFn: () => loadParamMetadata({ firmwareType }),
+    enabled: firmwareType !== "unknown",
+    staleTime: Infinity,
+  }).data;
 
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
@@ -378,6 +399,10 @@ function ParametersTab() {
                   const row = visibleRows[vi.index];
                   const draft = drafts.get(row.name);
                   const dirty = !!draft;
+                  const m = meta?.get(row.name);
+                  const hint = m?.range
+                    ? `${m.range.min}…${m.range.max}${m.units ? ` ${m.units}` : ""}`
+                    : (m?.units ?? "");
                   return (
                     <div
                       key={row.name}
@@ -397,11 +422,14 @@ function ParametersTab() {
                       <span className="text-muted-foreground w-14 shrink-0">
                         {row.category}
                       </span>
-                      <span className="flex-1 truncate" title={row.name}>
+                      <span
+                        className="flex-1 truncate"
+                        title={m?.humanName || m?.description || row.name}
+                      >
                         {row.name}
                       </span>
-                      <span className="text-muted-foreground w-24 text-right tabular-nums">
-                        {formatParamValue(row.value)}
+                      <span className="text-muted-foreground w-40 text-right truncate tabular-nums" title={displayValue(row.value, m)}>
+                        {displayValue(row.value, m)}
                       </span>
                       <Input
                         type="number"
@@ -414,6 +442,9 @@ function ParametersTab() {
                         }}
                         className="w-28 h-7 text-xs"
                       />
+                      <span className="text-muted-foreground/70 w-24 shrink-0 truncate text-[10px]" title={hint}>
+                        {hint}
+                      </span>
                     </div>
                   );
                 })}

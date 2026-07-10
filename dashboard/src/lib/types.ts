@@ -285,6 +285,10 @@ export interface AgentHeartbeat {
   fc_connected: boolean;
   fc_port?: string;
   fc_baud?: number;
+  /** Canonical FC firmware family: "ardupilot" | "px4" | "betaflight" | "inav" | "unknown". */
+  fcFirmware?: string;
+  /** Detected FC firmware variant for MSP FCs: "betaflight" | "inav". */
+  fcVariant?: string;
 }
 
 // /api/v1/network/client/* — Wi-Fi client surface
