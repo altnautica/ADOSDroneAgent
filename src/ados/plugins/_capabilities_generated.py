@@ -400,8 +400,6 @@ GCS_CAPABILITIES: frozenset[str] = frozenset(
         "ui.slot.video-overlay",
         "ui.slot.notification-channel",
         "ui.slot.settings-section",
-        "ui.slot.connection-protocol",
-        "ui.slot.recording-processor",
         "ui.slot.flight-skill",
         "ui.slot.node-detail-tab",
         "ui.slot.cockpit-panel",

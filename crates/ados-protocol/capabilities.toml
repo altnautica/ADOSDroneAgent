@@ -435,7 +435,7 @@ risk_reason = "Moves captured data (imagery, keyframes) off the drone to another
 enforced = false
 
 # ===========================================================================
-# GCS capabilities (19): 12 UI slots + 7 data/command/mission/cloud
+# GCS capabilities (17): 10 UI slots + 7 data/command/mission/cloud
 # ===========================================================================
 
 [[gcs]]
@@ -493,22 +493,6 @@ description = "Lets the plugin add its own section to the GCS Settings page so t
 category = "ui_slot"
 risk = "low"
 risk_reason = "Sandboxed iframe inside the Settings page."
-
-[[gcs]]
-id = "ui.slot.connection-protocol"
-label = "Register a custom connection protocol"
-description = "Lets the plugin offer a new connection protocol in the Connect dialog (for example a vendor radio or a custom transport)."
-category = "ui_slot"
-risk = "medium"
-risk_reason = "Connection protocols sit on the path between the GCS and the aircraft."
-
-[[gcs]]
-id = "ui.slot.recording-processor"
-label = "Process recordings after a flight"
-description = "Lets the plugin run a post-flight processing step over recordings (transcoding, analysis, upload). Runs inside a sandboxed worker."
-category = "ui_slot"
-risk = "low"
-risk_reason = "Operates on stored recordings; no live flight effect."
 
 [[gcs]]
 id = "ui.slot.flight-skill"
