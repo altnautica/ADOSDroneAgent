@@ -49,10 +49,25 @@ from ados.sdk.drivers import (
     PayloadSession,
     PayloadState,
 )
+from ados.sdk.offload import (
+    FreshnessGate,
+    GateState,
+    LockGate,
+    LockState,
+)
 from ados.sdk.testing import (
     FakeVisionEngine,
     PluginTestHarness,
     load_fixture,
+)
+from ados.sdk.tracking import (
+    DEFAULT_COAST_WINDOW_S,
+    LOCK_LOCKED,
+    LOCK_LOST,
+    LOCK_UNCERTAIN,
+    EffectiveLock,
+    LockedTarget,
+    LockedTargetTracker,
 )
 from ados.sdk.vision import (
     BoundingBox,
@@ -75,6 +90,19 @@ __all__ = [
     "PluginTestHarness",
     "FakeVisionEngine",
     "load_fixture",
+    # Locked-target behaviour gate (shared by target-driven plugins)
+    "LockedTargetTracker",
+    "LockedTarget",
+    "EffectiveLock",
+    "LOCK_LOCKED",
+    "LOCK_UNCERTAIN",
+    "LOCK_LOST",
+    "DEFAULT_COAST_WINDOW_S",
+    # Perception-offload freshness/link gate
+    "FreshnessGate",
+    "GateState",
+    "LockGate",
+    "LockState",
     # Vision
     "VisionClient",
     "FrameFormat",
