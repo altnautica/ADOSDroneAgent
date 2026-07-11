@@ -243,6 +243,10 @@ async def get_plugin(plugin_id: str):
                 "overlays": manifest.gcs.contributes.overlays,
                 "notifications": manifest.gcs.contributes.notifications,
                 "skills": manifest.gcs.contributes.skills,
+                "tabs": manifest.gcs.contributes.tabs,
+                "parameters": manifest.gcs.contributes.parameters,
+                "models": manifest.gcs.contributes.models,
+                "target_actions": manifest.gcs.contributes.target_actions,
             },
             "locales": manifest.gcs.locales,
         }

@@ -428,6 +428,15 @@ class GcsContributes(_StrictModel):
     overlays: list[dict[str, Any]] = Field(default_factory=list)
     notifications: list[dict[str, Any]] = Field(default_factory=list)
     smart_functions: list[dict[str, Any]] = Field(default_factory=list)
+    # Node-detail tab contributions (the node.detail.tab slot), each with its
+    # profile narrowing plus title/icon/order. Free-form and additive; the GCS
+    # contribution registry reads them, the agent does not interpret them.
+    tabs: list[dict[str, Any]] = Field(default_factory=list)
+    # Declarative parameter contributions. The GCS renders these as native
+    # config controls; the agent reads the same per-drone keys live each loop.
+    parameters: list[dict[str, Any]] = Field(default_factory=list)
+    # Detection/vision models the plugin ships, offered by the model picker.
+    models: list[dict[str, Any]] = Field(default_factory=list)
     # Flight Skill contributions. Each entry surfaces a behavior as a
     # first-class Skill in the cockpit Skill Bar (toggle, hotkey/gamepad
     # binding, activation via per-drone config, read-back via an event
@@ -435,6 +444,12 @@ class GcsContributes(_StrictModel):
     # GCS skill registry. Kept free-form (``dict``) and additive so a
     # forward-compatible manifest parses without a schema bump.
     skills: list[dict[str, Any]] = Field(default_factory=list)
+    # Target-action contributions. Each entry is an action a plugin offers for
+    # a clicked detection in the cockpit target overlay: designate the target,
+    # then flip a per-drone config key. Listed beside the built-in actions in
+    # one popup. The agent does not interpret these; the GCS target-action
+    # registry reads them. Free-form and additive like ``skills``.
+    target_actions: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class GcsBlock(_StrictModel):
