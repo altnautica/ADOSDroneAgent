@@ -17,12 +17,13 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ados_protocol::framebus::FrameFormat;
+use ados_protocol::framebus::{FrameFormat, ModelKind};
 use ados_vision::backend::{select_backend, BackendPrefs};
 use ados_vision::config::{CameraEntry, VisionConfig};
 use ados_vision::detection_bus;
 use ados_vision::engine::VisionEngine;
 use ados_vision::frame_bus;
+use ados_vision::perception_scheduler::PerceptionScheduler;
 use ados_vision::ring::now_ms;
 use ados_vision::source::{
     discover_cameras_default, AnySource, CaptureSource, FrameSource, TapSource,
@@ -149,7 +150,10 @@ async fn main() {
     // camera's capture loop drives inference and the engine publishes a
     // detection stream (consumed by follow / designate plugins). Absent ⇒ the
     // engine only runs models a plugin registers over vision.sock.
-    let detector_id: Option<String> = if let Some(det) = &config.detector {
+    // Registration side-effects (the model lands in the engine registry, read
+    // back below to build the schedule); the returned id itself is unused now
+    // that the schedule drives inference.
+    let _detector_id: Option<String> = if let Some(det) = &config.detector {
         let meta = det.to_metadata();
         let id = meta.id.clone();
         match engine.register_model(meta).await {
@@ -196,6 +200,34 @@ async fn main() {
         }
     }
 
+    // Build the per-camera schedule input: every registered engine-run detection
+    // model, each with a target rate + priority so the perception scheduler paces
+    // them over the ONE accelerator. Sourced from the model registry (task-typed)
+    // so an added detection model auto-schedules. A single unpaced detector (the
+    // historical default) maps to one always-due model — byte-equivalent to the
+    // old single-detector loop.
+    let paces: Vec<ModelPace> = {
+        let ids = engine.models_for_kind(ModelKind::Detection).await;
+        let default_priority = 100u8;
+        ids.into_iter()
+            .map(|id| {
+                let (rate_hz, priority) = match &config.detector {
+                    Some(det) if det.model_id == id => (
+                        det.rate_hz.unwrap_or(0.0),
+                        det.priority.unwrap_or(default_priority),
+                    ),
+                    _ => (0.0, default_priority),
+                };
+                ModelPace {
+                    id,
+                    rate_hz,
+                    priority,
+                }
+            })
+            .collect()
+    };
+    tracing::info!(models = paces.len(), "perception schedule built");
+
     let cancel = Arc::new(Notify::new());
 
     // Resolve the camera set: an explicit config list wins; otherwise HAL
@@ -210,9 +242,9 @@ async fn main() {
         let engine = engine.clone();
         let cancel = cancel.clone();
         let downscale = (config.downscale_width, config.downscale_height);
-        let detector_id = detector_id.clone();
+        let paces = paces.clone();
         tasks.push(tokio::spawn(async move {
-            run_camera(engine, cam, downscale, detector_id, cancel).await;
+            run_camera(engine, cam, downscale, paces, cancel).await;
         }));
     }
 
@@ -315,18 +347,39 @@ async fn resolve_cameras(config: &VisionConfig) -> Vec<ResolvedCamera> {
         .collect()
 }
 
+/// One engine-run detection model plus how the perception scheduler paces it.
+#[derive(Debug, Clone)]
+struct ModelPace {
+    id: String,
+    /// Target inference rate in Hz; `0.0` = unpaced (run whenever the accelerator
+    /// is free), the historical single-detector behaviour.
+    rate_hz: f32,
+    priority: u8,
+}
+
 /// Run one camera's capture loop: open its source, pull frames, downscale-stamp
 /// is left to the source (which publishes its native format), and
 /// publish each into the engine ring. A source error backs off and re-opens.
+///
+/// Inference is driven by a per-camera [`PerceptionScheduler`] over `paces`: on
+/// each free frame the scheduler returns the detection models DUE now (by rate +
+/// priority), and they run in one spawned batch that serializes on the engine's
+/// single accelerator lease. With one unpaced model the scheduler returns it
+/// every free frame, exactly the old single-detector loop.
 async fn run_camera(
     engine: Arc<VisionEngine>,
     cam: ResolvedCamera,
     _downscale: (u32, u32),
-    detector_id: Option<String>,
+    paces: Vec<ModelPace>,
     cancel: Arc<Notify>,
 ) {
     let mut frame_id: u64 = 0;
-    // One in-flight inference per camera: a frame captured while the detector is
+    // The per-camera schedule: each camera paces its models independently.
+    let mut scheduler = PerceptionScheduler::new();
+    for p in &paces {
+        scheduler.upsert(p.id.clone(), p.rate_hz, p.priority);
+    }
+    // One in-flight inference batch per camera: a frame captured while a batch is
     // busy is skipped, so capture (and the video ring) never blocks on
     // inference. Decoupled, latest-frame-wins.
     let infer_sem = Arc::new(tokio::sync::Semaphore::new(1));
@@ -376,25 +429,34 @@ async fn run_camera(
                                 .await
                             {
                                 Ok(desc) => {
-                                    // Drive the detector on this frame unless an
-                                    // inference is already in flight (skip then,
-                                    // keeping capture decoupled, latest-wins).
-                                    if let Some(det) = &detector_id {
+                                    // Run the models DUE now, unless a batch is
+                                    // already in flight (skip then, keeping capture
+                                    // decoupled, latest-wins). Acquire the slot
+                                    // FIRST so a busy frame never consumes a model's
+                                    // scheduling turn; only mark models run when they
+                                    // actually run.
+                                    if !paces.is_empty() {
                                         if let Ok(permit) =
                                             infer_sem.clone().try_acquire_owned()
                                         {
-                                            let eng = engine.clone();
-                                            let det = det.clone();
-                                            let data = raw.data.clone();
-                                            tokio::spawn(async move {
-                                                let _permit = permit;
-                                                if let Err(e) = eng
-                                                    .infer_and_publish(&det, &desc, &data)
-                                                    .await
-                                                {
-                                                    tracing::warn!(error = %e, "detector_infer_failed");
-                                                }
-                                            });
+                                            let due = scheduler.take_due(now_ms() as u64);
+                                            if !due.is_empty() {
+                                                let eng = engine.clone();
+                                                let data = raw.data.clone();
+                                                tokio::spawn(async move {
+                                                    let _permit = permit;
+                                                    for det in due {
+                                                        if let Err(e) = eng
+                                                            .infer_and_publish(&det, &desc, &data)
+                                                            .await
+                                                        {
+                                                            tracing::warn!(model = %det, error = %e, "detector_infer_failed");
+                                                        }
+                                                    }
+                                                });
+                                            }
+                                            // else: permit drops here, released; no
+                                            // model was due this frame.
                                         }
                                     }
                                 }

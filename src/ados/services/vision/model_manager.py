@@ -67,6 +67,11 @@ class ModelInfo:
     description: str = ""
     task: str = ""  # detection, tracking, depth, segmentation
     variants: list[dict[str, Any]] = field(default_factory=list)
+    # True when the registry marks this the recommended default for its task, so
+    # auto-provisioning can pick a sensible detector for a fresh NPU board without
+    # an operator choosing one. Absent in the registry ⇒ False (nothing is a
+    # default unless the registry says so).
+    recommended: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -75,6 +80,7 @@ class ModelInfo:
             "description": self.description,
             "task": self.task,
             "variants": self.variants,
+            "recommended": self.recommended,
         }
 
 
@@ -211,6 +217,7 @@ class ModelManager:
                 description=m.get("description", ""),
                 task=m.get("task", ""),
                 variants=m.get("variants", []),
+                recommended=bool(m.get("recommended", False)),
             )
             for m in models
         ]
@@ -252,6 +259,7 @@ class ModelManager:
                         description=m.get("description", ""),
                         task=m.get("task", ""),
                         variants=m.get("variants", []),
+                        recommended=bool(m.get("recommended", False)),
                     )
                     for m in models
                 ]
@@ -322,6 +330,21 @@ class ModelManager:
                 })
                 seen.add(model_file.stem)
         return installed
+
+    def recommended_detector(self) -> str | None:
+        """The model id to auto-provision as the detector for a fresh board.
+
+        Picks the registry's recommended detection model (``recommended: true``),
+        else the first detection-task model the registry lists, else ``None`` when
+        the registry has no detection model. This is what lets an NPU board come up
+        already detecting with zero operator steps: ``select_best_variant`` then
+        chooses the best *variant* of this model for the board's NPU TOPS.
+        """
+        detection = [m for m in self._registry if (m.task or "").lower() == "detection"]
+        for m in detection:
+            if m.recommended:
+                return m.id
+        return detection[0].id if detection else None
 
     def select_best_variant(self, model_id: str) -> dict[str, Any] | None:
         """Select the best model variant for the current board's NPU TOPS."""

@@ -83,6 +83,16 @@ pub struct DetectorConfig {
     /// detections carry no class name (the track id still flows).
     #[serde(default)]
     pub class_labels: Vec<String>,
+    /// Target inference rate in Hz. Absent (or `<= 0`) ⇒ unpaced (run on every
+    /// captured frame), which is the historical single-detector behaviour. Set it
+    /// to pace this detector so it shares the one accelerator with other models
+    /// (`person@15Hz` + `depth@5Hz`) instead of monopolising it.
+    #[serde(default)]
+    pub rate_hz: Option<f32>,
+    /// Scheduling priority (higher runs first when several models are due at
+    /// once). Absent ⇒ a high default so a lone detector always wins.
+    #[serde(default)]
+    pub priority: Option<u8>,
 }
 
 impl DetectorConfig {
