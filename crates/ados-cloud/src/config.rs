@@ -168,11 +168,43 @@ pub struct WfbSection {
     pub auto_pair_enabled: bool,
 }
 
-/// The `video:` section. Only the nested `wfb` slice is read here.
+fn default_camera_width() -> u32 {
+    1280
+}
+fn default_camera_height() -> u32 {
+    720
+}
+
+/// The `video.camera:` slice — the encoder's frame size. The offload reconciler
+/// advertises this to the compute node so its `ffmpeg` reads fixed
+/// `width*height*3` RGB24 frames off the drone's RTSP feed (a mismatch misframes,
+/// so this must be the true source size). Mirrors the Python `video.camera`
+/// width/height (default 1280x720).
+#[derive(Debug, Clone, Deserialize)]
+pub struct CameraSection {
+    #[serde(default = "default_camera_width")]
+    pub width: u32,
+    #[serde(default = "default_camera_height")]
+    pub height: u32,
+}
+
+impl Default for CameraSection {
+    fn default() -> Self {
+        CameraSection {
+            width: default_camera_width(),
+            height: default_camera_height(),
+        }
+    }
+}
+
+/// The `video:` section. The nested `wfb` slice (auto-pair) and the `camera`
+/// frame size (offload) are read here.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct VideoSection {
     #[serde(default)]
     pub wfb: WfbSection,
+    #[serde(default)]
+    pub camera: CameraSection,
 }
 
 /// The `atlas:` section. Only the enable gate is read here; the cameras /

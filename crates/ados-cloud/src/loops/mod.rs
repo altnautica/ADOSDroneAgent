@@ -14,6 +14,7 @@ pub mod beacon;
 pub mod command_poll;
 pub mod enrichment;
 pub mod heartbeat;
+pub mod offload_reconciler;
 
 pub use atlas_jobs::{
     build_atlas_job_post, compute_jobs_path, post_atlas_job, read_jobs_sidecar_from,

@@ -26,7 +26,9 @@ use ados_plugin_host::{Paths, PluginSupervisor};
 use ados_cloud::config::CloudConfig;
 use ados_cloud::dispatch::install::DownloadSource;
 use ados_cloud::ground_station::{bridge as gs_bridge, CloudRelayBridge};
-use ados_cloud::loops::{atlas_forwarder, atlas_jobs, beacon, command_poll, enrichment, heartbeat};
+use ados_cloud::loops::{
+    atlas_forwarder, atlas_jobs, beacon, command_poll, enrichment, heartbeat, offload_reconciler,
+};
 use ados_cloud::mqtt::transport::TransportConfig;
 use ados_cloud::mqtt::{MavlinkMqttRelay, MspMqttRelay, WS_PATH};
 use ados_cloud::{dispatch, pairing::PairingState};
@@ -195,6 +197,13 @@ async fn main() -> Result<()> {
         // ladder (direct LAN -> WFB relay -> opt-in cloud), local-first. INERT
         // unless Atlas is enabled, so a non-Atlas agent is byte-unchanged.
         tokio::spawn(atlas_forwarder::run(config.clone(), shutdown_rx.clone())),
+        // ── Perception offload reconciler ──────────────────────
+        // On an NPU-less drone, auto-discover a paired workstation on the LAN and
+        // offload the heavy detection to it: stream the camera over RTSP, run the
+        // detector on the node, return detections onto the local vision bus. The
+        // offload-link sidecar it writes drives the reported perception tier.
+        // INERT off a drone / when perception.offload is disabled.
+        tokio::spawn(offload_reconciler::run(config.clone(), shutdown_rx.clone())),
         // ── Atlas reconstruct-job cloud sync ───────────────────
         // On a workstation/compute node, read the reconstruct-job sidecar
         // ados-compute writes and POST each job to {convex}/agent/atlas-jobs so
