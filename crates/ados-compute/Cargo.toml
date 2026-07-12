@@ -23,6 +23,9 @@ ados-protocol = { path = "../ados-protocol", features = ["tracing-layer"] }
 # queue (the world-model receive side). The bearer half is the air/GS sender.
 ados-atlas-transport = { path = "../ados-atlas-transport" }
 rusqlite = { workspace = true }
+# Error glue for the offload stream/bridge modules (the store/scheduler stay on
+# the typed ComputeError; the streaming session + return bridge use anyhow).
+anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # YAML reader for the `atlas.enabled` gate of /etc/ados/config.yaml, mirroring
@@ -35,7 +38,22 @@ tracing-journald = { workspace = true }
 # The job API is served on a single TCP listener (loopback until auth ships),
 # the same axum-over-tokio surface the logging daemon uses.
 tokio = { workspace = true }
-axum = { workspace = true }
+# `ws` powers the offload detection return stream (node -> drone) served on the
+# same axum surface, mirroring the atlas delta lane.
+axum = { workspace = true, features = ["ws"] }
+# The drone-side offload safety gate: freshness + lock-state so a stale or
+# link-lost offloaded detection is treated as lost (stop and hold), never
+# extrapolated. Pure logic, no I/O.
+ados-offload = { path = "../ados-offload" }
+# The drone-side WebSocket client that subscribes to the node's detection
+# return stream, and the stream combinator it drives (matching the versions the
+# atlas transport lane uses).
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+# Building the vision.sock publish Envelope (the return bridge republishes an
+# offloaded batch onto the drone's local vision.detection bus) and its msgpack.
+rmpv = { workspace = true }
+rmp-serde = { workspace = true }
 # The compute-offload client (the agent-side caller of this node's job API).
 # Local-first plain HTTP on the LAN; the workspace's reqwest is unified onto the
 # no-provider rustls path (ados-cloud), so the client builder calls the shared
@@ -84,3 +102,7 @@ tower = { workspace = true, features = ["util"] }
 # Temp pairing.json files for the auth-gate tests.
 tempfile = "3"
 axum = { workspace = true }
+# The end-to-end offload SITL gate spins a real vision.sock server backed by a
+# VisionEngine, so the return bridge's published batch is asserted on the actual
+# drone detection bus. Dev-only + no ONNX so CI needs no model.
+ados-vision = { path = "../ados-vision", default-features = false }

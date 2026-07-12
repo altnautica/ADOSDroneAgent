@@ -8,31 +8,12 @@
 //! A consumer treats a stale or link-lost result as lost (the safety gate lives
 //! on the drone side).
 
-use serde::{Deserialize, Serialize};
-
 use crate::ComputeError;
 
-/// A reference to one frame the node was asked to process. The real lane
-/// carries the pixels over a shared-memory ring or the stream lane; this names
-/// the frame so a detection can be tied back to it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct FrameRef {
-    pub camera_id: String,
-    pub width: u32,
-    pub height: u32,
-    pub ts_ms: i64,
-}
-
-/// One detection returned to the drone.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Detection {
-    /// Normalized `[x, y, w, h]` in `0.0..=1.0`.
-    pub bbox: [f32; 4],
-    pub class: String,
-    pub confidence: f32,
-    /// A stable track id when the backend tracks across frames.
-    pub track_id: Option<u64>,
-}
+// The offload wire (the frame reference + the returned detection) lives in
+// `ados_protocol::offload` so this node crate and the drone-side return bridge
+// build against one frozen definition without depending on each other.
+pub use ados_protocol::offload::{Detection, FrameRef};
 
 /// A detection backend. `Send + Sync` so a worker pool can share one.
 pub trait Detector: Send + Sync {

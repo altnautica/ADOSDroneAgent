@@ -34,6 +34,10 @@ mod keyframe_persister;
 /// `ados_groundlink::mdns`.
 pub mod mdns;
 mod offload;
+mod offload_bridge;
+mod offload_client;
+mod offload_stream;
+mod offload_ws;
 mod pipeline;
 mod reconstructor;
 mod rerun_log;
@@ -71,6 +75,14 @@ pub use mdns::{advertise_compute, resolve_compute, ComputeAdvert, ResolvedComput
 #[cfg(feature = "onnx")]
 pub use offload::OnnxDetector;
 pub use offload::{Detection, Detector, FrameRef, MockDetector};
+pub use offload_bridge::{OffloadReturnBridge, VisionSockPublisher};
+pub use offload_client::stream_offload_detections;
+pub use offload_stream::{
+    run_offload_session, OffloadFrame, OffloadFrameStream, RtspFrameStream, VecFrameStream,
+};
+pub use offload_ws::{
+    offload_ws_path, offload_ws_router, pump_to_broadcaster, DetectionBroadcaster, OFFLOAD_WS_ROUTE,
+};
 pub use pipeline::{chain_input_uri, stage_index_of, Pipeline, PipelineRunner, PipelineStage};
 pub use reconstructor::{MockReconstructor, ReconstructOutput, Reconstructor};
 pub use rerun_log::{
