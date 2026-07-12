@@ -317,6 +317,7 @@ fn sample_batch(frame_id: u64) -> DetectionBatch {
             track_id: Some(frame_id),
             assoc_confidence: None,
             lock_state: None,
+            attributes: None,
         }],
     }
 }
