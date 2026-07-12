@@ -198,6 +198,13 @@ rust_const = "ados_compute::heartbeat_sidecar::COMPUTE_HEARTBEAT_SIDECAR"
 description = "Compute-node heartbeat folded into the agent heartbeat."
 
 [[sidecar]]
+id = "offload-link"
+version = 1
+path = "/run/ados/offload-link.json"
+rust_const = "ados_protocol::offload_link::OFFLOAD_LINK_SIDECAR"
+description = "Drone perception offload-link state: a paired reachable workstation the drone is offloading to, feeding the perception-tier decision."
+
+[[sidecar]]
 id = "wfb-stats"
 version = 1
 path = "/run/ados/wfb-stats.json"

@@ -193,6 +193,83 @@ pub struct AtlasSection {
     pub compute_node_addr: Option<String>,
 }
 
+fn default_perception_mode() -> String {
+    "auto".to_string()
+}
+
+/// The `perception.offload:` slice (drone side): where the heavy detector runs.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OffloadSection {
+    /// Tri-state `auto` | `on` | `off`. `auto` = offload when NPU-less + a
+    /// workstation is reachable (the default). An unknown value reads as `auto`
+    /// (neither forced-on nor off), so a typo never silently disables offload.
+    #[serde(default = "default_perception_mode")]
+    pub enabled: String,
+    /// A pinned workstation address (`host:port`); empty = auto-discover over
+    /// mDNS. Overridable per-run via `ADOS_PERCEPTION_OFFLOAD_ADDR`.
+    #[serde(default)]
+    pub compute_node_addr: Option<String>,
+}
+
+impl Default for OffloadSection {
+    fn default() -> Self {
+        OffloadSection {
+            enabled: default_perception_mode(),
+            compute_node_addr: None,
+        }
+    }
+}
+
+impl OffloadSection {
+    /// The operator turned offload off explicitly.
+    pub fn is_off(&self) -> bool {
+        self.enabled.trim().eq_ignore_ascii_case("off")
+    }
+    /// The operator forced offload on (offload even with a local accelerator).
+    pub fn is_forced_on(&self) -> bool {
+        self.enabled.trim().eq_ignore_ascii_case("on")
+    }
+}
+
+/// The `perception.serving:` slice (workstation side): whether this node serves
+/// offload for other drones and which detector by default.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ServingSection {
+    /// Tri-state `auto` | `on` | `off`. `auto` = auto-accept + serve (default).
+    #[serde(default = "default_perception_mode")]
+    pub enabled: String,
+    /// The served detector model id; empty = the daemon's default.
+    #[serde(default)]
+    pub detector_model: Option<String>,
+}
+
+impl Default for ServingSection {
+    fn default() -> Self {
+        ServingSection {
+            enabled: default_perception_mode(),
+            detector_model: None,
+        }
+    }
+}
+
+impl ServingSection {
+    /// Serving is disabled explicitly.
+    pub fn is_off(&self) -> bool {
+        self.enabled.trim().eq_ignore_ascii_case("off")
+    }
+}
+
+/// The `perception:` section — two-tier execution config. `offload` is read on a
+/// drone, `serving` on a workstation; both default so a fresh agent needs no
+/// setup.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PerceptionSection {
+    #[serde(default)]
+    pub offload: OffloadSection,
+    #[serde(default)]
+    pub serving: ServingSection,
+}
+
 /// The slice of the agent config the cloud relay reads. Every field defaults so
 /// a missing section never fails the load.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -207,6 +284,8 @@ pub struct CloudConfig {
     pub video: VideoSection,
     #[serde(default)]
     pub atlas: AtlasSection,
+    #[serde(default)]
+    pub perception: PerceptionSection,
 }
 
 /// The `ADOS_ATLAS_ENABLED` env override (truthy = `1` / `true` / `yes` / `on`,
@@ -234,6 +313,29 @@ pub fn atlas_compute_addr(config: &CloudConfig) -> Option<String> {
     }
     config
         .atlas
+        .compute_node_addr
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// The pinned workstation address (`host:port`) the perception offload targets
+/// when set, so the reconciler skips mDNS and offloads straight to it (a
+/// segmented / bridged network, or an operator who pinned a specific box). The
+/// `ADOS_PERCEPTION_OFFLOAD_ADDR` env var wins, else the
+/// `perception.offload.compute_node_addr` field. Whitespace / empty ⇒ unset
+/// (auto-discover). Mirrors [`atlas_compute_addr`].
+pub fn perception_offload_addr(config: &CloudConfig) -> Option<String> {
+    if let Ok(v) = std::env::var("ADOS_PERCEPTION_OFFLOAD_ADDR") {
+        let t = v.trim();
+        if !t.is_empty() {
+            return Some(t.to_string());
+        }
+    }
+    config
+        .perception
+        .offload
         .compute_node_addr
         .as_deref()
         .map(str::trim)

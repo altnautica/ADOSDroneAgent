@@ -18,6 +18,7 @@ from .system import (
     DiscoveryConfig,
     LoggingConfig,
     PairingConfig,
+    PerceptionConfig,
     SwarmConfig,
     UiConfig,
     VisionConfig,
@@ -39,6 +40,7 @@ class ADOSConfig(BaseModel):
     discovery: DiscoveryConfig = DiscoveryConfig()
     vision: VisionConfig = VisionConfig()
     atlas: AtlasConfig = AtlasConfig()
+    perception: PerceptionConfig = PerceptionConfig()
     swarm: SwarmConfig = SwarmConfig()
     ground_station: GroundStationConfig = GroundStationConfig()
     ui: UiConfig = Field(default_factory=UiConfig)

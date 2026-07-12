@@ -322,24 +322,33 @@ fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
         }
     };
     // The perception tier this node runs on: the canonical ados_offload::pick_tier
-    // decision from the board's accelerator (not a second impl). The offload
-    // signals (a paired workstation + link quality) are not wired on the drone
-    // yet, so an NPU board reads `local` and a board without one reads `none`;
-    // the offload target stays absent until a workstation is paired (rule 44).
+    // decision from the board's accelerator + the live offload-link the reconciler
+    // writes (a paired, reachable workstation flips compute_node_paired +
+    // bearer_acceptable true and names the target). Absent / stale ⇒ no link ⇒ an
+    // NPU board reads `local` and a board without one reads `none`; the offload
+    // target stays absent until a workstation is actually paired (rule 44). Fed
+    // identically to /api/status via `TierInputs::for_drone`.
     let has_accelerator = base.board_npu_tops > 0.0;
-    let perception_tier = match ados_offload::pick_tier(&ados_offload::TierInputs {
+    let offload_link = ados_protocol::offload_link::read_offload_link(now_epoch_ms());
+    let (link_paired, link_bearer_ok) = offload_link
+        .as_ref()
+        .map(|l| (l.paired, l.bearer_acceptable))
+        .unwrap_or((false, false));
+    let perception_tier = match ados_offload::pick_tier(&ados_offload::TierInputs::for_drone(
         has_accelerator,
-        models_fit_locally: true,
-        compute_node_paired: false,
-        bearer_acceptable: false,
-        can_run_light_local: false,
-    }) {
+        link_paired,
+        link_bearer_ok,
+    )) {
         Some(ados_offload::PerceptionTier::Local) => "local",
         Some(ados_offload::PerceptionTier::Offload) => "offload",
         Some(ados_offload::PerceptionTier::Hybrid) => "hybrid",
         None => "none",
     }
     .to_string();
+    // Surface the target only on an actual offload path (rule 44).
+    let perception_offload_target = offload_link
+        .filter(|l| l.is_offload_path())
+        .and_then(|l| l.target);
 
     HeartbeatPayload {
         device_id: base.device_id.clone(),
@@ -354,7 +363,7 @@ fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
         npu_tops: base.board_npu_tops,
         has_accelerator,
         perception_tier,
-        perception_offload_target: None,
+        perception_offload_target,
         // Unmeasured by the native loop: omitted (None) so the wire says
         // "unknown" rather than asserting a 0 / false / "stopped" reading the
         // loop never took (operating rule 37). The Python enrichment producer

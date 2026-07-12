@@ -86,6 +86,43 @@ class AtlasConfig(BaseModel):
     intrinsics: dict[str, AtlasIntrinsicsOverride] = {}
 
 
+class PerceptionOffloadConfig(BaseModel):
+    """Drone-side perception offload: where the heavy detector runs.
+
+    ``enabled`` is a tri-state: ``auto`` (offload when the board is NPU-less and a
+    workstation is reachable on the LAN — the default), ``on`` (force offload),
+    ``off`` (never offload). ``compute_node_addr`` pins a specific workstation
+    (``host:port``); empty means auto-discover over mDNS. Mirrors the Rust
+    ``perception.offload`` block the reconciler reads.
+    """
+
+    enabled: Literal["auto", "on", "off"] = "auto"
+    compute_node_addr: str | None = None
+
+
+class PerceptionServingConfig(BaseModel):
+    """Workstation-side offload serving: whether this node runs detectors for
+    other drones and which one by default.
+
+    ``enabled`` tri-state: ``auto`` (auto-accept + serve LAN offload — the
+    default), ``on`` (force serving), ``off`` (never serve). ``detector_model``
+    picks the served detector by model id; empty means the daemon's default.
+    """
+
+    enabled: Literal["auto", "on", "off"] = "auto"
+    detector_model: str | None = None
+
+
+class PerceptionConfig(BaseModel):
+    """Two-tier perception execution config (mirrors the Rust ``perception:``
+    block). ``offload`` is read on a drone, ``serving`` on a workstation; both
+    default so a fresh agent needs no setup — a no-NPU drone + a workstation on
+    one LAN offload hands-free."""
+
+    offload: PerceptionOffloadConfig = PerceptionOffloadConfig()
+    serving: PerceptionServingConfig = PerceptionServingConfig()
+
+
 class LoggingConfig(BaseModel):
     level: str = "info"
     max_size_mb: int = 50

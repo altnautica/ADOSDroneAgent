@@ -37,6 +37,30 @@ pub struct TierInputs {
     pub can_run_light_local: bool,
 }
 
+impl TierInputs {
+    /// The tier inputs a drone-profile status surface builds each read: the local
+    /// accelerator picture plus the offload-link signal (a paired, reachable
+    /// workstation). `models_fit_locally` is held `true` for an accelerator board
+    /// (an NPU board is assumed to fit its recommended detector — there is no
+    /// model-fit probe yet, so this is a documented assumption, not a fabricated
+    /// signal) and `can_run_light_local` `false` (no CPU light-detector path runs
+    /// today). Both status call sites (`/api/status`, the cloud heartbeat) use
+    /// this so they feed `pick_tier` identically and cannot drift.
+    pub fn for_drone(
+        has_accelerator: bool,
+        compute_node_paired: bool,
+        bearer_acceptable: bool,
+    ) -> Self {
+        TierInputs {
+            has_accelerator,
+            models_fit_locally: true,
+            compute_node_paired,
+            bearer_acceptable,
+            can_run_light_local: false,
+        }
+    }
+}
+
 /// Pick the perception tier, or `None` when no heavy perception is available
 /// (an NPU-less board with no usable compute node — it flies on bare odometry,
 /// with no detection / tracking / map-based autonomy).
@@ -137,5 +161,23 @@ mod tests {
     fn no_accelerator_no_node_no_light_local_is_none() {
         // Bare odometry only: no detection / tracking / map-based autonomy.
         assert_eq!(pick_tier(&inputs()), None);
+    }
+
+    #[test]
+    fn for_drone_maps_the_offload_link_to_the_expected_tier() {
+        // NPU-less + a paired reachable workstation ⇒ offload.
+        assert_eq!(
+            pick_tier(&TierInputs::for_drone(false, true, true)),
+            Some(PerceptionTier::Offload)
+        );
+        // NPU-less + no link ⇒ none (honest: no offload path).
+        assert_eq!(pick_tier(&TierInputs::for_drone(false, false, false)), None);
+        // An accelerator board runs local regardless of a link.
+        assert_eq!(
+            pick_tier(&TierInputs::for_drone(true, true, true)),
+            Some(PerceptionTier::Local)
+        );
+        // A paired node on an unacceptable bearer is not an offload path.
+        assert_eq!(pick_tier(&TierInputs::for_drone(false, true, false)), None);
     }
 }

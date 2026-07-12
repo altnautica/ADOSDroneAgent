@@ -30,6 +30,7 @@ SIDECAR_VERSIONS: dict[str, int] = {
     "atlas-forward": 1,
     "compute-jobs": 1,
     "compute-heartbeat": 1,
+    "offload-link": 1,
     "wfb-stats": 1,
     "hop-supervisor": 1,
     "mgmt-link": 1,
@@ -181,6 +182,13 @@ SIDECAR_CATALOG: dict[str, dict[str, object]] = {
         "transport": "/run/ados/compute-heartbeat.json",
         "status": "sidecar",
         "description": "Compute-node heartbeat folded into the agent heartbeat.",
+    },
+    "offload-link": {
+        "version": 1,
+        "wire": "json",
+        "transport": "/run/ados/offload-link.json",
+        "status": "sidecar",
+        "description": "Drone perception offload-link state: a paired reachable workstation the drone is offloading to, feeding the perception-tier decision.",
     },
     "wfb-stats": {
         "version": 1,

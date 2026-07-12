@@ -53,6 +53,7 @@ pub mod logd;
 #[cfg(feature = "mavlink")]
 pub mod mavlink;
 pub mod offload;
+pub mod offload_link;
 pub mod pairing_posture;
 pub mod plugin;
 pub mod rest;

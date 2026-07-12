@@ -110,7 +110,7 @@ pub async fn get_full_status(State(state): State<AppState>, headers: HeaderMap) 
     // The perception capability + tier, before `board` is moved into the payload.
     // Same canonical ados_offload::pick_tier decision the LAN /api/status uses so
     // the GCS Perception hub reads a consistent tier from either route.
-    let (npu_tops, has_accelerator, perception_tier) =
+    let (npu_tops, has_accelerator, perception_tier, offload_target) =
         crate::routes::status::perception_fields(&board);
 
     let mut payload = Map::new();
@@ -120,7 +120,13 @@ pub async fn get_full_status(State(state): State<AppState>, headers: HeaderMap) 
     payload.insert("npuTops".to_string(), json!(npu_tops));
     payload.insert("hasAccelerator".to_string(), json!(has_accelerator));
     payload.insert("perceptionTier".to_string(), json!(perception_tier));
-    payload.insert("perceptionOffloadTarget".to_string(), Value::Null);
+    payload.insert(
+        "perceptionOffloadTarget".to_string(),
+        match offload_target {
+            Some(t) => Value::String(t),
+            None => Value::Null,
+        },
+    );
     payload.insert("health".to_string(), health);
     payload.insert("fc_connected".to_string(), fc_connected);
     payload.insert("fc_port".to_string(), fc_port);
