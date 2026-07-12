@@ -115,6 +115,8 @@ pub async fn get_status(State(state): State<AppState>) -> Json<Value> {
     // renders "port open · no MAVLink", heartbeatAgeS validates the link is live,
     // fcSource reflects the picker choice. Present alongside the legacy snake
     // fc_connected (which is now the gated truth, not transport-open).
+    let (npu_tops, has_accelerator, perception_tier) = perception_fields(&board);
+
     let liveness = fc_liveness_from_snapshot(snapshot.as_ref());
     // Honest reachability: true for a live MAVLink FC OR a detected MSP FC on an
     // open transport (an MSP FC is present + reachable but never heartbeats, so
@@ -138,6 +140,10 @@ pub async fn get_status(State(state): State<AppState>) -> Json<Value> {
         "fcVariant": liveness.fc_variant,
         "fcFirmware": liveness.fc_firmware,
         "fcReachable": fc_reachable,
+        "npuTops": npu_tops,
+        "hasAccelerator": has_accelerator,
+        "perceptionTier": perception_tier,
+        "perceptionOffloadTarget": Value::Null,
         "dependencies": Value::Object(dependencies),
     });
 
@@ -197,6 +203,43 @@ pub(crate) fn derive_health(signals: Option<&Map<String, Value>>) -> Value {
 ///
 /// Shared with the consolidated `/api/status/full` route, which serves the same
 /// board block from the same sidecar.
+/// Derive the perception capability + tier from the board block (the same board
+/// sidecar [`read_board`] returns). `npu_tops` is the board's declared NPU
+/// throughput; the tier is the canonical `ados_offload::pick_tier` decision (NOT
+/// a second implementation), so `/api/status` reports the same tier the drone
+/// runs on. The offload signals (a paired workstation + an acceptable link) are
+/// not wired on the drone yet, so an NPU board reads `local` and a board without
+/// one reads `none`; `compute_node_paired` folds in when that signal exists. The
+/// offload target stays null until a workstation is paired — never a fabricated
+/// reach (Rule 44). Returns `(npu_tops, has_accelerator, tier)`.
+///
+/// Shared with the consolidated `/api/status/full` route so both report the same
+/// perception fields.
+pub(crate) fn perception_fields(board: &Value) -> (f64, bool, &'static str) {
+    let npu_tops = board
+        .get("npu_tops")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let has_accelerator = npu_tops > 0.0;
+    let tier = ados_offload::pick_tier(&ados_offload::TierInputs {
+        has_accelerator,
+        // An NPU board is assumed to fit its recommended detector; the offload
+        // signals are conservatively false until the drone-side orchestration
+        // wires a paired-workstation + link-quality probe.
+        models_fit_locally: true,
+        compute_node_paired: false,
+        bearer_acceptable: false,
+        can_run_light_local: false,
+    });
+    let tier_str = match tier {
+        Some(ados_offload::PerceptionTier::Local) => "local",
+        Some(ados_offload::PerceptionTier::Offload) => "offload",
+        Some(ados_offload::PerceptionTier::Hybrid) => "hybrid",
+        None => "none",
+    };
+    (npu_tops, has_accelerator, tier_str)
+}
+
 pub(crate) fn read_board(path: &Path) -> Value {
     match std::fs::read(path) {
         Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
@@ -465,6 +508,24 @@ pub fn process_uptime_seconds(started: Instant) -> f64 {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn perception_fields_maps_board_caps_to_a_tier() {
+        // An NPU board (npu_tops > 0) runs detection locally.
+        let (npu, accel, tier) = perception_fields(&json!({ "npu_tops": 6.0 }));
+        assert_eq!(npu, 6.0);
+        assert!(accel);
+        assert_eq!(tier, "local");
+        // A CPU board with no NPU + no paired node has no perception tier.
+        let (npu, accel, tier) = perception_fields(&json!({ "npu_tops": 0.0 }));
+        assert_eq!(npu, 0.0);
+        assert!(!accel);
+        assert_eq!(tier, "none");
+        // A board block with no npu_tops key degrades to no-accelerator/none.
+        let (_npu, accel, tier) = perception_fields(&json!({}));
+        assert!(!accel);
+        assert_eq!(tier, "none");
+    }
 
     #[test]
     fn telemetry_strips_the_four_runtime_extras() {

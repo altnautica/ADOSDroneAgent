@@ -23,6 +23,9 @@ path = "src/main.rs"
 # FC send path with), so a frame this surface writes to the MAVLink socket is
 # byte-identical to one the router would have written.
 ados-protocol = { path = "../ados-protocol", features = ["mavlink"] }
+# The canonical perception-tier decision (pick_tier) so the status surfaces
+# report the same tier the drone runs on, not a second implementation.
+ados-offload = { path = "../ados-offload" }
 ados-config = { path = "../ados-config" }
 # Gamepad enumeration + the primary-device sidecar reader, reused by the
 # ground-station input read routes so the native surface lists controllers off

@@ -196,6 +196,17 @@ pub struct HeartbeatPayload {
     pub board_soc: String,
     pub board_arch: String,
 
+    // --- perception ---
+    // The NPU capability + the perception tier this node runs on. `npu_tops`
+    // comes from the board sidecar; `perception_tier` is the canonical
+    // ados_offload::pick_tier decision (not a second impl). The offload target is
+    // absent until a workstation is paired (never a fabricated reach, rule 44).
+    pub npu_tops: f64,
+    pub has_accelerator: bool,
+    pub perception_tier: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub perception_offload_target: Option<String>,
+
     // --- health ---
     // CPU/memory/disk are measured by the Python enrichment producer, not the
     // native loop. Optional + skip so a heartbeat with no fresh enrichment OMITS
@@ -490,6 +501,10 @@ mod tests {
             board_tier: 0,
             board_soc: String::new(),
             board_arch: String::new(),
+            npu_tops: 0.0,
+            has_accelerator: false,
+            perception_tier: "none".to_string(),
+            perception_offload_target: None,
             cpu_percent: Some(0.0),
             memory_percent: Some(0.0),
             disk_percent: Some(0.0),

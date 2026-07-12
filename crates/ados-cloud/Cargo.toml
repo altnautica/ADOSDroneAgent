@@ -16,6 +16,9 @@ path = "src/bin/ados-cloud.rs"
 # dispatcher will drive (path deps; the supervisor consumer wiring lands with
 # the command-dispatcher task).
 ados-protocol = { path = "../ados-protocol", features = ["tracing-layer"] }
+# The canonical perception-tier decision (pick_tier) so the cloud beacon reports
+# the same tier the drone runs on, not a second implementation.
+ados-offload = { path = "../ados-offload" }
 ados-config = { path = "../ados-config" }
 ados-plugin-host = { path = "../ados-plugin-host" }
 # The Atlas stream lane: this crate hosts the Cloud bearer (it owns the broker

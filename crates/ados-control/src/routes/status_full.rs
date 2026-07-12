@@ -107,10 +107,20 @@ pub async fn get_full_status(State(state): State<AppState>, headers: HeaderMap) 
     // --- Capabilities: retired per-agent catalog; an empty dict for forward-compat ---
     let capabilities: Value = json!({});
 
+    // The perception capability + tier, before `board` is moved into the payload.
+    // Same canonical ados_offload::pick_tier decision the LAN /api/status uses so
+    // the GCS Perception hub reads a consistent tier from either route.
+    let (npu_tops, has_accelerator, perception_tier) =
+        crate::routes::status::perception_fields(&board);
+
     let mut payload = Map::new();
     payload.insert("version".to_string(), json!(state.agent_version()));
     payload.insert("uptime_seconds".to_string(), uptime);
     payload.insert("board".to_string(), board);
+    payload.insert("npuTops".to_string(), json!(npu_tops));
+    payload.insert("hasAccelerator".to_string(), json!(has_accelerator));
+    payload.insert("perceptionTier".to_string(), json!(perception_tier));
+    payload.insert("perceptionOffloadTarget".to_string(), Value::Null);
     payload.insert("health".to_string(), health);
     payload.insert("fc_connected".to_string(), fc_connected);
     payload.insert("fc_port".to_string(), fc_port);

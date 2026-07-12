@@ -245,6 +245,9 @@ pub struct HeartbeatBase {
     pub board_tier: i64,
     pub board_soc: String,
     pub board_arch: String,
+    /// NPU throughput (TOPS) from the board sidecar; 0 when the board has no NPU.
+    /// Feeds the perception-tier decision on the cloud beacon.
+    pub board_npu_tops: f64,
 }
 
 /// Build the heartbeat wire object from the native base plus an optional
@@ -318,6 +321,26 @@ fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
             Some(errs)
         }
     };
+    // The perception tier this node runs on: the canonical ados_offload::pick_tier
+    // decision from the board's accelerator (not a second impl). The offload
+    // signals (a paired workstation + link quality) are not wired on the drone
+    // yet, so an NPU board reads `local` and a board without one reads `none`;
+    // the offload target stays absent until a workstation is paired (rule 44).
+    let has_accelerator = base.board_npu_tops > 0.0;
+    let perception_tier = match ados_offload::pick_tier(&ados_offload::TierInputs {
+        has_accelerator,
+        models_fit_locally: true,
+        compute_node_paired: false,
+        bearer_acceptable: false,
+        can_run_light_local: false,
+    }) {
+        Some(ados_offload::PerceptionTier::Local) => "local",
+        Some(ados_offload::PerceptionTier::Offload) => "offload",
+        Some(ados_offload::PerceptionTier::Hybrid) => "hybrid",
+        None => "none",
+    }
+    .to_string();
+
     HeartbeatPayload {
         device_id: base.device_id.clone(),
         version: base.version.clone(),
@@ -328,6 +351,10 @@ fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
         board_tier: base.board_tier,
         board_soc: base.board_soc.clone(),
         board_arch: base.board_arch.clone(),
+        npu_tops: base.board_npu_tops,
+        has_accelerator,
+        perception_tier,
+        perception_offload_target: None,
         // Unmeasured by the native loop: omitted (None) so the wire says
         // "unknown" rather than asserting a 0 / false / "stopped" reading the
         // loop never took (operating rule 37). The Python enrichment producer
@@ -452,6 +479,7 @@ mod tests {
             board_tier: 3,
             board_soc: "rk3582".to_string(),
             board_arch: "aarch64".to_string(),
+            board_npu_tops: 6.0,
         }
     }
 
@@ -642,6 +670,22 @@ mod tests {
         }
         // radio is the absent block.
         assert_eq!(obj["radio"]["state"], "absent");
+    }
+
+    #[test]
+    fn cloud_beacon_carries_the_perception_tier() {
+        // The base() board is an NPU part (6 TOPS), so the beacon reports the
+        // accelerator + a `local` tier (pick_tier). The offload target is absent
+        // (null-stripped) until a workstation is paired.
+        let v = build_payload(&base(), None);
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj["npuTops"], 6.0);
+        assert_eq!(obj["hasAccelerator"], true);
+        assert_eq!(obj["perceptionTier"], "local");
+        assert!(
+            !obj.contains_key("perceptionOffloadTarget"),
+            "no paired workstation ⇒ the offload target is absent, not null"
+        );
     }
 
     #[test]

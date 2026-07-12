@@ -264,7 +264,7 @@ const BOARD_SIDECAR_VERSION: u16 = 1;
 /// to "unknown"/0/"" when the file is absent or malformed — the same degraded
 /// shape the loop emitted before, but truthful whenever the board has been
 /// detected (the normal case once the API service has served one status).
-fn board_base() -> (String, i64, String, String) {
+fn board_base() -> (String, i64, String, String, f64) {
     let parsed: Option<serde_json::Value> = std::fs::read_to_string(BOARD_SIDECAR)
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok());
@@ -287,11 +287,16 @@ fn board_base() -> (String, i64, String, String) {
         .and_then(|o| o.get("tier"))
         .and_then(serde_json::Value::as_i64)
         .unwrap_or(0);
+    let npu_tops = obj
+        .and_then(|o| o.get("npu_tops"))
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or(0.0);
     (
         s("name").unwrap_or_else(|| "unknown".to_string()),
         tier,
         s("soc").unwrap_or_default(),
         s("arch").unwrap_or_default(),
+        npu_tops,
     )
 }
 
@@ -321,7 +326,8 @@ fn spawn_heartbeat(
                         continue;
                     }
                     let api_key = api_key.expect("should_emit gates on api_key being Some");
-                    let (board_name, board_tier, board_soc, board_arch) = board_base();
+                    let (board_name, board_tier, board_soc, board_arch, board_npu_tops) =
+                        board_base();
                     let base = heartbeat::HeartbeatBase {
                         device_id: config.agent.device_id.clone(),
                         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -332,6 +338,7 @@ fn spawn_heartbeat(
                         board_tier,
                         board_soc,
                         board_arch,
+                        board_npu_tops,
                     };
                     // Live status (resources + FC link + service fleet) built in
                     // Rust from the real sources each tick, folded over the base.
@@ -482,7 +489,7 @@ async fn beacon_register_once(
     api_key: &str,
     code_expires_at: Option<i64>,
 ) {
-    let (board_name, board_tier, _soc, _arch) = board_base();
+    let (board_name, board_tier, _soc, _arch, _npu) = board_base();
     let inputs = beacon::BeaconInputs {
         device_id: config.agent.device_id.clone(),
         pairing_code: code.to_string(),

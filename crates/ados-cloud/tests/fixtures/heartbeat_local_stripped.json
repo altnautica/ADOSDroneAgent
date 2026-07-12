@@ -18,6 +18,7 @@
   "fcBaud": 0,
   "fcConnected": false,
   "fcPort": "",
+  "hasAccelerator": false,
   "lastIp": "127.0.0.1",
   "mavlinkWsPort": 0,
   "mdnsHost": "",
@@ -27,6 +28,8 @@
   "memoryPercent": 12.0,
   "memoryTotalMb": 4096,
   "memoryUsedMb": 256,
+  "npuTops": 0.0,
+  "perceptionTier": "none",
   "profile": "drone",
   "radio": {
     "acquire_state": null,

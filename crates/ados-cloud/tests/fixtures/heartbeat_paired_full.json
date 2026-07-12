@@ -27,6 +27,7 @@
   "fcBaud": 0,
   "fcConnected": false,
   "fcPort": "",
+  "hasAccelerator": false,
   "lastIp": "127.0.0.1",
   "last_plugin_update_check_at": 1716940800000,
   "lcdRotation": 90,
@@ -40,6 +41,8 @@
   "memoryTotalMb": 4096,
   "memoryUsedMb": 256,
   "missionControlUrl": "https://mc.example",
+  "npuTops": 0.0,
+  "perceptionTier": "none",
   "peripherals": [
     {
       "address": "/dev/fb1",
