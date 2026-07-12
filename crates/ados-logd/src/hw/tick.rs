@@ -19,12 +19,13 @@ use super::disk::{read_diskstats, read_fs_usage};
 use super::helpers::{push_metric, sanitize, used_mb};
 use super::memory::{read_meminfo, read_pressure};
 use super::net::read_iface_stats;
+use super::npu::read_npu_load_pct;
 use super::power::{read_power_rails, RailKind};
 use super::sched::{read_loadavg, read_vmstat};
 use super::thermal::{read_hwmon_temps, read_thermal_zones};
 use super::{
     Collector, TickOutput, DISK_SCHED_CADENCE, FREQ_UTIL_CADENCE, MEM_PSI_CADENCE, NET_CADENCE,
-    POWER_CADENCE, SUMMARY_CADENCE, THERMAL_CADENCE, USB_CADENCE,
+    NPU_CADENCE, POWER_CADENCE, SUMMARY_CADENCE, THERMAL_CADENCE, USB_CADENCE,
 };
 use crate::writer::now_us;
 
@@ -80,6 +81,10 @@ impl Collector {
             self.next_usb = now + USB_CADENCE;
             unavailable += self.fold_usb(ts, &mut snap, &mut metrics);
         }
+        if now >= self.next_npu {
+            self.next_npu = now + NPU_CADENCE;
+            unavailable += self.fold_npu(ts, &mut snap, &mut metrics);
+        }
         if now >= self.next_summary {
             self.next_summary = now + SUMMARY_CADENCE;
             self.fold_summary(ts, &mut snap, &mut metrics);
@@ -133,6 +138,22 @@ impl Collector {
             );
         }
         unavailable
+    }
+
+    /// NPU utilization (Rockchip RKNPU debugfs), emitted as `npu.load_pct`.
+    /// Returns `1` when there is no readable NPU load (no NPU, debugfs not
+    /// mounted, or no permission) so the absence is observed rather than reported
+    /// as a fabricated 0 (Rule 44); the signal is simply absent then.
+    fn fold_npu(&self, ts: i64, snap: &mut HwSnapshot, metrics: &mut Vec<TelemetryFrame>) -> u32 {
+        match read_npu_load_pct(&self.root) {
+            Some(pct) => {
+                snap.signals
+                    .insert("npu.load_pct".to_string(), MpVal::from(pct));
+                push_metric(metrics, ts, "npu.load_pct", pct as f64, &[]);
+                0
+            }
+            None => 1,
+        }
     }
 
     /// Per-core frequency + governor + utilization. Utilization is a rate against

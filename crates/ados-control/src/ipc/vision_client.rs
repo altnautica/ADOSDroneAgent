@@ -220,6 +220,9 @@ mod tests {
                 execution: ModelExecution::EngineRun,
                 backend_loaded: true,
                 output_classes: vec!["person".to_string()],
+                fps: 14.5,
+                latency_ms: 22.0,
+                is_inference_capable: true,
             }];
             let bytes = rmp_serde::to_vec_named(&models).unwrap();
             let reply = Envelope {

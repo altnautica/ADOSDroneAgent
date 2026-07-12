@@ -38,6 +38,7 @@ pub mod disk;
 pub mod helpers;
 pub mod memory;
 pub mod net;
+pub mod npu;
 pub mod power;
 pub mod pss;
 pub mod reader;
@@ -85,6 +86,10 @@ pub const NET_CADENCE: Duration = Duration::from_secs(1);
 pub const DISK_SCHED_CADENCE: Duration = Duration::from_secs(1);
 /// USB enumeration speed + topology. Changes only on hotplug.
 pub const USB_CADENCE: Duration = Duration::from_secs(10);
+/// NPU utilization (Rockchip RKNPU debugfs). Load tracks inference bursts, so a
+/// sub-second cadence keeps the reading responsive without much cost; absent on a
+/// board with no NPU (the class then reads "unavailable", never a fake 0).
+pub const NPU_CADENCE: Duration = Duration::from_millis(500);
 /// Pi throttle bitfield. The subprocess is cheap; the throttle bit must be
 /// caught promptly.
 pub const THROTTLE_CADENCE: Duration = Duration::from_secs(1);
@@ -134,6 +139,7 @@ pub struct Collector {
     next_net: Instant,
     next_disk_sched: Instant,
     next_usb: Instant,
+    next_npu: Instant,
     next_throttle: Instant,
     next_regdomain: Instant,
     next_pss: Instant,
@@ -168,6 +174,7 @@ impl Collector {
             next_net: now,
             next_disk_sched: now,
             next_usb: now,
+            next_npu: now,
             next_throttle: now,
             next_regdomain: now,
             next_pss: now,

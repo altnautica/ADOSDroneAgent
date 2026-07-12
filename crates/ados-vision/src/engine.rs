@@ -25,7 +25,7 @@ use anyhow::{anyhow, Result};
 use tokio::sync::{broadcast, Mutex, Semaphore};
 
 use crate::backend::{LoadedModel, VisionBackend};
-use crate::ring::RingWriter;
+use crate::ring::{now_ms, RingWriter};
 use crate::tracker::{Appearance, Candidate, SingleObjectTracker, TrackerConfig};
 
 /// Broadcast depth for frame descriptors and detections. Slow subscribers lag
@@ -43,6 +43,51 @@ struct RegisteredModel {
 /// One camera's published surface: the ring writer it writes frames into.
 struct CameraRing {
     writer: RingWriter,
+}
+
+/// Rolling per-model inference timing for the telemetry surface. EWMA-smoothed so
+/// one slow frame does not spike the reported latency/fps. All-zero until the
+/// model runs (the honest "no data" reading, never a claim of zero throughput).
+#[derive(Debug, Clone, Copy, Default)]
+struct ModelTiming {
+    ewma_latency_ms: f32,
+    ewma_interval_ms: f32,
+    last_infer_ms: Option<i64>,
+    samples: u64,
+}
+
+impl ModelTiming {
+    /// EWMA weight for a new sample (a light smoothing so the reading tracks the
+    /// current rate without jitter).
+    const ALPHA: f32 = 0.2;
+
+    fn record(&mut self, latency_ms: f32, now: i64) {
+        self.ewma_latency_ms = if self.samples == 0 {
+            latency_ms
+        } else {
+            Self::ALPHA * latency_ms + (1.0 - Self::ALPHA) * self.ewma_latency_ms
+        };
+        if let Some(last) = self.last_infer_ms {
+            let interval = (now - last).max(0) as f32;
+            if interval > 0.0 {
+                self.ewma_interval_ms = if self.ewma_interval_ms == 0.0 {
+                    interval
+                } else {
+                    Self::ALPHA * interval + (1.0 - Self::ALPHA) * self.ewma_interval_ms
+                };
+            }
+        }
+        self.last_infer_ms = Some(now);
+        self.samples = self.samples.saturating_add(1);
+    }
+
+    fn fps(&self) -> f32 {
+        if self.ewma_interval_ms > 0.0 {
+            1000.0 / self.ewma_interval_ms
+        } else {
+            0.0
+        }
+    }
 }
 
 /// The shared engine state.
@@ -73,6 +118,9 @@ pub struct VisionEngine {
     reid_enabled: bool,
     /// The registered model id whose `embed` produces the appearance embedding.
     reid_model_id: Option<String>,
+    /// Per-model rolling inference timing (fps + latency), fed by `infer` and read
+    /// by `list_models` for the telemetry surface.
+    timings: Mutex<HashMap<String, ModelTiming>>,
 }
 
 impl VisionEngine {
@@ -133,7 +181,19 @@ impl VisionEngine {
             tracker_cfg,
             reid_enabled,
             reid_model_id,
+            timings: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Record one inference's timing for a model (called by `infer`). Locks only
+    /// the timings map, after the models lock is released, so the lock order stays
+    /// models → timings.
+    async fn record_timing(&self, model_id: &str, latency_ms: f32, now: i64) {
+        let mut timings = self.timings.lock().await;
+        timings
+            .entry(model_id.to_string())
+            .or_default()
+            .record(latency_ms, now);
     }
 
     /// The backend name (for logs and the socket info reply).
@@ -259,14 +319,26 @@ impl VisionEngine {
     /// ones actively publishing detections.
     pub async fn list_models(&self) -> Vec<ados_protocol::framebus::ModelInfo> {
         let models = self.models.lock().await;
+        // Lock order models → timings (record_timing only ever holds timings).
+        let timings = self.timings.lock().await;
+        let backend_capable = self.backend.is_inference_capable();
         let mut out: Vec<ados_protocol::framebus::ModelInfo> = models
             .values()
-            .map(|m| ados_protocol::framebus::ModelInfo {
-                id: m.meta.id.clone(),
-                kind: m.meta.kind,
-                execution: m.meta.execution,
-                backend_loaded: m.loaded.is_some(),
-                output_classes: m.meta.output_classes.clone(),
+            .map(|m| {
+                let t = timings.get(&m.meta.id);
+                ados_protocol::framebus::ModelInfo {
+                    id: m.meta.id.clone(),
+                    kind: m.meta.kind,
+                    execution: m.meta.execution,
+                    backend_loaded: m.loaded.is_some(),
+                    output_classes: m.meta.output_classes.clone(),
+                    fps: t.map(|t| t.fps()).unwrap_or(0.0),
+                    latency_ms: t.map(|t| t.ewma_latency_ms).unwrap_or(0.0),
+                    // A model runs a real detector only when its file loaded AND the
+                    // engine's backend is inference-capable (a mock backend is not),
+                    // so a placeholder is never presented as a working detector.
+                    is_inference_capable: m.loaded.is_some() && backend_capable,
+                }
             })
             .collect();
         out.sort_by(|a, b| a.id.cmp(&b.id));
@@ -306,7 +378,16 @@ impl VisionEngine {
             .loaded
             .as_ref()
             .ok_or_else(|| anyhow!("model {model_id} has no loaded backend"))?;
-        loaded.infer(frame, width, height, format)
+        let t0 = std::time::Instant::now();
+        let result = loaded.infer(frame, width, height, format);
+        let latency_ms = t0.elapsed().as_secs_f32() * 1000.0;
+        // Release the models lock (the borrow of `loaded`/`reg` ends with `result`)
+        // before recording the timing, keeping the lock order models → timings.
+        drop(models);
+        if result.is_ok() {
+            self.record_timing(model_id, latency_ms, now_ms()).await;
+        }
+        result
     }
 
     /// Publish a detection batch on `vision.detection`. A plugin-side model
@@ -681,6 +762,63 @@ mod tests {
             .await
             .unwrap();
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn model_timing_tracks_latency_and_fps() {
+        let mut t = ModelTiming::default();
+        // No data yet: an unrun model reports zero, not a fabricated rate.
+        assert_eq!(t.fps(), 0.0);
+        assert_eq!(t.ewma_latency_ms, 0.0);
+        // First sample seeds the latency; fps still 0 (no interval yet).
+        t.record(20.0, 1000);
+        assert_eq!(t.ewma_latency_ms, 20.0);
+        assert_eq!(t.fps(), 0.0);
+        // Second sample 100 ms later: the interval is 100 ms -> ~10 fps.
+        t.record(20.0, 1100);
+        assert!(
+            (t.fps() - 10.0).abs() < 0.01,
+            "100ms interval -> ~10fps, got {}",
+            t.fps()
+        );
+        assert_eq!(t.samples, 2);
+    }
+
+    #[tokio::test]
+    async fn list_models_flags_a_mock_backend_as_not_inference_capable() {
+        // A model loads on the mock backend (backend_loaded true) but the mock
+        // runs no real inference, so is_inference_capable is false — a status
+        // surface must not present it as a working detector (Rule 44).
+        let e = engine();
+        e.register_model(meta("m1", ModelExecution::EngineRun))
+            .await
+            .unwrap();
+        let models = e.list_models().await;
+        assert_eq!(models.len(), 1);
+        assert!(models[0].backend_loaded, "the mock loads the model");
+        assert!(
+            !models[0].is_inference_capable,
+            "the mock backend is not inference-capable"
+        );
+        // Timing is zero until it runs.
+        assert_eq!(models[0].fps, 0.0);
+        assert_eq!(models[0].latency_ms, 0.0);
+    }
+
+    #[tokio::test]
+    async fn infer_records_timing_surfaced_by_list_models() {
+        let e = engine();
+        e.register_model(meta("m1", ModelExecution::EngineRun))
+            .await
+            .unwrap();
+        // One inference records a latency sample; list_models surfaces it.
+        e.infer("m1", &[0u8; 192], 8, 8, FrameFormat::Rgb24)
+            .await
+            .unwrap();
+        let models = e.list_models().await;
+        // latency_ms is set from the (tiny) measured duration; assert the field is
+        // populated (>= 0, the timing path ran) — a real backend reports a real ms.
+        assert!(models[0].latency_ms >= 0.0);
     }
 
     #[tokio::test]

@@ -479,6 +479,21 @@ pub struct ModelInfo {
     /// model whose file loaded); false for a plugin-side or failed-to-load model.
     pub backend_loaded: bool,
     pub output_classes: Vec<String>,
+    /// Measured inference rate in Hz (an EWMA over inter-inference intervals).
+    /// `0.0` when the model has not run yet — the honest "no data" reading, not a
+    /// claim of zero throughput. Additive: an older payload without it decodes to
+    /// `0.0`.
+    #[serde(default)]
+    pub fps: f32,
+    /// Measured per-inference latency in ms (an EWMA). `0.0` until the model runs.
+    #[serde(default, rename = "latencyMs")]
+    pub latency_ms: f32,
+    /// Whether this model actually runs a real backend (an engine-run model whose
+    /// file loaded on an inference-capable backend). A mock-backend engine reports
+    /// `false` so a status surface never presents a placeholder as a working
+    /// detector (Rule 44). Additive; defaults `false`.
+    #[serde(default, rename = "isInferenceCapable")]
+    pub is_inference_capable: bool,
 }
 
 /// How a registered model is executed.

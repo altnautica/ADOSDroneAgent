@@ -115,8 +115,16 @@ pub async fn designate(State(_state): State<AppState>, Json(req): Json<Designate
 /// GCS vision hub shows every model loaded on the drone (task, execution,
 /// backend-loaded), not only the ones actively publishing detections. An
 /// unreachable engine (vision off / not up) is a 503, never a silent empty.
-pub async fn engine_status(State(_state): State<AppState>) -> Response {
+pub async fn engine_status(State(state): State<AppState>) -> Response {
     let client = VisionIpcClient::default_socket();
+    // The node NPU utilization from the logging store's hardware signals. `None`
+    // when no sampler feeds it (a board with no NPU, or debugfs not readable) —
+    // surfaced as `null`, never a fabricated 0 (Rule 44).
+    let npu_util = state
+        .logd
+        .latest_hw_signals()
+        .await
+        .and_then(|s| s.get("npu.load_pct").and_then(|v| v.as_f64()));
     match client.list_models().await {
         Ok(resp) => {
             // The engine replies `{models: Binary(msgpack Vec<ModelInfo>)}`.
@@ -129,7 +137,16 @@ pub async fn engine_status(State(_state): State<AppState>) -> Response {
                 Some(b) => rmp_serde::from_slice(b).unwrap_or_default(),
                 None => Vec::new(),
             };
-            (StatusCode::OK, Json(json!({ "models": models }))).into_response()
+            let model_count = models.len();
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "models": models,
+                    "modelCount": model_count,
+                    "npuUtilizationPct": npu_util,
+                })),
+            )
+                .into_response()
         }
         Err(e) => detail(
             StatusCode::SERVICE_UNAVAILABLE,
