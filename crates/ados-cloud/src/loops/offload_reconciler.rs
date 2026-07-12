@@ -65,6 +65,8 @@ struct RunningSession {
     handle: JoinHandle<()>,
     /// The node address this session offloads to (`host:port`).
     target: String,
+    /// The node's device id (from discovery), refreshed onto the link sidecar.
+    device_id: Option<String>,
 }
 
 /// A per-tick decision — resolved (blocking / async) into concrete offload facts,
@@ -172,18 +174,24 @@ async fn resolve_node(config: &CloudConfig) -> Option<(String, u16, Option<Strin
     Some((node.host, node.job_api_port, Some(node.device_id)))
 }
 
-/// Build a concrete offload decision (or Idle) — the network-touching resolve of
-/// the pure gate. `may_resolve` throttles the mDNS browse while searching.
-async fn decide(config: &CloudConfig, may_resolve: bool) -> Decision {
-    if !should_attempt(
+/// The cheap keep-offloading gate (no network): a live session stays up while
+/// the board still wants to offload and the camera is still publishing. Only
+/// this — never a re-resolve — decides whether to keep a running session, so a
+/// transient mDNS miss can never tear down a healthy offload.
+fn keep_offloading(config: &CloudConfig) -> bool {
+    should_attempt(
         &config.agent.profile,
         config.perception.offload.is_off(),
         config.perception.offload.is_forced_on(),
         board_npu_tops(),
-    ) {
-        return Decision::Idle;
-    }
-    if !camera_ready() || !may_resolve {
+    ) && camera_ready()
+}
+
+/// Build a concrete offload decision (or Idle) — the network-touching resolve run
+/// only when there is no live session (starting one). It never runs against a
+/// live session, so the resolve throttle can't tear a healthy offload down.
+async fn decide(config: &CloudConfig) -> Decision {
+    if !keep_offloading(config) {
         return Decision::Idle;
     }
     let Some((node_host, node_port, node_device_id)) = resolve_node(config).await else {
@@ -252,19 +260,28 @@ pub async fn run(config: Arc<CloudConfig>, mut shutdown: watch::Receiver<bool>) 
                     running = None;
                 }
 
-                // Throttle mDNS browses while searching (no active session); when
-                // a session is running we never re-resolve.
-                let may_resolve = if running.is_some() {
-                    false
+                if let Some(sess) = running.as_ref() {
+                    // A session is live: KEEP it (and refresh the link's mtime)
+                    // on the cheap gate, without re-resolving — a transient mDNS
+                    // miss must never tear a healthy offload down. Only a real
+                    // change (offload disabled / camera gone) stops it.
+                    if keep_offloading(&config) {
+                        write_link(true, Some(sess.target.clone()), sess.device_id.clone());
+                    } else if let Some(sess) = running.take() {
+                        tracing::info!(target = %sess.target, "offload reconciler: stopping the session");
+                        sess.cancel.notify_waiters();
+                        write_link(false, None, None);
+                    }
                 } else {
+                    // No live session: try to start one, resolving at most every
+                    // SEARCH_BACKOFF so a fruitless search does not browse mDNS
+                    // every tick.
                     let due = last_search.is_none_or(|t| t.elapsed() >= SEARCH_BACKOFF);
-                    if due { last_search = Some(Instant::now()); }
-                    due
-                };
-
-                match decide(&config, may_resolve).await {
-                    Decision::Offload { base_url, target, node_device_id, rtsp_url, width, height } => {
-                        if running.is_none() {
+                    if due {
+                        last_search = Some(Instant::now());
+                        if let Decision::Offload { base_url, target, node_device_id, rtsp_url, width, height } =
+                            decide(&config).await
+                        {
                             let cancel = Arc::new(Notify::new());
                             let cfg = OrchestratorConfig::vision_only(
                                 session_id(&config), CAMERA_ID, rtsp_url, width, height, TARGET_BUDGET_MS,
@@ -272,23 +289,14 @@ pub async fn run(config: Arc<CloudConfig>, mut shutdown: watch::Receiver<bool>) 
                             let api_key = PairingState::load().api_key().map(str::to_string);
                             let endpoint = NodeEndpoint::Direct { base_url, api_key };
                             let cancel_task = cancel.clone();
-                            let target_log = target.clone();
-                            tracing::info!(target = %target_log, "offload reconciler: starting a session");
+                            tracing::info!(target = %target, "offload reconciler: starting a session");
                             let handle = tokio::spawn(async move {
                                 if let Err(e) = run_offload_orchestrator(cfg, endpoint, cancel_task).await {
                                     tracing::warn!(error = %e, "offload orchestrator ended");
                                 }
                             });
-                            running = Some(RunningSession { cancel, handle, target: target.clone() });
-                        }
-                        // Refresh the link each tick so its mtime stays fresh.
-                        write_link(true, Some(target), node_device_id);
-                    }
-                    Decision::Idle => {
-                        if let Some(sess) = running.take() {
-                            tracing::info!(target = %sess.target, "offload reconciler: stopping the session");
-                            sess.cancel.notify_waiters();
-                            write_link(false, None, None);
+                            write_link(true, Some(target.clone()), node_device_id.clone());
+                            running = Some(RunningSession { cancel, handle, target, device_id: node_device_id });
                         }
                     }
                 }
