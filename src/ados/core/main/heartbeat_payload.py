@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 from ados import __version__
 from ados.core.paths import INSTALL_RESULT, WFB_MODULE_SOURCE
 from ados.core.service_tracker import ServiceState
+from ados.services.vision.tier import perception_tier
 
 from ._helpers import _get_local_ip
 
@@ -189,6 +190,16 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
     board_tier = board.tier if board else 0
     board_soc = board.soc if board else ""
     board_arch = board.arch if board else ""
+
+    # Perception capability + the tier this node would pick. npuTops/hasAccelerator
+    # are the board's declared NPU capability; perceptionTier mirrors
+    # ados-offload::pick_tier (an NPU board runs detection locally, a board without
+    # one offloads to a paired compute node). The offload target stays null until a
+    # workstation is paired — never a fabricated reach (Rule 44).
+    board_npu_tops = float(getattr(board, "npu_tops", 0.0) or 0.0) if board else 0.0
+    board_has_accel = bool(getattr(board, "has_accelerator", False)) if board else False
+    perception_tier_val = perception_tier(has_accelerator=board_has_accel)
+    perception_offload_target = None
 
     # Health info from monitor
     health = app.health
@@ -396,6 +407,10 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
         "boardTier": board_tier,
         "boardSoc": board_soc,
         "boardArch": board_arch,
+        "npuTops": board_npu_tops,
+        "hasAccelerator": board_has_accel,
+        "perceptionTier": perception_tier_val,
+        "perceptionOffloadTarget": perception_offload_target,
         "cpuPercent": cpu_percent,
         "memoryPercent": memory_percent,
         "diskPercent": disk_percent,

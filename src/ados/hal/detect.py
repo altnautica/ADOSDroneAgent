@@ -173,6 +173,13 @@ class VideoSection(BaseModel):
     encoder_api: str | None = None
 
 
+class ComputeSection(BaseModel):
+    """Compute knobs. Only the NPU capability is read here; extra keys
+    (cores, gpu, hw_encoder, ram, ...) are ignored."""
+
+    npu_tops: float = 0.0
+
+
 class BoardProfile(BaseModel):
     """Pydantic model for YAML board profile validation."""
 
@@ -199,6 +206,7 @@ class BoardProfile(BaseModel):
     # provisioner (install-time) and the camera/radio/FC services (runtime).
     # All default empty so boards that omit them load unchanged.
     video: VideoSection = Field(default_factory=VideoSection)
+    compute: ComputeSection = Field(default_factory=ComputeSection)
     cameras: CamerasSection = Field(default_factory=CamerasSection)
     radios: RadiosSection = Field(default_factory=RadiosSection)
     flight_controller: FlightControllerSection = Field(
@@ -217,6 +225,15 @@ class BoardInfo:
     soc: str = "unknown"
     arch: str = "aarch64"
     hw_video_codecs: list[str] = field(default_factory=list)
+    # NPU throughput in TOPS from the board profile's compute section (0.0 when
+    # the board has no NPU / an unknown board). The perception tier keys on this:
+    # an accelerator runs detection locally; a board without one offloads.
+    npu_tops: float = 0.0
+
+    @property
+    def has_accelerator(self) -> bool:
+        """Whether the board has a usable inference accelerator (an NPU)."""
+        return self.npu_tops > 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -229,6 +246,8 @@ class BoardInfo:
             "soc": self.soc,
             "arch": self.arch,
             "hw_video_codecs": self.hw_video_codecs,
+            "npu_tops": self.npu_tops,
+            "has_accelerator": self.has_accelerator,
         }
 
 
@@ -333,6 +352,7 @@ def _board_from_profile(
         soc=profile.soc,
         arch=profile.arch,
         hw_video_codecs=list(profile.hw_video_codecs),
+        npu_tops=profile.compute.npu_tops,
     )
 
 

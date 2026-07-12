@@ -18,6 +18,24 @@ def _fresh_app() -> AgentApp:
     return app
 
 
+def test_heartbeat_payload_carries_perception_capability() -> None:
+    """The heartbeat carries the NPU capability + the perception tier so the GCS
+    can show where detection runs. On the test box (no NPU board detected) the
+    accelerator reads false, the tier reads 'none', and the offload target is
+    null (never a fabricated reach)."""
+    app = _fresh_app()
+    payload = app._build_heartbeat_payload()
+    assert "npuTops" in payload
+    assert isinstance(payload["npuTops"], (int, float))
+    assert isinstance(payload["hasAccelerator"], bool)
+    assert payload["perceptionTier"] in ("local", "offload", "hybrid", "none")
+    # The offload target is null until a workstation is paired.
+    assert payload["perceptionOffloadTarget"] is None
+    # Capability and tier agree: no accelerator ⇒ not local.
+    if not payload["hasAccelerator"]:
+        assert payload["perceptionTier"] != "local"
+
+
 def test_heartbeat_payload_includes_runtime_mode() -> None:
     """The heartbeat carries the native-vs-packaged aggregate so the GCS
     can light the per-node runtime badge. On the test box (no native
