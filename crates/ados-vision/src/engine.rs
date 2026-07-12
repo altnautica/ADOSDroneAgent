@@ -429,6 +429,10 @@ impl VisionEngine {
             camera_id: desc.camera_id.clone(),
             frame_id: desc.frame_id,
             ts_ms: desc.ts_ms,
+            // The vision frame's pixel size the boxes are in, so the overlay
+            // scales to it.
+            frame_width: desc.width,
+            frame_height: desc.height,
             detections,
         };
         self.publish_detection(batch.clone());
@@ -850,6 +854,8 @@ mod tests {
             camera_id: "c".into(),
             frame_id: 1,
             ts_ms: 0,
+            frame_width: 640,
+            frame_height: 480,
             detections: vec![Detection {
                 bbox: BoundingBox {
                     x: 0.0,

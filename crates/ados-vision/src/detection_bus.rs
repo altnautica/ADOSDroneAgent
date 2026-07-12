@@ -107,6 +107,8 @@ mod tests {
             camera_id: "uvc-0".into(),
             frame_id: 7,
             ts_ms: 1_700_000_000_000,
+            frame_width: 640,
+            frame_height: 480,
             detections: vec![Detection {
                 bbox: BoundingBox {
                     x: 12.0,

@@ -218,6 +218,8 @@ async fn handle_infer(engine: &Arc<VisionEngine>, args: &Value) -> Result<Value>
         camera_id: req.camera_id.clone().unwrap_or_default(),
         frame_id: req.frame_id.unwrap_or(0),
         ts_ms: req.ts_ms.unwrap_or(0),
+        frame_width: width,
+        frame_height: height,
         detections,
     };
     // Encode the batch as a binary field so the host returns it unchanged.
@@ -752,6 +754,8 @@ mod tests {
             camera_id: "c".into(),
             frame_id: 1,
             ts_ms: 0,
+            frame_width: 640,
+            frame_height: 480,
             detections: vec![],
         };
         let args: Value = rmp_serde::from_slice(&batch.to_msgpack().unwrap()).unwrap();
@@ -813,6 +817,8 @@ mod tests {
             camera_id: "uvc-0".into(),
             frame_id: 9,
             ts_ms: 5,
+            frame_width: 640,
+            frame_height: 480,
             detections: vec![Detection {
                 bbox: BoundingBox {
                     x: 1.0,

@@ -632,6 +632,14 @@ pub struct DetectionBatch {
     pub camera_id: String,
     pub frame_id: u64,
     pub ts_ms: i64,
+    /// The source frame's pixel size, so a consumer scales the pixel-space boxes
+    /// to the rendered frame. `0` when the source did not report it (the consumer
+    /// then falls back to its own default). Additive + serde-default, so a batch
+    /// from an older producer (no dims) still decodes (mirrors `attributes`).
+    #[serde(default)]
+    pub frame_width: u32,
+    #[serde(default)]
+    pub frame_height: u32,
     pub detections: Vec<Detection>,
 }
 
@@ -738,6 +746,8 @@ mod contract_tests {
             camera_id: "uvc-0".into(),
             frame_id: 7,
             ts_ms: 1_700_000_000_000,
+            frame_width: 640,
+            frame_height: 480,
             detections: vec![Detection {
                 bbox: BoundingBox {
                     x: 12.0,
@@ -775,6 +785,8 @@ mod contract_tests {
             camera_id: "c".into(),
             frame_id: 1,
             ts_ms: 0,
+            frame_width: 640,
+            frame_height: 480,
             detections: vec![],
         };
         let bytes = batch.to_msgpack().unwrap();

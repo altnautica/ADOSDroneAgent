@@ -109,6 +109,11 @@ impl OffloadReturnBridge {
             // The per-session frame sequence is the frame identity on the bus.
             frame_id: batch.seq,
             ts_ms: batch.ts_ms,
+            // The pixel space the boxes above were denormalized into — the
+            // offload session's frame size — so the GCS overlay scales to it
+            // instead of guessing (fixes offloaded boxes landing off the target).
+            frame_width: batch.width,
+            frame_height: batch.height,
             detections,
         };
         (db, status)
@@ -276,6 +281,11 @@ mod tests {
         assert_eq!(db.v, VISION_DETECTION_VERSION);
         assert_eq!(db.camera_id, "front");
         assert_eq!(db.frame_id, 3);
+        // The batch carries the frame size the boxes were denormalized into, so
+        // the GCS overlay scales to it instead of guessing 640x480 (offloaded
+        // boxes would otherwise land off the target).
+        assert_eq!(db.frame_width, 1280);
+        assert_eq!(db.frame_height, 720);
         assert_eq!(db.detections.len(), 1);
         let b = &db.detections[0].bbox;
         // 0.25*1280 / 0.25*720 / 0.5*1280 / 0.5*720

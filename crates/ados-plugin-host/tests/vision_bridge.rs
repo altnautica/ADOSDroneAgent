@@ -305,6 +305,8 @@ fn sample_batch(frame_id: u64) -> DetectionBatch {
         camera_id: "uvc-0".into(),
         frame_id,
         ts_ms: 1_700_000_000_000 + frame_id as i64,
+        frame_width: 640,
+        frame_height: 480,
         detections: vec![Detection {
             bbox: BoundingBox {
                 x: frame_id as f32,

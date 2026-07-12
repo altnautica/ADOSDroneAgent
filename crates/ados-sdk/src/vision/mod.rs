@@ -171,6 +171,8 @@ impl VisionClient {
             camera_id: frame.descriptor.camera_id.clone(),
             frame_id: frame.descriptor.frame_id,
             ts_ms: frame.descriptor.ts_ms,
+            frame_width: frame.descriptor.width,
+            frame_height: frame.descriptor.height,
             detections: vec![detection],
         };
         self.publish_detection(&batch).await
