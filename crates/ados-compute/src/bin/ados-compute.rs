@@ -48,7 +48,7 @@ use ados_compute::{
     artifact_router, build_atlas_jobs_sidecar, build_rerun_output, build_router_with_base,
     derive_public_base, rewrite_output_to_artifact_url, submit_reconstruct_job,
     write_atlas_jobs_sidecar, write_compute_heartbeat, AtlasIngest, Cluster, ComputeAuth,
-    ComputeJobState, Engine, JobStore, LiveReconstructConfig, MockDetector, Prepared,
+    ComputeJobState, Detector, Engine, JobStore, LiveReconstructConfig, MockDetector, Prepared,
     PreparedInput, Scheduler, SelectingReconstructor, DEFAULT_PAIRING_PATH,
 };
 use tokio::net::TcpListener;
@@ -97,6 +97,66 @@ fn init_logging() {
 
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+/// Pick the perception-offload detector. When the `onnx` feature is built AND
+/// `ADOS_COMPUTE_DETECTOR_MODEL` names an `.onnx` file, load the real ONNX
+/// detector (CoreML-accelerated on macOS via the `coreml` feature); otherwise
+/// fall back to the mock so the offload path stays exercised with no model. A
+/// load failure logs and falls back to the mock rather than refusing to start
+/// (Rule 26: the node still comes up).
+fn select_detector() -> Arc<dyn Detector> {
+    #[cfg(feature = "onnx")]
+    {
+        let path = env_or("ADOS_COMPUTE_DETECTOR_MODEL", "");
+        if !path.is_empty() {
+            let (iw, ih) = parse_input_dims(&env_or("ADOS_COMPUTE_DETECTOR_INPUT", "640x640"));
+            let classes: Vec<String> = std::env::var("ADOS_COMPUTE_DETECTOR_CLASSES")
+                .ok()
+                .map(|s| {
+                    s.split(',')
+                        .map(|c| c.trim().to_string())
+                        .filter(|c| !c.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let head = match env_or("ADOS_COMPUTE_DETECTOR_HEAD", "yolo8").as_str() {
+                "yolo5" => ados_protocol::framebus::DetectionHead::Yolo5,
+                _ => ados_protocol::framebus::DetectionHead::Yolo8,
+            };
+            let meta = ados_protocol::framebus::ModelMetadata {
+                id: "offload-detector".into(),
+                kind: ados_protocol::framebus::ModelKind::Detection,
+                execution: ados_protocol::framebus::ModelExecution::EngineRun,
+                input_width: iw,
+                input_height: ih,
+                input_format: ados_protocol::framebus::FrameFormat::Rgb24,
+                output_classes: classes,
+                model_path: Some(path.clone()),
+                head,
+            };
+            match ados_compute::OnnxDetector::from_model(&meta) {
+                Ok(det) => {
+                    tracing::info!(model = %path, input = format!("{iw}x{ih}"), "perception offload: real ONNX detector loaded");
+                    return Arc::new(det);
+                }
+                Err(e) => {
+                    tracing::warn!(model = %path, error = %e, "perception offload: ONNX load failed, using mock");
+                }
+            }
+        }
+    }
+    Arc::new(MockDetector)
+}
+
+/// Parse a `WxH` input-size string (e.g. `640x640`) into `(width, height)`,
+/// defaulting to 640 square on a malformed value.
+#[cfg(feature = "onnx")]
+fn parse_input_dims(s: &str) -> (u32, u32) {
+    let mut it = s.split(['x', 'X']);
+    let w = it.next().and_then(|v| v.trim().parse().ok()).unwrap_or(640);
+    let h = it.next().and_then(|v| v.trim().parse().ok()).unwrap_or(w);
+    (w, h)
 }
 
 /// Resolve a stable per-node id: the `ADOS_COMPUTE_NODE_ID` override if set,
@@ -277,7 +337,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let scheduler = Scheduler::new(
         store,
         Arc::new(SelectingReconstructor::new(work_root.clone())),
-        Arc::new(MockDetector),
+        select_detector(),
     );
     let engine = Engine::new(scheduler, Cluster::new_master(node_id.clone()), workers);
     let state = Arc::new(Mutex::new(engine));

@@ -405,7 +405,7 @@ mod tests {
         )
         .await;
         assert_eq!(job["state"], "completed");
-        assert_eq!(job["result_ref"], "mock://detection/job-off");
+        assert_eq!(job["result_ref"], "offload://detection/job-off");
         // The offload must have produced a detection ARTIFACT, not just a
         // terminal state. The worker discards JobOutcome.detections, so the
         // recorded Output is the only evidence through the REST surface.

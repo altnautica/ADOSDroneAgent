@@ -137,7 +137,24 @@ mod onnx_backend {
                 .model_path
                 .as_deref()
                 .ok_or_else(|| anyhow::anyhow!("onnx model has no model_path"))?;
-            let session = ort::session::Session::builder()?.commit_from_file(path)?;
+            let mut builder = ort::session::Session::builder()?;
+            // On the macOS workstation, register the CoreML execution provider so
+            // inference runs on the Apple GPU/ANE instead of the CPU. Best-effort:
+            // ORT falls back to CPU if CoreML cannot take a node. Only compiled in
+            // under the `coreml` feature on macOS, so a Linux/drone build is
+            // unaffected.
+            #[cfg(all(feature = "coreml", target_os = "macos"))]
+            {
+                use ort::execution_providers::CoreMLExecutionProvider;
+                // `with_execution_providers` returns `ort::Error<SessionBuilder>`,
+                // which is not `Send` under the coreml feature (it carries a
+                // non-Send OperatorDomain), so `?`-into-anyhow would not compile.
+                // Format the error to a string and wrap it fresh instead.
+                builder = builder
+                    .with_execution_providers([CoreMLExecutionProvider::default().build()])
+                    .map_err(|e| anyhow!("register CoreML execution provider: {e}"))?;
+            }
+            let session = builder.commit_from_file(path)?;
             let input_name = session
                 .inputs()
                 .first()

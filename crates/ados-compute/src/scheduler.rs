@@ -221,13 +221,17 @@ impl Scheduler {
                 } else {
                     "detection"
                 };
-                match detector.infer(frame) {
+                // Pixels arrive on the streaming transport (wired next); the
+                // job-params lane carries only frame metadata, so pass None. A
+                // real detector errors without pixels rather than fabricating a
+                // box; the mock ignores them.
+                match detector.infer(frame, None) {
                     Ok(detections) => {
                         let output = Output::new(
                             format!("{}-out", job.id),
                             job.id.clone(),
                             out_kind.into(),
-                            format!("mock://{out_kind}/{}", job.id),
+                            format!("offload://{out_kind}/{}", job.id),
                             now_ms,
                         );
                         BackendResult {
@@ -536,7 +540,7 @@ mod tests {
         assert_eq!(outcome.state, ComputeJobState::Completed);
         // A SLAM offload's artifact is a pose, not a detection.
         assert_eq!(outcome.outputs[0].kind, "pose");
-        assert_eq!(outcome.outputs[0].uri, "mock://pose/job-slam");
+        assert_eq!(outcome.outputs[0].uri, "offload://pose/job-slam");
     }
 
     #[test]

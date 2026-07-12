@@ -63,6 +63,20 @@ tower-http = { workspace = true }
 # system memory with the GPU). Cross-platform; the GPU identity + utilisation are
 # macOS-cfg `system_profiler`/`powermetrics` calls in `gpu.rs`.
 sysinfo = { workspace = true }
+# The real perception-offload detector: the compute node hosts ados-vision's
+# ONNX backend (the same YOLO decode the drone runs on its NPU) so an offloaded
+# detection is identical to a local one. Optional + feature-gated so a CPU-only
+# CI build (and the mock path) needs no ONNX Runtime; `onnx` pulls it in and
+# `coreml` adds the Apple-GPU execution provider for the macOS workstation.
+ados-vision = { path = "../ados-vision", optional = true, default-features = false }
+
+[features]
+default = []
+# Build the real ONNX detector (OnnxDetector) hosted on ados-vision's backend.
+onnx = ["dep:ados-vision", "ados-vision/onnx"]
+# Register the CoreML execution provider so ONNX inference runs on the Apple GPU
+# (macOS workstation). Implies `onnx`.
+coreml = ["onnx", "ados-vision/coreml"]
 
 [dev-dependencies]
 # `ServiceExt::oneshot` drives the router in tests without binding a port.

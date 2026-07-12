@@ -120,6 +120,7 @@ version = "0.1.0"
 dependencies = [
  "ados-atlas-transport",
  "ados-protocol",
+ "ados-vision",
  "axum",
  "mdns-sd",
  "reqwest",

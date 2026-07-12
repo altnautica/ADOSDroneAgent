@@ -21,6 +21,11 @@ default = []
 # Opt-in ONNX Runtime backend. Pulls a heavy native runtime, so it is never on
 # by default.
 onnx = ["dep:ort"]
+# Register the CoreML execution provider so ONNX inference runs on the Apple GPU
+# (macOS workstation, "leverage the GPU"). Implies `onnx`; a no-op on non-macOS
+# builds (the backend registers it only under target_os = "macos"). Off by
+# default so a Linux/CI build never pulls the CoreML runtime.
+coreml = ["onnx", "ort/coreml"]
 # Opt-in appearance (re-id) model support for the tracker: builds the
 # sidecar-backed appearance extractor. Compiled out by default so the motion-only
 # tracker carries no extra weight; mirrors `onnx` in being a non-default feature.
