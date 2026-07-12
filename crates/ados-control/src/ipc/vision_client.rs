@@ -79,6 +79,14 @@ impl VisionIpcClient {
             .await
     }
 
+    /// Send a `vision.list_models` request and return the engine's response args
+    /// (`{models: Binary(msgpack Vec<ModelInfo>)}`). A read-back of the model
+    /// registry for the GCS vision hub.
+    pub async fn list_models(&self) -> Result<Value, VisionError> {
+        self.request(methods::LIST_MODELS, "vision.model.list", Value::Nil)
+            .await
+    }
+
     /// One fresh-connection request/response against the engine socket.
     async fn request(
         &self,
@@ -182,6 +190,65 @@ mod tests {
             .find(|(k, _)| k.as_str() == Some("designated"))
             .map(|(_, v)| v.as_bool());
         assert_eq!(designated, Some(Some(true)));
+        server.await.unwrap();
+    }
+
+    /// `list_models` sends the `vision.list_models` method and reads back the
+    /// engine's `{models: Binary(msgpack Vec<ModelInfo>)}` reply. The route
+    /// decodes the Binary field; here we prove the client carries the right
+    /// method + returns the reply args verbatim.
+    #[tokio::test]
+    async fn list_models_carries_the_method_and_returns_args() {
+        use ados_protocol::framebus::{ModelExecution, ModelInfo, ModelKind};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vision.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut conn, _addr) = listener.accept().await.unwrap();
+            let mut header = [0u8; HEADER_SIZE];
+            conn.read_exact(&mut header).await.unwrap();
+            let len = decode_len(header, PLUGIN_MAX_FRAME, false).unwrap();
+            let mut body = vec![0u8; len];
+            conn.read_exact(&mut body).await.unwrap();
+            let req = Envelope::from_msgpack(&body).unwrap();
+            assert_eq!(req.method, methods::LIST_MODELS);
+            let models = vec![ModelInfo {
+                id: "yolov8n".to_string(),
+                kind: ModelKind::Detection,
+                execution: ModelExecution::EngineRun,
+                backend_loaded: true,
+                output_classes: vec!["person".to_string()],
+            }];
+            let bytes = rmp_serde::to_vec_named(&models).unwrap();
+            let reply = Envelope {
+                version: PROTOCOL_VERSION,
+                kind: "response".to_string(),
+                method: methods::LIST_MODELS.to_string(),
+                capability: String::new(),
+                args: Value::Map(vec![(Value::from("models"), Value::Binary(bytes))]),
+                request_id: req.request_id,
+                token: String::new(),
+                error: None,
+            };
+            let frame = reply.encode_frame().unwrap();
+            conn.write_all(&frame).await.unwrap();
+            conn.flush().await.unwrap();
+        });
+
+        let client = VisionIpcClient::new(path);
+        let resp = client.list_models().await.unwrap();
+        let map = resp.as_map().unwrap();
+        let bytes = map
+            .iter()
+            .find(|(k, _)| k.as_str() == Some("models"))
+            .and_then(|(_, v)| v.as_slice())
+            .expect("models binary present");
+        let decoded: Vec<ModelInfo> = rmp_serde::from_slice(bytes).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].id, "yolov8n");
+        assert!(decoded[0].backend_loaded);
         server.await.unwrap();
     }
 

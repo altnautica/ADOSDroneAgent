@@ -172,6 +172,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "nix 0.29.0",
+ "rmp-serde",
  "rmpv",
  "sd-notify",
  "serde",

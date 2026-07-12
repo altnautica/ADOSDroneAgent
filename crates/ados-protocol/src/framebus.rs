@@ -445,6 +445,12 @@ pub mod methods {
     /// plugin). Args: `{camera_id, bbox, class_label?, confidence?}`.
     pub const DESIGNATE_TRACK: &str = "vision.designate_track";
 
+    /// List the engine's registered models — a read-back of the model registry
+    /// so the GCS vision hub can show every model loaded on the drone (not just
+    /// the one publishing detections). No args; the reply carries the models as
+    /// a msgpack-encoded `Vec<ModelInfo>` in a binary field.
+    pub const LIST_MODELS: &str = "vision.list_models";
+
     /// Event method the host uses to push a frame descriptor to a subscriber
     /// (mirrors `mavlink.deliver`).
     pub const DELIVER_FRAME: &str = "vision.deliver";
@@ -458,6 +464,21 @@ pub enum ModelKind {
     Segmentation,
     Classification,
     Tracking,
+}
+
+/// A registered model's info, for the engine's list-models read-back (the
+/// [`methods::LIST_MODELS`] reply). Lets the GCS vision hub show every model
+/// loaded on the drone — its task, how it runs, whether the engine loaded a
+/// backend for it — not only the models currently publishing detections.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelInfo {
+    pub id: String,
+    pub kind: ModelKind,
+    pub execution: ModelExecution,
+    /// True when the engine holds a loaded backend model for it (an engine-run
+    /// model whose file loaded); false for a plugin-side or failed-to-load model.
+    pub backend_loaded: bool,
+    pub output_classes: Vec<String>,
 }
 
 /// How a registered model is executed.

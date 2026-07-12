@@ -138,6 +138,11 @@ pub fn build_router(state: AppState, net_native: bool, hid_native: bool) -> Rout
         // tracker for a camera onto the box the operator clicked, via the vision
         // socket. Auth-gated when paired (a write), 503 when vision is not up.
         .route("/api/vision/designate", post(vision::designate))
+        // Vision engine status: the registered-model read-back for the GCS vision
+        // hub, so it shows every model loaded on the drone (task, execution,
+        // backend-loaded), not only the ones actively publishing detections. A
+        // read; 503 when vision is not up.
+        .route("/api/vision/status", get(vision::engine_status))
         // Vision detector selection: pick (PUT) / clear (DELETE) the model the
         // engine auto-loads. The write merges the vision.detector config block
         // (model_id + enabled, optional model_path) and restarts ados-vision so

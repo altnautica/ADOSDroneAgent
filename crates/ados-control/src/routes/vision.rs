@@ -110,3 +110,30 @@ pub async fn designate(State(_state): State<AppState>, Json(req): Json<Designate
         ),
     }
 }
+
+/// `GET /api/vision/status` — the engine's registered-model read-back, so the
+/// GCS vision hub shows every model loaded on the drone (task, execution,
+/// backend-loaded), not only the ones actively publishing detections. An
+/// unreachable engine (vision off / not up) is a 503, never a silent empty.
+pub async fn engine_status(State(_state): State<AppState>) -> Response {
+    let client = VisionIpcClient::default_socket();
+    match client.list_models().await {
+        Ok(resp) => {
+            // The engine replies `{models: Binary(msgpack Vec<ModelInfo>)}`.
+            let map = resp.as_map().map(|m| m.to_vec()).unwrap_or_default();
+            let bytes = map
+                .iter()
+                .find(|(k, _)| k.as_str() == Some("models"))
+                .and_then(|(_, v)| v.as_slice());
+            let models: Vec<ados_protocol::framebus::ModelInfo> = match bytes {
+                Some(b) => rmp_serde::from_slice(b).unwrap_or_default(),
+                None => Vec::new(),
+            };
+            (StatusCode::OK, Json(json!({ "models": models }))).into_response()
+        }
+        Err(e) => detail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("vision engine unavailable: {e}"),
+        ),
+    }
+}

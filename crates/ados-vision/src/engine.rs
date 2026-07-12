@@ -253,6 +253,26 @@ impl VisionEngine {
         ids
     }
 
+    /// A read-back of every registered model (id, task, execution, whether a
+    /// backend loaded, output classes), sorted by id. The GCS vision hub shows
+    /// this so an operator sees every model loaded on the drone, not only the
+    /// ones actively publishing detections.
+    pub async fn list_models(&self) -> Vec<ados_protocol::framebus::ModelInfo> {
+        let models = self.models.lock().await;
+        let mut out: Vec<ados_protocol::framebus::ModelInfo> = models
+            .values()
+            .map(|m| ados_protocol::framebus::ModelInfo {
+                id: m.meta.id.clone(),
+                kind: m.meta.kind,
+                execution: m.meta.execution,
+                backend_loaded: m.loaded.is_some(),
+                output_classes: m.meta.output_classes.clone(),
+            })
+            .collect();
+        out.sort_by(|a, b| a.id.cmp(&b.id));
+        out
+    }
+
     /// Run inference for `model_id` on a frame, serialized on the accelerator
     /// lease. Returns the detections. Errors when the model is unknown, is
     /// plugin-side (the plugin must run it), or has no loaded backend model.

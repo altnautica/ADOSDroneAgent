@@ -177,12 +177,21 @@ async fn dispatch(engine: &Arc<VisionEngine>, env: &Envelope) -> (Value, Option<
         m if m == methods::INFER => handle_infer(engine, &env.args).await,
         m if m == methods::PUBLISH_DETECTION => handle_publish(engine, &env.args).await,
         m if m == methods::DESIGNATE_TRACK => handle_designate_track(engine, &env.args).await,
+        m if m == methods::LIST_MODELS => handle_list_models(engine).await,
         other => Err(anyhow!("unknown vision method {other}")),
     };
     match result {
         Ok(args) => (args, None),
         Err(e) => (Value::Map(Vec::new()), Some(e.to_string())),
     }
+}
+
+async fn handle_list_models(engine: &Arc<VisionEngine>) -> Result<Value> {
+    // The engine's registered models, encoded as a msgpack Vec<ModelInfo> in a
+    // binary field so the control-plane relay returns them unchanged.
+    let models = engine.list_models().await;
+    let bytes = rmp_serde::to_vec_named(&models).map_err(|e| anyhow!("encode models: {e}"))?;
+    Ok(ok_map(&[("models", Value::Binary(bytes))]))
 }
 
 async fn handle_register(engine: &Arc<VisionEngine>, args: &Value) -> Result<Value> {
@@ -634,6 +643,47 @@ mod tests {
         assert_eq!(get(&map, "model_id"), Some(Value::from("com.example.m")));
         assert_eq!(get(&map, "execution"), Some(Value::from("engine_run")));
         assert_eq!(e.model_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn list_models_returns_the_registered_set() {
+        use ados_protocol::framebus::{ModelExecution, ModelInfo, ModelKind};
+        let e = engine();
+        for (id, exec) in [
+            ("b-model", ModelExecution::PluginSide),
+            ("a-model", ModelExecution::EngineRun),
+        ] {
+            let meta = ModelMetadata {
+                id: id.into(),
+                kind: ModelKind::Detection,
+                execution: exec,
+                input_width: 8,
+                input_height: 8,
+                input_format: FrameFormat::Rgb24,
+                output_classes: vec!["person".into()],
+                model_path: None,
+                head: ados_protocol::framebus::DetectionHead::Yolo8,
+            };
+            e.register_model(meta).await.unwrap();
+        }
+
+        let (resp, err) = dispatch(&e, &req_env(methods::LIST_MODELS, Value::Nil)).await;
+        assert!(err.is_none());
+        let map = as_map(&resp);
+        let bytes = match get(&map, "models") {
+            Some(Value::Binary(b)) => b,
+            other => panic!("expected models binary, got {other:?}"),
+        };
+        let models: Vec<ModelInfo> = rmp_serde::from_slice(&bytes).unwrap();
+        // Sorted by id, with execution + backend-loaded reported per model.
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "a-model");
+        assert_eq!(models[0].execution, ModelExecution::EngineRun);
+        assert_eq!(models[1].id, "b-model");
+        assert_eq!(models[1].execution, ModelExecution::PluginSide);
+        // The plugin-side model has no loaded backend.
+        assert!(!models[1].backend_loaded);
+        assert_eq!(models[0].output_classes, vec!["person".to_string()]);
     }
 
     #[tokio::test]
