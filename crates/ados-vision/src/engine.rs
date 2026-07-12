@@ -238,6 +238,21 @@ impl VisionEngine {
         self.models.lock().await.len()
     }
 
+    /// Registered model ids whose task (kind) matches `kind`, sorted for a
+    /// deterministic result. Lets a consumer request perception by TASK ("a
+    /// detection model", "a depth model") instead of naming one global
+    /// detector, so several tasks can be selected and paced together.
+    pub async fn models_for_kind(&self, kind: ados_protocol::framebus::ModelKind) -> Vec<String> {
+        let models = self.models.lock().await;
+        let mut ids: Vec<String> = models
+            .values()
+            .filter(|m| m.meta.kind == kind)
+            .map(|m| m.meta.id.clone())
+            .collect();
+        ids.sort();
+        ids
+    }
+
     /// Run inference for `model_id` on a frame, serialized on the accelerator
     /// lease. Returns the detections. Errors when the model is unknown, is
     /// plugin-side (the plugin must run it), or has no loaded backend model.
@@ -571,6 +586,32 @@ mod tests {
             model_path: None,
             head: ados_protocol::framebus::DetectionHead::Yolo8,
         }
+    }
+
+    #[tokio::test]
+    async fn models_for_kind_filters_by_task() {
+        let e = engine();
+        e.register_model(meta("det-a", ModelExecution::PluginSide))
+            .await
+            .unwrap();
+        e.register_model(meta("det-b", ModelExecution::PluginSide))
+            .await
+            .unwrap();
+        let mut seg = meta("seg", ModelExecution::PluginSide);
+        seg.kind = ModelKind::Segmentation;
+        e.register_model(seg).await.unwrap();
+
+        // Detection task returns both detectors, sorted; segmentation returns
+        // the one seg model; a task with no models returns empty.
+        assert_eq!(
+            e.models_for_kind(ModelKind::Detection).await,
+            vec!["det-a", "det-b"]
+        );
+        assert_eq!(
+            e.models_for_kind(ModelKind::Segmentation).await,
+            vec!["seg"]
+        );
+        assert!(e.models_for_kind(ModelKind::Tracking).await.is_empty());
     }
 
     #[tokio::test]

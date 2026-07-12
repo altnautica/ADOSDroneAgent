@@ -42,6 +42,7 @@ pub mod config;
 pub mod detection_bus;
 pub mod engine;
 pub mod frame_bus;
+pub mod perception_scheduler;
 pub mod reid;
 pub mod ring;
 pub mod source;
