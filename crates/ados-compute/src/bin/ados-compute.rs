@@ -46,10 +46,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use ados_atlas_transport::{atlas_event_router, AtlasEvent};
 use ados_compute::{
     artifact_router, build_atlas_jobs_sidecar, build_rerun_output, build_router_with_base,
-    derive_public_base, rewrite_output_to_artifact_url, submit_reconstruct_job,
-    write_atlas_jobs_sidecar, write_compute_heartbeat, AtlasIngest, Cluster, ComputeAuth,
-    ComputeJobState, Detector, Engine, JobStore, LiveReconstructConfig, MockDetector, Prepared,
-    PreparedInput, Scheduler, SelectingReconstructor, DEFAULT_PAIRING_PATH,
+    derive_public_base, offload_ws_router, rewrite_output_to_artifact_url, submit_reconstruct_job,
+    write_atlas_jobs_sidecar, write_compute_heartbeat, AtlasIngest, BackendResult, Cluster,
+    ComputeAuth, ComputeJobState, DetectionBroadcaster, Detector, Engine, JobStore,
+    LiveReconstructConfig, MockDetector, OffloadSessionManager, Prepared, PreparedInput, Scheduler,
+    SelectingReconstructor, SessionSpec, DEFAULT_PAIRING_PATH,
 };
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex};
@@ -66,6 +67,10 @@ const ATLAS_EVENT_CHANNEL_CAP: usize = 256;
 /// granularity + the skip-while-running reconcile). The cadence's own thresholds
 /// are much coarser (tens of seconds / keyframes); this is just the poll period.
 const LIVE_CADENCE_TICK_SECS: u64 = 2;
+/// Broadcaster/channel depth (batches) for the streaming-offload detection return
+/// lane. A slow WS subscriber past this buffer lags and skips (never blocking the
+/// detector); the pump keeps pace with the detector on this bound.
+const OFFLOAD_WS_CHANNEL_CAP: usize = 64;
 
 fn init_logging() {
     use ados_protocol::logd::layer::LogdLayer;
@@ -332,15 +337,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = std::fs::create_dir_all(&work_root);
 
     let store = JobStore::open(&db)?;
+    // The detector is shared between the one-shot job path (the scheduler) and the
+    // streaming-session path (the session manager below), so both run the same
+    // real ONNX model (or the mock in CI) over their frames.
+    let detector = select_detector();
     // The reconstructor picks the real backend per job (Brush when installed),
     // falling back to the mock (CI / no-GPU), and writes artifacts under work_root.
     let scheduler = Scheduler::new(
         store,
         Arc::new(SelectingReconstructor::new(work_root.clone())),
-        select_detector(),
+        detector.clone(),
     );
     let engine = Engine::new(scheduler, Cluster::new_master(node_id.clone()), workers);
     let state = Arc::new(Mutex::new(engine));
+
+    // The streaming perception-offload lane: a PerceptionOffload job carrying a
+    // `session` block (an NPU-less drone streaming its live camera) starts a
+    // continuous frames->detections session whose batches fan out over this
+    // broadcaster; the drone subscribes on the WS route mounted below. The
+    // one-shot per-frame offload job path is unchanged.
+    let offload_broadcaster = Arc::new(DetectionBroadcaster::new(OFFLOAD_WS_CHANNEL_CAP));
+    let offload_sessions = Arc::new(OffloadSessionManager::new(
+        offload_broadcaster.clone(),
+        detector.clone(),
+    ));
 
     // Startup recovery: a job left in Running (the daemon crashed mid-backend)
     // is neither claimable nor purgeable, so requeue it before the workers start.
@@ -363,7 +383,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ws = state.clone();
         let wr = work_root.clone();
         let pb = public_base.clone();
-        tokio::spawn(async move { worker_loop(ws, wr, pb).await });
+        let sessions = offload_sessions.clone();
+        tokio::spawn(async move { worker_loop(ws, wr, pb, sessions).await });
     }
     let rs = state.clone();
     tokio::spawn(async move { retention_loop(rs, retention_ms).await });
@@ -387,7 +408,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         auth,
         std::sync::Arc::from(public_base.as_str()),
     )
-    .merge(artifact_router(work_root.clone()));
+    .merge(artifact_router(work_root.clone()))
+    // The per-session offload detection return stream (node -> drone) rides the
+    // same job-API listener: the drone subscribes at /ws/offload/<session_id>.
+    // Unauthed like the atlas event route below (a LAN-local detection stream);
+    // the compute pairing gate wraps only the /api/compute/* routes.
+    .merge(offload_ws_router(offload_broadcaster.clone()));
 
     // Atlas world-model receiver. INERT unless atlas is enabled (Rule 46 single
     // canonical gate): when on, mount POST /api/atlas/event alongside the compute
@@ -441,7 +467,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// during the backend run wins inside `finalize`. A real `file://` artifact under
 /// the work root is rewritten to a fetchable LAN URL (the GCS reads it as the
 /// output URL) before finalize, keeping the local path for any pipeline chaining.
-async fn worker_loop(state: Arc<Mutex<Engine>>, work_root: PathBuf, public_base: String) {
+async fn worker_loop(
+    state: Arc<Mutex<Engine>>,
+    work_root: PathBuf,
+    public_base: String,
+    sessions: Arc<OffloadSessionManager>,
+) {
     loop {
         let (prepared, reconstructor, detector) = {
             let engine = state.lock().await;
@@ -451,6 +482,36 @@ async fn worker_loop(state: Arc<Mutex<Engine>>, work_root: PathBuf, public_base:
         };
         match prepared {
             Ok(Prepared::Ready { job, input }) => {
+                // A PerceptionOffload job carrying a `session` block requests a
+                // continuous streaming session, not one-shot inference: start the
+                // session (the node pulls the drone's RTSP feed -> detector ->
+                // broadcaster -> the WS the drone subscribes to) and finalize the
+                // job as accepted. The one-shot per-frame path below is unchanged.
+                if let Some(spec) = SessionSpec::from_job_params(&job.params) {
+                    let session_id = spec.id.clone();
+                    sessions.start(spec).await;
+                    let outcome = {
+                        let engine = state.lock().await;
+                        engine.scheduler().finalize(
+                            &job,
+                            BackendResult {
+                                outputs: Vec::new(),
+                                detections: Vec::new(),
+                                error: None,
+                            },
+                            now_ms(),
+                        )
+                    };
+                    match outcome {
+                        Ok(o) => {
+                            tracing::info!(job = %o.job_id, session = %session_id, "offload streaming session started")
+                        }
+                        Err(e) => {
+                            tracing::error!(job = %job.id, error = %e, "offload session job finalize failed")
+                        }
+                    }
+                    continue;
+                }
                 // Run the (real, possibly minutes-long) backend off the async
                 // runtime thread so a long reconstruction never starves the HTTP
                 // surface. The owned job + input move into the blocking task and

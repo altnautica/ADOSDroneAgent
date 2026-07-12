@@ -37,9 +37,12 @@ pub struct OffloadFrame {
 /// A source of RGB24 frames for an offload session. `next_frame` resolves with
 /// the next frame or an error when the source ends (stream closed, capture
 /// process exited); the session then stops (the drone re-opens it).
-#[allow(async_fn_in_trait)]
+///
+/// The returned future is `Send` so a session over an arbitrary stream can be
+/// spawned onto the multi-threaded runtime (the session manager spawns one per
+/// streaming session); both concrete impls' futures are already `Send`.
 pub trait OffloadFrameStream: Send {
-    async fn next_frame(&mut self) -> Result<OffloadFrame>;
+    fn next_frame(&mut self) -> impl std::future::Future<Output = Result<OffloadFrame>> + Send;
 }
 
 /// Run a streaming offload session: pull frames, run the detector on each on a

@@ -36,6 +36,8 @@ pub mod mdns;
 mod offload;
 mod offload_bridge;
 mod offload_client;
+mod offload_orchestrator;
+mod offload_session_manager;
 mod offload_stream;
 mod offload_ws;
 mod pipeline;
@@ -77,6 +79,10 @@ pub use offload::OnnxDetector;
 pub use offload::{Detection, Detector, FrameRef, MockDetector};
 pub use offload_bridge::{OffloadReturnBridge, VisionSockPublisher};
 pub use offload_client::stream_offload_detections;
+pub use offload_orchestrator::{
+    run_offload_orchestrator, NodeEndpoint, OrchestratorConfig, DEFAULT_VISION_SOCK,
+};
+pub use offload_session_manager::{OffloadSessionManager, SessionSpec};
 pub use offload_stream::{
     run_offload_session, OffloadFrame, OffloadFrameStream, RtspFrameStream, VecFrameStream,
 };
