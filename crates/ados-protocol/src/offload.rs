@@ -40,8 +40,8 @@ pub struct Detection {
 
 /// The current wire version of an [`OffloadDetectionBatch`]. Bumped whenever the
 /// batch's on-wire shape changes; a decode stamped with any other version fails
-/// loudly rather than silently mis-parsing (the DEC-225 freeze-and-version
-/// discipline, mirroring the `vision.detection` batch).
+/// loudly rather than silently mis-parsing (the freeze-and-version discipline,
+/// mirroring the versioned `vision.detection` batch).
 pub const OFFLOAD_DETECTION_VERSION: u16 = 1;
 
 /// One returned batch of detections for a streaming offload session (node ->
