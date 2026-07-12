@@ -54,8 +54,15 @@ YAML
 fi
 
 # --- Build both daemons (hard-fail: a broken build must stop here). ----------
+# ados-compute is built with `coreml` so it serves the REAL ONNX detector on the
+# Apple GPU (else it falls back to the mock — one placeholder box). Set
+# ADOS_COMPUTE_NO_COREML=1 to build the mock-only node (no ONNX Runtime).
 echo "building ados-control + ados-compute ..."
-( cd "$CRATES_DIR" && cargo build -p ados-control -p ados-compute )
+if [ -n "${ADOS_COMPUTE_NO_COREML:-}" ]; then
+  ( cd "$CRATES_DIR" && cargo build -p ados-control && cargo build -p ados-compute )
+else
+  ( cd "$CRATES_DIR" && cargo build -p ados-control && cargo build -p ados-compute --features coreml )
+fi
 
 CONTROL_BIN="$TARGET_DIR/ados-control"
 COMPUTE_BIN="$TARGET_DIR/ados-compute"
@@ -84,6 +91,27 @@ export ADOS_COMPUTE_WORK="${ADOS_COMPUTE_WORK:-$ADOS_HOME/compute/work}"
 export ADOS_COMPUTE_BIND=0.0.0.0:8092
 export ADOS_ATLAS_ENABLED=1
 export ADOS_COMPUTE_NODE_ID="${ADOS_COMPUTE_NODE_ID:-${DEVICE_ID}}"
+
+# --- Perception-offload detector. --------------------------------------------
+# Point ADOS_COMPUTE_DETECTOR_MODEL at a COCO detection .onnx to serve REAL
+# detections to an offloading drone; otherwise the node serves the mock detector
+# (a single placeholder box). Default search: $ADOS_HOME/models/. The input size
+# / head / class labels default to a YOLOv8 COCO model and are overridable.
+DETECTOR_DEFAULT="$ADOS_HOME/models/yolov8n_coco_640.onnx"
+if [ -z "${ADOS_COMPUTE_DETECTOR_MODEL:-}" ] && [ -f "$DETECTOR_DEFAULT" ]; then
+  export ADOS_COMPUTE_DETECTOR_MODEL="$DETECTOR_DEFAULT"
+fi
+if [ -n "${ADOS_COMPUTE_DETECTOR_MODEL:-}" ]; then
+  export ADOS_COMPUTE_DETECTOR_INPUT="${ADOS_COMPUTE_DETECTOR_INPUT:-640x640}"
+  export ADOS_COMPUTE_DETECTOR_HEAD="${ADOS_COMPUTE_DETECTOR_HEAD:-yolo8}"
+  # COCO-80 class labels (the standard YOLO order), so returned classes read as
+  # "person"/"car"/... instead of bare indices. Override to match your model.
+  export ADOS_COMPUTE_DETECTOR_CLASSES="${ADOS_COMPUTE_DETECTOR_CLASSES:-person,bicycle,car,motorcycle,airplane,bus,train,truck,boat,traffic light,fire hydrant,stop sign,parking meter,bench,bird,cat,dog,horse,sheep,cow,elephant,bear,zebra,giraffe,backpack,umbrella,handbag,tie,suitcase,frisbee,skis,snowboard,sports ball,kite,baseball bat,baseball glove,skateboard,surfboard,tennis racket,bottle,wine glass,cup,fork,knife,spoon,bowl,banana,apple,sandwich,orange,broccoli,carrot,hot dog,pizza,donut,cake,chair,couch,potted plant,bed,dining table,toilet,tv,laptop,mouse,remote,keyboard,cell phone,microwave,oven,toaster,sink,refrigerator,book,clock,vase,scissors,teddy bear,hair drier,toothbrush}"
+  echo "detector: $ADOS_COMPUTE_DETECTOR_MODEL (input $ADOS_COMPUTE_DETECTOR_INPUT, head $ADOS_COMPUTE_DETECTOR_HEAD)"
+else
+  echo "no detector model — serving the MOCK detector (one placeholder box)."
+  echo "  drop a COCO .onnx at $DETECTOR_DEFAULT or set ADOS_COMPUTE_DETECTOR_MODEL for real detections."
+fi
 # Pin a browser-reachable artifact base (this host's LAN IPv4, derived at
 # runtime) so reconstruction artifact URLs use a resolvable address instead of
 # the drifting mDNS .local hostname the browser cannot resolve.
