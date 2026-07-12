@@ -148,6 +148,7 @@ fn det(x: f32, y: f32, conf: f32) -> Detection {
         track_id: None,
         assoc_confidence: None,
         lock_state: None,
+        attributes: None,
     }
 }
 

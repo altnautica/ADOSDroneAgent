@@ -1140,6 +1140,7 @@ fn reported(track: &Track, bbox: BoundingBox, lock: LockState, assoc: f32) -> De
         track_id: Some(track.id),
         assoc_confidence: Some(assoc.clamp(0.0, 1.0)),
         lock_state: Some(lock),
+        attributes: None,
     }
 }
 
@@ -1190,6 +1191,7 @@ mod tests {
             track_id: None,
             assoc_confidence: None,
             lock_state: None,
+            attributes: None,
         }
     }
 

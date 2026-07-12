@@ -265,6 +265,7 @@ async fn handle_designate_track(engine: &Arc<VisionEngine>, args: &Value) -> Res
         track_id: None,
         assoc_confidence: None,
         lock_state: None,
+        attributes: None,
     };
     let track_id = engine.designate(&camera_id, &target).await;
     Ok(ok_map(&[
@@ -774,6 +775,7 @@ mod tests {
                 track_id: Some(7),
                 assoc_confidence: None,
                 lock_state: None,
+                attributes: None,
             }],
         };
         let frame = deliver_detection(&batch).unwrap();

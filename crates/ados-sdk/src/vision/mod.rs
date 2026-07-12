@@ -379,6 +379,7 @@ mod tests {
             track_id: Some(7),
             assoc_confidence: None,
             lock_state: None,
+            attributes: None,
         }];
         let blob = rmp_serde::to_vec_named(&dets).unwrap();
         let args = Value::Map(vec![(Value::from("detections"), Value::Binary(blob))]);

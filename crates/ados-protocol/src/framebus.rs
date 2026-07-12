@@ -25,6 +25,7 @@
 //! `vision.detection` topic and ride the plugin envelope directly; only frames
 //! need the ring.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{compiler_fence, fence, Ordering};
 
 use serde::{Deserialize, Serialize};
@@ -563,6 +564,15 @@ pub struct Detection {
     /// source does not report a lock state.
     #[serde(default)]
     pub lock_state: Option<LockState>,
+    /// Open, self-describing per-detection attributes: the extension point for
+    /// richer perception a model may carry beyond the 2D box — a segmentation
+    /// mask reference, keypoints, a depth estimate, a world-frame position — as
+    /// well as any model-specific metadata, keyed by name. A concrete primitive
+    /// promotes to its own typed field once a consumer needs it as first-class;
+    /// until then it rides here so the contract extends without a schema change.
+    /// Absent (skipped on the wire) when the source reports none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attributes: Option<BTreeMap<String, rmpv::Value>>,
 }
 
 /// The current wire version of a [`DetectionBatch`] on the `vision.detection`
@@ -704,6 +714,7 @@ mod contract_tests {
                 track_id: None,
                 assoc_confidence: None,
                 lock_state: None,
+                attributes: None,
             }],
         };
         let bytes = b.to_msgpack().unwrap();
@@ -777,6 +788,7 @@ mod contract_tests {
             track_id: Some(42),
             assoc_confidence: Some(0.73),
             lock_state: Some(LockState::Uncertain),
+            attributes: None,
         };
         let bytes = rmp_serde::to_vec_named(&d).unwrap();
         let back: Detection = rmp_serde::from_slice(&bytes).unwrap();
@@ -789,6 +801,64 @@ mod contract_tests {
         assert_eq!(rmp_serde::from_slice::<String>(&s).unwrap(), "locked");
         let s = rmp_serde::to_vec_named(&LockState::Lost).unwrap();
         assert_eq!(rmp_serde::from_slice::<String>(&s).unwrap(), "lost");
+    }
+
+    #[test]
+    fn detection_attributes_round_trip() {
+        // The open self-describing attributes map survives the msgpack wire.
+        let mut attrs = BTreeMap::new();
+        attrs.insert("depth_m".to_string(), rmpv::Value::from(4.2_f64));
+        attrs.insert("source".to_string(), rmpv::Value::from("plugin"));
+        let d = Detection {
+            bbox: BoundingBox {
+                x: 1.0,
+                y: 2.0,
+                width: 3.0,
+                height: 4.0,
+            },
+            class_label: "target".into(),
+            confidence: 0.9,
+            track_id: Some(7),
+            assoc_confidence: None,
+            lock_state: Some(LockState::Locked),
+            attributes: Some(attrs.clone()),
+        };
+        let bytes = rmp_serde::to_vec_named(&d).unwrap();
+        let back: Detection = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(back, d);
+        assert_eq!(back.attributes, Some(attrs));
+    }
+
+    #[test]
+    fn detection_without_attributes_defaults_none() {
+        // A producer predating `attributes` (no such key) still decodes, with
+        // attributes defaulting to None; and a detection with None skips the
+        // key on the wire (no per-detection overhead in the common case).
+        #[derive(Serialize)]
+        struct NoAttrsDetection {
+            bbox: BoundingBox,
+            class_label: String,
+            confidence: f32,
+            track_id: Option<u64>,
+            assoc_confidence: Option<f32>,
+            lock_state: Option<LockState>,
+        }
+        let old = NoAttrsDetection {
+            bbox: BoundingBox {
+                x: 0.0,
+                y: 0.0,
+                width: 5.0,
+                height: 5.0,
+            },
+            class_label: "target".into(),
+            confidence: 0.5,
+            track_id: None,
+            assoc_confidence: None,
+            lock_state: None,
+        };
+        let bytes = rmp_serde::to_vec_named(&old).unwrap();
+        let back: Detection = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(back.attributes, None);
     }
 
     #[test]
@@ -845,6 +915,7 @@ mod contract_tests {
             track_id: Some(3),
             assoc_confidence: Some(0.4),
             lock_state: Some(LockState::Lost),
+            attributes: None,
         };
         let bytes = rmp_serde::to_vec_named(&d).unwrap();
         let back: OldReader = rmp_serde::from_slice(&bytes).unwrap();

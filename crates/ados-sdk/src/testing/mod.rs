@@ -308,6 +308,7 @@ mod tests {
                 track_id: None,
                 assoc_confidence: None,
                 lock_state: None,
+                attributes: None,
             }],
         };
         engine.capture(batch.clone());

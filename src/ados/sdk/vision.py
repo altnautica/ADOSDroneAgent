@@ -526,9 +526,18 @@ class Detection:
     """Discrete identity-lock state this frame: ``"locked"`` | ``"uncertain"``
     | ``"lost"`` (lowercase, matching the wire enum). ``None`` when the source
     does not report a lock state."""
+    attributes: dict[str, Any] | None = None
+    """Open, self-describing per-detection attributes: the extension point for
+    richer perception beyond the 2D box (a segmentation mask reference,
+    keypoints, a depth estimate, a world-frame position) plus any model-specific
+    metadata, keyed by name. A concrete primitive promotes to its own typed
+    field once a consumer needs it as first-class; until then it rides here so
+    the contract extends without a schema change. ``None`` when the source
+    reports none. Also default-absent so it round-trips with producers/readers
+    that predate it."""
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "bbox": self.bbox.to_dict(),
             "class_label": self.class_label,
             "confidence": float(self.confidence),
@@ -540,9 +549,15 @@ class Detection:
             ),
             "lock_state": self.lock_state,
         }
+        # Omitted on the wire when absent, matching the Rust contract's
+        # skip-when-None (no per-detection overhead in the common case).
+        if self.attributes is not None:
+            out["attributes"] = self.attributes
+        return out
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> Detection:
+        attributes = raw.get("attributes")
         return cls(
             bbox=BoundingBox.from_dict(raw["bbox"]),
             class_label=str(raw["class_label"]),
@@ -562,6 +577,7 @@ class Detection:
                 if raw.get("lock_state") is not None
                 else None
             ),
+            attributes=dict(attributes) if isinstance(attributes, dict) else None,
         )
 
 

@@ -606,6 +606,7 @@ fn decode_detections(resp: &rmpv::Value) -> Result<Vec<Detection>> {
             lock_state: map_get(dm, "lock_state")
                 .and_then(|v| v.as_str())
                 .and_then(parse_lock),
+            attributes: None,
         });
     }
     Ok(out)

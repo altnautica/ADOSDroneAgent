@@ -663,6 +663,7 @@ mod tests {
                 track_id: None,
                 assoc_confidence: None,
                 lock_state: None,
+                attributes: None,
             }],
         };
         let reached = e.publish_detection(batch.clone());
@@ -710,6 +711,7 @@ mod tests {
             track_id: None,
             assoc_confidence: None,
             lock_state: None,
+            attributes: None,
         }
     }
 

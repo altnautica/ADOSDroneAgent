@@ -106,6 +106,7 @@ pub fn decode(data: &[f32], rows: usize, cols: usize, p: &DecodeParams) -> Vec<D
             track_id: None,
             assoc_confidence: None,
             lock_state: None,
+            attributes: None,
         });
     }
     out

@@ -119,6 +119,7 @@ mod tests {
                 track_id: Some(3),
                 assoc_confidence: None,
                 lock_state: None,
+                attributes: None,
             }],
         }
     }
