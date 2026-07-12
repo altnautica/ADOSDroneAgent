@@ -689,4 +689,5 @@ def test_model_info_to_dict_round_trip() -> None:
         "description": "desc",
         "task": "detection",
         "variants": [{"min_tops": 1.0}],
+        "recommended": False,
     }
