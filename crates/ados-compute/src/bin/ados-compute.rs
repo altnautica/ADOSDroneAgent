@@ -110,10 +110,18 @@ fn env_or(key: &str, default: &str) -> String {
 /// fall back to the mock so the offload path stays exercised with no model. A
 /// load failure logs and falls back to the mock rather than refusing to start
 /// (Rule 26: the node still comes up).
-fn select_detector() -> Arc<dyn Detector> {
+fn select_detector(config_model_path: Option<&str>) -> Arc<dyn Detector> {
+    // Used only in the onnx build (the mock path ignores it).
+    #[cfg(not(feature = "onnx"))]
+    let _ = config_model_path;
     #[cfg(feature = "onnx")]
     {
-        let path = env_or("ADOS_COMPUTE_DETECTOR_MODEL", "");
+        // The env wins (the bench override); else the operator-picked model from
+        // `perception.serving.detector_model` (resolved to a path). Empty ⇒ mock.
+        let path = match env_or("ADOS_COMPUTE_DETECTOR_MODEL", "") {
+            p if !p.is_empty() => p,
+            _ => config_model_path.unwrap_or("").to_string(),
+        };
         if !path.is_empty() {
             let (iw, ih) = parse_input_dims(&env_or("ADOS_COMPUTE_DETECTOR_INPUT", "640x640"));
             let classes: Vec<String> = std::env::var("ADOS_COMPUTE_DETECTOR_CLASSES")
@@ -340,7 +348,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The detector is shared between the one-shot job path (the scheduler) and the
     // streaming-session path (the session manager below), so both run the same
     // real ONNX model (or the mock in CI) over their frames.
-    let detector = select_detector();
+    // The offload-serving config: the toggle (auto-serve unless disabled) + the
+    // operator-picked detector model. Read once at startup (a change takes effect
+    // on the next daemon restart).
+    let serving = ados_compute::load_serving_config();
+    if !serving.serve_offload {
+        tracing::info!(
+            "perception offload serving disabled by config (perception.serving.enabled=off)"
+        );
+    }
+    let detector = select_detector(serving.detector_model_path.as_deref());
     // The reconstructor picks the real backend per job (Brush when installed),
     // falling back to the mock (CI / no-GPU), and writes artifacts under work_root.
     let scheduler = Scheduler::new(
@@ -360,6 +377,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let offload_sessions = Arc::new(OffloadSessionManager::new(
         offload_broadcaster.clone(),
         detector.clone(),
+        serving.serve_offload,
     ));
 
     // Startup recovery: a job left in Running (the daemon crashed mid-backend)

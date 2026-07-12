@@ -120,6 +120,7 @@ name = "ados-compute"
 version = "0.1.0"
 dependencies = [
  "ados-atlas-transport",
+ "ados-config",
  "ados-offload",
  "ados-protocol",
  "ados-vision",

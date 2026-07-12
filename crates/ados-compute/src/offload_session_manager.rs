@@ -83,6 +83,10 @@ impl SessionSpec {
 pub struct OffloadSessionManager {
     broadcaster: Arc<DetectionBroadcaster>,
     detector: Arc<dyn Detector>,
+    /// Whether the node serves offload sessions at all (the
+    /// `perception.serving.enabled` toggle). When false, `start` declines so the
+    /// node reconstructs but never runs perception offload for a drone.
+    serve_offload: bool,
     /// session id -> its cancel handle. `Arc<Mutex<..>>` so a session's own
     /// self-cleanup task can remove its entry when its stream ends.
     active: Arc<Mutex<HashMap<String, Arc<Notify>>>>,
@@ -90,11 +94,17 @@ pub struct OffloadSessionManager {
 
 impl OffloadSessionManager {
     /// A manager fanning sessions out over `broadcaster`, running `detector` on
-    /// every streamed frame.
-    pub fn new(broadcaster: Arc<DetectionBroadcaster>, detector: Arc<dyn Detector>) -> Self {
+    /// every streamed frame. `serve_offload` is the config toggle: when false,
+    /// every `start` is declined (the node still does reconstruction).
+    pub fn new(
+        broadcaster: Arc<DetectionBroadcaster>,
+        detector: Arc<dyn Detector>,
+        serve_offload: bool,
+    ) -> Self {
         Self {
             broadcaster,
             detector,
+            serve_offload,
             active: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -120,6 +130,10 @@ impl OffloadSessionManager {
     where
         S: OffloadFrameStream + 'static,
     {
+        if !self.serve_offload {
+            tracing::info!(session = %spec.id, "offload serving disabled by config; session declined");
+            return;
+        }
         let cancel = {
             let mut active = self.active.lock().await;
             if active.contains_key(&spec.id) {
@@ -194,7 +208,24 @@ mod tests {
         OffloadSessionManager::new(
             Arc::new(DetectionBroadcaster::new(64)),
             Arc::new(MockDetector),
+            true,
         )
+    }
+
+    #[tokio::test]
+    async fn a_disabled_manager_declines_a_session() {
+        let mgr = OffloadSessionManager::new(
+            Arc::new(DetectionBroadcaster::new(64)),
+            Arc::new(MockDetector),
+            false, // serving disabled
+        );
+        mgr.start_with_stream(spec("s-off"), VecFrameStream::new(vec![]))
+            .await;
+        assert_eq!(
+            mgr.active_count().await,
+            0,
+            "a disabled node starts no session"
+        );
     }
 
     fn spec(id: &str) -> SessionSpec {

@@ -22,6 +22,9 @@ ados-protocol = { path = "../ados-protocol", features = ["tracing-layer"] }
 # keyframe + capture-state events a drone forwards, and drains them into the job
 # queue (the world-model receive side). The bearer half is the air/GS sender.
 ados-atlas-transport = { path = "../ados-atlas-transport" }
+# Loud-fail read of the `perception.serving` slice of the agent config (the
+# offload-serving toggle + the served detector model).
+ados-config = { path = "../ados-config" }
 rusqlite = { workspace = true }
 # Error glue for the offload stream/bridge modules (the store/scheduler stay on
 # the typed ComputeError; the streaming session + return bridge use anyhow).
