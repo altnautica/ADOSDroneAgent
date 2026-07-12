@@ -28,6 +28,7 @@ import { AdvancedSettings } from "@/routes/settings/advanced-settings";
 import { CloudSettings } from "@/routes/settings/cloud-settings";
 import { DisplaySettings } from "@/routes/settings/display-settings";
 import { NetworkSettings } from "@/routes/settings/network-settings";
+import { OffloadSettings } from "@/routes/settings/offload-settings";
 import { ProfileSettings } from "@/routes/settings/profile-settings";
 import { RegionSettings } from "@/routes/settings/region-settings";
 import { VideoRoute } from "@/routes/video-route";
@@ -143,6 +144,7 @@ export function App() {
                   <Route path="network" element={<NetworkSettings />} />
                   <Route path="cloud" element={<CloudSettings />} />
                   <Route path="display" element={<DisplaySettings />} />
+                  <Route path="offload" element={<OffloadSettings />} />
                   <Route path="advanced" element={<AdvancedSettings />} />
                 </Route>
                 <Route

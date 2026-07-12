@@ -3,6 +3,7 @@ import {
   Cpu,
   Globe,
   Monitor,
+  Share2,
   ShieldAlert,
   UserCog,
   Wifi,
@@ -49,6 +50,12 @@ const SECTIONS: SectionLink[] = [
     label: "Display",
     icon: Monitor,
     blurb: "Local kiosk display selection.",
+  },
+  {
+    to: "/settings/offload",
+    label: "Offload",
+    icon: Share2,
+    blurb: "Perception offload: drone target or workstation serving.",
   },
   {
     to: "/settings/advanced",

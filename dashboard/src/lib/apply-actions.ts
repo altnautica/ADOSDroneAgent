@@ -79,6 +79,16 @@ export function postApply(payload: ApplyPayload) {
   });
 }
 
+// A single dot-path config write (the same PUT /api/config the GCS uses). Used
+// by the Offload settings page, whose keys are additive perception.* fields with
+// no batch-apply section — a per-key write is simpler and mirrors the GCS.
+export function putConfigValue(key: string, value: string) {
+  return apiFetch<{ ok?: boolean }>("/api/config", {
+    method: "PUT",
+    body: { key, value },
+  });
+}
+
 // Helpers used by section pages to read suggested defaults from the
 // existing setup status payload.
 

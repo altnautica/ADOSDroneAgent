@@ -31,6 +31,18 @@ export interface AgentConfig {
       api_key?: string;
     };
   };
+  // Two-tier perception execution: the drone-side offload target + the
+  // workstation-side serving toggle. Read on the Offload settings page.
+  perception?: {
+    offload?: {
+      enabled?: string;
+      compute_node_addr?: string;
+    };
+    serving?: {
+      enabled?: string;
+      detector_model?: string;
+    };
+  };
   [key: string]: unknown;
 }
 
