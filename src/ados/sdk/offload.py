@@ -15,7 +15,10 @@ usable by any offloaded-vision behaviour.
 from __future__ import annotations
 
 import enum
+import logging
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 
 class ExecutionTier(str, enum.Enum):
@@ -43,6 +46,50 @@ class ExecutionTier(str, enum.Enum):
     """Run the model on the paired compute node; detections stream back."""
     AUTO = "auto"
     """Let the runtime pick local vs offload from the live perception tier."""
+
+
+class ResolvedTier(str, enum.Enum):
+    """The perception tier the host RESOLVED for a session — distinct from the
+    plugin's :class:`ExecutionTier` *intent*.
+
+    A plugin passes an :class:`ExecutionTier` intent (``local`` / ``offload`` /
+    ``auto``) to ``ctx.compute.open_stream``; the host resolves it against the
+    live board + offload signals (``ados_offload::pick_tier``) and reports one of
+    these back on ``session.execution``. The resolved domain is a SUPERSET of the
+    intent: it drops ``auto`` (already decided) and adds ``hybrid`` (a light local
+    model plus the node) and ``none`` (no perception path — odometry only). So a
+    resolved tier must never be forced back through :class:`ExecutionTier`, which
+    has no ``hybrid`` / ``none`` member and would raise on them.
+    """
+
+    LOCAL = "local"
+    """Inference ran on the drone's own accelerator."""
+    OFFLOAD = "offload"
+    """Inference ran on the paired compute node; detections streamed back."""
+    HYBRID = "hybrid"
+    """A light local model plus the node — both contribute."""
+    NONE = "none"
+    """No perception path resolved (odometry only, no detection / tracking)."""
+
+    @classmethod
+    def parse(cls, value: str) -> ResolvedTier:
+        """Parse a host-reported tier string, TOTAL and never raising.
+
+        A recognised value maps to its member; an unrecognised one (a
+        forward/unknown tier from a newer host) degrades to :attr:`LOCAL` — the
+        on-drone path, matching the absent-key default — and logs, so an
+        unexpected reply can never crash the plugin's ``open_stream``.
+        """
+        try:
+            return cls(value)
+        except ValueError:
+            logger.warning(
+                "unknown resolved perception tier %r from the host; "
+                "treating the session as %r",
+                value,
+                cls.LOCAL.value,
+            )
+            return cls.LOCAL
 
 
 class GateState(str, enum.Enum):

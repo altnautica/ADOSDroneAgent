@@ -6,7 +6,25 @@ lock-state machine, with the never-auto-re-acquire invariant.
 
 from __future__ import annotations
 
-from ados.sdk.offload import FreshnessGate, GateState, LockGate, LockState
+from ados.sdk.offload import (
+    FreshnessGate,
+    GateState,
+    LockGate,
+    LockState,
+    ResolvedTier,
+)
+
+
+def test_resolved_tier_parse_is_total_and_never_raises():
+    # The host reports one of local/offload/hybrid/none; parse maps each and
+    # degrades an unexpected value to the on-drone default rather than raising.
+    assert ResolvedTier.parse("local") is ResolvedTier.LOCAL
+    assert ResolvedTier.parse("offload") is ResolvedTier.OFFLOAD
+    assert ResolvedTier.parse("hybrid") is ResolvedTier.HYBRID
+    assert ResolvedTier.parse("none") is ResolvedTier.NONE
+    # Unknown / empty -> LOCAL, never a ValueError.
+    assert ResolvedTier.parse("bogus") is ResolvedTier.LOCAL
+    assert ResolvedTier.parse("") is ResolvedTier.LOCAL
 
 
 def test_freshness_is_lost_until_a_result_then_fresh_then_stale():

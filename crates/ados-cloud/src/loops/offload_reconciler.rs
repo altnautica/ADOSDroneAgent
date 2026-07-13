@@ -320,7 +320,16 @@ pub async fn run(config: Arc<CloudConfig>, mut shutdown: watch::Receiver<bool>) 
                         write_link(true, Some(sess.target.clone()), sess.device_id.clone());
                     } else if let Some(sess) = running.take() {
                         tracing::info!(target = %sess.target, "offload reconciler: stopping the session");
-                        sess.cancel.notify_waiters();
+                        // notify_one (not notify_waiters): the orchestrator task
+                        // runs submit_job().await (up to ~15s) + opens the WS
+                        // BEFORE it parks on cancel.notified(), so a stop issued in
+                        // that window has no parked waiter. notify_one STORES a
+                        // permit the task observes the moment it parks; notify_waiters
+                        // would be dropped and, since the handle was already taken,
+                        // the next tick could start a SECOND session while the first
+                        // keeps streaming. The node-side session manager relies on the
+                        // same permit semantics for its stop path.
+                        sess.cancel.notify_one();
                         write_link(false, None, None);
                     }
                 } else {
@@ -361,7 +370,10 @@ pub async fn run(config: Arc<CloudConfig>, mut shutdown: watch::Receiver<bool>) 
     }
 
     if let Some(sess) = running.take() {
-        sess.cancel.notify_waiters();
+        // notify_one stores a permit so the cancel is observed even if the
+        // orchestrator task has not yet reached cancel.notified() (still in its
+        // submit_job/WS-open window) — notify_waiters would be lost on shutdown.
+        sess.cancel.notify_one();
     }
 }
 
@@ -421,5 +433,34 @@ mod tests {
         assert!(local_ip_towards("1.1.1.1", 80).is_some());
         // An unresolvable host yields None (never a fabricated reach).
         assert!(local_ip_towards("not a host", 80).is_none());
+    }
+
+    /// The cancel primitive must survive a stop issued BEFORE the orchestrator
+    /// task parks on `cancel.notified()` — that window (submit_job + WS open) is
+    /// exactly when the reconciler's stop fires. `notify_one` stores a permit;
+    /// `notify_waiters` (the old bug) would drop it with no parked waiter.
+    #[tokio::test]
+    async fn notify_one_before_parking_is_still_observed() {
+        let cancel = Arc::new(Notify::new());
+        // Stop fires first, while the "orchestrator" is still busy (no waiter yet).
+        cancel.notify_one();
+        // The task then parks: it observes the stored permit immediately.
+        tokio::time::timeout(Duration::from_millis(200), cancel.notified())
+            .await
+            .expect("a notify_one permit is observed by a later waiter");
+    }
+
+    #[tokio::test]
+    async fn notify_waiters_before_parking_is_lost() {
+        // The bug this fix removes: notify_waiters with no parked waiter wakes
+        // nobody, so a later waiter never observes it (the cancel is dropped).
+        let cancel = Arc::new(Notify::new());
+        cancel.notify_waiters();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), cancel.notified())
+                .await
+                .is_err(),
+            "notify_waiters with no waiter is lost, proving why the fix uses notify_one"
+        );
     }
 }

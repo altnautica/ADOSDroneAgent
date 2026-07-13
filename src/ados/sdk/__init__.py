@@ -61,6 +61,7 @@ from ados.sdk.offload import (
     GateState,
     LockGate,
     LockState,
+    ResolvedTier,
 )
 from ados.sdk.testing import (
     FakeVisionEngine,
@@ -116,6 +117,7 @@ __all__ = [
     "JobStatus",
     "OffloadStreamSession",
     "ExecutionTier",
+    "ResolvedTier",
     # Vision
     "VisionClient",
     "FrameFormat",

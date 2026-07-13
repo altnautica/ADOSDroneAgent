@@ -13,7 +13,7 @@ import pytest
 
 from ados.plugins.errors import CapabilityDenied
 from ados.sdk.compute import ComputeClient, JobStatus, Submission
-from ados.sdk.offload import ExecutionTier
+from ados.sdk.offload import ExecutionTier, ResolvedTier
 from ados.sdk.testing.stubs import FakeIpcClient
 from ados.sdk.vision import DetectionBatch
 
@@ -184,7 +184,7 @@ async def test_open_stream_offload_async_iterates_returned_batches():
     )
     compute = ComputeClient(ipc)
     session = await compute.open_stream(camera_id="front", execution=ExecutionTier.AUTO)
-    assert session.execution is ExecutionTier.OFFLOAD
+    assert session.execution is ResolvedTier.OFFLOAD
     assert session.opened is True
     assert session.session_id == "s1"
     assert session.source == "rtsp://10.0.0.2:8554/main"
@@ -222,7 +222,7 @@ async def test_open_stream_auto_resolves_offload_when_npu_less_paired_local_othe
         {"execution": "offload", "opened": True, "session_id": "s-off", "camera_id": "front"},
     )
     offloaded = await compute.open_stream(execution=ExecutionTier.AUTO)
-    assert offloaded.execution is ExecutionTier.OFFLOAD
+    assert offloaded.execution is ResolvedTier.OFFLOAD
     assert offloaded.opened is True
 
     # An accelerator / no node -> the host resolves local, starts no session.
@@ -231,8 +231,39 @@ async def test_open_stream_auto_resolves_offload_when_npu_less_paired_local_othe
         {"execution": "local", "opened": False, "session_id": "s-loc", "camera_id": "front"},
     )
     local = await compute.open_stream(execution=ExecutionTier.AUTO)
-    assert local.execution is ExecutionTier.LOCAL
+    assert local.execution is ResolvedTier.LOCAL
     assert local.opened is False
+
+
+async def test_open_stream_reports_hybrid_and_none_without_raising():
+    # The host resolves a tier the plugin's ExecutionTier intent has no member
+    # for (hybrid = light-local + node; none = no perception path). The session
+    # must report the resolved tier, not crash constructing it (Bug: the old
+    # ExecutionTier() constructor raised ValueError on hybrid/none).
+    ipc = _ipc({"compute.stream.open"})
+    compute = ComputeClient(ipc)
+    for tier, opened in (("hybrid", True), ("none", False)):
+        ipc.set_response(
+            "compute.stream.open",
+            {"execution": tier, "opened": opened, "session_id": f"s-{tier}", "camera_id": "front"},
+        )
+        session = await compute.open_stream(execution=ExecutionTier.AUTO)
+        assert session.execution is ResolvedTier(tier)
+        assert session.execution.value == tier
+        assert session.opened is opened
+
+
+async def test_open_stream_falls_back_on_an_unknown_tier_without_raising():
+    # A forward/unknown tier from a newer host degrades to the on-drone default,
+    # never raising (a crash here would take down the plugin's open_stream).
+    ipc = _ipc({"compute.stream.open"})
+    ipc.set_response(
+        "compute.stream.open",
+        {"execution": "quantum", "opened": False, "session_id": "s-x", "camera_id": "front"},
+    )
+    compute = ComputeClient(ipc)
+    session = await compute.open_stream(execution=ExecutionTier.AUTO)
+    assert session.execution is ResolvedTier.LOCAL
 
 
 async def test_open_stream_health_reads_the_session_registry():

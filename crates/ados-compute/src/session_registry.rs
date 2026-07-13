@@ -284,9 +284,15 @@ impl SessionRegistry {
         self.lock().len()
     }
 
-    /// Whether any session is live (the batch-yields-to-streaming signal).
+    /// Whether any session is actively live — `Opening` or `Live` (the
+    /// batch-yields-to-streaming signal). A `Stalled` session (quiet /
+    /// reconnecting) does NOT count, matching the `active` projection's
+    /// [`counts_as_active`] definition; batch yields only to a session that is
+    /// actually producing / coming up, never to a stalled one holding a record.
     pub(crate) fn any_live(&self) -> bool {
-        !self.lock().is_empty()
+        self.lock()
+            .values()
+            .any(|e| counts_as_active(e.session.state))
     }
 
     /// Snapshot every live session as a serializable view, oldest first.
@@ -500,6 +506,34 @@ mod tests {
         assert_eq!(v["reconnects"], 0);
         assert_eq!(v["restarts"], 0);
         assert_eq!(v["uptime_ms"], 1000); // 2000 - 1000
+    }
+
+    #[test]
+    fn any_live_counts_active_sessions_not_stalled_ones() {
+        let r = SessionRegistry::new();
+        // No records -> nothing live.
+        assert!(!r.any_live());
+
+        // Opening counts as live.
+        r.register("s1", "front", "rtsp://d/main", cancel(), 1000);
+        assert!(r.any_live(), "an Opening session is live");
+
+        // Live counts.
+        r.on_batch("s1", 1100);
+        assert!(r.any_live(), "a Live session is live");
+
+        // Stalled alone does NOT count (holds a record, but is not producing).
+        r.on_reconnect("s1");
+        assert_eq!(state(&r, "s1"), SessionState::Stalled);
+        assert!(
+            !r.any_live(),
+            "a Stalled session holds a record but is not counted live"
+        );
+        assert_eq!(r.len(), 1, "the stalled session is still registered");
+
+        // Recovery flips it back to live.
+        r.on_batch("s1", 2000);
+        assert!(r.any_live(), "recovery back to Live counts again");
     }
 
     #[test]

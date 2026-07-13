@@ -29,7 +29,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from ados.sdk.offload import ExecutionTier
+from ados.sdk.offload import ExecutionTier, ResolvedTier
 
 if TYPE_CHECKING:
     from ados.plugins.ipc_client import PluginIpcClient
@@ -98,10 +98,13 @@ class OffloadStreamSession:
     plugin that only opens and closes a session (never iterates) does not need
     the ``vision.detection.subscribe`` capability.
 
-    :attr:`execution` is the tier the host resolved for this session (the agent's
-    ``pick_tier`` decision), and :attr:`opened` is whether an offload session was
-    actually started (``False`` when the runtime resolved to local — the plugin
-    then runs its model on the local accelerator via ``ctx.vision``).
+    :attr:`execution` is the :class:`~ados.sdk.offload.ResolvedTier` the host
+    resolved for this session (the agent's ``pick_tier`` decision — one of
+    ``local`` / ``offload`` / ``hybrid`` / ``none``, NOT the plugin's
+    :class:`~ados.sdk.offload.ExecutionTier` intent), and :attr:`opened` is
+    whether an offload session was actually started (``False`` when the runtime
+    resolved to local — the plugin then runs its model on the local accelerator
+    via ``ctx.vision``).
     """
 
     def __init__(
@@ -110,7 +113,7 @@ class OffloadStreamSession:
         ipc: PluginIpcClient,
         session_id: str,
         camera_id: str,
-        execution: ExecutionTier,
+        execution: ResolvedTier,
         opened: bool,
         source: str | None = None,
         node: str | None = None,
@@ -319,7 +322,9 @@ class ComputeClient:
 
         The host resolves the perception tier (``ados_offload::pick_tier`` reading
         the offload-link sidecar — the tier logic is not duplicated here) and
-        reports the resolved tier on the returned session's :attr:`execution`. For
+        reports it on the returned session's :attr:`execution` as a
+        :class:`~ados.sdk.offload.ResolvedTier` (``local`` / ``offload`` /
+        ``hybrid`` / ``none`` — a superset of the ``ExecutionTier`` intent). For
         ``AUTO``/``OFFLOAD`` on an NPU-less drone with a paired node it starts the
         node-side session (``session.opened`` is ``True``); when it resolves to
         local it starts none (``opened`` is ``False``) and the plugin runs its
@@ -349,7 +354,10 @@ class ComputeClient:
             ipc=self._ipc,
             session_id=str(resp.get("session_id", session_id or "")),
             camera_id=str(resp.get("camera_id", camera_id)),
-            execution=ExecutionTier(str(resp.get("execution", "local"))),
+            # The host reports the RESOLVED tier (local/offload/hybrid/none), a
+            # superset of the ExecutionTier intent — parse it into the total
+            # ResolvedTier so a hybrid/none/unknown reply never raises here.
+            execution=ResolvedTier.parse(str(resp.get("execution", "local"))),
             opened=bool(resp.get("opened", False)),
             source=resp.get("source"),
             node=resp.get("node"),
