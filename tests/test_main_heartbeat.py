@@ -7,8 +7,13 @@ which serves the same heartbeat contract from inside the API process.
 
 from __future__ import annotations
 
+import json
+import time
+from pathlib import Path
+
 from ados.core.config import ADOSConfig
 from ados.core.main import AgentApp
+from ados.hal.detect import BoardInfo
 
 
 def _fresh_app() -> AgentApp:
@@ -16,6 +21,36 @@ def _fresh_app() -> AgentApp:
     config = ADOSConfig()
     app = AgentApp(config)
     return app
+
+
+def _no_accel_board() -> BoardInfo:
+    """A deterministic NPU-less board so the tier decision does not depend on
+    whatever the CI/dev box auto-detects."""
+    return BoardInfo(name="pi", model="Raspberry Pi 4", tier=3, ram_mb=4000, cpu_cores=4)
+
+
+def _write_offload_link(
+    path: Path,
+    *,
+    paired: bool,
+    bearer: bool,
+    target: str | None,
+    age_ms: float = 0.0,
+) -> None:
+    """Write an offload-link sidecar in the shape the offload reconciler emits
+    (camelCase, staleness-gated on ``generatedAtMs``)."""
+    now_ms = time.time() * 1000.0
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "generatedAtMs": now_ms - age_ms,
+                "paired": paired,
+                "bearerAcceptable": bearer,
+                "target": target,
+            }
+        )
+    )
 
 
 def test_heartbeat_payload_carries_perception_capability() -> None:
@@ -34,6 +69,57 @@ def test_heartbeat_payload_carries_perception_capability() -> None:
     # Capability and tier agree: no accelerator ⇒ not local.
     if not payload["hasAccelerator"]:
         assert payload["perceptionTier"] != "local"
+
+
+def test_heartbeat_offload_link_reports_offload_tier_and_target(
+    monkeypatch, tmp_path
+) -> None:
+    """A fresh offload-link sidecar (a paired, reachable workstation) makes an
+    NPU-less drone report tier 'offload' and name the workstation target on the
+    cloud heartbeat — matching the native /api/status so LAN and cloud agree."""
+    link = tmp_path / "offload-link.json"
+    _write_offload_link(link, paired=True, bearer=True, target="192.168.1.5:8092")
+    monkeypatch.setattr("ados.core.paths.OFFLOAD_LINK_JSON", link)
+
+    app = _fresh_app()
+    app.board = _no_accel_board()
+    payload = app._build_heartbeat_payload()
+    assert payload["hasAccelerator"] is False
+    assert payload["perceptionTier"] == "offload"
+    assert payload["perceptionOffloadTarget"] == "192.168.1.5:8092"
+
+
+def test_heartbeat_stale_offload_link_is_not_reported(monkeypatch, tmp_path) -> None:
+    """A stale offload-link sidecar (older than the staleness window) is treated
+    as absent: the drone falls back to the no-offload tier ('none' on an NPU-less
+    board) with a null target, never a frozen 'offload' after the workstation is
+    gone (Rule 44)."""
+    link = tmp_path / "offload-link.json"
+    _write_offload_link(
+        link, paired=True, bearer=True, target="192.168.1.5:8092", age_ms=30_000.0
+    )
+    monkeypatch.setattr("ados.core.paths.OFFLOAD_LINK_JSON", link)
+
+    app = _fresh_app()
+    app.board = _no_accel_board()
+    payload = app._build_heartbeat_payload()
+    assert payload["perceptionTier"] == "none"
+    assert payload["perceptionOffloadTarget"] is None
+
+
+def test_heartbeat_unpaired_offload_link_names_no_target(monkeypatch, tmp_path) -> None:
+    """A fresh sidecar reporting 'not paired this tick' is not an offload path:
+    tier 'none' and a null target (the reconciler writes paired:false rather than
+    leaving a stale paired file behind)."""
+    link = tmp_path / "offload-link.json"
+    _write_offload_link(link, paired=False, bearer=False, target=None)
+    monkeypatch.setattr("ados.core.paths.OFFLOAD_LINK_JSON", link)
+
+    app = _fresh_app()
+    app.board = _no_accel_board()
+    payload = app._build_heartbeat_payload()
+    assert payload["perceptionTier"] == "none"
+    assert payload["perceptionOffloadTarget"] is None
 
 
 def test_heartbeat_payload_includes_runtime_mode() -> None:

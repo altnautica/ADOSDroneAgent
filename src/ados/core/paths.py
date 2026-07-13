@@ -199,6 +199,14 @@ USB_REHOME_JSON = ADOS_RUN_DIR / "usb-rehome.json"
 CAMERA_USB_RECOVERY_JSON = ADOS_RUN_DIR / "camera-usb-recovery.json"
 BITRATE_CONTROLLER_JSON = ADOS_RUN_DIR / "bitrate-controller.json"
 
+# Perception offload-link state, written by the offload reconciler: whether a
+# workstation node is paired + reachable and the drone is offloading to it. Read
+# staleness-gated by the perception-tier decision so an NPU-less drone with a
+# reachable workstation reports (and runs) tier "offload". Shape is the
+# ados-protocol offload-link sidecar (camelCase: paired / bearerAcceptable /
+# target / generatedAtMs).
+OFFLOAD_LINK_JSON = ADOS_RUN_DIR / "offload-link.json"
+
 # Local-bind to cloud-relay failover state. Written by the always-on
 # auto-pair supervisor (a separate process from the API) when a fresh
 # rig keeps failing to bind locally and falls back to the cloud relay.

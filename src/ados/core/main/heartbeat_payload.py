@@ -52,6 +52,42 @@ def _read_install_result() -> dict | None:
 _WFB_STATS_FRESH_S = 10.0
 
 
+# An offload-link sidecar not re-written within this window is treated as
+# absent, so a dead / hung reconciler (whose tmpfs file persists) never keeps a
+# drone reporting a frozen "offload" tier after the workstation is gone
+# (operating rule 44). Mirrors ados_protocol::offload_link::OFFLOAD_LINK_STALE_MS
+# (4x the reconciler's ~5 s tick).
+_OFFLOAD_LINK_STALE_MS = 20_000
+
+
+def _read_offload_link() -> dict | None:
+    """Read the perception offload-link sidecar, staleness-gated.
+
+    Mirrors ``ados_protocol::offload_link::read_offload_link`` (the reader the
+    native ``/api/status`` uses): parse the sidecar the offload reconciler writes
+    each tick, require its ``generatedAtMs`` write time, and drop it when older
+    than :data:`_OFFLOAD_LINK_STALE_MS`. Returns the parsed dict (camelCase keys:
+    ``paired`` / ``bearerAcceptable`` / ``target``), or ``None`` on a missing,
+    unparseable, write-time-less, or stale file. Best-effort; never raises.
+    """
+    from ados.core.paths import OFFLOAD_LINK_JSON
+
+    try:
+        data = json.loads(OFFLOAD_LINK_JSON.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    generated = data.get("generatedAtMs")
+    if not isinstance(generated, (int, float)):
+        # No write time ⇒ cannot age-gate it ⇒ conservatively treated as gone.
+        return None
+    now_ms = time.time() * 1000.0
+    if now_ms - float(generated) > _OFFLOAD_LINK_STALE_MS:
+        return None
+    return data
+
+
 def _read_wfb_stats_sidecar() -> dict | None:
     """Read the radio service's stats sidecar when it exists and is fresh.
 
@@ -194,12 +230,30 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
     # Perception capability + the tier this node would pick. npuTops/hasAccelerator
     # are the board's declared NPU capability; perceptionTier mirrors
     # ados-offload::pick_tier (an NPU board runs detection locally, a board without
-    # one offloads to a paired compute node). The offload target stays null until a
-    # workstation is paired — never a fabricated reach (Rule 44).
+    # one offloads to a paired compute node). The offload signals are the live
+    # offload-link the reconciler writes: a paired, reachable workstation flips
+    # compute_node_paired + bearer_acceptable true and names the target. Absent /
+    # stale ⇒ no link ⇒ an NPU board reads "local" and a board without one reads
+    # "none"; the target surfaces only on an actual offload path, never a
+    # fabricated reach (Rule 44). Fed identically to the native /api/status via the
+    # same sidecar + tier decision, so the LAN and cloud surfaces agree.
     board_npu_tops = float(getattr(board, "npu_tops", 0.0) or 0.0) if board else 0.0
     board_has_accel = bool(getattr(board, "has_accelerator", False)) if board else False
-    perception_tier_val = perception_tier(has_accelerator=board_has_accel)
-    perception_offload_target = None
+    _offload_link = _read_offload_link()
+    _link_paired = bool(_offload_link.get("paired", False)) if _offload_link else False
+    _link_bearer_ok = (
+        bool(_offload_link.get("bearerAcceptable", False)) if _offload_link else False
+    )
+    perception_tier_val = perception_tier(
+        has_accelerator=board_has_accel,
+        compute_node_paired=_link_paired,
+        bearer_acceptable=_link_bearer_ok,
+    )
+    # is_offload_path == paired && bearer_acceptable (independent of the tier: an
+    # accelerator board still names a reachable node it could offload to).
+    perception_offload_target = (
+        _offload_link.get("target") if (_link_paired and _link_bearer_ok) else None
+    )
 
     # Health info from monitor
     health = app.health

@@ -95,6 +95,7 @@ fn base_payload() -> HeartbeatPayload {
         compute_cluster_master_id: None,
         compute_queue_depth: None,
         compute_active_jobs: None,
+        compute_active_sessions: None,
         compute_workers_idle: None,
         compute_cluster_aggregate_workers_idle: None,
         compute_cluster_slaves: None,

@@ -50,6 +50,8 @@ struct ComputeSidecar {
     compute_cluster_master_id: Option<String>,
     compute_queue_depth: Option<i64>,
     compute_active_jobs: Option<i64>,
+    /// Live streaming perception-offload sessions (a node serving N drones).
+    compute_active_sessions: Option<i64>,
     compute_workers_idle: Option<i64>,
     compute_cluster_aggregate_workers_idle: Option<i64>,
     compute_cluster_slaves: Option<Vec<ClusterSlave>>,
@@ -436,6 +438,7 @@ fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
         compute_cluster_master_id: compute.compute_cluster_master_id,
         compute_queue_depth: compute.compute_queue_depth,
         compute_active_jobs: compute.compute_active_jobs,
+        compute_active_sessions: compute.compute_active_sessions,
         compute_workers_idle: compute.compute_workers_idle,
         compute_cluster_aggregate_workers_idle: compute.compute_cluster_aggregate_workers_idle,
         compute_cluster_slaves: compute.compute_cluster_slaves,
@@ -514,6 +517,7 @@ mod tests {
                 "computeClusterMasterId": "node-a",
                 "computeQueueDepth": 2,
                 "computeActiveJobs": 1,
+                "computeActiveSessions": 4,
                 "computeWorkersIdle": 3,
                 "computeClusterAggregateWorkersIdle": 5,
                 "computeClusterSlaves": [
@@ -525,6 +529,9 @@ mod tests {
         let fresh = read_compute_sidecar_from(&path, 1_000_000 + 5_000).unwrap();
         assert_eq!(fresh.compute_role.as_deref(), Some("master"));
         assert_eq!(fresh.compute_workers_idle, Some(3));
+        // Live streaming offload sessions fold onto the heartbeat too (distinct
+        // from queued/active reconstruction jobs).
+        assert_eq!(fresh.compute_active_sessions, Some(4));
         assert_eq!(fresh.compute_cluster_slaves.unwrap()[0].node_id, "s1");
         // Stale (past the budget) → None: a dead/hung producer is not folded.
         assert!(read_compute_sidecar_from(&path, 1_000_000 + 25_000).is_none());

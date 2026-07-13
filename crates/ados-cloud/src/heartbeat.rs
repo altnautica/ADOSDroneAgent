@@ -364,6 +364,11 @@ pub struct HeartbeatPayload {
     pub compute_queue_depth: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compute_active_jobs: Option<i64>,
+    /// Live streaming perception-offload sessions (a node serving N drones),
+    /// distinct from queued/active reconstruction jobs. Absent on a non-compute
+    /// node so a drone/GS heartbeat stays byte-identical.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compute_active_sessions: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compute_workers_idle: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -569,6 +574,7 @@ mod tests {
             compute_cluster_master_id: None,
             compute_queue_depth: None,
             compute_active_jobs: None,
+            compute_active_sessions: None,
             compute_workers_idle: None,
             compute_cluster_aggregate_workers_idle: None,
             compute_cluster_slaves: None,
