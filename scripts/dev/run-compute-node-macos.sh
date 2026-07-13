@@ -26,7 +26,17 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 CRATES_DIR="$REPO_ROOT/crates"
-TARGET_DIR="${CARGO_TARGET_DIR:-$CRATES_DIR/target}/debug"
+# A compute node serves the REAL ONNX detector over a live RTSP feed, so it runs
+# an optimized (release) build by default — a debug build's inference is slow
+# enough that it can't keep up with the frame stream and mediamtx drops the node
+# as a slow reader. Set ADOS_COMPUTE_PROFILE=debug for a fast-iteration build.
+PROFILE="${ADOS_COMPUTE_PROFILE:-release}"
+if [ "$PROFILE" = "release" ]; then
+  CARGO_PROFILE_FLAG="--release"; PROFILE_DIR="release"
+else
+  CARGO_PROFILE_FLAG=""; PROFILE_DIR="debug"
+fi
+TARGET_DIR="${CARGO_TARGET_DIR:-$CRATES_DIR/target}/$PROFILE_DIR"
 
 # --- Dev home + run/compute dirs (never the system /run//etc paths). ---------
 ADOS_HOME="${ADOS_HOME:-$HOME/.ados}"
@@ -59,9 +69,9 @@ fi
 # ADOS_COMPUTE_NO_COREML=1 to build the mock-only node (no ONNX Runtime).
 echo "building ados-control + ados-compute ..."
 if [ -n "${ADOS_COMPUTE_NO_COREML:-}" ]; then
-  ( cd "$CRATES_DIR" && cargo build -p ados-control && cargo build -p ados-compute )
+  ( cd "$CRATES_DIR" && cargo build $CARGO_PROFILE_FLAG -p ados-control && cargo build $CARGO_PROFILE_FLAG -p ados-compute )
 else
-  ( cd "$CRATES_DIR" && cargo build -p ados-control && cargo build -p ados-compute --features coreml )
+  ( cd "$CRATES_DIR" && cargo build $CARGO_PROFILE_FLAG -p ados-control && cargo build $CARGO_PROFILE_FLAG -p ados-compute --features coreml )
 fi
 
 CONTROL_BIN="$TARGET_DIR/ados-control"
