@@ -51,6 +51,9 @@ REQUIRED_CAP: dict[str, str | None] = {
     "compute.job.read": "compute.job.read",
     "compute.job.outputs": "compute.job.read",
     "compute.job.cancel": "compute.job.submit",
+    "compute.stream.open": "compute.stream.open",
+    "compute.stream.close": "compute.stream.open",
+    "compute.stream.health": "compute.stream.open",
 }
 
 # Methods whose cap is decided inline by the handler from the request

@@ -26,7 +26,22 @@ NEW_AGENT_CAPS = (
 # single source of truth (generated from capabilities.toml); this test guards
 # that the count does not change unnoticed, while the internal-consistency check
 # below proves the catalog and its metadata table agree.
-EXPECTED_AGENT_CAPABILITY_COUNT = 46
+EXPECTED_AGENT_CAPABILITY_COUNT = 47
+
+# The compute + vision capability family: gated at the dispatch level today, so
+# the catalog must mark them enforced (the metadata that drives the install
+# dialog's "has a runtime gate" signal must be honest — Rule 44).
+COMPUTE_VISION_FAMILY = (
+    "compute.job.submit",
+    "compute.job.read",
+    "compute.dataset.write",
+    "compute.stream.open",
+    "vision.frame.read",
+    "vision.model.register",
+    "vision.detection.publish",
+    "vision.detection.subscribe",
+    "vision.track.designate",
+)
 
 
 def test_agent_capability_count() -> None:
@@ -60,6 +75,25 @@ def test_event_bus_capabilities_still_enforced() -> None:
     """Sanity check: the enforced subset did not shift."""
     assert "event.publish" in ENFORCED_AGENT_CAPABILITIES
     assert "event.subscribe" in ENFORCED_AGENT_CAPABILITIES
+
+
+def test_compute_stream_open_capability_exists() -> None:
+    """The streaming perception-offload open capability is in the catalog + its
+    metadata table (the install dialog surfaces its risk)."""
+    assert "compute.stream.open" in AGENT_CAPABILITIES
+    assert is_known_agent_capability("compute.stream.open")
+    assert "compute.stream.open" in CAPABILITY_CATALOG
+
+
+def test_compute_and_vision_family_is_enforced() -> None:
+    """The compute + vision family carries a runtime dispatch gate today, so the
+    catalog must mark each enforced — a lie here would train an operator to
+    distrust the install dialog's risk signal (Rule 44)."""
+    for cap in COMPUTE_VISION_FAMILY:
+        assert cap in AGENT_CAPABILITIES, f"{cap!r} missing from the catalog"
+        assert cap in ENFORCED_AGENT_CAPABILITIES, (
+            f"{cap!r} is gated at dispatch but not marked enforced in the catalog"
+        )
 
 
 def test_existing_baseline_capabilities_preserved() -> None:

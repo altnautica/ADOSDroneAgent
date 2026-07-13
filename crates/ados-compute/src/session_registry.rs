@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 /// A streaming session with no detection batch for this long is considered
@@ -40,7 +40,7 @@ pub(crate) fn now_ms() -> i64 {
 }
 
 /// The lifecycle state of a streaming offload session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionState {
     /// Started; no detection batch has been emitted yet.
@@ -74,7 +74,7 @@ pub enum WorkPriority {
 
 /// A streaming perception-offload session's live record, as served over the job
 /// API. Snake-case fields to match the rest of the `/api/compute/*` surface.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamingSession {
     /// The session id (the WS path + the batch tag).
     pub id: String,
@@ -98,7 +98,7 @@ pub struct StreamingSession {
 
 /// A session record plus its snapshot-time uptime, as returned by
 /// `GET /api/compute/sessions`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionView {
     #[serde(flatten)]
     pub session: StreamingSession,

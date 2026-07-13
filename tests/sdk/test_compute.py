@@ -7,11 +7,15 @@ enforces, and that a missing capability is denied.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from ados.plugins.errors import CapabilityDenied
 from ados.sdk.compute import ComputeClient, JobStatus, Submission
+from ados.sdk.offload import ExecutionTier
 from ados.sdk.testing.stubs import FakeIpcClient
+from ados.sdk.vision import DetectionBatch
 
 
 def _ipc(caps: set[str]) -> FakeIpcClient:
@@ -150,3 +154,147 @@ async def test_write_dataset_raises_when_the_node_returns_no_id():
     compute = ComputeClient(ipc)
     with pytest.raises(RuntimeError):
         await compute.write_dataset("bag")
+
+
+# -------------------------------------------------------------------------
+# Streaming perception-offload sessions (ctx.compute.open_stream).
+# -------------------------------------------------------------------------
+
+
+def _batch(camera_id: str = "front", frame_id: int = 1) -> DetectionBatch:
+    return DetectionBatch(
+        model_id="offload", camera_id=camera_id, frame_id=frame_id, ts_ms=frame_id
+    )
+
+
+async def test_open_stream_offload_async_iterates_returned_batches():
+    # Opening needs compute.stream.open; iterating the returned batches rides the
+    # shared detection bus, so it also needs vision.detection.subscribe.
+    ipc = _ipc({"compute.stream.open", "vision.detection.subscribe"})
+    ipc.set_response(
+        "compute.stream.open",
+        {
+            "execution": "offload",
+            "opened": True,
+            "session_id": "s1",
+            "camera_id": "front",
+            "source": "rtsp://10.0.0.2:8554/main",
+            "node": "http://10.0.0.9:8092",
+        },
+    )
+    compute = ComputeClient(ipc)
+    session = await compute.open_stream(camera_id="front", execution=ExecutionTier.AUTO)
+    assert session.execution is ExecutionTier.OFFLOAD
+    assert session.opened is True
+    assert session.session_id == "s1"
+    assert session.source == "rtsp://10.0.0.2:8554/main"
+
+    # The open request went out tagged with the open cap.
+    assert ipc.requests[0][0] == "compute.stream.open"
+    assert ipc.requests[0][1]["execution"] == "auto"
+
+    # `async for` arms the detection subscription lazily on first iteration, then
+    # yields each delivered batch (the same DetectionBatch the engine publishes).
+    consumer = asyncio.ensure_future(session.__anext__())
+    for _ in range(5):  # let the subscription arm + the getter park
+        await asyncio.sleep(0)
+    # The subscribe RPC was sent (arming the host push) under the subscribe cap.
+    assert any(m == "vision.subscribe_detections" for m, _ in ipc.requests)
+    await ipc.deliver_detection({"batch": _batch().to_msgpack(), "timestamp_ms": 1})
+    got = await asyncio.wait_for(consumer, timeout=1.0)
+    assert isinstance(got, DetectionBatch)
+    assert got.camera_id == "front"
+    assert got.frame_id == 1
+
+    await session.close()
+
+
+async def test_open_stream_auto_resolves_offload_when_npu_less_paired_local_otherwise():
+    # AUTO does not reimplement the tier decision: it sends the intent and the
+    # host reports the resolved tier. On an NPU-less/paired signal the host
+    # resolves to offload (opened); otherwise to local (nothing started).
+    ipc = _ipc({"compute.stream.open"})
+    compute = ComputeClient(ipc)
+
+    # NPU-less + paired node -> the host resolves offload.
+    ipc.set_response(
+        "compute.stream.open",
+        {"execution": "offload", "opened": True, "session_id": "s-off", "camera_id": "front"},
+    )
+    offloaded = await compute.open_stream(execution=ExecutionTier.AUTO)
+    assert offloaded.execution is ExecutionTier.OFFLOAD
+    assert offloaded.opened is True
+
+    # An accelerator / no node -> the host resolves local, starts no session.
+    ipc.set_response(
+        "compute.stream.open",
+        {"execution": "local", "opened": False, "session_id": "s-loc", "camera_id": "front"},
+    )
+    local = await compute.open_stream(execution=ExecutionTier.AUTO)
+    assert local.execution is ExecutionTier.LOCAL
+    assert local.opened is False
+
+
+async def test_open_stream_health_reads_the_session_registry():
+    ipc = _ipc({"compute.stream.open"})
+    ipc.set_response(
+        "compute.stream.open",
+        {"execution": "offload", "opened": True, "session_id": "s1", "camera_id": "front"},
+    )
+    ipc.set_response(
+        "compute.stream.health",
+        {"id": "s1", "state": "live", "frames_processed": 12, "found": True},
+    )
+    compute = ComputeClient(ipc)
+    session = await compute.open_stream(execution=ExecutionTier.OFFLOAD)
+    health = await session.health()
+    assert health["state"] == "live"
+    assert health["frames_processed"] == 12
+    # Health is gated on the open cap (the opener reads its own session).
+    method, _ = ipc.requests[-1]
+    assert method == "compute.stream.health"
+
+
+async def test_open_stream_close_ends_iteration():
+    ipc = _ipc({"compute.stream.open", "vision.detection.subscribe"})
+    ipc.set_response(
+        "compute.stream.open",
+        {"execution": "offload", "opened": True, "session_id": "s1", "camera_id": "front"},
+    )
+    ipc.set_response("compute.stream.close", {"closed": True, "session_id": "s1"})
+    compute = ComputeClient(ipc)
+    session = await compute.open_stream(execution=ExecutionTier.OFFLOAD)
+
+    consumer = asyncio.ensure_future(session.__anext__())
+    for _ in range(5):
+        await asyncio.sleep(0)
+    # Closing unblocks a pending iterator so `async for` ends cleanly.
+    await session.close()
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(consumer, timeout=1.0)
+    # A second close is idempotent (no second RPC).
+    close_calls = [m for m, _ in ipc.requests if m == "compute.stream.close"]
+    await session.close()
+    assert [m for m, _ in ipc.requests if m == "compute.stream.close"] == close_calls
+
+
+async def test_open_stream_without_the_open_cap_is_denied():
+    ipc = _ipc({"vision.detection.subscribe"})  # can consume, cannot open
+    compute = ComputeClient(ipc)
+    with pytest.raises(CapabilityDenied):
+        await compute.open_stream(execution=ExecutionTier.OFFLOAD)
+    assert ipc.requests == []
+
+
+async def test_iterating_a_stream_without_the_subscribe_cap_is_denied():
+    # Opening is allowed with just the open cap, but iterating (which arms the
+    # detection subscription) needs vision.detection.subscribe.
+    ipc = _ipc({"compute.stream.open"})
+    ipc.set_response(
+        "compute.stream.open",
+        {"execution": "offload", "opened": True, "session_id": "s1", "camera_id": "front"},
+    )
+    compute = ComputeClient(ipc)
+    session = await compute.open_stream(execution=ExecutionTier.OFFLOAD)
+    with pytest.raises(CapabilityDenied):
+        await session.__anext__()

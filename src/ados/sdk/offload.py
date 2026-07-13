@@ -18,6 +18,33 @@ import enum
 from dataclasses import dataclass
 
 
+class ExecutionTier(str, enum.Enum):
+    """Where a plugin's inference model runs, chosen when it opens a stream.
+
+    ``LOCAL`` runs the model on the drone's own accelerator (the existing vision
+    path — the plugin registers its model with the engine). ``OFFLOAD`` runs it
+    on a paired compute node: the drone streams its camera to the node, the node
+    runs the model, and detections return onto the drone's shared
+    ``vision.detection`` bus. ``AUTO`` lets the runtime pick — local when the
+    drone has a usable accelerator, offload when it is NPU-less and a compute
+    node is paired. Either way the detections land on the same bus, so downstream
+    (the cockpit, other plugins, the lock/behaviour gate) is
+    execution-transparent.
+
+    The tier decision itself is the agent's, from ``ados_offload::pick_tier``
+    reading the offload-link sidecar; it is NOT reimplemented here. A plugin
+    passes its intent to ``ctx.compute.open_stream`` and the host resolves the
+    tier and reports it back on the session (``session.execution``).
+    """
+
+    LOCAL = "local"
+    """Run the model on the drone's own accelerator (the local vision path)."""
+    OFFLOAD = "offload"
+    """Run the model on the paired compute node; detections stream back."""
+    AUTO = "auto"
+    """Let the runtime pick local vs offload from the live perception tier."""
+
+
 class GateState(str, enum.Enum):
     """The freshness of one offloaded stream."""
 

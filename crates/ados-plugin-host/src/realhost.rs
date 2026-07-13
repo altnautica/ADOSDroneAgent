@@ -22,14 +22,21 @@
 //! (they never `.await`), so a std mutex is correct and is never held across an
 //! await point.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rmpv::Value;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Notify};
+use tokio::task::JoinHandle;
 
-use ados_compute::{ComputeClient, ComputeJobKind};
+use ados_compute::{
+    run_offload_orchestrator, ComputeClient, ComputeJobKind, NodeEndpoint, OrchestratorConfig,
+    DEFAULT_PAIRING_PATH,
+};
+use ados_protocol::offload_link::{read_offload_link_from, OFFLOAD_LINK_SIDECAR};
+use ados_protocol::pairing_posture::{load_pairing, Pairing};
 
 use crate::host::{not_implemented, HostError, HostResult, HostServices};
 use crate::mavlink_client::MavlinkClient;
@@ -1004,6 +1011,71 @@ pub type RuntimeLookup = Box<dyn Fn(&str) -> Option<(PathBuf, BTreeSet<String>)>
 /// Resolves a plugin id to its bound agent identity (empty when unbound).
 pub type AgentIdLookup = Box<dyn Fn(&str) -> String + Send + Sync>;
 
+/// A live streaming perception-offload session a plugin opened via
+/// `compute.stream.open`. The host holds the cancel handle (to close the lane on
+/// an explicit `compute.stream.close`, or when the plugin disconnects) plus the
+/// node reach (to read the session's live health from `/api/compute/sessions`).
+struct OffloadStreamHandle {
+    /// The plugin that opened it, so a disconnect closes only its own streams.
+    plugin_id: String,
+    /// Cancels the orchestrator task — the graceful close that settles the
+    /// offload safety gate to Lost before the lane ends.
+    cancel: Arc<Notify>,
+    /// The orchestrator task; aborted on close as a belt-and-braces reap (the
+    /// cancel is the graceful path).
+    task: JoinHandle<()>,
+    /// The compute node's job-API base URL the session runs against (for health).
+    node_base_url: String,
+    /// The pairing key sent to the node off-box (`None` on-box / unpaired).
+    api_key: Option<String>,
+}
+
+/// The RTSP port the drone's encoder publishes its primary feed on, and the
+/// stream path — the node pulls `rtsp://<drone-lan-ip>:8554/main` (the same feed
+/// the auto-offload reconciler streams). The node ingests this source.
+const OFFLOAD_RTSP_PORT: u16 = 8554;
+const OFFLOAD_RTSP_PATH: &str = "main";
+/// Default decoded frame size for an offload session when the plugin omits it
+/// (the orchestrator's own default). The plugin passes its camera size so the
+/// node's RGB24 decode matches; this is the safety default.
+const OFFLOAD_DEFAULT_WIDTH: u32 = 1280;
+const OFFLOAD_DEFAULT_HEIGHT: u32 = 720;
+/// Default freshness budget (ms) for the returned detection stream: past this
+/// with no new batch, the offload safety gate trips the designated lock to Lost.
+const OFFLOAD_DEFAULT_BUDGET_MS: i64 = 700;
+
+fn now_epoch_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// The drone's egress IP toward `node_addr` (`host:port`) — the source address a
+/// connection to the node would use, i.e. the address the node can pull the
+/// drone's RTSP feed back on. A UDP "connect" picks the source IP without sending
+/// a packet. `None` when the node address does not resolve or no route exists
+/// (Rule 47: no verified reach ⇒ do not advertise one). Mirrors the offload
+/// reconciler's egress probe (which owns the auto path); this crate has no build
+/// dependency on it, so the tiny std-only probe is duplicated (not tier logic).
+fn local_ip_towards(node_addr: &str) -> Option<std::net::IpAddr> {
+    use std::net::{ToSocketAddrs, UdpSocket};
+    let addr = node_addr.to_socket_addrs().ok()?.next()?;
+    let sock = UdpSocket::bind(("0.0.0.0", 0)).ok()?;
+    sock.connect(addr).ok()?;
+    sock.local_addr().ok().map(|a| a.ip())
+}
+
+/// The pairing key to present off-box, from a `pairing.json`. `None` when the
+/// agent is unpaired (open) — matching the reconciler, which sends the drone's
+/// own pairing key on the off-box leg.
+fn pairing_key(path: &std::path::Path) -> Option<String> {
+    match load_pairing(path) {
+        Pairing::Paired(key) => Some(key),
+        Pairing::Unpaired => None,
+    }
+}
+
 /// The real host: the five in-memory facades, the optional MAVLink client, and
 /// the two runtime lookups. Mirrors the `HostServices` dataclass and
 /// `default_host_services()` (every external slot starts `None`).
@@ -1039,6 +1111,22 @@ pub struct RealHost {
     /// stream automatically when its owner disconnects (the SAFE-by-default
     /// invariant: a stream never outlives the plugin that opened it).
     aux_stream_owner: Mutex<Option<String>>,
+    /// Live streaming perception-offload sessions a plugin opened, keyed by
+    /// session id. Each holds its cancel handle + orchestrator task + the node
+    /// reach for health reads. A session is closed on an explicit
+    /// `compute.stream.close` or when its opener disconnects (SAFE-by-default: a
+    /// session never outlives the plugin that opened it).
+    offload_streams: Mutex<HashMap<String, OffloadStreamHandle>>,
+    /// Monotonic counter minting a unique session id when the plugin omits one.
+    offload_session_seq: AtomicU64,
+    /// The `pairing.json` the off-box pairing key is read from (canonical
+    /// `/etc/ados/pairing.json`; a builder overrides it in tests).
+    pairing_path: PathBuf,
+    /// The offload-link sidecar the perception-tier decision is read from (the
+    /// canonical `/run/ados/offload-link.json`; a builder overrides it in tests).
+    /// Reusing the sidecar keeps the tier decision one source of truth (Rule 44),
+    /// not a second copy of `ados_offload::pick_tier`.
+    offload_link_path: PathBuf,
 }
 
 /// Canonical sidecar the reserved data-driven display page reads. Kept in sync
@@ -1077,7 +1165,25 @@ impl RealHost {
             gpio_cmd_path: PathBuf::from(GPIO_CMD_SOCK),
             radio_aux_cmd_path: PathBuf::from(RADIO_AUX_CMD_SOCK),
             aux_stream_owner: Mutex::new(None),
+            offload_streams: Mutex::new(HashMap::new()),
+            offload_session_seq: AtomicU64::new(0),
+            pairing_path: PathBuf::from(DEFAULT_PAIRING_PATH),
+            offload_link_path: PathBuf::from(OFFLOAD_LINK_SIDECAR),
         }
+    }
+
+    /// Override the `pairing.json` path (builder style, tests). Production uses
+    /// the canonical `/etc/ados/pairing.json` from [`Self::new`].
+    pub fn with_pairing_path(mut self, path: PathBuf) -> Self {
+        self.pairing_path = path;
+        self
+    }
+
+    /// Override the offload-link sidecar path (builder style, tests). Production
+    /// uses the canonical `/run/ados/offload-link.json` from [`Self::new`].
+    pub fn with_offload_link_path(mut self, path: PathBuf) -> Self {
+        self.offload_link_path = path;
+        self
     }
 
     /// Override the display-page sidecar path (builder style, tests). Production
@@ -1338,6 +1444,9 @@ const ALL_DISPATCH_METHODS: &[crate::dispatch::Method] = {
         ComputeJobRead,
         ComputeJobOutputs,
         ComputeJobCancel,
+        ComputeStreamOpen,
+        ComputeStreamClose,
+        ComputeStreamHealth,
     ]
 };
 
@@ -2124,6 +2233,27 @@ impl HostServices for RealHost {
             let req = serde_json::json!({"op": "close"});
             let _ = self.forward_radio_aux(req, "radio.aux_stream.close");
         }
+        // SAFE-by-default: a streaming offload session never outlives the plugin
+        // that opened it. Cancel + reap every session this plugin opened on
+        // disconnect. Take the handles under the lock, then cancel outside it.
+        let owned_streams: Vec<OffloadStreamHandle> = {
+            let mut streams = self
+                .offload_streams
+                .lock()
+                .expect("offload streams mutex poisoned");
+            let ids: Vec<String> = streams
+                .iter()
+                .filter(|(_, h)| h.plugin_id == plugin_id)
+                .map(|(id, _)| id.clone())
+                .collect();
+            ids.into_iter()
+                .filter_map(|id| streams.remove(&id))
+                .collect()
+        };
+        for h in owned_streams {
+            h.cancel.notify_waiters();
+            h.task.abort();
+        }
     }
 
     fn mavlink_subscribe_stream(
@@ -2304,6 +2434,249 @@ impl HostServices for RealHost {
             .await
             .map_err(|e| HostError::Rpc(e.to_string()))?;
         Ok(json_to_mpv(&serde_json::json!({ "cancelled": cancelled })))
+    }
+
+    async fn compute_stream_open(
+        &self,
+        plugin_id: &str,
+        args: &Value,
+    ) -> Result<HostResult, HostError> {
+        // The plugin names the camera + model + execution intent; the host owns
+        // the source (the drone's LAN-reachable RTSP feed) and the node reach
+        // (from the offload-link sidecar), so a sandboxed plugin can neither point
+        // the node at an arbitrary URL nor learn the pairing key.
+        let camera_id = arg_str(args, "camera_id").unwrap_or("front").to_string();
+        let execution = arg_str(args, "execution").unwrap_or("auto");
+        let width = arg_i64(args, "width")
+            .and_then(|n| u32::try_from(n).ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(OFFLOAD_DEFAULT_WIDTH);
+        let height = arg_i64(args, "height")
+            .and_then(|n| u32::try_from(n).ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(OFFLOAD_DEFAULT_HEIGHT);
+        let target_budget_ms = arg_i64(args, "target_budget_ms")
+            .filter(|n| *n > 0)
+            .unwrap_or(OFFLOAD_DEFAULT_BUDGET_MS);
+        let model_id = arg_str(args, "model_id").map(str::to_string);
+
+        let session_id = match arg_str(args, "session_id") {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => {
+                let n = self.offload_session_seq.fetch_add(1, Ordering::Relaxed);
+                format!("plugin-{plugin_id}-{n}")
+            }
+        };
+
+        // Resolve the perception tier from the offload-link sidecar — the same
+        // signal `ados_offload::pick_tier` / the status surfaces read, not a
+        // second copy of the tier logic (Rule 44).
+        let link = read_offload_link_from(&self.offload_link_path, now_epoch_ms());
+        let offload_path = link.as_ref().is_some_and(|l| l.is_offload_path());
+
+        // Decide local vs offload per the requested execution + the tier signal.
+        // `auto` (and any unrecognised value, which defaults to auto) offloads
+        // only when the sidecar reports a paired node on an acceptable bearer.
+        let go_offload = match execution {
+            "local" => false,
+            "offload" => true,
+            _ => offload_path,
+        };
+
+        if !go_offload {
+            // LOCAL: the plugin runs its model on the local accelerator (the
+            // existing vision path); no offload session is started here.
+            return Ok(json_to_mpv(&serde_json::json!({
+                "execution": "local",
+                "opened": false,
+                "session_id": session_id,
+                "camera_id": camera_id,
+            })));
+        }
+
+        // OFFLOAD: the node the sidecar named, or refuse honestly (never a
+        // fabricated node, Rule 44/47). Forced offload with no paired node in the
+        // sidecar has no target (the drone is not currently offloading).
+        let target = link
+            .as_ref()
+            .and_then(|l| l.target.clone())
+            .filter(|t| !t.is_empty())
+            .ok_or_else(|| {
+                HostError::Rpc(
+                    "no paired compute node to offload to (the drone is not currently offloading to a workstation)"
+                        .to_string(),
+                )
+            })?;
+        let base_url = format!("http://{target}");
+        let api_key = pairing_key(&self.pairing_path);
+
+        // The node pulls the drone's RTSP feed on the drone's LAN-reachable egress
+        // IP toward the node (never localhost — the node is a different machine).
+        let local_ip = local_ip_towards(&target).ok_or_else(|| {
+            HostError::Rpc(
+                "cannot determine a LAN-reachable camera address toward the compute node"
+                    .to_string(),
+            )
+        })?;
+        let rtsp_url = format!("rtsp://{local_ip}:{OFFLOAD_RTSP_PORT}/{OFFLOAD_RTSP_PATH}");
+
+        // Idempotent re-open: a session already live under this id is a no-op
+        // success, mirroring the node-side registry dedup.
+        if self
+            .offload_streams
+            .lock()
+            .expect("offload streams mutex poisoned")
+            .contains_key(&session_id)
+        {
+            return Ok(json_to_mpv(&serde_json::json!({
+                "execution": "offload",
+                "opened": true,
+                "already_open": true,
+                "session_id": session_id,
+                "camera_id": camera_id,
+                "source": rtsp_url,
+                "node": base_url,
+            })));
+        }
+
+        // Build the orchestrator config + node endpoint and spawn the supervised
+        // lane: submit the streaming-session job to the node, subscribe to the
+        // node's per-session detection WS, and republish each returned batch onto
+        // the drone's local `vision.detection` bus through the offload safety gate.
+        // This is the same `run_offload_orchestrator` the auto-offload reconciler
+        // drives, so the plugin's detections are execution-transparent on the bus.
+        let mut cfg = OrchestratorConfig::vision_only(
+            session_id.clone(),
+            camera_id.clone(),
+            rtsp_url.clone(),
+            width,
+            height,
+            target_budget_ms,
+        );
+        if let Some(m) = model_id {
+            cfg.model_id = m;
+        }
+        let cancel = Arc::new(Notify::new());
+        let endpoint = NodeEndpoint::Direct {
+            base_url: base_url.clone(),
+            api_key: api_key.clone(),
+        };
+        let cancel_task = cancel.clone();
+        let sid = session_id.clone();
+        let task = tokio::spawn(async move {
+            if let Err(e) = run_offload_orchestrator(cfg, endpoint, cancel_task).await {
+                tracing::warn!(session = %sid, error = %e, "plugin offload stream ended");
+            }
+        });
+
+        self.offload_streams
+            .lock()
+            .expect("offload streams mutex poisoned")
+            .insert(
+                session_id.clone(),
+                OffloadStreamHandle {
+                    plugin_id: plugin_id.to_string(),
+                    cancel,
+                    task,
+                    node_base_url: base_url.clone(),
+                    api_key,
+                },
+            );
+
+        tracing::info!(plugin_id, session = %session_id, node = %base_url, "plugin opened an offload stream");
+        Ok(json_to_mpv(&serde_json::json!({
+            "execution": "offload",
+            "opened": true,
+            "session_id": session_id,
+            "camera_id": camera_id,
+            "source": rtsp_url,
+            "node": base_url,
+        })))
+    }
+
+    async fn compute_stream_close(
+        &self,
+        plugin_id: &str,
+        args: &Value,
+    ) -> Result<HostResult, HostError> {
+        let session_id = arg_str(args, "session_id")
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| HostError::Rpc("session_id is required".to_string()))?;
+        // Only the plugin that opened a session may close it. Remove it from the
+        // map under the lock, then cancel + reap outside the lock.
+        let handle = {
+            let mut streams = self
+                .offload_streams
+                .lock()
+                .expect("offload streams mutex poisoned");
+            match streams.get(session_id) {
+                Some(h) if h.plugin_id == plugin_id => streams.remove(session_id),
+                _ => None,
+            }
+        };
+        let closed = match handle {
+            Some(h) => {
+                h.cancel.notify_waiters();
+                h.task.abort();
+                true
+            }
+            None => false,
+        };
+        Ok(json_to_mpv(
+            &serde_json::json!({ "closed": closed, "session_id": session_id }),
+        ))
+    }
+
+    async fn compute_stream_health(
+        &self,
+        plugin_id: &str,
+        args: &Value,
+    ) -> Result<HostResult, HostError> {
+        let session_id = arg_str(args, "session_id")
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| HostError::Rpc("session_id is required".to_string()))?;
+        // The node reach for THIS session (opened by this plugin). No handle ⇒ the
+        // session is not open here ⇒ report closed (never a fabricated live state,
+        // Rule 44).
+        let reach = {
+            let streams = self
+                .offload_streams
+                .lock()
+                .expect("offload streams mutex poisoned");
+            streams
+                .get(session_id)
+                .filter(|h| h.plugin_id == plugin_id)
+                .map(|h| (h.node_base_url.clone(), h.api_key.clone()))
+        };
+        let Some((base_url, api_key)) = reach else {
+            return Ok(json_to_mpv(&serde_json::json!({
+                "session_id": session_id,
+                "state": "closed",
+                "found": false,
+            })));
+        };
+        // Read the node's live session registry and find this session. A session
+        // absent from the node's list has been reaped ⇒ closed.
+        let client = ComputeClient::new(base_url, api_key);
+        let sessions = client
+            .sessions()
+            .await
+            .map_err(|e| HostError::Rpc(format!("read node sessions: {e}")))?;
+        match sessions.into_iter().find(|s| s.session.id == session_id) {
+            Some(view) => {
+                let mut json =
+                    serde_json::to_value(&view).map_err(|e| HostError::Rpc(e.to_string()))?;
+                if let serde_json::Value::Object(ref mut m) = json {
+                    m.insert("found".to_string(), serde_json::Value::Bool(true));
+                }
+                Ok(json_to_mpv(&json))
+            }
+            None => Ok(json_to_mpv(&serde_json::json!({
+                "session_id": session_id,
+                "state": "closed",
+                "found": false,
+            }))),
+        }
     }
 }
 
@@ -4444,6 +4817,204 @@ gcs:
         assert_eq!(
             map_get(&reply, "error").and_then(Value::as_str),
             Some("not_implemented")
+        );
+    }
+
+    /// A unique offload-link sidecar path for a test, so writing one never clashes
+    /// with another test or the real `/run` path.
+    fn temp_sidecar(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "ados-plugin-host-offload-link-{tag}-{}.json",
+            std::process::id()
+        ))
+    }
+
+    #[tokio::test]
+    async fn open_stream_local_execution_starts_no_session() {
+        use crate::dispatch::Method;
+        use crate::handlers::route_host_method;
+        use std::collections::BTreeSet;
+
+        // execution=local ⇒ the plugin runs its model on the local accelerator;
+        // the host opens NO offload session and reports the resolved local tier.
+        let host = RealHost::new();
+        let caps: BTreeSet<String> = ["compute.stream.open"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let args = Value::Map(vec![
+            (Value::from("execution"), Value::from("local")),
+            (Value::from("camera_id"), Value::from("front")),
+        ]);
+        let reply = route_host_method(&host, Method::ComputeStreamOpen, "p", &args, &caps)
+            .await
+            .unwrap();
+        assert_eq!(
+            map_get(&reply, "execution").and_then(Value::as_str),
+            Some("local")
+        );
+        assert_eq!(
+            map_get(&reply, "opened").and_then(Value::as_bool),
+            Some(false)
+        );
+        // No live session registered.
+        assert!(host.offload_streams.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn open_stream_auto_without_a_paired_node_resolves_local() {
+        // execution=auto + no offload-link sidecar ⇒ the tier signal says local
+        // (no paired node), so the host opens no session — never a fabricated node.
+        let host = RealHost::new().with_offload_link_path(temp_sidecar("auto-none"));
+        let reply = host
+            .compute_stream_open(
+                "p",
+                &Value::Map(vec![(Value::from("execution"), Value::from("auto"))]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            map_get(&reply, "execution").and_then(Value::as_str),
+            Some("local")
+        );
+    }
+
+    #[tokio::test]
+    async fn open_stream_forced_offload_with_no_node_is_a_clear_error() {
+        // execution=offload but no paired node in the sidecar ⇒ an honest error,
+        // not a fabricated node (Rule 44/47).
+        let host = RealHost::new().with_offload_link_path(temp_sidecar("forced-none"));
+        let err = host
+            .compute_stream_open(
+                "p",
+                &Value::Map(vec![(Value::from("execution"), Value::from("offload"))]),
+            )
+            .await
+            .expect_err("forced offload with no node must error");
+        match err {
+            HostError::Rpc(m) => assert!(m.contains("no paired compute node"), "got {m}"),
+            other => panic!("expected an Rpc error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn open_stream_offload_starts_a_session_and_close_stops_it() {
+        use ados_protocol::offload_link::{write_offload_link_to, OffloadLink};
+
+        // A paired-node sidecar makes `auto` resolve to offload. The node target
+        // is a loopback address the egress probe can resolve; the orchestrator's
+        // own connect to it fails in the background (nothing is listening) — the
+        // open path is what this test asserts (spawn + registry + close).
+        let sidecar = temp_sidecar("offload-start");
+        let link = OffloadLink::stamped(
+            true,
+            true,
+            Some("127.0.0.1:18092".into()),
+            None,
+            None,
+            now_epoch_ms(),
+        );
+        write_offload_link_to(&sidecar, &link).unwrap();
+
+        let host = RealHost::new()
+            .with_offload_link_path(sidecar.clone())
+            // Unpaired pairing ⇒ no key needed off-box (the LAN presence gate).
+            .with_pairing_path(temp_sidecar("no-pairing"));
+
+        let open = host
+            .compute_stream_open(
+                "p",
+                &Value::Map(vec![
+                    (Value::from("execution"), Value::from("auto")),
+                    (Value::from("session_id"), Value::from("s-plugin-1")),
+                    (Value::from("camera_id"), Value::from("front")),
+                ]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            map_get(&open, "execution").and_then(Value::as_str),
+            Some("offload")
+        );
+        assert_eq!(
+            map_get(&open, "opened").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            map_get(&open, "session_id").and_then(Value::as_str),
+            Some("s-plugin-1")
+        );
+        // The source the node pulls is a real LAN RTSP url (never localhost is not
+        // asserted here — a loopback-only test box legitimately egresses 127.0.0.1;
+        // the shape is what matters).
+        assert!(map_get(&open, "source")
+            .and_then(Value::as_str)
+            .is_some_and(|s| s.starts_with("rtsp://") && s.ends_with(":8554/main")));
+        // The session is registered live.
+        assert_eq!(host.offload_streams.lock().unwrap().len(), 1);
+
+        // A different plugin cannot close it.
+        let other = host
+            .compute_stream_close(
+                "q",
+                &Value::Map(vec![(Value::from("session_id"), Value::from("s-plugin-1"))]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            map_get(&other, "closed").and_then(Value::as_bool),
+            Some(false)
+        );
+
+        // The opener closes it.
+        let closed = host
+            .compute_stream_close(
+                "p",
+                &Value::Map(vec![(Value::from("session_id"), Value::from("s-plugin-1"))]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            map_get(&closed, "closed").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(host.offload_streams.lock().unwrap().is_empty());
+
+        // Closing again is idempotent (already gone).
+        let again = host
+            .compute_stream_close(
+                "p",
+                &Value::Map(vec![(Value::from("session_id"), Value::from("s-plugin-1"))]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            map_get(&again, "closed").and_then(Value::as_bool),
+            Some(false)
+        );
+
+        std::fs::remove_file(&sidecar).ok();
+    }
+
+    #[tokio::test]
+    async fn stream_health_of_an_unopened_session_reads_closed() {
+        // No session opened here ⇒ health reports closed / not-found rather than
+        // a fabricated live state (Rule 44).
+        let host = RealHost::new();
+        let reply = host
+            .compute_stream_health(
+                "p",
+                &Value::Map(vec![(Value::from("session_id"), Value::from("nope"))]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            map_get(&reply, "state").and_then(Value::as_str),
+            Some("closed")
+        );
+        assert_eq!(
+            map_get(&reply, "found").and_then(Value::as_bool),
+            Some(false)
         );
     }
 }

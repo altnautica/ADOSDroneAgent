@@ -355,6 +355,11 @@ pub async fn route_host_method<H: HostServices + ?Sized>(
         Method::ComputeJobRead => host.compute_job_read(plugin_id, args).await,
         Method::ComputeJobOutputs => host.compute_job_outputs(plugin_id, args).await,
         Method::ComputeJobCancel => host.compute_job_cancel(plugin_id, args).await,
+        // Streaming perception offload: open / close / read-health of a live
+        // frames→detections session on the paired compute node.
+        Method::ComputeStreamOpen => host.compute_stream_open(plugin_id, args).await,
+        Method::ComputeStreamClose => host.compute_stream_close(plugin_id, args).await,
+        Method::ComputeStreamHealth => host.compute_stream_health(plugin_id, args).await,
         // The event surface, ping, and the streaming subscribe methods never
         // reach here; the server short-circuits both `vision.subscribe_frames`
         // and `vision.subscribe_detections`, arming the per-connection push

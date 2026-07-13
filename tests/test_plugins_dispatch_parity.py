@@ -75,6 +75,9 @@ EXPECTED: dict[str, str | None] = {
     "compute.job.cancel": "compute.job.submit",
     "compute.job.outputs": "compute.job.read",
     "compute.dataset.write": "compute.dataset.write",
+    "compute.stream.open": "compute.stream.open",
+    "compute.stream.close": "compute.stream.open",
+    "compute.stream.health": "compute.stream.open",
 }
 
 

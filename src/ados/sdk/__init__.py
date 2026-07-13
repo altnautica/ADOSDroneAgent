@@ -12,6 +12,12 @@ as the host APIs stabilise.
 
 from __future__ import annotations
 
+from ados.sdk.compute import (
+    ComputeClient,
+    JobStatus,
+    OffloadStreamSession,
+    Submission,
+)
 from ados.sdk.drivers import (
     CameraCandidate,
     CameraCapabilities,
@@ -50,6 +56,7 @@ from ados.sdk.drivers import (
     PayloadState,
 )
 from ados.sdk.offload import (
+    ExecutionTier,
     FreshnessGate,
     GateState,
     LockGate,
@@ -103,6 +110,12 @@ __all__ = [
     "GateState",
     "LockGate",
     "LockState",
+    # Compute offload (jobs + streaming perception sessions)
+    "ComputeClient",
+    "Submission",
+    "JobStatus",
+    "OffloadStreamSession",
+    "ExecutionTier",
     # Vision
     "VisionClient",
     "FrameFormat",

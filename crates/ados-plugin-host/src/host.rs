@@ -420,6 +420,50 @@ pub trait HostServices: Send + Sync + 'static {
     ) -> impl std::future::Future<Output = Result<HostResult, HostError>> + Send {
         std::future::ready(Ok(not_implemented("compute.job.cancel")))
     }
+
+    /// Open a streaming perception-offload session for a plugin: the drone
+    /// streams its camera to a paired compute node, the node runs the detector,
+    /// and detections return onto the drone's shared `vision.detection` bus (the
+    /// same shape a local detector publishes, so downstream is execution-
+    /// transparent). A real host resolves the runtime perception tier (reusing
+    /// the offload-link sidecar), and for the offload tier starts and supervises
+    /// the offload orchestrator, holding the session's cancel handle. It returns
+    /// the resolved `{execution, opened, session_id, ...}` so the plugin knows
+    /// whether the model runs on the node (offload) or should run locally. The
+    /// default returns `not_implemented` so [`NoopHost`] (and a host with no
+    /// compute node) stays inert.
+    fn compute_stream_open(
+        &self,
+        _plugin_id: &str,
+        _args: &Value,
+    ) -> impl std::future::Future<Output = Result<HostResult, HostError>> + Send {
+        std::future::ready(Ok(not_implemented("compute.stream.open")))
+    }
+
+    /// Close a streaming perception-offload session the plugin opened (by
+    /// `session_id`). A real host fires the session's cancel handle so the
+    /// orchestrator tears the lane down and settles the safety gate to Lost.
+    /// Returns `{closed: bool}`. Idempotent: closing an unknown / already-closed
+    /// session is a quiet `{closed: false}`.
+    fn compute_stream_close(
+        &self,
+        _plugin_id: &str,
+        _args: &Value,
+    ) -> impl std::future::Future<Output = Result<HostResult, HostError>> + Send {
+        std::future::ready(Ok(not_implemented("compute.stream.close")))
+    }
+
+    /// Read a streaming session's live health from the compute node's session
+    /// registry (`/api/compute/sessions`): its state, throughput, and reconnect
+    /// / restart history. A real host queries the node the session was opened
+    /// against; a session absent from the node's list (reaped) reads as closed.
+    fn compute_stream_health(
+        &self,
+        _plugin_id: &str,
+        _args: &Value,
+    ) -> impl std::future::Future<Output = Result<HostResult, HostError>> + Send {
+        std::future::ready(Ok(not_implemented("compute.stream.health")))
+    }
 }
 
 /// The default host: every host-coupled method returns `not_implemented`.

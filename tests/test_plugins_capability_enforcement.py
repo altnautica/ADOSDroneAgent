@@ -83,20 +83,35 @@ def _install_with_perms(plugin_id: str, **grants: bool) -> PluginInstall:
 
 
 def test_catalog_size_matches_spec() -> None:
-    # 46 agent capabilities in the catalog. Beyond the earlier substrate set
+    # 47 agent capabilities in the catalog. Beyond the earlier substrate set
     # (button.subscribe, flight.guided_setpoint, mavlink.tunnel,
     # radio.aux_stream, display.oled.page) and the GPIO output + vision
     # designate/subscribe caps (hardware.gpio_out, vision.detection.subscribe,
-    # vision.track.designate), the three compute-offload caps
-    # (compute.dataset.write, compute.job.submit, compute.job.read) back the
-    # plugin compute-offload methods.
-    assert len(AGENT_CAPABILITIES) == 46
+    # vision.track.designate), the compute-offload caps (compute.dataset.write,
+    # compute.job.submit, compute.job.read, compute.stream.open) back the plugin
+    # compute-offload + streaming-perception methods.
+    assert len(AGENT_CAPABILITIES) == 47
 
 
-def test_only_event_caps_are_enforced_today() -> None:
-    # The event bus caps plus GPIO output carry a runtime gate today.
+def test_gated_caps_are_marked_enforced() -> None:
+    # The catalog's `enforced` flag reflects the dispatch-level gate today: the
+    # event bus, GPIO output, and the whole compute + vision family carry a
+    # runtime gate (metadata must be honest — Rule 44).
     assert ENFORCED_AGENT_CAPABILITIES == frozenset(
-        {"event.publish", "event.subscribe", "hardware.gpio_out"}
+        {
+            "event.publish",
+            "event.subscribe",
+            "hardware.gpio_out",
+            "compute.dataset.write",
+            "compute.job.read",
+            "compute.job.submit",
+            "compute.stream.open",
+            "vision.detection.publish",
+            "vision.detection.subscribe",
+            "vision.frame.read",
+            "vision.model.register",
+            "vision.track.designate",
+        }
     )
 
 

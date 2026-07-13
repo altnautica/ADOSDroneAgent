@@ -55,6 +55,7 @@ AGENT_CAPABILITIES: frozenset[str] = frozenset(
         "compute.job.submit",
         "compute.job.read",
         "compute.dataset.write",
+        "compute.stream.open",
     }
 )
 
@@ -63,6 +64,15 @@ ENFORCED_AGENT_CAPABILITIES: frozenset[str] = frozenset(
         "event.publish",
         "event.subscribe",
         "hardware.gpio_out",
+        "vision.frame.read",
+        "vision.model.register",
+        "vision.detection.publish",
+        "vision.detection.subscribe",
+        "vision.track.designate",
+        "compute.job.submit",
+        "compute.job.read",
+        "compute.dataset.write",
+        "compute.stream.open",
     }
 )
 
@@ -388,6 +398,13 @@ CAPABILITY_CATALOG: dict[str, dict[str, str]] = {
         "category": "compute_process",
         "risk": "medium",
         "risk_reason": "Moves captured data (imagery, keyframes) off the drone to another node.",
+    },
+    "compute.stream.open": {
+        "label": "Open a streaming perception offload session",
+        "description": "Lets the plugin open a continuous perception-offload session to a paired compute node: the drone streams its camera to the node, the node runs the plugin's detection model on its accelerator, and detections return onto the drone's shared detection bus. The plugin runs its model off the drone (or on the local accelerator when the runtime picks local) transparently, and holds a handle to close the session and read its live health. Whether inference runs locally or on the node is the runtime's tier decision.",
+        "category": "compute_process",
+        "risk": "medium",
+        "risk_reason": "Streams live camera imagery off the drone to another node and consumes shared compute; the returned detections drive on-board behaviours through the safety gate.",
     },
 }
 

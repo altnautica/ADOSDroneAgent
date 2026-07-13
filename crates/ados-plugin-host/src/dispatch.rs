@@ -86,6 +86,11 @@ pub enum Method {
     ComputeJobRead,
     ComputeJobOutputs,
     ComputeJobCancel,
+    // Streaming perception offload: open / close / read-health of a live
+    // frames→detections session on a paired compute node.
+    ComputeStreamOpen,
+    ComputeStreamClose,
+    ComputeStreamHealth,
 }
 
 impl Method {
@@ -146,6 +151,9 @@ impl Method {
             "compute.job.read" => Self::ComputeJobRead,
             "compute.job.outputs" => Self::ComputeJobOutputs,
             "compute.job.cancel" => Self::ComputeJobCancel,
+            "compute.stream.open" => Self::ComputeStreamOpen,
+            "compute.stream.close" => Self::ComputeStreamClose,
+            "compute.stream.health" => Self::ComputeStreamHealth,
             _ => return None,
         })
     }
@@ -192,6 +200,9 @@ impl Method {
             Self::ComputeJobRead => "compute.job.read",
             Self::ComputeJobOutputs => "compute.job.outputs",
             Self::ComputeJobCancel => "compute.job.cancel",
+            Self::ComputeStreamOpen => "compute.stream.open",
+            Self::ComputeStreamClose => "compute.stream.close",
+            Self::ComputeStreamHealth => "compute.stream.health",
         }
     }
 
@@ -454,6 +465,9 @@ mod tests {
         Method::ComputeJobRead,
         Method::ComputeJobOutputs,
         Method::ComputeJobCancel,
+        Method::ComputeStreamOpen,
+        Method::ComputeStreamClose,
+        Method::ComputeStreamHealth,
     ];
 
     #[test]
@@ -626,6 +640,28 @@ mod tests {
             gate("compute.job.submit", false, &caps(&["compute.job.submit"])),
             Gate::Allow(Method::ComputeJobSubmit)
         );
+    }
+
+    #[test]
+    fn compute_stream_methods_gate_on_the_open_capability() {
+        // open / close / health are the one open-a-stream surface: all three are
+        // refused without `compute.stream.open` and allowed with it (the opener
+        // manages the session it opened). The `compute.job.submit` cap does NOT
+        // satisfy them — a streaming session is a distinct grant.
+        for (method, variant) in [
+            ("compute.stream.open", Method::ComputeStreamOpen),
+            ("compute.stream.close", Method::ComputeStreamClose),
+            ("compute.stream.health", Method::ComputeStreamHealth),
+        ] {
+            assert_eq!(
+                gate(method, false, &caps(&["compute.job.submit"])),
+                Gate::CapabilityDenied("capability_denied: compute.stream.open".to_string())
+            );
+            assert_eq!(
+                gate(method, false, &caps(&["compute.stream.open"])),
+                Gate::Allow(variant)
+            );
+        }
     }
 
     #[test]

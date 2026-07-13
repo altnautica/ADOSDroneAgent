@@ -137,6 +137,17 @@ impl ComputeClient {
             .await
     }
 
+    /// List the node's live streaming perception-offload sessions
+    /// (`/api/compute/sessions`), each with its state, throughput, and
+    /// reconnect / restart history. The plugin host reads this to report a
+    /// streaming session's health to a plugin (`compute.stream.health`); a
+    /// closed session is absent from the list (the node reaps it), so a caller
+    /// treats "not found" as closed.
+    pub async fn sessions(&self) -> Result<Vec<crate::SessionView>, ClientError> {
+        self.send_json(self.http.get(self.url("/api/compute/sessions")))
+            .await
+    }
+
     /// Register a dataset (`compute.dataset.write`). The heavy input rides a
     /// separate bulk/stream lane; this records the dataset the job consumes.
     pub async fn write_dataset(
@@ -359,6 +370,18 @@ mod tests {
             Err(ClientError::Http(409, _)) => {}
             other => panic!("expected Http(409) on a duplicate id, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn sessions_lists_the_live_streaming_sessions() {
+        // The default router wires an empty session registry, so the live-session
+        // list reads back as an empty vec (no session is streaming). This exercises
+        // the client's `/api/compute/sessions` read path the plugin-host health
+        // method uses.
+        let (addr, _engine) = spawn(unpaired_auth()).await;
+        let client = ComputeClient::new(format!("http://{addr}"), None);
+        let sessions = client.sessions().await.unwrap();
+        assert!(sessions.is_empty(), "no session is live on a fresh node");
     }
 
     #[tokio::test]

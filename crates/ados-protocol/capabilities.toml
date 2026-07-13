@@ -17,7 +17,7 @@
 # Edit here, then run codegen. Do not edit the generated files by hand.
 
 # ===========================================================================
-# AGENT capabilities (46)
+# AGENT capabilities (47)
 # ===========================================================================
 
 [[agent]]
@@ -324,7 +324,7 @@ description = "Lets the plugin subscribe to normalized camera frames the vision 
 category = "compute_process"
 risk = "medium"
 risk_reason = "Frames may contain sensitive imagery; a frame consumer can process it off the normal recording path."
-enforced = false
+enforced = true
 
 [[agent]]
 id = "vision.model.register"
@@ -333,7 +333,7 @@ description = "Lets the plugin register an inference model (and its input format
 category = "compute_process"
 risk = "medium"
 risk_reason = "A model can consume the shared accelerator and CPU; a heavy or faulty model can starve other vision consumers."
-enforced = false
+enforced = true
 
 [[agent]]
 id = "vision.detection.publish"
@@ -342,7 +342,7 @@ description = "Lets the plugin publish detection results (bounding boxes, class 
 category = "data_network"
 risk = "low"
 risk_reason = "Detections are derived data on a sandboxed topic and do not affect flight."
-enforced = false
+enforced = true
 
 [[agent]]
 id = "vision.detection.subscribe"
@@ -351,7 +351,7 @@ description = "Lets the plugin receive the detection batches the vision engine p
 category = "data_network"
 risk = "low"
 risk_reason = "Detections are derived data on a sandboxed topic and do not affect flight."
-enforced = false
+enforced = true
 
 [[agent]]
 id = "vision.track.designate"
@@ -360,7 +360,7 @@ description = "Lets the plugin choose which object the vision engine's single-ob
 category = "data_network"
 risk = "medium"
 risk_reason = "Choosing the follow target steers downstream follow/framing behaviour, though designation alone does not command flight."
-enforced = false
+enforced = true
 
 [[agent]]
 id = "button.subscribe"
@@ -414,7 +414,7 @@ description = "Lets the plugin submit a job to a paired compute node: a reconstr
 category = "compute_process"
 risk = "medium"
 risk_reason = "Sends data off the drone to another node and consumes shared compute; a streaming offload also moves imagery off the normal path."
-enforced = false
+enforced = true
 
 [[agent]]
 id = "compute.job.read"
@@ -423,7 +423,7 @@ description = "Lets the plugin poll the status and progress of jobs it submitted
 category = "compute_process"
 risk = "low"
 risk_reason = "Read-only on the job interface; no effect on flight or on other plugins' jobs."
-enforced = false
+enforced = true
 
 [[agent]]
 id = "compute.dataset.write"
@@ -432,7 +432,16 @@ description = "Lets the plugin upload an input dataset (a keyframe bag, or the f
 category = "compute_process"
 risk = "medium"
 risk_reason = "Moves captured data (imagery, keyframes) off the drone to another node."
-enforced = false
+enforced = true
+
+[[agent]]
+id = "compute.stream.open"
+label = "Open a streaming perception offload session"
+description = "Lets the plugin open a continuous perception-offload session to a paired compute node: the drone streams its camera to the node, the node runs the plugin's detection model on its accelerator, and detections return onto the drone's shared detection bus. The plugin runs its model off the drone (or on the local accelerator when the runtime picks local) transparently, and holds a handle to close the session and read its live health. Whether inference runs locally or on the node is the runtime's tier decision."
+category = "compute_process"
+risk = "medium"
+risk_reason = "Streams live camera imagery off the drone to another node and consumes shared compute; the returned detections drive on-board behaviours through the safety gate."
+enforced = true
 
 # ===========================================================================
 # GCS capabilities (17): 10 UI slots + 7 data/command/mission/cloud
@@ -787,3 +796,22 @@ required_cap = "compute.job.read"
 [[method]]
 id = "compute.job.cancel"
 required_cap = "compute.job.submit"
+
+# ---- streaming perception offload ----
+# A plugin opens a continuous perception-offload session: the drone streams its
+# camera to a paired compute node, the node runs the detector, and detections
+# return onto the drone's shared detection bus. `open` starts (or resolves to
+# local for) the session; `close` stops it; `health` reads its live state from
+# the node's session registry. All three are the same open-a-stream surface, so
+# they share the one open capability (the opener manages its own session).
+[[method]]
+id = "compute.stream.open"
+required_cap = "compute.stream.open"
+
+[[method]]
+id = "compute.stream.close"
+required_cap = "compute.stream.open"
+
+[[method]]
+id = "compute.stream.health"
+required_cap = "compute.stream.open"
