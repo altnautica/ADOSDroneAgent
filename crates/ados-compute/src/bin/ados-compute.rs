@@ -365,8 +365,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(SelectingReconstructor::new(work_root.clone())),
         detector.clone(),
     );
-    let engine = Engine::new(scheduler, Cluster::new_master(node_id.clone()), workers);
-    let state = Arc::new(Mutex::new(engine));
+    let mut engine = Engine::new(scheduler, Cluster::new_master(node_id.clone()), workers);
 
     // The streaming perception-offload lane: a PerceptionOffload job carrying a
     // `session` block (an NPU-less drone streaming its live camera) starts a
@@ -379,6 +378,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         detector.clone(),
         serving.serve_offload,
     ));
+    // Share the session counter so the node heartbeat reflects live offload
+    // sessions (a node streaming to N drones reports N, not 0).
+    engine.set_session_counter(offload_sessions.session_counter());
+    let state = Arc::new(Mutex::new(engine));
 
     // Startup recovery: a job left in Running (the daemon crashed mid-backend)
     // is neither claimable nor purgeable, so requeue it before the workers start.

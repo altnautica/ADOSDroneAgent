@@ -67,6 +67,9 @@ pub struct ComputeHeartbeatSidecar {
     pub compute_cluster_master_id: String,
     pub compute_queue_depth: u32,
     pub compute_active_jobs: u32,
+    /// Live streaming perception-offload sessions (a node streaming to N drones).
+    /// Additive; a reader that does not know the key ignores it.
+    pub compute_active_sessions: u32,
     pub compute_workers_idle: u32,
     pub compute_cluster_aggregate_workers_idle: u32,
     pub compute_cluster_slaves: Vec<SlaveEntry>,
@@ -92,6 +95,7 @@ impl ComputeHeartbeatSidecar {
             compute_cluster_master_id: hb.cluster.master_id.clone(),
             compute_queue_depth: hb.queue_depth,
             compute_active_jobs: hb.active_jobs,
+            compute_active_sessions: hb.active_sessions,
             compute_workers_idle: hb.workers_idle,
             compute_cluster_aggregate_workers_idle: hb.cluster.aggregate_workers_idle,
             compute_cluster_slaves: hb
@@ -167,6 +171,7 @@ mod tests {
             queue_depth: 3,
             active_jobs: 1,
             workers_idle: 4,
+            active_sessions: 5,
         }
     }
 
@@ -192,6 +197,7 @@ mod tests {
         assert_eq!(v["computeClusterMasterId"], "node-master");
         assert_eq!(v["computeQueueDepth"], 3);
         assert_eq!(v["computeActiveJobs"], 1);
+        assert_eq!(v["computeActiveSessions"], 5);
         assert_eq!(v["computeWorkersIdle"], 4);
         assert_eq!(v["computeClusterAggregateWorkersIdle"], 6);
         assert_eq!(v["generatedAtMs"], 1700);

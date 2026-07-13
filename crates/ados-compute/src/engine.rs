@@ -4,6 +4,9 @@
 //! REST job API, mDNS pairing, and the real heartbeat transport wrap this; the
 //! engine itself does no I/O so it stays testable.
 
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -20,6 +23,12 @@ pub struct ComputeHeartbeat {
     pub queue_depth: u32,
     pub active_jobs: u32,
     pub workers_idle: u32,
+    /// Live streaming perception-offload sessions (a node streaming detections to
+    /// N drones reports N). Distinct from `active_jobs` (queued/running one-shot
+    /// jobs); a continuous session is not a queued job. Additive: `#[serde(default)]`
+    /// so a reader talking to an older node (no field) reads 0.
+    #[serde(default)]
+    pub active_sessions: u32,
 }
 
 /// One compute node: its scheduler, its cluster view, and its worker count.
@@ -27,6 +36,10 @@ pub struct Engine {
     scheduler: Scheduler,
     cluster: Cluster,
     workers: u32,
+    /// Live streaming-offload session count, shared with the session manager
+    /// (which owns + updates it). `None` when the node runs no session manager
+    /// (e.g. tests), reported as 0 in the heartbeat.
+    session_counter: Option<Arc<AtomicU32>>,
 }
 
 impl Engine {
@@ -37,7 +50,15 @@ impl Engine {
             scheduler,
             cluster,
             workers,
+            session_counter: None,
         }
+    }
+
+    /// Share the streaming-offload session counter so the heartbeat reflects live
+    /// offload sessions. The counter is owned + updated by the session manager;
+    /// the engine only reads it.
+    pub fn set_session_counter(&mut self, counter: Arc<AtomicU32>) {
+        self.session_counter = Some(counter);
     }
 
     /// The scheduler (the API layer submits jobs and reads results through it).
@@ -66,12 +87,18 @@ impl Engine {
         let queue_depth = store.count_in_state(ComputeJobState::Queued)?;
         let active_jobs = store.count_in_state(ComputeJobState::Running)?;
         let workers_idle = self.workers.saturating_sub(active_jobs);
+        let active_sessions = self
+            .session_counter
+            .as_ref()
+            .map(|c| c.load(Ordering::Relaxed))
+            .unwrap_or(0);
         Ok(ComputeHeartbeat {
             role: self.cluster.role(),
             cluster: self.cluster.descriptor(workers_idle),
             queue_depth,
             active_jobs,
             workers_idle,
+            active_sessions,
         })
     }
 }
@@ -178,5 +205,20 @@ mod tests {
         assert_eq!(hb.active_jobs, 3);
         // 3 running > 2 workers, so idle saturates at 0 (never underflows).
         assert_eq!(hb.workers_idle, 0);
+    }
+
+    #[test]
+    fn heartbeat_reports_active_offload_sessions_from_the_shared_counter() {
+        let mut e = engine();
+        // No counter set yet: a node with no session manager reports 0, not a panic.
+        assert_eq!(e.heartbeat().unwrap().active_sessions, 0);
+        let counter = Arc::new(AtomicU32::new(0));
+        e.set_session_counter(counter.clone());
+        assert_eq!(e.heartbeat().unwrap().active_sessions, 0);
+        // Two live streaming sessions surface as active_sessions (distinct from
+        // active_jobs, which counts queued/running one-shot jobs).
+        counter.fetch_add(2, Ordering::Relaxed);
+        assert_eq!(e.heartbeat().unwrap().active_sessions, 2);
+        assert_eq!(e.heartbeat().unwrap().active_jobs, 0);
     }
 }

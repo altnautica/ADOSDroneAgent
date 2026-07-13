@@ -21,6 +21,7 @@
 //! shutdown.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use serde::Deserialize;
@@ -90,6 +91,10 @@ pub struct OffloadSessionManager {
     /// session id -> its cancel handle. `Arc<Mutex<..>>` so a session's own
     /// self-cleanup task can remove its entry when its stream ends.
     active: Arc<Mutex<HashMap<String, Arc<Notify>>>>,
+    /// Live session count, shared with the engine's heartbeat so a node streaming
+    /// to N drones reports N active offload sessions (not 0). Incremented when a
+    /// session starts and decremented when it ends, in lockstep with `active`.
+    session_counter: Arc<AtomicU32>,
 }
 
 impl OffloadSessionManager {
@@ -106,7 +111,14 @@ impl OffloadSessionManager {
             detector,
             serve_offload,
             active: Arc::new(Mutex::new(HashMap::new())),
+            session_counter: Arc::new(AtomicU32::new(0)),
         }
+    }
+
+    /// The live-session counter, shared into the engine so its heartbeat reflects
+    /// active offload sessions.
+    pub fn session_counter(&self) -> Arc<AtomicU32> {
+        self.session_counter.clone()
     }
 
     /// Start (or re-affirm) the session described by `spec`, pulling the drone's
@@ -142,16 +154,23 @@ impl OffloadSessionManager {
             }
             let cancel = Arc::new(Notify::new());
             active.insert(spec.id.clone(), cancel.clone());
+            // In lockstep with `active`: a real new session bumps the live count.
+            self.session_counter.fetch_add(1, Ordering::Relaxed);
             cancel
         };
 
         // The session emits one batch per frame onto `tx`; the pump forwards them
         // into the broadcaster the WS router fans out to the drone's subscriber.
         let (tx, rx) = mpsc::channel(SESSION_CHANNEL_CAP);
-        tokio::spawn(pump_to_broadcaster(rx, self.broadcaster.clone()));
+        tokio::spawn(pump_to_broadcaster(
+            spec.id.clone(),
+            rx,
+            self.broadcaster.clone(),
+        ));
 
         let detector = self.detector.clone();
         let active = self.active.clone();
+        let counter = self.session_counter.clone();
         let id = spec.id.clone();
         let camera_id = spec.camera_id.clone();
         tokio::spawn(async move {
@@ -160,6 +179,7 @@ impl OffloadSessionManager {
             // re-open of the same id starts a fresh session rather than being
             // deduped against a dead one.
             active.lock().await.remove(&id);
+            counter.fetch_sub(1, Ordering::Relaxed);
             tracing::info!(session = %id, "offload session ended");
         });
         tracing::info!(session = %spec.id, camera = %spec.camera_id, "offload session started");
@@ -328,6 +348,75 @@ mod tests {
         assert_eq!(mgr.active_count().await, 1, "re-submit deduped");
         // Stop it cleanly.
         assert!(mgr.stop("s1").await);
+    }
+
+    #[tokio::test]
+    async fn a_session_restarts_under_the_same_id_after_the_previous_one_ended() {
+        let mgr = manager();
+        let mut rx = mgr.broadcaster().subscribe();
+
+        // First session over a finite stream: it runs, emits, then ends + self-reaps.
+        mgr.start_with_stream(spec("s1"), VecFrameStream::solid("front", 64, 48, 2, 1000))
+            .await;
+        for i in 0..2 {
+            let b = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+                .await
+                .expect("a batch within 5s")
+                .expect("broadcaster open");
+            assert_eq!(b.seq, i);
+        }
+        for _ in 0..200 {
+            if mgr.active_count().await == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(mgr.active_count().await, 0, "the first session was reaped");
+
+        // Re-open the SAME id: it must start a FRESH session (not be deduped
+        // against the ended one), so batches flow again with seq restarting at 0.
+        mgr.start_with_stream(spec("s1"), VecFrameStream::solid("front", 64, 48, 2, 2000))
+            .await;
+        let b = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("the re-opened session emits")
+            .expect("broadcaster open");
+        assert_eq!(b.session_id, "s1");
+        assert_eq!(b.seq, 0, "a fresh session restarts the sequence");
+    }
+
+    #[tokio::test]
+    async fn the_session_counter_tracks_live_sessions() {
+        let mgr = manager();
+        let counter = mgr.session_counter();
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+
+        mgr.start_with_stream(
+            spec("s1"),
+            VecFrameStream::solid("front", 16, 16, 100_000, 0),
+        )
+        .await;
+        // The increment is synchronous with the start, so it is already 1 here.
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            mgr.active_count().await,
+            1,
+            "counter agrees with the active map"
+        );
+
+        assert!(mgr.stop("s1").await);
+        // The decrement lands when the session task unwinds.
+        for _ in 0..200 {
+            if counter.load(Ordering::Relaxed) == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            0,
+            "the counter decremented when the session ended"
+        );
     }
 
     #[tokio::test]

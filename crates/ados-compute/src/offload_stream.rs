@@ -14,6 +14,7 @@
 //! runtime.
 
 use std::process::Stdio;
+use std::time::{Duration, Instant};
 
 use ados_protocol::offload::{Detection, FrameRef, OffloadDetectionBatch};
 use anyhow::{anyhow, Result};
@@ -22,6 +23,15 @@ use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
 
 use crate::offload::Detector;
+
+/// Reconnect backoff for a continuous (live) frame source: the first retry waits
+/// this long after a transient frame error.
+const RECONNECT_BACKOFF_BASE_MS: u64 = 200;
+/// The backoff doubles after each failed retry, up to this cap.
+const RECONNECT_BACKOFF_CAP_MS: u64 = 2_000;
+/// Give up (end the session so the drone re-opens it) only once a live source has
+/// stayed broken continuously for this long. A single blip never ends a session.
+const RECONNECT_GIVE_UP_MS: u128 = 30_000;
 
 /// One decoded RGB24 frame streamed from a drone, plus the metadata a detection
 /// is tied back to. `pixels` is `width * height * 3` bytes, row-major.
@@ -43,6 +53,14 @@ pub struct OffloadFrame {
 /// streaming session); both concrete impls' futures are already `Send`.
 pub trait OffloadFrameStream: Send {
     fn next_frame(&mut self) -> impl std::future::Future<Output = Result<OffloadFrame>> + Send;
+
+    /// Whether this is a live, reconnectable source. A live source (the drone's
+    /// RTSP feed) treats a frame error as a transient hiccup to retry, not the end
+    /// of the session; a finite replay source treats exhaustion as terminal.
+    /// Defaults to `false` so a replay source ends when it runs out.
+    fn is_continuous(&self) -> bool {
+        false
+    }
 }
 
 /// Run a streaming offload session: pull frames, run the detector on each on a
@@ -62,6 +80,11 @@ pub async fn run_offload_session<S: OffloadFrameStream>(
     cancel: Arc<tokio::sync::Notify>,
 ) {
     let mut seq: u64 = 0;
+    // Reconnect state for a continuous (live) source: a transient frame error is a
+    // hiccup to retry with a bounded backoff, not the end of the session. Reset on
+    // every good frame.
+    let mut backoff_ms = RECONNECT_BACKOFF_BASE_MS;
+    let mut failing_since: Option<Instant> = None;
     // Hold ONE notified future for the whole session so a cancel is never missed
     // between iterations (a fresh `cancel.notified()` per loop can race with the
     // signal). The canceller uses `notify_one`, so a cancel fired before the first
@@ -69,15 +92,42 @@ pub async fn run_offload_session<S: OffloadFrameStream>(
     let cancelled = cancel.notified();
     tokio::pin!(cancelled);
     loop {
-        let frame = tokio::select! {
-            f = stream.next_frame() => match f {
-                Ok(f) => f,
-                Err(e) => {
+        let next = tokio::select! {
+            f = stream.next_frame() => f,
+            _ = &mut cancelled => break,
+        };
+        let frame = match next {
+            Ok(f) => {
+                // A good frame clears the reconnect state.
+                backoff_ms = RECONNECT_BACKOFF_BASE_MS;
+                failing_since = None;
+                f
+            }
+            Err(e) => {
+                if !stream.is_continuous() {
+                    // A finite/replay source: exhaustion is terminal.
                     tracing::info!(session = session_id, error = %e, "offload session frame stream ended");
                     break;
                 }
-            },
-            _ = &mut cancelled => break,
+                // A live source (the drone's RTSP feed): a transient blip (an
+                // ffmpeg exit / RTSP drop) is a hiccup, not the end. The stream
+                // respawns its capture on the next call, so back off and retry;
+                // give up only if it stays broken past the budget (then the session
+                // ends and the drone re-opens it).
+                let since = *failing_since.get_or_insert_with(Instant::now);
+                if since.elapsed().as_millis() > RECONNECT_GIVE_UP_MS {
+                    tracing::warn!(session = session_id, error = %e, "offload frame stream down past the reconnect budget; ending session");
+                    break;
+                }
+                tracing::info!(session = session_id, error = %e, backoff_ms, "offload frame stream hiccup; reconnecting");
+                // Cancel-aware backoff: a cancel during the wait still stops promptly.
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_millis(backoff_ms)) => {}
+                    _ = &mut cancelled => break,
+                }
+                backoff_ms = backoff_ms.saturating_mul(2).min(RECONNECT_BACKOFF_CAP_MS);
+                continue;
+            }
         };
 
         let detections = match run_detector(&detector, &frame).await {
@@ -228,6 +278,12 @@ impl OffloadFrameStream for RtspFrameStream {
             pixels,
         })
     }
+
+    // The RTSP feed is a live source: a read error is a transient blip to
+    // reconnect through, not the end of the session.
+    fn is_continuous(&self) -> bool {
+        true
+    }
 }
 
 /// Replays a fixed set of frames, then ends. The synthetic source for tests + the
@@ -320,6 +376,71 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(5), session)
             .await
             .expect("session stopped on the closed sink")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_continuous_stream_reconnects_after_a_transient_hiccup() {
+        // A live source that errors ONCE (an ffmpeg / RTSP blip) then yields frames.
+        // The session must NOT end on the blip: it reconnects and resumes emitting.
+        struct FlakyThenSteady {
+            errored: bool,
+            camera_id: String,
+        }
+        impl OffloadFrameStream for FlakyThenSteady {
+            async fn next_frame(&mut self) -> Result<OffloadFrame> {
+                if !self.errored {
+                    self.errored = true;
+                    return Err(anyhow!("transient rtsp blip"));
+                }
+                Ok(OffloadFrame {
+                    camera_id: self.camera_id.clone(),
+                    ts_ms: 1,
+                    width: 16,
+                    height: 16,
+                    pixels: vec![128u8; 16 * 16 * 3],
+                })
+            }
+            fn is_continuous(&self) -> bool {
+                true
+            }
+        }
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let cancel = Arc::new(tokio::sync::Notify::new());
+        let stream = FlakyThenSteady {
+            errored: false,
+            camera_id: "front".into(),
+        };
+        let detector: Arc<dyn Detector> = Arc::new(MockDetector);
+        let c = cancel.clone();
+        let session = tokio::spawn(async move {
+            run_offload_session("s-flaky", "front", stream, detector, tx, c).await;
+        });
+
+        // Despite the first-frame error, the session reconnects (a short backoff)
+        // and emits batches once frames flow again; seq starts at the first GOOD
+        // frame (the errored read emitted nothing).
+        let b0 = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("a batch arrives after the reconnect")
+            .expect("channel open");
+        assert_eq!(b0.session_id, "s-flaky");
+        assert_eq!(
+            b0.seq, 0,
+            "the errored read emitted nothing; seq starts at the first good frame"
+        );
+        let b1 = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("the session keeps streaming")
+            .expect("channel open");
+        assert_eq!(b1.seq, 1);
+
+        // Stop the (otherwise endless) session.
+        cancel.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(5), session)
+            .await
+            .expect("session stopped on cancel")
             .unwrap();
     }
 

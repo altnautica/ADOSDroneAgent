@@ -7,7 +7,8 @@
 //! a slow subscriber that lags is skipped (never blocking the detector), and a
 //! disconnected one is reaped even while the stream is idle.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use ados_protocol::offload::OffloadDetectionBatch;
 use axum::{
@@ -19,7 +20,7 @@ use axum::{
     routing::get,
     Router,
 };
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 
 /// The WS route the drone subscribes to, one path per session.
 pub const OFFLOAD_WS_ROUTE: &str = "/ws/offload/:session_id";
@@ -32,6 +33,11 @@ pub fn offload_ws_path(session_id: &str) -> String {
 /// Fans out returned detection batches, tagged by session, to every subscriber.
 pub struct DetectionBroadcaster {
     tx: broadcast::Sender<OffloadDetectionBatch>,
+    /// Per-session close signal. When a session ends, its `pump_to_broadcaster`
+    /// drops the session's watch sender here, waking every WS subscriber for that
+    /// session so its socket closes and the drone reconnects. Keyed by session id
+    /// so ending one session never disturbs another live one.
+    closes: Mutex<HashMap<String, watch::Sender<bool>>>,
 }
 
 impl DetectionBroadcaster {
@@ -39,7 +45,34 @@ impl DetectionBroadcaster {
     /// subscriber past the buffer lags and skips, never blocking the detector).
     pub fn new(capacity: usize) -> Self {
         let (tx, _rx) = broadcast::channel(capacity);
-        Self { tx }
+        Self {
+            tx,
+            closes: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// A close-signal receiver for `session_id` (the WS handler holds one per
+    /// connection). Get-or-creates the session's signal so a subscriber that
+    /// connects before the session's pump has registered still shares the same
+    /// signal; the receiver resolves once the session ends.
+    fn close_watch(&self, session_id: &str) -> watch::Receiver<bool> {
+        self.closes
+            .lock()
+            .expect("closes registry poisoned")
+            .entry(session_id.to_string())
+            .or_insert_with(|| watch::channel(false).0)
+            .subscribe()
+    }
+
+    /// Signal that a session has ended: remove (and drop) its close sender so every
+    /// WS subscriber for that session wakes and closes its socket. A session with
+    /// no subscribers is a no-op; removing the entry lets a later re-open of the
+    /// same session id register a fresh signal.
+    pub fn close_session(&self, session_id: &str) {
+        self.closes
+            .lock()
+            .expect("closes registry poisoned")
+            .remove(session_id);
     }
 
     /// Publish a returned batch. Returns the number of currently-subscribed
@@ -64,14 +97,20 @@ impl DetectionBroadcaster {
 
 /// Pump a session's detection channel into the broadcaster until the channel
 /// closes (the session ended). The daemon spawns this per session so the
-/// streaming session stays decoupled from the WS fan-out.
+/// streaming session stays decoupled from the WS fan-out. When the channel
+/// closes, this signals every WS subscriber for `session_id` to close so the
+/// drone's subscriber returns and its reconnect logic re-opens the session.
 pub async fn pump_to_broadcaster(
+    session_id: String,
     mut rx: tokio::sync::mpsc::Receiver<OffloadDetectionBatch>,
     broadcaster: Arc<DetectionBroadcaster>,
 ) {
     while let Some(batch) = rx.recv().await {
         broadcaster.publish(batch);
     }
+    // The session's detection channel closed (the session ended): close this
+    // session's WS subscribers so the drone stops waiting on a dead stream.
+    broadcaster.close_session(&session_id);
 }
 
 /// The axum router the compute node mounts to serve the per-session detection
@@ -88,18 +127,25 @@ async fn offload_ws(
     State(b): State<Arc<DetectionBroadcaster>>,
 ) -> Response {
     // Subscribe BEFORE the upgrade completes so a batch published in the connect
-    // window is not missed by a freshly-connected drone.
+    // window is not missed by a freshly-connected drone. The close watch closes
+    // this socket when its session ends (so the drone reconnects).
     let rx = b.subscribe();
-    ws.on_upgrade(move |socket| forward_batches(socket, session_id, rx))
+    let close_rx = b.close_watch(&session_id);
+    ws.on_upgrade(move |socket| forward_batches(socket, session_id, rx, close_rx))
 }
 
 async fn forward_batches(
     mut socket: WebSocket,
     session_id: String,
     mut rx: broadcast::Receiver<OffloadDetectionBatch>,
+    mut close_rx: watch::Receiver<bool>,
 ) {
     loop {
+        // `biased`: drain any pending batch BEFORE observing the close, so the
+        // final batches queued before a session ended are delivered rather than
+        // dropped by the close firing first.
         tokio::select! {
+            biased;
             published = rx.recv() => match published {
                 Ok(batch) => {
                     if batch.session_id != session_id {
@@ -117,6 +163,13 @@ async fn forward_batches(
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => break,
             },
+            // The session ended: its close sender was dropped, so `changed()`
+            // resolves (with an error). Close the socket so the drone's subscriber
+            // returns and its reconnect logic re-opens the session.
+            _ = close_rx.changed() => {
+                let _ = socket.send(Message::Close(None)).await;
+                break;
+            }
             // Inbound: drain client frames so axum's automatic pong reply fires
             // (keepalive) and a disconnect is reaped even while the stream is idle.
             inbound = socket.recv() => match inbound {
@@ -228,12 +281,57 @@ mod tests {
         let broadcaster = Arc::new(DetectionBroadcaster::new(16));
         let mut rx = broadcaster.subscribe();
         let (tx, mrx) = tokio::sync::mpsc::channel(8);
-        let pump = tokio::spawn(pump_to_broadcaster(mrx, broadcaster.clone()));
+        let pump = tokio::spawn(pump_to_broadcaster(
+            "s1".to_string(),
+            mrx,
+            broadcaster.clone(),
+        ));
         tx.send(batch("s1", 0)).await.unwrap();
         tx.send(batch("s1", 1)).await.unwrap();
         assert_eq!(rx.recv().await.unwrap().seq, 0);
         assert_eq!(rx.recv().await.unwrap().seq, 1);
         drop(tx);
         pump.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_sessions_ws_closes_when_its_session_ends_while_another_stays_open() {
+        let broadcaster = Arc::new(DetectionBroadcaster::new(16));
+        let addr = spawn_server(broadcaster.clone()).await;
+
+        // One subscriber per session.
+        let (mut ws1, _r1) =
+            tokio_tungstenite::connect_async(format!("ws://{addr}{}", offload_ws_path("s1")))
+                .await
+                .unwrap();
+        let (mut ws2, _r2) =
+            tokio_tungstenite::connect_async(format!("ws://{addr}{}", offload_ws_path("s2")))
+                .await
+                .unwrap();
+        wait_for_subscribers(&broadcaster, 2).await;
+
+        // s1's session ends: only its WS must close.
+        broadcaster.close_session("s1");
+
+        // ws1 sees the stream close (a Close frame, then the socket ends).
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(5), ws1.next())
+            .await
+            .expect("ws1 resolves promptly on its session end");
+        match closed {
+            None | Some(Err(_)) => {}
+            Some(Ok(msg)) if msg.is_close() => {}
+            Some(Ok(other)) => panic!("expected ws1 to close, got a data frame: {other:?}"),
+        }
+
+        // s2 stays open and still receives its own batches.
+        broadcaster.publish(batch("s2", 7));
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(5), ws2.next())
+            .await
+            .expect("ws2 still delivers")
+            .expect("ws2 open")
+            .unwrap();
+        let got = OffloadDetectionBatch::from_msgpack(&msg.into_data()).unwrap();
+        assert_eq!(got.session_id, "s2");
+        assert_eq!(got.seq, 7);
     }
 }

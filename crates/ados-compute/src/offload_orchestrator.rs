@@ -36,7 +36,6 @@ use ados_protocol::offload::OffloadDetectionBatch;
 use anyhow::{anyhow, Result};
 use tokio::sync::{mpsc, Notify};
 
-use crate::client::ClientError;
 use crate::offload_bridge::{OffloadReturnBridge, VisionSockPublisher};
 use crate::offload_client::stream_offload_detections;
 use crate::{ComputeClient, ComputeJobKind};
@@ -156,11 +155,14 @@ fn ws_url_from_base(base_url: &str, session_id: &str) -> String {
 /// the node's detection return stream, and republish onto the local vision bus
 /// through the safety gate until `cancel` fires or the node stream ends.
 ///
-/// Idempotent submit: the session id is the job id, so a re-run (a lossy-link
-/// retry, or a reconnect) yields a `409 Conflict` the node already serves — not
-/// a second session — which is treated as success. A hard submit failure returns
-/// an error so the caller (the rig-side supervisor wiring) retries; the WS is not
-/// opened against a node that never started the session.
+/// The session identity travels in the job params (`session.id`); the node's
+/// active-session map is the source of truth for dedup, so the job row is just an
+/// ephemeral trigger with a node-minted id. A re-open after a session ended always
+/// mints a fresh trigger the worker picks up and (re)starts the session — a
+/// retained terminal job from a prior open never blocks the restart — while a
+/// re-submit of a still-live session is deduped on the node (a harmless no-op). A
+/// hard submit failure returns an error so the caller retries; the WS is not opened
+/// against a node that never accepted the trigger.
 pub async fn run_offload_orchestrator(
     cfg: OrchestratorConfig,
     node: NodeEndpoint,
@@ -181,19 +183,18 @@ pub async fn run_offload_orchestrator(
     });
     match client
         .submit_job(
+            // No dataset (the session consumes the live RTSP feed, not a stored
+            // dataset) and no caller-chosen job id (the node mints a unique one, so
+            // a re-open is never swallowed as a duplicate of a retained job).
             ComputeJobKind::PerceptionOffload,
-            Some(cfg.session_id.clone()),
+            None,
             params,
-            Some(cfg.session_id.clone()),
+            None,
         )
         .await
     {
         Ok(_) => {
             tracing::info!(session = %cfg.session_id, node = %base_url, "offload session submitted")
-        }
-        // A re-run of a live session is a 409 — the node already runs it.
-        Err(ClientError::Http(409, _)) => {
-            tracing::info!(session = %cfg.session_id, "offload session already registered on the node")
         }
         Err(e) => return Err(anyhow!("submit offload session job: {e}")),
     }

@@ -71,7 +71,7 @@ async fn offload_frames_reach_the_drone_vision_bus_end_to_end() {
     // The streaming session pumps its detection channel into the broadcaster.
     let (sess_tx, sess_rx) = tokio::sync::mpsc::channel::<OffloadDetectionBatch>(64);
     let bpump = broadcaster.clone();
-    tokio::spawn(pump_to_broadcaster(sess_rx, bpump));
+    tokio::spawn(pump_to_broadcaster("sess-1".to_string(), sess_rx, bpump));
 
     // --- drone side: subscribe over WS ---------------------------------------
     let dir = tempfile::tempdir().unwrap();
@@ -254,18 +254,18 @@ async fn the_orchestrator_drives_the_offload_loop_end_to_end() {
     );
 
     // The submit landed a real job on the node (proving step 2 ran, not just the
-    // WS): the session job is recorded under its session id.
+    // WS): the job id is node-minted, so find it by the session spec in its params.
     {
         let e = _engine.lock().await;
-        let job = e
-            .scheduler()
-            .store()
-            .get_job("sess-orch")
-            .unwrap()
-            .expect("the orchestrator submitted the session job");
+        let jobs = e.scheduler().store().list_jobs().unwrap();
+        let session_job = jobs.iter().find(|j| {
+            SessionSpec::from_job_params(&j.params)
+                .map(|s| s.id == "sess-orch")
+                .unwrap_or(false)
+        });
         assert!(
-            SessionSpec::from_job_params(&job.params).is_some(),
-            "the submitted job carries the streaming-session spec"
+            session_job.is_some(),
+            "the orchestrator submitted a streaming-session job for this session"
         );
     }
 

@@ -478,6 +478,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_sessionless_submit_mints_unique_ids_so_a_reopen_is_never_blocked() {
+        // The offload orchestrator submits its streaming-session trigger with NO
+        // job_id, so the node mints a unique one. A re-open after a session ended
+        // must never collide with a retained terminal job from the prior open:
+        // two identical no-id submits both succeed with DIFFERENT ids.
+        let router = build_router(test_state(), unpaired_auth());
+        let body = serde_json::json!({
+            "kind": "perception_offload",
+            "params": { "session": { "id": "s1", "rtsp_url": "rtsp://d:8554/main", "camera_id": "front" } }
+        });
+        let (st1, sub1) = send(&router, "POST", "/api/compute/jobs", body.clone()).await;
+        assert_eq!(st1, StatusCode::CREATED);
+        let (st2, sub2) = send(&router, "POST", "/api/compute/jobs", body).await;
+        assert_eq!(st2, StatusCode::CREATED, "a re-open is never a 409");
+        assert_ne!(
+            sub1["job_id"], sub2["job_id"],
+            "each trigger gets a unique node-minted id"
+        );
+    }
+
+    #[tokio::test]
     async fn duplicate_job_id_is_a_409() {
         let router = build_router(test_state(), unpaired_auth());
         let body =
