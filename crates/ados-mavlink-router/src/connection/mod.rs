@@ -101,6 +101,12 @@ pub struct FcConnection {
     /// Drives the reconnect backoff: a session that proved writable resets to
     /// the minimum, while a port that opens but never accepts a write backs off.
     wrote_since_open: AtomicBool,
+    /// True when the most recent open attempt FAILED to establish a transport
+    /// (the socket/serial device could not be opened at all). Drives the
+    /// `source_unreachable` link hint: a configured (non-auto) source whose
+    /// endpoint never opens is an unreachable / wrong endpoint, not merely a
+    /// silent FC. Set false the moment a transport opens; the run loop owns it.
+    open_failed: AtomicBool,
     port: Mutex<String>,
     /// The FC firmware family identified from the opened port's USB descriptor
     /// (`betaflight` / `inav`), or `None` for a MAVLink / unknown FC. An MSP FC
@@ -158,6 +164,7 @@ impl FcConnection {
             target_system: AtomicU8::new(1),
             connected: AtomicBool::new(false),
             wrote_since_open: AtomicBool::new(false),
+            open_failed: AtomicBool::new(false),
             port: Mutex::new(String::new()),
             fc_variant: Mutex::new(None),
             baud: AtomicU32::new(0),
@@ -232,9 +239,14 @@ impl FcConnection {
     ///   - `no_heartbeat` — the transport is open, no HEARTBEAT decoded, and no
     ///     MSP traffic was seen: a wrong baud, an unpowered / not-yet-booted FC,
     ///     wrong wiring, or a serial protocol other than MAVLink/MSP.
+    ///   - `source_unreachable` — the transport is NOT open and a configured
+    ///     (non-auto) source failed to open: the configured endpoint (a wrong /
+    ///     down `tcp:`/`udp:` host or an absent serial device) is unreachable.
+    ///     The operator fix is the source config, not plugging in an FC.
     ///
     /// Derived (not latched) so it self-corrects: the moment a HEARTBEAT decodes
-    /// it reads `none`, and the MSP evidence ages out via [`MSP_HINT_TTL`].
+    /// it reads `none`, the MSP evidence ages out via [`MSP_HINT_TTL`], and the
+    /// unreachable flag clears the moment a transport opens.
     pub async fn link_hint(&self) -> &'static str {
         if &*self.port.lock().await == "demo" {
             return "none";
@@ -243,6 +255,13 @@ impl FcConnection {
             return "none";
         }
         if !self.transport_open() {
+            // A configured (non-auto) source whose last open attempt failed is
+            // an unreachable / wrong endpoint — the operator's fix is the source
+            // config, not "plug in an FC". Auto-discovery stays silent: with no
+            // configured endpoint there is nothing to be unreachable.
+            if self.open_failed.load(Ordering::Relaxed) && self.source() != "auto" {
+                return "source_unreachable";
+            }
             return "none";
         }
         // A Betaflight/iNav FC identified by its USB descriptor speaks MSP, not
@@ -342,6 +361,11 @@ impl FcConnection {
                 _ = cancel.notified() => return,
             };
             let Some((read_half, write_half, port, baud)) = stream else {
+                // The transport could not be opened — the configured endpoint is
+                // unreachable / absent. Record it so link_hint() can explain the
+                // silent link instead of leaving the operator with a bare "not
+                // connected".
+                self.open_failed.store(true, Ordering::Relaxed);
                 tokio::select! {
                     _ = tokio::time::sleep(backoff) => {}
                     _ = cancel.notified() => return,
@@ -349,6 +373,8 @@ impl FcConnection {
                 backoff = (backoff * 2).min(RECONNECT_MAX);
                 continue;
             };
+            // A transport opened — clear the unreachable flag.
+            self.open_failed.store(false, Ordering::Relaxed);
             *self.port.lock().await = port.clone();
             // Identify an MSP FC (Betaflight/iNav) by the opened port's USB
             // descriptor — the passive signal that survives the silent-until-
@@ -824,6 +850,46 @@ mod liveness_tests {
         *c.last_msp_at.lock().await =
             Some(Instant::now() - (MSP_HINT_TTL + Duration::from_secs(1)));
         // Stale MSP evidence no longer arms the hint; falls back to no_heartbeat.
+        assert_eq!(c.link_hint().await, "no_heartbeat");
+    }
+
+    #[tokio::test]
+    async fn link_hint_is_source_unreachable_for_a_failed_configured_source() {
+        // A configured tcp source whose endpoint never opens (the run loop set
+        // open_failed) is unreachable, not merely a silent FC.
+        let c = conn_with(MavlinkConfig {
+            source: "tcp".into(),
+            serial_port: "tcp:203.0.113.9:15760".into(),
+            ..MavlinkConfig::default()
+        });
+        c.open_failed.store(true, Ordering::Relaxed);
+        assert!(!c.transport_open());
+        assert_eq!(c.link_hint().await, "source_unreachable");
+    }
+
+    #[tokio::test]
+    async fn link_hint_auto_discovery_stays_none_even_when_open_fails() {
+        // Auto-discovery has no configured endpoint to be "unreachable", so a
+        // failed probe stays quiet (nothing for the operator to fix).
+        let c = conn_with(MavlinkConfig::default());
+        c.open_failed.store(true, Ordering::Relaxed);
+        assert_eq!(c.source(), "auto");
+        assert_eq!(c.link_hint().await, "none");
+    }
+
+    #[tokio::test]
+    async fn link_hint_clears_source_unreachable_once_a_transport_opens() {
+        let c = conn_with(MavlinkConfig {
+            source: "tcp".into(),
+            serial_port: "tcp:203.0.113.9:15760".into(),
+            ..MavlinkConfig::default()
+        });
+        c.open_failed.store(true, Ordering::Relaxed);
+        assert_eq!(c.link_hint().await, "source_unreachable");
+        // The transport opened (run loop clears open_failed); the link is now
+        // open-and-silent, so the hint moves to no_heartbeat.
+        c.open_failed.store(false, Ordering::Relaxed);
+        c.connected.store(true, Ordering::Relaxed);
         assert_eq!(c.link_hint().await, "no_heartbeat");
     }
 
