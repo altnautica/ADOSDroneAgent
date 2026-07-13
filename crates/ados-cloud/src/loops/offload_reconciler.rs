@@ -25,13 +25,18 @@ use std::net::{IpAddr, ToSocketAddrs, UdpSocket};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ados_compute::{resolve_compute, run_offload_orchestrator, NodeEndpoint, OrchestratorConfig};
+use ados_compute::{
+    resolve_compute, run_offload_orchestrator, DetectionTee, NodeEndpoint, OrchestratorConfig,
+};
 use ados_protocol::offload_link::{write_offload_link, OffloadLink};
 use tokio::sync::{watch, Notify};
 use tokio::task::JoinHandle;
 
 use crate::config::{perception_offload_addr, CloudConfig};
+use crate::mqtt::transport::{RumqttcTransport, TransportConfig};
+use crate::mqtt::WS_PATH;
 use crate::pairing::PairingState;
+use crate::vision_bearer::CloudDetectionPublisher;
 
 /// The reconcile cadence. Comfortably under the sidecar's 20 s staleness window
 /// so an active link's mtime stays fresh, and responsive enough to pick up a
@@ -56,6 +61,10 @@ const TARGET_BUDGET_MS: i64 = 700;
 const BOARD_JSON: &str = "/run/ados/board.json";
 /// The camera pipeline readiness sidecar.
 const CAMERA_STATE_JSON: &str = "/run/ados/camera-state.json";
+/// The in-flight ceiling for the dedicated cloud detection session (mirrors the
+/// MAVLink relay's Rule-37 high ceiling — the publish path is the limit).
+const CLOUD_INFLIGHT: u16 = 1000;
+const CLOUD_KEEP_ALIVE: Duration = Duration::from_secs(30);
 
 /// The drone's live offload-session state the reconciler owns.
 struct RunningSession {
@@ -232,6 +241,44 @@ fn session_id(config: &CloudConfig) -> String {
     format!("offload-{}", config.agent.device_id)
 }
 
+/// Lazily build the dedicated cloud detection publisher (once) and hand back a
+/// tee for the orchestrator, or `None` in local-first mode / while unpaired.
+///
+/// Rule 39: the tee exists only when the agent is in an explicit cloud-relay
+/// posture AND paired — a LAN-only drone keeps its detections local. The MQTT
+/// session uses a DISTINCT client id (`ados-{device}-vision`) so it never
+/// collides with the MAVLink relay's `ados-{device}` session (a same-id second
+/// session kicks the first, as the atlas lane does with `ados-{device}-atlas`).
+/// Built at most once and reused across offload sessions.
+fn cloud_detection_tee(
+    config: &CloudConfig,
+    slot: &mut Option<Arc<CloudDetectionPublisher>>,
+) -> Option<Arc<dyn DetectionTee>> {
+    if !config.cloud_relay_enabled() {
+        return None;
+    }
+    if slot.is_none() {
+        let api_key = PairingState::load().api_key()?.to_string();
+        let cfg = TransportConfig {
+            client_id: format!("ados-{}-vision", config.agent.device_id),
+            host: config.server.cloud.mqtt_broker.clone(),
+            port: config.server.cloud.mqtt_port,
+            ws_path: WS_PATH.to_string(),
+            username: format!("ados-{}", config.agent.device_id),
+            password: api_key,
+            inflight: CLOUD_INFLIGHT,
+            keep_alive: CLOUD_KEEP_ALIVE,
+        };
+        tracing::info!("offload reconciler cloud detection lane connecting");
+        let transport = RumqttcTransport::connect(&cfg);
+        *slot = Some(Arc::new(CloudDetectionPublisher::new(
+            &config.agent.device_id,
+            transport,
+        )));
+    }
+    slot.clone().map(|p| p as Arc<dyn DetectionTee>)
+}
+
 /// Run the offload reconciler until `shutdown` flips.
 pub async fn run(config: Arc<CloudConfig>, mut shutdown: watch::Receiver<bool>) {
     // Cheap inert gate (config is loaded once at daemon start, changed via a
@@ -247,6 +294,10 @@ pub async fn run(config: Arc<CloudConfig>, mut shutdown: watch::Receiver<bool>) 
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut running: Option<RunningSession> = None;
     let mut last_search: Option<Instant> = None;
+    // The dedicated cloud detection publisher, built at most once (on the first
+    // offloaded session in cloud mode) and reused across sessions. `None` in
+    // local-first mode (Rule 39).
+    let mut cloud_pub: Option<Arc<CloudDetectionPublisher>> = None;
 
     loop {
         tokio::select! {
@@ -283,9 +334,14 @@ pub async fn run(config: Arc<CloudConfig>, mut shutdown: watch::Receiver<bool>) 
                             decide(&config).await
                         {
                             let cancel = Arc::new(Notify::new());
+                            // Tee returned detections to the cloud relay too, so a
+                            // hosted / off-LAN GCS renders the same live boxes. None
+                            // (LAN-only) leaves the session local (Rule 39).
+                            let tee = cloud_detection_tee(&config, &mut cloud_pub);
                             let cfg = OrchestratorConfig::vision_only(
                                 session_id(&config), CAMERA_ID, rtsp_url, width, height, TARGET_BUDGET_MS,
-                            );
+                            )
+                            .with_detection_tee(tee);
                             let api_key = PairingState::load().api_key().map(str::to_string);
                             let endpoint = NodeEndpoint::Direct { base_url, api_key };
                             let cancel_task = cancel.clone();

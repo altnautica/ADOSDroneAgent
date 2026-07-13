@@ -224,6 +224,7 @@ async fn the_orchestrator_drives_the_offload_loop_end_to_end() {
         pose_budget_ms: 5_000,
         model_id: "offload".into(),
         vision_sock: sock_path,
+        detection_tee: None,
     };
     // Discovery is injected (Direct): the SITL seam skips mDNS and points the
     // orchestrator at the mock node's base URL. Submit + WS + bridge are real.

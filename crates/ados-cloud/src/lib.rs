@@ -42,6 +42,7 @@ pub mod loops;
 pub mod mqtt;
 pub mod pairing;
 pub mod tls;
+pub mod vision_bearer;
 
 pub use atlas_bearer::CloudBearer;
 pub use config::CloudConfig;
@@ -54,3 +55,4 @@ pub use mqtt::{
     WebrtcSignalingRelay,
 };
 pub use pairing::PairingState;
+pub use vision_bearer::CloudDetectionPublisher;

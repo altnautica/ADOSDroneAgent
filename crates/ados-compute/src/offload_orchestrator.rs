@@ -32,6 +32,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ados_offload::OffloadMode;
+use ados_protocol::framebus::DetectionBatch;
 use ados_protocol::offload::OffloadDetectionBatch;
 use anyhow::{anyhow, Result};
 use tokio::sync::{mpsc, Notify};
@@ -47,6 +48,18 @@ const RETURN_CHANNEL_CAP: usize = 64;
 const SAFETY_TICK_MS: u64 = 100;
 /// The default `/run/ados/vision.sock` the return bridge publishes onto.
 pub const DEFAULT_VISION_SOCK: &str = "/run/ados/vision.sock";
+
+/// A fire-and-forget sink for each returned (converted) detection batch, teed
+/// alongside the republish onto the local vision bus. The cloud relay implements
+/// it (`ados-cloud`) so a hosted / off-LAN GCS renders the same live detections a
+/// LAN GCS gets over the vision-detection WebSocket. `publish` is synchronous and
+/// non-blocking (it drops on a busy / down publisher), so it never stalls the
+/// offload return path; a LAN-only agent wires no tee and stays local (Rule 39).
+pub trait DetectionTee: Send + Sync {
+    /// Tee one converted batch. Best-effort: never blocks, never errors back to
+    /// the caller — a full outgoing queue or a down link silently drops it.
+    fn publish(&self, batch: &DetectionBatch);
+}
 
 /// Where to reach the compute node.
 pub enum NodeEndpoint {
@@ -89,6 +102,10 @@ pub struct OrchestratorConfig {
     /// The vision request socket the bridge publishes onto (defaults to
     /// [`DEFAULT_VISION_SOCK`]).
     pub vision_sock: String,
+    /// An optional fire-and-forget sink for each returned batch, teed alongside
+    /// the local vision bus (the cloud-relay detection publisher). `None` on a
+    /// LAN-only agent (Rule 39: local stays local, no cloud round-trip).
+    pub detection_tee: Option<Arc<dyn DetectionTee>>,
 }
 
 impl OrchestratorConfig {
@@ -115,7 +132,16 @@ impl OrchestratorConfig {
             pose_budget_ms: target_budget_ms,
             model_id: "offload".into(),
             vision_sock: DEFAULT_VISION_SOCK.into(),
+            detection_tee: None,
         }
+    }
+
+    /// Attach a fire-and-forget cloud detection tee: each returned batch is teed
+    /// to it in addition to the local vision bus. `None` leaves the session
+    /// LAN-only (Rule 39).
+    pub fn with_detection_tee(mut self, tee: Option<Arc<dyn DetectionTee>>) -> Self {
+        self.detection_tee = tee;
+        self
     }
 }
 
@@ -252,6 +278,12 @@ async fn drain_into_bridge(
                     // batch; a returned box is never dropped silently past a log.
                     if let Err(e) = publisher.publish(&db).await {
                         tracing::warn!(error = %e, "offload return publish onto vision bus failed");
+                    }
+                    // Tee the SAME converted batch to the cloud relay (when a tee
+                    // is wired) so a hosted / off-LAN GCS renders the same live
+                    // detections. Fire-and-forget: never blocks the local path.
+                    if let Some(tee) = &cfg.detection_tee {
+                        tee.publish(&db);
                     }
                 }
                 // The node stream ended (session stopped / node gone) or the

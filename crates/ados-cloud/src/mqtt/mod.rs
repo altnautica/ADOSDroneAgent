@@ -63,6 +63,12 @@ pub fn topic_msp_tx(device_id: &str) -> String {
 pub fn topic_msp_rx(device_id: &str) -> String {
     format!("ados/{device_id}/msp/rx")
 }
+/// The live vision-detection topic: offloaded detection batches published for a
+/// hosted / off-LAN GCS, matching the LAN vision-detection WebSocket's shape so
+/// the GCS parses one shape for both paths. A lossy live stream, published q0.
+pub fn topic_vision_detections(device_id: &str) -> String {
+    format!("ados/{device_id}/vision/detections")
+}
 pub fn topic_webrtc_offer(device_id: &str) -> String {
     format!("ados/{device_id}/webrtc/offer")
 }
@@ -107,6 +113,7 @@ mod tests {
         assert_eq!(topic_mavlink_rx("d"), "ados/d/mavlink/rx");
         assert_eq!(topic_msp_tx("d"), "ados/d/msp/tx");
         assert_eq!(topic_msp_rx("d"), "ados/d/msp/rx");
+        assert_eq!(topic_vision_detections("d"), "ados/d/vision/detections");
         assert_eq!(topic_webrtc_offer("d"), "ados/d/webrtc/offer");
         assert_eq!(topic_webrtc_answer("d"), "ados/d/webrtc/answer");
     }

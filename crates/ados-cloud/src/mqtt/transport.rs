@@ -65,6 +65,18 @@ pub trait MqttTransport: Send + Sync {
         payload: Vec<u8>,
     ) -> Result<(), TransportError>;
 
+    /// Non-blocking publish: enqueue a payload for delivery without awaiting the
+    /// broker. Returns immediately; a full outgoing queue is an error (the caller
+    /// drops the payload rather than blocking). For a fire-and-forget lossy stream
+    /// (a live detection tee, like the MAVLink telemetry topic) where recency
+    /// beats completeness and the producer must never stall on a slow uplink.
+    fn try_publish(
+        &self,
+        topic: &str,
+        qos: MqttQos,
+        payload: Vec<u8>,
+    ) -> Result<(), TransportError>;
+
     /// Subscribe to a topic at the given QoS.
     async fn subscribe(&self, topic: &str, qos: MqttQos) -> Result<(), TransportError>;
 }
@@ -222,6 +234,19 @@ impl MqttTransport for RumqttcTransport {
             .map_err(|e| TransportError::Client(e.to_string()))
     }
 
+    fn try_publish(
+        &self,
+        topic: &str,
+        qos: MqttQos,
+        payload: Vec<u8>,
+    ) -> Result<(), TransportError> {
+        // Non-blocking: rumqttc enqueues onto its bounded request channel and
+        // returns immediately, erroring when the channel is full (drop-on-busy).
+        self.client
+            .try_publish(topic.to_string(), qos.into(), false, payload)
+            .map_err(|e| TransportError::Client(e.to_string()))
+    }
+
     async fn subscribe(&self, topic: &str, qos: MqttQos) -> Result<(), TransportError> {
         self.client
             .subscribe(topic.to_string(), qos.into())
@@ -250,6 +275,19 @@ pub(crate) mod test_support {
     #[async_trait]
     impl MqttTransport for FakeTransport {
         async fn publish(
+            &self,
+            topic: &str,
+            qos: MqttQos,
+            payload: Vec<u8>,
+        ) -> Result<(), TransportError> {
+            self.publishes
+                .lock()
+                .unwrap()
+                .push((topic.to_string(), qos, payload));
+            Ok(())
+        }
+
+        fn try_publish(
             &self,
             topic: &str,
             qos: MqttQos,
