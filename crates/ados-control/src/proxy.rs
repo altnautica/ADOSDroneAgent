@@ -150,7 +150,7 @@ fn relay_response(upstream: http::Response<Incoming>) -> Response {
 /// True when the request is a WebSocket upgrade handshake (`Connection` lists
 /// `upgrade` AND `Upgrade: websocket`), so it routes through the transport-level
 /// upgrade passthrough rather than the plain request/response path.
-fn is_websocket_upgrade(headers: &http::HeaderMap) -> bool {
+pub(crate) fn is_websocket_upgrade(headers: &http::HeaderMap) -> bool {
     let connection_has_upgrade = headers
         .get(http::header::CONNECTION)
         .and_then(|v| v.to_str().ok())

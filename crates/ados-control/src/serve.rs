@@ -39,9 +39,10 @@ use tokio::sync::oneshot;
 use tower::{Service, ServiceBuilder};
 use tower_http::cors::CorsLayer;
 
-use crate::auth::{self, PairingState, RateLimiter};
+use crate::auth::{self, Pairing, PairingState, RateLimiter};
 use crate::proxy_auth::{BodyField, Decision, ProxiedAuth, RequestHeaders};
 use crate::routes::detail;
+use ados_protocol::ws_ticket::{now_unix, WsTicketIssuer};
 
 /// The header the front stamps on a request that passes its on-box loopback
 /// check, so the residual Python (which does not see the TCP peer) can honour the
@@ -223,7 +224,14 @@ async fn proxied_auth_then_forward(
             .as_deref()
             .map(|tok| dashboard_pin.session_valid_for(&pairing, tok))
             .unwrap_or(false);
-        if !session_ok {
+        // A browser cannot set `X-ADOS-Key` on a WebSocket handshake, so a
+        // proxied WS route (e.g. the vision-detections stream) authenticates via
+        // a one-shot HMAC ticket in the `Sec-WebSocket-Protocol` list. Admit at
+        // the edge when the ticket is authentic + unexpired; the proxied Python
+        // route re-verifies the ticket AND enforces the exact route scope, so a
+        // wrong-scope ticket is still rejected there.
+        let ws_ticket_ok = ws_upgrade_ticket_admits(request.headers(), &pairing);
+        if !session_ok && !ws_ticket_ok {
             return reject_response(status, field, message);
         }
     }
@@ -261,6 +269,50 @@ async fn proxied_auth_then_forward(
     }
 
     next.run(request).await
+}
+
+/// True when a WebSocket-upgrade request to a proxied route carries an authentic,
+/// unexpired one-shot HMAC ticket in its `Sec-WebSocket-Protocol` list
+/// (`["ados-ws-ticket", "<token>"]`). A browser cannot set an `X-ADOS-Key` header
+/// on a WS handshake, so the ticket subprotocol is the only data-plane credential
+/// it can present for a proxied stream (e.g. `/api/vision/detections/ws`). The
+/// front admits an authentic ticket at the edge; the proxied Python route
+/// re-verifies the ticket AND enforces the exact route scope via
+/// `authenticate_websocket`, so the front verifies against the scope encoded in
+/// the token and the route stays the authority on scope. Mirrors the native
+/// ground-station WS ticket check in `routes::gs_ws`.
+fn ws_upgrade_ticket_admits(headers: &http::HeaderMap, pairing: &Pairing) -> bool {
+    if !crate::proxy::is_websocket_upgrade(headers) {
+        return false;
+    }
+    let Pairing::Paired(key) = pairing else {
+        return false;
+    };
+    // Flatten the offered subprotocols (comma-joined within one header and/or
+    // split across several); the ticket itself carries no comma so it survives.
+    let offered: Vec<String> = headers
+        .get_all("sec-websocket-protocol")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|raw| raw.split(','))
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let Some(pos) = offered.iter().position(|p| p == "ados-ws-ticket") else {
+        return false;
+    };
+    let Some(token) = offered.get(pos + 1) else {
+        return false;
+    };
+    // The scope is the token's 2nd `|`-field (`v1|<scope>|<issued>|<expires>|<mac>`).
+    // Verify authenticity for that scope; the Python route independently enforces
+    // the exact scope it expects, so a wrong-scope ticket is still rejected there.
+    let Some(scope) = token.split('|').nth(1).filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    WsTicketIssuer::from_api_key(key)
+        .verify(token, scope, now_unix())
+        .is_ok()
 }
 
 /// Pull the headers the proxied-auth decision reads into the typed struct, so
@@ -507,5 +559,50 @@ mod tests {
             let addr = l.local_addr().expect("a bound listener resolves its addr");
             assert_ne!(addr.port(), 0, "an ephemeral bind resolves to a real port");
         }
+    }
+
+    fn ws_headers(subprotocol: Option<&str>) -> http::HeaderMap {
+        let mut h = http::HeaderMap::new();
+        h.insert(http::header::CONNECTION, "upgrade".parse().unwrap());
+        h.insert(http::header::UPGRADE, "websocket".parse().unwrap());
+        if let Some(sp) = subprotocol {
+            h.insert("sec-websocket-protocol", sp.parse().unwrap());
+        }
+        h
+    }
+
+    #[test]
+    fn ws_ticket_admits_authentic_upgrade_and_rejects_the_rest() {
+        let key = "ados_secret";
+        let paired = Pairing::Paired(key.to_string());
+        let ticket = WsTicketIssuer::from_api_key(key)
+            .mint("vision.detections", 30)
+            .token;
+
+        // A WS upgrade carrying an authentic ticket subprotocol is admitted.
+        let good = ws_headers(Some(&format!("ados-ws-ticket, {ticket}")));
+        assert!(ws_upgrade_ticket_admits(&good, &paired));
+
+        // No ticket in the subprotocol list → not admitted.
+        assert!(!ws_upgrade_ticket_admits(&ws_headers(None), &paired));
+
+        // A valid ticket present but the request is NOT a WS upgrade → not admitted.
+        let mut plain = http::HeaderMap::new();
+        plain.insert(
+            "sec-websocket-protocol",
+            format!("ados-ws-ticket, {ticket}").parse().unwrap(),
+        );
+        assert!(!ws_upgrade_ticket_admits(&plain, &paired));
+
+        // Unpaired agent → the edge handles openness elsewhere; the ticket helper
+        // never admits on its own.
+        assert!(!ws_upgrade_ticket_admits(&good, &Pairing::Unpaired));
+
+        // A ticket signed by a DIFFERENT pairing key → rejected.
+        let forged = WsTicketIssuer::from_api_key("other-key")
+            .mint("vision.detections", 30)
+            .token;
+        let bad = ws_headers(Some(&format!("ados-ws-ticket, {forged}")));
+        assert!(!ws_upgrade_ticket_admits(&bad, &paired));
     }
 }
