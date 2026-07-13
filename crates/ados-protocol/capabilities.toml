@@ -583,6 +583,22 @@ category = "data_network"
 risk = "medium"
 risk_reason = "Cloud writes can affect other operators on the same fleet."
 
+[[gcs]]
+id = "perception.read"
+label = "Read perception state in the GCS"
+description = "Lets the plugin read the drone's perception state — where detection runs (on the drone or offloaded to a compute node), the bound compute node, and the live session health (feed freshness, throughput). Read-only on derived data; it does not open or read the camera."
+category = "data_network"
+risk = "low"
+risk_reason = "Read-only on derived detection metadata; no camera access."
+
+[[gcs]]
+id = "perception.subscribe"
+label = "Subscribe to live detections in the GCS"
+description = "Lets the plugin subscribe to the live detection stream (bounding boxes, classes, track ids) for the drones the operator has paired, the same detections the cockpit already renders. Read-only; the detections are derived data, not the raw camera feed."
+category = "data_network"
+risk = "low"
+risk_reason = "Read-only on the derived detection stream; no camera access."
+
 # ===========================================================================
 # Plugin RPC dispatch table (24): wire method -> dispatch-level required cap.
 #
