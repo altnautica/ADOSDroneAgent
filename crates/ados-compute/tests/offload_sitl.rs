@@ -17,8 +17,8 @@ use ados_compute::{
     build_router, offload_ws_path, offload_ws_router, pump_to_broadcaster,
     run_offload_orchestrator, run_offload_session, stream_offload_detections, Cluster, ComputeAuth,
     DetectionBroadcaster, Engine, JobStore, MockDetector, MockReconstructor, NodeEndpoint,
-    OffloadReturnBridge, OrchestratorConfig, Scheduler, SessionSpec, VecFrameStream,
-    VisionSockPublisher,
+    OffloadReturnBridge, OrchestratorConfig, Scheduler, SessionProgress, SessionSpec,
+    VecFrameStream, VisionSockPublisher,
 };
 use ados_offload::OffloadMode;
 use ados_protocol::framebus::DetectionBatch;
@@ -120,7 +120,16 @@ async fn offload_frames_reach_the_drone_vision_bus_end_to_end() {
     let session_cancel = Arc::new(Notify::new());
     let sc2 = session_cancel.clone();
     let session = tokio::spawn(async move {
-        run_offload_session("sess-1", "front", stream, detector, sess_tx, sc2).await;
+        run_offload_session(
+            "sess-1",
+            "front",
+            stream,
+            detector,
+            sess_tx,
+            sc2,
+            SessionProgress::detached(),
+        )
+        .await;
     });
 
     // --- assert: 3 batches reached the actual vision detection bus ------------

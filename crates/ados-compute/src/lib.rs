@@ -48,6 +48,7 @@ mod scheduler;
 mod seed;
 mod serving_config;
 mod session;
+mod session_registry;
 mod store;
 
 pub use api::{build_router, build_router_with_base, ApiState, CancelResponse, SubmitResponse};
@@ -85,7 +86,8 @@ pub use offload_orchestrator::{
 };
 pub use offload_session_manager::{OffloadSessionManager, SessionSpec};
 pub use offload_stream::{
-    run_offload_session, OffloadFrame, OffloadFrameStream, RtspFrameStream, VecFrameStream,
+    run_offload_session, OffloadFrame, OffloadFrameStream, RtspFrameStream, SessionExit,
+    VecFrameStream,
 };
 pub use offload_ws::{
     offload_ws_path, offload_ws_router, pump_to_broadcaster, DetectionBroadcaster, OFFLOAD_WS_ROUTE,
@@ -101,6 +103,10 @@ pub use scheduler::{BackendResult, JobOutcome, Prepared, PreparedInput, Schedule
 pub use seed::{seed_points, SeedError, MIN_SEED_POINTS};
 pub use serving_config::{load_serving_config, ServingConfig};
 pub use session::{LiveReconstructConfig, LiveReconstructDriver};
+pub use session_registry::{
+    SessionProgress, SessionRegistry, SessionState, SessionStateCounts, SessionView,
+    StreamingSession, WorkPriority,
+};
 pub use store::{Dataset, JobRecord, JobStore, Output};
 
 // Re-export the shared wire contract so callers get one import surface.

@@ -31,6 +31,26 @@ use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
 
 use crate::offload::Detector;
+use crate::session_registry::SessionProgress;
+
+/// Why a streaming offload session's runner returned. The supervisor uses this to
+/// decide whether to restart the session (a node-side fault) or close it cleanly
+/// (an intentional or drone-driven end).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionExit {
+    /// The session was cancelled (stop / shutdown).
+    Cancelled,
+    /// The detection sink closed (the return pump ended) — a clean end.
+    SinkClosed,
+    /// A finite / replay frame source was exhausted — a clean end.
+    StreamEnded,
+    /// A live source stayed down past the frame-reconnect budget — the drone
+    /// re-opens the session; not a node-side fault to restart.
+    SourceLost,
+    /// The detector backend failed — a node-side fault the supervisor restarts
+    /// under a bounded budget.
+    BackendFault,
+}
 
 /// Reconnect backoff for a continuous (live) frame source: the first retry waits
 /// this long after a transient frame error.
@@ -84,7 +104,10 @@ pub trait OffloadFrameStream: Send {
 /// sink is dropped (the last subscriber left). `session_id` and `camera_id` tag
 /// every emitted batch; `seq` counts processed frames within the session. A
 /// per-frame detector error stops the session (it is a backend fault, not bad
-/// data) rather than silently emitting empty batches forever.
+/// data) rather than silently emitting empty batches forever. `progress` reports
+/// each emitted batch and reader reconnect to the session registry (a detached
+/// handle is a no-op). Returns a [`SessionExit`] naming why the runner returned,
+/// which the supervisor uses to decide restart vs. clean close.
 pub async fn run_offload_session<S: OffloadFrameStream + 'static>(
     session_id: &str,
     camera_id: &str,
@@ -92,11 +115,18 @@ pub async fn run_offload_session<S: OffloadFrameStream + 'static>(
     detector: Arc<dyn Detector>,
     sink: tokio::sync::mpsc::Sender<OffloadDetectionBatch>,
     cancel: Arc<tokio::sync::Notify>,
-) {
+    progress: SessionProgress,
+) -> SessionExit {
     if stream.is_continuous() {
-        run_process_latest_session(session_id, camera_id, stream, detector, sink, cancel).await;
+        run_process_latest_session(
+            session_id, camera_id, stream, detector, sink, cancel, progress,
+        )
+        .await
     } else {
-        run_sequential_session(session_id, camera_id, stream, detector, sink, cancel).await;
+        run_sequential_session(
+            session_id, camera_id, stream, detector, sink, cancel, progress,
+        )
+        .await
     }
 }
 
@@ -110,7 +140,8 @@ async fn run_sequential_session<S: OffloadFrameStream>(
     detector: Arc<dyn Detector>,
     sink: tokio::sync::mpsc::Sender<OffloadDetectionBatch>,
     cancel: Arc<tokio::sync::Notify>,
-) {
+    progress: SessionProgress,
+) -> SessionExit {
     let mut seq: u64 = 0;
     // Hold ONE notified future for the whole session so a cancel is never missed
     // between iterations (a fresh `cancel.notified()` per loop can race with the
@@ -121,19 +152,23 @@ async fn run_sequential_session<S: OffloadFrameStream>(
     loop {
         let next = tokio::select! {
             f = stream.next_frame() => f,
-            _ = &mut cancelled => break,
+            _ = &mut cancelled => return SessionExit::Cancelled,
         };
         let frame = match next {
             Ok(f) => f,
             Err(e) => {
                 // A finite/replay source: exhaustion is terminal.
                 tracing::info!(session = session_id, error = %e, "offload session frame stream ended");
-                break;
+                return SessionExit::StreamEnded;
             }
         };
-        match detect_and_emit(session_id, camera_id, seq, frame, &detector, &sink).await {
+        match detect_and_emit(
+            session_id, camera_id, seq, frame, &detector, &sink, &progress,
+        )
+        .await
+        {
             Step::Continue => seq = seq.wrapping_add(1),
-            Step::Stop => break,
+            Step::Stop(exit) => return exit,
         }
     }
 }
@@ -151,7 +186,8 @@ async fn run_process_latest_session<S: OffloadFrameStream + 'static>(
     detector: Arc<dyn Detector>,
     sink: tokio::sync::mpsc::Sender<OffloadDetectionBatch>,
     cancel: Arc<tokio::sync::Notify>,
-) {
+    progress: SessionProgress,
+) -> SessionExit {
     // The reader publishes the newest decoded frame here; a frame the consumer
     // never observed is simply overwritten (depth-1 conflate). `None` until the
     // first frame arrives.
@@ -164,8 +200,16 @@ async fn run_process_latest_session<S: OffloadFrameStream + 'static>(
     let reader_task = {
         let session_owned = session_id.to_string();
         let reader_stop = reader_stop.clone();
+        let reader_progress = progress.clone();
         tokio::spawn(async move {
-            run_latest_reader(&session_owned, stream, latest_tx, reader_stop).await;
+            run_latest_reader(
+                &session_owned,
+                stream,
+                latest_tx,
+                reader_stop,
+                reader_progress,
+            )
+            .await;
         })
     };
 
@@ -174,16 +218,16 @@ async fn run_process_latest_session<S: OffloadFrameStream + 'static>(
     // missed between iterations (mirrors the sequential path).
     let cancelled = cancel.notified();
     tokio::pin!(cancelled);
-    loop {
+    let exit = loop {
         // Wait for a fresh newest-frame. `changed()` erroring means the reader
         // dropped its sender — the live source ended past the reconnect budget.
         tokio::select! {
             changed = latest_rx.changed() => {
                 if changed.is_err() {
-                    break;
+                    break SessionExit::SourceLost;
                 }
             }
-            _ = &mut cancelled => break,
+            _ = &mut cancelled => break SessionExit::Cancelled,
         }
         // Take the newest available frame; anything the reader published while we
         // were inferring collapses to this one value. `borrow_and_update` marks it
@@ -192,16 +236,21 @@ async fn run_process_latest_session<S: OffloadFrameStream + 'static>(
             continue;
         };
 
-        match detect_and_emit(session_id, camera_id, seq, frame, &detector, &sink).await {
+        match detect_and_emit(
+            session_id, camera_id, seq, frame, &detector, &sink, &progress,
+        )
+        .await
+        {
             Step::Continue => seq = seq.wrapping_add(1),
-            Step::Stop => break,
+            Step::Stop(e) => break e,
         }
-    }
+    };
 
     // Stop the reader (it may be blocked in a frame read) and join it so the
     // capture child is torn down before the session task returns.
     reader_stop.notify_one();
     let _ = reader_task.await;
+    exit
 }
 
 /// The ingestion half of the process-latest path: continuously pull frames from a
@@ -216,6 +265,7 @@ async fn run_latest_reader<S: OffloadFrameStream>(
     mut stream: S,
     latest_tx: tokio::sync::watch::Sender<Option<OffloadFrame>>,
     stop: Arc<tokio::sync::Notify>,
+    progress: SessionProgress,
 ) {
     let mut backoff_ms = RECONNECT_BACKOFF_BASE_MS;
     let mut failing_since: Option<Instant> = None;
@@ -251,6 +301,9 @@ async fn run_latest_reader<S: OffloadFrameStream>(
                     tracing::warn!(session = session_id, error = %e, "offload frame stream down past the reconnect budget; ending session");
                     break;
                 }
+                // A transient reconnect: mark the session stalled + count the retry
+                // so a status surface shows the honest reconnecting state.
+                progress.on_reconnect();
                 tracing::info!(session = session_id, error = %e, backoff_ms, "offload frame stream hiccup; reconnecting");
                 // Cancel-aware backoff: a stop during the wait still ends promptly.
                 tokio::select! {
@@ -267,12 +320,13 @@ async fn run_latest_reader<S: OffloadFrameStream>(
 /// Whether the session should keep going after a frame is processed.
 enum Step {
     Continue,
-    Stop,
+    Stop(SessionExit),
 }
 
 /// Run the detector on `frame`, tag the batch with `seq`, and push it onto `sink`.
-/// Returns [`Step::Stop`] when the detector failed (a backend fault) or the sink
-/// closed (the last subscriber left) — both end the session.
+/// Returns [`Step::Stop`] with the reason when the detector failed (a backend
+/// fault) or the sink closed (the pump left) — both end the session. On a
+/// successful emit, reports the batch to `progress` (→ the session goes `Live`).
 async fn detect_and_emit(
     session_id: &str,
     camera_id: &str,
@@ -280,6 +334,7 @@ async fn detect_and_emit(
     frame: OffloadFrame,
     detector: &Arc<dyn Detector>,
     sink: &tokio::sync::mpsc::Sender<OffloadDetectionBatch>,
+    progress: &SessionProgress,
 ) -> Step {
     // Read the batch metadata off the frame before its pixels move into inference.
     let (ts_ms, width, height) = (frame.ts_ms, frame.width, frame.height);
@@ -287,21 +342,23 @@ async fn detect_and_emit(
         Ok(d) => d,
         Err(e) => {
             tracing::warn!(session = session_id, error = %e, "offload session detector failed; stopping");
-            return Step::Stop;
+            return Step::Stop(SessionExit::BackendFault);
         }
     };
 
     let batch =
         OffloadDetectionBatch::new(session_id, camera_id, seq, ts_ms, width, height, detections);
 
-    // A closed channel means every subscriber left; the session is done.
+    // A closed channel means the return pump left; the session is done.
     if sink.send(batch).await.is_err() {
         tracing::info!(
             session = session_id,
             "offload session sink closed; stopping"
         );
-        return Step::Stop;
+        return Step::Stop(SessionExit::SinkClosed);
     }
+    // A batch reached the pump: the session is producing → Live + throughput.
+    progress.on_batch();
     Step::Continue
 }
 
@@ -482,7 +539,16 @@ mod tests {
         let stream = VecFrameStream::solid("front", 64, 48, 3, 1000);
         let detector: Arc<dyn Detector> = Arc::new(MockDetector);
         let session = tokio::spawn(async move {
-            run_offload_session("sess-1", "front", stream, detector, tx, cancel).await;
+            run_offload_session(
+                "sess-1",
+                "front",
+                stream,
+                detector,
+                tx,
+                cancel,
+                SessionProgress::detached(),
+            )
+            .await;
         });
 
         let mut batches = Vec::new();
@@ -517,7 +583,16 @@ mod tests {
         drop(rx);
         // A tiny wait so the drop lands, then run: the first send fails, stopping.
         let session = tokio::spawn(async move {
-            run_offload_session("s", "front", stream, detector, tx, cancel).await;
+            run_offload_session(
+                "s",
+                "front",
+                stream,
+                detector,
+                tx,
+                cancel,
+                SessionProgress::detached(),
+            )
+            .await;
         });
         // Bounded: if the stop logic regressed this would hang the test.
         tokio::time::timeout(std::time::Duration::from_secs(5), session)
@@ -562,7 +637,16 @@ mod tests {
         let detector: Arc<dyn Detector> = Arc::new(MockDetector);
         let c = cancel.clone();
         let session = tokio::spawn(async move {
-            run_offload_session("s-flaky", "front", stream, detector, tx, c).await;
+            run_offload_session(
+                "s-flaky",
+                "front",
+                stream,
+                detector,
+                tx,
+                c,
+                SessionProgress::detached(),
+            )
+            .await;
         });
 
         // Despite the first-frame error, the session reconnects (a short backoff)
@@ -599,7 +683,16 @@ mod tests {
         let detector: Arc<dyn Detector> = Arc::new(MockDetector);
         let c = cancel.clone();
         let session = tokio::spawn(async move {
-            run_offload_session("s", "front", stream, detector, tx, c).await;
+            run_offload_session(
+                "s",
+                "front",
+                stream,
+                detector,
+                tx,
+                c,
+                SessionProgress::detached(),
+            )
+            .await;
         });
         cancel.notify_one();
         tokio::time::timeout(std::time::Duration::from_secs(5), session)
@@ -676,7 +769,16 @@ mod tests {
         let detector: Arc<dyn Detector> = Arc::new(SlowMock);
         let c = cancel.clone();
         let session = tokio::spawn(async move {
-            run_offload_session("s-latest", "front", stream, detector, tx, c).await;
+            run_offload_session(
+                "s-latest",
+                "front",
+                stream,
+                detector,
+                tx,
+                c,
+                SessionProgress::detached(),
+            )
+            .await;
         });
 
         // Collect batches until the source stops producing (no batch for a beat =
@@ -764,7 +866,16 @@ mod tests {
         let detector: Arc<dyn Detector> = Arc::new(MockDetector);
         let c = cancel.clone();
         let session = tokio::spawn(async move {
-            run_offload_session("s-reconnect", "front", stream, detector, tx, c).await;
+            run_offload_session(
+                "s-reconnect",
+                "front",
+                stream,
+                detector,
+                tx,
+                c,
+                SessionProgress::detached(),
+            )
+            .await;
         });
 
         // Despite the first two errored reads, a detection arrives once frames flow

@@ -409,6 +409,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let rs = state.clone();
     tokio::spawn(async move { retention_loop(rs, retention_ms).await });
+    // The stall watchdog flips a Live session that went quiet (its source froze /
+    // the drone paused, with no reader error) to Stalled, so the session surfaces
+    // report the honest quiet state rather than a stale Live.
+    offload_sessions.spawn_stall_watchdog();
     // Publish the cluster + queue state to the heartbeat sidecar so the native
     // cloud relay can fold the compute fields into the agent heartbeat (RUST-
     // first; the relay reads the file, no cross-crate coupling). On an atlas node
@@ -428,6 +432,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         state.clone(),
         auth,
         std::sync::Arc::from(public_base.as_str()),
+        // The live session registry so /api/compute/status carries the state
+        // breakdown + /api/compute/sessions serves the live records.
+        offload_sessions.registry(),
     )
     .merge(artifact_router(work_root.clone()))
     // The per-session offload detection return stream (node -> drone) rides the
@@ -532,6 +539,20 @@ async fn worker_loop(
                         }
                     }
                     continue;
+                }
+                // Reconstruction is best-effort batch work and runs off this worker
+                // on a blocking thread; a streaming perception-offload session is
+                // latency-critical and runs on its OWN task, outside this batch
+                // worker pool. They do not queue behind each other, so batch cannot
+                // starve streaming of a worker slot. Before starting the heavy
+                // reconstruction backend we still yield once when a session is live,
+                // so any ready streaming work is polled first (WorkPriority::Streaming
+                // > Batch). This is a cooperative nudge; fine-grained CPU/GPU
+                // preemption of an in-flight reconstruction is out of scope.
+                if matches!(input, PreparedInput::Reconstruct(_))
+                    && sessions.should_yield_to_streaming()
+                {
+                    tokio::task::yield_now().await;
                 }
                 // Run the (real, possibly minutes-long) backend off the async
                 // runtime thread so a long reconstruction never starves the HTTP

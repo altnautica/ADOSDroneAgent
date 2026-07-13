@@ -20,7 +20,10 @@ use tokio::sync::Mutex;
 
 use crate::artifacts::rewrite_artifact_host;
 use crate::auth::{require_pairing, ComputeAuth};
-use crate::{ComputeError, ComputeJobKind, ComputeJobState, Dataset, Engine, JobRecord};
+use crate::session_registry::{SessionRegistry, SessionStateCounts};
+use crate::{
+    ComputeError, ComputeHeartbeat, ComputeJobKind, ComputeJobState, Dataset, Engine, JobRecord,
+};
 
 /// Shared engine handle. One mutex serializes access to the single-writer store,
 /// shared by the API handlers and the worker loop.
@@ -32,18 +35,25 @@ pub type ApiState = Arc<Mutex<Engine>>;
 /// on-box ⇒ open, paired + off-box ⇒ `X-ADOS-Key` required, with an off-box rate
 /// limiter. The peer address the gate reads comes from `ConnectInfo`, so the
 /// daemon serves the router with `into_make_service_with_connect_info::<SocketAddr>()`.
-/// Build the router with a default public base (loopback). The daemon uses
-/// [`build_router_with_base`] with its live base; this shorthand is for callers
-/// (the on-box control-front mount, tests) where artifact-host rewriting is a
-/// no-op on the URLs they exercise.
+/// Build the router with a default public base (loopback) and an empty session
+/// registry (`/api/compute/sessions` reads `[]`). The daemon uses
+/// [`build_router_with_base`] with its live base + the live registry; this
+/// shorthand is for callers (the on-box control-front mount, tests) where
+/// artifact-host rewriting is a no-op and no session is live.
 pub fn build_router(state: ApiState, auth: Arc<ComputeAuth>) -> Router {
-    build_router_with_base(state, auth, Arc::from("http://127.0.0.1:8092"))
+    build_router_with_base(
+        state,
+        auth,
+        Arc::from("http://127.0.0.1:8092"),
+        Arc::new(SessionRegistry::new()),
+    )
 }
 
 pub fn build_router_with_base(
     state: ApiState,
     auth: Arc<ComputeAuth>,
     public_base: Arc<str>,
+    sessions: Arc<SessionRegistry>,
 ) -> Router {
     Router::new()
         .route("/api/compute/status", get(status))
@@ -52,10 +62,15 @@ pub fn build_router_with_base(
         .route("/api/compute/jobs/:id", get(job_status))
         .route("/api/compute/jobs/:id/cancel", post(cancel_job))
         .route("/api/compute/jobs/:id/outputs", get(job_outputs))
+        // The live streaming perception-offload sessions (state / throughput /
+        // reconnect + restart history), read from the registry, not the job store.
+        .route("/api/compute/sessions", get(list_sessions))
         .layer(axum::middleware::from_fn_with_state(auth, require_pairing))
         // The live public base rewrites each stored artifact URL's host on read,
         // so a URL frozen at an earlier (drifting) hostname stays reachable.
         .layer(Extension(public_base))
+        // The session registry the status + sessions handlers read.
+        .layer(Extension(sessions))
         .with_state(state)
 }
 
@@ -145,9 +160,39 @@ impl JobView {
     }
 }
 
-async fn status(State(state): State<ApiState>) -> Result<Response, ComputeError> {
-    let engine = state.lock().await;
-    Ok(Json(engine.heartbeat()?).into_response())
+/// The node status: the engine heartbeat (role / cluster / queue / active
+/// sessions count) plus a per-state breakdown of the live streaming sessions.
+/// `session_states` is additive — an older reader deserializing into
+/// `ComputeHeartbeat` ignores it (`active_sessions` is the stable count).
+#[derive(Debug, Serialize)]
+struct StatusResponse {
+    #[serde(flatten)]
+    heartbeat: ComputeHeartbeat,
+    session_states: SessionStateCounts,
+}
+
+async fn status(
+    State(state): State<ApiState>,
+    Extension(sessions): Extension<Arc<SessionRegistry>>,
+) -> Result<Response, ComputeError> {
+    let heartbeat = {
+        let engine = state.lock().await;
+        engine.heartbeat()?
+    };
+    let resp = StatusResponse {
+        heartbeat,
+        session_states: sessions.state_counts(),
+    };
+    Ok(Json(resp).into_response())
+}
+
+/// The live streaming perception-offload sessions: state, throughput, and the
+/// reconnect and restart history. Read straight from the registry, so it reflects
+/// the true live state of each session, not a stale job row.
+async fn list_sessions(
+    Extension(sessions): Extension<Arc<SessionRegistry>>,
+) -> Result<Response, ComputeError> {
+    Ok(Json(sessions.snapshot(now_ms())).into_response())
 }
 
 async fn create_dataset(
@@ -558,6 +603,111 @@ mod tests {
         assert_eq!(body["role"], "master");
         assert_eq!(body["workers_idle"], 2);
         assert_eq!(body["cluster"]["master_id"], "node-a");
+    }
+
+    /// A router over a populated session registry, to exercise the session
+    /// surfaces (`build_router`'s registry is empty). The engine's heartbeat
+    /// counter is wired to the same registry (as the daemon wires it), so
+    /// `active_sessions` reflects the live records.
+    fn router_with_sessions(sessions: Arc<SessionRegistry>) -> Router {
+        let store = JobStore::open_in_memory().unwrap();
+        let scheduler = Scheduler::new(store, Arc::new(MockReconstructor), Arc::new(MockDetector));
+        let mut engine = Engine::new(scheduler, Cluster::new_master("node-a"), 2);
+        engine.set_session_counter(sessions.active_counter());
+        let state = Arc::new(Mutex::new(engine));
+        build_router_with_base(
+            state,
+            unpaired_auth(),
+            Arc::from("http://127.0.0.1:8092"),
+            sessions,
+        )
+    }
+
+    #[tokio::test]
+    async fn sessions_endpoint_lists_live_sessions_with_their_fields() {
+        let registry = Arc::new(SessionRegistry::new());
+        registry.register(
+            "s1",
+            "front",
+            "rtsp://drone.local:8554/main",
+            Arc::new(tokio::sync::Notify::new()),
+            1000,
+        );
+        registry.on_batch("s1", 1500); // -> Live, one frame + batch, last-batch stamped
+        let router = router_with_sessions(registry);
+
+        let (st, body) = send(
+            &router,
+            "GET",
+            "/api/compute/sessions",
+            serde_json::Value::Null,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let arr = body.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        let s = &arr[0];
+        assert_eq!(s["id"], "s1");
+        assert_eq!(s["state"], "live");
+        assert_eq!(s["camera_id"], "front");
+        assert_eq!(s["source"], "rtsp://drone.local:8554/main");
+        assert_eq!(s["frames_processed"], 1);
+        assert_eq!(s["batches_emitted"], 1);
+        assert_eq!(s["last_batch_at_ms"], 1500);
+        assert_eq!(s["reconnects"], 0);
+        assert_eq!(s["restarts"], 0);
+        assert!(s["uptime_ms"].is_i64(), "uptime is reported");
+    }
+
+    #[tokio::test]
+    async fn sessions_endpoint_is_empty_with_no_live_session() {
+        let router = build_router(test_state(), unpaired_auth());
+        let (st, body) = send(
+            &router,
+            "GET",
+            "/api/compute/sessions",
+            serde_json::Value::Null,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body.as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn status_reports_the_session_state_breakdown() {
+        let registry = Arc::new(SessionRegistry::new());
+        registry.register(
+            "s1",
+            "front",
+            "rtsp://d/main",
+            Arc::new(tokio::sync::Notify::new()),
+            1000,
+        );
+        registry.on_batch("s1", 1100); // Live
+        registry.register(
+            "s2",
+            "rear",
+            "rtsp://d/rear",
+            Arc::new(tokio::sync::Notify::new()),
+            1000,
+        ); // Opening
+        let router = router_with_sessions(registry);
+
+        let (st, body) = send(
+            &router,
+            "GET",
+            "/api/compute/status",
+            serde_json::Value::Null,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        // The heartbeat fields still flatten through.
+        assert_eq!(body["role"], "master");
+        // Two live sessions surface in the active count + the state breakdown.
+        assert_eq!(body["active_sessions"], 2);
+        assert_eq!(body["session_states"]["live"], 1);
+        assert_eq!(body["session_states"]["opening"], 1);
+        assert_eq!(body["session_states"]["stalled"], 0);
     }
 
     #[tokio::test]
