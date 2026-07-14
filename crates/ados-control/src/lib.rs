@@ -18,6 +18,7 @@ pub mod config;
 pub mod dashboard_pin;
 pub mod hw_local;
 pub mod ipc;
+pub mod mcp;
 pub mod pairing_store;
 pub mod profile;
 pub mod proxy;
