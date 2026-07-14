@@ -291,6 +291,40 @@ class _LifecycleClient:
 # ---------------------------------------------------------------------
 
 
+class _ToolsClient:
+    """``ctx.tools`` facade: register MCP tool handlers.
+
+    A plugin declares its tools in the manifest (``agent.contributes.tools``)
+    and registers a handler for each here. The host routes a ``tool.invoke``
+    for a declared tool name to the registered handler and returns its result
+    to the MCP client. Requires the ``mcp.expose`` capability, which the host
+    and the runner both gate on, so registering a handler without the grant
+    still cannot be invoked.
+    """
+
+    def __init__(self, ipc: PluginIpcClient) -> None:
+        self._ipc = ipc
+
+    def register(self, name: str, handler: Callable[[dict], Any]) -> None:
+        """Register ``handler`` as the callable for the declared tool ``name``.
+        The handler takes the tool's argument dict and returns a JSON-able
+        result (a dict is returned verbatim; anything else is wrapped in
+        ``{"result": ...}``). It may be sync or async."""
+        self._ipc.register_tool(name, handler)
+
+    def tool(self, name: str | None = None) -> Callable[[Callable], Callable]:
+        """Decorator form. ``@ctx.tools.tool("start_follow")`` registers the
+        wrapped function as the handler for that tool (the tool name defaults
+        to the function name). Returns the function unchanged so it stays
+        callable in-process."""
+
+        def _decorate(func: Callable[[dict], Any]) -> Callable[[dict], Any]:
+            self._ipc.register_tool(name or func.__name__, func)
+            return func
+
+        return _decorate
+
+
 class PluginContext:
     """The object handed to every lifecycle hook on the plugin class.
 
@@ -354,6 +388,9 @@ class PluginContext:
         self.config_kv = _ConfigClient(ipc, config)
         self.process = _ProcessClient(ipc)
         self.lifecycle = _LifecycleClient(ipc)
+        # MCP tool facade: register a handler for each tool the plugin declares
+        # in its manifest, so an AI client can invoke it via the MCP surface.
+        self.tools = _ToolsClient(ipc)
         self._ipc = ipc
 
     async def ping_supervisor(self) -> dict:
@@ -370,5 +407,6 @@ __all__ = [
     "_ConfigClient",
     "_ProcessClient",
     "_LifecycleClient",
+    "_ToolsClient",
     "_matches",
 ]

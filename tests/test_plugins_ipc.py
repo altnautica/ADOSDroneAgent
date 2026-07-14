@@ -526,3 +526,23 @@ async def test_tool_invoke_plugin_not_running_errors(short_sock_dir: Path) -> No
     server = PluginIpcServer(bus=bus, token_issuer=issuer, socket_dir=short_sock_dir)
     with pytest.raises(_RpcError, match="plugin_not_running"):
         await server.invoke_tool(PLUGIN_ID, "echo", {})
+
+
+@pytest.mark.asyncio
+async def test_ctx_tools_decorator_registers_and_invokes(short_sock_dir: Path) -> None:
+    """The SDK ctx.tools facade registers a handler that a host invoke reaches."""
+    server, client, teardown = await _tool_harness(short_sock_dir, {"mcp.expose"})
+    try:
+        ctx = PluginContext(
+            plugin_id=PLUGIN_ID, plugin_version="0.1.0", config={}, ipc=client
+        )
+
+        @ctx.tools.tool("greet")
+        def _greet(args: dict) -> dict:
+            return {"hello": args.get("name", "world")}
+
+        assert await server.invoke_tool(PLUGIN_ID, "greet", {"name": "ada"}) == {
+            "hello": "ada"
+        }
+    finally:
+        await teardown()
