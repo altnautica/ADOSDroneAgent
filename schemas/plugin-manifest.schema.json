@@ -130,6 +130,30 @@
             }
           ],
           "default": null
+        },
+        "tools": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Tools",
+          "type": "array"
+        },
+        "resources": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Resources",
+          "type": "array"
+        },
+        "prompts": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Prompts",
+          "type": "array"
         }
       },
       "title": "AgentContributes",
@@ -244,6 +268,30 @@
             "type": "object"
           },
           "title": "Smart Functions",
+          "type": "array"
+        },
+        "tools": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Tools",
+          "type": "array"
+        },
+        "resources": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Resources",
+          "type": "array"
+        },
+        "prompts": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Prompts",
           "type": "array"
         }
       },
@@ -583,7 +631,7 @@
   "properties": {
     "schema_version": {
       "default": 1,
-      "maximum": 2,
+      "maximum": 3,
       "minimum": 1,
       "title": "Schema Version",
       "type": "integer"

@@ -203,6 +203,15 @@ class AgentContributes(_StrictModel):
     services: list[ServiceSpec] = Field(default_factory=list)
     drivers: list[dict[str, Any]] = Field(default_factory=list)
     vision: VisionContribution | None = None
+    # MCP tool / resource / prompt contributions (schema v3). Free-form and
+    # additive; the plugin host reads them to build the tool registry and to
+    # route a host->plugin tool.invoke. The agent does not interpret their
+    # bodies beyond name + inputSchema + safety_class. A v2 manifest with no
+    # tools block loads exactly as before, so the platform stays inert for
+    # every existing plugin. Exposure needs the mcp.expose capability.
+    tools: list[dict[str, Any]] = Field(default_factory=list)
+    resources: list[dict[str, Any]] = Field(default_factory=list)
+    prompts: list[dict[str, Any]] = Field(default_factory=list)
 
     @field_validator("services", mode="before")
     @classmethod
@@ -450,6 +459,13 @@ class GcsContributes(_StrictModel):
     # one popup. The agent does not interpret these; the GCS target-action
     # registry reads them. Free-form and additive like ``skills``.
     target_actions: list[dict[str, Any]] = Field(default_factory=list)
+    # MCP tool / resource / prompt contributions for the GCS half (schema v3).
+    # The GCS contribution registry reads these to assemble the MCP tools/list;
+    # a GCS-only plugin's tools route through the GCS bridge (no agent socket).
+    # Free-form and additive like ``skills``. Exposure needs the mcp.expose cap.
+    tools: list[dict[str, Any]] = Field(default_factory=list)
+    resources: list[dict[str, Any]] = Field(default_factory=list)
+    prompts: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class GcsBlock(_StrictModel):
@@ -574,12 +590,14 @@ class Screenshot(_StrictModel):
 class PluginManifest(_StrictModel):
     """Top-level plugin manifest. Loaded from ``manifest.yaml``."""
 
-    schema_version: int = Field(1, ge=1, le=2)
+    schema_version: int = Field(1, ge=1, le=3)
     """Manifest schema version. ``1`` is the original baseline. ``2``
     unlocks the additional ``agent`` fields ``vendor_attribution``,
-    ``subprocess_spawn``, and ``per_drone_config``. Both versions
-    parse identical-shape v1 manifests; the version field is
-    informational so older tooling can route on schema generation."""
+    ``subprocess_spawn``, and ``per_drone_config``. ``3`` unlocks the
+    MCP ``tools`` / ``resources`` / ``prompts`` contributions on both
+    the agent and GCS halves. Every version parses identical-shape
+    older manifests; the version field is informational so older
+    tooling can route on schema generation."""
     id: str
     version: str
     name: str

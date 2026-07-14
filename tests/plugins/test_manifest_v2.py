@@ -160,12 +160,45 @@ def test_vio_component_kind_accepted() -> None:
     assert m.agent.mavlink_components[0].component_kind == "vio"
 
 
-def test_schema_version_3_rejected() -> None:
-    """Schema version must stay bounded; v3 is not defined yet."""
+def test_schema_version_3_accepted() -> None:
+    """v3 unlocks the MCP tools/resources/prompts contributions."""
+    ok = _v2_manifest_dict()
+    ok["schema_version"] = 3
+    m = PluginManifest.from_yaml_text(_yaml(ok))
+    assert m.schema_version == 3
+
+
+def test_schema_version_4_rejected() -> None:
+    """Schema version stays bounded; v4 is not defined yet."""
     bad = _v2_manifest_dict()
-    bad["schema_version"] = 3
+    bad["schema_version"] = 4
     with pytest.raises(ManifestError):
         PluginManifest.from_yaml_text(_yaml(bad))
+
+
+def test_v3_tools_contribution_parses() -> None:
+    """A v3 agent half with tools/resources/prompts parses; the bodies are
+    kept free-form (name + inputSchema + safety_class), the platform stays
+    inert for a v2 manifest with no tools block."""
+    src = _v2_manifest_dict()
+    src["schema_version"] = 3
+    src["agent"]["contributes"] = {
+        "tools": [
+            {
+                "name": "start_follow",
+                "title": "Start following",
+                "inputSchema": {"type": "object", "properties": {}},
+                "safety_class": "flight_action",
+            }
+        ],
+        "resources": [{"uri": "follow/state", "mime": "application/json"}],
+        "prompts": [{"name": "tune_follow"}],
+    }
+    m = PluginManifest.from_yaml_text(_yaml(src))
+    assert m.agent is not None
+    assert m.agent.contributes.tools[0]["name"] == "start_follow"
+    assert m.agent.contributes.resources[0]["uri"] == "follow/state"
+    assert m.agent.contributes.prompts[0]["name"] == "tune_follow"
 
 
 def test_round_trip_preserves_v2_fields() -> None:
