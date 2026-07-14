@@ -52,6 +52,7 @@ pub mod ipc;
 pub mod logd;
 #[cfg(feature = "mavlink")]
 pub mod mavlink;
+pub mod mcp_token;
 pub mod offload;
 pub mod offload_link;
 pub mod pairing_posture;
