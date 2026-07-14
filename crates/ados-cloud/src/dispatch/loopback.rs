@@ -138,10 +138,10 @@ pub fn route_for(name: &str, args: &serde_json::Value) -> Option<LoopbackRoute> 
         "wfb_pair_unpair" => Some(LoopbackRoute::post("/api/wfb/pair/unpair")),
 
         // ── Raw FC command passthrough ─────────────────────────────
-        "send_command" => Some(
-            LoopbackRoute::post("/api/command")
-                .with_body(args.get("args").cloned().unwrap_or_else(|| args.clone())),
-        ),
+        // send_command carries { cmd, args } — the exact CommandRequest body
+        // /api/command deserializes. Forward it verbatim; extracting only the inner
+        // `args` array would POST a bare list and fail deserialization.
+        "send_command" => Some(LoopbackRoute::post("/api/command").with_body(args.clone())),
 
         _ => None,
     }
@@ -242,6 +242,20 @@ pub fn interpret(name: &str, http_status: u16, payload: serde_json::Value) -> Co
 mod tests {
     use super::*;
     use crate::dispatch::CommandStatus;
+
+    #[test]
+    fn send_command_forwards_the_full_cmd_args_body() {
+        // The relay enqueues send_command as { cmd, args } — the exact CommandRequest
+        // body. It must reach /api/command verbatim; forwarding only the inner args
+        // array would POST a bare list and fail deserialization.
+        let r = route_for("send_command", &serde_json::json!({"cmd": "arm", "args": []})).unwrap();
+        assert_eq!(r.method, Method::Post);
+        assert_eq!(r.path, "/api/command");
+        assert_eq!(r.body, Some(serde_json::json!({"cmd": "arm", "args": []})));
+
+        let t = route_for("send_command", &serde_json::json!({"cmd": "takeoff", "args": [25]})).unwrap();
+        assert_eq!(t.body, Some(serde_json::json!({"cmd": "takeoff", "args": [25]})));
+    }
 
     #[test]
     fn restart_service_maps_to_named_route() {
