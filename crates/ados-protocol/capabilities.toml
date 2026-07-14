@@ -17,7 +17,7 @@
 # Edit here, then run codegen. Do not edit the generated files by hand.
 
 # ===========================================================================
-# AGENT capabilities (47)
+# AGENT capabilities (48)
 # ===========================================================================
 
 [[agent]]
@@ -443,8 +443,17 @@ risk = "medium"
 risk_reason = "Streams live camera imagery off the drone to another node and consumes shared compute; the returned detections drive on-board behaviours through the safety gate."
 enforced = true
 
+[[agent]]
+id = "mcp.expose"
+label = "Expose the plugin's tools to the AI-control (MCP) surface"
+description = "Lets the plugin publish its declared tools, resources, and prompts to an MCP client, and lets the host route a tool invocation into the plugin. Exposure alone grants no host authority: each tool acts only through the plugin's OTHER granted capabilities, so a tool can never do anything the plugin could not already do."
+category = "data_network"
+risk = "medium"
+risk_reason = "Publishes a callable interface to an AI client; the effect of any call is still bounded by the plugin's other capabilities and the MCP token's scope."
+enforced = true
+
 # ===========================================================================
-# GCS capabilities (17): 10 UI slots + 7 data/command/mission/cloud
+# GCS capabilities (18): 10 UI slots + 8 data/command/mission/cloud
 # ===========================================================================
 
 [[gcs]]
@@ -599,8 +608,16 @@ category = "data_network"
 risk = "low"
 risk_reason = "Read-only on the derived detection stream; no camera access."
 
+[[gcs]]
+id = "mcp.expose"
+label = "Expose the plugin's GCS tools to the AI-control (MCP) surface"
+description = "Lets the plugin publish its declared GCS-half tools, resources, and prompts to an MCP client. A GCS-only tool routes through the GCS bridge (command / mission), so its effect is still bounded by the plugin's other GCS capabilities and the MCP token's scope."
+category = "data_network"
+risk = "medium"
+risk_reason = "Publishes a callable interface to an AI client; effect is bounded by the plugin's other capabilities and the token scope."
+
 # ===========================================================================
-# Plugin RPC dispatch table (24): wire method -> dispatch-level required cap.
+# Plugin RPC dispatch table (25): wire method -> dispatch-level required cap.
 #
 # The single source of truth for the gate the plugin IPC server applies BEFORE
 # routing a request. Codegen emits this into both the Rust host
@@ -629,6 +646,15 @@ id = "event.subscribe"
 
 [[method]]
 id = "ping"
+
+# ---- MCP tool invocation (host -> plugin request/response) ----
+# The one host->plugin request method: the host asks the plugin to run one of
+# its declared tools and awaits a correlated response. Gated on mcp.expose so a
+# plugin without it never has a tool invoked, checked by the runner against the
+# same generated table the host uses.
+[[method]]
+id = "tool.invoke"
+required_cap = "mcp.expose"
 
 # ---- telemetry ----
 [[method]]

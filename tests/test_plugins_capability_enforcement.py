@@ -83,14 +83,15 @@ def _install_with_perms(plugin_id: str, **grants: bool) -> PluginInstall:
 
 
 def test_catalog_size_matches_spec() -> None:
-    # 47 agent capabilities in the catalog. Beyond the earlier substrate set
+    # 48 agent capabilities in the catalog. Beyond the earlier substrate set
     # (button.subscribe, flight.guided_setpoint, mavlink.tunnel,
     # radio.aux_stream, display.oled.page) and the GPIO output + vision
     # designate/subscribe caps (hardware.gpio_out, vision.detection.subscribe,
     # vision.track.designate), the compute-offload caps (compute.dataset.write,
     # compute.job.submit, compute.job.read, compute.stream.open) back the plugin
-    # compute-offload + streaming-perception methods.
-    assert len(AGENT_CAPABILITIES) == 47
+    # compute-offload + streaming-perception methods, and mcp.expose gates the
+    # plugin's tool/resource/prompt exposure to the MCP surface.
+    assert len(AGENT_CAPABILITIES) == 48
 
 
 def test_gated_caps_are_marked_enforced() -> None:
@@ -106,6 +107,7 @@ def test_gated_caps_are_marked_enforced() -> None:
             "compute.job.read",
             "compute.job.submit",
             "compute.stream.open",
+            "mcp.expose",
             "vision.detection.publish",
             "vision.detection.subscribe",
             "vision.frame.read",

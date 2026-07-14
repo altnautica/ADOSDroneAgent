@@ -26,6 +26,7 @@ pub const DISPATCH_METHODS: &[DispatchMethod] = &[
     DispatchMethod { method: "event.publish", required_cap: None, inline: false },
     DispatchMethod { method: "event.subscribe", required_cap: None, inline: false },
     DispatchMethod { method: "ping", required_cap: None, inline: false },
+    DispatchMethod { method: "tool.invoke", required_cap: Some("mcp.expose"), inline: false },
     DispatchMethod { method: "telemetry.subscribe", required_cap: Some("telemetry.read"), inline: false },
     DispatchMethod { method: "telemetry.extend", required_cap: Some("telemetry.extend"), inline: false },
     DispatchMethod { method: "mission.read", required_cap: Some("mission.read"), inline: false },

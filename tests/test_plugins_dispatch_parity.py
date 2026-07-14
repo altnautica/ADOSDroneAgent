@@ -40,6 +40,7 @@ EXPECTED: dict[str, str | None] = {
     "event.publish": None,
     "event.subscribe": None,
     "ping": None,
+    "tool.invoke": "mcp.expose",
     "telemetry.subscribe": "telemetry.read",
     "telemetry.extend": "telemetry.extend",
     "mission.read": "mission.read",
