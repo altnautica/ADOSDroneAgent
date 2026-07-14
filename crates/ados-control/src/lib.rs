@@ -77,6 +77,10 @@ pub struct DaemonPaths {
     /// LAN-edge auth reads a session salt from. Injectable so a test points it at
     /// a tempdir.
     pub dashboard_pin_path: PathBuf,
+    /// The MCP-token record the `/api/mcp/*` routes read + write and (when the
+    /// accept flag is on) the LAN-edge auth reads on a would-be-401. Injectable so
+    /// a test points it at a tempdir.
+    pub mcp_token_path: PathBuf,
     /// The vehicle-state socket the status + telemetry routes read. Injectable so
     /// a test points it at a mock-IPC socket in a tempdir.
     pub state_socket: PathBuf,
@@ -129,6 +133,12 @@ impl Default for DaemonPaths {
         let dashboard_pin_path = std::env::var("ADOS_DASHBOARD_PIN_JSON")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from(dashboard_pin::DEFAULT_DASHBOARD_PIN_PATH));
+        // The MCP-token record honours `ADOS_MCP_TOKEN_JSON` (the same override the
+        // store's own `McpTokenStore::new` reads), defaulting to
+        // `/etc/ados/mcp-token.json`.
+        let mcp_token_path = std::env::var("ADOS_MCP_TOKEN_JSON")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from(mcp::DEFAULT_MCP_TOKEN_PATH));
         // The state socket resolves under `ADOS_RUN_DIR` (the same override the
         // Python `ados.core.ipc` honours), defaulting to `/run/ados/state.sock`.
         let state_socket = default_state_socket();
@@ -163,6 +173,7 @@ impl Default for DaemonPaths {
             control_tcp_port,
             pairing_path,
             dashboard_pin_path,
+            mcp_token_path,
             state_socket,
             mavlink_socket,
             logd_query_socket,
@@ -260,6 +271,12 @@ where
     let dashboard_pin = Arc::new(crate::dashboard_pin::DashboardPin::with_path(
         paths.dashboard_pin_path.clone(),
     ));
+    // The MCP-token store, shared (one `Arc`) between the `/api/mcp/*` routes and
+    // the LAN-edge auth (which, behind the accept flag, verifies a scoped MCP
+    // token as an alternative credential), so both read one record.
+    let mcp_tokens = Arc::new(crate::mcp::McpTokenStore::with_path(
+        paths.mcp_token_path.clone(),
+    ));
     let state = AppState::new(
         Arc::clone(&pairing),
         state_client,
@@ -268,6 +285,7 @@ where
         paths.board_path.clone(),
         pairing_paths,
         Arc::clone(&dashboard_pin),
+        Arc::clone(&mcp_tokens),
     );
 
     // Native-vs-residual gates for the profile-conditional route groups, resolved

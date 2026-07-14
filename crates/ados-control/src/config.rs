@@ -183,6 +183,20 @@ pub struct SecuritySection {
 pub struct ControlSecurityConfig {
     #[serde(default)]
     pub security: SecuritySection,
+    #[serde(default)]
+    pub mcp: McpSection,
+}
+
+/// The `mcp:` section: the AI-control-surface posture the LAN auth edge reads.
+/// A control-front-only section (no Python mirror). Default all-off, so the MCP
+/// token path is inert until an operator opts in.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct McpSection {
+    /// When true, the LAN auth edge accepts a scoped MCP token
+    /// (`X-ADOS-MCP-Token`) as an alternative to `X-ADOS-Key` on a would-be-401,
+    /// enforcing the token's scope against the route class. Default off.
+    #[serde(default)]
+    pub token_accept_enabled: bool,
 }
 
 impl ControlSecurityConfig {

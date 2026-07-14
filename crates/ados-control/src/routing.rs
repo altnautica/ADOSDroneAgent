@@ -113,6 +113,12 @@ fn native_routes() -> Vec<NativeRoute> {
         post("/api/dashboard/pin/verify"),
         post("/api/dashboard/pin/set"),
         post("/api/dashboard/pin/clear"),
+        // MCP-token management: the AI-control surface's mint/status/revoke. Native
+        // so they keep the front's auth posture (mint additionally gates on-box/key
+        // in-handler).
+        get("/api/mcp/status"),
+        post("/api/mcp/tokens"),
+        post("/api/mcp/revoke"),
         // Params: the full list + the single-param read (a {name} template).
         get("/api/params"),
         get("/api/params/{name}"),
@@ -426,7 +432,7 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            125,
+            128,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);
@@ -571,6 +577,11 @@ mod tests {
         assert!(has(Method::POST, "/api/dashboard/pin/verify"));
         assert!(has(Method::POST, "/api/dashboard/pin/set"));
         assert!(has(Method::POST, "/api/dashboard/pin/clear"));
+        // The MCP-token management routes are native (else the mint/revoke writes
+        // would be auth-skipped).
+        assert!(has(Method::GET, "/api/mcp/status"));
+        assert!(has(Method::POST, "/api/mcp/tokens"));
+        assert!(has(Method::POST, "/api/mcp/revoke"));
         // The plugin per-drone config write is native (a control-plane write, so
         // it stays off the residual Python plugin surface).
         assert!(has(Method::PUT, "/api/plugins/{plugin_id}/config"));

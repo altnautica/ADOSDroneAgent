@@ -50,6 +50,7 @@ pub mod logs_write;
 pub mod mac_adapters;
 pub mod mac_pin;
 pub mod mavlink_ports;
+pub mod mcp;
 pub mod network_client_read;
 pub mod network_write;
 pub mod pairing;
@@ -215,6 +216,13 @@ pub fn build_router(state: AppState, net_native: bool, hid_native: bool) -> Rout
         .route("/api/dashboard/pin/verify", post(dashboard_pin::verify_pin))
         .route("/api/dashboard/pin/set", post(dashboard_pin::set_pin))
         .route("/api/dashboard/pin/clear", post(dashboard_pin::clear_pin))
+        // MCP-token management (AI-control surface). status is a read; mint issues
+        // a credential (authorized in the handler to on-box or a valid key); revoke
+        // needs the admin scope class. The edge honors a minted token only when the
+        // mcp.token_accept_enabled flag is set (default off, reported by status).
+        .route("/api/mcp/status", get(mcp::get_mcp_status))
+        .route("/api/mcp/tokens", post(mcp::mint_mcp_token))
+        .route("/api/mcp/revoke", post(mcp::revoke_mcp_token))
         // Params: the full cached FC parameter list, plus the single-param read +
         // write sharing one path (a path-param route; the write builds a PARAM_SET
         // frame and sends it to the FC, the read projects the one cached param).

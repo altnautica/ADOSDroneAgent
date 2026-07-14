@@ -219,6 +219,9 @@ mod tests {
             Arc::new(crate::dashboard_pin::DashboardPin::with_path(
                 dir.join("dashboard-pin.json"),
             )),
+            Arc::new(crate::mcp::McpTokenStore::with_path(
+                dir.join("mcp-token.json"),
+            )),
         )
     }
 

@@ -909,6 +909,9 @@ mod tests {
             std::sync::Arc::new(crate::dashboard_pin::DashboardPin::with_path(
                 dir.path().join("dashboard-pin.json"),
             )),
+            std::sync::Arc::new(crate::mcp::McpTokenStore::with_path(
+                dir.path().join("mcp-token.json"),
+            )),
         );
         (dir, state)
     }

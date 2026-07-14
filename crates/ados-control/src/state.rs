@@ -204,6 +204,10 @@ pub struct AppState {
     /// `pairing-info` route reads `pin_set` from. Shared (same `Arc`) with the
     /// LAN-edge auth so the routes and the gate read one record.
     pub dashboard_pin: Arc<DashboardPin>,
+    /// The MCP-token store the `/api/mcp/*` routes read + write, and (when the
+    /// accept flag is on) the LAN-edge auth consults on a would-be-401. Shared
+    /// (same `Arc`) with the edge so the routes and the gate read one record.
+    pub mcp_tokens: Arc<crate::mcp::McpTokenStore>,
     /// When this daemon started, the status route's uptime fallback when the
     /// state snapshot carries no `service_uptime`.
     started: Instant,
@@ -224,6 +228,7 @@ impl AppState {
         board_path: PathBuf,
         pairing_paths: PairingPaths,
         dashboard_pin: Arc<DashboardPin>,
+        mcp_tokens: Arc<crate::mcp::McpTokenStore>,
     ) -> Self {
         Self {
             pairing,
@@ -233,6 +238,7 @@ impl AppState {
             board_path,
             pairing_paths,
             dashboard_pin,
+            mcp_tokens,
             started: Instant::now(),
         }
     }
