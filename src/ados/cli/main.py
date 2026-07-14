@@ -1130,6 +1130,7 @@ def demo(port: int) -> None:
 from ados.cli.hardware import hardware_group  # noqa: E402
 from ados.cli.help import help_command  # noqa: E402
 from ados.cli.logs import logs_group  # noqa: E402
+from ados.cli.mcp import mcp_group  # noqa: E402
 from ados.cli.network import network_group  # noqa: E402
 from ados.cli.pair import pair, unpair  # noqa: E402
 from ados.cli.plugin import plugin_group  # noqa: E402
@@ -1145,7 +1146,15 @@ cli.add_command(unpair)
 cli.add_command(help_command)
 cli.add_command(logs_group)
 
-for _group in (hardware_group, network_group, plugin_group, profile_group, radio_group, rust_group):
+for _group in (
+    hardware_group,
+    mcp_group,
+    network_group,
+    plugin_group,
+    profile_group,
+    radio_group,
+    rust_group,
+):
     _group.hidden = True
     cli.add_command(_group)
 
