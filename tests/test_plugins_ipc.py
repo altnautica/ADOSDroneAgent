@@ -417,3 +417,112 @@ async def test_binds_when_native_host_pinned_off(short_sock_dir: Path) -> None:
         await client.close()
     finally:
         await server.stop_for_plugin(PLUGIN_ID)
+
+
+# ---------------------------------------------------------------------
+# MCP tool invocation (host -> plugin request/response)
+# ---------------------------------------------------------------------
+
+
+async def _tool_harness(sock_dir: Path, caps: set[str]):
+    """Boot a server + a client whose token carries ``caps``. Returns
+    (server, client, teardown)."""
+    bus = EventBus()
+    issuer = TokenIssuer()
+    server = PluginIpcServer(bus=bus, token_issuer=issuer, socket_dir=sock_dir)
+    sock_path = await server.start_for_plugin(PLUGIN_ID)
+    token = issuer.mint(plugin_id=PLUGIN_ID, granted_caps=caps)
+    client = PluginIpcClient(
+        plugin_id=PLUGIN_ID, token=token.to_string(), socket_path=sock_path
+    )
+    await client.connect()
+
+    async def teardown() -> None:
+        await client.close()
+        await server.stop_for_plugin(PLUGIN_ID)
+
+    return server, client, teardown
+
+
+@pytest.mark.asyncio
+async def test_tool_invoke_round_trips(short_sock_dir: Path) -> None:
+    server, client, teardown = await _tool_harness(short_sock_dir, {"mcp.expose"})
+    try:
+        client.register_tool("echo", lambda args: {"echoed": args})
+
+        async def _adder(args: dict) -> dict:
+            return {"sum": args["a"] + args["b"]}
+
+        client.register_tool("add", _adder)
+
+        assert await server.invoke_tool(PLUGIN_ID, "echo", {"x": 1}) == {
+            "echoed": {"x": 1}
+        }
+        assert await server.invoke_tool(PLUGIN_ID, "add", {"a": 2, "b": 3}) == {
+            "sum": 5
+        }
+    finally:
+        await teardown()
+
+
+@pytest.mark.asyncio
+async def test_tool_invoke_non_dict_result_is_wrapped(short_sock_dir: Path) -> None:
+    server, client, teardown = await _tool_harness(short_sock_dir, {"mcp.expose"})
+    try:
+        client.register_tool("answer", lambda _args: 42)
+        assert await server.invoke_tool(PLUGIN_ID, "answer", {}) == {"result": 42}
+    finally:
+        await teardown()
+
+
+@pytest.mark.asyncio
+async def test_tool_invoke_unknown_tool_errors(short_sock_dir: Path) -> None:
+    from ados.plugins.ipc_server import _RpcError
+
+    server, _client, teardown = await _tool_harness(short_sock_dir, {"mcp.expose"})
+    try:
+        with pytest.raises(_RpcError, match="tool_not_found"):
+            await server.invoke_tool(PLUGIN_ID, "nope", {})
+    finally:
+        await teardown()
+
+
+@pytest.mark.asyncio
+async def test_tool_invoke_handler_exception_surfaces(short_sock_dir: Path) -> None:
+    from ados.plugins.ipc_server import _RpcError
+
+    server, client, teardown = await _tool_harness(short_sock_dir, {"mcp.expose"})
+    try:
+        def _boom(_args: dict) -> dict:
+            raise ValueError("bad")
+
+        client.register_tool("boom", _boom)
+        with pytest.raises(_RpcError, match="tool_error"):
+            await server.invoke_tool(PLUGIN_ID, "boom", {})
+    finally:
+        await teardown()
+
+
+@pytest.mark.asyncio
+async def test_tool_invoke_without_mcp_expose_is_denied(short_sock_dir: Path) -> None:
+    from ados.plugins.errors import CapabilityDenied
+
+    # The token lacks mcp.expose: the host-side gate refuses before sending.
+    server, client, teardown = await _tool_harness(short_sock_dir, {"event.publish"})
+    try:
+        client.register_tool("echo", lambda args: {"echoed": args})
+        with pytest.raises(CapabilityDenied):
+            await server.invoke_tool(PLUGIN_ID, "echo", {})
+    finally:
+        await teardown()
+
+
+@pytest.mark.asyncio
+async def test_tool_invoke_plugin_not_running_errors(short_sock_dir: Path) -> None:
+    from ados.plugins.ipc_server import _RpcError
+
+    bus = EventBus()
+    issuer = TokenIssuer()
+    server = PluginIpcServer(bus=bus, token_issuer=issuer, socket_dir=short_sock_dir)
+    with pytest.raises(_RpcError, match="plugin_not_running"):
+        await server.invoke_tool(PLUGIN_ID, "echo", {})

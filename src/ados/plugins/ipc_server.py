@@ -34,6 +34,7 @@ from pathlib import Path
 from ados.core.asyncio_util import log_task_exceptions
 from ados.core.logging import get_logger
 from ados.core.runtime_mode import is_service_native
+from ados.plugins._dispatch_generated import REQUIRED_CAP
 from ados.plugins.errors import CapabilityDenied as _CapabilityDenied
 from ados.plugins.events import (
     Event,
@@ -108,6 +109,10 @@ class PluginIpcServer:
         self._host = host if host is not None else default_host_services()
         self._servers: dict[str, asyncio.AbstractServer] = {}
         self._sessions: dict[str, PluginSession] = {}
+        # Host -> plugin request/response: a tool.invoke the host sends a plugin,
+        # awaiting its correlated reply. Keyed by the request id the host mints.
+        self._pending_invokes: dict[str, asyncio.Future[Envelope]] = {}
+        self._invoke_seq = 0
         # When the native plugin host is the active socket owner this server
         # yields instead of binding (they would otherwise contend for the same
         # <id>.sock). Injectable for tests; defaults to the on-disk cutover
@@ -263,6 +268,14 @@ class PluginIpcServer:
             env = await read_frame(reader)
             if env is None:
                 return
+            # A response envelope is the plugin replying to a host-issued
+            # tool.invoke; resolve the pending future and move on (it is not a
+            # request to dispatch).
+            if env.type == "response":
+                fut = self._pending_invokes.pop(env.request_id, None)
+                if fut is not None and not fut.done():
+                    fut.set_result(env)
+                continue
             # Re-check token freshness on every request. The handshake
             # accepted the token once; the session lives longer than the
             # token's TTL is allowed to. If the token has aged past
@@ -507,6 +520,58 @@ class PluginIpcServer:
         )
         writer.write(encode_frame(env))
         await writer.drain()
+
+    async def invoke_tool(
+        self,
+        plugin_id: str,
+        tool_name: str,
+        arguments: dict,
+        *,
+        timeout_s: float = 5.0,
+    ) -> dict:
+        """Ask a running plugin to run one of its declared tools; return the
+        result dict. Raises when the plugin is not connected, lacks the cap
+        the generated table names for ``tool.invoke`` (``mcp.expose``), the
+        call times out, or the plugin replies with an error.
+
+        This host-side gate is authoritative: the session token was verified at
+        handshake, so ``session.token.granted_caps`` is trustworthy; a plugin
+        without the cap never has a tool routed to it. The runner re-checks
+        against the same generated table so the two sides cannot drift.
+        """
+        session = self._sessions.get(plugin_id)
+        if session is None:
+            raise _RpcError(f"plugin_not_running: {plugin_id}")
+        required = REQUIRED_CAP.get("tool.invoke")
+        if required is not None and required not in session.token.granted_caps:
+            raise _CapabilityDenied(plugin_id, required)
+        self._invoke_seq += 1
+        req_id = f"inv-{self._invoke_seq}"
+        fut: asyncio.Future[Envelope] = asyncio.get_running_loop().create_future()
+        self._pending_invokes[req_id] = fut
+        env = Envelope(
+            type="request",
+            method="tool.invoke",
+            capability=required or "",
+            args={"tool": tool_name, "arguments": arguments},
+            request_id=req_id,
+            token=session.token.to_string(),
+        )
+        try:
+            session.writer.write(encode_frame(env))
+            await session.writer.drain()
+        except (ConnectionError, BrokenPipeError) as exc:
+            self._pending_invokes.pop(req_id, None)
+            raise _RpcError(f"plugin_write_failed: {exc}") from exc
+        try:
+            response = await asyncio.wait_for(fut, timeout=timeout_s)
+        except TimeoutError as exc:
+            raise _RpcError(f"tool_timeout: {tool_name}") from exc
+        finally:
+            self._pending_invokes.pop(req_id, None)
+        if response.error:
+            raise _RpcError(response.error)
+        return response.args
 
 
 class _RpcError(Exception):

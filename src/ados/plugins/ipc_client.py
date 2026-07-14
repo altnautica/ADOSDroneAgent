@@ -24,18 +24,27 @@ Public surface today:
 from __future__ import annotations
 
 import asyncio
+import inspect
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 from ados.core.logging import get_logger
+from ados.plugins._dispatch_generated import REQUIRED_CAP
 from ados.plugins.errors import CapabilityDenied, PluginError
 from ados.plugins.rpc import (
+    CapabilityToken,
     Envelope,
     FrameError,
+    TokenError,
     encode_frame,
     read_frame,
 )
+
+# The wire method the host sends to ask the plugin to run one of its declared
+# tools; the runner replies with a correlated response. Gated on the cap the
+# generated table names for it, so the two sides cannot drift.
+_TOOL_INVOKE_METHOD = "tool.invoke"
 
 # ---------------------------------------------------------------------
 # Typed exceptions surfaced to plugin code
@@ -91,6 +100,29 @@ class PluginIpcClient:
         ] = []
         self._reader_task: asyncio.Task | None = None
         self._next_id = 0
+        # MCP tool handlers the plugin registers (the SDK @tool decorator fills
+        # this). The host asks the plugin to run one by name via a tool.invoke
+        # request; the runner looks it up here and replies with the result.
+        self._tool_handlers: dict[
+            str, Callable[[dict], Awaitable[Any] | Any]
+        ] = {}
+        # The plugin's own granted caps, parsed once from its token (parse only,
+        # no HMAC verify — the runner trusts its own token; the host verified it).
+        # An unparseable token yields an empty set so a tool.invoke fails closed.
+        try:
+            self._granted_caps: frozenset[str] = CapabilityToken.from_string(
+                token
+            ).granted_caps
+        except TokenError:
+            self._granted_caps = frozenset()
+
+    def register_tool(
+        self, name: str, handler: Callable[[dict], Awaitable[Any] | Any]
+    ) -> None:
+        """Register an MCP tool handler by name. The SDK ``@tool`` decorator
+        calls this from the plugin's declared tool set; the host routes a
+        ``tool.invoke`` for ``name`` to ``handler(arguments)``."""
+        self._tool_handlers[name] = handler
 
     async def connect(self) -> None:
         self._reader, self._writer = await asyncio.open_unix_connection(
@@ -378,6 +410,10 @@ class PluginIpcClient:
                         await self._dispatch_detection(env)
                     else:
                         await self._dispatch_event(env)
+                elif env.type == "request" and env.method == _TOOL_INVOKE_METHOD:
+                    # Host -> plugin request: run one of the plugin's tools and
+                    # reply with a correlated response.
+                    await self._handle_tool_invoke(env)
                 else:
                     fut = self._pending.get(env.request_id)
                     if fut is not None and not fut.done():
@@ -390,6 +426,59 @@ class PluginIpcClient:
                 plugin_id=self._plugin_id,
                 error=str(exc),
             )
+
+    async def _handle_tool_invoke(self, env: Envelope) -> None:
+        """Run a declared tool for a host ``tool.invoke`` request and reply.
+
+        Gated on the cap the generated table names for ``tool.invoke``
+        (``mcp.expose``): a plugin whose token lacks it never runs a tool. An
+        unknown tool or a handler exception is surfaced as an error response,
+        never a silent drop, so the host's pending future always resolves.
+        """
+        required = REQUIRED_CAP.get(_TOOL_INVOKE_METHOD)
+        if required is not None and required not in self._granted_caps:
+            await self._reply(env.request_id, args={}, error=f"capability_denied: {required}")
+            return
+        tool = env.args.get("tool")
+        if not isinstance(tool, str):
+            await self._reply(env.request_id, args={}, error="tool.invoke: missing tool name")
+            return
+        handler = self._tool_handlers.get(tool)
+        if handler is None:
+            await self._reply(env.request_id, args={}, error=f"tool_not_found: {tool}")
+            return
+        raw_args = env.args.get("arguments")
+        arguments = raw_args if isinstance(raw_args, dict) else {}
+        try:
+            result = handler(arguments)
+            if inspect.isawaitable(result):
+                result = await result
+        except Exception as exc:  # noqa: BLE001
+            await self._reply(env.request_id, args={}, error=f"tool_error: {exc}")
+            return
+        payload = result if isinstance(result, dict) else {"result": result}
+        await self._reply(env.request_id, args=payload, error=None)
+
+    async def _reply(
+        self, request_id: str, *, args: dict, error: str | None
+    ) -> None:
+        """Write a response envelope back to the host for a tool.invoke."""
+        if self._writer is None:
+            return
+        env = Envelope(
+            type="response",
+            method="response",
+            capability="",
+            args=args,
+            request_id=request_id,
+            token="",
+            error=error,
+        )
+        try:
+            self._writer.write(encode_frame(env))
+            await self._writer.drain()
+        except (ConnectionError, BrokenPipeError):
+            pass
 
     async def _dispatch_event(self, env: Envelope) -> None:
         topic: Any = env.args.get("topic")
