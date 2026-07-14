@@ -40,8 +40,11 @@ use tower::{Service, ServiceBuilder};
 use tower_http::cors::CorsLayer;
 
 use crate::auth::{self, Pairing, PairingState, RateLimiter};
+use crate::config::{ControlSecurityConfig, PairingConfig};
+use crate::mcp::{route_scope, McpTokenStore, MCP_SCOPES_HEADER, MCP_TOKEN_HEADER};
 use crate::proxy_auth::{BodyField, Decision, ProxiedAuth, RequestHeaders};
 use crate::routes::detail;
+use ados_protocol::mcp_token::scope_allows_class;
 use ados_protocol::ws_ticket::{now_unix, WsTicketIssuer};
 
 /// The header the front stamps on a request that passes its on-box loopback
@@ -71,6 +74,67 @@ struct EdgeAuth {
     /// The dashboard-access PIN store: consulted only on a would-be-401 to accept
     /// a valid dashboard session token as an alternative data-plane credential.
     dashboard_pin: Arc<crate::dashboard_pin::DashboardPin>,
+    /// The MCP-token store: consulted only on a would-be-401 for a NATIVE route,
+    /// and only when the accept flag is on, to admit a scoped MCP token as a
+    /// last-resort credential (with per-route scope enforcement).
+    mcp_tokens: Arc<McpTokenStore>,
+    /// The agent config path the edge reads the MCP accept flag + this node's
+    /// device id from, on the rare would-be-401-with-MCP-token path.
+    config_path: std::path::PathBuf,
+}
+
+/// The outcome of consulting a presented MCP token at the auth edge.
+enum McpDecision {
+    /// Admit the request; carry the comma-joined granted scope groups to stamp on
+    /// the trusted `X-ADOS-MCP-Scopes` header for any downstream consumer.
+    Admit(String),
+    /// A token was presented and verified, but its scopes do not permit this
+    /// route class (or the route is not token-reachable). Reject with `403` rather
+    /// than the `401` fall-through, so the client learns it is a scope problem.
+    ScopeDenied,
+    /// No usable MCP token (absent header, the accept flag is off, or the token
+    /// is invalid/expired/revoked). Fall through to the normal `401`.
+    Fallthrough,
+}
+
+impl EdgeAuth {
+    /// Consult a presented MCP token for a native route on a would-be-401. Reads
+    /// the accept flag + this node's device id fresh (the rate limiter bounds this
+    /// rare path) and verifies the token against the current pairing key. Returns
+    /// [`McpDecision::Fallthrough`] the moment anything is missing/invalid, so an
+    /// absent flag or a bad token behaves exactly as before (a normal 401).
+    fn mcp_admits(
+        &self,
+        method: &http::Method,
+        path: &str,
+        headers: &http::HeaderMap,
+    ) -> McpDecision {
+        let Some(token) = headers.get(MCP_TOKEN_HEADER).and_then(|v| v.to_str().ok()) else {
+            return McpDecision::Fallthrough;
+        };
+        // Opt-in: default off. An agent that has never enabled the flag never
+        // honors an MCP token, so the whole path is inert until an operator opts in.
+        if !ControlSecurityConfig::load_from(&self.config_path)
+            .mcp
+            .token_accept_enabled
+        {
+            return McpDecision::Fallthrough;
+        }
+        let device_id = PairingConfig::load_from(&self.config_path).agent.device_id;
+        let pairing = self.pairing.current();
+        let Some(claims) = self
+            .mcp_tokens
+            .verify(&pairing, token, now_unix_ms(), &device_id)
+        else {
+            return McpDecision::Fallthrough;
+        };
+        match route_scope(method, path) {
+            Some(required) if scope_allows_class(required, &claims.scopes) => {
+                McpDecision::Admit(claims.scopes.join(","))
+            }
+            _ => McpDecision::ScopeDenied,
+        }
+    }
 }
 
 /// The TCP-edge middleware: trustworthy on-box header stamping, then (for native
@@ -118,6 +182,12 @@ async fn tcp_edge(State(edge): State<EdgeAuth>, mut request: Request, next: Next
             .headers_mut()
             .insert(ONBOX_HEADER, axum::http::HeaderValue::from_static("1"));
     }
+
+    // Strip any client-supplied MCP-scopes header (it cannot be trusted). It is set
+    // below only when a valid MCP token is admitted — for every request, native or
+    // proxied — so a value arriving from a client can never be spoofed in. Mirrors
+    // the on-box header's strip-then-set discipline.
+    request.headers_mut().remove(MCP_SCOPES_HEADER);
 
     // A route the front does not serve natively falls through to the reverse
     // proxy. The front runs the ported auth decision itself before forwarding,
@@ -176,12 +246,33 @@ async fn tcp_edge(State(edge): State<EdgeAuth>, mut request: Request, next: Next
             })
             .unwrap_or(false);
         if !session_ok {
-            // Match the FastAPI message so a GCS that surfaces the body reads the
-            // same text against either surface.
-            return detail(
-                StatusCode::UNAUTHORIZED,
-                "Missing X-ADOS-Key header. This agent is paired and requires authentication.",
-            );
+            // Last-resort: a scoped MCP token (behind the default-off accept flag).
+            // Admitted only for a native route whose class the token's scopes cover;
+            // a verified-but-wrong-scope token is a 403, an absent/invalid one falls
+            // through to the same 401 as before.
+            match edge.mcp_admits(request.method(), &path, request.headers()) {
+                McpDecision::Admit(scopes) => {
+                    // Stamp the trusted scope groups (the client value was stripped
+                    // at the top) for any downstream consumer, then admit.
+                    if let Ok(v) = axum::http::HeaderValue::from_str(&scopes) {
+                        request.headers_mut().insert(MCP_SCOPES_HEADER, v);
+                    }
+                }
+                McpDecision::ScopeDenied => {
+                    return detail(
+                        StatusCode::FORBIDDEN,
+                        "The presented MCP token's scope does not permit this route.",
+                    );
+                }
+                McpDecision::Fallthrough => {
+                    // Match the FastAPI message so a GCS that surfaces the body reads
+                    // the same text against either surface.
+                    return detail(
+                        StatusCode::UNAUTHORIZED,
+                        "Missing X-ADOS-Key header. This agent is paired and requires authentication.",
+                    );
+                }
+            }
         }
     }
     next.run(request).await
@@ -315,6 +406,15 @@ fn ws_upgrade_ticket_admits(headers: &http::HeaderMap, pairing: &Pairing) -> boo
         .is_ok()
 }
 
+/// Wall-clock unix milliseconds, matching the MCP token's millisecond expiry.
+fn now_unix_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 /// Pull the headers the proxied-auth decision reads into the typed struct, so
 /// the decision is a pure function of strings (decoupled from the live
 /// `HeaderMap`). A non-UTF-8 header value is treated as absent.
@@ -366,12 +466,16 @@ pub fn tcp_app(
     pairing: Arc<PairingState>,
     proxied: Arc<ProxiedAuth>,
     dashboard_pin: Arc<crate::dashboard_pin::DashboardPin>,
+    mcp_tokens: Arc<McpTokenStore>,
+    config_path: std::path::PathBuf,
 ) -> Router {
     let edge = EdgeAuth {
         pairing,
         rate: Arc::new(RateLimiter::default_control()),
         proxied,
         dashboard_pin,
+        mcp_tokens,
+        config_path,
     };
     // CORS wraps OUTSIDE the auth layer (ServiceBuilder applies the first layer
     // outermost). A browser cross-origin call to this LAN edge sends a custom
@@ -604,5 +708,124 @@ mod tests {
             .token;
         let bad = ws_headers(Some(&format!("ados-ws-ticket, {forged}")));
         assert!(!ws_upgrade_ticket_admits(&bad, &paired));
+    }
+
+    /// Build an `EdgeAuth` over temp paths: a paired agent (`api_key=ados_secret`,
+    /// device `node-1`) with the MCP accept flag `enabled`, plus a store carrying
+    /// one minted `read`-scope token. Returns the edge and the token string.
+    fn mcp_edge(dir: &Path, accept_enabled: bool) -> (EdgeAuth, String) {
+        let pairing_path = dir.join("pairing.json");
+        std::fs::write(
+            &pairing_path,
+            r#"{"paired": true, "api_key": "ados_secret"}"#,
+        )
+        .unwrap();
+        let config_path = dir.join("config.yaml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "mcp:\n  token_accept_enabled: {accept_enabled}\nagent:\n  device_id: node-1\n"
+            ),
+        )
+        .unwrap();
+        let mcp_tokens = Arc::new(McpTokenStore::with_path(dir.join("mcp-token.json")));
+        let scopes = ["read".to_string()];
+        let token = mcp_tokens
+            .mint(&crate::mcp::MintRequest {
+                api_key: "ados_secret",
+                label: "test",
+                operator_id: "op",
+                node_id: "node-1",
+                scopes: &scopes,
+                allowed_nodes: &[],
+                ttl_ms: 3_600_000,
+                now_secs: 0.0,
+                now_ms: now_unix_ms(),
+            })
+            .unwrap();
+        let edge = EdgeAuth {
+            pairing: Arc::new(PairingState::with_path(pairing_path)),
+            rate: Arc::new(RateLimiter::default_control()),
+            proxied: Arc::new(ProxiedAuth::new(crate::config::SecuritySection::default())),
+            dashboard_pin: Arc::new(crate::dashboard_pin::DashboardPin::with_path(
+                dir.join("dashboard-pin.json"),
+            )),
+            mcp_tokens,
+            config_path,
+        };
+        (edge, token)
+    }
+
+    fn token_headers(token: &str) -> http::HeaderMap {
+        let mut h = http::HeaderMap::new();
+        h.insert(MCP_TOKEN_HEADER, token.parse().unwrap());
+        h
+    }
+
+    #[test]
+    fn mcp_admits_a_read_token_on_a_read_route() {
+        let dir = tempfile::tempdir().unwrap();
+        let (edge, token) = mcp_edge(dir.path(), true);
+        let h = token_headers(&token);
+        // A read-scoped token reaches a read (GET) route.
+        match edge.mcp_admits(&http::Method::GET, "/api/status", &h) {
+            McpDecision::Admit(scopes) => assert_eq!(scopes, "read"),
+            other => panic!("expected Admit, got {:?}", DecisionDbg(&other)),
+        }
+    }
+
+    #[test]
+    fn mcp_denies_a_read_token_on_a_flight_route() {
+        let dir = tempfile::tempdir().unwrap();
+        let (edge, token) = mcp_edge(dir.path(), true);
+        let h = token_headers(&token);
+        // The command route needs the flight class; a read token is scope-denied.
+        assert!(matches!(
+            edge.mcp_admits(&http::Method::POST, "/api/command", &h),
+            McpDecision::ScopeDenied
+        ));
+    }
+
+    #[test]
+    fn mcp_falls_through_when_flag_off_or_no_token() {
+        let dir = tempfile::tempdir().unwrap();
+        // Flag OFF: even a valid token falls through to the normal 401.
+        let (edge_off, token) = mcp_edge(dir.path(), false);
+        assert!(matches!(
+            edge_off.mcp_admits(&http::Method::GET, "/api/status", &token_headers(&token)),
+            McpDecision::Fallthrough
+        ));
+        // Flag ON but no token header → fall through.
+        let dir2 = tempfile::tempdir().unwrap();
+        let (edge_on, _t) = mcp_edge(dir2.path(), true);
+        assert!(matches!(
+            edge_on.mcp_admits(&http::Method::GET, "/api/status", &http::HeaderMap::new()),
+            McpDecision::Fallthrough
+        ));
+    }
+
+    #[test]
+    fn mcp_falls_through_on_a_tampered_or_wrong_key_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let (edge, token) = mcp_edge(dir.path(), true);
+        // Flip a byte in the blob → HMAC fails → fall through (a normal 401).
+        let (blob, sig) = token.rsplit_once('.').unwrap();
+        let tampered = format!("{blob}x.{sig}");
+        assert!(matches!(
+            edge.mcp_admits(&http::Method::GET, "/api/status", &token_headers(&tampered)),
+            McpDecision::Fallthrough
+        ));
+    }
+
+    /// A tiny Debug shim so a failing Admit assertion can print the variant.
+    struct DecisionDbg<'a>(&'a McpDecision);
+    impl std::fmt::Debug for DecisionDbg<'_> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self.0 {
+                McpDecision::Admit(s) => write!(f, "Admit({s})"),
+                McpDecision::ScopeDenied => write!(f, "ScopeDenied"),
+                McpDecision::Fallthrough => write!(f, "Fallthrough"),
+            }
+        }
     }
 }

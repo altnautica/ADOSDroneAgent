@@ -327,6 +327,8 @@ where
         Arc::clone(&pairing),
         Arc::clone(&proxied_auth),
         Arc::clone(&dashboard_pin),
+        Arc::clone(&mcp_tokens),
+        paths.config_path.clone(),
     );
 
     // Bind every listener up front so a bind failure surfaces here. The LAN front
