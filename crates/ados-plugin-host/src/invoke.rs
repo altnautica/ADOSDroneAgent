@@ -79,6 +79,19 @@ impl InvokeRegistry {
             .remove(plugin_id);
     }
 
+    /// Identity-checked unregister: remove the plugin's sender ONLY when the
+    /// stored sender is `sender`'s own channel. On a reconnect overlap the old
+    /// connection's teardown must not evict the NEW connection's freshly
+    /// registered sender (which would leave the live plugin reporting
+    /// `plugin_not_running` until the daemon restarts). `same_channel` compares
+    /// channel identity, so an unregister from a superseded connection is a no-op.
+    pub fn unregister_if(&self, plugin_id: &str, sender: &mpsc::Sender<InvokeRequest>) {
+        let mut map = self.senders.lock().expect("invoke registry mutex");
+        if map.get(plugin_id).is_some_and(|s| s.same_channel(sender)) {
+            map.remove(plugin_id);
+        }
+    }
+
     /// Ask the live plugin connection to run `tool` with `arguments` and return
     /// its result. Fails (never hangs) when the plugin is not connected, its
     /// channel is closed, the connection drops the reply, or the timeout fires.
@@ -104,12 +117,20 @@ impl InvokeRegistry {
             arguments,
             reply: reply_tx,
         };
-        if sender.send(req).await.is_err() {
+        // One deadline bounds BOTH the enqueue and the reply, so a wedged plugin
+        // that stops draining its bounded channel cannot make the enqueue hang
+        // (the original `sender.send().await` blocked forever on a full channel,
+        // before the reply timeout could ever apply).
+        let deadline = tokio::time::Instant::now() + timeout;
+        match tokio::time::timeout_at(deadline, sender.send(req)).await {
+            Ok(Ok(())) => {}
             // The connection task dropped its receiver between the lookup and
             // the send: treat as not running.
-            return Err(format!("plugin_not_running: {plugin_id}"));
+            Ok(Err(_)) => return Err(format!("plugin_not_running: {plugin_id}")),
+            // The channel is full and the connection is not draining it.
+            Err(_) => return Err(format!("plugin_busy: {plugin_id}")),
         }
-        match tokio::time::timeout(timeout, reply_rx).await {
+        match tokio::time::timeout_at(deadline, reply_rx).await {
             Ok(Ok(result)) => result,
             // The connection dropped the reply sender without answering (it
             // ended mid-invoke).
@@ -203,6 +224,45 @@ mod tests {
         reg.register("com.x.p", tx);
         assert!(reg.is_connected("com.x.p"));
         reg.unregister("com.x.p");
+        assert!(!reg.is_connected("com.x.p"));
+    }
+
+    #[tokio::test]
+    async fn invoke_returns_busy_when_the_connection_never_drains() {
+        // A capacity-1 channel that is never received from: the first invoke fills
+        // the slot and times out (no reply), leaving its request in the buffer; the
+        // second invoke cannot enqueue and must return busy rather than hang.
+        let reg = InvokeRegistry::new();
+        let (tx, _rx) = mpsc::channel::<InvokeRequest>(1);
+        reg.register("com.x.p", tx);
+        let e1 = reg
+            .invoke("com.x.p", "a", Value::Nil, Duration::from_millis(30))
+            .await
+            .unwrap_err();
+        assert!(e1.contains("tool_timeout"), "{e1}");
+        let e2 = reg
+            .invoke("com.x.p", "b", Value::Nil, Duration::from_millis(30))
+            .await
+            .unwrap_err();
+        assert!(e2.contains("plugin_busy"), "{e2}");
+    }
+
+    #[tokio::test]
+    async fn unregister_if_only_removes_the_matching_connection() {
+        // A reconnect overlap: the OLD connection's teardown must not evict the
+        // NEW connection's sender registered under the same plugin id.
+        let reg = InvokeRegistry::new();
+        let (old_tx, _old_rx) = mpsc::channel::<InvokeRequest>(4);
+        reg.register("com.x.p", old_tx.clone());
+        // The new connection replaces the sender.
+        let (new_tx, _new_rx) = mpsc::channel::<InvokeRequest>(4);
+        reg.register("com.x.p", new_tx.clone());
+        // The old connection tears down with an identity-checked unregister: it is
+        // a no-op because the stored sender is the new one.
+        reg.unregister_if("com.x.p", &old_tx);
+        assert!(reg.is_connected("com.x.p"), "the new connection survives");
+        // The new connection's own identity-checked unregister does remove it.
+        reg.unregister_if("com.x.p", &new_tx);
         assert!(!reg.is_connected("com.x.p"));
     }
 }

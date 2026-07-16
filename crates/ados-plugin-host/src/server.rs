@@ -267,11 +267,19 @@ impl<H: HostServices> Connection<H> {
         // session end the sender is unregistered and any pending waiter is failed
         // (the one-shot senders drop), so a control-socket invoke never hangs.
         let (invoke_tx, mut invoke_rx) = tokio::sync::mpsc::channel::<InvokeRequest>(16);
-        self.invoke.register(&self.plugin_id, invoke_tx);
+        // Register a CLONE and keep our own handle so the session-end unregister is
+        // identity-checked (a reconnect overlap must not evict the successor's
+        // sender registered under the same plugin id).
+        self.invoke.register(&self.plugin_id, invoke_tx.clone());
         let mut pending_invokes: std::collections::HashMap<
             String,
             tokio::sync::oneshot::Sender<Result<Value, String>>,
         > = std::collections::HashMap::new();
+        // Periodically reap pending invokes whose registry-side receiver is gone
+        // (the invoke timed out or was abandoned), so an adversarial plugin that
+        // accepts invokes but never replies cannot grow the map unbounded.
+        let mut reap = tokio::time::interval(std::time::Duration::from_secs(10));
+        reap.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         // ---- dispatch loop --------------------------------------------
         let result = loop {
@@ -403,14 +411,22 @@ impl<H: HostServices> Connection<H> {
                         }
                     }
                 }
+                _ = reap.tick() => {
+                    // Drop pending invokes whose one-shot reply receiver was
+                    // dropped by the registry (timeout/abandon). Cheap; bounds the
+                    // map to genuinely in-flight invokes.
+                    pending_invokes.retain(|_, reply| !reply.is_closed());
+                }
             }
         };
 
         // Unregister the invoke sender so a later control-socket invoke fails
-        // closed (plugin_not_running). Dropping `pending_invokes` here fails any
-        // in-flight waiter (its one-shot sender drops -> plugin_disconnected), so
-        // no control-socket invoke hangs past the session.
-        self.invoke.unregister(&self.plugin_id);
+        // closed (plugin_not_running). Identity-checked so a superseding
+        // reconnect's sender is never evicted by this ended session. Dropping
+        // `pending_invokes` here fails any in-flight waiter (its one-shot sender
+        // drops -> plugin_disconnected), so no control-socket invoke hangs past
+        // the session.
+        self.invoke.unregister_if(&self.plugin_id, &invoke_tx);
 
         // Stop the per-subscription forwarder tasks so none survive the session.
         for f in forwarders {
