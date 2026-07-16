@@ -45,6 +45,7 @@ pub mod dispatch;
 pub mod errors;
 pub mod handlers;
 pub mod host;
+pub mod invoke;
 pub mod manifest;
 pub mod mavlink_client;
 pub mod realhost;
@@ -65,6 +66,7 @@ pub use errors::{
 };
 pub use handlers::{Event, EventBus};
 pub use host::{HostResult, HostServices, NoopHost};
+pub use invoke::{InvokeRegistry, InvokeRequest, DEFAULT_INVOKE_TIMEOUT};
 pub use manifest::{AgentRuntime, PluginManifest};
 pub use server::{PluginIpcServer, ServerError, DEFAULT_SOCKET_DIR};
 pub use signing::{is_first_party_signer, FIRST_PARTY_SIGNERS};

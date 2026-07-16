@@ -284,6 +284,14 @@ pub fn gate(method_name: &str, token_is_expired: bool, granted_caps: &BTreeSet<S
     Gate::Allow(method)
 }
 
+/// Methods in the generated dispatch table that travel HOST -> PLUGIN (the host
+/// asks the plugin), not plugin -> host. They carry a required cap in the table
+/// (the receiving plugin gates on it), but they are NOT plugin-request methods
+/// this host dispatches, so they are absent from the [`Method`] enum by design.
+/// The coverage tests subtract them so a genuinely-missing plugin->host method
+/// is still caught. Grow this as more host->plugin methods are added.
+pub const HOST_TO_PLUGIN_METHODS: &[&str] = &["tool.invoke"];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -496,9 +504,14 @@ mod tests {
             );
         }
 
-        // 2. Every generated method is a known enum variant. A generated row the
-        //    enum does not cover would be unroutable by the Rust host.
+        // 2. Every generated PLUGIN->HOST method is a known enum variant. A
+        //    generated row the enum does not cover would be unroutable by the
+        //    Rust host. Host->plugin methods (tool.invoke) are excluded — they
+        //    carry a cap for the receiving plugin but are not dispatched here.
         for row in DISPATCH_METHODS {
+            if HOST_TO_PLUGIN_METHODS.contains(&row.method) {
+                continue;
+            }
             assert!(
                 Method::from_wire(row.method).is_some(),
                 "generated method {} has no enum variant",
@@ -506,8 +519,13 @@ mod tests {
             );
         }
 
-        // 3. Same cardinality, so neither side carries an extra row.
-        assert_eq!(ALL_METHODS.len(), DISPATCH_METHODS.len());
+        // 3. Same cardinality (the enum covers exactly the plugin->host rows, so
+        //    the generated set minus the host->plugin methods), so neither side
+        //    carries an extra row.
+        assert_eq!(
+            ALL_METHODS.len(),
+            DISPATCH_METHODS.len() - HOST_TO_PLUGIN_METHODS.len()
+        );
     }
 
     #[test]

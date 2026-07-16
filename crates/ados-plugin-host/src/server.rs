@@ -25,6 +25,7 @@ use tokio::task::JoinHandle;
 use crate::dispatch::{gate, Gate, Method};
 use crate::handlers::{self, Event, EventBus, PublishOutcome};
 use crate::host::HostServices;
+use crate::invoke::{InvokeRegistry, InvokeRequest};
 
 /// Default per-plugin socket directory. Mirrors `SOCKET_DIR` in Python.
 pub const DEFAULT_SOCKET_DIR: &str = "/run/ados/plugins";
@@ -61,6 +62,9 @@ pub struct PluginIpcServer<H: HostServices> {
     token_issuer: Arc<TokenIssuer>,
     bus: Arc<EventBus>,
     host: Arc<H>,
+    /// The host-to-plugin invoke seam: each connection registers its outbound
+    /// sender here, and the control socket reaches a plugin's tools through it.
+    invoke: Arc<InvokeRegistry>,
 }
 
 impl<H: HostServices> PluginIpcServer<H> {
@@ -75,7 +79,15 @@ impl<H: HostServices> PluginIpcServer<H> {
             token_issuer,
             bus,
             host,
+            invoke: Arc::new(InvokeRegistry::new()),
         }
+    }
+
+    /// The shared invoke registry the control socket forwards a `tool.invoke`
+    /// into. Hand this to [`crate::control::serve_control`] so an operator's
+    /// `POST /api/plugins/{id}/tools/{tool}/invoke` reaches a live plugin.
+    pub fn invoke_registry(&self) -> Arc<InvokeRegistry> {
+        self.invoke.clone()
     }
 
     /// The socket path for a plugin id.
@@ -99,6 +111,7 @@ impl<H: HostServices> PluginIpcServer<H> {
         let bus = self.bus.clone();
         let host = self.host.clone();
         let socket_dir = self.socket_dir.clone();
+        let invoke = self.invoke.clone();
         let task = tokio::spawn(async move {
             loop {
                 let stream = match listener.accept().await {
@@ -111,6 +124,7 @@ impl<H: HostServices> PluginIpcServer<H> {
                     bus: bus.clone(),
                     host: host.clone(),
                     socket_dir: socket_dir.clone(),
+                    invoke: invoke.clone(),
                 };
                 tokio::spawn(async move {
                     if let Err(err) = conn.run(stream).await {
@@ -151,6 +165,9 @@ struct Connection<H: HostServices> {
     /// The per-plugin socket directory, used to locate the published-state
     /// sidecar written on each authorized publish.
     socket_dir: PathBuf,
+    /// The shared invoke registry: this connection registers its outbound
+    /// sender here while its session is up so the control socket can reach it.
+    invoke: Arc<InvokeRegistry>,
 }
 
 impl<H: HostServices> Connection<H> {
@@ -244,6 +261,18 @@ impl<H: HostServices> Connection<H> {
         let mut detection_subs: Vec<String> = Vec::new();
         let (det_tx, mut det_rx) = tokio::sync::mpsc::channel::<DetectionDelivery>(256);
 
+        // MCP tool invocation: register an outbound-request sender so the control
+        // socket can reach THIS live connection (the host->plugin request flow),
+        // and track pending replies here so the read branch can resolve them. On
+        // session end the sender is unregistered and any pending waiter is failed
+        // (the one-shot senders drop), so a control-socket invoke never hangs.
+        let (invoke_tx, mut invoke_rx) = tokio::sync::mpsc::channel::<InvokeRequest>(16);
+        self.invoke.register(&self.plugin_id, invoke_tx);
+        let mut pending_invokes: std::collections::HashMap<
+            String,
+            tokio::sync::oneshot::Sender<Result<Value, String>>,
+        > = std::collections::HashMap::new();
+
         // ---- dispatch loop --------------------------------------------
         let result = loop {
             // Race the inbound request against an outgoing event or MAVLink frame
@@ -257,6 +286,18 @@ impl<H: HostServices> Connection<H> {
                         Ok(None) => break Ok(()),
                         Err(e) => break Err(e),
                     };
+                    // A response frame is the plugin's reply to a host-issued
+                    // tool.invoke: resolve the waiter, do NOT route it as a request.
+                    if env.kind == "response" {
+                        if let Some(reply) = pending_invokes.remove(&env.request_id) {
+                            let outcome = match env.error {
+                                Some(msg) => Err(msg),
+                                None => Ok(env.args),
+                            };
+                            let _ = reply.send(outcome);
+                        }
+                        continue;
+                    }
                     if let Err(e) = self
                         .handle_request(
                             &mut write_half,
@@ -274,6 +315,40 @@ impl<H: HostServices> Connection<H> {
                         .await
                     {
                         break Err(e);
+                    }
+                }
+                req = invoke_rx.recv() => {
+                    // A control-socket tool.invoke targeting this plugin. Gate on
+                    // the plugin's verified token carrying mcp.expose (the host
+                    // authority; the runner re-checks), then write the request and
+                    // track the pending reply. `None` means the registry dropped
+                    // the sender (session ending) — keep serving.
+                    if let Some(InvokeRequest { request_id, tool, arguments, reply }) = req {
+                        if !token.granted_caps.contains("mcp.expose") {
+                            let _ = reply.send(Err("capability_denied: mcp.expose".to_string()));
+                        } else {
+                            let env = Envelope {
+                                version: PROTOCOL_VERSION,
+                                kind: "request".to_string(),
+                                method: "tool.invoke".to_string(),
+                                capability: "mcp.expose".to_string(),
+                                args: Value::Map(vec![
+                                    (Value::from("tool"), Value::from(tool)),
+                                    (Value::from("arguments"), arguments),
+                                ]),
+                                request_id: request_id.clone(),
+                                token: String::new(),
+                                error: None,
+                            };
+                            match write_frame(&mut write_half, &env).await {
+                                Ok(()) => {
+                                    pending_invokes.insert(request_id, reply);
+                                }
+                                Err(_) => {
+                                    let _ = reply.send(Err("plugin_write_failed".to_string()));
+                                }
+                            }
+                        }
                     }
                 }
                 evt = bus_rx.recv() => {
@@ -330,6 +405,12 @@ impl<H: HostServices> Connection<H> {
                 }
             }
         };
+
+        // Unregister the invoke sender so a later control-socket invoke fails
+        // closed (plugin_not_running). Dropping `pending_invokes` here fails any
+        // in-flight waiter (its one-shot sender drops -> plugin_disconnected), so
+        // no control-socket invoke hangs past the session.
+        self.invoke.unregister(&self.plugin_id);
 
         // Stop the per-subscription forwarder tasks so none survive the session.
         for f in forwarders {
@@ -908,5 +989,111 @@ mod tests {
             !path.exists(),
             "socket file should be gone after stop_plugin"
         );
+    }
+
+    #[tokio::test]
+    async fn tool_invoke_reaches_a_connected_plugin() {
+        use std::collections::BTreeSet;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let issuer = Arc::new(TokenIssuer::new(b"invoke-secret".to_vec()));
+        let bus = Arc::new(EventBus::new());
+        let host = Arc::new(NoopHost);
+        let server = PluginIpcServer::new(dir.path(), issuer.clone(), bus, host);
+        let registry = server.invoke_registry();
+
+        let plugin_id = "com.example.demo";
+        let (path, accept) = server.serve_plugin(plugin_id).expect("serve");
+
+        // Connect a fake runner once the socket is bound.
+        let mut stream = None;
+        for _ in 0..50 {
+            if let Ok(s) = UnixStream::connect(&path).await {
+                stream = Some(s);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let (mut rd, mut wr) = stream.expect("connect").into_split();
+
+        // Handshake with an mcp.expose token.
+        let mut caps = BTreeSet::new();
+        caps.insert("mcp.expose".to_string());
+        let token = issuer.mint(plugin_id, &caps, 600).to_token_string();
+        let hello = Envelope {
+            version: PROTOCOL_VERSION,
+            kind: "request".to_string(),
+            method: "hello".to_string(),
+            capability: String::new(),
+            args: Value::Map(vec![]),
+            request_id: "h1".to_string(),
+            token,
+            error: None,
+        };
+        write_frame(&mut wr, &hello).await.expect("send hello");
+        let ready = read_envelope(&mut rd)
+            .await
+            .expect("read ready")
+            .expect("ready envelope");
+        assert_eq!(ready.kind, "response");
+
+        // The fake runner answers one tool.invoke by echoing the tool name.
+        let runner = tokio::spawn(async move {
+            while let Some(env) = read_envelope(&mut rd).await.expect("read") {
+                if env.kind == "request" && env.method == "tool.invoke" {
+                    let tool = match &env.args {
+                        Value::Map(pairs) => pairs
+                            .iter()
+                            .find_map(|(k, v)| {
+                                (k.as_str() == Some("tool"))
+                                    .then(|| v.as_str().unwrap_or("").to_string())
+                            })
+                            .unwrap_or_default(),
+                        _ => String::new(),
+                    };
+                    let resp = Envelope {
+                        version: PROTOCOL_VERSION,
+                        kind: "response".to_string(),
+                        method: "response".to_string(),
+                        capability: String::new(),
+                        args: Value::Map(vec![(Value::from("ran"), Value::from(tool))]),
+                        request_id: env.request_id.clone(),
+                        token: String::new(),
+                        error: None,
+                    };
+                    write_frame(&mut wr, &resp).await.expect("reply");
+                }
+            }
+        });
+
+        // Wait for the connection to register its invoke sender post-handshake.
+        for _ in 0..50 {
+            if registry.is_connected(plugin_id) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            registry.is_connected(plugin_id),
+            "connection must register invoke"
+        );
+
+        let out = registry
+            .invoke(
+                plugin_id,
+                "greet",
+                Value::Map(vec![]),
+                Duration::from_secs(2),
+            )
+            .await
+            .expect("invoke result");
+        assert_eq!(
+            out,
+            Value::Map(vec![(Value::from("ran"), Value::from("greet"))])
+        );
+
+        runner.abort();
+        accept.abort();
+        server.stop_plugin(plugin_id);
     }
 }

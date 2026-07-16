@@ -2946,11 +2946,20 @@ mod tests {
 
     #[test]
     fn all_dispatch_methods_is_exhaustive() {
-        // The local ALL_DISPATCH_METHODS list must cover every generated method
-        // and carry no extras, so ungrantable_caps() reasons over the full set.
+        // The local ALL_DISPATCH_METHODS list must cover every generated
+        // PLUGIN->HOST method and carry no extras, so ungrantable_caps() reasons
+        // over the full set. Host->plugin methods (tool.invoke) are excluded —
+        // the host issues them, it does not dispatch them from a plugin request.
+        use crate::dispatch::HOST_TO_PLUGIN_METHODS;
         use ados_protocol::dispatch::DISPATCH_METHODS;
-        assert_eq!(ALL_DISPATCH_METHODS.len(), DISPATCH_METHODS.len());
+        assert_eq!(
+            ALL_DISPATCH_METHODS.len(),
+            DISPATCH_METHODS.len() - HOST_TO_PLUGIN_METHODS.len()
+        );
         for row in DISPATCH_METHODS {
+            if HOST_TO_PLUGIN_METHODS.contains(&row.method) {
+                continue;
+            }
             assert!(
                 ALL_DISPATCH_METHODS
                     .iter()
