@@ -19,6 +19,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use ados_protocol::frame::{decode_len, HEADER_SIZE, PLUGIN_MAX_FRAME};
 use ados_protocol::plugin::{Envelope, PROTOCOL_VERSION};
@@ -27,6 +28,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::task::JoinHandle;
 
+use crate::invoke::{InvokeRegistry, DEFAULT_INVOKE_TIMEOUT};
+
 /// The control socket file name under the per-plugin socket dir. The leading
 /// underscore keeps it out of the `<plugin_id>.sock` namespace (no plugin id is
 /// `_control`).
@@ -34,6 +37,13 @@ pub const CONTROL_SOCKET_NAME: &str = "_control.sock";
 
 /// The control method that applies a per-plugin config write to the live store.
 pub const METHOD_CONFIG_SET: &str = "config.set";
+
+/// The control method that runs one of a plugin's declared MCP tools on its live
+/// connection and returns the result. The off-box authorization is the
+/// `ados-control` HTTP edge (the MCP-token scope gate); by the time it reaches
+/// this socket it is an on-box trusted caller, and the plugin host gates the
+/// send on the plugin's own token carrying `mcp.expose`.
+pub const METHOD_TOOL_INVOKE: &str = "tool.invoke";
 
 /// The control socket path under a socket dir.
 pub fn control_socket_path(socket_dir: &Path) -> PathBuf {
@@ -132,7 +142,65 @@ fn handle_request<H: ConfigControl>(host: &H, req: &Envelope) -> Envelope {
     }
 }
 
-async fn serve_connection<H: ConfigControl>(host: Arc<H>, mut stream: UnixStream) {
+fn tool_ok(request_id: &str, result: Value) -> Envelope {
+    Envelope {
+        version: PROTOCOL_VERSION,
+        kind: "response".to_string(),
+        method: METHOD_TOOL_INVOKE.to_string(),
+        capability: String::new(),
+        args: result,
+        request_id: request_id.to_string(),
+        token: String::new(),
+        error: None,
+    }
+}
+
+fn tool_err(request_id: &str, message: String) -> Envelope {
+    Envelope {
+        version: PROTOCOL_VERSION,
+        kind: "response".to_string(),
+        method: METHOD_TOOL_INVOKE.to_string(),
+        capability: String::new(),
+        args: Value::Map(vec![]),
+        request_id: request_id.to_string(),
+        token: String::new(),
+        error: Some(message),
+    }
+}
+
+/// Handle one `tool.invoke` control request by routing it to the live plugin
+/// connection via the invoke registry. Async because it awaits the plugin's
+/// reply. `arguments` defaults to an empty map; `timeout_ms` to the registry
+/// default. A not-connected / slow / erroring plugin yields an error response,
+/// never a hang.
+async fn handle_tool_invoke(invoke: &InvokeRegistry, req: &Envelope) -> Envelope {
+    let Some(plugin_id) = arg_str(&req.args, "plugin_id").filter(|s| !s.is_empty()) else {
+        return tool_err(
+            &req.request_id,
+            "plugin_id must be a non-empty string".into(),
+        );
+    };
+    let Some(tool) = arg_str(&req.args, "tool").filter(|s| !s.is_empty()) else {
+        return tool_err(&req.request_id, "tool must be a non-empty string".into());
+    };
+    let arguments = arg(&req.args, "arguments")
+        .cloned()
+        .unwrap_or(Value::Map(vec![]));
+    let timeout = arg(&req.args, "timeout_ms")
+        .and_then(|v| v.as_u64())
+        .map(Duration::from_millis)
+        .unwrap_or(DEFAULT_INVOKE_TIMEOUT);
+    match invoke.invoke(plugin_id, tool, arguments, timeout).await {
+        Ok(result) => tool_ok(&req.request_id, result),
+        Err(e) => tool_err(&req.request_id, e),
+    }
+}
+
+async fn serve_connection<H: ConfigControl>(
+    host: Arc<H>,
+    invoke: Arc<InvokeRegistry>,
+    mut stream: UnixStream,
+) {
     // One request/response per connection (the client opens fresh per call,
     // matching the vision IPC client). A read/decode failure just drops the
     // connection.
@@ -149,6 +217,9 @@ async fn serve_connection<H: ConfigControl>(host: Arc<H>, mut stream: UnixStream
         return;
     }
     let resp = match Envelope::from_msgpack(&body) {
+        Ok(req) if req.method == METHOD_TOOL_INVOKE => {
+            handle_tool_invoke(invoke.as_ref(), &req).await
+        }
         Ok(req) => handle_request(host.as_ref(), &req),
         Err(e) => err_response("", format!("decode control request: {e}")),
     };
@@ -164,6 +235,7 @@ async fn serve_connection<H: ConfigControl>(host: Arc<H>, mut stream: UnixStream
 /// path and the accept-task handle so the daemon can unlink + abort on shutdown.
 pub fn serve_control<H: ConfigControl + 'static>(
     host: Arc<H>,
+    invoke: Arc<InvokeRegistry>,
     socket_dir: PathBuf,
 ) -> std::io::Result<(PathBuf, JoinHandle<()>)> {
     let path = control_socket_path(&socket_dir);
@@ -180,8 +252,9 @@ pub fn serve_control<H: ConfigControl + 'static>(
                 Err(_) => break,
             };
             let host = host.clone();
+            let invoke = invoke.clone();
             tokio::spawn(async move {
-                serve_connection(host, stream).await;
+                serve_connection(host, invoke, stream).await;
             });
         }
     });
@@ -324,7 +397,8 @@ mod tests {
     async fn round_trips_over_a_bound_socket() {
         let dir = tempfile::tempdir().unwrap();
         let host = Arc::new(StubHost::default());
-        let (path, task) = serve_control(host.clone(), dir.path().to_path_buf()).unwrap();
+        let invoke = Arc::new(InvokeRegistry::new());
+        let (path, task) = serve_control(host.clone(), invoke, dir.path().to_path_buf()).unwrap();
 
         let req = request(vec![
             (Value::from("plugin_id"), Value::from("p")),
@@ -348,5 +422,62 @@ mod tests {
         assert_eq!(host.last.lock().unwrap().clone().unwrap().1, "active");
 
         task.abort();
+    }
+
+    fn tool_request(plugin_id: &str, tool: &str) -> Envelope {
+        Envelope {
+            version: PROTOCOL_VERSION,
+            kind: "request".to_string(),
+            method: METHOD_TOOL_INVOKE.to_string(),
+            capability: String::new(),
+            args: Value::Map(vec![
+                (Value::from("plugin_id"), Value::from(plugin_id)),
+                (Value::from("tool"), Value::from(tool)),
+                (Value::from("arguments"), Value::Map(vec![])),
+            ]),
+            request_id: "ctl-inv".to_string(),
+            token: String::new(),
+            error: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_invoke_against_no_connection_errors() {
+        let invoke = InvokeRegistry::new();
+        let resp = handle_tool_invoke(&invoke, &tool_request("com.x.p", "t")).await;
+        assert_eq!(resp.method, METHOD_TOOL_INVOKE);
+        assert!(resp.error.unwrap().contains("plugin_not_running"));
+    }
+
+    #[tokio::test]
+    async fn tool_invoke_routes_to_a_registered_connection() {
+        let invoke = InvokeRegistry::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::invoke::InvokeRequest>(4);
+        invoke.register("com.x.p", tx);
+        // A fake connection replies with the tool name echoed.
+        let responder = tokio::spawn(async move {
+            let req = rx.recv().await.unwrap();
+            let _ = req.reply.send(Ok(Value::Map(vec![(
+                Value::from("ran"),
+                Value::from(req.tool),
+            )])));
+        });
+        let resp = handle_tool_invoke(&invoke, &tool_request("com.x.p", "greet")).await;
+        assert_eq!(resp.error, None);
+        assert_eq!(
+            resp.args,
+            Value::Map(vec![(Value::from("ran"), Value::from("greet"))])
+        );
+        responder.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tool_invoke_rejects_a_missing_tool_name() {
+        let invoke = InvokeRegistry::new();
+        let mut req = tool_request("com.x.p", "t");
+        // Drop the tool arg.
+        req.args = Value::Map(vec![(Value::from("plugin_id"), Value::from("com.x.p"))]);
+        let resp = handle_tool_invoke(&invoke, &req).await;
+        assert!(resp.error.unwrap().contains("tool must be"));
     }
 }

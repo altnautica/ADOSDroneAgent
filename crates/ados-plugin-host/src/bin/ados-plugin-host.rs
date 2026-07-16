@@ -292,13 +292,23 @@ async fn wire(
     let bus = Arc::new(EventBus::new());
     let host = build_host(install_dir.clone(), run_dir).await;
 
-    // The on-box control socket: the native `ados-control` plugin-config route
-    // reaches this daemon's live `ConfigStore` through it (a GCS skill toggle /
-    // per-drone settings change for a plugin the writer is not). Bound once for
-    // the whole daemon on the shared host Arc, before the host moves into the
-    // per-plugin server. A bind failure is non-fatal: plugin RPC still works,
-    // only the off-box config-write reach is unavailable.
-    let control = match ados_plugin_host::serve_control(host.clone(), socket_dir.clone()) {
+    // Build the per-plugin server first so the control socket can share its
+    // invoke registry (the host->plugin tool.invoke seam). The server holds a
+    // clone of the host Arc; the original stays available for the control socket.
+    let server = PluginIpcServer::new(&socket_dir, issuer.clone(), bus, host.clone());
+
+    // The on-box control socket: the native `ados-control` plugin routes reach
+    // this daemon through it — a GCS skill toggle / per-drone config write for a
+    // plugin the writer is not, and a `tool.invoke` that runs one of a plugin's
+    // MCP tools on its live connection and returns the result. Bound once for the
+    // whole daemon on the shared host Arc + the server's invoke registry. A bind
+    // failure is non-fatal: plugin RPC still works, only the off-box config-write
+    // and tool-invoke reach are unavailable.
+    let control = match ados_plugin_host::serve_control(
+        host.clone(),
+        server.invoke_registry(),
+        socket_dir.clone(),
+    ) {
         Ok((path, handle)) => {
             tracing::info!(socket = %path.display(), "serving plugin-host control socket");
             Some((path, handle))
@@ -307,13 +317,11 @@ async fn wire(
             tracing::warn!(
                 error = %e,
                 "failed to bind plugin-host control socket; GCS plugin config writes \
-                 will not reach the live host"
+                 and tool invocations will not reach the live host"
             );
             None
         }
     };
-
-    let server = PluginIpcServer::new(&socket_dir, issuer.clone(), bus, host);
 
     let mut served: Vec<(String, JoinHandle<()>)> = Vec::new();
     for install in supervisor.installs() {
