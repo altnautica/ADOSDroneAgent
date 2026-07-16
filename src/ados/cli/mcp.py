@@ -6,22 +6,27 @@ agent-mode) presents instead of the full pairing key:
 * ``ados mcp status`` — show the acceptance posture + the minted tokens.
 * ``ados mcp mint`` — mint a scoped token (shown once).
 * ``ados mcp revoke`` — revoke one token by id, or ``--all``.
+* ``ados mcp enable`` / ``ados mcp disable`` — turn scoped-token acceptance at the
+  LAN auth edge on/off (writes ``mcp.token_accept_enabled`` to ``config.yaml`` and
+  restarts ``ados-control`` so the change takes effect). Needs ``sudo``.
 
-All three drive the agent's REST API at ``http://localhost:8080``; on-box the
-mint/status/revoke routes are admitted without a key (loopback trust), so the
-CLI behaves identically to the GCS hitting the same routes with the key.
+The status/mint/revoke commands drive the agent's REST API at
+``http://localhost:8080``; on-box the mint/status/revoke routes are admitted
+without a key (loopback trust). enable/disable edit the on-box config the control
+front reads at startup, so they run locally with root privilege.
 """
 
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 
 import click
 import httpx
 
-from ados.core.paths import PAIRING_JSON
+from ados.core.paths import CONFIG_YAML, PAIRING_JSON
 
 API_BASE = "http://localhost:8080"
 
@@ -154,3 +159,110 @@ def mcp_revoke(token_id: str | None, revoke_all: bool) -> None:
         raise click.ClickException("Provide a token id, or --all.")
     _request("POST", "/api/mcp/revoke", json=payload)
     click.echo("All MCP tokens revoked." if revoke_all else "Revoked.")
+
+
+# --- acceptance toggle (config write + control restart) ---------------------
+#
+# ``mcp.token_accept_enabled`` lives in the on-box config the control front reads
+# at startup, so turning acceptance on/off is a config write plus a restart of
+# ``ados-control`` — the same shape as ``ados profile set``. It is a local root
+# operation (writes ``/etc/ados/config.yaml``, restarts a unit), NOT a REST call,
+# so it must be run with ``sudo``. Never hand-edit the config file — this is the
+# sanctioned path so the change is reproducible.
+
+CONTROL_UNIT = "ados-control"
+
+
+def _write_token_accept(enabled: bool) -> Path:
+    """Set ``mcp.token_accept_enabled`` in config.yaml, leaving other keys intact.
+
+    Idempotent, atomic (tmp + replace), pyyaml safe-load/safe-dump — mirrors
+    ``profile._write_config_yaml``.
+    """
+    try:
+        import yaml
+    except ImportError as exc:  # pragma: no cover - pyyaml is a hard dep
+        raise click.ClickException("pyyaml is required to update config.yaml") from exc
+
+    path = Path(CONFIG_YAML)
+    if path.exists():
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError):
+            data = {}
+    else:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+
+    mcp = data.setdefault("mcp", {})
+    if isinstance(mcp, dict):
+        mcp["token_accept_enabled"] = enabled
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(
+        yaml.safe_dump(data, sort_keys=False, default_flow_style=False),
+        encoding="utf-8",
+    )
+    tmp.replace(path)
+    return path
+
+
+def _restart_control() -> tuple[bool, str]:
+    """Restart the control front so the new acceptance posture takes effect."""
+    try:
+        result = subprocess.run(
+            ["systemctl", "restart", CONTROL_UNIT],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except FileNotFoundError:
+        return False, "systemctl not found (not a systemd host)"
+    except subprocess.TimeoutExpired:
+        return False, "restart timed out"
+    if result.returncode != 0:
+        return False, (result.stderr or result.stdout or "restart failed").strip()
+    return True, ""
+
+
+def _apply_token_accept(enabled: bool, no_restart: bool) -> None:
+    """Write the flag and (unless suppressed) restart the control front."""
+    try:
+        path = _write_token_accept(enabled)
+    except PermissionError as exc:
+        raise click.ClickException(
+            f"Cannot write {CONFIG_YAML} (need root). Re-run with sudo: "
+            f"`sudo ados mcp {'enable' if enabled else 'disable'}`."
+        ) from exc
+    state = "enabled" if enabled else "disabled"
+    click.echo(f"MCP token acceptance {state} in {path}.")
+    if no_restart:
+        click.echo(
+            f"Restart the control front to apply: `sudo systemctl restart {CONTROL_UNIT}`."
+        )
+        return
+    ok, detail = _restart_control()
+    if ok:
+        click.echo(f"Restarted {CONTROL_UNIT}; the new posture is live.")
+    else:
+        click.echo(
+            click.style(
+                f"Config written, but restarting {CONTROL_UNIT} failed: {detail}\n"
+                f"Apply it with `sudo systemctl restart {CONTROL_UNIT}`.",
+                fg="yellow",
+            )
+        )
+
+
+@mcp_group.command("enable", help="Accept scoped MCP tokens at the LAN auth edge (needs sudo).")
+@click.option("--no-restart", is_flag=True, help="Write the config but do not restart the control front.")
+def mcp_enable(no_restart: bool) -> None:
+    _apply_token_accept(True, no_restart)
+
+
+@mcp_group.command("disable", help="Stop honoring scoped MCP tokens at the LAN auth edge (needs sudo).")
+@click.option("--no-restart", is_flag=True, help="Write the config but do not restart the control front.")
+def mcp_disable(no_restart: bool) -> None:
+    _apply_token_accept(False, no_restart)
