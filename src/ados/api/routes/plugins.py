@@ -234,6 +234,24 @@ async def get_plugin(plugin_id: str):
     except SupervisorError as exc:
         return _err(20, "host_io_error", str(exc), 500)
     permission_ids = sorted(manifest.declared_permissions())
+    # MCP tool/resource/prompt contributions, merged across both halves with a
+    # ``half`` marker, so an MCP connector can enumerate a plugin's exposed tools
+    # in one read. An agent-half tool invokes over the per-plugin socket
+    # (POST /api/plugins/{id}/tools/{tool}/invoke); a gcs-half tool routes through
+    # the GCS bridge. Exposure is gated by mcp.expose (see granted_capabilities).
+    mcp_tools: list = []
+    mcp_resources: list = []
+    mcp_prompts: list = []
+    for half_name, block in (("agent", manifest.agent), ("gcs", manifest.gcs)):
+        if block is None:
+            continue
+        contributes = block.contributes
+        for item in getattr(contributes, "tools", []):
+            mcp_tools.append({**item, "half": half_name})
+        for item in getattr(contributes, "resources", []):
+            mcp_resources.append({**item, "half": half_name})
+        for item in getattr(contributes, "prompts", []):
+            mcp_prompts.append({**item, "half": half_name})
     gcs_block = None
     if manifest.gcs is not None:
         gcs_block = {
@@ -270,6 +288,14 @@ async def get_plugin(plugin_id: str):
             # bundle (served by GET /plugins/{id}/gcs/{path}) with no cloud.
             "gcs": gcs_block,
             "permissions": _enrich_permissions(permission_ids),
+            # The plugin's declared MCP tools/resources/prompts, so an MCP
+            # connector enumerates them into its tools/list. Gated by mcp.expose
+            # in granted_capabilities above.
+            "mcp": {
+                "tools": mcp_tools,
+                "resources": mcp_resources,
+                "prompts": mcp_prompts,
+            },
         },
     }
 

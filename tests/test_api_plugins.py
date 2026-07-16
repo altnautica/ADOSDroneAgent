@@ -158,6 +158,53 @@ def test_install_round_trip(client, supervisor, tmp_path: Path):
     detail = client.get("/api/plugins/com.example.basic").json()
     assert detail["manifest"]["risk"] == "low"
     assert "agent" in detail["manifest"]["halves"]
+    # A plugin with no tools surfaces an empty mcp block.
+    assert detail["manifest"]["mcp"] == {"tools": [], "resources": [], "prompts": []}
+
+
+def test_get_plugin_surfaces_mcp_tools(client, supervisor, tmp_path: Path):
+    manifest_yaml = """\
+schema_version: 3
+id: com.example.tools
+version: 0.1.0
+name: Tools
+license: GPL-3.0-or-later
+risk: low
+compatibility:
+  ados_version: ">=0.0.0"
+agent:
+  entrypoint: agent/plugin.py
+  isolation: subprocess
+  permissions: ["event.publish", "mcp.expose"]
+  contributes:
+    tools:
+      - name: start_follow
+        title: Start following
+        safety_class: flight_action
+        inputSchema: {type: object}
+      - name: stop_follow
+        safety_class: safe_write
+"""
+    archive_path = tmp_path / "com.example.tools.adosplug"
+    with zipfile.ZipFile(archive_path, "w") as zf:
+        zf.writestr(MANIFEST_FILENAME, manifest_yaml)
+        zf.writestr("agent/plugin.py", "# stub\n")
+    raw = archive_path.read_bytes()
+    with patch("ados.plugins.supervisor.subprocess.run") as run_mock:
+        run_mock.return_value = MagicMock(returncode=0, stderr="")
+        resp = client.post(
+            "/api/plugins/install",
+            files={"file": ("com.example.tools.adosplug", raw, "application/zip")},
+        )
+    assert resp.status_code == 200, resp.text
+
+    detail = client.get("/api/plugins/com.example.tools").json()
+    mcp = detail["manifest"]["mcp"]
+    names = [t["name"] for t in mcp["tools"]]
+    assert names == ["start_follow", "stop_follow"]
+    # Agent-half tools carry the half marker and their declared safety class.
+    assert all(t["half"] == "agent" for t in mcp["tools"])
+    assert mcp["tools"][0]["safety_class"] == "flight_action"
 
 
 def test_install_rejects_non_adosplug(client, supervisor, tmp_path: Path):
