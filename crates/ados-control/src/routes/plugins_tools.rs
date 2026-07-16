@@ -34,7 +34,9 @@ use crate::state::AppState;
 /// host's default.
 #[derive(Debug, Default, Deserialize)]
 pub struct InvokeToolBody {
-    /// The tool's argument value (any JSON scalar/array/object). Absent → `{}`.
+    /// The tool's arguments — a JSON object (a map of named params), matching the
+    /// MCP `tools/call` shape. Absent → `{}`. A non-object is rejected (it would
+    /// otherwise be silently coerced to `{}` at the runner, losing the arguments).
     #[serde(default)]
     pub arguments: Option<rmpv::Value>,
     /// Bound on the wait in milliseconds. Absent → the daemon default.
@@ -74,7 +76,15 @@ pub async fn invoke_plugin_tool(
         );
     }
     let Json(body) = body.unwrap_or_default();
-    let arguments = body.arguments.unwrap_or(rmpv::Value::Map(vec![]));
+    let arguments = match body.arguments {
+        None => rmpv::Value::Map(vec![]),
+        Some(v) if matches!(v, rmpv::Value::Map(_)) => v,
+        // A scalar/array would be coerced to `{}` at the runner (silent arg loss),
+        // so reject it with a clear error rather than run the tool with no args.
+        Some(_) => {
+            return detail(StatusCode::BAD_REQUEST, "arguments must be a JSON object");
+        }
+    };
     let client = PluginControlClient::default_socket();
     match client
         .tool_invoke(&plugin_id, &tool, arguments, body.timeout_ms)

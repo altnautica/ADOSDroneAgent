@@ -566,6 +566,10 @@ class PluginIpcServer:
         session = self._sessions.get(plugin_id)
         if session is None:
             raise _RpcError(f"plugin_not_running: {plugin_id}")
+        # Re-check expiry, like the dispatch loop does per request: the session can
+        # outlive the token's TTL, so an invoke against an aged-out token is refused.
+        if session.token.is_expired():
+            raise _RpcError("token_expired")
         required = REQUIRED_CAP.get("tool.invoke")
         if required is not None and required not in session.token.granted_caps:
             raise _CapabilityDenied(plugin_id, required)

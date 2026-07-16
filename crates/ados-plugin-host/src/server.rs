@@ -332,7 +332,12 @@ impl<H: HostServices> Connection<H> {
                     // track the pending reply. `None` means the registry dropped
                     // the sender (session ending) — keep serving.
                     if let Some(InvokeRequest { request_id, tool, arguments, reply }) = req {
-                        if !token.granted_caps.contains("mcp.expose") {
+                        // Re-check expiry, like the request path does: the session
+                        // outlives the token's TTL, so an invoke arriving after the
+                        // token aged out must be refused, not run.
+                        if token.is_expired(now_secs()) {
+                            let _ = reply.send(Err(crate::dispatch::errors::TOKEN_EXPIRED.to_string()));
+                        } else if !token.granted_caps.contains("mcp.expose") {
                             let _ = reply.send(Err("capability_denied: mcp.expose".to_string()));
                         } else {
                             let env = Envelope {

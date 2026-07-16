@@ -118,7 +118,11 @@ def mcp_status(as_json: bool) -> None:
     "--node",
     "allowed_nodes",
     multiple=True,
-    help="Restrict the token to a device id (repeatable).",
+    help=(
+        "Advisory node allowlist carried in the token (repeatable). This token is "
+        "already bound to THIS node by its issuer; the list is a hint for a fleet "
+        "connector, not an extra agent-side restriction."
+    ),
 )
 def mcp_mint(
     label: str, scopes: tuple[str, ...], ttl_days: int, allowed_nodes: tuple[str, ...]
