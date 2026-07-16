@@ -314,9 +314,18 @@ fn new_token_id() -> Result<String, getrandom::Error> {
 /// gated routes an MCP token can present against.
 pub fn route_scope(method: &Method, path: &str) -> Option<ScopeClass> {
     use ScopeClass::*;
-    // Every native read is `read`. A GET carries no side effect on the agent.
+    // A GET carries no side effect on the agent, so every native read is `read` —
+    // EXCEPT a GET whose response body carries a secret, which needs the
+    // `secret_read` scope so a plain `read` token cannot reach it. No native GET is
+    // secret-bearing today (the pairing key / WFB bind key / WS ticket are never
+    // returned by a GET); a future one MUST be listed in `SECRET_GET_ROUTES` or a
+    // `read` token would reach it (fail-open for that one route).
     if method == Method::GET {
-        return Some(Read);
+        return Some(if is_secret_get(path) {
+            SecretRead
+        } else {
+            Read
+        });
     }
     match *method {
         Method::POST => match path {
@@ -333,8 +342,9 @@ pub fn route_scope(method: &Method, path: &str) -> Option<ScopeClass> {
             // Vision custom-model upload + MCP self-revoke + WS-ticket mint (mints
             // a data-plane credential) are admin actions.
             "/api/vision/models/upload" | "/api/mcp/revoke" | "/api/_ws/ticket" => Some(Admin),
-            // CAN passthrough (currently a 501 stub) is a control write.
-            "/api/can/passthrough" => Some(Admin),
+            // CAN passthrough injects arbitrary CAN frames to the FC / ESCs /
+            // servos — a vehicle-command write on par with /api/command -> flight.
+            "/api/can/passthrough" => Some(Flight),
             // Operator-facing safe writes.
             "/api/vision/designate" | "/api/logs/push" => Some(SafeWrite),
             p if p.starts_with("/api/atlas/capture/") => Some(SafeWrite),
@@ -396,6 +406,19 @@ fn is_plugin_config(path: &str) -> bool {
         Some(id) => !id.is_empty() && !id.contains('/'),
         None => false,
     }
+}
+
+/// Native `GET` routes whose response body carries a secret and therefore need the
+/// `secret_read` scope rather than plain `read`. Empty today: no native GET returns
+/// the pairing key, the WFB bind key, or a WS ticket (`/api/pairing/code` is public
+/// and 409s when paired, `wfb/pair` returns only a fingerprint, `signing/counters`
+/// returns zeros). Add any future secret-bearing GET here, or a plain `read` token
+/// would reach it; this is a deliberate security surface, not a convenience list.
+const SECRET_GET_ROUTES: &[&str] = &[];
+
+/// Whether a native GET route returns a secret (needs `secret_read`, not `read`).
+fn is_secret_get(path: &str) -> bool {
+    SECRET_GET_ROUTES.contains(&path)
 }
 
 /// `POST /api/plugins/{plugin_id}/tools/{tool}/invoke` — a two-param template.
@@ -580,6 +603,41 @@ mod tests {
         assert_eq!(
             route_scope(&Method::POST, "/api/command"),
             Some(ScopeClass::Flight)
+        );
+        // CAN passthrough injects frames to the FC/ESCs/servos -> also flight.
+        assert_eq!(
+            route_scope(&Method::POST, "/api/can/passthrough"),
+            Some(ScopeClass::Flight)
+        );
+    }
+
+    #[test]
+    fn secret_read_class_gates_on_the_secret_read_scope() {
+        // A read-only token cannot reach a secret-read route; a secret_read token can.
+        assert_eq!(ScopeClass::SecretRead.group_name(), "secret_read");
+        assert!(!ados_protocol::mcp_token::scope_allows_class(
+            ScopeClass::SecretRead,
+            &["read".to_string()]
+        ));
+        assert!(ados_protocol::mcp_token::scope_allows_class(
+            ScopeClass::SecretRead,
+            &["read".to_string(), "secret_read".to_string()]
+        ));
+    }
+
+    #[test]
+    fn no_native_get_is_secret_bearing_today() {
+        // GET->Read is a blanket, so any GET that returns a secret MUST be listed
+        // as secret_read or a plain `read` token reaches it. This guards the
+        // invariant: adding a secret-bearing GET without classifying it fails here.
+        assert!(
+            SECRET_GET_ROUTES.is_empty(),
+            "classify any secret-bearing native GET as secret_read"
+        );
+        // A representative native GET stays plain read.
+        assert_eq!(
+            route_scope(&Method::GET, "/api/status"),
+            Some(ScopeClass::Read)
         );
     }
 

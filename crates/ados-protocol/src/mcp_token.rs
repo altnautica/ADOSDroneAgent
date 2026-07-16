@@ -76,10 +76,13 @@ pub struct McpClaims {
     pub label: String,
 }
 
-/// The scope class a route requires. Mirrors the connector's safety classes.
+/// The scope class a route requires. Mirrors the connector's safety classes, plus
+/// `SecretRead` for a read route whose body carries a secret: it needs the
+/// `secret_read` scope, NOT plain `read`, so a `read`-only token cannot reach it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScopeClass {
     Read,
+    SecretRead,
     SafeWrite,
     Admin,
     Flight,
@@ -90,6 +93,7 @@ impl ScopeClass {
     pub fn group_name(self) -> &'static str {
         match self {
             ScopeClass::Read => "read",
+            ScopeClass::SecretRead => "secret_read",
             ScopeClass::SafeWrite => "safe_write",
             ScopeClass::Admin => "admin",
             ScopeClass::Flight => "flight",
