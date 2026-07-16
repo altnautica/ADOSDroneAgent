@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use ados_compute::{run_offload_session, Detector, OnnxDetector, RtspFrameStream};
+use ados_compute::{run_offload_session, Detector, OnnxDetector, RtspFrameStream, SessionProgress};
 use ados_protocol::framebus::{
     DetectionHead, FrameFormat, ModelExecution, ModelKind, ModelMetadata,
 };
@@ -68,7 +68,16 @@ async fn offload_pulls_a_live_rtsp_camera_and_detects() {
     let cancel = Arc::new(Notify::new());
     let cancel2 = cancel.clone();
     let session = tokio::spawn(async move {
-        run_offload_session("live-1", "front", stream, detector, tx, cancel2).await;
+        run_offload_session(
+            "live-1",
+            "front",
+            stream,
+            detector,
+            tx,
+            cancel2,
+            SessionProgress::detached(),
+        )
+        .await;
     });
 
     let mut batches = 0usize;

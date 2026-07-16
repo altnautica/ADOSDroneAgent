@@ -248,13 +248,24 @@ mod tests {
         // The relay enqueues send_command as { cmd, args } — the exact CommandRequest
         // body. It must reach /api/command verbatim; forwarding only the inner args
         // array would POST a bare list and fail deserialization.
-        let r = route_for("send_command", &serde_json::json!({"cmd": "arm", "args": []})).unwrap();
+        let r = route_for(
+            "send_command",
+            &serde_json::json!({"cmd": "arm", "args": []}),
+        )
+        .unwrap();
         assert_eq!(r.method, Method::Post);
         assert_eq!(r.path, "/api/command");
         assert_eq!(r.body, Some(serde_json::json!({"cmd": "arm", "args": []})));
 
-        let t = route_for("send_command", &serde_json::json!({"cmd": "takeoff", "args": [25]})).unwrap();
-        assert_eq!(t.body, Some(serde_json::json!({"cmd": "takeoff", "args": [25]})));
+        let t = route_for(
+            "send_command",
+            &serde_json::json!({"cmd": "takeoff", "args": [25]}),
+        )
+        .unwrap();
+        assert_eq!(
+            t.body,
+            Some(serde_json::json!({"cmd": "takeoff", "args": [25]}))
+        );
     }
 
     #[test]
