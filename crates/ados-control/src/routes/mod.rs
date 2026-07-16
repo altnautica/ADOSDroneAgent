@@ -59,6 +59,7 @@ pub mod params_single;
 pub mod params_write;
 pub mod plugins_config;
 pub mod plugins_state;
+pub mod plugins_tools;
 pub mod service_control;
 pub mod services;
 pub mod signing;
@@ -171,6 +172,14 @@ pub fn build_router(state: AppState, net_native: bool, hid_native: bool) -> Rout
         .route(
             "/api/plugins/:plugin_id/config",
             put(plugins_config::put_plugin_config),
+        )
+        // Plugin MCP-tool invocation: an MCP client runs a plugin's declared tool
+        // through the plugin host's control socket and gets the result. A native
+        // write; 503 when the plugin host is not up. The connector gates the
+        // tool's safety class; the plugin host gates on the plugin's mcp.expose.
+        .route(
+            "/api/plugins/:plugin_id/tools/:tool/invoke",
+            post(plugins_tools::invoke_plugin_tool),
         )
         // Plugin published-state read: a plugin's latest state per topic, read
         // from the plugin host's per-plugin state sidecar so a LAN-paired GCS can

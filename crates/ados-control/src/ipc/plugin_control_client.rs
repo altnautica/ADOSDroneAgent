@@ -28,6 +28,8 @@ use tokio::net::UnixStream;
 
 /// The control method that applies a per-plugin config write.
 const METHOD_CONFIG_SET: &str = "config.set";
+/// The control method that runs one of a plugin's declared MCP tools.
+const METHOD_TOOL_INVOKE: &str = "tool.invoke";
 /// The default plugin socket directory (matches `DEFAULT_SOCKET_DIR` in the
 /// plugin host). Overridable via `ADOS_PLUGIN_SOCKET_DIR` so a test / SITL run
 /// points both the daemon and this client at a tempdir.
@@ -101,6 +103,30 @@ impl PluginControlClient {
         self.request(METHOD_CONFIG_SET, Value::Map(args)).await
     }
 
+    /// Run one of a plugin's declared MCP tools on its live connection through
+    /// the daemon and return the tool's result value. `arguments` is the tool's
+    /// argument value (usually a map); `timeout_ms` bounds the wait (None → the
+    /// daemon default). A tool error / not-connected plugin surfaces as
+    /// [`PluginControlError::Rpc`]; an unreachable daemon as
+    /// [`PluginControlError::Io`], which the route maps to a 503.
+    pub async fn tool_invoke(
+        &self,
+        plugin_id: &str,
+        tool: &str,
+        arguments: Value,
+        timeout_ms: Option<u64>,
+    ) -> Result<Value, PluginControlError> {
+        let mut args = vec![
+            (Value::from("plugin_id"), Value::from(plugin_id)),
+            (Value::from("tool"), Value::from(tool)),
+            (Value::from("arguments"), arguments),
+        ];
+        if let Some(ms) = timeout_ms {
+            args.push((Value::from("timeout_ms"), Value::from(ms)));
+        }
+        self.request(METHOD_TOOL_INVOKE, Value::Map(args)).await
+    }
+
     /// One fresh-connection request/response against the control socket.
     async fn request(&self, method: &str, args: Value) -> Result<Value, PluginControlError> {
         let env = Envelope {
@@ -148,6 +174,22 @@ mod tests {
         let client = PluginControlClient::new(dir.path().join("absent.sock"));
         let err = client
             .config_set("p", "active", Value::Boolean(true), Some("drone"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, PluginControlError::Io(_)),
+            "expected Io: {err:?}"
+        );
+    }
+
+    /// A tool invoke against an absent socket is likewise an I/O error (a 503),
+    /// never a panic.
+    #[tokio::test]
+    async fn tool_invoke_against_absent_socket_is_io_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = PluginControlClient::new(dir.path().join("absent.sock"));
+        let err = client
+            .tool_invoke("p", "greet", Value::Map(vec![]), None)
             .await
             .unwrap_err();
         assert!(

@@ -340,6 +340,11 @@ pub fn route_scope(method: &Method, path: &str) -> Option<ScopeClass> {
             p if p.starts_with("/api/atlas/capture/") => Some(SafeWrite),
             // Unpairing tears down the trust relationship.
             "/api/pairing/unpair" => Some(Destructive),
+            // Running a plugin's MCP tool: the edge floor is admin. The connector
+            // enforces each tool's declared safety class (a flight tool needs the
+            // flight scope) and the plugin's own caps bound the effect, so this is
+            // a coarse floor, not the fine gate.
+            p if is_plugin_tool_invoke(p) => Some(Admin),
             // Ground-station control writes.
             p if p.starts_with("/api/v1/ground-station/") => Some(Admin),
             _ => None,
@@ -391,6 +396,20 @@ fn is_plugin_config(path: &str) -> bool {
         Some(id) => !id.is_empty() && !id.contains('/'),
         None => false,
     }
+}
+
+/// `POST /api/plugins/{plugin_id}/tools/{tool}/invoke` — a two-param template.
+fn is_plugin_tool_invoke(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("/api/plugins/") else {
+        return false;
+    };
+    let Some(rest) = rest.strip_suffix("/invoke") else {
+        return false;
+    };
+    // rest is `{plugin_id}/tools/{tool}`: exactly three non-empty segments with
+    // the middle literal `tools`.
+    let parts: Vec<&str> = rest.split('/').collect();
+    parts.len() == 3 && parts[1] == "tools" && !parts[0].is_empty() && !parts[2].is_empty()
 }
 
 #[cfg(test)]
@@ -601,6 +620,16 @@ mod tests {
         assert_eq!(
             route_scope(&Method::POST, "/api/_ws/ticket"),
             Some(ScopeClass::Admin)
+        );
+        // A plugin tool invoke floors at admin (the connector gates the fine class).
+        assert_eq!(
+            route_scope(&Method::POST, "/api/plugins/com.x.p/tools/greet/invoke"),
+            Some(ScopeClass::Admin)
+        );
+        // A plugin path that is NOT the tool-invoke shape stays fail-closed.
+        assert_eq!(
+            route_scope(&Method::POST, "/api/plugins/com.x.p/install"),
+            None
         );
     }
 
