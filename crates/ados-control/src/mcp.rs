@@ -49,6 +49,14 @@ pub const MCP_SCOPES_HEADER: &str = "x-ados-mcp-scopes";
 /// (a "revoke all") makes every previously-minted token fail verification.
 const SALT_LEN: usize = 16;
 
+/// Serializes store MUTATIONS (mint / revoke / revoke_all) across this process so
+/// a load-modify-write of the record cannot interleave with another writer (a
+/// mint racing a revoke_all must not re-write the pre-revoke salt and resurrect
+/// revoked tokens). The read path (verify / status / any_minted) is intentionally
+/// unguarded — it only reads, and a self-contained token's validity never depends
+/// on a concurrent write finishing.
+static STORE_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// One minted token's registry entry. The secret is NOT stored (the token is
 /// self-contained + shown once at mint); this is the operator-facing record so
 /// `status` can list + `revoke` can target a specific token id.
@@ -193,6 +201,7 @@ impl McpTokenStore {
     /// group, mints the salt on first use, derives the issuer, appends the record,
     /// and returns the one-time token string. `now_secs`/`now_ms` are the wall clock.
     pub fn mint(&self, req: &MintRequest) -> Result<String, MintError> {
+        let _guard = STORE_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         if req.api_key.is_empty() {
             return Err(MintError::Unpaired);
         }
@@ -262,6 +271,7 @@ impl McpTokenStore {
     /// Revoke one token by id (denylist). A no-op success if the id is unknown or
     /// already revoked. Absent record = nothing to revoke (success).
     pub fn revoke(&self, token_id: &str) -> std::io::Result<()> {
+        let _guard = STORE_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut doc = self.load();
         if !doc.revoked.iter().any(|r| r == token_id) {
             doc.revoked.push(token_id.to_string());
@@ -272,6 +282,7 @@ impl McpTokenStore {
     /// Revoke ALL tokens by rotating the salt (every prior token's key dies) and
     /// clearing the registry + denylist. A subsequent mint installs a fresh salt.
     pub fn revoke_all(&self) -> std::io::Result<()> {
+        let _guard = STORE_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Removing the record is the cleanest bulk revoke: the salt is gone, so no
         // prior token can verify, and the next mint re-mints a fresh salt.
         match std::fs::remove_file(&self.path) {
@@ -556,6 +567,30 @@ mod tests {
         let tok2 = s.mint(&req(&scopes, 3_600_000, 0)).unwrap();
         assert!(s.verify(&paired(), &tok2, 1_000, "node-1").is_some());
         assert_ne!(tok, tok2, "a new salt yields a different token");
+    }
+
+    #[test]
+    fn concurrent_mints_do_not_lose_writes() {
+        // Serialized load-modify-write + a unique temp file per write means every
+        // concurrent mint is recorded (an unlocked RMW sharing one temp name would
+        // drop writes). 8 threads mint against one store; all 8 must land.
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let s = Arc::new(store(dir.path()));
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let s = s.clone();
+                std::thread::spawn(move || {
+                    let scopes = ["read".to_string()];
+                    s.mint(&req(&scopes, 3_600_000, 1_000_000 + i)).unwrap();
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let (tokens, _) = s.status();
+        assert_eq!(tokens.len(), 8, "every concurrent mint is recorded");
     }
 
     #[test]

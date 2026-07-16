@@ -277,7 +277,13 @@ pub(crate) fn atomic_write_0600(path: &Path, body: &[u8]) -> std::io::Result<()>
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("ados-pairing");
-    let tmp = parent.join(format!("{}.{}.tmp", file_name, std::process::id()));
+    // A per-call unique suffix (pid + a monotonic counter) so two concurrent
+    // same-process writers to the same target never collide on one temp file
+    // (which would corrupt one write, and — for the MCP token store — could lose
+    // a revocation racing a mint).
+    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = parent.join(format!("{}.{}.{}.tmp", file_name, std::process::id(), seq));
 
     let write_result = (|| -> std::io::Result<()> {
         let mut opts = std::fs::OpenOptions::new();
