@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from ados.core.paths import PLUGIN_RUN_DIR
 from ados.plugins.manifest import PluginManifest
 from ados.plugins.systemd import (
     PLUGIN_SLICE_NAME,
@@ -117,11 +118,12 @@ def test_render_unit_emits_resource_limits() -> None:
 def test_render_unit_rust_runtime_execs_the_plugin_binary() -> None:
     unit = render_unit(_rust_manifest(), _INSTALL_DIR)
     # ExecStart points at the unpacked plugin binary with its socket path.
+    sock = PLUGIN_RUN_DIR / "com.example.rustplug.sock"
     assert (
-        "ExecStart=/var/ados/plugins/com.example.rustplug/"
+        f"ExecStart={_INSTALL_DIR}/com.example.rustplug/"
         "agent/bin/com.example.rustplug "
         "com.example.rustplug "
-        "--socket /run/ados/plugins/com.example.rustplug.sock" in unit
+        f"--socket {sock}" in unit
     )
     # The token is never on the ExecStart line (it comes from the unit env).
     exec_line = next(
@@ -141,8 +143,8 @@ def test_render_unit_delivers_token_via_environment_file() -> None:
     # reads ADOS_PLUGIN_TOKEN / ADOS_PLUGIN_SOCKET from its environment.
     for manifest in (_subprocess_manifest(), _rust_manifest()):
         unit = render_unit(manifest, _INSTALL_DIR)
-        sock = f"/run/ados/plugins/{manifest.id}.sock"
-        env_file = f"/run/ados/plugins/{manifest.id}.token.env"
+        sock = PLUGIN_RUN_DIR / f"{manifest.id}.sock"
+        env_file = PLUGIN_RUN_DIR / f"{manifest.id}.token.env"
         assert f"Environment=ADOS_PLUGIN_SOCKET={sock}" in unit
         assert f"EnvironmentFile=-{env_file}" in unit
 
