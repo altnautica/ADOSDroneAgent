@@ -84,6 +84,13 @@ class PluginSession:
     subscriptions: set[str]
     mavlink_subscriptions: set[str] = field(default_factory=set)
     pump_tasks: list[asyncio.Task] = field(default_factory=list)
+    # Host -> plugin request/response: a tool.invoke the host sent THIS plugin,
+    # awaiting its correlated reply. Per-session (not server-wide) so a plugin
+    # can only resolve its OWN pending invokes — a response frame from one
+    # session can never resolve another session's waiter.
+    pending_invokes: dict[str, asyncio.Future[Envelope]] = field(
+        default_factory=dict
+    )
 
 
 class PluginIpcServer:
@@ -109,9 +116,8 @@ class PluginIpcServer:
         self._host = host if host is not None else default_host_services()
         self._servers: dict[str, asyncio.AbstractServer] = {}
         self._sessions: dict[str, PluginSession] = {}
-        # Host -> plugin request/response: a tool.invoke the host sends a plugin,
-        # awaiting its correlated reply. Keyed by the request id the host mints.
-        self._pending_invokes: dict[str, asyncio.Future[Envelope]] = {}
+        # Monotonic counter for host->plugin invoke request ids (globally unique,
+        # though each pending future lives on its own session's map).
         self._invoke_seq = 0
         # When the native plugin host is the active socket owner this server
         # yields instead of binding (they would otherwise contend for the same
@@ -193,6 +199,7 @@ class PluginIpcServer:
     ) -> None:
         peer = writer.get_extra_info("peername")
         log.info("plugin_ipc_client_connected", plugin_id=plugin_id, peer=peer)
+        session: PluginSession | None = None
         try:
             session = await self._handshake(plugin_id, reader, writer)
             if session is None:
@@ -217,9 +224,22 @@ class PluginIpcServer:
                 error_type=type(exc).__name__,
             )
         finally:
-            session = self._sessions.pop(plugin_id, None)
-            if session is not None:
+            # Identity-checked teardown: only remove + release when OUR session is
+            # still the registered one. On a reconnect overlap the old connection's
+            # teardown must not evict the successor's session (and release its
+            # live reservations). `session` is None if the handshake failed, in
+            # which case this connection registered nothing.
+            if session is not None and self._sessions.get(plugin_id) is session:
+                self._sessions.pop(plugin_id, None)
                 self._release_session_resources(session)
+                # Fail any in-flight host->plugin invokes so no caller hangs past
+                # the session (mirrors the Rust host dropping its pending map).
+                for fut in session.pending_invokes.values():
+                    if not fut.done():
+                        fut.set_exception(
+                            _RpcError(f"plugin_disconnected: {plugin_id}")
+                        )
+                session.pending_invokes.clear()
             writer.close()
             try:
                 await writer.wait_closed()
@@ -269,10 +289,11 @@ class PluginIpcServer:
             if env is None:
                 return
             # A response envelope is the plugin replying to a host-issued
-            # tool.invoke; resolve the pending future and move on (it is not a
-            # request to dispatch).
+            # tool.invoke; resolve THIS session's pending future and move on (it
+            # is not a request to dispatch). Only this session's own map is
+            # consulted, so a session cannot resolve another session's waiter.
             if env.type == "response":
-                fut = self._pending_invokes.pop(env.request_id, None)
+                fut = session.pending_invokes.pop(env.request_id, None)
                 if fut is not None and not fut.done():
                     fut.set_result(env)
                 continue
@@ -534,10 +555,13 @@ class PluginIpcServer:
         the generated table names for ``tool.invoke`` (``mcp.expose``), the
         call times out, or the plugin replies with an error.
 
-        This host-side gate is authoritative: the session token was verified at
-        handshake, so ``session.token.granted_caps`` is trustworthy; a plugin
-        without the cap never has a tool routed to it. The runner re-checks
-        against the same generated table so the two sides cannot drift.
+        This is a host-side PRE-CHECK, not the sole authority: the session token
+        was verified at handshake so ``session.token.granted_caps`` is a
+        trustworthy gate, and the runner re-checks against the same generated
+        table so the two sides cannot drift. The pending reply is correlated on
+        the session's OWN map, so only this plugin's response frame can resolve
+        it. (In production the Rust plugin host owns the control socket; this
+        Python path is the fallback host's equivalent.)
         """
         session = self._sessions.get(plugin_id)
         if session is None:
@@ -548,7 +572,7 @@ class PluginIpcServer:
         self._invoke_seq += 1
         req_id = f"inv-{self._invoke_seq}"
         fut: asyncio.Future[Envelope] = asyncio.get_running_loop().create_future()
-        self._pending_invokes[req_id] = fut
+        session.pending_invokes[req_id] = fut
         env = Envelope(
             type="request",
             method="tool.invoke",
@@ -561,14 +585,14 @@ class PluginIpcServer:
             session.writer.write(encode_frame(env))
             await session.writer.drain()
         except (ConnectionError, BrokenPipeError) as exc:
-            self._pending_invokes.pop(req_id, None)
+            session.pending_invokes.pop(req_id, None)
             raise _RpcError(f"plugin_write_failed: {exc}") from exc
         try:
             response = await asyncio.wait_for(fut, timeout=timeout_s)
         except TimeoutError as exc:
             raise _RpcError(f"tool_timeout: {tool_name}") from exc
         finally:
-            self._pending_invokes.pop(req_id, None)
+            session.pending_invokes.pop(req_id, None)
         if response.error:
             raise _RpcError(response.error)
         return response.args

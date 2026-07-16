@@ -466,6 +466,36 @@ async def test_tool_invoke_round_trips(short_sock_dir: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_pending_invokes_live_on_the_session_not_the_server(
+    short_sock_dir: Path,
+) -> None:
+    # AFIX-1: the host->plugin pending-invoke map lives on the session, so a
+    # response frame from one plugin can never resolve another plugin's waiter.
+    server, client, teardown = await _tool_harness(short_sock_dir, {"mcp.expose"})
+    try:
+        assert not hasattr(server, "_pending_invokes"), "no server-wide pending map"
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _slow(_args: dict) -> dict:
+            started.set()
+            await release.wait()
+            return {"ok": True}
+
+        client.register_tool("slow", _slow)
+        call = asyncio.create_task(server.invoke_tool(PLUGIN_ID, "slow", {}))
+        await asyncio.wait_for(started.wait(), timeout=2)
+        # While in flight, the pending future is tracked on THIS session's map.
+        session = server._sessions[PLUGIN_ID]
+        assert len(session.pending_invokes) == 1
+        release.set()
+        assert await asyncio.wait_for(call, timeout=2) == {"ok": True}
+        assert session.pending_invokes == {}  # cleaned up after the reply
+    finally:
+        await teardown()
+
+
+@pytest.mark.asyncio
 async def test_tool_invoke_non_dict_result_is_wrapped(short_sock_dir: Path) -> None:
     server, client, teardown = await _tool_harness(short_sock_dir, {"mcp.expose"})
     try:
