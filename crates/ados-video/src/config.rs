@@ -3,7 +3,7 @@
 //! `CameraConfig` model (`core/config/video.py`). Only the fields the encoder
 //! command builder reads are modelled here.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 fn default_source() -> String {
     "csi".to_string()
@@ -25,6 +25,9 @@ fn default_bitrate_kbps() -> u32 {
 }
 fn default_codec_preference() -> String {
     "auto".to_string()
+}
+fn default_true() -> bool {
+    true
 }
 
 /// Camera capture/encode settings. Mirrors the Python `CameraConfig`.
@@ -106,14 +109,45 @@ impl CameraConfig {
     }
 }
 
+/// A physical fingerprint that re-pins a leg's logical `id` onto its current
+/// `source` device across a hot-plug / reboot that renamed the device node.
+/// USB cameras get a `vid:pid[:serial]` string; CSI cameras get the sensor name
+/// plus the camera port index. Every field is optional — an absent `match` means
+/// the leg is pinned only by its `source` locator (a network URL never moves, so
+/// a network leg carries no fingerprint). Mirrors the Python `CameraMatch`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CameraMatch {
+    /// USB fingerprint, `vid:pid` or `vid:pid:serial` (lowercase hex vid/pid).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usb: Option<String>,
+    /// CSI sensor name (e.g. `imx219`), from the camera enumeration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub csi_sensor: Option<String>,
+    /// CSI camera port index (the connector the sensor is on).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub csi_port: Option<u32>,
+}
+
 /// One entry of the optional `video.cameras:` list — a single video leg the
 /// node exposes as its own mediamtx path (and `:8889/<id>/whep`). Present only
 /// when the operator (or a driver plugin) declares more than one stream; an
 /// absent `video.cameras` falls back to the single legacy `video.camera` block
 /// verbatim (see [`AgentVideoConfig::resolve_legs`]).
+///
+/// `id` is the leg's immutable logical identity; `source` is its current
+/// locator (a device path or a network URL); `match` re-pins `source` back to
+/// `id` when a hot-plug renames the device node. `role` is the TRANSPORT plane
+/// (primary → the fixed `main` mediamtx path / WFB / cloud); `purpose` is the
+/// CONSUMER plane a plugin binds to (feed / detect / navigation / …) — they are
+/// complementary, not merged. The management fields (`name` / `orientation` /
+/// `purpose` / `enabled` / `owner` / `fov_deg` / `mount_pitch_deg` /
+/// `calibration` / `match`) are metadata surfaced through the camera roster and
+/// consumed by plugins; the encode + radio pipeline reads none of them, so an
+/// existing single-`role` config resolves byte-identically.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CameraLeg {
-    /// Stable per-node stream id — the mediamtx path name and the WHEP id.
+    /// Stable per-node stream id — the mediamtx path name and the WHEP id. Also
+    /// the leg's immutable logical identity in the camera roster.
     pub id: String,
     /// Capture source: a device hint / path (local encode) or an `rtsp://` /
     /// `http://` URL (a secondary network leg mediamtx pulls on demand).
@@ -134,6 +168,41 @@ pub struct CameraLeg {
     pub fps: u32,
     #[serde(default = "default_bitrate_kbps")]
     pub bitrate_kbps: u32,
+    /// Operator-facing display name for the roster (e.g. "Belly cam").
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Coarse physical mount orientation: `forward` | `down` | `back` | `left` |
+    /// `right` | `up` | `gimbal` | `custom`. Enough for plugin binding (a
+    /// down-facing leg is the precision-landing candidate); not full extrinsics.
+    #[serde(default)]
+    pub orientation: Option<String>,
+    /// What the leg is FOR — one or more of `feed` | `detect` | `navigation` |
+    /// `precision-landing` | `thermal` | `mapping` | `recording`. Plugins bind to
+    /// a purpose; a leg may serve several.
+    #[serde(default)]
+    pub purpose: Vec<String>,
+    /// Whether the operator has this leg enabled. Metadata in v1 (the pipeline
+    /// does not gate on it yet); default `true` so existing legs are unchanged.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Who declared this leg: `"operator"` for an operator-managed leg, or a
+    /// plugin id (e.g. `com.altnautica.siyi-pod`) for a driver-declared leg. The
+    /// merge-by-owner persist keys on this so an operator write preserves a
+    /// plugin's legs and vice versa. Absent ⇒ treated as operator-owned.
+    #[serde(default)]
+    pub owner: Option<String>,
+    /// Horizontal field of view in degrees, when known (informational).
+    #[serde(default)]
+    pub fov_deg: Option<f32>,
+    /// Mount pitch offset in degrees (e.g. a 45°-down inspection cam).
+    #[serde(default)]
+    pub mount_pitch_deg: Option<f32>,
+    /// A calibration reference (a profile name or a stored intrinsics id).
+    #[serde(default)]
+    pub calibration: Option<String>,
+    /// Physical fingerprint that re-pins `source` → `id` across a device rename.
+    #[serde(default, rename = "match")]
+    pub camera_match: Option<CameraMatch>,
 }
 
 impl CameraLeg {
@@ -846,11 +915,90 @@ video:
         assert_eq!(leg.fps, 30);
         assert_eq!(leg.bitrate_kbps, 4000);
         assert!(leg.role.is_none());
+        // The management fields default to the same values the Python `CameraLeg`
+        // model does, so a leg declared before the roster fields existed reads the
+        // same on both halves (name/orientation/owner/fov/mount/calibration/match
+        // absent, purpose empty, enabled true).
+        assert!(leg.name.is_none());
+        assert!(leg.orientation.is_none());
+        assert!(leg.purpose.is_empty());
+        assert!(leg.enabled);
+        assert!(leg.owner.is_none());
+        assert!(leg.fov_deg.is_none());
+        assert!(leg.mount_pitch_deg.is_none());
+        assert!(leg.calibration.is_none());
+        assert!(leg.camera_match.is_none());
         // A single declared leg (no role) is the primary owned encoder.
         let legs = cfg.resolve_legs(&CameraConfig::default());
         assert_eq!(legs.len(), 1);
         assert!(legs[0].is_primary);
         assert!(!legs[0].is_network_pull);
+    }
+
+    #[test]
+    fn camera_leg_management_fields_parse_and_resolve_unchanged() {
+        // A leg carrying the full management field set parses every field, and
+        // the resolved leg is byte-identical to one without them (the pipeline
+        // reads none of the metadata — it stays on id/source/role/codec/geometry).
+        let yaml = "\
+video:
+  cameras:
+    - id: belly
+      source: /dev/video2
+      role: primary
+      codec: h265
+      name: Belly cam
+      orientation: down
+      purpose: [detect, precision-landing]
+      enabled: false
+      owner: operator
+      fov_deg: 82.5
+      mount_pitch_deg: -45.0
+      calibration: belly-v1
+      match: { usb: \"046d:0825:ABC123\" }
+";
+        let (_dir, path) = write_tmp(yaml);
+        let cfg = AgentVideoConfig::load_from(&path);
+        assert_eq!(cfg.cameras.len(), 1);
+        let leg = &cfg.cameras[0];
+        assert_eq!(leg.name.as_deref(), Some("Belly cam"));
+        assert_eq!(leg.orientation.as_deref(), Some("down"));
+        assert_eq!(leg.purpose, vec!["detect", "precision-landing"]);
+        assert!(!leg.enabled);
+        assert_eq!(leg.owner.as_deref(), Some("operator"));
+        assert_eq!(leg.fov_deg, Some(82.5));
+        assert_eq!(leg.mount_pitch_deg, Some(-45.0));
+        assert_eq!(leg.calibration.as_deref(), Some("belly-v1"));
+        assert_eq!(
+            leg.camera_match.as_ref().and_then(|m| m.usb.as_deref()),
+            Some("046d:0825:ABC123")
+        );
+        // The resolved leg carries only the transport-plane fields; the metadata
+        // never reaches the encoder, so an `enabled: false` leg still resolves the
+        // same way (enable-gating is a later polish item, not this schema pass).
+        let legs = cfg.resolve_legs(&CameraConfig::default());
+        assert_eq!(legs.len(), 1);
+        assert_eq!(legs[0].id, "main"); // primary → the fixed main path
+        assert_eq!(legs[0].role, "primary");
+        assert_eq!(legs[0].codec, "h265");
+        assert!(legs[0].is_primary);
+    }
+
+    #[test]
+    fn camera_match_csi_fingerprint_parses() {
+        let yaml = "\
+video:
+  cameras:
+    - id: nadir
+      source: /dev/video0
+      match: { csi_sensor: imx219, csi_port: 1 }
+";
+        let (_dir, path) = write_tmp(yaml);
+        let cfg = AgentVideoConfig::load_from(&path);
+        let m = cfg.cameras[0].camera_match.as_ref().unwrap();
+        assert_eq!(m.csi_sensor.as_deref(), Some("imx219"));
+        assert_eq!(m.csi_port, Some(1));
+        assert!(m.usb.is_none());
     }
 
     #[test]

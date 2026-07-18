@@ -278,3 +278,64 @@ def test_use_gst_air_pipeline_falls_back_to_false_on_detect_failure(
     )
     cfg = VideoConfig()
     assert cfg.use_gst_air_pipeline is False
+
+
+def test_camera_leg_management_field_defaults_match_rust():
+    """A CameraLeg with only id/source declared defaults every management field
+    to the same value the Rust `CameraLeg` does (name/orientation/owner/fov/mount/
+    calibration/match absent, purpose empty, enabled True), so a leg declared
+    before the roster fields existed reads identically on both halves."""
+    from ados.core.config.video import CameraLeg
+
+    leg = CameraLeg(id="belly", source="/dev/video2")
+    assert leg.name is None
+    assert leg.orientation is None
+    assert leg.purpose == []
+    assert leg.enabled is True
+    assert leg.owner is None
+    assert leg.fov_deg is None
+    assert leg.mount_pitch_deg is None
+    assert leg.calibration is None
+    assert leg.camera_match is None
+
+
+def test_camera_leg_management_fields_round_trip():
+    """The full management field set parses, including the ``match`` wire key
+    aliased to ``camera_match`` (``match`` is a Python keyword)."""
+    from ados.core.config.video import CameraLeg
+
+    leg = CameraLeg.model_validate(
+        {
+            "id": "belly",
+            "source": "/dev/video2",
+            "role": "primary",
+            "codec": "h265",
+            "name": "Belly cam",
+            "orientation": "down",
+            "purpose": ["detect", "precision-landing"],
+            "enabled": False,
+            "owner": "operator",
+            "fov_deg": 82.5,
+            "mount_pitch_deg": -45.0,
+            "calibration": "belly-v1",
+            "match": {"usb": "046d:0825:ABC123"},
+        }
+    )
+    assert leg.name == "Belly cam"
+    assert leg.orientation == "down"
+    assert leg.purpose == ["detect", "precision-landing"]
+    assert leg.enabled is False
+    assert leg.owner == "operator"
+    assert leg.fov_deg == 82.5
+    assert leg.mount_pitch_deg == -45.0
+    assert leg.calibration == "belly-v1"
+    assert leg.camera_match is not None
+    assert leg.camera_match.usb == "046d:0825:ABC123"
+    # A CSI fingerprint parses the sensor + port.
+    csi = CameraLeg.model_validate(
+        {"id": "nadir", "source": "/dev/video0", "match": {"csi_sensor": "imx219", "csi_port": 1}}
+    )
+    assert csi.camera_match is not None
+    assert csi.camera_match.csi_sensor == "imx219"
+    assert csi.camera_match.csi_port == 1
+    assert csi.camera_match.usb is None

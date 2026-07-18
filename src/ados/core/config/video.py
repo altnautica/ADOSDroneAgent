@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from ados.core.paths import RECORDINGS_DIR
 
@@ -90,12 +90,35 @@ class CameraConfig(BaseModel):
     expected: Literal["auto", "true", "false"] = "auto"
 
 
+class CameraMatch(BaseModel):
+    """A physical fingerprint that re-pins a leg's logical ``id`` onto its
+    current ``source`` device after a hot-plug / reboot renamed the device node.
+    USB cameras carry a ``vid:pid[:serial]`` string; CSI cameras carry the sensor
+    name plus the camera port index. Every field is optional — an absent match
+    means the leg is pinned only by its ``source`` locator (a network URL never
+    moves). Mirrors the Rust ``CameraMatch``.
+    """
+
+    usb: str | None = None
+    csi_sensor: str | None = None
+    csi_port: int | None = None
+
+
 class CameraLeg(BaseModel):
     """One entry of the optional ``video.cameras`` list — a single video leg the
     node exposes as its own mediamtx path (and ``:8889/<id>/whep``). Present only
     when more than one stream is declared (a smart pod, a dual-camera rig); an
     absent list falls back to the single ``video.camera`` block. The primary leg
     is always served at the fixed ``main`` path; secondary legs keep their ids.
+
+    ``id`` is the leg's immutable logical identity; ``source`` is its current
+    locator; ``match`` re-pins ``source`` → ``id`` across a device rename.
+    ``role`` is the transport plane (primary → the fixed ``main`` path / WFB /
+    cloud); ``purpose`` is the consumer plane a plugin binds to. The management
+    fields (``name`` / ``orientation`` / ``purpose`` / ``enabled`` / ``owner`` /
+    ``fov_deg`` / ``mount_pitch_deg`` / ``calibration`` / ``match``) are metadata
+    surfaced through the camera roster; the encode + radio pipeline reads none of
+    them, so an existing single-``role`` config resolves byte-identically.
     """
 
     id: str = "main"
@@ -109,6 +132,35 @@ class CameraLeg(BaseModel):
     height: int = 720
     fps: int = 30
     bitrate_kbps: int = 4000
+    # --- Camera-roster management metadata (consumed by the roster + plugins,
+    # never by the encode/radio pipeline; additive and default-safe). ---
+    # Operator-facing display name for the roster.
+    name: str | None = None
+    # Coarse physical mount orientation: forward | down | back | left | right |
+    # up | gimbal | custom. Enough for plugin binding, not full extrinsics.
+    orientation: str | None = None
+    # What the leg is FOR: feed | detect | navigation | precision-landing |
+    # thermal | mapping | recording. A leg may serve several.
+    purpose: list[str] = Field(default_factory=list)
+    # Whether the operator has this leg enabled. Metadata in v1 (the pipeline does
+    # not gate on it yet); default True so existing legs are unchanged.
+    enabled: bool = True
+    # Who declared this leg: "operator" or a plugin id. The merge-by-owner persist
+    # keys on this so an operator write preserves plugin legs and vice versa.
+    # Absent → treated as operator-owned.
+    owner: str | None = None
+    # Horizontal field of view in degrees, when known (informational).
+    fov_deg: float | None = None
+    # Mount pitch offset in degrees (e.g. a 45°-down inspection cam).
+    mount_pitch_deg: float | None = None
+    # A calibration reference (a profile name or a stored intrinsics id).
+    calibration: str | None = None
+    # Physical fingerprint that re-pins source → id across a device rename. Uses
+    # the wire key ``match`` (a Python keyword), aliased to the ``camera_match``
+    # attribute.
+    camera_match: CameraMatch | None = Field(default=None, alias="match")
+
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class RecordingConfig(BaseModel):
