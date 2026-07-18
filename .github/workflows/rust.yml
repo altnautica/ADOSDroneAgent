@@ -973,6 +973,63 @@ jobs:
           name: "Prebuilt ados-vision (rolling)"
           files: crates/rel/*
 
+  # Build the vision engine WITH the ONNX Runtime backend (--features onnx) and
+  # publish it as a distinct asset the installer fetches for CPU-strong, NPU-less
+  # boards (those whose board profile declares compute.local_inference: onnx), so
+  # they run the detector on the CPU out of the box. Unlike every other prebuilt
+  # this is NOT a static musl binary: ONNX Runtime has no aarch64-musl prebuilt
+  # (a --features onnx build cannot link musl), so this ships as a glibc (gnu)
+  # binary that statically embeds ONNX Runtime. Built NATIVELY with the GNU
+  # toolchain (the toolchain the ONNX Runtime static lib was built with — a native
+  # link avoids the C++ ABI mismatch a cross linker would hit) on ubuntu-22.04-arm
+  # so the glibc floor is 2.35, old enough for the target boards' Debian 12 /
+  # Raspberry Pi OS Bookworm (glibc 2.36). The onnx gnu build is already exercised
+  # by the build-test job's `--all-features` release build; this only re-builds it
+  # on the older-glibc runner and publishes it. Runs only on pushes to main.
+  publish-vision-onnx:
+    needs: build-test
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-22.04-arm
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build ados-vision with the onnx backend (native glibc)
+        run: cargo build --release --features onnx -p ados-vision
+
+      - name: Stage artifact + checksum
+        run: |
+          set -euo pipefail
+          mkdir -p rel
+          cp target/release/ados-vision rel/ados-vision-onnx-aarch64
+          ( cd rel && sha256sum ados-vision-onnx-aarch64 > ados-vision-onnx-aarch64.sha256 )
+
+      - name: Sign artifact (only when the signing key is present)
+        env:
+          SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SIGNING_KEY}" ]; then
+            echo "No ADOS_DRIVER_SIGNING_KEY set; publishing SHA256-only (dev posture)."
+            exit 0
+          fi
+          sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
+          printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
+          minisign -S -s /tmp/sign.key -m rel/ados-vision-onnx-aarch64 -x rel/ados-vision-onnx-aarch64.minisig
+          rm -f /tmp/sign.key
+
+      - name: Publish rolling prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: prebuilt-vision-onnx
+          prerelease: true
+          name: "Prebuilt ados-vision (onnx, rolling)"
+          files: crates/rel/*
+
   # Build the installer as a static arm64 binary and publish it to a rolling
   # prerelease the bootstrap fetches. Static (musl) so one binary runs on every
   # supported board regardless of its glibc. Runs only on pushes to main, not

@@ -20,6 +20,13 @@ hw_video_codecs:
   - h265_enc
   - h265_dec
 
+# No NPU on the Pi 5, but the Cortex-A76 quad at 2.4 GHz runs a small detector
+# on the CPU via the in-process ONNX backend. This makes the installer fetch the
+# onnx-enabled vision build and the perception tier read "local" (detection runs
+# on-board, no compute-node offload needed).
+compute:
+  local_inference: onnx
+
 # Pi 5 exposes 2x MIPI CSI on the board itself. Downward navigation
 # camera lands on the spare CSI port; USB stays free for the WFB-ng
 # dongle and accessory sensors.
