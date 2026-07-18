@@ -161,11 +161,12 @@ impl VideoOrchestrator {
             cmd
         };
 
-        // Configure + start mediamtx (gates on the RTSP port internally).
-        if let Err(e) = self
-            .mediamtx
-            .write_config(&[(MAIN_PATH.to_string(), "publisher".to_string())])
-        {
+        // Configure + start mediamtx (gates on the RTSP port internally). The
+        // primary publishes into `main`; any secondary legs are added as their
+        // own mediamtx paths (sourceOnDemand pulls) so mediamtx serves each at
+        // `:8889/<id>/whep` independently. A single-leg node yields exactly the
+        // one `main` publisher path (byte-identical to the single-stream path).
+        if let Err(e) = self.mediamtx.write_config(&self.legs_to_streams()) {
             tracing::error!(error = %e, "mediamtx_config_write_failed");
             self.last_start_error = StartError::MediamtxFailed;
             self.state = PipelineState::Error;

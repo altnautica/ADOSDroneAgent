@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{Mutex, Notify};
 
-use crate::config::{AgentVideoConfig, CameraConfig};
+use crate::config::{AgentVideoConfig, CameraConfig, ResolvedLeg};
 use crate::discover::{self, DiscoveryResult};
 use crate::encoder::{EncoderEnv, EncoderKind};
 use crate::mediamtx::{MediamtxManager, MAIN_PATH};
@@ -59,6 +59,14 @@ pub use crate::health::{
 pub struct VideoOrchestrator {
     pub(crate) config: AgentVideoConfig,
     pub(crate) camera_cfg: CameraConfig,
+    /// The resolved video legs this node serves. The primary leg (`main`) is
+    /// driven by the inline pipeline below (encoder / wfb / cloud / vision);
+    /// secondary legs are additional mediamtx paths (`sourceOnDemand` pulls)
+    /// added to the mediamtx config so mediamtx serves each at `:8889/<id>/whep`
+    /// independently — one dead secondary source cannot wedge the primary or a
+    /// sibling (per-path isolation is mediamtx's, not the orchestrator's). An
+    /// empty `video.cameras` resolves to a single `main` leg (back-compat).
+    pub(crate) legs: Vec<ResolvedLeg>,
 
     pub(crate) mediamtx: MediamtxManager,
     pub(crate) encoder: Option<ManagedProcess>,
@@ -146,9 +154,11 @@ impl VideoOrchestrator {
         config_dir: &std::path::Path,
     ) -> Self {
         let now = Instant::now();
+        let legs = config.resolve_legs(&camera_cfg);
         Self {
             config,
             camera_cfg,
+            legs,
             mediamtx: MediamtxManager::new(config_dir),
             encoder: None,
             wfb_tee: None,
@@ -211,6 +221,32 @@ impl VideoOrchestrator {
 
     pub(crate) fn pipe_uri(&self) -> String {
         format!("rtsp://localhost:{}/main", self.mediamtx.rtsp_port())
+    }
+
+    /// The `(path, source)` pairs to feed [`MediamtxManager::write_config`]: the
+    /// primary as a `"publisher"` (the local encoder publishes into `main`), and
+    /// each secondary network leg as its RTSP source (a mediamtx `sourceOnDemand`
+    /// pull). A local-encode secondary is skipped for now (it would need its own
+    /// encoder — a documented follow-up); dropping it is honest (no dead
+    /// publisher path) but rare (the multi-stream case is network legs). Back-
+    /// compat: a single `main` leg yields exactly `[("main","publisher")]`.
+    pub(crate) fn legs_to_streams(&self) -> Vec<(String, String)> {
+        self.legs
+            .iter()
+            .filter_map(|leg| {
+                if leg.is_primary {
+                    Some((leg.id.clone(), "publisher".to_string()))
+                } else if leg.is_network_pull {
+                    Some((leg.id.clone(), leg.source.clone()))
+                } else {
+                    tracing::warn!(
+                        id = %leg.id,
+                        "video_leg_skipped: a local-encode secondary needs its own encoder (not yet supported)"
+                    );
+                    None
+                }
+            })
+            .collect()
     }
 
     pub(crate) fn sei_latency_on(&self) -> bool {
@@ -824,6 +860,51 @@ mod tests {
             CameraConfig::default(),
             std::path::Path::new("/tmp"),
         )
+    }
+
+    fn leg(id: &str, source: &str, role: &str, primary: bool, pull: bool) -> ResolvedLeg {
+        ResolvedLeg {
+            id: id.into(),
+            source: source.into(),
+            role: role.into(),
+            codec: "h264".into(),
+            is_primary: primary,
+            is_network_pull: pull,
+            width: 1280,
+            height: 720,
+            fps: 30,
+            bitrate_kbps: 4000,
+        }
+    }
+
+    #[test]
+    fn legs_to_streams_single_main_publisher_backcompat() {
+        // Default config (no video.cameras) → one main publisher, byte-identical
+        // to the single-stream path.
+        let o = test_orch();
+        assert_eq!(
+            o.legs_to_streams(),
+            vec![("main".to_string(), "publisher".to_string())]
+        );
+    }
+
+    #[test]
+    fn legs_to_streams_primary_publisher_plus_network_pull() {
+        let mut o = test_orch();
+        o.legs = vec![
+            leg("main", "rtsp://pod/zoom", "primary", true, false),
+            leg("ir", "rtsp://pod/ir", "ir", false, true),
+            // A local-encode secondary is dropped (no owned encoder yet) rather
+            // than advertising a dead publisher path.
+            leg("belly", "/dev/video1", "secondary", false, false),
+        ];
+        assert_eq!(
+            o.legs_to_streams(),
+            vec![
+                ("main".to_string(), "publisher".to_string()),
+                ("ir".to_string(), "rtsp://pod/ir".to_string()),
+            ]
+        );
     }
 
     #[test]

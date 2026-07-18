@@ -406,6 +406,12 @@ impl AgentVideoConfig {
     /// `"primary"` (else the first) is the primary — always an owned encoder, so
     /// a network-primary keeps its ffmpeg bridge — and every other leg with a
     /// network source becomes a mediamtx `sourceOnDemand` pull.
+    ///
+    /// The primary leg is always served at the fixed path/id `"main"` — the WFB
+    /// radio, cloud relay, and vision tap all key on `main`. Secondary legs keep
+    /// their declared ids (their own mediamtx path + `:8889/<id>/whep`). Roles
+    /// (`eo` / `eo_wide` / `ir`) carry the labels, so a primary named `main`
+    /// still reads as "EO Zoom" on the GCS.
     pub fn resolve_legs(&self, camera: &CameraConfig) -> Vec<ResolvedLeg> {
         if self.cameras.is_empty() {
             return vec![ResolvedLeg {
@@ -438,7 +444,12 @@ impl AgentVideoConfig {
                     c.role.clone().unwrap_or_else(|| "secondary".to_string())
                 };
                 ResolvedLeg {
-                    id: c.id.clone(),
+                    // The primary is always served at the fixed "main" path.
+                    id: if is_primary {
+                        "main".to_string()
+                    } else {
+                        c.id.clone()
+                    },
                     source: c.source.clone(),
                     role,
                     codec: c.codec.clone(),
@@ -738,12 +749,14 @@ video:
         assert_eq!(cfg.cameras.len(), 3);
         let legs = cfg.resolve_legs(&CameraConfig::default());
         assert_eq!(legs.len(), 3);
-        // No leg declared role "primary" → the first leg is the primary and is
-        // an owned encoder; the two secondary RTSP legs are network pulls.
-        assert_eq!(legs[0].id, "eo-zoom");
+        // No leg declared role "primary" → the first leg is the primary, served
+        // at the fixed "main" path as an owned encoder; the two secondary RTSP
+        // legs are network pulls that keep their declared ids.
+        assert_eq!(legs[0].id, "main");
         assert!(legs[0].is_primary);
         assert!(!legs[0].is_network_pull);
         assert_eq!(legs[0].role, "primary");
+        assert_eq!(legs[1].id, "eo-wide");
         assert!(!legs[1].is_primary);
         assert!(legs[1].is_network_pull);
         assert_eq!(legs[1].role, "eo_wide");
@@ -761,11 +774,12 @@ video:
 ";
         let (_dir, path) = write_tmp(yaml);
         let legs = AgentVideoConfig::load_from(&path).resolve_legs(&CameraConfig::default());
-        // The second leg is the declared primary (owned encoder); the first,
-        // though listed first, is a secondary network pull.
+        // The second leg is the declared primary (owned encoder, served at the
+        // fixed "main" path); the first, though listed first, is a secondary
+        // network pull that keeps its declared id.
         let primary: Vec<_> = legs.iter().filter(|l| l.is_primary).collect();
         assert_eq!(primary.len(), 1);
-        assert_eq!(primary[0].id, "main-eo");
+        assert_eq!(primary[0].id, "main");
         assert!(!primary[0].is_network_pull);
         assert!(legs.iter().find(|l| l.id == "ir").unwrap().is_network_pull);
     }
