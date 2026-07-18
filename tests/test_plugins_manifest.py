@@ -172,12 +172,20 @@ def test_target_profiles_accepts_ground_station() -> None:
     assert m.agent.target_profiles == ["ground-station"]
 
 
-def test_target_profiles_accepts_multi_target() -> None:
+def test_target_profiles_accepts_workstation() -> None:
     raw = _good_manifest_dict()
-    raw["agent"]["target_profiles"] = ["drone", "ground-station"]
+    raw["agent"]["target_profiles"] = ["workstation"]
     m = PluginManifest.from_yaml_text(_yaml(raw))
     assert m.agent is not None
-    assert m.agent.target_profiles == ["drone", "ground-station"]
+    assert m.agent.target_profiles == ["workstation"]
+
+
+def test_target_profiles_accepts_multi_target() -> None:
+    raw = _good_manifest_dict()
+    raw["agent"]["target_profiles"] = ["drone", "ground-station", "workstation"]
+    m = PluginManifest.from_yaml_text(_yaml(raw))
+    assert m.agent is not None
+    assert m.agent.target_profiles == ["drone", "ground-station", "workstation"]
 
 
 def test_target_profiles_dedupes_repeated_entries() -> None:

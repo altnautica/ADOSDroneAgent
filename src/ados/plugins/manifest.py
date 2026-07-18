@@ -300,21 +300,22 @@ class AgentBlock(_StrictModel):
     Default false preserves single-config behavior from the v1
     schema. Schema v2."""
 
-    target_profiles: list[Literal["drone", "ground-station"]] = Field(
+    target_profiles: list[Literal["drone", "ground-station", "workstation"]] = Field(
         default_factory=lambda: ["drone"],
     )
     """Node profiles the plugin is compatible with. Default ``["drone"]``
     so existing manifests that omit the field stay drone-only — which
     matches the only first-party plugin that exists today
     (``com.altnautica.vision-nav``). A plugin that wants to surface on a
-    ground station declares ``["ground-station"]``; a multi-target
-    plugin declares both. Schema v2 — older manifests get the default."""
+    ground station declares ``["ground-station"]``, on the operator
+    workstation ``["workstation"]``; a multi-target plugin declares more
+    than one. Schema v2 — older manifests get the default."""
 
     @field_validator("target_profiles")
     @classmethod
     def _validate_target_profiles(
         cls, value: list[str]
-    ) -> list[Literal["drone", "ground-station"]]:
+    ) -> list[Literal["drone", "ground-station", "workstation"]]:
         if not value:
             raise ManifestError(
                 "agent.target_profiles must list at least one profile",
@@ -323,7 +324,7 @@ class AgentBlock(_StrictModel):
         # across reads. Pydantic's Literal validation runs before this
         # hook, so each entry is already a known profile string.
         seen: set[str] = set()
-        deduped: list[Literal["drone", "ground-station"]] = []
+        deduped: list[Literal["drone", "ground-station", "workstation"]] = []
         for entry in value:
             if entry in seen:
                 continue
