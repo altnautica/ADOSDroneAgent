@@ -141,6 +141,15 @@ class FakeIpcClient:
         self.registered_components.append((int(comp_id), kind))
         return {"registered": True}
 
+    async def video_source_set(self, cameras: list[dict]) -> dict[str, Any]:
+        if "video.source.set" not in self._granted:
+            raise CapabilityDenied(self.plugin_id, "video.source.set")
+        legs = [dict(c) for c in cameras]
+        self.requests.append(("video.source.set", {"cameras": legs}))
+        return self._responses.get(
+            "video.source.set", {"ok": True, "count": len(legs)}
+        )
+
     async def vision_subscribe_detections(
         self, callback: Callable[[dict[str, Any]], Any]
     ) -> None:

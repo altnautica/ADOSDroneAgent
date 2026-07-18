@@ -332,6 +332,7 @@ pub async fn route_host_method<H: HostServices + ?Sized>(
         Method::CameraClaim => host.camera_claim(plugin_id, args),
         Method::CameraRelease => host.camera_release(plugin_id, args),
         Method::CameraGetFrame => host.camera_get_frame(plugin_id, args),
+        Method::VideoSourceSet => host.video_source_set(plugin_id, args),
         Method::ConfigGet => host.config_get(plugin_id, args),
         Method::ConfigSet => host.config_set(plugin_id, args),
         Method::ProcessSpawn => host.process_spawn(plugin_id, args),

@@ -287,6 +287,20 @@ class PluginIpcClient:
             )
         ).args
 
+    # ---- Video source -------------------------------------------------
+
+    async def video_source_set(self, cameras: list[dict]) -> dict:
+        """Declare the video pipeline's stream sources. The host forwards the
+        list to the supervisor, which persists ``video.cameras`` and restarts
+        the pipeline. Gated on the ``video.source.set`` capability."""
+        return (
+            await self._send_request(
+                "video.source.set",
+                capability="video.source.set",
+                args={"cameras": list(cameras)},
+            )
+        ).args
+
     # ---- Config kv ----------------------------------------------------
 
     async def config_get(self, key: str, default: Any = None) -> Any:

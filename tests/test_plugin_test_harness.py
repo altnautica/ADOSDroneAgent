@@ -164,3 +164,29 @@ def test_load_fixture_returns_empty_for_empty_file(tmp_path: Path) -> None:
     p = tmp_path / "empty.yaml"
     p.write_text("", encoding="utf-8")
     assert load_fixture(p) == []
+
+
+@pytest.mark.asyncio
+async def test_video_set_source_routes_the_leg_list() -> None:
+    async with PluginTestHarness(
+        plugin_id=PLUGIN_ID,
+        granted_capabilities={"video.source.set"},
+    ) as h:
+        legs = [
+            {"id": "main", "source": "rtsp://cam/main", "role": "eo"},
+            {"id": "ir", "source": "rtsp://cam/ir", "role": "ir"},
+        ]
+        result = await h.context.video.set_source(legs)
+        assert result["ok"] is True
+        assert result["count"] == 2
+        method, args = h._ipc.requests[-1]
+        assert method == "video.source.set"
+        assert args["cameras"] == legs
+
+
+@pytest.mark.asyncio
+async def test_video_set_source_requires_the_capability() -> None:
+    async with PluginTestHarness(plugin_id=PLUGIN_ID) as h:
+        with pytest.raises(CapabilityDenied) as excinfo:
+            await h.context.video.set_source([{"id": "main", "source": "rtsp://cam/main"}])
+        assert excinfo.value.capability == "video.source.set"

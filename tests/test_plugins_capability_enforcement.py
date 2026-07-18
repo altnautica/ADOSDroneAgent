@@ -83,26 +83,30 @@ def _install_with_perms(plugin_id: str, **grants: bool) -> PluginInstall:
 
 
 def test_catalog_size_matches_spec() -> None:
-    # 48 agent capabilities in the catalog. Beyond the earlier substrate set
+    # 49 agent capabilities in the catalog. Beyond the earlier substrate set
     # (button.subscribe, flight.guided_setpoint, mavlink.tunnel,
     # radio.aux_stream, display.oled.page) and the GPIO output + vision
     # designate/subscribe caps (hardware.gpio_out, vision.detection.subscribe,
     # vision.track.designate), the compute-offload caps (compute.dataset.write,
     # compute.job.submit, compute.job.read, compute.stream.open) back the plugin
-    # compute-offload + streaming-perception methods, and mcp.expose gates the
-    # plugin's tool/resource/prompt exposure to the MCP surface.
-    assert len(AGENT_CAPABILITIES) == 48
+    # compute-offload + streaming-perception methods, mcp.expose gates the
+    # plugin's tool/resource/prompt exposure to the MCP surface, and
+    # video.source.set lets a camera/pod driver reconfigure the video pipeline's
+    # stream sources.
+    assert len(AGENT_CAPABILITIES) == 49
 
 
 def test_gated_caps_are_marked_enforced() -> None:
     # The catalog's `enforced` flag reflects the dispatch-level gate today: the
-    # event bus, GPIO output, and the whole compute + vision family carry a
-    # runtime gate (metadata must be honest — Rule 44).
+    # event bus, GPIO output, video-source reconfiguration, and the whole
+    # compute + vision family carry a runtime gate (metadata must be honest —
+    # Rule 44).
     assert ENFORCED_AGENT_CAPABILITIES == frozenset(
         {
             "event.publish",
             "event.subscribe",
             "hardware.gpio_out",
+            "video.source.set",
             "compute.dataset.write",
             "compute.job.read",
             "compute.job.submit",

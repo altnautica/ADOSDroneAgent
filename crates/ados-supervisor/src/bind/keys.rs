@@ -266,6 +266,68 @@ pub fn persist_pair_state(
     }
 }
 
+/// Set `video.cameras` on the config mapping to the given leg list, transcoding
+/// the JSON list into the YAML data model verbatim (each leg is `{id, source,
+/// role?, codec?}`; the video pipeline resolves them at startup). A non-array or
+/// non-transcodable value leaves the config untouched — the caller validates the
+/// list shape before this is reached, so this is defence-in-depth.
+pub fn apply_video_cameras(root: &mut Mapping, cameras: &serde_json::Value) {
+    let Ok(value) = serde_norway::to_value(cameras) else {
+        return;
+    };
+    if !matches!(value, Value::Sequence(_)) {
+        return;
+    }
+    let video = ensure_map(root, "video");
+    video.insert(Value::String("cameras".to_string()), value);
+}
+
+/// Load → set `video.cameras` → atomically rewrite the config, serialised by the
+/// same flock and euid-0 gate as [`persist_pair_state`] (the file is 0600 root).
+/// Returns false (no write) for a non-root caller on Linux. The video pipeline
+/// reads the new source list on its next start, so the caller restarts
+/// `ados-video` after a `true`.
+pub fn persist_video_cameras(
+    config_path: &Path,
+    lock_path: &Path,
+    cameras: &serde_json::Value,
+) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        if !nix::unistd::geteuid().is_root() {
+            tracing::error!(
+                path = %config_path.display(),
+                euid = nix::unistd::geteuid().as_raw(),
+                "config_write_requires_root"
+            );
+            return false;
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    let _lock = acquire_config_lock(lock_path);
+    #[cfg(not(target_os = "linux"))]
+    let _ = lock_path;
+
+    let mut root = load_config_mapping(config_path);
+    apply_video_cameras(&mut root, cameras);
+
+    let body = match serde_norway::to_string(&Value::Mapping(root)) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = %e, path = %config_path.display(), "config_write_failed");
+            return false;
+        }
+    };
+    match atomic_write(config_path, body.as_bytes(), 0o600) {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::error!(error = %e, path = %config_path.display(), "config_write_failed");
+            false
+        }
+    }
+}
+
 /// Persist an inbound 64-byte key file + pair state and prompt the normal wfb
 /// unit to pick it up. The async surface mirrors `PairManager.apply_keypair`;
 /// the `Err(String)` path is what the orchestrator wraps into a phase-tagged
@@ -558,5 +620,52 @@ mod tests {
         // Pre-existing keys preserved.
         assert_eq!(wfb.get("channel").unwrap(), &Value::Number(149.into()));
         assert!(reloaded.get("agent").is_some());
+    }
+
+    #[test]
+    fn persist_video_cameras_writes_the_leg_list_and_preserves_the_rest() {
+        // Dev-host end-to-end: load → set video.cameras → atomic-write → reload.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        std::fs::write(
+            &cfg,
+            "video:\n  wfb:\n    channel: 149\nagent:\n  profile: drone\n",
+        )
+        .unwrap();
+        let lock = dir.path().join("config.yaml.lock");
+        let cameras = serde_json::json!([
+            {"id": "main", "source": "rtsp://192.168.144.25:8554/main", "role": "eo"},
+            {"id": "ir", "source": "rtsp://192.168.144.25:8554/ir", "role": "ir", "codec": "h264"},
+        ]);
+        let ok = persist_video_cameras(&cfg, &lock, &cameras);
+        // On Linux as non-root this returns false; on the dev host it writes.
+        if cfg!(target_os = "linux") {
+            return;
+        }
+        assert!(ok);
+        let reloaded = load_config_mapping(&cfg);
+        let video = reloaded.get("video").and_then(Value::as_mapping).unwrap();
+        let legs = video.get("cameras").and_then(Value::as_sequence).unwrap();
+        assert_eq!(legs.len(), 2);
+        let first = legs[0].as_mapping().unwrap();
+        assert_eq!(first.get("id").unwrap(), &Value::String("main".into()));
+        assert_eq!(
+            first.get("source").unwrap(),
+            &Value::String("rtsp://192.168.144.25:8554/main".into())
+        );
+        // Pre-existing video.wfb keys preserved (the set is a merge, not a replace).
+        let wfb = video.get("wfb").and_then(Value::as_mapping).unwrap();
+        assert_eq!(wfb.get("channel").unwrap(), &Value::Number(149.into()));
+        assert!(reloaded.get("agent").is_some());
+    }
+
+    #[test]
+    fn apply_video_cameras_ignores_a_non_array() {
+        // Defence-in-depth: a non-sequence value never mutates the config.
+        let mut root = Mapping::new();
+        apply_video_cameras(&mut root, &serde_json::json!({"id": "main"}));
+        assert!(root.get("video").is_none());
+        apply_video_cameras(&mut root, &serde_json::json!("main"));
+        assert!(root.get("video").is_none());
     }
 }

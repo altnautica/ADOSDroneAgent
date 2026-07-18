@@ -185,6 +185,9 @@ pub trait HostServices: Send + Sync + 'static {
     fn camera_get_frame(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
         Ok(not_implemented("camera.get_frame"))
     }
+    fn video_source_set(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
+        Ok(not_implemented("video.source.set"))
+    }
     fn config_get(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
         Ok(not_implemented("config.get"))
     }

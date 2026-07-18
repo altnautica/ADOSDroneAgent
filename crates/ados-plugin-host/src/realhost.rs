@@ -1105,6 +1105,11 @@ pub struct RealHost {
     /// stream. The host forwards each `radio.aux_stream.*` method to it (the same
     /// command-socket precedent); a builder overrides it in tests.
     radio_aux_cmd_path: PathBuf,
+    /// Command socket the supervisor serves for video-source reconfiguration. The
+    /// host forwards `video.source.set` to it (the same command-socket precedent);
+    /// the supervisor persists the source list + restarts the video service. A
+    /// builder overrides it in tests.
+    video_cmd_path: PathBuf,
     /// The plugin id that currently holds the auxiliary stream open, or `None`
     /// when the stream is closed. The aux pair is a single shared resource on the
     /// one adapter, so at most one plugin owns it at a time. Used to close the
@@ -1146,6 +1151,12 @@ const GPIO_CMD_SOCK: &str = "/run/ados/gpio-cmd.sock";
 /// dependency (the radio crate is not on the host's dependency path).
 const RADIO_AUX_CMD_SOCK: &str = "/run/ados/radio-aux.sock";
 
+/// Canonical supervisor video command socket the host forwards `video.source.set`
+/// to. Kept in sync with the supervisor's `VIDEO_CMD_SOCK` by the cross-crate
+/// wire string, not a build dependency (the supervisor crate is not on the host's
+/// dependency path).
+const VIDEO_CMD_SOCK: &str = "/run/ados/video-cmd.sock";
+
 impl RealHost {
     /// A host with empty facades and every external slot unwired, matching
     /// `default_host_services()`.
@@ -1164,6 +1175,7 @@ impl RealHost {
             display_page_path: PathBuf::from(LCD_PLUGIN_PAGE_PATH),
             gpio_cmd_path: PathBuf::from(GPIO_CMD_SOCK),
             radio_aux_cmd_path: PathBuf::from(RADIO_AUX_CMD_SOCK),
+            video_cmd_path: PathBuf::from(VIDEO_CMD_SOCK),
             aux_stream_owner: Mutex::new(None),
             offload_streams: Mutex::new(HashMap::new()),
             offload_session_seq: AtomicU64::new(0),
@@ -1205,6 +1217,13 @@ impl RealHost {
     /// [`Self::new`].
     pub fn with_radio_aux_cmd_path(mut self, path: PathBuf) -> Self {
         self.radio_aux_cmd_path = path;
+        self
+    }
+
+    /// Override the supervisor video command socket path (builder style, tests).
+    /// Production uses the canonical `/run/ados/video-cmd.sock` from [`Self::new`].
+    pub fn with_video_cmd_path(mut self, path: PathBuf) -> Self {
+        self.video_cmd_path = path;
         self
     }
 
@@ -1285,6 +1304,33 @@ impl RealHost {
                     (
                         Value::from("reason"),
                         Value::from("gpio service unavailable"),
+                    ),
+                ])
+            }
+        }
+    }
+
+    /// Forward a built `video.source.set` request to the supervisor's video
+    /// command socket and return its reply. Synchronous (a blocking unix-socket
+    /// round-trip over the shared [`gpio_socket_roundtrip`] newline-JSON helper),
+    /// so the host trait method stays non-async; the supervisor persists the
+    /// source list + restarts the video service, then answers.
+    ///
+    /// A missing service / connection / IO error degrades to the `not_available`
+    /// shape rather than erroring, matching the GPIO / radio not-available paths —
+    /// the supervisor may not be up (e.g. an early-boot window or a profile with
+    /// no video pipeline).
+    fn forward_video(&self, request: serde_json::Value, method: &str) -> HostResult {
+        match gpio_socket_roundtrip(&self.video_cmd_path, &request) {
+            Ok(reply) => json_to_mpv(&reply),
+            Err(e) => {
+                tracing::debug!(method, error = %e, "video command forward failed");
+                Value::Map(vec![
+                    (Value::from("error"), Value::from("not_available")),
+                    (Value::from("method"), Value::from(method)),
+                    (
+                        Value::from("reason"),
+                        Value::from("video service unavailable"),
                     ),
                 ])
             }
@@ -1424,6 +1470,7 @@ const ALL_DISPATCH_METHODS: &[crate::dispatch::Method] = {
         CameraClaim,
         CameraRelease,
         CameraGetFrame,
+        VideoSourceSet,
         ConfigGet,
         ConfigSet,
         ProcessSpawn,
@@ -2079,6 +2126,34 @@ impl HostServices for RealHost {
             req["duty_pct"] = duty_pct.into();
         }
         Ok(self.forward_gpio(req, "gpio.buzzer.beep"))
+    }
+
+    fn video_source_set(&self, _plugin_id: &str, args: &Value) -> Result<HostResult, HostError> {
+        // Build the supervisor's video-source request from the validated args,
+        // then forward it to the supervisor's video command socket. The dispatch
+        // gate already enforced the video-source capability before this runs.
+        let cameras = map_get(args, "cameras")
+            .and_then(|v| serde_json::to_value(v).ok())
+            .filter(|v| v.is_array())
+            .ok_or_else(|| HostError::Rpc("cameras must be an array".to_string()))?;
+        let legs = cameras.as_array().expect("filtered on is_array");
+        if legs.is_empty() {
+            return Err(HostError::Rpc("cameras must not be empty".to_string()));
+        }
+        // A leg with no id or no source cannot be served, so reject the whole
+        // list rather than write a half-usable config (Rule 44 — never advertise
+        // a stream the pipeline can't actually serve).
+        for leg in legs {
+            let id = leg.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            let source = leg.get("source").and_then(|v| v.as_str()).unwrap_or("");
+            if id.is_empty() || source.is_empty() {
+                return Err(HostError::Rpc(
+                    "each camera needs a non-empty id and source".to_string(),
+                ));
+            }
+        }
+        let req = serde_json::json!({"op": "video.source.set", "cameras": cameras});
+        Ok(self.forward_video(req, "video.source.set"))
     }
 
     fn radio_aux_stream_open(
@@ -4233,6 +4308,98 @@ gcs:
         assert_eq!(
             field(&m, "method").and_then(Value::as_str),
             Some("gpio.output.set")
+        );
+    }
+
+    // ---- video.source.set ------------------------------------------------
+
+    #[cfg(unix)]
+    #[test]
+    fn video_source_set_forwards_the_source_list_and_returns_the_reply() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("video-cmd.sock");
+        let stub = gpio_stub(path.clone(), r#"{"ok":true,"count":2}"#);
+        let host = RealHost::new().with_video_cmd_path(path);
+
+        let cameras = Value::Array(vec![
+            map(&[
+                ("id", Value::from("main")),
+                ("source", Value::from("rtsp://192.168.144.25:8554/main")),
+                ("role", Value::from("eo")),
+            ]),
+            map(&[
+                ("id", Value::from("ir")),
+                ("source", Value::from("rtsp://192.168.144.25:8554/ir")),
+                ("role", Value::from("ir")),
+            ]),
+        ]);
+        let args = map(&[("cameras", cameras)]);
+        let m = ok_map(host.video_source_set("p", &args));
+        // The reply round-trips back to the plugin verbatim.
+        assert_eq!(field(&m, "ok").and_then(Value::as_bool), Some(true));
+        assert_eq!(field(&m, "count").and_then(Value::as_i64), Some(2));
+
+        // The forwarded request carried the op + the full leg list.
+        let sent = stub.join().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&sent).unwrap();
+        assert_eq!(v["op"], "video.source.set");
+        assert_eq!(v["cameras"][0]["id"], "main");
+        assert_eq!(v["cameras"][0]["source"], "rtsp://192.168.144.25:8554/main");
+        assert_eq!(v["cameras"][1]["role"], "ir");
+    }
+
+    #[test]
+    fn video_source_set_rejects_a_non_array_or_empty_or_incomplete_list() {
+        let host = RealHost::new();
+        // Not an array.
+        assert_eq!(
+            err_body(host.video_source_set("p", &map(&[("cameras", Value::from("main"))]))),
+            "cameras must be an array"
+        );
+        // Empty array.
+        assert_eq!(
+            err_body(host.video_source_set("p", &map(&[("cameras", Value::Array(vec![]))]))),
+            "cameras must not be empty"
+        );
+        // A leg with no source cannot be served.
+        let bad = Value::Array(vec![map(&[("id", Value::from("main"))])]);
+        assert_eq!(
+            err_body(host.video_source_set("p", &map(&[("cameras", bad)]))),
+            "each camera needs a non-empty id and source"
+        );
+    }
+
+    #[test]
+    fn video_source_set_degrades_to_not_available_when_the_service_is_absent() {
+        // No socket bound: the forward reports not_available, never errors.
+        let host = RealHost::new().with_video_cmd_path(std::path::PathBuf::from(
+            "/nonexistent/ados-video-test.sock",
+        ));
+        let cameras = Value::Array(vec![map(&[
+            ("id", Value::from("main")),
+            ("source", Value::from("rtsp://x/main")),
+        ])]);
+        let m = ok_map(host.video_source_set("p", &map(&[("cameras", cameras)])));
+        assert_eq!(
+            field(&m, "error").and_then(Value::as_str),
+            Some("not_available")
+        );
+        assert_eq!(
+            field(&m, "method").and_then(Value::as_str),
+            Some("video.source.set")
+        );
+    }
+
+    #[test]
+    fn video_source_set_is_gated_on_the_video_source_capability() {
+        use crate::dispatch::{gate, Gate, Method};
+        assert_eq!(
+            gate("video.source.set", false, &caps(&[])),
+            Gate::CapabilityDenied("capability_denied: video.source.set".to_string())
+        );
+        assert_eq!(
+            gate("video.source.set", false, &caps(&["video.source.set"])),
+            Gate::Allow(Method::VideoSourceSet)
         );
     }
 

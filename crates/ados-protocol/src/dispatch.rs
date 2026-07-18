@@ -42,6 +42,7 @@ pub const DISPATCH_METHODS: &[DispatchMethod] = &[
     DispatchMethod { method: "camera.claim", required_cap: Some("sensor.camera.register"), inline: false },
     DispatchMethod { method: "camera.release", required_cap: Some("sensor.camera.register"), inline: false },
     DispatchMethod { method: "camera.get_frame", required_cap: Some("sensor.camera.register"), inline: false },
+    DispatchMethod { method: "video.source.set", required_cap: Some("video.source.set"), inline: false },
     DispatchMethod { method: "config.get", required_cap: None, inline: false },
     DispatchMethod { method: "config.set", required_cap: None, inline: false },
     DispatchMethod { method: "process.spawn", required_cap: Some("process.spawn"), inline: false },

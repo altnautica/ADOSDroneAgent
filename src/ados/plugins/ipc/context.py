@@ -217,6 +217,35 @@ class _CameraClient:
         )
 
 
+class _VideoClient:
+    """``ctx.video`` facade.
+
+    A driver plugin (e.g. a smart-camera / optical-pod driver) declares the
+    camera and stream sources the agent's video pipeline should serve, so the
+    operator never hand-types an RTSP URL. The host forwards the source list to
+    the supervisor, which persists it and restarts the video pipeline.
+    """
+
+    def __init__(self, ipc: PluginIpcClient) -> None:
+        self._ipc = ipc
+
+    async def set_source(self, cameras: list[dict]) -> dict:
+        """Configure the video pipeline's stream sources.
+
+        ``cameras`` is a list of legs, each ``{"id", "source", "role"?,
+        "codec"?}``: ``id`` names the stream path (the primary leg is
+        ``main``), ``source`` is an RTSP/URL the pipeline pulls or
+        ``publisher`` for a locally-encoded leg, and ``role`` (e.g. ``eo`` /
+        ``ir`` / ``eo_wide``) and ``codec`` are advisory. Applying a new list
+        restarts the video pipeline. Requires the ``video.source.set``
+        capability.
+
+        Returns ``{"ok": bool, "count": int, "restarted": bool}`` (or a
+        ``not_available`` shape when the supervisor is unreachable).
+        """
+        return await self._ipc.video_source_set(cameras)
+
+
 class _TelemetryClient:
     def __init__(self, ipc: PluginIpcClient) -> None:
         self._ipc = ipc
@@ -368,6 +397,10 @@ class PluginContext:
         # keep working without changes to their on_start body.
         self.peripherals = self.peripheral_manager
         self.camera = _CameraClient(ipc)
+        # Video-source facade: a camera / pod driver declares the pipeline's
+        # stream sources (the host forwards to the supervisor, which persists the
+        # list + restarts the pipeline). The host gates the video-source cap.
+        self.video = _VideoClient(ipc)
         # Vision engine facade: frame subscription (shared-memory ring),
         # model registration, inference, detection publishing, and
         # visual-odometry pose injection. The host gates the vision caps.
@@ -403,6 +436,7 @@ __all__ = [
     "_EventsClient",
     "_MAVLinkClient",
     "_PeripheralManagerClient",
+    "_VideoClient",
     "_TelemetryClient",
     "_ConfigClient",
     "_ProcessClient",

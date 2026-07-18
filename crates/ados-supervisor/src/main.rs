@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use ados_supervisor::{
     auto_pair, bind, config::AgentConfig, hotplug, lifecycle::Supervisor, mac_pin, sdnotify,
-    service_memory,
+    service_memory, video_cmd,
 };
 
 const MONITOR_INTERVAL: Duration = Duration::from_secs(5);
@@ -110,6 +110,13 @@ async fn main() -> Result<()> {
             }
         });
     }
+
+    // Video-source command socket: the plugin host forwards `video.source.set`
+    // here (a camera/pod driver auto-configuring its feeds); the supervisor is
+    // the privileged config-write + restart authority. Always served (cheap,
+    // like the bind control socket); a plugin only reaches it with the granted
+    // video-source capability, and only a drone with a video pipeline uses it.
+    tokio::spawn(video_cmd::run(shutdown_rx.clone()));
 
     // Local-radio auto-pair: drive the first-boot bind in-process (moved out of
     // the cloud relay, which is idle in local-first mode). Bindable role only;

@@ -56,6 +56,10 @@ pub enum Method {
     CameraClaim,
     CameraRelease,
     CameraGetFrame,
+    // Video: declare the pipeline's camera/stream source list. The host forwards
+    // it to the supervisor's video command socket, which persists the source
+    // list and restarts the video service.
+    VideoSourceSet,
     // Config kv.
     ConfigGet,
     ConfigSet,
@@ -137,6 +141,7 @@ impl Method {
             "camera.claim" => Self::CameraClaim,
             "camera.release" => Self::CameraRelease,
             "camera.get_frame" => Self::CameraGetFrame,
+            "video.source.set" => Self::VideoSourceSet,
             "config.get" => Self::ConfigGet,
             "config.set" => Self::ConfigSet,
             "process.spawn" => Self::ProcessSpawn,
@@ -180,6 +185,7 @@ impl Method {
             Self::CameraClaim => "camera.claim",
             Self::CameraRelease => "camera.release",
             Self::CameraGetFrame => "camera.get_frame",
+            Self::VideoSourceSet => "video.source.set",
             Self::ConfigGet => "config.get",
             Self::ConfigSet => "config.set",
             Self::ProcessSpawn => "process.spawn",
@@ -409,6 +415,21 @@ mod tests {
     }
 
     #[test]
+    fn video_source_set_gates_on_the_video_source_capability() {
+        // Refused without the cap, allowed with it. A driver plugin can never
+        // reconfigure the video pipeline's sources without the operator-granted
+        // capability.
+        assert_eq!(
+            gate("video.source.set", false, &caps(&[])),
+            Gate::CapabilityDenied("capability_denied: video.source.set".to_string())
+        );
+        assert_eq!(
+            gate("video.source.set", false, &caps(&["video.source.set"])),
+            Gate::Allow(Method::VideoSourceSet)
+        );
+    }
+
+    #[test]
     fn mavlink_tunnel_send_gates_on_the_tunnel_capability() {
         // Refused without the tunnel cap (and the plain mavlink.write does not
         // satisfy it), allowed with it.
@@ -453,6 +474,7 @@ mod tests {
         Method::CameraClaim,
         Method::CameraRelease,
         Method::CameraGetFrame,
+        Method::VideoSourceSet,
         Method::ConfigGet,
         Method::ConfigSet,
         Method::ProcessSpawn,
