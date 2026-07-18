@@ -250,6 +250,10 @@ pub struct HeartbeatBase {
     /// NPU throughput (TOPS) from the board sidecar; 0 when the board has no NPU.
     /// Feeds the perception-tier decision on the cloud beacon.
     pub board_npu_tops: f64,
+    /// The board profile declares CPU-ONNX local inference (an NPU-less but
+    /// CPU-strong board runs the detector on-board). Feeds the perception-tier
+    /// decision alongside `board_npu_tops`; false on an older board sidecar.
+    pub board_local_inference: bool,
 }
 
 /// Build the heartbeat wire object from the native base plus an optional
@@ -324,11 +328,12 @@ fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
         }
     };
     // The perception tier this node runs on: the canonical ados_offload::pick_tier
-    // decision from the board's accelerator + the live offload-link the reconciler
-    // writes (a paired, reachable workstation flips compute_node_paired +
-    // bearer_acceptable true and names the target). Absent / stale ⇒ no link ⇒ an
-    // NPU board reads `local` and a board without one reads `none`; the offload
-    // target stays absent until a workstation is actually paired (rule 44). Fed
+    // decision from the board's local compute path (an NPU, or the profile-declared
+    // CPU-ONNX local inference) + the live offload-link the reconciler writes (a
+    // paired, reachable workstation flips compute_node_paired + bearer_acceptable
+    // true and names the target). Absent / stale ⇒ no link ⇒ a board with a local
+    // path reads `local` and one without any path reads `none`; the offload target
+    // stays absent until a workstation is actually paired (rule 44). Fed
     // identically to /api/status via `TierInputs::for_drone`.
     let has_accelerator = base.board_npu_tops > 0.0;
     let offload_link = ados_protocol::offload_link::read_offload_link(now_epoch_ms());
@@ -338,6 +343,7 @@ fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
         .unwrap_or((false, false));
     let perception_tier = match ados_offload::pick_tier(&ados_offload::TierInputs::for_drone(
         has_accelerator,
+        base.board_local_inference,
         link_paired,
         link_bearer_ok,
     )) {
@@ -492,6 +498,7 @@ mod tests {
             board_soc: "rk3582".to_string(),
             board_arch: "aarch64".to_string(),
             board_npu_tops: 6.0,
+            board_local_inference: false,
         }
     }
 

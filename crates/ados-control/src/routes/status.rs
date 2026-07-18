@@ -210,9 +210,10 @@ pub(crate) fn derive_health(signals: Option<&Map<String, Value>>) -> Value {
 /// sidecar [`read_board`] returns). `npu_tops` is the board's declared NPU
 /// throughput; the tier is the canonical `ados_offload::pick_tier` decision (NOT
 /// a second implementation), so `/api/status` reports the same tier the drone
-/// runs on. The offload signals (a paired workstation + an acceptable link) are
-/// not wired on the drone yet, so an NPU board reads `local` and a board without
-/// one reads `none`; `compute_node_paired` folds in when that signal exists. The
+/// runs on. An NPU board — or a board whose profile declares CPU-ONNX local
+/// inference (`has_local_inference`) — reads `local`; an NPU-less board with no
+/// such declaration and no offload path reads `none`; the offload-link the
+/// reconciler writes (a paired reachable workstation) folds in when present. The
 /// offload target stays null until a workstation is paired — never a fabricated
 /// reach (Rule 44). Returns `(npu_tops, has_accelerator, tier)`.
 ///
@@ -224,6 +225,14 @@ pub(crate) fn perception_fields(board: &Value) -> (f64, bool, &'static str, Opti
         .and_then(|v| v.as_f64())
         .unwrap_or(0.0);
     let has_accelerator = npu_tops > 0.0;
+    // The board's declared CPU-ONNX local-inference capability (an NPU-less but
+    // CPU-strong board runs the detector on-board). Absent on an older board
+    // sidecar ⇒ false, so the tier is unchanged there (rule 44 — a local path is
+    // reported only when the board really declares one).
+    let local_inference_capable = board
+        .get("has_local_inference")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     // The live offload-link the reconciler writes: a paired, reachable workstation
     // flips compute_node_paired + bearer_acceptable true and names the target.
     // Absent / stale ⇒ no link ⇒ an NPU-less board reports `none` (rule 44 —
@@ -236,6 +245,7 @@ pub(crate) fn perception_fields(board: &Value) -> (f64, bool, &'static str, Opti
         .unwrap_or((false, false));
     let tier = ados_offload::pick_tier(&ados_offload::TierInputs::for_drone(
         has_accelerator,
+        local_inference_capable,
         paired,
         bearer_ok,
     ));
@@ -545,6 +555,14 @@ mod tests {
         let (_npu, accel, tier, _target) = perception_fields(&json!({}));
         assert!(!accel);
         assert_eq!(tier, "none");
+        // A CPU-strong board with no NPU but the profile-declared ONNX local
+        // inference reads `local` (runs the detector on-board), with the
+        // accelerator flag still false (it has no NPU).
+        let (npu, accel, tier, _target) =
+            perception_fields(&json!({ "npu_tops": 0.0, "has_local_inference": true }));
+        assert_eq!(npu, 0.0);
+        assert!(!accel);
+        assert_eq!(tier, "local");
     }
 
     #[test]

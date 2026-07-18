@@ -13,7 +13,9 @@ fn tier_from_link(link: Option<&OffloadLink>) -> Option<PerceptionTier> {
     let (paired, bearer_ok) = link
         .map(|l| (l.paired, l.bearer_acceptable))
         .unwrap_or((false, false));
-    pick_tier(&TierInputs::for_drone(false, paired, bearer_ok))
+    // An NPU-less board with no CPU-inference declaration: the tier is driven by
+    // the offload link alone.
+    pick_tier(&TierInputs::for_drone(false, false, paired, bearer_ok))
 }
 
 #[test]

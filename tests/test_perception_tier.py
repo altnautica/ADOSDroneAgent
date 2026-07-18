@@ -61,6 +61,23 @@ class TestPerceptionTier:
         assert perception_tier(has_accelerator=True) == "local"
         assert perception_tier(has_accelerator=False) == "none"
 
+    def test_cpu_onnx_capable_board_is_local_without_an_accelerator(self) -> None:
+        # A board with no NPU but a CPU strong enough for the ONNX detector runs
+        # detection on-board (a full local path), local even with a node paired.
+        assert (
+            perception_tier(has_accelerator=False, local_inference_capable=True)
+            == "local"
+        )
+        assert (
+            perception_tier(
+                has_accelerator=False,
+                local_inference_capable=True,
+                compute_node_paired=True,
+                bearer_acceptable=True,
+            )
+            == "local"
+        )
+
 
 class TestBoardAccelerator:
     def test_npu_board_reports_accelerator(self) -> None:
@@ -77,4 +94,25 @@ class TestBoardAccelerator:
         assert b.has_accelerator is False
         d = b.to_dict()
         assert d["npu_tops"] == 0.0
+        assert d["has_accelerator"] is False
+        # Default board: no CPU-inference declaration.
+        assert d["local_inference"] == "none"
+        assert d["has_local_inference"] is False
+
+    def test_cpu_onnx_board_reports_local_inference(self) -> None:
+        # A CPU-strong board that declares ONNX local inference reports it in the
+        # sidecar dict (a full local path) while still having no NPU.
+        b = BoardInfo(
+            name="pi5",
+            model="Raspberry Pi 5",
+            tier=3,
+            ram_mb=8000,
+            cpu_cores=4,
+            local_inference="onnx",
+        )
+        assert b.has_accelerator is False
+        assert b.has_local_inference is True
+        d = b.to_dict()
+        assert d["local_inference"] == "onnx"
+        assert d["has_local_inference"] is True
         assert d["has_accelerator"] is False

@@ -239,6 +239,9 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
     # same sidecar + tier decision, so the LAN and cloud surfaces agree.
     board_npu_tops = float(getattr(board, "npu_tops", 0.0) or 0.0) if board else 0.0
     board_has_accel = bool(getattr(board, "has_accelerator", False)) if board else False
+    board_local_inference = (
+        bool(getattr(board, "has_local_inference", False)) if board else False
+    )
     _offload_link = _read_offload_link()
     _link_paired = bool(_offload_link.get("paired", False)) if _offload_link else False
     _link_bearer_ok = (
@@ -246,6 +249,7 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
     )
     perception_tier_val = perception_tier(
         has_accelerator=board_has_accel,
+        local_inference_capable=board_local_inference,
         compute_node_paired=_link_paired,
         bearer_acceptable=_link_bearer_ok,
     )

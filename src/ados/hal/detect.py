@@ -174,10 +174,17 @@ class VideoSection(BaseModel):
 
 
 class ComputeSection(BaseModel):
-    """Compute knobs. Only the NPU capability is read here; extra keys
-    (cores, gpu, hw_encoder, ram, ...) are ignored."""
+    """Compute knobs. The NPU capability and the local-inference declaration are
+    read here; extra keys (cores, gpu, hw_encoder, ram, ...) are ignored."""
 
     npu_tops: float = 0.0
+    # Whether this board can run the detector locally WITHOUT an NPU, on the CPU
+    # via the in-process ONNX backend. "none" (default) = no CPU-inference path;
+    # "onnx" = a CPU strong enough for the ONNX detector (declared only on boards
+    # where it is genuinely usable, per Rule 44). Drives the perception tier
+    # (a capable board reads `local`) and the installer's vision-binary variant
+    # selection (a capable board fetches the onnx-enabled ados-vision build).
+    local_inference: Literal["none", "onnx"] = "none"
 
 
 class BoardProfile(BaseModel):
@@ -229,11 +236,23 @@ class BoardInfo:
     # the board has no NPU / an unknown board). The perception tier keys on this:
     # an accelerator runs detection locally; a board without one offloads.
     npu_tops: float = 0.0
+    # The board profile's local-inference declaration ("none" | "onnx"). "onnx"
+    # marks an NPU-less but CPU-strong board that runs the detector on-board via
+    # the in-process ONNX backend. Empty string / "none" ⇒ no CPU-inference path.
+    local_inference: str = "none"
 
     @property
     def has_accelerator(self) -> bool:
         """Whether the board has a usable inference accelerator (an NPU)."""
         return self.npu_tops > 0.0
+
+    @property
+    def has_local_inference(self) -> bool:
+        """Whether the board can run the detector locally on the CPU (no NPU),
+        via the in-process ONNX backend. A full local perception path: the
+        perception tier reads `local` for such a board the same way an NPU board
+        does."""
+        return self.local_inference not in ("", "none")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -248,6 +267,8 @@ class BoardInfo:
             "hw_video_codecs": self.hw_video_codecs,
             "npu_tops": self.npu_tops,
             "has_accelerator": self.has_accelerator,
+            "local_inference": self.local_inference,
+            "has_local_inference": self.has_local_inference,
         }
 
 
@@ -380,6 +401,7 @@ def _board_from_profile(
         arch=profile.arch,
         hw_video_codecs=list(profile.hw_video_codecs),
         npu_tops=profile.compute.npu_tops,
+        local_inference=profile.compute.local_inference,
     )
 
 
