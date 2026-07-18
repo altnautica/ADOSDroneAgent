@@ -215,6 +215,10 @@ impl VideoOrchestrator {
         self.last_start_error = StartError::None;
         tracing::info!(encoder = ?kind, "pipeline_started");
 
+        // Publish the resolved leg list so the status surfaces + the GCS stream
+        // switcher can advertise each `:8889/<id>/whep` leg.
+        self.refresh_video_streams();
+
         // Best-effort radio fan-out + optional SEI tap. Only spawn the tee once
         // the encoder's RTSP publisher exists; otherwise the first DESCRIBE runs
         // against a missing path and ffmpeg exits in ~1-2 s. The run-loop ladder

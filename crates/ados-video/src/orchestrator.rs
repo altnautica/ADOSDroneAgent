@@ -143,6 +143,10 @@ pub struct VideoOrchestrator {
     /// `/run/ados/camera-state.json` contract path. Set only in tests so the
     /// wedge/park re-persist can be asserted against a temp file.
     pub(crate) camera_state_path: Option<std::path::PathBuf>,
+
+    /// Override for the video-streams sidecar path. `None` ⇒ the canonical
+    /// `/run/ados/video-streams.json` contract path. Set only in tests.
+    pub(crate) video_streams_path: Option<std::path::PathBuf>,
 }
 
 impl VideoOrchestrator {
@@ -189,6 +193,7 @@ impl VideoOrchestrator {
             python_executable: discover::python_executable(),
             env: EncoderEnv::detect(),
             camera_state_path: None,
+            video_streams_path: None,
         }
     }
 
@@ -201,6 +206,21 @@ impl VideoOrchestrator {
         match self.camera_state_path.as_deref() {
             Some(p) => discover::persist_camera_state_to(&self.last_cameras, p),
             None => discover::persist_camera_state(&self.last_cameras),
+        }
+    }
+
+    /// Write the video-streams sidecar (the resolved leg list: id/role/codec)
+    /// so the out-of-process status surfaces can advertise each leg + the GCS
+    /// can populate its stream switcher. Best-effort — a write failure is
+    /// logged, never fatal. Honors [`Self::video_streams_path`].
+    pub(crate) fn refresh_video_streams(&self) {
+        let snap = crate::video_streams::VideoStreamsSnapshot::from_legs(&self.legs);
+        let path = self
+            .video_streams_path
+            .as_deref()
+            .unwrap_or_else(|| std::path::Path::new(crate::video_streams::VIDEO_STREAMS_JSON));
+        if let Err(e) = snap.write_to(path) {
+            tracing::warn!(error = %e, "video_streams_sidecar_write_failed");
         }
     }
 
@@ -905,6 +925,20 @@ mod tests {
                 ("ir".to_string(), "rtsp://pod/ir".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn refresh_video_streams_writes_the_resolved_leg_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("video-streams.json");
+        let mut o = test_orch();
+        o.video_streams_path = Some(path.clone());
+        o.refresh_video_streams();
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        // Default (back-compat) config resolves to a single primary "main" leg.
+        let streams = v["streams"].as_array().unwrap();
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0]["id"], "main");
     }
 
     #[test]
