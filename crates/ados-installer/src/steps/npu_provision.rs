@@ -80,8 +80,9 @@ pub fn is_npu_board(model: &str) -> bool {
 /// Read the board-model string the NPU decision keys on: the persisted override
 /// sentinel first (an operator/installer force), then the kernel device-tree
 /// model. Mirrors the binary's `board_id()` resolution order. Empty when neither
-/// is present (a dev host) — which `is_npu_board` then treats as not-NPU.
-fn read_board_model() -> String {
+/// is present (a dev host) — which `is_npu_board` then treats as not-NPU. Shared
+/// with the fetch step, which keys the vision-binary variant on the same string.
+pub(crate) fn read_board_model() -> String {
     if let Ok(s) = std::fs::read_to_string("/etc/ados/board_override") {
         let v = s.trim().trim_matches('\0').trim().to_string();
         if !v.is_empty() {

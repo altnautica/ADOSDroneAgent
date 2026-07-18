@@ -179,6 +179,38 @@ fn install_one_with_retry(
     unreachable!("the loop returns Ok or Err on the final attempt")
 }
 
+/// Install one service's binary. For the vision engine, a board that declares
+/// CPU-ONNX local inference (a strong CPU, no NPU) fetches the onnx-enabled build
+/// so it runs the detector on the CPU; if that variant cannot be fetched the
+/// install falls back to the default build so it never aborts on a missing
+/// variant (Rule 26 — the default build still installs and honestly reports no
+/// real inference until the onnx variant is available). Every other service
+/// installs its single catalog binary unchanged.
+fn install_service(
+    b: &PrebuiltBinary,
+    board_model: &str,
+    tmp_dir: &Path,
+    channel: Channel,
+    sink: &ProgressSink,
+) -> anyhow::Result<()> {
+    if b.service == "ados-vision" && binaries::board_prefers_onnx_vision(board_model) {
+        match install_one_with_retry(&binaries::PREBUILT_VISION_ONNX, tmp_dir, channel, sink) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "onnx vision build fetch failed; falling back to the default vision build"
+                );
+                sink.sub_log(
+                    "fetch_binaries",
+                    "onnx vision build unavailable; using the default vision build",
+                );
+            }
+        }
+    }
+    install_one_with_retry(b, tmp_dir, channel, sink)
+}
+
 /// `<dest>.dl` sibling used as the verify-then-rename staging path. It lives in
 /// the same directory as `dest` so the final `rename` is atomic.
 fn dl_sibling(dest: &Path) -> PathBuf {
@@ -288,6 +320,10 @@ impl Step for FetchBinaries {
             Err(e) => return StepOutcome::Failed(format!("could not create temp dir: {e}")),
         };
 
+        // The device-tree model keys the vision-binary variant (a CPU-ONNX board
+        // fetches the onnx-enabled vision build). Read once for the whole fetch.
+        let board_model = crate::steps::npu_provision::read_board_model();
+
         // Drive the determinate "Downloading components" bar: k of N binaries.
         let sink = ctx.progress.clone();
         let bins = binaries::for_profile(&ctx.profile);
@@ -295,7 +331,7 @@ impl Step for FetchBinaries {
         sink.sub_progress(self.id(), 0, total);
         for (i, b) in bins.into_iter().enumerate() {
             sink.activity(self.id(), format!("installing {}", b.service));
-            let ok = match install_one_with_retry(b, &tmp_dir, channel, &sink) {
+            let ok = match install_service(b, &board_model, &tmp_dir, channel, &sink) {
                 Ok(()) => {
                     // Kept at debug: the live-detail pane names each component as
                     // it lands, so an info line here would just repeat "installed

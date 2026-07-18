@@ -269,6 +269,60 @@ pub fn for_profile(profile: &str) -> Vec<&'static PrebuiltBinary> {
         .collect()
 }
 
+/// The ONNX-enabled `ados-vision` variant, fetched for a board that declares
+/// CPU-ONNX local inference (an NPU-less but CPU-strong board — see
+/// [`board_prefers_onnx_vision`]). Same install destination as the default vision
+/// binary (`/opt/ados/bin/ados-vision`): it is the SAME service, built with the
+/// onnx feature so it runs the detector on the CPU. A separate release tag +
+/// asset so the default build is untouched — the default ships as a static musl
+/// binary, which cannot link ONNX Runtime (no musl prebuilt), so the onnx build
+/// is a distinct glibc asset published by its own release job. Not part of the
+/// `PREBUILT` catalog: the fetch step selects it in place of the default vision
+/// entry, with the default as a fallback so a missing onnx asset never aborts an
+/// install.
+pub const PREBUILT_VISION_ONNX: PrebuiltBinary = PrebuiltBinary {
+    service: "ados-vision",
+    asset: "ados-vision-onnx-aarch64",
+    release_tag: "prebuilt-vision-onnx",
+    dest: "/opt/ados/bin/ados-vision",
+    gate: Gate::Hard,
+    profiles: DRONE,
+};
+
+/// Board-model substrings that get the ONNX-enabled `ados-vision` build. Matched
+/// case-insensitively against the device-tree model string, mirroring the board
+/// profiles that declare `compute.local_inference: onnx` (Cortex-A76-class,
+/// NPU-less boards a CPU YOLO runs usefully on). Keep this list in step with
+/// those YAML profiles. NPU-class boards are intentionally excluded — they run
+/// the accelerator sidecar, not the CPU ONNX build.
+const ONNX_VISION_BOARD_SUBSTRINGS: &[&str] = &["raspberry pi 5", "compute module 5", "cm5"];
+
+/// Whether the board model declares CPU-ONNX local inference and should fetch the
+/// onnx-enabled vision build. Pure, case-insensitive substring match.
+pub fn board_prefers_onnx_vision(model: &str) -> bool {
+    let m = model.to_lowercase();
+    ONNX_VISION_BOARD_SUBSTRINGS.iter().any(|k| m.contains(k))
+}
+
+/// The default `ados-vision` catalog entry (the static musl build, no onnx).
+pub fn default_vision_binary() -> &'static PrebuiltBinary {
+    PREBUILT
+        .iter()
+        .find(|b| b.service == "ados-vision")
+        .expect("ados-vision is in the catalog")
+}
+
+/// The `ados-vision` prebuilt to fetch for a board: the ONNX-enabled build when
+/// the board declares CPU-ONNX local inference, else the default build. The fetch
+/// step falls back to the default when the onnx variant cannot be fetched.
+pub fn vision_binary(model: &str) -> &'static PrebuiltBinary {
+    if board_prefers_onnx_vision(model) {
+        &PREBUILT_VISION_ONNX
+    } else {
+        default_vision_binary()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,6 +505,54 @@ mod tests {
         assert_eq!(tag("ados-input"), "prebuilt-hid");
         assert_eq!(tag("ados-display"), "prebuilt-display");
         assert_eq!(tag("ados-display-probe"), "prebuilt-display");
+    }
+
+    #[test]
+    fn onnx_vision_variant_targets_the_same_service_and_destination() {
+        // The onnx build is the SAME service installed at the SAME path as the
+        // default vision binary — only the fetched asset differs.
+        let default = default_vision_binary();
+        assert_eq!(PREBUILT_VISION_ONNX.service, default.service);
+        assert_eq!(PREBUILT_VISION_ONNX.dest, default.dest);
+        assert_eq!(PREBUILT_VISION_ONNX.dest, "/opt/ados/bin/ados-vision");
+        // A distinct asset + release tag so the default (musl) build is untouched.
+        assert_ne!(PREBUILT_VISION_ONNX.asset, default.asset);
+        assert_ne!(PREBUILT_VISION_ONNX.release_tag, default.release_tag);
+        assert_eq!(PREBUILT_VISION_ONNX.asset, "ados-vision-onnx-aarch64");
+        assert_eq!(PREBUILT_VISION_ONNX.release_tag, "prebuilt-vision-onnx");
+        // Not part of the catalog (it is selected in place of the default entry).
+        assert!(!PREBUILT
+            .iter()
+            .any(|b| b.asset == PREBUILT_VISION_ONNX.asset));
+    }
+
+    #[test]
+    fn onnx_vision_selected_only_for_cpu_strong_boards() {
+        // CPU-strong, NPU-less boards that declare local ONNX inference.
+        assert!(board_prefers_onnx_vision("Raspberry Pi 5 Model B Rev 1.0"));
+        assert!(board_prefers_onnx_vision("Raspberry Pi Compute Module 5"));
+        assert!(board_prefers_onnx_vision("Raspberry Pi CM5"));
+        // NPU boards run the sidecar, not the CPU ONNX build.
+        assert!(!board_prefers_onnx_vision("Radxa ROCK 5C Lite (RK3582)"));
+        assert!(!board_prefers_onnx_vision("NVIDIA Jetson Orin Nano"));
+        // Weaker / unknown boards stay on the default build.
+        assert!(!board_prefers_onnx_vision("Raspberry Pi 4 Model B"));
+        assert!(!board_prefers_onnx_vision(""));
+    }
+
+    #[test]
+    fn vision_binary_resolves_the_variant_by_board() {
+        // A CPU-strong board resolves to the onnx build; everything else to the
+        // default catalog entry.
+        assert_eq!(
+            vision_binary("Raspberry Pi 5 Model B").asset,
+            "ados-vision-onnx-aarch64"
+        );
+        assert_eq!(
+            vision_binary("Radxa ROCK 5C Lite").asset,
+            default_vision_binary().asset
+        );
+        assert_eq!(vision_binary("").asset, default_vision_binary().asset);
     }
 
     #[test]
