@@ -607,12 +607,12 @@ fn decode_detections(resp: &rmpv::Value) -> Result<Vec<Detection>> {
             .ok_or_else(|| anyhow!("detection has no bbox map"))?;
         let bf = |k: &str| map_get(bm, k).and_then(num_f32).unwrap_or(0.0);
         out.push(Detection {
-            bbox: BoundingBox {
+            bbox: Some(BoundingBox {
                 x: bf("x"),
                 y: bf("y"),
                 width: bf("width"),
                 height: bf("height"),
-            },
+            }),
             class_label: map_get(dm, "class_label")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
@@ -624,6 +624,10 @@ fn decode_detections(resp: &rmpv::Value) -> Result<Vec<Detection>> {
                 .and_then(|v| v.as_str())
                 .and_then(parse_lock),
             attributes: None,
+            mask: None,
+            keypoints: None,
+            depth: None,
+            world_pos: None,
         });
     }
     Ok(out)
@@ -813,8 +817,9 @@ mod tests {
         assert_eq!(dets[0].class_label, "UAV");
         assert_eq!(dets[0].track_id, Some(7));
         assert_eq!(dets[0].lock_state, Some(LockState::Locked));
-        assert!((dets[0].bbox.x - 10.0).abs() < 1e-3);
-        assert!((dets[0].bbox.height - 40.0).abs() < 1e-3);
+        let b0 = dets[0].bbox.as_ref().unwrap();
+        assert!((b0.x - 10.0).abs() < 1e-3);
+        assert!((b0.height - 40.0).abs() < 1e-3);
         assert!((dets[0].confidence - 0.9).abs() < 1e-3);
     }
 

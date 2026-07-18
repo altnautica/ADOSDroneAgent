@@ -115,18 +115,22 @@ mod tests {
             frame_width: 1280,
             frame_height: 720,
             detections: vec![Detection {
-                bbox: BoundingBox {
+                bbox: Some(BoundingBox {
                     x: 320.0,
                     y: 180.0,
                     width: 640.0,
                     height: 360.0,
-                },
+                }),
                 class_label: "person".into(),
                 confidence: 0.8,
                 track_id: Some(3),
                 assoc_confidence: None,
                 lock_state: None,
                 attributes: None,
+                mask: None,
+                keypoints: None,
+                depth: None,
+                world_pos: None,
             }],
         }
     }

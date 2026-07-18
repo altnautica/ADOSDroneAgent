@@ -299,18 +299,22 @@ mod tests {
             frame_width: 640,
             frame_height: 480,
             detections: vec![Detection {
-                bbox: BoundingBox {
+                bbox: Some(BoundingBox {
                     x: 0.0,
                     y: 0.0,
                     width: 1.0,
                     height: 1.0,
-                },
+                }),
                 class_label: "weed".into(),
                 confidence: 0.5,
                 track_id: None,
                 assoc_confidence: None,
                 lock_state: None,
                 attributes: None,
+                mask: None,
+                keypoints: None,
+                depth: None,
+                world_pos: None,
             }],
         };
         engine.capture(batch.clone());

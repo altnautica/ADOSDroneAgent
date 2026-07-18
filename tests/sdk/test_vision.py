@@ -24,9 +24,11 @@ from ados.sdk.vision import (
     BoundingBox,
     Detection,
     DetectionBatch,
+    DetectionHead,
     Frame,
     FrameDescriptor,
     FrameFormat,
+    Keypoint,
     ModelExecution,
     ModelKind,
     ModelMetadata,
@@ -115,12 +117,15 @@ def test_model_metadata_msgpack_field_names_match_rust():
         "input_format",
         "output_classes",
         "model_path",
+        "head",
     }
     # Enum wire strings match the Rust renames.
     assert raw["kind"] == "detection"
     assert raw["execution"] == "engine_run"
     assert raw["input_format"] == "rgb24"
     assert raw["output_classes"] == ["weed", "crop"]
+    # The output-head layout defaults to the current YOLOv8 export.
+    assert raw["head"] == "yolo8"
     assert ModelMetadata.from_msgpack(m.to_msgpack()) == m
 
 
@@ -169,6 +174,105 @@ def test_detection_batch_msgpack_field_names_match_rust():
     assert det["assoc_confidence"] is None
     assert det["lock_state"] is None
     assert DetectionBatch.from_msgpack(b.to_msgpack()) == b
+
+
+def test_model_kind_new_variants_are_lowercase_wire_strings():
+    assert ModelKind.POSE.value == "pose"
+    assert ModelKind.DEPTH.value == "depth"
+    assert ModelKind.REID.value == "reid"
+    assert DetectionHead.YOLO8.value == "yolo8"
+    assert DetectionHead.YOLO5.value == "yolo5"
+
+
+def test_detection_batch_carries_frame_size_both_ways():
+    # The Rust engine stamps the source frame's pixel size on the batch so a
+    # consumer scales the pixel-space boxes to the rendered frame instead of
+    # guessing. The Python SDK must read it back (previously it was dropped).
+    rust_shaped = {
+        "v": 2,
+        "model_id": "m",
+        "camera_id": "uvc-0",
+        "frame_id": 3,
+        "ts_ms": 5,
+        "frame_width": 1280,
+        "frame_height": 720,
+        "detections": [],
+    }
+    batch = DetectionBatch.from_dict(rust_shaped)
+    assert batch.frame_width == 1280
+    assert batch.frame_height == 720
+    # And a Python-produced batch carries the dims on the wire and round-trips.
+    produced = DetectionBatch(
+        model_id="m",
+        camera_id="uvc-0",
+        frame_id=3,
+        ts_ms=5,
+        detections=[],
+        frame_width=1280,
+        frame_height=720,
+    )
+    raw = _unpack(produced.to_msgpack())
+    assert raw["frame_width"] == 1280
+    assert raw["frame_height"] == 720
+    assert DetectionBatch.from_msgpack(produced.to_msgpack()) == produced
+
+
+def test_percept_typed_fields_round_trip():
+    # A rich percept carrying a mask, keypoints, a depth, and a world position
+    # survives the msgpack wire byte-for-byte.
+    det = Detection(
+        bbox=BoundingBox(10.0, 12.0, 30.0, 40.0),
+        class_label="person",
+        confidence=0.88,
+        track_id=9,
+        assoc_confidence=0.7,
+        lock_state="locked",
+        mask=[[10.0, 12.0], [40.0, 12.0], [40.0, 52.0], [10.0, 52.0]],
+        keypoints=[Keypoint(25.0, 18.0, 0.9), Keypoint(25.0, 40.0, 0.6)],
+        depth=4.5,
+        world_pos=[12.5, -3.0, 1.2],
+    )
+    back = Detection.from_dict(det.to_dict())
+    assert back == det
+    assert len(back.mask) == 4
+    assert back.keypoints == [Keypoint(25.0, 18.0, 0.9), Keypoint(25.0, 40.0, 0.6)]
+    assert back.depth == 4.5
+    assert back.world_pos == [12.5, -3.0, 1.2]
+
+
+def test_boxless_percept_round_trips():
+    # A percept with no 2D box (a mask/depth-only reading) omits bbox on the
+    # wire and reads back as None.
+    det = Detection(
+        bbox=None,
+        class_label="region",
+        confidence=0.5,
+        mask=[[0.0, 0.0], [100.0, 0.0], [50.0, 100.0]],
+        depth=2.0,
+    )
+    raw = det.to_dict()
+    assert "bbox" not in raw
+    back = Detection.from_dict(raw)
+    assert back == det
+    assert back.bbox is None
+
+
+def test_detection_predating_percept_fields_defaults_none():
+    # A producer that predates the mask/keypoints/depth/world_pos fields decodes
+    # with them defaulting to None (skip-when-absent forward compatibility).
+    raw = {
+        "bbox": {"x": 0.0, "y": 0.0, "width": 5.0, "height": 5.0},
+        "class_label": "target",
+        "confidence": 0.6,
+        "track_id": 1,
+        "assoc_confidence": None,
+        "lock_state": "locked",
+    }
+    det = Detection.from_dict(raw)
+    assert det.mask is None
+    assert det.keypoints is None
+    assert det.depth is None
+    assert det.world_pos is None
 
 
 def test_detection_dict_shape_aligns_with_sidecar_protocol():

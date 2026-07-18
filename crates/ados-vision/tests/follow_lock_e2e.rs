@@ -137,18 +137,22 @@ fn reid_meta() -> ModelMetadata {
 
 fn det(x: f32, y: f32, conf: f32) -> Detection {
     Detection {
-        bbox: BoundingBox {
+        bbox: Some(BoundingBox {
             x,
             y,
             width: 40.0,
             height: 80.0,
-        },
+        }),
         class_label: "person".into(),
         confidence: conf,
         track_id: None,
         assoc_confidence: None,
         lock_state: None,
         attributes: None,
+        mask: None,
+        keypoints: None,
+        depth: None,
+        world_pos: None,
     }
 }
 
@@ -219,7 +223,7 @@ async fn engine_locks_and_holds_a_stable_track_through_the_public_path() {
     }
     let engine = build_engine(true, script).await;
 
-    let frame = frame_with(&[(target.bbox, red)]);
+    let frame = frame_with(&[(target.bbox.unwrap(), red)]);
     let mut last_id = None;
     for i in 0..4 {
         let batch = engine
@@ -259,9 +263,9 @@ async fn a_lost_track_does_not_silently_reacquire() {
     }
     let engine = build_engine(true, script).await;
 
-    let target_frame = frame_with(&[(target.bbox, red)]);
+    let target_frame = frame_with(&[(target.bbox.unwrap(), red)]);
     let empty_frame = frame_with(&[]);
-    let mover_frame = frame_with(&[(mover.bbox, [20, 20, 220])]);
+    let mover_frame = frame_with(&[(mover.bbox.unwrap(), [20, 20, 220])]);
 
     let mut locked_id = None;
     for i in 0..4 {
@@ -347,7 +351,7 @@ async fn crossing_end_x(reid: bool) -> f32 {
     }
     let engine = build_engine(reid, script).await;
 
-    let lock_frame = frame_with(&[(target_lock.bbox, red)]);
+    let lock_frame = frame_with(&[(target_lock.bbox.unwrap(), red)]);
     let mut lock_id = None;
     for i in 0..4 {
         let b = engine
@@ -360,7 +364,10 @@ async fn crossing_end_x(reid: bool) -> f32 {
     }
     let lock_id = lock_id.expect("locked the red target");
 
-    let contest = frame_with(&[(distractor.bbox, blue), (target_jumped.bbox, red)]);
+    let contest = frame_with(&[
+        (distractor.bbox.unwrap(), blue),
+        (target_jumped.bbox.unwrap(), red),
+    ]);
     let mut end_x = 100.0;
     for i in 4..8 {
         let b = engine
@@ -368,7 +375,7 @@ async fn crossing_end_x(reid: bool) -> f32 {
             .await
             .unwrap();
         if let Some(d) = b.detections.iter().find(|d| d.track_id == Some(lock_id)) {
-            end_x = d.bbox.x;
+            end_x = d.bbox.unwrap().x;
         }
     }
     end_x

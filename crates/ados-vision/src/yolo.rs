@@ -100,13 +100,17 @@ pub fn decode(data: &[f32], rows: usize, cols: usize, p: &DecodeParams) -> Vec<D
             .cloned()
             .unwrap_or_else(|| class.to_string());
         out.push(Detection {
-            bbox,
+            bbox: Some(bbox),
             class_label: label,
             confidence: score,
             track_id: None,
             assoc_confidence: None,
             lock_state: None,
             attributes: None,
+            mask: None,
+            keypoints: None,
+            depth: None,
+            world_pos: None,
         });
     }
     out
@@ -363,12 +367,13 @@ mod tests {
         let dets = decode(&data, r, c, &params(DetectionHead::Yolo8, &l, 0.25));
         assert_eq!(dets.len(), 2);
         let drone = dets.iter().find(|d| d.class_label == "drone").unwrap();
-        assert!((drone.bbox.x - 80.0).abs() < 1e-3);
-        assert!((drone.bbox.y - 80.0).abs() < 1e-3);
-        assert!((drone.bbox.width - 40.0).abs() < 1e-3);
+        let drone_b = drone.bbox.as_ref().unwrap();
+        assert!((drone_b.x - 80.0).abs() < 1e-3);
+        assert!((drone_b.y - 80.0).abs() < 1e-3);
+        assert!((drone_b.width - 40.0).abs() < 1e-3);
         assert!((drone.confidence - 0.90).abs() < 1e-4);
         let person = dets.iter().find(|d| d.class_label == "person").unwrap();
-        assert!((person.bbox.x - 290.0).abs() < 1e-3);
+        assert!((person.bbox.as_ref().unwrap().x - 290.0).abs() < 1e-3);
         assert!((person.confidence - 0.80).abs() < 1e-4);
     }
 

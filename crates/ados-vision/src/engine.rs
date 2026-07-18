@@ -527,10 +527,15 @@ impl VisionEngine {
         let Some((iw, ih)) = dims else {
             return none();
         };
-        // Crop every box first (no lock needed).
+        // Crop every box first (no lock needed). A box-less percept has no box
+        // to crop, so it gets no appearance embedding (motion-only for it).
         let crops: Vec<Option<Vec<u8>>> = detections
             .iter()
-            .map(|d| crate::reid::crop_resize_rgb24(frame, width, height, &d.bbox, iw, ih))
+            .map(|d| {
+                d.bbox
+                    .as_ref()
+                    .and_then(|b| crate::reid::crop_resize_rgb24(frame, width, height, b, iw, ih))
+            })
             .collect();
 
         // Embed under the accelerator lease + the model lock. If the lease can't
@@ -623,7 +628,13 @@ fn merge_tracked(
     }
     if update.measured {
         // The tracker associated to one of the input boxes; stamp the closest.
-        match best_overlap_index(&detections, &locked.bbox) {
+        // The tracker's reported box is always present; a box-less report (none
+        // today) falls through to keeping the held target visible.
+        match locked
+            .bbox
+            .as_ref()
+            .and_then(|lb| best_overlap_index(&detections, lb))
+        {
             Some(idx) => {
                 detections[idx].track_id = locked.track_id;
                 detections[idx].lock_state = locked.lock_state;
@@ -648,7 +659,11 @@ fn best_overlap_index(
 ) -> Option<usize> {
     let mut best: Option<(usize, f32)> = None;
     for (i, d) in detections.iter().enumerate() {
-        let i_o_u = bbox_iou(&d.bbox, bbox);
+        // A box-less percept can never overlap the tracked box.
+        let Some(db) = d.bbox.as_ref() else {
+            continue;
+        };
+        let i_o_u = bbox_iou(db, bbox);
         if i_o_u > 0.0 && best.is_none_or(|(_, b)| i_o_u > b) {
             best = Some((i, i_o_u));
         }
@@ -865,18 +880,22 @@ mod tests {
             frame_width: 640,
             frame_height: 480,
             detections: vec![Detection {
-                bbox: BoundingBox {
+                bbox: Some(BoundingBox {
                     x: 0.0,
                     y: 0.0,
                     width: 1.0,
                     height: 1.0,
-                },
+                }),
                 class_label: "x".into(),
                 confidence: 0.5,
                 track_id: None,
                 assoc_confidence: None,
                 lock_state: None,
                 attributes: None,
+                mask: None,
+                keypoints: None,
+                depth: None,
+                world_pos: None,
             }],
         };
         let reached = e.publish_detection(batch.clone());
@@ -913,18 +932,22 @@ mod tests {
 
     fn det(x: f32, y: f32, conf: f32, label: &str) -> Detection {
         Detection {
-            bbox: BoundingBox {
+            bbox: Some(BoundingBox {
                 x,
                 y,
                 width: 40.0,
                 height: 40.0,
-            },
+            }),
             class_label: label.into(),
             confidence: conf,
             track_id: None,
             assoc_confidence: None,
             lock_state: None,
             attributes: None,
+            mask: None,
+            keypoints: None,
+            depth: None,
+            world_pos: None,
         }
     }
 

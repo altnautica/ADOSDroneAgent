@@ -308,18 +308,22 @@ fn sample_batch(frame_id: u64) -> DetectionBatch {
         frame_width: 640,
         frame_height: 480,
         detections: vec![Detection {
-            bbox: BoundingBox {
+            bbox: Some(BoundingBox {
                 x: frame_id as f32,
                 y: 2.0,
                 width: 3.0,
                 height: 4.0,
-            },
+            }),
             class_label: "person".into(),
             confidence: 0.9,
             track_id: Some(frame_id),
             assoc_confidence: None,
             lock_state: None,
             attributes: None,
+            mask: None,
+            keypoints: None,
+            depth: None,
+            world_pos: None,
         }],
     }
 }

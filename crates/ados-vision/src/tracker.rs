@@ -607,10 +607,14 @@ impl SingleObjectTracker {
     /// the ambiguity guard refuses to silently pick between two
     /// appearance-indistinguishable objects.
     pub fn update_with_appearance(&mut self, candidates: &[Candidate]) -> TrackUpdate {
-        // Filter out detections below the confidence floor up front.
+        // Filter out detections below the confidence floor up front, and any
+        // box-less percept (a mask/pose/depth-only reading): this is a 2D-box
+        // tracker, so a candidate with no `bbox` is not a follow target.
         let eligible: Vec<&Candidate> = candidates
             .iter()
-            .filter(|c| c.detection.confidence >= self.cfg.min_confidence)
+            .filter(|c| {
+                c.detection.confidence >= self.cfg.min_confidence && c.detection.bbox.is_some()
+            })
             .collect();
 
         match self.track.take() {
@@ -648,7 +652,12 @@ impl SingleObjectTracker {
                 let template = self.template_for(cand);
                 let track = Track {
                     id,
-                    kf: BoxKalman::new(&det.bbox, &self.cfg),
+                    kf: BoxKalman::new(
+                        det.bbox
+                            .as_ref()
+                            .expect("eligible candidate carries a bbox"),
+                        &self.cfg,
+                    ),
                     // One hit is not yet enough to confirm (default confirm_hits
                     // is 2), so a single spurious blob never claims an id.
                     state: if self.cfg.confirm_hits <= 1 {
@@ -712,7 +721,11 @@ impl SingleObjectTracker {
                 // ambiguity hold that is now resolved by a lone candidate does
                 // not (the ambiguity was resolved by the competitor leaving).
                 let was_miss_coast = track.state == TrackState::Coasting && !track.coast_ambiguous;
-                track.kf.update(&det.bbox);
+                track.kf.update(
+                    det.bbox
+                        .as_ref()
+                        .expect("associated candidate carries a bbox"),
+                );
                 track.hits += 1;
                 track.misses = 0;
                 // Class-continuity guard: do not silently adopt a different
@@ -925,8 +938,13 @@ impl SingleObjectTracker {
         let mut out: Vec<Scored<'a>> = Vec::new();
         for cand in candidates {
             let det = &cand.detection;
-            let geo_iou = iou(predicted, &det.bbox);
-            let (dcx, dcy) = center(&det.bbox);
+            // A box-less percept cannot be scored against the predicted box; the
+            // eligible filter already drops these, so this only guards the type.
+            let Some(det_bbox) = det.bbox.as_ref() else {
+                continue;
+            };
+            let geo_iou = iou(predicted, det_bbox);
+            let (dcx, dcy) = center(det_bbox);
             let dist = ((dcx - pcx).powi(2) + (dcy - pcy).powi(2)).sqrt();
             let in_gate = geo_iou >= self.cfg.min_iou || dist <= gate;
             if !in_gate {
@@ -1162,13 +1180,17 @@ fn motion_fit(geo_iou: f32, dist: f32, gate: f32) -> f32 {
 /// the wire.
 fn reported(track: &Track, bbox: BoundingBox, lock: LockState, assoc: f32) -> Detection {
     Detection {
-        bbox,
+        bbox: Some(bbox),
         class_label: track.class_label.clone(),
         confidence: track.confidence,
         track_id: Some(track.id),
         assoc_confidence: Some(assoc.clamp(0.0, 1.0)),
         lock_state: Some(lock),
         attributes: None,
+        mask: None,
+        keypoints: None,
+        depth: None,
+        world_pos: None,
     }
 }
 
@@ -1208,18 +1230,22 @@ mod tests {
 
     fn det(x: f32, y: f32, w: f32, h: f32, conf: f32, label: &str) -> Detection {
         Detection {
-            bbox: BoundingBox {
+            bbox: Some(BoundingBox {
                 x,
                 y,
                 width: w,
                 height: h,
-            },
+            }),
             class_label: label.into(),
             confidence: conf,
             track_id: None,
             assoc_confidence: None,
             lock_state: None,
             attributes: None,
+            mask: None,
+            keypoints: None,
+            depth: None,
+            world_pos: None,
         }
     }
 
@@ -1287,8 +1313,8 @@ mod tests {
 
     /// Distance from a reported box center to a given object's box center.
     fn center_err(report: &Detection, truth: &Detection) -> f32 {
-        let (rx, ry) = center(&report.bbox);
-        let (tx, ty) = center(&truth.bbox);
+        let (rx, ry) = center(report.bbox.as_ref().unwrap());
+        let (tx, ty) = center(truth.bbox.as_ref().unwrap());
         ((rx - tx).powi(2) + (ry - ty).powi(2)).sqrt()
     }
 
@@ -1353,11 +1379,11 @@ mod tests {
     #[test]
     fn kalman_predicts_constant_velocity() {
         let cfg = TrackerConfig::default();
-        let mut kf = BoxKalman::new(&obj(0.0, 0.0).bbox, &cfg);
+        let mut kf = BoxKalman::new(&obj(0.0, 0.0).bbox.unwrap(), &cfg);
         kf.predict();
-        kf.update(&obj(10.0, 0.0).bbox);
+        kf.update(&obj(10.0, 0.0).bbox.unwrap());
         kf.predict();
-        kf.update(&obj(20.0, 0.0).bbox);
+        kf.update(&obj(20.0, 0.0).bbox.unwrap());
         let before = center(&kf.bbox()).0;
         kf.predict();
         let after = center(&kf.bbox()).0;
@@ -1374,11 +1400,11 @@ mod tests {
             max_velocity: 12.0,
             ..TrackerConfig::default()
         };
-        let mut kf = BoxKalman::new(&obj(0.0, 0.0).bbox, &cfg);
+        let mut kf = BoxKalman::new(&obj(0.0, 0.0).bbox.unwrap(), &cfg);
         kf.predict();
         // A 500px jump in one step: without the clamp the learned velocity would
         // be near 500; it must be bounded to max_velocity.
-        kf.update(&obj(500.0, 0.0).bbox);
+        kf.update(&obj(500.0, 0.0).bbox.unwrap());
         assert!(
             kf.vel[0].abs() <= cfg.max_velocity + 1e-3,
             "velocity must be clamped: {}",

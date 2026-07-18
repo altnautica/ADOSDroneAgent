@@ -464,6 +464,15 @@ pub enum ModelKind {
     Segmentation,
     Classification,
     Tracking,
+    /// Keypoint / pose estimation: the model emits per-detection `keypoints`
+    /// (skeleton joints or landmarks) rather than only a box.
+    Pose,
+    /// Monocular depth estimation: the model emits a per-detection `depth`
+    /// (metres) so a consumer can place the object in space.
+    Depth,
+    /// Appearance re-identification: the model emits an embedding used to
+    /// re-associate the same object across frames (feeds the tracker, not a box).
+    Reid,
 }
 
 /// A registered model's info, for the engine's list-models read-back (the
@@ -565,6 +574,16 @@ pub struct BoundingBox {
     pub height: f32,
 }
 
+/// One keypoint of a detection (a pose joint or a landmark), in the frame's own
+/// pixel resolution, with its own detection confidence.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Keypoint {
+    pub x: f32,
+    pub y: f32,
+    /// Confidence this keypoint was located correctly, `0..1`.
+    pub confidence: f32,
+}
+
 /// Confidence that this frame's detection belongs to the same object as the
 /// track it was associated with. `Locked` = the tracker is confident the
 /// identity held; `Uncertain` = the association is weak (occlusion, a nearby
@@ -581,10 +600,21 @@ pub enum LockState {
     Lost,
 }
 
-/// One detection from a model.
+/// One percept from a model: the self-describing per-frame unit a consumer
+/// reads. It began as a 2D box and grows by ADDING typed optional fields (each
+/// serde-default + skipped when absent), so a producer emits only what it
+/// measured and an older producer/reader round-trips unchanged. The 2D box is
+/// itself now optional: a box detector always sets it, while a box-less percept
+/// (a segmentation mask, a pose, a depth-only reading) may omit it and carry its
+/// geometry in the typed fields below.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Detection {
-    pub bbox: BoundingBox,
+    /// The 2D bounding box in the frame's own pixel resolution. `Some` for the
+    /// common box detector (always set before box-less percepts existed, so an
+    /// older producer's payload still decodes to `Some`); `None` for a box-less
+    /// percept. Skipped on the wire when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bbox: Option<BoundingBox>,
     pub class_label: String,
     pub confidence: f32,
     /// Stable track id across frames (tracking models only).
@@ -609,6 +639,25 @@ pub struct Detection {
     /// Absent (skipped on the wire) when the source reports none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attributes: Option<BTreeMap<String, rmpv::Value>>,
+    /// Segmentation mask as a polygon of `(x, y)` vertices tracing the object
+    /// outline, in the frame's own pixel resolution. `None` when the source
+    /// reports no mask.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask: Option<Vec<[f32; 2]>>,
+    /// Keypoints (pose joints or landmarks) for this detection, in frame pixels.
+    /// `None` when the source reports none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keypoints: Option<Vec<Keypoint>>,
+    /// Estimated distance from the camera to the detection, in metres. `None`
+    /// when the source reports no depth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depth: Option<f32>,
+    /// The detection's position in a world frame, as a bare 3-array so the frame
+    /// convention can evolve without a schema change: local ENU metres
+    /// `[x, y, z]`, or geographic `[lat, lon, alt]` once a producer geolocates.
+    /// `None` when the source reports no world position.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub world_pos: Option<[f64; 3]>,
 }
 
 /// The current wire version of a [`DetectionBatch`] on the `vision.detection`
@@ -616,7 +665,7 @@ pub struct Detection {
 /// stamped with any other version fails loudly rather than silently mis-parsing.
 /// Mirrors the `vision.detection` entry in the contract registry
 /// (`contracts.toml`).
-pub const VISION_DETECTION_VERSION: u16 = 1;
+pub const VISION_DETECTION_VERSION: u16 = 2;
 
 /// The payload on `vision.detection`, labelled by source model and frame so
 /// overlays and consumers can align boxes to the frame they came from.
@@ -749,18 +798,22 @@ mod contract_tests {
             frame_width: 640,
             frame_height: 480,
             detections: vec![Detection {
-                bbox: BoundingBox {
+                bbox: Some(BoundingBox {
                     x: 12.0,
                     y: 20.0,
                     width: 64.0,
                     height: 32.0,
-                },
+                }),
                 class_label: "weed".into(),
                 confidence: 0.87,
                 track_id: None,
                 assoc_confidence: None,
                 lock_state: None,
                 attributes: None,
+                mask: None,
+                keypoints: None,
+                depth: None,
+                world_pos: None,
             }],
         };
         let bytes = b.to_msgpack().unwrap();
@@ -825,18 +878,22 @@ mod contract_tests {
     #[test]
     fn detection_lock_fields_round_trip_present() {
         let d = Detection {
-            bbox: BoundingBox {
+            bbox: Some(BoundingBox {
                 x: 1.0,
                 y: 2.0,
                 width: 10.0,
                 height: 20.0,
-            },
+            }),
             class_label: "target".into(),
             confidence: 0.91,
             track_id: Some(42),
             assoc_confidence: Some(0.73),
             lock_state: Some(LockState::Uncertain),
             attributes: None,
+            mask: None,
+            keypoints: None,
+            depth: None,
+            world_pos: None,
         };
         let bytes = rmp_serde::to_vec_named(&d).unwrap();
         let back: Detection = rmp_serde::from_slice(&bytes).unwrap();
@@ -858,18 +915,22 @@ mod contract_tests {
         attrs.insert("depth_m".to_string(), rmpv::Value::from(4.2_f64));
         attrs.insert("source".to_string(), rmpv::Value::from("plugin"));
         let d = Detection {
-            bbox: BoundingBox {
+            bbox: Some(BoundingBox {
                 x: 1.0,
                 y: 2.0,
                 width: 3.0,
                 height: 4.0,
-            },
+            }),
             class_label: "target".into(),
             confidence: 0.9,
             track_id: Some(7),
             assoc_confidence: None,
             lock_state: Some(LockState::Locked),
             attributes: Some(attrs.clone()),
+            mask: None,
+            keypoints: None,
+            depth: None,
+            world_pos: None,
         };
         let bytes = rmp_serde::to_vec_named(&d).unwrap();
         let back: Detection = rmp_serde::from_slice(&bytes).unwrap();
@@ -952,18 +1013,22 @@ mod contract_tests {
             track_id: Option<u64>,
         }
         let d = Detection {
-            bbox: BoundingBox {
+            bbox: Some(BoundingBox {
                 x: 1.0,
                 y: 1.0,
                 width: 2.0,
                 height: 2.0,
-            },
+            }),
             class_label: "target".into(),
             confidence: 0.8,
             track_id: Some(3),
             assoc_confidence: Some(0.4),
             lock_state: Some(LockState::Lost),
             attributes: None,
+            mask: None,
+            keypoints: None,
+            depth: None,
+            world_pos: None,
         };
         let bytes = rmp_serde::to_vec_named(&d).unwrap();
         let back: OldReader = rmp_serde::from_slice(&bytes).unwrap();
@@ -977,6 +1042,127 @@ mod contract_tests {
         assert_eq!(rmp_serde::from_slice::<String>(&k).unwrap(), "tracking");
         let e = rmp_serde::to_vec_named(&ModelExecution::PluginSide).unwrap();
         assert_eq!(rmp_serde::from_slice::<String>(&e).unwrap(), "plugin_side");
+    }
+
+    #[test]
+    fn model_kind_new_variants_serialize_lowercase() {
+        for (kind, want) in [
+            (ModelKind::Pose, "pose"),
+            (ModelKind::Depth, "depth"),
+            (ModelKind::Reid, "reid"),
+        ] {
+            let bytes = rmp_serde::to_vec_named(&kind).unwrap();
+            assert_eq!(rmp_serde::from_slice::<String>(&bytes).unwrap(), want);
+        }
+    }
+
+    #[test]
+    fn percept_typed_fields_round_trip() {
+        // A rich percept carrying a mask, keypoints, a depth, and a world
+        // position survives the msgpack wire byte-for-byte.
+        let d = Detection {
+            bbox: Some(BoundingBox {
+                x: 10.0,
+                y: 12.0,
+                width: 30.0,
+                height: 40.0,
+            }),
+            class_label: "person".into(),
+            confidence: 0.88,
+            track_id: Some(9),
+            assoc_confidence: Some(0.7),
+            lock_state: Some(LockState::Locked),
+            attributes: None,
+            mask: Some(vec![[10.0, 12.0], [40.0, 12.0], [40.0, 52.0], [10.0, 52.0]]),
+            keypoints: Some(vec![
+                Keypoint {
+                    x: 25.0,
+                    y: 18.0,
+                    confidence: 0.9,
+                },
+                Keypoint {
+                    x: 25.0,
+                    y: 40.0,
+                    confidence: 0.6,
+                },
+            ]),
+            depth: Some(4.5),
+            world_pos: Some([12.5, -3.0, 1.2]),
+        };
+        let bytes = rmp_serde::to_vec_named(&d).unwrap();
+        let back: Detection = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(back, d);
+        assert_eq!(back.mask.as_ref().unwrap().len(), 4);
+        assert_eq!(back.keypoints.as_ref().unwrap().len(), 2);
+        assert_eq!(back.depth, Some(4.5));
+        assert_eq!(back.world_pos, Some([12.5, -3.0, 1.2]));
+    }
+
+    #[test]
+    fn boxless_percept_round_trips() {
+        // A percept with no 2D box (a mask/pose/depth-only reading) still
+        // decodes: bbox is absent on the wire and reads back as None.
+        let d = Detection {
+            bbox: None,
+            class_label: "region".into(),
+            confidence: 0.5,
+            track_id: None,
+            assoc_confidence: None,
+            lock_state: None,
+            attributes: None,
+            mask: Some(vec![[0.0, 0.0], [100.0, 0.0], [50.0, 100.0]]),
+            keypoints: None,
+            depth: Some(2.0),
+            world_pos: None,
+        };
+        let bytes = rmp_serde::to_vec_named(&d).unwrap();
+        let back: Detection = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(back, d);
+        assert_eq!(back.bbox, None);
+    }
+
+    #[test]
+    fn detection_predating_percept_fields_defaults_none() {
+        // A producer that predates the mask/keypoints/depth/world_pos fields
+        // (no such keys, and a required box) still decodes; the new typed
+        // fields default to None.
+        #[derive(Serialize)]
+        struct PrePerceptDetection {
+            bbox: BoundingBox,
+            class_label: String,
+            confidence: f32,
+            track_id: Option<u64>,
+            assoc_confidence: Option<f32>,
+            lock_state: Option<LockState>,
+        }
+        let old = PrePerceptDetection {
+            bbox: BoundingBox {
+                x: 0.0,
+                y: 0.0,
+                width: 5.0,
+                height: 5.0,
+            },
+            class_label: "target".into(),
+            confidence: 0.6,
+            track_id: Some(1),
+            assoc_confidence: None,
+            lock_state: Some(LockState::Locked),
+        };
+        let bytes = rmp_serde::to_vec_named(&old).unwrap();
+        let back: Detection = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(
+            back.bbox,
+            Some(BoundingBox {
+                x: 0.0,
+                y: 0.0,
+                width: 5.0,
+                height: 5.0,
+            })
+        );
+        assert_eq!(back.mask, None);
+        assert_eq!(back.keypoints, None);
+        assert_eq!(back.depth, None);
+        assert_eq!(back.world_pos, None);
     }
 }
 

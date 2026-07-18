@@ -402,6 +402,13 @@ class ModelKind(str, enum.Enum):
     SEGMENTATION = "segmentation"
     CLASSIFICATION = "classification"
     TRACKING = "tracking"
+    POSE = "pose"
+    """Keypoint / pose estimation: emits per-detection ``keypoints``."""
+    DEPTH = "depth"
+    """Monocular depth estimation: emits a per-detection ``depth`` (metres)."""
+    REID = "reid"
+    """Appearance re-identification: emits an embedding used to re-associate the
+    same object across frames (feeds the tracker, not a box)."""
 
 
 class ModelExecution(str, enum.Enum):
@@ -412,6 +419,15 @@ class ModelExecution(str, enum.Enum):
     publishes detections itself."""
     PLUGIN_SIDE = "plugin_side"
     """The plugin runs the model and publishes detections (or calls ``infer``)."""
+
+
+class DetectionHead(str, enum.Enum):
+    """The output-tensor layout of a detection model's head, so the decoder
+    reads the right axes. Mirrors the Rust enum; ``yolo8`` is the current export
+    path and the default when a payload predates the field."""
+
+    YOLO8 = "yolo8"
+    YOLO5 = "yolo5"
 
 
 @dataclass(frozen=True)
@@ -434,6 +450,9 @@ class ModelMetadata:
     """Class labels in output-index order (empty for non-detection kinds)."""
     model_path: str | None = None
     """Path to the model file on the agent, for engine-run models."""
+    head: DetectionHead = DetectionHead.YOLO8
+    """Output-head layout for decoding (detection models). Defaults to ``yolo8``;
+    a payload that predates this field decodes to the ``yolo8`` default."""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -445,6 +464,7 @@ class ModelMetadata:
             "input_format": FrameFormat(self.input_format).value,
             "output_classes": list(self.output_classes),
             "model_path": self.model_path,
+            "head": DetectionHead(self.head).value,
         }
 
     @classmethod
@@ -462,6 +482,7 @@ class ModelMetadata:
                 if raw.get("model_path") is not None
                 else None
             ),
+            head=DetectionHead(str(raw.get("head", DetectionHead.YOLO8.value))),
         )
 
     def to_msgpack(self) -> bytes:
@@ -504,16 +525,45 @@ class BoundingBox:
 
 
 @dataclass(frozen=True)
-class Detection:
-    """One detection from a model.
+class Keypoint:
+    """One keypoint of a detection (a pose joint or a landmark), in the frame's
+    own pixel resolution, with its own detection confidence."""
 
-    Field names match the shared contract: ``bbox``, ``class_label``,
-    ``confidence``, ``track_id``, ``assoc_confidence``, ``lock_state``. The same
-    shape the inference sidecar emits. The two lock fields are optional and
-    default-absent so they round-trip with producers/readers that predate them.
+    x: float
+    y: float
+    confidence: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "x": float(self.x),
+            "y": float(self.y),
+            "confidence": float(self.confidence),
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> Keypoint:
+        return cls(
+            x=float(raw["x"]),
+            y=float(raw["y"]),
+            confidence=float(raw["confidence"]),
+        )
+
+
+@dataclass(frozen=True)
+class Detection:
+    """One percept from a model: the self-describing per-frame unit a consumer
+    reads. It began as a 2D box and grows by adding typed optional fields (each
+    default-absent on the wire), so a producer emits only what it measured and an
+    older producer/reader round-trips unchanged.
+
+    Field names match the shared contract. The 2D ``bbox`` is now itself optional:
+    a box detector always sets it, while a box-less percept (a segmentation mask,
+    a pose, or a depth-only reading) may leave it ``None`` and carry its geometry
+    in ``mask`` / ``keypoints`` / ``depth`` / ``world_pos`` instead. The optional
+    fields are skipped on the wire when absent.
     """
 
-    bbox: BoundingBox
+    bbox: BoundingBox | None
     class_label: str
     confidence: float
     track_id: int | None = None
@@ -535,10 +585,22 @@ class Detection:
     the contract extends without a schema change. ``None`` when the source
     reports none. Also default-absent so it round-trips with producers/readers
     that predate it."""
+    mask: list[list[float]] | None = None
+    """Segmentation mask as a polygon of ``[x, y]`` vertices tracing the object
+    outline, in frame pixels. ``None`` when the source reports no mask."""
+    keypoints: list[Keypoint] | None = None
+    """Keypoints (pose joints or landmarks) for this detection, in frame pixels.
+    ``None`` when the source reports none."""
+    depth: float | None = None
+    """Estimated distance from the camera to the detection, in metres. ``None``
+    when the source reports no depth."""
+    world_pos: list[float] | None = None
+    """The detection's position in a world frame, as a bare 3-list so the frame
+    convention can evolve: local ENU metres ``[x, y, z]`` or geographic
+    ``[lat, lon, alt]``. ``None`` when the source reports no world position."""
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
-            "bbox": self.bbox.to_dict(),
             "class_label": self.class_label,
             "confidence": float(self.confidence),
             "track_id": self.track_id,
@@ -549,17 +611,35 @@ class Detection:
             ),
             "lock_state": self.lock_state,
         }
-        # Omitted on the wire when absent, matching the Rust contract's
-        # skip-when-None (no per-detection overhead in the common case).
+        # The following are omitted on the wire when absent, matching the Rust
+        # contract's skip-when-None (no per-detection overhead in the common
+        # case). The box is optional so a box-less percept omits it entirely.
+        if self.bbox is not None:
+            out["bbox"] = self.bbox.to_dict()
         if self.attributes is not None:
             out["attributes"] = self.attributes
+        if self.mask is not None:
+            out["mask"] = [[float(p[0]), float(p[1])] for p in self.mask]
+        if self.keypoints is not None:
+            out["keypoints"] = [kp.to_dict() for kp in self.keypoints]
+        if self.depth is not None:
+            out["depth"] = float(self.depth)
+        if self.world_pos is not None:
+            out["world_pos"] = [float(v) for v in self.world_pos]
         return out
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> Detection:
         attributes = raw.get("attributes")
+        mask = raw.get("mask")
+        keypoints = raw.get("keypoints")
+        world_pos = raw.get("world_pos")
         return cls(
-            bbox=BoundingBox.from_dict(raw["bbox"]),
+            bbox=(
+                BoundingBox.from_dict(raw["bbox"])
+                if raw.get("bbox") is not None
+                else None
+            ),
             class_label=str(raw["class_label"]),
             confidence=float(raw["confidence"]),
             track_id=(
@@ -578,6 +658,24 @@ class Detection:
                 else None
             ),
             attributes=dict(attributes) if isinstance(attributes, dict) else None,
+            mask=(
+                [[float(p[0]), float(p[1])] for p in mask]
+                if isinstance(mask, list)
+                else None
+            ),
+            keypoints=(
+                [Keypoint.from_dict(kp) for kp in keypoints]
+                if isinstance(keypoints, list)
+                else None
+            ),
+            depth=(
+                float(raw["depth"]) if raw.get("depth") is not None else None
+            ),
+            world_pos=(
+                [float(v) for v in world_pos]
+                if isinstance(world_pos, list)
+                else None
+            ),
         )
 
 
@@ -595,10 +693,17 @@ class DetectionBatch:
     frame_id: int
     ts_ms: int
     detections: list[Detection] = field(default_factory=list)
+    frame_width: int | None = None
+    """The source frame's pixel width, so a consumer scales the pixel-space boxes
+    to the rendered frame instead of guessing. ``None`` when the source did not
+    report it. The Rust engine always carries this; a plugin that omits it lets
+    the consumer fall back to its own default."""
+    frame_height: int | None = None
+    """The source frame's pixel height (paired with ``frame_width``)."""
     v: int = _DETECTION_WIRE_VERSION
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "v": self.v,
             "model_id": self.model_id,
             "camera_id": self.camera_id,
@@ -606,6 +711,13 @@ class DetectionBatch:
             "ts_ms": int(self.ts_ms),
             "detections": [d.to_dict() for d in self.detections],
         }
+        # Omitted on the wire when absent (a producer that does not know the
+        # frame size); the Rust decoder defaults a missing dim to 0 = unknown.
+        if self.frame_width is not None:
+            out["frame_width"] = int(self.frame_width)
+        if self.frame_height is not None:
+            out["frame_height"] = int(self.frame_height)
+        return out
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> DetectionBatch:
@@ -618,6 +730,16 @@ class DetectionBatch:
             detections=[
                 Detection.from_dict(d) for d in (raw.get("detections") or [])
             ],
+            frame_width=(
+                int(raw["frame_width"])
+                if raw.get("frame_width") is not None
+                else None
+            ),
+            frame_height=(
+                int(raw["frame_height"])
+                if raw.get("frame_height") is not None
+                else None
+            ),
         )
 
     def to_msgpack(self) -> bytes:
@@ -1107,6 +1229,10 @@ class VisionClient:
             frame_id=frame.descriptor.frame_id,
             ts_ms=frame.descriptor.ts_ms,
             detections=[detection],
+            # Carry the source frame's size so a consumer scales the pixel-space
+            # box to the rendered frame instead of guessing.
+            frame_width=frame.descriptor.width,
+            frame_height=frame.descriptor.height,
         )
         return await self.publish_detection(batch)
 
@@ -1150,8 +1276,10 @@ __all__ = [
     "read_slot",
     "ModelKind",
     "ModelExecution",
+    "DetectionHead",
     "ModelMetadata",
     "BoundingBox",
+    "Keypoint",
     "Detection",
     "DetectionBatch",
     "Pose",

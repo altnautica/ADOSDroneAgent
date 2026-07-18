@@ -62,7 +62,8 @@ fn coco_onnx_loads_and_infers_one_frame() {
     // The detector ran end-to-end; every detection it does return is well-formed.
     for d in &dets {
         assert!(d.confidence >= 0.0 && d.confidence <= 1.0);
-        assert!(d.bbox.width >= 0.0 && d.bbox.height >= 0.0);
+        let b = d.bbox.as_ref().expect("a box detector emits a bbox");
+        assert!(b.width >= 0.0 && b.height >= 0.0);
     }
 }
 
@@ -104,9 +105,10 @@ fn coco_onnx_detects_a_real_person() {
         people.len()
     );
     for p in &people {
+        let b = p.bbox.as_ref().expect("a box detector emits a bbox");
         eprintln!(
             "  person conf={:.2} bbox=({:.0},{:.0},{:.0},{:.0})",
-            p.confidence, p.bbox.x, p.bbox.y, p.bbox.width, p.bbox.height
+            p.confidence, b.x, b.y, b.width, b.height
         );
     }
     assert!(

@@ -133,18 +133,22 @@ impl OffloadReturnBridge {
         let fh = height.max(1) as f32;
         let is_designated = self.designated_track.is_some() && d.track_id == self.designated_track;
         BusDetection {
-            bbox: BoundingBox {
+            bbox: Some(BoundingBox {
                 x: d.bbox[0] * fw,
                 y: d.bbox[1] * fh,
                 width: d.bbox[2] * fw,
                 height: d.bbox[3] * fh,
-            },
+            }),
             class_label: d.class.clone(),
             confidence: d.confidence,
             track_id: d.track_id,
             assoc_confidence: None,
             lock_state: if is_designated { lock } else { None },
             attributes: None,
+            mask: None,
+            keypoints: None,
+            depth: None,
+            world_pos: None,
         }
     }
 }
@@ -287,7 +291,7 @@ mod tests {
         assert_eq!(db.frame_width, 1280);
         assert_eq!(db.frame_height, 720);
         assert_eq!(db.detections.len(), 1);
-        let b = &db.detections[0].bbox;
+        let b = db.detections[0].bbox.as_ref().unwrap();
         // 0.25*1280 / 0.25*720 / 0.5*1280 / 0.5*720
         assert_eq!(b.x, 320.0);
         assert_eq!(b.y, 180.0);

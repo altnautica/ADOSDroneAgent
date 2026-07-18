@@ -370,18 +370,22 @@ mod tests {
     #[test]
     fn detections_decode_from_a_blob() {
         let dets = vec![Detection {
-            bbox: framebus::BoundingBox {
+            bbox: Some(framebus::BoundingBox {
                 x: 1.0,
                 y: 2.0,
                 width: 3.0,
                 height: 4.0,
-            },
+            }),
             class_label: "weed".into(),
             confidence: 0.9,
             track_id: Some(7),
             assoc_confidence: None,
             lock_state: None,
             attributes: None,
+            mask: None,
+            keypoints: None,
+            depth: None,
+            world_pos: None,
         }];
         let blob = rmp_serde::to_vec_named(&dets).unwrap();
         let args = Value::Map(vec![(Value::from("detections"), Value::Binary(blob))]);

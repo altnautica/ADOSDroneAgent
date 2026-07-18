@@ -14,7 +14,7 @@ CONTRACT_VERSIONS: dict[str, int] = {
     "framebus.ring": 1,
     "framebus.descriptor": 1,
     "tap.frame": 1,
-    "vision.detection": 1,
+    "vision.detection": 2,
     "atlas.envelope": 1,
     "compute": 1,
     "state.v2": 2,
@@ -90,11 +90,11 @@ CONTRACT_CATALOG: dict[str, dict[str, object]] = {
         "description": "Vision-tap frame header (ADVT magic) between the video pipeline and the vision engine.",
     },
     "vision.detection": {
-        "version": 1,
+        "version": 2,
         "wire": "msgpack",
         "transport": "event-bus",
         "status": "active",
-        "description": "Structured detection batches published on the vision.detection topic.",
+        "description": "Self-describing detection/percept batches published on the vision.detection topic (v2 adds optional mask, keypoints, depth, world position, and an optional 2D box).",
     },
     "atlas.envelope": {
         "version": 1,

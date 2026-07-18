@@ -152,7 +152,7 @@ async fn offload_frames_reach_the_drone_vision_bus_end_to_end() {
         );
         assert_eq!(b.detections.len(), 1, "the mock returns one box per frame");
         // The normalized [0.4,0.4,0.2,0.2] mock box denormalized to 64x48.
-        let bb = &b.detections[0].bbox;
+        let bb = b.detections[0].bbox.as_ref().unwrap();
         assert!(
             (bb.x - 0.4 * 64.0).abs() < 1e-3,
             "x denormalized to frame width"
@@ -316,7 +316,7 @@ async fn the_orchestrator_drives_the_offload_loop_end_to_end() {
         );
         assert_eq!(b.detections.len(), 1);
         // The normalized [0.4,0.4,0.2,0.2] box denormalized to 64x48 by the bridge.
-        let bb = &b.detections[0].bbox;
+        let bb = b.detections[0].bbox.as_ref().unwrap();
         assert!(
             (bb.x - 0.4 * 64.0).abs() < 1e-3,
             "x denormalized to frame width"

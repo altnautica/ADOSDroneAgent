@@ -110,18 +110,22 @@ mod tests {
             frame_width: 640,
             frame_height: 480,
             detections: vec![Detection {
-                bbox: BoundingBox {
+                bbox: Some(BoundingBox {
                     x: 12.0,
                     y: 20.0,
                     width: 64.0,
                     height: 32.0,
-                },
+                }),
                 class_label: "weed".into(),
                 confidence: 0.87,
                 track_id: Some(3),
                 assoc_confidence: None,
                 lock_state: None,
                 attributes: None,
+                mask: None,
+                keypoints: None,
+                depth: None,
+                world_pos: None,
             }],
         }
     }

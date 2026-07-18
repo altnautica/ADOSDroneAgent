@@ -265,18 +265,22 @@ async fn handle_designate_track(engine: &Arc<VisionEngine>, args: &Value) -> Res
         .ok_or_else(|| anyhow!("designate missing bbox"))?;
     let bf = |k: &str| map_get(bbox_map, k).and_then(num_f32).unwrap_or(0.0);
     let target = Detection {
-        bbox: BoundingBox {
+        bbox: Some(BoundingBox {
             x: bf("x"),
             y: bf("y"),
             width: bf("width"),
             height: bf("height"),
-        },
+        }),
         class_label: map_str(map, "class_label").unwrap_or_default(),
         confidence: map_get(map, "confidence").and_then(num_f32).unwrap_or(1.0),
         track_id: None,
         assoc_confidence: None,
         lock_state: None,
         attributes: None,
+        mask: None,
+        keypoints: None,
+        depth: None,
+        world_pos: None,
     };
     let track_id = engine.designate(&camera_id, &target).await;
     Ok(ok_map(&[
@@ -820,18 +824,22 @@ mod tests {
             frame_width: 640,
             frame_height: 480,
             detections: vec![Detection {
-                bbox: BoundingBox {
+                bbox: Some(BoundingBox {
                     x: 1.0,
                     y: 2.0,
                     width: 3.0,
                     height: 4.0,
-                },
+                }),
                 class_label: "person".into(),
                 confidence: 0.9,
                 track_id: Some(7),
                 assoc_confidence: None,
                 lock_state: None,
                 attributes: None,
+                mask: None,
+                keypoints: None,
+                depth: None,
+                world_pos: None,
             }],
         };
         let frame = deliver_detection(&batch).unwrap();

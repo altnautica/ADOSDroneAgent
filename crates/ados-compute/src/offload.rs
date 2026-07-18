@@ -69,26 +69,24 @@ impl Detector for MockDetector {
 
 /// Normalize a pixel-space `ados-vision` detection (box in the frame's own
 /// resolution) into the offload wire shape (box in `0.0..=1.0`). Pulled out so
-/// it is unit-testable without a model.
+/// it is unit-testable without a model. Returns `None` for a box-less percept
+/// (a mask/pose/depth-only reading): the offload wire is box-based, so a percept
+/// with no 2D box is dropped from the offload result rather than forced to zero.
 #[cfg(feature = "onnx")]
 fn to_offload_detection(
     d: ados_protocol::framebus::Detection,
     frame_w: u32,
     frame_h: u32,
-) -> Detection {
+) -> Option<Detection> {
+    let bbox = d.bbox?;
     let fw = (frame_w.max(1)) as f32;
     let fh = (frame_h.max(1)) as f32;
-    Detection {
-        bbox: [
-            d.bbox.x / fw,
-            d.bbox.y / fh,
-            d.bbox.width / fw,
-            d.bbox.height / fh,
-        ],
+    Some(Detection {
+        bbox: [bbox.x / fw, bbox.y / fh, bbox.width / fw, bbox.height / fh],
         class: d.class_label,
         confidence: d.confidence,
         track_id: d.track_id,
-    }
+    })
 }
 
 /// A real ONNX detector: the compute node hosts `ados-vision`'s ONNX backend
@@ -154,7 +152,7 @@ impl Detector for OnnxDetector {
             })?;
         Ok(dets
             .into_iter()
-            .map(|d| to_offload_detection(d, frame.width, frame.height))
+            .filter_map(|d| to_offload_detection(d, frame.width, frame.height))
             .collect())
     }
 }
@@ -184,20 +182,24 @@ mod tests {
     fn to_offload_detection_normalizes_the_pixel_box() {
         use ados_protocol::framebus::{BoundingBox, Detection as VDet};
         let v = VDet {
-            bbox: BoundingBox {
+            bbox: Some(BoundingBox {
                 x: 320.0,
                 y: 180.0,
                 width: 640.0,
                 height: 360.0,
-            },
+            }),
             class_label: "person".into(),
             confidence: 0.8,
             track_id: Some(3),
             assoc_confidence: None,
             lock_state: None,
             attributes: None,
+            mask: None,
+            keypoints: None,
+            depth: None,
+            world_pos: None,
         };
-        let out = to_offload_detection(v, 1280, 720);
+        let out = to_offload_detection(v, 1280, 720).expect("a boxed detection normalizes");
         assert_eq!(out.bbox, [0.25, 0.25, 0.5, 0.5]);
         assert_eq!(out.class, "person");
         assert_eq!(out.confidence, 0.8);

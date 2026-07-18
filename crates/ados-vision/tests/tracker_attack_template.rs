@@ -15,18 +15,22 @@ use ados_vision::tracker::{
 
 fn det(x: f32, y: f32, w: f32, h: f32, conf: f32, label: &str) -> Detection {
     Detection {
-        bbox: BoundingBox {
+        bbox: Some(BoundingBox {
             x,
             y,
             width: w,
             height: h,
-        },
+        }),
         class_label: label.into(),
         confidence: conf,
         track_id: None,
         assoc_confidence: None,
         lock_state: None,
         attributes: None,
+        mask: None,
+        keypoints: None,
+        depth: None,
+        world_pos: None,
     }
 }
 
@@ -47,10 +51,15 @@ fn app_at_sim(sim: f32) -> Appearance {
 }
 
 fn center_err(report: &Detection, truth: &Detection) -> f32 {
-    let rx = report.bbox.x + report.bbox.width / 2.0;
-    let ry = report.bbox.y + report.bbox.height / 2.0;
-    let tx = truth.bbox.x + truth.bbox.width / 2.0;
-    let ty = truth.bbox.y + truth.bbox.height / 2.0;
+    let rb = report
+        .bbox
+        .as_ref()
+        .expect("reported detection carries a bbox");
+    let tb = truth.bbox.as_ref().expect("truth detection carries a bbox");
+    let rx = rb.x + rb.width / 2.0;
+    let ry = rb.y + rb.height / 2.0;
+    let tx = tb.x + tb.width / 2.0;
+    let ty = tb.y + tb.height / 2.0;
     ((rx - tx).powi(2) + (ry - ty).powi(2)).sqrt()
 }
 
