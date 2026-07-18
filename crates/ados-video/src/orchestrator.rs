@@ -1382,8 +1382,8 @@ mod tests {
         o.state = PipelineState::Running;
         // A running secondary encoder (a real long-lived child), accrued respawns,
         // and a start stamp older than the healthy window.
-        let proc = ManagedProcess::spawn("test-secondary", "sleep", &["30".into()])
-            .expect("spawn sleep");
+        let proc =
+            ManagedProcess::spawn("test-secondary", "sleep", &["30".into()]).expect("spawn sleep");
         o.secondary_encoders.push(("sub".into(), proc));
         o.secondary_respawn_attempts.insert("sub".into(), 4);
         o.secondary_started_at
@@ -1402,8 +1402,8 @@ mod tests {
     async fn secondary_respawn_counter_holds_within_the_healthy_window() {
         let mut o = test_orch();
         o.state = PipelineState::Running;
-        let proc = ManagedProcess::spawn("test-secondary", "sleep", &["30".into()])
-            .expect("spawn sleep");
+        let proc =
+            ManagedProcess::spawn("test-secondary", "sleep", &["30".into()]).expect("spawn sleep");
         o.secondary_encoders.push(("sub".into(), proc));
         o.secondary_respawn_attempts.insert("sub".into(), 4);
         // Started just now — the window has NOT elapsed, so the count must hold.

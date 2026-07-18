@@ -508,7 +508,12 @@ impl VideoOrchestrator {
         // primary's `note_healthy_tick`, so the budget counts CONSECUTIVE failures
         // and a flaky-but-recoverable camera is never permanently abandoned.
         for id in &running_ids {
-            let over_budget = self.secondary_respawn_attempts.get(id).copied().unwrap_or(0) > 0;
+            let over_budget = self
+                .secondary_respawn_attempts
+                .get(id)
+                .copied()
+                .unwrap_or(0)
+                > 0;
             let window_elapsed = self
                 .secondary_started_at
                 .get(id)
