@@ -84,6 +84,10 @@ pub struct VideoOrchestrator {
     /// mediamtx `sourceOnDemand` pulls and own no process here. Empty on a
     /// single-leg / network-only node.
     pub(crate) secondary_encoders: Vec<(String, ManagedProcess)>,
+    /// Per-leg respawn attempts for local secondary encoders, so a permanently
+    /// broken local secondary camera is given up on rather than respawned every
+    /// tick forever (a bounded circuit breaker; network-pull legs are unaffected).
+    pub(crate) secondary_respawn_attempts: std::collections::HashMap<String, u32>,
     pub(crate) wfb_tee: Option<ManagedProcess>,
     pub(crate) cloud_push: Option<ManagedProcess>,
     pub(crate) sei_tap: Option<ManagedProcess>,
@@ -182,6 +186,7 @@ impl VideoOrchestrator {
             mediamtx: MediamtxManager::new(config_dir),
             encoder: None,
             secondary_encoders: Vec::new(),
+            secondary_respawn_attempts: std::collections::HashMap::new(),
             wfb_tee: None,
             cloud_push: None,
             sei_tap: None,

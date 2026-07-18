@@ -23,6 +23,10 @@ use crate::mediamtx::MAIN_PATH;
 use crate::orchestrator::VideoOrchestrator;
 use crate::process::{kill_orphans, ManagedProcess};
 use crate::tap::{self, spawn_vision_tap};
+
+/// Give up respawning a local secondary encoder after this many attempts, so a
+/// permanently-broken camera does not respawn forever every tick.
+const MAX_SECONDARY_RESPAWNS: u32 = 5;
 use crate::wfb_tee::{drain_wfb_tee_stderr, orphan_pattern, spawn_wfb_tee, ProgressTracker};
 
 impl VideoOrchestrator {
@@ -401,6 +405,16 @@ impl VideoOrchestrator {
             {
                 continue;
             }
+            // Skip a leg that has exhausted its respawn budget (given up on).
+            if self
+                .secondary_respawn_attempts
+                .get(&leg.id)
+                .copied()
+                .unwrap_or(0)
+                > MAX_SECONDARY_RESPAWNS
+            {
+                continue;
+            }
             let camera_type = Self::secondary_camera_type(&leg.source);
             let Some(kind) = detect_encoder_for_camera(
                 camera_type,
@@ -477,7 +491,24 @@ impl VideoOrchestrator {
         if !dead_ids.is_empty() {
             self.secondary_encoders
                 .retain(|(id, _)| !dead_ids.contains(id));
-            // Re-run the spawn pass; it only starts legs not already running.
+            // Count a respawn per dead leg, so a permanently-broken local camera
+            // is given up on (a bounded circuit breaker) rather than respawned
+            // forever every tick.
+            for id in &dead_ids {
+                let n = self
+                    .secondary_respawn_attempts
+                    .entry(id.clone())
+                    .or_insert(0);
+                *n += 1;
+                if *n > MAX_SECONDARY_RESPAWNS {
+                    tracing::warn!(
+                        leg = %id, attempts = *n,
+                        "secondary_encoder_giving_up: too many respawns"
+                    );
+                }
+            }
+            // Re-run the spawn pass; it only starts legs not already running and
+            // skips legs past the respawn cap.
             self.start_secondary_encoders().await;
         }
     }

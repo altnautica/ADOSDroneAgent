@@ -91,9 +91,13 @@ async fn dispatch(req: &[u8], pm: &dyn ProcessManager) -> Value {
     if legs.is_empty() {
         return json!({"ok": false, "error": "E_ARGS", "reason": "cameras must not be empty"});
     }
-    // A leg with no id or no source cannot be served, so reject the whole list
-    // rather than write a half-usable config (Rule 44 — never advertise a stream
-    // the pipeline cannot actually serve).
+    // Validate every leg. A leg with no id/source cannot be served; a leg id
+    // becomes a mediamtx path + a WHEP URL segment, so it must be path-safe
+    // (alphanumeric / dash / underscore) and unique — a bad char or a duplicate
+    // would corrupt the mediamtx config and wedge the whole pipeline. Reject the
+    // whole list rather than write a half-usable config (Rule 44 — never
+    // advertise a stream the pipeline cannot actually serve).
+    let mut seen = std::collections::HashSet::new();
     for leg in legs {
         let id = leg.get("id").and_then(Value::as_str).unwrap_or("");
         let source = leg.get("source").and_then(Value::as_str).unwrap_or("");
@@ -102,6 +106,21 @@ async fn dispatch(req: &[u8], pm: &dyn ProcessManager) -> Value {
                 "ok": false,
                 "error": "E_ARGS",
                 "reason": "each camera needs a non-empty id and source",
+            });
+        }
+        if !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return json!({
+                "ok": false, "error": "E_ARGS",
+                "reason": format!("camera id {id:?} has an unsafe character"),
+            });
+        }
+        if !seen.insert(id) {
+            return json!({
+                "ok": false, "error": "E_ARGS",
+                "reason": format!("duplicate camera id {id:?}"),
             });
         }
     }
@@ -116,8 +135,12 @@ async fn dispatch(req: &[u8], pm: &dyn ProcessManager) -> Value {
     if !persisted {
         return json!({"ok": false, "error": "E_PERSIST"});
     }
+    // The new sources are only LIVE once the pipeline restarts, so `ok` reflects
+    // the actual restart (not just the config write). A restart failure is a
+    // real failure the caller logs + retries — the config is saved (persisted:
+    // true) and will apply on the next start, but the streams are not live yet.
     let restarted = pm.restart(ADOS_VIDEO_UNIT).await;
-    json!({"ok": true, "count": legs.len(), "restarted": restarted})
+    json!({"ok": restarted, "count": legs.len(), "persisted": true, "restarted": restarted})
 }
 
 /// 0o660 + group-own to `ados` so the sandboxed plugin host in that group can
@@ -197,6 +220,14 @@ mod tests {
             br#"{"op":"video.source.set","cameras":"main"}"#.as_slice(),
             br#"{"op":"video.source.set","cameras":[]}"#.as_slice(),
             br#"{"op":"video.source.set","cameras":[{"id":"main"}]}"#.as_slice(),
+            // A leg id with a mediamtx-unsafe character (a space / slash).
+            br#"{"op":"video.source.set","cameras":[{"id":"bad id","source":"rtsp://x/y"}]}"#
+                .as_slice(),
+            br#"{"op":"video.source.set","cameras":[{"id":"a/b","source":"rtsp://x/y"}]}"#
+                .as_slice(),
+            // Duplicate leg ids would collapse in the mediamtx path map.
+            br#"{"op":"video.source.set","cameras":[{"id":"main","source":"rtsp://x/1"},{"id":"main","source":"rtsp://x/2"}]}"#
+                .as_slice(),
         ] {
             let resp = dispatch(body, &NullManager).await;
             assert_eq!(resp["ok"], false, "body should reject: {body:?}");

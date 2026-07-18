@@ -1088,6 +1088,8 @@ fn read_video_streams(host: &str) -> Vec<Value> {
                 "role": leg.get("role").and_then(|r| r.as_str()).unwrap_or(""),
                 "codec": leg.get("codec").and_then(|c| c.as_str()).unwrap_or(""),
                 "whep": format!("http://{host}:{MEDIAMTX_WEBRTC_PORT}/{id}/whep"),
+                // Per-leg liveness (null when the agent has not sampled it yet).
+                "live": leg.get("live").cloned().unwrap_or(Value::Null),
             }))
         })
         .collect()
@@ -1213,7 +1215,15 @@ async fn probe_mediamtx() -> Option<Value> {
     }
     let data: Value = serde_json::from_slice(&body).ok()?;
     let items = data.get("items").and_then(Value::as_array)?;
-    let path = items.first()?;
+    // Look the primary `main` path up BY NAME — never `items.first()`. With
+    // multiple named paths (main / eo_wide / ir) the first-listed may be an idle
+    // secondary `sourceOnDemand` leg (ready only while a reader is attached),
+    // which would collapse the whole video block to not-ready even while /main
+    // is live and serving.
+    let path = items
+        .iter()
+        .find(|p| p.get("name").and_then(Value::as_str) == Some("main"))
+        .or_else(|| items.first())?;
     Some(json!({
         "running": true,
         "stream_name": path.get("name").cloned().unwrap_or_else(|| json!("main")),
