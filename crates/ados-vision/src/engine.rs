@@ -345,6 +345,30 @@ impl VisionEngine {
         out
     }
 
+    /// Resolve a perception capability: the first inference-capable registered
+    /// model of `kind` whose `output_classes` covers `class` (or any model of
+    /// that kind when `class` is `None`), by id order. `None` when nothing
+    /// matches — the honest "this node cannot do that" answer instead of
+    /// hand-picking a global detector.
+    ///
+    /// Only inference-capable models resolve: a mock-backed or failed-to-load
+    /// model is never returned as a working capability (Rule 44). The result is
+    /// deterministic because [`Self::list_models`] is sorted by id.
+    pub async fn resolve_capability(
+        &self,
+        kind: ados_protocol::framebus::ModelKind,
+        class: Option<&str>,
+    ) -> Option<ados_protocol::framebus::ModelInfo> {
+        self.list_models()
+            .await
+            .into_iter()
+            .filter(|m| m.kind == kind && m.is_inference_capable)
+            .find(|m| match class {
+                Some(c) => m.output_classes.iter().any(|oc| oc == c),
+                None => true,
+            })
+    }
+
     /// Run inference for `model_id` on a frame, serialized on the accelerator
     /// lease. Returns the detections. Errors when the model is unknown, is
     /// plugin-side (the plugin must run it), or has no loaded backend model.
@@ -740,6 +764,105 @@ mod tests {
             vec!["seg"]
         );
         assert!(e.models_for_kind(ModelKind::Tracking).await.is_empty());
+    }
+
+    /// A no-op loaded model, so a test backend can report inference-capable
+    /// without pulling a real backend feature.
+    struct NoopModel;
+
+    impl LoadedModel for NoopModel {
+        fn infer(
+            &self,
+            _frame: &[u8],
+            _w: u32,
+            _h: u32,
+            _f: FrameFormat,
+        ) -> Result<Vec<Detection>> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// A test backend that loads any model and, unlike [`MockBackend`], reports
+    /// inference-capable — so a resolved capability has a real model to return.
+    struct CapableBackend;
+
+    impl VisionBackend for CapableBackend {
+        fn load(&self, _meta: &ModelMetadata) -> Result<Box<dyn LoadedModel>> {
+            Ok(Box::new(NoopModel))
+        }
+        fn name(&self) -> &str {
+            "capable"
+        }
+    }
+
+    fn capable_engine() -> Arc<VisionEngine> {
+        VisionEngine::new(Box::new(CapableBackend), 4)
+    }
+
+    #[tokio::test]
+    async fn resolve_capability_matches_kind_and_class() {
+        let e = capable_engine();
+        // A person/car detector, engine-run so it loads on the capable backend.
+        let mut det = meta("person-det", ModelExecution::EngineRun);
+        det.output_classes = vec!["person".into(), "car".into()];
+        e.register_model(det).await.unwrap();
+
+        // detection + person resolves the model.
+        let m = e
+            .resolve_capability(ModelKind::Detection, Some("person"))
+            .await
+            .expect("a person detector resolves detection+person");
+        assert_eq!(m.id, "person-det");
+        assert!(m.is_inference_capable);
+
+        // detection + None resolves any model of that kind.
+        assert_eq!(
+            e.resolve_capability(ModelKind::Detection, None)
+                .await
+                .map(|m| m.id),
+            Some("person-det".into())
+        );
+
+        // An unlisted class does not resolve.
+        assert!(e
+            .resolve_capability(ModelKind::Detection, Some("boat"))
+            .await
+            .is_none());
+
+        // A kind with no registered model does not resolve.
+        assert!(e.resolve_capability(ModelKind::Depth, None).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_capability_skips_a_non_inference_capable_model() {
+        // The default mock engine loads the model (backend_loaded) but is not
+        // inference-capable, so the detection capability does not resolve — a
+        // placeholder is never offered as a working capability (Rule 44).
+        let e = engine();
+        e.register_model(meta("m1", ModelExecution::EngineRun))
+            .await
+            .unwrap();
+        assert!(e
+            .resolve_capability(ModelKind::Detection, None)
+            .await
+            .is_none());
+    }
+
+    /// resolve returns the lowest-id inference-capable match (deterministic).
+    #[tokio::test]
+    async fn resolve_capability_is_deterministic_by_id() {
+        let e = capable_engine();
+        for id in ["det-c", "det-a", "det-b"] {
+            let mut m = meta(id, ModelExecution::EngineRun);
+            m.output_classes = vec!["person".into()];
+            e.register_model(m).await.unwrap();
+        }
+        assert_eq!(
+            e.resolve_capability(ModelKind::Detection, Some("person"))
+                .await
+                .map(|m| m.id),
+            Some("det-a".into())
+        );
     }
 
     #[tokio::test]

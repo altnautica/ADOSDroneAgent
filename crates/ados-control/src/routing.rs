@@ -86,6 +86,8 @@ fn native_routes() -> Vec<NativeRoute> {
         post("/api/vision/designate"),
         // Vision engine status: the registered-model read-back for the GCS hub.
         get("/api/vision/status"),
+        // Vision capabilities: perception-by-task read + single-capability resolve.
+        get("/api/vision/capabilities"),
         // Vision detector selection (PUT pick / DELETE clear) + custom-model upload.
         put("/api/vision/detector"),
         delete("/api/vision/detector"),
@@ -435,7 +437,7 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            129,
+            130,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);
@@ -600,6 +602,8 @@ mod tests {
         assert!(has(Method::POST, "/api/vision/models/upload"));
         // The engine-status read-back (registered model set) is native.
         assert!(has(Method::GET, "/api/vision/status"));
+        // The perception-capabilities read (grouped + single-resolve) is native.
+        assert!(has(Method::GET, "/api/vision/capabilities"));
         // The system-resources snapshot is native.
         assert!(has(Method::GET, "/api/system"));
         // The read-tail wave: composite diagnostics + the GS recording/ui/input reads.

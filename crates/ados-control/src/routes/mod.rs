@@ -145,6 +145,10 @@ pub fn build_router(state: AppState, net_native: bool, hid_native: bool) -> Rout
         // backend-loaded), not only the ones actively publishing detections. A
         // read; 503 when vision is not up.
         .route("/api/vision/status", get(vision::engine_status))
+        // Vision capabilities: what perception this node offers, grouped by task
+        // (kind) with their classes + inference-capability, or a single-capability
+        // resolution via ?kind=&class=. A read; 503 when vision is not up.
+        .route("/api/vision/capabilities", get(vision::engine_capabilities))
         // Vision detector selection: pick (PUT) / clear (DELETE) the model the
         // engine auto-loads. The write merges the vision.detector config block
         // (model_id + enabled, optional model_path) and restarts ados-vision so
