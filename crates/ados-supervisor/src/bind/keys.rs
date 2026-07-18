@@ -109,13 +109,26 @@ pub fn read_public_fingerprint(path: &Path) -> Result<String, String> {
     Ok(hex::encode(out))
 }
 
-/// Load `config.yaml` as a mapping, tolerating absence / a non-mapping root.
-fn load_config_mapping(path: &Path) -> Mapping {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|t| serde_norway::from_str::<Value>(&t).ok())
-        .and_then(|v| v.as_mapping().cloned())
-        .unwrap_or_default()
+/// Load the config mapping for a WRITE, distinguishing an absent file (a fresh
+/// start — Ok(empty)) from a present-but-unparseable one (Err). A present file
+/// that will not parse must NEVER be overwritten: a load-then-write over it would
+/// silently drop every existing key (WFB pairing, `agent.profile`, network). The
+/// caller aborts the write on Err rather than clobbering.
+fn try_load_config_mapping(path: &Path) -> Result<Mapping, String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Mapping::new()),
+        Err(e) => return Err(format!("read failed: {e}")),
+    };
+    if text.trim().is_empty() {
+        return Ok(Mapping::new());
+    }
+    match serde_norway::from_str::<Value>(&text) {
+        Ok(Value::Mapping(m)) => Ok(m),
+        Ok(Value::Null) => Ok(Mapping::new()),
+        Ok(_) => Err("config root is not a mapping".to_string()),
+        Err(e) => Err(format!("config yaml is unparseable: {e}")),
+    }
 }
 
 /// Get (materialising if absent) the nested mapping at `key`, replacing a
@@ -241,7 +254,13 @@ pub fn persist_pair_state(
     #[cfg(not(target_os = "linux"))]
     let _ = lock_path;
 
-    let mut root = load_config_mapping(config_path);
+    let mut root = match try_load_config_mapping(config_path) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::error!(error = %e, path = %config_path.display(), "config_write_aborted_unparseable");
+            return false;
+        }
+    };
     apply_pair_fields(
         &mut root,
         role,
@@ -278,6 +297,27 @@ pub fn apply_video_cameras(root: &mut Mapping, cameras: &serde_json::Value) {
     if !matches!(value, Value::Sequence(_)) {
         return;
     }
+    // Mirror the PRIMARY leg's source into `video.camera.source`, so the inline
+    // video pipeline (which reads `video.camera`) serves the primary leg. A
+    // pod-only drone has no local camera — its primary leg is a network RTSP the
+    // existing IP-camera path pulls into `/main`. Without this, the pipeline runs
+    // local V4L2/CSI discovery, finds nothing, and never starts (zero video). The
+    // primary is the leg with role `primary`, else the first (matching
+    // `VideoConfig::resolve_legs`).
+    if let Some(arr) = cameras.as_array() {
+        let primary = arr
+            .iter()
+            .find(|c| c.get("role").and_then(serde_json::Value::as_str) == Some("primary"))
+            .or_else(|| arr.first());
+        if let Some(src) = primary
+            .and_then(|c| c.get("source"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            let camera = ensure_map(ensure_map(root, "video"), "camera");
+            set_str(camera, "source", src);
+        }
+    }
     let video = ensure_map(root, "video");
     video.insert(Value::String("cameras".to_string()), value);
 }
@@ -309,7 +349,13 @@ pub fn persist_video_cameras(
     #[cfg(not(target_os = "linux"))]
     let _ = lock_path;
 
-    let mut root = load_config_mapping(config_path);
+    let mut root = match try_load_config_mapping(config_path) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::error!(error = %e, path = %config_path.display(), "config_write_aborted_unparseable");
+            return false;
+        }
+    };
     apply_video_cameras(&mut root, cameras);
 
     let body = match serde_norway::to_string(&Value::Mapping(root)) {
@@ -605,7 +651,7 @@ mod tests {
             return;
         }
         assert!(ok);
-        let reloaded = load_config_mapping(&cfg);
+        let reloaded = try_load_config_mapping(&cfg).unwrap();
         let wfb = reloaded
             .get("video")
             .and_then(Value::as_mapping)
@@ -643,7 +689,7 @@ mod tests {
             return;
         }
         assert!(ok);
-        let reloaded = load_config_mapping(&cfg);
+        let reloaded = try_load_config_mapping(&cfg).unwrap();
         let video = reloaded.get("video").and_then(Value::as_mapping).unwrap();
         let legs = video.get("cameras").and_then(Value::as_sequence).unwrap();
         assert_eq!(legs.len(), 2);
@@ -657,6 +703,29 @@ mod tests {
         let wfb = video.get("wfb").and_then(Value::as_mapping).unwrap();
         assert_eq!(wfb.get("channel").unwrap(), &Value::Number(149.into()));
         assert!(reloaded.get("agent").is_some());
+        // A1: the primary leg's source is mirrored into video.camera.source so
+        // the inline pipeline serves it (a pod-only drone has no local camera).
+        let camera = video.get("camera").and_then(Value::as_mapping).unwrap();
+        assert_eq!(
+            camera.get("source").unwrap(),
+            &Value::String("rtsp://192.168.144.25:8554/main".into())
+        );
+    }
+
+    #[test]
+    fn persist_video_cameras_refuses_to_clobber_an_unparseable_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        // A present but unparseable config (a corrupt / truncated write).
+        std::fs::write(&cfg, "agent:\n  profile: drone\nvideo: [unclosed\n").unwrap();
+        let lock = dir.path().join("config.yaml.lock");
+        let before = std::fs::read_to_string(&cfg).unwrap();
+        let cameras = serde_json::json!([{"id":"main","source":"rtsp://x/main","role":"eo"}]);
+        let ok = persist_video_cameras(&cfg, &lock, &cameras);
+        assert!(!ok, "must refuse to write over an unparseable config");
+        // The corrupt file is left untouched, not clobbered with an empty config
+        // that would drop WFB pairing + profile.
+        assert_eq!(std::fs::read_to_string(&cfg).unwrap(), before);
     }
 
     #[test]

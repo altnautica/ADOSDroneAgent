@@ -461,11 +461,16 @@ impl AgentVideoConfig {
             .map(|(i, c)| {
                 let is_primary = i == primary_idx;
                 let is_network_pull = !is_primary && c.network_source().is_some();
-                let role = if is_primary {
-                    "primary".to_string()
-                } else {
-                    c.role.clone().unwrap_or_else(|| "secondary".to_string())
-                };
+                // Keep the leg's DECLARED role (e.g. "eo") so the GCS label map
+                // resolves; a primary named "main" still reads as "EO Zoom". Fall
+                // back to "primary"/"secondary" only when the leg declared no role.
+                let role = c.role.clone().unwrap_or_else(|| {
+                    if is_primary {
+                        "primary".to_string()
+                    } else {
+                        "secondary".to_string()
+                    }
+                });
                 ResolvedLeg {
                     // The primary is always served at the fixed "main" path.
                     id: if is_primary {
@@ -778,7 +783,7 @@ video:
         assert_eq!(legs[0].id, "main");
         assert!(legs[0].is_primary);
         assert!(!legs[0].is_network_pull);
-        assert_eq!(legs[0].role, "primary");
+        assert_eq!(legs[0].role, "eo"); // A6: keeps its declared role, not "primary"
         assert_eq!(legs[1].id, "eo-wide");
         assert!(!legs[1].is_primary);
         assert!(legs[1].is_network_pull);
@@ -805,6 +810,24 @@ video:
         assert_eq!(primary[0].id, "main");
         assert!(!primary[0].is_network_pull);
         assert!(legs.iter().find(|l| l.id == "ir").unwrap().is_network_pull);
+    }
+
+    #[test]
+    fn resolve_legs_keeps_the_primary_declared_role_label() {
+        // A6: the primary leg keeps its declared role (e.g. "eo") so the GCS
+        // label map resolves — it is NOT clobbered to "primary". (The SIYI ZT30
+        // shape: first leg EO-zoom on main, second IR on sub.)
+        let yaml = "\
+video:
+  cameras:
+    - { id: eo-zoom, source: rtsp://192.168.144.25:8554/main, role: eo }
+    - { id: sub,     source: rtsp://192.168.144.25:8554/sub,  role: ir }
+";
+        let (_dir, path) = write_tmp(yaml);
+        let legs = AgentVideoConfig::load_from(&path).resolve_legs(&CameraConfig::default());
+        let primary = legs.iter().find(|l| l.is_primary).unwrap();
+        assert_eq!(primary.id, "main"); // served at the fixed main path
+        assert_eq!(primary.role, "eo"); // but keeps the EO label
     }
 
     #[test]
