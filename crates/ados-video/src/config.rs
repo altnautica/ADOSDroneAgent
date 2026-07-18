@@ -106,6 +106,70 @@ impl CameraConfig {
     }
 }
 
+/// One entry of the optional `video.cameras:` list — a single video leg the
+/// node exposes as its own mediamtx path (and `:8889/<id>/whep`). Present only
+/// when the operator (or a driver plugin) declares more than one stream; an
+/// absent `video.cameras` falls back to the single legacy `video.camera` block
+/// verbatim (see [`AgentVideoConfig::resolve_legs`]).
+#[derive(Debug, Clone, Deserialize)]
+pub struct CameraLeg {
+    /// Stable per-node stream id — the mediamtx path name and the WHEP id.
+    pub id: String,
+    /// Capture source: a device hint / path (local encode) or an `rtsp://` /
+    /// `http://` URL (a secondary network leg mediamtx pulls on demand).
+    #[serde(default = "default_source")]
+    pub source: String,
+    /// Logical role: `"primary"` designates the WFB/cloud stream; any other
+    /// value (or absent) is a LAN-WHEP-only secondary. Absent on every leg ⇒ the
+    /// first leg is the primary.
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default = "default_codec")]
+    pub codec: String,
+    #[serde(default = "default_width")]
+    pub width: u32,
+    #[serde(default = "default_height")]
+    pub height: u32,
+    #[serde(default = "default_fps")]
+    pub fps: u32,
+    #[serde(default = "default_bitrate_kbps")]
+    pub bitrate_kbps: u32,
+}
+
+impl CameraLeg {
+    /// An explicit network capture source (`rtsp://…` / `http://…`), or `None`
+    /// for a local device. Mirrors [`CameraConfig::network_source`].
+    pub fn network_source(&self) -> Option<&str> {
+        let s = self.source.trim();
+        if s.starts_with("rtsp://") || s.starts_with("http://") {
+            Some(s)
+        } else {
+            None
+        }
+    }
+}
+
+/// A resolved video leg — what the orchestrator actually drives. Exactly one leg
+/// is the primary (the WFB/cloud stream); the rest are LAN-WHEP-only
+/// secondaries. A secondary with a network source is a mediamtx `sourceOnDemand`
+/// pull (no agent-owned encoder); every other leg (the primary always, or a
+/// local secondary) is an agent-owned encoder that publishes into its path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedLeg {
+    pub id: String,
+    pub source: String,
+    pub role: String,
+    pub codec: String,
+    /// True for the single designated primary leg (carries WFB + cloud + SEI).
+    pub is_primary: bool,
+    /// True ⇒ mediamtx pulls the source on demand (no owned encoder process).
+    pub is_network_pull: bool,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub bitrate_kbps: u32,
+}
+
 // --- agent-level video config (the orchestrator's gates + cloud + GST flags) -
 
 fn default_video_mode() -> String {
@@ -240,6 +304,11 @@ pub struct AgentVideoConfig {
     /// The `video.vision:` sub-block (the additive frame tap). Default OFF.
     #[serde(default)]
     pub vision: VisionTapConfig,
+    /// The optional `video.cameras:` list — more than one video leg the node
+    /// exposes concurrently (a smart pod, a dual-camera rig). Empty ⇒ the single
+    /// legacy `video.camera` path (fully backward compatible).
+    #[serde(default)]
+    pub cameras: Vec<CameraLeg>,
 }
 
 impl Default for AgentVideoConfig {
@@ -251,6 +320,7 @@ impl Default for AgentVideoConfig {
             cloud_rtp_port: default_cloud_rtp_port(),
             wfb: WfbVideoConfig::default(),
             vision: VisionTapConfig::default(),
+            cameras: Vec::new(),
         }
     }
 }
@@ -288,6 +358,8 @@ impl AgentVideoConfig {
             wfb: WfbVideoConfig,
             #[serde(default)]
             vision: VisionTapConfig,
+            #[serde(default)]
+            cameras: Vec<CameraLeg>,
         }
         impl Default for VideoSection {
             fn default() -> Self {
@@ -298,6 +370,7 @@ impl AgentVideoConfig {
                     cloud_rtp_port: default_cloud_rtp_port(),
                     wfb: WfbVideoConfig::default(),
                     vision: VisionTapConfig::default(),
+                    cameras: Vec::new(),
                 }
             }
         }
@@ -321,7 +394,63 @@ impl AgentVideoConfig {
             cloud_rtp_port: raw.video.cloud_rtp_port,
             wfb: raw.video.wfb,
             vision: raw.video.vision,
+            cameras: raw.video.cameras,
         }
+    }
+
+    /// Resolve the effective video legs the orchestrator drives.
+    ///
+    /// Back-compat: an empty `video.cameras` yields a single `main` primary leg
+    /// built from the legacy `video.camera` block, so the pipeline is
+    /// byte-identical to the single-stream path. Otherwise the leg whose role is
+    /// `"primary"` (else the first) is the primary — always an owned encoder, so
+    /// a network-primary keeps its ffmpeg bridge — and every other leg with a
+    /// network source becomes a mediamtx `sourceOnDemand` pull.
+    pub fn resolve_legs(&self, camera: &CameraConfig) -> Vec<ResolvedLeg> {
+        if self.cameras.is_empty() {
+            return vec![ResolvedLeg {
+                id: "main".to_string(),
+                source: camera.source.clone(),
+                role: "primary".to_string(),
+                codec: camera.codec.clone(),
+                is_primary: true,
+                is_network_pull: false,
+                width: camera.width,
+                height: camera.height,
+                fps: camera.fps,
+                bitrate_kbps: camera.bitrate_kbps,
+            }];
+        }
+        let primary_idx = self
+            .cameras
+            .iter()
+            .position(|c| c.role.as_deref() == Some("primary"))
+            .unwrap_or(0);
+        self.cameras
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let is_primary = i == primary_idx;
+                let is_network_pull = !is_primary && c.network_source().is_some();
+                let role = if is_primary {
+                    "primary".to_string()
+                } else {
+                    c.role.clone().unwrap_or_else(|| "secondary".to_string())
+                };
+                ResolvedLeg {
+                    id: c.id.clone(),
+                    source: c.source.clone(),
+                    role,
+                    codec: c.codec.clone(),
+                    is_primary,
+                    is_network_pull,
+                    width: c.width,
+                    height: c.height,
+                    fps: c.fps,
+                    bitrate_kbps: c.bitrate_kbps,
+                }
+            })
+            .collect()
     }
 
     /// True when the resolved profile is the ground station (the orchestrator
@@ -570,5 +699,97 @@ video:
         // Unparseable → defaults, never a panic / block.
         assert_eq!(c.mode, "wfb");
         assert!(c.profile.is_none());
+    }
+
+    // --- video.cameras[] / resolve_legs -------------------------------
+
+    #[test]
+    fn cameras_absent_synthesizes_single_main_leg() {
+        // No `video.cameras` ⇒ one primary "main" leg from the legacy block,
+        // byte-identical to the single-stream path.
+        let cfg = AgentVideoConfig::default();
+        let cam = CameraConfig {
+            source: "usb".to_string(),
+            codec: "h265".to_string(),
+            ..CameraConfig::default()
+        };
+        let legs = cfg.resolve_legs(&cam);
+        assert_eq!(legs.len(), 1);
+        let leg = &legs[0];
+        assert_eq!(leg.id, "main");
+        assert_eq!(leg.role, "primary");
+        assert_eq!(leg.source, "usb");
+        assert_eq!(leg.codec, "h265");
+        assert!(leg.is_primary);
+        assert!(!leg.is_network_pull);
+    }
+
+    #[test]
+    fn cameras_parse_multi_leg_and_resolve() {
+        let yaml = "\
+video:
+  cameras:
+    - { id: eo-zoom, source: rtsp://192.168.144.25:8554/main, role: eo, codec: h265 }
+    - { id: eo-wide, source: rtsp://192.168.144.25:8554/sub, role: eo_wide, codec: h264 }
+    - { id: ir, source: rtsp://192.168.144.25:8554/ir, role: ir }
+";
+        let (_dir, path) = write_tmp(yaml);
+        let cfg = AgentVideoConfig::load_from(&path);
+        assert_eq!(cfg.cameras.len(), 3);
+        let legs = cfg.resolve_legs(&CameraConfig::default());
+        assert_eq!(legs.len(), 3);
+        // No leg declared role "primary" → the first leg is the primary and is
+        // an owned encoder; the two secondary RTSP legs are network pulls.
+        assert_eq!(legs[0].id, "eo-zoom");
+        assert!(legs[0].is_primary);
+        assert!(!legs[0].is_network_pull);
+        assert_eq!(legs[0].role, "primary");
+        assert!(!legs[1].is_primary);
+        assert!(legs[1].is_network_pull);
+        assert_eq!(legs[1].role, "eo_wide");
+        assert!(legs[2].is_network_pull);
+        assert_eq!(legs[2].codec, "h264"); // per-leg codec default
+    }
+
+    #[test]
+    fn resolve_legs_honours_explicit_primary_role() {
+        let yaml = "\
+video:
+  cameras:
+    - { id: ir, source: rtsp://10.0.0.9/ir, role: ir }
+    - { id: main-eo, source: /dev/video0, role: primary }
+";
+        let (_dir, path) = write_tmp(yaml);
+        let legs = AgentVideoConfig::load_from(&path).resolve_legs(&CameraConfig::default());
+        // The second leg is the declared primary (owned encoder); the first,
+        // though listed first, is a secondary network pull.
+        let primary: Vec<_> = legs.iter().filter(|l| l.is_primary).collect();
+        assert_eq!(primary.len(), 1);
+        assert_eq!(primary[0].id, "main-eo");
+        assert!(!primary[0].is_network_pull);
+        assert!(legs.iter().find(|l| l.id == "ir").unwrap().is_network_pull);
+    }
+
+    #[test]
+    fn camera_leg_partial_fields_fill_defaults() {
+        let yaml = "\
+video:
+  cameras:
+    - { id: solo, source: /dev/video0 }
+";
+        let (_dir, path) = write_tmp(yaml);
+        let cfg = AgentVideoConfig::load_from(&path);
+        let leg = &cfg.cameras[0];
+        assert_eq!(leg.codec, "h264");
+        assert_eq!(leg.width, 1280);
+        assert_eq!(leg.height, 720);
+        assert_eq!(leg.fps, 30);
+        assert_eq!(leg.bitrate_kbps, 4000);
+        assert!(leg.role.is_none());
+        // A single declared leg (no role) is the primary owned encoder.
+        let legs = cfg.resolve_legs(&CameraConfig::default());
+        assert_eq!(legs.len(), 1);
+        assert!(legs[0].is_primary);
+        assert!(!legs[0].is_network_pull);
     }
 }
