@@ -709,6 +709,34 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
             if isinstance(state, str) and state in ("ready", "missing", "error"):
                 payload["cameraState"] = state
 
+    # Per-leg video streams from /run/ados/video-streams.json, written by the
+    # ados-video pipeline on start + each healthy tick, so a cloud-relayed
+    # multi-stream node's legs reach the GCS stream switcher. The GCS resolves
+    # each leg's WHEP URL (:8889/<id>/whep) against the node's reachable host.
+    # Stale snapshots (> 20 s since the last re-stamp) are dropped (rule 44).
+    try:
+        with open("/run/ados/video-streams.json") as _vsf:
+            vs_doc = _json.loads(_vsf.read())
+    except (OSError, ValueError):
+        vs_doc = None
+    if isinstance(vs_doc, dict):
+        vs_updated = vs_doc.get("updated_at_unix")
+        vs_fresh = (
+            isinstance(vs_updated, (int, float))
+            and (time.time() - float(vs_updated)) <= 20.0
+        )
+        streams = vs_doc.get("streams")
+        if vs_fresh and isinstance(streams, list) and streams:
+            payload["videoStreams"] = [
+                {
+                    "id": s.get("id"),
+                    "role": s.get("role", ""),
+                    "codec": s.get("codec", ""),
+                }
+                for s in streams
+                if isinstance(s, dict) and s.get("id")
+            ]
+
     # Management-link health — sourced cross-process from
     # /run/ados/mgmt-link.json, written by the supervisor's management-link
     # guardian each tick. Surfaces whether the operator can still reach the box

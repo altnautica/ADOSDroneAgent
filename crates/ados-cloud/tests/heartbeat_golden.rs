@@ -89,6 +89,7 @@ fn base_payload() -> HeartbeatPayload {
         video_encoder_hw_accel: None,
         video_camera_source: None,
         video_pipeline_state: None,
+        video_streams: None,
         display_type: None,
         can_buses: None,
         compute_role: None,

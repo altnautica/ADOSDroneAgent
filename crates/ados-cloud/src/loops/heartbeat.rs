@@ -24,7 +24,7 @@
 use std::time::Duration;
 
 use crate::heartbeat::{
-    ClusterSlave, ConfigErrorEntry, HeartbeatPayload, RadioBlock, RemoteAccess,
+    ClusterSlave, ConfigErrorEntry, HeartbeatPayload, RadioBlock, RemoteAccess, VideoStreamHb,
 };
 
 /// The compute-node heartbeat sidecar written by `ados-compute`
@@ -81,6 +81,45 @@ fn read_compute_sidecar_from(path: &std::path::Path, now_ms: i64) -> Option<Comp
 
 fn read_compute_sidecar(now_ms: i64) -> Option<ComputeSidecar> {
     read_compute_sidecar_from(std::path::Path::new(COMPUTE_HEARTBEAT_SIDECAR), now_ms)
+}
+
+const VIDEO_STREAMS_SIDECAR: &str = "/run/ados/video-streams.json";
+
+/// A video-streams sidecar not re-stamped within this window is treated as
+/// absent, so a stopped pipeline's lingering tmpfs file stops advertising dead
+/// legs (Rule 44). 4x the ~5 s healthy-tick re-stamp cadence.
+const VIDEO_STREAMS_STALE_MS: i64 = 20_000;
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct VideoStreamsSidecarDoc {
+    #[serde(default)]
+    updated_at_unix: f64,
+    #[serde(default)]
+    streams: Vec<VideoStreamHb>,
+}
+
+/// Read + parse the video-streams sidecar, folding its per-leg list onto the
+/// heartbeat so a cloud-relayed multi-stream node's legs reach the GCS switcher.
+/// `None` when absent, unparseable, empty, or STALE.
+fn read_video_streams_sidecar_from(
+    path: &std::path::Path,
+    now_ms: i64,
+) -> Option<Vec<VideoStreamHb>> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let doc: VideoStreamsSidecarDoc = serde_json::from_str(&text).ok()?;
+    let gen_ms = (doc.updated_at_unix * 1000.0) as i64;
+    if gen_ms > 0
+        && now_ms.saturating_sub(gen_ms) <= VIDEO_STREAMS_STALE_MS
+        && !doc.streams.is_empty()
+    {
+        Some(doc.streams)
+    } else {
+        None
+    }
+}
+
+fn read_video_streams_sidecar(now_ms: i64) -> Option<Vec<VideoStreamHb>> {
+    read_video_streams_sidecar_from(std::path::Path::new(VIDEO_STREAMS_SIDECAR), now_ms)
 }
 
 /// Local epoch ms for the staleness gate.
@@ -308,6 +347,7 @@ fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
     // Fold the compute-node sidecar (compute profile only; None elsewhere, and
     // None when the file is stale so a dead producer is not folded forever).
     let compute = read_compute_sidecar(now_epoch_ms()).unwrap_or_default();
+    let video_streams = read_video_streams_sidecar(now_epoch_ms());
     // Ferry every fresh plugin/feature state slice opaquely (empty map omitted).
     let plugin_state = {
         let slices = read_plugin_state_sidecars();
@@ -438,6 +478,7 @@ fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
         video_encoder_hw_accel: None,
         video_camera_source: None,
         video_pipeline_state: None,
+        video_streams,
         display_type: None,
         can_buses: None,
         compute_role: compute.compute_role,

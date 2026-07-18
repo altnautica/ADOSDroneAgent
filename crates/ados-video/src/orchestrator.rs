@@ -587,6 +587,10 @@ impl VideoOrchestrator {
         if health_ok {
             self.note_healthy_tick();
             self.refresh_camera_state();
+            // Re-stamp the leg-list sidecar so the cloud heartbeat's staleness
+            // gate keeps advertising a running pipeline's legs (and drops them
+            // once the pipeline stops re-stamping).
+            self.refresh_video_streams();
         } else {
             self.note_unhealthy_tick();
         }

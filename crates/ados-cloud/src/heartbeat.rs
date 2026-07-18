@@ -344,6 +344,12 @@ pub struct HeartbeatPayload {
     pub video_camera_source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub video_pipeline_state: Option<String>,
+    /// Per-leg video streams (id/role/codec) a multi-stream node serves, folded
+    /// from the /run/ados/video-streams.json sidecar. Absent on a single-stream
+    /// node so the heartbeat stays byte-identical. The GCS resolves each leg's
+    /// `:8889/<id>/whep` URL against the node's reachable host.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub video_streams: Option<Vec<VideoStreamHb>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_type: Option<String>,
 
@@ -417,6 +423,17 @@ pub struct ClusterSlave {
 pub struct ConfigErrorEntry {
     pub service: String,
     pub error: String,
+}
+
+/// One advertised video leg on the heartbeat: its stable id (the mediamtx path
+/// and WHEP id), a logical role (eo, eo_wide, ir), and the codec. The GCS
+/// resolves each leg's WHEP URL (webrtc port 8889) against the node's reachable
+/// host. Keys are single words, so the casing is identical either way.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VideoStreamHb {
+    pub id: String,
+    pub role: String,
+    pub codec: String,
 }
 
 /// One FC CAN bus entry. The block is omitted from the payload when no CAN
@@ -568,6 +585,7 @@ mod tests {
             video_encoder_hw_accel: None,
             video_camera_source: None,
             video_pipeline_state: None,
+            video_streams: None,
             display_type: None,
             can_buses: None,
             compute_role: None,
