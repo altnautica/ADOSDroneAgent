@@ -12,6 +12,13 @@ as the host APIs stabilise.
 
 from __future__ import annotations
 
+from ados.sdk.cameras import (
+    CAMERA_SELECTOR_AUTO,
+    CAMERA_SELECTOR_BINDING,
+    CAMERA_SELECTOR_CONTROL,
+    primary_camera_id,
+    resolve_camera_selection,
+)
 from ados.sdk.compute import (
     ComputeClient,
     JobStatus,
@@ -94,6 +101,12 @@ from ados.sdk.vision import (
 )
 
 __all__ = [
+    # Camera binding (the camera-selector resolver)
+    "CAMERA_SELECTOR_CONTROL",
+    "CAMERA_SELECTOR_BINDING",
+    "CAMERA_SELECTOR_AUTO",
+    "primary_camera_id",
+    "resolve_camera_selection",
     # Testing
     "PluginTestHarness",
     "FakeVisionEngine",
