@@ -1042,7 +1042,16 @@ jobs:
             echo "No ADOS_DRIVER_SIGNING_KEY set; publishing SHA256-only (dev posture)."
             exit 0
           fi
-          sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
+          # This job builds on the older-glibc runner (so the binary runs on the
+          # Bookworm target boards); minisign is not packaged for that runner's
+          # apt, so signing degrades to SHA256-only there rather than failing the
+          # publish. On edge (the default channel) the installer accepts SHA256;
+          # the signed artifacts on the newer-glibc jobs are unaffected.
+          sudo apt-get update || true
+          if ! sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign; then
+            echo "minisign unavailable on this runner; publishing SHA256-only."
+            exit 0
+          fi
           printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
           minisign -S -s /tmp/sign.key -m rel/ados-vision-onnx-aarch64 -x rel/ados-vision-onnx-aarch64.minisig
           minisign -S -s /tmp/sign.key -m rel/libonnxruntime-aarch64.so -x rel/libonnxruntime-aarch64.so.minisig
