@@ -4,6 +4,14 @@
       "additionalProperties": false,
       "description": "Agent-half manifest block.",
       "properties": {
+        "contains_vendor_binary": {
+          "default": false,
+          "title": "Contains Vendor Binary",
+          "type": "boolean"
+        },
+        "contributes": {
+          "$ref": "#/$defs/AgentContributes"
+        },
         "entrypoint": {
           "title": "Entrypoint",
           "type": "string"
@@ -17,14 +25,17 @@
           "title": "Isolation",
           "type": "string"
         },
-        "runtime": {
-          "default": "python",
-          "enum": [
-            "python",
-            "rust"
-          ],
-          "title": "Runtime",
-          "type": "string"
+        "mavlink_components": {
+          "items": {
+            "$ref": "#/$defs/MavlinkComponent"
+          },
+          "title": "Mavlink Components",
+          "type": "array"
+        },
+        "per_drone_config": {
+          "default": false,
+          "title": "Per Drone Config",
+          "type": "boolean"
         },
         "permissions": {
           "items": {
@@ -36,32 +47,14 @@
         "resources": {
           "$ref": "#/$defs/ResourceLimits"
         },
-        "contributes": {
-          "$ref": "#/$defs/AgentContributes"
-        },
-        "mavlink_components": {
-          "items": {
-            "$ref": "#/$defs/MavlinkComponent"
-          },
-          "title": "Mavlink Components",
-          "type": "array"
-        },
-        "contains_vendor_binary": {
-          "default": false,
-          "title": "Contains Vendor Binary",
-          "type": "boolean"
-        },
-        "test_fixtures": {
-          "additionalProperties": {
-            "type": "string"
-          },
-          "title": "Test Fixtures",
-          "type": "object"
-        },
-        "vendor_attribution": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/VendorAttribution" },
-          "default": []
+        "runtime": {
+          "default": "python",
+          "enum": [
+            "python",
+            "rust"
+          ],
+          "title": "Runtime",
+          "type": "string"
         },
         "subprocess_spawn": {
           "anyOf": [
@@ -78,21 +71,30 @@
           "default": null,
           "title": "Subprocess Spawn"
         },
-        "per_drone_config": {
-          "default": false,
-          "title": "Per Drone Config",
-          "type": "boolean"
-        },
         "target_profiles": {
           "items": {
             "enum": [
               "drone",
               "ground-station",
-              "lite"
+              "workstation"
             ],
             "type": "string"
           },
           "title": "Target Profiles",
+          "type": "array"
+        },
+        "test_fixtures": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Test Fixtures",
+          "type": "object"
+        },
+        "vendor_attribution": {
+          "items": {
+            "$ref": "#/$defs/VendorAttribution"
+          },
+          "title": "Vendor Attribution",
           "type": "array"
         }
       },
@@ -105,19 +107,43 @@
     "AgentContributes": {
       "additionalProperties": false,
       "properties": {
-        "services": {
-          "items": {
-            "type": "string"
-          },
-          "title": "Services",
-          "type": "array"
-        },
         "drivers": {
           "items": {
             "additionalProperties": true,
             "type": "object"
           },
           "title": "Drivers",
+          "type": "array"
+        },
+        "prompts": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Prompts",
+          "type": "array"
+        },
+        "resources": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Resources",
+          "type": "array"
+        },
+        "services": {
+          "items": {
+            "$ref": "#/$defs/ServiceSpec"
+          },
+          "title": "Services",
+          "type": "array"
+        },
+        "tools": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Tools",
           "type": "array"
         },
         "vision": {
@@ -130,30 +156,6 @@
             }
           ],
           "default": null
-        },
-        "tools": {
-          "items": {
-            "additionalProperties": true,
-            "type": "object"
-          },
-          "title": "Tools",
-          "type": "array"
-        },
-        "resources": {
-          "items": {
-            "additionalProperties": true,
-            "type": "object"
-          },
-          "title": "Resources",
-          "type": "array"
-        },
-        "prompts": {
-          "items": {
-            "additionalProperties": true,
-            "type": "object"
-          },
-          "title": "Prompts",
-          "type": "array"
         }
       },
       "title": "AgentContributes",
@@ -179,6 +181,20 @@
           "default": null,
           "title": "Gcs Version"
         },
+        "min_tier": {
+          "anyOf": [
+            {
+              "maximum": 4,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Min Tier"
+        },
         "supported_boards": {
           "items": {
             "type": "string"
@@ -193,10 +209,59 @@
       "title": "Compatibility",
       "type": "object"
     },
+    "FcParameter": {
+      "additionalProperties": false,
+      "description": "A single firmware parameter the plugin expects the operator to\nset before the feature behaves correctly. ``value`` is optional\nbecause some parameters take a bitmask the operator computes from\nmultiple flags; in that case ``note`` carries the guidance.",
+      "properties": {
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Note"
+        },
+        "param": {
+          "minLength": 1,
+          "title": "Param",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Value"
+        }
+      },
+      "required": [
+        "param"
+      ],
+      "title": "FcParameter",
+      "type": "object"
+    },
     "GcsBlock": {
       "additionalProperties": false,
       "description": "GCS-half manifest block.",
       "properties": {
+        "contributes": {
+          "$ref": "#/$defs/GcsContributes"
+        },
         "entrypoint": {
           "title": "Entrypoint",
           "type": "string"
@@ -211,21 +276,18 @@
           "title": "Isolation",
           "type": "string"
         },
-        "permissions": {
-          "items": {
-            "$ref": "#/$defs/PermissionRef"
-          },
-          "title": "Permissions",
-          "type": "array"
-        },
-        "contributes": {
-          "$ref": "#/$defs/GcsContributes"
-        },
         "locales": {
           "items": {
             "type": "string"
           },
           "title": "Locales",
+          "type": "array"
+        },
+        "permissions": {
+          "items": {
+            "$ref": "#/$defs/PermissionRef"
+          },
+          "title": "Permissions",
           "type": "array"
         }
       },
@@ -238,20 +300,12 @@
     "GcsContributes": {
       "additionalProperties": false,
       "properties": {
-        "panels": {
+        "models": {
           "items": {
             "additionalProperties": true,
             "type": "object"
           },
-          "title": "Panels",
-          "type": "array"
-        },
-        "overlays": {
-          "items": {
-            "additionalProperties": true,
-            "type": "object"
-          },
-          "title": "Overlays",
+          "title": "Models",
           "type": "array"
         },
         "notifications": {
@@ -262,20 +316,36 @@
           "title": "Notifications",
           "type": "array"
         },
-        "smart_functions": {
+        "overlays": {
           "items": {
             "additionalProperties": true,
             "type": "object"
           },
-          "title": "Smart Functions",
+          "title": "Overlays",
           "type": "array"
         },
-        "tools": {
+        "panels": {
           "items": {
             "additionalProperties": true,
             "type": "object"
           },
-          "title": "Tools",
+          "title": "Panels",
+          "type": "array"
+        },
+        "parameters": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Parameters",
+          "type": "array"
+        },
+        "prompts": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Prompts",
           "type": "array"
         },
         "resources": {
@@ -286,16 +356,94 @@
           "title": "Resources",
           "type": "array"
         },
-        "prompts": {
+        "skills": {
           "items": {
             "additionalProperties": true,
             "type": "object"
           },
-          "title": "Prompts",
+          "title": "Skills",
+          "type": "array"
+        },
+        "smart_functions": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Smart Functions",
+          "type": "array"
+        },
+        "tabs": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Tabs",
+          "type": "array"
+        },
+        "target_actions": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Target Actions",
+          "type": "array"
+        },
+        "tools": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Tools",
           "type": "array"
         }
       },
       "title": "GcsContributes",
+      "type": "object"
+    },
+    "HardwareRequirements": {
+      "additionalProperties": false,
+      "description": "Optional hardware-side requirements surfaced in the install dialog.\n\nAll fields are free-form so the dialog can render whatever the\nmanifest author wants the operator to see. The agent does not enforce\nany of these at install time; they are informational copy.",
+      "properties": {
+        "boards": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Boards",
+          "type": "array"
+        },
+        "cameras": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cameras"
+        },
+        "fc_firmware": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Fc Firmware"
+        },
+        "optional": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Optional",
+          "type": "array"
+        }
+      },
+      "title": "HardwareRequirements",
       "type": "object"
     },
     "MavlinkComponent": {
@@ -345,15 +493,6 @@
       "additionalProperties": false,
       "description": "Object form of a permission entry: ``{id, required, degraded_behavior}``.",
       "properties": {
-        "id": {
-          "title": "Id",
-          "type": "string"
-        },
-        "required": {
-          "default": true,
-          "title": "Required",
-          "type": "boolean"
-        },
         "degraded_behavior": {
           "anyOf": [
             {
@@ -365,6 +504,15 @@
           ],
           "default": null,
           "title": "Degraded Behavior"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "required": {
+          "default": true,
+          "title": "Required",
+          "type": "boolean"
         }
       },
       "required": [
@@ -373,16 +521,113 @@
       "title": "PermissionRef",
       "type": "object"
     },
+    "RequiredFcParameters": {
+      "additionalProperties": false,
+      "description": "Per-firmware bucket of required parameter hints. Each bucket is\noptional so a plugin can ship guidance for only the firmware it\nactually targets.",
+      "properties": {
+        "ardupilot": {
+          "items": {
+            "$ref": "#/$defs/FcParameter"
+          },
+          "title": "Ardupilot",
+          "type": "array"
+        },
+        "inav": {
+          "items": {
+            "$ref": "#/$defs/FcParameter"
+          },
+          "title": "Inav",
+          "type": "array"
+        },
+        "px4": {
+          "items": {
+            "$ref": "#/$defs/FcParameter"
+          },
+          "title": "Px4",
+          "type": "array"
+        }
+      },
+      "title": "RequiredFcParameters",
+      "type": "object"
+    },
+    "ResourceImpact": {
+      "additionalProperties": false,
+      "description": "Estimated runtime resource impact. The supervisor still enforces\nthe hard limits declared under ``agent.resources``; these numbers are\nforecast copy for the install-dialog summary.",
+      "properties": {
+        "cpu_percent_peak": {
+          "anyOf": [
+            {
+              "maximum": 1000,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cpu Percent Peak"
+        },
+        "output_rate_hz": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "maximum": 10000,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Output Rate Hz"
+        },
+        "pids": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pids"
+        },
+        "ram_mb": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ram Mb"
+        },
+        "startup_time_seconds": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Startup Time Seconds"
+        }
+      },
+      "title": "ResourceImpact",
+      "type": "object"
+    },
     "ResourceLimits": {
       "additionalProperties": false,
       "properties": {
-        "max_ram_mb": {
-          "default": 96,
-          "maximum": 4096,
-          "minimum": 8,
-          "title": "Max Ram Mb",
-          "type": "integer"
-        },
         "max_cpu_percent": {
           "default": 25,
           "maximum": 100,
@@ -396,25 +641,193 @@
           "minimum": 1,
           "title": "Max Pids",
           "type": "integer"
+        },
+        "max_ram_mb": {
+          "default": 96,
+          "maximum": 4096,
+          "minimum": 8,
+          "title": "Max Ram Mb",
+          "type": "integer"
         }
       },
       "title": "ResourceLimits",
       "type": "object"
     },
+    "Screenshot": {
+      "additionalProperties": false,
+      "description": "One screenshot entry rendered by the install dialog.",
+      "properties": {
+        "caption": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Caption"
+        },
+        "url": {
+          "minLength": 1,
+          "title": "Url",
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "title": "Screenshot",
+      "type": "object"
+    },
+    "ServiceSpec": {
+      "additionalProperties": false,
+      "description": "A long-running service a plugin declares on top of its main half.\n\nThe supervisor renders one extra systemd unit per spec under the\nplugin slice and starts/stops it across the plugin's enable/disable\nlifecycle. Each spec reports readiness on the heartbeat so the GCS\ncan show whether the declared daemon is actually up and serving.\n\nFields:\n\n* ``name`` \u2014 short identifier, unique within the plugin. Used to\n  build the unit name (``ados-plugin-<id>-<name>.service``, with\n  dots and underscores sanitized to hyphens) and to key the\n  readiness entry. Lowercase alnum plus ``.``, ``_``, ``-``.\n* ``command`` \u2014 the exec line the unit runs. Treated as a verbatim\n  ``ExecStart``; the plugin author is responsible for an absolute\n  path or a binary on ``PATH``.\n* ``ready_check`` \u2014 how readiness is probed. ``None`` \u21d2 the service\n  is ready iff its unit is active. A value that starts with\n  ``http://`` or ``https://`` \u21d2 an HTTP GET, ready on a 2xx status.\n  Any other value \u21d2 a shell command, ready on exit code 0.\n* ``restart`` \u2014 systemd restart policy for the unit.\n* ``slice`` \u2014 cgroup slice the unit runs in; defaults to the shared\n  plugin slice so resource accounting stays grouped.\n\nBackward-compatible: a bare string element in ``services`` is\ncoerced to ``{\"name\": <s>, \"command\": <s>}`` so existing\n``services: [\"foo\"]`` manifests still parse.",
+      "properties": {
+        "command": {
+          "minLength": 1,
+          "title": "Command",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "ready_check": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ready Check"
+        },
+        "restart": {
+          "default": "on-failure",
+          "enum": [
+            "always",
+            "on-failure",
+            "no"
+          ],
+          "title": "Restart",
+          "type": "string"
+        },
+        "slice": {
+          "default": "ados-plugins.slice",
+          "title": "Slice",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "command"
+      ],
+      "title": "ServiceSpec",
+      "type": "object"
+    },
     "VendorAttribution": {
       "additionalProperties": true,
-      "description": "Source-offer record for plugins that ship a vendor binary. Required when agent.contains_vendor_binary is true so the install dialog can surface upstream repo, version, license, and a reachable source URL. Satisfies GPL-3.0 section 6 for plugins that distribute pre-compiled binaries built from GPL-compatible upstreams.",
+      "description": "Source-offer record for plugins that ship a vendor binary.\n\nRequired when ``agent.contains_vendor_binary`` is true so the install\ndialog can surface the upstream repo, version, license, and a\nreachable source URL. Satisfies GPL-3.0 section 6 for plugins that\ndistribute pre-compiled binaries built from GPL-compatible\nupstreams.\n\nAccepts two equivalent field name sets so existing first-party\nplugins do not have to migrate their manifest copy:\n\n* ``name`` / ``source_url`` / ``upstream_version`` (informational)\n* ``upstream_repo`` / ``source_offer_url`` / ``commit_sha`` (legalistic)\n\nOnly ``license`` is strictly required; the other fields are\noptional and at least one of ``source_url`` or ``source_offer_url``\nplus one of ``upstream_version`` or ``commit_sha`` should be set\nfor the GCS install dialog to render meaningful disclosure.",
       "properties": {
-        "name": { "title": "Name", "type": "string" },
-        "license": { "minLength": 1, "title": "License", "type": "string" },
-        "source_url": { "title": "Source Url", "type": "string" },
-        "source_offer_url": { "title": "Source Offer Url", "type": "string" },
-        "upstream_repo": { "title": "Upstream Repo", "type": "string" },
-        "upstream_version": { "title": "Upstream Version", "type": "string" },
-        "commit_sha": { "title": "Commit Sha", "type": "string" },
-        "notice": { "title": "Notice", "type": "string" }
+        "commit_sha": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Commit Sha"
+        },
+        "license": {
+          "minLength": 1,
+          "title": "License",
+          "type": "string"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "notice": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Notice"
+        },
+        "source_offer_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Offer Url"
+        },
+        "source_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Url"
+        },
+        "upstream_repo": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Upstream Repo"
+        },
+        "upstream_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Upstream Version"
+        }
       },
-      "required": ["license"],
+      "required": [
+        "license"
+      ],
       "title": "VendorAttribution",
       "type": "object"
     },
@@ -429,14 +842,6 @@
           "title": "Behaviors",
           "type": "array"
         },
-        "models": {
-          "items": {
-            "additionalProperties": true,
-            "type": "object"
-          },
-          "title": "Models",
-          "type": "array"
-        },
         "detectors": {
           "items": {
             "additionalProperties": true,
@@ -444,219 +849,104 @@
           },
           "title": "Detectors",
           "type": "array"
+        },
+        "models": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Models",
+          "type": "array"
         }
       },
       "title": "VisionContribution",
-      "type": "object"
-    },
-    "HardwareRequirements": {
-      "additionalProperties": false,
-      "description": "Optional hardware-side requirements surfaced in the install dialog. All fields are free-form copy the dialog renders; the agent does not enforce these at install time.",
-      "properties": {
-        "cameras": {
-          "anyOf": [
-            { "type": "string" },
-            { "type": "null" }
-          ],
-          "default": null,
-          "title": "Cameras"
-        },
-        "fc_firmware": {
-          "anyOf": [
-            { "type": "string" },
-            { "type": "null" }
-          ],
-          "default": null,
-          "title": "Fc Firmware"
-        },
-        "boards": {
-          "items": { "type": "string" },
-          "title": "Boards",
-          "type": "array"
-        },
-        "optional": {
-          "items": { "type": "string" },
-          "title": "Optional",
-          "type": "array"
-        }
-      },
-      "title": "HardwareRequirements",
-      "type": "object"
-    },
-    "ResourceImpact": {
-      "additionalProperties": false,
-      "description": "Estimated runtime resource impact. The supervisor still enforces the hard limits declared under agent.resources; these numbers are forecast copy for the install-dialog summary.",
-      "properties": {
-        "cpu_percent_peak": {
-          "anyOf": [
-            {
-              "maximum": 1000,
-              "minimum": 0,
-              "type": "number"
-            },
-            { "type": "null" }
-          ],
-          "default": null,
-          "title": "Cpu Percent Peak"
-        },
-        "ram_mb": {
-          "anyOf": [
-            {
-              "exclusiveMinimum": 0,
-              "type": "number"
-            },
-            { "type": "null" }
-          ],
-          "default": null,
-          "title": "Ram Mb"
-        },
-        "pids": {
-          "anyOf": [
-            {
-              "exclusiveMinimum": 0,
-              "type": "integer"
-            },
-            { "type": "null" }
-          ],
-          "default": null,
-          "title": "Pids"
-        },
-        "startup_time_seconds": {
-          "anyOf": [
-            {
-              "exclusiveMinimum": 0,
-              "type": "number"
-            },
-            { "type": "null" }
-          ],
-          "default": null,
-          "title": "Startup Time Seconds"
-        },
-        "output_rate_hz": {
-          "anyOf": [
-            {
-              "exclusiveMinimum": 0,
-              "maximum": 10000,
-              "type": "number"
-            },
-            { "type": "null" }
-          ],
-          "default": null,
-          "title": "Output Rate Hz"
-        }
-      },
-      "title": "ResourceImpact",
-      "type": "object"
-    },
-    "FcParameter": {
-      "additionalProperties": false,
-      "description": "A single firmware parameter the plugin expects the operator to set before the feature behaves correctly.",
-      "properties": {
-        "param": {
-          "minLength": 1,
-          "title": "Param",
-          "type": "string"
-        },
-        "note": {
-          "anyOf": [
-            { "type": "string" },
-            { "type": "null" }
-          ],
-          "default": null,
-          "title": "Note"
-        },
-        "value": {
-          "anyOf": [
-            { "type": "string" },
-            { "type": "number" },
-            { "type": "integer" },
-            { "type": "null" }
-          ],
-          "default": null,
-          "title": "Value"
-        }
-      },
-      "required": ["param"],
-      "title": "FcParameter",
-      "type": "object"
-    },
-    "RequiredFcParameters": {
-      "additionalProperties": false,
-      "description": "Per-firmware bucket of required parameter hints. Each bucket is optional so a plugin can ship guidance for only the firmware it actually targets.",
-      "properties": {
-        "ardupilot": {
-          "items": { "$ref": "#/$defs/FcParameter" },
-          "title": "Ardupilot",
-          "type": "array"
-        },
-        "px4": {
-          "items": { "$ref": "#/$defs/FcParameter" },
-          "title": "Px4",
-          "type": "array"
-        },
-        "inav": {
-          "items": { "$ref": "#/$defs/FcParameter" },
-          "title": "Inav",
-          "type": "array"
-        }
-      },
-      "title": "RequiredFcParameters",
-      "type": "object"
-    },
-    "Screenshot": {
-      "additionalProperties": false,
-      "description": "One screenshot entry rendered by the install dialog.",
-      "properties": {
-        "url": {
-          "minLength": 1,
-          "title": "Url",
-          "type": "string"
-        },
-        "caption": {
-          "anyOf": [
-            { "type": "string" },
-            { "type": "null" }
-          ],
-          "default": null,
-          "title": "Caption"
-        }
-      },
-      "required": ["url"],
-      "title": "Screenshot",
       "type": "object"
     }
   },
   "additionalProperties": false,
   "description": "Top-level plugin manifest. Loaded from ``manifest.yaml``.",
   "properties": {
-    "schema_version": {
-      "default": 1,
-      "maximum": 3,
-      "minimum": 1,
-      "title": "Schema Version",
-      "type": "integer"
+    "agent": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AgentBlock"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     },
-    "id": {
-      "title": "Id",
+    "author": {
+      "default": "",
+      "title": "Author",
       "type": "string"
     },
-    "version": {
-      "title": "Version",
-      "type": "string"
-    },
-    "name": {
-      "title": "Name",
-      "type": "string"
+    "compatibility": {
+      "$ref": "#/$defs/Compatibility"
     },
     "description": {
       "default": "",
       "title": "Description",
       "type": "string"
     },
-    "author": {
-      "default": "",
-      "title": "Author",
-      "type": "string"
+    "description_long": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Description Long"
+    },
+    "documentation_url": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Documentation Url"
+    },
+    "extra": {
+      "additionalProperties": true,
+      "title": "Extra",
+      "type": "object"
+    },
+    "features": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Features",
+      "type": "array"
+    },
+    "gcs": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GcsBlock"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "hardware_requirements": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/HardwareRequirements"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     },
     "homepage": {
       "anyOf": [
@@ -670,10 +960,40 @@
       "default": null,
       "title": "Homepage"
     },
+    "id": {
+      "title": "Id",
+      "type": "string"
+    },
     "license": {
       "default": "",
       "title": "License",
       "type": "string"
+    },
+    "name": {
+      "title": "Name",
+      "type": "string"
+    },
+    "required_fc_parameters": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RequiredFcParameters"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "resource_impact": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ResourceImpact"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     },
     "risk": {
       "default": "medium",
@@ -686,91 +1006,30 @@
       "title": "Risk",
       "type": "string"
     },
-    "compatibility": {
-      "$ref": "#/$defs/Compatibility"
-    },
-    "agent": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/AgentBlock"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null
-    },
-    "gcs": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/GcsBlock"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null
-    },
-    "description_long": {
-      "anyOf": [
-        { "type": "string" },
-        { "type": "null" }
-      ],
-      "default": null,
-      "title": "Description Long"
-    },
-    "features": {
-      "items": { "type": "string" },
-      "title": "Features",
-      "type": "array"
-    },
-    "hardware_requirements": {
-      "anyOf": [
-        { "$ref": "#/$defs/HardwareRequirements" },
-        { "type": "null" }
-      ],
-      "default": null
-    },
-    "resource_impact": {
-      "anyOf": [
-        { "$ref": "#/$defs/ResourceImpact" },
-        { "type": "null" }
-      ],
-      "default": null
-    },
-    "required_fc_parameters": {
-      "anyOf": [
-        { "$ref": "#/$defs/RequiredFcParameters" },
-        { "type": "null" }
-      ],
-      "default": null
-    },
-    "telemetry_fields": {
-      "items": { "type": "string" },
-      "title": "Telemetry Fields",
-      "type": "array"
-    },
-    "documentation_url": {
-      "anyOf": [
-        {
-          "format": "uri",
-          "pattern": "^https://",
-          "type": "string"
-        },
-        { "type": "null" }
-      ],
-      "default": null,
-      "title": "Documentation Url"
+    "schema_version": {
+      "default": 1,
+      "maximum": 3,
+      "minimum": 1,
+      "title": "Schema Version",
+      "type": "integer"
     },
     "screenshots": {
-      "items": { "$ref": "#/$defs/Screenshot" },
+      "items": {
+        "$ref": "#/$defs/Screenshot"
+      },
       "title": "Screenshots",
       "type": "array"
     },
-    "extra": {
-      "additionalProperties": true,
-      "title": "Extra",
-      "type": "object"
+    "telemetry_fields": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Telemetry Fields",
+      "type": "array"
+    },
+    "version": {
+      "title": "Version",
+      "type": "string"
     }
   },
   "required": [
