@@ -301,6 +301,21 @@ class PluginIpcClient:
             )
         ).args
 
+    # ---- Flight setpoints ---------------------------------------------
+
+    async def flight_guided_setpoint_send(self, setpoint: dict) -> dict:
+        """Send a guided-mode position/velocity setpoint to the flight
+        controller. The host forwards it to the MAVLink router, which encodes
+        the appropriate SET_POSITION_TARGET message. Gated on the
+        ``flight.guided_setpoint`` capability."""
+        return (
+            await self._send_request(
+                "flight.guided_setpoint.send",
+                capability="flight.guided_setpoint",
+                args=dict(setpoint),
+            )
+        ).args
+
     # ---- Config kv ----------------------------------------------------
 
     async def config_get(self, key: str, default: Any = None) -> Any:

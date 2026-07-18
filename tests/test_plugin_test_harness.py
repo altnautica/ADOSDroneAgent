@@ -190,3 +190,43 @@ async def test_video_set_source_requires_the_capability() -> None:
         with pytest.raises(CapabilityDenied) as excinfo:
             await h.context.video.set_source([{"id": "main", "source": "rtsp://cam/main"}])
         assert excinfo.value.capability == "video.source.set"
+
+
+@pytest.mark.asyncio
+async def test_flight_guided_setpoint_routes_and_fills_axes() -> None:
+    async with PluginTestHarness(
+        plugin_id=PLUGIN_ID,
+        granted_capabilities={"flight.guided_setpoint"},
+    ) as h:
+        result = await h.context.flight.guided_setpoint(
+            kind="global_int",
+            coordinate_frame=6,
+            type_mask=2552,
+            x=12_345_678.0,
+            y=98_765_432.0,
+            z=30.0,
+            yaw=1.5,
+        )
+        assert result["ok"] is True
+        sp = h._ipc.sent_setpoints[-1]
+        assert sp["kind"] == "global_int"
+        assert sp["coordinate_frame"] == 6
+        assert sp["type_mask"] == 2552
+        assert sp["x"] == 12_345_678.0
+        assert sp["y"] == 98_765_432.0
+        assert sp["z"] == 30.0
+        assert sp["yaw"] == 1.5
+        # Unset axes default to zero (an ignored axis is left unset upstream).
+        assert sp["vx"] == 0.0 and sp["afz"] == 0.0 and sp["yaw_rate"] == 0.0
+        method, _ = h._ipc.requests[-1]
+        assert method == "flight.guided_setpoint.send"
+
+
+@pytest.mark.asyncio
+async def test_flight_guided_setpoint_requires_the_capability() -> None:
+    async with PluginTestHarness(plugin_id=PLUGIN_ID) as h:
+        with pytest.raises(CapabilityDenied) as excinfo:
+            await h.context.flight.guided_setpoint(
+                kind="local_ned", coordinate_frame=1, type_mask=0
+            )
+        assert excinfo.value.capability == "flight.guided_setpoint"

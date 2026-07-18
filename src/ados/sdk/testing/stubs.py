@@ -52,6 +52,7 @@ class FakeIpcClient:
         self._responses: dict[str, dict[str, Any]] = {}
         self.registered_components: list[tuple[int, str]] = []
         self.sent_mavlink: list[tuple[bytes, int | None]] = []
+        self.sent_setpoints: list[dict[str, Any]] = []
         # Detection-deliver callbacks registered via the vision facade. A test
         # injects a batch with :meth:`deliver_detection`.
         self._detection_callbacks: list[
@@ -148,6 +149,18 @@ class FakeIpcClient:
         self.requests.append(("video.source.set", {"cameras": legs}))
         return self._responses.get(
             "video.source.set", {"ok": True, "count": len(legs)}
+        )
+
+    async def flight_guided_setpoint_send(
+        self, setpoint: dict[str, Any]
+    ) -> dict[str, Any]:
+        if "flight.guided_setpoint" not in self._granted:
+            raise CapabilityDenied(self.plugin_id, "flight.guided_setpoint")
+        sp = dict(setpoint)
+        self.sent_setpoints.append(sp)
+        self.requests.append(("flight.guided_setpoint.send", sp))
+        return self._responses.get(
+            "flight.guided_setpoint.send", {"ok": True}
         )
 
     async def vision_subscribe_detections(

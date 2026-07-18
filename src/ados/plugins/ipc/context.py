@@ -246,6 +246,68 @@ class _VideoClient:
         return await self._ipc.video_source_set(cameras)
 
 
+class _FlightClient:
+    """``ctx.flight`` facade.
+
+    A flight-behavior plugin (e.g. Follow Me, Orbit) commands the vehicle in
+    guided mode through a scoped setpoint sender rather than raw MAVLink writes,
+    so the host can gate the flight-command surface with a single capability
+    (``flight.guided_setpoint``). The host forwards the setpoint to the MAVLink
+    router, which encodes the appropriate ``SET_POSITION_TARGET_*`` message.
+    """
+
+    def __init__(self, ipc: PluginIpcClient) -> None:
+        self._ipc = ipc
+
+    async def guided_setpoint(
+        self,
+        *,
+        kind: str,
+        coordinate_frame: int,
+        type_mask: int,
+        x: float = 0.0,
+        y: float = 0.0,
+        z: float = 0.0,
+        vx: float = 0.0,
+        vy: float = 0.0,
+        vz: float = 0.0,
+        afx: float = 0.0,
+        afy: float = 0.0,
+        afz: float = 0.0,
+        yaw: float = 0.0,
+        yaw_rate: float = 0.0,
+    ) -> dict:
+        """Command a guided-mode position/velocity/acceleration setpoint.
+
+        ``kind`` selects the frame family: ``"global_int"`` (lat/lon in 1e7,
+        alt in m) or ``"local_ned"`` (metres). ``coordinate_frame`` is a
+        ``MAV_FRAME_*`` integer and ``type_mask`` is the ignore-axis bitmask
+        (a set bit ignores that axis). Unset axes default to zero. Requires the
+        ``flight.guided_setpoint`` capability.
+
+        Returns ``{"ok": bool, ...}`` (or a ``not_available`` shape when the
+        MAVLink router is unreachable).
+        """
+        return await self._ipc.flight_guided_setpoint_send(
+            {
+                "kind": kind,
+                "coordinate_frame": int(coordinate_frame),
+                "type_mask": int(type_mask),
+                "x": float(x),
+                "y": float(y),
+                "z": float(z),
+                "vx": float(vx),
+                "vy": float(vy),
+                "vz": float(vz),
+                "afx": float(afx),
+                "afy": float(afy),
+                "afz": float(afz),
+                "yaw": float(yaw),
+                "yaw_rate": float(yaw_rate),
+            }
+        )
+
+
 class _TelemetryClient:
     def __init__(self, ipc: PluginIpcClient) -> None:
         self._ipc = ipc
@@ -401,6 +463,10 @@ class PluginContext:
         # stream sources (the host forwards to the supervisor, which persists the
         # list + restarts the pipeline). The host gates the video-source cap.
         self.video = _VideoClient(ipc)
+        # Flight facade: a flight-behavior plugin commands guided-mode setpoints
+        # through a scoped sender (the host gates the flight-command cap and
+        # forwards to the MAVLink router) rather than raw MAVLink writes.
+        self.flight = _FlightClient(ipc)
         # Vision engine facade: frame subscription (shared-memory ring),
         # model registration, inference, detection publishing, and
         # visual-odometry pose injection. The host gates the vision caps.
@@ -437,6 +503,7 @@ __all__ = [
     "_MAVLinkClient",
     "_PeripheralManagerClient",
     "_VideoClient",
+    "_FlightClient",
     "_TelemetryClient",
     "_ConfigClient",
     "_ProcessClient",
