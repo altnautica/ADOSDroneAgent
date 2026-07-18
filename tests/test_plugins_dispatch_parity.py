@@ -56,6 +56,7 @@ EXPECTED: dict[str, str | None] = {
     "camera.claim": "sensor.camera.register",
     "camera.release": "sensor.camera.register",
     "camera.get_frame": "sensor.camera.register",
+    "video.source.set": "video.source.set",
     "config.get": None,
     "config.set": None,
     "process.spawn": "process.spawn",
