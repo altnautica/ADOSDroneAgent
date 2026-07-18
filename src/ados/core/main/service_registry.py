@@ -74,10 +74,13 @@ async def register_services(app: AgentApp) -> None:  # noqa: C901
     )
 
     # Detect board
-    from ados.hal.detect import detect_board
+    from ados.hal.detect import detect_board, persist_board_sidecar
     board = detect_board()
     app.board = board  # store for heartbeat + route access
     app.board_name = board.name
+    # Persist the fingerprint to the board sidecar so the native control surface
+    # reports the true NPU capability + perception tier (nothing else writes it).
+    persist_board_sidecar(board)
     log.info("board_info", name=board.name, tier=board.tier, ram_mb=board.ram_mb)
 
     # Set tier from detection if auto

@@ -251,6 +251,33 @@ class BoardInfo:
         }
 
 
+def persist_board_sidecar(board: BoardInfo) -> bool:
+    """Write the detected board fingerprint to the board sidecar file.
+
+    The native control surface reads this sidecar for the board's NPU capability
+    and the perception tier (``npu_tops`` -> ``has_accelerator`` -> local vs
+    offload). Nothing else writes it, so a board that never persists it reports
+    ``npu_tops: 0`` regardless of a real accelerator. This is called once at
+    startup, right after detection, so the reader sees the true capability.
+
+    Written atomically (tmp + replace). Best-effort: a run dir that is not yet
+    writable is not fatal (the value self-heals on the next call), so a failure
+    returns ``False`` rather than blocking startup. Returns ``True`` on success.
+    """
+    import json
+
+    from ados.core.paths import BOARD_JSON
+
+    try:
+        BOARD_JSON.parent.mkdir(parents=True, exist_ok=True)
+        tmp = BOARD_JSON.with_name(BOARD_JSON.name + ".tmp")
+        tmp.write_text(json.dumps(board.to_dict()))
+        tmp.replace(BOARD_JSON)
+        return True
+    except OSError:
+        return False
+
+
 def detect_tier(ram_mb: int) -> int:
     """Assign tier based on available RAM.
 
