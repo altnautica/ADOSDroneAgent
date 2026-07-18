@@ -289,6 +289,23 @@ pub const PREBUILT_VISION_ONNX: PrebuiltBinary = PrebuiltBinary {
     profiles: DRONE,
 };
 
+/// The ONNX Runtime shared library the onnx-enabled `ados-vision` binary loads at
+/// start (via `ORT_DYLIB_PATH`). Published under the same tag as the onnx binary
+/// (`prebuilt-vision-onnx`); an official aarch64 build whose glibc floor is well
+/// below the target board's, so it runs where the pyke build the crate would
+/// otherwise download does not. The onnx binary links the runtime dynamically, so
+/// this library must be present for it to run — the fetch step installs the two
+/// together and falls back to the default (musl, no-onnx) vision build if either
+/// is unavailable. Placed alongside `ados-vision`'s config, not on `bin/`.
+pub const PREBUILT_VISION_ONNX_RUNTIME: PrebuiltBinary = PrebuiltBinary {
+    service: "libonnxruntime",
+    asset: "libonnxruntime-aarch64.so",
+    release_tag: "prebuilt-vision-onnx",
+    dest: "/opt/ados/lib/libonnxruntime.so",
+    gate: Gate::BestEffort,
+    profiles: DRONE,
+};
+
 /// Board-model substrings that get the ONNX-enabled `ados-vision` build. Matched
 /// case-insensitively against the device-tree model string, mirroring the board
 /// profiles that declare `compute.local_inference: onnx` (Cortex-A76-class,
@@ -524,6 +541,33 @@ mod tests {
         assert!(!PREBUILT
             .iter()
             .any(|b| b.asset == PREBUILT_VISION_ONNX.asset));
+    }
+
+    #[test]
+    fn onnx_runtime_library_ships_beside_the_onnx_binary() {
+        // The ONNX Runtime shared library rides the same release tag as the onnx
+        // binary, installs off `bin/`, and is best-effort so a miss falls back to
+        // the default vision build rather than aborting the install.
+        assert_eq!(
+            PREBUILT_VISION_ONNX_RUNTIME.release_tag,
+            PREBUILT_VISION_ONNX.release_tag
+        );
+        assert_eq!(
+            PREBUILT_VISION_ONNX_RUNTIME.asset,
+            "libonnxruntime-aarch64.so"
+        );
+        assert_eq!(
+            PREBUILT_VISION_ONNX_RUNTIME.dest,
+            "/opt/ados/lib/libonnxruntime.so"
+        );
+        assert!(matches!(
+            PREBUILT_VISION_ONNX_RUNTIME.gate,
+            Gate::BestEffort
+        ));
+        // Not part of the catalog (fetched alongside the onnx binary explicitly).
+        assert!(!PREBUILT
+            .iter()
+            .any(|b| b.asset == PREBUILT_VISION_ONNX_RUNTIME.asset));
     }
 
     #[test]

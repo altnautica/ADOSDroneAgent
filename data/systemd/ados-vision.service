@@ -22,6 +22,10 @@ ExecStart=/bin/sh -c 'if [ -x /opt/ados/bin/ados-vision ]; then exec /opt/ados/b
 Restart=on-failure
 RestartSec=3
 Environment=ADOS_CONFIG=/etc/ados/config.yaml
+# The onnx-enabled build loads the ONNX Runtime dynamically; point it at the
+# shared library the installer places (absent on the default musl build, which
+# ignores this). A stale path is harmless — the default build never dlopens ORT.
+Environment=ORT_DYLIB_PATH=/opt/ados/lib/libonnxruntime.so
 EnvironmentFile=-/etc/ados/env
 
 NoNewPrivileges=yes

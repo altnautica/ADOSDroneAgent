@@ -18,9 +18,12 @@ path = "src/bin/ados-vision.rs"
 # The default build carries no native inference runtime so it compiles fast
 # everywhere; the MockBackend and the RKNN sidecar IPC client cover the baseline.
 default = []
-# Opt-in ONNX Runtime backend. Pulls a heavy native runtime, so it is never on
-# by default.
-onnx = ["dep:ort"]
+# Opt-in ONNX Runtime backend. Loads the runtime dynamically (dlopen at start)
+# rather than static-linking a downloaded build, so the compiled binary carries
+# no link-time dependency on the runtime's glibc/libstdc++ — the shared library
+# is fetched separately (a glibc-2.17 manylinux build that runs on every target)
+# and its path handed in via ORT_DYLIB_PATH. Never on by default; heavy runtime.
+onnx = ["dep:ort", "ort/load-dynamic"]
 # Register the CoreML execution provider so ONNX inference runs on the Apple GPU
 # (macOS workstation, "leverage the GPU"). Implies `onnx`; a no-op on non-macOS
 # builds (the backend registers it only under target_os = "macos"). Off by
@@ -45,7 +48,12 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 memmap2 = { workspace = true }
-# ONNX Runtime, gated behind the `onnx` feature.
+# ONNX Runtime, gated behind the `onnx` feature. The `load-dynamic` feature
+# (enabled by the `onnx` feature) dlopens the shared library at start from
+# ORT_DYLIB_PATH, so the compiled binary never link-depends on the runtime's
+# glibc/libstdc++. Default features are kept for the pregenerated bindings; the
+# build-time download is never linked (load-dynamic) and the shipped runtime is
+# a separate glibc-2.17 manylinux build the installer places on the box.
 ort = { version = "2.0.0-rc.9", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]

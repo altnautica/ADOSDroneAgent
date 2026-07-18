@@ -990,16 +990,16 @@ jobs:
     needs: build-test
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-22.04-arm
-    # NON-BLOCKING (experimental): the ort prebuilt ONNX Runtime for aarch64
-    # links against glibc 2.38 (__isoc23_strtol) + a newer libstdc++
-    # (__cxa_call_terminate), so the static link fails on this 2.35 runner — and
-    # building on a 2.38 runner would only produce a binary that fails at runtime
-    # on the Bookworm (2.36) target boards. The installer already falls back to
-    # the default build (honestly reporting no inference), so this optional
-    # publish stays non-blocking until a glibc-compatible ONNX Runtime
-    # distribution lands (a manylinux static link, or dynamic load + a shipped
-    # shared lib). Tracked as a follow-up; it must never fail the whole workflow.
-    continue-on-error: true
+    # The onnx backend loads the ONNX Runtime dynamically (the crate's
+    # `load-dynamic` feature), so the compiled binary carries no link-time
+    # dependency on the runtime's glibc/libstdc++ and builds cleanly on this
+    # runner. The runtime shared library is shipped separately: an official
+    # aarch64 build whose glibc floor is well below the Bookworm target, fetched
+    # by the installer to a fixed path and handed to the binary via
+    # ORT_DYLIB_PATH. The runtime version must match the ABI the `ort` crate
+    # targets — bump it here in lockstep with the `ort` dependency.
+    env:
+      ORT_RUNTIME_VERSION: "1.24.2"
     permissions:
       contents: write
     steps:
@@ -1008,17 +1008,32 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build ados-vision with the onnx backend (native glibc)
+      - name: Build ados-vision with the onnx backend (dynamic load)
         run: cargo build --release --features onnx -p ados-vision
 
-      - name: Stage artifact + checksum
+      - name: Fetch the ONNX Runtime shared library (official aarch64 build)
+        run: |
+          set -euo pipefail
+          ver="${ORT_RUNTIME_VERSION}"
+          tarball="onnxruntime-linux-aarch64-${ver}.tgz"
+          url="https://github.com/microsoft/onnxruntime/releases/download/v${ver}/${tarball}"
+          curl -fSL --retry 3 -o "${tarball}" "${url}"
+          tar -xzf "${tarball}"
+          # The tarball ships lib/libonnxruntime.so.<ver> plus a versionless
+          # symlink; publish the real (dereferenced) shared object.
+          cp -L "onnxruntime-linux-aarch64-${ver}/lib/libonnxruntime.so" libonnxruntime-aarch64.so
+          file libonnxruntime-aarch64.so
+
+      - name: Stage artifacts + checksums
         run: |
           set -euo pipefail
           mkdir -p rel
           cp target/release/ados-vision rel/ados-vision-onnx-aarch64
+          cp libonnxruntime-aarch64.so rel/libonnxruntime-aarch64.so
           ( cd rel && sha256sum ados-vision-onnx-aarch64 > ados-vision-onnx-aarch64.sha256 )
+          ( cd rel && sha256sum libonnxruntime-aarch64.so > libonnxruntime-aarch64.so.sha256 )
 
-      - name: Sign artifact (only when the signing key is present)
+      - name: Sign artifacts (only when the signing key is present)
         env:
           SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
         run: |
@@ -1030,6 +1045,7 @@ jobs:
           sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
           printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
           minisign -S -s /tmp/sign.key -m rel/ados-vision-onnx-aarch64 -x rel/ados-vision-onnx-aarch64.minisig
+          minisign -S -s /tmp/sign.key -m rel/libonnxruntime-aarch64.so -x rel/libonnxruntime-aarch64.so.minisig
           rm -f /tmp/sign.key
 
       - name: Publish rolling prerelease

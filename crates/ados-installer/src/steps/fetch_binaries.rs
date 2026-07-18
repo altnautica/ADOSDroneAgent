@@ -194,7 +194,12 @@ fn install_service(
     sink: &ProgressSink,
 ) -> anyhow::Result<()> {
     if b.service == "ados-vision" && binaries::board_prefers_onnx_vision(board_model) {
-        match install_one_with_retry(&binaries::PREBUILT_VISION_ONNX, tmp_dir, channel, sink) {
+        // The onnx binary links the ONNX Runtime dynamically, so the binary AND
+        // its shared library are installed together — either both land or the
+        // install falls back to the default (musl, no-onnx) build. Installing the
+        // onnx binary without its runtime would leave a vision service that
+        // cannot dlopen ORT at start.
+        match install_onnx_vision(tmp_dir, channel, sink) {
             Ok(()) => return Ok(()),
             Err(e) => {
                 tracing::warn!(
@@ -209,6 +214,25 @@ fn install_service(
         }
     }
     install_one_with_retry(b, tmp_dir, channel, sink)
+}
+
+/// Install the onnx-enabled `ados-vision` binary together with the ONNX Runtime
+/// shared library it dlopens at start. Both must land — if the runtime library
+/// cannot be fetched, the onnx binary would fail to start, so this returns `Err`
+/// and the caller falls back to the default vision build.
+fn install_onnx_vision(
+    tmp_dir: &Path,
+    channel: Channel,
+    sink: &ProgressSink,
+) -> anyhow::Result<()> {
+    install_one_with_retry(&binaries::PREBUILT_VISION_ONNX, tmp_dir, channel, sink)?;
+    install_one_with_retry(
+        &binaries::PREBUILT_VISION_ONNX_RUNTIME,
+        tmp_dir,
+        channel,
+        sink,
+    )
+    .map_err(|e| anyhow::anyhow!("ONNX Runtime library fetch failed: {e}"))
 }
 
 /// `<dest>.dl` sibling used as the verify-then-rename staging path. It lives in
