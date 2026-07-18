@@ -990,6 +990,16 @@ jobs:
     needs: build-test
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-22.04-arm
+    # NON-BLOCKING (experimental): the ort prebuilt ONNX Runtime for aarch64
+    # links against glibc 2.38 (__isoc23_strtol) + a newer libstdc++
+    # (__cxa_call_terminate), so the static link fails on this 2.35 runner — and
+    # building on a 2.38 runner would only produce a binary that fails at runtime
+    # on the Bookworm (2.36) target boards. The installer already falls back to
+    # the default build (honestly reporting no inference), so this optional
+    # publish stays non-blocking until a glibc-compatible ONNX Runtime
+    # distribution lands (a manylinux static link, or dynamic load + a shipped
+    # shared lib). Tracked as a follow-up; it must never fail the whole workflow.
+    continue-on-error: true
     permissions:
       contents: write
     steps:
