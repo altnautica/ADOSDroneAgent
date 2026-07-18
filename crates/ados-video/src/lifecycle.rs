@@ -16,7 +16,7 @@ use std::time::Duration;
 use crate::discover;
 use crate::encoder::{
     augment_encoder_with_raw_tap, binary_present, build_encoder_command, detect_encoder_for_camera,
-    wrap_with_sei_inject, EncoderParams,
+    wrap_with_sei_inject, CameraInfo, CameraType, EncoderParams,
 };
 use crate::health::{PipelineState, StartError};
 use crate::mediamtx::MAIN_PATH;
@@ -219,6 +219,10 @@ impl VideoOrchestrator {
         // switcher can advertise each `:8889/<id>/whep` leg.
         self.refresh_video_streams();
 
+        // Bring up the owned encoders for any LOCAL secondary legs (each
+        // publishes its camera into its own mediamtx path). Additive + isolated.
+        self.start_secondary_encoders().await;
+
         // Best-effort radio fan-out + optional SEI tap. Only spawn the tee once
         // the encoder's RTSP publisher exists; otherwise the first DESCRIBE runs
         // against a missing path and ffmpeg exits in ~1-2 s. The run-loop ladder
@@ -361,6 +365,121 @@ impl VideoOrchestrator {
             format = %v.pixel_format(),
             "vision_tap_started"
         );
+    }
+
+    /// Classify a local secondary leg's bus from its source hint, for encoder
+    /// selection. A `/dev/videoN` path or a `"usb"`/`"ip"` hint → USB; a `"csi"`
+    /// hint → CSI. Network legs never reach here (they are mediamtx pulls).
+    fn secondary_camera_type(source: &str) -> CameraType {
+        let s = source.trim().to_ascii_lowercase();
+        if s == "csi" {
+            CameraType::Csi
+        } else {
+            CameraType::Usb
+        }
+    }
+
+    /// Build + spawn the owned encoders for the LOCAL secondary legs (each
+    /// publishes its camera into `rtsp://localhost:<port>/<id>`). Best-effort +
+    /// strictly additive: a failure on one leg leaves the primary + the other
+    /// legs fully up (separate processes). Idempotent — a leg already running is
+    /// left alone. Skips the primary (the inline pipeline owns it) and network
+    /// pulls (mediamtx owns them).
+    pub async fn start_secondary_encoders(&mut self) {
+        if self.state != PipelineState::Running {
+            return;
+        }
+        let port = self.mediamtx.rtsp_port();
+        for leg in self.legs.clone() {
+            if leg.is_primary || leg.is_network_pull {
+                continue;
+            }
+            if self
+                .secondary_encoders
+                .iter_mut()
+                .any(|(id, p)| id == &leg.id && p.is_running())
+            {
+                continue;
+            }
+            let camera_type = Self::secondary_camera_type(&leg.source);
+            let Some(kind) = detect_encoder_for_camera(
+                camera_type,
+                binary_present("rpicam-vid"),
+                binary_present("ffmpeg"),
+                binary_present("gst-launch-1.0"),
+            ) else {
+                tracing::warn!(id = %leg.id, "secondary_encoder_skipped: no encoder available");
+                continue;
+            };
+            let camera = CameraInfo {
+                camera_type,
+                device_path: leg.source.clone(),
+                capabilities: Vec::new(),
+            };
+            let cam_cfg = leg.to_camera_config();
+            let params = EncoderParams::from_camera_config(kind, &cam_cfg);
+            let output = format!("rtsp://localhost:{port}/{}", leg.id);
+            let cmd = match build_encoder_command(
+                &params,
+                &leg.source,
+                &output,
+                Some(&camera),
+                &self.env,
+            ) {
+                Ok(c) if !c.is_empty() => c,
+                _ => {
+                    tracing::warn!(id = %leg.id, "secondary_encoder_command_build_failed");
+                    continue;
+                }
+            };
+            match ManagedProcess::spawn(&format!("encoder-{}", leg.id), &cmd[0], &cmd[1..]) {
+                Ok(mut proc) => {
+                    if let Some(stderr) = proc.take_stderr() {
+                        tokio::spawn(crate::stderr_drain::drain_plain(
+                            stderr,
+                            "secondary_encoder",
+                        ));
+                    }
+                    // Replace any dead slot for this leg, else push.
+                    self.secondary_encoders.retain(|(id, _)| id != &leg.id);
+                    self.secondary_encoders.push((leg.id.clone(), proc));
+                    tracing::info!(id = %leg.id, encoder = ?kind, "secondary_encoder_started");
+                }
+                Err(e) => {
+                    tracing::warn!(id = %leg.id, error = %e, "secondary_encoder_spawn_failed");
+                }
+            }
+        }
+    }
+
+    /// Terminate every owned secondary-leg encoder.
+    pub async fn stop_secondary_encoders(&mut self) {
+        for (id, mut proc) in std::mem::take(&mut self.secondary_encoders) {
+            let _ = id;
+            proc.terminate(Duration::from_secs(5)).await;
+        }
+    }
+
+    /// Best-effort respawn of any DEAD secondary-leg encoder. Isolated from the
+    /// primary restart ladder — a secondary is a LAN-WHEP-only extra, so a plain
+    /// liveness respawn (no backoff ladder / circuit breaker) is sufficient.
+    /// Called at the end of the running tick.
+    pub async fn supervise_secondary_encoders(&mut self) {
+        if self.state != PipelineState::Running {
+            return;
+        }
+        let mut dead_ids: Vec<String> = Vec::new();
+        for (id, p) in self.secondary_encoders.iter_mut() {
+            if !p.is_running() {
+                dead_ids.push(id.clone());
+            }
+        }
+        if !dead_ids.is_empty() {
+            self.secondary_encoders
+                .retain(|(id, _)| !dead_ids.contains(id));
+            // Re-run the spawn pass; it only starts legs not already running.
+            self.start_secondary_encoders().await;
+        }
     }
 
     /// Stop the decoupled vision frame tap. Mirrors

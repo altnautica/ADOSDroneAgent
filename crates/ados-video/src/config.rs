@@ -170,6 +170,29 @@ pub struct ResolvedLeg {
     pub bitrate_kbps: u32,
 }
 
+impl ResolvedLeg {
+    /// A [`CameraConfig`] view of this leg, so a secondary local-encode leg can
+    /// reuse the same encoder command builder as the primary. `codec_preference`
+    /// defaults to `"auto"` (the leg carries only the concrete `codec`).
+    pub fn to_camera_config(&self) -> CameraConfig {
+        CameraConfig {
+            source: self.source.clone(),
+            codec: self.codec.clone(),
+            width: self.width,
+            height: self.height,
+            fps: self.fps,
+            bitrate_kbps: self.bitrate_kbps,
+            codec_preference: "auto".to_string(),
+        }
+    }
+
+    /// A leg the orchestrator owns an encoder for (the primary, or a local
+    /// secondary) — as opposed to a mediamtx `sourceOnDemand` network pull.
+    pub fn is_owned_encoder(&self) -> bool {
+        self.is_primary || !self.is_network_pull
+    }
+}
+
 // --- agent-level video config (the orchestrator's gates + cloud + GST flags) -
 
 fn default_video_mode() -> String {
@@ -805,5 +828,28 @@ video:
         assert_eq!(legs.len(), 1);
         assert!(legs[0].is_primary);
         assert!(!legs[0].is_network_pull);
+    }
+
+    #[test]
+    fn resolved_leg_ownership_and_camera_config() {
+        let yaml = "\
+video:
+  cameras:
+    - { id: main, source: /dev/video0, role: eo, codec: h264 }
+    - { id: belly, source: /dev/video1, role: eo_wide, codec: h265, width: 640, height: 480, fps: 15 }
+    - { id: ir, source: rtsp://pod/ir, role: ir }
+";
+        let (_dir, path) = write_tmp(yaml);
+        let legs = AgentVideoConfig::load_from(&path).resolve_legs(&CameraConfig::default());
+        // Primary + local secondary own an encoder; the network secondary is a pull.
+        assert!(legs[0].is_owned_encoder()); // main (primary)
+        assert!(legs[1].is_owned_encoder()); // belly (local secondary)
+        assert!(!legs[2].is_owned_encoder()); // ir (network pull)
+                                              // The local secondary's CameraConfig view carries its own geometry.
+        let cam = legs[1].to_camera_config();
+        assert_eq!(cam.source, "/dev/video1");
+        assert_eq!(cam.codec, "h265");
+        assert_eq!(cam.width, 640);
+        assert_eq!(cam.fps, 15);
     }
 }

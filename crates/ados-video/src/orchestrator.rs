@@ -70,6 +70,13 @@ pub struct VideoOrchestrator {
 
     pub(crate) mediamtx: MediamtxManager,
     pub(crate) encoder: Option<ManagedProcess>,
+    /// Owned encoders for LOCAL secondary legs (keyed by leg id): each publishes
+    /// its own camera into its own mediamtx path, LAN-WHEP-only. Structurally
+    /// isolated from the primary pipeline (separate processes) — a dead secondary
+    /// encoder cannot wedge the primary or a sibling. Network secondary legs are
+    /// mediamtx `sourceOnDemand` pulls and own no process here. Empty on a
+    /// single-leg / network-only node.
+    pub(crate) secondary_encoders: Vec<(String, ManagedProcess)>,
     pub(crate) wfb_tee: Option<ManagedProcess>,
     pub(crate) cloud_push: Option<ManagedProcess>,
     pub(crate) sei_tap: Option<ManagedProcess>,
@@ -165,6 +172,7 @@ impl VideoOrchestrator {
             legs,
             mediamtx: MediamtxManager::new(config_dir),
             encoder: None,
+            secondary_encoders: Vec::new(),
             wfb_tee: None,
             cloud_push: None,
             sei_tap: None,
@@ -243,27 +251,19 @@ impl VideoOrchestrator {
         format!("rtsp://localhost:{}/main", self.mediamtx.rtsp_port())
     }
 
-    /// The `(path, source)` pairs to feed [`MediamtxManager::write_config`]: the
-    /// primary as a `"publisher"` (the local encoder publishes into `main`), and
-    /// each secondary network leg as its RTSP source (a mediamtx `sourceOnDemand`
-    /// pull). A local-encode secondary is skipped for now (it would need its own
-    /// encoder — a documented follow-up); dropping it is honest (no dead
-    /// publisher path) but rare (the multi-stream case is network legs). Back-
+    /// The `(path, source)` pairs to feed [`MediamtxManager::write_config`]: an
+    /// owned-encoder leg (the primary always, or a local secondary) is a
+    /// `"publisher"` (its encoder publishes into the path), and a secondary
+    /// network leg is its RTSP source (a mediamtx `sourceOnDemand` pull). Back-
     /// compat: a single `main` leg yields exactly `[("main","publisher")]`.
     pub(crate) fn legs_to_streams(&self) -> Vec<(String, String)> {
         self.legs
             .iter()
-            .filter_map(|leg| {
-                if leg.is_primary {
-                    Some((leg.id.clone(), "publisher".to_string()))
-                } else if leg.is_network_pull {
-                    Some((leg.id.clone(), leg.source.clone()))
+            .map(|leg| {
+                if leg.is_network_pull {
+                    (leg.id.clone(), leg.source.clone())
                 } else {
-                    tracing::warn!(
-                        id = %leg.id,
-                        "video_leg_skipped: a local-encode secondary needs its own encoder (not yet supported)"
-                    );
-                    None
+                    (leg.id.clone(), "publisher".to_string())
                 }
             })
             .collect()
@@ -288,6 +288,7 @@ impl VideoOrchestrator {
         self.stop_gst_air().await;
         self.stop_wfb_tee().await;
         self.stop_vision_tap().await;
+        self.stop_secondary_encoders().await;
         if let Some(mut tap) = self.sei_tap.take() {
             tap.terminate(Duration::from_secs(5)).await;
         }
@@ -589,6 +590,10 @@ impl VideoOrchestrator {
         } else {
             self.note_unhealthy_tick();
         }
+
+        // Supervise the isolated secondary-leg encoders (best-effort respawn of
+        // any dead one). Independent of the primary's health ladder below.
+        self.supervise_secondary_encoders().await;
 
         if !health_ok {
             self.restart_count += 1;
@@ -914,8 +919,8 @@ mod tests {
         o.legs = vec![
             leg("main", "rtsp://pod/zoom", "primary", true, false),
             leg("ir", "rtsp://pod/ir", "ir", false, true),
-            // A local-encode secondary is dropped (no owned encoder yet) rather
-            // than advertising a dead publisher path.
+            // A local-encode secondary publishes into its own path via an owned
+            // encoder (a mediamtx path awaiting a publisher).
             leg("belly", "/dev/video1", "secondary", false, false),
         ];
         assert_eq!(
@@ -923,6 +928,7 @@ mod tests {
             vec![
                 ("main".to_string(), "publisher".to_string()),
                 ("ir".to_string(), "rtsp://pod/ir".to_string()),
+                ("belly".to_string(), "publisher".to_string()),
             ]
         );
     }
