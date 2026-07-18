@@ -11,7 +11,7 @@
 //! loop) lives in [`crate::orchestrator`]; this module is the mechanism those
 //! decisions actuate.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::discover;
 use crate::encoder::{
@@ -457,6 +457,10 @@ impl VideoOrchestrator {
                     // Replace any dead slot for this leg, else push.
                     self.secondary_encoders.retain(|(id, _)| id != &leg.id);
                     self.secondary_encoders.push((leg.id.clone(), proc));
+                    // Stamp the (re)start so a leg that survives a healthy window
+                    // clears its respawn count (consecutive-failure semantics).
+                    self.secondary_started_at
+                        .insert(leg.id.clone(), Instant::now());
                     tracing::info!(id = %leg.id, encoder = ?kind, "secondary_encoder_started");
                 }
                 Err(e) => {
@@ -472,6 +476,10 @@ impl VideoOrchestrator {
             let _ = id;
             proc.terminate(Duration::from_secs(5)).await;
         }
+        // Clear the per-leg circuit-breaker state so a reconfigure / pipeline
+        // restart starts each leg fresh rather than inheriting a stale count.
+        self.secondary_respawn_attempts.clear();
+        self.secondary_started_at.clear();
     }
 
     /// Best-effort respawn of any DEAD secondary-leg encoder. Isolated from the
@@ -482,10 +490,35 @@ impl VideoOrchestrator {
         if self.state != PipelineState::Running {
             return;
         }
+        // One pass splits the encoders into still-running and dead (is_running
+        // polls the child, so it needs &mut and cannot run inside a closure that
+        // also borrows the counter maps).
+        let now = Instant::now();
         let mut dead_ids: Vec<String> = Vec::new();
+        let mut running_ids: Vec<String> = Vec::new();
         for (id, p) in self.secondary_encoders.iter_mut() {
-            if !p.is_running() {
+            if p.is_running() {
+                running_ids.push(id.clone());
+            } else {
                 dead_ids.push(id.clone());
+            }
+        }
+        // Clear the respawn count for any leg that has run healthy (process alive)
+        // for a full window since its last (re)start — the secondary analog of the
+        // primary's `note_healthy_tick`, so the budget counts CONSECUTIVE failures
+        // and a flaky-but-recoverable camera is never permanently abandoned.
+        for id in &running_ids {
+            let over_budget = self.secondary_respawn_attempts.get(id).copied().unwrap_or(0) > 0;
+            let window_elapsed = self
+                .secondary_started_at
+                .get(id)
+                .is_some_and(|since| crate::health::healthy_window_elapsed(*since, now));
+            if over_budget && window_elapsed {
+                tracing::info!(
+                    leg = %id, window_s = crate::health::HEALTHY_RESET_WINDOW.as_secs(),
+                    "secondary_encoder_respawn_counter_reset: healthy window reached"
+                );
+                self.secondary_respawn_attempts.remove(id);
             }
         }
         if !dead_ids.is_empty() {

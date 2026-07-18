@@ -434,6 +434,12 @@ pub struct VideoStreamHb {
     pub id: String,
     pub role: String,
     pub codec: String,
+    /// Per-leg liveness, deserialized straight from the sidecar's `live`:
+    /// `Some(true)` the path is receiving, `Some(false)` a publisher leg is flat
+    /// (degraded), absent = not sampled / an idle on-demand leg (unknown, not
+    /// dead — the GCS keeps it selectable). Absent on agents predating the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live: Option<bool>,
 }
 
 /// One FC CAN bus entry. The block is omitted from the payload when no CAN

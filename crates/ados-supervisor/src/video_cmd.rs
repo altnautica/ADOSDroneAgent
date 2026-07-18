@@ -124,6 +124,26 @@ async fn dispatch(req: &[u8], pm: &dyn ProcessManager) -> Value {
             });
         }
     }
+    // The primary leg (the first with role "primary", else the first leg) is
+    // always resolved to the reserved "main" path. A NON-primary leg that also
+    // declares id "main" would resolve to a SECOND leg at "main" and overwrite
+    // the primary path in the mediamtx config — wedging the whole primary
+    // pipeline (video, WFB, cloud relay, and the vision tap all key on "main").
+    // The submitted-id uniqueness check above cannot catch this because the two
+    // ids differ BEFORE resolution renames the primary. Reject the collision.
+    let primary_idx = legs
+        .iter()
+        .position(|l| l.get("role").and_then(Value::as_str) == Some("primary"))
+        .unwrap_or(0);
+    for (i, leg) in legs.iter().enumerate() {
+        let id = leg.get("id").and_then(Value::as_str).unwrap_or("");
+        if i != primary_idx && id == "main" {
+            return json!({
+                "ok": false, "error": "E_ARGS",
+                "reason": "a non-primary camera cannot use the reserved id \"main\"",
+            });
+        }
+    }
 
     // Persist video.cameras under the config flock (0600, euid-0), then restart
     // the video pipeline so it resolves + serves the new source list.
@@ -227,6 +247,11 @@ mod tests {
                 .as_slice(),
             // Duplicate leg ids would collapse in the mediamtx path map.
             br#"{"op":"video.source.set","cameras":[{"id":"main","source":"rtsp://x/1"},{"id":"main","source":"rtsp://x/2"}]}"#
+                .as_slice(),
+            // A non-primary leg named "main" collides with the primary, which
+            // always resolves to the reserved "main" path — the submitted ids
+            // ("eo" vs "main") differ so the uniqueness check above misses it.
+            br#"{"op":"video.source.set","cameras":[{"id":"eo","role":"primary","source":"rtsp://x/zoom"},{"id":"main","role":"ir","source":"rtsp://x/ir"}]}"#
                 .as_slice(),
         ] {
             let resp = dispatch(body, &NullManager).await;

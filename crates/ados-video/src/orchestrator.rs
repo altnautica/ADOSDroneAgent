@@ -87,7 +87,14 @@ pub struct VideoOrchestrator {
     /// Per-leg respawn attempts for local secondary encoders, so a permanently
     /// broken local secondary camera is given up on rather than respawned every
     /// tick forever (a bounded circuit breaker; network-pull legs are unaffected).
+    /// The count is CONSECUTIVE-failure, not lifetime: it is cleared once a leg
+    /// runs healthy for a window (see `secondary_started_at`), so a flaky-but-
+    /// recoverable camera is not permanently abandoned after enough total deaths.
     pub(crate) secondary_respawn_attempts: std::collections::HashMap<String, u32>,
+    /// When each local secondary encoder was last (re)started, so a leg that has
+    /// run healthy for `HEALTHY_RESET_WINDOW` clears its respawn count — the
+    /// secondary analog of the primary's `note_healthy_tick` restart-count reset.
+    pub(crate) secondary_started_at: std::collections::HashMap<String, Instant>,
     pub(crate) wfb_tee: Option<ManagedProcess>,
     pub(crate) cloud_push: Option<ManagedProcess>,
     pub(crate) sei_tap: Option<ManagedProcess>,
@@ -187,6 +194,7 @@ impl VideoOrchestrator {
             encoder: None,
             secondary_encoders: Vec::new(),
             secondary_respawn_attempts: std::collections::HashMap::new(),
+            secondary_started_at: std::collections::HashMap::new(),
             wfb_tee: None,
             cloud_push: None,
             sei_tap: None,
@@ -246,8 +254,12 @@ impl VideoOrchestrator {
         // Only the extra legs need sampling here — the primary "main" leg's flow
         // is already watched by `check_inbound_flow_healthy`; sample it too for a
         // uniform per-leg surface.
-        let ids: Vec<String> = self.legs.iter().map(|l| l.id.clone()).collect();
-        for id in ids {
+        let legs: Vec<(String, bool)> = self
+            .legs
+            .iter()
+            .map(|l| (l.id.clone(), l.is_network_pull))
+            .collect();
+        for (id, is_network_pull) in legs {
             let Some(cur) = self.mediamtx.inbound_bytes(&id).await else {
                 // No sample (path not up yet) → leave prior liveness untouched.
                 continue;
@@ -258,7 +270,14 @@ impl VideoOrchestrator {
                 entry.1 = now;
                 self.leg_live.insert(id, true);
             } else if now.saturating_duration_since(entry.1).as_secs() >= LEG_FLAT_SECS {
-                self.leg_live.insert(id, false);
+                match liveness_on_flat(is_network_pull) {
+                    Some(v) => {
+                        self.leg_live.insert(id, v);
+                    }
+                    None => {
+                        self.leg_live.remove(&id);
+                    }
+                }
             }
         }
         // Drop liveness for legs that no longer exist (a config change).
@@ -905,6 +924,21 @@ impl VideoOrchestrator {
     }
 }
 
+/// The liveness a leg gets when its inbound byte counter has been flat past the
+/// window. A `sourceOnDemand` leg (a network-pull secondary) is only pulled while
+/// a viewer reads it, so "flat" means "no reader", NOT "dead" — report `None`
+/// (unknown; the GCS keeps the leg selectable) rather than a false-degraded
+/// `Some(false)` (Rule 44); a genuinely dead on-demand source surfaces as a
+/// failed pull the moment a viewer connects. Primary + local (publisher) legs
+/// always push, so a flat counter there IS a real degradation → `Some(false)`.
+fn liveness_on_flat(is_network_pull: bool) -> Option<bool> {
+    if is_network_pull {
+        None
+    } else {
+        Some(false)
+    }
+}
+
 /// Sleep up to `dur`, waking early on shutdown or (when `wake_on_camera`) on a
 /// camera-plugged SIGUSR1. A zero / negative duration returns immediately.
 /// Mirrors `_sleep_or_wake_on_camera` fused with shutdown awareness.
@@ -1331,5 +1365,57 @@ mod tests {
         o.note_healthy_tick();
         assert!(o.last_healthy_at.is_some());
         assert_eq!(o.restart_count, 2);
+    }
+
+    #[test]
+    fn a_flat_on_demand_leg_is_unknown_not_dead() {
+        // A network-pull (sourceOnDemand) leg with no reader reads flat; that is
+        // "no viewer", not "dead", so it must be UNKNOWN (None), never a
+        // false-degraded false. A primary/local publisher flat IS degraded.
+        assert_eq!(liveness_on_flat(true), None);
+        assert_eq!(liveness_on_flat(false), Some(false));
+    }
+
+    #[tokio::test]
+    async fn secondary_respawn_counter_resets_after_a_healthy_window() {
+        let mut o = test_orch();
+        o.state = PipelineState::Running;
+        // A running secondary encoder (a real long-lived child), accrued respawns,
+        // and a start stamp older than the healthy window.
+        let proc = ManagedProcess::spawn("test-secondary", "sleep", &["30".into()])
+            .expect("spawn sleep");
+        o.secondary_encoders.push(("sub".into(), proc));
+        o.secondary_respawn_attempts.insert("sub".into(), 4);
+        o.secondary_started_at
+            .insert("sub".into(), Instant::now() - Duration::from_secs(61));
+
+        o.supervise_secondary_encoders().await;
+
+        assert!(
+            !o.secondary_respawn_attempts.contains_key("sub"),
+            "a leg that ran healthy past the window clears its respawn count"
+        );
+        o.stop_secondary_encoders().await;
+    }
+
+    #[tokio::test]
+    async fn secondary_respawn_counter_holds_within_the_healthy_window() {
+        let mut o = test_orch();
+        o.state = PipelineState::Running;
+        let proc = ManagedProcess::spawn("test-secondary", "sleep", &["30".into()])
+            .expect("spawn sleep");
+        o.secondary_encoders.push(("sub".into(), proc));
+        o.secondary_respawn_attempts.insert("sub".into(), 4);
+        // Started just now — the window has NOT elapsed, so the count must hold.
+        o.secondary_started_at.insert("sub".into(), Instant::now());
+
+        o.supervise_secondary_encoders().await;
+
+        assert_eq!(
+            o.secondary_respawn_attempts.get("sub").copied(),
+            Some(4),
+            "a leg still inside the healthy window keeps its respawn count"
+        );
+        o.stop_secondary_encoders().await;
     }
 }
