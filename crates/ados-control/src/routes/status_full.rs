@@ -1061,7 +1061,36 @@ async fn build_video_block(
         wfb_status,
         host,
         resolve_mediamtx_ready().await,
+        read_video_streams(host),
     )
+}
+
+/// Read the video-streams sidecar (`/run/ados/video-streams.json`, written by
+/// ados-video on pipeline start) and resolve each leg to a dialable WHEP URL, so
+/// the status surface can advertise every `:8889/<id>/whep` leg for the GCS
+/// stream switcher. Best-effort: any read/parse failure yields an empty list.
+fn read_video_streams(host: &str) -> Vec<Value> {
+    let Ok(body) = std::fs::read("/run/ados/video-streams.json") else {
+        return Vec::new();
+    };
+    let Ok(doc) = serde_json::from_slice::<Value>(&body) else {
+        return Vec::new();
+    };
+    let Some(streams) = doc.get("streams").and_then(|s| s.as_array()) else {
+        return Vec::new();
+    };
+    streams
+        .iter()
+        .filter_map(|leg| {
+            let id = leg.get("id")?.as_str()?;
+            Some(json!({
+                "id": id,
+                "role": leg.get("role").and_then(|r| r.as_str()).unwrap_or(""),
+                "codec": leg.get("codec").and_then(|c| c.as_str()).unwrap_or(""),
+                "whep": format!("http://{host}:{MEDIAMTX_WEBRTC_PORT}/{id}/whep"),
+            }))
+        })
+        .collect()
 }
 
 /// Resolve whether the local mediamtx has a ready stream: the management-API
@@ -1084,6 +1113,7 @@ fn build_video_block_with(
     wfb_status: &Option<Map<String, Value>>,
     host: &str,
     mediamtx_ready: bool,
+    streams: Vec<Value>,
 ) -> Value {
     // Default: not initialised, no playable endpoint.
     let default = json!({
@@ -1095,13 +1125,19 @@ fn build_video_block_with(
     });
 
     let running = || {
-        json!({
+        let mut block = json!({
             "state": "running",
             "whep_url": format!("http://{host}:{MEDIAMTX_WEBRTC_PORT}/main/whep"),
             "recording": false,
             "recording_filename": null,
             "recording_started_at": null,
-        })
+        });
+        // Advertise the per-leg streams (only when a live pipeline wrote the
+        // sidecar) so the GCS switcher can address each `:8889/<id>/whep` leg.
+        if !streams.is_empty() {
+            block["streams"] = Value::Array(streams.clone());
+        }
+        block
     };
 
     if resolved_profile == "drone" {
@@ -2020,7 +2056,7 @@ mod tests {
         // mediamtx absent (readiness injected false) → not_initialized, no whep.
         // The readiness is threaded in explicitly, so the assertion holds
         // deterministically regardless of whatever answers 9997/8889 on the host.
-        let v = build_video_block_with("drone", &None, "localhost", false);
+        let v = build_video_block_with("drone", &None, "localhost", false, vec![]);
         assert_eq!(v["state"], json!("not_initialized"));
         assert_eq!(v["whep_url"], Value::Null);
         assert_eq!(v["recording"], json!(false));
@@ -2030,9 +2066,25 @@ mod tests {
     #[test]
     fn video_block_on_drone_with_ready_mediamtx_is_running() {
         // mediamtx ready (readiness injected true) → running + a WHEP URL.
-        let v = build_video_block_with("drone", &None, "example-host", true);
+        let v = build_video_block_with("drone", &None, "example-host", true, vec![]);
         assert_eq!(v["state"], json!("running"));
         assert_eq!(v["whep_url"], json!("http://example-host:8889/main/whep"));
+        // No sidecar streams → no `streams` key (single-stream nodes unchanged).
+        assert!(v.get("streams").is_none());
+    }
+
+    #[test]
+    fn video_block_advertises_per_leg_streams_when_present() {
+        let streams = vec![
+            json!({ "id": "main", "role": "eo", "codec": "h265", "whep": "http://h:8889/main/whep" }),
+            json!({ "id": "ir", "role": "ir", "codec": "h264", "whep": "http://h:8889/ir/whep" }),
+        ];
+        let v = build_video_block_with("drone", &None, "h", true, streams);
+        assert_eq!(v["state"], json!("running"));
+        let legs = v["streams"].as_array().unwrap();
+        assert_eq!(legs.len(), 2);
+        assert_eq!(legs[1]["id"], json!("ir"));
+        assert_eq!(legs[1]["whep"], json!("http://h:8889/ir/whep"));
     }
 
     #[test]
@@ -2040,7 +2092,7 @@ mod tests {
         // A ground station whose WFB link is not delivering reports stopped, no
         // whep — regardless of mediamtx reachability (the gate is the link). Inject
         // mediamtx ready=true to prove the link gate dominates even then.
-        let v = build_video_block_with("ground-station", &None, "localhost", true);
+        let v = build_video_block_with("ground-station", &None, "localhost", true, vec![]);
         assert_eq!(v["state"], json!("stopped"));
         assert_eq!(v["whep_url"], Value::Null);
     }
@@ -2052,7 +2104,7 @@ mod tests {
             ("state", json!("active")),
             ("valid_rx_packets_per_s", json!(120.0)),
         ]));
-        let v = build_video_block_with("ground-station", &wfb, "localhost", false);
+        let v = build_video_block_with("ground-station", &wfb, "localhost", false, vec![]);
         assert_eq!(v["state"], json!("connecting"));
         assert_eq!(v["whep_url"], Value::Null);
     }
