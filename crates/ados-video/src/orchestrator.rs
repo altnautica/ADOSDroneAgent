@@ -68,6 +68,13 @@ pub struct VideoOrchestrator {
     /// empty `video.cameras` resolves to a single `main` leg (back-compat).
     pub(crate) legs: Vec<ResolvedLeg>,
 
+    /// Per-leg inbound-byte watchdog state (last counter value + when it last
+    /// advanced), keyed by leg id. Feeds the per-leg `live` flag in the sidecar
+    /// so a stalled secondary leg is surfaced honestly (Rule 44).
+    pub(crate) leg_inbound: std::collections::HashMap<String, (u64, Instant)>,
+    /// The derived per-leg liveness the sidecar stamps (`id -> is_live`).
+    pub(crate) leg_live: std::collections::HashMap<String, bool>,
+
     pub(crate) mediamtx: MediamtxManager,
     pub(crate) encoder: Option<ManagedProcess>,
     /// Owned encoders for LOCAL secondary legs (keyed by leg id): each publishes
@@ -170,6 +177,8 @@ impl VideoOrchestrator {
             config,
             camera_cfg,
             legs,
+            leg_inbound: std::collections::HashMap::new(),
+            leg_live: std::collections::HashMap::new(),
             mediamtx: MediamtxManager::new(config_dir),
             encoder: None,
             secondary_encoders: Vec::new(),
@@ -221,8 +230,42 @@ impl VideoOrchestrator {
     /// so the out-of-process status surfaces can advertise each leg + the GCS
     /// can populate its stream switcher. Best-effort — a write failure is
     /// logged, never fatal. Honors [`Self::video_streams_path`].
+    /// Sample each leg's mediamtx inbound-byte counter and derive per-leg
+    /// liveness (`leg_live`): a leg whose counter advanced is live; a leg flat
+    /// for `LEG_FLAT_SECS` is stalled. Surfaces a dead secondary leg in the
+    /// sidecar (Rule 44). mediamtx owns per-path re-establishment for a
+    /// `sourceOnDemand` pull when a reader re-attaches; this is the detection.
+    pub(crate) async fn sample_leg_liveness(&mut self) {
+        const LEG_FLAT_SECS: u64 = 30;
+        let now = Instant::now();
+        // Only the extra legs need sampling here — the primary "main" leg's flow
+        // is already watched by `check_inbound_flow_healthy`; sample it too for a
+        // uniform per-leg surface.
+        let ids: Vec<String> = self.legs.iter().map(|l| l.id.clone()).collect();
+        for id in ids {
+            let Some(cur) = self.mediamtx.inbound_bytes(&id).await else {
+                // No sample (path not up yet) → leave prior liveness untouched.
+                continue;
+            };
+            let entry = self.leg_inbound.entry(id.clone()).or_insert((cur, now));
+            if cur > entry.0 {
+                entry.0 = cur;
+                entry.1 = now;
+                self.leg_live.insert(id, true);
+            } else if now.saturating_duration_since(entry.1).as_secs() >= LEG_FLAT_SECS {
+                self.leg_live.insert(id, false);
+            }
+        }
+        // Drop liveness for legs that no longer exist (a config change).
+        let present: std::collections::HashSet<&str> =
+            self.legs.iter().map(|l| l.id.as_str()).collect();
+        self.leg_inbound.retain(|k, _| present.contains(k.as_str()));
+        self.leg_live.retain(|k, _| present.contains(k.as_str()));
+    }
+
     pub(crate) fn refresh_video_streams(&self) {
-        let snap = crate::video_streams::VideoStreamsSnapshot::from_legs(&self.legs);
+        let snap =
+            crate::video_streams::VideoStreamsSnapshot::from_legs(&self.legs, &self.leg_live);
         let path = self
             .video_streams_path
             .as_deref()
@@ -584,13 +627,17 @@ impl VideoOrchestrator {
     /// restart cadence.
     async fn tick_running(&mut self, shutdown: &Shutdown) {
         let health_ok = self.check_health().await;
+        // Sample per-leg liveness, then re-stamp the leg-list sidecar EVERY tick,
+        // regardless of the PRIMARY's health: the advertised legs are static
+        // (resolved at startup) and the secondary legs are served by mediamtx
+        // independently of the primary, so an unhealthy primary (mid
+        // restart-ladder) must not let the sidecar go stale and drop the healthy
+        // secondary legs from the heartbeat/switcher.
+        self.sample_leg_liveness().await;
+        self.refresh_video_streams();
         if health_ok {
             self.note_healthy_tick();
             self.refresh_camera_state();
-            // Re-stamp the leg-list sidecar so the cloud heartbeat's staleness
-            // gate keeps advertising a running pipeline's legs (and drops them
-            // once the pipeline stops re-stamping).
-            self.refresh_video_streams();
         } else {
             self.note_unhealthy_tick();
         }

@@ -259,10 +259,10 @@ description = "Camera pipeline readiness state."
 
 [[sidecar]]
 id = "video-streams"
-version = 1
+version = 2
 path = "/run/ados/video-streams.json"
 rust_const = "ados_video::video_streams::VIDEO_STREAMS_JSON"
-description = "Per-leg video stream list (id/role/codec) the node serves, for the GCS stream switcher."
+description = "Per-leg video stream list (id/role/codec/live) the node serves, for the GCS stream switcher."
 
 [[sidecar]]
 id = "camera-usb-recovery"

@@ -39,7 +39,7 @@ SIDECAR_VERSIONS: dict[str, int] = {
     "bind-state": 1,
     "mesh-state": 1,
     "camera-state": 1,
-    "video-streams": 1,
+    "video-streams": 2,
     "camera-usb-recovery": 1,
     "pic-state": 1,
     "gpio-output": 1,
@@ -248,11 +248,11 @@ SIDECAR_CATALOG: dict[str, dict[str, object]] = {
         "description": "Camera pipeline readiness state.",
     },
     "video-streams": {
-        "version": 1,
+        "version": 2,
         "wire": "json",
         "transport": "/run/ados/video-streams.json",
         "status": "sidecar",
-        "description": "Per-leg video stream list (id/role/codec) the node serves, for the GCS stream switcher.",
+        "description": "Per-leg video stream list (id/role/codec/live) the node serves, for the GCS stream switcher.",
     },
     "camera-usb-recovery": {
         "version": 1,

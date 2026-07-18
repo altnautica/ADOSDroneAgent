@@ -22,7 +22,7 @@ pub const VIDEO_STREAMS_JSON: &str = "/run/ados/video-streams.json";
 
 /// Schema version of the `video-streams.json` sidecar. Kept in step with the
 /// registry in `contracts.toml`; readers compare best-effort and read anyway.
-pub const VIDEO_STREAMS_SIDECAR_VERSION: u16 = 1;
+pub const VIDEO_STREAMS_SIDECAR_VERSION: u16 = 2;
 
 /// One advertised video leg — the stable identity a viewer connects to at
 /// `:8889/<id>/whep`. Only the display/identity fields cross the process
@@ -32,6 +32,13 @@ pub struct VideoStreamEntry {
     pub id: String,
     pub role: String,
     pub codec: String,
+    /// Per-leg liveness: `Some(true)` = this leg's mediamtx path is receiving
+    /// bytes, `Some(false)` = it has been flat (stalled source), `None` = not
+    /// yet sampled. A stalled secondary leg is surfaced honestly here so the GCS
+    /// switcher/PiP + the operator can see which leg is dead (Rule 44) rather
+    /// than a silently-black stream. Additive/optional — absent on older readers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live: Option<bool>,
 }
 
 /// The exact `video-streams.json` payload.
@@ -43,10 +50,11 @@ pub struct VideoStreamsSnapshot {
 }
 
 impl VideoStreamsSnapshot {
-    /// Build the snapshot from the orchestrator's resolved leg list. The source
-    /// URL is intentionally dropped — a viewer keys on `id` (the mediamtx path)
-    /// and the surfaces synthesize the WHEP URL from `id`.
-    pub fn from_legs(legs: &[ResolvedLeg]) -> Self {
+    /// Build the snapshot from the orchestrator's resolved leg list, stamping
+    /// each leg's liveness from `live` (keyed by leg id; absent id ⇒ not sampled
+    /// yet ⇒ `None`). The source URL is intentionally dropped — a viewer keys on
+    /// `id` (the mediamtx path) and the surfaces synthesize the WHEP URL from it.
+    pub fn from_legs(legs: &[ResolvedLeg], live: &std::collections::HashMap<String, bool>) -> Self {
         Self {
             version: VIDEO_STREAMS_SIDECAR_VERSION,
             updated_at_unix: now_unix(),
@@ -56,6 +64,7 @@ impl VideoStreamsSnapshot {
                     id: l.id.clone(),
                     role: l.role.clone(),
                     codec: l.codec.clone(),
+                    live: live.get(&l.id).copied(),
                 })
                 .collect(),
         }
@@ -125,10 +134,12 @@ mod tests {
 
     #[test]
     fn snapshot_carries_id_role_codec_per_leg_and_drops_source() {
-        let s =
-            VideoStreamsSnapshot::from_legs(&[leg("main", "eo", "h265"), leg("ir", "ir", "h264")]);
+        let s = VideoStreamsSnapshot::from_legs(
+            &[leg("main", "eo", "h265"), leg("ir", "ir", "h264")],
+            &Default::default(),
+        );
         let v: serde_json::Value = serde_json::to_value(&s).unwrap();
-        assert_eq!(v["version"], 1);
+        assert_eq!(v["version"], 2);
         assert!(v["updated_at_unix"].as_f64().unwrap() > 0.0);
         let streams = v["streams"].as_array().unwrap();
         assert_eq!(streams.len(), 2);
@@ -138,13 +149,29 @@ mod tests {
         assert_eq!(streams[1]["id"], "ir");
         // The private source URL never crosses the boundary.
         assert!(streams[0].get("source").is_none());
+        // Unsampled liveness is omitted (additive, back-compatible).
+        assert!(streams[0].get("live").is_none());
+    }
+
+    #[test]
+    fn snapshot_stamps_per_leg_liveness_when_sampled() {
+        let mut live = std::collections::HashMap::new();
+        live.insert("main".to_string(), true);
+        live.insert("ir".to_string(), false);
+        let s = VideoStreamsSnapshot::from_legs(
+            &[leg("main", "eo", "h265"), leg("ir", "ir", "h264")],
+            &live,
+        );
+        let v: serde_json::Value = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["streams"][0]["live"], true);
+        assert_eq!(v["streams"][1]["live"], false);
     }
 
     #[test]
     fn write_is_atomic_and_round_trips() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("video-streams.json");
-        let s = VideoStreamsSnapshot::from_legs(&[leg("main", "eo", "h264")]);
+        let s = VideoStreamsSnapshot::from_legs(&[leg("main", "eo", "h264")], &Default::default());
         s.write_to(&path).unwrap();
         let reloaded: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
