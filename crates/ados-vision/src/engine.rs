@@ -609,10 +609,18 @@ fn merge_tracked(
     mut detections: Vec<Detection>,
     update: crate::tracker::TrackUpdate,
 ) -> Vec<Detection> {
-    let Some(locked) = update.detection else {
+    let Some(mut locked) = update.detection else {
         // Idle or tentative-not-yet-confirmed: nothing to stamp.
         return detections;
     };
+    // Only an operator-designated track presents a lock state to consumers,
+    // mirroring the offload publish path. An automatically seeded track (the
+    // most-confident auto-pick) is still tracked — it keeps its id and predicted
+    // box — but carries no lock state, so a follow behavior only ever engages a
+    // target the operator actually designated.
+    if !update.operator_designated {
+        locked.lock_state = None;
+    }
     if update.measured {
         // The tracker associated to one of the input boxes; stamp the closest.
         match best_overlap_index(&detections, &locked.bbox) {
@@ -673,7 +681,7 @@ fn bbox_iou(
 mod tests {
     use super::*;
     use crate::backend::MockBackend;
-    use ados_protocol::framebus::{BoundingBox, ModelKind};
+    use ados_protocol::framebus::{BoundingBox, LockState, ModelKind};
 
     fn engine() -> Arc<VisionEngine> {
         VisionEngine::new(Box::new(MockBackend), 4)
@@ -955,11 +963,15 @@ mod tests {
             .await;
 
         let stamped: Vec<_> = confirmed.iter().filter(|d| d.track_id.is_some()).collect();
-        assert_eq!(stamped.len(), 1, "exactly one detection carries the lock");
+        assert_eq!(
+            stamped.len(),
+            1,
+            "exactly one detection carries the track id"
+        );
         let id = stamped[0].track_id.unwrap();
         assert!(
-            stamped[0].lock_state.is_some(),
-            "the locked box reports a lock state"
+            stamped[0].lock_state.is_none(),
+            "an auto-seeded track is tracked but never presented as locked"
         );
         assert_eq!(e.current_track("cam").await, Some(id));
 
@@ -1003,5 +1015,48 @@ mod tests {
         // reset_track drops the lock entirely.
         e.reset_track("cam").await;
         assert_eq!(e.current_track("cam").await, None);
+    }
+
+    #[tokio::test]
+    async fn auto_seed_publishes_no_lock_state_but_designate_does() {
+        // An auto-seeded track (no operator designate) must NOT be published as
+        // locked, even once confirmed — it is tracked (carries an id) for
+        // continuity, but a follow behavior only ever engages a target the
+        // operator actually designated. This mirrors the offload publish path.
+        let e =
+            VisionEngine::with_tracker(Box::new(MockBackend), 4, true, TrackerConfig::default());
+        let subject = det(100.0, 100.0, 0.9, "uav");
+        e.apply_tracker("cam", vec![subject.clone()], &[], 0, 0, FrameFormat::Rgb24)
+            .await;
+        let auto = e
+            .apply_tracker("cam", vec![subject.clone()], &[], 0, 0, FrameFormat::Rgb24)
+            .await;
+        let tracked: Vec<_> = auto.iter().filter(|d| d.track_id.is_some()).collect();
+        assert_eq!(tracked.len(), 1, "the auto-seeded subject is tracked");
+        assert!(
+            tracked[0].lock_state.is_none(),
+            "an auto-seeded track is never published as locked"
+        );
+
+        // The SAME subject, now explicitly designated by the operator, IS
+        // published as locked once the track confirms.
+        e.reset_track("cam").await;
+        e.designate("cam", &subject)
+            .await
+            .expect("designate seeds a track");
+        e.apply_tracker("cam", vec![subject.clone()], &[], 0, 0, FrameFormat::Rgb24)
+            .await;
+        let designated = e
+            .apply_tracker("cam", vec![subject.clone()], &[], 0, 0, FrameFormat::Rgb24)
+            .await;
+        let locked: Vec<_> = designated
+            .iter()
+            .filter(|d| d.lock_state == Some(LockState::Locked))
+            .collect();
+        assert_eq!(
+            locked.len(),
+            1,
+            "an operator-designated track is published as locked"
+        );
     }
 }

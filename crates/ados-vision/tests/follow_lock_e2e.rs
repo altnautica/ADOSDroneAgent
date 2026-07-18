@@ -228,7 +228,10 @@ async fn engine_locks_and_holds_a_stable_track_through_the_public_path() {
             .unwrap();
         if let Some(d) = batch.detections.iter().find(|d| d.track_id.is_some()) {
             last_id = d.track_id;
-            assert!(d.lock_state.is_some(), "a locked box carries a lock state");
+            assert!(
+                d.lock_state.is_none(),
+                "an auto-seeded track is tracked but not published as locked"
+            );
         }
     }
     let id = last_id.expect("a track id is stamped");

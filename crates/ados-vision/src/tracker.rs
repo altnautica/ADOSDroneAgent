@@ -338,6 +338,12 @@ pub struct TrackUpdate {
     /// re-designate the target. A silent capture never happens; this flag is how
     /// the ambiguity surfaces.
     pub needs_redesignation: bool,
+    /// True only when the reported track was seeded by an explicit operator
+    /// [`SingleObjectTracker::designate`] call. A consumer publish path gates the
+    /// wire `lock_state` on this: an auto-seeded track (`false`) is tracked and
+    /// carries an id, but is never presented as locked, mirroring the offload
+    /// publish path. `false` on a frame with nothing to report.
+    pub operator_designated: bool,
 }
 
 /// A constant-velocity Kalman filter over a bounding box.
@@ -502,6 +508,15 @@ struct Track {
     /// by the competitor's disappearance, so no extra re-confirm frame is owed.
     /// Only a miss-coast (the laundering threat) takes the re-confirm window.
     coast_ambiguous: bool,
+    /// True only when this track originates from an explicit operator
+    /// [`SingleObjectTracker::designate`] call. An automatically seeded track
+    /// (the most-confident auto-pick) is `false`: it is still tracked for
+    /// continuity — it keeps its id and predicted box — but a consumer publish
+    /// path must NOT present it as locked. Only a target the operator actually
+    /// designated carries a lock state to consumers, so a follow behavior can
+    /// never engage a subject nobody chose. This mirrors the offload publish
+    /// path, which stamps a lock state only on the designated track.
+    operator_designated: bool,
 }
 
 impl SingleObjectTracker {
@@ -565,7 +580,7 @@ impl SingleObjectTracker {
     pub fn designate(&mut self, detection: &Detection) -> Option<u64> {
         self.track = None;
         let cand = Candidate::motion_only(detection.clone());
-        let _ = self.seed(&[&cand]);
+        let _ = self.seed(&[&cand], true);
         self.track.as_ref().map(|t| t.id)
     }
 
@@ -599,14 +614,18 @@ impl SingleObjectTracker {
             .collect();
 
         match self.track.take() {
-            None => self.seed(&eligible),
+            None => self.seed(&eligible, false),
             Some(track) => self.advance(track, &eligible),
         }
     }
 
     /// No track yet: lock onto the most confident eligible detection (if any),
-    /// capturing its appearance template.
-    fn seed(&mut self, candidates: &[&Candidate]) -> TrackUpdate {
+    /// capturing its appearance template. `operator_designated` is `true` only
+    /// when the seed comes from an explicit [`Self::designate`] call (the
+    /// operator's pick); the automatic most-confident seed passes `false`, and
+    /// that flag rides the track so a consumer publish path can withhold the
+    /// lock state from an auto-seeded target.
+    fn seed(&mut self, candidates: &[&Candidate], operator_designated: bool) -> TrackUpdate {
         // A fresh seed clears any pending re-designation: we are starting over.
         self.needs_redesignation = false;
         let best = candidates
@@ -620,6 +639,7 @@ impl SingleObjectTracker {
                 track_id: None,
                 measured: false,
                 needs_redesignation: false,
+                operator_designated: false,
             },
             Some(cand) => {
                 let det = &cand.detection;
@@ -644,6 +664,7 @@ impl SingleObjectTracker {
                     template,
                     reconfirming: false,
                     coast_ambiguous: false,
+                    operator_designated,
                 };
                 let state = track.state;
                 let report = if state == TrackState::Confirmed {
@@ -664,6 +685,7 @@ impl SingleObjectTracker {
                     track_id: id_out,
                     measured: true,
                     needs_redesignation: false,
+                    operator_designated,
                 }
             }
         }
@@ -769,6 +791,7 @@ impl SingleObjectTracker {
                 };
                 let id_out = self.current_id_for(&track);
                 let needs = self.needs_redesignation;
+                let operator_designated = track.operator_designated;
                 self.track = Some(track);
                 TrackUpdate {
                     state,
@@ -776,6 +799,7 @@ impl SingleObjectTracker {
                     track_id: id_out,
                     measured,
                     needs_redesignation: needs,
+                    operator_designated,
                 }
             }
             Decision::Ambiguous(assoc) => {
@@ -801,6 +825,7 @@ impl SingleObjectTracker {
                             track_id: None,
                             measured: false,
                             needs_redesignation: false,
+                            operator_designated: track.operator_designated,
                         }
                     }
                     TrackState::Confirmed | TrackState::Coasting => {
@@ -842,6 +867,7 @@ impl SingleObjectTracker {
                 track_id: None,
                 measured: false,
                 needs_redesignation: false,
+                operator_designated: track.operator_designated,
             };
         }
         track.state = TrackState::Coasting;
@@ -858,6 +884,7 @@ impl SingleObjectTracker {
         let report = reported(&track, predicted, LockState::Uncertain, assoc);
         let id_out = Some(track.id);
         let needs = self.needs_redesignation;
+        let operator_designated = track.operator_designated;
         self.track = Some(track);
         TrackUpdate {
             state: TrackState::Coasting,
@@ -865,6 +892,7 @@ impl SingleObjectTracker {
             track_id: id_out,
             measured: false,
             needs_redesignation: needs,
+            operator_designated,
         }
     }
 
