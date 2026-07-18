@@ -15,17 +15,59 @@ from ados.setup.models import (
     RemoteAccessStatus,
     SetupAccessUrl,
     VideoAccess,
+    VideoStreamAccess,
 )
 
 from ._constants import _HOTSPOT_IP, _HOTSPOT_URL, _USB_GADGET_IP
 
 
-async def _video_access(runtime: Any, host_name: str) -> VideoAccess:
+def _stream_legs(
+    config: Any, host_name: str, webrtc_port: int, hls_port: int
+) -> list[VideoStreamAccess]:
+    """The per-leg video streams a node exposes, from the declared
+    ``video.cameras`` list. The primary leg (declared role ``primary`` else the
+    first) is always served at the fixed ``main`` path; secondary legs keep their
+    ids. An absent / empty list yields the single ``main`` stream (back-compat).
+    Mirrors the Rust ``resolve_legs`` primary→``main`` normalization so the
+    advertised ids match the served mediamtx paths."""
+    cameras = list(getattr(getattr(config, "video", None), "cameras", None) or [])
+
+    def leg(sid: str, role: str, codec: str) -> VideoStreamAccess:
+        return VideoStreamAccess(
+            id=sid,
+            role=role,
+            codec=codec,
+            whep_url=f"http://{host_name}:{webrtc_port}/{sid}/whep",
+            hls_url=f"http://{host_name}:{hls_port}/{sid}/index.m3u8",
+        )
+
+    if not cameras:
+        return [leg("main", "", "")]
+    primary_idx = next(
+        (i for i, c in enumerate(cameras) if getattr(c, "role", None) == "primary"),
+        0,
+    )
+    out: list[VideoStreamAccess] = []
+    for i, c in enumerate(cameras):
+        sid = "main" if i == primary_idx else str(getattr(c, "id", "") or "main")
+        role = str(getattr(c, "role", "") or "")
+        codec = str(getattr(c, "codec", "") or "")
+        out.append(leg(sid, role, codec))
+    return out
+
+
+async def _video_access(
+    runtime: Any, host_name: str, config: Any = None
+) -> VideoAccess:
     """Build the VideoAccess slice with WebRTC WHEP + HLS URLs.
 
     HLS lives on a different mediamtx port (8888 by default) so it
     bypasses CORS and works as a fallback when WebRTC is blocked.
     The dashboard's video panel falls back to HLS when WHEP fails.
+
+    When the node declares more than one video leg (``video.cameras``), each is
+    advertised in ``streams``; the top-level ``whep_url`` / ``hls_url`` stay the
+    primary (`main`) leg for back-compat.
     """
     pipeline = runtime.video_pipeline()
     if pipeline is not None:
@@ -40,6 +82,11 @@ async def _video_access(runtime: Any, host_name: str) -> VideoAccess:
             whep_url=f"http://{host_name}:{webrtc_port}/main/whep" if running else None,
             hls_url=f"http://{host_name}:{hls_port}/main/index.m3u8" if running else None,
             recording=bool(recorder.get("recording", False)),
+            streams=(
+                _stream_legs(config, host_name, webrtc_port, hls_port)
+                if running
+                else []
+            ),
         )
 
     try:
@@ -62,6 +109,7 @@ async def _video_access(runtime: Any, host_name: str) -> VideoAccess:
                 whep_url=f"http://{host_name}:{webrtc_port}/main/whep",
                 hls_url=f"http://{host_name}:{hls_port}/main/index.m3u8",
                 recording=False,
+                streams=_stream_legs(config, host_name, webrtc_port, hls_port),
             )
     except Exception:
         pass
@@ -208,16 +256,34 @@ def _access_urls(
     # The WHEP endpoint stays exposed internally for the dashboard's
     # WebRTC fast path, but advertising it as a clickable URL was a
     # dead end — browsers do not render the raw WHEP signalling URL.
-    viewer_url = _viewer_url_from_whep(video.whep_url)
-    if viewer_url:
-        urls.append(
-            SetupAccessUrl(
-                kind="video",
-                label="Local video viewer",
-                url=viewer_url,
-                source="local",
+    if len(video.streams) > 1:
+        # A multi-stream node advertises one video entry per leg, each carrying
+        # its id / role / codec so the GCS can populate the stream switcher.
+        for s in video.streams:
+            leg_viewer = _viewer_url_from_whep(s.whep_url)
+            if leg_viewer:
+                urls.append(
+                    SetupAccessUrl(
+                        kind="video",
+                        label=f"Video · {s.role or s.id}",
+                        url=leg_viewer,
+                        source="local",
+                        id=s.id,
+                        role=s.role,
+                        codec=s.codec,
+                    )
+                )
+    else:
+        viewer_url = _viewer_url_from_whep(video.whep_url)
+        if viewer_url:
+            urls.append(
+                SetupAccessUrl(
+                    kind="video",
+                    label="Local video viewer",
+                    url=viewer_url,
+                    source="local",
+                )
             )
-        )
     public_viewer_url = _viewer_url_from_whep(video.public_whep_url)
     if public_viewer_url:
         urls.append(

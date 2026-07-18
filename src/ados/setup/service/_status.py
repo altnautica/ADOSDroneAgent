@@ -81,7 +81,7 @@ async def build_setup_status(  # noqa: C901
         f"tcp://{lan_host}:{mavlink_tcp_port}" if mavlink_tcp_port else None
     )
 
-    video = await _video_access(runtime, lan_host)
+    video = await _video_access(runtime, lan_host, config)
     remote = _remote_status(config)
     uplink_kind = _probe_active_uplink_kind()
     wifi_ssid = _probe_wifi_ssid() if uplink_kind == "wifi" else None

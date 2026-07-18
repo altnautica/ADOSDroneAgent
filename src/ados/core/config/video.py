@@ -90,6 +90,27 @@ class CameraConfig(BaseModel):
     expected: Literal["auto", "true", "false"] = "auto"
 
 
+class CameraLeg(BaseModel):
+    """One entry of the optional ``video.cameras`` list — a single video leg the
+    node exposes as its own mediamtx path (and ``:8889/<id>/whep``). Present only
+    when more than one stream is declared (a smart pod, a dual-camera rig); an
+    absent list falls back to the single ``video.camera`` block. The primary leg
+    is always served at the fixed ``main`` path; secondary legs keep their ids.
+    """
+
+    id: str = "main"
+    source: str = "csi"
+    # Logical role: "primary" designates the WFB/cloud stream; any other value
+    # (or absent) is a LAN-WHEP-only secondary. Absent on every leg → the first
+    # leg is the primary.
+    role: str | None = None
+    codec: str = "h264"
+    width: int = 1280
+    height: int = 720
+    fps: int = 30
+    bitrate_kbps: int = 4000
+
+
 class RecordingConfig(BaseModel):
     enabled: bool = False
     path: str = str(RECORDINGS_DIR)
@@ -124,6 +145,10 @@ class VideoConfig(BaseModel):
     mode: str = "wfb"
     wfb: WfbConfig = WfbConfig()
     camera: CameraConfig = CameraConfig()
+    # Optional multi-stream list. Empty → the single ``camera`` leg (fully
+    # backward compatible). Written by a driver plugin (a smart pod) via the
+    # ``video.source.set`` host service, or set by an operator.
+    cameras: list[CameraLeg] = Field(default_factory=list)
     recording: RecordingConfig = RecordingConfig()
     usb_recovery: UsbRecoveryConfig = UsbRecoveryConfig()
     cloud_relay_url: str = ""  # e.g. rtsp://video.altnautica.com:8554

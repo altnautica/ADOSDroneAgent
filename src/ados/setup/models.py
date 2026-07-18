@@ -26,6 +26,14 @@ class SetupAccessUrl(BaseModel):
     url: str
     source: Literal["local", "hotspot", "usb", "mdns", "cloud", "configured"]
     primary: bool = False
+    # Per-stream identity for a `kind="video"` entry when the node exposes more
+    # than one video leg (a smart pod, a dual-camera rig). Empty on a single-leg
+    # node, so existing consumers are unaffected. `id` is the mediamtx path /
+    # WHEP id, `role` drives the GCS label (eo / eo_wide / ir / split), `codec`
+    # lets the decoder pick the right path.
+    id: str = ""
+    role: str = ""
+    codec: str = ""
 
 
 class RemoteAccessStatus(BaseModel):
@@ -37,6 +45,18 @@ class RemoteAccessStatus(BaseModel):
     error: str = ""
 
 
+class VideoStreamAccess(BaseModel):
+    """One video leg the node exposes: its stable id, role, codec, and the WHEP /
+    HLS URLs a viewer connects to. On a single-leg node this is just the `main`
+    stream; a multi-stream node (a smart pod) lists one per leg."""
+
+    id: str = "main"
+    role: str = ""
+    codec: str = ""
+    whep_url: str | None = None
+    hls_url: str | None = None
+
+
 class VideoAccess(BaseModel):
     state: str = "not_initialized"
     whep_url: str | None = None
@@ -44,6 +64,9 @@ class VideoAccess(BaseModel):
     hls_url: str | None = None
     public_hls_url: str | None = None
     recording: bool = False
+    # Per-leg streams when the node exposes more than one; the top-level
+    # `whep_url` / `hls_url` stay the primary (`main`) leg for back-compat.
+    streams: list[VideoStreamAccess] = Field(default_factory=list)
 
 
 class MavlinkAccess(BaseModel):
