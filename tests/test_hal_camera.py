@@ -208,3 +208,80 @@ class TestDiscoverCameras:
         with patch("ados.hal.camera.platform.system", return_value="Darwin"):
             cameras = discover_cameras()
             assert cameras == []
+
+
+class TestFingerprints:
+    def test_to_dict_carries_match(self):
+        cam = CameraInfo(
+            name="belly",
+            type=CameraType.USB,
+            device_path="/dev/video0",
+            match={"usb": "046d:0825"},
+        )
+        assert cam.to_dict()["match"] == {"usb": "046d:0825"}
+
+    def test_csi_match_has_sensor_and_port(self):
+        output = "1 : imx219 [3280x2464 10-bit RGGB] (/base/soc/i2c/imx219)\n"
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stderr = output
+        mock_result.stdout = ""
+        with patch("ados.hal.camera.subprocess.run", return_value=mock_result):
+            cameras = _discover_csi_cameras()
+            assert cameras[0].match == {"csi_sensor": "imx219", "csi_port": 1}
+
+    def test_usb_match_is_empty_without_sysfs(self):
+        from ados.hal.camera import _usb_match
+
+        # A node with no sysfs backing (a non-USB device, a non-Linux host)
+        # degrades to an empty fingerprint rather than raising.
+        assert _usb_match("/dev/video99") == {}
+
+    def test_usb_match_reads_vid_pid_serial(self, tmp_path, monkeypatch):
+        from ados.hal import camera as camera_mod
+
+        # Build a fake sysfs tree: the video node's `device` link points at a UVC
+        # interface dir whose parent USB device dir carries idVendor/idProduct/serial.
+        usb_dev = tmp_path / "1-1"
+        iface = usb_dev / "1-1:1.0"
+        iface.mkdir(parents=True)
+        (usb_dev / "idVendor").write_text("046D\n")
+        (usb_dev / "idProduct").write_text("0825\n")
+        (usb_dev / "serial").write_text("ABC123\n")
+        monkeypatch.setattr(
+            camera_mod.os.path,
+            "realpath",
+            lambda p: str(iface),
+        )
+        assert camera_mod._usb_match("/dev/video7") == {"usb": "046d:0825:ABC123"}
+
+    def test_write_discovery_sidecar_round_trips(self, tmp_path):
+        import json
+
+        from ados.hal.camera import write_discovery_sidecar
+
+        path = tmp_path / "cameras-discovered.json"
+        cams = [
+            CameraInfo(
+                name="CSI-0 (imx219)",
+                type=CameraType.CSI,
+                device_path="/dev/video0",
+                width=3280,
+                height=2464,
+                capabilities=["h264", "mjpeg"],
+                match={"csi_sensor": "imx219", "csi_port": 0},
+            ),
+        ]
+        assert write_discovery_sidecar(cams, path=str(path)) is True
+        blob = json.loads(path.read_text())
+        assert blob["version"] == 1
+        assert blob["updated_at_unix"] > 0
+        assert len(blob["cameras"]) == 1
+        assert blob["cameras"][0]["device_path"] == "/dev/video0"
+        assert blob["cameras"][0]["match"] == {"csi_sensor": "imx219", "csi_port": 0}
+
+    def test_write_discovery_sidecar_survives_a_bad_path(self):
+        from ados.hal.camera import write_discovery_sidecar
+
+        # A write into a path that cannot be created returns False, never raises.
+        assert write_discovery_sidecar([], path="/nonexistent-root/deny/x.json") is False

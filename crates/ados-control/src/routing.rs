@@ -151,6 +151,8 @@ fn native_routes() -> Vec<NativeRoute> {
         get("/api/video/latency"),
         get("/api/v1/video/air-pipeline"),
         get("/api/video/config"),
+        // Camera roster read (declared + discovered + live, reconciled).
+        get("/api/video/cameras"),
         // Ground-station status + radio (profile-gated).
         get("/api/v1/ground-station/status"),
         get("/api/v1/ground-station/wfb"),
@@ -437,7 +439,7 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            130,
+            131,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);
@@ -459,6 +461,7 @@ mod tests {
             "/api/video/latency",
             "/api/v1/video/air-pipeline",
             "/api/video/config",
+            "/api/video/cameras",
             "/api/v1/ground-station/status",
             "/api/v1/ground-station/wfb",
             "/api/v1/ground-station/wfb/relay/status",

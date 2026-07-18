@@ -34,7 +34,11 @@ import argparse
 import json
 import sys
 
-from ados.hal.camera import HardwareRole, discover_cameras
+from ados.hal.camera import (
+    HardwareRole,
+    discover_cameras,
+    write_discovery_sidecar,
+)
 from ados.services.video.camera_mgr import CameraManager
 
 
@@ -49,6 +53,11 @@ def _build_result() -> dict:
     codec / ISP / decoder devices itself).
     """
     cameras = discover_cameras()
+
+    # Refresh the discovery sidecar the camera-roster route reads. Best-effort:
+    # a write failure (a read-only runtime dir on a dev host) never affects the
+    # orchestrator's probe result.
+    write_discovery_sidecar(cameras)
 
     mgr = CameraManager()
     mgr.set_cameras(cameras)

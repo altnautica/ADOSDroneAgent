@@ -1,0 +1,669 @@
+//! Camera-roster read + write routes: `GET /api/video/cameras` (the roster the
+//! Cameras management surface renders) and `PUT /api/video/cameras` (the operator
+//! write that persists the leg list).
+//!
+//! The roster is the one place the operator sees EVERY camera the node knows
+//! about — the legs declared in `video.cameras[]`, the devices the HAL enumeration
+//! discovered (the `cameras-discovered.json` sidecar), and the live stream state
+//! (`video-streams.json`) — reconciled into one list. Each row carries the leg's
+//! logical identity + management metadata (name / orientation / purpose / owner /
+//! fov / mount) and a `state` telling the operator whether it is assigned to a
+//! stream, an unassigned discovered device, plugin-owned, or offline.
+//!
+//! Both routes are native (RUST-FIRST): the read merges three on-disk sidecars
+//! with no per-request subprocess (the Python HAL writes the discovery sidecar at
+//! enumeration time), and the write dials the supervisor's video command socket
+//! directly. The read degrades to `{"cameras": []}` (guaranteed 200) when the
+//! sidecars are absent, the same posture the status route takes.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+use axum::Json;
+use serde::Deserialize;
+use serde_json::{json, Value};
+
+use ados_video::config::{AgentVideoConfig, CameraConfig, CameraLeg, CameraMatch};
+
+// ---------------------------------------------------------------------------
+// Path seam.
+// ---------------------------------------------------------------------------
+
+/// The runtime dir (`ADOS_RUN_DIR`, default `/run/ados`) — the same override the
+/// sibling sidecars resolve under and the Python HAL writes into.
+fn run_dir() -> PathBuf {
+    PathBuf::from(std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string()))
+}
+
+/// The config file (`ADOS_CONFIG`, default `/etc/ados/config.yaml`) the declared
+/// `video.cameras[]` + the legacy `video.camera` block are loaded from.
+fn config_path() -> PathBuf {
+    PathBuf::from(
+        std::env::var("ADOS_CONFIG").unwrap_or_else(|_| crate::config::CONFIG_YAML.to_string()),
+    )
+}
+
+/// The discovery sidecar the Python camera enumeration writes
+/// (`/run/ados/cameras-discovered.json`). Mirrors the Python
+/// `cameras_discovered_path()`.
+fn discovered_path() -> PathBuf {
+    run_dir().join("cameras-discovered.json")
+}
+
+/// The live-streams sidecar the video orchestrator writes when it serves more
+/// than one leg (`/run/ados/video-streams.json`).
+fn live_streams_path() -> PathBuf {
+    run_dir().join("video-streams.json")
+}
+
+// ---------------------------------------------------------------------------
+// Sidecar shapes.
+// ---------------------------------------------------------------------------
+
+/// One discovered device from the `cameras-discovered.json` sidecar. Only the
+/// fields the roster reconciliation needs; unknown fields are ignored.
+#[derive(Debug, Clone, Deserialize)]
+struct DiscoveredCamera {
+    #[serde(default)]
+    name: String,
+    #[serde(default, rename = "type")]
+    cam_type: String,
+    #[serde(default)]
+    device_path: String,
+    #[serde(default)]
+    width: u32,
+    #[serde(default)]
+    height: u32,
+    #[serde(default, rename = "match")]
+    camera_match: Option<CameraMatch>,
+}
+
+/// The `cameras-discovered.json` payload.
+#[derive(Debug, Default, Deserialize)]
+struct DiscoveredSnapshot {
+    #[serde(default)]
+    cameras: Vec<DiscoveredCamera>,
+}
+
+/// One live stream entry from `video-streams.json` (only id + liveness matter for
+/// the roster).
+#[derive(Debug, Clone, Deserialize)]
+struct LiveStream {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    live: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct LiveSnapshot {
+    #[serde(default)]
+    streams: Vec<LiveStream>,
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/video/cameras
+// ---------------------------------------------------------------------------
+
+/// `GET /api/video/cameras` → the reconciled camera roster.
+///
+/// Merges the declared legs (`video.cameras[]`, or the legacy single
+/// `video.camera` block synthesised as `main`), the discovered devices, and the
+/// live stream state into one list. Guaranteed 200; degrades to `{"cameras": []}`
+/// when nothing is declared and no device was discovered.
+pub async fn get_video_cameras() -> Json<Value> {
+    Json(json!({ "cameras": load_roster() }))
+}
+
+/// Load the three sources and reconcile them. Split from the handler so the file
+/// wiring is one call and the reconciliation stays a pure, path-free function.
+fn load_roster() -> Vec<Value> {
+    let cfg_path = config_path();
+    let video_cfg = AgentVideoConfig::load_from(&cfg_path);
+    let camera = CameraConfig::load_from(&cfg_path);
+    let declared = declared_legs(video_cfg, &camera);
+    let discovered = load_discovered(&discovered_path());
+    let live = load_live(&live_streams_path());
+    build_roster(&declared, &discovered, &live)
+}
+
+/// The declared legs the roster reconciles: the explicit `video.cameras[]` list,
+/// or — when it is empty — a single synthesised `main` leg from the legacy
+/// `video.camera` block (matching [`AgentVideoConfig::resolve_legs`]), so a
+/// single-camera drone shows its camera as the assigned main stream rather than
+/// an unassigned discovered device.
+fn declared_legs(video_cfg: AgentVideoConfig, camera: &CameraConfig) -> Vec<CameraLeg> {
+    if !video_cfg.cameras.is_empty() {
+        return video_cfg.cameras;
+    }
+    vec![CameraLeg {
+        id: "main".to_string(),
+        source: camera.source.clone(),
+        role: Some("primary".to_string()),
+        codec: camera.codec.clone(),
+        width: camera.width,
+        height: camera.height,
+        fps: camera.fps,
+        bitrate_kbps: camera.bitrate_kbps,
+        name: None,
+        orientation: None,
+        purpose: Vec::new(),
+        enabled: true,
+        owner: None,
+        fov_deg: None,
+        mount_pitch_deg: None,
+        calibration: None,
+        camera_match: None,
+    }]
+}
+
+/// Read + parse the discovery sidecar, or an empty list on any read/parse failure
+/// (an absent sidecar on a fresh boot, a dev host with no runtime dir).
+fn load_discovered(path: &Path) -> Vec<DiscoveredCamera> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    serde_json::from_str::<DiscoveredSnapshot>(&text)
+        .map(|s| s.cameras)
+        .unwrap_or_default()
+}
+
+/// Read + parse the live-streams sidecar into an `id -> live` map, or an empty map
+/// on any failure (an absent sidecar — the single-stream path never writes one).
+fn load_live(path: &Path) -> HashMap<String, Option<bool>> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return HashMap::new();
+    };
+    let Ok(snap) = serde_json::from_str::<LiveSnapshot>(&text) else {
+        return HashMap::new();
+    };
+    snap.streams
+        .into_iter()
+        .filter(|s| !s.id.is_empty())
+        .map(|s| (s.id, s.live))
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Reconciliation.
+// ---------------------------------------------------------------------------
+
+/// True when a fingerprint carries no usable field (an empty `match: {}` the HAL
+/// writes when it could not read a fingerprint).
+fn match_is_empty(m: Option<&CameraMatch>) -> bool {
+    match m {
+        None => true,
+        Some(m) => m.usb.is_none() && m.csi_sensor.is_none() && m.csi_port.is_none(),
+    }
+}
+
+/// True when a declared leg's fingerprint identifies the same physical device as
+/// a discovered one: an equal USB `vid:pid[:serial]`, or an equal CSI sensor +
+/// port. Empty fingerprints never match (they identify no device).
+fn fingerprint_matches(declared: Option<&CameraMatch>, discovered: Option<&CameraMatch>) -> bool {
+    let (Some(d), Some(x)) = (declared, discovered) else {
+        return false;
+    };
+    if let (Some(a), Some(b)) = (&d.usb, &x.usb) {
+        if a == b {
+            return true;
+        }
+    }
+    if d.csi_sensor.is_some() && d.csi_sensor == x.csi_sensor && d.csi_port == x.csi_port {
+        return true;
+    }
+    false
+}
+
+/// True when a leg source is a network capture URL (a leg mediamtx pulls, not a
+/// local device the discovery covers).
+fn is_network_source(source: &str) -> bool {
+    let s = source.trim();
+    s.starts_with("rtsp://") || s.starts_with("http://")
+}
+
+/// True when a leg source is a bare device-class hint (`csi` / `usb` / `ip`)
+/// rather than a concrete `/dev/videoN` path or a URL — the shape the legacy
+/// single-camera block carries.
+fn is_hint_source(source: &str) -> bool {
+    matches!(source.trim(), "csi" | "usb" | "ip")
+}
+
+/// Find the index of an unused discovered device this local leg identifies, or
+/// `None`. Matches a concrete path by `device_path == source`, else by
+/// fingerprint (a hot-plug renamed the node → re-pin); matches a bare hint source
+/// by device class. Never matches a network leg (no discovery covers it).
+fn match_discovered(
+    leg: &CameraLeg,
+    discovered: &[DiscoveredCamera],
+    used: &[bool],
+) -> Option<usize> {
+    let source = leg.source.trim();
+    if is_network_source(source) {
+        return None;
+    }
+    if is_hint_source(source) {
+        return discovered
+            .iter()
+            .enumerate()
+            .find_map(|(i, d)| (!used[i] && d.cam_type == source).then_some(i));
+    }
+    // Concrete path: exact device-path match first.
+    if let Some(i) = discovered
+        .iter()
+        .enumerate()
+        .find_map(|(i, d)| (!used[i] && d.device_path == source).then_some(i))
+    {
+        return Some(i);
+    }
+    // Else re-pin by fingerprint (the device moved to a different node).
+    discovered.iter().enumerate().find_map(|(i, d)| {
+        (!used[i] && fingerprint_matches(leg.camera_match.as_ref(), d.camera_match.as_ref()))
+            .then_some(i)
+    })
+}
+
+/// The owner tag, treating an absent or `"operator"` owner as operator-managed and
+/// anything else as a plugin id.
+fn is_plugin_owned(owner: Option<&str>) -> bool {
+    matches!(owner, Some(o) if !o.is_empty() && o != "operator")
+}
+
+/// A JSON string value, or `null` for an absent / empty option.
+fn opt_str(value: Option<&str>) -> Value {
+    match value {
+        Some(s) if !s.is_empty() => Value::from(s),
+        _ => Value::Null,
+    }
+}
+
+/// Serialize an optional fingerprint into the roster row, treating an empty one
+/// as absent (`null`).
+fn match_value(m: Option<&CameraMatch>) -> Value {
+    if match_is_empty(m) {
+        return Value::Null;
+    }
+    serde_json::to_value(m.expect("checked non-empty")).unwrap_or(Value::Null)
+}
+
+/// Reconcile declared legs + discovered devices + live state into the roster rows.
+///
+/// Every declared leg becomes a row (state `assigned` / `plugin_owned` when its
+/// device is present or it is a network leg, `offline` when a declared local
+/// device is not discovered). Every discovered device not claimed by a declared
+/// leg becomes a `discovered_unassigned` row so the operator can assign it. Pure
+/// (no I/O) so the full reconciliation matrix is unit-tested.
+fn build_roster(
+    declared: &[CameraLeg],
+    discovered: &[DiscoveredCamera],
+    live: &HashMap<String, Option<bool>>,
+) -> Vec<Value> {
+    // The primary declared leg is served at the fixed `main` path, so its live
+    // state is keyed on `main` in the sidecar (matching `resolve_legs`).
+    let primary_idx = declared
+        .iter()
+        .position(|l| l.role.as_deref() == Some("primary"));
+    let mut used = vec![false; discovered.len()];
+    let mut rows: Vec<Value> = Vec::new();
+
+    for (i, leg) in declared.iter().enumerate() {
+        let is_primary = match primary_idx {
+            Some(p) => i == p,
+            None => i == 0,
+        };
+        let served_id = if is_primary { "main" } else { leg.id.as_str() };
+        let live_state = live
+            .get(served_id)
+            .copied()
+            .flatten()
+            .or_else(|| live.get(&leg.id).copied().flatten());
+
+        let network = is_network_source(&leg.source);
+        let mut device_path = if !network && leg.source.trim().contains('/') {
+            // A concrete configured device path is the leg's intended device even
+            // when it is currently absent.
+            Some(leg.source.trim().to_string())
+        } else {
+            None
+        };
+        let mut match_val = leg.camera_match.clone();
+        let mut present = network;
+
+        if !network {
+            if let Some(di) = match_discovered(leg, discovered, &used) {
+                used[di] = true;
+                let d = &discovered[di];
+                device_path = Some(d.device_path.clone());
+                if match_is_empty(match_val.as_ref()) {
+                    match_val = d.camera_match.clone();
+                }
+                present = true;
+            }
+        }
+
+        let state = if !present {
+            "offline"
+        } else if is_plugin_owned(leg.owner.as_deref()) {
+            "plugin_owned"
+        } else {
+            "assigned"
+        };
+
+        rows.push(json!({
+            "id": leg.id,
+            "name": opt_str(leg.name.as_deref()),
+            "source": leg.source,
+            "role": opt_str(leg.role.as_deref()),
+            "purpose": leg.purpose,
+            "orientation": opt_str(leg.orientation.as_deref()),
+            "enabled": leg.enabled,
+            "owner": opt_str(leg.owner.as_deref()),
+            "state": state,
+            "live": live_state.map(Value::from).unwrap_or(Value::Null),
+            "device_path": device_path.map(Value::from).unwrap_or(Value::Null),
+            "width": leg.width,
+            "height": leg.height,
+            "fps": leg.fps,
+            "codec": leg.codec,
+            "match": match_value(match_val.as_ref()),
+            "fov_deg": leg.fov_deg.map(Value::from).unwrap_or(Value::Null),
+            "mount_pitch_deg": leg.mount_pitch_deg.map(Value::from).unwrap_or(Value::Null),
+        }));
+    }
+
+    // Discovered devices no declared leg claimed: unassigned candidates the
+    // operator can add.
+    for (i, d) in discovered.iter().enumerate() {
+        if used[i] {
+            continue;
+        }
+        let id = device_handle(&d.device_path);
+        rows.push(json!({
+            "id": id,
+            "name": opt_str(Some(d.name.as_str())),
+            "source": d.device_path,
+            "role": Value::Null,
+            "purpose": Vec::<String>::new(),
+            "orientation": Value::Null,
+            "enabled": false,
+            "owner": Value::Null,
+            "state": "discovered_unassigned",
+            "live": Value::Null,
+            "device_path": opt_str(Some(d.device_path.as_str())),
+            "width": (d.width > 0).then_some(d.width).map(Value::from).unwrap_or(Value::Null),
+            "height": (d.height > 0).then_some(d.height).map(Value::from).unwrap_or(Value::Null),
+            "fps": Value::Null,
+            "codec": Value::Null,
+            "match": match_value(d.camera_match.as_ref()),
+            "fov_deg": Value::Null,
+            "mount_pitch_deg": Value::Null,
+        }));
+    }
+
+    rows
+}
+
+/// A stable roster handle for an unassigned discovered device: the device-node
+/// basename (`/dev/video0` → `video0`), or the whole path when it has no `/`.
+fn device_handle(device_path: &str) -> String {
+    device_path
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(device_path)
+        .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn leg(id: &str, source: &str) -> CameraLeg {
+        CameraLeg {
+            id: id.to_string(),
+            source: source.to_string(),
+            role: None,
+            codec: "h264".to_string(),
+            width: 1280,
+            height: 720,
+            fps: 30,
+            bitrate_kbps: 4000,
+            name: None,
+            orientation: None,
+            purpose: Vec::new(),
+            enabled: true,
+            owner: None,
+            fov_deg: None,
+            mount_pitch_deg: None,
+            calibration: None,
+            camera_match: None,
+        }
+    }
+
+    fn discovered(
+        name: &str,
+        cam_type: &str,
+        path: &str,
+        m: Option<CameraMatch>,
+    ) -> DiscoveredCamera {
+        DiscoveredCamera {
+            name: name.to_string(),
+            cam_type: cam_type.to_string(),
+            device_path: path.to_string(),
+            width: 0,
+            height: 0,
+            camera_match: m,
+        }
+    }
+
+    fn usb_fp(usb: &str) -> CameraMatch {
+        CameraMatch {
+            usb: Some(usb.to_string()),
+            csi_sensor: None,
+            csi_port: None,
+        }
+    }
+
+    #[test]
+    fn absent_declared_and_discovered_yields_empty_roster() {
+        let rows = build_roster(&[], &[], &HashMap::new());
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn declared_local_leg_matched_by_device_path_is_assigned() {
+        let mut l = leg("belly", "/dev/video2");
+        l.role = Some("primary".to_string());
+        let disc = vec![discovered(
+            "USB Cam",
+            "usb",
+            "/dev/video2",
+            Some(usb_fp("046d:0825")),
+        )];
+        let mut live = HashMap::new();
+        live.insert("main".to_string(), Some(true));
+        let rows = build_roster(&[l], &disc, &live);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["state"], "assigned");
+        assert_eq!(rows[0]["device_path"], "/dev/video2");
+        assert_eq!(rows[0]["live"], true);
+        // The declared leg had no fingerprint → enriched from the discovered one.
+        assert_eq!(rows[0]["match"]["usb"], "046d:0825");
+    }
+
+    #[test]
+    fn declared_local_leg_repins_by_fingerprint_when_the_node_moved() {
+        // The leg was declared on /dev/video0 but the camera now enumerates on
+        // /dev/video3; the fingerprint re-pins it (still assigned, device re-pinned).
+        let mut l = leg("belly", "/dev/video0");
+        l.camera_match = Some(usb_fp("046d:0825:ABC"));
+        let disc = vec![discovered(
+            "USB Cam",
+            "usb",
+            "/dev/video3",
+            Some(usb_fp("046d:0825:ABC")),
+        )];
+        let rows = build_roster(&[l], &disc, &HashMap::new());
+        assert_eq!(rows[0]["state"], "assigned");
+        assert_eq!(rows[0]["device_path"], "/dev/video3");
+    }
+
+    #[test]
+    fn declared_local_leg_absent_device_is_offline() {
+        let l = leg("belly", "/dev/video9");
+        let rows = build_roster(&[l], &[], &HashMap::new());
+        assert_eq!(rows[0]["state"], "offline");
+        // The intended configured device path is still surfaced.
+        assert_eq!(rows[0]["device_path"], "/dev/video9");
+        assert_eq!(rows[0]["live"], Value::Null);
+    }
+
+    #[test]
+    fn plugin_owned_network_leg_is_plugin_owned() {
+        let mut l = leg("ir", "rtsp://192.168.144.25:8554/ir");
+        l.owner = Some("com.altnautica.siyi-pod".to_string());
+        l.role = Some("ir".to_string());
+        let mut live = HashMap::new();
+        live.insert("ir".to_string(), Some(true));
+        let rows = build_roster(&[l], &[], &live);
+        assert_eq!(rows[0]["state"], "plugin_owned");
+        assert_eq!(rows[0]["owner"], "com.altnautica.siyi-pod");
+        assert_eq!(rows[0]["device_path"], Value::Null);
+        assert_eq!(rows[0]["live"], true);
+    }
+
+    #[test]
+    fn operator_network_leg_is_assigned() {
+        let l = leg("cam", "rtsp://10.0.0.9/main");
+        let rows = build_roster(&[l], &[], &HashMap::new());
+        assert_eq!(rows[0]["state"], "assigned");
+    }
+
+    #[test]
+    fn discovered_device_not_claimed_is_unassigned() {
+        let disc = vec![DiscoveredCamera {
+            name: "USB Cam".to_string(),
+            cam_type: "usb".to_string(),
+            device_path: "/dev/video0".to_string(),
+            width: 1920,
+            height: 1080,
+            camera_match: Some(usb_fp("046d:0825")),
+        }];
+        let rows = build_roster(&[], &disc, &HashMap::new());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["state"], "discovered_unassigned");
+        assert_eq!(rows[0]["id"], "video0");
+        assert_eq!(rows[0]["enabled"], false);
+        assert_eq!(rows[0]["width"], 1920);
+        assert_eq!(rows[0]["match"]["usb"], "046d:0825");
+    }
+
+    #[test]
+    fn legacy_hint_source_matches_a_discovered_device_by_class() {
+        // The synthesised legacy `main` leg (source "csi") reconciles to the one
+        // discovered CSI camera by device class, so a single-camera drone shows it
+        // as the assigned main stream, not an unassigned device.
+        let mut l = leg("main", "csi");
+        l.role = Some("primary".to_string());
+        let disc = vec![discovered(
+            "CSI-0 (imx219)",
+            "csi",
+            "/dev/video0",
+            Some(CameraMatch {
+                usb: None,
+                csi_sensor: Some("imx219".to_string()),
+                csi_port: Some(0),
+            }),
+        )];
+        let rows = build_roster(&[l], &disc, &HashMap::new());
+        // Exactly one row (the discovered camera was claimed by the main leg).
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["id"], "main");
+        assert_eq!(rows[0]["state"], "assigned");
+        assert_eq!(rows[0]["device_path"], "/dev/video0");
+        assert_eq!(rows[0]["match"]["csi_sensor"], "imx219");
+    }
+
+    #[test]
+    fn two_declared_legs_do_not_both_claim_one_device() {
+        let a = leg("a", "/dev/video0");
+        let b = leg("b", "/dev/video0");
+        let disc = vec![discovered("Cam", "usb", "/dev/video0", None)];
+        let rows = build_roster(&[a, b], &disc, &HashMap::new());
+        // First leg claims the device (assigned); the second finds nothing (offline).
+        assert_eq!(rows[0]["state"], "assigned");
+        assert_eq!(rows[1]["state"], "offline");
+    }
+
+    #[test]
+    fn empty_fingerprint_serializes_as_null() {
+        let mut l = leg("cam", "/dev/video0");
+        l.camera_match = Some(CameraMatch::default());
+        let rows = build_roster(&[l], &[], &HashMap::new());
+        assert_eq!(rows[0]["match"], Value::Null);
+    }
+
+    #[test]
+    fn management_fields_pass_through_to_the_row() {
+        let mut l = leg("belly", "/dev/video2");
+        l.name = Some("Belly cam".to_string());
+        l.orientation = Some("down".to_string());
+        l.purpose = vec!["detect".to_string(), "precision-landing".to_string()];
+        l.enabled = false;
+        l.owner = Some("operator".to_string());
+        l.fov_deg = Some(82.5);
+        l.mount_pitch_deg = Some(-45.0);
+        let disc = vec![discovered("Cam", "usb", "/dev/video2", None)];
+        let rows = build_roster(&[l], &disc, &HashMap::new());
+        let r = &rows[0];
+        assert_eq!(r["name"], "Belly cam");
+        assert_eq!(r["orientation"], "down");
+        assert_eq!(r["purpose"], json!(["detect", "precision-landing"]));
+        assert_eq!(r["enabled"], false);
+        assert_eq!(r["owner"], "operator");
+        assert_eq!(r["fov_deg"], 82.5);
+        assert_eq!(r["mount_pitch_deg"], -45.0);
+        // owner "operator" is not a plugin → assigned, not plugin_owned.
+        assert_eq!(r["state"], "assigned");
+    }
+
+    // --- sidecar loaders ---
+
+    #[test]
+    fn load_discovered_tolerates_absent_and_garbage() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(load_discovered(&dir.path().join("absent.json")).is_empty());
+        let bad = dir.path().join("bad.json");
+        std::fs::write(&bad, "not json").unwrap();
+        assert!(load_discovered(&bad).is_empty());
+        let ok = dir.path().join("ok.json");
+        std::fs::write(
+            &ok,
+            r#"{"version":1,"cameras":[{"name":"c","type":"usb","device_path":"/dev/video0","match":{"usb":"1:2"}}]}"#,
+        )
+        .unwrap();
+        let cams = load_discovered(&ok);
+        assert_eq!(cams.len(), 1);
+        assert_eq!(cams[0].device_path, "/dev/video0");
+        assert_eq!(
+            cams[0].camera_match.as_ref().unwrap().usb.as_deref(),
+            Some("1:2")
+        );
+    }
+
+    #[test]
+    fn load_live_maps_id_to_liveness() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("video-streams.json");
+        std::fs::write(
+            &path,
+            r#"{"version":2,"streams":[{"id":"main","role":"eo","codec":"h265","live":true},{"id":"ir","role":"ir","codec":"h264","live":false}]}"#,
+        )
+        .unwrap();
+        let live = load_live(&path);
+        assert_eq!(live.get("main").copied().flatten(), Some(true));
+        assert_eq!(live.get("ir").copied().flatten(), Some(false));
+        // Absent file → empty map.
+        assert!(load_live(&dir.path().join("absent.json")).is_empty());
+    }
+}

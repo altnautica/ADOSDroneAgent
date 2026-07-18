@@ -3,16 +3,38 @@
 from __future__ import annotations
 
 import errno
+import json
 import os
 import platform
 import re
 import subprocess
+import time
 from dataclasses import dataclass, field
 from enum import StrEnum
 
 from ados.core.logging import get_logger
 
 log = get_logger("hal.camera")
+
+# Discovery sidecar the enumeration writes and the native camera-roster route
+# (ados-control `GET /api/video/cameras`) reads, so the serve path stays
+# subprocess-free. The roster reconciles this against the declared
+# `video.cameras[]` and the live `video-streams.json`. Overridable via
+# ADOS_RUN_DIR for tests / a non-default runtime dir.
+CAMERAS_DISCOVERED_JSON_NAME = "cameras-discovered.json"
+
+# Schema version of the discovery sidecar. Readers compare best-effort and read
+# anyway (additive fields never break an older reader).
+CAMERAS_DISCOVERED_VERSION = 1
+
+
+def _run_dir() -> str:
+    return os.environ.get("ADOS_RUN_DIR", "/run/ados")
+
+
+def cameras_discovered_path() -> str:
+    """Canonical path of the discovery sidecar under the runtime dir."""
+    return os.path.join(_run_dir(), CAMERAS_DISCOVERED_JSON_NAME)
 
 
 class CameraType(StrEnum):
@@ -39,6 +61,12 @@ class CameraInfo:
     height: int = 0
     capabilities: list[str] = field(default_factory=list)
     hardware_role: HardwareRole = HardwareRole.CAMERA
+    # Physical fingerprint the camera roster reconciles a declared leg against
+    # when the device node has been renamed by a hot-plug/reboot: a USB camera
+    # carries ``{"usb": "vid:pid[:serial]"}``, a CSI camera carries
+    # ``{"csi_sensor": <name>, "csi_port": <index>}``. Empty when the fingerprint
+    # could not be read (best-effort; the roster then keys on the device path).
+    match: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -49,7 +77,52 @@ class CameraInfo:
             "height": self.height,
             "capabilities": self.capabilities,
             "hardware_role": self.hardware_role.value,
+            "match": self.match,
         }
+
+
+def _read_sysfs(path: str) -> str | None:
+    """Read a single-line sysfs attribute, stripped, or None on any failure."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            value = fh.read().strip()
+    except OSError:
+        return None
+    return value or None
+
+
+def _usb_match(device_path: str) -> dict:
+    """Best-effort USB fingerprint for a ``/dev/videoN`` node.
+
+    Resolves the video node's sysfs device link, then walks up the device tree
+    to the USB device directory that carries ``idVendor`` / ``idProduct`` (the
+    parent of the UVC interface), reading an optional ``serial``. Returns
+    ``{"usb": "vid:pid"}`` or ``{"usb": "vid:pid:serial"}`` (lowercase hex vid/
+    pid), or ``{}`` when the sysfs path is absent (non-USB, non-Linux, or a
+    permission failure) — the roster then keys on the device path alone.
+    """
+    node = os.path.basename(device_path.rstrip("/"))
+    base = f"/sys/class/video4linux/{node}/device"
+    try:
+        dev = os.path.realpath(base)
+    except OSError:
+        return {}
+    if not os.path.isdir(dev):
+        return {}
+    for _ in range(8):
+        vid = _read_sysfs(os.path.join(dev, "idVendor"))
+        pid = _read_sysfs(os.path.join(dev, "idProduct"))
+        if vid and pid:
+            fp = f"{vid.lower()}:{pid.lower()}"
+            serial = _read_sysfs(os.path.join(dev, "serial"))
+            if serial:
+                fp = f"{fp}:{serial}"
+            return {"usb": fp}
+        parent = os.path.dirname(dev)
+        if parent == dev:
+            break
+        dev = parent
+    return {}
 
 
 def _discover_csi_cameras() -> list[CameraInfo]:
@@ -80,6 +153,7 @@ def _discover_csi_cameras() -> list[CameraInfo]:
                 width=width,
                 height=height,
                 capabilities=["h264", "mjpeg"],
+                match={"csi_sensor": sensor, "csi_port": int(idx)},
             ))
 
         if cameras:
@@ -195,6 +269,7 @@ def _discover_usb_cameras() -> list[CameraInfo]:
                     device_path=stripped,
                     capabilities=["mjpeg", "yuyv"],
                     hardware_role=HardwareRole.CAMERA,
+                    match=_usb_match(stripped),
                 ))
                 block_consumed = True
 
@@ -252,6 +327,44 @@ def discover_cameras(
 
     log.info("camera_discovery_complete", total=len(cameras), platform=system)
     return cameras
+
+
+def write_discovery_sidecar(
+    cameras: list[CameraInfo],
+    path: str | None = None,
+) -> bool:
+    """Atomically write the discovery sidecar the camera-roster route reads.
+
+    The payload is ``{version, updated_at_unix, cameras: [CameraInfo.to_dict()]}``.
+    Writing it here keeps the roster serve path (the native Rust route) free of a
+    per-request subprocess — the enumeration runs when the pipeline (re)starts and
+    the route merges the sidecar against the declared legs and the live streams.
+
+    Best-effort: returns True on success, False on any I/O error (a read-only or
+    absent runtime dir on a dev host), never raising so the enumeration seam it
+    rides on is unaffected.
+    """
+    target = path or cameras_discovered_path()
+    payload = {
+        "version": CAMERAS_DISCOVERED_VERSION,
+        "updated_at_unix": time.time(),
+        "cameras": [c.to_dict() for c in cameras],
+    }
+    try:
+        parent = os.path.dirname(target)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        tmp = f"{target}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, target)
+        return True
+    except OSError as exc:
+        log.debug("camera_discovery_sidecar_write_failed", path=target, error=str(exc))
+        return False
 
 
 if __name__ == "__main__":

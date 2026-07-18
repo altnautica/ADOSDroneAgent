@@ -20,6 +20,7 @@
 //! test pins the full set so the two never drift.
 
 pub mod atlas;
+pub mod camera_config;
 pub mod can;
 pub mod command;
 pub mod compute_status;
@@ -319,6 +320,10 @@ pub fn build_router(state: AppState, net_native: bool, hid_native: bool) -> Rout
             get(video::get_air_pipeline_status),
         )
         .route("/api/video/config", get(video::get_video_config))
+        // Camera roster: the reconciled per-node camera list (declared legs +
+        // discovered devices + live stream state) the Cameras management surface
+        // renders. A read; guaranteed 200 (degrades to an empty roster).
+        .route("/api/video/cameras", get(camera_config::get_video_cameras))
         // Ground-station profile reads (404 off a drone): the status snapshot, the
         // stored radio config, and the three distributed-receive role reads.
         .route("/api/v1/ground-station/status", get(gs_status::get_status))
