@@ -70,20 +70,36 @@ pub async fn run(mut shutdown: watch::Receiver<bool>) {
     tracing::info!("video command socket stopped");
 }
 
-/// Parse + route one request. Only `video.source.set` is accepted; it persists
-/// the camera list and restarts the video pipeline. Pure-parse / validation
-/// errors return a structured error, never panic. Kept small + testable: the
-/// config write + restart are the only side effects, both driven through the
-/// injected [`ProcessManager`] and the config path constants.
+/// Parse + route one request. Two ops persist the camera list and restart the
+/// video pipeline: `video.source.set` (a driver plugin declaring its own feeds,
+/// attributed to the plugin) and `video.cameras.set` (the operator's Cameras
+/// surface write, attributed to `operator`). Both merge by owner so an operator
+/// write preserves plugin legs and a plugin write preserves operator legs.
+/// Pure-parse / validation errors return a structured error, never panic. Kept
+/// small + testable: the config write + restart are the only side effects, both
+/// driven through the injected [`ProcessManager`] and the config path constants.
 async fn dispatch(req: &[u8], pm: &dyn ProcessManager) -> Value {
     let parsed: Value = match serde_json::from_slice(req) {
         Ok(v) => v,
         Err(_) => return json!({"ok": false, "error": "E_PARSE"}),
     };
     let op = parsed.get("op").and_then(Value::as_str).unwrap_or("");
-    if op != "video.source.set" {
-        return json!({"ok": false, "error": "E_UNKNOWN_OP", "op": op});
-    }
+    // The owner attributed to the incoming legs. A `video.cameras.set` (the
+    // operator surface) defaults to `operator`; a `video.source.set` (a driver
+    // plugin) defaults to the generic `plugin` bucket when the caller did not
+    // stamp its plugin id, so a plugin write never collapses into the operator's
+    // legs. A caller-supplied `owner` (the plugin host stamps its plugin id, the
+    // operator route stamps `operator`) always wins.
+    let default_owner = match op {
+        "video.cameras.set" => "operator",
+        "video.source.set" => "plugin",
+        _ => return json!({"ok": false, "error": "E_UNKNOWN_OP", "op": op}),
+    };
+    let owner = parsed
+        .get("owner")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(default_owner);
     let Some(cameras) = parsed.get("cameras").filter(|c| c.is_array()) else {
         return json!({"ok": false, "error": "E_ARGS", "reason": "cameras must be an array"});
     };
@@ -145,12 +161,14 @@ async fn dispatch(req: &[u8], pm: &dyn ProcessManager) -> Value {
         }
     }
 
-    // Persist video.cameras under the config flock (0600, euid-0), then restart
-    // the video pipeline so it resolves + serves the new source list.
+    // Persist video.cameras under the config flock (0600, euid-0), merging by
+    // owner so this write preserves the other party's legs, then restart the
+    // video pipeline so it resolves + serves the new source list.
     let persisted = bind::keys::persist_video_cameras(
         Path::new(bind::CONFIG_YAML),
         Path::new(bind::CONFIG_LOCK_PATH),
         cameras,
+        owner,
     );
     if !persisted {
         return json!({"ok": false, "error": "E_PERSIST"});
@@ -232,6 +250,20 @@ mod tests {
         let resp = dispatch(b"not json", &NullManager).await;
         assert_eq!(resp["ok"], false);
         assert_eq!(resp["error"], "E_PARSE");
+    }
+
+    #[tokio::test]
+    async fn video_cameras_set_op_is_routed_not_unknown() {
+        // The operator-surface op is accepted (reaches validation, an empty list
+        // is an E_ARGS not E_UNKNOWN_OP), proving it is routed alongside
+        // video.source.set without touching the real config.
+        let resp = dispatch(
+            br#"{"op":"video.cameras.set","owner":"operator","cameras":[]}"#,
+            &NullManager,
+        )
+        .await;
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"], "E_ARGS");
     }
 
     #[tokio::test]

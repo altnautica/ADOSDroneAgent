@@ -19,11 +19,15 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use ados_video::config::{AgentVideoConfig, CameraConfig, CameraLeg, CameraMatch};
+
+use crate::routes::detail;
 
 // ---------------------------------------------------------------------------
 // Path seam.
@@ -55,6 +59,31 @@ fn discovered_path() -> PathBuf {
 fn live_streams_path() -> PathBuf {
     run_dir().join("video-streams.json")
 }
+
+/// The supervisor's video command socket (`/run/ados/video-cmd.sock`), the same
+/// socket the plugin host forwards `video.source.set` to; the operator write
+/// forwards `video.cameras.set` here. The supervisor is the config-write +
+/// restart authority.
+fn video_cmd_sock() -> PathBuf {
+    run_dir().join("video-cmd.sock")
+}
+
+/// The orientation values a leg may declare (a coarse mount enum, not full
+/// extrinsics).
+const ORIENTATIONS: [&str; 8] = [
+    "forward", "down", "back", "left", "right", "up", "gimbal", "custom",
+];
+
+/// The purpose values a leg may declare (what a plugin binds the camera to).
+const PURPOSES: [&str; 7] = [
+    "feed",
+    "detect",
+    "navigation",
+    "precision-landing",
+    "thermal",
+    "mapping",
+    "recording",
+];
 
 // ---------------------------------------------------------------------------
 // Sidecar shapes.
@@ -125,6 +154,192 @@ fn load_roster() -> Vec<Value> {
     let discovered = load_discovered(&discovered_path());
     let live = load_live(&live_streams_path());
     build_roster(&declared, &discovered, &live)
+}
+
+// ---------------------------------------------------------------------------
+// PUT /api/video/cameras
+// ---------------------------------------------------------------------------
+
+/// The `PUT /api/video/cameras` body: the operator's declared leg list. Each leg
+/// is a free-form object (validated below) carrying at least an `id` + `source`,
+/// plus the optional management fields. The owner is stamped by the supervisor
+/// (the operator write is attributed to `operator`); a client-supplied `owner`
+/// on a leg is ignored.
+#[derive(Debug, Deserialize)]
+pub struct PutCamerasBody {
+    #[serde(default)]
+    cameras: Vec<Value>,
+}
+
+/// `PUT /api/video/cameras` — persist the operator's camera leg list.
+///
+/// Validates the list (path-safe unique ids, known orientation / purpose values,
+/// no non-primary leg claiming the reserved `main` id), then forwards a
+/// `video.cameras.set` op to the supervisor's video command socket, which merges
+/// the operator legs by owner (preserving plugin-declared legs) and restarts the
+/// video pipeline. A validation failure is a 400; an unreachable supervisor a
+/// 503; a saved-but-not-restarted result a 502.
+pub async fn put_video_cameras(Json(body): Json<PutCamerasBody>) -> Response {
+    if let Err(msg) = validate_cameras(&body.cameras) {
+        return detail(StatusCode::BAD_REQUEST, msg);
+    }
+    let request = json!({
+        "op": "video.cameras.set",
+        "owner": "operator",
+        "cameras": body.cameras,
+    });
+    match video_cmd(&request, &video_cmd_sock()).await {
+        VideoCmd::Reply(reply) => classify_video_reply(reply),
+        VideoCmd::Unavailable => detail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "video command socket unavailable",
+        ),
+    }
+}
+
+/// Validate the operator's leg list. Mirrors the supervisor's own
+/// `video.source.set` checks (path-safe unique ids, no non-primary leg on the
+/// reserved `main` id) and adds the orientation / purpose enum checks the
+/// supervisor does not perform, so a bad edit is a clear 400 before the socket
+/// round-trip rather than a corrupt config.
+fn validate_cameras(cameras: &[Value]) -> Result<(), String> {
+    if cameras.is_empty() {
+        return Err("cameras must not be empty".to_string());
+    }
+    let mut seen = std::collections::HashSet::new();
+    // The primary leg (the first with role "primary", else the first) always
+    // resolves to the reserved "main" path, so no OTHER leg may claim "main".
+    let primary_idx = cameras
+        .iter()
+        .position(|l| l.get("role").and_then(Value::as_str) == Some("primary"))
+        .unwrap_or(0);
+    for (i, leg) in cameras.iter().enumerate() {
+        let Some(obj) = leg.as_object() else {
+            return Err("each camera must be an object".to_string());
+        };
+        let id = obj.get("id").and_then(Value::as_str).unwrap_or("");
+        let source = obj.get("source").and_then(Value::as_str).unwrap_or("");
+        if id.is_empty() || source.is_empty() {
+            return Err("each camera needs a non-empty id and source".to_string());
+        }
+        if !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(format!("camera id {id:?} has an unsafe character"));
+        }
+        if !seen.insert(id) {
+            return Err(format!("duplicate camera id {id:?}"));
+        }
+        if i != primary_idx && id == "main" {
+            return Err("a non-primary camera cannot use the reserved id \"main\"".to_string());
+        }
+        if let Some(orientation) = obj.get("orientation").and_then(Value::as_str) {
+            if !orientation.is_empty() && !ORIENTATIONS.contains(&orientation) {
+                return Err(format!("unknown orientation {orientation:?}"));
+            }
+        }
+        if let Some(purposes) = obj.get("purpose").and_then(Value::as_array) {
+            for p in purposes {
+                let p = p.as_str().unwrap_or("");
+                if !PURPOSES.contains(&p) {
+                    return Err(format!("unknown purpose {p:?}"));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The outcome of a video-command-socket round-trip.
+enum VideoCmd {
+    /// The supervisor replied with a JSON object (whatever `ok`/`error` it holds).
+    Reply(Map<String, Value>),
+    /// The socket was unreachable / did not reply / replied unparseably.
+    Unavailable,
+}
+
+/// Send one newline-terminated JSON request to the video command socket and read
+/// one newline-terminated JSON reply. Mirrors the `gs_network_write` round-trip;
+/// the read is bounded so a runaway reply cannot exhaust memory. `sock` is
+/// injectable so a test points it at a stub.
+async fn video_cmd(request: &Value, sock: &Path) -> VideoCmd {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// A reply is a few small fields; bound the read to guard a runaway.
+    const MAX_REPLY_BYTES: usize = 64 * 1024;
+
+    let mut stream = match tokio::net::UnixStream::connect(sock).await {
+        Ok(s) => s,
+        Err(_) => return VideoCmd::Unavailable,
+    };
+    let mut line = match serde_json::to_vec(request) {
+        Ok(b) => b,
+        Err(_) => return VideoCmd::Unavailable,
+    };
+    line.push(b'\n');
+    if stream.write_all(&line).await.is_err() || stream.flush().await.is_err() {
+        return VideoCmd::Unavailable;
+    }
+
+    let mut raw = Vec::new();
+    let mut buf = [0u8; 8 * 1024];
+    loop {
+        let n = match stream.read(&mut buf).await {
+            Ok(n) => n,
+            Err(_) => return VideoCmd::Unavailable,
+        };
+        if n == 0 {
+            break; // EOF: the server replies once then closes.
+        }
+        if raw.len() + n > MAX_REPLY_BYTES {
+            return VideoCmd::Unavailable;
+        }
+        raw.extend_from_slice(&buf[..n]);
+        if raw.contains(&b'\n') {
+            break;
+        }
+    }
+    let text = match String::from_utf8(raw) {
+        Ok(t) => t,
+        Err(_) => return VideoCmd::Unavailable,
+    };
+    match text.lines().next().map(serde_json::from_str::<Value>) {
+        Some(Ok(Value::Object(map))) => VideoCmd::Reply(map),
+        _ => VideoCmd::Unavailable,
+    }
+}
+
+/// Map the supervisor's reply object to an HTTP response.
+///
+/// `ok:true` → 200 with the reply. An `E_ARGS` / `E_PARSE` / `E_UNKNOWN_OP`
+/// (a validation the handler should have caught) → 400; `E_PERSIST` (the config
+/// write failed) → 500; a persisted-but-not-restarted result (the config saved,
+/// the pipeline restart failed) → 502 so the operator retries; anything else →
+/// 502.
+fn classify_video_reply(reply: Map<String, Value>) -> Response {
+    if reply.get("ok") == Some(&Value::Bool(true)) {
+        return (StatusCode::OK, Json(Value::Object(reply))).into_response();
+    }
+    let error = reply.get("error").and_then(Value::as_str).unwrap_or("");
+    match error {
+        "E_ARGS" | "E_PARSE" | "E_UNKNOWN_OP" => detail(
+            StatusCode::BAD_REQUEST,
+            reply
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("invalid camera list")
+                .to_string(),
+        ),
+        "E_PERSIST" => detail(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "camera config write failed",
+        ),
+        _ => detail(
+            StatusCode::BAD_GATEWAY,
+            "camera config saved but the video pipeline restart failed",
+        ),
+    }
 }
 
 /// The declared legs the roster reconciles: the explicit `video.cameras[]` list,
@@ -665,5 +880,129 @@ mod tests {
         assert_eq!(live.get("ir").copied().flatten(), Some(false));
         // Absent file → empty map.
         assert!(load_live(&dir.path().join("absent.json")).is_empty());
+    }
+
+    // --- PUT validation + reply classification + socket round-trip ---
+
+    #[test]
+    fn validate_cameras_accepts_a_well_formed_list() {
+        let cams = vec![
+            json!({"id": "eo", "source": "/dev/video0", "role": "primary", "orientation": "forward", "purpose": ["feed", "detect"]}),
+            json!({"id": "belly", "source": "/dev/video1", "orientation": "down", "purpose": ["precision-landing"]}),
+        ];
+        assert!(validate_cameras(&cams).is_ok());
+    }
+
+    #[test]
+    fn validate_cameras_rejects_bad_lists() {
+        // Empty.
+        assert!(validate_cameras(&[]).is_err());
+        // Missing id/source.
+        assert!(validate_cameras(&[json!({"id": "eo"})]).is_err());
+        // Unsafe id char.
+        assert!(validate_cameras(&[json!({"id": "a b", "source": "/dev/video0"})]).is_err());
+        assert!(validate_cameras(&[json!({"id": "a/b", "source": "/dev/video0"})]).is_err());
+        // Duplicate ids.
+        assert!(validate_cameras(&[
+            json!({"id": "eo", "source": "/dev/video0"}),
+            json!({"id": "eo", "source": "/dev/video1"}),
+        ])
+        .is_err());
+        // A non-primary leg claiming the reserved "main" id.
+        assert!(validate_cameras(&[
+            json!({"id": "eo", "source": "/dev/video0", "role": "primary"}),
+            json!({"id": "main", "source": "/dev/video1", "role": "ir"}),
+        ])
+        .is_err());
+        // Unknown orientation / purpose.
+        assert!(validate_cameras(&[
+            json!({"id": "eo", "source": "/dev/video0", "orientation": "sideways"})
+        ])
+        .is_err());
+        assert!(validate_cameras(&[
+            json!({"id": "eo", "source": "/dev/video0", "purpose": ["weaponise"]})
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn classify_video_reply_maps_status_codes() {
+        let ok = classify_video_reply(
+            json!({"ok": true, "count": 2, "persisted": true, "restarted": true})
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+        assert_eq!(ok.status(), StatusCode::OK);
+
+        let args = classify_video_reply(
+            json!({"ok": false, "error": "E_ARGS", "reason": "bad"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+        assert_eq!(args.status(), StatusCode::BAD_REQUEST);
+
+        let persist = classify_video_reply(
+            json!({"ok": false, "error": "E_PERSIST"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+        assert_eq!(persist.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        // Saved but the restart failed (no error field, ok:false).
+        let restart = classify_video_reply(
+            json!({"ok": false, "count": 1, "persisted": true, "restarted": false})
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+        assert_eq!(restart.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn video_cmd_round_trips_a_reply() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("video-cmd.sock");
+        // A stub server: accept one connection, read the request line, reply once.
+        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        let server = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).await.unwrap();
+            // The request carries the operator op + owner.
+            let req: Value =
+                serde_json::from_slice(buf[..n].split(|b| *b == b'\n').next().unwrap()).unwrap();
+            assert_eq!(req["op"], "video.cameras.set");
+            assert_eq!(req["owner"], "operator");
+            stream
+                .write_all(b"{\"ok\":true,\"count\":1,\"persisted\":true,\"restarted\":true}\n")
+                .await
+                .unwrap();
+            stream.flush().await.unwrap();
+        });
+
+        let req = json!({"op": "video.cameras.set", "owner": "operator", "cameras": [{"id": "eo", "source": "/dev/video0"}]});
+        match video_cmd(&req, &sock).await {
+            VideoCmd::Reply(reply) => {
+                assert_eq!(reply.get("ok"), Some(&Value::Bool(true)));
+                assert_eq!(reply.get("count"), Some(&json!(1)));
+            }
+            VideoCmd::Unavailable => panic!("expected a reply"),
+        }
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn video_cmd_is_unavailable_when_the_socket_is_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("absent.sock");
+        let req = json!({"op": "video.cameras.set", "cameras": []});
+        assert!(matches!(
+            video_cmd(&req, &sock).await,
+            VideoCmd::Unavailable
+        ));
     }
 }

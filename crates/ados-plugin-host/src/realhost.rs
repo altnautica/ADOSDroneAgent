@@ -2128,7 +2128,7 @@ impl HostServices for RealHost {
         Ok(self.forward_gpio(req, "gpio.buzzer.beep"))
     }
 
-    fn video_source_set(&self, _plugin_id: &str, args: &Value) -> Result<HostResult, HostError> {
+    fn video_source_set(&self, plugin_id: &str, args: &Value) -> Result<HostResult, HostError> {
         // Build the supervisor's video-source request from the validated args,
         // then forward it to the supervisor's video command socket. The dispatch
         // gate already enforced the video-source capability before this runs.
@@ -2152,7 +2152,14 @@ impl HostServices for RealHost {
                 ));
             }
         }
-        let req = serde_json::json!({"op": "video.source.set", "cameras": cameras});
+        // Attribute the declared legs to this plugin so the supervisor's
+        // merge-by-owner persist replaces only this plugin's legs and preserves
+        // the operator's (and other plugins') legs.
+        let req = serde_json::json!({
+            "op": "video.source.set",
+            "cameras": cameras,
+            "owner": plugin_id,
+        });
         Ok(self.forward_video(req, "video.source.set"))
     }
 
@@ -4346,6 +4353,9 @@ gcs:
         assert_eq!(v["cameras"][0]["id"], "main");
         assert_eq!(v["cameras"][0]["source"], "rtsp://192.168.144.25:8554/main");
         assert_eq!(v["cameras"][1]["role"], "ir");
+        // The request is attributed to the calling plugin so the supervisor's
+        // merge-by-owner persist preserves the operator's legs.
+        assert_eq!(v["owner"], "p");
     }
 
     #[test]

@@ -322,8 +322,12 @@ pub fn build_router(state: AppState, net_native: bool, hid_native: bool) -> Rout
         .route("/api/video/config", get(video::get_video_config))
         // Camera roster: the reconciled per-node camera list (declared legs +
         // discovered devices + live stream state) the Cameras management surface
-        // renders. A read; guaranteed 200 (degrades to an empty roster).
-        .route("/api/video/cameras", get(camera_config::get_video_cameras))
+        // renders (GET, guaranteed 200), plus the operator write that persists the
+        // leg list (PUT → the supervisor's merge-by-owner persist + restart).
+        .route(
+            "/api/video/cameras",
+            get(camera_config::get_video_cameras).put(camera_config::put_video_cameras),
+        )
         // Ground-station profile reads (404 off a drone): the status snapshot, the
         // stored radio config, and the three distributed-receive role reads.
         .route("/api/v1/ground-station/status", get(gs_status::get_status))

@@ -151,8 +151,10 @@ fn native_routes() -> Vec<NativeRoute> {
         get("/api/video/latency"),
         get("/api/v1/video/air-pipeline"),
         get("/api/video/config"),
-        // Camera roster read (declared + discovered + live, reconciled).
+        // Camera roster read (declared + discovered + live, reconciled) + the
+        // operator write (persists the leg list via the supervisor's video socket).
         get("/api/video/cameras"),
+        put("/api/video/cameras"),
         // Ground-station status + radio (profile-gated).
         get("/api/v1/ground-station/status"),
         get("/api/v1/ground-station/wfb"),
@@ -439,7 +441,7 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            131,
+            132,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);
@@ -520,6 +522,8 @@ mod tests {
         // The MAC-pin writes: a POST pin + a DELETE {iface} clear template.
         assert!(has(Method::POST, "/api/v1/network/mac/pin"));
         assert!(has(Method::DELETE, "/api/v1/network/mac/{iface}"));
+        // The operator camera-roster write.
+        assert!(has(Method::PUT, "/api/video/cameras"));
         // The WFB radio writes + the GS network priority + GS wfb config writes.
         assert!(has(Method::POST, "/api/wfb/channel"));
         assert!(has(Method::PUT, "/api/wfb/tx-power"));
