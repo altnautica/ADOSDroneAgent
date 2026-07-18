@@ -153,8 +153,9 @@ fn native_routes() -> Vec<NativeRoute> {
         get("/api/video/config"),
         // Camera roster read (declared + discovered + live, reconciled) + the
         // operator write (persists the leg list via the supervisor's video socket).
-        get("/api/video/cameras"),
-        put("/api/video/cameras"),
+        // Distinct path from the legacy /api/video/cameras switchable enumeration.
+        get("/api/video/roster"),
+        put("/api/video/roster"),
         // Ground-station status + radio (profile-gated).
         get("/api/v1/ground-station/status"),
         get("/api/v1/ground-station/wfb"),
@@ -463,7 +464,7 @@ mod tests {
             "/api/video/latency",
             "/api/v1/video/air-pipeline",
             "/api/video/config",
-            "/api/video/cameras",
+            "/api/video/roster",
             "/api/v1/ground-station/status",
             "/api/v1/ground-station/wfb",
             "/api/v1/ground-station/wfb/relay/status",
@@ -523,7 +524,7 @@ mod tests {
         assert!(has(Method::POST, "/api/v1/network/mac/pin"));
         assert!(has(Method::DELETE, "/api/v1/network/mac/{iface}"));
         // The operator camera-roster write.
-        assert!(has(Method::PUT, "/api/video/cameras"));
+        assert!(has(Method::PUT, "/api/video/roster"));
         // The WFB radio writes + the GS network priority + GS wfb config writes.
         assert!(has(Method::POST, "/api/wfb/channel"));
         assert!(has(Method::PUT, "/api/wfb/tx-power"));

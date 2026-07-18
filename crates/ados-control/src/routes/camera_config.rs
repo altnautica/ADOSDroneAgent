@@ -1,5 +1,5 @@
-//! Camera-roster read + write routes: `GET /api/video/cameras` (the roster the
-//! Cameras management surface renders) and `PUT /api/video/cameras` (the operator
+//! Camera-roster read + write routes: `GET /api/video/roster` (the roster the
+//! Cameras management surface renders) and `PUT /api/video/roster` (the operator
 //! write that persists the leg list).
 //!
 //! The roster is the one place the operator sees EVERY camera the node knows
@@ -131,10 +131,10 @@ struct LiveSnapshot {
 }
 
 // ---------------------------------------------------------------------------
-// GET /api/video/cameras
+// GET /api/video/roster
 // ---------------------------------------------------------------------------
 
-/// `GET /api/video/cameras` → the reconciled camera roster.
+/// `GET /api/video/roster` → the reconciled camera roster.
 ///
 /// Merges the declared legs (`video.cameras[]`, or the legacy single
 /// `video.camera` block synthesised as `main`), the discovered devices, and the
@@ -157,10 +157,10 @@ fn load_roster() -> Vec<Value> {
 }
 
 // ---------------------------------------------------------------------------
-// PUT /api/video/cameras
+// PUT /api/video/roster
 // ---------------------------------------------------------------------------
 
-/// The `PUT /api/video/cameras` body: the operator's declared leg list. Each leg
+/// The `PUT /api/video/roster` body: the operator's declared leg list. Each leg
 /// is a free-form object (validated below) carrying at least an `id` + `source`,
 /// plus the optional management fields. The owner is stamped by the supervisor
 /// (the operator write is attributed to `operator`); a client-supplied `owner`
@@ -171,7 +171,7 @@ pub struct PutCamerasBody {
     cameras: Vec<Value>,
 }
 
-/// `PUT /api/video/cameras` — persist the operator's camera leg list.
+/// `PUT /api/video/roster` — persist the operator's camera leg list.
 ///
 /// Validates the list (path-safe unique ids, known orientation / purpose values,
 /// no non-primary leg claiming the reserved `main` id), then forwards a

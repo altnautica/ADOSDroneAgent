@@ -17,7 +17,7 @@ from ados.core.logging import get_logger
 log = get_logger("hal.camera")
 
 # Discovery sidecar the enumeration writes and the native camera-roster route
-# (ados-control `GET /api/video/cameras`) reads, so the serve path stays
+# (ados-control `GET /api/video/roster`) reads, so the serve path stays
 # subprocess-free. The roster reconciles this against the declared
 # `video.cameras[]` and the live `video-streams.json`. Overridable via
 # ADOS_RUN_DIR for tests / a non-default runtime dir.

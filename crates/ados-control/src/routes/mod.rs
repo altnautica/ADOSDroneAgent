@@ -323,9 +323,12 @@ pub fn build_router(state: AppState, net_native: bool, hid_native: bool) -> Rout
         // Camera roster: the reconciled per-node camera list (declared legs +
         // discovered devices + live stream state) the Cameras management surface
         // renders (GET, guaranteed 200), plus the operator write that persists the
-        // leg list (PUT → the supervisor's merge-by-owner persist + restart).
+        // leg list (PUT → the supervisor's merge-by-owner persist + restart). This
+        // lives at /api/video/roster, distinct from the legacy /api/video/cameras
+        // switchable-camera enumeration ({cameras, assignments}) which the ground
+        // station's camera switch still serves from the residual API.
         .route(
-            "/api/video/cameras",
+            "/api/video/roster",
             get(camera_config::get_video_cameras).put(camera_config::put_video_cameras),
         )
         // Ground-station profile reads (404 off a drone): the status snapshot, the

@@ -24,7 +24,7 @@ The declarative parameter shape (a free-form entry in
 The stored value the plugin reads from its config is either the sentinel
 ``"auto"`` (or an empty value — by-requirement) or a concrete camera id
 (explicit). :func:`resolve_camera_selection` turns that value, plus the camera
-roster (the rows from ``GET /api/video/cameras``), into the concrete leg id the
+roster (the rows from ``GET /api/video/roster``), into the concrete leg id the
 plugin binds to — or ``None`` when no usable camera is available, so a safety
 plugin stops rather than binding to a dead device.
 """
@@ -125,7 +125,7 @@ def resolve_camera_selection(
       ``orientation`` (each applied only when set); when none matches, falls back
       to the primary camera; when the roster is empty, ``None``.
 
-    ``cameras`` is the roster (the rows from ``GET /api/video/cameras``), or any
+    ``cameras`` is the roster (the rows from ``GET /api/video/roster``), or any
     list of camera dicts carrying at least an ``id`` (and optionally ``enabled``
     / ``state`` / ``purpose`` / ``orientation`` / ``role``).
     """
