@@ -1121,4 +1121,65 @@ mod tests {
         assert!(ts.contains("export const CONTRACT_CATALOG: Record<string, ContractMeta>"));
         assert!(ts.contains("export const SIDECAR_CATALOG: Record<string, ContractMeta>"));
     }
+
+    /// Every ASCII integer on a line, in order (the header counts are the only
+    /// integers on their comment lines).
+    fn integers_in(line: &str) -> Vec<usize> {
+        line.split(|c: char| !c.is_ascii_digit())
+            .filter(|s| !s.is_empty())
+            .filter_map(|s| s.parse::<usize>().ok())
+            .collect()
+    }
+
+    /// The first source line containing `needle`.
+    fn find_line<'a>(text: &'a str, needle: &str) -> &'a str {
+        text.lines()
+            .find(|l| l.contains(needle))
+            .unwrap_or_else(|| panic!("no line contains {needle:?}"))
+    }
+
+    #[test]
+    fn header_comment_counts_match_the_catalog() {
+        // The `capabilities.toml` section headers carry parenthesised counts
+        // (`AGENT capabilities (49)`, `GCS capabilities (20): 10 UI slots + 10 …`,
+        // `dispatch table (43)`). They are hand-written documentation that silently
+        // rots when a capability is added; pin them to the real entry counts so a
+        // drift fails here, not at a confused reader.
+        let toml_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("ados-protocol/capabilities.toml");
+        let raw = std::fs::read_to_string(&toml_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", toml_path.display()));
+        let cat: Catalog = toml::from_str(&raw).expect("parse capabilities.toml");
+
+        let agent_count = cat.agent.len();
+        let gcs_count = cat.gcs.len();
+        let ui_slot_count = cat.gcs.iter().filter(|c| c.category == "ui_slot").count();
+        let method_count = cat.method.len();
+
+        // AGENT header: the single integer is the agent-capability count.
+        let agent_header = integers_in(find_line(&raw, "AGENT capabilities ("));
+        assert_eq!(
+            agent_header.first().copied(),
+            Some(agent_count),
+            "AGENT capabilities header count != {agent_count} actual"
+        );
+
+        // GCS header: (total): N UI slots + M data — total/ui/data must all agree.
+        let gcs_header = integers_in(find_line(&raw, "GCS capabilities ("));
+        assert_eq!(
+            gcs_header,
+            vec![gcs_count, ui_slot_count, gcs_count - ui_slot_count],
+            "GCS capabilities header (total: ui + data) != actual"
+        );
+
+        // Dispatch header: the single integer is the dispatch-method count.
+        let dispatch_header = integers_in(find_line(&raw, "dispatch table ("));
+        assert_eq!(
+            dispatch_header.first().copied(),
+            Some(method_count),
+            "dispatch table header count != {method_count} actual"
+        );
+    }
 }

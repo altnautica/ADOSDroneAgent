@@ -17,7 +17,7 @@
 # Edit here, then run codegen. Do not edit the generated files by hand.
 
 # ===========================================================================
-# AGENT capabilities (48)
+# AGENT capabilities (49)
 # ===========================================================================
 
 [[agent]]
@@ -462,7 +462,7 @@ risk_reason = "Publishes a callable interface to an AI client; the effect of any
 enforced = true
 
 # ===========================================================================
-# GCS capabilities (18): 10 UI slots + 8 data/command/mission/cloud
+# GCS capabilities (20): 10 UI slots + 10 data/command/mission/cloud
 # ===========================================================================
 
 [[gcs]]
@@ -626,7 +626,7 @@ risk = "medium"
 risk_reason = "Publishes a callable interface to an AI client; effect is bounded by the plugin's other capabilities and the token scope."
 
 # ===========================================================================
-# Plugin RPC dispatch table (25): wire method -> dispatch-level required cap.
+# Plugin RPC dispatch table (43): wire method -> dispatch-level required cap.
 #
 # The single source of truth for the gate the plugin IPC server applies BEFORE
 # routing a request. Codegen emits this into both the Rust host
