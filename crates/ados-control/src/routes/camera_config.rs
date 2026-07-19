@@ -461,10 +461,22 @@ fn match_discovered(
         return None;
     }
     if is_hint_source(source) {
-        return discovered
-            .iter()
-            .enumerate()
-            .find_map(|(i, d)| (!used[i] && d.cam_type == source).then_some(i));
+        // A bare device-class hint (the legacy single-camera block's `csi` / `usb`
+        // / `ip`). Prefer a device of the hinted class, then fall through the
+        // pipeline's CSI→USB→IP auto-assign order (`camera_mgr.auto_assign`) so a
+        // `csi`-hint main leg on a node whose only camera is USB reconciles to that
+        // USB device — assigned, one row — rather than showing offline while the
+        // USB camera appears as a phantom unassigned row.
+        for class in [source, "csi", "usb", "ip"] {
+            if let Some(i) = discovered
+                .iter()
+                .enumerate()
+                .find_map(|(i, d)| (!used[i] && d.cam_type == class).then_some(i))
+            {
+                return Some(i);
+            }
+        }
+        return None;
     }
     // Concrete path: exact device-path match first.
     if let Some(i) = discovered
@@ -804,6 +816,46 @@ mod tests {
         assert_eq!(rows[0]["state"], "assigned");
         assert_eq!(rows[0]["device_path"], "/dev/video0");
         assert_eq!(rows[0]["match"]["csi_sensor"], "imx219");
+    }
+
+    #[test]
+    fn hint_source_falls_back_through_the_auto_assign_order() {
+        // A `csi`-hint main leg on a node whose only camera is USB reconciles to
+        // that USB device (the pipeline's CSI→USB→IP auto-assign fallback), so it
+        // is assigned — a single row, not offline + a phantom unassigned USB row.
+        let mut l = leg("main", "csi");
+        l.role = Some("primary".to_string());
+        let disc = vec![discovered(
+            "USB Cam",
+            "usb",
+            "/dev/video0",
+            Some(usb_fp("046d:0825")),
+        )];
+        let rows = build_roster(&[l], &disc, &HashMap::new());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["id"], "main");
+        assert_eq!(rows[0]["state"], "assigned");
+        assert_eq!(rows[0]["device_path"], "/dev/video0");
+    }
+
+    #[test]
+    fn hint_source_prefers_the_exact_class_before_falling_back() {
+        // A `usb` hint on a node with both a CSI and a USB camera takes the USB
+        // one (exact-class match wins), leaving the CSI camera as an unassigned
+        // candidate row.
+        let mut l = leg("main", "usb");
+        l.role = Some("primary".to_string());
+        let disc = vec![
+            discovered("CSI-0 (imx219)", "csi", "/dev/video0", None),
+            discovered("USB Cam", "usb", "/dev/video1", None),
+        ];
+        let rows = build_roster(&[l], &disc, &HashMap::new());
+        let main = rows.iter().find(|r| r["id"] == "main").unwrap();
+        assert_eq!(main["state"], "assigned");
+        assert_eq!(main["device_path"], "/dev/video1");
+        assert!(rows
+            .iter()
+            .any(|r| r["state"] == "discovered_unassigned" && r["source"] == "/dev/video0"));
     }
 
     #[test]
