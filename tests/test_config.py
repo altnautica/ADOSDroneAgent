@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tempfile
 
+import pytest
 import yaml
 
 from ados.core.config import ADOSConfig, load_config
@@ -339,3 +340,16 @@ def test_camera_leg_management_fields_round_trip():
     assert csi.camera_match.csi_sensor == "imx219"
     assert csi.camera_match.csi_port == 1
     assert csi.camera_match.usb is None
+
+
+def test_profile_accepts_workstation_and_compute():
+    """The config profile enum accepts every profile a fleet node runs as. A
+    workstation or compute node sets its profile explicitly, so its config must
+    validate across the drone / ground-station / workstation / compute set."""
+    from ados.core.config.agent import AgentConfig
+
+    for profile in ("auto", "drone", "ground_station", "workstation", "compute"):
+        assert AgentConfig(profile=profile).profile == profile
+
+    with pytest.raises(ValueError):
+        AgentConfig(profile="not-a-profile")

@@ -6,14 +6,14 @@ from pydantic import BaseModel, field_validator
 
 # profile drives air vs ground-station behavior. "auto" triggers the
 # boot-time hardware fingerprint in ados.bootstrap.profile_detect.
-_ALLOWED_PROFILES = {"auto", "drone", "ground_station"}
+_ALLOWED_PROFILES = {"auto", "drone", "ground_station", "workstation", "compute"}
 
 
 class AgentConfig(BaseModel):
     device_id: str = ""
     name: str = "my-drone"
     tier: str = "auto"
-    profile: str = "auto"  # auto | drone | ground_station
+    profile: str = "auto"  # auto | drone | ground_station | workstation | compute
 
     @field_validator("profile")
     @classmethod
