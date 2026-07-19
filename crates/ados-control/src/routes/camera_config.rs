@@ -25,7 +25,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
-use ados_video::config::{AgentVideoConfig, CameraConfig, CameraLeg, CameraMatch};
+use ados_video::config::{CameraLeg, CameraMatch, RosterVideoConfig};
 
 use crate::routes::detail;
 
@@ -146,11 +146,13 @@ pub async fn get_video_cameras() -> Json<Value> {
 
 /// Load the three sources and reconcile them. Split from the handler so the file
 /// wiring is one call and the reconciliation stays a pure, path-free function.
+///
+/// The config load is the QUIET single-pass [`RosterVideoConfig::load_from`]: it
+/// parses `config.yaml` once and writes no config-status sidecar, so a pollable
+/// roster read never races the `ados-video` service's own status stamping.
 fn load_roster() -> Vec<Value> {
-    let cfg_path = config_path();
-    let video_cfg = AgentVideoConfig::load_from(&cfg_path);
-    let camera = CameraConfig::load_from(&cfg_path);
-    let declared = declared_legs(video_cfg, &camera);
+    let cfg = RosterVideoConfig::load_from(&config_path());
+    let declared = declared_legs(&cfg);
     let discovered = load_discovered(&discovered_path());
     let live = load_live(&live_streams_path());
     build_roster(&declared, &discovered, &live)
@@ -347,10 +349,11 @@ fn classify_video_reply(reply: Map<String, Value>) -> Response {
 /// `video.camera` block (matching [`AgentVideoConfig::resolve_legs`]), so a
 /// single-camera drone shows its camera as the assigned main stream rather than
 /// an unassigned discovered device.
-fn declared_legs(video_cfg: AgentVideoConfig, camera: &CameraConfig) -> Vec<CameraLeg> {
-    if !video_cfg.cameras.is_empty() {
-        return video_cfg.cameras;
+fn declared_legs(cfg: &RosterVideoConfig) -> Vec<CameraLeg> {
+    if !cfg.cameras.is_empty() {
+        return cfg.cameras.clone();
     }
+    let camera = cfg.camera.clone().unwrap_or_default();
     vec![CameraLeg {
         id: "main".to_string(),
         source: camera.source.clone(),

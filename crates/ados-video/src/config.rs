@@ -585,6 +585,79 @@ impl AgentVideoConfig {
     }
 }
 
+/// The roster-relevant slice of the video config, loaded in ONE quiet pass.
+///
+/// The camera-roster route reads config, discovery, and live-stream state and
+/// serves them on a pollable HTTP surface. It must NOT re-run the `ados-video`
+/// service's broad, status-stamping config load ([`AgentVideoConfig::load_from`]
+/// calls [`ados_config::write_config_status`]) — doing so races the service and
+/// flashes spurious config-status faults on the fleet Health view. This loader
+/// parses `config.yaml` exactly once with the quiet-default helper (the same
+/// posture as [`CameraConfig::load_from`]) and writes no status sidecar.
+///
+/// `camera` is `None` when the config declared no `video.camera` block at all, so
+/// the roster can tell a real single-camera drone (a declared block) from a
+/// camera-less node (no block) and not synthesise a phantom offline `main`.
+#[derive(Debug, Clone, Default)]
+pub struct RosterVideoConfig {
+    /// The resolved node profile (`video.profile` overriding `agent.profile`),
+    /// used to gate the roster to companion nodes.
+    pub profile: Option<String>,
+    /// The legacy single-camera `video.camera` block, or `None` when the config
+    /// declared no such block.
+    pub camera: Option<CameraConfig>,
+    /// The explicit multi-leg `video.cameras[]` list (empty when absent).
+    pub cameras: Vec<CameraLeg>,
+}
+
+impl RosterVideoConfig {
+    /// Load the roster config quietly (one parse, no config-status side-effect).
+    /// Returns the defaults (no profile, no camera, no legs) when the file is
+    /// missing or unparseable so the roster read never blocks.
+    pub fn load_from(path: &std::path::Path) -> Self {
+        #[derive(Debug, Default, Deserialize)]
+        struct RawConfig {
+            #[serde(default)]
+            agent: AgentSection,
+            #[serde(default)]
+            video: VideoSection,
+        }
+        #[derive(Debug, Default, Deserialize)]
+        struct AgentSection {
+            #[serde(default)]
+            profile: Option<String>,
+        }
+        #[derive(Debug, Default, Deserialize)]
+        struct VideoSection {
+            #[serde(default)]
+            profile: Option<String>,
+            #[serde(default)]
+            camera: Option<CameraConfig>,
+            #[serde(default)]
+            cameras: Vec<CameraLeg>,
+        }
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return Self::default();
+        };
+        let raw: RawConfig = ados_config::yaml_or_default(&text, "video");
+        Self {
+            profile: raw.video.profile.or(raw.agent.profile),
+            camera: raw.video.camera,
+            cameras: raw.video.cameras,
+        }
+    }
+
+    /// True when the resolved profile is a ground station — the node carries no
+    /// onboard camera, so the roster surface does not apply. The on-disk form is
+    /// underscore (`ground_station`); the hyphen wire form is accepted too.
+    pub fn is_ground_station(&self) -> bool {
+        matches!(
+            self.profile.as_deref(),
+            Some("ground_station") | Some("ground-station")
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -999,6 +1072,63 @@ video:
         assert_eq!(m.csi_sensor.as_deref(), Some("imx219"));
         assert_eq!(m.csi_port, Some(1));
         assert!(m.usb.is_none());
+    }
+
+    // --- RosterVideoConfig (quiet single-pass roster loader) ----------
+
+    #[test]
+    fn roster_config_loads_profile_camera_presence_and_legs_in_one_pass() {
+        // The camera block present ⇒ Some (a real single-camera drone); the
+        // cameras[] list and the resolved profile parse in the same pass. This is
+        // the quiet loader the roster route uses (no config-status side-effect —
+        // it calls the quiet yaml_or_default, never write_config_status).
+        let yaml = "\
+agent:
+  profile: drone
+video:
+  camera: { source: usb, codec: h265 }
+  cameras:
+    - { id: eo, source: /dev/video0, role: primary }
+    - { id: ir, source: rtsp://pod/ir, role: ir }
+";
+        let (_dir, path) = write_tmp(yaml);
+        let cfg = RosterVideoConfig::load_from(&path);
+        assert_eq!(cfg.profile.as_deref(), Some("drone"));
+        assert!(!cfg.is_ground_station());
+        let camera = cfg.camera.expect("a declared video.camera block is Some");
+        assert_eq!(camera.source, "usb");
+        assert_eq!(camera.codec, "h265");
+        assert_eq!(cfg.cameras.len(), 2);
+        assert_eq!(cfg.cameras[0].id, "eo");
+    }
+
+    #[test]
+    fn roster_config_camera_absent_is_none() {
+        // No `video.camera` block ⇒ None, so the roster can distinguish a
+        // camera-less node from a real single-camera drone.
+        let yaml = "agent:\n  profile: ground_station\nvideo:\n  mode: wfb\n";
+        let (_dir, path) = write_tmp(yaml);
+        let cfg = RosterVideoConfig::load_from(&path);
+        assert!(cfg.camera.is_none());
+        assert!(cfg.cameras.is_empty());
+        assert!(cfg.is_ground_station());
+    }
+
+    #[test]
+    fn roster_config_profile_override_and_defaults() {
+        // video.profile overrides agent.profile; a missing/malformed file yields
+        // the empty default (no profile, no camera, no legs) and never blocks.
+        let yaml = "agent:\n  profile: drone\nvideo:\n  profile: ground-station\n";
+        let (_dir, path) = write_tmp(yaml);
+        assert!(RosterVideoConfig::load_from(&path).is_ground_station());
+        let missing = RosterVideoConfig::load_from(std::path::Path::new("/nope/config.yaml"));
+        assert!(missing.profile.is_none());
+        assert!(missing.camera.is_none());
+        assert!(missing.cameras.is_empty());
+        let (_bad_dir, bad) = write_tmp("this: : not [valid yaml }}}");
+        let malformed = RosterVideoConfig::load_from(&bad);
+        assert!(malformed.camera.is_none());
+        assert!(malformed.cameras.is_empty());
     }
 
     #[test]
