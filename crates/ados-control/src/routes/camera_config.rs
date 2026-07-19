@@ -468,10 +468,11 @@ fn fingerprint_matches(declared: Option<&CameraMatch>, discovered: Option<&Camer
 }
 
 /// True when a leg source is a network capture URL (a leg mediamtx pulls, not a
-/// local device the discovery covers).
+/// local device the discovery covers). Recognises the plain and TLS forms of
+/// RTSP and HTTP, matching the pipeline's own `CameraLeg::network_source` so the
+/// roster and the pipeline classify a leg identically.
 fn is_network_source(source: &str) -> bool {
-    let s = source.trim();
-    s.starts_with("rtsp://") || s.starts_with("http://")
+    ados_video::config::is_network_url(source)
 }
 
 /// True when a leg source is a bare device-class hint (`csi` / `usb` / `ip`)
@@ -872,6 +873,18 @@ mod tests {
         let l = leg("cam", "rtsp://10.0.0.9/main");
         let rows = build_roster(&[l], &[], &HashMap::new());
         assert_eq!(rows[0]["state"], "assigned");
+    }
+
+    #[test]
+    fn tls_network_leg_is_recognised_as_a_network_source() {
+        // An `https://` (or `rtsps://`) leg is a network source: it is assigned
+        // (present without a discovered device) and carries no device_path.
+        for url in ["https://cam.local/stream", "rtsps://10.0.0.9:322/live"] {
+            let l = leg("cam", url);
+            let rows = build_roster(&[l], &[], &HashMap::new());
+            assert_eq!(rows[0]["state"], "assigned", "{url} should be assigned");
+            assert_eq!(rows[0]["device_path"], Value::Null);
+        }
     }
 
     #[test]

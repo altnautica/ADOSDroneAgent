@@ -30,6 +30,17 @@ fn default_true() -> bool {
     true
 }
 
+/// True when a source string is a network capture URL — a stream mediamtx pulls
+/// (or ffmpeg reads) rather than a local V4L2/CSI device. Recognises plain and
+/// TLS forms of RTSP and HTTP (`rtsp://`, `rtsps://`, `http://`, `https://`).
+pub fn is_network_url(source: &str) -> bool {
+    let s = source.trim();
+    s.starts_with("rtsp://")
+        || s.starts_with("rtsps://")
+        || s.starts_with("http://")
+        || s.starts_with("https://")
+}
+
 /// Camera capture/encode settings. Mirrors the Python `CameraConfig`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CameraConfig {
@@ -67,8 +78,8 @@ impl Default for CameraConfig {
 }
 
 impl CameraConfig {
-    /// An explicit network capture source (`rtsp://…` or `http://…`), or
-    /// `None` for the local-camera discovery path.
+    /// An explicit network capture source (`rtsp://…`, `rtsps://…`, `http://…`,
+    /// or `https://…`), or `None` for the local-camera discovery path.
     ///
     /// When `source` is a network URL the pipeline streams from it directly
     /// instead of probing for a local V4L2/CSI camera — the "ip camera" mode,
@@ -80,11 +91,7 @@ impl CameraConfig {
     /// encoder still gates the characters that reach the argv.
     pub fn network_source(&self) -> Option<&str> {
         let s = self.source.trim();
-        if s.starts_with("rtsp://") || s.starts_with("http://") {
-            Some(s)
-        } else {
-            None
-        }
+        is_network_url(s).then_some(s)
     }
 
     /// Load from the `video.camera:` block in the agent config file. Returns
@@ -206,15 +213,12 @@ pub struct CameraLeg {
 }
 
 impl CameraLeg {
-    /// An explicit network capture source (`rtsp://…` / `http://…`), or `None`
-    /// for a local device. Mirrors [`CameraConfig::network_source`].
+    /// An explicit network capture source (`rtsp://…` / `rtsps://…` / `http://…`
+    /// / `https://…`), or `None` for a local device. Mirrors
+    /// [`CameraConfig::network_source`].
     pub fn network_source(&self) -> Option<&str> {
         let s = self.source.trim();
-        if s.starts_with("rtsp://") || s.starts_with("http://") {
-            Some(s)
-        } else {
-            None
-        }
+        is_network_url(s).then_some(s)
     }
 }
 
@@ -714,6 +718,11 @@ mod tests {
         assert_eq!(c.network_source(), Some("rtsp://10.0.0.9:554/live"));
         c.source = "http://cam.local:8080/stream".to_string();
         assert_eq!(c.network_source(), Some("http://cam.local:8080/stream"));
+        // The TLS forms of RTSP and HTTP are network sources too.
+        c.source = "rtsps://10.0.0.9:322/live".to_string();
+        assert_eq!(c.network_source(), Some("rtsps://10.0.0.9:322/live"));
+        c.source = "https://cam.local/stream".to_string();
+        assert_eq!(c.network_source(), Some("https://cam.local/stream"));
         // Surrounding whitespace is trimmed.
         c.source = "  rtsp://host/main  ".to_string();
         assert_eq!(c.network_source(), Some("rtsp://host/main"));
