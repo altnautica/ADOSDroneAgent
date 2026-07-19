@@ -87,9 +87,15 @@ def _camera_id(camera: dict) -> str | None:
 
 
 def primary_camera_id(cameras: list[dict]) -> str | None:
-    """The id of the primary camera — the leg with role ``primary``, else the
-    first available leg, else the first leg — matching the video pipeline's
-    primary resolution. ``None`` for an empty roster."""
+    """The id of the primary camera — the leg with role ``primary`` (available),
+    else the first available leg — matching the video pipeline's primary
+    resolution.
+
+    ``None`` when no available camera exists (an empty roster, or one where every
+    leg is offline/disabled): the resolver never returns a dead device, so a
+    plugin that binds through it stops rather than driving a camera that is not
+    there.
+    """
     for cam in cameras:
         if cam.get("role") == "primary" and _available(cam):
             cid = _camera_id(cam)
@@ -100,10 +106,6 @@ def primary_camera_id(cameras: list[dict]) -> str | None:
             cid = _camera_id(cam)
             if cid:
                 return cid
-    for cam in cameras:
-        cid = _camera_id(cam)
-        if cid:
-            return cid
     return None
 
 
@@ -122,8 +124,12 @@ def resolve_camera_selection(
       surfaces "no camera" rather than silently binding to a different one.
     * **By-requirement** (``selection`` is ``None`` / empty / ``"auto"``):
       returns the first available camera matching the required ``purpose`` AND
-      ``orientation`` (each applied only when set); when none matches, falls back
-      to the primary camera; when the roster is empty, ``None``.
+      ``orientation`` (each applied only when set). A declared ``purpose`` /
+      ``orientation`` is a **hard filter**: when nothing available satisfies it,
+      the result is ``None`` (the plugin stops), never a silent fall-back to a
+      camera that does not meet the requirement. Only when NO requirement is
+      declared does the resolution fall back to the primary available stream; an
+      all-offline (or empty) roster resolves to ``None``.
 
     ``cameras`` is the roster (the rows from ``GET /api/video/roster``), or any
     list of camera dicts carrying at least an ``id`` (and optionally ``enabled``
@@ -136,13 +142,18 @@ def resolve_camera_selection(
                 return target
         return None
 
-    # By-requirement: first available leg matching the requirement.
+    # By-requirement: first available leg satisfying the declared requirement.
     for cam in cameras:
         if _available(cam) and _matches(cam, purpose, orientation):
             cid = _camera_id(cam)
             if cid:
                 return cid
-    # No requirement match → the primary stream.
+    # A declared purpose/orientation is a hard filter: when nothing available
+    # matches, return None (the plugin stops) rather than binding to a camera
+    # that does not meet the requirement.
+    if purpose or orientation:
+        return None
+    # No requirement declared → the primary (available) stream.
     return primary_camera_id(cameras)
 
 

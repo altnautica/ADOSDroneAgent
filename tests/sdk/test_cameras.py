@@ -90,27 +90,36 @@ def test_by_requirement_filters_by_orientation():
         )
         == "nadir"
     )
-    # A requirement nothing satisfies (no up-facing detect cam) → falls back to
-    # the primary.
+    # A declared requirement nothing available satisfies (no up-facing detect cam)
+    # is a HARD filter → None, never a fall-back to the primary.
     assert (
         resolve_camera_selection(
             CAMERA_SELECTOR_AUTO, _roster(), purpose="detect", orientation="up"
         )
-        == "eo"
+        is None
     )
 
 
-def test_by_requirement_falls_back_to_primary_when_no_match():
-    # No thermal-down cam → falls back to the primary EO leg.
+def test_by_requirement_hard_filter_returns_none_when_no_match():
+    # No thermal-down cam available → the declared requirement is a hard filter,
+    # so the resolution returns None (the safety plugin stops) rather than binding
+    # to the primary EO leg, which does not meet the requirement.
     assert (
         resolve_camera_selection(
             CAMERA_SELECTOR_AUTO, _roster(), purpose="thermal", orientation="down"
         )
-        == "eo"
+        is None
+    )
+    # A declared purpose with no available match → None even though a primary EO
+    # leg is available.
+    assert (
+        resolve_camera_selection(CAMERA_SELECTOR_AUTO, _roster(), purpose="mapping")
+        is None
     )
 
 
 def test_by_requirement_with_no_purpose_returns_the_primary():
+    # With NO requirement declared, auto falls back to the primary available leg.
     assert resolve_camera_selection(CAMERA_SELECTOR_AUTO, _roster()) == "eo"
 
 
@@ -123,19 +132,31 @@ def test_primary_camera_id_prefers_the_primary_role():
     assert primary_camera_id(_roster()) == "eo"
 
 
-def test_primary_camera_id_falls_back_to_first_available_then_first():
+def test_primary_camera_id_returns_first_available_or_none():
     # No primary role → the first available leg.
     cams = [
         {"id": "a", "role": None, "enabled": False, "state": "assigned"},
         {"id": "b", "role": None, "enabled": True, "state": "assigned"},
     ]
     assert primary_camera_id(cams) == "b"
-    # None available → the first leg regardless.
+    # None available → None (never a dead camera as a last resort).
     cams = [
         {"id": "a", "role": None, "enabled": False, "state": "offline"},
         {"id": "b", "role": None, "enabled": False, "state": "offline"},
     ]
-    assert primary_camera_id(cams) == "a"
+    assert primary_camera_id(cams) is None
+
+
+def test_all_offline_roster_resolves_to_none():
+    # Every leg offline/disabled → auto (no requirement) resolves to None, and
+    # primary_camera_id resolves to None: a safety plugin stops rather than
+    # binding to a dead camera.
+    cams = [
+        {"id": "a", "role": "primary", "enabled": True, "state": "offline"},
+        {"id": "b", "role": None, "enabled": False, "state": "assigned"},
+    ]
+    assert resolve_camera_selection(CAMERA_SELECTOR_AUTO, cams) is None
+    assert primary_camera_id(cams) is None
 
 
 def test_lenient_defaults_treat_missing_fields_as_available():
