@@ -566,11 +566,6 @@ fn build_roster(
             None => i == 0,
         };
         let served_id = if is_primary { "main" } else { leg.id.as_str() };
-        let live_state = live
-            .get(served_id)
-            .copied()
-            .flatten()
-            .or_else(|| live.get(&leg.id).copied().flatten());
 
         let network = is_network_source(&leg.source);
         let mut device_path = if !network && leg.source.trim().contains('/') {
@@ -601,6 +596,18 @@ fn build_roster(
             "plugin_owned"
         } else {
             "assigned"
+        };
+
+        // An offline leg is not live, regardless of a stale live-stream sidecar
+        // reading — only a present leg reports its sidecar liveness (so the state
+        // and live fields never contradict each other).
+        let live_state = if present {
+            live.get(served_id)
+                .copied()
+                .flatten()
+                .or_else(|| live.get(&leg.id).copied().flatten())
+        } else {
+            None
         };
 
         rows.push(json!({
@@ -820,6 +827,19 @@ mod tests {
         assert_eq!(rows[0]["state"], "offline");
         // The intended configured device path is still surfaced.
         assert_eq!(rows[0]["device_path"], "/dev/video9");
+        assert_eq!(rows[0]["live"], Value::Null);
+    }
+
+    #[test]
+    fn an_offline_leg_is_never_reported_live() {
+        // A stale live-stream sidecar still lists the leg as live, but the device
+        // is gone (not discovered) → the row is offline AND live is null; the two
+        // fields must not contradict each other.
+        let l = leg("belly", "/dev/video9");
+        let mut live = HashMap::new();
+        live.insert("belly".to_string(), Some(true));
+        let rows = build_roster(&[l], &[], &live);
+        assert_eq!(rows[0]["state"], "offline");
         assert_eq!(rows[0]["live"], Value::Null);
     }
 
