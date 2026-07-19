@@ -152,8 +152,13 @@ pub async fn get_video_cameras() -> Json<Value> {
 /// roster read never races the `ados-video` service's own status stamping.
 fn load_roster() -> Vec<Value> {
     let cfg = RosterVideoConfig::load_from(&config_path());
-    let declared = declared_legs(&cfg);
+    // The camera roster is a companion-node concept. A ground station carries no
+    // onboard camera, so it serves an empty roster rather than a phantom `main`.
+    if cfg.is_ground_station() {
+        return Vec::new();
+    }
     let discovered = load_discovered(&discovered_path());
+    let declared = declared_legs(&cfg, !discovered.is_empty());
     let live = load_live(&live_streams_path());
     build_roster(&declared, &discovered, &live)
 }
@@ -182,6 +187,14 @@ pub struct PutCamerasBody {
 /// video pipeline. A validation failure is a 400; an unreachable supervisor a
 /// 503; a saved-but-not-restarted result a 502.
 pub async fn put_video_cameras(Json(body): Json<PutCamerasBody>) -> Response {
+    // The camera roster is a companion-node surface; a ground station has no
+    // onboard camera to manage, so the write does not apply there.
+    if RosterVideoConfig::load_from(&config_path()).is_ground_station() {
+        return detail(
+            StatusCode::NOT_FOUND,
+            "the camera roster is not available on a ground station",
+        );
+    }
     if let Err(msg) = validate_cameras(&body.cameras) {
         return detail(StatusCode::BAD_REQUEST, msg);
     }
@@ -346,12 +359,23 @@ fn classify_video_reply(reply: Map<String, Value>) -> Response {
 
 /// The declared legs the roster reconciles: the explicit `video.cameras[]` list,
 /// or — when it is empty — a single synthesised `main` leg from the legacy
-/// `video.camera` block (matching [`AgentVideoConfig::resolve_legs`]), so a
+/// `video.camera` block (matching `AgentVideoConfig::resolve_legs`), so a
 /// single-camera drone shows its camera as the assigned main stream rather than
 /// an unassigned discovered device.
-fn declared_legs(cfg: &RosterVideoConfig) -> Vec<CameraLeg> {
+///
+/// The synthesised `main` leg is emitted only when the operator actually declared
+/// a `video.camera` block (`cfg.camera` is `Some`) OR a camera was discovered
+/// (`has_discovered`). A camera-less node (a compute box, a bench install with no
+/// camera and no declared block) returns no legs, so the roster is empty instead
+/// of showing a phantom offline `main`. A real single-camera drone that relies on
+/// the config defaults (no explicit block) still shows its camera, because its
+/// device was discovered.
+fn declared_legs(cfg: &RosterVideoConfig, has_discovered: bool) -> Vec<CameraLeg> {
     if !cfg.cameras.is_empty() {
         return cfg.cameras.clone();
+    }
+    if cfg.camera.is_none() && !has_discovered {
+        return Vec::new();
     }
     let camera = cfg.camera.clone().unwrap_or_default();
     vec![CameraLeg {
@@ -702,6 +726,53 @@ mod tests {
     fn absent_declared_and_discovered_yields_empty_roster() {
         let rows = build_roster(&[], &[], &HashMap::new());
         assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn declared_legs_empty_when_no_camera_declared_and_none_discovered() {
+        // A camera-less node (no video.cameras[], no video.camera block, no
+        // discovered device) declares no leg — the roster is empty, not a phantom
+        // offline `main`.
+        let cfg = RosterVideoConfig::default();
+        assert!(declared_legs(&cfg, false).is_empty());
+    }
+
+    #[test]
+    fn declared_legs_synthesizes_main_when_a_device_was_discovered() {
+        // A real single-camera drone that relies on the config defaults (no
+        // explicit block) still shows its camera, because a device was discovered.
+        let cfg = RosterVideoConfig::default();
+        let legs = declared_legs(&cfg, true);
+        assert_eq!(legs.len(), 1);
+        assert_eq!(legs[0].id, "main");
+        assert_eq!(legs[0].role.as_deref(), Some("primary"));
+    }
+
+    #[test]
+    fn declared_legs_synthesizes_main_when_the_camera_block_was_declared() {
+        // An explicitly declared camera block shows its `main` leg even when the
+        // device is currently absent (it resolves to offline, honestly).
+        let cfg = RosterVideoConfig {
+            camera: Some(ados_video::config::CameraConfig {
+                source: "/dev/video3".to_string(),
+                ..Default::default()
+            }),
+            ..RosterVideoConfig::default()
+        };
+        let legs = declared_legs(&cfg, false);
+        assert_eq!(legs.len(), 1);
+        assert_eq!(legs[0].source, "/dev/video3");
+    }
+
+    #[test]
+    fn declared_legs_returns_the_explicit_cameras_list() {
+        let cfg = RosterVideoConfig {
+            cameras: vec![leg("eo", "/dev/video0"), leg("ir", "rtsp://pod/ir")],
+            ..RosterVideoConfig::default()
+        };
+        let legs = declared_legs(&cfg, false);
+        assert_eq!(legs.len(), 2);
+        assert_eq!(legs[0].id, "eo");
     }
 
     #[test]
