@@ -254,12 +254,22 @@ fn validate_cameras(cameras: &[Value]) -> Result<(), String> {
                 return Err(format!("unknown orientation {orientation:?}"));
             }
         }
-        if let Some(purposes) = obj.get("purpose").and_then(Value::as_array) {
-            for p in purposes {
-                let p = p.as_str().unwrap_or("");
-                if !PURPOSES.contains(&p) {
-                    return Err(format!("unknown purpose {p:?}"));
+        match obj.get("purpose") {
+            // Absent or explicitly null → no purpose (the empty list on reload).
+            None | Some(Value::Null) => {}
+            Some(Value::Array(purposes)) => {
+                for p in purposes {
+                    let p = p.as_str().unwrap_or("");
+                    if !PURPOSES.contains(&p) {
+                        return Err(format!("unknown purpose {p:?}"));
+                    }
                 }
+            }
+            // A non-array purpose (a bare string, a number) would be accepted here
+            // but fail the `purpose: Vec<String>` deserialization on reload, so
+            // reject it up front with a clear 400.
+            Some(_) => {
+                return Err("camera purpose must be an array of purpose strings".to_string());
             }
         }
     }
@@ -1092,6 +1102,16 @@ mod tests {
             json!({"id": "eo", "source": "/dev/video0", "purpose": ["weaponise"]})
         ])
         .is_err());
+        // A non-array purpose is rejected (it would break the reload otherwise).
+        assert!(validate_cameras(&[
+            json!({"id": "eo", "source": "/dev/video0", "purpose": "detect"})
+        ])
+        .is_err());
+        // An explicit null purpose is accepted (treated as no purpose).
+        assert!(
+            validate_cameras(&[json!({"id": "eo", "source": "/dev/video0", "purpose": null})])
+                .is_ok()
+        );
     }
 
     #[test]
