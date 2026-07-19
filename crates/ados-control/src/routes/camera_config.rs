@@ -580,9 +580,11 @@ fn build_roster(
             "height": leg.height,
             "fps": leg.fps,
             "codec": leg.codec,
+            "bitrate_kbps": leg.bitrate_kbps,
             "match": match_value(match_val.as_ref()),
             "fov_deg": leg.fov_deg.map(Value::from).unwrap_or(Value::Null),
             "mount_pitch_deg": leg.mount_pitch_deg.map(Value::from).unwrap_or(Value::Null),
+            "calibration": opt_str(leg.calibration.as_deref()),
         }));
     }
 
@@ -609,9 +611,11 @@ fn build_roster(
             "height": (d.height > 0).then_some(d.height).map(Value::from).unwrap_or(Value::Null),
             "fps": Value::Null,
             "codec": Value::Null,
+            "bitrate_kbps": Value::Null,
             "match": match_value(d.camera_match.as_ref()),
             "fov_deg": Value::Null,
             "mount_pitch_deg": Value::Null,
+            "calibration": Value::Null,
         }));
     }
 
@@ -840,6 +844,25 @@ mod tests {
         assert_eq!(r["mount_pitch_deg"], -45.0);
         // owner "operator" is not a plugin → assigned, not plugin_owned.
         assert_eq!(r["state"], "assigned");
+    }
+
+    #[test]
+    fn bitrate_and_calibration_round_trip_to_the_row() {
+        // The roster must carry the leg's transmit bitrate and calibration
+        // reference so an operator PUT reads them back and does not silently reset
+        // the WFB bitrate to the compiled default.
+        let mut l = leg("belly", "/dev/video2");
+        l.bitrate_kbps = 6500;
+        l.calibration = Some("belly-v1".to_string());
+        let disc = vec![discovered("Cam", "usb", "/dev/video2", None)];
+        let rows = build_roster(&[l], &disc, &HashMap::new());
+        assert_eq!(rows[0]["bitrate_kbps"], 6500);
+        assert_eq!(rows[0]["calibration"], "belly-v1");
+        // An unassigned discovered row carries neither (it is not a configured leg).
+        let disc2 = vec![discovered("Cam", "usb", "/dev/video5", None)];
+        let unassigned = build_roster(&[], &disc2, &HashMap::new());
+        assert_eq!(unassigned[0]["bitrate_kbps"], Value::Null);
+        assert_eq!(unassigned[0]["calibration"], Value::Null);
     }
 
     // --- sidecar loaders ---
