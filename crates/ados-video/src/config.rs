@@ -5,6 +5,9 @@
 
 use serde::{Deserialize, Serialize};
 
+fn default_id() -> String {
+    "main".to_string()
+}
 fn default_source() -> String {
     "csi".to_string()
 }
@@ -154,7 +157,11 @@ pub struct CameraMatch {
 #[derive(Debug, Clone, Deserialize)]
 pub struct CameraLeg {
     /// Stable per-node stream id — the mediamtx path name and the WHEP id. Also
-    /// the leg's immutable logical identity in the camera roster.
+    /// the leg's immutable logical identity in the camera roster. Defaults to
+    /// `"main"` (the legacy single-camera identity), matching the Python
+    /// `CameraLeg.id` default so a leg written without an explicit id resolves
+    /// the same on both halves.
+    #[serde(default = "default_id")]
     pub id: String,
     /// Capture source: a device hint / path (local encode) or an `rtsp://` /
     /// `http://` URL (a secondary network leg mediamtx pulls on demand).
@@ -1064,6 +1071,18 @@ video:
         assert_eq!(legs[0].role, "primary");
         assert_eq!(legs[0].codec, "h265");
         assert!(legs[0].is_primary);
+    }
+
+    #[test]
+    fn camera_leg_id_defaults_to_main_matching_python() {
+        // A leg written without an explicit `id` resolves to "main" (the legacy
+        // single-camera identity), matching the Python CameraLeg.id default so the
+        // two halves parse an id-less leg the same way.
+        let yaml = "video:\n  cameras:\n    - { source: /dev/video0 }\n";
+        let (_dir, path) = write_tmp(yaml);
+        let cfg = AgentVideoConfig::load_from(&path);
+        assert_eq!(cfg.cameras.len(), 1);
+        assert_eq!(cfg.cameras[0].id, "main");
     }
 
     #[test]
