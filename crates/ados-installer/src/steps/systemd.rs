@@ -1229,6 +1229,29 @@ fn provision_ados_identity() {
     }
 }
 
+/// The hardware-peripheral groups that ADOS systemd units name via
+/// `SupplementaryGroups=` (today `gpio`; `i2c` and `spi` back the ground-station
+/// OLED and future peripheral units, and the GS group memberships). Raspberry Pi
+/// OS and the Radxa BSP create these via their board packages/udev, but a generic
+/// Armbian image does not — and systemd fails a unit BEFORE `ExecStart` when a
+/// `SupplementaryGroups=` entry names a group that does not exist (exit
+/// 216/GROUP). Provisioning them lets those units start on any image; device
+/// access is separate (the consumers run as root, so they need only the group to
+/// exist for systemd to resolve the directive).
+const ADOS_HARDWARE_GROUPS: &[&str] = &["gpio", "i2c", "spi"];
+
+/// Create the hardware-peripheral groups if absent (idempotent), mirroring the
+/// `ados` group creation in `provision_ados_identity`. A no-op on images that
+/// already ship them (Raspberry Pi OS / Radxa BSP). Must run before any unit is
+/// enabled or started so a unit's `SupplementaryGroups=` resolves.
+fn provision_hardware_groups() {
+    for grp in ADOS_HARDWARE_GROUPS {
+        if !exec::run_ok("getent", &["group", grp]) {
+            let _ = exec::run("groupadd", &["--system", grp]);
+        }
+    }
+}
+
 /// Add the human operator (the user who ran the install under sudo) to the `ados`
 /// group, so on-box non-root RCA works without sudo: the logging store's query
 /// socket is group-owned by `ados` at mode 0o660, so a group member can run
@@ -1310,6 +1333,13 @@ impl Step for Systemd {
         // memberships all reference `ados:ados`; create it first so the
         // tmpfiles chown and the usermod resolve instead of silently no-opping.
         provision_ados_identity();
+
+        // Create the hardware-peripheral groups (gpio/i2c/spi) when the base
+        // image lacks them, before any unit is enabled or started, so a unit's
+        // `SupplementaryGroups=` resolves instead of aborting the unit at
+        // 216/GROUP (the generic-Armbian case — the BSP/Pi images already ship
+        // them, where this is a no-op).
+        provision_hardware_groups();
 
         // Let the human operator read the logging store's query socket without
         // sudo: the socket is group-owned by `ados` at 0o660, so add the sudo
@@ -1428,6 +1458,62 @@ fn set_mode(_path: &Path, _mode: u32) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hardware_groups_include_gpio() {
+        // gpio is the group generic Armbian lacks; ados-gpio.service is
+        // cross-profile and declares SupplementaryGroups=gpio, so without it the
+        // unit aborts at 216/GROUP before ExecStart.
+        assert!(ADOS_HARDWARE_GROUPS.contains(&"gpio"));
+    }
+
+    #[test]
+    fn every_unit_supplementary_group_is_provisioned_or_base() {
+        // Guard against drift: every group named in a unit's SupplementaryGroups=
+        // must be one the installer provisions (ADOS_HARDWARE_GROUPS) or a group
+        // present on every Debian/Armbian image (base-passwd, or created by
+        // systemd-udev/bluez). A new unit referencing an unprovisioned, non-base
+        // group would fail 216/GROUP on a minimal image.
+        const BASE_GROUPS: &[&str] = &[
+            "dialout",
+            "video",
+            "audio",
+            "plugdev",
+            "input",
+            "bluetooth",
+            "tty",
+            "disk",
+            "cdrom",
+        ];
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/systemd");
+        let mut checked = 0usize;
+        for entry in std::fs::read_dir(&dir).expect("data/systemd is readable") {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("service") {
+                continue;
+            }
+            let body = std::fs::read_to_string(&path).unwrap();
+            for line in body.lines() {
+                if let Some(rest) = line.trim().strip_prefix("SupplementaryGroups=") {
+                    for grp in rest.split_whitespace() {
+                        checked += 1;
+                        assert!(
+                            ADOS_HARDWARE_GROUPS.contains(&grp) || BASE_GROUPS.contains(&grp),
+                            "unit {:?} references group {:?} that is neither provisioned by the \
+                             installer (ADOS_HARDWARE_GROUPS) nor a base-passwd group; it will \
+                             fail 216/GROUP on a minimal image",
+                            path.file_name().unwrap(),
+                            grp,
+                        );
+                    }
+                }
+            }
+        }
+        assert!(
+            checked > 0,
+            "expected SupplementaryGroups= in at least one unit"
+        );
+    }
 
     #[test]
     fn env_file_carries_the_core_paths() {
