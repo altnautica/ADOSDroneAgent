@@ -27,6 +27,7 @@
 use crate::graph::Step;
 
 pub mod aic8800_tune;
+pub mod appliance;
 pub mod config_identity;
 pub mod deps;
 pub mod dkms;
@@ -63,6 +64,7 @@ pub fn full_install_chain() -> Vec<Box<dyn Step>> {
         Box::new(wifi_join::WifiJoin),
         Box::new(rtl_regulatory::RtlRegulatory),
         Box::new(aic8800_tune::Aic8800Tune),
+        Box::new(appliance::Appliance),
         Box::new(watchdog::Watchdog),
         Box::new(systemd::Systemd),
         Box::new(start::Start),
@@ -79,7 +81,7 @@ mod tests {
     fn full_chain_orders_cleanly() {
         let steps = full_install_chain();
         let order = topo_order(&steps).expect("the install chain must be a valid DAG");
-        assert_eq!(order.len(), 17);
+        assert_eq!(order.len(), 18);
 
         let pos = |id: &str| order.iter().position(|x| x == id).unwrap();
         // Spot-check the load-bearing edges.
@@ -109,6 +111,9 @@ mod tests {
         // radio comes up.
         assert!(pos("config_identity") < pos("aic8800_tune"));
         assert!(pos("aic8800_tune") < pos("systemd"));
+        // The appliance keep-awake + quiet-background-daemons step runs after
+        // config so /etc is ready.
+        assert!(pos("config_identity") < pos("appliance"));
         // The hardware watchdog arms after the apt/systemd upgrade is done.
         assert!(pos("deps") < pos("watchdog"));
         assert!(pos("systemd") < pos("start"));

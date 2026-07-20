@@ -45,7 +45,7 @@ pub fn dropin_files() -> Vec<&'static str> {
         "/etc/udev/rules.d/99-ados-eth-no-eee.rules",
         "/etc/NetworkManager/conf.d/99-ados-wifi-powersave.conf",
         "/etc/modprobe.d/ados-aic8800.conf",
-        "/etc/systemd/logind.conf.d/99-ados-nosleep.conf",
+        "/etc/systemd/logind.conf.d/90-ados-no-idle.conf",
         "/etc/avahi/services/ados-gs-ap.service",
     ]
 }
@@ -238,7 +238,7 @@ mod tests {
             "/etc/sysctl.d/99-ados-video.conf",
             "/etc/modules-load.d/ados-display.conf",
             "/etc/NetworkManager/conf.d/99-ados-wifi-powersave.conf",
-            "/etc/systemd/logind.conf.d/99-ados-nosleep.conf",
+            "/etc/systemd/logind.conf.d/90-ados-no-idle.conf",
             "/etc/avahi/services/ados-gs-ap.service",
         ] {
             assert!(

@@ -172,8 +172,6 @@ const USB_AUTOSUSPEND_ARG: &str = "usbcore.autosuspend=-1";
 /// Stale per-interface Ethernet-EEE rule a prior install may have written; the
 /// boot oneshot owns EEE-off now, so any leftover rule is removed.
 const ETH_NO_EEE_RULE: &str = "/etc/udev/rules.d/99-ados-eth-no-eee.rules";
-/// logind drop-in that ignores idle/power-key/lid/suspend so the box never sleeps.
-const LOGIND_NOSLEEP_CONF: &str = "/etc/systemd/logind.conf.d/99-ados-nosleep.conf";
 /// The SSH login banner copied from `data/motd/30-ados`.
 const MOTD_FILE: &str = "/etc/update-motd.d/30-ados";
 /// Static avahi service file advertising the AP-side `_ados._tcp` record.
@@ -469,18 +467,6 @@ fn apply_cold_boot_enum_aid_cmdline() {
             "cold-boot usb enumeration aid enabled on kernel cmdline (reboot to apply)"
         );
     }
-}
-
-/// Build the logind no-sleep drop-in body (pure). Ignores the idle timer, power
-/// key, lid switch, and suspend key so a console keypress or a closed lid cannot
-/// suspend the box (`install_power_hardening` step 5).
-pub fn logind_nosleep_body() -> String {
-    "[Login]\n\
-IdleAction=ignore\n\
-HandlePowerKey=ignore\n\
-HandleLidSwitch=ignore\n\
-HandleSuspendKey=ignore\n"
-        .to_string()
 }
 
 /// Build the `/etc/ados/env` file body (pure). `device_id` is read from
@@ -922,10 +908,12 @@ fn resolve_iw_path() -> Option<String> {
 /// 2. Fallback WiFi-power-save udev rule (for non-NM-managed `wlan*`).
 /// 3. Broad USB-no-autosuspend udev rule.
 /// 4. Remove any stale per-interface EEE rule (the boot oneshot owns EEE-off).
-/// 5. Mask the sleep targets + a logind no-sleep drop-in.
-/// 6. Deploy `ados-power-reassert.sh` to /opt/ados/bin + enable/start the
+/// 5. Deploy `ados-power-reassert.sh` to /opt/ados/bin + enable/start the
 ///    `ados-power.service` oneshot (the unit file ships in data/systemd and is
 ///    already deployed by `deploy_units`).
+///
+/// Sleep-masking + the logind no-sleep drop-in live in the dedicated appliance
+/// step (steps/appliance.rs); this function no longer touches sleep.
 ///
 /// Idempotent; applies on the spot. CPU governor is intentionally left untouched.
 fn install_power_hardening(source: Option<&Path>) {
@@ -992,27 +980,11 @@ fn install_power_hardening(source: Option<&Path>) {
         &["trigger", "--subsystem-match=usb", "--action=change"],
     );
 
-    // ── 5. Mask system sleep + logind no-sleep drop-in. ──
-    let _ = exec::run(
-        "systemctl",
-        &[
-            "mask",
-            "sleep.target",
-            "suspend.target",
-            "hibernate.target",
-            "hybrid-sleep.target",
-            "suspend-then-hibernate.target",
-        ],
-    );
-    if let Some(parent) = Path::new(LOGIND_NOSLEEP_CONF).parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if std::fs::write(LOGIND_NOSLEEP_CONF, logind_nosleep_body()).is_ok() {
-        set_mode(Path::new(LOGIND_NOSLEEP_CONF), 0o644);
-    }
-    let _ = exec::run("systemctl", &["daemon-reload"]);
+    // Masking the sleep targets + the logind no-sleep drop-in is owned by the
+    // dedicated appliance step (steps/appliance.rs), which also quiets desktop
+    // background package daemons — so it is not repeated here.
 
-    // ── 6. Boot re-assert oneshot. ──
+    // ── 5. Boot re-assert oneshot. ──
     // The unit file (data/systemd/ados-power.service) is deployed by
     // deploy_units; here we install the helper script it execs and enable+start
     // the unit. The script lives at scripts/ados-power-reassert.sh in the source
@@ -1035,7 +1007,7 @@ fn install_power_hardening(source: Option<&Path>) {
     // Run it now so the knobs are asserted on the current boot too.
     let _ = exec::run("systemctl", &["start", "ados-power.service"]);
 
-    // ── 7. Kernel freeze resilience. The hardware watchdog (steps/watchdog.rs)
+    // ── 6. Kernel freeze resilience. The hardware watchdog (steps/watchdog.rs)
     // catches a total lockup; these catch the cases it cannot — a hung kernel
     // task while PID 1 is still alive to pet the watchdog, or an oops — by
     // turning a hang into a reboot, and keep the trace on disk so a freeze stops
@@ -1059,7 +1031,7 @@ fn install_power_hardening(source: Option<&Path>) {
     }
 
     tracing::info!(
-        "power hardening applied (WiFi/USB/EEE power-save off, sleep masked, freeze resilience armed)"
+        "power hardening applied (WiFi/USB/EEE power-save off, freeze resilience armed)"
     );
 }
 
@@ -1846,16 +1818,6 @@ mod tests {
     }
 
     #[test]
-    fn logind_nosleep_ignores_every_sleep_path() {
-        let body = logind_nosleep_body();
-        assert!(body.contains("[Login]"));
-        assert!(body.contains("IdleAction=ignore"));
-        assert!(body.contains("HandlePowerKey=ignore"));
-        assert!(body.contains("HandleLidSwitch=ignore"));
-        assert!(body.contains("HandleSuspendKey=ignore"));
-    }
-
-    #[test]
     fn reassert_inline_fallback_skips_default_route_iface() {
         // The inline fallback must contain the def-route skip so it never
         // renegotiates the management NIC's PHY (the wired-link-bounce hazard).
@@ -1877,7 +1839,6 @@ mod tests {
             USB_NO_AUTOSUSPEND_RULE,
             USB_AUTOSUSPEND_TMPFILES,
             ETH_NO_EEE_RULE,
-            LOGIND_NOSLEEP_CONF,
         ] {
             assert!(
                 removed.contains(&path),
