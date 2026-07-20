@@ -18,6 +18,7 @@ use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::Mutex;
 
 use ados_hid::buttons::{self, default_button_mapping};
+use ados_hid::buttons_ipc::{self, BUTTONS_SOCK};
 use ados_hid::eventbus::ButtonEventBus;
 use ados_hid::paths::pic_state_json;
 use ados_hid::pic::{PicArbiter, WATCHDOG_INTERVAL_SECONDS};
@@ -101,6 +102,20 @@ async fn main() -> Result<()> {
             let path = Path::new(PIC_SOCK);
             if let Err(e) = pic_ipc::serve(arbiter, button_bus, path, Some(sidecar_path)).await {
                 tracing::error!(error = %e, "pic control socket exited");
+            }
+        });
+    }
+
+    // The dedicated button fanout: the same classified presses, streamed on their
+    // own socket so the HDMI cockpit relay can subscribe without touching the PIC
+    // arbiter seam. Shares the one button bus, so short/long/cancel + the config
+    // mapping stay single-source in the reader/classifier below.
+    {
+        let button_bus = button_bus.clone();
+        tokio::spawn(async move {
+            let path = Path::new(BUTTONS_SOCK);
+            if let Err(e) = buttons_ipc::serve(button_bus, path).await {
+                tracing::error!(error = %e, "button event socket exited");
             }
         });
     }

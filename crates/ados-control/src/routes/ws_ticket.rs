@@ -24,14 +24,16 @@ use crate::state::AppState;
 
 /// The scopes the agent will mint tickets for. The agent is both issuer and
 /// validator; pinning the set to the routes it knows about stops a stray client
-/// minting tickets for a scope the agent never checks. Mirrors
-/// `ados.api.routes.ws_tickets.ALLOWED_SCOPES` exactly.
-const ALLOWED_SCOPES: [&str; 6] = [
+/// minting tickets for a scope the agent never checks. Each entry must have a
+/// handler that verifies a ticket for it (`gs.*` in [`crate::routes::gs_ws`], the
+/// MAVLink-WS scope in the router proxy, the vision + setup streams).
+const ALLOWED_SCOPES: [&str; 7] = [
     "setup.cloudflare_logs",
     "gs.pic_events",
     "gs.mavlink_ws",
     "gs.uplink_events",
     "gs.mesh_events",
+    "gs.button_events",
     "vision.detections",
 ];
 
@@ -101,12 +103,21 @@ mod tests {
     use ados_protocol::ws_ticket::SCOPE_MAVLINK_WS;
 
     #[test]
-    fn allowed_scopes_match_the_python_set() {
-        // Drift guard: the agent is issuer + validator, so this set must equal
-        // `ados.api.routes.ws_tickets.ALLOWED_SCOPES`. The MAVLink-WS scope the
-        // router validates against must be in it.
+    fn allowed_scopes_cover_the_validating_handlers() {
+        // Drift guard: the agent is issuer + validator, so every scope a handler
+        // verifies must be mintable here. The MAVLink-WS scope the router
+        // validates against must be in the set, and the four `gs.*` stream scopes
+        // the ground-station relays check must all be present.
         assert!(ALLOWED_SCOPES.contains(&SCOPE_MAVLINK_WS));
-        assert_eq!(ALLOWED_SCOPES.len(), 6);
+        for scope in [
+            "gs.pic_events",
+            "gs.uplink_events",
+            "gs.mesh_events",
+            "gs.button_events",
+        ] {
+            assert!(ALLOWED_SCOPES.contains(&scope), "{scope} must be mintable");
+        }
+        assert_eq!(ALLOWED_SCOPES.len(), 7);
     }
 
     #[test]

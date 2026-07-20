@@ -13,6 +13,10 @@
 //! * [`buttons`] — the GPIO front-panel button service: pure press
 //!   classification (debounce, short/long/cancel, SIGHUP mapping merge) plus a
 //!   target-gated character-device read loop.
+//! * [`buttons_ipc`] — a dedicated Unix-domain fanout socket
+//!   (`/run/ados/buttons.sock`) streaming already-classified front-panel presses
+//!   as newline-JSON, the seam the HDMI cockpit relay subscribes to (sibling of
+//!   the pic.sock `subscribe_buttons` stream, sharing the same button bus).
 //! * [`touch`] — the touch stroke FSM + tap/long_press/swipe/drag classifier
 //!   (pure), fed by the affine transform; the evdev read loop is target-gated.
 //! * [`input`] — gamepad enumeration, the 1 Hz hotplug diff engine, and primary
@@ -34,6 +38,7 @@
 
 pub mod affine;
 pub mod buttons;
+pub mod buttons_ipc;
 pub mod eventbus;
 pub mod hid_cmd;
 pub mod input;

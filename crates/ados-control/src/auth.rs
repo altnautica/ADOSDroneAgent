@@ -156,6 +156,7 @@ pub fn is_public(path: &str) -> bool {
             | "/api/v1/ground-station/ws/uplink"
             | "/api/v1/ground-station/pic/events"
             | "/api/v1/ground-station/ws/mesh"
+            | "/api/v1/ground-station/ws/buttons"
     )
 }
 
@@ -280,6 +281,7 @@ mod tests {
             "/api/v1/ground-station/ws/uplink",
             "/api/v1/ground-station/pic/events",
             "/api/v1/ground-station/ws/mesh",
+            "/api/v1/ground-station/ws/buttons",
         ] {
             assert!(is_public(p), "{p} should be public");
         }

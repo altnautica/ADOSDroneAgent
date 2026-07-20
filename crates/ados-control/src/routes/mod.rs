@@ -438,18 +438,21 @@ pub fn build_router(state: AppState, net_native: bool, hid_native: bool) -> Rout
         )
         // Ground-station WebSocket relays (profile-gated): the uplink-matrix
         // change stream (polled off the durable store), the PIC arbiter's
-        // transition stream (relayed off the native control socket), and the mesh
-        // + pairing event stream (fanned off the two cross-process journals). Each
-        // handler enforces the WebSocket auth contract itself (header key OR a
-        // scoped ticket) because the upgrade bypasses the HTTP auth edge; the
-        // matching paths are in the public-exempt set so the edge passes the
-        // handshake through to the handler.
+        // transition stream (relayed off the native control socket), the mesh
+        // + pairing event stream (fanned off the two cross-process journals), and
+        // the front-panel button stream (relayed off the dedicated button socket
+        // so the HDMI cockpit web app is driven by the GPIO buttons). Each handler
+        // enforces the WebSocket auth contract itself (header key OR a scoped
+        // ticket) because the upgrade bypasses the HTTP auth edge; the matching
+        // paths are in the public-exempt set so the edge passes the handshake
+        // through to the handler.
         .route("/api/v1/ground-station/ws/uplink", get(gs_ws::ws_uplink))
         .route(
             "/api/v1/ground-station/pic/events",
             get(gs_ws::ws_pic_events),
         )
         .route("/api/v1/ground-station/ws/mesh", get(gs_ws::ws_mesh))
+        .route("/api/v1/ground-station/ws/buttons", get(gs_ws::ws_buttons))
         // Wi-Fi client reads (profile-agnostic): the live station status off the
         // uplink daemon's command socket, and the saved NM profiles. The scan stays
         // proxied (its rescan is a side effect with no daemon-socket op).

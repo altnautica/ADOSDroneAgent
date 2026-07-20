@@ -35,6 +35,16 @@
 //! newline-JSON object per transition. This handler subscribes to that socket
 //! and forwards each line verbatim as a WebSocket text frame.
 //!
+//! ## `/ws/buttons`
+//!
+//! Relays the front-panel button stream so a browser (the HDMI cockpit web app)
+//! can be driven by the ground station's four GPIO buttons. The `ados-pic` daemon
+//! owns the GPIO reader, classifies each press as short / long / cancel through
+//! its shared classifier, and binds a dedicated `/run/ados/buttons.sock`; its
+//! `subscribe` op emits one newline-JSON `{button, kind, action, timestamp_ms}`
+//! object per press. This handler subscribes to that socket and forwards each
+//! line verbatim as a WebSocket text frame — it re-derives no button semantics.
+//!
 //! ## `/ws/mesh`
 //!
 //! Fans two cross-process journals into one socket: the mesh-event journal
@@ -69,6 +79,9 @@ const SCOPE_UPLINK_EVENTS: &str = "gs.uplink_events";
 
 /// The scope a `/pic/events` ticket must be minted for.
 const SCOPE_PIC_EVENTS: &str = "gs.pic_events";
+
+/// The scope a `/ws/buttons` ticket must be minted for.
+const SCOPE_BUTTON_EVENTS: &str = "gs.button_events";
 
 /// The scope a `/ws/mesh` ticket must be minted for.
 const SCOPE_MESH_EVENTS: &str = "gs.mesh_events";
@@ -383,6 +396,105 @@ async fn pic_loop(mut socket: WebSocket, state: AppState, _auth: WsAuth) {
                         }
                     }
                     Ok(None) | Err(_) => return, // arbiter socket closed
+                }
+            }
+            incoming = socket.recv() => {
+                match incoming {
+                    None | Some(Ok(Message::Close(_))) | Some(Err(_)) => return,
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// /ws/buttons
+// ---------------------------------------------------------------------------
+
+/// The `/ws/buttons` upgrade entry point. Resolves the handshake auth and the
+/// profile gate, then relays the front-panel button stream on the socket.
+pub async fn ws_buttons(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let auth = decide_ws_auth(&state, &headers, SCOPE_BUTTON_EVENTS);
+    let Some((ws, auth)) = upgrade_with(ws, auth) else {
+        return ws_reject();
+    };
+    ws.on_upgrade(move |socket| buttons_loop(socket, state, auth))
+}
+
+/// Relay the button fanout stream: profile-gate after accept, open the button
+/// socket, send `{"op":"subscribe"}`, and forward each newline-JSON press
+/// verbatim as a text frame until either side ends. The `ados-pic` reader is the
+/// single source of the short/long/cancel classification + the config mapping, so
+/// this loop forwards the already-classified events untouched.
+async fn buttons_loop(mut socket: WebSocket, state: AppState, _auth: WsAuth) {
+    if !is_ground_station(&state) {
+        let _ = socket
+            .send(Message::Close(Some(close_frame(
+                1008,
+                "E_PROFILE_MISMATCH",
+            ))))
+            .await;
+        return;
+    }
+
+    let buttons_sock = run_dir().join("buttons.sock");
+    let stream = match tokio::net::UnixStream::connect(&buttons_sock).await {
+        Ok(s) => s,
+        Err(exc) => {
+            // Match the PIC relay: report the unavailable bus, then close.
+            let body = json!({
+                "event": "error",
+                "code": "E_BUTTON_BUS_UNAVAILABLE",
+                "message": exc.to_string(),
+            });
+            if let Ok(text) = serde_json::to_string(&body) {
+                let _ = socket.send(Message::Text(text)).await;
+            }
+            let _ = socket.send(Message::Close(None)).await;
+            return;
+        }
+    };
+
+    let (read_half, mut write_half) = stream.into_split();
+    if write_half
+        .write_all(b"{\"op\":\"subscribe\"}\n")
+        .await
+        .is_err()
+        || write_half.flush().await.is_err()
+    {
+        return;
+    }
+
+    let mut lines = BufReader::new(read_half).lines();
+    loop {
+        tokio::select! {
+            line = lines.next_line() => {
+                match line {
+                    Ok(Some(line)) => {
+                        if line.trim().is_empty() {
+                            continue;
+                        }
+                        // Forward only well-formed JSON, dropping a malformed line
+                        // (the PIC relay `continue`s on a JSON decode error).
+                        match serde_json::from_str::<Value>(&line) {
+                            Ok(event) => {
+                                let text = match serde_json::to_string(&event) {
+                                    Ok(t) => t,
+                                    Err(_) => continue,
+                                };
+                                if socket.send(Message::Text(text)).await.is_err() {
+                                    return; // client gone
+                                }
+                            }
+                            Err(_) => continue,
+                        }
+                    }
+                    Ok(None) | Err(_) => return, // button socket closed
                 }
             }
             incoming = socket.recv() => {
@@ -1046,6 +1158,41 @@ mod tests {
         )]);
         assert!(matches!(
             decide_ws_auth(&state, &h, SCOPE_MESH_EVENTS),
+            WsAuth::Reject
+        ));
+    }
+
+    // -- button stream: auth scope --------------------------------------------
+
+    #[test]
+    fn button_stream_admits_with_a_valid_button_scoped_ticket() {
+        let (_d, state) = state_with_pairing(r#"{"paired": true, "api_key": "k"}"#);
+        let token = WsTicketIssuer::from_api_key("k")
+            .mint(SCOPE_BUTTON_EVENTS, 30)
+            .token;
+        let h = headers_with(&[(
+            "sec-websocket-protocol",
+            &format!("ados-ws-ticket, {token}"),
+        )]);
+        assert!(matches!(
+            decide_ws_auth(&state, &h, SCOPE_BUTTON_EVENTS),
+            WsAuth::AcceptTicket
+        ));
+    }
+
+    #[test]
+    fn button_stream_rejects_a_wrong_scope_ticket() {
+        let (_d, state) = state_with_pairing(r#"{"paired": true, "api_key": "k"}"#);
+        // A pic-scoped ticket presented to the button scope is rejected.
+        let token = WsTicketIssuer::from_api_key("k")
+            .mint(SCOPE_PIC_EVENTS, 30)
+            .token;
+        let h = headers_with(&[(
+            "sec-websocket-protocol",
+            &format!("ados-ws-ticket, {token}"),
+        )]);
+        assert!(matches!(
+            decide_ws_auth(&state, &h, SCOPE_BUTTON_EVENTS),
             WsAuth::Reject
         ));
     }
