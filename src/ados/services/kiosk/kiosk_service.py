@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import signal
 import sys
 import time
@@ -62,6 +63,14 @@ _MINIMAL_RAM_THRESHOLD_BYTES = 3 * 1024 * 1024 * 1024
 
 _STDERR_TAIL_BYTES = 2048
 
+# Chromium browser binary candidates, in resolution order. The binary name
+# varies by distro: Raspberry Pi OS historically shipped `chromium-browser`;
+# Debian, Armbian, and current Raspberry Pi OS ship `chromium`
+# (`/usr/bin/chromium`). `-stable` is the flatpak/snap-adjacent name some
+# images expose. The installer installs whichever apt package is available; the
+# kiosk resolves the binary at runtime so it does not depend on one fixed name.
+_BROWSER_CANDIDATES = ("chromium-browser", "chromium", "chromium-browser-stable")
+
 
 def _hdmi_present() -> bool:
     """True when the DRM card node exists.
@@ -89,9 +98,10 @@ def hdmi_present() -> bool:
 def _get_kiosk_config(config: Any) -> tuple[str | None, bool | None]:
     """Return (target_url, minimal_layer) from config, if present.
 
-    The Pydantic config model does not yet declare a `ground_station`
-    section. We access it defensively so callers work on both old and
-    new config shapes. Either field may be None when unset.
+    Reads ``config.ground_station.kiosk`` (the KioskConfig model). Accessed
+    defensively with ``getattr`` so a duck-typed test config or a bare object
+    without the section resolves to ``(None, None)`` instead of raising. Either
+    field may be None when unset.
     """
     gs = getattr(config, "ground_station", None)
     if gs is None:
@@ -146,17 +156,39 @@ def _resolve_target_url(config: Any) -> tuple[str, bool]:
     return url, minimal
 
 
-def _build_chromium_argv(url: str) -> list[str]:
-    """Full argv for `cage -- chromium-browser ...`.
+def _resolve_browser_binary() -> str:
+    """Return the first Chromium browser binary present on PATH.
 
-    We invoke `chromium-browser`. On Debian-based Raspberry Pi OS that
-    is the package binary. cage handles the Wayland compositor; we
-    ask Chromium to use Wayland + EGL for hardware acceleration.
+    The binary name varies by distro (see `_BROWSER_CANDIDATES`). Probe the
+    known names in order and return the absolute path of the first that
+    resolves. Raise `FileNotFoundError` naming every tried candidate when none
+    is present, so the supervisor's `kiosk_binary_missing` path reports exactly
+    what was searched instead of a bare `chromium-browser` not-found.
     """
+    for name in _BROWSER_CANDIDATES:
+        found = shutil.which(name)
+        if found:
+            return found
+    raise FileNotFoundError(
+        "no Chromium browser binary found on PATH; tried: "
+        + ", ".join(_BROWSER_CANDIDATES)
+    )
+
+
+def _build_chromium_argv(url: str) -> list[str]:
+    """Full argv for `cage -- <chromium> ...`.
+
+    The browser binary is resolved at runtime (`_resolve_browser_binary`)
+    because its package/binary name varies by distro. cage handles the Wayland
+    compositor; we ask Chromium to use Wayland + EGL for hardware acceleration.
+    Raises `FileNotFoundError` (propagated to the `kiosk_binary_missing` path)
+    when no browser is installed.
+    """
+    browser = _resolve_browser_binary()
     return [
         "cage",
         "--",
-        "chromium-browser",
+        browser,
         "--kiosk",
         "--noerrdialogs",
         "--disable-infobars",
@@ -351,7 +383,14 @@ async def _amain() -> int:
     url, minimal = _resolve_target_url(config)
     slog.info("kiosk_target_resolved", url=url, minimal_layer=minimal)
 
-    argv = _build_chromium_argv(url)
+    try:
+        argv = _build_chromium_argv(url)
+    except FileNotFoundError as exc:
+        # No Chromium browser installed. Report which names were searched and
+        # exit non-zero (the same rc the supervisor uses when a spawn hits a
+        # missing binary) so the failure is visible without churning.
+        slog.error("kiosk_binary_missing", error=str(exc))
+        return 3
     supervisor = KioskSupervisor(argv)
 
     loop = asyncio.get_event_loop()

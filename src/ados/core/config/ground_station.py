@@ -35,6 +35,25 @@ class GroundStationUiConfig(BaseModel):
     screens: dict = Field(default_factory=dict)
 
 
+class KioskConfig(BaseModel):
+    """HDMI kiosk (Chromium-under-cage) configuration.
+
+    The single source of truth for the kiosk. The kiosk service reads
+    ``target_url`` (the page it points the browser at) and ``minimal_layer``
+    (append ``?layer=minimal`` on low-RAM boards); the ``PUT
+    /api/v1/ground-station/display`` write route and ``PUT /api/config``
+    persist ``enabled`` / ``resolution`` / ``target_url`` here. Living in the
+    Pydantic model means it validates, round-trips through save cycles, shows
+    up in config dumps, and is read from exactly one place instead of the old
+    ``ground-station-ui.json`` side-file the kiosk service never read.
+    """
+
+    enabled: bool = False
+    resolution: str = "auto"
+    target_url: str | None = None
+    minimal_layer: bool = False
+
+
 class WfbRelayConfig(BaseModel):
     """Relay-role WFB forwarder settings.
 
@@ -132,3 +151,8 @@ class GroundStationConfig(BaseModel):
     # type (probing HDMI / framebuffer when set to "auto") and ships it
     # to Mission Control under ``displayType``.
     display: DisplayConfig = Field(default_factory=DisplayConfig)
+    # HDMI kiosk config: the page the Chromium-under-cage kiosk points at plus
+    # its render/display knobs. The kiosk service reads target_url + minimal_layer
+    # here, and the display write route + PUT /api/config persist here, so the
+    # kiosk config lives in exactly one place.
+    kiosk: KioskConfig = Field(default_factory=KioskConfig)

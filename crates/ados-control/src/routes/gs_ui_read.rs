@@ -14,17 +14,17 @@
 //!   order/enabled lists). An absent / unreadable / unparseable side-file degrades
 //!   to the all-defaults shape, never a 500.
 //! - **`GET /api/v1/ground-station/display`** — the persisted HDMI kiosk display
-//!   config: `{resolution, kiosk_enabled, kiosk_target_url}`, the side-file
-//!   `display` section merged over the defaults (`resolution "auto"`,
-//!   `kiosk_enabled false`, `kiosk_target_url null`). Same fault-tolerant read.
+//!   config: `{resolution, kiosk_enabled, kiosk_target_url}`, the
+//!   `ground_station.kiosk` section of the agent config projected over the defaults
+//!   (`resolution "auto"`, `kiosk_enabled false`, `kiosk_target_url null`). Same
+//!   fault-tolerant read.
 //!
-//! Both reads source from the same legacy side-file the FastAPI handlers read:
-//! `/etc/ados/ground-station-ui.json` (the `GS_UI_JSON` path), resolved here as a
-//! sibling of the agent config (`<config dir>/ground-station-ui.json`) so a test
-//! redirects it through the injected config path. The authoritative
-//! `ground_station.ui.<section>` YAML write path the PUT handlers use stays on the
-//! residual surface; these GET reads project the side-file blob exactly as the
-//! Python `_load_ui_config` / `_load_display_config` do.
+//! The `/ui` read sources from the legacy UI side-file (`/etc/ados/ground-station-ui.json`,
+//! the `GS_UI_JSON` path, resolved here as a sibling of the agent config) exactly as
+//! the Python `_load_ui_config` does. The `/display` read sources from
+//! `ground_station.kiosk` of the YAML config — the single source of truth the kiosk
+//! service reads and the display write route persists — mapping the config fields
+//! (`resolution` / `enabled` / `target_url`) onto the wire shape.
 
 use std::path::{Path, PathBuf};
 
@@ -78,6 +78,73 @@ fn ui_config_path(state: &AppState) -> PathBuf {
         .parent()
         .map(|dir| dir.join("ground-station-ui.json"))
         .unwrap_or_else(|| PathBuf::from("/etc/ados/ground-station-ui.json"))
+}
+
+/// The agent config path (`/etc/ados/config.yaml` on a real box), the YAML store the
+/// `/display` read sources `ground_station.kiosk` from.
+fn config_yaml_path(state: &AppState) -> PathBuf {
+    state.pairing_paths.config.clone()
+}
+
+/// Read the persisted `ground_station.kiosk` mapping from the YAML config as a JSON
+/// object map. An absent / unreadable / non-mapping config, or an absent kiosk
+/// section, yields the empty map (so `/display` degrades to the all-defaults shape,
+/// never a 500). The kiosk service reads the same section.
+fn read_gs_kiosk_section(config_path: &Path) -> Map<String, Value> {
+    let text = match std::fs::read_to_string(config_path) {
+        Ok(t) => t,
+        Err(_) => return Map::new(),
+    };
+    let yaml: serde_norway::Value = match serde_norway::from_str(&text) {
+        Ok(v) => v,
+        Err(_) => return Map::new(),
+    };
+    match yaml
+        .get("ground_station")
+        .and_then(|g| g.get("kiosk"))
+        .map(yaml_to_json)
+    {
+        Some(Value::Object(map)) => map,
+        _ => Map::new(),
+    }
+}
+
+/// Convert a `serde_norway::Value` into a `serde_json::Value`, preserving scalar /
+/// sequence / mapping shape. Non-string mapping keys are stringified (config keys
+/// are always strings, so this only guards the match's totality).
+fn yaml_to_json(value: &serde_norway::Value) -> Value {
+    use serde_norway::Value as Yaml;
+    match value {
+        Yaml::Null => Value::Null,
+        Yaml::Bool(b) => Value::Bool(*b),
+        Yaml::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                json!(i)
+            } else if let Some(u) = n.as_u64() {
+                json!(u)
+            } else if let Some(f) = n.as_f64() {
+                json!(f)
+            } else {
+                Value::Null
+            }
+        }
+        Yaml::String(s) => Value::String(s.clone()),
+        Yaml::Sequence(seq) => Value::Array(seq.iter().map(yaml_to_json).collect()),
+        Yaml::Mapping(map) => {
+            let mut out = Map::new();
+            for (k, v) in map {
+                let key = match k {
+                    Yaml::String(s) => s.clone(),
+                    other => serde_norway::to_string(other)
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_default(),
+                };
+                out.insert(key, yaml_to_json(v));
+            }
+            Value::Object(out)
+        }
+        Yaml::Tagged(t) => yaml_to_json(&t.value),
+    }
 }
 
 /// Read the side-file into an object map, returning the empty map on absence / a
@@ -204,22 +271,35 @@ fn build_ui_config(blob: &Map<String, Value>) -> Value {
 /// `GET /api/v1/ground-station/display` → `{resolution, kiosk_enabled,
 /// kiosk_target_url}`.
 ///
-/// `404` `E_PROFILE_MISMATCH` off a ground-station node. Otherwise the side-file's
-/// `display` section merged over the built-in defaults, byte-identical to the Python
-/// `_load_display_config`. An absent / unreadable side-file yields the all-defaults
-/// shape, never a 500.
+/// `404` `E_PROFILE_MISMATCH` off a ground-station node. Otherwise the persisted
+/// `ground_station.kiosk` section of the agent config projected over the built-in
+/// defaults. An absent / unreadable config yields the all-defaults shape, never a
+/// 500.
 pub async fn get_display(State(state): State<AppState>) -> Response {
     if !is_ground_station(&state) {
         return profile_mismatch();
     }
-    let blob = read_ui_blob(&ui_config_path(&state));
-    Json(build_display_config(&blob)).into_response()
+    let kiosk = read_gs_kiosk_section(&config_yaml_path(&state));
+    Json(build_display_config(&kiosk)).into_response()
 }
 
-/// Compose the `/display` body from a side-file blob: the defaults merged with the
-/// blob's `display` section. Split out so the merge is unit-tested without IO.
-fn build_display_config(blob: &Map<String, Value>) -> Value {
-    merge_over_defaults(default_display(), blob.get("display"))
+/// Project a persisted `ground_station.kiosk` section into the display wire shape
+/// `{resolution, kiosk_enabled, kiosk_target_url}` over the built-in defaults. The
+/// config keys (`resolution` / `enabled` / `target_url`) map onto the wire keys; a
+/// key the section omits keeps its default. Split out so the projection is
+/// unit-tested without IO.
+fn build_display_config(kiosk: &Map<String, Value>) -> Value {
+    let mut out = default_display();
+    if let Some(v) = kiosk.get("resolution") {
+        out.insert("resolution".to_string(), v.clone());
+    }
+    if let Some(v) = kiosk.get("enabled") {
+        out.insert("kiosk_enabled".to_string(), v.clone());
+    }
+    if let Some(v) = kiosk.get("target_url") {
+        out.insert("kiosk_target_url".to_string(), v.clone());
+    }
+    Value::Object(out)
 }
 
 #[cfg(test)]
@@ -308,10 +388,10 @@ mod tests {
     }
 
     #[test]
-    fn display_config_of_an_absent_side_file_is_the_defaults() {
-        // No display section → the built-in defaults. The golden shape on a fresh GS.
-        let blob = Map::new();
-        let got = build_display_config(&blob);
+    fn display_config_of_an_absent_section_is_the_defaults() {
+        // No kiosk section → the built-in defaults. The golden shape on a fresh GS.
+        let kiosk = Map::new();
+        let got = build_display_config(&kiosk);
         let want = json!({
             "resolution": "auto",
             "kiosk_enabled": false,
@@ -321,20 +401,57 @@ mod tests {
     }
 
     #[test]
-    fn display_config_merges_a_stored_section_over_the_defaults() {
-        // A stored display section overrides only the keys it carries.
-        let mut blob = Map::new();
-        blob.insert(
-            "display".to_string(),
-            json!({"resolution": "1080p", "kiosk_enabled": true, "kiosk_target_url": "http://x"}),
-        );
-        let got = build_display_config(&blob);
+    fn display_config_projects_a_stored_kiosk_section_over_the_defaults() {
+        // A stored ground_station.kiosk section maps its config field names onto the
+        // wire keys; a kiosk-only key (minimal_layer) is not surfaced on the wire.
+        let mut kiosk = Map::new();
+        kiosk.insert("resolution".to_string(), json!("1080p"));
+        kiosk.insert("enabled".to_string(), json!(true));
+        kiosk.insert("target_url".to_string(), json!("http://x"));
+        kiosk.insert("minimal_layer".to_string(), json!(true));
+        let got = build_display_config(&kiosk);
         let want = json!({
             "resolution": "1080p",
             "kiosk_enabled": true,
             "kiosk_target_url": "http://x",
         });
         assert_eq!(got, want);
+    }
+
+    #[test]
+    fn read_gs_kiosk_section_reads_config_and_projects_to_wire() {
+        // The kiosk section is read from the YAML config and projected to the wire
+        // display shape (the single source of truth the kiosk service also reads).
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        std::fs::write(
+            &cfg,
+            "ground_station:\n  kiosk:\n    resolution: 720p\n    enabled: true\n    target_url: http://hud\n    minimal_layer: true\n",
+        )
+        .unwrap();
+        let got = build_display_config(&read_gs_kiosk_section(&cfg));
+        assert_eq!(got["resolution"], json!("720p"));
+        assert_eq!(got["kiosk_enabled"], json!(true));
+        assert_eq!(got["kiosk_target_url"], json!("http://hud"));
+    }
+
+    #[test]
+    fn read_gs_kiosk_section_absent_or_empty_yields_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        // Absent config → empty section → all-defaults display.
+        assert_eq!(
+            read_gs_kiosk_section(&dir.path().join("nope.yaml")),
+            Map::new()
+        );
+        // A config with no ground_station.kiosk → empty section.
+        let cfg = dir.path().join("config.yaml");
+        std::fs::write(&cfg, "agent:\n  name: gs\n").unwrap();
+        assert_eq!(read_gs_kiosk_section(&cfg), Map::new());
+        // Which projects to the all-defaults display.
+        assert_eq!(
+            build_display_config(&read_gs_kiosk_section(&cfg)),
+            json!({"resolution": "auto", "kiosk_enabled": false, "kiosk_target_url": null})
+        );
     }
 
     #[test]
@@ -364,16 +481,11 @@ mod tests {
 
     #[test]
     fn read_ui_blob_reads_a_full_blob_from_disk() {
-        // A side-file with all three sections + a display section round-trips; the
-        // ui builder projects the three UI sections and the display builder the
-        // display one, off the same blob.
+        // A side-file with a partial oled section round-trips; the ui builder
+        // projects the three UI sections off the blob, defaults filling the gaps.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ground-station-ui.json");
-        std::fs::write(
-            &path,
-            r#"{"oled":{"brightness":50},"display":{"resolution":"720p"}}"#,
-        )
-        .unwrap();
+        std::fs::write(&path, r#"{"oled":{"brightness":50}}"#).unwrap();
         let blob = read_ui_blob(&path);
         assert_eq!(build_ui_config(&blob)["oled"]["brightness"], json!(50));
         // The screen_cycle default still stands under the partial oled override.
@@ -381,9 +493,11 @@ mod tests {
             build_ui_config(&blob)["oled"]["screen_cycle_seconds"],
             json!(5)
         );
-        assert_eq!(build_display_config(&blob)["resolution"], json!("720p"));
-        // The display defaults the side-file did not override still stand.
-        assert_eq!(build_display_config(&blob)["kiosk_enabled"], json!(false));
+        // The untouched buttons section is the full default.
+        assert_eq!(
+            build_ui_config(&blob)["buttons"]["mapping"]["B1_short"],
+            json!("cycle_screen")
+        );
     }
 
     #[test]

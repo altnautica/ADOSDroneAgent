@@ -247,14 +247,38 @@ def test_resolve_target_url_env_can_force_full_layer(
 # ---------------------------------------------------------------------------
 
 
-def test_build_chromium_argv_invokes_cage_and_chromium() -> None:
-    argv = _build_chromium_argv("http://target/hud")
+def test_build_chromium_argv_invokes_cage_and_resolved_browser() -> None:
+    # The browser binary is resolved at runtime (its name varies by distro), so the
+    # third argv slot is whatever `_resolve_browser_binary` returns.
+    with patch.object(ks, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
+        argv = _build_chromium_argv("http://target/hud")
     assert argv[0] == "cage"
     assert argv[1] == "--"
-    assert argv[2] == "chromium-browser"
+    assert argv[2] == "/usr/bin/chromium"
     assert "--kiosk" in argv
     assert "--ozone-platform=wayland" in argv
     assert argv[-1] == "http://target/hud"
+
+
+def test_resolve_browser_binary_returns_first_found() -> None:
+    """`shutil.which` resolves the first present candidate to its path."""
+
+    def fake_which(name: str) -> str | None:
+        # Only `chromium` (the second candidate) is installed on this box.
+        return "/usr/bin/chromium" if name == "chromium" else None
+
+    with patch("shutil.which", side_effect=fake_which):
+        assert ks._resolve_browser_binary() == "/usr/bin/chromium"
+
+
+def test_resolve_browser_binary_raises_naming_every_candidate() -> None:
+    """No browser on PATH → FileNotFoundError that names every tried candidate."""
+    with patch("shutil.which", return_value=None):
+        with pytest.raises(FileNotFoundError) as exc:
+            ks._resolve_browser_binary()
+    msg = str(exc.value)
+    for name in ks._BROWSER_CANDIDATES:
+        assert name in msg
 
 
 # ---------------------------------------------------------------------------

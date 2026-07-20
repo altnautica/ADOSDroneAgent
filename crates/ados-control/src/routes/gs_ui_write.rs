@@ -18,7 +18,8 @@
 //!   echo the full UI config blob.
 //! - **`PUT /api/v1/ground-station/display`** — apply the supplied HDMI kiosk
 //!   fields (`resolution` / `kiosk_enabled` / `kiosk_target_url`), persist the
-//!   merged display config into the side-file, and echo the display config.
+//!   merged config into `ground_station.kiosk` of the agent config, and echo the
+//!   display config.
 //!
 //! ## Two persistence targets, mirroring the FastAPI handlers
 //!
@@ -34,9 +35,12 @@
 //! WFB writes use) for the persist, and the side-file read + in-memory section
 //! overlay for the response body.
 //!
-//! The `/display` write is simpler: it both persists and sources its response from
-//! the same side-file `display` section, mirroring `_save_display_config` /
-//! `_load_display_config`.
+//! The `/display` write is the single-source-of-truth path: it seeds from, and
+//! persists into, `ground_station.kiosk` of the YAML config — the same section the
+//! kiosk service reads (`target_url` / `minimal_layer`) and `PUT /api/config`
+//! writes. The wire fields (`resolution` / `kiosk_enabled` / `kiosk_target_url`)
+//! map onto the config fields (`resolution` / `enabled` / `target_url`); a merge
+//! preserves any other kiosk key (e.g. an operator-set `minimal_layer`).
 //!
 //! ## Persist-failure is a 500, not a degraded body
 //!
@@ -339,10 +343,84 @@ fn load_ui_config(blob: &Map<String, Value>) -> Map<String, Value> {
     out
 }
 
-/// The defaults-merged display config from a side-file blob, byte-identical to the
-/// Python `_load_display_config`.
-fn load_display_config(blob: &Map<String, Value>) -> Map<String, Value> {
-    merge_over_defaults(default_display(), blob.get("display"))
+/// Read the persisted `ground_station.kiosk` mapping from the YAML config as a JSON
+/// object map. An absent / unreadable / non-mapping config, or an absent kiosk
+/// section, yields the empty map. Used to seed the display write so only the
+/// operator-supplied fields change.
+fn read_gs_kiosk_section(config_path: &Path) -> Map<String, Value> {
+    let text = match std::fs::read_to_string(config_path) {
+        Ok(t) => t,
+        Err(_) => return Map::new(),
+    };
+    let yaml: serde_norway::Value = match serde_norway::from_str(&text) {
+        Ok(v) => v,
+        Err(_) => return Map::new(),
+    };
+    match yaml
+        .get("ground_station")
+        .and_then(|g| g.get("kiosk"))
+        .map(yaml_to_json)
+    {
+        Some(Value::Object(map)) => map,
+        _ => Map::new(),
+    }
+}
+
+/// Project a persisted `ground_station.kiosk` section into the display-route wire
+/// shape `{resolution, kiosk_enabled, kiosk_target_url}` over the built-in defaults.
+/// The config keys (`resolution` / `enabled` / `target_url`) map onto the wire keys;
+/// a key the section omits keeps its default.
+fn display_wire_from_kiosk(kiosk: &Map<String, Value>) -> Map<String, Value> {
+    let mut out = default_display();
+    if let Some(v) = kiosk.get("resolution") {
+        out.insert("resolution".to_string(), v.clone());
+    }
+    if let Some(v) = kiosk.get("enabled") {
+        out.insert("kiosk_enabled".to_string(), v.clone());
+    }
+    if let Some(v) = kiosk.get("target_url") {
+        out.insert("kiosk_target_url".to_string(), v.clone());
+    }
+    out
+}
+
+/// Convert a `serde_norway::Value` into a `serde_json::Value`, preserving scalar /
+/// sequence / mapping shape (the reverse of [`json_to_yaml`]). Non-string mapping
+/// keys are stringified — config keys are always strings, so this only guards the
+/// match's totality.
+fn yaml_to_json(value: &serde_norway::Value) -> Value {
+    use serde_norway::Value as Yaml;
+    match value {
+        Yaml::Null => Value::Null,
+        Yaml::Bool(b) => Value::Bool(*b),
+        Yaml::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                json!(i)
+            } else if let Some(u) = n.as_u64() {
+                json!(u)
+            } else if let Some(f) = n.as_f64() {
+                json!(f)
+            } else {
+                Value::Null
+            }
+        }
+        Yaml::String(s) => Value::String(s.clone()),
+        Yaml::Sequence(seq) => Value::Array(seq.iter().map(yaml_to_json).collect()),
+        Yaml::Mapping(map) => {
+            let mut out = Map::new();
+            for (k, v) in map {
+                let key = match k {
+                    Yaml::String(s) => s.clone(),
+                    other => serde_norway::to_string(other)
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_default(),
+                };
+                out.insert(key, yaml_to_json(v));
+            }
+            Value::Object(out)
+        }
+        Yaml::Tagged(t) => yaml_to_json(&t.value),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -434,50 +512,58 @@ fn json_to_yaml(value: &Value) -> serde_norway::Value {
 }
 
 // ---------------------------------------------------------------------------
-// Side-file display persist: write the `display` section (mirrors _save_display_config).
+// Kiosk config persist: merge fields into ground_station.kiosk (the single source
+// of truth the kiosk service + PUT /api/config also use).
 // ---------------------------------------------------------------------------
 
-/// Write `display` back into the side-file's `display` section, atomically,
-/// preserving every other key (the Python `_save_display_config` loads the blob,
-/// sets `data["display"]`, and writes `json.dumps(indent=2, sort_keys=True)`).
-/// Returns `Ok(())` on success, `Err(message)` on any I/O fault so the caller can
-/// map it to the `E_UI_SAVE_FAILED` 500.
-fn save_display_config(path: &Path, display: &Map<String, Value>) -> Result<(), String> {
-    // Load the existing blob (absent / unparseable starts from an empty object,
-    // matching the Python `data = {}` seed under `except (OSError, ValueError)`).
-    let mut data: Map<String, Value> = match std::fs::read_to_string(path) {
-        Ok(text) => match serde_json::from_str::<Value>(&text) {
-            Ok(Value::Object(map)) => map,
-            _ => Map::new(),
-        },
-        Err(_) => Map::new(),
-    };
-    data.insert("display".to_string(), Value::Object(display.clone()));
-    // The Python writes `json.dumps(data, indent=2, sort_keys=True)`.
-    let body = serde_json::to_string_pretty(&sort_keys(&Value::Object(data)))
-        .map_err(|e| e.to_string())?;
-    write_atomic_bytes(path, body.as_bytes())
-}
+/// Merge the supplied kiosk fields into `ground_station.kiosk` of the on-disk YAML
+/// config, atomically (tmp + rename), preserving every other key (e.g. an
+/// operator-set `minimal_layer`) and the mapping insertion order. Returns `Ok(())`
+/// on success, `Err(message)` on any read/parse/serialize/write fault so the caller
+/// maps it to the `E_UI_SAVE_FAILED` 500 — including the EPERM a non-root front gets
+/// on the 0600 root-owned config.
+fn persist_gs_kiosk_fields(config_path: &Path, fields: &[(&str, Value)]) -> Result<(), String> {
+    use serde_norway::{Mapping, Value as Yaml};
 
-/// Recursively sort the keys of every object so the serialized output matches the
-/// Python `json.dumps(sort_keys=True)`. `serde_json`'s default map preserves
-/// insertion order, so the keys are reordered explicitly into a fresh map (its
-/// `to_string_pretty` then emits them in iteration order). Arrays + scalars pass
-/// through unchanged.
-fn sort_keys(value: &Value) -> Value {
-    match value {
-        Value::Object(map) => {
-            let mut keys: Vec<&String> = map.keys().collect();
-            keys.sort();
-            let mut out = Map::new();
-            for k in keys {
-                out.insert(k.clone(), sort_keys(&map[k]));
-            }
-            Value::Object(out)
+    // An absent / non-mapping config starts from an empty mapping (the same seed the
+    // sibling `persist_gs_ui_section` uses).
+    let mut data: Yaml = match std::fs::read_to_string(config_path) {
+        Ok(text) => match serde_norway::from_str::<Yaml>(&text) {
+            Ok(v) if v.is_mapping() => v,
+            _ => Yaml::Mapping(Mapping::new()),
+        },
+        Err(_) => Yaml::Mapping(Mapping::new()),
+    };
+
+    {
+        let root = data
+            .as_mapping_mut()
+            .ok_or_else(|| "config root is not a mapping".to_string())?;
+        let gs = root
+            .entry(Yaml::String("ground_station".to_string()))
+            .or_insert_with(|| Yaml::Mapping(Mapping::new()));
+        if !gs.is_mapping() {
+            *gs = Yaml::Mapping(Mapping::new());
         }
-        Value::Array(arr) => Value::Array(arr.iter().map(sort_keys).collect()),
-        other => other.clone(),
+        let gs_map = gs
+            .as_mapping_mut()
+            .ok_or_else(|| "ground_station section is not a mapping".to_string())?;
+        let kiosk = gs_map
+            .entry(Yaml::String("kiosk".to_string()))
+            .or_insert_with(|| Yaml::Mapping(Mapping::new()));
+        if !kiosk.is_mapping() {
+            *kiosk = Yaml::Mapping(Mapping::new());
+        }
+        let kiosk_map = kiosk
+            .as_mapping_mut()
+            .ok_or_else(|| "kiosk section is not a mapping".to_string())?;
+        for (k, v) in fields {
+            kiosk_map.insert(Yaml::String((*k).to_string()), json_to_yaml(v));
+        }
     }
+
+    let body = serde_norway::to_string(&data).map_err(|e| e.to_string())?;
+    write_atomic_bytes(config_path, body.as_bytes())
 }
 
 /// Write `bytes` to `path` atomically: ensure the parent dir, write a `.tmp`
@@ -746,10 +832,10 @@ const ALLOWED_RESOLUTIONS: [&str; 3] = ["auto", "720p", "1080p"];
 /// `PUT .../display` → the merged HDMI kiosk display config.
 ///
 /// `404` off a ground-station node; `400 E_INVALID_RESOLUTION` when `resolution` is
-/// supplied and not one of `auto` / `720p` / `1080p`. Applies the supplied fields
-/// over the loaded display config, persists the merged config into the side-file's
-/// `display` section, and echoes the merged config. A persist fault is a
-/// `500 E_UI_SAVE_FAILED`.
+/// supplied and not one of `auto` / `720p` / `1080p`. Seeds from the persisted
+/// `ground_station.kiosk` section, applies the supplied fields, persists the merged
+/// config back into `ground_station.kiosk`, and echoes the merged config. A persist
+/// fault is a `500 E_UI_SAVE_FAILED`.
 pub async fn put_display(
     State(state): State<AppState>,
     Json(update): Json<DisplayUpdate>,
@@ -757,12 +843,16 @@ pub async fn put_display(
     if !is_ground_station(&state) {
         return profile_mismatch();
     }
-    put_display_at(&ui_config_path(&state), &update)
+    put_display_at(&config_yaml_path(&state), &update)
 }
 
-/// The display-write logic against an explicit side-file path.
-fn put_display_at(ui_path: &Path, update: &DisplayUpdate) -> Response {
-    let mut current = load_display_config(&read_ui_blob(ui_path));
+/// The display-write logic against an explicit YAML config path. Seeds the current
+/// value from the persisted `ground_station.kiosk` section, applies the supplied
+/// fields, persists the owned fields back into `ground_station.kiosk` (wire →
+/// config field-name mapping; a merge preserves any other kiosk key such as
+/// `minimal_layer`), and echoes the wire display config.
+fn put_display_at(config_path: &Path, update: &DisplayUpdate) -> Response {
+    let mut current = display_wire_from_kiosk(&read_gs_kiosk_section(config_path));
 
     if let Some(res) = &update.resolution {
         if !ALLOWED_RESOLUTIONS.contains(&res.as_str()) {
@@ -777,7 +867,32 @@ fn put_display_at(ui_path: &Path, update: &DisplayUpdate) -> Response {
         current.insert("kiosk_target_url".to_string(), Value::String(url.clone()));
     }
 
-    if let Err(e) = save_display_config(ui_path, &current) {
+    // Map the wire fields onto the config field names and merge them into
+    // ground_station.kiosk. minimal_layer + any other kiosk key is preserved.
+    let fields = [
+        (
+            "resolution",
+            current
+                .get("resolution")
+                .cloned()
+                .unwrap_or_else(|| Value::String("auto".to_string())),
+        ),
+        (
+            "enabled",
+            current
+                .get("kiosk_enabled")
+                .cloned()
+                .unwrap_or(Value::Bool(false)),
+        ),
+        (
+            "target_url",
+            current
+                .get("kiosk_target_url")
+                .cloned()
+                .unwrap_or(Value::Null),
+        ),
+    ];
+    if let Err(e) = persist_gs_kiosk_fields(config_path, &fields) {
         return error_message(StatusCode::INTERNAL_SERVER_ERROR, "E_UI_SAVE_FAILED", e);
     }
     Json(Value::Object(current)).into_response()
@@ -1086,18 +1201,20 @@ mod tests {
     // ── /display ──────────────────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn put_display_applies_fields_and_persists_to_the_side_file() {
+    async fn put_display_applies_fields_and_persists_to_config() {
         let dir = tempfile::tempdir().unwrap();
-        let ui = dir.path().join("ground-station-ui.json");
+        let cfg = dir.path().join("config.yaml");
+        std::fs::write(&cfg, "agent:\n  name: gs-1\n").unwrap();
 
         let update = DisplayUpdate {
             resolution: Some("1080p".to_string()),
             kiosk_enabled: Some(true),
             kiosk_target_url: Some("http://localhost:8080/hud".to_string()),
         };
-        let resp = put_display_at(&ui, &update);
+        let resp = put_display_at(&cfg, &update);
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp).await;
+        // The wire body keeps the {resolution, kiosk_enabled, kiosk_target_url} shape.
         assert_eq!(
             body,
             json!({
@@ -1106,21 +1223,48 @@ mod tests {
                 "kiosk_target_url": "http://localhost:8080/hud",
             })
         );
-        // The side-file holds the display section under the `display` key.
-        let parsed: Value = serde_json::from_str(&std::fs::read_to_string(&ui).unwrap()).unwrap();
-        assert_eq!(parsed["display"]["resolution"], json!("1080p"));
-        assert_eq!(parsed["display"]["kiosk_enabled"], json!(true));
+        // Persisted under ground_station.kiosk with the config field names; the
+        // unrelated agent.name key survives the merge.
+        let parsed: serde_norway::Value =
+            serde_norway::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+        let kiosk = parsed
+            .get("ground_station")
+            .and_then(|g| g.get("kiosk"))
+            .unwrap();
+        assert_eq!(
+            kiosk
+                .get("resolution")
+                .and_then(serde_norway::Value::as_str),
+            Some("1080p")
+        );
+        assert_eq!(
+            kiosk.get("enabled").and_then(serde_norway::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            kiosk
+                .get("target_url")
+                .and_then(serde_norway::Value::as_str),
+            Some("http://localhost:8080/hud")
+        );
+        assert_eq!(
+            parsed
+                .get("agent")
+                .and_then(|a| a.get("name"))
+                .and_then(|n| n.as_str()),
+            Some("gs-1")
+        );
     }
 
     #[tokio::test]
     async fn put_display_partial_update_keeps_unset_defaults() {
         let dir = tempfile::tempdir().unwrap();
-        let ui = dir.path().join("ground-station-ui.json");
+        let cfg = dir.path().join("config.yaml");
         let update = DisplayUpdate {
             resolution: Some("720p".to_string()),
             ..Default::default()
         };
-        let resp = put_display_at(&ui, &update);
+        let resp = put_display_at(&cfg, &update);
         let body = body_json(resp).await;
         assert_eq!(body["resolution"], json!("720p"));
         // The unset fields keep their defaults.
@@ -1129,33 +1273,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn put_display_seeds_from_existing_kiosk_and_preserves_other_keys() {
+        // An existing kiosk section (a stored target_url + an operator-set
+        // minimal_layer) seeds the response; a partial update changes only the
+        // supplied field and the merge preserves minimal_layer + a sibling config key.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        std::fs::write(
+            &cfg,
+            "ground_station:\n  share_uplink: true\n  kiosk:\n    target_url: http://old/hud\n    minimal_layer: true\n",
+        )
+        .unwrap();
+
+        let update = DisplayUpdate {
+            resolution: Some("720p".to_string()),
+            ..Default::default()
+        };
+        let resp = put_display_at(&cfg, &update);
+        let body = body_json(resp).await;
+        // resolution takes the request; target_url seeds from the stored value;
+        // kiosk_enabled falls to the default (the stored section had no `enabled`).
+        assert_eq!(body["resolution"], json!("720p"));
+        assert_eq!(body["kiosk_target_url"], json!("http://old/hud"));
+        assert_eq!(body["kiosk_enabled"], json!(false));
+
+        let parsed: serde_norway::Value =
+            serde_norway::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+        let kiosk = parsed
+            .get("ground_station")
+            .and_then(|g| g.get("kiosk"))
+            .unwrap();
+        assert_eq!(
+            kiosk
+                .get("resolution")
+                .and_then(serde_norway::Value::as_str),
+            Some("720p")
+        );
+        assert_eq!(
+            kiosk
+                .get("target_url")
+                .and_then(serde_norway::Value::as_str),
+            Some("http://old/hud")
+        );
+        // The operator-set minimal_layer is NOT clobbered by the display write.
+        assert_eq!(
+            kiosk
+                .get("minimal_layer")
+                .and_then(serde_norway::Value::as_bool),
+            Some(true)
+        );
+        // A sibling ground_station key survives the merge.
+        assert_eq!(
+            parsed
+                .get("ground_station")
+                .and_then(|g| g.get("share_uplink"))
+                .and_then(serde_norway::Value::as_bool),
+            Some(true)
+        );
+    }
+
+    #[tokio::test]
     async fn put_display_invalid_resolution_is_a_400() {
         let dir = tempfile::tempdir().unwrap();
-        let ui = dir.path().join("ground-station-ui.json");
+        let cfg = dir.path().join("config.yaml");
         let update = DisplayUpdate {
             resolution: Some("4k".to_string()),
             ..Default::default()
         };
-        let resp = put_display_at(&ui, &update);
+        let resp = put_display_at(&cfg, &update);
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let body = body_json(resp).await;
         assert_eq!(
             body,
             json!({"detail": {"error": {"code": "E_INVALID_RESOLUTION"}}})
         );
-        // The side-file was NOT written (the validation short-circuits the persist).
-        assert!(!ui.exists());
+        // The config was NOT written (the validation short-circuits the persist).
+        assert!(!cfg.exists());
     }
 
     #[tokio::test]
     async fn put_display_persist_fault_is_a_500_e_ui_save_failed() {
-        // A side-file path whose parent cannot be created → persist fails → 500.
+        // A config path whose parent cannot be created → persist fails → 500.
         let dir = tempfile::tempdir().unwrap();
         let blocker = dir.path().join("blocker");
         std::fs::write(&blocker, b"x").unwrap();
-        let ui = blocker.join("ground-station-ui.json");
+        let cfg = blocker.join("config.yaml");
         let resp = put_display_at(
-            &ui,
+            &cfg,
             &DisplayUpdate {
                 kiosk_enabled: Some(true),
                 ..Default::default()
@@ -1164,34 +1368,6 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body = body_json(resp).await;
         assert_eq!(body["detail"]["error"]["code"], json!("E_UI_SAVE_FAILED"));
-    }
-
-    // ── side-file display write byte format ───────────────────────────────────
-
-    #[test]
-    fn save_display_preserves_other_keys_and_sorts_keys() {
-        // The save merges into the `display` key, preserving an unrelated section,
-        // and serializes with sorted keys (matching json.dumps(sort_keys=True)).
-        let dir = tempfile::tempdir().unwrap();
-        let ui = dir.path().join("ground-station-ui.json");
-        std::fs::write(&ui, r#"{"oled":{"brightness":10}}"#).unwrap();
-        let mut display = Map::new();
-        display.insert("resolution".to_string(), Value::String("auto".to_string()));
-        display.insert("kiosk_enabled".to_string(), Value::Bool(false));
-        save_display_config(&ui, &display).unwrap();
-        let text = std::fs::read_to_string(&ui).unwrap();
-        // Round-trips with both sections present.
-        let parsed: Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(parsed["oled"]["brightness"], json!(10));
-        assert_eq!(parsed["display"]["resolution"], json!("auto"));
-        // Keys are sorted: "display" sorts before "oled" at the top level.
-        let disp_pos = text.find("\"display\"").unwrap();
-        let oled_pos = text.find("\"oled\"").unwrap();
-        assert!(disp_pos < oled_pos);
-        // Within display, "kiosk_enabled" sorts before "resolution".
-        let kiosk_pos = text.find("\"kiosk_enabled\"").unwrap();
-        let res_pos = text.find("\"resolution\"").unwrap();
-        assert!(kiosk_pos < res_pos);
     }
 
     #[test]

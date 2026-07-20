@@ -56,7 +56,6 @@ from .models import (
     BluetoothPairRequest,
     BluetoothScanRequest,
     ButtonsUpdate,
-    DisplayUpdate,
     EthernetConfigUpdate,
     GamepadPrimaryUpdate,
     MeshConfigUpdate,
@@ -91,7 +90,6 @@ from .ui_config import (
     _load_ui_config,
     _persist_gs_ui_section,
     _refresh_in_memory_ui,
-    _save_display_config,
     _save_ui_config,
 )
 from .validators import (
@@ -132,7 +130,6 @@ __all__ = [
     "_load_ui_config",
     "_save_ui_config",
     "_load_display_config",
-    "_save_display_config",
     "_persist_gs_ui_section",
     "_refresh_in_memory_ui",
     # system snapshot
@@ -173,7 +170,6 @@ __all__ = [
     "OledUpdate",
     "ButtonsUpdate",
     "ScreensUpdate",
-    "DisplayUpdate",
     "BluetoothScanRequest",
     "BluetoothPairRequest",
     "GamepadPrimaryUpdate",

@@ -9,9 +9,10 @@ Two layers of UI state live in this module:
   the YAML-backed ``ADOSConfig`` and mirrors it into the running
   service.
 
-The display sub-config is its own pair of helpers that piggybacks on
-the legacy JSON file because the YAML model does not yet carry a
-display section.
+The display (HDMI kiosk) sub-config reads ``ground_station.kiosk`` from
+the YAML-backed ``ADOSConfig`` — the single source of truth the kiosk
+service and the native write route also use — via ``_load_display_config``.
+Writes go through the native ``ados-control`` display route.
 """
 
 from __future__ import annotations
@@ -52,30 +53,32 @@ def _save_ui_config(data: dict[str, Any]) -> None:
 
 
 def _load_display_config() -> dict[str, Any]:
-    """Read display section of the persistent UI config blob."""
-    data: dict[str, Any] = {}
-    try:
-        if _UI_CONFIG_PATH.is_file():
-            data = json.loads(_UI_CONFIG_PATH.read_text(encoding="utf-8")) or {}
-    except (OSError, ValueError):
-        data = {}
-    display = {**_DEFAULT_DISPLAY, **(data.get("display") or {})}
+    """Project the persisted kiosk config into the display-route wire shape.
+
+    Reads ``ground_station.kiosk`` from ``/etc/ados/config.yaml`` (the single
+    source of truth the kiosk service also reads) and maps the config fields
+    (``enabled`` / ``resolution`` / ``target_url``) onto the display route's
+    ``{resolution, kiosk_enabled, kiosk_target_url}`` contract, over the
+    built-in defaults. An absent / unreadable config yields the all-defaults
+    shape. The native ``ados-control`` read route projects the same section
+    identically.
+    """
+    from ados.services.ground_station.pair_manager import _load_config_dict
+
+    data = _load_config_dict()
+    gs = data.get("ground_station") if isinstance(data, dict) else None
+    kiosk = gs.get("kiosk") if isinstance(gs, dict) else None
+    if not isinstance(kiosk, dict):
+        kiosk = {}
+
+    display = dict(_DEFAULT_DISPLAY)
+    if "resolution" in kiosk:
+        display["resolution"] = kiosk["resolution"]
+    if "enabled" in kiosk:
+        display["kiosk_enabled"] = kiosk["enabled"]
+    if "target_url" in kiosk:
+        display["kiosk_target_url"] = kiosk["target_url"]
     return display
-
-
-def _save_display_config(display: dict[str, Any]) -> None:
-    """Merge the new display blob back into the UI config file."""
-    data: dict[str, Any] = {}
-    try:
-        if _UI_CONFIG_PATH.is_file():
-            data = json.loads(_UI_CONFIG_PATH.read_text(encoding="utf-8")) or {}
-    except (OSError, ValueError):
-        data = {}
-    data["display"] = display
-    _UI_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = _UI_CONFIG_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
-    tmp.replace(_UI_CONFIG_PATH)
 
 
 def _persist_gs_ui_section(section: str, value: dict[str, Any]) -> None:
@@ -124,7 +127,6 @@ __all__ = [
     "_load_ui_config",
     "_save_ui_config",
     "_load_display_config",
-    "_save_display_config",
     "_persist_gs_ui_section",
     "_refresh_in_memory_ui",
 ]

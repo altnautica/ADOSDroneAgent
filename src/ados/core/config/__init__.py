@@ -52,6 +52,7 @@ from .cloud import (
 from .ground_station import (
     GroundStationConfig,
     GroundStationUiConfig,
+    KioskConfig,
     MeshConfig,
     WfbReceiverConfig,
     WfbRelayConfig,
@@ -133,6 +134,7 @@ __all__ = [
     # ground station
     "GroundStationConfig",
     "GroundStationUiConfig",
+    "KioskConfig",
     "MeshConfig",
     "WfbReceiverConfig",
     "WfbRelayConfig",

@@ -73,14 +73,6 @@ class ScreensUpdate(BaseModel):
     enabled: list[str] | None = None
 
 
-class DisplayUpdate(BaseModel):
-    """PUT body for HDMI kiosk display config."""
-
-    resolution: str | None = Field(default=None)
-    kiosk_enabled: bool | None = None
-    kiosk_target_url: str | None = None
-
-
 class BluetoothScanRequest(BaseModel):
     """POST body for the Bluetooth scan endpoint."""
 
@@ -237,7 +229,6 @@ __all__ = [
     "OledUpdate",
     "ButtonsUpdate",
     "ScreensUpdate",
-    "DisplayUpdate",
     "BluetoothScanRequest",
     "BluetoothPairRequest",
     "GamepadPrimaryUpdate",

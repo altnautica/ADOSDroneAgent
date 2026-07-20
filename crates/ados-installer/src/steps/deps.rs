@@ -63,7 +63,9 @@ pub fn optional_packages() -> &'static [&'static str] {
 }
 
 /// Core ground-station apt packages (the AP + bluetooth + kiosk-compositor
-/// stack, minus the chromium browser which installs separately/best-effort).
+/// stack). The Chromium browser the kiosk launches under `cage` is NOT in this
+/// required set: its apt package name varies by distro, so it installs
+/// best-effort by candidate name in the Deps step ([`install_browser`]).
 /// Required for the ground_station profile. `batctl` + `wpasupplicant` back the
 /// self-healing local mesh carrier on dual-RTL ground stations.
 pub fn ground_station_core_packages() -> &'static [&'static str] {
@@ -76,6 +78,15 @@ pub fn ground_station_core_packages() -> &'static [&'static str] {
         "batctl",
         "wpasupplicant",
     ]
+}
+
+/// Chromium browser package candidates for the HDMI kiosk, in install-preference
+/// order. The apt package name differs by distro: Debian, Armbian, and current
+/// Raspberry Pi OS ship `chromium` (binary `/usr/bin/chromium`); older Raspberry
+/// Pi OS and Ubuntu shipped `chromium-browser`. The Deps step installs the first
+/// candidate that succeeds so the kiosk has a browser regardless of the base image.
+pub fn browser_packages() -> &'static [&'static str] {
+    &["chromium", "chromium-browser"]
 }
 
 /// Core workstation / compute apt packages (REQUIRED for the reconstruction
@@ -166,6 +177,28 @@ fn apt_install(pkgs: &[&str], required: bool, sink: &ProgressSink) -> anyhow::Re
         "best-effort apt-get install reported a non-zero status; continuing"
     );
     Ok(())
+}
+
+/// Best-effort install of the first available Chromium browser package. Tries each
+/// candidate in [`browser_packages`] order and stops at the first `apt-get install`
+/// that exits zero. Returns `true` when a browser installed. Best-effort by design:
+/// a headless ground station (no HDMI sink) never launches the kiosk, and the kiosk
+/// service resolves the browser binary at runtime and fails loudly if none is
+/// present, so a miss here degrades rather than blocks the install.
+fn install_browser(sink: &ProgressSink) -> bool {
+    for pkg in browser_packages() {
+        let res = apt(&["install", "-y", pkg], sink);
+        if res.success() {
+            tracing::info!(package = pkg, "installed HDMI kiosk browser");
+            return true;
+        }
+        tracing::warn!(
+            package = pkg,
+            code = ?res.code,
+            "browser package not installable; trying the next candidate"
+        );
+    }
+    false
 }
 
 /// The ordered interpreter candidates [`find_python`] probes (pure). System
@@ -272,6 +305,17 @@ impl Step for Deps {
         // Optional headers tolerate failure (wfb_rtsp demo target only).
         if let Err(e) = apt_install(optional_packages(), false, &sink) {
             tracing::warn!(error = %e, "optional dev headers not installed; wfb_rtsp build skipped");
+        }
+
+        // The ground-station HDMI kiosk needs a Chromium browser, whose apt package
+        // name varies by distro (chromium vs chromium-browser). Install the first
+        // candidate that succeeds; best-effort so a headless ground station (no HDMI
+        // sink) or an image lacking both names degrades cleanly (the kiosk service
+        // resolves the browser binary at runtime and fails loudly if none is present).
+        if ctx.profile == "ground_station" && !install_browser(&sink) {
+            tracing::warn!(
+                "no chromium browser package installed; the HDMI kiosk is unavailable until one is present"
+            );
         }
 
         // Rockchip boards get the hardware MPP gstreamer plugin opportunistically
@@ -387,6 +431,17 @@ mod tests {
             len_before,
             "required package set must be unique"
         );
+    }
+
+    #[test]
+    fn browser_candidates_cover_both_distro_names() {
+        let b = browser_packages();
+        // Both the Debian/Armbian name and the older Raspberry Pi OS / Ubuntu name
+        // are tried so the kiosk gets a browser on any base image.
+        assert!(b.contains(&"chromium"));
+        assert!(b.contains(&"chromium-browser"));
+        // `chromium` is tried first (Debian / Armbian / current Raspberry Pi OS).
+        assert_eq!(b.first(), Some(&"chromium"));
     }
 
     #[test]
