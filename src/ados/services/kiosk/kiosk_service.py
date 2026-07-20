@@ -1,37 +1,49 @@
-"""HDMI kiosk service: Chromium under cage, pointed at the local HUD.
+"""HDMI kiosk service: Chromium full-screen, pointed at the agent cockpit.
 
-HDMI + gamepad should deliver standalone flight with no phone
-required. This service owns the HDMI output.
+HDMI + touch + gamepad should deliver a standalone field console with no
+laptop required. This service owns the HDMI output. The default target is the
+agent-served cockpit at ``http://localhost:8080/cockpit`` (a light SPA served
+by the agent's own front, not a Next.js build on the box).
 
 Lifecycle:
-1. Probe `/dev/dri/card0`. If absent, the Pi has no HDMI sink connected
+1. Probe `/dev/dri/card0`. If absent, the box has no HDMI sink connected
    (or the DRM driver did not bind). Log clearly and exit 0 so systemd
    does not churn restarting. Rule 26: the rest of the ground station
    keeps working even without HDMI.
 2. Resolve target URL via config -> env var -> default chain.
-3. Launch `cage -- chromium-browser --kiosk ... <url>` as a child
-   process. cage is a Wayland single-app compositor, lightest option
-   on Pi 4B and the one the setup image ships.
+3. Launch Chromium full-screen, adaptively:
+   - When a graphical desktop session is already running on the box (a
+     display manager with KDE / GNOME / etc.), launch Chromium as a
+     full-screen kiosk window INSIDE that session. cage is NOT used here:
+     it needs to own the DRM master, which the running desktop compositor
+     already holds, so cage would fight the desktop and churn.
+   - When no desktop is present (the appliance case), launch under `cage`,
+     a Wayland single-app compositor that owns the display itself.
+   The Chromium binary is resolved at runtime (its name varies by distro).
 4. Supervise the child. On exit, backoff-restart. Five crashes in 60
    seconds flips to ERROR and we stop restarting so systemd can apply
    its own service-level retry.
-5. On SIGTERM: send SIGTERM to cage, wait 10 s for graceful exit,
-   SIGKILL if it is still up.
+5. On SIGTERM: send SIGTERM to the child, wait 10 s for graceful exit,
+   SIGKILL if it is still up. Under cage we also sweep orphaned cage /
+   chromium processes; inside a running desktop we do NOT broad-sweep
+   chromium (that would kill the operator's own browser windows).
 
 Not in scope:
-- Bundling a GCS build. The URL is assumed to be served elsewhere.
-- Serving the GCS dev server.
-- `?layer=minimal` render path. That is a GCS concern (Flutes wave).
+- Bundling the cockpit here. It is served by the agent front at :8080.
+- Sub-30 ms DRM-composited low-latency video (a v2 optimization).
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+import pwd
 import shutil
 import signal
+import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -44,7 +56,7 @@ log = get_logger("kiosk.kiosk_service")
 
 _DRM_CARD_PATH = Path("/dev/dri/card0")
 
-_DEFAULT_URL = "http://localhost:4000/hud"
+_DEFAULT_URL = "http://localhost:8080/cockpit"
 _ENV_URL_KEY = "ADOS_KIOSK_URL"
 _ENV_MINIMAL_KEY = "ADOS_KIOSK_MINIMAL_LAYER"
 
@@ -201,11 +213,217 @@ def _build_chromium_argv(url: str) -> list[str]:
     ]
 
 
+# ---------------------------------------------------------------------------
+# Adaptive launch: run inside a live desktop when one is present, else own the
+# display via cage.
+# ---------------------------------------------------------------------------
+
+# Session types loginctl reports for a graphical session.
+_GRAPHICAL_SESSION_TYPES = ("wayland", "x11")
+
+
+@dataclass(frozen=True)
+class DesktopSession:
+    """A running graphical login session the kiosk can launch a window into."""
+
+    uid: int
+    session_type: str  # "wayland" | "x11"
+    display: str | None  # X11 DISPLAY (e.g. ":0"); None for wayland
+    wayland_display: str | None  # wayland socket name; None for x11
+
+
+def _loginctl_sessions() -> list[str]:
+    """Return the session ids from ``loginctl``, or [] when loginctl is absent
+    or fails (no systemd-logind → treat the box as having no managed desktop,
+    so the kiosk owns the display via cage)."""
+    loginctl = shutil.which("loginctl")
+    if not loginctl:
+        return []
+    try:
+        out = subprocess.run(
+            [loginctl, "list-sessions", "--no-legend"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if out.returncode != 0:
+        return []
+    ids: list[str] = []
+    for line in out.stdout.splitlines():
+        parts = line.split()
+        if parts:
+            ids.append(parts[0])
+    return ids
+
+
+def _loginctl_session_props(session_id: str) -> dict[str, str]:
+    """Return the ``key=value`` properties of one session, or {} on failure."""
+    loginctl = shutil.which("loginctl")
+    if not loginctl:
+        return {}
+    try:
+        out = subprocess.run(
+            [
+                loginctl,
+                "show-session",
+                session_id,
+                "-p",
+                "Type",
+                "-p",
+                "State",
+                "-p",
+                "Active",
+                "-p",
+                "Remote",
+                "-p",
+                "User",
+                "-p",
+                "Display",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    if out.returncode != 0:
+        return {}
+    props: dict[str, str] = {}
+    for line in out.stdout.splitlines():
+        key, _, value = line.partition("=")
+        props[key.strip()] = value.strip()
+    return props
+
+
+def _wayland_display_for(uid: int) -> str:
+    """Best-effort discovery of the wayland socket name in the user's runtime
+    dir, defaulting to ``wayland-0`` (the common default) when none is found."""
+    runtime_dir = f"/run/user/{uid}"
+    try:
+        names = sorted(
+            n
+            for n in os.listdir(runtime_dir)
+            if n.startswith("wayland-") and not n.endswith(".lock")
+        )
+    except OSError:
+        names = []
+    return names[0] if names else "wayland-0"
+
+
+def _xauthority_for(uid: int) -> str | None:
+    """Locate the user's X authority cookie so an X11 launch can authenticate to
+    the running X server. Best-effort across the common locations."""
+    candidates: list[str] = []
+    try:
+        home = pwd.getpwuid(uid).pw_dir
+        candidates.append(os.path.join(home, ".Xauthority"))
+    except KeyError:
+        pass
+    candidates.append(f"/run/user/{uid}/.mutter-Xwaylandauth")
+    candidates.append(f"/run/user/{uid}/gdm/Xauthority")
+    for path in candidates:
+        try:
+            if os.path.exists(path):
+                return path
+        except OSError:
+            continue
+    return None
+
+
+def _detect_desktop_session() -> DesktopSession | None:
+    """Return the active graphical login session, or None when the box has no
+    running desktop. A None result means the kiosk should own the display via
+    cage; a session means it should launch a window into that desktop instead
+    (cage cannot, because the desktop compositor already holds the DRM master)."""
+    for session_id in _loginctl_sessions():
+        props = _loginctl_session_props(session_id)
+        stype = props.get("Type", "")
+        if stype not in _GRAPHICAL_SESSION_TYPES:
+            continue
+        if props.get("Remote", "no") == "yes":
+            continue
+        if props.get("Active") != "yes" and props.get("State") != "active":
+            continue
+        try:
+            uid = int(props.get("User", ""))
+        except ValueError:
+            continue
+        if stype == "wayland":
+            return DesktopSession(
+                uid=uid,
+                session_type="wayland",
+                display=None,
+                wayland_display=_wayland_display_for(uid),
+            )
+        return DesktopSession(
+            uid=uid,
+            session_type="x11",
+            display=props.get("Display") or ":0",
+            wayland_display=None,
+        )
+    return None
+
+
+def _session_env(session: DesktopSession) -> dict[str, str]:
+    """The environment overlay that lets a process launched by this service
+    connect to the running desktop's display server."""
+    env: dict[str, str] = {"XDG_RUNTIME_DIR": f"/run/user/{session.uid}"}
+    if session.session_type == "wayland":
+        env["WAYLAND_DISPLAY"] = session.wayland_display or "wayland-0"
+    else:
+        env["DISPLAY"] = session.display or ":0"
+        xauth = _xauthority_for(session.uid)
+        if xauth:
+            env["XAUTHORITY"] = xauth
+    return env
+
+
+def _build_windowed_chromium_argv(url: str, session_type: str) -> list[str]:
+    """Full argv for a full-screen Chromium kiosk WITHOUT cage, to run inside an
+    already-running desktop session. The Ozone platform matches the session so
+    Chromium attaches to the live compositor / X server rather than trying to
+    own the display. Raises ``FileNotFoundError`` (propagated to the
+    ``kiosk_binary_missing`` path) when no browser is installed."""
+    browser = _resolve_browser_binary()
+    platform = "wayland" if session_type == "wayland" else "x11"
+    return [
+        browser,
+        "--kiosk",
+        "--start-fullscreen",
+        "--noerrdialogs",
+        "--disable-infobars",
+        "--no-first-run",
+        f"--ozone-platform={platform}",
+        "--use-gl=egl",
+        "--enable-gpu-rasterization",
+        "--autoplay-policy=no-user-gesture-required",
+        url,
+    ]
+
+
 class KioskSupervisor:
     """Spawn and supervise the cage + Chromium child process."""
 
-    def __init__(self, argv: list[str]) -> None:
+    def __init__(
+        self,
+        argv: list[str],
+        *,
+        env: dict[str, str] | None = None,
+        sweep_orphans: bool = True,
+    ) -> None:
         self._argv = argv
+        # An environment overlay merged over the service env (used to attach a
+        # windowed launch to a running desktop's display server). None inherits
+        # the service env unchanged (the cage path).
+        self._env = env
+        # Whether to broad-pkill cage/chromium orphans on stop. True under cage
+        # (safe — cage owns the only chromium). False inside a running desktop,
+        # where a broad chromium sweep would kill the operator's own browser.
+        self._sweep_orphans_enabled = sweep_orphans
         self._proc: asyncio.subprocess.Process | None = None
         self._stop = asyncio.Event()
         self._crash_times: list[float] = []
@@ -215,10 +433,16 @@ class KioskSupervisor:
 
     async def _spawn(self) -> asyncio.subprocess.Process:
         log.info("kiosk_spawning", argv=self._argv)
+        spawn_env = None if self._env is None else {**os.environ, **self._env}
         return await asyncio.create_subprocess_exec(
             *self._argv,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=spawn_env,
+            # Own session so a windowed Chromium's whole tree is killable via
+            # the child, without a broad pkill that would hit the desktop's
+            # other browsers.
+            start_new_session=True,
         )
 
     async def _graceful_kill(self, proc: asyncio.subprocess.Process) -> None:
@@ -245,8 +469,12 @@ class KioskSupervisor:
         # cage may leave an orphaned chromium-browser process when it is
         # torn down under load. Sweep both names best-effort so systemd
         # sees a clean exit. Idempotent: pkill returns non-zero when
-        # nothing matched, which is fine.
-        await self._sweep_orphans()
+        # nothing matched, which is fine. Skipped inside a running desktop,
+        # where a broad chromium pkill would also kill the operator's own
+        # browser windows — there, terminating our own child (a Chromium that
+        # shuts its tree down on SIGTERM) is enough.
+        if self._sweep_orphans_enabled:
+            await self._sweep_orphans()
 
     async def _sweep_orphans(self) -> None:
         """Best-effort pkill sweep of cage and chromium-browser children."""
@@ -383,15 +611,30 @@ async def _amain() -> int:
     url, minimal = _resolve_target_url(config)
     slog.info("kiosk_target_resolved", url=url, minimal_layer=minimal)
 
+    # Adaptive launch: run a full-screen window inside a live desktop when one
+    # is present (cage cannot — the desktop already owns the DRM master), else
+    # own the display via cage.
+    session = _detect_desktop_session()
     try:
-        argv = _build_chromium_argv(url)
+        if session is not None:
+            slog.info(
+                "kiosk_desktop_session_detected",
+                session_type=session.session_type,
+                uid=session.uid,
+            )
+            argv = _build_windowed_chromium_argv(url, session.session_type)
+            env = _session_env(session)
+            supervisor = KioskSupervisor(argv, env=env, sweep_orphans=False)
+        else:
+            slog.info("kiosk_no_desktop_session", msg="owning the display via cage")
+            argv = _build_chromium_argv(url)
+            supervisor = KioskSupervisor(argv)
     except FileNotFoundError as exc:
         # No Chromium browser installed. Report which names were searched and
         # exit non-zero (the same rc the supervisor uses when a spawn hits a
         # missing binary) so the failure is visible without churning.
         slog.error("kiosk_binary_missing", error=str(exc))
         return 3
-    supervisor = KioskSupervisor(argv)
 
     loop = asyncio.get_event_loop()
 

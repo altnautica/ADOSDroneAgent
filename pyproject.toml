@@ -120,6 +120,7 @@ include = ["ados*"]
 "ados.hal" = ["boards/*.yaml"]
 "ados.core" = ["defaults.yaml"]
 "ados.dashboard" = ["static/**/*"]
+"ados.cockpit" = ["static/**/*"]
 "ados.data" = ["*.json"]
 
 

@@ -121,6 +121,46 @@ def create_app(agent: Any) -> FastAPI:
     # ground station.
     app.include_router(whep.router)
 
+    from importlib.resources import files
+
+    # On-screen ground-station cockpit. A separate committed bundle from the
+    # laptop dashboard, served at /cockpit for the HDMI kiosk (a light SPA, not
+    # a Next.js build on the box). Mounted BEFORE the dashboard's ``/`` mount so
+    # ``/cockpit/*`` matches here first. The source lives at
+    # ADOSDroneAgent/cockpit/; scripts/build-cockpit.sh builds it and copies the
+    # output into the ``ados.cockpit.static`` package on the wheel. The cockpit
+    # has no client-side URL routing, so a plain html=True static mount is
+    # sufficient (``/cockpit`` -> ``/cockpit/`` -> index.html, assets under
+    # ``/cockpit/assets/``).
+    try:
+        import ados.cockpit as _cockpit_pkg
+    except ImportError as exc:
+        raise RuntimeError(
+            "Cockpit package 'ados.cockpit' is missing. "
+            "Reinstall the agent package or rebuild from source."
+        ) from exc
+    cockpit_static_dir = Path(str(files(_cockpit_pkg))) / "static"
+    if not cockpit_static_dir.exists():
+        raise RuntimeError(
+            f"Cockpit static directory missing at {cockpit_static_dir}. "
+            "Run scripts/build-cockpit.sh or reinstall the agent package."
+        )
+
+    from starlette.responses import RedirectResponse
+
+    async def _cockpit_index_redirect(_request: Any) -> RedirectResponse:
+        # A bare /cockpit (no trailing slash) does not match the StaticFiles
+        # mount below (which serves /cockpit/), so redirect to it. This lets the
+        # kiosk and reach links target the clean /cockpit URL.
+        return RedirectResponse(url="/cockpit/")
+
+    app.add_route("/cockpit", _cockpit_index_redirect, include_in_schema=False)
+    app.mount(
+        "/cockpit",
+        StaticFiles(directory=str(cockpit_static_dir), html=True),
+        name="cockpit_static",
+    )
+
     # Browser dashboard. Mounted AFTER every router above so API routes
     # match first and `/` serves the SPA entry. The TypeScript source
     # lives at ADOSDroneAgent/dashboard/; CI builds it and copies the
@@ -135,7 +175,6 @@ def create_app(agent: Any) -> FastAPI:
     # SpaStaticFiles below adds a 404 → index.html fallback for any
     # request that doesn't map to a real asset and isn't an /api/* path
     # (those are handled earlier in the middleware chain).
-    from importlib.resources import files
     try:
         import ados.dashboard as _dashboard_pkg
     except ImportError as exc:

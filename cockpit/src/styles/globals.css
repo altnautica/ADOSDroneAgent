@@ -1,0 +1,89 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * ADOS Ground Cockpit — amber-on-charcoal, dark, high-contrast.
+ *
+ * Sizing model: the layout is authored against an 800x480 reference panel
+ * and scales fluidly to fill any HDMI output. The root font-size tracks the
+ * viewport's smaller dimension (vmin), multiplied by an operator UI-scale
+ * knob, so a 1080p panel shows the same layout, larger — not more content.
+ * Everything downstream sizes in rem so it scales as one. Physical touch
+ * targets are floored at 48px regardless of scale.
+ */
+
+@layer base {
+  :root {
+    /* Operator UI-scale knob (persisted). 1 = the reference size. */
+    --ui-scale: 1;
+
+    /* charcoal screen */
+    --background: 0 0% 12%;
+    --foreground: 0 0% 88%;
+    /* a raised charcoal surface (panels, strips) */
+    --surface: 0 0% 15%;
+    --surface-foreground: 0 0% 91%;
+    /* amber accent + the dark text drawn on top of it */
+    --amber: 43 79% 63%;
+    --amber-foreground: 0 0% 10%;
+    /* muted body / description text */
+    --muted: 0 0% 15%;
+    --muted-foreground: 0 0% 54%;
+    /* semantic status */
+    --ok: 120 42% 63%;
+    --warn: 47 69% 65%;
+    --err: 8 68% 62%;
+    /* structure */
+    --border: 0 0% 23%;
+    --input: 0 0% 19%;
+    --ring: 43 79% 63%;
+    --radius: 0.65rem;
+  }
+
+  html {
+    /* fluid root: ~15px @ 800x480, ~34px @ 1920x1080, floored + capped. */
+    font-size: clamp(13px, calc(3.2vmin * var(--ui-scale)), 40px);
+    height: 100%;
+  }
+
+  * {
+    @apply border-border;
+    /* kill the 300ms tap delay + double-tap zoom on the resistive panel */
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans;
+    height: 100%;
+    margin: 0;
+    /* a kiosk never scrolls the document or rubber-bands */
+    overflow: hidden;
+    overscroll-behavior: none;
+    user-select: none;
+    -webkit-user-select: none;
+    font-feature-settings: "cv11", "ss01";
+  }
+
+  #root {
+    height: 100%;
+  }
+}
+
+@layer components {
+  /* Any interactive row/control opts into a 48px-floored hit target. */
+  .touch-target {
+    min-height: max(2.75rem, 48px);
+    min-width: max(2.75rem, 48px);
+  }
+
+  /* The shared focus ring the single input dispatcher moves across touch,
+   * button, and gamepad sources. Applied via data-focused on the focused
+   * element so button/gamepad navigation is visible eyes-on-panel. */
+  [data-focused="true"] {
+    outline: 0.15rem solid hsl(var(--ring));
+    outline-offset: -0.15rem;
+    border-radius: var(--radius);
+  }
+}

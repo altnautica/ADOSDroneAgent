@@ -183,7 +183,7 @@ def test_resolve_target_url_defaults_when_nothing_set(monkeypatch: pytest.Monkey
     monkeypatch.delenv("ADOS_KIOSK_MINIMAL_LAYER", raising=False)
     with patch.object(ks, "_low_ram_board", return_value=False):
         url, minimal = _resolve_target_url(SimpleNamespace())
-    assert url == "http://localhost:4000/hud"
+    assert url == "http://localhost:8080/cockpit"
     assert minimal is False
 
 
@@ -279,6 +279,180 @@ def test_resolve_browser_binary_raises_naming_every_candidate() -> None:
     msg = str(exc.value)
     for name in ks._BROWSER_CANDIDATES:
         assert name in msg
+
+
+# ---------------------------------------------------------------------------
+# Adaptive launch: run inside a live desktop vs own the display via cage
+# ---------------------------------------------------------------------------
+
+
+def test_windowed_argv_wayland_has_no_cage_and_wayland_platform() -> None:
+    with patch.object(ks, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
+        argv = ks._build_windowed_chromium_argv("http://target/cockpit", "wayland")
+    assert "cage" not in argv
+    assert argv[0] == "/usr/bin/chromium"
+    assert "--kiosk" in argv
+    assert "--ozone-platform=wayland" in argv
+    assert argv[-1] == "http://target/cockpit"
+
+
+def test_windowed_argv_x11_uses_x11_platform() -> None:
+    with patch.object(ks, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
+        argv = ks._build_windowed_chromium_argv("http://target/cockpit", "x11")
+    assert "--ozone-platform=x11" in argv
+    assert "cage" not in argv
+
+
+def test_detect_desktop_session_returns_active_wayland_session() -> None:
+    props = {
+        "Type": "wayland",
+        "State": "active",
+        "Active": "yes",
+        "Remote": "no",
+        "User": "1000",
+        "Display": "",
+    }
+    with patch.object(ks, "_loginctl_sessions", return_value=["c1"]):
+        with patch.object(ks, "_loginctl_session_props", return_value=props):
+            session = ks._detect_desktop_session()
+    assert session is not None
+    assert session.session_type == "wayland"
+    assert session.uid == 1000
+
+
+def test_detect_desktop_session_returns_x11_session_with_display() -> None:
+    props = {
+        "Type": "x11",
+        "Active": "yes",
+        "Remote": "no",
+        "User": "1000",
+        "Display": ":0",
+    }
+    with patch.object(ks, "_loginctl_sessions", return_value=["c1"]):
+        with patch.object(ks, "_loginctl_session_props", return_value=props):
+            session = ks._detect_desktop_session()
+    assert session is not None
+    assert session.session_type == "x11"
+    assert session.display == ":0"
+
+
+def test_detect_desktop_session_none_when_only_tty_sessions() -> None:
+    """A bare tty (non-graphical) session must not be treated as a desktop."""
+    props = {"Type": "tty", "Active": "yes", "Remote": "no", "User": "1000"}
+    with patch.object(ks, "_loginctl_sessions", return_value=["c1"]):
+        with patch.object(ks, "_loginctl_session_props", return_value=props):
+            assert ks._detect_desktop_session() is None
+
+
+def test_detect_desktop_session_skips_inactive_graphical_session() -> None:
+    props = {
+        "Type": "wayland",
+        "Active": "no",
+        "State": "online",
+        "Remote": "no",
+        "User": "1000",
+    }
+    with patch.object(ks, "_loginctl_sessions", return_value=["c1"]):
+        with patch.object(ks, "_loginctl_session_props", return_value=props):
+            assert ks._detect_desktop_session() is None
+
+
+def test_loginctl_sessions_empty_when_binary_absent() -> None:
+    """No loginctl (no systemd-logind) → no managed desktop → cage path."""
+    with patch("shutil.which", return_value=None):
+        assert ks._loginctl_sessions() == []
+
+
+def test_session_env_wayland_sets_wayland_display_and_runtime_dir() -> None:
+    session = ks.DesktopSession(
+        uid=1000, session_type="wayland", display=None, wayland_display="wayland-1"
+    )
+    env = ks._session_env(session)
+    assert env["XDG_RUNTIME_DIR"] == "/run/user/1000"
+    assert env["WAYLAND_DISPLAY"] == "wayland-1"
+    assert "DISPLAY" not in env
+
+
+def test_session_env_x11_sets_display_and_xauthority() -> None:
+    session = ks.DesktopSession(uid=1000, session_type="x11", display=":0", wayland_display=None)
+    with patch.object(ks, "_xauthority_for", return_value="/home/op/.Xauthority"):
+        env = ks._session_env(session)
+    assert env["DISPLAY"] == ":0"
+    assert env["XAUTHORITY"] == "/home/op/.Xauthority"
+    assert env["XDG_RUNTIME_DIR"] == "/run/user/1000"
+
+
+# ---------------------------------------------------------------------------
+# Supervisor env overlay + orphan-sweep gating
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_spawn_merges_env_overlay_over_service_env() -> None:
+    """A windowed launch passes a merged env (service env + overlay) so the
+    child can reach the running desktop's display server."""
+    captured: dict[str, Any] = {}
+
+    async def _fake_exec(*_args: Any, **kwargs: Any) -> _FakeProc:
+        captured.update(kwargs)
+        return _FakeProc()
+
+    sup = KioskSupervisor(["chromium", "http://x"], env={"DISPLAY": ":0"})
+    with patch("asyncio.create_subprocess_exec", _fake_exec):
+        await sup._spawn()
+    env = captured["env"]
+    assert env is not None
+    assert env["DISPLAY"] == ":0"
+    # Inherits the service env (e.g. PATH) rather than replacing it.
+    assert "PATH" in env
+
+
+@pytest.mark.asyncio
+async def test_spawn_inherits_env_when_no_overlay() -> None:
+    """The cage path passes env=None so the child inherits the service env."""
+    captured: dict[str, Any] = {}
+
+    async def _fake_exec(*_args: Any, **kwargs: Any) -> _FakeProc:
+        captured.update(kwargs)
+        return _FakeProc()
+
+    sup = KioskSupervisor(["cage", "--"])
+    with patch("asyncio.create_subprocess_exec", _fake_exec):
+        await sup._spawn()
+    assert captured["env"] is None
+
+
+@pytest.mark.asyncio
+async def test_graceful_kill_skips_sweep_when_disabled() -> None:
+    """Inside a running desktop (sweep_orphans=False) the broad chromium pkill
+    must not run, so the operator's own browser windows survive."""
+    proc = _FakeProc()
+    sup = KioskSupervisor(["chromium", "http://x"], sweep_orphans=False)
+    sweep_calls = 0
+
+    async def _tracking_sweep() -> None:
+        nonlocal sweep_calls
+        sweep_calls += 1
+
+    with patch.object(sup, "_sweep_orphans", new=_tracking_sweep):
+        await sup._graceful_kill(proc)
+    assert sweep_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_graceful_kill_runs_sweep_when_enabled() -> None:
+    """The cage path sweeps orphaned cage / chromium processes on stop."""
+    proc = _FakeProc()
+    sup = KioskSupervisor(["cage", "--"])  # sweep_orphans defaults to True
+    sweep_calls = 0
+
+    async def _tracking_sweep() -> None:
+        nonlocal sweep_calls
+        sweep_calls += 1
+
+    with patch.object(sup, "_sweep_orphans", new=_tracking_sweep):
+        await sup._graceful_kill(proc)
+    assert sweep_calls == 1
 
 
 # ---------------------------------------------------------------------------
