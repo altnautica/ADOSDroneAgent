@@ -68,7 +68,7 @@ fi
 # stringop-overflow/truncation diagnostics on the vendored driver source that a
 # BSP kernel's -Werror (e.g. RK3566 CONFIG_WERROR) then hard-fails on, so silence
 # those too — harmless on older toolchains that never emit them.
-RELAX_CFLAGS="-Wno-error -Wno-misleading-indentation -Wno-address-of-packed-member -Wno-date-time -Wno-stringop-overflow -Wno-stringop-truncation"
+RELAX_CFLAGS="-Wno-error -Wno-misleading-indentation -Wno-address-of-packed-member -Wno-date-time -Wno-stringop-overflow -Wno-stringop-truncation -Wno-stringop-overread"
 
 # Match the DKMS path: a large stack so gcc's recursive type analysis does not
 # overflow the default 8 MB and abort with a front-end "Segmentation fault" ICE
