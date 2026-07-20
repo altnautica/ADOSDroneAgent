@@ -244,6 +244,26 @@ impl HostapdManager {
         true
     }
 
+    /// Release the AP gateway address from the AP interface. Idempotent: `ip
+    /// addr del` returns non-zero when the address is already absent, which is
+    /// swallowed. Only the `192.168.4.1/24` AP address is removed, so a wlan0
+    /// that is (also) carrying a client uplink keeps its client IP. Used when
+    /// standing the AP down so the AP gateway never lingers on the interface.
+    pub async fn release_ip(&self) {
+        self.runner
+            .run(
+                &["ip", "addr", "del", AP_CIDR, "dev", &self.interface],
+                SHORT_TIMEOUT,
+            )
+            .await;
+    }
+
+    /// True when the hostapd unit is active. Thin public accessor over
+    /// `is_unit_active` for the setup-AP guard's reconcile.
+    pub async fn is_running(&self) -> bool {
+        self.is_unit_active(HOSTAPD_UNIT).await
+    }
+
     /// Bring the AP up: write configs, assign the gateway IP, start both units.
     /// Mirrors `start`. Returns whether hostapd started.
     pub async fn start(&mut self) -> bool {

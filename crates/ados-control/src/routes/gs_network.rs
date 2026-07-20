@@ -132,6 +132,12 @@ const DEFAULT_PRIORITY: [&str; 4] = ["eth0", "wlan0_client", "wwan0", "usb0"];
 /// `_HOSTAPD_UNIT`.
 const HOSTAPD_UNIT: &str = "ados-hostapd.service";
 
+/// The setup-AP guard decision sidecar the `ados-net` daemon writes each
+/// reconcile (mirrors `ados_net::paths::AP_GUARD_JSON`). Merged into the AP view
+/// so the stand-down decision is diagnosable, matching the Python
+/// `_ap_guard_diagnostics`.
+const AP_GUARD_SIDECAR: &str = "/run/ados/ap-guard.json";
+
 /// The default AP interface the hostapd manager binds (`_AP_IFACE`). The front
 /// honours a configured `network.hotspot.interface` when present, else this.
 const AP_IFACE: &str = "wlan0";
@@ -224,7 +230,57 @@ fn ap_view(cfg: &Value) -> Value {
     } else {
         Vec::new()
     };
-    ap_view_compose(&ssid, channel, &interface, running, clients)
+    let mut view = ap_view_compose(&ssid, channel, &interface, running, clients);
+    merge_ap_guard_diagnostics(&mut view);
+    view
+}
+
+/// Merge the setup-AP guard's live decision (`standing_down` + reason + phy
+/// count + client-uplink flag) into the AP view so an operator can see WHY the
+/// AP is up or down (Rule 44). Mirrors the Python `_ap_guard_diagnostics`: an
+/// absent / unreadable sidecar defaults to `standing_down=false` with a
+/// `standdown_reason` of `"unknown"`, never failing the view.
+fn merge_ap_guard_diagnostics(view: &mut Value) {
+    let Some(obj) = view.as_object_mut() else {
+        return;
+    };
+    let (standing_down, reason, phy_count, client_up) = read_ap_guard_sidecar();
+    obj.insert("standing_down".to_string(), Value::Bool(standing_down));
+    obj.insert("standdown_reason".to_string(), Value::String(reason));
+    obj.insert("wifi_phy_count".to_string(), phy_count);
+    obj.insert("client_uplink_active".to_string(), client_up);
+}
+
+/// Read the guard sidecar into `(standing_down, standdown_reason,
+/// wifi_phy_count, client_uplink_active)`. The count + client flag pass through
+/// verbatim (a JSON number / bool, or null when absent), matching the Python
+/// `data.get(...)` semantics.
+fn read_ap_guard_sidecar() -> (bool, String, Value, Value) {
+    let default = (false, "unknown".to_string(), Value::Null, Value::Null);
+    let Ok(bytes) = std::fs::read(AP_GUARD_SIDECAR) else {
+        return default;
+    };
+    let Ok(v) = serde_json::from_slice::<Value>(&bytes) else {
+        return default;
+    };
+    if !v.is_object() {
+        return default;
+    }
+    let standing_down = v
+        .get("standing_down")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let reason = v
+        .get("reason")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let phy_count = v.get("wifi_phy_count").cloned().unwrap_or(Value::Null);
+    let client_up = v
+        .get("client_uplink_active")
+        .cloned()
+        .unwrap_or(Value::Null);
+    (standing_down, reason, phy_count, client_up)
 }
 
 /// Compose the `_ap_view` body from already-probed pieces: the resolved SSID, the

@@ -7,6 +7,7 @@
 //! cellular (`wwan0`) uplink: D-Bus-first via ModemManager1, AT fallback
 //! delegated to Python; HW-gated and disabled by default.
 
+pub mod ap_guard;
 pub mod ethernet;
 pub mod hostapd;
 pub mod modem;
@@ -14,6 +15,7 @@ pub mod modem_at;
 pub mod usb_gadget;
 pub mod wifi_client;
 
+pub use ap_guard::{ApGuardDecision, SetupApGuard};
 pub use ethernet::EthernetManager;
 pub use hostapd::{build_ssid, HostapdManager};
 pub use modem::{apn_for_imsi, desired_modem_session, ModemConfig, ModemManager, ModemSession};

@@ -49,6 +49,17 @@ pub const DNSMASQ_USB0_PID: &str = "/run/ados/dnsmasq-usb0.pid";
 /// `{"apn":..,"cap_gb":..,"enabled":..}`.
 pub const GS_MODEM_JSON: &str = "/etc/ados/ground-station-modem.json";
 
+/// AP-was-enabled handoff flag (`AP_FLAG_PATH`). The wifi-client manager writes
+/// it when it stops the AP to take `wlan0` for a station connection and clears
+/// it on `leave`, so its presence means a client join owns the radio. The
+/// setup-AP guard reads it (by `.exists()`) to avoid racing the join/leave path.
+pub const AP_WAS_ENABLED_FLAG: &str = "/run/ados/ap-was-enabled";
+
+/// Setup-AP guard decision sidecar (`AP_GUARD_JSON`). The `ados-net` daemon
+/// writes the live stand-down decision here each reconcile; the control front
+/// merges it into the ground-station AP status so the decision is diagnosable.
+pub const AP_GUARD_JSON: &str = "/run/ados/ap-guard.json";
+
 /// Build the canonical `GS_UPLINK_JSON` path.
 pub fn gs_uplink_json() -> &'static Path {
     Path::new(GS_UPLINK_JSON)

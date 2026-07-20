@@ -142,6 +142,40 @@ def _read_wfb_view(app: Any) -> dict[str, Any]:
     }
 
 
+def _ap_guard_diagnostics() -> dict[str, Any]:
+    """The setup-AP stand-down guard's live decision, for the AP status view.
+
+    The ``ados-net`` daemon writes ``/run/ados/ap-guard.json`` each reconcile
+    (mirrors the Rust ``AP_GUARD_JSON`` constant). It records whether the setup
+    AP is standing down because the box's sole wifi radio is already carrying a
+    client uplink, so an operator can see WHY the AP is up or down (Rule 44). An
+    absent / unreadable sidecar defaults to ``standing_down=False`` with a
+    ``standdown_reason`` of ``"unknown"`` and never fails the view.
+    """
+    import json as _json
+
+    default: dict[str, Any] = {
+        "standing_down": False,
+        "standdown_reason": "unknown",
+        "wifi_phy_count": None,
+        "client_uplink_active": None,
+    }
+    try:
+        with open("/run/ados/ap-guard.json", encoding="utf-8") as fh:
+            data = _json.load(fh)
+    except (OSError, ValueError):
+        return default
+    if not isinstance(data, dict):
+        return default
+    reason = data.get("reason")
+    return {
+        "standing_down": bool(data.get("standing_down", False)),
+        "standdown_reason": reason if isinstance(reason, str) else "unknown",
+        "wifi_phy_count": data.get("wifi_phy_count"),
+        "client_uplink_active": data.get("client_uplink_active"),
+    }
+
+
 def _ap_view(app: Any) -> dict[str, Any]:
     try:
         mgr = _hostapd_manager(app)
@@ -154,6 +188,7 @@ def _ap_view(app: Any) -> dict[str, Any]:
             "interface": st.get("interface"),
             "gateway": st.get("gateway"),
             "connected_clients": st.get("connected_clients", []),
+            **_ap_guard_diagnostics(),
         }
     except Exception:
         hotspot = getattr(app.config.network, "hotspot", None)
@@ -167,6 +202,7 @@ def _ap_view(app: Any) -> dict[str, Any]:
             "interface": None,
             "gateway": None,
             "connected_clients": [],
+            **_ap_guard_diagnostics(),
         }
 
 

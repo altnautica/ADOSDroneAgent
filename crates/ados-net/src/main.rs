@@ -24,7 +24,7 @@ use ados_net::cmd::TokioCmdRunner;
 use ados_net::data_cap::{DataCapTracker, SysfsUsageSource, DATA_CAP_INTERVAL};
 use ados_net::managers::{
     desired_modem_session, EthernetManager, HostapdManager, ModemConfig, ModemManager,
-    ModemSession, UsbGadgetManager, WifiClientManager,
+    ModemSession, SetupApGuard, UsbGadgetManager, WifiClientManager,
 };
 use ados_net::router::failover;
 use ados_net::sysfs::detect_ethernet_iface;
@@ -271,14 +271,18 @@ async fn main() -> Result<()> {
         String::new(),
         runner.clone(),
     )));
-    {
-        let mut hostapd = hostapd.lock().await;
-        hostapd.ensure_passphrase();
-        if !hostapd.start().await {
-            let ssid = hostapd.ssid().to_string();
-            tracing::warn!(ssid = %ssid, "ap_start_incomplete");
-        }
-    }
+    hostapd.lock().await.ensure_passphrase();
+
+    // The setup-AP guard reconciles the LAN-side AP against the single-radio +
+    // client-uplink collision: on a box whose sole wifi radio is already
+    // carrying a client uplink, the setup AP and the client cannot share the one
+    // radio, so the guard stands the AP down (and restores it when that uplink is
+    // gone). In every other case — multiple radios, no wifi, or no working
+    // client uplink — the AP comes up exactly as before, so a fresh headless GS
+    // whose only reachability is the setup AP keeps it. The initial reconcile
+    // replaces the old unconditional AP bring-up.
+    let ap_guard = SetupApGuard::new(Arc::clone(&hostapd), WifiClientManager::new(runner.clone()));
+    ap_guard.reconcile(true).await;
 
     // Operator uplink-matrix command socket. The REST `/network/*` write handlers
     // forward to this when the native daemon owns the uplink, so they never drive
@@ -329,6 +333,10 @@ async fn main() -> Result<()> {
         tokio::select! {
             _ = interval.tick() => {
                 router.tick().await;
+                // Reconcile the setup AP against the single-radio + client-uplink
+                // guard so a client link that comes up (or drops) after boot is
+                // followed within one health cycle.
+                ap_guard.reconcile(false).await;
             }
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("uplink router stopping (SIGINT)");

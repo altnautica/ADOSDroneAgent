@@ -547,6 +547,13 @@ REGISTRY: list[RouteCase] = [
             "link",
             "speed_mbps",
             "dhcp_lease_remaining_s",
+            # The setup-AP guard decision the ados-net daemon reconciles every
+            # health cycle: quasi-volatile (it moves with the sole-radio /
+            # client-uplink state), so mask it like active_uplink.
+            "standing_down",
+            "standdown_reason",
+            "wifi_phy_count",
+            "client_uplink_active",
         ),
     ),
     # Ground-station nearby-network scan. A {networks} list; the scan results move

@@ -31,7 +31,7 @@ use self::lock::Wlan0Lock;
 const WLAN_IFACE: &str = "wlan0";
 const HOSTAPD_UNIT: &str = "ados-hostapd.service";
 const LOCK_PATH: &str = "/var/lock/ados-wlan0.lock";
-const AP_FLAG_PATH: &str = "/run/ados/ap-was-enabled";
+const AP_FLAG_PATH: &str = crate::paths::AP_WAS_ENABLED_FLAG;
 const CLIENT_CONFIG_PATH: &str = "/etc/ados/ground-station-wifi-client.json";
 
 const RUN_TIMEOUT: Duration = Duration::from_secs(15);
