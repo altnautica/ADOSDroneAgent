@@ -83,23 +83,12 @@ export function getGsStatus(signal?: AbortSignal): Promise<GsStatus> {
   return apiFetch<GsStatus>("/api/v1/ground-station/status", { signal });
 }
 
-/** The whole sanitized config tree (`GET /api/config`), the Settings source. */
+/** The whole sanitized config tree (`GET /api/config`), the Settings source.
+ *  The Settings tree writes one leaf at a time via `PUT /api/config {key,value}`,
+ *  which is owned by the config store (it needs the typed error/persisted echo,
+ *  not the config shape the GET returns). */
 export function getConfig(signal?: AbortSignal): Promise<AgentConfig> {
   return apiFetch<AgentConfig>("/api/config", { signal });
-}
-
-/** Write one dot-path config leaf (`PUT /api/config {key, value}`). The value
- *  is sent as a string; the leaf's Pydantic type cast interprets it. */
-export function putConfig(
-  key: string,
-  value: string,
-  signal?: AbortSignal,
-): Promise<AgentConfig> {
-  return apiFetch<AgentConfig>("/api/config", {
-    method: "PUT",
-    body: { key, value },
-    signal,
-  });
 }
 
 /** The radio link view (`GET /api/wfb`), the Link screen's tuning source. */

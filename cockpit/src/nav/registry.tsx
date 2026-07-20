@@ -4,9 +4,10 @@
 // opened via `open-detail`) without touching the shell or the navigator.
 //
 // Feed is wired now (video + HUD); Link/Mesh/Pair/Uplink/System read their live
-// agent surfaces. Settings stays a placeholder body that names the surfaces it
-// will read, so the shell is fully navigable and that screen has a real slot to
-// grow into (the settings-tree stage replaces its `render`).
+// agent surfaces. Settings is the full config tree: its tab renders the curated
+// root, and each drill level (`settings:<path>`) resolves to a Settings screen
+// bound to that path — so the shell's detail stack + hardware "back" drive the
+// drill without a static screen per config group.
 
 import {
   Gauge,
@@ -22,10 +23,15 @@ import { FeedScreen } from "@/components/screens/feed-screen";
 import { LinkScreen } from "@/components/screens/link-screen";
 import { MeshScreen } from "@/components/screens/mesh-screen";
 import { PairScreen } from "@/components/screens/pair-screen";
-import { PlaceholderScreen } from "@/components/screens/placeholder-screen";
+import { SettingsScreen } from "@/components/screens/settings-screen";
 import { SystemScreen } from "@/components/screens/system-screen";
 import { UplinkScreen } from "@/components/screens/uplink-screen";
 import { DEFAULT_TAB_ID, type ScreenSpec } from "@/nav/navigator";
+
+/** Prefix on the detail-stack id for a Settings drill level. Everything after
+ *  it is the drill path the Settings screen renders (`~`/`~group`/`#`/`#path`/
+ *  `@path`). */
+const SETTINGS_DETAIL_PREFIX = "settings:";
 
 const SCREENS: ScreenSpec[] = [
   {
@@ -76,14 +82,7 @@ const SCREENS: ScreenSpec[] = [
     title: "Settings",
     icon: Settings,
     kind: "tab",
-    render: () => (
-      <PlaceholderScreen
-        title="Settings"
-        icon={Settings}
-        summary="Every agent parameter, settable in the field: a 48px drill-down tree over the whole config with type-inferred editors and a reboot-required banner."
-        reads={["GET /api/config", "PUT /api/config"]}
-      />
-    ),
+    render: (ctx) => <SettingsScreen path="~" dispatch={ctx.dispatch} />,
   },
 ];
 
@@ -100,7 +99,20 @@ export function tabScreens(): ScreenSpec[] {
 }
 
 /** Resolve a screen by id, falling back to the default tab if the id is
- *  unknown (mirrors the TFT navigator's fall-through to a stable first page). */
+ *  unknown (mirrors the TFT navigator's fall-through to a stable first page).
+ *  A `settings:<path>` id is a dynamic Settings drill level: it resolves to the
+ *  Settings screen bound to that drill path (registered nowhere, so it never
+ *  appears in the menu — a detail screen pushed onto the stack). */
 export function getScreen(id: string): ScreenSpec {
+  if (id.startsWith(SETTINGS_DETAIL_PREFIX)) {
+    const path = id.slice(SETTINGS_DETAIL_PREFIX.length);
+    return {
+      id,
+      title: "Settings",
+      icon: Settings,
+      kind: "detail",
+      render: (ctx) => <SettingsScreen path={path} dispatch={ctx.dispatch} />,
+    };
+  }
   return REGISTRY.get(id) ?? REGISTRY.get(DEFAULT_TAB_ID) ?? SCREENS[0];
 }

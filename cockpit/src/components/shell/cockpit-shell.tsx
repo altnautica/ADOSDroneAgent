@@ -14,6 +14,7 @@
 import { ActionBar, type InputStatus } from "@/components/shell/action-bar";
 import { MenuRail } from "@/components/shell/menu-rail";
 import { QuickMenu } from "@/components/shell/quick-menu";
+import { RebootBanner } from "@/components/shell/reboot-banner";
 import { StatusStrip } from "@/components/shell/status-strip";
 import { TelemetryProvider } from "@/hooks/telemetry-context";
 import { getScreen } from "@/nav/registry";
@@ -59,6 +60,7 @@ export function CockpitShell({ input }: { input: InputStatus }) {
           }
         >
           <StatusStrip floating={fullBleed} />
+          <RebootBanner floating={fullBleed} />
           {menuStrip}
           <ActionBar floating={fullBleed} input={input} />
         </div>
