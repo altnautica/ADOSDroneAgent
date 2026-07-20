@@ -30,6 +30,7 @@ from typing import Any
 import click
 import httpx
 
+from ados.cli import default_api_base
 from ados.cli.logs_transport import LogsClient, LogsTransportError
 from ados.core.paths import LOGD_QUERY_SOCK, PAIRING_JSON
 
@@ -41,7 +42,7 @@ QUERY_TCP_PORT = 8090
 # The agent's local control surface. `push` records its request under the
 # root-owned runtime dir, so a non-root operator hands the write to the agent
 # process here instead of touching the dir itself.
-API_BASE = "http://localhost:8080"
+API_BASE = default_api_base()
 
 
 def _client(host: str | None, key: str | None) -> LogsClient:

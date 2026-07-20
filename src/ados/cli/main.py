@@ -17,10 +17,10 @@ from typing import Any
 import click
 import httpx
 
-from ados.cli import _ansi
+from ados.cli import _ansi, api_bases, default_api_base
 from ados.core.paths import PAIRING_JSON
 
-API_BASE = "http://localhost:8080"
+API_BASE = default_api_base()
 PAIRING_STATE_PATH = PAIRING_JSON
 
 # macOS runs a rootless, Rust-only workstation node: the control surface serves
@@ -47,21 +47,30 @@ def _auth_headers() -> dict[str, str]:
 
 
 def _request(method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+    timeout = kwargs.pop("timeout", 8.0)
+    # Try each candidate control port; only a connection refusal falls through to
+    # the next one. A wrong-port probe must never masquerade as "agent not
+    # running" — the front may be on :8080 or the alternate :8082.
+    bases = api_bases()
     try:
-        with httpx.Client(timeout=kwargs.pop("timeout", 8.0)) as client:
-            response = client.request(
-                method,
-                f"{API_BASE}{path}",
-                headers=_auth_headers(),
-                **kwargs,
-            )
-            response.raise_for_status()
-            data = response.json()
-            return data if isinstance(data, dict) else {"data": data}
-    except httpx.ConnectError:
+        for base in bases:
+            try:
+                with httpx.Client(timeout=timeout) as client:
+                    response = client.request(
+                        method,
+                        f"{base}{path}",
+                        headers=_auth_headers(),
+                        **kwargs,
+                    )
+                response.raise_for_status()
+                data = response.json()
+                return data if isinstance(data, dict) else {"data": data}
+            except httpx.ConnectError:
+                continue  # this port refused; try the next candidate
+        # Every candidate control port refused the connection.
         raise click.ClickException(
-            "Agent is not running. Open the setup URL printed by the service, "
-            "or start demo mode from the development entrypoint."
+            "Agent is not running. Open the setup URL printed by the "
+            "service, or start demo mode from the development entrypoint."
         ) from None
     except httpx.HTTPStatusError as exc:
         raise click.ClickException(

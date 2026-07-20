@@ -25,9 +25,10 @@ from typing import Any
 import click
 import httpx
 
+from ados.cli import api_bases, default_api_base
 from ados.core.paths import PAIRING_JSON
 
-API_BASE = "http://localhost:8080"
+API_BASE = default_api_base()
 
 # The RTL8812EU (WFB) kernel module name and the vendored DKMS installer that the
 # agent installer persists under the source tree (edge channel clones with
@@ -99,29 +100,35 @@ def _request(
     **kwargs: Any,
 ) -> tuple[int, dict[str, Any]]:
     """Minimal REST helper. Returns (status_code, parsed_body)."""
+    timeout = kwargs.pop("timeout", 8.0)
+    # Try each candidate control port; a connection refusal falls through to the
+    # next so a wrong-port probe never reads as "agent not running".
+    bases = api_bases()
     try:
-        with httpx.Client(timeout=kwargs.pop("timeout", 8.0)) as client:
-            resp = client.request(
-                method,
-                f"{API_BASE}{path}",
-                headers=_auth_headers(),
-                **kwargs,
-            )
+        for base in bases:
             try:
-                body = resp.json()
-            except ValueError:
-                body = {"text": resp.text}
-            if raise_for_status and resp.status_code >= 400:
-                detail = body.get("detail") if isinstance(body, dict) else None
-                raise click.ClickException(
-                    f"Agent API returned {resp.status_code}: {detail or body}"
-                )
-            return resp.status_code, body if isinstance(body, dict) else {"data": body}
-    except httpx.ConnectError as exc:
+                with httpx.Client(timeout=timeout) as client:
+                    resp = client.request(
+                        method,
+                        f"{base}{path}",
+                        headers=_auth_headers(),
+                        **kwargs,
+                    )
+                try:
+                    body = resp.json()
+                except ValueError:
+                    body = {"text": resp.text}
+                if raise_for_status and resp.status_code >= 400:
+                    detail = body.get("detail") if isinstance(body, dict) else None
+                    raise click.ClickException(
+                        f"Agent API returned {resp.status_code}: {detail or body}"
+                    )
+                return resp.status_code, body if isinstance(body, dict) else {"data": body}
+            except httpx.ConnectError:
+                continue  # this port refused; try the next candidate
         raise click.ClickException(
-            "Agent is not running on http://localhost:8080. "
-            "Start the supervisor or run `ados demo`."
-        ) from exc
+            "Agent is not running. Start the supervisor or run `ados demo`."
+        )
     except httpx.HTTPError as exc:
         raise click.ClickException(str(exc)) from exc
 
