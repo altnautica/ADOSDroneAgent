@@ -262,6 +262,24 @@ pub fn read_machine_id() -> Option<String> {
     None
 }
 
+/// The `udevadm` invocations the pin/unpin path runs after touching a `.link`
+/// file. It ONLY reloads the rules database so a future device event (a
+/// hot-plug, or the next boot) picks up the new/removed file.
+///
+/// It MUST NOT `trigger` the `net` subsystem: `udevadm trigger` re-runs
+/// `net_setup_link` on the LIVE interface, which re-applies the pinned
+/// `MACAddress=` to the running `wlan0`, drops the association, and forces a new
+/// DHCP lease — churning the operator's management link mid-run. That is the
+/// exact hazard the installer's `install_power_hardening` avoids by scoping its
+/// own trigger to `--subsystem-match=usb`. The pin is meant to take effect on
+/// the next boot (per the module contract above), so no live trigger is ever
+/// needed here. Kept at module scope (not inside the Linux-gated `mod linux`) so
+/// the invariant is unit-testable on every platform.
+// Consumed by `mod linux::reload_udev` (Linux-only) and the invariant test; on a
+// non-Linux, non-test build neither is compiled, so allow the unused const there.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const UDEV_RELOAD_ARGV: &[&[&str]] = &[&["control", "--reload"]];
+
 // ── Linux device + .link I/O ─────────────────────────────────────────────────
 
 #[cfg(target_os = "linux")]
@@ -436,13 +454,14 @@ mod linux {
         }
     }
 
+    /// Reload the udev rules database so a later device event (a hot-plug, or
+    /// the next boot) picks up the new/removed `.link` file. Runs only the
+    /// invocations in [`super::UDEV_RELOAD_ARGV`] — which deliberately excludes
+    /// any `udevadm trigger` of the `net` subsystem (see that const's docs).
     fn reload_udev() {
-        let _ = Command::new("udevadm")
-            .args(["control", "--reload"])
-            .status();
-        let _ = Command::new("udevadm")
-            .args(["trigger", "--subsystem-match=net"])
-            .status();
+        for argv in UDEV_RELOAD_ARGV {
+            let _ = Command::new("udevadm").args(*argv).status();
+        }
     }
 
     /// The full reconcile: enumerate -> fold the learner -> classify -> write
@@ -633,6 +652,30 @@ mod tests {
     fn link_filename_sorts_before_stock() {
         assert_eq!(link_file_name("wlan0"), "10-ados-mac-wlan0.link");
         assert!("10-ados-mac-wlan0.link" < "50-radxa-aic8800.link");
+    }
+
+    #[test]
+    fn reload_udev_never_triggers_the_live_net_link() {
+        // The pin/unpin path may reload the udev rules DB, but must NEVER
+        // `udevadm trigger` the net subsystem — that re-applies the pinned MAC
+        // to the LIVE interface and drops the operator's management link (the
+        // install-churn root cause). Reloading the rules DB is the only allowed
+        // action; the `.link` takes effect on the next boot / hot-plug event.
+        for argv in UDEV_RELOAD_ARGV {
+            assert!(
+                !argv.contains(&"trigger"),
+                "reload must not re-trigger devices: {argv:?}"
+            );
+            assert!(
+                !argv.iter().any(|a| a.contains("subsystem-match=net")),
+                "reload must never target the net subsystem: {argv:?}"
+            );
+        }
+        // Positive assertion: it does reload the rules DB so a new/removed file
+        // is seen at the next event.
+        assert!(UDEV_RELOAD_ARGV
+            .iter()
+            .any(|argv| argv.contains(&"control") && argv.contains(&"--reload")));
     }
 
     #[test]
