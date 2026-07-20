@@ -5,7 +5,13 @@
 
 import { getApiKey } from "@/lib/api-key";
 import { getSession } from "@/lib/session";
-import type { AgentConfig, ConfigValue, GsStatus } from "@/lib/types";
+import type {
+  AgentConfig,
+  ConfigValue,
+  GsStatus,
+  RosterCamera,
+  VehicleState,
+} from "@/lib/types";
 
 export class ApiError extends Error {
   status: number;
@@ -101,4 +107,39 @@ export function getWfb<T = Record<string, ConfigValue>>(
   signal?: AbortSignal,
 ): Promise<T> {
   return apiFetch<T>("/api/wfb", { signal });
+}
+
+/** The paired drone's live vehicle state (`GET /api/telemetry`) — attitude,
+ *  position, velocity, battery, GPS — the Feed HUD's flight-instrument source.
+ *  Returns `{}` when no vehicle has been heard. */
+export function getTelemetry(signal?: AbortSignal): Promise<VehicleState> {
+  return apiFetch<VehicleState>("/api/telemetry", { signal });
+}
+
+/** The reconciled camera roster (`GET /api/video/roster`). The Feed shows
+ *  multi-stream tabs only when more than one camera is reported. A ground
+ *  station returns an empty list. */
+export function getRoster(
+  signal?: AbortSignal,
+): Promise<{ cameras: RosterCamera[] }> {
+  return apiFetch<{ cameras: RosterCamera[] }>("/api/video/roster", { signal });
+}
+
+/** Start the ground-station video recorder
+ *  (`POST /api/v1/ground-station/recording/start`). */
+export function startRecording(signal?: AbortSignal): Promise<unknown> {
+  return apiFetch("/api/v1/ground-station/recording/start", {
+    method: "POST",
+    body: {},
+    signal,
+  });
+}
+
+/** Stop the in-flight recording (`POST /api/v1/ground-station/recording/stop`). */
+export function stopRecording(signal?: AbortSignal): Promise<unknown> {
+  return apiFetch("/api/v1/ground-station/recording/stop", {
+    method: "POST",
+    body: {},
+    signal,
+  });
 }

@@ -92,6 +92,86 @@ export interface ButtonEvent {
   timestamp_ms?: number;
 }
 
+/** The paired drone's live vehicle state — the shape of `GET /api/telemetry`
+ *  (the MAVLink router's `to_wire` snapshot the laptop dashboard also consumes).
+ *  On a ground station this is the drone's state received over the radio link
+ *  and republished locally. Every leaf is nullable; the endpoint returns `{}`
+ *  when no vehicle has been heard, so all blocks are optional. Attitude angles
+ *  are RADIANS (raw MAVLink ATTITUDE); position/velocity are metres and m/s;
+ *  heading is degrees; `battery.remaining` is a percentage with `-1` meaning
+ *  unknown. */
+export interface VehicleAttitude {
+  roll: number | null;
+  pitch: number | null;
+  yaw: number | null;
+}
+
+export interface VehiclePosition {
+  lat: number | null;
+  lon: number | null;
+  alt_msl: number | null;
+  alt_rel: number | null;
+  heading: number | null;
+}
+
+export interface VehicleVelocity {
+  vx: number | null;
+  vy: number | null;
+  vz: number | null;
+  groundspeed: number | null;
+  airspeed: number | null;
+  climb: number | null;
+}
+
+export interface VehicleBattery {
+  voltage: number | null;
+  current: number | null;
+  remaining: number | null;
+  temperature: number | null;
+}
+
+export interface VehicleGps {
+  fix_type: number | null;
+  satellites: number | null;
+  eph: number | null;
+  epv: number | null;
+}
+
+export interface VehicleState {
+  mav_type?: number | null;
+  autopilot?: number | null;
+  armed?: boolean;
+  mode?: string | null;
+  position?: VehiclePosition;
+  velocity?: VehicleVelocity;
+  attitude?: VehicleAttitude;
+  battery?: VehicleBattery;
+  gps?: VehicleGps;
+  /** Distance to the launch/home point in metres, when the agent supplies it.
+   *  Absent today (the vehicle snapshot carries no home), so the HUD renders a
+   *  dash rather than fabricating a distance. */
+  home_distance?: number | null;
+  /** ISO 8601 stamp of the last message / heartbeat received. On-box the panel
+   *  shares the agent's clock, so these gate attitude freshness reliably. */
+  last_update?: string;
+  last_heartbeat?: string;
+}
+
+/** One entry of the `GET /api/video/roster` reconciled camera list. Only the
+ *  fields the Feed's multi-stream tabs need; unknown extras are tolerated. A
+ *  ground station serves an empty roster (it has no onboard camera), so the
+ *  tabs never appear there. */
+export interface RosterCamera {
+  id: string;
+  label?: string;
+  name?: string;
+  role?: string;
+  live?: boolean;
+  /** Per-leg WHEP endpoint, when the agent advertises one. The primary leg is
+   *  reached through the fixed `/whep` proxy. */
+  whep_url?: string;
+}
+
 /** The agent config is a nested JSON object (`GET /api/config`, sanitized
  *  Pydantic model_dump). The Settings tree renders it in a later stage. */
 export type ConfigValue =

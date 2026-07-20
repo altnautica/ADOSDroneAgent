@@ -24,6 +24,28 @@ export function fmtMbps(v: number | null | undefined): string {
   return v == null ? DASH : `${v.toFixed(1)} Mbps`;
 }
 
+/** A compass heading in degrees → "045°". Guards the MAVLink "unknown"
+ *  sentinel (hdg 65535 → 655.35) and any out-of-range value. */
+export function fmtHeading(v: number | null | undefined): string {
+  if (v == null || !Number.isFinite(v) || v < 0 || v > 360) return DASH;
+  return `${String(Math.round(v) % 360).padStart(3, "0")}°`;
+}
+
+/** Metres, rounded, with a "m" suffix. */
+export function fmtMeters(v: number | null | undefined): string {
+  return v == null || !Number.isFinite(v) ? DASH : `${Math.round(v)} m`;
+}
+
+/** A plain rounded integer, or a dash. Used for the tape readouts + sat count. */
+export function fmtInt(v: number | null | undefined): string {
+  return v == null || !Number.isFinite(v) ? DASH : `${Math.round(v)}`;
+}
+
+/** A GPS satellite count, guarding the "unknown" (255) sentinel. */
+export function fmtSats(v: number | null | undefined): string {
+  return v == null || !Number.isFinite(v) || v > 200 ? DASH : `${Math.round(v)}`;
+}
+
 /** Seconds → a compact "1d 2h", "3h 4m", "5m 6s" uptime string. */
 export function fmtUptime(seconds: number | null | undefined): string {
   if (seconds == null || seconds < 0) return DASH;

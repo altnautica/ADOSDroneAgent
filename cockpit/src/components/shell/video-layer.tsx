@@ -1,19 +1,29 @@
 // L0 — the full-bleed WHEP video layer. Owns one WHEP session against the
-// agent's `POST /whep` proxy (a recvonly WebRTC pull of the mediamtx feed) and
-// paints it edge-to-edge behind the HUD. On failure it retries with backoff and
-// surfaces an honest connecting/no-feed state rather than a frozen black frame.
+// agent's WHEP proxy (a recvonly WebRTC pull of the mediamtx feed) and paints it
+// edge-to-edge behind the HUD. On failure it retries with backoff and surfaces
+// an honest connecting/no-feed state rather than a frozen black frame. The Feed
+// re-points it (a different `whepUrl` for another camera, or a bumped
+// `reconnectKey` for a manual refresh) by changing its props.
 
 import { useEffect, useRef, useState } from "react";
 
 import { startWhep, type WhepSession } from "@/lib/whep";
 
-const WHEP_URL = "/whep";
 const RETRY_MIN_MS = 1500;
 const RETRY_MAX_MS = 8000;
 
 type FeedState = "connecting" | "live" | "error";
 
-export function VideoLayer() {
+export function VideoLayer({
+  whepUrl = "/whep",
+  reconnectKey,
+}: {
+  /** The WHEP endpoint for the active stream (the primary leg is `/whep`). */
+  whepUrl?: string;
+  /** Changing this tears down and re-establishes the session (a camera switch
+   *  or a manual refresh). */
+  reconnectKey?: string;
+}) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [state, setState] = useState<FeedState>("connecting");
 
@@ -28,7 +38,7 @@ export function VideoLayer() {
       const el = videoRef.current;
       if (cancelled || !el) return;
       setState("connecting");
-      const result = await startWhep(WHEP_URL, el, controller.signal);
+      const result = await startWhep(whepUrl, el, controller.signal);
       if (cancelled) {
         void result.session?.close();
         return;
@@ -70,7 +80,7 @@ export function VideoLayer() {
       if (retryTimer) clearTimeout(retryTimer);
       void session?.close();
     };
-  }, []);
+  }, [whepUrl, reconnectKey]);
 
   return (
     <div className="absolute inset-0 bg-black">
@@ -84,7 +94,7 @@ export function VideoLayer() {
       {state !== "live" ? (
         <div className="absolute inset-0 flex items-center justify-center">
           <span className="rounded-md bg-background/70 px-[0.9rem] py-[0.5rem] text-[0.9rem] text-muted-foreground">
-            {state === "connecting" ? "Connecting to feed…" : "No video feed"}
+            {state === "connecting" ? "Connecting to feed…" : "No video source"}
           </span>
         </div>
       ) : null}
