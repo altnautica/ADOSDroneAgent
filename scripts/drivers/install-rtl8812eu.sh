@@ -95,6 +95,25 @@ if lsmod | awk '{print $1}' | grep -qx "${MODULE_NAME}"; then
     info "${MODULE_NAME} is loaded but not a current patched DKMS build; rebuilding so the patched module is installed and reboot-persistent."
 fi
 
+# Also short-circuit when the patched module is already BUILT + INSTALLED for
+# THIS kernel but simply not loaded -- no adapter attached yet, or a fresh
+# reboot before the module autoloads. Without this a dongle-less box (and any
+# box between reboots) rebuilds the multi-minute module on every install /
+# `ados update`, because the "loaded" gate above never fires. Kernel-filtered
+# (modinfo -k / dkms status -k) + the same patch-marker gate, so a stale or
+# unpatched build still (correctly) rebuilds.
+if [ -n "${_dkms_pkg}" ] && [ -n "${_dkms_ver}" ] \
+    && modinfo -k "${KERNEL}" "${MODULE_NAME}" >/dev/null 2>&1 \
+    && dkms status -m "${_dkms_pkg}" -v "${_dkms_ver}" -k "${KERNEL}" 2>/dev/null | grep -qi 'installed' \
+    && [ -f "/usr/src/${_dkms_pkg}-${_dkms_ver}/core/rtw_mlme_ext.c" ] \
+    && grep -qF "${PATCH_MARKER}" "/usr/src/${_dkms_pkg}-${_dkms_ver}/core/rtw_mlme_ext.c"; then
+    info "${MODULE_NAME} already built + installed via DKMS for ${KERNEL} (current patches); skipping the rebuild."
+    modprobe "${MODULE_NAME}" 2>/dev/null || true   # load if the adapter is present; harmless if not
+    mkdir -p /run/ados 2>/dev/null || true
+    printf 'dkms\n' > /run/ados/wfb-module-source 2>/dev/null || true
+    exit 0
+fi
+
 # --- Prebuilt fast-path: load a verified prebuilt module, skip the compile --
 #
 # On-device DKMS compilation is slow and, on marginal hardware, can crash the
