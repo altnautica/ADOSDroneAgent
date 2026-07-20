@@ -3,10 +3,10 @@
 // TAB_ORDER. Later stages replace a screen's `render` (or add `detail` screens
 // opened via `open-detail`) without touching the shell or the navigator.
 //
-// Feed is wired now (video + HUD); Link/Mesh/Pair/Uplink/System/Settings are
-// registered as real entries with a placeholder body that names the agent
-// surfaces they will read, so the shell is
-// fully navigable and each screen has a real slot to grow into.
+// Feed is wired now (video + HUD); Link/Mesh/Pair/Uplink/System read their live
+// agent surfaces. Settings stays a placeholder body that names the surfaces it
+// will read, so the shell is fully navigable and that screen has a real slot to
+// grow into (the settings-tree stage replaces its `render`).
 
 import {
   Gauge,
@@ -19,7 +19,12 @@ import {
 } from "lucide-react";
 
 import { FeedScreen } from "@/components/screens/feed-screen";
+import { LinkScreen } from "@/components/screens/link-screen";
+import { MeshScreen } from "@/components/screens/mesh-screen";
+import { PairScreen } from "@/components/screens/pair-screen";
 import { PlaceholderScreen } from "@/components/screens/placeholder-screen";
+import { SystemScreen } from "@/components/screens/system-screen";
+import { UplinkScreen } from "@/components/screens/uplink-screen";
 import { DEFAULT_TAB_ID, type ScreenSpec } from "@/nav/navigator";
 
 const SCREENS: ScreenSpec[] = [
@@ -36,74 +41,35 @@ const SCREENS: ScreenSpec[] = [
     title: "Link",
     icon: Radio,
     kind: "tab",
-    render: () => (
-      <PlaceholderScreen
-        title="Link"
-        icon={Radio}
-        summary="The WFB radio link: channel, region, RSSI, valid-RX, dual-check state, TX/RX counters, and an Optimize-channel action."
-        reads={["GET /api/v1/ground-station/status", "GET /api/wfb", "PUT /api/config"]}
-      />
-    ),
+    render: () => <LinkScreen />,
   },
   {
     id: "mesh",
     title: "Mesh",
     icon: Network,
     kind: "tab",
-    render: () => (
-      <PlaceholderScreen
-        title="Mesh"
-        icon={Network}
-        summary="Distributed-RX role (direct / relay / receiver), neighbour list, gateway election, combined-stream health, and field tap-to-pair."
-        reads={[
-          "GET .../wfb/relay/status",
-          "GET .../wfb/receiver/relays",
-          "PUT /api/config",
-        ]}
-      />
-    ),
+    render: () => <MeshScreen />,
   },
   {
     id: "pair",
     title: "Pair",
     icon: Link2,
     kind: "tab",
-    render: () => (
-      <PlaceholderScreen
-        title="Pair"
-        icon={Link2}
-        summary="Pair a drone to this ground station: local pair state, the pair code when unpaired, and a claim / unpair action. Local-first, never via cloud."
-        reads={["GET /api/pairing/info", "POST /api/pairing/claim"]}
-      />
-    ),
+    render: () => <PairScreen />,
   },
   {
     id: "uplink",
     title: "Uplink",
     icon: SlidersHorizontal,
     kind: "tab",
-    render: () => (
-      <PlaceholderScreen
-        title="Uplink"
-        icon={SlidersHorizontal}
-        summary="The uplink matrix (WiFi client, Ethernet, USB tether, 4G) with per-lane state, a priority / failover control, share-uplink, and the data-cap readout."
-        reads={["GET /api/v1/ground-station/status", "GET .../modem-status", "PUT /api/config"]}
-      />
-    ),
+    render: () => <UplinkScreen />,
   },
   {
     id: "system",
     title: "System",
     icon: Cpu,
     kind: "tab",
-    render: () => (
-      <PlaceholderScreen
-        title="System"
-        icon={Cpu}
-        summary="Box health (CPU / RAM / temp / disk), agent version + update, display arbitration, touch calibration, factory reset, and reboot."
-        reads={["GET /api/v1/ground-station/status", "PUT /api/config"]}
-      />
-    ),
+    render: () => <SystemScreen />,
   },
   {
     id: "settings",
