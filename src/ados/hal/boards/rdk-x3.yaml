@@ -1,0 +1,221 @@
+# D-Robotics RDK X3 — Horizon Sunrise X3 (XJ3), Raspberry-Pi-4B form factor
+#
+# Vendor-BSP board on an OLD 4.14.87 kernel. ADOS keeps this board on the
+# on-device DKMS RTL8812EU build (NO prebuilt matrix row): the svpcom driver
+# against this ancient cfg80211 API is unproven, and the hobot headers
+# (hobot-kernel-headers, archive.d-robotics.cc) are pinned to the flashed
+# image and age out of the public apt, so a reproducible CI build is not
+# durable — the same reason the RK3588 Radxa BSP stays on DKMS.
+#
+# The onboard Wi-Fi is a Broadcom/AMPAK AP6212 (BCM43438-class, 2.4 GHz +
+# BT 4.2), not an RTL, so it is never an injection interface — WFB rides an
+# EXTERNAL USB RTL8812EU dongle. The AP6212 is intentionally NOT listed under
+# radios: (management/best-effort only, excluded from injection).
+#
+# The 5 TOPS "Bernoulli" BPU is a Horizon proprietary accelerator (hbdk /
+# OpenExplorer .bin toolchain) — NOT an ONNX/RKNN NPU. ADOS's in-process
+# ONNX / RKNN vision backends cannot target it, so it is declared
+# npu_tops: 0.0 / local_inference: none (Rule 44 — never advertise a
+# capability the runtime cannot deliver). Perception OFFLOADS from this board.
+# The real BPU spec is kept in ignored compute keys (bpu / bpu_tops) for docs.
+#
+# Sources:
+#   https://www.cnx-software.com/2024/09/24/d-robotics-rdk-x3-development-board-features-sunrise-x3-quad-core-arm-cortex-a53-soc-with-a-5tops-bernoulli-bpu/
+#   https://developer.d-robotics.cc/rdk_doc/en/Quick_start/hardware_introduction/rdk_x3/
+#   https://www.waveshare.com/wiki/Horizon_Sunrise_X3_PI
+
+name: "D-Robotics RDK X3"
+vendor: "D-Robotics"
+soc: "Horizon Sunrise X3"
+arch: "aarch64"
+model_patterns:
+  # Detection returns only the MOST-SPECIFIC (first) /proc/device-tree/compatible
+  # token and matches by substring, so "hobot,x3" catches the board node
+  # (hobot,x3-pi) AND the SoC-family node (hobot,x3) either way.
+  - "hobot,x3"
+  - "hobot,x3-pi"
+  - "Hobot X3 PI"          # /proc/device-tree/model
+  - "Hobot X3"
+  - "Horizon Sunrise X3"
+  - "Sunrise X3"
+  - "RDK X3"
+default_tier: 3
+
+# Pi-4B-compatible 40-pin header (Hobot.GPIO BOARD numbering). Modest set:
+# I2C (3/5), 40-pin UART ttyS3 (8/10), SPI (19/21/23/24), spare GPIO.
+gpio_pins:
+  - 3    # I2C SDA
+  - 5    # I2C SCL
+  - 7    # GPIO
+  - 8    # UART TXD (ttyS3)
+  - 10   # UART RXD (ttyS3)
+  - 11   # GPIO
+  - 12   # GPIO / I2S
+  - 13   # GPIO
+  - 15   # GPIO
+  - 16   # GPIO
+  - 18   # GPIO
+  - 19   # SPI MOSI
+  - 21   # SPI MISO
+  - 22   # GPIO
+  - 23   # SPI CLK
+  - 24   # SPI CS0
+  - 26   # SPI CS1
+uart_paths:
+  - /dev/ttyS3
+  - /dev/ttyS0
+hw_video_codecs:
+  - h264_enc
+  - h264_dec
+  - h265_enc
+  - h265_dec
+
+board:
+  id: rdk-x3
+  manufacturer: D-Robotics
+  status: experimental
+
+compute:
+  cores: 4
+  core_type: "Cortex-A53 x4 @ 1.5 GHz"
+  max_freq_mhz: 1500
+  # npu_tops: 0.0 is INTENTIONAL. The board carries a real 5 TOPS Horizon
+  # "Bernoulli" BPU, but it is a proprietary accelerator (hbdk / OpenExplorer,
+  # compiles models to .bin) that ADOS's ONNX/RKNN vision engine cannot drive.
+  # Declaring it here would flip has_accelerator=True and make the perception
+  # tier attempt local detection on hardware ADOS cannot use (Rule 44). Keep 0.0
+  # so the tier correctly OFFLOADS. The A53 quad is also too weak for the CPU
+  # ONNX path, so local_inference stays none.
+  npu_tops: 0.0
+  local_inference: none
+  # --- ignored by the loader; documentation of the real accelerator ---
+  bpu: "Horizon Bernoulli (dual-core)"
+  bpu_tops: 5.0
+  bpu_runtime: "Horizon hbdk / OpenExplorer (.bin, proprietary — NOT ONNX/RKNN, unusable by ADOS)"
+  gpu: "none (no 3D GPU)"
+  hw_encoder: ["h264", "h265"]
+  hw_decoder: ["h264", "h265"]
+  ram_mb: 1024        # documents the smallest historical SKU; 2 GB / 4 GB common. Runtime detects actual.
+  ram_type: LPDDR4
+
+storage:
+  emmc: false         # RDK X3 (Pi form factor) boots from microSD; the X3 Module variant has eMMC
+  emmc_gb: 0
+  sd_card: true
+  nand: false
+
+buses:
+  uart:
+    - id: uart3
+      path: /dev/ttyS3
+      baud: 921600
+      fc_capable: true
+    - id: uart0
+      path: /dev/ttyS0
+      baud: 115200
+      fc_capable: false
+  usb:
+    - id: usb0
+      path: "/dev/bus/usb/001/*"
+      type: usb3
+  # Header I2C is the Pi-pinout bus on physical pins 3/5. Bus number varies by
+  # BSP; the runtime probes and falls back, so this is a hint not a hard path.
+  i2c:
+    - id: i2c0
+      path: /dev/i2c-0
+      speed_hz: 400000
+  spi:
+    - id: spi0
+      path: /dev/spidev0.0
+      notes: "40-pin header SPI (pins 19/21/23/24), Pi-pinout signal positions"
+
+network:
+  wifi: true          # onboard AP6212 (Broadcom/AMPAK) — management/best-effort only, never injection
+  ethernet: true      # Gigabit Ethernet
+  bluetooth: true     # BT 4.2 via AP6212
+
+video:
+  csi_ports: 1
+  csi_connector: "15-pin Raspberry-Pi-compatible MIPI CSI"
+  max_encode_resolution: "3840x2160"
+  max_encode_fps: 60
+  # Horizon media (vio/vpu) userspace encode — a vendor API, not rpicam / not Rockchip MPP.
+  encoder_api: vendor
+  nav_cameras:
+    csi_count: 1
+    usb_uvc_count: 1
+    recommended_role: nav-usb
+
+# Cameras this board can drive. The camera-userspace provisioning package fires
+# on any supported camera; the CSI path uses the Horizon ISP.
+cameras:
+  supported:
+    - id: csi-mipi
+      type: csi
+      bus: csi
+      orientation: forward
+      # CSI sensor enablement on the X3 is via the D-Robotics config tool
+      # (srpi-config / device tree), NOT a Radxa-style dtbo glob and NOT one of
+      # the schema's overlay_source mechanisms. Left overlay_required: false so
+      # the provisioner never tries an overlay path it cannot drive; the exact
+      # sensor + enablement token is bench-gated (verify on the rig). vendor_isp
+      # marks the Horizon ISP capture path.
+      overlay_required: false
+      vendor_isp: true
+    - id: usb-nav
+      type: usb
+      bus: usb
+      orientation: downward
+      overlay_required: false
+      vendor_isp: false
+
+# Radios this board carries. Drives install-time driver provisioning. Only the
+# EXTERNAL USB RTL8812EU is an injection interface; the onboard AP6212 is
+# excluded (management/best-effort). install: dkms — this board has no prebuilt
+# module row (vendor 4.14.87 BSP, headers not durable), so the module is built
+# on-device via DKMS.
+radios:
+  supported:
+    - id: wfb-rtl8812eu
+      role: wfb-injection
+      chipset: RTL8812EU
+      driver: rtl8812eu
+      install: dkms
+      modules_required: [8812eu]
+      mesh_capable: true
+
+# Flight-controller link hints, priority-ordered. uart3 owns /dev/ttyS3 (40-pin
+# header serial); the runtime router still probes and falls back to USB-ACM.
+flight_controller:
+  interfaces:
+    - id: fc-uart3
+      type: uart
+      path: /dev/ttyS3
+      baud: 921600
+      priority: 1
+    - id: fc-usb
+      type: usb-acm
+      baud_candidates: [921600, 115200, 57600]
+      priority: 2
+
+# Universal provisioning manifest: ensure packages, enable declared overlays,
+# install declared drivers. The wfb-rtl8812eu driver entry fires the on-device
+# DKMS build (this board has no prebuilt-module row).
+provisioning:
+  packages:
+    - {id: camera-userspace, when: camera, apt: [gstreamer1.0-tools, v4l-utils]}
+  drivers:
+    - {radio: wfb-rtl8812eu}
+
+power:
+  typical_watts: 3.0
+  max_watts: 9.0
+  voltage: 5.0
+  input: "USB-C 5V/3A"
+
+# Perception OFFLOADS from this board: the 5 TOPS BPU is not ADOS-usable (see
+# compute) and the A53 quad is too weak for on-CPU detection or a VIO front-end.
+navigation:
+  vio_capable: false
+  rangefinder_ports:
+    - {type: i2c, path: /dev/i2c-0, speed_hz: 400000}

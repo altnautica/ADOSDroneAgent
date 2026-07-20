@@ -1,0 +1,191 @@
+# Raspberry Pi Zero 2 W — Broadcom BCM2710A1 (RP3A0 SiP, 512 MB LPDDR2)
+#
+# Pi-Zero-sized headless SBC. The RP3A0 system-in-package wraps the
+# Broadcom BCM2710A1 die (the same silicon as the BCM2837 used on the Pi 3,
+# a quad Cortex-A53 @ 1 GHz) with 512 MB of DRAM. 512 MB RAM makes this a
+# HEADLESS-ONLY, tier-2 board: a fit for the lean headless profile (MAVLink +
+# control + RTL/WFB + Wi-Fi mgmt, zero-Python), NOT a full-stack
+# video-streaming drone.
+#
+# Fingerprint (detection = /proc/device-tree compatible-first-token +
+# model substring): the device-tree `model` is "Raspberry Pi Zero 2 W
+# Rev 1.0" and `compatible` is "raspberrypi,model-zero-2-w","brcm,bcm2837".
+# So the two model_patterns below cover both the compatible token and the
+# model substring. The bare SoC string is deliberately NOT listed:
+# `/proc/cpuinfo` Hardware reports "BCM2835" (a longstanding firmware
+# quirk) and the DT compatible reports "brcm,bcm2837" (collides with the
+# Pi 3 / CM3), so neither is a safe auto-detect substring.
+#
+# Prebuilt RTL8812EU driver: served by the CI `rpi-v8` flavor
+# (linux-headers-rpi-v8, debian:trixie container) which already covers
+# "Pi 3 / 4 / 400 / Zero 2 W" — no new driver-matrix row is needed; the
+# DKMS fallback also applies.
+#
+# Sources:
+#   https://github.com/raspberrypi/linux/blob/rpi-6.6.y/arch/arm/boot/dts/broadcom/bcm2837-rpi-zero-2-w.dts
+#   https://www.raspberrypi.com/documentation/computers/processors.html (RP3A0)
+#   https://www.mouser.com/datasheet/2/635/raspberry_pi_zero_2_w_product_brief-3049509.pdf
+
+name: "Raspberry Pi Zero 2 W"
+vendor: "Raspberry Pi"
+soc: "BCM2710A1"
+arch: "aarch64"
+model_patterns:
+  # Device-tree model substring (full string is "Raspberry Pi Zero 2 W Rev 1.0").
+  - "Raspberry Pi Zero 2 W"
+  # Device-tree compatible first token.
+  - "raspberrypi,model-zero-2-w"
+default_tier: 2
+
+gpio_pins:
+  - 2   # SDA1
+  - 3   # SCL1
+  - 14  # UART TX
+  - 15  # UART RX
+  - 18  # PWM0
+uart_paths:
+  - /dev/ttyAMA0
+  - /dev/ttyS0
+hw_video_codecs:
+  - h264_dec
+  # VideoCore IV. As on the Pi 3 (same BCM2837 silicon), reliable hardware
+  # H.264 ENCODE is not exposed across standard 64-bit Raspberry Pi OS
+  # builds, so encode is omitted (see the video block: encoder_api "none").
+
+board:
+  id: zero2w
+  manufacturer: Raspberry Pi
+  status: experimental
+
+compute:
+  cores: 4
+  core_type: "Cortex-A53 x4"
+  max_freq_mhz: 1000
+  gpu: "VideoCore IV"
+  npu_tops: 0.0
+  hw_encoder: []
+  hw_decoder: ["h264"]
+  ram_mb: 512
+  ram_type: LPDDR2
+
+storage:
+  emmc: false
+  emmc_gb: 0
+  sd_card: true
+  nand: false
+
+# One usable USB host port (the micro-USB OTG data port) — typically the
+# WFB RTL8812EU dongle. A second USB device (FC over ACM, UVC camera)
+# needs a powered hub. I2C1 on pins 3/5, SPI0 on the header.
+buses:
+  uart:
+    - id: uart0
+      path: /dev/ttyS0
+      baud: 115200
+      # GPIO-header mini-UART. The PL011 (/dev/ttyAMA0) is bound to the
+      # onboard Bluetooth by default; free it with dtoverlay=disable-bt
+      # for a cleaner FC link at high baud.
+      fc_capable: true
+  usb:
+    - id: usb0
+      path: "/dev/bus/usb/001/*"
+      type: usb2
+  i2c:
+    - id: i2c1
+      path: /dev/i2c-1
+      speed_hz: 400000
+      notes: "pins 3/5 (SDA/SCL) — OLED / rangefinder"
+  spi:
+    - id: spi0
+      path: /dev/spidev0.0
+
+network:
+  wifi: true          # onboard 2.4 GHz 802.11 b/g/n (Cypress/Synaptics) — best-effort, NOT used for WFB injection
+  ethernet: false
+  bluetooth: true
+
+# Mini 22-pin CSI connector (needs the Zero-camera adapter ribbon). With
+# the single USB host port usually carrying the WFB dongle, the CSI is the
+# natural camera path. No reliable 64-bit HW encode, so encode fields null.
+video:
+  csi_ports: 1
+  csi_connector: "mini 22-pin 0.5mm FPC (adapter to standard 15-pin CSI)"
+  max_encode_resolution: null
+  max_encode_fps: null
+  encoder_api: "none"
+  nav_cameras:
+    csi_count: 1
+    usb_uvc_count: 1
+    recommended_role: nav-csi
+
+# Cameras this board can drive. The universal provisioner enables
+# overlay_required cameras at install time and the camera service binds
+# them at runtime; overlay_ref is a glob token matched under /boot/firmware
+# /overlays (Raspberry Pi OS ships imx219.dtbo).
+cameras:
+  supported:
+    - id: csi-imx219
+      type: csi
+      sensor: "Sony IMX219"
+      bus: csi
+      orientation: forward
+      overlay_required: true
+      overlay_source: raspberrypi
+      overlay_ref: "imx219"
+    - id: usb-nav
+      type: usb
+      bus: usb
+      orientation: downward
+      overlay_required: false
+
+# Radios this board carries. Drives install-time driver provisioning via the
+# universal provisioner. The onboard management Wi-Fi is intentionally NOT
+# listed — it is excluded from injection use by the adapter selector.
+radios:
+  supported:
+    - id: wfb-rtl8812eu
+      role: wfb-injection
+      chipset: RTL8812EU
+      driver: rtl8812eu
+      install: dkms
+      modules_required: [8812eu]
+      mesh_capable: true
+
+# Flight-controller link hints, priority-ordered. USB-ACM is preferred when
+# the single USB host port is free; otherwise the FC lands on the GPIO
+# mini-UART (ttyS0). The runtime router still probes and falls back.
+flight_controller:
+  interfaces:
+    - id: fc-usb
+      type: usb-acm
+      baud_candidates: [921600, 115200, 57600]
+      priority: 1
+    - id: fc-uart0
+      type: uart
+      path: /dev/ttyS0
+      baud: 115200
+      priority: 2
+
+# Universal provisioning manifest walked by the install-time provisioner:
+# ensure packages, enable declared overlays, install declared drivers.
+provisioning:
+  packages:
+    - {id: camera-userspace, when: camera, apt: [gstreamer1.0-tools, v4l-utils]}
+  overlays:
+    - {camera: csi-imx219, when: camera_overlay_required}
+  drivers:
+    - {radio: wfb-rtl8812eu}
+
+power:
+  typical_watts: 1.2
+  max_watts: 3.5
+  voltage: 5.0
+  input: "micro-USB 5V/2.5A"
+
+# 512 MB + Cortex-A53 + no NPU cannot host VIO; optical flow is the
+# practical default. Rangefinder lands on I2C1 or the header UART.
+navigation:
+  vio_capable: false
+  rangefinder_ports:
+    - {type: i2c, path: /dev/i2c-1, speed_hz: 400000}
+    - {type: uart, path: /dev/ttyS0, baud_max: 115200}
