@@ -20,7 +20,7 @@ pub mod widgets;
 mod catalog;
 mod hw;
 mod screens;
-mod wifi;
+pub mod wifi;
 
 use crate::cli::Args;
 use crate::ui::theme::Theme;

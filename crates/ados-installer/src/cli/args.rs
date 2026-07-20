@@ -30,6 +30,13 @@ pub struct Args {
     pub display: Option<String>,
     /// `--camera <v>` — camera hardware hint.
     pub camera: Option<String>,
+    /// `--wifi-ssid <v>` — join this Wi-Fi network non-interactively during a
+    /// headless (flag-driven) install, so the operator can later unplug the
+    /// wired cable. The join reuses the same nmcli path as the onboarding
+    /// wizard and never touches the interface the SSH session rides on.
+    pub wifi_ssid: Option<String>,
+    /// `--wifi-pass <v>` — password for `--wifi-ssid` (omit for an open network).
+    pub wifi_pass: Option<String>,
     /// `--uninstall` — remove the agent.
     pub uninstall: bool,
     /// `--status` — print install status and exit.
@@ -108,6 +115,8 @@ impl Args {
                 "--version" => args.version = Some(take_value(&tokens, &mut i, "--version")?),
                 "--display" => args.display = Some(take_value(&tokens, &mut i, "--display")?),
                 "--camera" => args.camera = Some(take_value(&tokens, &mut i, "--camera")?),
+                "--wifi-ssid" => args.wifi_ssid = Some(take_value(&tokens, &mut i, "--wifi-ssid")?),
+                "--wifi-pass" => args.wifi_pass = Some(take_value(&tokens, &mut i, "--wifi-pass")?),
                 other if other.starts_with('-') => {
                     return Err(ParseError::UnknownFlag(other.to_string()));
                 }
@@ -213,6 +222,21 @@ mod tests {
     fn no_rtl_driver_flag_parses() {
         assert!(Args::parse(["--no-rtl-driver"]).unwrap().no_rtl_driver);
         assert!(!Args::default().no_rtl_driver);
+    }
+
+    #[test]
+    fn parses_wifi_flags() {
+        // SSID/password can carry spaces and symbols (quoted by the shell).
+        let a = Args::parse(["--wifi-ssid", "Home Net", "--wifi-pass", "s3cr3t"]).unwrap();
+        assert_eq!(a.wifi_ssid.as_deref(), Some("Home Net"));
+        assert_eq!(a.wifi_pass.as_deref(), Some("s3cr3t"));
+        // Both absent by default (no headless Wi-Fi join unless requested).
+        assert!(Args::default().wifi_ssid.is_none());
+        assert!(Args::default().wifi_pass.is_none());
+        // An SSID with no password parses (open network).
+        let open = Args::parse(["--wifi-ssid", "cafe"]).unwrap();
+        assert_eq!(open.wifi_ssid.as_deref(), Some("cafe"));
+        assert!(open.wifi_pass.is_none());
     }
 
     #[test]

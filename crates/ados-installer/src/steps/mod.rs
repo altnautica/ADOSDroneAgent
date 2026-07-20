@@ -42,6 +42,7 @@ pub mod systemd;
 pub mod venv_agent;
 pub mod watchdog;
 pub mod wfb_ng;
+pub mod wifi_join;
 
 /// Assemble the full fresh-install step chain. The graph engine orders these
 /// by their declared `requires`, so the insertion order here is only the
@@ -58,6 +59,7 @@ pub fn full_install_chain() -> Vec<Box<dyn Step>> {
         Box::new(dkms::Dkms),
         Box::new(config_identity::ConfigIdentity),
         Box::new(network_mac_pin::NetworkMacPin),
+        Box::new(wifi_join::WifiJoin),
         Box::new(rtl_regulatory::RtlRegulatory),
         Box::new(watchdog::Watchdog),
         Box::new(systemd::Systemd),
@@ -75,11 +77,14 @@ mod tests {
     fn full_chain_orders_cleanly() {
         let steps = full_install_chain();
         let order = topo_order(&steps).expect("the install chain must be a valid DAG");
-        assert_eq!(order.len(), 15);
+        assert_eq!(order.len(), 16);
 
         let pos = |id: &str| order.iter().position(|x| x == id).unwrap();
         // Spot-check the load-bearing edges.
         assert!(pos("preflight") < pos("deps"));
+        // The headless Wi-Fi join runs after config (hostname is set before the
+        // box appears on the joined network).
+        assert!(pos("config_identity") < pos("wifi_join"));
         // The NPU runtime provisioning installs its wheel into the agent venv,
         // so it must run after the venv exists.
         assert!(pos("venv_agent") < pos("npu_provision"));

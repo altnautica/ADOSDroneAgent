@@ -28,6 +28,9 @@ OPTIONS:
     --version <ver>                    Pin an explicit agent version
     --display <hint>                   Display hardware hint
     --camera <hint>                    Camera hardware hint
+    --wifi-ssid <ssid>                 Join this Wi-Fi network during a headless
+                                       install (so the wired cable can be unplugged)
+    --wifi-pass <password>             Password for --wifi-ssid (omit if open)
     --uninstall                        Remove the agent
     --status                           Print install status and exit
     --plain                            Plain line output (no animation/color)
