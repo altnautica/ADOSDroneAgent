@@ -263,7 +263,10 @@ mod tests {
         // hardware ceiling, so systemd is never clamped.
         for ceiling in [6u32, 10, 16, 30, 60, 120] {
             let rt = safe_runtime_secs(Some(ceiling));
-            assert!(rt < ceiling, "runtime {rt}s must be under hw ceiling {ceiling}s");
+            assert!(
+                rt < ceiling,
+                "runtime {rt}s must be under hw ceiling {ceiling}s"
+            );
         }
     }
 }

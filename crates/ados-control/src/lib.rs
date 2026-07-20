@@ -495,7 +495,10 @@ mod tests {
         // front.conf is missing/empty from a killed install -> self-heals).
         assert_eq!(resolve_control_tcp_port(None, true), paths::FRONT_TCP_PORT);
         // No front marker -> the alternate :8082 plane.
-        assert_eq!(resolve_control_tcp_port(None, false), paths::CONTROL_TCP_PORT);
+        assert_eq!(
+            resolve_control_tcp_port(None, false),
+            paths::CONTROL_TCP_PORT
+        );
         // An explicit env port always wins (the unit pins it per profile).
         assert_eq!(resolve_control_tcp_port(Some(9999), true), 9999);
         assert_eq!(resolve_control_tcp_port(Some(8082), true), 8082);
