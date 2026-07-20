@@ -302,11 +302,17 @@ class StandaloneApiRuntime:
 
             import yaml
 
-            from ados.hal.detect import detect_board
+            from ados.hal.detect import detect_board, persist_board_sidecar
             from ados.services.vision.model_manager import ModelManager
 
             board_info = detect_board()
             self.board_name = board_info.name
+            # Persist the board fingerprint to the sidecar the native control
+            # surface reads for the board name + NPU capability. This is the live
+            # startup path; the AgentApp/register_services persist is not wired
+            # here, so without this the sidecar is never written and the reader
+            # falls back to a generic CPU probe (wrong board name, npu_tops 0).
+            persist_board_sidecar(board_info)
             board_profile_dict: dict = {}
             boards_dir = Path(__file__).resolve().parent.parent / "hal" / "boards"
             if not boards_dir.exists():
