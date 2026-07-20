@@ -101,7 +101,13 @@ jobs:
         run: |
           set -eux
           DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            build-essential bc kmod patch gnupg curl jq libelf-dev
+            build-essential bc kmod patch gnupg curl jq libelf-dev \
+            python3 python-is-python3
+          # Some vendor BSP kernels (e.g. the RK3566 5.10 line) invoke the
+          # unversioned `python` from their build scripts; Debian ships only
+          # `python3`, so python-is-python3 provides the `python` shim. Fall
+          # back to a manual symlink if that package is unavailable on a base.
+          command -v python >/dev/null || ln -sf "$(command -v python3)" /usr/local/bin/python
           # minisign is used only by the publish job (signing); on older bases
           # (Debian 11 bullseye) it may be absent and the build never signs, so
           # install it best-effort here.
