@@ -5,10 +5,13 @@ import { BannerHost } from "./banner-host";
 import { BottomDock } from "./bottom-dock";
 import { Header } from "./header";
 import { Sidebar } from "./sidebar";
+import { useWakeLock } from "@/hooks/use-wake-lock";
 import { useUiStore } from "@/stores/ui-store";
 
 export function AppShell() {
   const theme = useUiStore((s) => s.theme);
+  // Keep the display awake while the console is open (laptop or panel).
+  useWakeLock();
   return (
     <div className="flex flex-col min-h-dvh">
       <Header />

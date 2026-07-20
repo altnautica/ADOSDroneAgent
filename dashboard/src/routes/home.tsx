@@ -2,6 +2,7 @@ import { CloudOff, Globe, RefreshCw } from "lucide-react";
 import { Link } from "react-router-dom";
 
 import { CloudPanel } from "@/components/panels/cloud-panel";
+import { CockpitLauncher } from "@/components/panels/cockpit-launcher";
 import { FcPanel } from "@/components/panels/fc-panel";
 import { HardwarePanel } from "@/components/panels/hardware-panel";
 import { MeshPanel } from "@/components/panels/mesh-panel";
@@ -151,6 +152,8 @@ function GroundHome({ role }: { role: "direct" | "relay" | "receiver" }) {
 
   return (
     <div className="space-y-4 max-w-[1400px]">
+      <CockpitLauncher />
+
       <header className="flex items-start justify-between gap-4">
         <div>
           <h1 className="text-xl font-semibold tracking-tight">Home</h1>
