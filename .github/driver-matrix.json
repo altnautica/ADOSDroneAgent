@@ -1,0 +1,62 @@
+[
+  {
+    "flavor": "rpi-v8",
+    "karch": "arm64",
+    "container": "debian:trixie",
+    "headers_source": "apt",
+    "apt_list": "deb [trusted=yes] http://archive.raspberrypi.org/debian trixie main",
+    "apt_key_url": "",
+    "headers_pkg": "linux-headers-rpi-v8",
+    "headers_deb_url": "",
+    "serves": "Raspberry Pi 3 / 4 / 400 / Zero 2 W / CM3 / CM4 (BCM2837/2711)",
+    "kver_hint": "6.x-v8"
+  },
+  {
+    "flavor": "rpi-2712",
+    "karch": "arm64",
+    "container": "debian:trixie",
+    "headers_source": "apt",
+    "apt_list": "deb [trusted=yes] http://archive.raspberrypi.org/debian trixie main",
+    "apt_key_url": "",
+    "headers_pkg": "linux-headers-rpi-2712",
+    "headers_deb_url": "",
+    "serves": "Raspberry Pi 5 / CM5 (BCM2712)",
+    "kver_hint": "6.x-2712"
+  },
+  {
+    "flavor": "radxa-a733",
+    "karch": "arm64",
+    "container": "debian:bullseye",
+    "headers_source": "apt",
+    "apt_list": "deb [trusted=yes] https://radxa-repo.github.io/a733-bullseye a733-bullseye main",
+    "apt_key_url": "",
+    "headers_pkg": "linux-headers-5.15.147-21-a733",
+    "headers_deb_url": "",
+    "serves": "Radxa Cubie A7S / A7Z (Allwinner A733), Debian 11 bullseye BSP (headers verified served by radxa-repo/a733-bullseye)",
+    "kver_hint": "5.15.147-21-a733"
+  },
+  {
+    "flavor": "radxa-rk356x",
+    "karch": "arm64",
+    "container": "debian:bookworm",
+    "headers_source": "apt",
+    "apt_list": "deb [trusted=yes] https://radxa-repo.github.io/bookworm bookworm main",
+    "apt_key_url": "",
+    "headers_pkg": "linux-headers-rk356x",
+    "headers_deb_url": "",
+    "serves": "Radxa CM3 / CM3-IO / Zero 3W / Zero 3E and other RK3566 Radxa BSP boards (Debian bookworm, 5.10 rk356x BSP kernel)",
+    "kver_hint": "5.10.160-39-rk356x"
+  },
+  {
+    "flavor": "beagley-ai",
+    "karch": "arm64",
+    "container": "debian:trixie",
+    "headers_source": "apt",
+    "apt_list": "deb [trusted=yes] http://repos.rcn-ee.com/debian/ trixie main",
+    "apt_key_url": "https://raw.githubusercontent.com/beagleboard/image-builder/master/target/keyring/repos.rcn-ee.net-archive-keyring.asc",
+    "headers_pkg": "linux-headers-6.1.83-ti-arm64-r74",
+    "headers_deb_url": "",
+    "serves": "BeagleBoard.org BeagleY-AI (TI AM67A / J722S) arm64, Debian Trixie userspace, 6.1.x-ti-arm64 kernel line; the -rNN advances on the rolling rcn-ee repo (CI derives the exact KVER from the installed headers)",
+    "kver_hint": "6.1.83-ti-arm64-r74"
+  }
+]

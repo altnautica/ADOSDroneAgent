@@ -4,21 +4,30 @@
 # boards run, so a fresh install can load a verified prebuilt module instead
 # of compiling on the device (slow, and crash-prone on marginal hardware).
 #
-# Each matrix row is a real kernel flavor. The build runs INSIDE a distro
-# container that matches the target's userspace (Raspberry Pi OS is Debian
-# trixie + the raspberrypi.org apt repo), because the headers packages depend
-# on that distro's 'linux-base' and will not resolve on a plain Ubuntu runner.
+# The board fleet is a DATA FILE: `.github/driver-matrix.json` is the canonical
+# "blessed kernel images" registry (one row = one supported kernel image, keyed
+# on the exact `uname -r` × arch a module must vermagic-match). The matrix job
+# loads it; the build job fans out over the rows. Coverage is per kernel image,
+# NOT per board, so one row serves every board sharing that kernel. Adding a row
+# is purely additive: any rig whose kernel isn't in the manifest cleanly falls
+# back to the on-device DKMS build (vermagic-strict).
+#
+# Two header-sourcing modes per row (`headers_source`):
+#   * "apt" (group A) — a durable public repo (Raspberry Pi, BeagleBoard rcn-ee,
+#     Radxa). The build installs `headers_pkg` from `apt_list` in a matched
+#     `container`. Reproducible forever from the public feed.
+#   * "deb" (group B) — a vendor-BSP kernel whose headers age out of / are pinned
+#     to the flashed image (Allwinner A733, Radxa RK3588 rsdk). The exact headers
+#     `.deb` is captured once from a live rig and hosted on the `bsp-headers`
+#     release; the build fetches + `dpkg`-installs it (`headers_deb_url` =
+#     "<tag>/<asset>" on this repo's releases, or a full URL). This makes CI
+#     reproduce the flashed kernel byte-for-byte regardless of whether the vendor
+#     still hosts that version.
+#
 # The build installs the headers, derives the exact kernelrelease, runs
 # build-prebuilt-ko.sh against it (same patches + relax-cflags as the on-device
-# DKMS build), and emits the artifact + a manifest row. The publish job folds
-# the rows into drivers-manifest.json and ships everything as Release assets.
-#
-# Coverage is the stock-kernel boards (Pi 3 / 4 / 5 / Zero 2 W) where the
-# on-device compile is pure overhead. Vendor-BSP boards (e.g. RK3588 Radxa)
-# keep the DKMS fallback: their headers packages age out of the public repo
-# and are pinned to the flashed image, so a reproducible CI build is not
-# durable. To add one later, pin its exact headers package + keyring from a
-# live rig's apt cache and give it its own matrix row + container.
+# DKMS build), and emits the artifact + a manifest row. The publish job folds the
+# rows into drivers-manifest.json and ships everything as Release assets.
 #
 # Triggers:
 #   - tag 'drivers-v*'   -> permanent stable Release (signed when the key
@@ -45,24 +54,31 @@ permissions:
   contents: write
 
 jobs:
+  matrix:
+    name: load matrix
+    runs-on: ubuntu-24.04-arm
+    outputs:
+      include: ${{ steps.load.outputs.include }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: load
+        name: Load the blessed-image matrix
+        run: |
+          set -euo pipefail
+          command -v jq >/dev/null || { sudo apt-get update && sudo apt-get install -y jq; }
+          # driver-matrix.json is a JSON array of row objects; feed it straight
+          # into strategy.matrix.include via fromJSON.
+          echo "include=$(jq -c . .github/driver-matrix.json)" >> "$GITHUB_OUTPUT"
+
   build:
     name: build (${{ matrix.flavor }})
+    needs: matrix
     runs-on: ubuntu-24.04-arm
     container: ${{ matrix.container }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # Raspberry Pi OS arm64 default kernel (Pi 3 / 4 / 400 / Zero 2 W).
-          - flavor: rpi-v8
-            container: debian:trixie
-            apt_list: "deb [trusted=yes] http://archive.raspberrypi.org/debian trixie main"
-            headers_pkg: linux-headers-rpi-v8
-          # Raspberry Pi 5 (BCM2712) kernel.
-          - flavor: rpi-2712
-            container: debian:trixie
-            apt_list: "deb [trusted=yes] http://archive.raspberrypi.org/debian trixie main"
-            headers_pkg: linux-headers-rpi-2712
+        include: ${{ fromJSON(needs.matrix.outputs.include) }}
     steps:
       # The container base is minimal; checkout needs git, and apt fetches need
       # TLS roots. Install both before actions/checkout can run.
@@ -82,23 +98,50 @@ jobs:
           DEBIAN_FRONTEND=noninteractive apt-get install -y \
             build-essential bc kmod patch minisign gnupg curl jq libelf-dev
 
-      - name: Add vendor kernel apt repo
+      - name: Add vendor kernel apt repo (group A)
+        if: ${{ matrix.headers_source == 'apt' }}
         run: |
           set -euxo pipefail
-          # trusted=yes skips upstream repo-signature verification. trixie's apt
-          # uses Sequoia (sqv), which rejects the raspberrypi.org archive key for
-          # its legacy SHA1 binding signature. Repo-signature verification of the
-          # public headers feed is not our trust boundary: the .ko we publish
-          # carries its own SHA256 (and minisign signature when a key is set), so
-          # the artifact's integrity does not depend on the upstream apt signature.
+          # trusted=yes skips upstream repo-signature verification. Repo-signature
+          # verification of the public headers feed is not our trust boundary: the
+          # .ko we publish carries its own SHA256 (and minisign signature when a
+          # key is set), so the artifact's integrity does not depend on the
+          # upstream apt signature. (An optional apt_key_url can still be pinned.)
           echo "${{ matrix.apt_list }}" | tee /etc/apt/sources.list.d/vendor-kernel.list
+          if [ -n "${{ matrix.apt_key_url }}" ]; then
+            curl -fsSL "${{ matrix.apt_key_url }}" -o /etc/apt/trusted.gpg.d/vendor-kernel.asc || true
+          fi
           apt-get update
 
-      - name: Install kernel headers + derive kernelrelease
-        id: kver
+      - name: Install kernel headers from apt (group A)
+        if: ${{ matrix.headers_source == 'apt' }}
         run: |
           set -euxo pipefail
           DEBIAN_FRONTEND=noninteractive apt-get install -y "${{ matrix.headers_pkg }}"
+
+      - name: Install kernel headers from a pinned .deb (group B / BSP)
+        if: ${{ matrix.headers_source == 'deb' }}
+        run: |
+          set -euxo pipefail
+          # headers_deb_url is one or more space-separated tokens; each is either a
+          # full URL or "<release-tag>/<asset>" on this repo's releases (e.g. a
+          # kernel-headers .deb captured from a live rig + uploaded to bsp-headers).
+          mkdir -p /tmp/hdr
+          for tok in ${{ matrix.headers_deb_url }}; do
+            case "$tok" in
+              http*) url="$tok" ;;
+              *)     url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${tok}" ;;
+            esac
+            echo "fetching ${url}"
+            curl -fsSL "$url" -o "/tmp/hdr/$(basename "$tok")"
+          done
+          # Local .deb install pulls deps (linux-base, etc.) from the base repos.
+          DEBIAN_FRONTEND=noninteractive apt-get install -y /tmp/hdr/*.deb
+
+      - name: Derive kernelrelease
+        id: kver
+        run: |
+          set -euxo pipefail
           # The headers install drops /lib/modules/<KVER>/build; that <KVER> is
           # the exact release the module must match. Pick the newest dir that
           # actually has a build/ tree (find avoids ls-parsing pitfalls).
