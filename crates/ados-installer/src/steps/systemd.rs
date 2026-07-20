@@ -558,9 +558,27 @@ fn deploy_udev_rules(udev_src: &Path) -> usize {
     }
     if count > 0 {
         let _ = exec::run("udevadm", &["control", "--reload"]);
-        let _ = exec::run("udevadm", &["trigger"]);
+        // Apply the freshly-deployed hot-plug rules to devices already present,
+        // but scope the trigger AWAY from the `net` subsystem: a bare trigger
+        // re-runs net_setup_link on the live management interface (e.g. wlan0),
+        // which re-applies any pinned MAC and drops the operator's link mid-run.
+        // (Same hazard `install_power_hardening` avoids by scoping to usb.) The
+        // net-targeting rule here — WiFi power-save off — is already re-asserted
+        // by the ados-power boot oneshot and the supervisor's runtime backstop.
+        let _ = exec::run("udevadm", &["trigger", "--subsystem-nomatch=net"]);
     }
     count
+}
+
+/// Write `contents` to `path` atomically (a temp file in the same directory,
+/// then rename). A process killed mid-write then leaves either the old file or
+/// the complete new one — never a truncated/0-byte file. The front-cutover
+/// drop-ins use this so an interrupted install can never strand the control
+/// surface on the wrong LAN port with an empty `ADOS_CONTROL_PORT`.
+fn write_atomic(path: &Path, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, contents)?;
+    std::fs::rename(&tmp, path)
 }
 
 /// Create `/run/ados` (+ tmpfiles rule) so the Unix sockets have a home that
@@ -809,9 +827,9 @@ fn reconcile_front_unit() {
     let api_dropin = Path::new(FRONT_API_DROPIN_DIR).join(FRONT_DROPIN_NAME);
     if front_on {
         let _ = std::fs::create_dir_all(FRONT_CONTROL_DROPIN_DIR);
-        let _ = std::fs::write(&control_dropin, front_control_dropin_body());
+        let _ = write_atomic(&control_dropin, front_control_dropin_body());
         let _ = std::fs::create_dir_all(FRONT_API_DROPIN_DIR);
-        let _ = std::fs::write(&api_dropin, front_api_dropin_body());
+        let _ = write_atomic(&api_dropin, front_api_dropin_body());
         let _ = exec::run("systemctl", &["daemon-reload"]);
         tracing::info!("front cutover: native control surface bound to the LAN port");
     } else {

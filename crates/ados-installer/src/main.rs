@@ -25,9 +25,35 @@ use ados_installer::ui;
 use ados_installer::uninstall;
 use ados_installer::wizard::{self, WizardControl};
 
+/// Ignore `SIGHUP` so a controlling-terminal hangup (a dropped SSH session)
+/// cannot kill the running install. Best-effort and idempotent; a failure to
+/// install the disposition just leaves the default. Linux-only: the macOS path
+/// runs under launchd, not a foreground SSH pty.
+#[cfg(target_os = "linux")]
+fn ignore_sighup() {
+    use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
+    let action = SigAction::new(SigHandler::SigIgn, SaFlags::empty(), SigSet::empty());
+    // Safety: SigIgn installs no handler function, so there is nothing
+    // async-signal-unsafe to run; mirrors the SIGINT/SIGWINCH setup in ui/tty.
+    unsafe {
+        let _ = sigaction(Signal::SIGHUP, &action);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn ignore_sighup() {}
+
 #[tokio::main]
 async fn main() -> Result<ExitCode> {
     init_logging();
+    // Survive a dropped controlling terminal. An install run over SSH sits in the
+    // foreground process group of the operator's pty; if a mid-install network
+    // reconfig churns that link (e.g. a Wi-Fi IP change), the pty hangup delivers
+    // SIGHUP to the install and kills it — stranding a half-completed state.
+    // Ignoring SIGHUP lets every install step finish regardless of the operator's
+    // link; the interactive UI keeps its own /dev/tty handle and degrades cleanly
+    // if that terminal goes away.
+    ignore_sighup();
 
     let args = match Args::from_env() {
         Ok(a) => a,
