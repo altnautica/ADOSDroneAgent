@@ -56,6 +56,9 @@ from ados.core.paths import (
     TOUCH_CALIB_PATH,
 )
 from ados.services.ui.display_conf import read_rotation
+from ados.services.ui.touch.libinput_calibration import (
+    regenerate_from_calibration as regenerate_hdmi_touch_calibration,
+)
 from ados.services.ui.touch.recent import recent_touches
 from ados.services.ui.touch.session import (
     STEP_COUNT,
@@ -334,6 +337,15 @@ async def post_calibrate_save() -> dict[str, Any]:
             "rms_residual_px": rms,
             "error": error or "save_failed",
         }
+    # An HDMI touch display is consumed by cage/libinput, not the SPI-LCD
+    # framebuffer reader, so a fresh fit must be pushed into the libinput
+    # calibration matrix too. This is a no-op on an SPI-LCD panel (the
+    # framebuffer reader picks up touch.calib directly). Best-effort: a udev
+    # write failure never fails the calibration the operator just completed.
+    try:
+        regenerate_hdmi_touch_calibration()
+    except Exception as exc:  # noqa: BLE001 - never fail a good calibration
+        log.warning("hdmi_touch_calibration_regen_failed", error=str(exc))
     return {"ok": True, "rms_residual_px": rms}
 
 

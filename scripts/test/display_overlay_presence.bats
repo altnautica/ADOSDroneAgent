@@ -30,7 +30,8 @@ setup() {
     ETC="${TMP}/etc/ados"
     MODLOAD="${TMP}/modules-load.d"
     BOOT="${TMP}/boot"
-    mkdir -p "${ETC}" "${MODLOAD}" "${BOOT}/extlinux"
+    UDEV="${TMP}/udev/rules.d"
+    mkdir -p "${ETC}" "${MODLOAD}" "${BOOT}/extlinux" "${UDEV}"
     # A plausible pre-existing boot config so a "no boot-config change"
     # assertion has something to compare against.
     printf 'LABEL ados\n  kernel /vmlinuz\n  fdt /board.dtb\n  append root=/dev/mmcblk0p2 rw\n' \
@@ -80,6 +81,7 @@ run_overlay() {
         ADOS_ETC_DIR="${ETC}" \
         ADOS_MODULES_LOAD_DIR="${MODLOAD}" \
         ADOS_BOOT_DIR="${BOOT}" \
+        ADOS_UDEV_RULES_DIR="${UDEV}" \
         ADOS_SYS_GRAPHICS_DIR="${SYS_GRAPHICS}" \
         ADOS_SYS_INPUT_DIR="${SYS_INPUT}" \
         ADOS_SYS_DRM_DIR="${SYS_DRM}" \
@@ -202,19 +204,101 @@ EOF
 }
 
 # -----------------------------------------------------------------------------
-# HDMI present -> marker written (kiosk surface), display_id=none, no boot edit
+# HDMI present on a board with NO touch panel -> marker written (kiosk surface),
+# display_id=none, no boot edit. pi-zero-2w declares no hdmi-touch display, so
+# plain HDMI stays video-only (the kiosk binds the DRM framebuffer directly).
 # -----------------------------------------------------------------------------
 
-@test "HDMI connected: marker written, display_id=none, no boot change" {
+@test "HDMI connected (no touch panel): marker written, display_id=none, no boot change" {
     mock_hdmi_connected
-    run_overlay rock-5c-lite
+    run_overlay pi-zero-2w
     [ "$status" -eq 0 ]
     grep -q '^display_id=none' "${ETC}/display.conf"
     grep -q '^display_presence=hdmi' "${ETC}/display.conf"
     # A display surface exists, so the marker IS written for the kiosk.
     [ -f "${ETC}/display.enabled" ]
     [ ! -f "${MODLOAD}/ados-display.conf" ]
+    [ ! -f "${UDEV}/99-ados-hdmi-touch.rules" ]
     [ "$(_hash_tree "${BOOT}")" = "${BOOT_BEFORE_HASH}" ]
+}
+
+# -----------------------------------------------------------------------------
+# HDMI present on a board that DECLARES an HDMI-touch panel -> provision the
+# touch-only overlay: compile + activate, load ads7846 (only), write the
+# LIBINPUT_CALIBRATION_MATRIX udev rule, and record the touch config so the
+# calibration wizard can regenerate the matrix. rock-5c-lite declares the
+# hdmi_touch_xpt2046 display; stub cpp/dtc/update-u-boot so the compile +
+# armbian activate run without real headers.
+# -----------------------------------------------------------------------------
+
+@test "HDMI connected + board declares hdmi-touch: touch overlay + udev matrix + ads7846" {
+    mock_hdmi_connected
+    # Stub the overlay toolchain so the upstream compile + armbian activate
+    # complete without real dt-bindings headers.
+    cat > "${TMP}/bin/dtc" <<'EOF'
+#!/usr/bin/env bash
+out=""; prev=""
+for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done
+[ -n "$out" ] && printf 'FAKEDTBO' > "$out"
+exit 0
+EOF
+    cat > "${TMP}/bin/cpp" <<'EOF'
+#!/usr/bin/env bash
+out=""; inp=""; prev=""
+for a in "$@"; do
+    if [ "$prev" = "-o" ]; then out="$a"
+    elif [ "${a#-}" = "$a" ] && [ -f "$a" ]; then inp="$a"; fi
+    prev="$a"
+done
+[ -n "$out" ] && [ -n "$inp" ] && grep -v '^#' "$inp" > "$out"
+exit 0
+EOF
+    cat > "${TMP}/bin/update-u-boot" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "${TMP}/bin/dtc" "${TMP}/bin/cpp" "${TMP}/bin/update-u-boot"
+    # Armbian activation path: an armbianEnv.txt + update-u-boot on PATH.
+    echo "user_overlays=" > "${BOOT}/armbianEnv.txt"
+
+    run env \
+        PATH="${TMP}/bin:${PATH}" \
+        ADOS_OVERLAY_ALLOW_NONROOT=1 \
+        ADOS_BOARD_ID="rock-5c-lite" \
+        ADOS_DISPLAY="auto" \
+        ADOS_ETC_DIR="${ETC}" \
+        ADOS_MODULES_LOAD_DIR="${MODLOAD}" \
+        ADOS_BOOT_DIR="${BOOT}" \
+        ADOS_UDEV_RULES_DIR="${UDEV}" \
+        ADOS_SYS_GRAPHICS_DIR="${SYS_GRAPHICS}" \
+        ADOS_SYS_INPUT_DIR="${SYS_INPUT}" \
+        ADOS_SYS_DRM_DIR="${SYS_DRM}" \
+        ADOS_DEV_DRI_DIR="${DEV_DRI}" \
+        ADOS_I2CDETECT_BIN="${I2CBIN}" \
+        bash "${SCRIPT}"
+    [ "$status" -eq 0 ]
+    # Resolved to the HDMI-touch panel, not none.
+    grep -q '^display_id=hdmi_touch_xpt2046' "${ETC}/display.conf"
+    grep -q '^type=hdmi-touch' "${ETC}/display.conf"
+    grep -q '^has_touch=true' "${ETC}/display.conf"
+    grep -q '^touch_chip=ADS7846' "${ETC}/display.conf"
+    # No framebuffer: video is HDMI.
+    grep -q '^framebuffer_path=$' "${ETC}/display.conf"
+    grep -q '^touch_device_name=ADS7846 Touchscreen' "${ETC}/display.conf"
+    grep -q '^libinput_calibration_matrix=' "${ETC}/display.conf"
+    # Marker written (a display surface + touch device exist).
+    [ -f "${ETC}/display.enabled" ]
+    # modules-load carries ONLY ads7846 (no fbtft framebuffer stack).
+    [ -f "${MODLOAD}/ados-display.conf" ]
+    grep -q '^ads7846$' "${MODLOAD}/ados-display.conf"
+    ! grep -q '^fbtft$' "${MODLOAD}/ados-display.conf"
+    ! grep -q '^fb_ili9486$' "${MODLOAD}/ados-display.conf"
+    # The udev calibration rule is written for the touch device.
+    [ -f "${UDEV}/99-ados-hdmi-touch.rules" ]
+    grep -q 'LIBINPUT_CALIBRATION_MATRIX' "${UDEV}/99-ados-hdmi-touch.rules"
+    grep -q 'ADS7846 Touchscreen' "${UDEV}/99-ados-hdmi-touch.rules"
+    # The touch-only overlay was installed under /boot/dtbo.
+    [ -f "${BOOT}/dtbo/rk3588-spi4-m2-cs1-xpt2046-touch.dtbo" ]
 }
 
 # -----------------------------------------------------------------------------

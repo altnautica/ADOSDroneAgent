@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from ados.core.logging import get_logger
 from ados.core.paths import BOARD_OVERRIDE_PATH as _BOARD_OVERRIDE_PATH
@@ -38,6 +38,48 @@ class DisplayGpio(BaseModel):
     direction: Literal["out", "in"]
 
 
+class DisplayTouch(BaseModel):
+    """A standalone SPI resistive-touch controller attached to an HDMI display.
+
+    Models an XPT2046 / ADS7846-compatible resistive touch controller that
+    is wired to an SPI bus but has NO framebuffer panel of its own — the
+    video comes over HDMI, only the touch overlay rides SPI. The installer
+    compiles a touch-only device-tree overlay (an ``ads7846`` node with the
+    pendown IRQ, no ILI9486 panel) and writes a ``LIBINPUT_CALIBRATION_MATRIX``
+    udev rule so cage/libinput maps the resistive contact onto the HDMI
+    output. It is the counterpart to the framebuffer fields on
+    :class:`DisplayBinding`, which model an SPI-LCD panel instead.
+
+    ``bus`` is the SPI controller id (``spi4`` on RK3588 maps to the
+    ``spi@feb40000`` node). ``cs`` is the chip-select slot the touch chip
+    sits on. ``irq`` is the pendown-interrupt GPIO — the ADS7846 PENIRQ line
+    is open-drain active-low, so the overlay declares it ``GPIO_ACTIVE_LOW``.
+    The device-tree overlay itself is named by the parent binding's
+    ``overlay_ref``/``overlay_source``.
+
+    ``x_min``/``x_max``/``y_min``/``y_max`` are the raw 12-bit ADC bounds the
+    touch overlay actually reports at the panel edges. A resistive panel
+    rarely spans the full 0..4095 range, so these bounds — together with the
+    ``swap_xy``/``invert_x``/``invert_y`` orientation flags — are what the
+    installer turns into the initial ``LIBINPUT_CALIBRATION_MATRIX``. They are
+    a best-guess baseline; the on-screen calibration wizard refits them on
+    the rig and regenerates the udev matrix.
+    """
+
+    controller: str = "XPT2046"
+    bus: str
+    cs: int = 0
+    irq: DisplayGpio
+    x_min: int = 0
+    x_max: int = 4095
+    y_min: int = 0
+    y_max: int = 4095
+    swap_xy: bool = False
+    invert_x: bool = False
+    invert_y: bool = False
+    modules_required: list[str] = Field(default_factory=lambda: ["ads7846"])
+
+
 class DisplayBinding(BaseModel):
     """One supported display and the wiring it claims on this board.
 
@@ -52,10 +94,17 @@ class DisplayBinding(BaseModel):
     the BSP already provides a compiled DTBO and the installer activates
     it; the fallback path vendors a copy of the upstream source under
     ``data/overlays/upstream/`` when the BSP overlay set is absent.
+
+    ``type = "hdmi-touch"`` describes an HDMI display carrying a standalone
+    SPI resistive-touch controller. Video arrives over HDMI (the kernel DRM
+    driver owns the framebuffer, so the ``framebuffer``/``controller`` panel
+    fields do not apply), and the SPI touch overlay is modelled by the
+    ``touch`` block. Every other ``type`` describes a panel whose own
+    controller drives the framebuffer.
     """
 
     id: str
-    type: Literal["spi-lcd", "hdmi", "dpi", "mipi-dsi"]
+    type: Literal["spi-lcd", "hdmi", "hdmi-touch", "dpi", "mipi-dsi"]
     controller: str
     touch_chip: str | None = None
     bus: str
@@ -65,6 +114,26 @@ class DisplayBinding(BaseModel):
     gpio: dict[str, DisplayGpio] = Field(default_factory=dict)
     default_rotation: int = 0
     modules_required: list[str] = Field(default_factory=list)
+
+    # Present only on ``type = "hdmi-touch"`` bindings: the standalone SPI
+    # resistive-touch controller wired alongside the HDMI video output.
+    touch: DisplayTouch | None = None
+
+    @model_validator(mode="after")
+    def _touch_required_for_hdmi_touch(self) -> DisplayBinding:
+        """An ``hdmi-touch`` binding must carry a ``touch`` block, and only it.
+
+        The ``touch`` block is the whole point of the ``hdmi-touch`` type, so
+        a binding that declares the type without one is a config error the
+        provisioner cannot act on. Conversely a non-``hdmi-touch`` binding
+        that carries a ``touch`` block is ambiguous, so both are rejected up
+        front rather than silently ignored.
+        """
+        if self.type == "hdmi-touch" and self.touch is None:
+            raise ValueError("type 'hdmi-touch' requires a 'touch' block")
+        if self.type != "hdmi-touch" and self.touch is not None:
+            raise ValueError("'touch' block is only valid on type 'hdmi-touch'")
+        return self
 
 
 class DisplaysSection(BaseModel):

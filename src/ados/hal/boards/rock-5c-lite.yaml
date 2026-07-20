@@ -214,6 +214,52 @@ displays:
         - fb_ili9486
         - ads7846
 
+    # HDMI display carrying a standalone XPT2046 (ADS7846-compatible) SPI
+    # resistive touch layer — video over HDMI, touch over SPI. The installer
+    # compiles the touch-ONLY overlay (an ads7846 node, no framebuffer panel)
+    # and writes a LIBINPUT_CALIBRATION_MATRIX udev rule so cage/chromium
+    # consumes the touch as a standard libinput touchscreen mapped onto the
+    # 800x480 output. This is an ALTERNATIVE wiring to waveshare35a above (a
+    # rig has one or the other, never both), so the touch reuses the same,
+    # proven SPI4-M2 header positions and the GPIO4_B3 PENIRQ line — only CS1
+    # is populated (CS0 stays free) and the ILI9486 panel is stripped.
+    #
+    # TO-VERIFY on hardware (a Rock 5C with an HDMI touch panel): the exact
+    # panel's SPI wiring (bus/CS), the PENIRQ header pin, and the raw ADC edge
+    # bounds. The bounds/orientation below are a best-guess baseline for a
+    # common 800x480 XPT2046 panel; a mis-aligned panel is refit by the
+    # on-screen calibration wizard, which regenerates the udev matrix.
+    - id: hdmi_touch_xpt2046
+      type: hdmi-touch
+      controller: HDMI
+      touch_chip: ADS7846
+      bus: spi4
+      resolution: 800x480
+      overlay_source: upstream-vendored
+      overlay_ref: rk3588-spi4-m2-cs1-xpt2046-touch
+      modules_required:
+        - ads7846
+      touch:
+        controller: XPT2046
+        bus: spi4
+        cs: 1
+        irq:
+          pin: GPIO4_B3     # PENIRQ, header pin 11 (proven on this carrier)
+          pinctrl: default
+          header_pin: 11
+          direction: in
+        # Raw 12-bit ADC bounds at the panel edges (best-guess baseline).
+        x_min: 200
+        x_max: 3900
+        y_min: 200
+        y_max: 3900
+        # Orientation of the resistive layer vs the landscape HDMI output.
+        swap_xy: false
+        invert_x: false
+        invert_y: false
+        modules_required:
+          - ads7846
+
 profiles:
   tier: pro
   max_features:

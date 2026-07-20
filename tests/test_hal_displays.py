@@ -17,6 +17,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pydantic
 import pytest
 import yaml
 
@@ -26,6 +27,7 @@ from ados.hal.detect import (
     DisplayBinding,
     DisplayGpio,
     DisplaysSection,
+    DisplayTouch,
     _load_board_profiles,
 )
 
@@ -131,8 +133,14 @@ class TestRock5cLiteDisplay:
     def profile(self) -> BoardProfile:
         return _load_yaml("rock-5c-lite.yaml")
 
-    def test_has_one_display(self, profile: BoardProfile):
-        assert len(profile.displays.supported) == 1
+    def test_has_two_displays(self, profile: BoardProfile):
+        # The SPI-LCD panel plus the alternative HDMI-touch wiring.
+        assert len(profile.displays.supported) == 2
+
+    def test_waveshare35a_is_first(self, profile: BoardProfile):
+        # waveshare35a stays supported[0] so the SPI-LCD auto-default and
+        # every supported[0] presence probe keep pointing at the panel.
+        assert profile.displays.supported[0].id == "waveshare35a"
 
     def test_waveshare35a_metadata(self, profile: BoardProfile):
         binding = profile.displays.supported[0]
@@ -145,6 +153,7 @@ class TestRock5cLiteDisplay:
         # vendored upstream source if the BSP overlay package is absent.
         assert binding.overlay_source == "upstream"
         assert binding.overlay_ref == "rk3588-spi4-m2-cs0-waveshare35"
+        assert binding.touch is None
 
     def test_gpio_pi_pinout_landings(self, profile: BoardProfile):
         gpio_map = profile.displays.supported[0].gpio
@@ -156,6 +165,98 @@ class TestRock5cLiteDisplay:
         assert gpio_map["irq"].header_pin == 11
         assert gpio_map["cs_touch"].pin == "GPIO1_A4"
         assert gpio_map["cs_touch"].header_pin == 26
+
+    def test_hdmi_touch_binding(self, profile: BoardProfile):
+        binding = profile.displays.supported[1]
+        assert binding.id == "hdmi_touch_xpt2046"
+        assert binding.type == "hdmi-touch"
+        assert binding.controller == "HDMI"
+        assert binding.touch_chip == "ADS7846"
+        assert binding.resolution == "800x480"
+        assert binding.overlay_source == "upstream-vendored"
+        assert binding.overlay_ref == "rk3588-spi4-m2-cs1-xpt2046-touch"
+        assert binding.modules_required == ["ads7846"]
+
+    def test_hdmi_touch_block(self, profile: BoardProfile):
+        touch = profile.displays.supported[1].touch
+        assert isinstance(touch, DisplayTouch)
+        assert touch.controller == "XPT2046"
+        assert touch.bus == "spi4"
+        assert touch.cs == 1
+        # PENIRQ on the proven GPIO4_B3 / header pin 11 line, ACTIVE_LOW.
+        assert touch.irq.pin == "GPIO4_B3"
+        assert touch.irq.header_pin == 11
+        assert touch.irq.direction == "in"
+        # Best-guess baseline ADC bounds + neutral orientation.
+        assert (touch.x_min, touch.x_max) == (200, 3900)
+        assert (touch.y_min, touch.y_max) == (200, 3900)
+        assert touch.swap_xy is False
+        assert touch.invert_x is False
+        assert touch.invert_y is False
+
+
+class TestHdmiTouchOverlayFile:
+    def test_touch_overlay_source_exists(self):
+        # The touch overlay basename is on the binding's overlay_ref.
+        binding = _load_yaml("rock-5c-lite.yaml").displays.supported[1]
+        overlay = UPSTREAM_DTS_DIR / f"{binding.overlay_ref}.dts"
+        assert overlay.exists(), f"missing touch overlay source at {overlay}"
+
+    def test_touch_overlay_is_panel_free(self):
+        """The touch overlay must not declare an ILI9486 framebuffer panel."""
+        binding = _load_yaml("rock-5c-lite.yaml").displays.supported[1]
+        text = (UPSTREAM_DTS_DIR / f"{binding.overlay_ref}.dts").read_text()
+        assert "ti,ads7846" in text
+        assert "ilitek,ili9486" not in text
+        # PENIRQ polarity must stay ACTIVE_LOW (the known-good fix).
+        assert "GPIO_ACTIVE_LOW" in text
+
+
+# ---------------------------------------------------------------------------
+# DisplayTouch / hdmi-touch validation rules
+# ---------------------------------------------------------------------------
+class TestHdmiTouchValidation:
+    def _irq(self) -> dict:
+        return {"pin": "GPIO4_B3", "header_pin": 11, "direction": "in"}
+
+    def test_hdmi_touch_requires_touch_block(self):
+        with pytest.raises(pydantic.ValidationError):
+            DisplayBinding(
+                id="x",
+                type="hdmi-touch",
+                controller="HDMI",
+                bus="spi4",
+                resolution="800x480",
+                overlay_ref="ref",
+            )
+
+    def test_touch_block_rejected_on_non_hdmi_touch(self):
+        with pytest.raises(pydantic.ValidationError):
+            DisplayBinding(
+                id="x",
+                type="spi-lcd",
+                controller="ILI9486",
+                bus="spi4",
+                resolution="480x320",
+                overlay_ref="ref",
+                touch={"bus": "spi4", "irq": self._irq()},
+            )
+
+    def test_hdmi_touch_with_touch_block_is_valid(self):
+        binding = DisplayBinding(
+            id="x",
+            type="hdmi-touch",
+            controller="HDMI",
+            bus="spi4",
+            resolution="800x480",
+            overlay_ref="ref",
+            touch={"bus": "spi4", "cs": 1, "irq": self._irq()},
+        )
+        assert binding.touch is not None
+        # Defaults fill in when omitted.
+        assert binding.touch.controller == "XPT2046"
+        assert binding.touch.x_max == 4095
+        assert binding.touch.modules_required == ["ads7846"]
 
 
 # ---------------------------------------------------------------------------

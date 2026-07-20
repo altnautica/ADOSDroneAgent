@@ -11,9 +11,23 @@ data/overlays/
 ├── README.md                                       ← this file
 ├── upstream/
 │   ├── waveshare35-lcd.dtsi                        ← shared chip-level dtsi
-│   └── rk3588-spi4-m2-cs0-waveshare35.dts          ← Rock 5C/5A/5D
+│   ├── rk3588-spi4-m2-cs0-waveshare35.dts          ← Rock 5C/5A/5D SPI LCD + touch
+│   └── rk3588-spi4-m2-cs1-xpt2046-touch.dts        ← Rock 5C/5A/5D touch-only (HDMI video)
 └── cubie-a7z-waveshare35a.dts                      ← Radxa Cubie A7Z (Allwinner A733)
 ```
+
+The `rk3588-spi4-m2-cs1-xpt2046-touch.dts` overlay is the panel-stripped
+sibling of the Rock 5C SPI-LCD overlay: an `ads7846` touch node on CS1 with
+no ILI9486 framebuffer, for an HDMI display that carries a standalone XPT2046
+resistive-touch layer (video over HDMI, touch over SPI). It is a standalone
+overlay (it does not `#include` the shared dtsi, which declares the panel),
+so it inlines the chip-level touch properties itself and the invariant lint
+skips it with a WARN by design. It keeps the same known-good `GPIO_ACTIVE_LOW`
+PENIRQ polarity + `EDGE_FALLING` trigger. See
+`scripts/drivers/install-display-overlay.sh` (the `hdmi-touch` provisioning
+path) for how it is compiled + activated and how the
+`LIBINPUT_CALIBRATION_MATRIX` udev rule is derived from the board's declared
+touch bounds.
 
 ## The chip-vs-SoC contract
 

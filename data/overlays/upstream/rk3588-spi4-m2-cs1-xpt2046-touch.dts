@@ -1,0 +1,90 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+/*
+ * Touch-ONLY XPT2046 / ADS7846 resistive touch controller on the SPI4
+ * controller's M2 pad mux — no framebuffer panel. Video comes over HDMI;
+ * this overlay only brings up the SPI resistive-touch chip so a generic
+ * HDMI display that carries an XPT2046 touch layer (e.g. a 5"/7" 800x480
+ * HDMI resistive-touch panel) reports a standard libinput touchscreen that
+ * cage/chromium can consume for the kiosk.
+ *
+ * This is the panel-stripped sibling of rk3588-spi4-m2-cs0-waveshare35.dts:
+ * the ILI9486 framebuffer node is removed and only the ads7846 node on CS1
+ * survives, wired to the same SPI4-M2 header positions (the Pi-standard SPI
+ * pins on Rock 5A / 5C / 5D) and the same GPIO4_B3 PENIRQ line. Because the
+ * touch layer is the only SPI device here, CS0 is left free.
+ *
+ * Polarity note: the XPT2046/ADS7846 PENIRQ output is open-drain
+ * active-low with a ~50 kohm internal chip-side pull-up. Combined with the
+ * Rockchip-side pcfg_pull_up from the pinctrl group below, the line idles
+ * HIGH at VCC and only drops to LOW during finger contact. pendown-gpio is
+ * GPIO_ACTIVE_LOW so gpiolib reads "pen down" when the electrical level is
+ * LOW. An ACTIVE_HIGH revision reads "pen permanently down" at idle and "pen
+ * up" on press, so the driver never arms the falling-edge IRQ and
+ * /proc/interrupts stays at 0. Do not flip to ACTIVE_HIGH without an
+ * end-to-end IRQ-counter increment proof — see data/overlays/README.md.
+ *
+ * Pinmux note: the PENIRQ pin also needs an explicit pinctrl group that puts
+ * gpio4 PB3 into RK_FUNC_GPIO with pcfg_pull_up. Without it,
+ * /sys/kernel/debug/pinctrl reports "(MUX UNCLAIMED)" and the line bias is
+ * undefined.
+ *
+ * Calibration note: this overlay leaves the driver's default 12-bit ABS
+ * range (0..4095). The declared touch bounds (ti,x/y-min/max in the HAL
+ * board YAML) and the swap/invert orientation flags are turned into a
+ * LIBINPUT_CALIBRATION_MATRIX udev rule by install-display-overlay.sh, so
+ * libinput does the mapping onto the HDMI output. The on-screen calibration
+ * wizard refits and regenerates that matrix on the rig.
+ */
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/pinctrl/rockchip.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+
+/dts-v1/;
+/plugin/;
+
+/ {
+    metadata {
+        title = "Enable XPT2046 resistive touch (touch-only) on SPI4";
+        compatible = "radxa,rock-5a", "radxa,rock-5c", "radxa,rock-5d";
+        category = "misc";
+        exclusive = "GPIO1_A0", "GPIO1_A1", "GPIO1_A2", "GPIO1_A3", "GPIO1_A4", "GPIO4_B3";
+        description = "Bring up an XPT2046/ADS7846 SPI resistive touch controller (no panel) on SPI4 for an HDMI touch display.";
+    };
+};
+
+&spi4 {
+    status = "okay";
+    #address-cells = <1>;
+    #size-cells = <0>;
+    pinctrl-names = "default";
+    pinctrl-0 = <&spi4m2_pins>;
+    num-cs = <2>;
+    cs-gpios = <&gpio1 RK_PA3 GPIO_ACTIVE_LOW
+                &gpio1 RK_PA4 GPIO_ACTIVE_LOW>;
+
+    touchscreen@1 {
+        compatible = "ti,ads7846";
+        status = "okay";
+        reg = <1>;
+        spi-max-frequency = <2000000>;
+        pinctrl-names = "default";
+        pinctrl-0 = <&ads7846_irq>;
+        interrupt-parent = <&gpio4>;
+        interrupts = <RK_PB3 IRQ_TYPE_EDGE_FALLING>;
+        pendown-gpio = <&gpio4 RK_PB3 GPIO_ACTIVE_LOW>;
+        vcc-supply = <&vcc5v0_sys>;
+        ti,x-plate-ohms = /bits/ 16 <60>;
+        ti,pressure-max = /bits/ 16 <255>;
+        ti,swap-xy = <0>;
+        touchscreen-max-pressure = <255>;
+    };
+};
+
+&pinctrl {
+    ados-xpt2046 {
+        ads7846_irq: ads7846-irq {
+            rockchip,pins = <4 RK_PB3 RK_FUNC_GPIO &pcfg_pull_up>;
+        };
+    };
+};

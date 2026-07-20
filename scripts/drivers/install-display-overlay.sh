@@ -105,6 +105,10 @@ MODULES_LOAD_DIR="${ADOS_MODULES_LOAD_DIR:-/etc/modules-load.d}"
 BOOT_DIR="${ADOS_BOOT_DIR:-/boot}"
 DISPLAY_CONF="${ADOS_DISPLAY_CONF:-${ETC_ADOS_DIR}/display.conf}"
 MODULES_LOAD_FILE="${ADOS_MODULES_LOAD_FILE:-${MODULES_LOAD_DIR}/ados-display.conf}"
+# udev rules dir + the HDMI-touch calibration rule. Overridable so the bats
+# suite can assert the LIBINPUT_CALIBRATION_MATRIX rule lands under a temp tree.
+UDEV_RULES_DIR="${ADOS_UDEV_RULES_DIR:-/etc/udev/rules.d}"
+UDEV_TOUCH_RULE_FILE="${ADOS_UDEV_TOUCH_RULE_FILE:-${UDEV_RULES_DIR}/99-ados-hdmi-touch.rules}"
 # Persistent marker written only when a panel is provisioned or a present
 # panel is recognized; removed on the no-display path. Services that drive a
 # display gate on it so they skip cleanly when no panel is attached.
@@ -286,6 +290,134 @@ display_key_from_yaml() {
     ' "${yaml}" 2>/dev/null
 }
 
+# Echo the id of the FIRST display in a board's YAML whose type matches
+# ``want_type`` (e.g. "hdmi-touch"), or nothing when none is declared. Same
+# block scoping as display_type_from_yaml. Pure awk so it works on a fresh
+# BSP without PyYAML.
+first_display_of_type() {
+    local board="$1" want_type="$2"
+    local yaml="${REPO_ROOT}/src/ados/hal/boards/${board}.yaml"
+    [ -f "${yaml}" ] || return 0
+    awk -v want="${want_type}" '
+        /^displays:/ { in_displays = 1; next }
+        in_displays && /^[^[:space:]]/ { in_displays = 0 }
+        in_displays {
+            if ($0 ~ /^[[:space:]]*-[[:space:]]*id:[[:space:]]*/) {
+                line = $0
+                sub(/^[[:space:]]*-[[:space:]]*id:[[:space:]]*/, "", line)
+                gsub(/[[:space:]]/, "", line)
+                cur_id = line
+                next
+            }
+            if ($0 ~ /^[[:space:]]*type:[[:space:]]*/) {
+                line = $0
+                sub(/^[[:space:]]*type:[[:space:]]*/, "", line)
+                gsub(/[[:space:]]/, "", line)
+                if (line == want) { print cur_id; exit }
+            }
+        }
+    ' "${yaml}" 2>/dev/null
+}
+
+# Read a scalar key from the nested ``touch:`` block of a display entry
+# (e.g. the HDMI-touch bounds x_min / swap_xy). Scoped to the display item by
+# id, then to its ``touch:`` sub-block by indentation. Echoes the value or
+# nothing. Pure awk; no PyYAML dependency on a fresh BSP.
+display_touch_key_from_yaml() {
+    local board="$1" display="$2" key="$3"
+    local yaml="${REPO_ROOT}/src/ados/hal/boards/${board}.yaml"
+    [ -f "${yaml}" ] || return 0
+    awk -v want="${display}" -v key="${key}" '
+        function indent(s,   n) { n = 0; while (substr(s, n + 1, 1) == " ") n++; return n }
+        /^displays:/ { in_displays = 1; next }
+        in_displays && /^[^[:space:]]/ { in_displays = 0 }
+        in_displays {
+            if ($0 ~ /^[[:space:]]*-[[:space:]]*id:[[:space:]]*/) {
+                line = $0
+                sub(/^[[:space:]]*-[[:space:]]*id:[[:space:]]*/, "", line)
+                gsub(/[[:space:]]/, "", line)
+                cur_id = line
+                in_touch = 0
+                next
+            }
+            if (cur_id == want && $0 ~ /^[[:space:]]*touch:[[:space:]]*$/) {
+                in_touch = 1
+                touch_indent = indent($0)
+                next
+            }
+            if (in_touch) {
+                # A line at or shallower than the touch: key closes the block.
+                if ($0 ~ /[^[:space:]]/ && indent($0) <= touch_indent) {
+                    in_touch = 0
+                } else if ($0 ~ ("^[[:space:]]*" key ":[[:space:]]*")) {
+                    line = $0
+                    sub(("^[[:space:]]*" key ":[[:space:]]*"), "", line)
+                    gsub(/[[:space:]]/, "", line)
+                    print line
+                    exit
+                }
+            }
+        }
+    ' "${yaml}" 2>/dev/null
+}
+
+# Compute the 6-value libinput LIBINPUT_CALIBRATION_MATRIX from raw ADC edge
+# bounds + orientation flags, echoed as "a b c d e f". The touch overlay
+# leaves the ads7846 driver at its default 0..4095 range, so libinput
+# normalizes n = raw / 4095 before applying this matrix; the matrix maps the
+# declared touch area onto normalized 0..1 output. Mirrors
+# ados.services.ui.touch.libinput_calibration.matrix_from_bounds (both are
+# unit-tested against each other). swap/invert args are "1"/"0".
+compute_libinput_matrix() {
+    local x_min="$1" x_max="$2" y_min="$3" y_max="$4"
+    local swap="$5" invert_x="$6" invert_y="$7"
+    awk -v xmin="${x_min}" -v xmax="${x_max}" -v ymin="${y_min}" -v ymax="${y_max}" \
+        -v swap="${swap}" -v ix="${invert_x}" -v iy="${invert_y}" '
+        BEGIN {
+            adc = 4095
+            spanx = xmax - xmin; spany = ymax - ymin
+            if (spanx <= 0) { xmin = 0; spanx = adc }
+            if (spany <= 0) { ymin = 0; spany = adc }
+            ax = adc / spanx; cx = -xmin / spanx
+            ay = adc / spany; cy = -ymin / spany
+            if (ix == "1") { sx = -ax; ox = 1 - cx } else { sx = ax; ox = cx }
+            if (iy == "1") { sy = -ay; oy = 1 - cy } else { sy = ay; oy = cy }
+            if (swap == "1") {
+                # screen X <- touch Y, screen Y <- touch X
+                a = 0; b = sy; c = oy; d = sx; e = 0; f = ox
+            } else {
+                a = sx; b = 0; c = ox; d = 0; e = sy; f = oy
+            }
+            printf "%.6g %.6g %.6g %.6g %.6g %.6g", a, b, c, d, e, f
+        }
+    '
+}
+
+# Write the LIBINPUT_CALIBRATION_MATRIX udev rule for the HDMI touch device.
+# cage/libinput reads it and maps the resistive contact onto the HDMI output.
+# The touch device only appears after the SPI overlay loads (a reboot), so the
+# rule is written now and the reload is best-effort.
+write_hdmi_touch_udev_rule() {
+    local device_name="$1" matrix="$2"
+    install -d -m 0755 "${UDEV_RULES_DIR}"
+    cat > "${UDEV_TOUCH_RULE_FILE}" <<EOF
+# Written by scripts/drivers/install-display-overlay.sh. Maps an HDMI display's
+# XPT2046/ADS7846 resistive touch onto the output for cage/libinput.
+# Regenerated by the calibration wizard (POST /api/v1/display/calibrate/save)
+# when the touch is recalibrated on the rig.
+SUBSYSTEM!="input", GOTO="ados_hdmi_touch_end"
+ATTRS{name}=="${device_name}", ENV{LIBINPUT_CALIBRATION_MATRIX}="${matrix}"
+LABEL="ados_hdmi_touch_end"
+EOF
+    chmod 0644 "${UDEV_TOUCH_RULE_FILE}"
+    info "Wrote ${UDEV_TOUCH_RULE_FILE} (LIBINPUT_CALIBRATION_MATRIX=${matrix})."
+    # Best-effort live reload; the device binds on the next boot regardless.
+    if command -v udevadm >/dev/null 2>&1; then
+        udevadm control --reload-rules >/dev/null 2>&1 || true
+        udevadm trigger --subsystem-match=input >/dev/null 2>&1 || true
+    fi
+}
+
 # Map an SPI-LCD controller name (ILI9486 / ST7789V / ...) to the fbtft
 # driver name the kernel exports under /sys/class/graphics/fbN/name. The
 # panel is "bound" only when one of those framebuffers reports this name.
@@ -442,14 +574,31 @@ if [ "${DISPLAY_ID}" = "auto" ]; then
         DISPLAY_PRESENCE="spi-bound"
         info "SPI-LCD panel '${DISPLAY_ID}' is already bound at /dev/${BOUND_FB}; recognizing it (no boot-config change)."
     elif detect_hdmi; then
-        DISPLAY_PRESENCE="hdmi"
-        info "HDMI display connected; auto mode resolves to the HDMI/kiosk path."
-        # No HDMI overlay panel is modelled in the board YAML today; the
-        # kiosk path is owned by the kiosk service, which binds to the DRM
-        # framebuffer directly. Treat HDMI as "no SPI panel to provision"
-        # and fall through to the none path, but leave the marker behind so
-        # display-driving services know a display surface exists.
-        DISPLAY_ID="none"
+        # An HDMI display is connected. If the board declares an HDMI display
+        # that carries a standalone SPI resistive-touch layer (hdmi-touch),
+        # provision that touch overlay so the kiosk gets a libinput
+        # touchscreen. Otherwise HDMI is video-only: the kiosk service binds
+        # the DRM framebuffer directly, so there is no SPI panel to provision
+        # — leave the marker and fall through to the none path.
+        hdmi_touch_id="$(first_display_of_type "${BOARD_ID}" hdmi-touch)"
+        if [ -n "${hdmi_touch_id}" ]; then
+            DISPLAY_PRESENCE="hdmi-touch"
+            DISPLAY_ID="${hdmi_touch_id}"
+            info "HDMI display connected and board declares touch panel '${DISPLAY_ID}'; provisioning the SPI touch overlay."
+            # DISPLAY_ID stays the hdmi-touch id; the per-board branch compiles
+            # the touch-only overlay, loads ads7846, and writes the udev
+            # calibration matrix. No SPI-LCD probation: there is no framebuffer
+            # to confirm (video is HDMI), and the boot edit is snapshotted.
+        else
+            DISPLAY_PRESENCE="hdmi"
+            info "HDMI display connected; auto mode resolves to the HDMI/kiosk path."
+            # No HDMI touch panel modelled for this board; the kiosk path is
+            # owned by the kiosk service, which binds the DRM framebuffer
+            # directly. Treat HDMI as "no SPI panel to provision" and fall
+            # through to the none path, but leave the marker behind so
+            # display-driving services know a display surface exists.
+            DISPLAY_ID="none"
+        fi
     elif detect_i2c_oled; then
         DISPLAY_PRESENCE="i2c-oled"
         info "I2C OLED detected; auto mode will provision the OLED (module load only, no boot-critical overlay)."
@@ -530,6 +679,12 @@ EOF
     info "No SPI panel provisioned; wrote ${DISPLAY_CONF} (display_id=none, presence=${DISPLAY_PRESENCE})."
     exit 0
 fi
+
+# Resolve the display type once here (a real, non-none display id is now
+# fixed). The shared tail (modules-load, udev, display.conf) branches on it so
+# an HDMI-touch panel loads only ads7846 and writes the libinput matrix, while
+# an SPI-LCD panel keeps the fbtft driver stack + framebuffer config.
+DISPLAY_TYPE="$(display_type_from_yaml "${BOARD_ID}" "${DISPLAY_ID}")"
 
 # ----------------------------------------------------------------------------
 # Build deps (lazy install — only when we are about to compile a DTS)
@@ -854,6 +1009,62 @@ ACTIVATED_VIA="unknown"
 OVERLAY_SOURCE="unknown"
 OVERLAY_REF=""
 
+# HDMI-touch panels are provisioned by a board-family-agnostic path: compile
+# the declared touch-only overlay (an ads7846 node, no framebuffer panel) and
+# activate it with the same bootloader mechanism the SPI-LCD path uses. The
+# udev calibration matrix + ads7846 modules-load land in the shared tail. This
+# runs instead of the per-board panel case below.
+if [ "${DISPLAY_TYPE}" = "hdmi-touch" ]; then
+    ovl_ref="$(display_key_from_yaml "${BOARD_ID}" "${DISPLAY_ID}" overlay_ref)"
+    ovl_src="$(display_key_from_yaml "${BOARD_ID}" "${DISPLAY_ID}" overlay_source)"
+    if [ -z "${ovl_ref}" ]; then
+        error "Display ${DISPLAY_ID} on ${BOARD_ID} declares no overlay_ref."
+        exit 4
+    fi
+    info "Provisioning HDMI touch overlay '${ovl_ref}' for ${DISPLAY_ID} (source=${ovl_src:-upstream-vendored})."
+    case "${ovl_src}" in
+        repo) compile_and_install_repo_dtbo "${BOARD_ID}" "${DISPLAY_ID}" ;;
+        *)    compile_and_install_upstream_dtbo "${ovl_ref}" ;;
+    esac
+    # Activate with the board's bootloader mechanism.
+    case "${BOARD_ID}" in
+        rock-5c-lite|rock-5c)
+            if activate_overlay_rk3588 "${ovl_ref}"; then
+                if [ -f "${BOOT_DIR}/dtbo/managed.list" ] && command -v u-boot-update >/dev/null 2>&1; then
+                    ACTIVATED_VIA="u-boot-update"
+                elif [ -f "${BOOT_DIR}/dtb/rockchip/overlays-list" ]; then
+                    ACTIVATED_VIA="overlays-list"
+                else
+                    ACTIVATED_VIA="armbianEnv"
+                fi
+            else
+                error "Could not activate HDMI touch overlay ${ovl_ref}."
+                exit 3
+            fi
+            ;;
+        cubie-a7z)
+            if activate_overlay_sun55i "${ovl_ref}"; then
+                if [ -f "${BOOT_DIR}/extlinux/extlinux.conf" ]; then
+                    ACTIVATED_VIA="extlinux"
+                elif [ -f "${BOOT_DIR}/orangepiEnv.txt" ]; then
+                    ACTIVATED_VIA="orangepiEnv"
+                elif [ -f "${BOOT_DIR}/armbianEnv.txt" ]; then
+                    ACTIVATED_VIA="armbianEnv"
+                fi
+            else
+                error "Could not activate HDMI touch overlay ${ovl_ref}."
+                exit 3
+            fi
+            ;;
+        *)
+            error "Board ${BOARD_ID} has no HDMI touch overlay activation handler."
+            exit 4
+            ;;
+    esac
+    OVERLAY_SOURCE="${ovl_src:-upstream-vendored}"
+    OVERLAY_REF="${ovl_ref}"
+else
+
 case "${BOARD_ID}" in
     cubie-a7z)
         case "${DISPLAY_ID}" in
@@ -1009,6 +1220,7 @@ case "${BOARD_ID}" in
         exit 0
         ;;
 esac
+fi  # DISPLAY_TYPE hdmi-touch vs per-board panel case
 fi  # SKIP_BOARD_BRANCH guard
 
 # ----------------------------------------------------------------------------
@@ -1063,9 +1275,23 @@ fi
 
 # ----------------------------------------------------------------------------
 # Module load list
+#
+# An HDMI-touch panel loads only the resistive-touch driver (video is HDMI,
+# owned by the kernel DRM driver, so no fbtft framebuffer stack). An SPI-LCD
+# panel loads the fbtft driver stack plus the touch driver.
 # ----------------------------------------------------------------------------
 install -d -m 0755 "${MODULES_LOAD_DIR}"
-cat > "${MODULES_LOAD_FILE}" <<'EOF'
+if [ "${DISPLAY_TYPE}" = "hdmi-touch" ]; then
+    cat > "${MODULES_LOAD_FILE}" <<'EOF'
+# Loaded by ados-display-overlay installer. Drives the SPI resistive-touch
+# chip (ADS7846/XPT2046) exposed under /dev/input/ for an HDMI display. Video
+# is HDMI (kernel DRM), so there is no fbtft framebuffer to load here.
+ads7846
+EOF
+    info "Wrote ${MODULES_LOAD_FILE} (ads7846 only; HDMI touch)"
+    modprobe ads7846 >/dev/null 2>&1 || true
+else
+    cat > "${MODULES_LOAD_FILE}" <<'EOF'
 # Loaded by ados-display-overlay installer. Drives the SPI LCD plus the
 # resistive touch chip exposed under /dev/input/. The framebuffer lands on
 # fb0 or fb1 depending on whether a DRM/HDMI driver also claims a node.
@@ -1073,12 +1299,12 @@ fbtft
 fb_ili9486
 ads7846
 EOF
-info "Wrote ${MODULES_LOAD_FILE}"
-
-# Try to insert the modules now so the panel comes up before reboot.
-modprobe fbtft        >/dev/null 2>&1 || true
-modprobe fb_ili9486   >/dev/null 2>&1 || true
-modprobe ads7846      >/dev/null 2>&1 || true
+    info "Wrote ${MODULES_LOAD_FILE}"
+    # Try to insert the modules now so the panel comes up before reboot.
+    modprobe fbtft        >/dev/null 2>&1 || true
+    modprobe fb_ili9486   >/dev/null 2>&1 || true
+    modprobe ads7846      >/dev/null 2>&1 || true
+fi
 
 # ----------------------------------------------------------------------------
 # Display config — read by the on-board UI service + heartbeat
@@ -1090,6 +1316,46 @@ install -d -m 0755 "${ETC_ADOS_DIR}"
 # binding shape; for waveshare35a both boards land 480x320 portrait
 # (rotation 90). has_touch is true because both DTSes ship with
 # ads7846 status="okay".
+#
+# HDMI-touch panels have no framebuffer of their own (video is HDMI), so they
+# leave FB_PATH/FB_NAME empty and instead carry the libinput touch device name
+# + calibration matrix so the calibration wizard can regenerate the udev rule.
+TOUCH_DEVICE_NAME=""
+LIBINPUT_MATRIX=""
+TOUCH_X_MIN=""
+TOUCH_X_MAX=""
+TOUCH_Y_MIN=""
+TOUCH_Y_MAX=""
+if [ "${DISPLAY_TYPE}" = "hdmi-touch" ]; then
+    CONTROLLER="$(display_key_from_yaml "${BOARD_ID}" "${DISPLAY_ID}" controller)"
+    [ -n "${CONTROLLER}" ] || CONTROLLER="HDMI"
+    TOUCH_CHIP="$(display_key_from_yaml "${BOARD_ID}" "${DISPLAY_ID}" touch_chip)"
+    [ -n "${TOUCH_CHIP}" ] || TOUCH_CHIP="ADS7846"
+    RESOLUTION="$(display_key_from_yaml "${BOARD_ID}" "${DISPLAY_ID}" resolution)"
+    [ -n "${RESOLUTION}" ] || RESOLUTION="800x480"
+    DEFAULT_ROTATION=0
+    HAS_TOUCH="true"
+    # No fbtft framebuffer: the DRM/HDMI driver owns the display.
+    FB_PATH=""
+    FB_NAME=""
+    # The kernel input device name the ads7846 driver reports; the udev rule
+    # and the wizard's regeneration both key on it.
+    TOUCH_DEVICE_NAME="${TOUCH_CHIP} Touchscreen"
+    # Read the declared touch bounds + orientation and compute the initial
+    # LIBINPUT_CALIBRATION_MATRIX. The wizard refits this on the rig.
+    TOUCH_X_MIN="$(display_touch_key_from_yaml "${BOARD_ID}" "${DISPLAY_ID}" x_min)"; [ -n "${TOUCH_X_MIN}" ] || TOUCH_X_MIN=0
+    TOUCH_X_MAX="$(display_touch_key_from_yaml "${BOARD_ID}" "${DISPLAY_ID}" x_max)"; [ -n "${TOUCH_X_MAX}" ] || TOUCH_X_MAX=4095
+    TOUCH_Y_MIN="$(display_touch_key_from_yaml "${BOARD_ID}" "${DISPLAY_ID}" y_min)"; [ -n "${TOUCH_Y_MIN}" ] || TOUCH_Y_MIN=0
+    TOUCH_Y_MAX="$(display_touch_key_from_yaml "${BOARD_ID}" "${DISPLAY_ID}" y_max)"; [ -n "${TOUCH_Y_MAX}" ] || TOUCH_Y_MAX=4095
+    _swap="$(display_touch_key_from_yaml "${BOARD_ID}" "${DISPLAY_ID}" swap_xy)"
+    _invx="$(display_touch_key_from_yaml "${BOARD_ID}" "${DISPLAY_ID}" invert_x)"
+    _invy="$(display_touch_key_from_yaml "${BOARD_ID}" "${DISPLAY_ID}" invert_y)"
+    [ "${_swap}" = "true" ] && _swap=1 || _swap=0
+    [ "${_invx}" = "true" ] && _invx=1 || _invx=0
+    [ "${_invy}" = "true" ] && _invy=1 || _invy=0
+    LIBINPUT_MATRIX="$(compute_libinput_matrix "${TOUCH_X_MIN}" "${TOUCH_X_MAX}" "${TOUCH_Y_MIN}" "${TOUCH_Y_MAX}" "${_swap}" "${_invx}" "${_invy}")"
+    write_hdmi_touch_udev_rule "${TOUCH_DEVICE_NAME}" "${LIBINPUT_MATRIX}"
+else
 case "${DISPLAY_ID}" in
     waveshare35a)
         CONTROLLER="ILI9486"
@@ -1124,6 +1390,7 @@ case "${DISPLAY_ID}" in
         FB_NAME=""
         ;;
 esac
+fi
 
 # Preserve an operator-set rotation from a prior run. The Python
 # helper ados.services.ui.display_conf.write_rotation() and the LCD
@@ -1173,6 +1440,7 @@ cat > "${DISPLAY_CONF}" <<EOF
 # install where the file did not exist.
 display_id=${DISPLAY_ID}
 board=${BOARD_ID}
+type=${DISPLAY_TYPE}
 controller=${CONTROLLER}
 touch_chip=${TOUCH_CHIP}
 has_touch=${HAS_TOUCH}
@@ -1184,6 +1452,20 @@ overlay_source=${OVERLAY_SOURCE}
 overlay_ref=${OVERLAY_REF}
 activated_via=${ACTIVATED_VIA}
 EOF
+# HDMI-touch panels append the libinput touch identity + calibration so the
+# on-screen wizard (POST /api/v1/display/calibrate/save) can regenerate the
+# udev matrix after a refit. Written only when those values are set.
+if [ "${DISPLAY_TYPE}" = "hdmi-touch" ]; then
+    {
+        echo "touch_device_name=${TOUCH_DEVICE_NAME}"
+        echo "libinput_calibration_matrix=${LIBINPUT_MATRIX}"
+        echo "touch_x_min=${TOUCH_X_MIN}"
+        echo "touch_x_max=${TOUCH_X_MAX}"
+        echo "touch_y_min=${TOUCH_Y_MIN}"
+        echo "touch_y_max=${TOUCH_Y_MAX}"
+        echo "udev_rule=${UDEV_TOUCH_RULE_FILE}"
+    } >> "${DISPLAY_CONF}"
+fi
 chmod 0644 "${DISPLAY_CONF}"
 info "Wrote ${DISPLAY_CONF}"
 
