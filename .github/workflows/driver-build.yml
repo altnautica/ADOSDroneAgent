@@ -184,6 +184,12 @@ jobs:
   publish:
     name: publish manifest + modules
     needs: build
+    # Publish whatever rows DID build, even if a row failed. Coverage is
+    # per-kernel-image and additive: one BSP row breaking on a toolchain quirk
+    # must not withhold the other verified .ko's from the fleet. `!cancelled()`
+    # runs this after a partial build; the assemble step below aborts loudly only
+    # if EVERY row failed (nothing to publish).
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/download-artifact@v4
@@ -199,8 +205,16 @@ jobs:
           mkdir -p rel
           find dl -name '8812eu-*.ko' -exec cp {} rel/ \;
           find dl -name '8812eu-*.ko.sha256' -exec cp {} rel/ \;
-          # Fold every per-row JSON into drivers-manifest.json.
-          jq -s '{generated: now | todate, drivers: .}' dl/*/row-*.json > rel/drivers-manifest.json
+          # Collect the per-row manifest fragments that were actually produced.
+          rows=$(find dl -name 'row-*.json')
+          if [ -z "${rows}" ]; then
+            echo "::error::no driver rows built — nothing to publish" >&2
+            exit 1
+          fi
+          echo "publishing $(echo "${rows}" | wc -l) driver row(s):"
+          echo "${rows}"
+          # Fold every produced per-row JSON into drivers-manifest.json.
+          jq -s '{generated: now | todate, drivers: .}' ${rows} > rel/drivers-manifest.json
           ( cd rel && sha256sum drivers-manifest.json > drivers-manifest.json.sha256 )
           cat rel/drivers-manifest.json
 

@@ -63,8 +63,12 @@ fi
 
 # Same flags the DKMS path uses, so the prebuilt matches what the device would
 # have compiled. Optimization is left to the vendored Makefile (it pins -O1);
-# these just relax the warnings newer kernels promote to errors.
-RELAX_CFLAGS="-Wno-error -Wno-misleading-indentation -Wno-address-of-packed-member -Wno-date-time"
+# these just relax the warnings newer kernels promote to errors. The CI
+# container's GCC is newer/stricter than most target boards' and emits
+# stringop-overflow/truncation diagnostics on the vendored driver source that a
+# BSP kernel's -Werror (e.g. RK3566 CONFIG_WERROR) then hard-fails on, so silence
+# those too — harmless on older toolchains that never emit them.
+RELAX_CFLAGS="-Wno-error -Wno-misleading-indentation -Wno-address-of-packed-member -Wno-date-time -Wno-stringop-overflow -Wno-stringop-truncation"
 
 # Match the DKMS path: a large stack so gcc's recursive type analysis does not
 # overflow the default 8 MB and abort with a front-end "Segmentation fault" ICE

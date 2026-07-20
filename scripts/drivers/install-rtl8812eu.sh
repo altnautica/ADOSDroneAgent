@@ -247,7 +247,7 @@ fi
 # the build below) — the crash is in the parser, so the -O level is
 # irrelevant. This patch must happen BEFORE dkms add because dkms copies
 # the source at add time and never re-reads it.
-RELAX_CFLAGS="-Wno-error -Wno-misleading-indentation -Wno-address-of-packed-member -Wno-date-time"
+RELAX_CFLAGS="-Wno-error -Wno-misleading-indentation -Wno-address-of-packed-member -Wno-date-time -Wno-stringop-overflow -Wno-stringop-truncation"
 DKMS_CONF="${VENDOR_DIR}/dkms.conf"
 # Content-aware: re-patch unless our EXACT flags are already present, so a
 # changed RELAX_CFLAGS actually takes effect on a config that carries a
