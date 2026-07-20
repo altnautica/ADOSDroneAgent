@@ -26,6 +26,7 @@
 
 use crate::graph::Step;
 
+pub mod aic8800_tune;
 pub mod config_identity;
 pub mod deps;
 pub mod dkms;
@@ -61,6 +62,7 @@ pub fn full_install_chain() -> Vec<Box<dyn Step>> {
         Box::new(network_mac_pin::NetworkMacPin),
         Box::new(wifi_join::WifiJoin),
         Box::new(rtl_regulatory::RtlRegulatory),
+        Box::new(aic8800_tune::Aic8800Tune),
         Box::new(watchdog::Watchdog),
         Box::new(systemd::Systemd),
         Box::new(start::Start),
@@ -77,7 +79,7 @@ mod tests {
     fn full_chain_orders_cleanly() {
         let steps = full_install_chain();
         let order = topo_order(&steps).expect("the install chain must be a valid DAG");
-        assert_eq!(order.len(), 16);
+        assert_eq!(order.len(), 17);
 
         let pos = |id: &str| order.iter().position(|x| x == id).unwrap();
         // Spot-check the load-bearing edges.
@@ -103,6 +105,10 @@ mod tests {
         assert!(pos("config_identity") < pos("rtl_regulatory"));
         assert!(pos("dkms") < pos("rtl_regulatory"));
         assert!(pos("rtl_regulatory") < pos("systemd"));
+        // The AIC8800 onboard-WiFi stability tune runs after config, before the
+        // radio comes up.
+        assert!(pos("config_identity") < pos("aic8800_tune"));
+        assert!(pos("aic8800_tune") < pos("systemd"));
         // The hardware watchdog arms after the apt/systemd upgrade is done.
         assert!(pos("deps") < pos("watchdog"));
         assert!(pos("systemd") < pos("start"));
