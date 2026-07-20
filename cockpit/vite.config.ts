@@ -8,7 +8,7 @@ import path from "node:path";
 // `ADOS_AGENT=192.168.x.y:8080 npm run dev` when the agent is elsewhere.
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "ADOS_");
-  const target = `http://${env.ADOS_AGENT ?? "skynodepi.local:8080"}`;
+  const target = `http://${env.ADOS_AGENT ?? "localhost:8080"}`;
 
   return {
     base: "/cockpit/",
