@@ -940,6 +940,81 @@ activate_overlay_rk3588() {
     return 1
 }
 
+# ----------------------------------------------------------------------------
+# Raspberry Pi HDMI-touch activation.
+#
+# Unlike the Rockchip / Allwinner path there is NO custom DTS to compile: the
+# Pi firmware ships the `ads7846` device-tree overlay in its overlays dir, so
+# the touch controller is bound by two config.txt directives -- dtparam=spi=on
+# and a parameterized dtoverlay=ads7846 line carrying the SPI chip-select, the
+# PENIRQ GPIO, and the raw ADC bounds declared in the board YAML's touch
+# block. Video stays on HDMI (the vc4-kms-v3d KMS driver, which we must NOT
+# disable here -- that is what drives the HDMI output), so only touch is
+# provisioned. Handles both firmware config locations (current Raspberry Pi OS
+# at /boot/firmware/config.txt, older images at /boot/config.txt). Idempotent:
+# an existing dtparam / dtoverlay line is left in place rather than duplicated.
+# Sets ACTIVATED_VIA on success.
+# ----------------------------------------------------------------------------
+provision_hdmi_touch_rpi() {
+    local pi_config
+    if [ -f "${BOOT_DIR}/firmware/config.txt" ]; then
+        pi_config="${BOOT_DIR}/firmware/config.txt"
+    elif [ -f "${BOOT_DIR}/config.txt" ]; then
+        pi_config="${BOOT_DIR}/config.txt"
+    else
+        error "Pi config.txt not found at ${BOOT_DIR}/firmware/config.txt or ${BOOT_DIR}/config.txt."
+        exit 3
+    fi
+
+    # Read the touch wiring from the board YAML so the dtoverlay reflects the
+    # declared chip-select / PENIRQ / bounds. Fall back to the Waveshare-style
+    # 5" HDMI + XPT2046 defaults when a field is absent.
+    local cs penirq_pin penirq xmin xmax ymin ymax swap swapxy
+    cs="$(display_touch_key_from_yaml "${BOARD_ID}" "${DISPLAY_ID}" cs)"; [ -n "${cs}" ] || cs=1
+    penirq_pin="$(display_touch_key_from_yaml "${BOARD_ID}" "${DISPLAY_ID}" pin)"
+    # The overlay's penirq parameter is the bare BCM GPIO number (GPIO25 -> 25).
+    penirq="$(printf '%s' "${penirq_pin}" | tr -cd '0-9')"; [ -n "${penirq}" ] || penirq=25
+    xmin="$(display_touch_key_from_yaml "${BOARD_ID}" "${DISPLAY_ID}" x_min)"; [ -n "${xmin}" ] || xmin=200
+    xmax="$(display_touch_key_from_yaml "${BOARD_ID}" "${DISPLAY_ID}" x_max)"; [ -n "${xmax}" ] || xmax=3900
+    ymin="$(display_touch_key_from_yaml "${BOARD_ID}" "${DISPLAY_ID}" y_min)"; [ -n "${ymin}" ] || ymin=200
+    ymax="$(display_touch_key_from_yaml "${BOARD_ID}" "${DISPLAY_ID}" y_max)"; [ -n "${ymax}" ] || ymax=3900
+    swap="$(display_touch_key_from_yaml "${BOARD_ID}" "${DISPLAY_ID}" swap_xy)"
+    [ "${swap}" = "true" ] && swapxy=1 || swapxy=0
+
+    local overlay_line="dtoverlay=ads7846,cs=${cs},penirq=${penirq},penirq_pull=2,speed=50000,keep_vref_on=1,swapxy=${swapxy},pmax=255,xohms=150,xmin=${xmin},xmax=${xmax},ymin=${ymin},ymax=${ymax}"
+
+    info "Provisioning HDMI touch on ${BOARD_ID} via ${pi_config} (Pi ships the ads7846 overlay; no DTS compile)."
+
+    # Snapshot config.txt before editing (best-effort). Unlike the SPI-LCD
+    # panel path this edit is NOT boot-critical -- HDMI video runs regardless,
+    # only the touch controller depends on it -- so a snapshot failure warns
+    # and continues rather than aborting the install (Rule 26 fail-soft).
+    snapshot_boot_config "${pi_config}" \
+        || warn "Could not snapshot ${pi_config}; continuing (HDMI-touch edit is not boot-critical)."
+
+    # Ensure SPI is enabled. Uncomment a commented dtparam=spi=on, else append.
+    if grep -qE '^[[:space:]]*#?[[:space:]]*dtparam=spi=on' "${pi_config}"; then
+        sed -i 's|^[[:space:]]*#[[:space:]]*dtparam=spi=on|dtparam=spi=on|' "${pi_config}"
+    else
+        printf '\n# Enabled by ADOS HDMI-touch overlay installer.\ndtparam=spi=on\n' >> "${pi_config}"
+    fi
+
+    # Append the ads7846 touch overlay. Idempotent: skip when a dtoverlay=ads7846
+    # line already exists so a re-run never duplicates it. The Pi firmware
+    # config.txt does not support inline comments, so the marker note lives on
+    # its own preceding line and the presence check keys on the directive.
+    if grep -qE '^[[:space:]]*dtoverlay=ads7846' "${pi_config}"; then
+        info "config.txt already carries a dtoverlay=ads7846 line; leaving it in place."
+    else
+        printf '\n# ADOS HDMI touch: XPT2046 resistive touch on SPI for the HDMI panel.\n%s\n' \
+            "${overlay_line}" >> "${pi_config}"
+        info "Appended ${overlay_line} to ${pi_config}."
+    fi
+
+    ACTIVATED_VIA="config.txt"
+    info "Edits applied to ${pi_config}. Reboot to bind the touch controller."
+}
+
 compile_and_install_repo_dtbo() {
     local board="$1"
     local display="$2"
@@ -1021,40 +1096,54 @@ if [ "${DISPLAY_TYPE}" = "hdmi-touch" ]; then
         error "Display ${DISPLAY_ID} on ${BOARD_ID} declares no overlay_ref."
         exit 4
     fi
-    info "Provisioning HDMI touch overlay '${ovl_ref}' for ${DISPLAY_ID} (source=${ovl_src:-upstream-vendored})."
-    case "${ovl_src}" in
-        repo) compile_and_install_repo_dtbo "${BOARD_ID}" "${DISPLAY_ID}" ;;
-        *)    compile_and_install_upstream_dtbo "${ovl_ref}" ;;
-    esac
-    # Activate with the board's bootloader mechanism.
+    # Two provisioning families. The Raspberry Pi binds the touch via the
+    # firmware-shipped ads7846 overlay (config.txt edit, no DTS compile). The
+    # Rockchip / Allwinner boards compile the declared touch-only overlay and
+    # activate it with their own bootloader mechanism.
     case "${BOARD_ID}" in
-        rock-5c-lite|rock-5c)
-            if activate_overlay_rk3588 "${ovl_ref}"; then
-                if [ -f "${BOOT_DIR}/dtbo/managed.list" ] && command -v u-boot-update >/dev/null 2>&1; then
-                    ACTIVATED_VIA="u-boot-update"
-                elif [ -f "${BOOT_DIR}/dtb/rockchip/overlays-list" ]; then
-                    ACTIVATED_VIA="overlays-list"
-                else
-                    ACTIVATED_VIA="armbianEnv"
-                fi
-            else
-                error "Could not activate HDMI touch overlay ${ovl_ref}."
-                exit 3
-            fi
+        rpi4b|rpi5|pi-zero-2w|raspberrypi)
+            # No custom DTS: the Pi firmware ships the ads7846 overlay. Enable
+            # SPI + append a parameterized dtoverlay=ads7846 line to config.txt.
+            # provision_hdmi_touch_rpi sets ACTIVATED_VIA.
+            provision_hdmi_touch_rpi
             ;;
-        cubie-a7z)
-            if activate_overlay_sun55i "${ovl_ref}"; then
-                if [ -f "${BOOT_DIR}/extlinux/extlinux.conf" ]; then
-                    ACTIVATED_VIA="extlinux"
-                elif [ -f "${BOOT_DIR}/orangepiEnv.txt" ]; then
-                    ACTIVATED_VIA="orangepiEnv"
-                elif [ -f "${BOOT_DIR}/armbianEnv.txt" ]; then
-                    ACTIVATED_VIA="armbianEnv"
-                fi
-            else
-                error "Could not activate HDMI touch overlay ${ovl_ref}."
-                exit 3
-            fi
+        rock-5c-lite|rock-5c|cubie-a7z)
+            info "Provisioning HDMI touch overlay '${ovl_ref}' for ${DISPLAY_ID} (source=${ovl_src:-upstream-vendored})."
+            case "${ovl_src}" in
+                repo) compile_and_install_repo_dtbo "${BOARD_ID}" "${DISPLAY_ID}" ;;
+                *)    compile_and_install_upstream_dtbo "${ovl_ref}" ;;
+            esac
+            # Activate with the board's bootloader mechanism.
+            case "${BOARD_ID}" in
+                rock-5c-lite|rock-5c)
+                    if activate_overlay_rk3588 "${ovl_ref}"; then
+                        if [ -f "${BOOT_DIR}/dtbo/managed.list" ] && command -v u-boot-update >/dev/null 2>&1; then
+                            ACTIVATED_VIA="u-boot-update"
+                        elif [ -f "${BOOT_DIR}/dtb/rockchip/overlays-list" ]; then
+                            ACTIVATED_VIA="overlays-list"
+                        else
+                            ACTIVATED_VIA="armbianEnv"
+                        fi
+                    else
+                        error "Could not activate HDMI touch overlay ${ovl_ref}."
+                        exit 3
+                    fi
+                    ;;
+                cubie-a7z)
+                    if activate_overlay_sun55i "${ovl_ref}"; then
+                        if [ -f "${BOOT_DIR}/extlinux/extlinux.conf" ]; then
+                            ACTIVATED_VIA="extlinux"
+                        elif [ -f "${BOOT_DIR}/orangepiEnv.txt" ]; then
+                            ACTIVATED_VIA="orangepiEnv"
+                        elif [ -f "${BOOT_DIR}/armbianEnv.txt" ]; then
+                            ACTIVATED_VIA="armbianEnv"
+                        fi
+                    else
+                        error "Could not activate HDMI touch overlay ${ovl_ref}."
+                        exit 3
+                    fi
+                    ;;
+            esac
             ;;
         *)
             error "Board ${BOARD_ID} has no HDMI touch overlay activation handler."

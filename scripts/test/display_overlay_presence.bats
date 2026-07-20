@@ -302,6 +302,105 @@ EOF
 }
 
 # -----------------------------------------------------------------------------
+# HDMI present on a Raspberry Pi that DECLARES an HDMI-touch panel -> provision
+# via the firmware-shipped ads7846 overlay: NO custom DTS is compiled, config.txt
+# gains dtparam=spi=on + a parameterized dtoverlay=ads7846 line, ads7846 (only)
+# is loaded, and the LIBINPUT_CALIBRATION_MATRIX udev rule is written. The HDMI
+# KMS driver (vc4-kms-v3d) must stay enabled -- video is HDMI. rpi4b declares the
+# hdmi_touch_xpt2046 display wired for the 40-pin SPI0 header. No toolchain stubs
+# are needed because the Pi path never runs cpp/dtc.
+# -----------------------------------------------------------------------------
+
+@test "HDMI on a Pi + board declares hdmi-touch: config.txt dtoverlay=ads7846, no DTS compile" {
+    mock_hdmi_connected
+    # A Raspberry Pi OS firmware config with the KMS driver but no SPI/touch yet.
+    mkdir -p "${BOOT}/firmware"
+    printf 'dtoverlay=vc4-kms-v3d\n' > "${BOOT}/firmware/config.txt"
+
+    run env \
+        ADOS_OVERLAY_ALLOW_NONROOT=1 \
+        ADOS_BOARD_ID="rpi4b" \
+        ADOS_DISPLAY="auto" \
+        ADOS_ETC_DIR="${ETC}" \
+        ADOS_MODULES_LOAD_DIR="${MODLOAD}" \
+        ADOS_BOOT_DIR="${BOOT}" \
+        ADOS_UDEV_RULES_DIR="${UDEV}" \
+        ADOS_SYS_GRAPHICS_DIR="${SYS_GRAPHICS}" \
+        ADOS_SYS_INPUT_DIR="${SYS_INPUT}" \
+        ADOS_SYS_DRM_DIR="${SYS_DRM}" \
+        ADOS_DEV_DRI_DIR="${DEV_DRI}" \
+        ADOS_I2CDETECT_BIN="${I2CBIN}" \
+        bash "${SCRIPT}"
+    [ "$status" -eq 0 ]
+    # Resolved to the HDMI-touch panel via the Pi config.txt path, not none.
+    grep -q '^display_id=hdmi_touch_xpt2046' "${ETC}/display.conf"
+    grep -q '^type=hdmi-touch' "${ETC}/display.conf"
+    grep -q '^activated_via=config.txt' "${ETC}/display.conf"
+    grep -q '^overlay_source=raspberrypi' "${ETC}/display.conf"
+    grep -q '^overlay_ref=ads7846' "${ETC}/display.conf"
+    # SPI enabled + the parameterized ads7846 touch overlay appended, carrying
+    # the declared CS / PENIRQ / bounds.
+    grep -qE '^dtparam=spi=on' "${BOOT}/firmware/config.txt"
+    grep -qE '^dtoverlay=ads7846,cs=1,penirq=25,' "${BOOT}/firmware/config.txt"
+    grep -q 'xmin=200' "${BOOT}/firmware/config.txt"
+    grep -q 'ymax=3900' "${BOOT}/firmware/config.txt"
+    # HDMI video stays on the KMS driver: vc4-kms-v3d is NOT disabled (unlike
+    # the SPI-LCD path, which comments it out).
+    grep -qE '^dtoverlay=vc4-kms-v3d' "${BOOT}/firmware/config.txt"
+    # NO custom DTS was compiled/installed -- the Pi firmware ships ads7846.
+    [ ! -d "${BOOT}/dtbo" ]
+    [ ! -d "${BOOT}/overlay-user" ]
+    # modules-load carries ONLY ads7846 (video is HDMI, no fbtft stack).
+    [ -f "${MODLOAD}/ados-display.conf" ]
+    grep -q '^ads7846$' "${MODLOAD}/ados-display.conf"
+    ! grep -q '^fbtft$' "${MODLOAD}/ados-display.conf"
+    ! grep -q '^fb_ili9486$' "${MODLOAD}/ados-display.conf"
+    # The udev calibration rule is written for the touch device.
+    [ -f "${UDEV}/99-ados-hdmi-touch.rules" ]
+    grep -q 'LIBINPUT_CALIBRATION_MATRIX' "${UDEV}/99-ados-hdmi-touch.rules"
+    grep -q 'ADS7846 Touchscreen' "${UDEV}/99-ados-hdmi-touch.rules"
+    # A display surface + touch device exist, so the marker is written.
+    [ -f "${ETC}/display.enabled" ]
+}
+
+# -----------------------------------------------------------------------------
+# Pi hdmi-touch config.txt edit is idempotent: a second pass detects the
+# existing dtoverlay=ads7846 line and does not duplicate it. Uses the fallback
+# /boot/config.txt location (older Raspberry Pi OS) to also exercise that branch.
+# -----------------------------------------------------------------------------
+
+@test "Pi hdmi-touch is idempotent and honors /boot/config.txt fallback" {
+    mock_hdmi_connected
+    # Older Raspberry Pi OS: config.txt at /boot/config.txt, pre-seeded as if a
+    # prior run already added the ads7846 overlay line. The installer must detect
+    # it and NOT append a second one (SPI is added once, since it was absent).
+    printf 'dtoverlay=vc4-kms-v3d\ndtoverlay=ads7846,cs=1,penirq=25,penirq_pull=2,speed=50000,keep_vref_on=1,swapxy=0,pmax=255,xohms=150,xmin=200,xmax=3900,ymin=200,ymax=3900\n' \
+        > "${BOOT}/config.txt"
+
+    run env \
+        ADOS_OVERLAY_ALLOW_NONROOT=1 \
+        ADOS_BOARD_ID="rpi4b" \
+        ADOS_DISPLAY="auto" \
+        ADOS_ETC_DIR="${ETC}" \
+        ADOS_MODULES_LOAD_DIR="${MODLOAD}" \
+        ADOS_BOOT_DIR="${BOOT}" \
+        ADOS_UDEV_RULES_DIR="${UDEV}" \
+        ADOS_SYS_GRAPHICS_DIR="${SYS_GRAPHICS}" \
+        ADOS_SYS_INPUT_DIR="${SYS_INPUT}" \
+        ADOS_SYS_DRM_DIR="${SYS_DRM}" \
+        ADOS_DEV_DRI_DIR="${DEV_DRI}" \
+        ADOS_I2CDETECT_BIN="${I2CBIN}" \
+        bash "${SCRIPT}"
+    [ "$status" -eq 0 ]
+    grep -q '^activated_via=config.txt' "${ETC}/display.conf"
+    # Exactly one dtoverlay=ads7846 and one dtparam=spi=on line (no duplication).
+    [ "$(grep -cE '^dtoverlay=ads7846' "${BOOT}/config.txt")" -eq 1 ]
+    [ "$(grep -cE '^dtparam=spi=on' "${BOOT}/config.txt")" -eq 1 ]
+    # No custom DTS compiled on this path either.
+    [ ! -d "${BOOT}/dtbo" ]
+}
+
+# -----------------------------------------------------------------------------
 # I2C OLED present -> marker written (OLED service), display_id=none, no boot
 # -----------------------------------------------------------------------------
 
