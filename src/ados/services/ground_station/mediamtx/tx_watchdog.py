@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from typing import TYPE_CHECKING
 
 from .ffmpeg_monitor import FFMPEG_MONITOR_TICK_SECONDS
@@ -20,6 +21,19 @@ if TYPE_CHECKING:
     import structlog
 
     from .manager import MediamtxGsManager
+
+# Freshness ceiling for the wfb-stats snapshot when it is used as a
+# source-liveness gate. Matches the 10 s mtime ceiling the status route
+# uses to flip a stale snapshot; past this the receiver's last write is
+# too old to trust as "a source is delivering right now".
+WFB_STATS_FRESH_SECONDS = 10.0
+
+# How long ffmpeg may stay alive with no live source AND no publisher on
+# /main before the monitor reaps it. Long enough that a source appearing
+# mid-probe (packets start flowing, the signal flips to "live") cancels
+# the reap well before it fires; short enough that an idle appliance
+# stops spinning ffmpeg promptly.
+NO_SOURCE_REAP_SECONDS = 15.0
 
 
 def _read_wfb_stats() -> dict | None:
@@ -78,6 +92,47 @@ def _wfb_acquire_state() -> str:
     return "idle"
 
 
+def _wfb_stats_age_seconds() -> float | None:
+    """Wall-clock age of the wfb-stats snapshot, or ``None`` if unreadable.
+
+    Split out from :func:`wfb_source_signal` so tests can drive the
+    freshness dimension independently of the snapshot body.
+    """
+    from ados.core.paths import WFB_STATS_JSON
+
+    try:
+        return time.time() - WFB_STATS_JSON.stat().st_mtime
+    except OSError:
+        return None
+
+
+def wfb_source_signal() -> str:
+    """Classify whether a live radio video source is delivering packets.
+
+    The ground ingest reads RTP off UDP 5600, fed by ``wfb_rx``. With no
+    drone paired / no frames arriving, ffmpeg spawned against that silent
+    port blocks in its codec probe forever (never exits, never publishes)
+    and spins CPU. This gate lets the ingest lifecycle avoid that idle
+    spin: only bring ffmpeg up once a source is actually present.
+
+    Returns one of:
+
+    * ``"live"`` — fresh snapshot reporting ``packets_received > 0``.
+    * ``"silent"`` — fresh snapshot reporting ``packets_received == 0``
+      (the receiver is up but no frames are flowing).
+    * ``"unknown"`` — snapshot missing, stale, or malformed; the caller
+      cannot conclude there is no source, so it should not defer on this
+      alone.
+    """
+    age = _wfb_stats_age_seconds()
+    if age is None or age > WFB_STATS_FRESH_SECONDS:
+        return "unknown"
+    received = _wfb_packets_received()
+    if received is None:
+        return "unknown"
+    return "live" if received > 0 else "silent"
+
+
 async def monitor_ffmpeg(
     manager: MediamtxGsManager,
     shutdown: asyncio.Event,
@@ -93,6 +148,10 @@ async def monitor_ffmpeg(
     """
     backoff = 5.0
     max_backoff = 60.0
+    # Monotonic timestamp of when ffmpeg was first seen alive with no
+    # live source and no publisher (a stuck codec probe). Reset whenever
+    # a live source or an actual publisher reappears.
+    no_source_since: float | None = None
     while not shutdown.is_set():
         try:
             await asyncio.wait_for(
@@ -102,6 +161,9 @@ async def monitor_ffmpeg(
         except TimeoutError:
             pass
         if not manager.ffmpeg_alive():
+            # ffmpeg is not alive — it cannot be a stuck probe, so clear
+            # the reap timer. A fresh spawn starts its grace window clean.
+            no_source_since = None
             # Mediamtx-core liveness FIRST: this loop only ever supervised the
             # ffmpeg ingest sidecar, never the mediamtx core that owns the RTSP
             # port. If the core crashed/OOMed, ffmpeg's push socket breaks and
@@ -182,7 +244,36 @@ async def monitor_ffmpeg(
         # delta probe), rely on the dead-process branch above plus
         # mediamtx's own broken-pipe recovery. ffmpeg restarts on
         # an actual crash or pipe break; that's enough.
+        #
+        # No-source reaper: an ffmpeg spawned against a silent UDP port
+        # (no drone, no frames) never finishes its codec probe — it
+        # neither exits nor registers a publisher, and spins CPU on an
+        # idle appliance. When there is no live source AND mediamtx
+        # reports no publisher on /main, that ffmpeg is a stuck probe:
+        # reap it after a short grace so the idle GS runs no ffmpeg. The
+        # dead-process branch above then holds it off until packets flow.
+        # Requiring "no publisher" means a healthy publisher is never
+        # reaped, so a brief source dropout on a live link rides through
+        # untouched (its RTSP session keeps the publisher registered).
+        if wfb_source_signal() != "live" and not await manager.path_has_publisher():
+            now = time.monotonic()
+            if no_source_since is None:
+                no_source_since = now
+            elif (now - no_source_since) >= NO_SOURCE_REAP_SECONDS:
+                slog.info(
+                    "ground_ffmpeg_reaped_no_source",
+                    grace_seconds=NO_SOURCE_REAP_SECONDS,
+                    msg=(
+                        "no live radio source and no publisher on /main; "
+                        "stopping the idle ffmpeg probe. It restarts within "
+                        "one tick of the first packet."
+                    ),
+                )
+                await manager.stop_ffmpeg_ingest()
+                no_source_since = None
+        else:
+            no_source_since = None
         backoff = 5.0
 
 
-__all__ = ["monitor_ffmpeg"]
+__all__ = ["monitor_ffmpeg", "wfb_source_signal"]

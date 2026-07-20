@@ -65,7 +65,7 @@ from .rtsp_config import (
     _write_sdp,
     bake_sprop_into_sdp,
 )
-from .tx_watchdog import monitor_ffmpeg
+from .tx_watchdog import monitor_ffmpeg, wfb_source_signal
 
 log = get_logger("ground_station.mediamtx")
 
@@ -374,6 +374,24 @@ class MediamtxGsManager:
             await self._core.stop()
             return False
 
+        # Do not spawn the ffmpeg ingest into a silent radio. With no
+        # drone paired / no frames on UDP 5600, ffmpeg blocks in its
+        # codec probe forever (never exits, never publishes) and spins
+        # CPU on an idle appliance. Defer the spawn when the receiver is
+        # confirmed up-but-silent; the monitor loop brings the ingest up
+        # within one tick of the first packet, so the live path's
+        # glass-to-glass latency is unchanged when a source IS present.
+        if wfb_source_signal() == "silent":
+            self._running = True
+            log.info(
+                "ground_ffmpeg_ingest_deferred_no_source",
+                msg=(
+                    "radio receiver up but no frames; deferring ffmpeg "
+                    "until a source appears"
+                ),
+            )
+            return True
+
         ingest_ok = await self._start_ffmpeg_ingest()
         if not ingest_ok:
             await self._core.stop()
@@ -467,6 +485,35 @@ class MediamtxGsManager:
                 )
         except Exception:
             return False
+
+    async def stop_ffmpeg_ingest(self) -> None:
+        """Reap just the ffmpeg ingest sidecar, leaving mediamtx core up.
+
+        Used by the monitor to stop an ffmpeg that is spinning in its
+        codec probe against a silent radio (no source, no publisher).
+        The RTSP/WHEP core stays up and ready; the monitor restarts the
+        ingest the moment packets flow again. Distinct from ``stop()``,
+        which tears the whole manager (core included) down for shutdown.
+        """
+        if self._sprop_bake_task is not None:
+            self._sprop_bake_task.cancel()
+            self._sprop_bake_task = None
+        if self._ffmpeg_stderr_task is not None:
+            self._ffmpeg_stderr_task.cancel()
+            self._ffmpeg_stderr_task = None
+        if self._ffmpeg is not None and self._ffmpeg.returncode is None:
+            try:
+                self._ffmpeg.terminate()
+                await asyncio.wait_for(self._ffmpeg.wait(), timeout=3.0)
+            except TimeoutError:
+                try:
+                    self._ffmpeg.kill()
+                    await self._ffmpeg.wait()
+                except ProcessLookupError:
+                    pass
+            except ProcessLookupError:
+                pass
+        self._ffmpeg = None
 
     async def restart_ffmpeg(self) -> bool:
         """Reap the dead ffmpeg sidecar and spawn a fresh one.

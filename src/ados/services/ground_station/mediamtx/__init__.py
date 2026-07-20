@@ -44,7 +44,7 @@ from .rtsp_config import (
     _write_sdp,
     bake_sprop_into_sdp,
 )
-from .tx_watchdog import monitor_ffmpeg
+from .tx_watchdog import monitor_ffmpeg, wfb_source_signal
 
 __all__ = [
     # manager
@@ -73,4 +73,5 @@ __all__ = [
     "build_ffmpeg_ingest_argv",
     # watchdog
     "monitor_ffmpeg",
+    "wfb_source_signal",
 ]
