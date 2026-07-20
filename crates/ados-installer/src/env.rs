@@ -212,9 +212,67 @@ pub fn is_supported_arch() -> bool {
     arch() == "aarch64"
 }
 
+/// Extract the profile name from a `profile.conf` body (pure). The file is the
+/// single `profile: <name>` line `config_identity::profile_conf_body` writes;
+/// tolerate a quoted value and surrounding whitespace. Returns `None` when the
+/// body carries no non-empty profile line.
+pub fn parse_profile_conf(body: &str) -> Option<String> {
+    for line in body.lines() {
+        if let Some(rest) = line.trim().strip_prefix("profile:") {
+            let v = rest.trim().trim_matches('"');
+            if !v.is_empty() {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Read the persisted install profile from `/etc/ados/profile.conf`, if present.
+/// This is what lets an `--upgrade` (or `ados update`) invoked with no
+/// `--profile` flag PRESERVE a non-drone box's profile instead of silently
+/// re-provisioning it as the `drone` default and tearing down its profile units.
+/// Returns `None` on a fresh box (no file), an unreadable file, or an empty
+/// profile line — in which case the caller keeps its own default.
+pub fn read_persisted_profile() -> Option<String> {
+    let body = std::fs::read_to_string(PROFILE_CONF).ok()?;
+    parse_profile_conf(&body)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_profile_conf_reads_the_profile_line() {
+        assert_eq!(
+            parse_profile_conf("profile: ground_station\n").as_deref(),
+            Some("ground_station")
+        );
+        // A quoted value (config.yaml style) is unwrapped.
+        assert_eq!(
+            parse_profile_conf("profile: \"drone\"\n").as_deref(),
+            Some("drone")
+        );
+        // Surrounding whitespace is tolerated.
+        assert_eq!(
+            parse_profile_conf("  profile:   workstation  \n").as_deref(),
+            Some("workstation")
+        );
+        // The profile line is found among other keys.
+        assert_eq!(
+            parse_profile_conf("device: abc\nprofile: compute\n").as_deref(),
+            Some("compute")
+        );
+    }
+
+    #[test]
+    fn parse_profile_conf_none_when_absent_or_empty() {
+        assert_eq!(parse_profile_conf(""), None);
+        assert_eq!(parse_profile_conf("profile:\n"), None);
+        assert_eq!(parse_profile_conf("profile: \"\"\n"), None);
+        assert_eq!(parse_profile_conf("other: value\n"), None);
+    }
 
     #[test]
     fn arch_normalizes_arm64_to_aarch64() {

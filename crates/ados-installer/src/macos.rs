@@ -374,13 +374,8 @@ fn status_profile(args: &Args, paths: &Paths) -> String {
         }
     }
     if let Ok(body) = std::fs::read_to_string(&paths.profile_conf) {
-        for line in body.lines() {
-            if let Some(rest) = line.trim().strip_prefix("profile:") {
-                let v = rest.trim().trim_matches('"');
-                if !v.is_empty() {
-                    return v.to_string();
-                }
-            }
+        if let Some(p) = crate::env::parse_profile_conf(&body) {
+            return p;
         }
     }
     "workstation".to_string()

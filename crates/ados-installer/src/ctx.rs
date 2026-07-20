@@ -6,6 +6,7 @@
 //! context is cheap to build in tests via [`Ctx::for_test`].
 
 use crate::checkpoint::Checkpoint;
+use crate::cli::args::normalize_profile;
 use crate::cli::Args;
 use crate::env::EnvInfo;
 use crate::result::FailureAccumulator;
@@ -58,7 +59,19 @@ impl Ctx {
     /// clone + build from source, the predecessor installer's default).
     pub fn from_args(args: Args, env: EnvInfo, checkpoint: Checkpoint) -> Self {
         let force = args.force;
-        let profile = args.profile.clone().unwrap_or_else(|| "drone".to_string());
+        // Resolve the profile: an explicit `--profile` wins; otherwise fall back
+        // to the persisted `/etc/ados/profile.conf` so an `--upgrade` /
+        // `ados update` with no flag PRESERVES a non-drone box's profile instead
+        // of re-provisioning it as the `drone` default and tearing down its
+        // profile units. A fresh box has no such file, so it keeps `drone`.
+        // (`crate::env::` is fully qualified: the `env` parameter shadows the
+        // module in this scope.)
+        let profile = args
+            .profile
+            .clone()
+            .or_else(crate::env::read_persisted_profile)
+            .map(|p| normalize_profile(&p))
+            .unwrap_or_else(|| "drone".to_string());
         let channel = args.channel.clone().unwrap_or_else(|| "edge".to_string());
         let install_rtl8812eu = !args.no_rtl_driver;
         Ctx {
