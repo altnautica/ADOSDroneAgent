@@ -1,0 +1,189 @@
+# Radxa Cubie A7S — Allwinner A733 (same SoC as the Cubie A7Z)
+#
+# 50.8 x 50.8 mm SBC, up to 16 GB LPDDR5. This profile targets the 4 GB
+# variant used as an NPU companion computer on a small quad. ram_mb below
+# documents that variant; runtime detection via psutil reports the actual
+# amount.
+#
+# Non-Pi header: the A7S breaks out a 30-pin header + a 15-pin header, NOT
+# a Raspberry-Pi 40-pin layout, so Pi-style HATs do not plug in. Power comes
+# in on the 30-pin header pins 2/4 (+5V) or the USB-C power port. The onboard
+# management Wi-Fi + Gigabit Ethernet are both present (the A7Z had no wired
+# Ethernet).
+#
+# SEED PROFILE — several fields are marked "TO-VERIFY on-rig" and are
+# corrected from real device-tree / dev-node values on first SSH bring-up.
+#
+# Sources:
+#   Radxa Cubie A7S Product Brief RAD-DOC-0183 Rev 1.4
+#   https://docs.radxa.com/en/cubie/a7s/hardware-use/hardware-info
+#   https://docs.radxa.com/en/cubie/a7s/app-dev/npu-dev
+
+name: "Radxa Cubie A7S"
+vendor: "Radxa"
+soc: "Allwinner A733"
+arch: "aarch64"
+model_patterns:
+  # Detected via the /proc/device-tree/compatible first token. Verified on-rig
+  # 2026-07-20: the model string is the GENERIC "sun60iw2" (shared with the A7Z)
+  # while compatible = "radxa,cubie-a7s\0arm,sun60iw2p1\0allwinner,sun60i-a733" —
+  # the "radxa,cubie-a7s"/"cubie-a7s" patterns below substring-match that unique
+  # first token, so no board_override is needed. The A733 family strings
+  # (sun60iw2 / sun60i-a733) are intentionally NOT listed: they are shared with
+  # cubie-a7z.yaml and would mis-route a real A7Z.
+  - "radxa,cubie-a7s"
+  - "Radxa Cubie A7S"
+  - "Cubie A7S"
+  - "cubie-a7s"
+default_tier: 3   # 4 GB + Cortex-A76 pair + 3 TOPS NPU
+
+gpio_pins:
+  - 2   # +5V IN (from the companion BEC)
+  - 4   # +5V (alt)
+  - 6   # GND
+  - 7   # PB0 / UART2-TX -> FC RX (R1)
+  - 11  # PB1 / UART2-RX <- FC TX (T1)
+uart_paths:
+  - /dev/ttyS0        # UART0 debug console (pins 8/10)
+  - /dev/ttyS2        # TO-VERIFY: UART2 (pins 7/11) as the FC link; confirm the ttyS number + overlay on-rig
+hw_video_codecs:
+  - h264_enc
+  - h264_dec
+  - h265_dec
+  - vp9_dec
+  # h265_enc: TO-VERIFY — the SoC claims H.265 encode <=4Kp30 but the documented
+  # GStreamer OMX path exposes only omxh264videoenc; confirm on-rig before relying on it.
+
+board:
+  id: cubie-a7s
+  manufacturer: Radxa
+  status: experimental
+
+compute:
+  cores: 8
+  core_type: "Cortex-A76 x2 + Cortex-A55 x6"
+  max_freq_mhz: 2000
+  gpu: "Imagination BXM-4-64 MC1"
+  npu_tops: 3.0            # Vivante VIP9000, INT8 (ACUITY / TIM-VX toolchain, NOT RKNN)
+  hw_encoder: ["h264"]
+  hw_decoder: ["h264", "h265", "vp9"]
+  ram_mb: 4096
+  ram_type: LPDDR5
+
+storage:
+  emmc: false             # verified on-rig 2026-07-20: this 4 GB Mini is microSD-only (no eMMC)
+  emmc_gb: 0
+  sd_card: true
+  nand: false
+
+buses:
+  uart:
+    - id: uart0
+      path: /dev/ttyS0
+      baud: 115200
+      fc_capable: false   # debug console
+    - id: uart2
+      # TO-VERIFY: verified 2026-07-20 that NO /dev/ttyS* exists until a UART
+      # overlay is enabled; the node + number are confirmed when the FC is wired.
+      path: /dev/ttyS2
+      baud: 921600
+      fc_capable: true    # FC link on 30-pin pins 7 (TX) / 11 (RX)
+  usb:
+    - id: usb-a
+      path: "/dev/bus/usb/*"
+      type: usb2          # USB Type-A host
+    - id: usb-c1
+      type: usb2          # 5V power + OTG (defaults to device mode)
+    - id: usb-c2
+      type: usb3          # USB 3.2 + DP-alt + OTG (force usb_host for a hub/radio)
+  i2c:
+    # Verified on-rig 2026-07-20: /dev/i2c-0, /dev/i2c-13, /dev/i2c-14 exist.
+    # Which bus lands on the 30-pin header TWI pins is confirmed when a sensor
+    # is wired (the header TWI-mux -> bus number is board-firmware-specific).
+    - id: i2c-header
+      path: /dev/i2c-0
+      speed_hz: 400000
+  spi:
+    - id: spi1
+      path: /dev/spidev1.0   # TO-VERIFY: SPI1 on pins 19/21/23/24
+      notes: "SPI1 MOSI/MISO/CLK/CS0 = 30-pin pins 19/21/23/24"
+
+network:
+  wifi: true              # WiFi 6, external antenna
+  ethernet: true          # Gigabit Ethernet (the A7Z had none)
+  bluetooth: true         # BT 5.4
+
+video:
+  csi_ports: 1
+  csi_connector: "31-pin 0.3mm Radxa FPC, 4-lane MIPI CSI"
+  max_encode_resolution: "3840x2160"
+  max_encode_fps: 30
+  encoder_api: vendor     # GStreamer + OpenMAX (Allwinner Cedar), not V4L2-M2M / MPP
+  # One CSI + the USB-A host (fanned out through a USB hub) can carry a UVC nav
+  # camera. On this 7" build the front camera is USB UVC on the hub.
+  nav_cameras:
+    csi_count: 1
+    usb_uvc_count: 4
+    recommended_role: nav-usb
+
+cameras:
+  supported:
+    - id: usb-nav
+      type: usb
+      bus: usb
+      orientation: forward
+      overlay_required: false
+      vendor_isp: false
+    - id: csi-radxa
+      type: csi
+      bus: csi
+      orientation: forward
+      overlay_required: true
+      overlay_source: bsp-disabled
+      overlay_ref: "radxa-camera"   # TO-VERIFY: exact overlay token (Camera 4K / 8M 219 / 13M 214) on-rig
+      vendor_isp: true
+      isp_flags: ["en-awisp=1", "en-largemode=0"]
+      modules_required: [sunxi-vin]
+
+radios:
+  supported:
+    - id: wfb-rtl8812eu
+      role: wfb-injection
+      chipset: RTL8812EU
+      driver: rtl8812eu
+      install: dkms
+      modules_required: [8812eu]
+      mesh_capable: true
+
+# FC link hints, priority-ordered. GPIO UART is preferred so the USB stays free
+# for the camera + WFB dongle; the runtime router still probes and falls back.
+flight_controller:
+  interfaces:
+    - id: fc-uart2
+      type: uart
+      path: /dev/ttyS2    # TO-VERIFY on-rig (UART2 on pins 7/11)
+      baud: 921600
+      priority: 1
+    - id: fc-usb
+      type: usb-acm
+      baud_candidates: [921600, 115200, 57600]
+      priority: 2
+
+provisioning:
+  packages:
+    - {id: camera-userspace, when: camera, apt: [gstreamer1.0-tools, v4l-utils]}
+  drivers:
+    - {radio: wfb-rtl8812eu}
+
+power:
+  typical_watts: 3.0
+  max_watts: 15.0
+  voltage: 5.0
+  input: "USB-C 5V/3A, or 30-pin header +5V pins 2&4"
+
+# Cortex-A76 pair + 3 TOPS NPU + 4 GB can host a VIO front-end. The FC owns the
+# UART link, so a rangefinder lands on an I2C header bus (verified on-rig).
+navigation:
+  vio_capable: true
+  rangefinder_ports:
+    - {type: i2c, path: /dev/i2c-0, speed_hz: 400000}

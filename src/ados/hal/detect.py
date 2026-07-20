@@ -339,6 +339,30 @@ def _read_device_model() -> str:
     return ""
 
 
+def _read_device_compatible() -> str:
+    """Return the most-specific board token from /proc/device-tree/compatible.
+
+    The compatible node is a NUL-separated, most-specific-first list
+    (e.g. ``radxa,cubie-a7s\x00arm,sun60iw2p1\x00allwinner,sun60i-a733``). Its
+    first token uniquely identifies the board, which disambiguates boards that
+    share a generic device-tree ``model`` string -- every Allwinner A733 board
+    reports ``sun60iw2`` as the model, so only the compatible node tells the
+    Cubie A7S apart from the A7Z. Only the first token is returned so the
+    generic SoC-family tokens later in the list never enter pattern matching.
+    Returns "" when unavailable.
+    """
+    try:
+        compat_path = Path("/proc/device-tree/compatible")
+        if compat_path.exists():
+            for token in compat_path.read_bytes().split(b"\x00"):
+                token = token.strip()
+                if token:
+                    return token.decode("utf-8", "ignore")
+    except OSError:
+        pass
+    return ""
+
+
 def _read_cpuinfo_model() -> str:
     """Fallback: read board model from /proc/cpuinfo Hardware or model lines."""
     try:
@@ -458,6 +482,11 @@ def _match_current_profile() -> BoardProfile | None:
         for profile in profiles:
             if profile.name.lower() == override_name.lower():
                 return profile
+    compat_string = _read_device_compatible()
+    if compat_string:
+        matched = _match_profile(profiles, compat_string)
+        if matched:
+            return matched
     model_string = _read_device_model()
     if model_string:
         matched = _match_profile(profiles, model_string)
@@ -517,8 +546,26 @@ def _detect_board_uncached() -> BoardInfo:
         log.info("board_override_unmatched", board=board.name, tier=board.tier)
         return board
 
-    # 2. Device tree detection
+    # 2. Device-tree detection. Match the most-specific compatible token first
+    #    (it uniquely identifies the board), then the model string (which can be
+    #    a generic SoC-family name shared by several boards -- every Allwinner
+    #    A733 board reports "sun60iw2" as the model, so only the compatible node
+    #    tells the Cubie A7S apart from the A7Z).
     model_string = _read_device_model()
+    compat_string = _read_device_compatible()
+    if compat_string:
+        matched = _match_profile(profiles, compat_string)
+        if matched:
+            board = _board_from_profile(
+                matched, model_string or compat_string, ram_mb, cpu_cores
+            )
+            log.info(
+                "board_detected_compatible",
+                board=board.name,
+                tier=board.tier,
+                ram_mb=ram_mb,
+            )
+            return board
     if model_string:
         matched = _match_profile(profiles, model_string)
         if matched:

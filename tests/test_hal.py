@@ -196,6 +196,7 @@ class TestDetectBoardDeviceTree:
         """detect_board() returns correct BoardInfo when device-tree matches."""
         with (
             patch("ados.hal.detect._read_board_override", return_value=""),
+            patch("ados.hal.detect._read_device_compatible", return_value=""),
             patch("ados.hal.detect._read_device_model", return_value=dt_string),
             patch("ados.hal.detect._read_cpuinfo_model", return_value=""),
             patch("psutil.virtual_memory") as mock_mem,
@@ -205,6 +206,78 @@ class TestDetectBoardDeviceTree:
             board = detect_board()
             assert board.name == board_name
             assert board.tier >= 1
+
+
+# ---------------------------------------------------------------------------
+# Compatible-node disambiguation: the Allwinner A733 boards (Cubie A7S / A7Z)
+# share the generic device-tree model "sun60iw2", so detection must fall to the
+# unique first token of /proc/device-tree/compatible.
+# ---------------------------------------------------------------------------
+class TestDetectBoardCompatible:
+    @pytest.mark.parametrize(
+        "compatible_first_token,expected_name",
+        [
+            ("radxa,cubie-a7s", "Radxa Cubie A7S"),
+            ("radxa,cubie-a7z", "Radxa Cubie A7Z"),
+        ],
+    )
+    def test_a733_boards_disambiguate_by_compatible(
+        self, compatible_first_token: str, expected_name: str
+    ):
+        """Both A733 boards report model 'sun60iw2'; the compatible token splits them."""
+        with (
+            patch("ados.hal.detect._read_board_override", return_value=""),
+            patch(
+                "ados.hal.detect._read_device_compatible",
+                return_value=compatible_first_token,
+            ),
+            patch("ados.hal.detect._read_device_model", return_value="sun60iw2"),
+            patch("ados.hal.detect._read_cpuinfo_model", return_value=""),
+            patch("psutil.virtual_memory") as mock_mem,
+            patch("psutil.cpu_count", return_value=8),
+        ):
+            mock_mem.return_value = type("VMem", (), {"total": 4 * 1024 * 1024 * 1024})()
+            board = detect_board()
+            assert board.name == expected_name
+
+    def test_compatible_match_precedes_generic_model(self):
+        """The A7S compatible token wins even though model 'sun60iw2' is an A7Z pattern.
+
+        Without the compatible check the A7S mis-detects as 'Radxa Cubie A7Z'
+        because 'sun60iw2' is a cubie-a7z model_pattern.
+        """
+        with (
+            patch("ados.hal.detect._read_board_override", return_value=""),
+            patch(
+                "ados.hal.detect._read_device_compatible",
+                return_value="radxa,cubie-a7s",
+            ),
+            patch("ados.hal.detect._read_device_model", return_value="sun60iw2"),
+            patch("ados.hal.detect._read_cpuinfo_model", return_value=""),
+            patch("psutil.virtual_memory") as mock_mem,
+            patch("psutil.cpu_count", return_value=8),
+        ):
+            mock_mem.return_value = type("VMem", (), {"total": 4 * 1024 * 1024 * 1024})()
+            board = detect_board()
+            assert board.name == "Radxa Cubie A7S"
+            assert board.soc == "Allwinner A733"
+
+    def test_empty_compatible_falls_through_to_model(self):
+        """No compatible node -> detection still works via the model string."""
+        with (
+            patch("ados.hal.detect._read_board_override", return_value=""),
+            patch("ados.hal.detect._read_device_compatible", return_value=""),
+            patch(
+                "ados.hal.detect._read_device_model",
+                return_value="Raspberry Pi 4 Model B Rev 1.4",
+            ),
+            patch("ados.hal.detect._read_cpuinfo_model", return_value=""),
+            patch("psutil.virtual_memory") as mock_mem,
+            patch("psutil.cpu_count", return_value=4),
+        ):
+            mock_mem.return_value = type("VMem", (), {"total": 4 * 1024 * 1024 * 1024})()
+            board = detect_board()
+            assert board.name == "Raspberry Pi 4B"
 
 
 # ---------------------------------------------------------------------------
@@ -263,6 +336,7 @@ class TestBoardInfoFields:
         dt_string = "NVIDIA Jetson Orin Nano Developer Kit"
         with (
             patch("ados.hal.detect._read_board_override", return_value=""),
+            patch("ados.hal.detect._read_device_compatible", return_value=""),
             patch("ados.hal.detect._read_device_model", return_value=dt_string),
             patch("ados.hal.detect._read_cpuinfo_model", return_value=""),
             patch("psutil.virtual_memory") as mock_mem,
