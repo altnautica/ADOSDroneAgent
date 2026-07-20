@@ -50,9 +50,33 @@ use crate::state::{AppState, PairingPaths};
 pub mod paths {
     /// Control socket: the trusted local plane (the on-box CLI).
     pub const CONTROL_SOCKET: &str = "/run/ados/control.sock";
-    /// The alternate TCP port on the full agent. Inert: the GCS uses the FastAPI
-    /// surface on `:8080` until the bench cutover rebinds this surface there.
+    /// The alternate LAN TCP port used when the native front is NOT the LAN
+    /// owner (the `control-rust-enabled` plane running alongside FastAPI's
+    /// `:8080`). Also the port a bare binary binds with no marker present.
     pub const CONTROL_TCP_PORT: u16 = 8082;
+    /// The LAN TCP port the native front OWNS once it is enabled — the GCS
+    /// reaches the agent here.
+    pub const FRONT_TCP_PORT: u16 = 8080;
+    /// The persistent marker the installer writes when the native front owns the
+    /// LAN port. It is the DURABLE source of truth for the port: it survives
+    /// reboots and a killed install, whereas the `front.conf` env drop-in can be
+    /// left empty by an install that died mid-write. Reading it here lets the
+    /// front self-heal to `:8080` on the next boot without a re-install.
+    pub const FRONT_MARKER_PATH: &str = "/etc/ados/front-rust-enabled";
+}
+
+/// Resolve the LAN TCP port from an explicit `ADOS_CONTROL_PORT` override or,
+/// absent that, the front-enabled marker. When the native front owns the LAN
+/// port (`/etc/ados/front-rust-enabled` present) a missing/empty `front.conf`
+/// still resolves to `:8080` — so a reboot self-heals a half-completed install
+/// instead of leaving the front stranded on the `:8082` fallback. An explicit env
+/// port always wins (the unit still pins it per profile).
+fn resolve_control_tcp_port(env_port: Option<u16>, front_enabled: bool) -> u16 {
+    match env_port {
+        Some(p) => p,
+        None if front_enabled => paths::FRONT_TCP_PORT,
+        None => paths::CONTROL_TCP_PORT,
+    }
 }
 
 /// How often the daemon pings the systemd watchdog while running. Comfortably
@@ -120,10 +144,11 @@ impl Default for DaemonPaths {
         let control_socket = std::env::var("ADOS_CONTROL_SOCKET")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from(paths::CONTROL_SOCKET));
-        let control_tcp_port = std::env::var("ADOS_CONTROL_PORT")
+        let env_port = std::env::var("ADOS_CONTROL_PORT")
             .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(paths::CONTROL_TCP_PORT);
+            .and_then(|s| s.parse().ok());
+        let front_enabled = Path::new(paths::FRONT_MARKER_PATH).exists();
+        let control_tcp_port = resolve_control_tcp_port(env_port, front_enabled);
         let pairing_path = std::env::var("ADOS_PAIRING_JSON")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from(auth::DEFAULT_PAIRING_PATH));
@@ -459,3 +484,20 @@ pub(crate) fn set_ados_group(path: &Path) {
 #[cfg(not(target_os = "linux"))]
 #[allow(dead_code)]
 pub(crate) fn set_ados_group(_path: &Path) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn front_marker_resolves_lan_port_to_8080() {
+        // Front enabled, no env override -> the front OWNS :8080 (even if
+        // front.conf is missing/empty from a killed install -> self-heals).
+        assert_eq!(resolve_control_tcp_port(None, true), paths::FRONT_TCP_PORT);
+        // No front marker -> the alternate :8082 plane.
+        assert_eq!(resolve_control_tcp_port(None, false), paths::CONTROL_TCP_PORT);
+        // An explicit env port always wins (the unit pins it per profile).
+        assert_eq!(resolve_control_tcp_port(Some(9999), true), 9999);
+        assert_eq!(resolve_control_tcp_port(Some(8082), true), 8082);
+    }
+}
