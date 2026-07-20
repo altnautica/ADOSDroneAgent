@@ -198,7 +198,8 @@ pub enum AdapterState {
     /// The cross-boot learner suspects randomization but is not certain; the
     /// operator confirms before a pin is written.
     Candidate,
-    /// A randomizer we cannot pin yet (e.g. no machine-id, no networkd).
+    /// A randomizer we cannot pin yet (e.g. no machine-id, no systemd-udev
+    /// link mechanism).
     Deferred,
     /// Pinning is disabled by config.
     Disabled,

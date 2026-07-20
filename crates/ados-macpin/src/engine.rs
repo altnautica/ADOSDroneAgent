@@ -136,7 +136,7 @@ pub fn classify_adapter(
     machine_id: Option<&str>,
     salt: &str,
     config: &ReconcileConfig,
-    networkd: bool,
+    link_mechanism: bool,
     learner: Option<&LearnerRecord>,
     with_learner: bool,
 ) -> Decision {
@@ -146,9 +146,9 @@ pub fn classify_adapter(
         .get(vidpid)
         .or_else(|| config.overrides.get(iface))
     {
-        return match (config.enabled, networkd, MacAddr::parse(raw)) {
+        return match (config.enabled, link_mechanism, MacAddr::parse(raw)) {
             (false, _, _) => Decision::Disabled,
-            (true, false, _) => Decision::Deferred("networkd not active".into()),
+            (true, false, _) => Decision::Deferred("no systemd-udev link mechanism".into()),
             (true, true, Some(mac)) => Decision::Pin {
                 mac,
                 source: AdapterSource::Override,
@@ -167,8 +167,8 @@ pub fn classify_adapter(
         if !config.enabled {
             return Decision::Disabled;
         }
-        if !networkd {
-            return Decision::Deferred("networkd not active".into());
+        if !link_mechanism {
+            return Decision::Deferred("no systemd-udev link mechanism".into());
         }
         return match machine_id.and_then(|m| derive_pinned_mac(m, salt)) {
             Some(mac) => Decision::Pin {
@@ -262,7 +262,7 @@ pub fn read_machine_id() -> Option<String> {
     None
 }
 
-// ── Linux device + networkd I/O ──────────────────────────────────────────────
+// ── Linux device + .link I/O ─────────────────────────────────────────────────
 
 #[cfg(target_os = "linux")]
 mod linux {
@@ -341,10 +341,16 @@ mod linux {
         (None, String::new())
     }
 
-    /// True when `systemd-networkd` is managing the network (so a `.link` will
-    /// be honored). `/run/systemd/netif` exists only while networkd runs.
-    pub fn networkd_available() -> bool {
-        Path::new("/run/systemd/netif").exists()
+    /// True when the systemd-udev `.link` mechanism is available to apply a
+    /// `[Link] MACAddress=` drop-in at device setup. The `net_setup_link` udev
+    /// builtin owns `.link` application and runs on ANY systemd host -- whether
+    /// the L3 manager is systemd-networkd OR NetworkManager (both run
+    /// systemd-udevd). So the pin is honored on NetworkManager-only boards too;
+    /// gating on networkd *running* (`/run/systemd/netif`) alone would wrongly
+    /// defer the pin on an NM board and let its MAC keep churning. We check the
+    /// udev runtime (`/run/udev`), with the networkd runtime dir as a fallback.
+    pub fn link_mechanism_available() -> bool {
+        Path::new("/run/udev").exists() || Path::new("/run/systemd/netif").exists()
     }
 
     /// Ask `udevadm` which `.link` currently wins for an interface and return
@@ -447,7 +453,7 @@ mod linux {
         let mut state = load_state();
         let adapters = enumerate_net_adapters();
         let machine_id = read_machine_id();
-        let networkd = networkd_available();
+        let link_mechanism = link_mechanism_available();
         let now = now_unix();
 
         let quirk_count = adapters
@@ -497,7 +503,7 @@ mod linux {
                 machine_id.as_deref(),
                 salt,
                 config,
-                networkd,
+                link_mechanism,
                 learner_rec.as_ref(),
                 with_learner,
             );
@@ -562,7 +568,7 @@ mod linux {
 
 #[cfg(target_os = "linux")]
 pub use linux::{
-    apply_live, enumerate_net_adapters, networkd_available, reconcile, remove_pin_link,
+    apply_live, enumerate_net_adapters, link_mechanism_available, reconcile, remove_pin_link,
     resolve_match_block, winning_match_block, write_pin_link,
 };
 
@@ -572,7 +578,7 @@ pub fn enumerate_net_adapters() -> Vec<NetAdapter> {
     Vec::new()
 }
 #[cfg(not(target_os = "linux"))]
-pub fn networkd_available() -> bool {
+pub fn link_mechanism_available() -> bool {
     false
 }
 #[cfg(not(target_os = "linux"))]
@@ -700,7 +706,7 @@ mod tests {
             ),
             Decision::Disabled
         );
-        // no networkd
+        // no link mechanism (systemd-udev unavailable)
         assert!(matches!(
             classify_adapter(
                 UsbId {
