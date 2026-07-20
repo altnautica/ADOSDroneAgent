@@ -16,6 +16,13 @@
 #   - https://www.cnx-software.com/2024/05/18/radxa-rock-5c-lite-sbc-rockchip-rk3588s2-rk3582-soc-wifi-6-raspberry-pi-pcie-ffc-connector/
 #   - https://www.hackster.io/news/radxa-launches-the-rock-5c-5c-lite-single-board-computers-and-adopts-raspberry-pi-s-pcie-pinout-d327c57ed04c
 #   - https://forum.radxa.com/t/announcing-the-rock-5c-power-performance-and-versatility-for-just-30/20429
+#
+# Prebuilt RTL8812EU driver: on Armbian (the vendor rk35xx BSP kernel,
+# e.g. 6.1.115-vendor-rk35xx) the `armbian-rk35xx` CI flavor
+# (linux-headers-vendor-rk35xx) publishes a verified prebuilt module the
+# installer loads by matching the running kernel's exact `uname -r`, so a
+# fresh flash skips the multi-minute on-device DKMS compile. Other images
+# (the Radxa BSP rsdk kernel) fall through to the DKMS build.
 
 name: "Radxa ROCK 5C Lite (RK3582)"
 vendor: "Radxa"

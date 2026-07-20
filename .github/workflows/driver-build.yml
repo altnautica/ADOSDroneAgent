@@ -14,8 +14,10 @@
 #
 # Two header-sourcing modes per row (`headers_source`):
 #   * "apt" (group A) — a durable public repo (Raspberry Pi, BeagleBoard rcn-ee,
-#     Radxa). The build installs `headers_pkg` from `apt_list` in a matched
-#     `container`. Reproducible forever from the public feed.
+#     Radxa, Armbian). The build installs `headers_pkg` from `apt_list` in a
+#     matched `container`. A versionless `headers_pkg` (e.g. linux-headers-rpi-v8,
+#     linux-headers-vendor-rk35xx) tracks the repo's current kernel, so the daily
+#     refresh follows the kernel forward and the manifest kver stays in step.
 #   * "deb" (group B) — a vendor-BSP kernel whose headers age out of / are pinned
 #     to the flashed image (Allwinner A733, Radxa RK3588 rsdk). The exact headers
 #     `.deb` is captured once from a live rig and hosted on the `bsp-headers`
@@ -102,7 +104,13 @@ jobs:
           set -eux
           DEBIAN_FRONTEND=noninteractive apt-get install -y \
             build-essential bc kmod patch gnupg curl jq libelf-dev \
+            libssl-dev bison flex \
             python3 python-is-python3
+          # Some vendor BSP header packages (e.g. Armbian's rk35xx line) run a
+          # `make modules_prepare`/`scripts` step in their postinst, which on a
+          # 6.1 kernel wants openssl headers (module signing) and the bison/flex
+          # parser generators — install them so the headers install cleanly on
+          # every base. Harmless on rows whose headers ship pre-prepared.
           # Some vendor BSP kernels (e.g. the RK3566 5.10 line) invoke the
           # unversioned `python` from their build scripts; Debian ships only
           # `python3`, so python-is-python3 provides the `python` shim. Fall
