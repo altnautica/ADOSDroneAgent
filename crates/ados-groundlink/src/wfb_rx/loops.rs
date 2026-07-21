@@ -19,7 +19,7 @@ use ados_radio::link_quality::{LinkQualityMonitor, LinkStats};
 
 use crate::watchdog::{Clock, SharedRxHealth, RX_HEALTH_SILENCE_THRESHOLD_S};
 
-use super::args::{RX_HEALTH_POLL_INTERVAL_S, STATE_ACTIVE};
+use super::args::{RX_HEALTH_POLL_INTERVAL_S, STATE_ACTIVE, STATE_SEARCHING};
 use super::seams::{live_channel, DataRxHandle, SharedValidCounter};
 use super::stats::{build_gs_stats, json_object_to_fields, GsChannelTruth, GsRegSnapshot};
 
@@ -71,10 +71,17 @@ pub async fn stats_reader_loop(
             } else {
                 (false, "searching")
             };
-            // Top-level lifecycle: the data RX is up and producing stats lines, so
-            // the plane is active; the per-channel lock state is the finer-grained
-            // `acquire_state` above.
-            let state = STATE_ACTIVE;
+            // Top-level lifecycle: "active" ONLY when the RX is actually decoding
+            // data. wfb_rx emits a PKT line every second even when it is hearing
+            // nothing, so producing stats lines is NOT proof of a working link —
+            // hardcoding "active" here made a stone-deaf ground station read as
+            // connected. When not decoding, report "searching"; the finer CAUSE
+            // (deaf / mis_keyed / jammed) is carried in snap.link_diag.
+            let state = if snap.packets_received > 0 {
+                STATE_ACTIVE
+            } else {
+                STATE_SEARCHING
+            };
             // Pull the live receive-health counters the watchdogs produce so the
             // sidecar carries real values rather than the previous hardcoded
             // zeros. Absent in tests, where the kills/silence default to zero.

@@ -1,3 +1,8 @@
+// The wfb-stats sidecar body is a single large `serde_json::json!` object; its
+// field count exceeds the default macro recursion limit (as in the sibling
+// ados-radio crate).
+#![recursion_limit = "256"]
+
 //! Ground-station data-plane: WFB receive, channel acquisition, video fan-out,
 //! and the self-healing mesh. Modules are added incrementally; this is the
 //! crate root.

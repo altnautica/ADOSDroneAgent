@@ -121,6 +121,12 @@ pub fn build_gs_stats(
     rx_silent_seconds: Option<f64>,
     video_inbound_bytes_per_s: f64,
 ) -> serde_json::Value {
+    // A real signal-strength reading requires a decoded packet. Without one the
+    // RSSI/SNR/noise fields are the default sentinel (rssi -100), not a
+    // measurement — a deaf ground station sits here. Report them as null (no
+    // measurement) rather than shipping -100 dBm as if it were a real weak-signal
+    // reading (the same gate the drone-side sidecar uses, so both rigs agree).
+    let measured = snap.packets_received > 0;
     serde_json::json!({
         // Sidecar schema version (best-effort drift signal for readers). Shared
         // with the drone-side writer via the one const so both rigs agree.
@@ -161,11 +167,18 @@ pub fn build_gs_stats(
         "valid_rx_packets_per_s": (valid_rx_packets_per_s * 100.0).round() / 100.0,
         "reacquire_kills": reacquire_kills,
         "video_inbound_bytes_per_s": (video_inbound_bytes_per_s * 10.0).round() / 10.0,
-        // Link-quality block (parity with the air side).
-        "rssi_dbm": snap.rssi_dbm,
+        // Which radio backend is driving the receive path: the Linux monitor-mode
+        // + wfb_rx backend. Wire value mirrors the drone-side KernelMonitor backend
+        // ("kernel") so Mission Control badges the live radio path from either rig
+        // (additive; Rule 28).
+        "backend": "kernel",
+        // Link-quality block (parity with the air side). Signal-strength fields are
+        // null until a packet is actually decoded (see `measured` above) so the
+        // no-measurement sentinel never masquerades as a real weak-signal reading.
+        "rssi_dbm": measured.then_some(snap.rssi_dbm),
         // Noise floor, mirroring the drone-side sidecar key.
-        "noise_dbm": snap.noise_dbm,
-        "snr_db": snap.snr_db,
+        "noise_dbm": measured.then_some(snap.noise_dbm),
+        "snr_db": measured.then_some(snap.snr_db),
         "packets_received": snap.packets_received,
         // Diagnostic RX counters from wfb_rx that separate the failure modes a bare
         // "0 received" hides on the RX side: `packets_all` is every frame captured
@@ -234,7 +247,7 @@ fn json_to_mpv(value: &serde_json::Value) -> ados_protocol::logd::Value {
 
 #[cfg(test)]
 mod tests {
-    use super::super::args::{STATE_ACTIVE, STATE_REG_BLOCKED};
+    use super::super::args::{STATE_ACTIVE, STATE_REG_BLOCKED, STATE_SEARCHING};
     use super::*;
 
     #[test]
@@ -309,8 +322,11 @@ mod tests {
             tx_power_max_dbm: 30,
             ..WfbConfig::default()
         };
+        // A measured snapshot (a packet decoded) so the signal-strength fields are
+        // real readings, not the no-measurement sentinel.
         let snap = LinkStats {
             noise_dbm: -91.0,
+            packets_received: 3,
             ..LinkStats::default()
         };
         let channels = GsChannelTruth {
@@ -339,6 +355,7 @@ mod tests {
         assert_eq!(v["noise_dbm"], -91.0);
         assert_eq!(v["tx_power_max_dbm"], 30);
         assert_eq!(v["rx_silent_seconds"], 7.5);
+        assert_eq!(v["backend"], "kernel");
         // The new keys must never be null on the ground sidecar.
         assert!(!v["state"].is_null());
         assert!(!v["noise_dbm"].is_null());
@@ -348,6 +365,49 @@ mod tests {
         assert!(v["reg_domain"].is_null());
         assert_eq!(v["reg_verified"], false);
         assert_eq!(v["enabled_channels"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn gs_stats_nulls_signal_fields_and_surfaces_diag_when_deaf() {
+        // A deaf ground station: wfb_rx alive and emitting a PKT line, but 0 decoded
+        // and 0 captured off-air. The signal-strength fields must be null (not the
+        // -100 sentinel dressed up as a reading), and the diagnostic counters +
+        // link_diag must carry the real, legible cause.
+        let snap = LinkStats {
+            link_diag: ados_radio::link_quality::LinkDiag::Deaf,
+            ..LinkStats::default() // packets_received == 0, packets_all == 0
+        };
+        let channels = GsChannelTruth {
+            actual: 149,
+            rendezvous: 149,
+            operating: 149,
+        };
+        let v = build_gs_stats(
+            &snap,
+            "wlan1",
+            Some("rtl88x2eu"),
+            true,
+            channels,
+            &GsRegSnapshot::default(),
+            &WfbConfig::default(),
+            STATE_SEARCHING,
+            "searching",
+            false,
+            0.0,
+            0,
+            0,
+            None,
+            0.0,
+        );
+        // No fabricated weak-signal reading when nothing was decoded.
+        assert!(v["rssi_dbm"].is_null());
+        assert!(v["noise_dbm"].is_null());
+        assert!(v["snr_db"].is_null());
+        // The cause is legible: deaf + all counters honestly zero.
+        assert_eq!(v["link_diag"], "deaf");
+        assert_eq!(v["packets_all"], 0);
+        assert_eq!(v["decrypt_errors"], 0);
+        assert_eq!(v["state"], "searching");
     }
 
     #[test]
