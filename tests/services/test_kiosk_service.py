@@ -251,13 +251,32 @@ def test_build_chromium_argv_invokes_cage_and_resolved_browser() -> None:
     # The browser binary is resolved at runtime (its name varies by distro), so the
     # third argv slot is whatever `_resolve_browser_binary` returns.
     with patch.object(ks, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
-        argv = _build_chromium_argv("http://target/hud")
+        argv = _build_chromium_argv("http://target/hud", ks._RENDERER_SOFTWARE)
     assert argv[0] == "cage"
     assert argv[1] == "--"
     assert argv[2] == "/usr/bin/chromium"
     assert "--kiosk" in argv
     assert "--ozone-platform=wayland" in argv
     assert argv[-1] == "http://target/hud"
+
+
+def test_build_chromium_argv_software_disables_gpu() -> None:
+    """Software renderer -> --disable-gpu, and NO EGL/GPU-raster flags (so
+    Chromium never opens a GPU EGL that the box cannot drive)."""
+    with patch.object(ks, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
+        argv = _build_chromium_argv("http://x", ks._RENDERER_SOFTWARE)
+    assert "--disable-gpu" in argv
+    assert "--use-gl=egl" not in argv
+    assert "--enable-gpu-rasterization" not in argv
+
+
+def test_build_chromium_argv_gpu_uses_egl() -> None:
+    """GPU renderer -> EGL + GPU rasterization, and NOT --disable-gpu."""
+    with patch.object(ks, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
+        argv = _build_chromium_argv("http://x", ks._RENDERER_GPU)
+    assert "--use-gl=egl" in argv
+    assert "--enable-gpu-rasterization" in argv
+    assert "--disable-gpu" not in argv
 
 
 def test_resolve_browser_binary_returns_first_found() -> None:
@@ -288,7 +307,9 @@ def test_resolve_browser_binary_raises_naming_every_candidate() -> None:
 
 def test_windowed_argv_wayland_has_no_cage_and_wayland_platform() -> None:
     with patch.object(ks, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
-        argv = ks._build_windowed_chromium_argv("http://target/cockpit", "wayland")
+        argv = ks._build_windowed_chromium_argv(
+            "http://target/cockpit", "wayland", ks._RENDERER_SOFTWARE
+        )
     assert "cage" not in argv
     assert argv[0] == "/usr/bin/chromium"
     assert "--kiosk" in argv
@@ -298,7 +319,9 @@ def test_windowed_argv_wayland_has_no_cage_and_wayland_platform() -> None:
 
 def test_windowed_argv_x11_uses_x11_platform() -> None:
     with patch.object(ks, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
-        argv = ks._build_windowed_chromium_argv("http://target/cockpit", "x11")
+        argv = ks._build_windowed_chromium_argv(
+            "http://target/cockpit", "x11", ks._RENDERER_SOFTWARE
+        )
     assert "--ozone-platform=x11" in argv
     assert "cage" not in argv
 
@@ -569,6 +592,315 @@ def test_tail_bytes_returns_trailing_window() -> None:
 
 def test_tail_bytes_empty_input() -> None:
     assert KioskSupervisor._tail_bytes(b"") == ""
+
+
+# ---------------------------------------------------------------------------
+# Renderer selection: software default, GPU opt-in via the install marker,
+# scoped libmali, and the GPU->software self-heal.
+# ---------------------------------------------------------------------------
+
+
+def test_normalise_renderer_aliases() -> None:
+    assert ks._normalise_renderer("gpu") == ks._RENDERER_GPU
+    assert ks._normalise_renderer("GLES2") == ks._RENDERER_GPU
+    assert ks._normalise_renderer("egl") == ks._RENDERER_GPU
+    assert ks._normalise_renderer("software") == ks._RENDERER_SOFTWARE
+    assert ks._normalise_renderer("pixman") == ks._RENDERER_SOFTWARE
+    assert ks._normalise_renderer("cpu") == ks._RENDERER_SOFTWARE
+    assert ks._normalise_renderer("nonsense") is None
+
+
+def test_read_render_marker_parses_renderer_and_lib_dir(tmp_path: Any) -> None:
+    marker = tmp_path / "kiosk-render.conf"
+    marker.write_text("# provisioned by installer\nrenderer: gpu\nlib_dir: /opt/ados/gpu/mali\n")
+    with patch.object(ks, "_RENDER_MARKER_PATH", marker):
+        renderer, lib_dir = ks._read_render_marker()
+    assert renderer == ks._RENDERER_GPU
+    assert lib_dir == "/opt/ados/gpu/mali"
+
+
+def test_read_render_marker_missing_file_returns_nones(tmp_path: Any) -> None:
+    with patch.object(ks, "_RENDER_MARKER_PATH", tmp_path / "absent.conf"):
+        assert ks._read_render_marker() == (None, None)
+
+
+def test_resolve_render_plan_defaults_to_software(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ADOS_KIOSK_RENDERER", raising=False)
+    with patch.object(ks, "_read_render_marker", return_value=(None, None)):
+        assert ks._resolve_render_plan() == (ks._RENDERER_SOFTWARE, None)
+
+
+def test_resolve_render_plan_env_override_software_wins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ADOS_KIOSK_RENDERER", "software")
+    with patch.object(ks, "_read_render_marker", return_value=(ks._RENDERER_GPU, "/x")):
+        assert ks._resolve_render_plan() == (ks._RENDERER_SOFTWARE, None)
+
+
+def test_resolve_render_plan_marker_gpu_requires_existing_lib_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    monkeypatch.delenv("ADOS_KIOSK_RENDERER", raising=False)
+    lib_dir = tmp_path / "mali"
+    lib_dir.mkdir()
+    with patch.object(ks, "_read_render_marker", return_value=(ks._RENDERER_GPU, str(lib_dir))):
+        assert ks._resolve_render_plan() == (ks._RENDERER_GPU, str(lib_dir))
+
+
+def test_resolve_render_plan_marker_gpu_stale_lib_dir_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A marker that says gpu but whose scoped lib dir is gone -> software."""
+    monkeypatch.delenv("ADOS_KIOSK_RENDERER", raising=False)
+    with patch.object(
+        ks, "_read_render_marker", return_value=(ks._RENDERER_GPU, "/opt/ados/gpu/gone")
+    ):
+        assert ks._resolve_render_plan() == (ks._RENDERER_SOFTWARE, None)
+
+
+def test_cage_env_software_uses_pixman_no_ld_path() -> None:
+    env = ks._cage_env(ks._RENDERER_SOFTWARE, None)
+    assert env["WLR_RENDERER"] == "pixman"
+    assert env["WLR_DRM_DEVICES"] == ks._DRM_DEVICE
+    assert env["WLR_NO_HARDWARE_CURSORS"] == "1"
+    assert "LD_LIBRARY_PATH" not in env
+
+
+def test_cage_env_gpu_scopes_libmali_and_pins_gles2(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
+    env = ks._cage_env(ks._RENDERER_GPU, "/opt/ados/gpu/mali")
+    assert env["WLR_RENDERER"] == "gles2"
+    assert env["LD_LIBRARY_PATH"] == "/opt/ados/gpu/mali"
+    assert env["EGL_PLATFORM"] == "gbm"
+    # A pixman-only crutch does not apply on the GPU path.
+    assert "WLR_NO_HARDWARE_CURSORS" not in env
+
+
+def test_cage_env_gpu_prepends_to_existing_ld_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/usr/lib/existing")
+    env = ks._cage_env(ks._RENDERER_GPU, "/opt/ados/gpu/mali")
+    assert env["LD_LIBRARY_PATH"] == "/opt/ados/gpu/mali:/usr/lib/existing"
+
+
+def test_cage_env_gpu_without_lib_dir_no_ld_path() -> None:
+    """GPU with a system-wide (unspecified) libmali gets no scoped LD path."""
+    env = ks._cage_env(ks._RENDERER_GPU, None)
+    assert env["WLR_RENDERER"] == "gles2"
+    assert "LD_LIBRARY_PATH" not in env
+
+
+def test_chromium_render_flags() -> None:
+    assert ks._chromium_render_flags(ks._RENDERER_SOFTWARE) == ["--disable-gpu"]
+    assert ks._chromium_render_flags(ks._RENDERER_GPU) == [
+        "--use-gl=egl",
+        "--enable-gpu-rasterization",
+    ]
+
+
+def test_looks_gpu_failure_matches_markers() -> None:
+    assert ks._looks_gpu_failure("EGL_NOT_INITIALIZED: DRI2 failed to create screen") is True
+    assert ks._looks_gpu_failure("failed to create renderer") is True
+    assert ks._looks_gpu_failure("clean shutdown, no errors") is False
+
+
+# ---------------------------------------------------------------------------
+# env_unset strips DISPLAY on the cage path; _make_supervisor path selection
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_spawn_env_unset_strips_display() -> None:
+    """The cage path passes env_unset={DISPLAY,...} so cage never sees a stale
+    DISPLAY (the historical X11-backend crash)."""
+    captured: dict[str, Any] = {}
+
+    async def _fake_exec(*_args: Any, **kwargs: Any) -> _FakeProc:
+        captured.update(kwargs)
+        return _FakeProc()
+
+    sup = KioskSupervisor(
+        ["cage", "--"],
+        env={"WLR_RENDERER": "pixman"},
+        env_unset=frozenset({"DISPLAY", "WAYLAND_DISPLAY"}),
+    )
+    with patch.dict("os.environ", {"DISPLAY": ":0", "PATH": "/usr/bin"}, clear=False):
+        with patch("asyncio.create_subprocess_exec", _fake_exec):
+            await sup._spawn()
+    env = captured["env"]
+    assert env is not None
+    assert "DISPLAY" not in env
+    assert env["WLR_RENDERER"] == "pixman"
+    assert "PATH" in env  # still inherits the service env otherwise
+
+
+def test_make_supervisor_cage_gpu_strips_display_and_scopes_libmali() -> None:
+    with patch.object(ks, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
+        sup = ks._make_supervisor("http://x", None, ks._RENDERER_GPU, "/opt/ados/gpu/mali")
+    assert sup._argv[0] == "cage"
+    assert "--use-gl=egl" in sup._argv
+    assert sup._env is not None
+    assert sup._env["WLR_RENDERER"] == "gles2"
+    assert sup._env["LD_LIBRARY_PATH"].startswith("/opt/ados/gpu/mali")
+    assert sup._env_unset is not None and "DISPLAY" in sup._env_unset
+    assert sup._sweep_orphans_enabled is True
+
+
+def test_make_supervisor_windowed_forces_software_even_when_gpu_requested() -> None:
+    """A live desktop owns its own GL; our scoped GPU userspace does not touch
+    it, so the windowed browser renders in software regardless of the marker."""
+    session = ks.DesktopSession(
+        uid=1000, session_type="wayland", display=None, wayland_display="wayland-0"
+    )
+    with patch.object(ks, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
+        with patch.object(ks, "_session_env", return_value={"XDG_RUNTIME_DIR": "/run/user/1000"}):
+            sup = ks._make_supervisor(
+                "http://x", session, ks._RENDERER_GPU, "/opt/ados/gpu/mali"
+            )
+    assert "--disable-gpu" in sup._argv
+    assert "--use-gl=egl" not in sup._argv
+    assert sup._sweep_orphans_enabled is False
+
+
+# ---------------------------------------------------------------------------
+# Display-manager-aware session wait (the KDE boot race)
+# ---------------------------------------------------------------------------
+
+
+def test_display_manager_active_true_when_a_dm_is_active() -> None:
+    def _fake_run(argv: list[str], **_kw: Any) -> Any:
+        # `systemctl is-active sddm.service` -> active
+        active = argv[-1] == "sddm.service"
+        return SimpleNamespace(stdout="active\n" if active else "inactive\n", returncode=0)
+
+    with patch("shutil.which", return_value="/usr/bin/systemctl"):
+        with patch("subprocess.run", side_effect=_fake_run):
+            assert ks._display_manager_active() is True
+
+
+def test_display_manager_active_false_when_none_active() -> None:
+    def _fake_run(_argv: list[str], **_kw: Any) -> Any:
+        return SimpleNamespace(stdout="inactive\n", returncode=3)
+
+    with patch("shutil.which", return_value="/usr/bin/systemctl"):
+        with patch("subprocess.run", side_effect=_fake_run):
+            assert ks._display_manager_active() is False
+
+
+@pytest.mark.asyncio
+async def test_resolve_desktop_session_returns_immediately_when_present() -> None:
+    session = ks.DesktopSession(uid=1, session_type="x11", display=":0", wayland_display=None)
+    with patch.object(ks, "_detect_desktop_session", return_value=session):
+        got = await ks._resolve_desktop_session()
+    assert got is session
+
+
+@pytest.mark.asyncio
+async def test_resolve_desktop_session_none_when_no_dm() -> None:
+    """No session AND no display manager -> genuinely headless -> cage."""
+    with patch.object(ks, "_detect_desktop_session", return_value=None):
+        with patch.object(ks, "_display_manager_active", return_value=False):
+            assert await ks._resolve_desktop_session() is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_desktop_session_waits_then_returns_when_dm_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A display manager is active but the session appears only after a poll —
+    the kiosk waits for it instead of racing to cage (the KDE boot race)."""
+    monkeypatch.setattr(ks, "_SESSION_WAIT_SECONDS", 1.0)
+    monkeypatch.setattr(ks, "_SESSION_POLL_SECONDS", 0.01)
+    session = ks.DesktopSession(uid=1, session_type="wayland", display=None, wayland_display="wayland-0")
+    calls = {"n": 0}
+
+    def _detect() -> ks.DesktopSession | None:
+        calls["n"] += 1
+        return session if calls["n"] >= 3 else None
+
+    with patch.object(ks, "_detect_desktop_session", side_effect=_detect):
+        with patch.object(ks, "_display_manager_active", return_value=True):
+            got = await ks._resolve_desktop_session()
+    assert got is session
+
+
+@pytest.mark.asyncio
+async def test_resolve_desktop_session_times_out_to_cage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DM active but no session ever becomes active -> falls back to cage."""
+    monkeypatch.setattr(ks, "_SESSION_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(ks, "_SESSION_POLL_SECONDS", 0.01)
+    with patch.object(ks, "_detect_desktop_session", return_value=None):
+        with patch.object(ks, "_display_manager_active", return_value=True):
+            assert await ks._resolve_desktop_session() is None
+
+
+# ---------------------------------------------------------------------------
+# crash_looped flag + the GPU->software downgrade in _amain
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_crash_loop_sets_crash_looped_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _fake_exec(*_args: Any, **_kwargs: Any) -> _FakeProc:
+        return _FakeProc(wait_result=2, wait_delay=0.0)
+
+    monkeypatch.setattr(ks, "_BACKOFF_START_SECONDS", 0.0)
+    monkeypatch.setattr(ks, "_BACKOFF_MAX_SECONDS", 0.0)
+    sup = KioskSupervisor(["cage", "--"])
+    with patch("asyncio.create_subprocess_exec", _fake_exec):
+        await sup.run()
+    assert sup.crash_looped is True
+
+
+class _FakeSupervisor:
+    """A supervisor stand-in for the _amain downgrade test."""
+
+    def __init__(self, crash: bool) -> None:
+        self._crash = crash
+        self.crash_looped = False
+        self.last_stderr_tail = "EGL_NOT_INITIALIZED" if crash else ""
+
+    def request_stop(self) -> None:
+        pass
+
+    async def run(self) -> int:
+        self.crash_looped = self._crash
+        return 5 if self._crash else 0
+
+
+@pytest.mark.asyncio
+async def test_amain_downgrades_gpu_to_software_on_cage_crash_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A GPU cage launch that crash-loops is retried once in software so the
+    cockpit still ends up rendering."""
+    renderers_used: list[str] = []
+    fakes = [_FakeSupervisor(crash=True), _FakeSupervisor(crash=False)]
+
+    def _fake_make(_url: str, _session: Any, renderer: str, _lib: Any) -> _FakeSupervisor:
+        renderers_used.append(renderer)
+        return fakes[len(renderers_used) - 1]
+
+    async def _no_session() -> None:
+        return None
+
+    monkeypatch.setattr(
+        ks, "load_config", lambda: SimpleNamespace(logging=SimpleNamespace(level="info"))
+    )
+    monkeypatch.setattr(ks, "configure_logging", lambda *a, **k: None)
+    monkeypatch.setattr(ks, "_hdmi_present", lambda: True)
+    monkeypatch.setattr(ks, "_resolve_target_url", lambda _c: ("http://x", False))
+    monkeypatch.setattr(
+        ks, "_resolve_render_plan", lambda: (ks._RENDERER_GPU, "/opt/ados/gpu/mali")
+    )
+    monkeypatch.setattr(ks, "_resolve_desktop_session", _no_session)
+    monkeypatch.setattr(ks, "_make_supervisor", _fake_make)
+
+    rc = await ks._amain()
+    assert renderers_used == [ks._RENDERER_GPU, ks._RENDERER_SOFTWARE]
+    assert rc == 0
 
 
 # ---------------------------------------------------------------------------

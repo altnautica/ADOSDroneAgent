@@ -59,6 +59,42 @@ _DRM_CARD_PATH = Path("/dev/dri/card0")
 _DEFAULT_URL = "http://localhost:8080/cockpit"
 _ENV_URL_KEY = "ADOS_KIOSK_URL"
 _ENV_MINIMAL_KEY = "ADOS_KIOSK_MINIMAL_LAYER"
+_ENV_RENDERER_KEY = "ADOS_KIOSK_RENDERER"
+
+# Renderer selection.
+#
+# "software" (pixman / CPU) is the safe default: it never touches the GPU and
+# renders on ANY board, so a fresh box always shows the cockpit. "gpu" (cage
+# WLR_RENDERER=gles2 + Chromium EGL) is opt-in, enabled only when the installer
+# has provisioned a working GPU userspace (e.g. the Rockchip libmali blob for a
+# Mali board) and recorded it in the render marker below.
+#
+# We deliberately do NOT run a live EGL probe here to auto-detect the GPU: on
+# some Rockchip boards, poking the GPU through a mismatched driver stack (the
+# stock Mesa libEGL against a Valhall-CSF Mali) hangs the whole box, and the
+# kiosk runs on every boot. The installer decides once, from the HAL, and writes
+# the marker; the kiosk trusts it, with a self-healing downgrade to software if
+# a GPU-mode child still crash-loops.
+_RENDER_MARKER_PATH = Path("/etc/ados/kiosk-render.conf")
+_RENDERER_GPU = "gpu"
+_RENDERER_SOFTWARE = "software"
+
+# The DRM device cage should own in the appliance (no-desktop) case.
+_DRM_DEVICE = "/dev/dri/card0"
+
+# Substrings in a child's stderr that mark a GPU/EGL/renderer init failure,
+# used to decide whether a GPU-mode crash should downgrade to software.
+_GPU_FAILURE_MARKERS = (
+    "failed to create renderer",
+    "failed to load driver",
+    "eglinitialize",
+    "egl_not_initialized",
+    "dri2",
+    "gbm",
+    "could not match drm and vulkan",
+    "no drm fd",
+    "wlr_renderer",
+)
 
 # Crash-loop guard.
 _CRASH_WINDOW_SECONDS = 60.0
@@ -168,6 +204,107 @@ def _resolve_target_url(config: Any) -> tuple[str, bool]:
     return url, minimal
 
 
+def _normalise_renderer(value: str) -> str | None:
+    v = value.strip().lower()
+    if v in (_RENDERER_GPU, "gles2", "gles", "egl"):
+        return _RENDERER_GPU
+    if v in (_RENDERER_SOFTWARE, "pixman", "sw", "cpu"):
+        return _RENDERER_SOFTWARE
+    return None
+
+
+def _read_render_marker() -> tuple[str | None, str | None]:
+    """Return ``(renderer, mali_lib_dir)`` from the install-written marker.
+
+    The marker is a tiny ``key: value`` file the installer writes only after it
+    provisioned a working GPU userspace for this board::
+
+        renderer: gpu
+        lib_dir: /opt/ados/gpu/mali
+
+    ``renderer`` is "gpu" or "software"; ``lib_dir`` (optional) is the private
+    directory holding the SCOPED libmali EGL/GLES/GBM so cage can use the GPU
+    without the system's Mesa libEGL being replaced. Absent / unreadable ->
+    ``(None, None)`` (caller defaults to software).
+    """
+    try:
+        text = _RENDER_MARKER_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return None, None
+    renderer: str | None = None
+    lib_dir: str | None = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        # Accept "renderer: gpu" or "renderer = gpu".
+        key, sep, value = line.partition(":")
+        if not sep:
+            key, sep, value = line.partition("=")
+        key = key.strip().lower()
+        value = value.strip()
+        if key == "renderer":
+            renderer = _normalise_renderer(value)
+        elif key == "lib_dir" and value:
+            lib_dir = value
+    return renderer, lib_dir
+
+
+def _resolve_render_plan() -> tuple[str, str | None]:
+    """Return ``(renderer, mali_lib_dir)`` for the cage launch.
+
+    Precedence: the ``ADOS_KIOSK_RENDERER`` env override -> the install-written
+    marker -> ``"software"`` (the safe default that always renders). A marker
+    "gpu" is trusted only when its scoped libmali directory still exists (a
+    stale marker whose libs were removed falls back to software cleanly). See
+    ``_RENDER_MARKER_PATH`` for why there is no live GPU probe here.
+    """
+    env = os.environ.get(_ENV_RENDERER_KEY)
+    if env:
+        chosen = _normalise_renderer(env)
+        if chosen == _RENDERER_SOFTWARE:
+            return _RENDERER_SOFTWARE, None
+        if chosen == _RENDERER_GPU:
+            # Operator override wins; still carry the marker's scoped lib dir.
+            _, lib_dir = _read_render_marker()
+            return _RENDERER_GPU, lib_dir
+    renderer, lib_dir = _read_render_marker()
+    if renderer == _RENDERER_GPU:
+        if lib_dir and not Path(lib_dir).is_dir():
+            return _RENDERER_SOFTWARE, None
+        return _RENDERER_GPU, lib_dir
+    return _RENDERER_SOFTWARE, None
+
+
+def _cage_env(renderer: str, mali_lib_dir: str | None) -> dict[str, str]:
+    """Environment overlay for the cage (appliance) launch.
+
+    Pins cage's renderer and DRM device. ``DISPLAY`` / ``WAYLAND_DISPLAY`` are
+    stripped separately (via ``env_unset``) so cage uses its own DRM backend
+    instead of trying to nest under an X11 / Wayland server that is not there.
+    When the GPU renderer is active and a scoped libmali directory is
+    provisioned, it is prepended to ``LD_LIBRARY_PATH`` so cage + Chromium load
+    the GPU EGL/GLES/GBM from there, WITHOUT the system Mesa libEGL being
+    touched (so a running desktop and the software fallback are never broken).
+    """
+    wlr = "gles2" if renderer == _RENDERER_GPU else "pixman"
+    env = {
+        "WLR_RENDERER": wlr,
+        "WLR_DRM_DEVICES": _DRM_DEVICE,
+    }
+    if renderer == _RENDERER_GPU and mali_lib_dir:
+        existing = os.environ.get("LD_LIBRARY_PATH", "")
+        env["LD_LIBRARY_PATH"] = (
+            f"{mali_lib_dir}:{existing}" if existing else mali_lib_dir
+        )
+        env["EGL_PLATFORM"] = "gbm"
+    elif renderer == _RENDERER_SOFTWARE:
+        # No GPU cursor plane in the software path; a hardware cursor on a
+        # pixman renderer is a known wlroots crash on some SBCs.
+        env["WLR_NO_HARDWARE_CURSORS"] = "1"
+    return env
+
+
 def _resolve_browser_binary() -> str:
     """Return the first Chromium browser binary present on PATH.
 
@@ -187,14 +324,27 @@ def _resolve_browser_binary() -> str:
     )
 
 
-def _build_chromium_argv(url: str) -> list[str]:
+def _chromium_render_flags(renderer: str) -> list[str]:
+    """Chromium flags for the chosen renderer.
+
+    GPU: Wayland + EGL + GPU rasterization (hardware accelerated, used only
+    when the GPU userspace is provisioned). Software: ``--disable-gpu`` so
+    Chromium composites on the CPU and never opens the GPU EGL, matching cage's
+    pixman renderer so nothing in the stack touches a GPU that cannot be driven.
+    """
+    if renderer == _RENDERER_GPU:
+        return ["--use-gl=egl", "--enable-gpu-rasterization"]
+    return ["--disable-gpu"]
+
+
+def _build_chromium_argv(url: str, renderer: str) -> list[str]:
     """Full argv for `cage -- <chromium> ...`.
 
     The browser binary is resolved at runtime (`_resolve_browser_binary`)
     because its package/binary name varies by distro. cage handles the Wayland
-    compositor; we ask Chromium to use Wayland + EGL for hardware acceleration.
-    Raises `FileNotFoundError` (propagated to the `kiosk_binary_missing` path)
-    when no browser is installed.
+    compositor; the GPU-vs-software Chromium flags follow ``renderer`` (matched
+    to cage's WLR_RENDERER). Raises `FileNotFoundError` (propagated to the
+    `kiosk_binary_missing` path) when no browser is installed.
     """
     browser = _resolve_browser_binary()
     return [
@@ -206,8 +356,7 @@ def _build_chromium_argv(url: str) -> list[str]:
         "--disable-infobars",
         "--no-first-run",
         "--ozone-platform=wayland",
-        "--use-gl=egl",
-        "--enable-gpu-rasterization",
+        *_chromium_render_flags(renderer),
         "--autoplay-policy=no-user-gesture-required",
         url,
     ]
@@ -368,6 +517,64 @@ def _detect_desktop_session() -> DesktopSession | None:
     return None
 
 
+# Display managers whose presence means a desktop session is about to come up,
+# so the kiosk should wait for it (and launch a window into it) instead of
+# racing to grab the display via cage while the desktop is still starting.
+_DISPLAY_MANAGERS = ("sddm", "gdm", "gdm3", "lightdm", "lxdm", "greetd")
+
+# How long to wait for a starting desktop session before falling back to cage.
+_SESSION_WAIT_SECONDS = 30.0
+_SESSION_POLL_SECONDS = 1.5
+
+
+def _display_manager_active() -> bool:
+    """True when a login/display manager unit is active — i.e. a desktop
+    session is up or coming up. Used to decide whether to wait for the session
+    before falling back to cage (avoids the boot race where the kiosk grabs the
+    display via cage a moment before KDE/GNOME finishes starting)."""
+    systemctl = shutil.which("systemctl")
+    if not systemctl:
+        return False
+    for dm in _DISPLAY_MANAGERS:
+        try:
+            out = subprocess.run(
+                [systemctl, "is-active", f"{dm}.service"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if out.stdout.strip() == "active":
+            return True
+    return False
+
+
+async def _resolve_desktop_session() -> DesktopSession | None:
+    """Return the active desktop session, waiting briefly for one to appear when
+    a display manager is active but the session has not become active yet (the
+    boot race). Returns None on a genuinely headless / CLI box (no session and
+    no display manager) so the caller owns the display via cage."""
+    session = _detect_desktop_session()
+    if session is not None:
+        return session
+    if not _display_manager_active():
+        return None
+    log.info("kiosk_waiting_for_desktop_session", timeout_s=_SESSION_WAIT_SECONDS)
+    deadline = time.monotonic() + _SESSION_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        await asyncio.sleep(_SESSION_POLL_SECONDS)
+        session = _detect_desktop_session()
+        if session is not None:
+            return session
+    log.warning(
+        "kiosk_desktop_session_timeout",
+        msg="display manager active but no session became active; using cage",
+    )
+    return None
+
+
 def _session_env(session: DesktopSession) -> dict[str, str]:
     """The environment overlay that lets a process launched by this service
     connect to the running desktop's display server."""
@@ -382,11 +589,15 @@ def _session_env(session: DesktopSession) -> dict[str, str]:
     return env
 
 
-def _build_windowed_chromium_argv(url: str, session_type: str) -> list[str]:
+def _build_windowed_chromium_argv(
+    url: str, session_type: str, renderer: str
+) -> list[str]:
     """Full argv for a full-screen Chromium kiosk WITHOUT cage, to run inside an
     already-running desktop session. The Ozone platform matches the session so
     Chromium attaches to the live compositor / X server rather than trying to
-    own the display. Raises ``FileNotFoundError`` (propagated to the
+    own the display. The GPU-vs-software flags follow ``renderer`` (a desktop on
+    a board with no GPU userspace runs on llvmpipe, where ``--disable-gpu`` is
+    the reliable path). Raises ``FileNotFoundError`` (propagated to the
     ``kiosk_binary_missing`` path) when no browser is installed."""
     browser = _resolve_browser_binary()
     platform = "wayland" if session_type == "wayland" else "x11"
@@ -398,8 +609,7 @@ def _build_windowed_chromium_argv(url: str, session_type: str) -> list[str]:
         "--disable-infobars",
         "--no-first-run",
         f"--ozone-platform={platform}",
-        "--use-gl=egl",
-        "--enable-gpu-rasterization",
+        *_chromium_render_flags(renderer),
         "--autoplay-policy=no-user-gesture-required",
         url,
     ]
@@ -413,13 +623,19 @@ class KioskSupervisor:
         argv: list[str],
         *,
         env: dict[str, str] | None = None,
+        env_unset: frozenset[str] | set[str] | None = None,
         sweep_orphans: bool = True,
     ) -> None:
         self._argv = argv
         # An environment overlay merged over the service env (used to attach a
-        # windowed launch to a running desktop's display server). None inherits
-        # the service env unchanged (the cage path).
+        # windowed launch to a running desktop's display server, or to pin
+        # cage's renderer/DRM device). None inherits the service env unchanged.
         self._env = env
+        # Keys to REMOVE from the child env after the overlay merge. The cage
+        # path strips DISPLAY / WAYLAND_DISPLAY so cage uses its own DRM backend
+        # instead of trying (and failing) to nest under an absent X11/Wayland
+        # server — the root of the historical "Failed to open xcb connection".
+        self._env_unset = env_unset
         # Whether to broad-pkill cage/chromium orphans on stop. True under cage
         # (safe — cage owns the only chromium). False inside a running desktop,
         # where a broad chromium sweep would kill the operator's own browser.
@@ -427,13 +643,24 @@ class KioskSupervisor:
         self._proc: asyncio.subprocess.Process | None = None
         self._stop = asyncio.Event()
         self._crash_times: list[float] = []
+        # Set True when the crash-loop guard trips (5 crashes / 60 s). Lets the
+        # caller downgrade a crash-looping GPU launch to the software renderer.
+        self.crash_looped = False
+        # Last child's stderr tail, for the caller's downgrade heuristic.
+        self.last_stderr_tail = ""
 
     def request_stop(self) -> None:
         self._stop.set()
 
     async def _spawn(self) -> asyncio.subprocess.Process:
         log.info("kiosk_spawning", argv=self._argv)
-        spawn_env = None if self._env is None else {**os.environ, **self._env}
+        spawn_env: dict[str, str] | None
+        if self._env is None and not self._env_unset:
+            spawn_env = None
+        else:
+            spawn_env = {**os.environ, **(self._env or {})}
+            for key in self._env_unset or ():
+                spawn_env.pop(key, None)
         return await asyncio.create_subprocess_exec(
             *self._argv,
             stdout=asyncio.subprocess.PIPE,
@@ -565,6 +792,7 @@ class KioskSupervisor:
             except Exception:
                 pass
             stderr_tail = self._tail_bytes(stderr_data)
+            self.last_stderr_tail = stderr_tail
 
             under_limit = self._record_crash_and_check()
             log.warning(
@@ -575,6 +803,7 @@ class KioskSupervisor:
             )
 
             if not under_limit:
+                self.crash_looped = True
                 log.error(
                     "kiosk_crash_loop_guard",
                     msg="5 crashes in 60s, stopping restart loop",
@@ -594,6 +823,42 @@ class KioskSupervisor:
         return 0
 
 
+def _looks_gpu_failure(stderr_tail: str) -> bool:
+    """True when a child's stderr tail carries a GPU/EGL/renderer-init failure
+    marker — a diagnostic hint for the GPU->software downgrade (the downgrade
+    itself does not depend on it)."""
+    low = stderr_tail.lower()
+    return any(marker in low for marker in _GPU_FAILURE_MARKERS)
+
+
+def _make_supervisor(
+    url: str,
+    session: DesktopSession | None,
+    renderer: str,
+    mali_lib_dir: str | None,
+) -> KioskSupervisor:
+    """Build the supervisor for the current (session, renderer) combination.
+
+    Windowed (a live desktop is present) attaches to that session's display
+    server and renders in SOFTWARE: a desktop owns its own GL stack and our
+    scoped GPU userspace does not touch it, so ``--disable-gpu`` is the safe
+    match (a desktop on a board with no GPU userspace is on llvmpipe anyway).
+    cage (the appliance case) owns the display, with DISPLAY / WAYLAND_DISPLAY
+    stripped and the renderer / DRM device / scoped libmali pinned. Raises
+    ``FileNotFoundError`` when no Chromium is installed."""
+    if session is not None:
+        argv = _build_windowed_chromium_argv(
+            url, session.session_type, _RENDERER_SOFTWARE
+        )
+        return KioskSupervisor(argv, env=_session_env(session), sweep_orphans=False)
+    argv = _build_chromium_argv(url, renderer)
+    return KioskSupervisor(
+        argv,
+        env=_cage_env(renderer, mali_lib_dir),
+        env_unset=frozenset({"DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY"}),
+    )
+
+
 async def _amain() -> int:
     config = load_config()
     configure_logging(config.logging.level)
@@ -609,38 +874,31 @@ async def _amain() -> int:
         return 0
 
     url, minimal = _resolve_target_url(config)
-    slog.info("kiosk_target_resolved", url=url, minimal_layer=minimal)
-
+    renderer, mali_lib_dir = _resolve_render_plan()
     # Adaptive launch: run a full-screen window inside a live desktop when one
     # is present (cage cannot — the desktop already owns the DRM master), else
-    # own the display via cage.
-    session = _detect_desktop_session()
-    try:
-        if session is not None:
-            slog.info(
-                "kiosk_desktop_session_detected",
-                session_type=session.session_type,
-                uid=session.uid,
-            )
-            argv = _build_windowed_chromium_argv(url, session.session_type)
-            env = _session_env(session)
-            supervisor = KioskSupervisor(argv, env=env, sweep_orphans=False)
-        else:
-            slog.info("kiosk_no_desktop_session", msg="owning the display via cage")
-            argv = _build_chromium_argv(url)
-            supervisor = KioskSupervisor(argv)
-    except FileNotFoundError as exc:
-        # No Chromium browser installed. Report which names were searched and
-        # exit non-zero (the same rc the supervisor uses when a spawn hits a
-        # missing binary) so the failure is visible without churning.
-        slog.error("kiosk_binary_missing", error=str(exc))
-        return 3
+    # own the display via cage. Waits briefly for a starting desktop when a
+    # display manager is active (the boot race).
+    session = await _resolve_desktop_session()
+    slog.info(
+        "kiosk_target_resolved",
+        url=url,
+        minimal_layer=minimal,
+        renderer=renderer,
+        gpu_lib_dir=mali_lib_dir,
+        desktop_session=(session.session_type if session else None),
+    )
 
     loop = asyncio.get_event_loop()
+    # The active supervisor changes on a GPU->software downgrade; the signal
+    # handler stops whichever one is current.
+    current: dict[str, KioskSupervisor | None] = {"sup": None}
 
     def _on_signal(*_args: Any) -> None:
         slog.info("kiosk_service_signal_stop")
-        supervisor.request_stop()
+        sup = current["sup"]
+        if sup is not None:
+            sup.request_stop()
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         try:
@@ -648,9 +906,58 @@ async def _amain() -> int:
         except NotImplementedError:
             signal.signal(sig, _on_signal)
 
-    rc = await supervisor.run()
-    slog.info("kiosk_service_stopped", rc=rc)
-    return rc
+    # Up to one automatic GPU -> software downgrade if the GPU launch
+    # crash-loops. Software (pixman / --disable-gpu) always renders, so a box
+    # whose GPU userspace is wrong still ends up showing the cockpit.
+    tried_software = renderer == _RENDERER_SOFTWARE
+    while True:
+        try:
+            supervisor = _make_supervisor(url, session, renderer, mali_lib_dir)
+        except FileNotFoundError as exc:
+            # No Chromium browser installed. Report which names were searched
+            # and exit non-zero so the failure is visible without churning.
+            slog.error("kiosk_binary_missing", error=str(exc))
+            return 3
+        current["sup"] = supervisor
+
+        if session is not None:
+            slog.info(
+                "kiosk_desktop_session_detected",
+                session_type=session.session_type,
+                uid=session.uid,
+                renderer=renderer,
+            )
+        else:
+            slog.info(
+                "kiosk_no_desktop_session",
+                msg="owning the display via cage",
+                renderer=renderer,
+            )
+
+        rc = await supervisor.run()
+
+        # Self-heal: a crash-looping GPU cage launch downgrades to software so
+        # the cockpit still ends up rendering (the windowed path is already
+        # software, so this only applies when cage owns the display).
+        if (
+            supervisor.crash_looped
+            and session is None
+            and renderer == _RENDERER_GPU
+            and not tried_software
+        ):
+            slog.error(
+                "kiosk_gpu_fallback",
+                msg="GPU renderer crash-looped; downgrading to software",
+                stderr_tail=supervisor.last_stderr_tail,
+                gpu_failure=_looks_gpu_failure(supervisor.last_stderr_tail),
+            )
+            renderer = _RENDERER_SOFTWARE
+            mali_lib_dir = None
+            tried_software = True
+            continue
+
+        slog.info("kiosk_service_stopped", rc=rc)
+        return rc
 
 
 def main() -> None:
