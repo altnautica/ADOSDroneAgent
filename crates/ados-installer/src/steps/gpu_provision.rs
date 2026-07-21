@@ -1,8 +1,15 @@
-//! GPU provision: on a Rockchip Mali board whose vendor kbase driver owns the
-//! GPU, install a SCOPED libmali GPU userspace blob so the HDMI kiosk (cage +
-//! Chromium) can hardware-accelerate its UI compositing — WITHOUT replacing the
-//! system Mesa libEGL. A running desktop and the software fallback both stay
-//! intact because the blob is exposed only to the kiosk's own processes.
+//! GPU provision: enable the HDMI kiosk's GPU renderer for the board's GPU, in
+//! one of two ways, then write a render marker the kiosk reads:
+//!   - **Rockchip Mali** (the vendor kbase owns the GPU, `/dev/mali0`): install a
+//!     SCOPED libmali GPU userspace blob so cage + Chromium can accelerate their
+//!     UI compositing WITHOUT replacing the system Mesa libEGL. A running desktop
+//!     and the software fallback both stay intact because the blob is exposed
+//!     only to the kiosk's own processes.
+//!   - **Mesa-native** (Pi VideoCore / Intel / AMD / NVIDIA, where the stock Mesa
+//!     GL already drives the GPU): just write the marker with NO scoped lib dir —
+//!     the kiosk uses the system GL. No blob, no download.
+//! Any other board (or a failed provision) leaves the kiosk on the software
+//! renderer, which always works.
 //!
 //! Non-destructive by design:
 //!   1. the `.deb` is fetched (pinned URL + verified sha256) and extracted with
@@ -118,15 +125,49 @@ fn catalog_lookup(family: &str) -> Option<&'static LibmaliVariant> {
 }
 
 /// The render-marker file body for a provisioned GPU (pure). Kept in sync with
-/// the kiosk's marker parser: `renderer` + `lib_dir` keys.
-fn render_marker_body(lib_dir: &str) -> String {
-    format!(
-        "# Written by the ADOS installer's GPU provisioning step.\n\
-         # The HDMI kiosk reads this to select the GPU (gles2/EGL) renderer and\n\
-         # the SCOPED libmali directory. Delete it to force the software renderer.\n\
-         renderer: gpu\n\
-         lib_dir: {lib_dir}\n"
-    )
+/// the kiosk's marker parser: `renderer` + optional `lib_dir` keys. A scoped
+/// `lib_dir` is present for the Rockchip libmali path; the Mesa-native path
+/// (Pi / Intel / AMD, where the stock Mesa GL already drives the GPU) writes no
+/// `lib_dir` so the kiosk uses the system GL.
+fn render_marker_body(lib_dir: Option<&str>) -> String {
+    let head = "# Written by the ADOS installer's GPU provisioning step.\n\
+                # The HDMI kiosk reads this to select the GPU (gles2/EGL) renderer.\n\
+                # Delete it to force the software renderer.\n\
+                renderer: gpu\n";
+    match lib_dir {
+        Some(dir) => format!("{head}lib_dir: {dir}\n"),
+        None => head.to_string(),
+    }
+}
+
+/// DRM render/display drivers whose stock Mesa GL reliably drives the GPU, so
+/// the kiosk can use the GPU (cage gles2 + Chromium EGL) with NO vendor blob.
+/// Deliberately conservative: it excludes `panfrost`/`lima` because on the
+/// Rockchip Valhall boards we target those are the BROKEN path (a Valhall Mali
+/// is handled by the libmali route via `/dev/mali0`, not Mesa). `v3d`/`vc4` =
+/// Raspberry Pi VideoCore, `i915` = Intel, `amdgpu`/`radeon` = AMD, `nouveau` =
+/// NVIDIA.
+const MESA_GOOD_DRIVERS: &[&str] = &["v3d", "vc4", "i915", "amdgpu", "radeon", "nouveau"];
+
+/// Return the name of a known-good Mesa GL DRM driver bound to a GPU on this
+/// box, or None. Reads the driver symlink of the render/display nodes — a safe
+/// stat, never a live GL init. Pure enough to unit-test via the sysfs root.
+fn mesa_native_gpu_driver() -> Option<String> {
+    for node in [
+        "/sys/class/drm/renderD128/device/driver",
+        "/sys/class/drm/renderD129/device/driver",
+        "/sys/class/drm/card0/device/driver",
+        "/sys/class/drm/card1/device/driver",
+    ] {
+        if let Ok(target) = std::fs::read_link(node) {
+            if let Some(name) = target.file_name().and_then(|n| n.to_str()) {
+                if MESA_GOOD_DRIVERS.contains(&name) {
+                    return Some(name.to_string());
+                }
+            }
+        }
+    }
+    None
 }
 
 /// The panfrost/panthor blacklist file body (pure).
@@ -298,62 +339,80 @@ impl Step for GpuProvision {
         if ctx.profile != "ground_station" {
             return StepOutcome::Skipped;
         }
-        // Safe runtime GPU probe: no vendor kbase node -> no accelerated path
-        // on this kernel -> software renderer.
-        if !mali_kbase_present() {
+        // Rockchip Mali (the vendor kbase owns the GPU) -> a scoped libmali blob.
+        if mali_kbase_present() {
+            return provision_libmali();
+        }
+        // Otherwise, if the stock Mesa GL already drives the GPU (Pi VideoCore,
+        // Intel, AMD, NVIDIA), enable the GPU renderer with NO vendor blob: the
+        // marker carries no lib_dir, so the kiosk uses the system GL directly.
+        if let Some(driver) = mesa_native_gpu_driver() {
+            if let Err(e) = write_file(RENDER_MARKER_PATH, &render_marker_body(None)) {
+                return StepOutcome::Failed(format!("writing the render marker failed: {e}"));
+            }
             tracing::info!(
-                "no Mali kbase GPU ({MALI_KBASE_NODE} absent); kiosk uses software renderer"
+                driver,
+                "enabled the Mesa GPU renderer for the kiosk (no blob)"
+            );
+            return StepOutcome::Ok;
+        }
+        tracing::info!("no accelerated GPU userspace found; kiosk uses the software renderer");
+        StepOutcome::Skipped
+    }
+}
+
+/// Provision the scoped libmali blob for a Rockchip Mali board and write the GPU
+/// render marker. Any failure degrades WITHOUT writing the marker, so the kiosk
+/// falls back to the software renderer that always works.
+fn provision_libmali() -> StepOutcome {
+    let family = match gpu_family_for(&read_soc_identity()) {
+        Some(f) => f,
+        None => {
+            tracing::info!("GPU family not recognised; kiosk uses software renderer");
+            return StepOutcome::Skipped;
+        }
+    };
+    let variant = match catalog_lookup(family) {
+        Some(v) => v,
+        None => {
+            tracing::info!(
+                family,
+                "no verified libmali blob catalogued for this GPU family; software renderer"
             );
             return StepOutcome::Skipped;
         }
-        let family = match gpu_family_for(&read_soc_identity()) {
-            Some(f) => f,
-            None => {
-                tracing::info!("GPU family not recognised; kiosk uses software renderer");
-                return StepOutcome::Skipped;
-            }
-        };
-        let variant = match catalog_lookup(family) {
-            Some(v) => v,
-            None => {
-                tracing::info!(
-                    family,
-                    "no verified libmali blob catalogued for this GPU family; software renderer"
-                );
-                return StepOutcome::Skipped;
-            }
-        };
+    };
 
-        // Provision. Any failure degrades WITHOUT writing the render marker, so
-        // the kiosk falls back to the software renderer.
-        let deb = match download_and_verify(variant) {
-            Ok(p) => p,
-            Err(e) => return StepOutcome::Failed(e),
-        };
-        let extract_res = extract_scoped(&deb);
-        let _ = std::fs::remove_file(&deb);
-        if let Err(e) = extract_res {
-            return StepOutcome::Failed(e);
-        }
-
-        // Keep the vendor kbase in charge of the GPU (best-effort; a write
-        // failure here does not undo the provisioned userspace).
-        if let Err(e) = write_file(PANFROST_BLACKLIST_PATH, &panfrost_blacklist_body()) {
-            tracing::warn!(error = %e, "could not write the panfrost blacklist");
-        }
-
-        // The marker is the last thing written: its presence means the scoped
-        // libmali is ready for the kiosk to use.
-        if let Err(e) = write_file(RENDER_MARKER_PATH, &render_marker_body(MALI_SCOPE_DIR)) {
-            return StepOutcome::Failed(format!("writing the render marker failed: {e}"));
-        }
-        tracing::info!(
-            family,
-            dir = MALI_SCOPE_DIR,
-            "provisioned scoped libmali GPU userspace for the kiosk"
-        );
-        StepOutcome::Ok
+    let deb = match download_and_verify(variant) {
+        Ok(p) => p,
+        Err(e) => return StepOutcome::Failed(e),
+    };
+    let extract_res = extract_scoped(&deb);
+    let _ = std::fs::remove_file(&deb);
+    if let Err(e) = extract_res {
+        return StepOutcome::Failed(e);
     }
+
+    // Keep the vendor kbase in charge of the GPU (best-effort; a write failure
+    // here does not undo the provisioned userspace).
+    if let Err(e) = write_file(PANFROST_BLACKLIST_PATH, &panfrost_blacklist_body()) {
+        tracing::warn!(error = %e, "could not write the panfrost blacklist");
+    }
+
+    // The marker is the last thing written: its presence means the scoped
+    // libmali is ready for the kiosk to use.
+    if let Err(e) = write_file(
+        RENDER_MARKER_PATH,
+        &render_marker_body(Some(MALI_SCOPE_DIR)),
+    ) {
+        return StepOutcome::Failed(format!("writing the render marker failed: {e}"));
+    }
+    tracing::info!(
+        family,
+        dir = MALI_SCOPE_DIR,
+        "provisioned scoped libmali GPU userspace for the kiosk"
+    );
+    StepOutcome::Ok
 }
 
 #[cfg(test)]
@@ -400,9 +459,31 @@ mod tests {
 
     #[test]
     fn render_marker_body_declares_gpu_and_lib_dir() {
-        let body = render_marker_body("/opt/ados/gpu/mali");
+        let body = render_marker_body(Some("/opt/ados/gpu/mali"));
         assert!(body.contains("renderer: gpu"));
         assert!(body.contains("lib_dir: /opt/ados/gpu/mali"));
+    }
+
+    #[test]
+    fn render_marker_body_no_lib_dir_for_mesa_native() {
+        // The Mesa-native path (Pi / Intel / AMD) writes gpu with NO lib_dir so
+        // the kiosk uses the system GL (the kiosk treats a missing lib_dir as a
+        // system-GL GPU renderer).
+        let body = render_marker_body(None);
+        assert!(body.contains("renderer: gpu"));
+        assert!(!body.contains("lib_dir"));
+    }
+
+    #[test]
+    fn mesa_good_drivers_include_known_and_exclude_panfrost() {
+        // Conservative allowlist: the reliably-Mesa-driven GPUs are enabled, but
+        // panfrost/lima are excluded — on the Rockchip Valhall boards we target
+        // those are the broken path (a Valhall Mali is handled via libmali).
+        for good in ["v3d", "vc4", "i915", "amdgpu", "radeon", "nouveau"] {
+            assert!(MESA_GOOD_DRIVERS.contains(&good), "missing {good}");
+        }
+        assert!(!MESA_GOOD_DRIVERS.contains(&"panfrost"));
+        assert!(!MESA_GOOD_DRIVERS.contains(&"lima"));
     }
 
     #[test]
