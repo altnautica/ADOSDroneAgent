@@ -1,11 +1,18 @@
 [Unit]
 Description=ADOS HDMI Kiosk (ground-station profile)
-After=graphical.target ados-mediamtx-gs.service
+After=ados-mediamtx-gs.service
 PartOf=ados-supervisor.service
-# No ConditionPathExists on the DRM node: the KMS display device can be created
-# a few seconds after this unit starts at boot (a boot race that a one-shot
-# condition loses, skipping the kiosk forever). The service instead WAITS for a
-# DRM display to appear and exits cleanly if none does (a headless box).
+# NOT ordered After=graphical.target: this unit is WantedBy=multi-user.target,
+# and graphical.target is itself After=multi-user.target, so ordering after
+# graphical.target forms a cycle (multi-user wants this -> this after graphical
+# -> graphical after multi-user) that systemd breaks by DELETING this unit's
+# start job — the kiosk then never auto-starts on boot. Instead the service
+# starts at multi-user.target and WAITS for the DRM display and the desktop
+# session itself (so it works on both a desktop box and a headless appliance).
+#
+# No ConditionPathExists on the DRM node either: the KMS display device can be
+# created a few seconds after this unit starts (a boot race a one-shot condition
+# loses); the service waits for a display and exits cleanly if none appears.
 StartLimitInterval=60s
 StartLimitBurst=5
 

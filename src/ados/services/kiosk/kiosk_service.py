@@ -569,7 +569,10 @@ def _detect_desktop_session() -> DesktopSession | None:
 _DISPLAY_MANAGERS = ("sddm", "gdm", "gdm3", "lightdm", "lxdm", "greetd")
 
 # How long to wait for a starting desktop session before falling back to cage.
-_SESSION_WAIT_SECONDS = 30.0
+# Generous because the kiosk now starts at multi-user.target (before the
+# desktop), so on a desktop box it waits here for the login session to become
+# active; it returns as soon as the session appears, so a large ceiling is free.
+_SESSION_WAIT_SECONDS = 90.0
 _SESSION_POLL_SECONDS = 1.5
 
 
