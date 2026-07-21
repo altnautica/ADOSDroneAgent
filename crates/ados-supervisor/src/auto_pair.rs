@@ -31,8 +31,41 @@ use crate::bind::BindRole;
 const CONFIG_YAML: &str = "/etc/ados/config.yaml";
 /// Settle delay before the first attempt (lets the radio + units come up).
 pub const START_DELAY: Duration = Duration::from_secs(15);
-/// Backoff between attempts.
-pub const RETRY_BACKOFF: Duration = Duration::from_secs(60);
+/// Base backoff between local-bind attempts.
+///
+/// Kept SHORT on purpose. The WFB bind is a two-party RENDEZVOUS: the drone's
+/// bind tunnel only opens while the ground station's bind server is
+/// simultaneously beaconing on the bind channel. Each rig runs this loop
+/// independently — a bind session, then a backoff — so a LONG backoff on either
+/// side means their active windows drift out of phase and never coincide. Two
+/// rigs side-by-side then never bind even though both radios are healthy (the
+/// windows are simply never open at the same time). This was masked when both
+/// rigs cold-boot together (their loops start aligned), but any rig restarted /
+/// re-installed later drifts out of phase forever.
+///
+/// A short backoff keeps both rigs in an active bind session almost all the
+/// time, so their windows overlap within a cycle regardless of when each
+/// started — no shared clock or coordination needed (the two rigs' clocks are
+/// not synchronised on an offline bench). [`RETRY_BACKOFF_JITTER_SECS`] adds
+/// randomness so two rigs looping with identical timing cannot stay phase-locked
+/// apart.
+pub const RETRY_BACKOFF: Duration = Duration::from_secs(3);
+/// Upper bound (seconds) on the random jitter added to [`RETRY_BACKOFF`] before
+/// each retry sleep, breaking any phase lock between two independently-looping
+/// rigs. Actual jitter is a uniform `0..=RETRY_BACKOFF_JITTER_SECS`.
+pub const RETRY_BACKOFF_JITTER_SECS: u64 = 4;
+
+/// The sleep before the next local-bind attempt: [`RETRY_BACKOFF`] plus a random
+/// `0..=RETRY_BACKOFF_JITTER_SECS` seconds of jitter. Pure-ish (reads the OS RNG;
+/// a best-effort fallback to zero jitter keeps the loop alive if the RNG hiccups,
+/// which it never does on the target).
+fn retry_backoff() -> Duration {
+    let mut b = [0u8; 1];
+    let jitter = getrandom::getrandom(&mut b)
+        .map(|_| (b[0] as u64) % (RETRY_BACKOFF_JITTER_SECS + 1))
+        .unwrap_or(0);
+    RETRY_BACKOFF + Duration::from_secs(jitter)
+}
 
 /// Cap on consecutive bind attempts before the rig stops retrying the local
 /// radio bind and asks the operator to fall back to the cloud relay. Real bind
@@ -355,7 +388,7 @@ async fn run_with_failover(
         }
         tokio::select! {
             _ = shutdown.changed() => break,
-            _ = tokio::time::sleep(RETRY_BACKOFF) => {}
+            _ = tokio::time::sleep(retry_backoff()) => {}
         }
     }
 }
@@ -372,6 +405,23 @@ mod tests {
             WFB_FAILOVER_SIDECAR_VERSION,
             ados_protocol::contracts::sidecar_version("wfb_failover").unwrap()
         );
+    }
+
+    #[test]
+    fn retry_backoff_is_short_and_jitter_bounded() {
+        // The backoff must stay short so both rigs bind near-continuously and
+        // their rendezvous windows overlap; and the total must never exceed
+        // base + max jitter (a long backoff reintroduces the phase-drift bug).
+        let base = RETRY_BACKOFF.as_secs();
+        assert!(base <= 5, "backoff base must stay short, got {base}s");
+        for _ in 0..200 {
+            let b = retry_backoff().as_secs();
+            assert!(
+                b >= base && b <= base + RETRY_BACKOFF_JITTER_SECS,
+                "backoff {b}s out of [{base}, {}]",
+                base + RETRY_BACKOFF_JITTER_SECS
+            );
+        }
     }
 
     #[test]
