@@ -55,6 +55,15 @@ from ados.core.logging import configure_logging, get_logger
 log = get_logger("kiosk.kiosk_service")
 
 _DRM_CARD_PATH = Path("/dev/dri/card0")
+_DRM_DIR = Path("/dev/dri")
+_DRM_SYSFS = Path("/sys/class/drm")
+
+# The DRM display devices can appear a few seconds AFTER multi-user/graphical
+# is reached at boot (the GPU/KMS driver probes asynchronously), so a one-shot
+# presence check loses a boot race and the kiosk never starts. We wait for a
+# display to appear instead of gating on it once.
+_DISPLAY_WAIT_SECONDS = 60.0
+_DISPLAY_POLL_SECONDS = 2.0
 
 _DEFAULT_URL = "http://localhost:8080/cockpit"
 _ENV_URL_KEY = "ADOS_KIOSK_URL"
@@ -121,14 +130,43 @@ _BROWSER_CANDIDATES = ("chromium-browser", "chromium", "chromium-browser-stable"
 
 
 def _hdmi_present() -> bool:
-    """True when the DRM card node exists.
+    """True when a DRM display is available.
 
-    We do not try to detect a connected monitor. `/dev/dri/card0` is the
-    kernel side of the KMS driver. If HDMI hardware is missing entirely
-    (headless image, DRM driver not loaded) the node is absent and we
-    cleanly skip the kiosk.
+    Prefers a connector reporting ``connected`` (a real monitor), scanning ALL
+    cards — on some boards (e.g. a Raspberry Pi) the render node is ``card0``
+    and the display is ``card1``, so a card0-only check is wrong. Falls back to
+    "any ``/dev/dri/card*`` node exists" when the sysfs status is unreadable, so
+    a board whose DRM subsystem is up but whose connector status we cannot read
+    still counts. Absent entirely (headless / DRM not loaded) -> False.
     """
-    return _DRM_CARD_PATH.exists()
+    try:
+        for status in _DRM_SYSFS.glob("card*-*/status"):
+            try:
+                if status.read_text().strip() == "connected":
+                    return True
+            except OSError:
+                continue
+    except OSError:
+        pass
+    try:
+        return any(_DRM_DIR.glob("card*"))
+    except OSError:
+        return False
+
+
+async def _wait_for_display() -> bool:
+    """Wait (bounded) for a DRM display to appear, absorbing the boot race where
+    the KMS device is created shortly after the service starts. Returns True as
+    soon as one is present, False after the timeout (a genuinely headless box)."""
+    if _hdmi_present():
+        return True
+    log.info("kiosk_waiting_for_display", timeout_s=_DISPLAY_WAIT_SECONDS)
+    deadline = time.monotonic() + _DISPLAY_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        await asyncio.sleep(_DISPLAY_POLL_SECONDS)
+        if _hdmi_present():
+            return True
+    return False
 
 
 def hdmi_present() -> bool:
@@ -909,11 +947,10 @@ async def _amain() -> int:
     slog = structlog.get_logger()
     slog.info("kiosk_service_starting")
 
-    if not _hdmi_present():
+    if not await _wait_for_display():
         slog.info(
             "kiosk_hdmi_absent",
-            path=str(_DRM_CARD_PATH),
-            msg="no DRM card node, HDMI kiosk skipped cleanly",
+            msg="no DRM display after wait; HDMI kiosk skipped cleanly",
         )
         return 0
 

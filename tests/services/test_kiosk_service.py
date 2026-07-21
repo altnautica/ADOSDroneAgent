@@ -102,16 +102,71 @@ class _FakeProc:
 # ---------------------------------------------------------------------------
 
 
-def test_hdmi_present_true_when_path_exists() -> None:
-    with patch.object(ks, "_DRM_CARD_PATH") as path:
-        path.exists.return_value = True
+def _drm_dirs(tmp_path: Any, connectors: dict[str, str], cards: list[str]) -> tuple[Any, Any]:
+    """Build fake /sys/class/drm (card*-*/status) + /dev/dri (card*) trees."""
+    sysfs = tmp_path / "sys_drm"
+    dev = tmp_path / "dev_dri"
+    sysfs.mkdir()
+    dev.mkdir()
+    for name, status in connectors.items():
+        c = sysfs / name
+        c.mkdir()
+        (c / "status").write_text(status + "\n")
+    for card in cards:
+        (dev / card).write_text("")
+    return sysfs, dev
+
+
+def test_hdmi_present_true_when_a_connector_is_connected(tmp_path: Any) -> None:
+    # On a Pi the display is card1, not card0 — a connected connector on ANY
+    # card counts.
+    sysfs, dev = _drm_dirs(
+        tmp_path, {"card1-HDMI-A-1": "connected", "card1-HDMI-A-2": "disconnected"}, ["card0", "card1"]
+    )
+    with patch.object(ks, "_DRM_SYSFS", sysfs), patch.object(ks, "_DRM_DIR", dev):
         assert _hdmi_present() is True
 
 
-def test_hdmi_present_false_when_path_missing() -> None:
-    with patch.object(ks, "_DRM_CARD_PATH") as path:
-        path.exists.return_value = False
+def test_hdmi_present_true_fallback_when_card_node_exists(tmp_path: Any) -> None:
+    # No connector status readable, but a DRM card node exists -> the subsystem
+    # is up, so proceed (fallback).
+    sysfs, dev = _drm_dirs(tmp_path, {}, ["card0"])
+    with patch.object(ks, "_DRM_SYSFS", sysfs), patch.object(ks, "_DRM_DIR", dev):
+        assert _hdmi_present() is True
+
+
+def test_hdmi_present_false_when_no_drm(tmp_path: Any) -> None:
+    sysfs, dev = _drm_dirs(tmp_path, {"card1-HDMI-A-1": "disconnected"}, [])
+    with patch.object(ks, "_DRM_SYSFS", sysfs), patch.object(ks, "_DRM_DIR", dev):
         assert _hdmi_present() is False
+
+
+@pytest.mark.asyncio
+async def test_wait_for_display_returns_immediately_when_present() -> None:
+    with patch.object(ks, "_hdmi_present", return_value=True):
+        assert await ks._wait_for_display() is True
+
+
+@pytest.mark.asyncio
+async def test_wait_for_display_times_out_headless(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ks, "_DISPLAY_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(ks, "_DISPLAY_POLL_SECONDS", 0.01)
+    with patch.object(ks, "_hdmi_present", return_value=False):
+        assert await ks._wait_for_display() is False
+
+
+@pytest.mark.asyncio
+async def test_wait_for_display_appears_after_poll(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ks, "_DISPLAY_WAIT_SECONDS", 1.0)
+    monkeypatch.setattr(ks, "_DISPLAY_POLL_SECONDS", 0.01)
+    calls = {"n": 0}
+
+    def _present() -> bool:
+        calls["n"] += 1
+        return calls["n"] >= 3  # appears on the 3rd check
+
+    with patch.object(ks, "_hdmi_present", side_effect=_present):
+        assert await ks._wait_for_display() is True
 
 
 def test_get_kiosk_config_missing_section_returns_nones() -> None:

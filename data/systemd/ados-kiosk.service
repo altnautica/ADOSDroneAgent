@@ -2,7 +2,10 @@
 Description=ADOS HDMI Kiosk (ground-station profile)
 After=graphical.target ados-mediamtx-gs.service
 PartOf=ados-supervisor.service
-ConditionPathExists=/dev/dri/card0
+# No ConditionPathExists on the DRM node: the KMS display device can be created
+# a few seconds after this unit starts at boot (a boot race that a one-shot
+# condition loses, skipping the kiosk forever). The service instead WAITS for a
+# DRM display to appear and exits cleanly if none does (a headless box).
 StartLimitInterval=60s
 StartLimitBurst=5
 
