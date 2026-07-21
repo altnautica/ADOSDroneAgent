@@ -1,13 +1,15 @@
-//! GPU provision: enable the HDMI kiosk's GPU renderer for the board's GPU, in
-//! one of two ways, then write a render marker the kiosk reads:
-//!   - **Rockchip Mali** (the vendor kbase owns the GPU, `/dev/mali0`): install a
-//!     SCOPED libmali GPU userspace blob so cage + Chromium can accelerate their
-//!     UI compositing WITHOUT replacing the system Mesa libEGL. A running desktop
-//!     and the software fallback both stay intact because the blob is exposed
-//!     only to the kiosk's own processes.
-//!   - **Mesa-native** (Pi VideoCore / Intel / AMD / NVIDIA, where the stock Mesa
-//!     GL already drives the GPU): just write the marker with NO scoped lib dir —
-//!     the kiosk uses the system GL. No blob, no download.
+//! GPU provision: enable the HDMI kiosk's GPU renderer for the board's GPU in
+//! one of two ways, then write a render marker the kiosk reads.
+//!
+//!   1. **Rockchip Mali** (the vendor kbase owns the GPU, `/dev/mali0`): install
+//!      a SCOPED libmali GPU userspace blob so cage + Chromium can accelerate
+//!      their UI compositing WITHOUT replacing the system Mesa libEGL. A running
+//!      desktop and the software fallback both stay intact because the blob is
+//!      exposed only to the kiosk's own processes.
+//!   2. **Mesa-native** (Pi VideoCore / Intel / AMD / NVIDIA, where the stock
+//!      Mesa GL already drives the GPU): just write the marker with NO scoped
+//!      lib dir — the kiosk uses the system GL. No blob, no download.
+//!
 //! Any other board (or a failed provision) leaves the kiosk on the software
 //! renderer, which always works.
 //!
