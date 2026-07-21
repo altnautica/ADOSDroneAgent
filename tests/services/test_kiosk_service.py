@@ -672,7 +672,8 @@ def test_cage_env_gpu_scopes_libmali_and_pins_gles2(monkeypatch: pytest.MonkeyPa
     env = ks._cage_env(ks._RENDERER_GPU, "/opt/ados/gpu/mali")
     assert env["WLR_RENDERER"] == "gles2"
     assert env["LD_LIBRARY_PATH"] == "/opt/ados/gpu/mali"
-    assert env["EGL_PLATFORM"] == "gbm"
+    # No EGL_PLATFORM: cage picks GBM and Chromium picks Wayland, each explicitly.
+    assert "EGL_PLATFORM" not in env
     # A pixman-only crutch does not apply on the GPU path.
     assert "WLR_NO_HARDWARE_CURSORS" not in env
 

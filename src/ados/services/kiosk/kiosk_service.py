@@ -293,11 +293,15 @@ def _cage_env(renderer: str, mali_lib_dir: str | None) -> dict[str, str]:
         "WLR_DRM_DEVICES": _DRM_DEVICE,
     }
     if renderer == _RENDERER_GPU and mali_lib_dir:
+        # Scope libmali to this process tree only (cage + Chromium), so the GPU
+        # EGL/GLES/GBM shadow Mesa WITHOUT the system libEGL being replaced. We do
+        # NOT set EGL_PLATFORM: cage selects GBM and Chromium selects Wayland
+        # explicitly, and forcing a single platform here would break the client
+        # that wanted the other one.
         existing = os.environ.get("LD_LIBRARY_PATH", "")
         env["LD_LIBRARY_PATH"] = (
             f"{mali_lib_dir}:{existing}" if existing else mali_lib_dir
         )
-        env["EGL_PLATFORM"] = "gbm"
     elif renderer == _RENDERER_SOFTWARE:
         # No GPU cursor plane in the software path; a hardware cursor on a
         # pixman renderer is a known wlroots crash on some SBCs.

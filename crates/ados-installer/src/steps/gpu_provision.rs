@@ -232,10 +232,13 @@ fn extract_scoped(deb: &Path) -> Result<(), String> {
         ));
     }
 
-    // The blob must actually be present, else refuse (do not write the marker).
-    if !Path::new(MALI_SCOPE_DIR).join("libmali.so.1").exists() {
+    // The blob AND the EGL wrapper cage actually loads must both be present,
+    // else refuse (do not write the marker) so a partial flatten falls back to
+    // the software renderer cleanly rather than half-arming the GPU path.
+    let scope = Path::new(MALI_SCOPE_DIR);
+    if !scope.join("libmali.so.1").exists() || !scope.join("libEGL.so.1").exists() {
         let _ = std::fs::remove_dir_all(&extract);
-        return Err("libmali.so.1 missing after extract".to_string());
+        return Err("libmali.so.1 / libEGL.so.1 missing after extract".to_string());
     }
 
     // CSF firmware: fill ONLY when the kernel slot is empty. The firmware pairs
