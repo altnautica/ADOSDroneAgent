@@ -600,12 +600,36 @@ def _display_manager_active() -> bool:
     return False
 
 
-async def _resolve_desktop_session() -> DesktopSession | None:
-    """Return the active desktop session, waiting briefly for one to appear when
-    a display manager is active but the session has not become active yet (the
-    boot race). Returns None on a genuinely headless / CLI box (no session and
-    no display manager) so the caller owns the display via cage."""
+def _session_socket_ready(session: DesktopSession) -> bool:
+    """True when the session's display-server socket is actually bound, so a
+    client can connect. A session can be 'active' in loginctl a moment before
+    its Wayland/X socket exists — launching then fails with 'Failed to connect
+    to Wayland display', which is exactly the first-attempt crash we want to
+    avoid on boot."""
+    if session.session_type == "wayland":
+        sock = Path(f"/run/user/{session.uid}") / (session.wayland_display or "wayland-0")
+        return sock.exists()
+    # X11: DISPLAY ":N" -> /tmp/.X11-unix/XN.
+    disp = (session.display or ":0").lstrip(":").split(".")[0]
+    return Path(f"/tmp/.X11-unix/X{disp}").exists()
+
+
+def _detect_ready_session() -> DesktopSession | None:
+    """A detected desktop session whose display-server socket is up (ready for a
+    client), else None so the caller keeps waiting."""
     session = _detect_desktop_session()
+    if session is not None and _session_socket_ready(session):
+        return session
+    return None
+
+
+async def _resolve_desktop_session() -> DesktopSession | None:
+    """Return an active desktop session whose display-server socket is READY,
+    waiting briefly for one when a display manager is active but the session /
+    its socket has not come up yet (the boot race). Returns None on a genuinely
+    headless / CLI box (no session and no display manager) so the caller owns
+    the display via cage."""
+    session = _detect_ready_session()
     if session is not None:
         return session
     if not _display_manager_active():
@@ -614,7 +638,7 @@ async def _resolve_desktop_session() -> DesktopSession | None:
     deadline = time.monotonic() + _SESSION_WAIT_SECONDS
     while time.monotonic() < deadline:
         await asyncio.sleep(_SESSION_POLL_SECONDS)
-        session = _detect_desktop_session()
+        session = _detect_ready_session()
         if session is not None:
             return session
     log.warning(

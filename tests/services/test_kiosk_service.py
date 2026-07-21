@@ -910,8 +910,77 @@ def test_display_manager_active_false_when_none_active() -> None:
 async def test_resolve_desktop_session_returns_immediately_when_present() -> None:
     session = ks.DesktopSession(uid=1, session_type="x11", display=":0", wayland_display=None)
     with patch.object(ks, "_detect_desktop_session", return_value=session):
-        got = await ks._resolve_desktop_session()
+        with patch.object(ks, "_session_socket_ready", return_value=True):
+            got = await ks._resolve_desktop_session()
     assert got is session
+
+
+@pytest.mark.asyncio
+async def test_resolve_desktop_session_waits_for_socket_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session is 'active' but its display-server socket is not up yet — the
+    kiosk waits (avoiding Chromium's 'Failed to connect to Wayland display')."""
+    monkeypatch.setattr(ks, "_SESSION_WAIT_SECONDS", 1.0)
+    monkeypatch.setattr(ks, "_SESSION_POLL_SECONDS", 0.01)
+    session = ks.DesktopSession(uid=1, session_type="wayland", display=None, wayland_display="wayland-0")
+    ready = {"n": 0}
+
+    def _sock_ready(_s: ks.DesktopSession) -> bool:
+        ready["n"] += 1
+        return ready["n"] >= 3  # socket comes up on the 3rd check
+
+    with patch.object(ks, "_detect_desktop_session", return_value=session):
+        with patch.object(ks, "_session_socket_ready", side_effect=_sock_ready):
+            with patch.object(ks, "_display_manager_active", return_value=True):
+                got = await ks._resolve_desktop_session()
+    assert got is session
+
+
+def test_session_socket_ready_wayland(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The wayland socket must actually exist at /run/user/<uid>/<display>."""
+    session = ks.DesktopSession(uid=4242, session_type="wayland", display=None, wayland_display="wayland-0")
+    runtime = tmp_path / "run_user_4242"
+    runtime.mkdir()
+    real_path = ks.Path
+
+    def fake_path(p: object) -> object:
+        return runtime if str(p) == "/run/user/4242" else real_path(p)
+
+    monkeypatch.setattr(ks, "Path", fake_path)
+    # Socket file absent -> not ready.
+    assert ks._session_socket_ready(session) is False
+    # Socket file present -> ready.
+    (runtime / "wayland-0").write_text("")
+    assert ks._session_socket_ready(session) is True
+
+
+def test_session_socket_ready_x11(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The X11 socket must exist at /tmp/.X11-unix/X<n>."""
+    session = ks.DesktopSession(uid=1, session_type="x11", display=":0", wayland_display=None)
+    x11 = tmp_path / "X11-unix"
+    x11.mkdir()
+    real_path = ks.Path
+
+    def fake_path(p: object) -> object:
+        return x11 / "X0" if str(p) == "/tmp/.X11-unix/X0" else real_path(p)
+
+    monkeypatch.setattr(ks, "Path", fake_path)
+    assert ks._session_socket_ready(session) is False
+    (x11 / "X0").write_text("")
+    assert ks._session_socket_ready(session) is True
+
+
+def test_detect_ready_session_gates_on_socket() -> None:
+    """A detected session is only returned once its display socket is up."""
+    session = ks.DesktopSession(uid=1, session_type="wayland", display=None, wayland_display="wayland-0")
+    with patch.object(ks, "_detect_desktop_session", return_value=session):
+        with patch.object(ks, "_session_socket_ready", return_value=False):
+            assert ks._detect_ready_session() is None
+        with patch.object(ks, "_session_socket_ready", return_value=True):
+            assert ks._detect_ready_session() is session
+    with patch.object(ks, "_detect_desktop_session", return_value=None):
+        assert ks._detect_ready_session() is None
 
 
 @pytest.mark.asyncio
@@ -938,8 +1007,9 @@ async def test_resolve_desktop_session_waits_then_returns_when_dm_active(
         return session if calls["n"] >= 3 else None
 
     with patch.object(ks, "_detect_desktop_session", side_effect=_detect):
-        with patch.object(ks, "_display_manager_active", return_value=True):
-            got = await ks._resolve_desktop_session()
+        with patch.object(ks, "_session_socket_ready", return_value=True):
+            with patch.object(ks, "_display_manager_active", return_value=True):
+                got = await ks._resolve_desktop_session()
     assert got is session
 
 
