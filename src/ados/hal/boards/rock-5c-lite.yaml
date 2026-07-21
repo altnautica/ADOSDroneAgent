@@ -5,10 +5,12 @@
 # RK3588 model zoo binaries (YOLOv8n, MiDaS, RetinaFace) run unmodified
 # via standard RKNPU2 / rknn-toolkit2 stack.
 #
-# Why no_gpu matters: video pipeline must use VPU H.264/H.265 hardware
-# encode (rkmpp) -> WFB-ng path. No GLES, no Vulkan compositing. HDMI
-# output (when needed for bench debug only) goes through DRM direct,
-# not Mesa/EGL.
+# Video encode always uses the VPU (rkmpp) -> WFB-ng path, independent of the
+# GPU. On the full Rock 5C the Mali-G610 IS present and accelerates the HDMI
+# kiosk UI (cage + Chromium via scoped libmali); the software renderer (pixman /
+# --disable-gpu) is the fallback when no accelerated GPU userspace is
+# provisioned. GPU presence is determined per-unit at runtime (/dev/mali0), not
+# assumed from this profile — see the installer's GPU provisioning step.
 #
 # Audit note (2026-04-07): an earlier procurement research pass falsely
 # claimed "RK3582 has the NPU fused off". That claim is wrong. Sources:
@@ -68,7 +70,13 @@ compute:
   cores: 6
   core_type: "Cortex-A76 x2 + Cortex-A55 x4"
   max_freq_mhz: 2400
-  gpu: null              # Mali-G610 fused off vs full Rock 5C
+  # Mali-G610 is PRESENT on the full Rock 5C (RK3588S2) — the common board this
+  # profile serves — and binned on the Lite (RK3582). This annotation is
+  # human-readable only (the parser ignores it); the AUTHORITATIVE, per-unit GPU
+  # determination is the runtime probe (`/dev/mali0` + the SoC family), which the
+  # installer's GPU provisioning step uses to enable the HDMI kiosk's GPU
+  # renderer (scoped libmali) and otherwise falls back to the software renderer.
+  gpu: "Mali-G610 MP4"   # full Rock 5C; binned on the Lite. Runtime-probed.
   npu_tops: 6.0          # 6 TOPS @ INT4, ~5 TOPS @ INT8 (intact, NOT fused off)
   hw_encoder: ["h264", "h265"]
   hw_decoder: ["h264", "h265", "vp9", "av1"]
@@ -129,7 +137,7 @@ video:
   csi_connector: "31-pin 0.3mm Radxa FPC (Hirose FH35C-31S-0.3SHW(50)), 4-lane"
   max_encode_resolution: "3840x2160"
   max_encode_fps: 60
-  encoder_api: rkmpp     # Mali-G610 absent, so video uses VPU + DRM, NOT GLES
+  encoder_api: rkmpp     # video encode uses the VPU (rkmpp); the GPU, when present, drives the kiosk UI
   # Single CSI consumed by the primary forward camera. Downward nav
   # camera (optical-flow or VIO mono) lands on one of the four USB ports.
   #
@@ -273,4 +281,4 @@ profiles:
   video_capable: true
   recommended_resolution: "1920x1080"
   memory_budget_mb: 4096    # Plenty of RAM headroom on 16GB
-  notes: "ADOS Dev Rig primary companion. NPU intact at 6 TOPS INT4 (RK3588 model zoo compatible). GPU fused off but irrelevant for headless drone use (no GLES needed; video uses VPU + WFB-ng). Heatsink mandatory (throttles 80C). Same physical PCB as full Rock 5C (1x MIPI CSI broken out, dual MIPI CSI not feasible)."
+  notes: "ADOS Dev Rig primary companion. NPU intact at 6 TOPS INT4 (RK3588 model zoo compatible). Video uses the VPU + WFB-ng, independent of the GPU; the Mali-G610 (present on the full Rock 5C, binned on the Lite) accelerates the HDMI kiosk UI when provisioned, else the kiosk renders in software. GPU presence is runtime-probed (/dev/mali0), not assumed. Heatsink mandatory (throttles 80C). Same physical PCB as full Rock 5C (1x MIPI CSI broken out, dual MIPI CSI not feasible)."
