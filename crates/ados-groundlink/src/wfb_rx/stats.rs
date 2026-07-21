@@ -167,6 +167,19 @@ pub fn build_gs_stats(
         "noise_dbm": snap.noise_dbm,
         "snr_db": snap.snr_db,
         "packets_received": snap.packets_received,
+        // Diagnostic RX counters from wfb_rx that separate the failure modes a bare
+        // "0 received" hides on the RX side: `packets_all` is every frame captured
+        // off-air BEFORE decrypt (0 = deaf radio, no RF arriving); `decrypt_errors`
+        // are wrong-key / wrong-link_id failures (RF arriving, not decodable);
+        // `packets_bad` are corrupt frames; `session_packets` counts valid
+        // session-key packets. `link_diag` is the one-glance verdict (deaf /
+        // mis_keyed / jammed / healthy / searching) so a deaf ground station's
+        // CAUSE is legible instead of reading as a bare "0 / connected".
+        "link_diag": snap.link_diag,
+        "packets_all": snap.packets_all,
+        "decrypt_errors": snap.decrypt_errors,
+        "packets_bad": snap.packets_bad,
+        "session_packets": snap.session_packets,
         "packets_lost": snap.packets_lost,
         "fec_recovered": snap.fec_recovered,
         "fec_failed": snap.fec_failed,

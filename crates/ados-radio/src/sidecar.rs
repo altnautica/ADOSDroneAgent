@@ -327,6 +327,18 @@ pub(crate) fn build_stats_value(
         "noise_dbm": measured.then_some(link.noise_dbm),
         "snr_db": measured.then_some(link.snr_db),
         "packets_received": link.packets_received,
+        // Diagnostic RX counters from wfb_rx that separate the failure modes a bare
+        // "0 received" hides: `packets_all` is every frame captured off-air BEFORE
+        // decrypt (0 = deaf radio, no RF arriving); `decrypt_errors` are wrong-key /
+        // wrong-link_id failures (RF arriving, not decodable); `packets_bad` are
+        // corrupt frames; `session_packets` counts valid session-key packets.
+        // `link_diag` is the one-glance verdict derived from them (deaf / mis_keyed /
+        // jammed / healthy / searching) so a dead link's CAUSE is legible.
+        "link_diag": link.link_diag,
+        "packets_all": link.packets_all,
+        "decrypt_errors": link.decrypt_errors,
+        "packets_bad": link.packets_bad,
+        "session_packets": link.session_packets,
         "packets_lost": link.packets_lost,
         "fec_recovered": link.fec_recovered,
         "fec_failed": link.fec_failed,

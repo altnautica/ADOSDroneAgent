@@ -19,6 +19,30 @@ use serde::Serialize;
 /// Default stats interval (the `-l 1000` ms → 1 s) used for the bitrate divisor.
 const STATS_INTERVAL_S: f64 = 1.0;
 
+/// A one-glance verdict on WHY the RX link is or is not carrying data, derived
+/// from the `wfb_rx` PKT counters. `all` (packets captured off-air, pre-decrypt)
+/// and `dec_err` (decrypt/session failures) separate the three failure modes that
+/// otherwise all read as "no data": a deaf radio (`all==0`, no RF arriving), a
+/// wrong-key / wrong-link_id link (`all>0` but `dec_err>0`, RF arriving but not
+/// decodable), and a healthy link (`data>0`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkDiag {
+    /// No stats line observed yet (radio bringing up).
+    Searching,
+    /// `wfb_rx` alive but 0 packets captured off-air: no RF arriving (TX power /
+    /// antenna / channel / the far end not transmitting).
+    Deaf,
+    /// RF arriving (`all>0`) but 0 decoded and decrypt errors present: keys don't
+    /// match, or the link_id / channel_id differs between the two ends.
+    MisKeyed,
+    /// RF arriving but 0 decoded and corrupt frames present: interference / a
+    /// too-weak-to-decode signal.
+    Jammed,
+    /// Decoded DATA packets are flowing: the link is up.
+    Healthy,
+}
+
 /// A point-in-time link-quality snapshot (the `wfb-stats.json` link block).
 #[derive(Debug, Clone, Serialize)]
 pub struct LinkStats {
@@ -27,12 +51,24 @@ pub struct LinkStats {
     pub rssi_max: f64,
     pub noise_dbm: f64,
     pub snr_db: f64,
+    /// Decoded DATA packets this interval — the true "link is up" counter.
     pub packets_received: i64,
+    /// All packets captured off-air this interval (pre-decrypt). `0` = deaf radio.
+    pub packets_all: i64,
+    /// Decrypt / session failures (wrong key or wrong link_id / channel_id).
+    pub decrypt_errors: i64,
+    /// Corrupt / undecodable frames (interference or a marginal signal).
+    pub packets_bad: i64,
+    /// Valid session-key packets seen (a peer with matching crypto is present).
+    pub session_packets: i64,
     pub packets_lost: i64,
     pub fec_recovered: i64,
     pub fec_failed: i64,
     pub bitrate_kbps: i64,
     pub loss_percent: f64,
+    /// One-glance verdict derived from the counters above (deaf / mis_keyed /
+    /// jammed / healthy / searching).
+    pub link_diag: LinkDiag,
     pub timestamp: String,
 }
 
@@ -45,11 +81,16 @@ impl Default for LinkStats {
             noise_dbm: -95.0,
             snr_db: 0.0,
             packets_received: 0,
+            packets_all: 0,
+            decrypt_errors: 0,
+            packets_bad: 0,
+            session_packets: 0,
             packets_lost: 0,
             fec_recovered: 0,
             fec_failed: 0,
             bitrate_kbps: 0,
             loss_percent: 0.0,
+            link_diag: LinkDiag::Searching,
             timestamp: String::new(),
         }
     }
@@ -65,10 +106,14 @@ struct RxAnt {
 
 #[derive(Debug, Clone, Copy, Default)]
 struct Pkt {
+    all: i64,
+    dec_err: i64,
+    session: i64,
     data: i64,
     uniq: i64,
     fec_recovered: i64,
     lost: i64,
+    bad: i64,
     b_outgoing: i64,
 }
 
@@ -103,12 +148,42 @@ fn parse_pkt(line: &str) -> Option<Pkt> {
         return None;
     }
     Some(Pkt {
+        all: f[0].parse().ok()?,
+        dec_err: f[2].parse().ok()?,
+        session: f[3].parse().ok()?,
         data: f[4].parse().ok()?,
         uniq: f[5].parse().ok()?,
         fec_recovered: f[6].parse().ok()?,
         lost: f[7].parse().ok()?,
+        bad: f[8].parse().ok()?,
         b_outgoing: f[10].parse().ok()?,
     })
+}
+
+/// Derive the one-glance link verdict from the PKT counters. `seen` is false until
+/// the first PKT line (radio still bringing up → searching). Order matters: a
+/// healthy link (decoded data) wins regardless of stray errors; otherwise a deaf
+/// radio (nothing off-air) is distinguished from a peer-present-but-undecodable
+/// link by whether decrypt errors (wrong key/link_id) or bad frames (interference)
+/// dominate.
+fn link_diag_of(seen: bool, pkt: &Pkt) -> LinkDiag {
+    if !seen {
+        return LinkDiag::Searching;
+    }
+    if pkt.data > 0 {
+        return LinkDiag::Healthy;
+    }
+    if pkt.all == 0 {
+        return LinkDiag::Deaf;
+    }
+    if pkt.dec_err > 0 {
+        return LinkDiag::MisKeyed;
+    }
+    if pkt.bad > 0 {
+        return LinkDiag::Jammed;
+    }
+    // Hearing frames off-air but none classified yet: still acquiring.
+    LinkDiag::Searching
 }
 
 /// Stateful aggregator: feed it `wfb_rx` stdout lines, read [`current`].
@@ -167,6 +242,7 @@ impl LinkQualityMonitor {
         } else {
             0.0
         };
+        let link_diag = link_diag_of(self.last_pkt.is_some(), &pkt);
         let stats = LinkStats {
             rssi_dbm: rssi_avg,
             rssi_min,
@@ -174,11 +250,16 @@ impl LinkQualityMonitor {
             noise_dbm: noise,
             snr_db: snr,
             packets_received: pkt.data,
+            packets_all: pkt.all,
+            decrypt_errors: pkt.dec_err,
+            packets_bad: pkt.bad,
+            session_packets: pkt.session,
             packets_lost: pkt.lost,
             fec_recovered: pkt.fec_recovered,
             fec_failed: pkt.lost, // upstream "lost" = beyond-FEC failures
             bitrate_kbps,
             loss_percent: (loss_pct * 100.0).round() / 100.0,
+            link_diag,
             timestamp: now_iso.to_string(),
         };
         self.latest = stats.clone();
@@ -219,6 +300,58 @@ mod tests {
         assert_eq!(s.bitrate_kbps, 2000);
         // loss = 20 / (180+20) * 100 = 10.0
         assert_eq!(s.loss_percent, 10.0);
+        // The formerly-discarded diagnostic counters are now surfaced.
+        assert_eq!(s.packets_all, 200);
+        assert_eq!(s.decrypt_errors, 0);
+        assert_eq!(s.packets_bad, 0);
+        assert_eq!(s.session_packets, 1);
+        // Decoded data flowing → healthy.
+        assert_eq!(s.link_diag, LinkDiag::Healthy);
+    }
+
+    #[test]
+    fn link_diag_distinguishes_failure_modes() {
+        // PKT layout: p_all:b_all:dec_err:sess:data:uniq:fec_rec:lost:bad:out:b_out
+        // Deaf: nothing captured off-air (all==0) — no RF arriving.
+        let mut m = LinkQualityMonitor::new();
+        let s = m.feed_line("1\tPKT\t0:0:0:0:0:0:0:0:0:0:0", TS).unwrap();
+        assert_eq!(s.link_diag, LinkDiag::Deaf);
+        assert_eq!(s.packets_all, 0);
+
+        // Mis-keyed: RF arriving (all>0) but 0 decoded + decrypt errors present.
+        let mut m = LinkQualityMonitor::new();
+        let s = m
+            .feed_line("1\tPKT\t120:80000:120:0:0:0:0:0:0:0:0", TS)
+            .unwrap();
+        assert_eq!(s.link_diag, LinkDiag::MisKeyed);
+        assert_eq!(s.decrypt_errors, 120);
+
+        // Jammed: RF arriving, 0 decoded, no decrypt errors, corrupt frames.
+        let mut m = LinkQualityMonitor::new();
+        let s = m
+            .feed_line("1\tPKT\t90:60000:0:0:0:0:0:0:90:0:0", TS)
+            .unwrap();
+        assert_eq!(s.link_diag, LinkDiag::Jammed);
+        assert_eq!(s.packets_bad, 90);
+
+        // Healthy: decoded data wins even with a few stray errors.
+        let mut m = LinkQualityMonitor::new();
+        let s = m
+            .feed_line("1\tPKT\t200:300000:2:1:180:180:0:0:1:160:250000", TS)
+            .unwrap();
+        assert_eq!(s.link_diag, LinkDiag::Healthy);
+    }
+
+    #[test]
+    fn link_diag_searching_before_any_pkt_line() {
+        // Default snapshot (no line yet) and an RX_ANT-only line are still searching.
+        let m = LinkQualityMonitor::new();
+        assert_eq!(m.current().link_diag, LinkDiag::Searching);
+        let mut m = LinkQualityMonitor::new();
+        let s = m
+            .feed_line("1\tRX_ANT\t5745:1:20\t0\t10:-65:-55:-45:9:14:18", TS)
+            .unwrap();
+        assert_eq!(s.link_diag, LinkDiag::Searching);
     }
 
     #[test]
