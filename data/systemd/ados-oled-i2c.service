@@ -1,0 +1,40 @@
+[Unit]
+Description=ADOS I2C status OLED (ground-station profile)
+PartOf=ados-supervisor.service
+# Read the agent's local REST API once it is up so the very first frame carries
+# real status. Best-effort: the renderer falls back to a placeholder when the
+# API is not answering yet, so this is an ordering hint, not a hard dependency.
+After=ados-control.service
+# Gate on the I2C bus existing AND the binary being installed. Unlike the
+# primary SPI-LCD renderer (ados-oled.service), the I2C status OLED is OPTIONAL
+# hardware that coexists with the HDMI cockpit: it is NOT tied to the
+# display.enabled marker (which is absent on a --display none HDMI box). When
+# I2C is disabled or the binary was not fetched, the unit SKIPS CLEAN (condition
+# unmet, not FAILED). When the bus is present the binary itself probes 0x3C/0x3D
+# and exits cleanly (rc 0) if no OLED acknowledges, so a rig with no panel wired
+# never churns.
+ConditionPathExists=/dev/i2c-1
+ConditionPathExists=/opt/ados/bin/ados-oled-i2c
+StartLimitInterval=60s
+StartLimitBurst=5
+
+[Service]
+# Join the shared accounting slice so MemoryCurrent/CPUUsage are observable per
+# unit (the slice sets MemoryAccounting=yes).
+Slice=ados.slice
+Type=simple
+User=root
+ExecStart=/opt/ados/bin/ados-oled-i2c
+Restart=on-failure
+RestartSec=5
+Environment=ADOS_CONFIG=/etc/ados/config.yaml
+EnvironmentFile=-/etc/ados/env
+
+MemoryMax=48M
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-oled-i2c
+
+[Install]
+WantedBy=ados-supervisor.service

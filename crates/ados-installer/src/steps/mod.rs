@@ -34,6 +34,7 @@ pub mod dkms;
 pub mod fetch_binaries;
 pub mod gpu_provision;
 pub mod health;
+pub mod i2c_enable;
 pub mod network_mac_pin;
 pub mod npu_provision;
 pub mod portable_python;
@@ -67,6 +68,7 @@ pub fn full_install_chain() -> Vec<Box<dyn Step>> {
         Box::new(aic8800_tune::Aic8800Tune),
         Box::new(appliance::Appliance),
         Box::new(gpu_provision::GpuProvision),
+        Box::new(i2c_enable::I2cEnable),
         Box::new(watchdog::Watchdog),
         Box::new(systemd::Systemd),
         Box::new(start::Start),
@@ -83,7 +85,7 @@ mod tests {
     fn full_chain_orders_cleanly() {
         let steps = full_install_chain();
         let order = topo_order(&steps).expect("the install chain must be a valid DAG");
-        assert_eq!(order.len(), 19);
+        assert_eq!(order.len(), 20);
 
         let pos = |id: &str| order.iter().position(|x| x == id).unwrap();
         // Spot-check the load-bearing edges.

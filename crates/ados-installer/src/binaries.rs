@@ -171,6 +171,14 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
         profiles: GROUND,
     },
     PrebuiltBinary {
+        service: "ados-oled-i2c",
+        asset: "ados-oled-i2c-aarch64",
+        release_tag: "prebuilt-display",
+        dest: "/opt/ados/bin/ados-oled-i2c",
+        gate: Gate::BestEffort,
+        profiles: GROUND,
+    },
+    PrebuiltBinary {
         service: "ados-vision",
         asset: "ados-vision-aarch64",
         release_tag: "prebuilt-vision",
@@ -345,8 +353,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_has_twenty_entries() {
-        assert_eq!(PREBUILT.len(), 20);
+    fn catalog_has_twenty_one_entries() {
+        assert_eq!(PREBUILT.len(), 21);
     }
 
     #[test]
@@ -522,6 +530,7 @@ mod tests {
         assert_eq!(tag("ados-input"), "prebuilt-hid");
         assert_eq!(tag("ados-display"), "prebuilt-display");
         assert_eq!(tag("ados-display-probe"), "prebuilt-display");
+        assert_eq!(tag("ados-oled-i2c"), "prebuilt-display");
     }
 
     #[test]

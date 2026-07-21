@@ -18,6 +18,10 @@ path = "src/bin/ados-display.rs"
 name = "ados-display-probe"
 path = "src/bin/ados-display-probe.rs"
 
+[[bin]]
+name = "ados-oled-i2c"
+path = "src/bin/ados-oled-i2c.rs"
+
 [dependencies]
 # The button + touch gesture FSMs (pure, host-portable) the navigator drives
 # the physical input from: front-panel press classification + touch strokes.

@@ -884,7 +884,7 @@ jobs:
       - name: Install musl tools
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
-      - name: Build static ados-display + ados-display-probe
+      - name: Build static ados-display + ados-display-probe + ados-oled-i2c
         run: cargo build --release --target aarch64-unknown-linux-musl -p ados-display
 
       - name: Stage artifacts + checksums
@@ -893,8 +893,10 @@ jobs:
           mkdir -p rel
           cp target/aarch64-unknown-linux-musl/release/ados-display rel/ados-display-aarch64
           cp target/aarch64-unknown-linux-musl/release/ados-display-probe rel/ados-display-probe-aarch64
+          cp target/aarch64-unknown-linux-musl/release/ados-oled-i2c rel/ados-oled-i2c-aarch64
           ( cd rel && sha256sum ados-display-aarch64 > ados-display-aarch64.sha256 )
           ( cd rel && sha256sum ados-display-probe-aarch64 > ados-display-probe-aarch64.sha256 )
+          ( cd rel && sha256sum ados-oled-i2c-aarch64 > ados-oled-i2c-aarch64.sha256 )
 
       - name: Sign artifacts (only when the signing key is present)
         env:
@@ -909,6 +911,7 @@ jobs:
           printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
           minisign -S -s /tmp/sign.key -m rel/ados-display-aarch64 -x rel/ados-display-aarch64.minisig
           minisign -S -s /tmp/sign.key -m rel/ados-display-probe-aarch64 -x rel/ados-display-probe-aarch64.minisig
+          minisign -S -s /tmp/sign.key -m rel/ados-oled-i2c-aarch64 -x rel/ados-oled-i2c-aarch64.minisig
           rm -f /tmp/sign.key
 
       - name: Publish rolling prerelease
