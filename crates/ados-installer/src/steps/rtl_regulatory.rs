@@ -12,10 +12,14 @@
 //! `00`) the efuse country, registering a worldwide plan that permits the home
 //! channel; the regulatory power-LIMIT table (`rtw_tx_pwr_lmt_enable=0`) is off so
 //! the legal per-region cap cannot clamp the home channel. The per-rate power
-//! CALIBRATION (`rtw_tx_pwr_by_rate=1`) stays ON: it is the efuse-derived PA
-//! linearization, not a regulatory limit, and disabling it mis-biases the power
-//! amplifier so it overheats and radiates a distorted signal no receiver can
-//! decode. Pinning a region instead turns the regulatory limit table back on.
+//! CALIBRATION table (`rtw_tx_pwr_by_rate`) defaults to `0` (OFF) so the home
+//! channel runs at full driver power — bounded not by the efuse per-rate table but
+//! by the software txpower clamp (`video.wfb.tx_power_dbm`), which stays armed for
+//! brownout/thermal safety. With the table ON (`=1`) the efuse per-rate calibration
+//! can cap the home channel BELOW the software clamp (down to the muted floor),
+//! starving the link. It is overridable to `1` via `network.regulatory.tx_pwr_by_rate`
+//! (a bench A/B knob). Pinning a region instead turns the regulatory limit table
+//! back on.
 //!
 //! The vendored `realtek_88x2eu.conf` template is deliberately NOT wired in: it
 //! uses `rtw_regd_src=1` (OS source), which still applies the efuse country hint
@@ -54,12 +58,21 @@ struct RegulatoryView {
     mode: Option<String>,
     #[serde(default)]
     region: Option<String>,
+    #[serde(default)]
+    tx_pwr_by_rate: Option<u8>,
 }
+
+/// Default per-rate PA-calibration table setting for the unrestricted posture.
+/// `0` = OFF: full driver power on the home channel, bounded by the software
+/// txpower clamp (which stays armed for brownout/thermal safety) rather than the
+/// efuse per-rate table. Must match the supervisor's `DEFAULT_TX_PWR_BY_RATE` so
+/// the install-time seed is byte-identical to the runtime reconcile.
+const DEFAULT_TX_PWR_BY_RATE: u8 = 0;
 
 /// The resolved operating-region posture.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Posture {
-    Unrestricted,
+    Unrestricted { tx_pwr_by_rate: u8 },
     Region(String),
 }
 
@@ -72,19 +85,24 @@ fn resolve_posture(text: &str) -> Posture {
         .and_then(|r| r.network)
         .and_then(|n| n.regulatory);
     let Some(reg) = reg else {
-        return Posture::Unrestricted;
+        return Posture::Unrestricted {
+            tx_pwr_by_rate: DEFAULT_TX_PWR_BY_RATE,
+        };
     };
+    // The per-rate calibration override applies only to the unrestricted posture;
+    // a pinned region uses the legal power-limit table instead.
+    let tx_pwr_by_rate = reg.tx_pwr_by_rate.unwrap_or(DEFAULT_TX_PWR_BY_RATE);
     let is_region = reg
         .mode
         .as_deref()
         .map(|m| m.trim().eq_ignore_ascii_case("region"))
         .unwrap_or(false);
     if !is_region {
-        return Posture::Unrestricted;
+        return Posture::Unrestricted { tx_pwr_by_rate };
     }
     match reg.region.map(|r| r.trim().to_ascii_uppercase()) {
         Some(code) if is_valid_region_code(&code) => Posture::Region(code),
-        _ => Posture::Unrestricted,
+        _ => Posture::Unrestricted { tx_pwr_by_rate },
     }
 }
 
@@ -102,7 +120,9 @@ fn is_valid_region_code(code: &str) -> bool {
 /// reconcile exactly.
 fn render_options(posture: &Posture) -> String {
     match posture {
-        Posture::Unrestricted => "options 8812eu rtw_regd_src=0 rtw_country_code=00 rtw_tx_pwr_lmt_enable=0 rtw_tx_pwr_by_rate=1".to_string(),
+        Posture::Unrestricted { tx_pwr_by_rate } => format!(
+            "options 8812eu rtw_regd_src=0 rtw_country_code=00 rtw_tx_pwr_lmt_enable=0 rtw_tx_pwr_by_rate={tx_pwr_by_rate}"
+        ),
         Posture::Region(code) => format!(
             "options 8812eu rtw_regd_src=0 rtw_country_code={code} rtw_tx_pwr_lmt_enable=1"
         ),
@@ -145,7 +165,9 @@ impl Step for RtlRegulatory {
     fn run(&self, _ctx: &mut Ctx) -> StepOutcome {
         let posture = std::fs::read_to_string(CONFIG_YAML)
             .map(|t| resolve_posture(&t))
-            .unwrap_or(Posture::Unrestricted);
+            .unwrap_or(Posture::Unrestricted {
+                tx_pwr_by_rate: DEFAULT_TX_PWR_BY_RATE,
+            });
         let body = render_file(&posture);
         let path = Path::new(MODPROBE_CONF_PATH);
         // Idempotent: skip the write when the file is already current.
@@ -179,19 +201,20 @@ fn write_file(path: &Path, body: &str) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    /// The default unrestricted posture (per-rate calibration off), for tests.
+    fn unr() -> Posture {
+        Posture::Unrestricted {
+            tx_pwr_by_rate: DEFAULT_TX_PWR_BY_RATE,
+        }
+    }
+
     #[test]
     fn default_config_resolves_to_unrestricted() {
-        assert_eq!(resolve_posture(""), Posture::Unrestricted);
-        assert_eq!(
-            resolve_posture("agent:\n  name: x\n"),
-            Posture::Unrestricted
-        );
+        assert_eq!(resolve_posture(""), unr());
+        assert_eq!(resolve_posture("agent:\n  name: x\n"), unr());
         // The seed config_identity writes has no network.regulatory block, so a
         // fresh box is permissive.
-        assert_eq!(
-            resolve_posture("video:\n  wfb:\n    channel: 149\n"),
-            Posture::Unrestricted
-        );
+        assert_eq!(resolve_posture("video:\n  wfb:\n    channel: 149\n"), unr());
     }
 
     #[test]
@@ -206,20 +229,35 @@ mod tests {
     fn region_without_valid_code_is_unrestricted() {
         assert_eq!(
             resolve_posture("network:\n  regulatory:\n    mode: region\n"),
-            Posture::Unrestricted
+            unr()
         );
         assert_eq!(
             resolve_posture("network:\n  regulatory:\n    mode: region\n    region: USA\n"),
-            Posture::Unrestricted
+            unr()
         );
     }
 
     #[test]
     fn unrestricted_options_line_is_exact() {
+        // Default per-rate calibration table OFF (=0): full driver power bounded by
+        // the software txpower clamp, not the efuse table. Must stay byte-identical
+        // to the supervisor's generator.
         assert_eq!(
-            render_options(&Posture::Unrestricted),
-            "options 8812eu rtw_regd_src=0 rtw_country_code=00 rtw_tx_pwr_lmt_enable=0 rtw_tx_pwr_by_rate=1"
+            render_options(&unr()),
+            "options 8812eu rtw_regd_src=0 rtw_country_code=00 rtw_tx_pwr_lmt_enable=0 rtw_tx_pwr_by_rate=0"
         );
+        assert_eq!(DEFAULT_TX_PWR_BY_RATE, 0);
+    }
+
+    #[test]
+    fn tx_pwr_by_rate_override_threads_through() {
+        // The bench A/B knob overrides the default under the unrestricted posture.
+        assert_eq!(
+            resolve_posture("network:\n  regulatory:\n    tx_pwr_by_rate: 1\n"),
+            Posture::Unrestricted { tx_pwr_by_rate: 1 }
+        );
+        assert!(render_options(&Posture::Unrestricted { tx_pwr_by_rate: 1 })
+            .contains("rtw_tx_pwr_by_rate=1"));
     }
 
     #[test]
@@ -234,15 +272,15 @@ mod tests {
     fn neither_options_line_uses_the_os_regdb_source() {
         // rtw_regd_src=1 (OS source) keeps the efuse hint and cannot lift a baked
         // country; the seed never emits it.
-        assert!(!render_options(&Posture::Unrestricted).contains("rtw_regd_src=1"));
+        assert!(!render_options(&unr()).contains("rtw_regd_src=1"));
         assert!(!render_options(&Posture::Region("US".to_string())).contains("rtw_regd_src=1"));
     }
 
     #[test]
     fn file_body_carries_header_and_options() {
-        let body = render_file(&Posture::Unrestricted);
+        let body = render_file(&unr());
         assert!(body.starts_with("# ADOS Drone Agent"));
-        assert!(body.contains(&render_options(&Posture::Unrestricted)));
+        assert!(body.contains(&render_options(&unr())));
         assert!(body.ends_with('\n'));
     }
 }
