@@ -359,6 +359,10 @@ def _build_chromium_argv(url: str, renderer: str) -> list[str]:
         "--noerrdialogs",
         "--disable-infobars",
         "--no-first-run",
+        # cage owns the display as root, so Chromium runs as root here and
+        # refuses to start without --no-sandbox. (The windowed path avoids this
+        # by running Chromium as the logged-in desktop user, keeping its sandbox.)
+        "--no-sandbox",
         "--ozone-platform=wayland",
         *_chromium_render_flags(renderer),
         "--autoplay-policy=no-user-gesture-required",
@@ -581,8 +585,18 @@ async def _resolve_desktop_session() -> DesktopSession | None:
 
 def _session_env(session: DesktopSession) -> dict[str, str]:
     """The environment overlay that lets a process launched by this service
-    connect to the running desktop's display server."""
+    connect to the running desktop's display server. Also carries the session
+    user's HOME/USER so the windowed browser — which runs AS that user, not
+    root (Chromium refuses to run as root without --no-sandbox) — has a writable
+    profile directory instead of inheriting the service's HOME=/root."""
     env: dict[str, str] = {"XDG_RUNTIME_DIR": f"/run/user/{session.uid}"}
+    try:
+        pw = pwd.getpwuid(session.uid)
+        env["HOME"] = pw.pw_dir
+        env["USER"] = pw.pw_name
+        env["LOGNAME"] = pw.pw_name
+    except KeyError:
+        pass
     if session.session_type == "wayland":
         env["WAYLAND_DISPLAY"] = session.wayland_display or "wayland-0"
     else:
@@ -629,8 +643,14 @@ class KioskSupervisor:
         env: dict[str, str] | None = None,
         env_unset: frozenset[str] | set[str] | None = None,
         sweep_orphans: bool = True,
+        run_as_uid: int | None = None,
     ) -> None:
         self._argv = argv
+        # When set, the child is dropped to this uid (and its primary gid) before
+        # exec — the windowed path runs Chromium as the logged-in desktop user
+        # rather than root, because Chromium refuses to run as root without
+        # --no-sandbox. None (the cage path) runs as the service user (root).
+        self._run_as_uid = run_as_uid
         # An environment overlay merged over the service env (used to attach a
         # windowed launch to a running desktop's display server, or to pin
         # cage's renderer/DRM device). None inherits the service env unchanged.
@@ -657,7 +677,7 @@ class KioskSupervisor:
         self._stop.set()
 
     async def _spawn(self) -> asyncio.subprocess.Process:
-        log.info("kiosk_spawning", argv=self._argv)
+        log.info("kiosk_spawning", argv=self._argv, run_as_uid=self._run_as_uid)
         spawn_env: dict[str, str] | None
         if self._env is None and not self._env_unset:
             spawn_env = None
@@ -665,6 +685,16 @@ class KioskSupervisor:
             spawn_env = {**os.environ, **(self._env or {})}
             for key in self._env_unset or ():
                 spawn_env.pop(key, None)
+        # Drop to the desktop user for the windowed path (Chromium refuses root).
+        # `user`/`group` setgid+setuid before exec (Python 3.9+). We resolve the
+        # primary gid ourselves so supplementary groups are dropped too.
+        extra: dict[str, Any] = {}
+        if self._run_as_uid is not None:
+            extra["user"] = self._run_as_uid
+            try:
+                extra["group"] = pwd.getpwuid(self._run_as_uid).pw_gid
+            except KeyError:
+                pass
         return await asyncio.create_subprocess_exec(
             *self._argv,
             stdout=asyncio.subprocess.PIPE,
@@ -674,6 +704,7 @@ class KioskSupervisor:
             # the child, without a broad pkill that would hit the desktop's
             # other browsers.
             start_new_session=True,
+            **extra,
         )
 
     async def _graceful_kill(self, proc: asyncio.subprocess.Process) -> None:
@@ -854,7 +885,16 @@ def _make_supervisor(
         argv = _build_windowed_chromium_argv(
             url, session.session_type, _RENDERER_SOFTWARE
         )
-        return KioskSupervisor(argv, env=_session_env(session), sweep_orphans=False)
+        # Run the browser AS the logged-in desktop user (not root): Chromium
+        # refuses to run as root without --no-sandbox, and dropping to the user
+        # keeps its sandbox and gives it a writable profile (HOME from
+        # _session_env).
+        return KioskSupervisor(
+            argv,
+            env=_session_env(session),
+            sweep_orphans=False,
+            run_as_uid=session.uid,
+        )
     argv = _build_chromium_argv(url, renderer)
     return KioskSupervisor(
         argv,

@@ -11,6 +11,7 @@ is invoked.
 from __future__ import annotations
 
 import asyncio
+import os
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -257,6 +258,8 @@ def test_build_chromium_argv_invokes_cage_and_resolved_browser() -> None:
     assert argv[2] == "/usr/bin/chromium"
     assert "--kiosk" in argv
     assert "--ozone-platform=wayland" in argv
+    # cage runs Chromium as root, so it needs --no-sandbox.
+    assert "--no-sandbox" in argv
     assert argv[-1] == "http://target/hud"
 
 
@@ -761,6 +764,66 @@ def test_make_supervisor_windowed_forces_software_even_when_gpu_requested() -> N
     assert "--disable-gpu" in sup._argv
     assert "--use-gl=egl" not in sup._argv
     assert sup._sweep_orphans_enabled is False
+
+
+def test_make_supervisor_windowed_runs_as_the_session_user() -> None:
+    """The windowed browser drops to the desktop user (Chromium refuses root);
+    the argv must NOT carry --no-sandbox (the sandbox is kept as a normal user)."""
+    session = ks.DesktopSession(
+        uid=1000, session_type="wayland", display=None, wayland_display="wayland-0"
+    )
+    with patch.object(ks, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
+        with patch.object(ks, "_session_env", return_value={"XDG_RUNTIME_DIR": "/run/user/1000"}):
+            sup = ks._make_supervisor("http://x", session, ks._RENDERER_SOFTWARE, None)
+    assert sup._run_as_uid == 1000
+    assert "--no-sandbox" not in sup._argv  # runs as a user, keeps its sandbox
+
+
+def test_session_env_carries_home_for_the_session_user() -> None:
+    """The windowed launch runs as the user, so it needs a writable HOME (not the
+    service's /root). Use the current process uid, which always resolves."""
+    uid = os.getuid()
+    session = ks.DesktopSession(
+        uid=uid, session_type="wayland", display=None, wayland_display="wayland-0"
+    )
+    env = ks._session_env(session)
+    assert env.get("HOME")  # present + non-empty
+    assert env.get("USER")
+
+
+@pytest.mark.asyncio
+async def test_spawn_drops_to_uid_when_run_as_uid_set() -> None:
+    """A supervisor with run_as_uid passes user=/group= to the spawn so the child
+    is dropped to the desktop user before exec."""
+    captured: dict[str, Any] = {}
+
+    async def _fake_exec(*_args: Any, **kwargs: Any) -> _FakeProc:
+        captured.update(kwargs)
+        return _FakeProc()
+
+    uid = os.getuid()
+    sup = KioskSupervisor(["chromium", "http://x"], run_as_uid=uid)
+    with patch("asyncio.create_subprocess_exec", _fake_exec):
+        await sup._spawn()
+    assert captured.get("user") == uid
+    assert "group" in captured  # primary gid resolved
+
+
+@pytest.mark.asyncio
+async def test_spawn_no_uid_drop_by_default() -> None:
+    """The cage path (no run_as_uid) passes no user/group — it runs as the
+    service user (root)."""
+    captured: dict[str, Any] = {}
+
+    async def _fake_exec(*_args: Any, **kwargs: Any) -> _FakeProc:
+        captured.update(kwargs)
+        return _FakeProc()
+
+    sup = KioskSupervisor(["cage", "--"])
+    with patch("asyncio.create_subprocess_exec", _fake_exec):
+        await sup._spawn()
+    assert "user" not in captured
+    assert "group" not in captured
 
 
 # ---------------------------------------------------------------------------
