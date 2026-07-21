@@ -101,6 +101,12 @@ class DisplayBinding(BaseModel):
     fields do not apply), and the SPI touch overlay is modelled by the
     ``touch`` block. Every other ``type`` describes a panel whose own
     controller drives the framebuffer.
+
+    A panel whose touch controller connects over USB instead of the GPIO/SPI
+    header (many HDMI touchscreens expose a micro-USB "touch" port for exactly
+    this) uses plain ``type = "hdmi"`` — the USB-HID touchscreen is auto-detected
+    by libinput and reaches cage + Chromium with NO overlay, NO ``touch`` block,
+    and no GPIO wiring. Only the SPI/GPIO ``ads7846`` case needs ``hdmi-touch``.
     """
 
     id: str
