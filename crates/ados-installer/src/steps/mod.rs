@@ -32,6 +32,7 @@ pub mod config_identity;
 pub mod deps;
 pub mod dkms;
 pub mod fetch_binaries;
+pub mod gpu_provision;
 pub mod health;
 pub mod network_mac_pin;
 pub mod npu_provision;
@@ -65,6 +66,7 @@ pub fn full_install_chain() -> Vec<Box<dyn Step>> {
         Box::new(rtl_regulatory::RtlRegulatory),
         Box::new(aic8800_tune::Aic8800Tune),
         Box::new(appliance::Appliance),
+        Box::new(gpu_provision::GpuProvision),
         Box::new(watchdog::Watchdog),
         Box::new(systemd::Systemd),
         Box::new(start::Start),
@@ -81,7 +83,7 @@ mod tests {
     fn full_chain_orders_cleanly() {
         let steps = full_install_chain();
         let order = topo_order(&steps).expect("the install chain must be a valid DAG");
-        assert_eq!(order.len(), 18);
+        assert_eq!(order.len(), 19);
 
         let pos = |id: &str| order.iter().position(|x| x == id).unwrap();
         // Spot-check the load-bearing edges.
@@ -114,6 +116,11 @@ mod tests {
         // The appliance keep-awake + quiet-background-daemons step runs after
         // config so /etc is ready.
         assert!(pos("config_identity") < pos("appliance"));
+        // The scoped-libmali GPU provisioning runs after deps + config, before
+        // systemd starts the kiosk (so the render marker is in place).
+        assert!(pos("deps") < pos("gpu_provision"));
+        assert!(pos("config_identity") < pos("gpu_provision"));
+        assert!(pos("gpu_provision") < pos("systemd"));
         // The hardware watchdog arms after the apt/systemd upgrade is done.
         assert!(pos("deps") < pos("watchdog"));
         assert!(pos("systemd") < pos("start"));
