@@ -55,6 +55,10 @@ export interface ScreenSpec {
    *  false (the default), the screen renders in a framed content region with
    *  solid chrome. */
   fullBleed?: boolean;
+  /** When true, the tab only appears on a ground-station profile (the mesh /
+   *  uplink screens are receive-side concepts a drone does not have). Absent =
+   *  shown on every profile. */
+  groundStationOnly?: boolean;
   render: (ctx: ScreenContext) => ReactNode;
 }
 

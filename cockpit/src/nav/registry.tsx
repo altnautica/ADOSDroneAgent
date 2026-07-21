@@ -27,6 +27,7 @@ import { SettingsScreen } from "@/components/screens/settings-screen";
 import { SystemScreen } from "@/components/screens/system-screen";
 import { UplinkScreen } from "@/components/screens/uplink-screen";
 import { DEFAULT_TAB_ID, type ScreenSpec } from "@/nav/navigator";
+import type { AgentProfile } from "@/hooks/use-profile";
 
 /** Prefix on the detail-stack id for a Settings drill level. Everything after
  *  it is the drill path the Settings screen renders (`~`/`~group`/`#`/`#path`/
@@ -54,6 +55,7 @@ const SCREENS: ScreenSpec[] = [
     title: "Mesh",
     icon: Network,
     kind: "tab",
+    groundStationOnly: true,
     render: () => <MeshScreen />,
   },
   {
@@ -68,6 +70,7 @@ const SCREENS: ScreenSpec[] = [
     title: "Uplink",
     icon: SlidersHorizontal,
     kind: "tab",
+    groundStationOnly: true,
     render: () => <UplinkScreen />,
   },
   {
@@ -93,9 +96,16 @@ export function allScreens(): ScreenSpec[] {
   return SCREENS;
 }
 
-/** The top-level tab screens, in menu order. */
-export function tabScreens(): ScreenSpec[] {
-  return SCREENS.filter((s) => s.kind === "tab");
+/** The top-level tab screens, in menu order, filtered for the agent profile.
+ *  A drone hides the ground-station-only tabs (Mesh, Uplink). An unknown profile
+ *  (before the probe resolves) shows the full ground-station set — the historical
+ *  default — and settles once the profile is known. */
+export function tabScreens(profile?: AgentProfile | null): ScreenSpec[] {
+  return SCREENS.filter((s) => {
+    if (s.kind !== "tab") return false;
+    if (s.groundStationOnly && profile === "drone") return false;
+    return true;
+  });
 }
 
 /** Resolve a screen by id, falling back to the default tab if the id is

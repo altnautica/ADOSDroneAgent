@@ -5,6 +5,7 @@
 
 import { X } from "lucide-react";
 
+import { useProfile } from "@/hooks/use-profile";
 import { useNavStore } from "@/stores/nav-store";
 import { tabScreens } from "@/nav/registry";
 
@@ -12,7 +13,8 @@ export function QuickMenu() {
   const goTab = useNavStore((s) => s.goTab);
   const closeQuickMenu = useNavStore((s) => s.closeQuickMenu);
   const activeTabId = useNavStore((s) => s.activeTabId);
-  const tabs = tabScreens();
+  const profile = useProfile();
+  const tabs = tabScreens(profile);
 
   return (
     <div

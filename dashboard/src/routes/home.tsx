@@ -106,6 +106,8 @@ function RegionChip() {
 function DroneHome() {
   return (
     <div className="space-y-4 max-w-[1400px]">
+      <CockpitLauncher />
+
       <header className="flex items-start justify-between gap-4">
         <div>
           <h1 className="text-xl font-semibold tracking-tight">Home</h1>

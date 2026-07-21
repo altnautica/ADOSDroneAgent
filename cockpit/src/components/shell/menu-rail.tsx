@@ -4,6 +4,7 @@
 // focus ring highlights the focused entry so the menu is fully operable
 // eyes-on-panel with any input source.
 
+import { useProfile } from "@/hooks/use-profile";
 import { useNavStore } from "@/stores/nav-store";
 import { tabScreens } from "@/nav/registry";
 import { cn } from "@/lib/utils";
@@ -13,7 +14,8 @@ export function MenuRail({ floating = false }: { floating?: boolean }) {
   const menuFocusIndex = useNavStore((s) => s.menuFocusIndex);
   const goTab = useNavStore((s) => s.goTab);
   const setMenuFocus = useNavStore((s) => s.setMenuFocus);
-  const tabs = tabScreens();
+  const profile = useProfile();
+  const tabs = tabScreens(profile);
 
   return (
     <nav
