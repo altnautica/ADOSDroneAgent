@@ -187,17 +187,62 @@ impl Step for PurgeResidue {
     }
     fn run(&self, ctx: &mut Ctx) -> StepOutcome {
         purge_orphan_route();
-        // The SPI-LCD overlay is profile-specific: a ground-station rig MUST
-        // carry it (the panel is its UI), a drone rig must NOT (the KMS GPU
-        // overlay claims fb0). Provision on GS, revert otherwise — so an
-        // install never strips a ground-station rig's own LCD overlay (which
-        // would leave it with no framebuffer and a white screen).
-        if ctx.profile == "ground_station" {
-            provision_lcd_boot_config();
-        } else {
-            revert_lcd_boot_config();
+        // The SPI-LCD framebuffer overlay (`dtoverlay=waveshare35a`, which
+        // comments out the KMS GPU overlay so the panel claims fb0) is
+        // provisioned ONLY when the operator actually selected an SPI-LCD
+        // panel. Keying off the profile alone force-added it to EVERY
+        // ground-station box — including an HDMI-cockpit GS (`--display none`),
+        // which killed the HDMI output (no `vc4-kms-v3d` -> no `/dev/dri` -> no
+        // kiosk). Respect the resolved `--display` choice instead.
+        match lcd_provision_action(ctx) {
+            LcdAction::Provision => provision_lcd_boot_config(),
+            LcdAction::Revert => revert_lcd_boot_config(),
+            // Auto: leave the boot config to the brick-safe
+            // install-display-overlay.sh auto-detector (bound-SPI keep / HDMI
+            // clean / probation) so we neither strip a real panel nor break HDMI.
+            LcdAction::Defer => {}
         }
         StepOutcome::Ok
+    }
+}
+
+/// What `PurgeResidue` should do with the Pi SPI-LCD framebuffer overlay.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum LcdAction {
+    /// Add `dtoverlay=waveshare35a` + disable the KMS overlay (panel is the UI).
+    Provision,
+    /// Strip any stale SPI-LCD overlay + re-enable KMS so HDMI boots clean.
+    Revert,
+    /// Change nothing — the brick-safe shell auto-detector owns the boot config.
+    Defer,
+}
+
+/// Decide the SPI-LCD boot-config action from the operator's `--display`
+/// choice, mirroring `config_identity::provision_overlays`' resolution: an
+/// explicit `--display` wins; otherwise a ground station defaults to `auto`
+/// (panel auto-detected) and every other profile to `none`. Pure + unit-tested.
+///
+///   * `none`  -> Revert  (explicit opt-out, or a drone: ensure a clean HDMI /
+///     GPU boot by stripping any stale SPI-LCD overlay).
+///   * `auto`  -> Defer   (the GS default: the brick-safe shell auto-detector
+///     keeps a bound panel or resolves HDMI/OLED — never force a change here,
+///     so a real SPI-LCD GS is never stripped to a white screen).
+///   * an explicit panel id -> Provision on a ground station (the panel is its
+///     UI), Revert on any other profile (a drone must never let the SPI
+///     framebuffer overlay steal fb0 from the GPU).
+fn lcd_provision_action(ctx: &Ctx) -> LcdAction {
+    let resolved = ctx.args.display.clone().unwrap_or_else(|| {
+        if ctx.profile == "ground_station" {
+            "auto".to_string()
+        } else {
+            "none".to_string()
+        }
+    });
+    match resolved.as_str() {
+        "none" => LcdAction::Revert,
+        "auto" => LcdAction::Defer,
+        _ if ctx.profile == "ground_station" => LcdAction::Provision,
+        _ => LcdAction::Revert,
     }
 }
 
@@ -293,6 +338,7 @@ fn provision_lcd_boot_config() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::checkpoint::Checkpoint;
 
     // ── orphan default route fixtures ──
 
@@ -439,6 +485,87 @@ mod tests {
             revert_lcd_config(&provisioned),
             clean,
             "revert(provision(clean)) must return the original clean config"
+        );
+    }
+
+    #[test]
+    fn lcd_revert_reenables_kms_disabled_by_the_lcd_installer() {
+        // The exact shape a Waveshare SPI-LCD install leaves on a Pi: KMS
+        // commented out + the panel overlay appended. Revert must restore HDMI.
+        let broken = "dtparam=audio=on\n\
+                      # dtoverlay=vc4-kms-v3d  # disabled by ADOS LCD installer (claims fb0)\n\
+                      max_framebuffers=2\n\
+                      dtoverlay=waveshare35a\n";
+        let out = revert_lcd_config(broken);
+        assert!(
+            out.contains("\ndtoverlay=vc4-kms-v3d\n") || out.starts_with("dtoverlay=vc4-kms-v3d\n"),
+            "KMS overlay must be re-enabled (active): {out:?}"
+        );
+        assert!(
+            !out.contains("dtoverlay=waveshare35a"),
+            "the SPI-LCD overlay must be stripped: {out:?}"
+        );
+    }
+
+    // ── lcd_provision_action: the display-choice-aware decision ──
+
+    fn ctx_with(display: Option<&str>, profile: &str) -> Ctx {
+        let mut ctx = Ctx::for_test(Checkpoint::new());
+        ctx.args.display = display.map(str::to_string);
+        ctx.profile = profile.to_string();
+        ctx
+    }
+
+    #[test]
+    fn action_gs_display_none_reverts_so_hdmi_boots() {
+        // The regression fix: a ground station installed with --display none
+        // (HDMI cockpit) must NOT get the SPI-LCD overlay force-added.
+        assert_eq!(
+            lcd_provision_action(&ctx_with(Some("none"), "ground_station")),
+            LcdAction::Revert
+        );
+    }
+
+    #[test]
+    fn action_gs_display_auto_defers_to_shell_autodetect() {
+        // The GS default: never force a boot-config change; the brick-safe
+        // shell auto-detector keeps a bound panel or resolves HDMI.
+        assert_eq!(
+            lcd_provision_action(&ctx_with(Some("auto"), "ground_station")),
+            LcdAction::Defer
+        );
+        // Absent --display on a GS resolves to "auto" -> Defer (never strips a
+        // real SPI-LCD GS to a white screen).
+        assert_eq!(
+            lcd_provision_action(&ctx_with(None, "ground_station")),
+            LcdAction::Defer
+        );
+    }
+
+    #[test]
+    fn action_gs_explicit_panel_provisions() {
+        assert_eq!(
+            lcd_provision_action(&ctx_with(Some("waveshare35a"), "ground_station")),
+            LcdAction::Provision
+        );
+    }
+
+    #[test]
+    fn action_drone_reverts_to_keep_the_gpu() {
+        // A drone (absent --display resolves to "none") must never carry the SPI
+        // framebuffer overlay stealing fb0 from the GPU.
+        assert_eq!(
+            lcd_provision_action(&ctx_with(None, "drone")),
+            LcdAction::Revert
+        );
+        assert_eq!(
+            lcd_provision_action(&ctx_with(Some("none"), "drone")),
+            LcdAction::Revert
+        );
+        // Even an explicit panel id on a drone reverts (a drone is not a panel host).
+        assert_eq!(
+            lcd_provision_action(&ctx_with(Some("waveshare35a"), "drone")),
+            LcdAction::Revert
         );
     }
 }
