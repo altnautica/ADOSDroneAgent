@@ -1,6 +1,11 @@
 [Unit]
 Description=ADOS HDMI Kiosk (ground-station profile)
-After=ados-mediamtx-gs.service
+# Order after the services that serve the cockpit on :8080 (the native control
+# front + the FastAPI app it proxies). This is only an ordering HINT — systemd
+# "started" is not "HTTP-ready" — so the service ALSO polls the target URL until
+# it is served before launching the browser (a browser pointed at a not-yet-ready
+# URL sticks on an error page).
+After=ados-mediamtx-gs.service ados-control.service ados-api.service
 PartOf=ados-supervisor.service
 # NOT ordered After=graphical.target: this unit is WantedBy=multi-user.target,
 # and graphical.target is itself After=multi-user.target, so ordering after

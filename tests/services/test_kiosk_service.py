@@ -169,6 +169,80 @@ async def test_wait_for_display_appears_after_poll(monkeypatch: pytest.MonkeyPat
         assert await ks._wait_for_display() is True
 
 
+class _FakeResp:
+    def __init__(self, status: int) -> None:
+        self.status = status
+
+    def __enter__(self) -> _FakeResp:
+        return self
+
+    def __exit__(self, *_a: object) -> None:
+        return None
+
+
+def test_url_serving_true_on_2xx() -> None:
+    with patch("urllib.request.urlopen", return_value=_FakeResp(200)):
+        assert ks._url_serving("http://localhost:8080/cockpit") is True
+
+
+def test_url_serving_true_on_redirect() -> None:
+    # urlopen follows redirects; a 307 -> /cockpit/ -> 200 lands as < 400.
+    with patch("urllib.request.urlopen", return_value=_FakeResp(307)):
+        assert ks._url_serving("http://localhost:8080/cockpit") is True
+
+
+def test_url_serving_false_on_404() -> None:
+    import urllib.error
+
+    err = urllib.error.HTTPError("http://x/cockpit", 404, "Not Found", {}, None)  # type: ignore[arg-type]
+    with patch("urllib.request.urlopen", side_effect=err):
+        assert ks._url_serving("http://localhost:8080/cockpit") is False
+
+
+def test_url_serving_true_on_auth_gate() -> None:
+    import urllib.error
+
+    err = urllib.error.HTTPError("http://x/cockpit", 403, "Forbidden", {}, None)  # type: ignore[arg-type]
+    with patch("urllib.request.urlopen", side_effect=err):
+        assert ks._url_serving("http://localhost:8080/cockpit") is True
+
+
+def test_url_serving_false_on_connection_refused() -> None:
+    import urllib.error
+
+    with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("refused")):
+        assert ks._url_serving("http://localhost:8080/cockpit") is False
+
+
+@pytest.mark.asyncio
+async def test_wait_for_url_returns_immediately_when_serving() -> None:
+    with patch.object(ks, "_url_serving", return_value=True):
+        assert await ks._wait_for_url("http://localhost:8080/cockpit") is True
+
+
+@pytest.mark.asyncio
+async def test_wait_for_url_serves_after_poll(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ks, "_URL_WAIT_SECONDS", 1.0)
+    monkeypatch.setattr(ks, "_URL_POLL_SECONDS", 0.01)
+    calls = {"n": 0}
+
+    def _serving(_url: str) -> bool:
+        calls["n"] += 1
+        return calls["n"] >= 3  # serves on the 3rd probe (the boot race)
+
+    with patch.object(ks, "_url_serving", side_effect=_serving):
+        assert await ks._wait_for_url("http://localhost:8080/cockpit") is True
+
+
+@pytest.mark.asyncio
+async def test_wait_for_url_times_out_launches_anyway(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ks, "_URL_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(ks, "_URL_POLL_SECONDS", 0.01)
+    with patch.object(ks, "_url_serving", return_value=False):
+        # False -> the caller launches the browser anyway (best-effort).
+        assert await ks._wait_for_url("http://localhost:8080/cockpit") is False
+
+
 def test_get_kiosk_config_missing_section_returns_nones() -> None:
     """Old config shape (no ``ground_station``) yields (None, None)."""
     assert _get_kiosk_config(SimpleNamespace()) == (None, None)

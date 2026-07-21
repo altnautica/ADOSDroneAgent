@@ -65,6 +65,15 @@ _DRM_SYSFS = Path("/sys/class/drm")
 _DISPLAY_WAIT_SECONDS = 60.0
 _DISPLAY_POLL_SECONDS = 2.0
 
+# The agent HTTP surface that serves the cockpit (the native control front and
+# the FastAPI app it proxies) finishes starting a few seconds after this service
+# on boot. A browser launched before the URL is served loads an error page and
+# STICKS there (no auto-retry), so the operator sees a "404 Not Found" instead of
+# the cockpit. We poll the target URL until it is served before launching.
+_URL_WAIT_SECONDS = 90.0
+_URL_POLL_SECONDS = 1.0
+_URL_PROBE_TIMEOUT = 3.0
+
 _DEFAULT_URL = "http://localhost:8080/cockpit"
 _ENV_URL_KEY = "ADOS_KIOSK_URL"
 _ENV_MINIMAL_KEY = "ADOS_KIOSK_MINIMAL_LAYER"
@@ -166,6 +175,46 @@ async def _wait_for_display() -> bool:
         await asyncio.sleep(_DISPLAY_POLL_SECONDS)
         if _hdmi_present():
             return True
+    return False
+
+
+def _url_serving(url: str) -> bool:
+    """True when the target URL answers with a non-error HTTP status, i.e. the
+    cockpit is being served. A connection refusal or a 4xx/5xx (the proxy up
+    before its backend, or the route not mounted yet) reads as not-ready. A
+    401/403/405 still means the server is up and routing, so it counts as served
+    (the on-box cockpit HTML is trusted and does not gate, but be lenient)."""
+    import urllib.error
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(url, timeout=_URL_PROBE_TIMEOUT) as resp:  # noqa: S310
+            return 200 <= resp.status < 400
+    except urllib.error.HTTPError as exc:
+        return exc.code in (401, 403, 405)
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+
+
+async def _wait_for_url(url: str) -> bool:
+    """Wait (bounded) for the cockpit URL to be served before launching the
+    browser, absorbing the boot race where the agent HTTP surface finishes
+    starting after this service. Without it the browser loads an error page and
+    sticks there. Returns True once served, False after the timeout (launch
+    anyway, best-effort — a genuinely-wrong URL should still show something)."""
+    if await asyncio.to_thread(_url_serving, url):
+        return True
+    log.info("kiosk_waiting_for_url", url=url, timeout_s=_URL_WAIT_SECONDS)
+    deadline = time.monotonic() + _URL_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        await asyncio.sleep(_URL_POLL_SECONDS)
+        if await asyncio.to_thread(_url_serving, url):
+            return True
+    log.warning(
+        "kiosk_url_wait_timeout",
+        url=url,
+        msg="cockpit URL not serving after wait; launching browser anyway",
+    )
     return False
 
 
@@ -982,6 +1031,11 @@ async def _amain() -> int:
         return 0
 
     url, minimal = _resolve_target_url(config)
+    # Wait for the cockpit URL to be served before launching the browser: on boot
+    # the agent HTTP surface comes up after this service, and a browser pointed at
+    # a not-yet-serving URL sticks on an error page (the operator sees "404 Not
+    # Found" instead of the cockpit).
+    await _wait_for_url(url)
     renderer, mali_lib_dir = _resolve_render_plan()
     # Adaptive launch: run a full-screen window inside a live desktop when one
     # is present (cage cannot — the desktop already owns the DRM master), else
