@@ -23,6 +23,50 @@ _LOSS_RANGE = (0.1, 2.0)
 _FEC_RECOVERY_RATE = 0.8
 _PACKETS_PER_SECOND = 1200
 
+# A measured link is called bad only on a real reading, so these gate the
+# DEGRADED verdict on the generated stats rather than on the proof below.
+_DEGRADED_RSSI_DBM = -68.0
+_DEGRADED_LOSS_PERCENT = 5.0
+
+# Simulated received-side proof cadence.
+#
+# The drone is the video source: once the link is up it is always injecting,
+# so the verdict turns entirely on whether a return signal was heard recently.
+# That is the real trigger, so the simulation models the same observable — the
+# age of the last return signal — instead of flipping a flag. The simulated
+# peer answers for the first stretch of each cycle and then goes quiet; the
+# proof ages past the grace window part-way through the silence, and the link
+# reports rf_unverified until the peer is heard again.
+#
+# The grace window is compressed from the radio's 30 s so an episode is
+# reachable inside a short demo session; the shape of the derivation is
+# unchanged.
+_RX_PROOF_CYCLE = 40.0  # seconds for one heard -> silent -> heard cycle
+_RX_PROOF_HEARD_WINDOW = 22.0  # the peer answers this far into each cycle
+_RX_PROOF_GRACE = 6.0  # proof older than this is no longer proof
+
+
+def _seconds_since_return_signal(elapsed: float) -> float:
+    """Age of the simulated return signal at ``elapsed`` seconds.
+
+    Zero while the simulated peer is answering (a beacon just landed), then
+    climbing once it goes quiet, so callers read the same observable the radio
+    tracks: how long since a verified return signal was last heard.
+    """
+    phase = elapsed % _RX_PROOF_CYCLE
+    if phase < _RX_PROOF_HEARD_WINDOW:
+        return 0.0
+    return phase - _RX_PROOF_HEARD_WINDOW
+
+
+def _is_rf_unverified(tx_live: bool, rx_proven: bool) -> bool:
+    """Transmitting with no confirmed reception — the radio's own verdict.
+
+    Not unverified when the transmit counter is flat (that is the idle case)
+    or when a return signal is fresh (the link is proven).
+    """
+    return tx_live and not rx_proven
+
 
 class DemoWfbManager:
     """Simulated WFB-ng link for demo mode and testing.
@@ -30,6 +74,16 @@ class DemoWfbManager:
     Generates realistic-looking link statistics with oscillating RSSI
     to simulate movement. Transitions through DISCONNECTED -> CONNECTING -> CONNECTED
     on startup, then generates stats at ~1 Hz.
+
+    The data is simulated, and says so: the interface reports ``wlan_demo``
+    (no such device exists) and nothing here touches the wfb-stats sidecar the
+    real radio writes, so a demo reading can never be mistaken for a rig's.
+
+    The received-side proof is simulated alongside the stats so the
+    transmitting-with-no-confirmed-reception path is exercisable without
+    hardware. ``channel_locked`` and ``rf_unverified`` are two views of the one
+    simulated proof, as they are on the real radio, so a status body can never
+    report an unverified link as locked.
     """
 
     def __init__(self) -> None:
@@ -39,6 +93,12 @@ class DemoWfbManager:
         self._channel = 149
         self._running = False
         self._start_time = 0.0
+        # Received-side proof, simulated. `_tx_live` mirrors an advancing
+        # transmit counter (false until the link is up, and again once
+        # stopped); `_rx_proven` mirrors a return signal heard inside the
+        # grace window. Both feed the one verdict below.
+        self._tx_live = False
+        self._rx_proven = False
         # Surface the same TX power knobs as the real manager so the
         # routes layer can introspect them uniformly during tests.
         self._tx_power_dbm: int = 5
@@ -66,6 +126,11 @@ class DemoWfbManager:
         """Link quality monitor with stats history."""
         return self._monitor
 
+    @property
+    def rf_unverified(self) -> bool:
+        """Transmitting with no confirmed reception, from the simulated proof."""
+        return _is_rf_unverified(self._tx_live, self._rx_proven)
+
     def get_status(self) -> dict:
         """Get current link status as a dictionary."""
         stats = self._monitor.get_current()
@@ -88,6 +153,13 @@ class DemoWfbManager:
             "tx_power_max_dbm": self._tx_power_max_dbm,
             "mcs_index": self._mcs_index,
             "topology": self._topology,
+            # The two halves of the received-side proof, both derived from the
+            # one simulated `_rx_proven` so they agree with each other and with
+            # the state string: locked once a return signal was heard,
+            # rf_unverified while the transmit counter advances and none has
+            # been.
+            "channel_locked": self._rx_proven,
+            "rf_unverified": self.rf_unverified,
         }
 
     @property
@@ -150,10 +222,58 @@ class DemoWfbManager:
             timestamp=now,
         )
 
+    def _derive_state(self, stats: LinkStats, rx_proven: bool) -> LinkState:
+        """Rank the simulated link the way the radio ranks the real one.
+
+        A genuinely bad MEASURED link outranks an unproven one, so DEGRADED is
+        decided first and an unverified transmit path is never masked over a
+        real reading. Below it, injecting with no confirmed reception is
+        RF_UNVERIFIED rather than CONNECTED: an advancing transmit counter only
+        proves frames were accepted, never that the energy reached a receiver.
+        """
+        if (
+            stats.rssi_dbm < _DEGRADED_RSSI_DBM
+            or stats.loss_percent > _DEGRADED_LOSS_PERCENT
+        ):
+            return LinkState.DEGRADED
+        if _is_rf_unverified(self._tx_live, rx_proven):
+            return LinkState.RF_UNVERIFIED
+        return LinkState.CONNECTED
+
+    def _tick(self, elapsed: float) -> LinkStats:
+        """Advance the simulation one sample and settle the derived state.
+
+        Split out of the run loop so the whole hear -> lose -> hear cycle can
+        be driven from a test clock instead of a wall-clock sleep.
+        """
+        stats = self._generate_stats(elapsed)
+        self._monitor._latest = stats
+        self._monitor._history.append(stats)
+        self._monitor._timestamps.append(time.monotonic())
+
+        proof_age = _seconds_since_return_signal(elapsed)
+        self._rx_proven = proof_age <= _RX_PROOF_GRACE
+        was_unverified = self._state == LinkState.RF_UNVERIFIED
+        self._state = self._derive_state(stats, self._rx_proven)
+
+        is_unverified = self._state == LinkState.RF_UNVERIFIED
+        if is_unverified != was_unverified:
+            log.info(
+                "demo_wfb_rf_unverified_entry" if is_unverified
+                else "demo_wfb_rf_unverified_clear",
+                proof_age_s=round(proof_age, 1),
+            )
+        return stats
+
     async def stop(self) -> None:
         """Stop the demo manager."""
         self._running = False
         self._state = LinkState.DISCONNECTED
+        # Nothing is injecting once stopped, so the transmitting-with-no-
+        # reception verdict clears with it rather than sticking at its last
+        # value.
+        self._tx_live = False
+        self._rx_proven = False
         log.info("demo_wfb_stopped")
 
     async def run(self) -> None:
@@ -170,19 +290,10 @@ class DemoWfbManager:
         await asyncio.sleep(1.0)
 
         self._state = LinkState.CONNECTED
+        # The drone is the video source, so from here it is always injecting.
+        self._tx_live = True
 
         # Generate stats at ~1 Hz
         while self._running:
-            elapsed = time.monotonic() - self._start_time
-            stats = self._generate_stats(elapsed)
-            self._monitor._latest = stats
-            self._monitor._history.append(stats)
-            self._monitor._timestamps.append(time.monotonic())
-
-            # Occasional degraded state to make it realistic
-            if stats.rssi_dbm < -68.0 or stats.loss_percent > 5.0:
-                self._state = LinkState.DEGRADED
-            else:
-                self._state = LinkState.CONNECTED
-
+            self._tick(time.monotonic() - self._start_time)
             await asyncio.sleep(1.0)
