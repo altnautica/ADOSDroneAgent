@@ -16,7 +16,7 @@ Data flow::
     ffmpeg (-i sdp:..., -c copy)  -->  rtsp://127.0.0.1:8554/main
         |
         v
-    mediamtx (publisher source on /main)  -->  WHEP at :8889/ados/whep
+    mediamtx (publisher source on /main)  -->  WHEP at :8889/main/whep
         |
         v
     Browser GCS / Android app
@@ -61,7 +61,6 @@ from .rtsp_config import (
     GROUND_RTP_PAYLOAD_TYPE,
     GROUND_RTSP_PATH,
     GROUND_SDP_PATH,
-    GROUND_WHEP_PATH,
     _write_sdp,
     bake_sprop_into_sdp,
 )
@@ -448,7 +447,6 @@ class MediamtxGsManager:
             self._ffmpeg is not None and self._ffmpeg.returncode is None
         )
         base["udp_ingest_port"] = self._udp_port
-        base["whep_path"] = GROUND_WHEP_PATH
         return base
 
     def ffmpeg_alive(self) -> bool:

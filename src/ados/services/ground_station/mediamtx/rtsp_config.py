@@ -36,7 +36,6 @@ log = get_logger("ground_station.mediamtx")
 
 GROUND_INGEST_UDP_PORT = 5600
 GROUND_RTSP_PATH = "main"
-GROUND_WHEP_PATH = "ados/whep"
 GROUND_RTP_PAYLOAD_TYPE = 96
 # SDP describing the RTP stream wfb_rx pushes to UDP 5600. ffmpeg reads
 # this file via ``-f sdp -i ...`` so it knows the codec / clock rate /
@@ -335,7 +334,6 @@ async def bake_sprop_into_sdp(
 __all__ = [
     "GROUND_INGEST_UDP_PORT",
     "GROUND_RTSP_PATH",
-    "GROUND_WHEP_PATH",
     "GROUND_RTP_PAYLOAD_TYPE",
     "GROUND_SDP_PATH",
     "SPROP_PROBE_DELAY_SECONDS",

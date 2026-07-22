@@ -11,7 +11,7 @@ from __future__ import annotations
 import socket
 from pathlib import Path
 
-from .rtsp_config import GROUND_RTSP_PATH, GROUND_WHEP_PATH
+from .rtsp_config import GROUND_RTSP_PATH
 
 
 def _physical_lan_interfaces() -> list[str]:
@@ -39,8 +39,8 @@ def build_mediamtx_yaml(
     """Return the ground-profile mediamtx YAML config as a dict.
 
     Same base shape as the air-side generator but the ``/main`` path is
-    declared with ``source: publisher`` so ffmpeg can push into it. The
-    WHEP path ``ados/whep`` is aliased to the same source.
+    declared with ``source: publisher`` so ffmpeg can push into it. WHEP is
+    served directly at ``:8889/main/whep`` (no alias path).
 
     Caller is responsible for serialising to disk and threading the
     final path through to the mediamtx subprocess.
@@ -130,23 +130,12 @@ def build_mediamtx_yaml(
         "hlsSegmentCount": 7,
         "hlsSegmentDuration": "1s",
         "paths": {
-            # ffmpeg pushes RTSP here with -c copy from udp://:5600
+            # ffmpeg pushes RTSP here with -c copy from udp://:5600.
+            # Browsers reach WebRTC directly at :8889/main/whep — mediamtx
+            # serves WHEP for any published path, so no separate alias path
+            # is declared (a self-pull alias was redundant with /main/whep
+            # and only added a second idle internal reader).
             GROUND_RTSP_PATH: {"source": "publisher"},
-            # WHEP alias. sourceOnDemand True keeps the secondary
-            # internal reader idle until a WHEP client actually
-            # connects to /ados/whep. The earlier `False` setting
-            # ran a permanent self-pull of /main into /ados/whep
-            # even when no one was using the WHEP path (browsers
-            # hit /main directly via webrtc:8889 endpoint), which
-            # doubled mediamtx's internal goroutine count and
-            # held a second RTSP reader open against the publisher
-            # all the time. The cold-start delay on WHEP first
-            # connect is ~1 GOP (~500 ms at fps/2 keyint); a fair
-            # trade for half the routine load.
-            GROUND_WHEP_PATH: {
-                "source": f"rtsp://127.0.0.1:{rtsp_port}/{GROUND_RTSP_PATH}",
-                "sourceOnDemand": True,
-            },
         },
     }
     if lan_ips:

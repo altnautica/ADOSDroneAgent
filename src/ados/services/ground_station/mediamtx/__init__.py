@@ -34,7 +34,6 @@ from .rtsp_config import (
     GROUND_RTP_PAYLOAD_TYPE,
     GROUND_RTSP_PATH,
     GROUND_SDP_PATH,
-    GROUND_WHEP_PATH,
     SPROP_PROBE_DELAY_SECONDS,
     SPROP_PROBE_DURATION_SECONDS,
     _build_sdp,
@@ -58,7 +57,6 @@ __all__ = [
     # rtsp / sdp config
     "GROUND_INGEST_UDP_PORT",
     "GROUND_RTSP_PATH",
-    "GROUND_WHEP_PATH",
     "GROUND_RTP_PAYLOAD_TYPE",
     "GROUND_SDP_PATH",
     "SPROP_PROBE_DELAY_SECONDS",
