@@ -409,6 +409,11 @@ REGISTRY: list[RouteCase] = [
             "video_inbound_bytes_per_s",
             "rx_silent_seconds",
             "channel_locked",
+            # The received-side verdict, alongside its other half above. It
+            # tracks the proof, and it drops to null once the snapshot backing
+            # it ages past the staleness ceiling, so two reads straddling that
+            # boundary legitimately differ.
+            "rf_unverified",
             "acquire_state",
             "history",
             "last_hop_at",
