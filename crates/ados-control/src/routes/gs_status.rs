@@ -364,6 +364,12 @@ fn link_view_from(path: &Path) -> Value {
     base.insert("loss_percent".to_string(), Value::Null);
     base.insert("tx_power_dbm".to_string(), Value::Null);
     base.insert("state".to_string(), json!("connecting"));
+    // The one-glance link diagnosis (deaf / mis_keyed / jammed / healthy /
+    // searching) + the RX counters that separate the failure modes a bare "0
+    // received" hides, so the always-on cockpit link bar reads a legible CAUSE.
+    base.insert("link_diag".to_string(), Value::Null);
+    base.insert("packets_all".to_string(), json!(0));
+    base.insert("decrypt_errors".to_string(), json!(0));
 
     let age_s = match std::fs::metadata(path).and_then(|m| m.modified()) {
         Ok(mtime) => mtime.elapsed().map(|d| d.as_secs_f64()).unwrap_or(0.0),
@@ -453,6 +459,30 @@ fn link_view_from(path: &Path) -> Value {
     merged.insert(
         "loss_percent".to_string(),
         payload.get("loss_percent").cloned().unwrap_or(Value::Null),
+    );
+    // Diagnostic trio from the sidecar: the verdict (a string, null when the
+    // writer has not classified yet) + the RX counters (0 when absent).
+    merged.insert(
+        "link_diag".to_string(),
+        payload
+            .get("link_diag")
+            .filter(|v| v.is_string())
+            .cloned()
+            .unwrap_or(Value::Null),
+    );
+    merged.insert(
+        "packets_all".to_string(),
+        json!(payload
+            .get("packets_all")
+            .and_then(json_to_i64)
+            .unwrap_or(0)),
+    );
+    merged.insert(
+        "decrypt_errors".to_string(),
+        json!(payload
+            .get("decrypt_errors")
+            .and_then(json_to_i64)
+            .unwrap_or(0)),
     );
     // tx_power_dbm: the payload value when present (not null), else the (null) base.
     let payload_tx = payload.get("tx_power_dbm").cloned();
@@ -1164,6 +1194,9 @@ mod tests {
             "loss_percent": null,
             "tx_power_dbm": null,
             "state": "connecting",
+            "link_diag": null,
+            "packets_all": 0,
+            "decrypt_errors": 0,
         });
         assert_eq!(view, want);
     }
@@ -1188,6 +1221,9 @@ mod tests {
             "loss_percent": 0.3,
             "tx_power_dbm": 20,
             "state": "connected",
+            "link_diag": "healthy",
+            "packets_all": 640,
+            "decrypt_errors": 0,
         });
         std::fs::write(&stats, serde_json::to_string(&payload).unwrap()).unwrap();
         let view = link_view_from(&stats);
@@ -1201,6 +1237,10 @@ mod tests {
         assert_eq!(view["packets_received"], json!(598));
         assert_eq!(view["tx_power_dbm"], json!(20));
         assert_eq!(view["state"], json!("connected"));
+        // The diagnostic trio pulls from the sidecar payload.
+        assert_eq!(view["link_diag"], json!("healthy"));
+        assert_eq!(view["packets_all"], json!(640));
+        assert_eq!(view["decrypt_errors"], json!(0));
     }
 
     #[test]
