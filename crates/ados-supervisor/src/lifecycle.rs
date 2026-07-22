@@ -455,6 +455,11 @@ impl Supervisor {
             DevKind::Camera => "ados-video",
             DevKind::Fc => "ados-mavlink",
             DevKind::Radio => "ados-wfb",
+            // The CRSF lane service; not yet in the service registry, so the
+            // index_of guard below makes this edge a silent no-op until it
+            // ships. Kept separate from Fc so an RC-module replug never
+            // restarts the FC link.
+            DevKind::Elrs => "ados-crsf",
         };
         if self.index_of(name).is_none() {
             return;

@@ -81,6 +81,68 @@ pub fn dev_nodes_present(prefixes: &[&str]) -> bool {
     false
 }
 
+/// The USB-serial tty inventory: every `/dev/tty{ACM,USB}<n>` node with its
+/// backing USB `(idVendor, idProduct)` resolved from sysfs (`None` for a node
+/// with no USB ancestor, or off-Linux). Sorted by name so the snapshot is
+/// stable across polls. This is the node-level view the hot-plug classifier
+/// needs: a class-wide "any tty exists" bool cannot tell an RC module's bridge
+/// apart from the flight controller sitting next to it.
+pub fn serial_tty_nodes() -> Vec<(String, Option<(u16, u16)>)> {
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir("/dev") else {
+        return out;
+    };
+    for entry in rd.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if is_indexed_serial_node(&name) {
+            let usb = tty_usb_id(&name);
+            out.push((name, usb));
+        }
+    }
+    out.sort();
+    out
+}
+
+/// True for `ttyACM<n>` / `ttyUSB<n>` (an index is required, so `ttyACM` bare
+/// or `ttyUSBx` never match).
+fn is_indexed_serial_node(name: &str) -> bool {
+    for pre in ["ttyACM", "ttyUSB"] {
+        if let Some(rest) = name.strip_prefix(pre) {
+            return !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit());
+        }
+    }
+    false
+}
+
+/// Resolve a tty node's backing USB id: `/sys/class/tty/<node>/device` points
+/// at the USB *interface*; `idVendor`/`idProduct` live on an ancestor USB
+/// device directory, so climb parents until one carries both files.
+fn tty_usb_id(node: &str) -> Option<(u16, u16)> {
+    let start = std::fs::canonicalize(format!("/sys/class/tty/{node}/device")).ok()?;
+    usb_id_above(&start)
+}
+
+/// Walk up from `start` looking for a directory carrying `idVendor` +
+/// `idProduct` (bounded, and never climbing out of /sys). Split from
+/// [`tty_usb_id`] so a fake directory layout can exercise it in a test.
+fn usb_id_above(start: &Path) -> Option<(u16, u16)> {
+    let mut cur = start.to_path_buf();
+    for _ in 0..6 {
+        if let (Some(vid), Some(pid)) = (
+            read_hex16(&cur.join("idVendor")),
+            read_hex16(&cur.join("idProduct")),
+        ) {
+            return Some((vid, pid));
+        }
+        let parent = cur.parent()?.to_path_buf();
+        if parent == Path::new("/sys") || parent == Path::new("/") {
+            return None;
+        }
+        cur = parent;
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,5 +154,31 @@ mod tests {
         std::fs::write(&f, "0bda\n").unwrap();
         assert_eq!(read_hex16(&f), Some(0x0BDA));
         assert_eq!(read_hex16(&dir.path().join("missing")), None);
+    }
+
+    #[test]
+    fn indexed_serial_node_requires_a_numeric_index() {
+        assert!(is_indexed_serial_node("ttyACM0"));
+        assert!(is_indexed_serial_node("ttyUSB12"));
+        assert!(!is_indexed_serial_node("ttyACM"));
+        assert!(!is_indexed_serial_node("ttyUSBx"));
+        assert!(!is_indexed_serial_node("ttyprintk"));
+        assert!(!is_indexed_serial_node("ttyS0"));
+    }
+
+    #[test]
+    fn usb_id_above_climbs_to_the_device_dir() {
+        // The interface dir has no id files; the parent (the USB device) does.
+        let dir = tempfile::tempdir().unwrap();
+        let device = dir.path().join("usbdev");
+        let iface = device.join("iface");
+        std::fs::create_dir_all(&iface).unwrap();
+        std::fs::write(device.join("idVendor"), "1a86\n").unwrap();
+        std::fs::write(device.join("idProduct"), "7523\n").unwrap();
+        assert_eq!(usb_id_above(&iface), Some((0x1A86, 0x7523)));
+        // No USB ancestor anywhere -> None.
+        let bare = dir.path().join("soc-uart");
+        std::fs::create_dir_all(&bare).unwrap();
+        assert_eq!(usb_id_above(&bare), None);
     }
 }
