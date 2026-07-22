@@ -6,9 +6,13 @@
 //! the far receiver heard anything. The only received-side proof this lane
 //! has is the inbound link-statistics telemetry (frame type 0x14) and its
 //! uplink link-quality figure, so the verdict keys on that: transmitting
-//! without fresh link statistics is `rf_unverified`, not "up". Before the
-//! proof window has even had a chance to fill, the honest answer is "no
-//! verdict yet" (`ready`, `rf_unverified: null`) — never a fabricated false.
+//! without fresh link statistics — or with fresh statistics whose uplink LQ
+//! reads ZERO (the module is talking to us but hears no receiver) — is
+//! `rf_unverified`, not "up". Before the proof window has even had a chance
+//! to fill, the honest answer is "no verdict yet" (`ready`,
+//! `rf_unverified: null`) — never a fabricated false. Only a state with a
+//! real received-side proof ([`LaneState::flyable`]) may ever be reported
+//! usable for flight.
 
 use std::time::Duration;
 
@@ -63,6 +67,15 @@ impl LaneState {
             LaneState::Disabled | LaneState::Unconfigured | LaneState::Ready => None,
         }
     }
+
+    /// Whether the lane may be reported usable for flight: true ONLY when a
+    /// received-side proof exists (a fresh link-statistics frame with a
+    /// non-zero uplink LQ). `rf_unverified` — and every no-verdict state — is
+    /// never flyable: a lane that cannot prove a receiver hears it must not
+    /// be offered as a control path.
+    pub fn flyable(self) -> bool {
+        matches!(self, LaneState::LinkOk | LaneState::Degraded)
+    }
 }
 
 /// The observed inputs the state derivation reads.
@@ -88,21 +101,28 @@ pub fn derive_state(i: &LinkInputs) -> LaneState {
     if !i.device_open {
         return LaneState::Unconfigured;
     }
-    // A fresh link-statistics frame is the received-side proof.
+    // A fresh link-statistics frame proves the serial telemetry hop — but
+    // only a NON-ZERO uplink LQ proves a receiver hears the transmission.
     if let Some(age) = i.stats_age {
         if age <= STATS_FRESH_WINDOW {
-            // A fresh frame always carries an LQ; a defensively-missing one
-            // reads degraded, never ok.
-            return if i.uplink_lq.unwrap_or(0) >= LQ_DEGRADED_BELOW {
-                LaneState::LinkOk
-            } else {
-                LaneState::Degraded
+            return match i.uplink_lq {
+                Some(lq) if lq >= LQ_DEGRADED_BELOW => LaneState::LinkOk,
+                Some(lq) if lq > 0 => LaneState::Degraded,
+                // Zero (or defensively-missing) uplink LQ: the module reports
+                // that nobody hears it — the same no-received-proof ladder as
+                // missing statistics, never "degraded".
+                _ => no_proof_state(i.tx_running_for),
             };
         }
     }
-    // No fresh proof. Transmitting past the grace window means the energy is
-    // provably going unheard; anything earlier is simply "no verdict yet".
-    match i.tx_running_for {
+    no_proof_state(i.tx_running_for)
+}
+
+/// The no-received-proof ladder: transmitting past the grace window means the
+/// energy is provably going unheard; anything earlier is simply "no verdict
+/// yet".
+fn no_proof_state(tx_running_for: Option<Duration>) -> LaneState {
+    match tx_running_for {
         Some(running) if running > RF_PROOF_GRACE => LaneState::RfUnverified,
         _ => LaneState::Ready,
     }
@@ -220,15 +240,75 @@ mod tests {
     }
 
     #[test]
-    fn fresh_stats_with_defensively_missing_lq_reads_degraded() {
+    fn tx_advancing_with_zero_uplink_lq_is_rf_unverified() {
+        // The module answers on serial (fresh statistics) but reports that no
+        // receiver hears it: transmission past the grace window is provably
+        // unheard — never "degraded", never flyable.
         let i = LinkInputs {
             enabled: true,
             device_open: true,
             tx_running_for: Some(secs(60)),
             stats_age: Some(secs(1)),
-            uplink_lq: None,
+            uplink_lq: Some(0),
         };
-        assert_eq!(derive_state(&i), LaneState::Degraded);
+        assert_eq!(derive_state(&i), LaneState::RfUnverified);
+        assert_eq!(LaneState::RfUnverified.rf_unverified_flag(), Some(true));
+        assert!(!LaneState::RfUnverified.flyable());
+        // A defensively-missing LQ reads the same: zero proof, not degraded.
+        let missing = LinkInputs {
+            uplink_lq: None,
+            ..i
+        };
+        assert_eq!(derive_state(&missing), LaneState::RfUnverified);
+    }
+
+    #[test]
+    fn zero_lq_inside_the_grace_window_is_still_no_verdict() {
+        // At bring-up the module reports LQ 0 while the RF link acquires; the
+        // grace window applies to the zero-LQ path exactly as to missing
+        // statistics — "no verdict yet", not a premature rf_unverified.
+        let i = LinkInputs {
+            enabled: true,
+            device_open: true,
+            tx_running_for: Some(secs(3)),
+            stats_age: Some(secs(1)),
+            uplink_lq: Some(0),
+        };
+        assert_eq!(derive_state(&i), LaneState::Ready);
+    }
+
+    #[test]
+    fn recovery_from_rf_unverified_needs_a_real_lq() {
+        // The rf_unverified → link_ok transition happens the moment a fresh
+        // statistics frame carries a non-zero LQ again.
+        let unheard = LinkInputs {
+            enabled: true,
+            device_open: true,
+            tx_running_for: Some(secs(60)),
+            stats_age: Some(secs(1)),
+            uplink_lq: Some(0),
+        };
+        assert_eq!(derive_state(&unheard), LaneState::RfUnverified);
+        let heard = LinkInputs {
+            uplink_lq: Some(97),
+            ..unheard
+        };
+        assert_eq!(derive_state(&heard), LaneState::LinkOk);
+        assert!(LaneState::LinkOk.flyable());
+    }
+
+    #[test]
+    fn only_received_side_proven_states_are_flyable() {
+        assert!(LaneState::LinkOk.flyable());
+        assert!(LaneState::Degraded.flyable());
+        for state in [
+            LaneState::Disabled,
+            LaneState::Unconfigured,
+            LaneState::Ready,
+            LaneState::RfUnverified,
+        ] {
+            assert!(!state.flyable(), "{state:?} must never read flyable");
+        }
     }
 
     #[test]

@@ -175,6 +175,13 @@ async fn run_service(cfg: &CrsfLaneConfig, mut shutdown: watch::Receiver<bool>) 
             counters.clone(),
             task_cancel.clone(),
         ));
+        // The flat-TX liveness watchdog: frames must keep being accepted by
+        // the module at cadence. A fire breaks to the respawn loop, which
+        // reinitialises the transport and re-verifies from a fresh window.
+        let mut watchdog_task = tokio::spawn(ados_crsf::watchdog::tx_liveness_watchdog(
+            counters.clone(),
+            task_cancel.clone(),
+        ));
         let cmd_state = CmdState {
             merge: merge.clone(),
             latest_status: latest_status.clone(),
@@ -208,6 +215,10 @@ async fn run_service(cfg: &CrsfLaneConfig, mut shutdown: watch::Receiver<bool>) 
                 r = &mut rx_task => {
                     tracing::warn!(exit = ?r, "crsf rx task exited");
                     break "rx_exit";
+                }
+                r = &mut watchdog_task => {
+                    tracing::warn!(fired = ?r, "crsf tx liveness watchdog fired");
+                    break "tx_stalled";
                 }
                 _ = tokio::time::sleep(HEARTBEAT_INTERVAL) => {}
             }
@@ -274,6 +285,7 @@ async fn run_service(cfg: &CrsfLaneConfig, mut shutdown: watch::Receiver<bool>) 
         task_cancel.notify_waiters();
         tx_task.abort();
         rx_task.abort();
+        watchdog_task.abort();
         cmd_task.abort();
         cancel_bridge.abort();
 

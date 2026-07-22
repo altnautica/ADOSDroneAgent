@@ -29,3 +29,4 @@ pub mod sidecar;
 pub mod sources;
 pub mod telemetry;
 pub mod transport;
+pub mod watchdog;

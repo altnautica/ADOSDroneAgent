@@ -38,3 +38,6 @@ evdev = { version = "0.12", features = ["tokio"] }
 
 [dev-dependencies]
 tempfile = "3"
+# The paused-clock harness for the liveness-watchdog stall-window tests.
+# Dev-only: resolver 2 keeps test-util out of the shipped binary's features.
+tokio = { workspace = true, features = ["test-util"] }

@@ -208,6 +208,7 @@ version = "0.1.0"
 dependencies = [
  "ados-config",
  "ados-protocol",
+ "evdev",
  "serde",
  "serde_json",
  "serde_norway",

@@ -7,13 +7,16 @@
 //! { "v": 1, "state": "…", "rssi_dbm": …, "lq_uplink": …, "lq_downlink": …,
 //!   "snr_db": …, "band": …, "packet_rate_hz": …, "tx_power_dbm": …,
 //!   "tx_frames_per_s": …, "rx_frames_per_s": …, "rf_unverified": …,
-//!   "mode": …, "channel_source": …, "relay_role": … }
+//!   "flyable": …, "mode": …, "channel_source": …, "relay_role": … }
 //! ```
 //!
 //! `state` ∈ `unconfigured|ready|link_ok|degraded|rf_unverified|disabled`.
 //! Every number/string is `null` when unmeasured, and `rf_unverified` is a
 //! tri-state boolean whose `null` means "no verdict yet" — a reading is
-//! reported only when it is real, never fabricated.
+//! reported only when it is real, never fabricated. `flyable` is a strict
+//! boolean gate: true ONLY for a state with a received-side proof (`link_ok`
+//! / `degraded`) — an unproven lane is conservatively not flyable, never
+//! "unknown so maybe".
 
 use serde_json::{json, Value};
 
@@ -93,6 +96,7 @@ pub fn build_stats_value(state: LaneState, inputs: &StatsInputs<'_>) -> Value {
         "tx_frames_per_s": inputs.tx_frames_per_s,
         "rx_frames_per_s": inputs.rx_frames_per_s,
         "rf_unverified": state.rf_unverified_flag(),
+        "flyable": state.flyable(),
         "mode": inputs.mode,
         "channel_source": inputs.channel_source,
         "relay_role": inputs.relay_role,
@@ -163,7 +167,7 @@ mod tests {
 
     /// The pinned field set, in one place, so a drift in either direction
     /// (a missing field or an invented one) fails loudly.
-    const PINNED_FIELDS: [&str; 15] = [
+    const PINNED_FIELDS: [&str; 16] = [
         "v",
         "state",
         "rssi_dbm",
@@ -176,6 +180,7 @@ mod tests {
         "tx_frames_per_s",
         "rx_frames_per_s",
         "rf_unverified",
+        "flyable",
         "mode",
         "channel_source",
         "relay_role",
@@ -216,12 +221,15 @@ mod tests {
     }
 
     #[test]
-    fn disabled_body_is_all_null_except_version_and_state() {
+    fn disabled_body_is_all_null_except_version_state_and_flyable() {
         let v = build_stats_value(LaneState::Disabled, &StatsInputs::default());
         assert_eq!(v["v"], 1);
         assert_eq!(v["state"], "disabled");
+        // The flyable gate is a strict boolean, never null: unproven reads
+        // false, conservatively.
+        assert_eq!(v["flyable"], false);
         for field in PINNED_FIELDS {
-            if field != "v" && field != "state" {
+            if field != "v" && field != "state" && field != "flyable" {
                 assert!(v[field].is_null(), "{field} must be null when unmeasured");
             }
         }
@@ -237,7 +245,7 @@ mod tests {
             tx_frames_per_s: Some(49.8),
             rx_frames_per_s: Some(12.0),
             mode: Some("rc"),
-            channel_source: Some("api"),
+            channel_source: Some("inject"),
             relay_role: None,
         };
         let v = build_stats_value(LaneState::LinkOk, &inputs);
@@ -251,20 +259,38 @@ mod tests {
         assert_eq!(v["tx_frames_per_s"], 49.8);
         assert_eq!(v["rx_frames_per_s"], 12.0);
         assert_eq!(v["rf_unverified"], false);
+        assert_eq!(v["flyable"], true);
         assert_eq!(v["mode"], "rc");
-        assert_eq!(v["channel_source"], "api");
+        assert_eq!(v["channel_source"], "inject");
         assert!(v["band"].is_null());
         assert!(v["relay_role"].is_null());
     }
 
     #[test]
-    fn rf_unverified_state_reports_true_never_a_fabricated_false() {
+    fn rf_unverified_state_reports_true_and_never_flyable() {
         let v = build_stats_value(LaneState::RfUnverified, &StatsInputs::default());
         assert_eq!(v["state"], "rf_unverified");
         assert_eq!(v["rf_unverified"], true);
-        // Ready = no verdict yet: null, not false.
+        assert_eq!(v["flyable"], false, "an unproven lane never reads flyable");
+        // Ready = no verdict yet: null rf_unverified, still not flyable.
         let v = build_stats_value(LaneState::Ready, &StatsInputs::default());
         assert!(v["rf_unverified"].is_null());
+        assert_eq!(v["flyable"], false);
+    }
+
+    #[test]
+    fn only_proven_states_read_flyable_on_the_sidecar() {
+        for (state, flyable) in [
+            (LaneState::Disabled, false),
+            (LaneState::Unconfigured, false),
+            (LaneState::Ready, false),
+            (LaneState::LinkOk, true),
+            (LaneState::Degraded, true),
+            (LaneState::RfUnverified, false),
+        ] {
+            let v = build_stats_value(state, &StatsInputs::default());
+            assert_eq!(v["flyable"], flyable, "state {state:?}");
+        }
     }
 
     #[test]
