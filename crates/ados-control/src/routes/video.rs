@@ -453,6 +453,51 @@ pub async fn get_video_config() -> Json<Value> {
     }))
 }
 
+/// Beyond this age the `wfb-stats.json` snapshot can no longer describe the link
+/// NOW, so the received-side verdict reads `null`. The same 10 s ceiling
+/// `/api/wfb` uses to flip its `state` to `"stale"`.
+const LINK_STALE_AFTER_S: f64 = 10.0;
+
+/// Age of the stats snapshot in seconds, or `None` when the file is absent or its
+/// mtime is unreadable. Drives the staleness gate on the received-side verdict.
+fn stats_age_seconds(stats_path: &Path) -> Option<f64> {
+    let mtime = std::fs::metadata(stats_path)
+        .and_then(|m| m.modified())
+        .ok()?;
+    // A clock that moved backwards yields an Err elapsed; treat that as fresh
+    // rather than inventing an age, the same way the status route does.
+    Some(mtime.elapsed().map(|d| d.as_secs_f64()).unwrap_or(0.0))
+}
+
+/// The `rf_unverified` verdict for the link block, or `null` when it cannot be
+/// sourced honestly.
+///
+/// The radio owns this boolean (an advancing transmit counter with no confirmed
+/// reception inside the proof grace window) and both sidecar writers carry it, so
+/// this block forwards the authoritative value instead of leaving the panel to
+/// re-derive it from the liveness counters beside it. It is the other half of
+/// `channel_locked`, which sits in the same block: locked is true once a verified
+/// return signal was heard, `rf_unverified` is true when the transmit counter
+/// advances while none has been.
+///
+/// Null — never a confident `false` — when the key is absent or non-boolean (a
+/// sidecar written before the field existed, or a garbled body) or when the
+/// snapshot is older than [`LINK_STALE_AFTER_S`], because a reading that old
+/// cannot say whether the radio is unverified NOW, and a stale `false` is exactly
+/// the healthy-looking dead link this field exists to expose. The status radio
+/// block applies the same rule, reaching it through the already-composed
+/// `state == "stale"` flip; here the raw sidecar is read directly, so the file
+/// mtime is the freshness source.
+fn rf_unverified_field(status: &Map<String, Value>, fresh: bool) -> Value {
+    if !fresh {
+        return Value::Null;
+    }
+    match status.get("rf_unverified") {
+        Some(Value::Bool(b)) => Value::Bool(*b),
+        _ => Value::Null,
+    }
+}
+
 /// The live radio-link liveness block the GCS Video Link panel reads from
 /// `config.link.*`. The in-process wfb manager is absent on this native front, so
 /// the values come from the `wfb-stats.json` sidecar the radio mirrors; `channel`
@@ -473,6 +518,10 @@ fn link_snapshot(config_channel: i64, stats_path: &Path) -> Value {
     for f in FIELDS {
         link.insert(f.to_string(), Value::Null);
     }
+    // The received-side verdict is always present too, `null` until it can be
+    // sourced honestly — it is gated on type and freshness rather than merged
+    // verbatim, so it gets its own placeholder outside the loop above.
+    link.insert("rf_unverified".to_string(), Value::Null);
     if let Some(status) = read_state_file(stats_path) {
         // Best-effort schema-drift signal (never reject): warn on a producer/reader
         // version mismatch, then read anyway. The writer const lives in the radio
@@ -488,6 +537,11 @@ fn link_snapshot(config_channel: i64, stats_path: &Path) -> Value {
                 }
             }
         }
+        let fresh = stats_age_seconds(stats_path).is_some_and(|age| age <= LINK_STALE_AFTER_S);
+        link.insert(
+            "rf_unverified".to_string(),
+            rf_unverified_field(&status, fresh),
+        );
     }
     // Channel falls back to the configured value so the panel always has a number
     // even before the first stats line lands.
@@ -1016,6 +1070,9 @@ mod tests {
         assert_eq!(link["channel"], json!(149));
         assert_eq!(link["acquire_state"], Value::Null);
         assert_eq!(link["tx_bytes_per_s"], Value::Null);
+        // With no snapshot at all there is no verdict to report, and a false
+        // here would claim a transmit path had been proven.
+        assert_eq!(link["rf_unverified"], Value::Null);
     }
 
     #[test]
@@ -1059,8 +1116,91 @@ mod tests {
         assert_eq!(link["channel"], json!(149));
         // A field not in the stats file stays null.
         assert_eq!(link["video_inbound_bytes_per_s"], Value::Null);
-        // Only the seven contract fields are present (the extra is dropped).
-        assert_eq!(link.as_object().unwrap().len(), 7);
+        // Only the eight contract fields are present (the extra is dropped).
+        assert_eq!(link.as_object().unwrap().len(), 8);
+    }
+
+    /// Write a stats sidecar and back-date its mtime by `age_s` seconds, so the
+    /// staleness gate can be driven without sleeping.
+    fn write_stats_aged(path: &Path, body: &str, age_s: u64) {
+        std::fs::write(path, body).unwrap();
+        if age_s > 0 {
+            let when = std::time::SystemTime::now() - std::time::Duration::from_secs(age_s);
+            let times = std::fs::FileTimes::new().set_accessed(when).set_modified(when);
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_times(times)
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn link_snapshot_forwards_the_rf_unverified_verdict() {
+        // The radio's authoritative verdict reaches the panel's link block
+        // verbatim in both directions, so the panel never re-derives it from the
+        // liveness counters beside it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wfb-stats.json");
+
+        write_stats_aged(
+            &path,
+            r#"{"rf_unverified": true, "channel_locked": false, "tx_bytes_per_s": 750000}"#,
+            0,
+        );
+        let link = link_snapshot(149, &path);
+        assert_eq!(link["rf_unverified"], json!(true));
+        // Its other half rides the same block: injecting blind is not locked.
+        assert_eq!(link["channel_locked"], json!(false));
+
+        write_stats_aged(
+            &path,
+            r#"{"rf_unverified": false, "channel_locked": true}"#,
+            0,
+        );
+        assert_eq!(link_snapshot(149, &path)["rf_unverified"], json!(false));
+    }
+
+    #[test]
+    fn link_snapshot_rf_unverified_is_null_when_it_cannot_be_sourced() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wfb-stats.json");
+
+        // Absent from the snapshot (a sidecar written before the field existed):
+        // unknown, never a confident false claiming the path was proven.
+        write_stats_aged(&path, r#"{"channel_locked": true}"#, 0);
+        assert_eq!(link_snapshot(149, &path)["rf_unverified"], Value::Null);
+
+        // Present but not a boolean: a garbled body is no reading either.
+        write_stats_aged(&path, r#"{"rf_unverified": "yes"}"#, 0);
+        assert_eq!(link_snapshot(149, &path)["rf_unverified"], Value::Null);
+
+        // An explicit JSON null is already no reading.
+        write_stats_aged(&path, r#"{"rf_unverified": null}"#, 0);
+        assert_eq!(link_snapshot(149, &path)["rf_unverified"], Value::Null);
+    }
+
+    #[test]
+    fn link_snapshot_rf_unverified_is_null_on_a_stale_snapshot() {
+        // A snapshot older than the staleness ceiling cannot say whether the
+        // radio is unverified NOW. Holding its last `false` is exactly the
+        // healthy-looking dead link this field exists to expose, so it reads
+        // null instead.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wfb-stats.json");
+        let body = r#"{"rf_unverified": false, "channel_locked": true, "tx_bytes_per_s": 750000}"#;
+
+        write_stats_aged(&path, body, 30);
+        let stale = link_snapshot(149, &path);
+        assert_eq!(stale["rf_unverified"], Value::Null);
+        // The gate is scoped to the verdict: the sibling liveness counters keep
+        // their existing merge behaviour on a stale read.
+        assert_eq!(stale["tx_bytes_per_s"], json!(750000));
+
+        // The same body inside the ceiling still reports the real verdict.
+        write_stats_aged(&path, body, 2);
+        assert_eq!(link_snapshot(149, &path)["rf_unverified"], json!(false));
     }
 
     // ----- /api/v1/video/air-pipeline -----

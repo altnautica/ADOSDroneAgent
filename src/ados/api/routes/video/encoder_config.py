@@ -71,6 +71,50 @@ def _bitrate_controller_snapshot(app: Any) -> dict[str, Any] | None:
     return _read_state_file(str(BITRATE_CONTROLLER_JSON))
 
 
+# Beyond this age the wfb-stats snapshot can no longer describe the link
+# NOW, so the received-side verdict reads None. The same 10 s ceiling
+# /api/wfb uses to flip its ``state`` to "stale".
+_LINK_STALE_AFTER_S = 10.0
+
+
+def _stats_age_seconds(path: str) -> float | None:
+    """Age of the stats snapshot in seconds, or None when it is absent or
+    its mtime is unreadable. Drives the staleness gate on the verdict."""
+    try:
+        import time
+        from pathlib import Path
+
+        return time.time() - Path(path).stat().st_mtime
+    except OSError:
+        return None
+
+
+def _rf_unverified(status: dict[str, Any] | None, *, fresh: bool) -> bool | None:
+    """The ``rf_unverified`` verdict for the link block, or None when it
+    cannot be sourced honestly.
+
+    The radio owns this boolean (an advancing transmit counter with no
+    confirmed reception inside the proof grace window) and both sidecar
+    writers carry it, so this block forwards the authoritative value
+    instead of leaving the panel to re-derive it from the liveness
+    counters beside it. It is the other half of ``channel_locked`` in the
+    same block: locked is true once a verified return signal was heard,
+    ``rf_unverified`` is true when the transmit counter advances while
+    none has been.
+
+    None — never a confident False — when the key is absent or
+    non-boolean (a sidecar written before the field existed, or a garbled
+    body) or when the snapshot is older than the staleness ceiling,
+    because a reading that old cannot say whether the radio is unverified
+    NOW, and a stale False is exactly the healthy-looking dead link this
+    field exists to expose.
+    """
+    if not fresh:
+        return None
+    value = (status or {}).get("rf_unverified")
+    return value if isinstance(value, bool) else None
+
+
 def _link_snapshot(app: Any, wfb_cfg: Any) -> dict[str, Any]:
     """Live radio-link liveness fields for the GCS Video Link panel.
 
@@ -92,8 +136,15 @@ def _link_snapshot(app: Any, wfb_cfg: Any) -> dict[str, Any]:
         "channel",
     )
     link: dict[str, Any] = {key: None for key in fields}
+    # The received-side verdict is always present too, None until it can be
+    # sourced honestly — it is gated on type and freshness rather than
+    # merged verbatim, so it is seeded outside the loop below.
+    link["rf_unverified"] = None
 
     status: dict[str, Any] | None = None
+    # An in-process manager IS the live producer, so its reading is fresh by
+    # construction; only the cross-process file can go stale under us.
+    fresh = True
     wfb_mgr = app.wfb_manager() if hasattr(app, "wfb_manager") else None
     if wfb_mgr is not None and hasattr(wfb_mgr, "get_status"):
         try:
@@ -107,11 +158,14 @@ def _link_snapshot(app: Any, wfb_cfg: Any) -> dict[str, Any]:
         from ados.core.paths import WFB_STATS_JSON
 
         status = _read_state_file(str(WFB_STATS_JSON))
+        age_s = _stats_age_seconds(str(WFB_STATS_JSON))
+        fresh = age_s is not None and age_s <= _LINK_STALE_AFTER_S
 
     if isinstance(status, dict):
         for key in fields:
             if status.get(key) is not None:
                 link[key] = status[key]
+        link["rf_unverified"] = _rf_unverified(status, fresh=fresh)
 
     # Channel falls back to the configured value so the panel always has
     # a number even before the first stats line lands.

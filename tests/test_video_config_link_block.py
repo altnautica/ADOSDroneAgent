@@ -125,9 +125,123 @@ async def test_link_block_stable_shape_when_no_data():
         "video_inbound_bytes_per_s",
         "rx_silent_seconds",
         "channel_locked",
+        "rf_unverified",
         "acquire_state",
         "channel",
     ):
         assert key in link, f"missing {key}"
     # Channel falls back to the configured value.
     assert link["channel"] == 161
+    # With no snapshot at all there is no verdict to report, and a False here
+    # would claim a transmit path had been proven.
+    assert link["rf_unverified"] is None
+
+
+@pytest.mark.asyncio
+async def test_link_block_forwards_the_rf_unverified_verdict():
+    """The radio's own verdict rides the link block in both directions.
+
+    An in-process manager IS the live producer, so its reading is fresh by
+    construction and needs no staleness gate.
+    """
+    unverified = {
+        "tx_bytes_per_s": 750000.0,
+        "channel_locked": False,
+        "rf_unverified": True,
+        "channel": 149,
+    }
+    app = _make_app(wfb_status=unverified)
+    with patch(
+        "ados.api.routes.video.encoder_config.get_agent_app",
+        return_value=app,
+    ), patch(
+        "ados.api.routes.video.encoder_config._read_state_file",
+        return_value=None,
+    ):
+        link = (await encoder_config.get_video_config())["link"]
+    assert link["rf_unverified"] is True
+    # Its other half rides the same block: injecting blind is not locked.
+    assert link["channel_locked"] is False
+
+    proven = {"channel_locked": True, "rf_unverified": False, "channel": 149}
+    app = _make_app(wfb_status=proven)
+    with patch(
+        "ados.api.routes.video.encoder_config.get_agent_app",
+        return_value=app,
+    ), patch(
+        "ados.api.routes.video.encoder_config._read_state_file",
+        return_value=None,
+    ):
+        link = (await encoder_config.get_video_config())["link"]
+    assert link["rf_unverified"] is False
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        # Absent (a sidecar written before the field existed).
+        {"channel_locked": True},
+        # Present but not a boolean — a garbled body is no reading either.
+        {"rf_unverified": "yes"},
+        # An explicit null is already no reading.
+        {"rf_unverified": None},
+    ],
+)
+def test_rf_unverified_is_none_when_it_cannot_be_sourced(status):
+    """Unknown reads unknown, never a confident False.
+
+    A False would claim an unproven transmit path had been proven, which is
+    the healthy-looking dead link this field exists to expose.
+    """
+    assert encoder_config._rf_unverified(status, fresh=True) is None
+    assert encoder_config._rf_unverified(None, fresh=True) is None
+
+
+def test_rf_unverified_is_none_on_a_stale_snapshot():
+    """A reading older than the ceiling cannot describe the link NOW."""
+    proven = {"rf_unverified": False}
+    assert encoder_config._rf_unverified(proven, fresh=True) is False
+    assert encoder_config._rf_unverified(proven, fresh=False) is None
+
+
+@pytest.mark.asyncio
+async def test_link_block_drops_a_stale_verdict_from_the_stats_file():
+    """Ground path: an aged snapshot keeps its counters but loses the verdict.
+
+    The staleness gate is scoped to the verdict; the sibling liveness counters
+    keep the merge behaviour they always had.
+    """
+    snapshot = {
+        "valid_rx_packets_per_s": 120.0,
+        "channel_locked": True,
+        "rf_unverified": False,
+        "channel": 44,
+    }
+    app = _make_app(wfb_status=None, config_channel=149)
+    with patch(
+        "ados.api.routes.video.encoder_config.get_agent_app",
+        return_value=app,
+    ), patch(
+        "ados.api.routes.video.encoder_config._read_state_file",
+        return_value=snapshot,
+    ), patch(
+        "ados.api.routes.video.encoder_config._stats_age_seconds",
+        return_value=30.0,
+    ):
+        link = (await encoder_config.get_video_config())["link"]
+    assert link["rf_unverified"] is None
+    assert link["valid_rx_packets_per_s"] == 120.0
+
+    # The same body inside the ceiling still reports the real verdict.
+    with patch(
+        "ados.api.routes.video.encoder_config.get_agent_app",
+        return_value=app,
+    ), patch(
+        "ados.api.routes.video.encoder_config._read_state_file",
+        return_value=snapshot,
+    ), patch(
+        "ados.api.routes.video.encoder_config._stats_age_seconds",
+        return_value=2.0,
+    ):
+        link = (await encoder_config.get_video_config())["link"]
+    assert link["rf_unverified"] is False
