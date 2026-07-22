@@ -4,6 +4,8 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+use crate::sources::ChannelSourceMode;
+
 /// Default RC frame cadence when the config does not pin one. Conservative:
 /// well inside what a USB-serial RC module accepts, and a full-duplex bridge
 /// owns the half-duplex bus turnaround, so the host only has to hold the
@@ -22,6 +24,10 @@ pub struct CrsfLaneConfig {
     pub device: String,
     /// RC frame cadence, frames per second, clamped to 1..=500.
     pub packet_rate_hz: u16,
+    /// Which source feeds the transmitted channels (`hid` | `inject` |
+    /// `hybrid`). Defaults to `hybrid`: the PIC arbiter's holder decides, and
+    /// with no claim held the programmatic lane feeds.
+    pub channel_source: ChannelSourceMode,
 }
 
 impl Default for CrsfLaneConfig {
@@ -30,6 +36,7 @@ impl Default for CrsfLaneConfig {
             enabled: false,
             device: String::new(),
             packet_rate_hz: DEFAULT_PACKET_RATE_HZ,
+            channel_source: ChannelSourceMode::Hybrid,
         }
     }
 }
@@ -54,6 +61,8 @@ struct CrsfSection {
     device: String,
     #[serde(default)]
     packet_rate_hz: Option<u16>,
+    #[serde(default)]
+    channel_source: Option<String>,
 }
 
 impl CrsfLaneConfig {
@@ -82,10 +91,21 @@ impl CrsfLaneConfig {
                 clamped
             }
         };
+        let channel_source = match raw.radio.crsf.channel_source.as_deref() {
+            None => ChannelSourceMode::Hybrid,
+            Some(s) => ChannelSourceMode::parse(s).unwrap_or_else(|| {
+                tracing::warn!(
+                    configured = s,
+                    "crsf channel_source unknown; defaulting to hybrid"
+                );
+                ChannelSourceMode::Hybrid
+            }),
+        };
         Self {
             enabled: raw.radio.crsf.enabled,
             device: raw.radio.crsf.device.trim().to_string(),
             packet_rate_hz,
+            channel_source,
         }
     }
 }
@@ -183,6 +203,36 @@ mod tests {
             "radio:\n  crsf:\n    packet_rate_hz: 0\n",
         );
         assert_eq!(CrsfLaneConfig::load_from(&path0).packet_rate_hz, 1);
+    }
+
+    #[test]
+    fn channel_source_parses_with_a_hybrid_default() {
+        let dir = tempfile::tempdir().unwrap();
+        for (yaml, expected) in [
+            (
+                "radio:\n  crsf:\n    enabled: true\n",
+                ChannelSourceMode::Hybrid,
+            ),
+            (
+                "radio:\n  crsf:\n    channel_source: hid\n",
+                ChannelSourceMode::Hid,
+            ),
+            (
+                "radio:\n  crsf:\n    channel_source: inject\n",
+                ChannelSourceMode::Inject,
+            ),
+            (
+                "radio:\n  crsf:\n    channel_source: bogus\n",
+                ChannelSourceMode::Hybrid,
+            ),
+        ] {
+            let path = write_file(&dir, "config.yaml", yaml);
+            assert_eq!(
+                CrsfLaneConfig::load_from(&path).channel_source,
+                expected,
+                "yaml: {yaml:?}"
+            );
+        }
     }
 
     #[test]

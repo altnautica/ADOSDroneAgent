@@ -18,9 +18,9 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{Mutex, Notify};
 use tokio_serial::{SerialPortBuilderExt, SerialStream};
 
-use crate::bank::ChannelBank;
 use crate::channels::build_rc_frame;
 use crate::frame::{Parser, TYPE_LINK_STATISTICS};
+use crate::sources::SourceMerge;
 use crate::telemetry::LinkStatistics;
 
 /// The CRSF UART line rate: 420 kbaud, 8 data bits, no parity, 1 stop bit
@@ -82,11 +82,12 @@ pub enum RxExit {
 }
 
 /// Transmit one RC channels frame per tick at `rate_hz` until cancelled or
-/// the writer dies. Each tick reads the live bank, so an injection lands on
-/// the very next frame.
+/// the writer dies. Each tick reads the source merge (authority + TTL applied
+/// per tick), so an injection lands on the very next frame and a silent
+/// injector decays to neutral on the very next frame after its TTL.
 pub async fn run_tx<W: AsyncWrite + Unpin>(
     mut writer: W,
-    bank: Arc<Mutex<ChannelBank>>,
+    merge: Arc<Mutex<SourceMerge>>,
     rate_hz: u16,
     counters: Arc<WireCounters>,
     cancel: Arc<Notify>,
@@ -102,7 +103,7 @@ pub async fn run_tx<W: AsyncWrite + Unpin>(
             _ = cancel.notified() => return TxExit::Cancelled,
             _ = ticker.tick() => {}
         }
-        let values = bank.lock().await.values();
+        let (values, _source) = merge.lock().await.current(Instant::now());
         // 16 in-range channel values always build; a failure here would be a
         // codec bug, and silently skipping the tick would hide it.
         let frame = match build_rc_frame(&values) {
@@ -176,10 +177,14 @@ pub async fn run_rx<R: AsyncRead + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bank::ChannelSource;
     use crate::channels::{unpack_channels, CHANNEL_COUNT, PACKED_SIZE};
     use crate::frame::{build_frame, ADDR_FLIGHT_CONTROLLER};
+    use crate::sources::{ChannelSourceMode, MAX_INJECT_TTL};
     use crate::telemetry::{build_telemetry_frame, Telemetry};
+
+    fn inject_merge() -> Arc<Mutex<SourceMerge>> {
+        Arc::new(Mutex::new(SourceMerge::new(ChannelSourceMode::Inject)))
+    }
 
     fn sample_stats() -> LinkStatistics {
         LinkStatistics {
@@ -202,13 +207,14 @@ mod tests {
     #[tokio::test]
     async fn loopback_tx_cadence_parses_end_to_end() {
         let (tx_side, rx_side) = tokio::io::duplex(4096);
-        let bank = Arc::new(Mutex::new(ChannelBank::default()));
+        let merge = inject_merge();
         let mut injected = [992u16; CHANNEL_COUNT];
         injected[2] = 172;
         injected[15] = 1811;
-        bank.lock()
+        merge
+            .lock()
             .await
-            .set_all(injected, ChannelSource::Api)
+            .inject_all(injected, MAX_INJECT_TTL, Instant::now(), None)
             .unwrap();
         let counters = Arc::new(WireCounters::default());
         let telemetry = Arc::new(Mutex::new(TelemetryState::default()));
@@ -216,7 +222,7 @@ mod tests {
 
         let tx = tokio::spawn(run_tx(
             tx_side,
-            bank.clone(),
+            merge.clone(),
             200, // fast cadence keeps the test quick
             counters.clone(),
             cancel.clone(),
@@ -314,13 +320,12 @@ mod tests {
     async fn cancel_stops_both_tasks() {
         let (tx_side, rx_keep) = tokio::io::duplex(4096);
         let (_tx_keep, rx_side) = tokio::io::duplex(4096);
-        let bank = Arc::new(Mutex::new(ChannelBank::default()));
         let counters = Arc::new(WireCounters::default());
         let telemetry = Arc::new(Mutex::new(TelemetryState::default()));
         let cancel = Arc::new(Notify::new());
         let tx = tokio::spawn(run_tx(
             tx_side,
-            bank,
+            inject_merge(),
             1, // slow: the cancel must not wait for a tick
             counters.clone(),
             cancel.clone(),
@@ -344,12 +349,11 @@ mod tests {
     async fn tx_write_error_surfaces_when_the_peer_closes() {
         let (tx_side, rx_side) = tokio::io::duplex(64);
         drop(rx_side);
-        let bank = Arc::new(Mutex::new(ChannelBank::default()));
         let counters = Arc::new(WireCounters::default());
         let cancel = Arc::new(Notify::new());
         let exit = tokio::time::timeout(
             Duration::from_secs(5),
-            run_tx(tx_side, bank, 100, counters, cancel),
+            run_tx(tx_side, inject_merge(), 100, counters, cancel),
         )
         .await
         .expect("exit promptly");

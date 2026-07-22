@@ -7,37 +7,45 @@
 //! ```text
 //! {"op":"status"}
 //!     -> {"ok":true, …the current sidecar body…}
-//! {"op":"set_channels","channels":[992, …16 values…]}
-//!     -> {"ok":true,"channels":[…],"channel_source":"api"}
-//! {"op":"set_channel","index":4,"value":1811}
-//!     -> {"ok":true,"index":4,"value":1811,"channel_source":"api"}
+//! {"op":"set_channels","channels":[992, …16 values…],"ttl_ms":1000,"client_id":"ai-1"}
+//!     -> {"ok":true,"channels":[…],"ttl_ms":1000,"channel_source":"inject","authority":"…"}
+//! {"op":"set_channel","index":4,"value":1811,"ttl_ms":1000,"client_id":"ai-1"}
+//!     -> {"ok":true,"index":4,"value":1811,"ttl_ms":1000,"channel_source":"inject","authority":"…"}
 //! ```
 //!
+//! Every injection carries a time-to-live (`ttl_ms`, clamped into the allowed
+//! window, defaulting when absent): a silent injector's values decay to the
+//! safe neutral set, never a held stale stick. `authority` in the reply names
+//! the source the transmitter obeys RIGHT NOW — an injection accepted while
+//! the HID path holds authority is stored but not transmitted, and the reply
+//! says so honestly.
+//!
 //! Channel values are validated against the usable endpoint range 172..=1811
-//! at parse time, before the live bank is ever locked; a failed request
+//! at parse time, before the live merge is ever locked; a failed request
 //! replies `{"ok":false,"error":"E_…"}` and changes nothing.
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use ados_protocol::ipc::{bind_command_socket, serve_rpc};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
-use crate::bank::{BankError, ChannelBank, ChannelSource};
+use crate::bank::BankError;
 use crate::channels::{CHANNEL_COUNT, CHANNEL_MAX, CHANNEL_MIN};
+use crate::sources::{clamp_ttl, SourceMerge, DEFAULT_INJECT_TTL};
 
 /// Cap on a single request line so a malformed client can't grow the buffer.
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
 
-/// The shared lane state the command handlers touch: the live channel bank
-/// (written here, read by the transmit tick) and the latest sidecar body
-/// (written by the heartbeat, served by the status verb). Both outlive a
-/// single serial bring-up.
+/// The shared lane state the command handlers touch: the source merge (the
+/// injection writer's target and the TX task's reader) and the latest sidecar
+/// body the status verb serves. Both outlive a single serial bring-up.
 #[derive(Clone)]
 pub struct CmdState {
-    pub bank: Arc<Mutex<ChannelBank>>,
+    pub merge: Arc<Mutex<SourceMerge>>,
     pub latest_status: Arc<Mutex<Value>>,
 }
 
@@ -50,6 +58,10 @@ struct Request {
     index: Option<usize>,
     #[serde(default)]
     value: Option<u16>,
+    #[serde(default)]
+    ttl_ms: Option<u64>,
+    #[serde(default)]
+    client_id: Option<String>,
 }
 
 /// Bind the command socket and serve one-shot requests until the listener
@@ -73,12 +85,21 @@ pub async fn serve(state: CmdState, sock_path: &Path) -> std::io::Result<()> {
 /// A request that has been parsed + field-validated and is ready to apply.
 /// Parsing this OUT of the raw bytes is pure (no lane access), so every
 /// malformed-request rejection happens before the service ever locks the
-/// live bank.
+/// live merge.
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
     Status,
-    SetChannels { channels: [u16; CHANNEL_COUNT] },
-    SetChannel { index: usize, value: u16 },
+    SetChannels {
+        channels: [u16; CHANNEL_COUNT],
+        ttl: Duration,
+        client_id: Option<String>,
+    },
+    SetChannel {
+        index: usize,
+        value: u16,
+        ttl: Duration,
+        client_id: Option<String>,
+    },
 }
 
 #[derive(Debug, PartialEq)]
@@ -93,6 +114,15 @@ fn error_reply(message: impl Into<String>) -> Value {
 
 fn channel_in_range(value: u16) -> bool {
     (CHANNEL_MIN..=CHANNEL_MAX).contains(&value)
+}
+
+/// Resolve the requested TTL: clamped into the allowed window, defaulting
+/// when absent.
+fn requested_ttl(ttl_ms: Option<u64>) -> Duration {
+    match ttl_ms {
+        Some(ms) => clamp_ttl(Duration::from_millis(ms)),
+        None => DEFAULT_INJECT_TTL,
+    }
 }
 
 /// Parse + validate one request line. Pure: no I/O, no locks.
@@ -114,7 +144,11 @@ fn parse_command(line: &[u8]) -> Parsed {
             if let Some(bad) = channels.iter().find(|&&v| !channel_in_range(v)) {
                 return Parsed::Reply(error_reply(format!("E_BAD_CHANNEL_VALUE: {bad}")));
             }
-            Parsed::Cmd(Command::SetChannels { channels })
+            Parsed::Cmd(Command::SetChannels {
+                channels,
+                ttl: requested_ttl(req.ttl_ms),
+                client_id: req.client_id,
+            })
         }
         "set_channel" => {
             let Some(index) = req.index else {
@@ -129,7 +163,12 @@ fn parse_command(line: &[u8]) -> Parsed {
             if !channel_in_range(value) {
                 return Parsed::Reply(error_reply(format!("E_BAD_CHANNEL_VALUE: {value}")));
             }
-            Parsed::Cmd(Command::SetChannel { index, value })
+            Parsed::Cmd(Command::SetChannel {
+                index,
+                value,
+                ttl: requested_ttl(req.ttl_ms),
+                client_id: req.client_id,
+            })
         }
         other => Parsed::Reply(error_reply(format!("E_UNKNOWN_OP: {other}"))),
     }
@@ -159,25 +198,40 @@ async fn apply(cmd: Command, state: &CmdState) -> Value {
                 _ => json!({"ok": true, "status": Value::Null}),
             }
         }
-        Command::SetChannels { channels } => {
-            let mut bank = state.bank.lock().await;
-            match bank.set_all(channels, ChannelSource::Api) {
+        Command::SetChannels {
+            channels,
+            ttl,
+            client_id,
+        } => {
+            let now = Instant::now();
+            let mut merge = state.merge.lock().await;
+            match merge.inject_all(channels, ttl, now, client_id) {
                 Ok(()) => json!({
                     "ok": true,
-                    "channels": bank.values().to_vec(),
-                    "channel_source": ChannelSource::Api.as_str(),
+                    "channels": channels.to_vec(),
+                    "ttl_ms": ttl.as_millis() as u64,
+                    "channel_source": crate::sources::ChannelSource::Inject.as_str(),
+                    "authority": merge.authority(now).as_str(),
                 }),
                 Err(e) => bank_error_reply(e),
             }
         }
-        Command::SetChannel { index, value } => {
-            let mut bank = state.bank.lock().await;
-            match bank.set_one(index, value, ChannelSource::Api) {
+        Command::SetChannel {
+            index,
+            value,
+            ttl,
+            client_id,
+        } => {
+            let now = Instant::now();
+            let mut merge = state.merge.lock().await;
+            match merge.inject_one(index, value, ttl, now, client_id) {
                 Ok(()) => json!({
                     "ok": true,
                     "index": index,
                     "value": value,
-                    "channel_source": ChannelSource::Api.as_str(),
+                    "ttl_ms": ttl.as_millis() as u64,
+                    "channel_source": crate::sources::ChannelSource::Inject.as_str(),
+                    "authority": merge.authority(now).as_str(),
                 }),
                 Err(e) => bank_error_reply(e),
             }
@@ -195,10 +249,11 @@ fn bank_error_reply(e: BankError) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sources::{ChannelSourceMode, MAX_INJECT_TTL, MIN_INJECT_TTL};
 
     fn state() -> CmdState {
         CmdState {
-            bank: Arc::new(Mutex::new(ChannelBank::default())),
+            merge: Arc::new(Mutex::new(SourceMerge::new(ChannelSourceMode::Inject))),
             latest_status: Arc::new(Mutex::new(Value::Null)),
         }
     }
@@ -254,30 +309,55 @@ mod tests {
     }
 
     #[test]
-    fn parse_accepts_valid_commands() {
+    fn parse_accepts_valid_commands_with_ttl_and_client() {
         assert_eq!(
             parse_command(br#"{"op":"status"}"#),
             Parsed::Cmd(Command::Status)
         );
         assert_eq!(
-            parse_command(br#"{"op":"set_channel","index":4,"value":1811}"#),
+            parse_command(
+                br#"{"op":"set_channel","index":4,"value":1811,"ttl_ms":700,"client_id":"ai"}"#
+            ),
             Parsed::Cmd(Command::SetChannel {
                 index: 4,
-                value: 1811
+                value: 1811,
+                ttl: Duration::from_millis(700),
+                client_id: Some("ai".to_string()),
             })
         );
+        // Absent ttl defaults; out-of-window ttl clamps at parse time.
+        match parse_command(br#"{"op":"set_channel","index":0,"value":992}"#) {
+            Parsed::Cmd(Command::SetChannel { ttl, .. }) => {
+                assert_eq!(ttl, DEFAULT_INJECT_TTL);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_command(br#"{"op":"set_channel","index":0,"value":992,"ttl_ms":1}"#) {
+            Parsed::Cmd(Command::SetChannel { ttl, .. }) => assert_eq!(ttl, MIN_INJECT_TTL),
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_command(br#"{"op":"set_channel","index":0,"value":992,"ttl_ms":999999}"#) {
+            Parsed::Cmd(Command::SetChannel { ttl, .. }) => assert_eq!(ttl, MAX_INJECT_TTL),
+            other => panic!("unexpected {other:?}"),
+        }
         let line =
             serde_json::to_vec(&json!({"op":"set_channels","channels":vec![992u16;16]})).unwrap();
         match parse_command(&line) {
-            Parsed::Cmd(Command::SetChannels { channels }) => {
+            Parsed::Cmd(Command::SetChannels {
+                channels,
+                ttl,
+                client_id,
+            }) => {
                 assert_eq!(channels, [992u16; 16]);
+                assert_eq!(ttl, DEFAULT_INJECT_TTL);
+                assert_eq!(client_id, None);
             }
             other => panic!("unexpected {other:?}"),
         }
     }
 
     #[tokio::test]
-    async fn apply_set_channels_updates_the_bank_and_source() {
+    async fn apply_set_channels_updates_the_merge() {
         let st = state();
         let resp = dispatch(
             &serde_json::to_vec(&json!({"op":"set_channels","channels":vec![1000u16;16]})).unwrap(),
@@ -285,10 +365,12 @@ mod tests {
         )
         .await;
         assert_eq!(resp["ok"], true);
-        assert_eq!(resp["channel_source"], "api");
-        let bank = st.bank.lock().await;
-        assert_eq!(bank.values(), [1000u16; 16]);
-        assert_eq!(bank.source().map(|s| s.as_str()), Some("api"));
+        assert_eq!(resp["channel_source"], "inject");
+        assert_eq!(resp["authority"], "inject");
+        assert_eq!(resp["ttl_ms"], DEFAULT_INJECT_TTL.as_millis() as u64);
+        let (values, src) = st.merge.lock().await.current(Instant::now());
+        assert_eq!(values, [1000u16; 16]);
+        assert_eq!(src.map(|s| s.as_str()), Some("inject"));
     }
 
     #[tokio::test]
@@ -296,7 +378,30 @@ mod tests {
         let st = state();
         let resp = dispatch(br#"{"op":"set_channel","index":7,"value":1500}"#, &st).await;
         assert_eq!(resp["ok"], true);
-        assert_eq!(st.bank.lock().await.values()[7], 1500);
+        let (values, _) = st.merge.lock().await.current(Instant::now());
+        assert_eq!(values[7], 1500);
+    }
+
+    #[tokio::test]
+    async fn injection_under_hid_authority_reports_it() {
+        // In hid mode the injection is stored but the HID path holds
+        // authority; the reply must say so, never imply the values fly.
+        let st = CmdState {
+            merge: Arc::new(Mutex::new(SourceMerge::new(ChannelSourceMode::Hid))),
+            latest_status: Arc::new(Mutex::new(Value::Null)),
+        };
+        let resp = dispatch(
+            &serde_json::to_vec(&json!({"op":"set_channels","channels":vec![1000u16;16]})).unwrap(),
+            &st,
+        )
+        .await;
+        assert_eq!(resp["ok"], true);
+        assert_eq!(resp["authority"], "hid");
+        // The transmitted set stays neutral (no HID data): the injection did
+        // not leak through.
+        let (values, src) = st.merge.lock().await.current(Instant::now());
+        assert_eq!(values, crate::bank::ChannelBank::neutral());
+        assert!(src.is_none());
     }
 
     #[tokio::test]
@@ -344,7 +449,8 @@ mod tests {
         stream.read_to_end(&mut buf).await.unwrap();
         let resp: Value = serde_json::from_slice(&buf).unwrap();
         assert_eq!(resp["ok"], true);
-        assert_eq!(st.bank.lock().await.values()[2], 992);
+        let (values, _) = st.merge.lock().await.current(Instant::now());
+        assert_eq!(values[2], 992);
         server.abort();
     }
 }

@@ -14,11 +14,11 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::{watch, Mutex, Notify};
 
-use ados_crsf::bank::ChannelBank;
 use ados_crsf::cmdsock::{self, CmdState};
 use ados_crsf::config::{profile_is_drone, CrsfLaneConfig};
 use ados_crsf::link::{derive_state, LaneState, LinkInputs};
 use ados_crsf::sidecar::{build_stats_value, write_stats_sidecar, StatsInputs};
+use ados_crsf::sources::{ChannelSourceMode, SourceMerge};
 use ados_crsf::transport::{open_serial, run_rx, run_tx, TelemetryState, WireCounters, CRSF_BAUD};
 
 const CONFIG_YAML: &str = "/etc/ados/config.yaml";
@@ -90,10 +90,23 @@ async fn run_service(cfg: &CrsfLaneConfig, mut shutdown: watch::Receiver<bool>) 
         return;
     }
 
-    // Lane state shared across serial respawns: the live channel bank and
-    // the latest sidecar body the status verb serves.
-    let bank = Arc::new(Mutex::new(ChannelBank::default()));
+    // Lane state shared across serial respawns: the channel-source merge the
+    // TX task reads and the latest sidecar body the status verb serves.
+    let merge = Arc::new(Mutex::new(SourceMerge::new(cfg.channel_source)));
     let latest_status = Arc::new(Mutex::new(serde_json::Value::Null));
+
+    // The HID/PIC source: stick + switch intent from the primary gamepad,
+    // fed into the merge for the whole service lifetime (the gamepad is
+    // independent of the serial module's respawn cycle). Device reads are
+    // Linux-only; elsewhere the hid slot stays empty, which reads as the
+    // safe neutral under HID authority.
+    #[cfg(target_os = "linux")]
+    if cfg.channel_source != ChannelSourceMode::Inject {
+        tokio::spawn(ados_crsf::hid::run_hid_source(
+            merge.clone(),
+            shutdown.clone(),
+        ));
+    }
 
     loop {
         // Latched shutdown gate at the top of the respawn loop.
@@ -151,7 +164,7 @@ async fn run_service(cfg: &CrsfLaneConfig, mut shutdown: watch::Receiver<bool>) 
 
         let mut tx_task = tokio::spawn(run_tx(
             write_half,
-            bank.clone(),
+            merge.clone(),
             cfg.packet_rate_hz,
             counters.clone(),
             task_cancel.clone(),
@@ -163,7 +176,7 @@ async fn run_service(cfg: &CrsfLaneConfig, mut shutdown: watch::Receiver<bool>) 
             task_cancel.clone(),
         ));
         let cmd_state = CmdState {
-            bank: bank.clone(),
+            merge: merge.clone(),
             latest_status: latest_status.clone(),
         };
         let cmd_cancel = task_cancel.clone();
@@ -209,6 +222,19 @@ async fn run_service(cfg: &CrsfLaneConfig, mut shutdown: watch::Receiver<bool>) 
             prev_rx = rx_total;
             prev_at = now;
 
+            // Refresh the PIC arbiter view for the hybrid authority decision
+            // (a staleness-gated sidecar read; an absent/stale arbiter reads
+            // unclaimed).
+            if cfg.channel_source != ChannelSourceMode::Inject {
+                let pic_path = ados_crsf::paths::run_path("pic-state.json");
+                let view = ados_crsf::sources::read_pic_view(
+                    Path::new(&pic_path),
+                    std::time::SystemTime::now(),
+                )
+                .unwrap_or_default();
+                merge.lock().await.set_pic(view);
+            }
+
             let (stats_age, link_copy) = {
                 let t = telemetry.lock().await;
                 (
@@ -229,7 +255,7 @@ async fn run_service(cfg: &CrsfLaneConfig, mut shutdown: watch::Receiver<bool>) 
                 Some(age) if age <= ados_crsf::link::STATS_FRESH_WINDOW => link_copy,
                 _ => None,
             };
-            let source = bank.lock().await.source().map(|s| s.as_str());
+            let source = merge.lock().await.current(now).1.map(|s| s.as_str());
             let inputs = StatsInputs {
                 link: fresh_link.as_ref(),
                 band: None,
