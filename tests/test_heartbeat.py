@@ -183,6 +183,44 @@ def test_radio_block_absent_omits_churn_fields():
     assert "restart_count" not in block
 
 
+def test_radio_block_forwards_the_rf_unverified_verdict():
+    """The radio's own verdict rides the block in both directions."""
+    unverified = {
+        "state": "rf_unverified",
+        "interface": "wlan1",
+        "channel": 149,
+        "rf_unverified": True,
+        "channel_locked": False,
+    }
+    block = build_radio_block(unverified)
+    assert block["rf_unverified"] is True
+    assert block["state"] == "rf_unverified"
+
+    proven = {
+        "state": "connected",
+        "interface": "wlan1",
+        "channel": 149,
+        "rf_unverified": False,
+        "channel_locked": True,
+    }
+    assert build_radio_block(proven)["rf_unverified"] is False
+
+
+def test_radio_block_rf_unverified_null_when_not_reported():
+    """Absent or non-boolean reads as null, never a confident False.
+
+    A receive-side view or an older sidecar has no verdict to give; reporting
+    False there would claim an unproven transmit path had been proven.
+    """
+    older = {"state": "connected", "interface": "wlan1", "channel": 149}
+    assert build_radio_block(older)["rf_unverified"] is None
+
+    junk = {"state": "connected", "rf_unverified": "yes"}
+    assert build_radio_block(junk)["rf_unverified"] is None
+
+    assert build_radio_block(None)["rf_unverified"] is None
+
+
 # --- compute_radio_stack_state ------------------------------------------
 
 

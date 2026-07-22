@@ -70,6 +70,7 @@
     "bitrate_kbps": 4096,
     "channel": 149,
     "channel_locked": null,
+    "rf_unverified": null,
     "driver": null,
     "fec_lost": null,
     "fec_recovered": null,

@@ -123,6 +123,9 @@ def build_radio_block(wfb_status: dict[str, Any] | None) -> dict[str, Any]:
             "tx_video_recvq_bytes": None,
             "acquire_state": None,
             "channel_locked": None,
+            # None, not False: with no radio view there is no verdict to
+            # report, and a False here would claim a transmit path was proven.
+            "rf_unverified": None,
             "reacquire_kills": None,
             "valid_rx_packets_per_s": None,
             "adapter_chipset": None,
@@ -192,6 +195,20 @@ def build_radio_block(wfb_status: dict[str, Any] | None) -> dict[str, Any]:
         # receiver remotely. Absent on the transmit side and older agents.
         "acquire_state": wfb_status.get("acquire_state"),
         "channel_locked": wfb_status.get("channel_locked"),
+        # The two halves of the received-side proof. channel_locked is true
+        # once a verified return signal was heard; rf_unverified is true when
+        # the transmit counter advances while none has been — the radio's own
+        # verdict, forwarded so a consumer reads it instead of re-deriving it
+        # from a heuristic. Null (never a confident False) when the key is
+        # absent, so a receive-side view or an older sidecar reads as "no
+        # reading" rather than claiming the transmit path was proven. A stale
+        # sidecar never reaches here: the caller drops it and emits the absent
+        # block.
+        "rf_unverified": (
+            wfb_status["rf_unverified"]
+            if isinstance(wfb_status.get("rf_unverified"), bool)
+            else None
+        ),
         "reacquire_kills": wfb_status.get("reacquire_kills"),
         "valid_rx_packets_per_s": wfb_status.get("valid_rx_packets_per_s"),
         # Selected radio adapter identity + injection verdict. chipset is

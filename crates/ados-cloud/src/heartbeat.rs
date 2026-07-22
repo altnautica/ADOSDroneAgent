@@ -81,12 +81,14 @@ pub struct Peripheral {
     pub extra: serde_json::Value,
 }
 
-/// The snake_case `radio` link block. Mirrors `build_radio_block` field-for-field
-/// (`state`, `iface`, `driver`, `channel`, `freq_mhz`, ...). The Python builder
-/// keeps `None` values in this nested dict (only top-level keys are stripped), so
-/// these `Option`s serialize as JSON `null` when absent — that is intentional
-/// parity. The block is always present in the payload (an all-`absent` block when
-/// no radio status is available).
+/// The snake_case `radio` link block (`state`, `iface`, `driver`, `channel`,
+/// `freq_mhz`, ...). This is the BASE block the native loop emits; the radio
+/// enrichment producer replaces the whole `radio` key when it has a live view,
+/// so this carries a subset of that producer's field set rather than mirroring
+/// it one-for-one. The Python builder keeps `None` values in this nested dict
+/// (only top-level keys are stripped), so these `Option`s serialize as JSON
+/// `null` when absent — that is intentional parity. The block is always present
+/// in the payload (an all-`absent` block when no radio status is available).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RadioBlock {
     pub state: Option<String>,
@@ -120,6 +122,12 @@ pub struct RadioBlock {
     pub tx_video_recvq_bytes: Option<i64>,
     pub acquire_state: Option<String>,
     pub channel_locked: Option<bool>,
+    /// The two halves of the received-side proof. `channel_locked` is true once
+    /// a verified return signal was heard; `rf_unverified` is true when the
+    /// transmit counter advances while none has been. `None` when there is no
+    /// verdict to report — never a confident `false`, which would claim an
+    /// unproven transmit path had been proven.
+    pub rf_unverified: Option<bool>,
     pub reacquire_kills: Option<i64>,
     pub valid_rx_packets_per_s: Option<f64>,
     pub adapter_chipset: Option<String>,
@@ -161,6 +169,7 @@ impl RadioBlock {
             tx_video_recvq_bytes: None,
             acquire_state: None,
             channel_locked: None,
+            rf_unverified: None,
             reacquire_kills: None,
             valid_rx_packets_per_s: None,
             adapter_chipset: None,
@@ -493,6 +502,29 @@ mod tests {
         assert!(radio.contains_key("rssi_dbm"));
         assert!(radio.contains_key("adapter_injection_ok"));
         assert!(!radio.contains_key("freqMhz"));
+    }
+
+    #[test]
+    fn radio_rf_unverified_rides_the_block_and_defaults_to_unknown() {
+        // With no radio view the verdict is JSON null (unknown), never false:
+        // a false would claim an unproven transmit path had been proven.
+        let p = minimal_payload();
+        let v = p.to_value();
+        let radio = v.get("radio").unwrap().as_object().unwrap();
+        assert!(radio.contains_key("rf_unverified"));
+        assert!(radio["rf_unverified"].is_null());
+
+        // A real verdict rides through unchanged, under the snake_case key the
+        // radio itself writes.
+        let mut p = minimal_payload();
+        p.radio = RadioBlock {
+            state: Some("rf_unverified".to_string()),
+            rf_unverified: Some(true),
+            channel_locked: Some(false),
+            ..RadioBlock::absent()
+        };
+        let v = p.to_value();
+        assert_eq!(v["radio"]["rf_unverified"], serde_json::json!(true));
     }
 
     #[test]
