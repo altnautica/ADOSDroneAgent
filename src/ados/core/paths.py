@@ -308,6 +308,11 @@ DISPLAY_CONF_PATH = ADOS_ETC_DIR / "display.conf"
 # so they skip cleanly on a board with no panel instead of running and
 # failing. Removed on the no-display path.
 DISPLAY_ENABLED_PATH = ADOS_ETC_DIR / "display.enabled"
+# Marker mirroring `radio.crsf.enabled`: present ⇔ the CRSF RC lane is opted
+# in. The ados-crsf systemd unit gates on it (ConditionPathExists) so a node
+# that never enables the lane skips the unit cleanly. Reconciled by the config
+# persist path and by the installer, never hand-managed.
+CRSF_ENABLED_PATH = ADOS_ETC_DIR / "crsf-enabled"
 # Probation marker for the apply-verify-auto-revert path. Written when a
 # boot-critical SPI-LCD overlay is applied blind on a board that declares
 # the panel but where it is not yet bound. Records the boot-config snapshot

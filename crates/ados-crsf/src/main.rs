@@ -6,6 +6,12 @@
 //! every second. Idles harmlessly (with an honest `disabled` sidecar) when
 //! the lane is not opted in or this node's profile does not run it, and shuts
 //! down cleanly on SIGTERM/SIGINT.
+//!
+//! SIGHUP is the in-process config reload (the unit's `ExecReload`): the
+//! current bring-up tears down cleanly, `/etc/ados/config.yaml` is re-read,
+//! and every gate (opt-in, profile, mode, device pin) re-runs — so enabling
+//! or re-pinning the lane through the config surface applies without
+//! dropping the unit.
 
 use std::path::Path;
 use std::sync::atomic::Ordering;
@@ -54,8 +60,6 @@ async fn main() {
     }
     tracing::info!("crsf_service_starting");
 
-    let cfg = CrsfLaneConfig::load_from(Path::new(CONFIG_YAML));
-
     // Shutdown is a latching watch flag, not a one-shot notify: once SIGTERM
     // flips it to true the value stays set, so a select arm that loses a race
     // on the first signal still sees the shutdown on the next loop iteration.
@@ -65,11 +69,109 @@ async fn main() {
         let _ = shutdown_tx.send(true);
     });
 
-    run_service(&cfg, shutdown_rx).await;
+    // SIGHUP = in-process config reload. `notify_one` stores a permit when no
+    // arm is waiting, so a reload landing mid-teardown is not lost; a burst of
+    // reloads coalesces into one re-read.
+    let reload = Arc::new(Notify::new());
+    #[cfg(unix)]
+    {
+        let reload = reload.clone();
+        tokio::spawn(async move {
+            use tokio::signal::unix::{signal, SignalKind};
+            let Ok(mut hup) = signal(SignalKind::hangup()) else {
+                return;
+            };
+            while hup.recv().await.is_some() {
+                tracing::info!("crsf_config_reload_signal");
+                reload.notify_one();
+            }
+        });
+    }
+
+    run_until_shutdown(
+        Path::new(CONFIG_YAML),
+        Path::new(PROFILE_CONF),
+        shutdown_rx,
+        reload,
+    )
+    .await;
     tracing::info!("crsf_service_stopped");
 }
 
-async fn run_service(cfg: &CrsfLaneConfig, mut shutdown: watch::Receiver<bool>) {
+/// Why one service pass returned: the process is stopping, or a config
+/// reload asked for a fresh pass over a re-read config.
+#[derive(Debug, PartialEq, Eq)]
+enum RunExit {
+    Shutdown,
+    Reload,
+}
+
+/// The reload loop: (re)read the config and run the service until shutdown.
+/// A `Reload` exit tears the pass down cleanly and re-runs every gate against
+/// the fresh config; `Shutdown` ends the process.
+async fn run_until_shutdown(
+    config_path: &Path,
+    profile_conf: &Path,
+    shutdown: watch::Receiver<bool>,
+    reload: Arc<Notify>,
+) {
+    loop {
+        if *shutdown.borrow() {
+            return;
+        }
+        let cfg = CrsfLaneConfig::load_from(config_path);
+        match run_service(
+            &cfg,
+            config_path,
+            profile_conf,
+            shutdown.clone(),
+            reload.clone(),
+        )
+        .await
+        {
+            RunExit::Shutdown => return,
+            RunExit::Reload => {
+                tracing::info!("crsf_config_reloaded");
+            }
+        }
+    }
+}
+
+/// One pass of the service under one loaded config. Owns the per-pass worker
+/// set: the HID source (when the channel-source mode wants it) is scoped to
+/// this pass via a latching stop flag, so a reload never leaks a second
+/// reader onto the same gamepad.
+async fn run_service(
+    cfg: &CrsfLaneConfig,
+    config_path: &Path,
+    profile_conf: &Path,
+    shutdown: watch::Receiver<bool>,
+    reload: Arc<Notify>,
+) -> RunExit {
+    let (pass_over_tx, pass_over_rx) = watch::channel(false);
+    let exit = run_service_pass(
+        cfg,
+        config_path,
+        profile_conf,
+        shutdown,
+        reload,
+        pass_over_rx,
+    )
+    .await;
+    // Latch the pass-scope flag so per-pass workers (the HID source) stop.
+    let _ = pass_over_tx.send(true);
+    exit
+}
+
+#[allow(unused_variables)] // `pass_scope` feeds the Linux-only HID source.
+async fn run_service_pass(
+    cfg: &CrsfLaneConfig,
+    config_path: &Path,
+    profile_conf: &Path,
+    mut shutdown: watch::Receiver<bool>,
+    reload: Arc<Notify>,
+    pass_scope: watch::Receiver<bool>,
+) -> RunExit {
     // Telemetry emitter for the periodic lane-status events shipped to the
     // logging daemon. Best-effort and non-blocking: an absent daemon socket
     // drops the sample, never stalling the lane.
@@ -81,18 +183,16 @@ async fn run_service(cfg: &CrsfLaneConfig, mut shutdown: watch::Receiver<bool>) 
     // simply not in use on this node.
     if !cfg.enabled {
         tracing::info!("crsf_lane_disabled");
-        idle_with_sidecar(&metrics, &mut shutdown, &StatsInputs::default()).await;
-        return;
+        return idle_with_sidecar(&metrics, &mut shutdown, &reload, &StatsInputs::default()).await;
     }
 
     // ── Profile gate ─────────────────────────────────────────────────────
     // The RC transmitter lane is ground-side; on a drone this binary idles
     // (defensive — the unit is already profile-gated at install time). The
     // sidecar reads `disabled`: the lane does not run on this node.
-    if profile_is_drone(Path::new(CONFIG_YAML), Path::new(PROFILE_CONF)) {
+    if profile_is_drone(config_path, profile_conf) {
         tracing::warn!("crsf_idle_on_drone_profile");
-        idle_with_sidecar(&metrics, &mut shutdown, &StatsInputs::default()).await;
-        return;
+        return idle_with_sidecar(&metrics, &mut shutdown, &reload, &StatsInputs::default()).await;
     }
 
     // ── Mode gate ────────────────────────────────────────────────────────
@@ -108,8 +208,7 @@ async fn run_service(cfg: &CrsfLaneConfig, mut shutdown: watch::Receiver<bool>) 
             relay_role: cfg.relay_role.sidecar_str(),
             ..StatsInputs::default()
         };
-        idle_with_sidecar(&metrics, &mut shutdown, &idle_inputs).await;
-        return;
+        return idle_with_sidecar(&metrics, &mut shutdown, &reload, &idle_inputs).await;
     }
 
     // Lane state shared across serial respawns: the channel-source merge the
@@ -126,14 +225,14 @@ async fn run_service(cfg: &CrsfLaneConfig, mut shutdown: watch::Receiver<bool>) 
     if cfg.channel_source != ChannelSourceMode::Inject {
         tokio::spawn(ados_crsf::hid::run_hid_source(
             merge.clone(),
-            shutdown.clone(),
+            pass_scope.clone(),
         ));
     }
 
     loop {
         // Latched shutdown gate at the top of the respawn loop.
         if *shutdown.borrow() {
-            return;
+            return RunExit::Shutdown;
         }
 
         // ── Device guard ─────────────────────────────────────────────────
@@ -148,7 +247,8 @@ async fn run_service(cfg: &CrsfLaneConfig, mut shutdown: watch::Receiver<bool>) 
             );
             tokio::select! {
                 biased;
-                _ = wait_for_shutdown_flag(&mut shutdown) => return,
+                _ = wait_for_shutdown_flag(&mut shutdown) => return RunExit::Shutdown,
+                _ = reload.notified() => return RunExit::Reload,
                 _ = tokio::time::sleep(RETRY_INTERVAL) => continue,
             }
         }
@@ -163,7 +263,8 @@ async fn run_service(cfg: &CrsfLaneConfig, mut shutdown: watch::Receiver<bool>) 
             );
             tokio::select! {
                 biased;
-                _ = wait_for_shutdown_flag(&mut shutdown) => return,
+                _ = wait_for_shutdown_flag(&mut shutdown) => return RunExit::Shutdown,
+                _ = reload.notified() => return RunExit::Reload,
                 _ = tokio::time::sleep(RETRY_INTERVAL) => continue,
             }
         };
@@ -235,6 +336,7 @@ async fn run_service(cfg: &CrsfLaneConfig, mut shutdown: watch::Receiver<bool>) 
             tokio::select! {
                 biased;
                 _ = wait_for_shutdown_flag(&mut shutdown) => break "shutdown",
+                _ = reload.notified() => break "reload",
                 r = &mut tx_task => {
                     tracing::warn!(exit = ?r, "crsf tx task exited");
                     break "tx_exit";
@@ -321,7 +423,10 @@ async fn run_service(cfg: &CrsfLaneConfig, mut shutdown: watch::Receiver<bool>) 
         cancel_bridge.abort();
 
         if *shutdown.borrow() {
-            return;
+            return RunExit::Shutdown;
+        }
+        if exit_reason == "reload" {
+            return RunExit::Reload;
         }
         tracing::info!(reason = exit_reason, "crsf_lane_respawning");
         let body = build_stats_value(LaneState::Unconfigured, &StatsInputs::default());
@@ -333,7 +438,8 @@ async fn run_service(cfg: &CrsfLaneConfig, mut shutdown: watch::Receiver<bool>) 
         );
         tokio::select! {
             biased;
-            _ = wait_for_shutdown_flag(&mut shutdown) => return,
+            _ = wait_for_shutdown_flag(&mut shutdown) => return RunExit::Shutdown,
+            _ = reload.notified() => return RunExit::Reload,
             _ = tokio::time::sleep(RETRY_INTERVAL) => {}
         }
     }
@@ -346,21 +452,23 @@ async fn wait_for_shutdown_flag(shutdown: &mut watch::Receiver<bool>) {
     let _ = shutdown.wait_for(|s| *s).await;
 }
 
-/// Idle in a terminal `disabled` state until shutdown, rewriting the honest
-/// sidecar on a slow cadence so its mtime keeps proving the service is alive
-/// (a staleness-gated reader must be able to tell live-disabled from dead).
-/// `inputs` lets a gate report its config-level facts (the lane mode, a relay
-/// role) alongside the terminal state.
+/// Idle in a terminal `disabled` state until shutdown or a config reload,
+/// rewriting the honest sidecar on a slow cadence so its mtime keeps proving
+/// the service is alive (a staleness-gated reader must be able to tell
+/// live-disabled from dead). `inputs` lets a gate report its config-level
+/// facts (the lane mode, a relay role) alongside the terminal state.
 async fn idle_with_sidecar(
     metrics: &ados_protocol::logd::emitter::IngestEmitter,
     shutdown: &mut watch::Receiver<bool>,
+    reload: &Notify,
     inputs: &StatsInputs<'_>,
-) {
+) -> RunExit {
     write_stats_sidecar(LaneState::Disabled, inputs, Some(metrics));
     loop {
         tokio::select! {
             biased;
-            _ = wait_for_shutdown_flag(shutdown) => return,
+            _ = wait_for_shutdown_flag(shutdown) => return RunExit::Shutdown,
+            _ = reload.notified() => return RunExit::Reload,
             _ = tokio::time::sleep(IDLE_REFRESH_INTERVAL) => {
                 write_stats_sidecar(LaneState::Disabled, inputs, Some(metrics));
             }
@@ -432,34 +540,92 @@ mod shutdown_tests {
         wait_for_shutdown_flag(&mut rx).await;
     }
 
+    /// Serialize the tests in this binary target that mutate the
+    /// process-global `ADOS_RUN_DIR` (env vars are per-process, tests run on
+    /// parallel threads). An async-aware mutex because the guard spans awaits.
+    async fn env_guard() -> tokio::sync::MutexGuard<'static, ()> {
+        static GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        GUARD.lock().await
+    }
+
+    /// Poll the sidecar until its `state` reads `want` (bounded), returning
+    /// the last body seen for the caller's follow-up assertions.
+    async fn wait_for_state(path: &std::path::Path, want: &str) -> serde_json::Value {
+        for _ in 0..400 {
+            if let Ok(text) = std::fs::read_to_string(path) {
+                if let Ok(body) = serde_json::from_str::<serde_json::Value>(&text) {
+                    if body["state"] == want {
+                        return body;
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("sidecar at {path:?} never reached state {want:?}");
+    }
+
     /// The disabled gate writes the honest sidecar and idles until shutdown —
     /// the whole-service acid test for "absent/false enabled".
     #[tokio::test]
     async fn disabled_lane_writes_the_sidecar_and_exits_on_shutdown() {
+        let _g = env_guard().await;
         let dir = tempfile::tempdir().unwrap();
-        // Not using the shared env guard here: this is the only test in THIS
-        // binary target that touches ADOS_RUN_DIR (the lib tests are a
-        // separate process).
         std::env::set_var("ADOS_RUN_DIR", dir.path());
         let cfg = CrsfLaneConfig {
             enabled: false,
             ..Default::default()
         };
         let (tx, rx) = watch::channel(false);
-        let service = tokio::spawn(async move { run_service(&cfg, rx).await });
-        // Wait for the disabled sidecar to land.
+        let reload = Arc::new(Notify::new());
+        let missing = dir.path().join("missing.yaml");
+        let missing_conf = dir.path().join("missing.conf");
+        let service =
+            tokio::spawn(
+                async move { run_service(&cfg, &missing, &missing_conf, rx, reload).await },
+            );
         let path = dir.path().join("crsf-stats.json");
-        for _ in 0..200 {
-            if path.exists() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        let body: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(body["state"], "disabled");
+        let body = wait_for_state(&path, "disabled").await;
         assert!(body["rf_unverified"].is_null());
         // The service idles until the shutdown latch flips, then exits.
+        tx.send(true).unwrap();
+        let exit = tokio::time::timeout(Duration::from_secs(5), service)
+            .await
+            .expect("clean exit on shutdown")
+            .unwrap();
+        assert_eq!(exit, RunExit::Shutdown);
+        std::env::remove_var("ADOS_RUN_DIR");
+    }
+
+    /// A config reload re-runs the gates in place: a lane enabled through the
+    /// config surface goes from `disabled` to `unconfigured` (enabled, no
+    /// device pinned) on one reload notify, with no unit restart.
+    #[tokio::test]
+    async fn config_reload_reruns_the_gates_without_a_restart() {
+        let _g = env_guard().await;
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("ADOS_RUN_DIR", dir.path());
+        let config_path = dir.path().join("config.yaml");
+        let profile_conf = dir.path().join("profile.conf");
+        std::fs::write(&config_path, "radio:\n  crsf:\n    enabled: false\n").unwrap();
+
+        let (tx, rx) = watch::channel(false);
+        let reload = Arc::new(Notify::new());
+        let loop_reload = reload.clone();
+        let loop_config = config_path.clone();
+        let loop_profile = profile_conf.clone();
+        let service = tokio::spawn(async move {
+            run_until_shutdown(&loop_config, &loop_profile, rx, loop_reload).await
+        });
+
+        let sidecar = dir.path().join("crsf-stats.json");
+        wait_for_state(&sidecar, "disabled").await;
+
+        // Enable the lane (no device pin) and signal the reload: the fresh
+        // pass passes the opt-in gate and parks at the device guard.
+        std::fs::write(&config_path, "radio:\n  crsf:\n    enabled: true\n").unwrap();
+        reload.notify_one();
+        wait_for_state(&sidecar, "unconfigured").await;
+
         tx.send(true).unwrap();
         tokio::time::timeout(Duration::from_secs(5), service)
             .await

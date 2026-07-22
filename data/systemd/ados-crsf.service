@@ -1,0 +1,54 @@
+[Unit]
+Description=ADOS CRSF RC Control Lane
+PartOf=ados-supervisor.service
+StartLimitInterval=60s
+StartLimitBurst=5
+# Opt-in: the lane runs only on a node whose config enables it. The marker
+# mirrors `radio.crsf.enabled` and is reconciled by the installer and the
+# config persist path — never hand-managed — so a node that never opts in
+# skips this unit cleanly at boot.
+ConditionPathExists=/etc/ados/crsf-enabled
+
+[Service]
+# Join the shared accounting slice so MemoryCurrent/CPUUsage are observable.
+Slice=ados.slice
+Type=simple
+# The native RC-lane binary is fetched best-effort (the lane is opt-in
+# hardware); until it lands the guard execs /bin/true so the unit is a clean
+# no-op rather than a restart loop.
+ExecStart=/bin/sh -c 'if [ -x /opt/ados/bin/ados-crsf ]; then exec /opt/ados/bin/ados-crsf; else exec /bin/true; fi'
+# In-process config reload: the service re-reads /etc/ados/config.yaml on
+# SIGHUP and re-runs its gates, so a config change applies without dropping
+# the unit (and without an operator systemctl).
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+Environment=ADOS_CONFIG=/etc/ados/config.yaml
+Environment=RUST_LOG=info
+EnvironmentFile=-/etc/ados/env
+
+# The RC transmitter module is a USB-serial device: the lane needs the tty
+# character devices and the run dir. No network capabilities — this is a
+# serial lane, not a network radio (no CAP_NET_RAW / CAP_NET_ADMIN).
+SupplementaryGroups=dialout
+DeviceAllow=char-ttyUSB rw
+DeviceAllow=char-ttyACM rw
+NoNewPrivileges=yes
+ProtectSystem=strict
+PrivateTmp=yes
+ReadWritePaths=/run/ados
+
+# Lightweight native service; cap it in the radio-service range so a runaway
+# can never starve the box.
+MemoryMax=64M
+CPUQuota=20%
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-crsf
+
+[Install]
+# Enable-linked cross-profile by the installer; systemd pulls it up with the
+# supervisor and the ConditionPathExists gate keeps it skipped until the
+# config opts the lane in.
+WantedBy=ados-supervisor.service

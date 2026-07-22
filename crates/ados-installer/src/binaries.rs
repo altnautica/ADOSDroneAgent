@@ -237,6 +237,20 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
         gate: Gate::BestEffort,
         profiles: BOTH,
     },
+    // The CRSF / ExpressLRS RC control lane. Best-effort and opt-in: the unit
+    // gates on the crsf-enabled marker (mirroring radio.crsf.enabled) and its
+    // ExecStart guard execs /bin/true until the binary lands, so a missing
+    // asset degrades nothing. Fetched on both profiles: the ground node drives
+    // the RC transmitter module today, the drone side carries the relay
+    // last-mile posture.
+    PrebuiltBinary {
+        service: "ados-crsf",
+        asset: "ados-crsf-aarch64",
+        release_tag: "prebuilt-crsf",
+        dest: "/opt/ados/bin/ados-crsf",
+        gate: Gate::BestEffort,
+        profiles: BOTH,
+    },
     // The video relay the pipeline streams through. It is a mirrored
     // third-party binary rather than an `ados-*` service, so it lands in the
     // system bin dir. Best-effort: a missing relay degrades video without
@@ -353,8 +367,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_has_twenty_one_entries() {
-        assert_eq!(PREBUILT.len(), 21);
+    fn catalog_has_twenty_two_entries() {
+        assert_eq!(PREBUILT.len(), 22);
     }
 
     #[test]

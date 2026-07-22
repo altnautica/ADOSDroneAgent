@@ -56,6 +56,12 @@ const UNIVERSAL_UNITS: &[&str] = &[
     // guard execs /bin/true until the operator drops the gpio-rust-enabled
     // marker, so enabling it on a board with no GPIO header is a clean no-op.
     "ados-gpio.service",
+    // CRSF / ExpressLRS RC control lane. Enabled cross-profile (ground-side
+    // transmitter today, drone-side for the relay last mile); the unit gates
+    // on the /etc/ados/crsf-enabled marker the installer + config persist
+    // path reconcile from `radio.crsf.enabled`, so a node that never opts the
+    // lane in skips it cleanly at boot.
+    "ados-crsf.service",
 ];
 
 /// Ground-station units enable-linked here (the START half is the `start`
@@ -736,6 +742,51 @@ fn reconcile_rust_cutover_units() {
     }
 }
 
+/// Parse `radio.crsf.enabled` from config.yaml text. Absent / malformed /
+/// not-present → false (the RC lane is opt-in). Pure.
+pub fn parse_crsf_enabled(text: &str) -> bool {
+    #[derive(serde::Deserialize, Default)]
+    struct Raw {
+        #[serde(default)]
+        radio: Radio,
+    }
+    #[derive(serde::Deserialize, Default)]
+    struct Radio {
+        #[serde(default)]
+        crsf: Option<Crsf>,
+    }
+    #[derive(serde::Deserialize, Default)]
+    struct Crsf {
+        #[serde(default)]
+        enabled: bool,
+    }
+    serde_norway::from_str::<Raw>(text)
+        .ok()
+        .and_then(|r| r.radio.crsf)
+        .map(|c| c.enabled)
+        .unwrap_or(false)
+}
+
+/// Reconcile the CRSF RC-lane enable marker from the operator config: the
+/// `/etc/ados/crsf-enabled` marker the ados-crsf unit gates on
+/// (`ConditionPathExists`) mirrors `radio.crsf.enabled`, so enabling the lane
+/// in config is sufficient — no manual systemctl. Idempotent; runs on every
+/// install so a partial state self-heals. The runtime half (a config write
+/// through the agent) reconciles the same marker and kicks the unit itself.
+fn reconcile_crsf_marker() {
+    let enabled = std::fs::read_to_string(crate::env::CONFIG_YAML)
+        .map(|text| parse_crsf_enabled(&text))
+        .unwrap_or(false);
+    let marker = Path::new(CONFIG_DIR).join("crsf-enabled");
+    if enabled {
+        if let Err(e) = std::fs::write(&marker, b"") {
+            tracing::warn!(error = %e, "crsf enable marker write failed");
+        }
+    } else {
+        let _ = std::fs::remove_file(&marker);
+    }
+}
+
 /// Reconcile the local logging and telemetry store unit against its
 /// fallback marker. The store is on by default (the log-view endpoints read
 /// it), so a fresh box with no marker enables it; the `logd-python-fallback`
@@ -1366,6 +1417,12 @@ impl Step for Systemd {
         }
         let _ = std::fs::create_dir_all("/etc/ados/peripherals");
 
+        // 5a-bis. Mirror `radio.crsf.enabled` onto the marker the ados-crsf
+        //     unit's ConditionPathExists gates on, so a config that opts the
+        //     RC lane in has the unit up after this install with no manual
+        //     systemctl (and an opted-out config leaves it cleanly skipped).
+        reconcile_crsf_marker();
+
         // 5b. The logging and telemetry store is on by default (the log-view
         //     endpoints read it). Enable it unless the fallback marker pins it
         //     off; the start step brings it up after the supervisor.
@@ -1801,6 +1858,24 @@ mod tests {
         ));
         assert!(!parse_cold_boot_enum_aid("agent:\n  name: x\n"));
         assert!(!parse_cold_boot_enum_aid(": : not yaml"));
+    }
+
+    #[test]
+    fn parse_crsf_enabled_gate() {
+        assert!(parse_crsf_enabled("radio:\n  crsf:\n    enabled: true\n"));
+        assert!(!parse_crsf_enabled("radio:\n  crsf:\n    enabled: false\n"));
+        // A crsf block with other fields but no enabled reads opted out, as do
+        // an absent block, an unrelated config, and malformed YAML. The
+        // model's explicit `device: null` must not fail the parse.
+        assert!(!parse_crsf_enabled(
+            "radio:\n  crsf:\n    device: /dev/ttyUSB0\n"
+        ));
+        assert!(parse_crsf_enabled(
+            "radio:\n  crsf:\n    enabled: true\n    device: null\n"
+        ));
+        assert!(!parse_crsf_enabled("radio: {}\n"));
+        assert!(!parse_crsf_enabled("agent:\n  name: x\n"));
+        assert!(!parse_crsf_enabled(": : not yaml"));
     }
 
     #[test]

@@ -174,6 +174,14 @@ pub const SERVICE_REGISTRY: &[ServiceDef] = &[
     // headless KEEP set. The unit ships disabled until the operator turns it on,
     // so on a board with no GPIO header it is a clean no-op.
     def("ados-gpio", Hardware, None, None),
+    // CRSF / ExpressLRS RC control lane. Ground-side today (the ground node
+    // drives the RC transmitter module) with a drone gate for the relay
+    // last-mile posture; the service itself idles on a drone profile and the
+    // unit gates on the /etc/ados/crsf-enabled marker (mirroring
+    // radio.crsf.enabled), so an un-opted node skips it cleanly. NOT in the
+    // headless KEEP set. Hot-plugging the RC module's USB bridge restarts it
+    // via the dedicated Elrs hot-plug class.
+    def("ados-crsf", Hardware, Some("drone|ground_station"), None),
     // Ground-station-only services. ados-wfb-rx is the single-node RX path,
     // gated to the direct role so it does not grab the adapter the relay or
     // receiver units drive.
@@ -301,7 +309,7 @@ mod tests {
     #[test]
     fn registry_has_expected_shape() {
         let specs = build_specs();
-        assert_eq!(specs.len(), 33, "service count drifted from the catalog");
+        assert_eq!(specs.len(), 34, "service count drifted from the catalog");
         // Core tier members. ados-mavlink/api/cloud/health are the cross-profile
         // always-on core (the single cloud unit serves the gateway + heartbeat on
         // both profiles, spawning the ground-station bridge when the role resolves
@@ -350,6 +358,14 @@ mod tests {
         assert_eq!(atlas.profile_gate, Some("drone"));
         assert_eq!(atlas.category, Category::Hardware);
         assert!(!atlas.headless_keep);
+        // The CRSF RC lane is a Hardware unit on both FC-bearing profiles
+        // (ground-side transmitter today, drone-side for the relay last mile),
+        // never in the headless keep set. Its presence here is what arms the
+        // Elrs hot-plug class routing to it.
+        let crsf = specs.iter().find(|s| s.name == "ados-crsf").unwrap();
+        assert_eq!(crsf.profile_gate, Some("drone|ground_station"));
+        assert_eq!(crsf.category, Category::Hardware);
+        assert!(!crsf.headless_keep);
     }
 
     #[test]

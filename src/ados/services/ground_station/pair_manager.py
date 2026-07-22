@@ -152,6 +152,16 @@ def _save_config_dict(data: dict[str, Any]) -> bool:
         # atomic at the rename level.
         lock_fd = -1
 
+    # Snapshot the on-disk config before overwriting it, so the post-write
+    # sync can tell whether the CRSF lane slice actually changed (best-effort;
+    # a missing/garbled file reads as no previous config).
+    previous_config: dict[str, Any] | None
+    try:
+        loaded = yaml.safe_load(_CONFIG_PATH.read_text())
+        previous_config = loaded if isinstance(loaded, dict) else None
+    except (OSError, yaml.YAMLError):
+        previous_config = None
+
     try:
         if lock_fd >= 0:
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
@@ -160,6 +170,17 @@ def _save_config_dict(data: dict[str, Any]) -> bool:
                 data, sort_keys=False, default_flow_style=False,
             )
             _atomic_write(_CONFIG_PATH, body.encode("utf-8"), mode=0o600)
+            # Keep the CRSF lane's enable marker + unit true to the persisted
+            # config (the marker mirrors radio.crsf.enabled; the unit gets a
+            # no-block reload-or-restart only when the lane slice changed).
+            # Best-effort by contract: a marker/systemctl hiccup never fails
+            # the write that already landed.
+            try:
+                from ados.core.crsf_marker import sync_after_config_write
+
+                sync_after_config_write(previous_config, data)
+            except Exception as exc:  # noqa: BLE001 — the write already landed
+                log.warning("crsf_config_sync_failed", error=str(exc))
             return True
         except (OSError, yaml.YAMLError) as exc:
             log.error(
