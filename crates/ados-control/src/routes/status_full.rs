@@ -813,6 +813,28 @@ fn regulatory_domain() -> String {
 /// the Python `if rssi == -100.0: rssi = None`.
 const RSSI_SENTINEL: f64 = -100.0;
 
+/// The `rf_unverified` verdict forwarded from the radio sidecar, or `null` when
+/// it cannot be sourced honestly.
+///
+/// The radio service owns this boolean (an advancing transmit counter with no
+/// confirmed reception inside the proof grace window); every other surface only
+/// forwards it, so a consumer never has to re-derive it from a heuristic.
+///
+/// It reads `null` — never a confident `false` — when the key is absent (a
+/// receive-side view, or a sidecar written before the field existed) or when the
+/// snapshot went stale, because a reading older than the staleness ceiling
+/// cannot say whether the radio is unverified NOW, and a stale `false` is
+/// exactly the healthy-looking dead link this field exists to expose.
+fn rf_unverified_field(status: &Map<String, Value>) -> Value {
+    if status.get("state").and_then(Value::as_str) == Some("stale") {
+        return Value::Null;
+    }
+    match status.get("rf_unverified") {
+        Some(Value::Bool(b)) => Value::Bool(*b),
+        _ => Value::Null,
+    }
+}
+
 /// Shape the forward-compatible `radio` heartbeat block from a WFB status view.
 ///
 /// `wfb_status` is the `/api/wfb` body (or `None` when no view is available). The
@@ -883,6 +905,12 @@ fn build_radio_block(wfb_status: Option<&Map<String, Value>>) -> Value {
         "tx_video_recvq_bytes": get_or_null(status, "tx_video_recvq_bytes"),
         "acquire_state": get_or_null(status, "acquire_state"),
         "channel_locked": get_or_null(status, "channel_locked"),
+        // The two halves of the received-side proof: `channel_locked` is true
+        // once a verified return signal was heard, `rf_unverified` is true when
+        // the transmit counter advances while none has been. Forwarded from the
+        // radio's own verdict so a consumer reads the authoritative value
+        // instead of re-deriving it.
+        "rf_unverified": rf_unverified_field(status),
         "reacquire_kills": get_or_null(status, "reacquire_kills"),
         "valid_rx_packets_per_s": get_or_null(status, "valid_rx_packets_per_s"),
         "adapter_chipset": get_or_null(status, "adapter_chipset"),
@@ -930,6 +958,9 @@ fn radio_absent_block() -> Value {
         "tx_video_recvq_bytes": null,
         "acquire_state": null,
         "channel_locked": null,
+        // Null, not false: with no radio view there is no verdict to report, and
+        // a false here would claim a transmit path was proven.
+        "rf_unverified": null,
         "reacquire_kills": null,
         "valid_rx_packets_per_s": null,
         "adapter_chipset": null,
@@ -2018,6 +2049,63 @@ mod tests {
         assert_eq!(block["snr_db"], json!(22.0));
         // fec_lost is the camel-free snake_case key sourced from fec_failed.
         assert_eq!(block["fec_lost"], Value::Null);
+    }
+
+    #[test]
+    fn radio_block_forwards_the_rf_unverified_verdict() {
+        // The radio's authoritative verdict reaches the status surface verbatim
+        // in both directions, so a consumer never re-derives it.
+        let unverified = signals(&[
+            ("state", json!("rf_unverified")),
+            ("rf_unverified", json!(true)),
+            ("channel_locked", json!(false)),
+        ]);
+        let block = build_radio_block(Some(&unverified));
+        assert_eq!(block["rf_unverified"], json!(true));
+        assert_eq!(block["state"], json!("rf_unverified"));
+
+        let proven = signals(&[
+            ("state", json!("connected")),
+            ("rf_unverified", json!(false)),
+            ("channel_locked", json!(true)),
+        ]);
+        assert_eq!(
+            build_radio_block(Some(&proven))["rf_unverified"],
+            json!(false)
+        );
+    }
+
+    #[test]
+    fn radio_block_rf_unverified_is_null_when_it_cannot_be_sourced() {
+        // Absent from the view (receive side / older sidecar): unknown, never a
+        // confident false that would claim the transmit path was proven.
+        let no_field = signals(&[("state", json!("connected"))]);
+        assert_eq!(
+            build_radio_block(Some(&no_field))["rf_unverified"],
+            Value::Null
+        );
+
+        // Stale snapshot: the last-known value cannot describe the link NOW.
+        let stale = signals(&[("state", json!("stale")), ("rf_unverified", json!(false))]);
+        assert_eq!(
+            build_radio_block(Some(&stale))["rf_unverified"],
+            Value::Null
+        );
+
+        // No radio view at all.
+        assert_eq!(build_radio_block(None)["rf_unverified"], Value::Null);
+    }
+
+    #[test]
+    fn radio_to_camel_exposes_rf_unverified() {
+        // The generic snake→camel remap must land the field as `rfUnverified`,
+        // the name the status consumers read.
+        let status = signals(&[
+            ("state", json!("rf_unverified")),
+            ("rf_unverified", json!(true)),
+        ]);
+        let camel = radio_to_camel(build_radio_block(Some(&status)));
+        assert_eq!(camel["rfUnverified"], json!(true));
     }
 
     #[test]
