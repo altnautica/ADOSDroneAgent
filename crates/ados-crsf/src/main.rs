@@ -270,6 +270,16 @@ async fn run_service_pass(
         };
         tracing::info!(device = %cfg.device, baud = CRSF_BAUD, rate_hz = cfg.packet_rate_hz, "crsf_serial_open");
 
+        // ── Regulatory posture at link bring-up ──────────────────────────
+        // One durable record per link session: the operator posture
+        // (unrestricted/region + the acknowledgement audit), the host-applied
+        // frame cadence, and the module-side knob targets whose mechanism is
+        // the CRSF parameter carrier — never the system radio stack. This is
+        // the record behind the operator-responsibility badge, so it is
+        // emitted before the first frame is transmitted.
+        let reg_policy = ados_crsf::reg::RegPolicy::load_from(config_path);
+        ados_crsf::reg::emit_reg_posture(&metrics, cfg, &reg_policy);
+
         // ── Bring-up: spawn the sibling tasks ────────────────────────────
         let (read_half, write_half) = tokio::io::split(stream);
         let counters = Arc::new(WireCounters::default());

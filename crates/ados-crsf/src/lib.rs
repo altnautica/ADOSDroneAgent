@@ -13,7 +13,8 @@
 //! `sources` (the HID/injection authority merge + TTL), `hid` (the primary-
 //! gamepad reader), `link` (the lane state machine), `transport` (serial +
 //! TX/RX tasks), `cmdsock` (the command socket), `sidecar` (the state file),
-//! `config` + `paths` (wiring).
+//! `reg` (the regulatory posture + bring-up event), `config` + `paths`
+//! (wiring).
 
 pub mod bank;
 pub mod channels;
@@ -24,6 +25,7 @@ pub mod hid;
 pub mod link;
 pub mod params;
 pub mod paths;
+pub mod reg;
 pub mod scale;
 pub mod sidecar;
 pub mod sources;
