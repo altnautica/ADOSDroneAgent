@@ -33,7 +33,9 @@ use crate::encoder::{EncoderEnv, EncoderKind};
 use crate::mediamtx::{MediamtxManager, MAIN_PATH};
 use crate::process::ManagedProcess;
 use crate::shutdown::Shutdown;
-use crate::wfb_tee::{wfb_tee_progress_is_stale, ProgressTracker, WFB_TEE_PROGRESS_TIMEOUT};
+use crate::wfb_tee::{
+    wfb_tee_output_is_stalled, wfb_tee_progress_is_stale, ProgressTracker, WFB_TEE_PROGRESS_TIMEOUT,
+};
 
 // The pipeline's pure health-decision logic (constants, FSM states, the
 // backoff / circuit-breaker / grace / inbound-flow decisions) lives in
@@ -514,6 +516,20 @@ impl VideoOrchestrator {
             tracing::warn!(
                 threshold_s = WFB_TEE_PROGRESS_TIMEOUT.as_secs(),
                 "wfb_tee_zombie_detected: alive but progress flat; forcing restart"
+            );
+            return false;
+        }
+        // Output-side check: ffmpeg keeps printing `progress=continue` with a
+        // FROZEN `total_size` when its input wedges, so the progress-token stamp
+        // above reads such a tap as alive. Trip on the output-byte counter having
+        // gone flat (only after the tap has emitted at least one datagram, so the
+        // RTSP handshake + first-IDR wait is never a false positive).
+        let output_seen = self.wfb_tee_progress.last_output_bytes().await >= 0;
+        let last_out = self.wfb_tee_progress.last_output_advance_at().await;
+        if wfb_tee_output_is_stalled(last_out, output_seen, Instant::now()) {
+            tracing::warn!(
+                threshold_s = WFB_TEE_PROGRESS_TIMEOUT.as_secs(),
+                "wfb_tee_zombie_detected: alive with progress tokens but output bytes flat; forcing restart"
             );
             return false;
         }

@@ -218,7 +218,29 @@ pub fn is_progress_line(line: &str) -> bool {
 /// Parse the `frame=N` counter from a progress line, if present (observability;
 /// does not advance under `-c:v copy` but harmless).
 pub fn parse_frame_count(line: &str) -> Option<u64> {
-    let idx = line.find("frame=")?;
+    parse_progress_u64(line, "frame=")
+}
+
+/// Parse the cumulative `total_size=N` output-byte counter from an ffmpeg
+/// `-progress` line, if present.
+///
+/// Unlike `frame=` (which counts decoded frames and stays flat under
+/// `-c:v copy`), `total_size` is the running count of bytes the muxer has
+/// written to the RTP output. It advances whenever the tap actually emits a
+/// datagram, so a monotone increase is the DIRECT proof that RTP is leaving the
+/// tap for the wfb-ng TX (the true output-side signal, not just "ffmpeg is still
+/// printing a status line"). A wedged tap whose input froze keeps printing
+/// `progress=continue` with a FROZEN `total_size`, so keying liveness off this
+/// value advancing (not mere token presence) is the Rule-37 output-counter check.
+pub fn parse_total_size(line: &str) -> Option<u64> {
+    parse_progress_u64(line, "total_size=")
+}
+
+/// Shared parser for a `<key>=N` unsigned counter in an ffmpeg progress/status
+/// line, honouring the `\b` word boundary (so `total_size=` never matches inside
+/// a longer token) and ffmpeg's space padding (`frame=  42`).
+fn parse_progress_u64(line: &str, key: &str) -> Option<u64> {
+    let idx = line.find(key)?;
     // Reject a substring match preceded by a word char (mirror the `\b`).
     if idx > 0 {
         let prev = line.as_bytes()[idx - 1];
@@ -226,9 +248,7 @@ pub fn parse_frame_count(line: &str) -> Option<u64> {
             return None;
         }
     }
-    let rest = &line[idx + "frame=".len()..];
-    // ffmpeg pads the value with spaces (`frame=  42`); skip them, then read
-    // the run of digits.
+    let rest = &line[idx + key.len()..];
     let digits: String = rest
         .trim_start_matches(' ')
         .chars()
@@ -249,6 +269,16 @@ pub fn parse_frame_count(line: &str) -> Option<u64> {
 pub struct ProgressTracker {
     last_progress_at: Arc<Mutex<Instant>>,
     last_frame_count: Arc<Mutex<i64>>,
+    /// High-water mark of the cumulative `total_size` output-byte counter, or
+    /// `-1` before any value is seen. Distinct from `last_progress_at`: the
+    /// latter stamps on any progress-token line (which ffmpeg prints even when
+    /// the output is frozen), while this only moves when RTP bytes actually
+    /// leave the tap.
+    last_output_bytes: Arc<Mutex<i64>>,
+    /// The instant `last_output_bytes` last increased. Seeded to construction
+    /// time so a fresh tap gets the full window before the output-stall check
+    /// can trip.
+    last_output_advance_at: Arc<Mutex<Instant>>,
 }
 
 impl ProgressTracker {
@@ -258,6 +288,8 @@ impl ProgressTracker {
         Self {
             last_progress_at: Arc::new(Mutex::new(Instant::now())),
             last_frame_count: Arc::new(Mutex::new(-1)),
+            last_output_bytes: Arc::new(Mutex::new(-1)),
+            last_output_advance_at: Arc::new(Mutex::new(Instant::now())),
         }
     }
 
@@ -283,6 +315,32 @@ impl ProgressTracker {
     pub async fn last_frame_count(&self) -> i64 {
         *self.last_frame_count.lock().await
     }
+
+    /// Record the cumulative `total_size` output-byte counter, stamping the
+    /// advance clock only when it actually increases. `total_size` can reset to
+    /// a lower value across an ffmpeg respawn, so only a strict increase (or the
+    /// first-ever value) is treated as forward progress; a lower value re-seeds
+    /// the high-water mark without stamping.
+    pub async fn observe_output_bytes(&self, bytes: u64, at: Instant) {
+        let mut hw = self.last_output_bytes.lock().await;
+        let advanced = *hw < 0 || (bytes as i64) > *hw;
+        if (bytes as i64) != *hw {
+            *hw = bytes as i64;
+        }
+        if advanced {
+            *self.last_output_advance_at.lock().await = at;
+        }
+    }
+
+    /// The high-water output-byte count, or `-1` if none seen yet.
+    pub async fn last_output_bytes(&self) -> i64 {
+        *self.last_output_bytes.lock().await
+    }
+
+    /// The instant the output-byte counter last advanced.
+    pub async fn last_output_advance_at(&self) -> Instant {
+        *self.last_output_advance_at.lock().await
+    }
 }
 
 impl Default for ProgressTracker {
@@ -295,6 +353,24 @@ impl Default for ProgressTracker {
 /// [`WFB_TEE_PROGRESS_TIMEOUT`] without a fresh progress token.
 pub fn wfb_tee_progress_is_stale(last_progress_at: Instant, now: Instant) -> bool {
     now.saturating_duration_since(last_progress_at) >= WFB_TEE_PROGRESS_TIMEOUT
+}
+
+/// The Rule-37 OUTPUT-counter check: true once the tap has emitted at least one
+/// datagram (`output_seen`) but its cumulative output-byte counter has not
+/// advanced for [`WFB_TEE_PROGRESS_TIMEOUT`].
+///
+/// This catches the failure the progress-token stamp cannot: a tap whose input
+/// froze keeps printing `progress=continue` with a frozen `total_size`, so
+/// [`wfb_tee_progress_is_stale`] reads it as alive. Keying off the output
+/// counter actually advancing is the direct proof RTP is still leaving the tap.
+/// Gated on `output_seen` so it never trips before the first datagram (during
+/// the RTSP handshake + first-IDR wait), where no output is expected yet.
+pub fn wfb_tee_output_is_stalled(
+    last_output_advance_at: Instant,
+    output_seen: bool,
+    now: Instant,
+) -> bool {
+    output_seen && now.saturating_duration_since(last_output_advance_at) >= WFB_TEE_PROGRESS_TIMEOUT
 }
 
 /// Drain the wfb_tee ffmpeg stderr, stamping `tracker` on every progress token
@@ -321,9 +397,16 @@ pub async fn drain_wfb_tee_stderr(stderr: ChildStderr, tracker: ProgressTracker)
         }
 
         if is_progress_token(text) {
-            tracker.stamp(Instant::now()).await;
+            let now = Instant::now();
+            tracker.stamp(now).await;
             if let Some(frame) = parse_frame_count(text) {
                 tracker.observe_frame(frame).await;
+            }
+            // The output-side signal: `total_size` advancing is the direct proof
+            // RTP is still leaving the tap (the token stamp above only proves
+            // ffmpeg is still printing a status line).
+            if let Some(bytes) = parse_total_size(text) {
+                tracker.observe_output_bytes(bytes, now).await;
             }
         }
 
@@ -475,6 +558,18 @@ mod tests {
         assert_eq!(parse_frame_count("keyframe=12"), None);
     }
 
+    #[test]
+    fn total_size_parsing() {
+        // The `-progress pipe:2` block emits a bare `total_size=N` line.
+        assert_eq!(parse_total_size("total_size=1048576"), Some(1_048_576));
+        assert_eq!(parse_total_size("total_size=  4096"), Some(4096));
+        // Word boundary: a longer token must not false-match.
+        assert_eq!(parse_total_size("xtotal_size=1"), None);
+        // A different key is not total_size.
+        assert_eq!(parse_total_size("out_time_us=200000"), None);
+        assert_eq!(parse_total_size("frame=42"), None);
+    }
+
     // --- stale watchdog boundary ---------------------------------------
 
     #[test]
@@ -491,6 +586,25 @@ mod tests {
         assert!(wfb_tee_progress_is_stale(base, past));
         // now == last_progress (just stamped) → not stale.
         assert!(!wfb_tee_progress_is_stale(base, base));
+    }
+
+    #[test]
+    fn output_stall_only_trips_after_output_seen() {
+        let base = Instant::now();
+        let past = base + Duration::from_secs(30);
+        // No output yet (handshake / first-IDR wait): never stalled, even past
+        // the window — the tap has not been given a chance to emit.
+        assert!(!wfb_tee_output_is_stalled(base, false, past));
+        // Output seen, but the counter advanced recently → not stalled.
+        let almost = base + Duration::from_millis(14_999);
+        assert!(!wfb_tee_output_is_stalled(base, true, almost));
+        // Output seen and frozen for the full window → stalled (the frozen-output
+        // case the progress-token stamp misses).
+        assert!(wfb_tee_output_is_stalled(
+            base,
+            true,
+            base + Duration::from_secs(15)
+        ));
     }
 
     // --- tracker --------------------------------------------------------
@@ -511,6 +625,44 @@ mod tests {
         assert_eq!(t.last_frame_count().await, 10);
         t.observe_frame(11).await;
         assert_eq!(t.last_frame_count().await, 11);
+    }
+
+    #[tokio::test]
+    async fn tracker_output_bytes_advance_and_respawn_reset() {
+        let t = ProgressTracker::new();
+        assert_eq!(t.last_output_bytes().await, -1);
+        let t0 = t.last_output_advance_at().await;
+
+        // First value seen → high-water set + advance stamped.
+        let t1 = t0 + Duration::from_secs(1);
+        t.observe_output_bytes(1000, t1).await;
+        assert_eq!(t.last_output_bytes().await, 1000);
+        assert_eq!(t.last_output_advance_at().await, t1);
+
+        // A strict increase advances the clock.
+        let t2 = t1 + Duration::from_secs(1);
+        t.observe_output_bytes(2000, t2).await;
+        assert_eq!(t.last_output_bytes().await, 2000);
+        assert_eq!(t.last_output_advance_at().await, t2);
+
+        // A repeated (frozen) value does NOT advance the clock — the frozen-output
+        // case: the high-water stays, but the advance instant does not move, so the
+        // stall predicate can eventually trip.
+        let t3 = t2 + Duration::from_secs(1);
+        t.observe_output_bytes(2000, t3).await;
+        assert_eq!(t.last_output_bytes().await, 2000);
+        assert_eq!(t.last_output_advance_at().await, t2);
+
+        // An ffmpeg respawn resets total_size to a lower value: re-seed the
+        // high-water without stamping an advance (it is not forward progress).
+        let t4 = t3 + Duration::from_secs(1);
+        t.observe_output_bytes(500, t4).await;
+        assert_eq!(t.last_output_bytes().await, 500);
+        assert_eq!(t.last_output_advance_at().await, t2);
+        // The next strict increase past the re-seeded mark advances again.
+        let t5 = t4 + Duration::from_secs(1);
+        t.observe_output_bytes(600, t5).await;
+        assert_eq!(t.last_output_advance_at().await, t5);
     }
 
     // --- stderr drain over a real pipe ---------------------------------
@@ -537,12 +689,16 @@ mod tests {
         // Emit a real diagnostic, then a progress block, to stderr (>&2).
         let script = r#"
             echo "frame=5" >&2
+            echo "total_size=98765" >&2
             echo "out_time_ms=200000" >&2
             echo "progress=continue" >&2
         "#;
         let tracker = drain_emitted(script).await;
         // A progress token advanced the frame counter.
         assert_eq!(tracker.last_frame_count().await, 5);
+        // The `total_size` line advanced the output-byte counter — the real
+        // output-side liveness signal.
+        assert_eq!(tracker.last_output_bytes().await, 98765);
         // The stamp advanced past the tracker's construction instant.
         // (Can't assert an exact value; assert it is not stale immediately.)
         let last = tracker.last_progress_at().await;
