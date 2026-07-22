@@ -27,7 +27,8 @@ pub struct GsRegSnapshot {
 /// drone side. `actual` is the LIVE interface channel; `rendezvous` is the
 /// operator's home; `operating` is the runtime channel (== rendezvous unless a
 /// coordinated move committed). The GS proves the link by its own valid-decode
-/// count, so it has no `rf_unverified` of its own (always false here).
+/// count and never measures a transmit path, so it has no `rf_unverified`
+/// verdict of its own — the sidecar reports `null` for it, never a boolean.
 #[derive(Debug, Clone, Copy)]
 pub struct GsChannelTruth {
     pub actual: u8,
@@ -208,10 +209,12 @@ pub fn build_gs_stats(
         "reg_verified": reg.verified,
         "enabled_channels": reg.enabled_channels,
         // The GS proves the link by its own valid-decode count, not by a TX
-        // counter, so it is never `rf_unverified` (the transmitting-zero-
-        // reception flag is a transmit-side concept). Surfaced for schema
-        // symmetry so the panel reads one shape from either rig.
-        "rf_unverified": false,
+        // counter: the transmitting-zero-reception verdict is a transmit-side
+        // measurement this plane never performs. The key rides for schema
+        // symmetry but carries `null` — no verdict — because a `false` here
+        // would present itself downstream as the radio's own proof that the
+        // transmit path was verified, for a node that measured nothing.
+        "rf_unverified": serde_json::Value::Null,
         "tx_power_dbm": cfg.tx_power_dbm,
         // The TX-power ceiling, mirroring the drone-side sidecar key so the panel
         // renders the headroom from either rig's stats.
@@ -357,8 +360,11 @@ mod tests {
             v["enabled_channels"],
             serde_json::json!([149, 153, 157, 161, 165])
         );
-        // The GS proves the link by valid decodes, so rf_unverified is never set.
-        assert_eq!(v["rf_unverified"], false);
+        // The GS proves the link by valid decodes and never measures a transmit
+        // path, so it reports NO transmit-proof verdict: the key is present for
+        // schema symmetry but null, never a boolean.
+        assert!(v.as_object().unwrap().contains_key("rf_unverified"));
+        assert!(v["rf_unverified"].is_null());
         assert_eq!(v["link_state"], "active");
         assert_eq!(v["acquire_state"], "locked");
         assert_eq!(v["channel_locked"], true);
@@ -369,6 +375,58 @@ mod tests {
         // mcs/topology/tx_power mirrored from config.
         assert_eq!(v["mcs_index"], cfg.mcs_index);
         assert_eq!(v["topology"], cfg.topology);
+    }
+
+    #[test]
+    fn gs_stats_never_claims_a_transmit_proof_verdict() {
+        // A receive-side node has not measured a transmit path, in ANY state:
+        // the `rf_unverified` key must read null (no verdict), never a boolean.
+        // A boolean false here flows through every forwarder as the radio's own
+        // measured proof that the transmit path was verified — the exact
+        // false-healthy surface the verdict exists to expose — so this test
+        // pins the producer to absence.
+        let channels = GsChannelTruth {
+            actual: 149,
+            rendezvous: 149,
+            operating: 149,
+        };
+        let adapter = GsAdapterInfo::new(Some("rtl88x2eu".to_string()), true, Some(480));
+        for (state, locked, decoded) in [
+            (STATE_ACTIVE, true, 25),
+            (STATE_SEARCHING, false, 0),
+            (STATE_REG_BLOCKED, false, 0),
+        ] {
+            let snap = LinkStats {
+                packets_received: decoded,
+                ..LinkStats::default()
+            };
+            let v = build_gs_stats(
+                &snap,
+                "wlan1",
+                &adapter,
+                channels,
+                &GsRegSnapshot::default(),
+                &WfbConfig::default(),
+                state,
+                "searching",
+                locked,
+                0.0,
+                0,
+                0,
+                None,
+                0.0,
+            );
+            assert!(
+                v.as_object().unwrap().contains_key("rf_unverified"),
+                "{state}: the key must ride for schema symmetry"
+            );
+            assert!(
+                v["rf_unverified"].is_null(),
+                "{state}: a receive-side node must report no transmit-proof \
+                 verdict, got {:?}",
+                v["rf_unverified"]
+            );
+        }
     }
 
     #[test]
