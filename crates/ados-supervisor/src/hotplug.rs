@@ -143,8 +143,10 @@ fn read_crsf_claim(path: &Path) -> CrsfClaim {
     }
     #[derive(Default, Deserialize)]
     struct CrsfSection {
+        // Nullable on disk (the config model writes `device: null` for "no
+        // pin"); a bare String would fail the whole parse on the explicit null.
         #[serde(default)]
-        device: String,
+        device: Option<String>,
         #[serde(default)]
         enabled: bool,
     }
@@ -157,7 +159,14 @@ fn read_crsf_claim(path: &Path) -> CrsfClaim {
     // An error!-per-poll here would flood the journal at 1 Hz.
     match serde_norway::from_str::<Raw>(&text) {
         Ok(raw) => CrsfClaim {
-            device: raw.radio.crsf.device.trim().to_string(),
+            device: raw
+                .radio
+                .crsf
+                .device
+                .as_deref()
+                .unwrap_or("")
+                .trim()
+                .to_string(),
             enabled: raw.radio.crsf.enabled,
         },
         Err(e) => {
@@ -415,6 +424,21 @@ mod tests {
         let bad = dir.path().join("bad.yaml");
         std::fs::write(&bad, ": not yaml [\n").unwrap();
         assert_eq!(read_crsf_claim(&bad), CrsfClaim::default());
+        // The config model writes `device: null` for "no pin"; the claim must
+        // read it as an enabled-but-unpinned lane, not fail the parse.
+        let nulled = dir.path().join("nulled.yaml");
+        std::fs::write(
+            &nulled,
+            "radio:\n  crsf:\n    enabled: true\n    device: null\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_crsf_claim(&nulled),
+            CrsfClaim {
+                device: String::new(),
+                enabled: true,
+            }
+        );
     }
 
     #[test]

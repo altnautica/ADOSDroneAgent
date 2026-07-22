@@ -591,22 +591,90 @@
       "type": "object"
     },
     "CrsfConfig": {
-      "description": "The ExpressLRS / CRSF RC control lane.\n\n``device`` pins the serial node the RC transmitter module is attached to\n(e.g. ``/dev/ttyUSB0``). A pinned device is excluded from flight-controller\nserial discovery and classified as the RC module by the hot-plug monitor,\nso plugging the module can never disturb the FC link. Empty = no pin.\n\n``enabled`` opts the lane in. It additionally allows the hot-plug monitor\nto classify a known RC-bridge USB id (CP2102/CH340/ESP32-S3) as the RC\nmodule even without a pin; with the lane off and no pin, a generic\nUSB-serial bridge stays an FC candidate (a VID alone cannot distinguish an\nFC behind the same bridge from an RC module).\n\n``packet_rate_hz`` is the RC frame cadence the lane transmits at (the\nprotocol supports 50 to 500 frames per second; the service clamps an\nout-of-range value and logs it).",
+      "description": "The ExpressLRS / CRSF RC control lane.\n\n``device`` pins the serial node the RC transmitter module is attached to\n(e.g. ``/dev/ttyUSB0``). A pinned device is excluded from flight-controller\nserial discovery and classified as the RC module by the hot-plug monitor,\nso plugging the module can never disturb the FC link. ``None`` = no pin;\nthe lane probes for a known RC-bridge when enabled.\n\n``enabled`` opts the lane in. It additionally allows the hot-plug monitor\nto classify a known RC-bridge USB id (CP2102/CH340/ESP32-S3) as the RC\nmodule even without a pin; with the lane off and no pin, a generic\nUSB-serial bridge stays an FC candidate (a VID alone cannot distinguish an\nFC behind the same bridge from an RC module).\n\n``band`` selects the module's operating band class: ``dual`` (a dual-band\nGemini module running both links), ``900`` (sub-GHz only), or ``2p4``\n(2.4 GHz only). A target for the module, surfaced on the lane's status;\nthe module's own parameter system owns the actual band change.\n\n``packet_rate_hz`` is the RC frame cadence the lane transmits at (the\nprotocol supports 50 to 500 frames per second; the service clamps an\nout-of-range value and logs it).\n\n``tx_power_dbm`` is the requested conducted TX power for the module.\n``None`` (the default) leaves the module at its own configured default \u2014\nthe lane never fabricates a power figure; the measured power comes back\non link-statistics telemetry.\n\n``mode`` selects what the attached module carries: ``crsf_rc`` (the RC\nchannel lane this service transmits), ``mavlink`` (the module runs its\nnative MAVLink mode and is owned by the MAVLink router's serial/UDP\nsource, not this lane), or ``airport`` (a generic serial data pipe).\n\n``channel_source`` decides what feeds the transmitted channels in\n``crsf_rc`` mode: ``hid`` (the handset/gamepad path only \u2014 the default),\n``inject`` (the programmatic API only), or ``hybrid`` (both, with the PIC\narbiter's holder deciding authority).\n\n``mavlink_transport`` selects the carrier for ``mode: mavlink``:\n``serial`` (the module's USB-serial port) or ``backpack_wifi`` (the\nmodule's WiFi backpack UDP bridge).\n\n``relay_role`` declares this node's part in an RC relay chain: ``none``\n(not relaying \u2014 the default), ``repeater`` (a pure CRSF repeater), or\n``agent_last_mile`` (an agent relay driving the ELRS last mile).",
       "properties": {
-        "device": {
-          "default": "",
-          "title": "Device",
+        "band": {
+          "default": "dual",
+          "enum": [
+            "dual",
+            "900",
+            "2p4"
+          ],
+          "title": "Band",
           "type": "string"
+        },
+        "channel_source": {
+          "default": "hid",
+          "enum": [
+            "hid",
+            "inject",
+            "hybrid"
+          ],
+          "title": "Channel Source",
+          "type": "string"
+        },
+        "device": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Device"
         },
         "enabled": {
           "default": false,
           "title": "Enabled",
           "type": "boolean"
         },
+        "mavlink_transport": {
+          "default": "serial",
+          "enum": [
+            "serial",
+            "backpack_wifi"
+          ],
+          "title": "Mavlink Transport",
+          "type": "string"
+        },
+        "mode": {
+          "default": "crsf_rc",
+          "enum": [
+            "crsf_rc",
+            "mavlink",
+            "airport"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
         "packet_rate_hz": {
-          "default": 50,
+          "default": 150,
           "title": "Packet Rate Hz",
           "type": "integer"
+        },
+        "relay_role": {
+          "default": "none",
+          "enum": [
+            "none",
+            "repeater",
+            "agent_last_mile"
+          ],
+          "title": "Relay Role",
+          "type": "string"
+        },
+        "tx_power_dbm": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tx Power Dbm"
         }
       },
       "title": "CrsfConfig",
@@ -1227,9 +1295,15 @@
         "crsf": {
           "$ref": "#/$defs/CrsfConfig",
           "default": {
-            "device": "",
+            "band": "dual",
+            "channel_source": "hid",
+            "device": null,
             "enabled": false,
-            "packet_rate_hz": 50
+            "mavlink_transport": "serial",
+            "mode": "crsf_rc",
+            "packet_rate_hz": 150,
+            "relay_role": "none",
+            "tx_power_dbm": null
           }
         }
       },
@@ -2241,9 +2315,15 @@
       "$ref": "#/$defs/RadioConfig",
       "default": {
         "crsf": {
-          "device": "",
+          "band": "dual",
+          "channel_source": "hid",
+          "device": null,
           "enabled": false,
-          "packet_rate_hz": 50
+          "mavlink_transport": "serial",
+          "mode": "crsf_rc",
+          "packet_rate_hz": 150,
+          "relay_role": "none",
+          "tx_power_dbm": null
         }
       }
     },

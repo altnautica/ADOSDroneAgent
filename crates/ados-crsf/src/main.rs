@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{watch, Mutex, Notify};
 
 use ados_crsf::cmdsock::{self, CmdState};
-use ados_crsf::config::{profile_is_drone, CrsfLaneConfig};
+use ados_crsf::config::{profile_is_drone, CrsfLaneConfig, LaneMode};
 use ados_crsf::link::{derive_state, LaneState, LinkInputs};
 use ados_crsf::sidecar::{build_stats_value, write_stats_sidecar, StatsInputs};
 use ados_crsf::sources::{ChannelSourceMode, SourceMerge};
@@ -28,10 +28,12 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 /// Backoff between bring-up attempts (no device, open failure, port death).
 const RETRY_INTERVAL: Duration = Duration::from_secs(5);
 /// Sidecar refresh cadence while the lane idles in a terminal state
-/// (disabled / wrong profile). The body does not change; the rewrite keeps
-/// the file's mtime fresh so a staleness-gated reader can tell a live idle
-/// lane from a dead service's orphaned file.
-const IDLE_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
+/// (disabled / wrong profile / non-RC mode). The body does not change; the
+/// rewrite keeps the file's mtime fresh so a staleness-gated reader can tell
+/// a live idle lane from a dead service's orphaned file. Half the tightest
+/// consumer window (the heartbeat's 10 s gate), so an idle lane never flaps
+/// in and out of the heartbeat at the staleness boundary.
+const IDLE_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
 #[tokio::main]
 async fn main() {
@@ -79,7 +81,7 @@ async fn run_service(cfg: &CrsfLaneConfig, mut shutdown: watch::Receiver<bool>) 
     // simply not in use on this node.
     if !cfg.enabled {
         tracing::info!("crsf_lane_disabled");
-        idle_with_sidecar(&metrics, &mut shutdown).await;
+        idle_with_sidecar(&metrics, &mut shutdown, &StatsInputs::default()).await;
         return;
     }
 
@@ -89,7 +91,24 @@ async fn run_service(cfg: &CrsfLaneConfig, mut shutdown: watch::Receiver<bool>) 
     // sidecar reads `disabled`: the lane does not run on this node.
     if profile_is_drone(Path::new(CONFIG_YAML), Path::new(PROFILE_CONF)) {
         tracing::warn!("crsf_idle_on_drone_profile");
-        idle_with_sidecar(&metrics, &mut shutdown).await;
+        idle_with_sidecar(&metrics, &mut shutdown, &StatsInputs::default()).await;
+        return;
+    }
+
+    // ── Mode gate ────────────────────────────────────────────────────────
+    // The RC transmitter runs only in `crsf_rc`. In `mavlink` mode the
+    // module's port belongs to the MAVLink router's serial/UDP source, and in
+    // `airport` mode it is a generic data pipe — driving RC frames onto
+    // either would corrupt that traffic. Idle with the configured mode
+    // reported honestly so the surface shows WHY the RC lane is not running.
+    if cfg.mode != LaneMode::CrsfRc {
+        tracing::info!(mode = cfg.mode.as_str(), "crsf_rc_lane_idle_for_mode");
+        let idle_inputs = StatsInputs {
+            mode: Some(cfg.mode.as_str()),
+            relay_role: cfg.relay_role.sidecar_str(),
+            ..StatsInputs::default()
+        };
+        idle_with_sidecar(&metrics, &mut shutdown, &idle_inputs).await;
         return;
     }
 
@@ -277,13 +296,17 @@ async fn run_service(cfg: &CrsfLaneConfig, mut shutdown: watch::Receiver<bool>) 
             let source = merge.lock().await.current(now).1.map(|s| s.as_str());
             let inputs = StatsInputs {
                 link: fresh_link.as_ref(),
+                // The operating band is a measurement the lane does not have
+                // (link statistics do not carry it); the configured band is a
+                // target, reported by the regulatory posture surface — the
+                // sidecar never echoes a target as a reading.
                 band: None,
                 packet_rate_hz: Some(cfg.packet_rate_hz),
                 tx_frames_per_s: Some(tx_fps),
                 rx_frames_per_s: Some(rx_fps),
-                mode: Some("rc"),
+                mode: Some(cfg.mode.as_str()),
                 channel_source: source,
-                relay_role: None,
+                relay_role: cfg.relay_role.sidecar_str(),
             };
             *latest_status.lock().await = build_stats_value(state, &inputs);
             write_stats_sidecar(state, &inputs, Some(&metrics));
@@ -326,17 +349,20 @@ async fn wait_for_shutdown_flag(shutdown: &mut watch::Receiver<bool>) {
 /// Idle in a terminal `disabled` state until shutdown, rewriting the honest
 /// sidecar on a slow cadence so its mtime keeps proving the service is alive
 /// (a staleness-gated reader must be able to tell live-disabled from dead).
+/// `inputs` lets a gate report its config-level facts (the lane mode, a relay
+/// role) alongside the terminal state.
 async fn idle_with_sidecar(
     metrics: &ados_protocol::logd::emitter::IngestEmitter,
     shutdown: &mut watch::Receiver<bool>,
+    inputs: &StatsInputs<'_>,
 ) {
-    write_stats_sidecar(LaneState::Disabled, &StatsInputs::default(), Some(metrics));
+    write_stats_sidecar(LaneState::Disabled, inputs, Some(metrics));
     loop {
         tokio::select! {
             biased;
             _ = wait_for_shutdown_flag(shutdown) => return,
             _ = tokio::time::sleep(IDLE_REFRESH_INTERVAL) => {
-                write_stats_sidecar(LaneState::Disabled, &StatsInputs::default(), Some(metrics));
+                write_stats_sidecar(LaneState::Disabled, inputs, Some(metrics));
             }
         }
     }

@@ -163,15 +163,25 @@ impl MavlinkConfig {
         }
         #[derive(Debug, Default, Deserialize)]
         struct CrsfSection {
+            // Nullable on disk (the config model writes `device: null` for
+            // "no pin"); a bare String would fail the parse on the explicit
+            // null and take the whole mavlink section down with it.
             #[serde(default)]
-            device: String,
+            device: Option<String>,
         }
         let Ok(text) = std::fs::read_to_string(path) else {
             return (MavlinkConfig::default(), None);
         };
         let (raw, error): (RawConfig, _) = ados_config::yaml_reporting(&text, "mavlink");
         let mut cfg = raw.mavlink;
-        cfg.crsf_device = raw.radio.crsf.device.trim().to_string();
+        cfg.crsf_device = raw
+            .radio
+            .crsf
+            .device
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .to_string();
         (cfg, error)
     }
 
@@ -296,6 +306,16 @@ mod tests {
         let cfg2 = dir.path().join("config2.yaml");
         write(&cfg2, "radio:\n  crsf:\n    enabled: true\n");
         assert_eq!(MavlinkConfig::load_from(&cfg2).crsf_device, "");
+        // The config model writes `device: null` for "no pin": the explicit
+        // null reads as no pin and must not fail the whole mavlink parse.
+        let cfg3 = dir.path().join("config3.yaml");
+        write(
+            &cfg3,
+            "mavlink:\n  serial_port: /dev/ttyACM0\nradio:\n  crsf:\n    device: null\n",
+        );
+        let c3 = MavlinkConfig::load_from(&cfg3);
+        assert_eq!(c3.crsf_device, "");
+        assert_eq!(c3.serial_port, "/dev/ttyACM0");
     }
 
     #[test]

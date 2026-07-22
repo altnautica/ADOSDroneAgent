@@ -89,12 +89,18 @@ def test_crsf_lane_defaults_off_and_unpinned():
     """A fresh config has no CRSF pin and the lane opted out."""
     cfg = ADOSConfig()
     assert cfg.radio.crsf.enabled is False
-    assert cfg.radio.crsf.device == ""
-    assert cfg.radio.crsf.packet_rate_hz == 50
+    assert cfg.radio.crsf.device is None
+    assert cfg.radio.crsf.band == "dual"
+    assert cfg.radio.crsf.packet_rate_hz == 150
+    assert cfg.radio.crsf.tx_power_dbm is None
+    assert cfg.radio.crsf.mode == "crsf_rc"
+    assert cfg.radio.crsf.channel_source == "hid"
+    assert cfg.radio.crsf.mavlink_transport == "serial"
+    assert cfg.radio.crsf.relay_role == "none"
 
 
 def test_crsf_pin_round_trips_through_a_full_save():
-    """The radio.crsf pin survives a model_dump() full-file rewrite.
+    """The radio.crsf block survives a model_dump() full-file rewrite.
 
     Every config save rewrites the whole YAML from ``model_dump()``; a section
     missing from the model would be silently dropped on the next write, erasing
@@ -103,7 +109,17 @@ def test_crsf_pin_round_trips_through_a_full_save():
     """
     data = {
         "radio": {
-            "crsf": {"enabled": True, "device": "/dev/ttyUSB0", "packet_rate_hz": 150}
+            "crsf": {
+                "enabled": True,
+                "device": "/dev/ttyUSB0",
+                "band": "900",
+                "packet_rate_hz": 250,
+                "tx_power_dbm": 20,
+                "mode": "mavlink",
+                "channel_source": "hybrid",
+                "mavlink_transport": "backpack_wifi",
+                "relay_role": "repeater",
+            }
         }
     }
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
@@ -112,13 +128,34 @@ def test_crsf_pin_round_trips_through_a_full_save():
         cfg = load_config(f.name)
     assert cfg.radio.crsf.enabled is True
     assert cfg.radio.crsf.device == "/dev/ttyUSB0"
-    assert cfg.radio.crsf.packet_rate_hz == 150
+    assert cfg.radio.crsf.band == "900"
+    assert cfg.radio.crsf.packet_rate_hz == 250
+    assert cfg.radio.crsf.tx_power_dbm == 20
+    assert cfg.radio.crsf.mode == "mavlink"
+    assert cfg.radio.crsf.channel_source == "hybrid"
+    assert cfg.radio.crsf.mavlink_transport == "backpack_wifi"
+    assert cfg.radio.crsf.relay_role == "repeater"
     dumped = cfg.model_dump()
-    assert dumped["radio"]["crsf"] == {
-        "enabled": True,
-        "device": "/dev/ttyUSB0",
-        "packet_rate_hz": 150,
-    }
+    assert dumped["radio"]["crsf"] == data["radio"]["crsf"]
+
+
+def test_crsf_unset_nullables_dump_as_null():
+    """The unset nullable fields (device pin, TX power) dump as ``None`` — the
+    on-disk YAML carries explicit nulls, which every native reader of the block
+    tolerates. A ``region``-style Literal typo is rejected by validation rather
+    than silently defaulted (the native readers degrade loudly instead)."""
+    import pytest
+    from pydantic import ValidationError
+
+    from ados.core.config.radio import CrsfConfig
+
+    dumped = ADOSConfig().model_dump()["radio"]["crsf"]
+    assert dumped["device"] is None
+    assert dumped["tx_power_dbm"] is None
+    with pytest.raises(ValidationError):
+        CrsfConfig(band="5ghz")
+    with pytest.raises(ValidationError):
+        CrsfConfig(channel_source="bogus")
 
 
 def test_regulatory_region_round_trips():

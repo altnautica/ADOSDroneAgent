@@ -51,13 +51,32 @@ def test_committed_schema_shape_and_secret_markers() -> None:
     schema = json.loads(_SCHEMA.read_text(encoding="utf-8"))
 
     # Every top-level config block is described.
-    for block in ("agent", "mavlink", "video", "network", "server", "security"):
+    for block in ("agent", "mavlink", "video", "network", "server", "security", "radio"):
         assert block in schema["properties"], f"missing top-level block {block!r}"
 
     # Enums survive (the server-mode Literal is the canary).
     mode = schema["$defs"]["ServerConfig"]["properties"]["mode"]
     assert mode["enum"] == ["cloud", "self_hosted", "local"]
     assert mode["default"] == "local"
+
+    # The CRSF RC-lane block carries its full field set with the pinned
+    # defaults, so a schema-driven UI renders the lane without hand-typed
+    # forms and the enums constrain the writes.
+    crsf = schema["$defs"]["CrsfConfig"]["properties"]
+    assert crsf["enabled"]["default"] is False
+    assert crsf["device"]["default"] is None
+    assert crsf["band"]["enum"] == ["dual", "900", "2p4"]
+    assert crsf["band"]["default"] == "dual"
+    assert crsf["packet_rate_hz"]["default"] == 150
+    assert crsf["tx_power_dbm"]["default"] is None
+    assert crsf["mode"]["enum"] == ["crsf_rc", "mavlink", "airport"]
+    assert crsf["mode"]["default"] == "crsf_rc"
+    assert crsf["channel_source"]["enum"] == ["hid", "inject", "hybrid"]
+    assert crsf["channel_source"]["default"] == "hid"
+    assert crsf["mavlink_transport"]["enum"] == ["serial", "backpack_wifi"]
+    assert crsf["mavlink_transport"]["default"] == "serial"
+    assert crsf["relay_role"]["enum"] == ["none", "repeater", "agent_last_mile"]
+    assert crsf["relay_role"]["default"] == "none"
 
     # Machine-independent defaults: the emitter pins the Linux FHS bases.
     assert (

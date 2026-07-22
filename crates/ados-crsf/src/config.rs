@@ -6,13 +6,147 @@ use serde::Deserialize;
 
 use crate::sources::ChannelSourceMode;
 
-/// Default RC frame cadence when the config does not pin one. Conservative:
-/// well inside what a USB-serial RC module accepts, and a full-duplex bridge
-/// owns the half-duplex bus turnaround, so the host only has to hold the
-/// frame cadence, not a microsecond turnaround budget.
-pub const DEFAULT_PACKET_RATE_HZ: u16 = 50;
+/// Default RC frame cadence when the config does not pin one: the standard
+/// mid rate — comfortably inside a USB-serial RC module bridge's budget
+/// (26 bytes × 150 Hz ≈ 31 kbit/s on a 420 kbaud line), and the full-duplex
+/// bridge owns the half-duplex bus turnaround, so the host only has to hold
+/// the frame cadence, not a microsecond turnaround budget.
+pub const DEFAULT_PACKET_RATE_HZ: u16 = 150;
 /// Ceiling on the configured cadence (the protocol's fastest standard rate).
 pub const MAX_PACKET_RATE_HZ: u16 = 500;
+
+/// The module's operating band class (`radio.crsf.band`). A target for the
+/// module, surfaced on status; the module's own parameter system owns the
+/// actual band change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BandMode {
+    /// A dual-band (Gemini-class) module running both links.
+    #[default]
+    Dual,
+    /// Sub-GHz only.
+    Band900,
+    /// 2.4 GHz only.
+    Band2p4,
+}
+
+impl BandMode {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "dual" => Some(Self::Dual),
+            "900" => Some(Self::Band900),
+            "2p4" => Some(Self::Band2p4),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Dual => "dual",
+            Self::Band900 => "900",
+            Self::Band2p4 => "2p4",
+        }
+    }
+}
+
+/// What the attached module carries (`radio.crsf.mode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LaneMode {
+    /// The RC channel lane this service transmits (the default).
+    #[default]
+    CrsfRc,
+    /// The module runs its native MAVLink mode; the MAVLink router's
+    /// serial/UDP source owns the port, not this lane.
+    Mavlink,
+    /// A generic serial data pipe through the module.
+    Airport,
+}
+
+impl LaneMode {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "crsf_rc" => Some(Self::CrsfRc),
+            "mavlink" => Some(Self::Mavlink),
+            "airport" => Some(Self::Airport),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CrsfRc => "crsf_rc",
+            Self::Mavlink => "mavlink",
+            Self::Airport => "airport",
+        }
+    }
+}
+
+/// The carrier for `mode: mavlink` (`radio.crsf.mavlink_transport`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MavlinkTransport {
+    /// The module's USB-serial port (the default).
+    #[default]
+    Serial,
+    /// The module's WiFi-backpack UDP bridge.
+    BackpackWifi,
+}
+
+impl MavlinkTransport {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "serial" => Some(Self::Serial),
+            "backpack_wifi" => Some(Self::BackpackWifi),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Serial => "serial",
+            Self::BackpackWifi => "backpack_wifi",
+        }
+    }
+}
+
+/// This node's part in an RC relay chain (`radio.crsf.relay_role`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RelayRole {
+    /// Not relaying (the default).
+    #[default]
+    None,
+    /// A pure CRSF repeater.
+    Repeater,
+    /// An agent relay driving the ELRS last mile.
+    AgentLastMile,
+}
+
+impl RelayRole {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "none" => Some(Self::None),
+            "repeater" => Some(Self::Repeater),
+            "agent_last_mile" => Some(Self::AgentLastMile),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Repeater => "repeater",
+            Self::AgentLastMile => "agent_last_mile",
+        }
+    }
+
+    /// The sidecar's `relay_role` field: participation is reported only when
+    /// this node actually relays — `none` reads as a JSON null, never a
+    /// fabricated role label.
+    pub fn sidecar_str(self) -> Option<&'static str> {
+        match self {
+            Self::None => None,
+            other => Some(other.as_str()),
+        }
+    }
+}
 
 /// The `radio.crsf` block of `/etc/ados/config.yaml`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,14 +154,29 @@ pub struct CrsfLaneConfig {
     /// The lane opt-in. Absent/false ⇒ the service idles harmlessly.
     pub enabled: bool,
     /// The serial device the RC transmitter module is pinned to
-    /// (e.g. `/dev/ttyUSB0`). Empty ⇒ no pin, the lane is unconfigured.
+    /// (e.g. `/dev/ttyUSB0`), normalized from the config's nullable field.
+    /// Empty ⇒ no pin, the lane is unconfigured.
     pub device: String,
+    /// The module's operating band class target.
+    pub band: BandMode,
     /// RC frame cadence, frames per second, clamped to 1..=500.
     pub packet_rate_hz: u16,
+    /// Requested conducted TX power for the module. `None` (the default)
+    /// leaves the module at its own default — never a fabricated figure; the
+    /// measured power comes back on link-statistics telemetry.
+    pub tx_power_dbm: Option<i64>,
+    /// What the attached module carries. The RC transmitter runs only in
+    /// `crsf_rc`; in the other modes this service idles (the port belongs to
+    /// the MAVLink router / the data pipe).
+    pub mode: LaneMode,
     /// Which source feeds the transmitted channels (`hid` | `inject` |
-    /// `hybrid`). Defaults to `hybrid`: the PIC arbiter's holder decides, and
-    /// with no claim held the programmatic lane feeds.
+    /// `hybrid`). Defaults to `hid`: the handset/gamepad path only — the
+    /// programmatic lane must be opted into.
     pub channel_source: ChannelSourceMode,
+    /// The carrier for `mode: mavlink`.
+    pub mavlink_transport: MavlinkTransport,
+    /// This node's part in an RC relay chain.
+    pub relay_role: RelayRole,
 }
 
 impl Default for CrsfLaneConfig {
@@ -35,8 +184,13 @@ impl Default for CrsfLaneConfig {
         Self {
             enabled: false,
             device: String::new(),
+            band: BandMode::Dual,
             packet_rate_hz: DEFAULT_PACKET_RATE_HZ,
-            channel_source: ChannelSourceMode::Hybrid,
+            tx_power_dbm: None,
+            mode: LaneMode::CrsfRc,
+            channel_source: ChannelSourceMode::Hid,
+            mavlink_transport: MavlinkTransport::Serial,
+            relay_role: RelayRole::None,
         }
     }
 }
@@ -57,12 +211,46 @@ struct RadioSection {
 struct CrsfSection {
     #[serde(default)]
     enabled: bool,
+    // Nullable on disk (the Python model writes `device: null` for "no pin"),
+    // so an Option is load-bearing: a bare String would fail the whole parse
+    // on the explicit null.
     #[serde(default)]
-    device: String,
+    device: Option<String>,
+    #[serde(default)]
+    band: Option<String>,
     #[serde(default)]
     packet_rate_hz: Option<u16>,
     #[serde(default)]
+    tx_power_dbm: Option<i64>,
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
     channel_source: Option<String>,
+    #[serde(default)]
+    mavlink_transport: Option<String>,
+    #[serde(default)]
+    relay_role: Option<String>,
+}
+
+/// Parse an optional enum-ish string field, warning (once, at load) and
+/// falling back to the default on an unknown value — a typo must degrade
+/// loudly to a safe default, never crash-loop the lane.
+fn parse_or_default<T: Default>(
+    field: &'static str,
+    raw: Option<&str>,
+    parse: impl Fn(&str) -> Option<T>,
+) -> T {
+    match raw {
+        None => T::default(),
+        Some(s) => parse(s).unwrap_or_else(|| {
+            tracing::warn!(
+                field,
+                configured = s,
+                "crsf config value unknown; using default"
+            );
+            T::default()
+        }),
+    }
 }
 
 impl CrsfLaneConfig {
@@ -77,8 +265,8 @@ impl CrsfLaneConfig {
     }
 
     fn from_raw(raw: RawConfig) -> Self {
-        let configured = raw.radio.crsf.packet_rate_hz;
-        let packet_rate_hz = match configured {
+        let crsf = raw.radio.crsf;
+        let packet_rate_hz = match crsf.packet_rate_hz {
             None => DEFAULT_PACKET_RATE_HZ,
             Some(r) if (1..=MAX_PACKET_RATE_HZ).contains(&r) => r,
             Some(r) => {
@@ -91,21 +279,34 @@ impl CrsfLaneConfig {
                 clamped
             }
         };
-        let channel_source = match raw.radio.crsf.channel_source.as_deref() {
-            None => ChannelSourceMode::Hybrid,
+        let channel_source = match crsf.channel_source.as_deref() {
+            None => ChannelSourceMode::Hid,
             Some(s) => ChannelSourceMode::parse(s).unwrap_or_else(|| {
                 tracing::warn!(
                     configured = s,
-                    "crsf channel_source unknown; defaulting to hybrid"
+                    "crsf channel_source unknown; defaulting to hid"
                 );
-                ChannelSourceMode::Hybrid
+                ChannelSourceMode::Hid
             }),
         };
         Self {
-            enabled: raw.radio.crsf.enabled,
-            device: raw.radio.crsf.device.trim().to_string(),
+            enabled: crsf.enabled,
+            device: crsf.device.as_deref().unwrap_or("").trim().to_string(),
+            band: parse_or_default("band", crsf.band.as_deref(), BandMode::parse),
             packet_rate_hz,
+            tx_power_dbm: crsf.tx_power_dbm,
+            mode: parse_or_default("mode", crsf.mode.as_deref(), LaneMode::parse),
             channel_source,
+            mavlink_transport: parse_or_default(
+                "mavlink_transport",
+                crsf.mavlink_transport.as_deref(),
+                MavlinkTransport::parse,
+            ),
+            relay_role: parse_or_default(
+                "relay_role",
+                crsf.relay_role.as_deref(),
+                RelayRole::parse,
+            ),
         }
     }
 }
@@ -169,6 +370,12 @@ mod tests {
         assert_eq!(cfg, CrsfLaneConfig::default());
         assert!(!cfg.enabled);
         assert_eq!(cfg.packet_rate_hz, DEFAULT_PACKET_RATE_HZ);
+        assert_eq!(cfg.band, BandMode::Dual);
+        assert_eq!(cfg.tx_power_dbm, None);
+        assert_eq!(cfg.mode, LaneMode::CrsfRc);
+        assert_eq!(cfg.channel_source, ChannelSourceMode::Hid);
+        assert_eq!(cfg.mavlink_transport, MavlinkTransport::Serial);
+        assert_eq!(cfg.relay_role, RelayRole::None);
     }
 
     #[test]
@@ -177,12 +384,34 @@ mod tests {
         let path = write_file(
             &dir,
             "config.yaml",
-            "radio:\n  crsf:\n    enabled: true\n    device: \" /dev/ttyUSB0 \"\n    packet_rate_hz: 150\n",
+            "radio:\n  crsf:\n    enabled: true\n    device: \" /dev/ttyUSB0 \"\n    band: \"900\"\n    packet_rate_hz: 250\n    tx_power_dbm: 20\n    mode: mavlink\n    channel_source: hybrid\n    mavlink_transport: backpack_wifi\n    relay_role: repeater\n",
         );
         let cfg = CrsfLaneConfig::load_from(&path);
         assert!(cfg.enabled);
         assert_eq!(cfg.device, "/dev/ttyUSB0");
-        assert_eq!(cfg.packet_rate_hz, 150);
+        assert_eq!(cfg.band, BandMode::Band900);
+        assert_eq!(cfg.packet_rate_hz, 250);
+        assert_eq!(cfg.tx_power_dbm, Some(20));
+        assert_eq!(cfg.mode, LaneMode::Mavlink);
+        assert_eq!(cfg.channel_source, ChannelSourceMode::Hybrid);
+        assert_eq!(cfg.mavlink_transport, MavlinkTransport::BackpackWifi);
+        assert_eq!(cfg.relay_role, RelayRole::Repeater);
+    }
+
+    #[test]
+    fn null_device_and_power_read_as_unset() {
+        // The Python model writes explicit nulls for the unset nullable
+        // fields; the parse must read them as absent, never fail.
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(
+            &dir,
+            "config.yaml",
+            "radio:\n  crsf:\n    enabled: true\n    device: null\n    tx_power_dbm: null\n",
+        );
+        let cfg = CrsfLaneConfig::load_from(&path);
+        assert!(cfg.enabled);
+        assert!(cfg.device.is_empty());
+        assert_eq!(cfg.tx_power_dbm, None);
     }
 
     #[test]
@@ -206,12 +435,12 @@ mod tests {
     }
 
     #[test]
-    fn channel_source_parses_with_a_hybrid_default() {
+    fn channel_source_parses_with_a_hid_default() {
         let dir = tempfile::tempdir().unwrap();
         for (yaml, expected) in [
             (
                 "radio:\n  crsf:\n    enabled: true\n",
-                ChannelSourceMode::Hybrid,
+                ChannelSourceMode::Hid,
             ),
             (
                 "radio:\n  crsf:\n    channel_source: hid\n",
@@ -222,8 +451,12 @@ mod tests {
                 ChannelSourceMode::Inject,
             ),
             (
-                "radio:\n  crsf:\n    channel_source: bogus\n",
+                "radio:\n  crsf:\n    channel_source: hybrid\n",
                 ChannelSourceMode::Hybrid,
+            ),
+            (
+                "radio:\n  crsf:\n    channel_source: bogus\n",
+                ChannelSourceMode::Hid,
             ),
         ] {
             let path = write_file(&dir, "config.yaml", yaml);
@@ -233,6 +466,48 @@ mod tests {
                 "yaml: {yaml:?}"
             );
         }
+    }
+
+    #[test]
+    fn unknown_enum_values_degrade_to_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(
+            &dir,
+            "config.yaml",
+            "radio:\n  crsf:\n    band: 5ghz\n    mode: teleport\n    mavlink_transport: carrier_pigeon\n    relay_role: chief\n",
+        );
+        let cfg = CrsfLaneConfig::load_from(&path);
+        assert_eq!(cfg.band, BandMode::Dual);
+        assert_eq!(cfg.mode, LaneMode::CrsfRc);
+        assert_eq!(cfg.mavlink_transport, MavlinkTransport::Serial);
+        assert_eq!(cfg.relay_role, RelayRole::None);
+    }
+
+    #[test]
+    fn enum_round_trips_cover_every_variant() {
+        for band in [BandMode::Dual, BandMode::Band900, BandMode::Band2p4] {
+            assert_eq!(BandMode::parse(band.as_str()), Some(band));
+        }
+        for mode in [LaneMode::CrsfRc, LaneMode::Mavlink, LaneMode::Airport] {
+            assert_eq!(LaneMode::parse(mode.as_str()), Some(mode));
+        }
+        for t in [MavlinkTransport::Serial, MavlinkTransport::BackpackWifi] {
+            assert_eq!(MavlinkTransport::parse(t.as_str()), Some(t));
+        }
+        for r in [
+            RelayRole::None,
+            RelayRole::Repeater,
+            RelayRole::AgentLastMile,
+        ] {
+            assert_eq!(RelayRole::parse(r.as_str()), Some(r));
+        }
+        // The sidecar projection reports participation only: `none` is null.
+        assert_eq!(RelayRole::None.sidecar_str(), None);
+        assert_eq!(RelayRole::Repeater.sidecar_str(), Some("repeater"));
+        assert_eq!(
+            RelayRole::AgentLastMile.sidecar_str(),
+            Some("agent_last_mile")
+        );
     }
 
     #[test]
