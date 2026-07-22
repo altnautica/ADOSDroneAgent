@@ -81,6 +81,16 @@ async def cloud_heartbeat_loop(app: AgentApp) -> None:
         if app.pairing_manager.is_paired and convex_url:
             try:
                 payload = app._build_heartbeat_payload()
+                # The status validator types its optional root fields as
+                # "absent OR T" — an explicit JSON null is REJECTED, so one
+                # None leaf (an offload target, an FC hint) would fail the
+                # whole heartbeat. Mirror the native relay, which omits every
+                # None-valued root key instead of serializing null. Top-level
+                # keys only: nested block members (the radio block's
+                # three-state verdicts) keep their nulls deliberately — the
+                # validator declares those nullable, and dropping them would
+                # erase the honest "no reading" state.
+                payload = {k: v for k, v in payload.items() if v is not None}
                 async with httpx.AsyncClient(timeout=10.0) as client:
                     await client.post(
                         f"{convex_url}/agent/status",
