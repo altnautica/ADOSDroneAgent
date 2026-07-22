@@ -185,6 +185,12 @@ fn native_routes() -> Vec<NativeRoute> {
         get("/api/v1/ground-station/pair/pending"),
         get("/api/v1/ground-station/pic"),
         get("/api/v1/ground-station/captive-token"),
+        // Ground-station CRSF RC lane (profile-gated): the staleness-gated
+        // state read + the channel-injection and parameter-write forwards to
+        // the lane daemon's command socket.
+        get("/api/v1/ground-station/crsf"),
+        post("/api/v1/ground-station/crsf/channels"),
+        post("/api/v1/ground-station/crsf/params"),
         // Ground-station reads ported in the read-tail wave (profile-gated).
         get("/api/v1/ground-station/recording/list"),
         get("/api/v1/ground-station/ui"),
@@ -447,7 +453,7 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            135,
+            138,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);
@@ -492,6 +498,7 @@ mod tests {
             "/api/v1/ground-station/pair/pending",
             "/api/v1/ground-station/pic",
             "/api/v1/ground-station/captive-token",
+            "/api/v1/ground-station/crsf",
             "/api/params/{name}",
             "/api/v1/network/client/status",
             "/api/v1/network/client/configured",
@@ -575,6 +582,10 @@ mod tests {
         ));
         assert!(has(Method::POST, "/api/v1/ground-station/pic/heartbeat"));
         assert!(has(Method::PUT, "/api/v1/ground-station/gamepads/primary"));
+        // The CRSF RC-lane injection + parameter writes must be native (else
+        // a flight-critical channel injection would be served auth-skipped).
+        assert!(has(Method::POST, "/api/v1/ground-station/crsf/channels"));
+        assert!(has(Method::POST, "/api/v1/ground-station/crsf/params"));
         assert!(has(Method::POST, "/api/v1/ground-station/bluetooth/scan"));
         assert!(has(Method::POST, "/api/v1/ground-station/bluetooth/pair"));
         assert!(has(

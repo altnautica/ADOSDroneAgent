@@ -31,6 +31,7 @@ pub mod fleet;
 pub mod gs_bluetooth;
 pub mod gs_camera_write;
 pub mod gs_cmd;
+pub mod gs_crsf;
 pub mod gs_gamepad_write;
 pub mod gs_input_read;
 pub mod gs_mesh;
@@ -534,6 +535,19 @@ pub fn build_router(state: AppState, net_native: bool, hid_native: bool) -> Rout
         .route(
             "/api/v1/ground-station/ui/screens",
             put(gs_ui_write::put_ui_screens),
+        )
+        // Ground-station CRSF RC-lane surface (profile-gated): the lane state
+        // sidecar (staleness-gated read), the programmatic channel injection,
+        // and the RC-module parameter write — the writes forward to the lane
+        // daemon's command socket (the owner of the live channel merge).
+        .route("/api/v1/ground-station/crsf", get(gs_crsf::get_crsf_status))
+        .route(
+            "/api/v1/ground-station/crsf/channels",
+            post(gs_crsf::post_crsf_channels),
+        )
+        .route(
+            "/api/v1/ground-station/crsf/params",
+            post(gs_crsf::post_crsf_param_write),
         );
 
     // Wi-Fi client writes (profile-agnostic) are served natively only where the

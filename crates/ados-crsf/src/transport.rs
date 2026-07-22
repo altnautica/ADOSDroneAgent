@@ -33,6 +33,42 @@ pub fn open_serial(port: &str, baud: u32) -> Option<SerialStream> {
     tokio_serial::new(port, baud).open_native_async().ok()
 }
 
+/// Cap on the out-of-band frame queue: parameter traffic is operator-paced
+/// (a handful of frames per interaction), so a queue this deep means the
+/// consumer is wedged and further pushes must be refused, not buffered.
+pub const OOB_QUEUE_CAP: usize = 32;
+
+/// The queue was full; the frame was not enqueued.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OobQueueFull;
+
+/// A bounded queue of out-of-band wire frames (parameter reads/writes) the
+/// TX task drains after each RC frame, so parameter traffic rides the same
+/// cadence without disturbing it. A std mutex: both sides hold it only for a
+/// push/drain, never across an await.
+#[derive(Debug, Default)]
+pub struct OobQueue {
+    inner: std::sync::Mutex<std::collections::VecDeque<Vec<u8>>>,
+}
+
+impl OobQueue {
+    /// Enqueue a complete wire frame, refusing beyond [`OOB_QUEUE_CAP`].
+    pub fn push(&self, frame: Vec<u8>) -> Result<(), OobQueueFull> {
+        let mut q = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        if q.len() >= OOB_QUEUE_CAP {
+            return Err(OobQueueFull);
+        }
+        q.push_back(frame);
+        Ok(())
+    }
+
+    /// Take every pending frame, in push order.
+    pub fn drain(&self) -> Vec<Vec<u8>> {
+        let mut q = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        q.drain(..).collect()
+    }
+}
+
 /// Shared wire counters both tasks bump and the heartbeat reads. Relaxed
 /// ordering everywhere: these are statistics, not synchronization.
 #[derive(Debug, Default)]
@@ -90,6 +126,7 @@ pub async fn run_tx<W: AsyncWrite + Unpin>(
     merge: Arc<Mutex<SourceMerge>>,
     rate_hz: u16,
     counters: Arc<WireCounters>,
+    oob: Arc<OobQueue>,
     cancel: Arc<Notify>,
 ) -> TxExit {
     let period = Duration::from_secs_f64(1.0 / f64::from(rate_hz.max(1)));
@@ -117,6 +154,14 @@ pub async fn run_tx<W: AsyncWrite + Unpin>(
             return TxExit::WriteError;
         }
         counters.tx_frames.fetch_add(1, Ordering::Relaxed);
+        // Out-of-band traffic (parameter frames) rides after the RC frame so
+        // the RC cadence is never delayed by parameter work. The queue is
+        // bounded, and a full drain at 420 kbaud is well under one period.
+        for pending in oob.drain() {
+            if writer.write_all(&pending).await.is_err() || writer.flush().await.is_err() {
+                return TxExit::WriteError;
+            }
+        }
     }
 }
 
@@ -220,11 +265,26 @@ mod tests {
         let telemetry = Arc::new(Mutex::new(TelemetryState::default()));
         let cancel = Arc::new(Notify::new());
 
+        let oob = Arc::new(OobQueue::default());
+        // A parameter frame queued out-of-band rides between RC frames.
+        let param = crate::params::ParameterWrite {
+            dest: crate::frame::ADDR_TRANSMITTER_MODULE,
+            origin: crate::frame::ADDR_HANDSET,
+            field_index: 3,
+            data: vec![2],
+        };
+        oob.push(
+            param
+                .to_frame(crate::frame::ADDR_TRANSMITTER_MODULE)
+                .unwrap(),
+        )
+        .unwrap();
         let tx = tokio::spawn(run_tx(
             tx_side,
             merge.clone(),
             200, // fast cadence keeps the test quick
             counters.clone(),
+            oob,
             cancel.clone(),
         ));
 
@@ -235,24 +295,41 @@ mod tests {
         let mut frames = Vec::new();
         let deadline = tokio::time::timeout(Duration::from_secs(5), async {
             let mut buf = [0u8; 64];
-            while frames.len() < 5 {
+            while frames.len() < 6 {
                 let n = reader.read(&mut buf).await.unwrap();
                 assert!(n > 0, "tx side closed unexpectedly");
                 frames.extend(parser.push(&buf[..n]));
             }
         })
         .await;
-        deadline.expect("five frames within the deadline");
+        deadline.expect("six frames within the deadline");
         cancel.notify_waiters();
         assert_eq!(tx.await.unwrap(), TxExit::Cancelled);
 
         assert!(parser.crc_errors == 0, "clean loopback has no crc errors");
-        assert!(counters.tx_frames.load(Ordering::Relaxed) >= 5);
+        assert!(
+            counters.tx_frames.load(Ordering::Relaxed) >= 5,
+            "five RC frames plus the param frame"
+        );
+        let mut saw_param = false;
         for frame in &frames {
-            assert_eq!(frame.frame_type, crate::frame::TYPE_RC_CHANNELS_PACKED);
-            let payload: [u8; PACKED_SIZE] = frame.payload.clone().try_into().unwrap();
-            assert_eq!(unpack_channels(&payload), injected);
+            match frame.frame_type {
+                crate::frame::TYPE_PARAMETER_WRITE => {
+                    // The queued out-of-band parameter frame came through the
+                    // same cadence, intact.
+                    let decoded = crate::params::ParameterWrite::decode(&frame.payload).unwrap();
+                    assert_eq!(decoded.field_index, 3);
+                    assert_eq!(decoded.data, vec![2]);
+                    saw_param = true;
+                }
+                t => {
+                    assert_eq!(t, crate::frame::TYPE_RC_CHANNELS_PACKED);
+                    let payload: [u8; PACKED_SIZE] = frame.payload.clone().try_into().unwrap();
+                    assert_eq!(unpack_channels(&payload), injected);
+                }
+            }
         }
+        assert!(saw_param, "the out-of-band parameter frame was transmitted");
         // The telemetry state stays empty — RC frames are not telemetry.
         assert!(telemetry.lock().await.last_link_stats.is_none());
     }
@@ -328,6 +405,7 @@ mod tests {
             inject_merge(),
             1, // slow: the cancel must not wait for a tick
             counters.clone(),
+            Arc::new(OobQueue::default()),
             cancel.clone(),
         ));
         let rx = tokio::spawn(run_rx(rx_side, telemetry, counters, cancel.clone()));
@@ -353,10 +431,35 @@ mod tests {
         let cancel = Arc::new(Notify::new());
         let exit = tokio::time::timeout(
             Duration::from_secs(5),
-            run_tx(tx_side, inject_merge(), 100, counters, cancel),
+            run_tx(
+                tx_side,
+                inject_merge(),
+                100,
+                counters,
+                Arc::new(OobQueue::default()),
+                cancel,
+            ),
         )
         .await
         .expect("exit promptly");
         assert_eq!(exit, TxExit::WriteError);
+    }
+
+    /// The out-of-band queue is bounded: pushes beyond the cap are refused,
+    /// and a drain empties it in push order.
+    #[test]
+    fn oob_queue_bounds_and_drains_in_order() {
+        let q = OobQueue::default();
+        for i in 0..OOB_QUEUE_CAP {
+            q.push(vec![i as u8]).unwrap();
+        }
+        assert_eq!(q.push(vec![0xFF]), Err(OobQueueFull));
+        let drained = q.drain();
+        assert_eq!(drained.len(), OOB_QUEUE_CAP);
+        assert_eq!(drained[0], vec![0u8]);
+        assert_eq!(drained[OOB_QUEUE_CAP - 1], vec![(OOB_QUEUE_CAP - 1) as u8]);
+        // Emptied: a fresh push succeeds.
+        assert!(q.drain().is_empty());
+        q.push(vec![1]).unwrap();
     }
 }

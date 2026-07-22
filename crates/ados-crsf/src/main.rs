@@ -27,6 +27,11 @@ const PROFILE_CONF: &str = "/etc/ados/profile.conf";
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 /// Backoff between bring-up attempts (no device, open failure, port death).
 const RETRY_INTERVAL: Duration = Duration::from_secs(5);
+/// Sidecar refresh cadence while the lane idles in a terminal state
+/// (disabled / wrong profile). The body does not change; the rewrite keeps
+/// the file's mtime fresh so a staleness-gated reader can tell a live idle
+/// lane from a dead service's orphaned file.
+const IDLE_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
 
 #[tokio::main]
 async fn main() {
@@ -74,8 +79,7 @@ async fn run_service(cfg: &CrsfLaneConfig, mut shutdown: watch::Receiver<bool>) 
     // simply not in use on this node.
     if !cfg.enabled {
         tracing::info!("crsf_lane_disabled");
-        write_stats_sidecar(LaneState::Disabled, &StatsInputs::default(), Some(&metrics));
-        wait_for_shutdown_flag(&mut shutdown).await;
+        idle_with_sidecar(&metrics, &mut shutdown).await;
         return;
     }
 
@@ -85,8 +89,7 @@ async fn run_service(cfg: &CrsfLaneConfig, mut shutdown: watch::Receiver<bool>) 
     // sidecar reads `disabled`: the lane does not run on this node.
     if profile_is_drone(Path::new(CONFIG_YAML), Path::new(PROFILE_CONF)) {
         tracing::warn!("crsf_idle_on_drone_profile");
-        write_stats_sidecar(LaneState::Disabled, &StatsInputs::default(), Some(&metrics));
-        wait_for_shutdown_flag(&mut shutdown).await;
+        idle_with_sidecar(&metrics, &mut shutdown).await;
         return;
     }
 
@@ -151,6 +154,9 @@ async fn run_service(cfg: &CrsfLaneConfig, mut shutdown: watch::Receiver<bool>) 
         let (read_half, write_half) = tokio::io::split(stream);
         let counters = Arc::new(WireCounters::default());
         let telemetry = Arc::new(Mutex::new(TelemetryState::default()));
+        // Per-bring-up out-of-band lane: parameter frames queued for a port
+        // that dies die with it (a stale write must not fire on a fresh port).
+        let oob = Arc::new(ados_crsf::transport::OobQueue::default());
         let task_cancel = Arc::new(Notify::new());
 
         // Bridge the latched shutdown onto the per-bring-up cancel notify so
@@ -167,6 +173,7 @@ async fn run_service(cfg: &CrsfLaneConfig, mut shutdown: watch::Receiver<bool>) 
             merge.clone(),
             cfg.packet_rate_hz,
             counters.clone(),
+            oob.clone(),
             task_cancel.clone(),
         ));
         let mut rx_task = tokio::spawn(run_rx(
@@ -185,6 +192,7 @@ async fn run_service(cfg: &CrsfLaneConfig, mut shutdown: watch::Receiver<bool>) 
         let cmd_state = CmdState {
             merge: merge.clone(),
             latest_status: latest_status.clone(),
+            oob: oob.clone(),
         };
         let cmd_cancel = task_cancel.clone();
         let cmd_task = tokio::spawn(async move {
@@ -313,6 +321,25 @@ async fn run_service(cfg: &CrsfLaneConfig, mut shutdown: watch::Receiver<bool>) 
 /// channel (the sender dropped — treat as shutdown).
 async fn wait_for_shutdown_flag(shutdown: &mut watch::Receiver<bool>) {
     let _ = shutdown.wait_for(|s| *s).await;
+}
+
+/// Idle in a terminal `disabled` state until shutdown, rewriting the honest
+/// sidecar on a slow cadence so its mtime keeps proving the service is alive
+/// (a staleness-gated reader must be able to tell live-disabled from dead).
+async fn idle_with_sidecar(
+    metrics: &ados_protocol::logd::emitter::IngestEmitter,
+    shutdown: &mut watch::Receiver<bool>,
+) {
+    write_stats_sidecar(LaneState::Disabled, &StatsInputs::default(), Some(metrics));
+    loop {
+        tokio::select! {
+            biased;
+            _ = wait_for_shutdown_flag(shutdown) => return,
+            _ = tokio::time::sleep(IDLE_REFRESH_INTERVAL) => {
+                write_stats_sidecar(LaneState::Disabled, &StatsInputs::default(), Some(metrics));
+            }
+        }
+    }
 }
 
 /// Resolve when SIGTERM or SIGINT is received.
