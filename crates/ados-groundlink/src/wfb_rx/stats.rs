@@ -35,6 +35,51 @@ pub struct GsChannelTruth {
     pub operating: u8,
 }
 
+/// The selected-adapter facts the receive sidecar surfaces, mirroring the
+/// drone-side `AdapterInfo` so the panel reads one shape from either rig.
+///
+/// Default (no adapter resolved yet) is the honest unknown: no chipset, no
+/// injection claim, no USB speed reading, not degraded. `usb_degraded` is never
+/// asserted without a real sub-high-speed reading — an unreadable or non-USB
+/// adapter is reported as unknown speed and NOT flagged, so the operator is
+/// never shown a fabricated fault.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GsAdapterInfo {
+    pub chipset: Option<String>,
+    pub injection_ok: bool,
+    /// Enumerated USB link speed (Mbps); `None` when not USB / unreadable.
+    pub usb_speed_mbps: Option<u32>,
+    /// True only when the adapter enumerated below high-speed. Such an adapter
+    /// can pass monitor-mode setup and advance its counters yet carry almost no
+    /// usable RF, so the receive plane must surface it rather than report a
+    /// healthy link.
+    pub usb_degraded: bool,
+}
+
+impl GsAdapterInfo {
+    /// Build from the resolved adapter identity, deriving `usb_degraded` with
+    /// the shared `usb_speed_degraded` threshold rather than restating it, so
+    /// the ground and air planes can never disagree on what "degraded" means.
+    pub fn new(chipset: Option<String>, injection_ok: bool, usb_speed_mbps: Option<u32>) -> Self {
+        Self {
+            chipset,
+            injection_ok,
+            usb_speed_mbps,
+            usb_degraded: ados_radio::adapter::usb_speed_degraded(usb_speed_mbps),
+        }
+    }
+}
+
+impl From<&ados_radio::adapter::SelectedAdapter> for GsAdapterInfo {
+    fn from(sel: &ados_radio::adapter::SelectedAdapter) -> Self {
+        Self::new(
+            Some(sel.chipset.clone()),
+            sel.injection_ok,
+            sel.usb_speed_mbps,
+        )
+    }
+}
+
 /// Write a minimal `reg_blocked` ground sidecar so the heartbeat + panel show the
 /// regulatory conflict while the run loop retries the gate. Carries the reason
 /// code and the rendezvous channel under inspection; no receive chain is running,
@@ -49,7 +94,7 @@ pub struct GsChannelTruth {
 /// retry loop.
 pub fn write_reg_blocked_sidecar(
     interface: &str,
-    chipset: Option<&str>,
+    adapter: &GsAdapterInfo,
     channel: u8,
     cfg: &WfbConfig,
     reg: &GsRegSnapshot,
@@ -64,11 +109,17 @@ pub fn write_reg_blocked_sidecar(
         rendezvous: channel,
         operating: channel,
     };
+    // No receive chain is running, so no injection is claimed. The USB facts are
+    // physical properties of the selected adapter and stay truthful here — a
+    // blocked gate on a slow-USB adapter must still show WHY.
+    let adapter = GsAdapterInfo {
+        injection_ok: false,
+        ..adapter.clone()
+    };
     let mut v = build_gs_stats(
         &snap,
         interface,
-        chipset,
-        false, // no injection while blocked
+        &adapter,
         channels,
         reg,
         cfg,
@@ -107,8 +158,7 @@ pub fn write_reg_blocked_sidecar(
 pub fn build_gs_stats(
     snap: &LinkStats,
     interface: &str,
-    adapter_chipset: Option<&str>,
-    adapter_injection_ok: bool,
+    adapter: &GsAdapterInfo,
     channels: GsChannelTruth,
     reg: &GsRegSnapshot,
     cfg: &WfbConfig,
@@ -137,8 +187,17 @@ pub fn build_gs_stats(
         // The state-machine state under its own key, mirroring the drone side.
         "link_state": state,
         "interface": interface,
-        "adapter_chipset": adapter_chipset,
-        "adapter_injection_ok": adapter_injection_ok,
+        "adapter_chipset": adapter.chipset,
+        "adapter_injection_ok": adapter.injection_ok,
+        // USB link health of the selected receive adapter, under the same keys the
+        // drone-side sidecar uses so the panel reads one shape from either rig. An
+        // adapter that enumerated below high-speed (e.g. 12 Mbps full-speed on a
+        // flaky port) can pass monitor-mode setup and advance its counters while
+        // carrying almost no usable RF, so a deaf ground station's CAUSE stays
+        // legible instead of reading as a bare "0 received". `null` speed means
+        // no reading was available (not USB / unreadable), never a claim of zero.
+        "adapter_usb_speed_mbps": adapter.usb_speed_mbps,
+        "adapter_usb_degraded": adapter.usb_degraded,
         // Back-compat alias: `channel` now reflects the LIVE interface channel.
         "channel": channels.actual,
         "actual_channel": channels.actual,
@@ -266,11 +325,11 @@ mod tests {
             verified: true,
             enabled_channels: vec![149, 153, 157, 161, 165],
         };
+        let adapter = GsAdapterInfo::new(Some("rtl88x2eu".to_string()), true, Some(480));
         let v = build_gs_stats(
             &snap,
             "wlan1",
-            Some("rtl88x2eu"),
-            true,
+            &adapter,
             channels,
             &reg,
             &cfg,
@@ -334,11 +393,11 @@ mod tests {
             rendezvous: 149,
             operating: 149,
         };
+        let adapter = GsAdapterInfo::new(Some("rtl88x2eu".to_string()), true, Some(480));
         let v = build_gs_stats(
             &snap,
             "wlan1",
-            Some("rtl88x2eu"),
-            true,
+            &adapter,
             channels,
             &GsRegSnapshot::default(),
             &cfg,
@@ -382,11 +441,11 @@ mod tests {
             rendezvous: 149,
             operating: 149,
         };
+        let adapter = GsAdapterInfo::new(Some("rtl88x2eu".to_string()), true, Some(480));
         let v = build_gs_stats(
             &snap,
             "wlan1",
-            Some("rtl88x2eu"),
-            true,
+            &adapter,
             channels,
             &GsRegSnapshot::default(),
             &WfbConfig::default(),
@@ -423,11 +482,11 @@ mod tests {
             rendezvous: 149,
             operating: 149,
         };
+        let adapter = GsAdapterInfo::new(Some("rtl88x2eu".to_string()), true, Some(480));
         let body = build_gs_stats(
             &snap,
             "wlan1",
-            Some("rtl88x2eu"),
-            true,
+            &adapter,
             channels,
             &GsRegSnapshot::default(),
             &cfg,
@@ -486,11 +545,11 @@ mod tests {
             verified: false,
             enabled_channels: vec![],
         };
+        let adapter = GsAdapterInfo::new(Some("rtl88x2eu".to_string()), false, Some(480));
         let mut v = build_gs_stats(
             &snap,
             "wlan1",
-            Some("rtl88x2eu"),
-            false,
+            &adapter,
             channels,
             &reg,
             &cfg,
@@ -520,6 +579,214 @@ mod tests {
         assert_eq!(v["reg_verified"], false);
     }
 
+    #[test]
+    fn gs_stats_reports_the_adapter_usb_link_health() {
+        // A healthy high-speed adapter: the real reading is surfaced and the
+        // degraded flag stays clear, under the same keys the drone side uses.
+        let channels = GsChannelTruth {
+            actual: 149,
+            rendezvous: 149,
+            operating: 149,
+        };
+        let adapter = GsAdapterInfo::new(Some("rtl88x2eu".to_string()), true, Some(480));
+        let v = build_gs_stats(
+            &LinkStats::default(),
+            "wlan1",
+            &adapter,
+            channels,
+            &GsRegSnapshot::default(),
+            &WfbConfig::default(),
+            STATE_ACTIVE,
+            "locked",
+            true,
+            1.0,
+            0,
+            0,
+            None,
+            0.0,
+        );
+        assert_eq!(v["adapter_usb_speed_mbps"], 480);
+        assert_eq!(v["adapter_usb_degraded"], false);
+    }
+
+    #[test]
+    fn gs_stats_flags_a_slow_usb_adapter_so_a_deaf_receiver_has_a_cause() {
+        // A full-speed (12 Mbps) enumeration cannot carry usable RF. The receive
+        // plane must surface it, otherwise a deaf ground station reads as a bare
+        // "0 received" with no legible cause.
+        let channels = GsChannelTruth {
+            actual: 149,
+            rendezvous: 149,
+            operating: 149,
+        };
+        let adapter = GsAdapterInfo::new(Some("rtl88x2eu".to_string()), true, Some(12));
+        let v = build_gs_stats(
+            &LinkStats::default(),
+            "wlan1",
+            &adapter,
+            channels,
+            &GsRegSnapshot::default(),
+            &WfbConfig::default(),
+            STATE_SEARCHING,
+            "searching",
+            false,
+            0.0,
+            0,
+            0,
+            None,
+            0.0,
+        );
+        assert_eq!(v["adapter_usb_speed_mbps"], 12);
+        assert_eq!(v["adapter_usb_degraded"], true);
+    }
+
+    #[test]
+    fn gs_stats_reports_an_unknown_usb_speed_as_null_and_never_as_zero() {
+        // No adapter resolved yet / a non-USB or unreadable adapter: the speed is
+        // an explicit JSON null (no reading), never a confident 0 that would look
+        // like a measured dead link, and the degraded flag is NOT raised on an
+        // absent reading.
+        let channels = GsChannelTruth {
+            actual: 149,
+            rendezvous: 149,
+            operating: 149,
+        };
+        let v = build_gs_stats(
+            &LinkStats::default(),
+            "wlan1",
+            &GsAdapterInfo::default(),
+            channels,
+            &GsRegSnapshot::default(),
+            &WfbConfig::default(),
+            STATE_SEARCHING,
+            "searching",
+            false,
+            0.0,
+            0,
+            0,
+            None,
+            0.0,
+        );
+        assert!(v["adapter_usb_speed_mbps"].is_null());
+        assert_ne!(v["adapter_usb_speed_mbps"], 0);
+        assert_eq!(v["adapter_usb_degraded"], false);
+        // An unresolved adapter also makes no chipset or injection claim.
+        assert!(v["adapter_chipset"].is_null());
+        assert_eq!(v["adapter_injection_ok"], false);
+    }
+
+    #[test]
+    fn gs_adapter_info_derives_degraded_from_the_shared_threshold() {
+        // The ground plane must not restate the degraded threshold: every
+        // constructed value agrees with the shared `usb_speed_degraded` helper,
+        // so the two rigs can never disagree on what "degraded" means.
+        for speed in [None, Some(12), Some(480), Some(5000)] {
+            let info = GsAdapterInfo::new(Some("rtl88x2eu".to_string()), true, speed);
+            assert_eq!(
+                info.usb_degraded,
+                ados_radio::adapter::usb_speed_degraded(speed),
+                "degraded flag disagreed with the shared threshold for {speed:?}"
+            );
+            assert_eq!(info.usb_speed_mbps, speed);
+        }
+    }
+
+    #[test]
+    fn reg_blocked_sidecar_keeps_the_usb_facts_while_denying_injection() {
+        // A regulatory-blocked gate runs no receive chain, so it claims no
+        // injection — but the adapter's USB link health is a physical fact that
+        // must survive, since a slow-USB adapter is exactly the kind of cause an
+        // operator needs while the gate retries.
+        let channels = GsChannelTruth {
+            actual: 149,
+            rendezvous: 149,
+            operating: 149,
+        };
+        let adapter = GsAdapterInfo::new(Some("rtl88x2eu".to_string()), true, Some(12));
+        let blocked = GsAdapterInfo {
+            injection_ok: false,
+            ..adapter.clone()
+        };
+        let v = build_gs_stats(
+            &LinkStats::default(),
+            "wlan1",
+            &blocked,
+            channels,
+            &GsRegSnapshot::default(),
+            &WfbConfig::default(),
+            STATE_REG_BLOCKED,
+            "searching",
+            false,
+            0.0,
+            0,
+            0,
+            None,
+            0.0,
+        );
+        assert_eq!(v["adapter_injection_ok"], false);
+        assert_eq!(v["adapter_usb_speed_mbps"], 12);
+        assert_eq!(v["adapter_usb_degraded"], true);
+    }
+
+    #[test]
+    fn gs_adapter_info_carries_every_fact_off_the_selected_adapter() {
+        // The resolved adapter record is the one source the sidecar reads, so no
+        // fact may be dropped on the way through (the drop is what left the
+        // ground sidecar reporting a default chipset and a fixed injection claim).
+        let sel = ados_radio::adapter::SelectedAdapter {
+            ifname: "wlan1".to_string(),
+            chipset: "rtl88x2eu".to_string(),
+            injection_ok: true,
+            usb_speed_mbps: Some(12),
+            usb_degraded: true,
+        };
+        let info = GsAdapterInfo::from(&sel);
+        assert_eq!(info.chipset.as_deref(), Some("rtl88x2eu"));
+        assert!(info.injection_ok);
+        assert_eq!(info.usb_speed_mbps, Some(12));
+        assert!(info.usb_degraded);
+    }
+
+    #[test]
+    fn json_object_to_fields_round_trips_the_usb_link_health() {
+        // The body shipped to the store must decode back identically, including a
+        // null speed (absent reading) and the integer speed reading — the store is
+        // the durable read source the panel falls back to.
+        let channels = GsChannelTruth {
+            actual: 149,
+            rendezvous: 149,
+            operating: 149,
+        };
+        for adapter in [
+            GsAdapterInfo::default(),
+            GsAdapterInfo::new(Some("rtl88x2eu".to_string()), true, Some(12)),
+        ] {
+            let body = build_gs_stats(
+                &LinkStats::default(),
+                "wlan1",
+                &adapter,
+                channels,
+                &GsRegSnapshot::default(),
+                &WfbConfig::default(),
+                STATE_SEARCHING,
+                "searching",
+                false,
+                0.0,
+                0,
+                0,
+                None,
+                0.0,
+            );
+            let fields = json_object_to_fields(&body);
+            let back = serde_json::to_value(fields).unwrap();
+            assert_eq!(
+                back["adapter_usb_speed_mbps"],
+                body["adapter_usb_speed_mbps"]
+            );
+            assert_eq!(back["adapter_usb_degraded"], body["adapter_usb_degraded"]);
+        }
+    }
+
     #[tokio::test]
     async fn reg_blocked_sidecar_emits_the_status_event_when_given_an_emitter() {
         // The reg-blocked write is the GS degraded-state path: passing an emitter
@@ -535,9 +802,10 @@ mod tests {
             dir.path().join("ingest.sock"),
         );
         let stats = emitter.stats();
+        let adapter = GsAdapterInfo::new(Some("rtl88x2eu".to_string()), true, Some(480));
         write_reg_blocked_sidecar(
             "wlan1",
-            Some("rtl88x2eu"),
+            &adapter,
             149,
             &WfbConfig::default(),
             &GsRegSnapshot::default(),
@@ -554,7 +822,7 @@ mod tests {
         let none_stats = none_emitter.stats();
         write_reg_blocked_sidecar(
             "wlan1",
-            Some("rtl88x2eu"),
+            &adapter,
             149,
             &WfbConfig::default(),
             &GsRegSnapshot::default(),

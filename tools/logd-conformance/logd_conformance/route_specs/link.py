@@ -8,7 +8,9 @@ from ..routes import FieldSpec, Locator, RouteSpec
 # (ados-groundlink) producers emit, plus the keys each emits alone. The combined
 # route check splits drone-vs-gs by source so a single-profile rig reports the
 # other profile's exclusives as missing-producer (no rows for that source) rather
-# than as a schema gap on the rows it does have.
+# than as a schema gap on the rows it does have. The adapter USB keys are common:
+# a slow-USB adapter strands a receiver as surely as a transmitter, so both
+# planes report the link speed and the degraded verdict.
 _WFB_STATUS_COMMON = [
     "state",
     "link_state",
@@ -23,6 +25,8 @@ _WFB_STATUS_COMMON = [
     "rf_unverified",
     "adapter_chipset",
     "adapter_injection_ok",
+    "adapter_usb_speed_mbps",
+    "adapter_usb_degraded",
     "tx_power_dbm",
     "tx_power_max_dbm",
     "topology",
@@ -42,13 +46,11 @@ _WFB_STATUS_COMMON = [
 ]
 
 # Air-side-only status keys (the transmit-plane truth: pair identity, the
-# adaptive-bitrate controller intent, the watchdog counters, the USB-speed gate).
+# adaptive-bitrate controller intent, the watchdog counters).
 _WFB_STATUS_DRONE_ONLY = [
     "regPosture",
     "pinnedRegion",
     "regVerified",
-    "adapter_usb_speed_mbps",
-    "adapter_usb_degraded",
     "fec_k",
     "fec_n",
     "restart_count",

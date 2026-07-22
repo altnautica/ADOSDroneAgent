@@ -211,6 +211,8 @@ _WFB_STATUS_GS_EVENT = {
         "rf_unverified": False,
         "adapter_chipset": "rtl88x2eu",
         "adapter_injection_ok": True,
+        "adapter_usb_speed_mbps": 480,
+        "adapter_usb_degraded": False,
         "tx_power_dbm": 5,
         "tx_power_max_dbm": 15,
         "topology": "host_vbus",

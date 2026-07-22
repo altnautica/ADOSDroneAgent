@@ -21,7 +21,9 @@ use crate::watchdog::{Clock, SharedRxHealth, RX_HEALTH_SILENCE_THRESHOLD_S};
 
 use super::args::{RX_HEALTH_POLL_INTERVAL_S, STATE_ACTIVE, STATE_SEARCHING};
 use super::seams::{live_channel, DataRxHandle, SharedValidCounter};
-use super::stats::{build_gs_stats, json_object_to_fields, GsChannelTruth, GsRegSnapshot};
+use super::stats::{
+    build_gs_stats, json_object_to_fields, GsAdapterInfo, GsChannelTruth, GsRegSnapshot,
+};
 
 /// Read `wfb_rx` stdout line-by-line, feed the link monitor, update the shared
 /// counter + LinkStats + the stdout-liveness stamp, and write the ground
@@ -39,8 +41,7 @@ pub async fn stats_reader_loop(
     rendezvous: u8,
     reg: GsRegSnapshot,
     cfg: WfbConfig,
-    chipset: Option<String>,
-    injection_ok: bool,
+    adapter: GsAdapterInfo,
     health: Option<SharedRxHealth>,
     zombie_kills: Arc<AtomicU32>,
     ingest: Option<IngestEmitter>,
@@ -106,8 +107,7 @@ pub async fn stats_reader_loop(
             let mut payload = build_gs_stats(
                 &snap,
                 &interface,
-                chipset.as_deref(),
-                injection_ok,
+                &adapter,
                 channels,
                 &reg,
                 &cfg,

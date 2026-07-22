@@ -55,7 +55,9 @@ pub use args::{
 };
 pub use loops::{stats_reader_loop, zombie_watchdog};
 pub use seams::{DataRxHandle, IwChannelSetter, SharedValidCounter, SystemClock};
-pub use stats::{build_gs_stats, write_reg_blocked_sidecar, GsChannelTruth, GsRegSnapshot};
+pub use stats::{
+    build_gs_stats, write_reg_blocked_sidecar, GsAdapterInfo, GsChannelTruth, GsRegSnapshot,
+};
 
 // Re-exported so the run loop can build the shared receive-health seam through
 // the same module that owns the stats reader.
@@ -69,8 +71,8 @@ pub struct WfbRxManager {
     config: WfbConfig,
     interface: String,
     channel: u8,
-    selected_chipset: Option<String>,
-    adapter_injection_ok: bool,
+    /// The selected receive adapter's facts, surfaced on every sidecar write.
+    adapter: GsAdapterInfo,
     /// The regulatory-permitted channel set for the receive interface, resolved
     /// once `prepare_interface` has applied the domain + read the wiphy back.
     /// Empty until then (and on a board where the set cannot be determined); the
@@ -90,8 +92,7 @@ impl WfbRxManager {
             config,
             interface,
             channel,
-            selected_chipset: None,
-            adapter_injection_ok: false,
+            adapter: GsAdapterInfo::default(),
             enabled_channels: BTreeSet::new(),
             reg_snapshot: GsRegSnapshot::default(),
         }
@@ -124,12 +125,17 @@ impl WfbRxManager {
         &self.enabled_channels
     }
 
-    /// Set the selected-adapter identity (the HAL detect path stays in Python;
-    /// the run loop sets these when an adapter is chosen so the sidecar carries
-    /// the same stranded-link signal the manager holds).
-    pub fn set_adapter(&mut self, chipset: Option<String>, injection_ok: bool) {
-        self.selected_chipset = chipset;
-        self.adapter_injection_ok = injection_ok;
+    /// Set the selected-adapter facts (chipset, injection verdict, USB link
+    /// health) so every sidecar write carries the same stranded-link signal the
+    /// manager holds.
+    pub fn set_adapter(&mut self, adapter: GsAdapterInfo) {
+        self.adapter = adapter;
+    }
+
+    /// The selected-adapter facts resolved by the run loop. Default (unknown
+    /// chipset, no injection claim, no USB reading) until an adapter is chosen.
+    pub fn adapter(&self) -> &GsAdapterInfo {
+        &self.adapter
     }
 
     /// Adopt the receive interface the run loop resolved (the auto-detected RTL
