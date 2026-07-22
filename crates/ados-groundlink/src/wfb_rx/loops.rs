@@ -44,6 +44,7 @@ pub async fn stats_reader_loop(
     health: Option<SharedRxHealth>,
     zombie_kills: Arc<AtomicU32>,
     ingest: Option<IngestEmitter>,
+    fanout: crate::fanout::FanoutCounters,
 ) {
     use tokio::io::AsyncBufReadExt;
     let mut lines = tokio::io::BufReader::new(stdout).lines();
@@ -102,7 +103,7 @@ pub async fn stats_reader_loop(
                 rendezvous,
                 operating: channel,
             };
-            let payload = build_gs_stats(
+            let mut payload = build_gs_stats(
                 &snap,
                 &interface,
                 chipset.as_deref(),
@@ -119,6 +120,15 @@ pub async fn stats_reader_loop(
                 rx_silent_seconds,
                 video_bps,
             );
+            // Fold the cumulative fan-out totals onto the sidecar so the
+            // video-pipeline harness can attribute the fan-out hop (decoded
+            // packets climbing but `fanout_forwarded` flat isolates the fault to
+            // the fan-out; both climbing but the ingest byte-rate flat isolates
+            // it to the mediamtx-gs ingest ffmpeg).
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert("fanout_forwarded".to_string(), fanout.forwarded().into());
+                obj.insert("fanout_drops".to_string(), fanout.drops().into());
+            }
             let path = Path::new(crate::paths::WFB_STATS_JSON);
             if let Err(e) = crate::sidecars::write_json_atomic(path, &payload, 0o644) {
                 tracing::debug!(error = %e, "ground_wfb_stats_persist_failed");

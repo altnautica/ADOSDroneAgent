@@ -26,6 +26,8 @@
 //! socket condition that cannot recover in place.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use tokio::net::UdpSocket;
 
@@ -36,6 +38,40 @@ pub const MEDIAMTX_PORT: u16 = 5600;
 /// Downstream port for the on-device LCD video tap.
 pub const LCD_PORT: u16 = 5605;
 
+/// Shared cumulative fan-out counters, cloneable across the tasks that need to
+/// read them.
+///
+/// The fan-out sits BETWEEN the wfb_rx decode and the mediamtx-gs ingest — a hop
+/// that was otherwise blind to the cross-process diagnostics. The stats reader
+/// folds these totals onto the `wfb-stats.json` sidecar so the video-pipeline
+/// harness can confirm the fan-out is actually forwarding (decoded packets
+/// climbing but `fanout_forwarded` flat isolates the fault to the fan-out; both
+/// climbing but the ingest byte-rate flat isolates it to the ingest ffmpeg).
+/// `forwarded` counts datagrams read from the decoder; `drops` counts per-target
+/// `send_to` failures.
+#[derive(Clone, Default)]
+pub struct FanoutCounters {
+    forwarded: Arc<AtomicU64>,
+    drops: Arc<AtomicU64>,
+}
+
+impl FanoutCounters {
+    /// A fresh zeroed counter set.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Cumulative datagrams read from the decoder and forwarded.
+    pub fn forwarded(&self) -> u64 {
+        self.forwarded.load(Ordering::Relaxed)
+    }
+
+    /// Cumulative per-target `send_to` failures.
+    pub fn drops(&self) -> u64 {
+        self.drops.load(Ordering::Relaxed)
+    }
+}
+
 /// Max datagram size we are willing to read in one go. RTP packets over the
 /// 5 GHz video link sit well under this; the headroom covers jumbo edge cases.
 const BUF_SIZE: usize = 65536;
@@ -44,7 +80,14 @@ const BUF_SIZE: usize = 65536;
 /// address in `targets`. Returns only on a fatal socket error or when the
 /// future is dropped (cancellation). The caller supervises lifecycle and
 /// restart; this loop does not implement its own retry.
-pub async fn run_fanout(listen_addr: SocketAddr, targets: &[SocketAddr]) -> std::io::Result<()> {
+///
+/// `counters` accumulates the forwarded/drop totals so a cross-process reader
+/// (the stats reader → sidecar → diagnostics harness) can see the fan-out hop.
+pub async fn run_fanout(
+    listen_addr: SocketAddr,
+    targets: &[SocketAddr],
+    counters: &FanoutCounters,
+) -> std::io::Result<()> {
     if targets.is_empty() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -110,9 +153,13 @@ pub async fn run_fanout(listen_addr: SocketAddr, targets: &[SocketAddr]) -> std:
             // the only backpressure.
             if out_sock.send_to(payload, target).await.is_err() {
                 drops += 1;
+                counters.drops.fetch_add(1, Ordering::Relaxed);
             }
         }
         forwarded += 1;
+        // Publish the cumulative forwarded total for the cross-process reader
+        // (the wfb-stats sidecar) so the fan-out hop is no longer blind.
+        counters.forwarded.fetch_add(1, Ordering::Relaxed);
         // Periodic counter log so a long-run drift in drop or recv-error rate is
         // visible without flooding the journal.
         if forwarded.is_multiple_of(5000) {
@@ -132,14 +179,16 @@ const ERROR_BACKOFF_THRESHOLD: u32 = 8;
 const ERROR_BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// The default ground-station fan-out wiring: listen on the internal port,
-/// forward to the mediamtx ingest and the LCD tap, all on localhost.
-pub async fn run_default_fanout() -> std::io::Result<()> {
+/// forward to the mediamtx ingest and the LCD tap, all on localhost. `counters`
+/// is the shared handle the stats reader also holds so the sidecar surfaces the
+/// forwarded/drop totals.
+pub async fn run_default_fanout(counters: FanoutCounters) -> std::io::Result<()> {
     let listen: SocketAddr = (std::net::Ipv4Addr::LOCALHOST, INTERNAL_LISTEN_PORT).into();
     let targets = [
         (std::net::Ipv4Addr::LOCALHOST, MEDIAMTX_PORT).into(),
         (std::net::Ipv4Addr::LOCALHOST, LCD_PORT).into(),
     ];
-    run_fanout(listen, &targets).await
+    run_fanout(listen, &targets, &counters).await
 }
 
 #[cfg(test)]
@@ -169,9 +218,11 @@ mod tests {
         drop(listen); // free it for run_fanout to bind.
 
         let targets = [mediamtx_addr, lcd_addr];
+        let counters = FanoutCounters::new();
+        let counters_task = counters.clone();
         let fanout = tokio::spawn(async move {
             // Ignore the never-Ok result; the task is aborted at test end.
-            let _ = run_fanout(listen_addr, &targets).await;
+            let _ = run_fanout(listen_addr, &targets, &counters_task).await;
         });
 
         // UDP gives no delivery guarantee and the fan-out's bind may land after
@@ -206,13 +257,22 @@ mod tests {
             }
         }
 
+        // The shared counter saw the forwarded datagrams (the cross-process
+        // signal the sidecar surfaces). At least the ones both consumers read.
+        assert!(
+            counters.forwarded() >= 1,
+            "fan-out forwarded counter did not advance"
+        );
+
         fanout.abort();
     }
 
     #[tokio::test]
     async fn empty_targets_is_rejected() {
         let listen: SocketAddr = (std::net::Ipv4Addr::LOCALHOST, 0).into();
-        let err = run_fanout(listen, &[]).await.unwrap_err();
+        let err = run_fanout(listen, &[], &FanoutCounters::new())
+            .await
+            .unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
 
@@ -257,7 +317,7 @@ mod tests {
 
         let targets = [live_addr, down_addr];
         let fanout = tokio::spawn(async move {
-            let _ = run_fanout(listen_addr, &targets).await;
+            let _ = run_fanout(listen_addr, &targets, &FanoutCounters::new()).await;
         });
 
         let sender = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))

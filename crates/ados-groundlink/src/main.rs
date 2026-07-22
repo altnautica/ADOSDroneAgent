@@ -520,8 +520,11 @@ async fn receive_loop(
         let rx_health = wfb_rx::SharedRxHealth::new();
 
         // Fan-out as a sub-service (5599 → 5600 mediamtx + 5605 LCD), aborted
-        // with the generation.
-        let fanout_task = tokio::spawn(fanout::run_default_fanout());
+        // with the generation. The shared counters are read by the stats reader
+        // so the wfb-stats sidecar surfaces the forwarded/drop totals (the
+        // fan-out hop, otherwise blind to the cross-process diagnostics).
+        let fanout_counters = fanout::FanoutCounters::new();
+        let fanout_task = tokio::spawn(fanout::run_default_fanout(fanout_counters.clone()));
 
         // 1 Hz receive-link telemetry for this generation: ship the link's
         // RSSI / SNR / uncorrected-FEC (the uplink command radio, mirroring the
@@ -588,6 +591,7 @@ async fn receive_loop(
                 Some(rx_health.clone()),
                 zombie_kills.clone(),
                 Some(ingest.clone()),
+                fanout_counters.clone(),
             ))
         });
 
