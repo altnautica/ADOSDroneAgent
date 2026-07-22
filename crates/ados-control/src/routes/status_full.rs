@@ -1255,6 +1255,39 @@ async fn probe_mediamtx_via_whep() -> Option<Value> {
     None
 }
 
+/// The cumulative `bytesReceived` counter on the mediamtx `main` path, read from
+/// the management API `/v3/paths/get/main`. This is the canonical
+/// video-into-mediamtx signal (the drone's encoder → mediamtx ingest, or the
+/// ground station's fan-out → mediamtx-gs ingest), and the reliable delta the
+/// video-diagnostics harness samples. `None` when the API is unreachable, returns
+/// non-200 (the ground-station mediamtx puts auth on the management API, so this
+/// can legitimately be unavailable there and the caller falls back to the WHEP
+/// liveness probe), or the body carries no numeric `bytesReceived`.
+pub(crate) async fn mediamtx_main_bytes_received() -> Option<i64> {
+    let url = format!("http://127.0.0.1:{MEDIAMTX_API_PORT}/v3/paths/get/main");
+    let (status, body) = http_get_local(&url).await.ok()?;
+    if status != 200 {
+        return None;
+    }
+    let data: Value = serde_json::from_slice(&body).ok()?;
+    data.get("bytesReceived")
+        .and_then(Value::as_i64)
+        .or_else(|| {
+            data.get("bytesReceived")
+                .and_then(Value::as_f64)
+                .map(|f| f as i64)
+        })
+}
+
+/// True when the mediamtx WHEP endpoint (`:8889/main/whep`) is bound and serving.
+/// A GET on the POST-only WHEP path returns 200/204/405 when mediamtx is up —
+/// the credential-free "endpoint exists and mediamtx is serving" signal the
+/// video-diagnostics harness uses for the served-WHEP hop (and the ground-station
+/// ingest hop when the management API is auth-gated).
+pub(crate) async fn mediamtx_whep_serving() -> bool {
+    probe_mediamtx_via_whep().await.is_some()
+}
+
 /// A minimal HTTP/1.1 `GET` over a local TCP endpoint, returning the status code +
 /// the decoded body. Used for the mediamtx probes (which speak HTTP on a loopback
 /// TCP port, not a Unix socket). `Connection: close` reads the body to EOF; a

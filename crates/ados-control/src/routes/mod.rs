@@ -311,6 +311,10 @@ pub fn build_router(state: AppState, net_native: bool, hid_native: bool) -> Rout
         // resources + network + device id + the last ados-agent log lines, for the
         // LCD Diagnostics drilldown and the GCS remote-display pane.
         .route("/api/v1/diagnostics", get(diagnostics::get_diagnostics))
+        // The per-hop video-pipeline verifier: samples reliable cumulative/rate
+        // counters (mediamtx bytesReceived, wfb_rx decode, fan-out, WHEP) twice
+        // and attributes a stall to the exact hop that stopped, profile-aware.
+        .route("/api/diag/video", get(diagnostics::get_video_diagnostics))
         // Video reads: glass-to-glass latency, the air-side pipeline snapshot, and
         // the encoder/radio config (the snapshot/record/switch writes + the
         // camera-enumeration route stay proxied).

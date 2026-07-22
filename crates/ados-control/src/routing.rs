@@ -147,6 +147,8 @@ fn native_routes() -> Vec<NativeRoute> {
         get("/api/system"),
         // Composite triage snapshot (LCD Diagnostics + GCS remote-display).
         get("/api/v1/diagnostics"),
+        // Per-hop video-pipeline verifier (samples reliable counters over a window).
+        get("/api/diag/video"),
         // Video reads.
         get("/api/video/latency"),
         get("/api/v1/video/air-pipeline"),
@@ -443,7 +445,7 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            133,
+            134,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);

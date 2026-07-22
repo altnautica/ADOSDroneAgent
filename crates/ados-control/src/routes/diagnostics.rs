@@ -420,6 +420,312 @@ fn collect_logs() -> Value {
 }
 
 // ---------------------------------------------------------------------------
+// GET /api/diag/video — the per-hop video-pipeline verifier.
+// ---------------------------------------------------------------------------
+
+/// The sampling window (ms) the video harness deltas cumulative counters over.
+/// Two reads this far apart give a reliable per-hop "is data flowing NOW" signal
+/// for the counters that are cumulative (mediamtx `bytesReceived`, the fan-out
+/// `fanout_forwarded` total); the rate fields (decoded packets/s, TX kbps) are
+/// read fresh in each sample. 2 s captures a live delta without making the
+/// on-demand route feel slow.
+const VIDEO_SAMPLE_WINDOW_MS: u64 = 2000;
+
+/// `GET /api/diag/video` — a per-hop, reliable-counter verdict on the video
+/// pipeline for THIS node's profile, so an operator (or an agent) can attribute
+/// a video stall to the exact hop that stopped instead of hand-probing.
+///
+/// It reads ONLY reliable cumulative/rate counters on the CANONICAL objects (the
+/// mediamtx `main` path, the wfb-stats sidecar, the WHEP endpoint) — never
+/// tcpdump, `/proc/net/udp` queue depth, or a single snapshot — and samples each
+/// twice over [`VIDEO_SAMPLE_WINDOW_MS`] so a hop is judged by data actually
+/// moving, not by a process being alive (Rule 37 / the pipeline runbook).
+///
+/// Drone (video SOURCE) hops: camera→mediamtx (mediamtx `main` bytesReceived
+/// delta) and mediamtx→radio-TX (the wfb TX bitrate; a drone injects only what
+/// the tap feeds it). Ground-station (video SINK) hops: RF→decode (wfb_rx decoded
+/// packets/s + the `link_diag` cause), decode→fan-out (`fanout_forwarded` delta),
+/// and fan-out→served-WHEP (mediamtx ingest bytes delta, or the WHEP-serving
+/// liveness when the ground mediamtx management API is auth-gated).
+pub async fn get_video_diagnostics(State(state): State<AppState>) -> Json<Value> {
+    let cfg = crate::config::PairingConfig::load_from(&state.pairing_paths.config);
+    let (profile, role) = crate::profile::current_profile_and_role(&cfg.agent.profile);
+
+    let s0 = VideoSample::take().await;
+    tokio::time::sleep(std::time::Duration::from_millis(VIDEO_SAMPLE_WINDOW_MS)).await;
+    let s1 = VideoSample::take().await;
+
+    let hops = if profile == "drone" {
+        drone_hops(&s0, &s1)
+    } else {
+        gs_hops(&s0, &s1)
+    };
+    let (hop_values, video_dies_at) = resolve_hops(hops);
+
+    Json(json!({
+        "profile": profile,
+        "role": role,
+        "canonical_path": "main",
+        "window_s": VIDEO_SAMPLE_WINDOW_MS as f64 / 1000.0,
+        "hops": hop_values,
+        "video_dies_at": video_dies_at,
+    }))
+}
+
+/// One reading of every video-pipeline source the harness trusts, taken
+/// concurrently so a slow probe does not serialise the sample.
+struct VideoSample {
+    /// The mediamtx `main` path cumulative `bytesReceived`, or `None` when the
+    /// management API is unreachable / auth-gated.
+    mtx_bytes_received: Option<i64>,
+    /// Whether the WHEP endpoint is bound and serving.
+    mtx_serving: bool,
+    /// The wfb-stats sidecar object (`packets_received`, `bitrate_kbps`,
+    /// `link_diag`, `fanout_forwarded`, ...), or `None` when absent/unparseable.
+    wfb: Option<Map<String, Value>>,
+}
+
+impl VideoSample {
+    async fn take() -> Self {
+        let (mtx_bytes_received, mtx_serving) = tokio::join!(
+            crate::routes::status_full::mediamtx_main_bytes_received(),
+            crate::routes::status_full::mediamtx_whep_serving(),
+        );
+        Self {
+            mtx_bytes_received,
+            mtx_serving,
+            wfb: read_run_sidecar("wfb-stats.json"),
+        }
+    }
+
+    /// A numeric field from the wfb sidecar, as `f64`.
+    fn wfb_num(&self, key: &str) -> Option<f64> {
+        self.wfb.as_ref()?.get(key).and_then(Value::as_f64)
+    }
+
+    /// A string field from the wfb sidecar.
+    fn wfb_str(&self, key: &str) -> Option<String> {
+        self.wfb
+            .as_ref()?
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    }
+}
+
+/// Read a `/run/ados/<name>` JSON sidecar object, honouring `ADOS_RUN_DIR`.
+/// `None` when absent / unparseable / not a JSON object.
+fn read_run_sidecar(name: &str) -> Option<Map<String, Value>> {
+    let run = std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string());
+    let path = Path::new(&run).join(name);
+    let text = std::fs::read_to_string(path).ok()?;
+    match serde_json::from_str::<Value>(&text).ok()? {
+        Value::Object(m) => Some(m),
+        _ => None,
+    }
+}
+
+/// One hop's raw finding before the upstream-aware verdict is applied.
+/// `flowing`: `Some(true)` data moved, `Some(false)` this hop read zero,
+/// `None` the source was unreadable (verdict `unknown`).
+struct HopFinding {
+    name: &'static str,
+    label: &'static str,
+    method: &'static str,
+    metric: String,
+    flowing: Option<bool>,
+    detail: Option<String>,
+}
+
+/// The drone (video-source) hop findings.
+fn drone_hops(s0: &VideoSample, s1: &VideoSample) -> Vec<HopFinding> {
+    // Hop 1: camera → encoder → mediamtx, by the mediamtx `main` bytesReceived
+    // delta (the canonical video-into-mediamtx counter).
+    let cam = match (s0.mtx_bytes_received, s1.mtx_bytes_received) {
+        (Some(a), Some(b)) => HopFinding {
+            name: "camera_to_mediamtx",
+            label: "Camera → encoder → mediamtx",
+            method: "mediamtx /v3/paths/get/main bytesReceived delta",
+            metric: format!("{} bytes in {:.1}s", (b - a).max(0), window_s()),
+            flowing: Some(b > a),
+            detail: None,
+        },
+        _ => hop_unknown(
+            "camera_to_mediamtx",
+            "Camera → encoder → mediamtx",
+            "mediamtx /v3/paths/get/main bytesReceived delta",
+            "mediamtx management API unreachable",
+        ),
+    };
+    // Hop 2: mediamtx → wfb tap → wfb_tx → radio, by the wfb TX bitrate (a drone
+    // injects only what the tap feeds it, so a non-zero TX bitrate proves the tap
+    // → TX leg is flowing). RF-radiated is a separate concern proved on the
+    // receiver's link_diag, not here (honest: this is the injection hop).
+    let tx_kbps = s1
+        .wfb_num("bitrate_kbps")
+        .or_else(|| s0.wfb_num("bitrate_kbps"));
+    let radio = match tx_kbps {
+        Some(k) => HopFinding {
+            name: "mediamtx_to_radio_tx",
+            label: "Tap → wfb_tx (radio injection)",
+            method: "wfb-stats bitrate_kbps (TX)",
+            metric: format!("{k:.0} kbps injected"),
+            flowing: Some(k > 0.0),
+            detail: Some("RF reception is confirmed on the receiver's link_diag".to_string()),
+        },
+        None => hop_unknown(
+            "mediamtx_to_radio_tx",
+            "Tap → wfb_tx (radio injection)",
+            "wfb-stats bitrate_kbps (TX)",
+            "wfb-stats sidecar unavailable",
+        ),
+    };
+    vec![cam, radio]
+}
+
+/// The ground-station (video-sink) hop findings.
+fn gs_hops(s0: &VideoSample, s1: &VideoSample) -> Vec<HopFinding> {
+    // Hop 1: RF → wfb_rx decode, by decoded packets/s, with the link_diag cause
+    // surfaced when nothing is decoding (deaf / mis_keyed / jammed / searching).
+    let pkts = s1
+        .wfb_num("packets_received")
+        .or_else(|| s0.wfb_num("packets_received"));
+    let link_diag = s1.wfb_str("link_diag").or_else(|| s0.wfb_str("link_diag"));
+    let decode = match pkts {
+        Some(p) => HopFinding {
+            name: "rf_to_decode",
+            label: "RF → wfb_rx decode",
+            method: "wfb_rx decoded packets/s + link_diag",
+            metric: format!("{p:.0} pkt/s decoded"),
+            flowing: Some(p > 0.0),
+            detail: link_diag.map(|d| format!("link_diag={d}")),
+        },
+        None => hop_unknown(
+            "rf_to_decode",
+            "RF → wfb_rx decode",
+            "wfb_rx decoded packets/s + link_diag",
+            "wfb-stats sidecar unavailable",
+        ),
+    };
+    // Hop 2: decode → fan-out, by the fanout_forwarded delta.
+    let ff0 = s0.wfb_num("fanout_forwarded");
+    let ff1 = s1.wfb_num("fanout_forwarded");
+    let fanout = match (ff0, ff1) {
+        (Some(a), Some(b)) => HopFinding {
+            name: "decode_to_fanout",
+            label: "wfb_rx → fan-out",
+            method: "fanout_forwarded delta",
+            metric: format!(
+                "{} datagrams in {:.1}s",
+                (b - a).max(0.0) as i64,
+                window_s()
+            ),
+            flowing: Some(b > a),
+            detail: None,
+        },
+        _ => hop_unknown(
+            "decode_to_fanout",
+            "wfb_rx → fan-out",
+            "fanout_forwarded delta",
+            "fanout_forwarded not present in wfb-stats",
+        ),
+    };
+    // Hop 3: fan-out → mediamtx-gs ingest → served WHEP. Prefer the mediamtx
+    // ingest bytes delta; when the ground mediamtx management API is auth-gated
+    // (bytesReceived unreadable) fall back to the WHEP-serving liveness.
+    let serve = match (s0.mtx_bytes_received, s1.mtx_bytes_received) {
+        (Some(a), Some(b)) => HopFinding {
+            name: "fanout_to_served",
+            label: "Fan-out → mediamtx → WHEP",
+            method: "mediamtx main bytesReceived delta",
+            metric: format!("{} bytes in {:.1}s", (b - a).max(0), window_s()),
+            flowing: Some(b > a),
+            detail: None,
+        },
+        _ => HopFinding {
+            name: "fanout_to_served",
+            label: "Fan-out → mediamtx → WHEP",
+            method: "WHEP endpoint serving (mediamtx API auth-gated)",
+            metric: if s1.mtx_serving {
+                "WHEP serving".to_string()
+            } else {
+                "WHEP not serving".to_string()
+            },
+            // A serving WHEP endpoint proves mediamtx is up, not that frames are
+            // flowing into it — a weaker signal, surfaced honestly.
+            flowing: Some(s1.mtx_serving),
+            detail: Some("ingest byte counter unavailable; WHEP liveness only".to_string()),
+        },
+    };
+    vec![decode, fanout, serve]
+}
+
+/// A hop whose source could not be read: verdict `unknown`, with the reason.
+fn hop_unknown(
+    name: &'static str,
+    label: &'static str,
+    method: &'static str,
+    reason: &str,
+) -> HopFinding {
+    HopFinding {
+        name,
+        label,
+        method,
+        metric: reason.to_string(),
+        flowing: None,
+        detail: None,
+    }
+}
+
+/// The sampling window in seconds, for the metric strings.
+fn window_s() -> f64 {
+    VIDEO_SAMPLE_WINDOW_MS as f64 / 1000.0
+}
+
+/// Apply the upstream-aware verdict to each hop and locate where video dies.
+///
+/// Walking the hops in flow order, a hop is `flowing` when data moved, `stalled`
+/// when it read zero WHILE its upstream was flowing (the fault is here),
+/// `no_upstream` when it read zero because the upstream was already dead (not
+/// this hop's fault), and `unknown` when the source was unreadable. `video_dies_at`
+/// is the first `stalled` hop; if none stalled it is the first hop that broke the
+/// chain (`no_upstream`/`unknown` boundary), or `null` when everything flows.
+fn resolve_hops(findings: Vec<HopFinding>) -> (Vec<Value>, Value) {
+    let mut out = Vec::with_capacity(findings.len());
+    let mut upstream_flowing = true;
+    let mut dies_at: Option<&'static str> = None;
+
+    for f in &findings {
+        let verdict = match f.flowing {
+            None => "unknown",
+            Some(true) => "flowing",
+            Some(false) if upstream_flowing => "stalled",
+            Some(false) => "no_upstream",
+        };
+        if dies_at.is_none() && (verdict == "stalled" || verdict == "unknown") {
+            dies_at = Some(f.name);
+        }
+        let mut obj = Map::new();
+        obj.insert("name".to_string(), json!(f.name));
+        obj.insert("label".to_string(), json!(f.label));
+        obj.insert("verdict".to_string(), json!(verdict));
+        obj.insert("flowing".to_string(), json!(f.flowing));
+        obj.insert("metric".to_string(), json!(f.metric));
+        obj.insert("method".to_string(), json!(f.method));
+        if let Some(d) = &f.detail {
+            obj.insert("detail".to_string(), json!(d));
+        }
+        out.push(Value::Object(obj));
+
+        // The chain continues only while a hop is confirmed flowing; a stalled /
+        // unknown / no_upstream hop means everything downstream is starved.
+        upstream_flowing = verdict == "flowing";
+    }
+
+    (out, dies_at.map(|s| json!(s)).unwrap_or(Value::Null))
+}
+
+// ---------------------------------------------------------------------------
 // Per-file helpers (copied verbatim from the sibling resource routes so the
 // arithmetic byte-matches Python's round()).
 // ---------------------------------------------------------------------------
@@ -660,5 +966,84 @@ Local:
         assert_eq!(round2(0.425), 0.43);
         assert_eq!(round2(1.005), 1.0);
         assert_eq!(round2(0.42), 0.42);
+    }
+
+    // --- video diagnostics: the upstream-aware hop verdict ----------------
+
+    fn finding(name: &'static str, flowing: Option<bool>) -> HopFinding {
+        HopFinding {
+            name,
+            label: name,
+            method: "test",
+            metric: "m".to_string(),
+            flowing,
+            detail: None,
+        }
+    }
+
+    #[test]
+    fn all_flowing_reports_no_death_point() {
+        let (hops, dies) = resolve_hops(vec![
+            finding("a", Some(true)),
+            finding("b", Some(true)),
+            finding("c", Some(true)),
+        ]);
+        assert_eq!(dies, Value::Null);
+        for h in &hops {
+            assert_eq!(h["verdict"], json!("flowing"));
+        }
+    }
+
+    #[test]
+    fn a_stalled_middle_hop_is_the_death_point_and_downstream_is_no_upstream() {
+        // a flows, b is dead (its upstream a flowed → STALLED here), c reads zero
+        // but only because b starved it → no_upstream (not c's fault).
+        let (hops, dies) = resolve_hops(vec![
+            finding("a", Some(true)),
+            finding("b", Some(false)),
+            finding("c", Some(false)),
+        ]);
+        assert_eq!(dies, json!("b"));
+        assert_eq!(hops[0]["verdict"], json!("flowing"));
+        assert_eq!(hops[1]["verdict"], json!("stalled"));
+        assert_eq!(hops[2]["verdict"], json!("no_upstream"));
+    }
+
+    #[test]
+    fn a_dead_source_hop_is_stalled_at_the_first_hop() {
+        // The very first hop reading zero (a deaf link / no camera) is the death
+        // point: its "upstream" is the physical source, treated as present.
+        let (hops, dies) = resolve_hops(vec![
+            finding("rf_to_decode", Some(false)),
+            finding("decode_to_fanout", Some(false)),
+        ]);
+        assert_eq!(dies, json!("rf_to_decode"));
+        assert_eq!(hops[0]["verdict"], json!("stalled"));
+        assert_eq!(hops[1]["verdict"], json!("no_upstream"));
+    }
+
+    #[test]
+    fn an_unreadable_hop_is_unknown_and_the_death_point() {
+        // An unreadable source breaks the chain: unknown, and (since nothing
+        // upstream already died) it is where the diagnosis stops.
+        let (hops, dies) = resolve_hops(vec![
+            finding("a", Some(true)),
+            finding("b", None),
+            finding("c", Some(false)),
+        ]);
+        assert_eq!(dies, json!("b"));
+        assert_eq!(hops[1]["verdict"], json!("unknown"));
+        // c cannot be blamed once the chain is already broken upstream.
+        assert_eq!(hops[2]["verdict"], json!("no_upstream"));
+    }
+
+    #[test]
+    fn detail_is_carried_through_only_when_present() {
+        let mut with_detail = finding("rf_to_decode", Some(false));
+        with_detail.detail = Some("link_diag=deaf".to_string());
+        let (hops, _dies) = resolve_hops(vec![with_detail, finding("b", Some(true))]);
+        assert_eq!(hops[0]["detail"], json!("link_diag=deaf"));
+        // The second hop had no detail → the key is absent (never a null/empty).
+        assert!(hops[1].get("detail").is_none());
     }
 }
