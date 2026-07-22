@@ -213,7 +213,11 @@ def _base_block(wfb_cfg: object) -> dict:
             "supports_monitor": False,
         },
         "adapter_chipset": None,
-        "adapter_injection_ok": False,
+        # None, not False: the base is served when no radio sidecar exists,
+        # i.e. no adapter scan has produced a verdict. A False here is a
+        # fabricated measured no-injection claim; a real sidecar always
+        # carries the key, so a genuine verdict overwrites this on merge.
+        "adapter_injection_ok": None,
         "rssi_dbm": -100.0,
         "noise_dbm": -95.0,
         "snr_db": 0.0,

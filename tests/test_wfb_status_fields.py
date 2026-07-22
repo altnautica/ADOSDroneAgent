@@ -54,3 +54,20 @@ def test_chipset_from_driver_mapping():
     assert _chipset_from_driver("88XXau") == "RTL8812AU"
     assert _chipset_from_driver("somethingelse") == "somethingelse"
     assert _chipset_from_driver("") == ""
+
+
+def test_base_block_carries_no_fabricated_adapter_verdict():
+    """The config-seeded base is what a caller sees when the radio service
+    never wrote a sidecar, i.e. no adapter scan has produced a verdict. The
+    injection verdict must read None there: a False is a fabricated
+    measured no-injection claim that three-state consumers (CLI, GCS)
+    render as a red scan outcome for hardware nothing ever examined.
+    """
+    from ados.api.routes.wfb import _base_block
+
+    base = _base_block(None)
+    assert base["adapter_injection_ok"] is None
+    # The USB / PHY verdicts must not be seeded at all (absent reads as
+    # "no reading" downstream); seeding a boolean would be the same lie.
+    assert "adapter_usb_degraded" not in base
+    assert "phy_muted" not in base

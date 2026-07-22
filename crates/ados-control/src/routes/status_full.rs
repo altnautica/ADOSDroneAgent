@@ -720,7 +720,13 @@ fn wfb_base_block(cfg: &WfbStatusConfig) -> Map<String, Value> {
         json!({"driver": "", "chipset": "", "supports_monitor": false}),
     );
     block.insert("adapter_chipset".to_string(), Value::Null);
-    block.insert("adapter_injection_ok".to_string(), json!(false));
+    // Null, not false: this base is what `build_radio_block` receives when no
+    // sidecar / stored status exists — i.e. no adapter scan ever produced a
+    // verdict. A false here would be a real boolean `bool_or_null` forwards
+    // verbatim, resurrecting the fabricated measured no-injection claim the
+    // radio block's null contract exists to prevent. A real sidecar always
+    // carries the key, so a genuine verdict overwrites this on merge.
+    block.insert("adapter_injection_ok".to_string(), Value::Null);
     block.insert("rssi_dbm".to_string(), json!(-100.0));
     block.insert("noise_dbm".to_string(), json!(-95.0));
     block.insert("snr_db".to_string(), json!(0.0));
@@ -2094,6 +2100,32 @@ mod tests {
         assert_eq!(block["adapter_injection_ok"], json!(false));
         assert_eq!(block["adapter_usb_degraded"], json!(true));
         assert_eq!(block["phy_muted"], json!(false));
+    }
+
+    #[test]
+    fn radio_block_over_the_no_sidecar_base_carries_no_fabricated_verdicts() {
+        // When neither a stored status nor a sidecar exists, the status view
+        // falls back to the config-seeded base block. That base must never
+        // seed a boolean for the adapter / PHY verdicts: `bool_or_null`
+        // forwards a real boolean verbatim, so a false planted there would
+        // resurface as a measured no-injection / healthy-USB claim for a rig
+        // whose radio never scanned anything.
+        let base = wfb_base_block(&WfbStatusConfig::default());
+        for key in ["adapter_injection_ok", "adapter_usb_degraded", "phy_muted"] {
+            assert!(
+                base.get(key).map(Value::is_null).unwrap_or(true),
+                "base block must not seed a boolean for {key}, got {:?}",
+                base.get(key)
+            );
+        }
+        let block = build_radio_block(Some(&base));
+        for key in ["adapter_injection_ok", "adapter_usb_degraded", "phy_muted"] {
+            assert!(
+                block[key].is_null(),
+                "{key} from the bare base must forward as null, got {:?}",
+                block[key]
+            );
+        }
     }
 
     #[test]

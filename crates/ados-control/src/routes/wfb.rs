@@ -344,7 +344,13 @@ fn base_block(cfg: &StatusConfig) -> Map<String, Value> {
         json!({"driver": "", "chipset": "", "supports_monitor": false}),
     );
     block.insert("adapter_chipset".to_string(), Value::Null);
-    block.insert("adapter_injection_ok".to_string(), json!(false));
+    // Null, not false: the base is what a caller sees when the radio service
+    // never wrote a sidecar, i.e. no adapter scan has produced a verdict. A
+    // false here is a fabricated measured-scan outcome that three-state
+    // consumers (CLI, GCS) would render as a red "no injection radio" claim
+    // for hardware nothing ever examined. A real sidecar always carries the
+    // key, so a genuine scan result (true OR false) overwrites this on merge.
+    block.insert("adapter_injection_ok".to_string(), Value::Null);
     block.insert("rssi_dbm".to_string(), json!(-100.0));
     block.insert("noise_dbm".to_string(), json!(-95.0));
     block.insert("snr_db".to_string(), json!(0.0));
@@ -1123,7 +1129,9 @@ mod tests {
             "bandwidth_mhz": 0,
             "adapter": {"driver": "", "chipset": "", "supports_monitor": false},
             "adapter_chipset": null,
-            "adapter_injection_ok": false,
+            // Null, never false: the base means "no adapter scan reading", and
+            // a false would be a fabricated measured no-injection claim.
+            "adapter_injection_ok": null,
             "rssi_dbm": -100.0,
             "noise_dbm": -95.0,
             "snr_db": 0.0,
