@@ -807,11 +807,31 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
                         // The key can be removed (unpair) at runtime; re-check.
                         let tx_key_present = Path::new(WFB_TX_KEY).exists();
                         let bind_active = read_bind_sentinel_active();
+                        // Received-side proof: the drone is locked only when a
+                        // verified return signal was heard within the grace
+                        // window; it is `rf_unverified` when injecting RF with
+                        // no such signal (the transmitting-zero-reception
+                        // case). Read once, before the state is derived, so the
+                        // derived state, the lock/unlock events, the sidecar
+                        // booleans and the episode detector all describe the
+                        // same instant.
+                        let now = Instant::now();
+                        let tx_is_live = tx_live.tx_live();
+                        let rx_proven = hb_proof.proven_within(
+                            ados_radio::link_proof::RX_PROOF_GRACE,
+                            now,
+                            hb_proof_reference,
+                        );
+                        let rf_unverified = ados_radio::link_proof::is_rf_unverified(
+                            tx_is_live,
+                            rx_proven,
+                        );
                         let state = derive_link_state(
                             tx_key_present,
                             bind_active,
                             &stats,
-                            tx_live.tx_live(),
+                            tx_is_live,
+                            rx_proven,
                         );
 
                         // Ship the per-heartbeat link-quality samples (the
@@ -868,20 +888,6 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
                         if let Some(live) = channel_from_iface(&hb_iface).await {
                             last_live_channel = live;
                         }
-                        // Received-side proof: the drone is locked only when a
-                        // verified return signal was heard within the grace window;
-                        // it is `rf_unverified` when injecting RF with no such
-                        // signal (the transmitting-zero-reception case).
-                        let now = Instant::now();
-                        let rx_proven = hb_proof.proven_within(
-                            ados_radio::link_proof::RX_PROOF_GRACE,
-                            now,
-                            hb_proof_reference,
-                        );
-                        let rf_unverified = ados_radio::link_proof::is_rf_unverified(
-                            tx_live.tx_live(),
-                            rx_proven,
-                        );
                         let channels = ChannelTruth {
                             actual: last_live_channel,
                             rendezvous: hb_rendezvous,

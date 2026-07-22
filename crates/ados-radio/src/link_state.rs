@@ -4,6 +4,7 @@
 //! REST handler and the GCS Radio panel render the same vocabulary regardless of
 //! which implementation writes the sidecar.
 
+use crate::link_proof::is_rf_unverified;
 use crate::link_quality::LinkStats;
 
 /// Loss above this percentage marks the link degraded.
@@ -22,6 +23,11 @@ pub enum LinkState {
     Connecting,
     Connected,
     Degraded,
+    /// Injecting RF with no confirmed reception: the transmit counter is
+    /// advancing yet no verified return signal was heard inside the grace
+    /// window. Distinct from `Degraded`, which requires a REAL decoded
+    /// measurement — this is the case where there is no measurement at all.
+    RfUnverified,
 }
 
 impl LinkState {
@@ -35,6 +41,7 @@ impl LinkState {
             LinkState::Connecting => "connecting",
             LinkState::Connected => "connected",
             LinkState::Degraded => "degraded",
+            LinkState::RfUnverified => "rf_unverified",
         }
     }
 
@@ -53,15 +60,26 @@ impl LinkState {
 ///   2. a bind session is in flight      → `binding`
 ///   3. a REAL measurement (decoded packets) shows loss > 50% or RSSI < -85 dBm
 ///      → `degraded`
-///   4. `tx_bytes` advanced in the last 5 s → `connected` (the radio is
-///      injecting RF)
-///   5. data packets are decoding        → `connected`
-///   6. otherwise                        → `connecting`
+///   4. injecting RF with no confirmed reception → `rf_unverified`
+///   5. `tx_bytes` advanced in the last 5 s → `connected` (the radio is
+///      injecting RF and a return signal was heard)
+///   6. data packets are decoding        → `connected`
+///   7. otherwise                        → `connecting`
 ///
 /// `tx_live` is true when the interface `tx_bytes` counter is non-zero and has
 /// moved within the last 5 s, the same liveness window the TX-health watchdog
-/// uses. It is the strongest "RF is leaving the antenna" signal, so it promotes
-/// the link to `connected` even before the stats RX has decoded a return packet.
+/// uses. `rx_proven` is true when a verified return signal (a control-plane ack
+/// or a peer beacon) was heard inside the proof grace window.
+///
+/// An advancing transmit counter alone only proves the driver accepted frames
+/// into its TX ring — never that the energy reached a receiver. So `tx_live`
+/// promotes the link to `connected` ONLY when reception is confirmed; injecting
+/// blind is `rf_unverified`, not `connected`. The verdict is [`is_rf_unverified`]
+/// verbatim — the same one definition the sidecar's standalone `rf_unverified`
+/// boolean uses — so the derived state and that boolean can never disagree.
+/// It sits above the `tx_live` fallthrough (which is exactly what it down-ranks)
+/// and below the degraded gate, so a genuinely bad MEASURED link still reports
+/// `degraded` rather than being masked as merely unproven.
 ///
 /// The `degraded` verdict requires a REAL link measurement. The default
 /// `LinkStats` sentinel (rssi -100, 0 packets, empty timestamp) means "no return
@@ -76,6 +94,7 @@ pub fn derive_link_state(
     bind_active: bool,
     link: &LinkStats,
     tx_live: bool,
+    rx_proven: bool,
 ) -> LinkState {
     if !tx_key_present {
         return LinkState::Unpaired;
@@ -89,6 +108,9 @@ pub fn derive_link_state(
         && (link.loss_percent > DEGRADED_LOSS_PERCENT || link.rssi_dbm < DEGRADED_RSSI_DBM)
     {
         return LinkState::Degraded;
+    }
+    if is_rf_unverified(tx_live, rx_proven) {
+        return LinkState::RfUnverified;
     }
     if tx_live {
         return LinkState::Connected;
@@ -112,6 +134,7 @@ mod tests {
         assert_eq!(LinkState::Connecting.as_str(), "connecting");
         assert_eq!(LinkState::Connected.as_str(), "connected");
         assert_eq!(LinkState::Degraded.as_str(), "degraded");
+        assert_eq!(LinkState::RfUnverified.as_str(), "rf_unverified");
     }
 
     #[test]
@@ -124,6 +147,9 @@ mod tests {
             LinkState::Binding,
             LinkState::Connecting,
             LinkState::Degraded,
+            // Injecting blind is not a usable link: an unproven transmit path
+            // must never read as locked.
+            LinkState::RfUnverified,
         ] {
             assert!(!s.is_locked(), "{} must not be locked", s.as_str());
         }
@@ -147,9 +173,9 @@ mod tests {
 
     #[test]
     fn no_key_is_unpaired_regardless_of_stats() {
-        // Even a healthy link reports unpaired when the key is gone.
+        // Even a healthy proven link reports unpaired when the key is gone.
         assert_eq!(
-            derive_link_state(false, false, &good_link(), true),
+            derive_link_state(false, false, &good_link(), true, true),
             LinkState::Unpaired
         );
     }
@@ -158,7 +184,7 @@ mod tests {
     fn bind_active_is_binding_over_everything_but_key() {
         // Bind outranks degraded / connected, but not the missing-key guard.
         assert_eq!(
-            derive_link_state(true, true, &good_link(), true),
+            derive_link_state(true, true, &good_link(), true, true),
             LinkState::Binding
         );
         let degraded = LinkStats {
@@ -166,7 +192,17 @@ mod tests {
             ..LinkStats::default()
         };
         assert_eq!(
-            derive_link_state(true, true, &degraded, false),
+            derive_link_state(true, true, &degraded, false, false),
+            LinkState::Binding
+        );
+    }
+
+    #[test]
+    fn bind_active_outranks_an_unproven_transmit() {
+        // A bind session injects on the bind channel with no peer proof yet;
+        // that is the bind path doing its job, not an unverified link.
+        assert_eq!(
+            derive_link_state(true, true, &LinkStats::default(), true, false),
             LinkState::Binding
         );
     }
@@ -180,7 +216,7 @@ mod tests {
             ..LinkStats::default()
         };
         assert_eq!(
-            derive_link_state(true, false, &link, true),
+            derive_link_state(true, false, &link, true, true),
             LinkState::Degraded
         );
     }
@@ -194,7 +230,7 @@ mod tests {
             ..LinkStats::default()
         };
         assert_eq!(
-            derive_link_state(true, false, &link, true),
+            derive_link_state(true, false, &link, true, true),
             LinkState::Degraded
         );
     }
@@ -209,7 +245,7 @@ mod tests {
             ..LinkStats::default()
         };
         assert_eq!(
-            derive_link_state(true, false, &link, false),
+            derive_link_state(true, false, &link, false, true),
             LinkState::Connected
         );
     }
@@ -224,15 +260,16 @@ mod tests {
             ..LinkStats::default()
         };
         assert_eq!(
-            derive_link_state(true, false, &link, false),
+            derive_link_state(true, false, &link, false, true),
             LinkState::Connected
         );
     }
 
     #[test]
-    fn tx_live_is_connected_even_without_decode_stats() {
+    fn tx_live_with_proof_is_connected_even_without_decode_stats() {
         // Drone-only rig: default LinkStats (rssi -100, 0 packets) but tx_bytes
-        // is advancing → the radio is injecting → connected, not degraded.
+        // is advancing AND a return signal was heard → the radio is injecting
+        // and the energy is reaching the peer → connected, not degraded.
         // The default rssi of -100 would trip degraded, so a tx-live rig must
         // still surface as connected. This is the drone-only-injection case:
         // provide a neutral rssi so the degraded guard does not pre-empt.
@@ -241,7 +278,7 @@ mod tests {
             ..LinkStats::default()
         };
         assert_eq!(
-            derive_link_state(true, false, &link, true),
+            derive_link_state(true, false, &link, true, true),
             LinkState::Connected
         );
     }
@@ -254,7 +291,7 @@ mod tests {
             ..LinkStats::default()
         };
         assert_eq!(
-            derive_link_state(true, false, &link, false),
+            derive_link_state(true, false, &link, false, true),
             LinkState::Connected
         );
     }
@@ -267,7 +304,7 @@ mod tests {
             ..LinkStats::default()
         };
         assert_eq!(
-            derive_link_state(true, false, &link, false),
+            derive_link_state(true, false, &link, false, false),
             LinkState::Connecting
         );
     }
@@ -279,7 +316,7 @@ mod tests {
         // rig with no tx activity surfaces as connecting (trying), never degraded
         // (a bad measured link). The degraded verdict needs a real decode.
         assert_eq!(
-            derive_link_state(true, false, &LinkStats::default(), false),
+            derive_link_state(true, false, &LinkStats::default(), false, false),
             LinkState::Connecting
         );
     }
@@ -287,11 +324,12 @@ mod tests {
     #[test]
     fn tx_live_on_sentinel_rssi_is_connected_not_degraded() {
         // The transmit-dominant drone case: the default sentinel (rssi -100, 0
-        // packets) while the radio is injecting RF must report connected, NOT
-        // degraded. The drone's video reaches the peer; it simply decodes no
-        // return signal of its own, so the sentinel rssi must not mark it bad.
+        // packets) while the radio is injecting RF and a return signal is fresh
+        // must report connected, NOT degraded. The drone's video reaches the
+        // peer; it simply decodes no inbound stream of its own, so the sentinel
+        // rssi must not mark it bad.
         assert_eq!(
-            derive_link_state(true, false, &LinkStats::default(), true),
+            derive_link_state(true, false, &LinkStats::default(), true, true),
             LinkState::Connected
         );
     }
@@ -307,8 +345,95 @@ mod tests {
             ..LinkStats::default()
         };
         assert_eq!(
-            derive_link_state(true, false, &link, true),
+            derive_link_state(true, false, &link, true, true),
             LinkState::Degraded
         );
+    }
+
+    #[test]
+    fn tx_live_without_proof_is_rf_unverified_not_connected() {
+        // The truthfulness case: the transmit counter is advancing but no
+        // verified return signal was heard, so the driver accepted frames that
+        // may never have radiated. Reporting connected here trained the
+        // operator to trust a link that was never proven — it must surface as
+        // rf_unverified instead.
+        let link = LinkStats {
+            rssi_dbm: -50.0,
+            ..LinkStats::default()
+        };
+        assert_eq!(
+            derive_link_state(true, false, &link, true, false),
+            LinkState::RfUnverified
+        );
+        // Same on the raw sentinel (0 packets, rssi -100): still unverified,
+        // never degraded — there is no measurement to call bad.
+        assert_eq!(
+            derive_link_state(true, false, &LinkStats::default(), true, false),
+            LinkState::RfUnverified
+        );
+    }
+
+    #[test]
+    fn flat_tx_without_proof_stays_connecting() {
+        // A flat transmit counter is the idle/stalled case the transmit
+        // watchdog owns, NOT the unverified case — the state is unchanged by
+        // the proof input when nothing is being injected.
+        let link = LinkStats {
+            rssi_dbm: -50.0,
+            ..LinkStats::default()
+        };
+        assert_eq!(
+            derive_link_state(true, false, &link, false, false),
+            LinkState::Connecting
+        );
+        assert_eq!(
+            derive_link_state(true, false, &LinkStats::default(), false, false),
+            LinkState::Connecting
+        );
+    }
+
+    #[test]
+    fn degraded_measurement_outranks_rf_unverified() {
+        // A REAL bad reading is more actionable than "unproven": a link that
+        // decoded packets at a rssi below the floor is degraded, and must not
+        // be masked as merely unverified.
+        let link = LinkStats {
+            rssi_dbm: -92.0,
+            packets_received: 50,
+            ..LinkStats::default()
+        };
+        assert_eq!(
+            derive_link_state(true, false, &link, true, false),
+            LinkState::Degraded
+        );
+    }
+
+    #[test]
+    fn unproven_transmit_is_never_locked() {
+        // The lock/unlock transition the telemetry producers emit must follow
+        // the proof: injecting blind is not a locked link.
+        assert!(
+            !derive_link_state(true, false, &LinkStats::default(), true, false).is_locked(),
+            "an unproven transmit must not report a locked link"
+        );
+        assert!(derive_link_state(true, false, &LinkStats::default(), true, true).is_locked());
+    }
+
+    #[test]
+    fn state_agrees_with_the_standalone_proof_verdict() {
+        // The derived state and the sidecar's standalone rf_unverified boolean
+        // come from one definition, so they can never disagree.
+        for tx_live in [true, false] {
+            for rx_proven in [true, false] {
+                let state =
+                    derive_link_state(true, false, &LinkStats::default(), tx_live, rx_proven);
+                assert_eq!(
+                    state == LinkState::RfUnverified,
+                    is_rf_unverified(tx_live, rx_proven),
+                    "state {} disagrees with the proof verdict at tx_live={tx_live} rx_proven={rx_proven}",
+                    state.as_str()
+                );
+            }
+        }
     }
 }

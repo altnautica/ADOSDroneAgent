@@ -542,10 +542,15 @@ async fn receive_loop(
                     tick.tick().await;
                     let stats = link.lock().await.clone();
                     let rx_key_present = std::path::Path::new(RX_KEY).exists();
+                    // A ground station is a receive end: it never injects the
+                    // video plane, so `tx_live` is false and the unverified
+                    // branch is structurally unreachable here. It proves the
+                    // link by its own decodes, which the stats above carry.
                     let state = ados_radio::link_state::derive_link_state(
                         rx_key_present,
                         false,
                         &stats,
+                        false,
                         false,
                     );
                     let mut tags = Fields::new();

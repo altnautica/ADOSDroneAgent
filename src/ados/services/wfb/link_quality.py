@@ -43,6 +43,10 @@ class LinkState(StrEnum):
     CONNECTING = "connecting"
     CONNECTED = "connected"
     DEGRADED = "degraded"
+    # Injecting RF with no confirmed reception: the transmit counter advances
+    # yet no verified return signal was heard inside the grace window. Distinct
+    # from DEGRADED, which needs a real decoded measurement to call bad.
+    RF_UNVERIFIED = "rf_unverified"
 
 # `\d+\tRX_ANT\t<freq>:<mcs>:<bw>\t<ant_id_hex>\t<count>:<rmin>:<ravg>:<rmax>:<smin>:<savg>:<smax>`
 #

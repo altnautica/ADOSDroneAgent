@@ -848,4 +848,45 @@ mod tests {
 
         std::env::remove_var("ADOS_RUN_DIR");
     }
+
+    #[test]
+    fn sidecar_state_agrees_with_the_rf_unverified_boolean() {
+        // The derived state string and the standalone boolean are two views of
+        // one verdict; a body that says `rf_unverified: true` while the state
+        // reads `connected` is the false-healthy surface this pairing exists to
+        // prevent, so the two are asserted together on one body.
+        let state = ados_radio::link_state::derive_link_state(
+            true,
+            false,
+            &LinkStats::default(),
+            true,  // transmitting
+            false, // no confirmed reception
+        );
+        assert_eq!(state, ados_radio::link_state::LinkState::RfUnverified);
+
+        let channels = ChannelTruth {
+            actual: 149,
+            rendezvous: 149,
+            operating: 149,
+            locked: false,
+            rf_unverified: true,
+        };
+        let body = build_stats_value(
+            state.as_str(),
+            &channels,
+            &RegSnapshot::default(),
+            5,
+            None,
+            &LinkStats::default(),
+            &WfbConfig::default(),
+            0,
+            &WatchdogCounters::default(),
+            &TxRates::default(),
+            &BitrateSnapshot::default(),
+        );
+        assert_eq!(body["state"], "rf_unverified");
+        assert_eq!(body["link_state"], "rf_unverified");
+        assert_eq!(body["rf_unverified"], true);
+        assert_eq!(body["channel_locked"], false);
+    }
 }
