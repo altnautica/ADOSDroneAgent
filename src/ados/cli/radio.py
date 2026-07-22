@@ -189,26 +189,32 @@ def _print_status_table(data: dict[str, Any], bind: dict[str, Any] | None = None
     fec_r = data.get("fec_recovered")
     fec_l = data.get("fec_failed")
     # Selected radio adapter identity + injection verdict. The selector
-    # only ever picks an iface whose monitor mode was proven, so a false
-    # verdict means no RTL injection-capable adapter was found — the link
-    # is stranded and we must NOT be transmitting on a management WiFi.
+    # only ever picks an iface whose monitor mode was proven, so a False
+    # verdict means the scan RAN and no RTL injection-capable adapter was
+    # found — the link is stranded and we must NOT be transmitting on a
+    # management WiFi. The verdict is three-state: a null means no scan has
+    # produced one yet (unpaired / pre-scan), which must not render the
+    # alarming measured-red line about a scan that never happened.
     selected_chipset = data.get("adapter_chipset")
-    injection_ok = bool(data.get("adapter_injection_ok", False))
+    injection_verdict = data.get("adapter_injection_ok")
     # A bind session that is mid-flight (any non-terminal state) tears the
     # radio down and rebuilds it, so a transient 'no injection radio' verdict
     # is expected and not an error — show the bind phase instead of the
     # alarming red line.
     bind_state = _bind_session_state(bind)
     bind_active = bool(bind_state) and bind_state not in _BIND_TERMINAL_STATES
-    if injection_ok:
+    if injection_verdict is True:
         injection_value = "yes"
         injection_colour = "green"
     elif bind_active:
         injection_value = f"binding ({bind_state}) — connecting"
         injection_colour = "yellow"
-    else:
+    elif injection_verdict is False:
         injection_value = "NO — no injection radio"
         injection_colour = "red"
+    else:
+        injection_value = "unknown — no adapter scan yet"
+        injection_colour = "yellow"
 
     click.echo(click.style(f"WFB-ng radio  state={state}", bold=True))
     click.echo("")

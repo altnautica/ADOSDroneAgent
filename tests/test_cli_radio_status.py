@@ -58,6 +58,26 @@ def test_radio_status_shows_loud_no_injection_verdict():
     assert "no injection radio" in out
 
 
+def test_radio_status_reports_a_missing_verdict_as_unknown_not_stranded():
+    # An unpaired / pre-scan rig has no injection verdict (the sidecar reports
+    # null): the CLI must say so, never render the measured-red "no injection
+    # radio" line about a scan that never ran.
+    out = _invoke(
+        {
+            "state": "unpaired",
+            "interface": "",
+            "adapter": {"driver": "", "chipset": ""},
+            "adapter_chipset": None,
+            "adapter_injection_ok": None,
+            "channel": 149,
+        }
+    )
+    assert "Injection capable" in out
+    assert "unknown" in out
+    assert "no adapter scan yet" in out
+    assert "no injection radio" not in out
+
+
 def test_radio_status_suppresses_no_injection_during_active_bind():
     # During an in-flight bind the radio is torn down + rebuilt, so a false
     # "no injection radio" verdict is expected and must NOT be shown as an
