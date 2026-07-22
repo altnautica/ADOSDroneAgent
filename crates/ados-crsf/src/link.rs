@@ -1,0 +1,243 @@
+//! The lane state machine: a pure derivation from observed inputs to the
+//! sidecar's `state` and `rf_unverified` fields.
+//!
+//! Liveness discipline: bytes accepted by the serial driver prove only that
+//! the driver took them — never that the RC module radiated, and never that
+//! the far receiver heard anything. The only received-side proof this lane
+//! has is the inbound link-statistics telemetry (frame type 0x14) and its
+//! uplink link-quality figure, so the verdict keys on that: transmitting
+//! without fresh link statistics is `rf_unverified`, not "up". Before the
+//! proof window has even had a chance to fill, the honest answer is "no
+//! verdict yet" (`ready`, `rf_unverified: null`) — never a fabricated false.
+
+use std::time::Duration;
+
+/// How fresh the last link-statistics frame must be to count as a
+/// received-side proof of the link.
+pub const STATS_FRESH_WINDOW: Duration = Duration::from_secs(3);
+
+/// How long transmission may run without any link statistics before the
+/// no-verdict grace ends and the lane reads `rf_unverified`.
+pub const RF_PROOF_GRACE: Duration = Duration::from_secs(5);
+
+/// Uplink link-quality percentage below which a proven link reads `degraded`.
+pub const LQ_DEGRADED_BELOW: u8 = 50;
+
+/// The lane state, exactly the sidecar vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaneState {
+    /// The lane is opted out (or this node's profile does not run it).
+    Disabled,
+    /// Enabled but no usable serial device is open.
+    Unconfigured,
+    /// Device open; no liveness verdict yet (not transmitting, or still
+    /// inside the proof grace window).
+    Ready,
+    /// Fresh link statistics with healthy uplink quality.
+    LinkOk,
+    /// Fresh link statistics but poor uplink quality.
+    Degraded,
+    /// Transmitting beyond the grace window with no received-side proof.
+    RfUnverified,
+}
+
+impl LaneState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LaneState::Disabled => "disabled",
+            LaneState::Unconfigured => "unconfigured",
+            LaneState::Ready => "ready",
+            LaneState::LinkOk => "link_ok",
+            LaneState::Degraded => "degraded",
+            LaneState::RfUnverified => "rf_unverified",
+        }
+    }
+
+    /// The sidecar's `rf_unverified` field for this state: `Some(false)` when
+    /// a received-side proof exists, `Some(true)` when transmission is
+    /// provably unheard, `None` when there is no verdict to report.
+    pub fn rf_unverified_flag(self) -> Option<bool> {
+        match self {
+            LaneState::LinkOk | LaneState::Degraded => Some(false),
+            LaneState::RfUnverified => Some(true),
+            LaneState::Disabled | LaneState::Unconfigured | LaneState::Ready => None,
+        }
+    }
+}
+
+/// The observed inputs the state derivation reads.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LinkInputs {
+    /// The lane is opted in AND this profile runs it.
+    pub enabled: bool,
+    /// A serial device is open.
+    pub device_open: bool,
+    /// How long the transmitter has been running, `None` when it is not.
+    pub tx_running_for: Option<Duration>,
+    /// Age of the last valid link-statistics frame, `None` when never seen.
+    pub stats_age: Option<Duration>,
+    /// Uplink link quality from that frame, 0..=100.
+    pub uplink_lq: Option<u8>,
+}
+
+/// Derive the lane state from the observed inputs. Pure.
+pub fn derive_state(i: &LinkInputs) -> LaneState {
+    if !i.enabled {
+        return LaneState::Disabled;
+    }
+    if !i.device_open {
+        return LaneState::Unconfigured;
+    }
+    // A fresh link-statistics frame is the received-side proof.
+    if let Some(age) = i.stats_age {
+        if age <= STATS_FRESH_WINDOW {
+            // A fresh frame always carries an LQ; a defensively-missing one
+            // reads degraded, never ok.
+            return if i.uplink_lq.unwrap_or(0) >= LQ_DEGRADED_BELOW {
+                LaneState::LinkOk
+            } else {
+                LaneState::Degraded
+            };
+        }
+    }
+    // No fresh proof. Transmitting past the grace window means the energy is
+    // provably going unheard; anything earlier is simply "no verdict yet".
+    match i.tx_running_for {
+        Some(running) if running > RF_PROOF_GRACE => LaneState::RfUnverified,
+        _ => LaneState::Ready,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn secs(s: u64) -> Duration {
+        Duration::from_secs(s)
+    }
+
+    #[test]
+    fn disabled_wins_over_everything() {
+        let i = LinkInputs {
+            enabled: false,
+            device_open: true,
+            tx_running_for: Some(secs(60)),
+            stats_age: Some(secs(0)),
+            uplink_lq: Some(100),
+        };
+        assert_eq!(derive_state(&i), LaneState::Disabled);
+        assert_eq!(LaneState::Disabled.rf_unverified_flag(), None);
+    }
+
+    #[test]
+    fn no_device_reads_unconfigured() {
+        let i = LinkInputs {
+            enabled: true,
+            device_open: false,
+            ..Default::default()
+        };
+        assert_eq!(derive_state(&i), LaneState::Unconfigured);
+        assert_eq!(LaneState::Unconfigured.rf_unverified_flag(), None);
+    }
+
+    #[test]
+    fn open_but_not_transmitting_is_ready_with_no_verdict() {
+        let i = LinkInputs {
+            enabled: true,
+            device_open: true,
+            tx_running_for: None,
+            stats_age: None,
+            uplink_lq: None,
+        };
+        assert_eq!(derive_state(&i), LaneState::Ready);
+        assert_eq!(LaneState::Ready.rf_unverified_flag(), None);
+    }
+
+    #[test]
+    fn transmitting_inside_grace_stays_ready() {
+        let i = LinkInputs {
+            enabled: true,
+            device_open: true,
+            tx_running_for: Some(secs(3)),
+            stats_age: None,
+            uplink_lq: None,
+        };
+        assert_eq!(derive_state(&i), LaneState::Ready);
+    }
+
+    #[test]
+    fn transmitting_past_grace_with_no_stats_is_rf_unverified() {
+        let i = LinkInputs {
+            enabled: true,
+            device_open: true,
+            tx_running_for: Some(secs(6)),
+            stats_age: None,
+            uplink_lq: None,
+        };
+        assert_eq!(derive_state(&i), LaneState::RfUnverified);
+        assert_eq!(LaneState::RfUnverified.rf_unverified_flag(), Some(true));
+    }
+
+    #[test]
+    fn fresh_stats_with_good_lq_is_link_ok() {
+        let i = LinkInputs {
+            enabled: true,
+            device_open: true,
+            tx_running_for: Some(secs(60)),
+            stats_age: Some(secs(1)),
+            uplink_lq: Some(99),
+        };
+        assert_eq!(derive_state(&i), LaneState::LinkOk);
+        assert_eq!(LaneState::LinkOk.rf_unverified_flag(), Some(false));
+    }
+
+    #[test]
+    fn fresh_stats_with_poor_lq_is_degraded() {
+        let i = LinkInputs {
+            enabled: true,
+            device_open: true,
+            tx_running_for: Some(secs(60)),
+            stats_age: Some(secs(1)),
+            uplink_lq: Some(LQ_DEGRADED_BELOW - 1),
+        };
+        assert_eq!(derive_state(&i), LaneState::Degraded);
+        // RF is verified (frames ARE arriving); the link is merely poor.
+        assert_eq!(LaneState::Degraded.rf_unverified_flag(), Some(false));
+    }
+
+    #[test]
+    fn stale_stats_fall_back_to_the_no_proof_ladder() {
+        // Stats went stale while transmitting: the proof has lapsed, so the
+        // lane is back to unverified — a dead link must not keep reading ok.
+        let i = LinkInputs {
+            enabled: true,
+            device_open: true,
+            tx_running_for: Some(secs(60)),
+            stats_age: Some(secs(10)),
+            uplink_lq: Some(100),
+        };
+        assert_eq!(derive_state(&i), LaneState::RfUnverified);
+    }
+
+    #[test]
+    fn fresh_stats_with_defensively_missing_lq_reads_degraded() {
+        let i = LinkInputs {
+            enabled: true,
+            device_open: true,
+            tx_running_for: Some(secs(60)),
+            stats_age: Some(secs(1)),
+            uplink_lq: None,
+        };
+        assert_eq!(derive_state(&i), LaneState::Degraded);
+    }
+
+    #[test]
+    fn state_strings_match_the_sidecar_vocabulary() {
+        assert_eq!(LaneState::Disabled.as_str(), "disabled");
+        assert_eq!(LaneState::Unconfigured.as_str(), "unconfigured");
+        assert_eq!(LaneState::Ready.as_str(), "ready");
+        assert_eq!(LaneState::LinkOk.as_str(), "link_ok");
+        assert_eq!(LaneState::Degraded.as_str(), "degraded");
+        assert_eq!(LaneState::RfUnverified.as_str(), "rf_unverified");
+    }
+}

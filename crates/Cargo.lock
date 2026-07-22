@@ -203,6 +203,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ados-crsf"
+version = "0.1.0"
+dependencies = [
+ "ados-config",
+ "ados-protocol",
+ "serde",
+ "serde_json",
+ "serde_norway",
+ "tempfile",
+ "tokio",
+ "tokio-serial",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "ados-display"
 version = "0.1.0"
 dependencies = [

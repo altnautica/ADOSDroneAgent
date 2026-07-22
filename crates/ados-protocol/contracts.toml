@@ -244,6 +244,13 @@ rust_const = "ados_radio::paths::BIND_STATE_SENTINEL"
 description = "WFB bind-session sentinel and precheck result."
 
 [[sidecar]]
+id = "crsf-stats"
+version = 1
+path = "/run/ados/crsf-stats.json"
+rust_const = "ados_crsf::paths::CRSF_STATS_JSON"
+description = "CRSF RC-lane state and link statistics: lane state, RSSI/LQ/SNR, frame rates, and the received-side liveness verdict."
+
+[[sidecar]]
 id = "mesh-state"
 version = 1
 path = "/run/ados/mesh-state.json"

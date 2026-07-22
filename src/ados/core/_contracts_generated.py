@@ -37,6 +37,7 @@ SIDECAR_VERSIONS: dict[str, int] = {
     "wifi-powersave": 1,
     "wfb_failover": 1,
     "bind-state": 1,
+    "crsf-stats": 1,
     "mesh-state": 1,
     "camera-state": 1,
     "video-streams": 2,
@@ -232,6 +233,13 @@ SIDECAR_CATALOG: dict[str, dict[str, object]] = {
         "transport": "/run/ados/bind-state.json",
         "status": "sidecar",
         "description": "WFB bind-session sentinel and precheck result.",
+    },
+    "crsf-stats": {
+        "version": 1,
+        "wire": "json",
+        "transport": "/run/ados/crsf-stats.json",
+        "status": "sidecar",
+        "description": "CRSF RC-lane state and link statistics: lane state, RSSI/LQ/SNR, frame rates, and the received-side liveness verdict.",
     },
     "mesh-state": {
         "version": 1,
