@@ -600,7 +600,7 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
     # normal case there; the sidecar carries the same key names as
     # get_status() so the block is identical either way. A stale sidecar
     # (> 10 s) is dropped so a stopped radio never reads as live.
-    from ados.core.radio_block import build_radio_block
+    from ados.core.radio_block import build_radio_block, verdict_or_none
     wfb = getattr(app, "_wfb_manager", None)
     wfb_status: dict | None = None
     if wfb is not None:
@@ -612,28 +612,32 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
         wfb_status = _read_wfb_stats_sidecar()
     payload["radio"] = build_radio_block(wfb_status)
 
-    # Top-level radio-adapter selection verdict. Mirrors the same two
-    # fields inside the radio block but hoists them to the payload root
-    # so Mission Control and the CLI can read the injection check
-    # without unpacking the radio sub-object. chipset is null and
-    # injectionOk is false when no RTL injection-capable adapter was
-    # found/verified — the stranded radio link signal.
+    # Top-level radio-adapter selection verdict. Mirrors the same fields
+    # inside the radio block but hoists them to the payload root so
+    # Mission Control and the CLI can read the injection check without
+    # unpacking the radio sub-object. chipset is null until a real RTL
+    # radio is verified; injectionOk False means the scan proved no
+    # injection-capable adapter — the stranded radio link signal. Both
+    # verdicts are None (no reading, never a confident False) when the
+    # radio view carries no boolean: a False would render a measured
+    # green USB link / red no-injection claim for hardware a
+    # never-scanned rig never examined.
     if isinstance(wfb_status, dict):
         payload["wfbAdapterChipset"] = wfb_status.get("adapter_chipset")
-        payload["wfbAdapterInjectionOk"] = bool(
-            wfb_status.get("adapter_injection_ok", False)
+        payload["wfbAdapterInjectionOk"] = verdict_or_none(
+            wfb_status, "adapter_injection_ok"
         )
         # USB link health of the selected adapter — a full-speed (12 Mbps) RTL
         # advances tx_bytes yet emits no RF; surface so the GCS warns.
         payload["wfbAdapterUsbSpeedMbps"] = wfb_status.get("adapter_usb_speed_mbps")
-        payload["wfbAdapterUsbDegraded"] = bool(
-            wfb_status.get("adapter_usb_degraded", False)
+        payload["wfbAdapterUsbDegraded"] = verdict_or_none(
+            wfb_status, "adapter_usb_degraded"
         )
     else:
         payload["wfbAdapterChipset"] = None
-        payload["wfbAdapterInjectionOk"] = False
+        payload["wfbAdapterInjectionOk"] = None
         payload["wfbAdapterUsbSpeedMbps"] = None
-        payload["wfbAdapterUsbDegraded"] = False
+        payload["wfbAdapterUsbDegraded"] = None
 
     # Overall radio-stack health for the GCS diagnostic line, derived from
     # the live radio sidecar (adapter injection verdict + pair flag) and the

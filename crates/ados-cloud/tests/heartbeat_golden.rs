@@ -72,7 +72,8 @@ fn base_payload() -> HeartbeatPayload {
         peripherals: None,
         radio: RadioBlock::absent(),
         wfb_adapter_chipset: None,
-        wfb_adapter_injection_ok: false,
+        // No radio view in the base ⇒ no injection verdict (key omitted).
+        wfb_adapter_injection_ok: None,
         lcd_active_page: None,
         ui_theme: None,
         lcd_touch_calibrated: None,
@@ -145,11 +146,11 @@ fn paired_full_matches_python_emit() {
         paired: true,
         paired_with_device_id: Some("ados-peer".to_string()),
         adapter_chipset: Some("RTL8812EU".to_string()),
-        adapter_injection_ok: true,
+        adapter_injection_ok: Some(true),
         ..RadioBlock::absent()
     };
     payload.wfb_adapter_chipset = Some("RTL8812EU".to_string());
-    payload.wfb_adapter_injection_ok = true;
+    payload.wfb_adapter_injection_ok = Some(true);
     payload.mission_control_url = Some("https://mc.example".to_string());
     payload.video_whep_url = Some("https://tunnel.example/main/".to_string());
     payload.peripherals = Some(vec![Peripheral {

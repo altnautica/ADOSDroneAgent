@@ -131,7 +131,12 @@ pub struct RadioBlock {
     pub reacquire_kills: Option<i64>,
     pub valid_rx_packets_per_s: Option<f64>,
     pub adapter_chipset: Option<String>,
-    pub adapter_injection_ok: bool,
+    /// The adapter injection verdict. `Some(false)` is a MEASURED outcome (the
+    /// scan ran and proved no injection-capable adapter — the loud stranded
+    /// radio signal); `None` means no verdict exists (no radio view, a
+    /// never-scanned rig) and serializes as JSON `null` so the three-state
+    /// consumer reads "unknown" instead of a fabricated scan result.
+    pub adapter_injection_ok: Option<bool>,
 }
 
 impl RadioBlock {
@@ -173,7 +178,9 @@ impl RadioBlock {
             reacquire_kills: None,
             valid_rx_packets_per_s: None,
             adapter_chipset: None,
-            adapter_injection_ok: false,
+            // Null, not false: with no radio view no adapter scan ever ran, so
+            // there is no injection verdict to report.
+            adapter_injection_ok: None,
         }
     }
 }
@@ -314,11 +321,15 @@ pub struct HeartbeatPayload {
 
     // --- radio (always present; snake_case sub-block) ---
     pub radio: RadioBlock,
-    // Adapter verdict hoisted to the root. chipset null-strips; injectionOk is a
-    // plain bool (false when no injection adapter verified).
+    // Adapter verdict hoisted to the root. Both halves strip when absent: a
+    // rig with no radio view has no chipset AND no injection verdict, and an
+    // asserted `false` would claim a measured no-injection scan outcome the
+    // rig never produced. `Some(false)` (a real scanned-none verdict) still
+    // rides the wire.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wfb_adapter_chipset: Option<String>,
-    pub wfb_adapter_injection_ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wfb_adapter_injection_ok: Option<bool>,
 
     // --- LCD / display enrichment (all optional, omitted when absent) ---
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -486,6 +497,9 @@ mod tests {
             freq_mhz: Some(5745),
             ..RadioBlock::absent()
         };
+        // A real scan verdict, so the hoisted root key is present to assert
+        // its casing (with no verdict the key is stripped entirely).
+        p.wfb_adapter_injection_ok = Some(true);
         let v = p.to_value();
         let obj = v.as_object().unwrap();
         // Root keys: camelCase.
@@ -502,6 +516,31 @@ mod tests {
         assert!(radio.contains_key("rssi_dbm"));
         assert!(radio.contains_key("adapter_injection_ok"));
         assert!(!radio.contains_key("freqMhz"));
+    }
+
+    #[test]
+    fn adapter_injection_verdict_defaults_to_unknown_never_false() {
+        // With no radio view there is no injection verdict: the nested block
+        // key reads null and the hoisted root key is stripped — never a
+        // fabricated false, which the three-state consumer would render as a
+        // measured scan outcome for a rig that never scanned.
+        let p = minimal_payload();
+        let v = p.to_value();
+        let radio = v.get("radio").unwrap().as_object().unwrap();
+        assert!(radio.contains_key("adapter_injection_ok"));
+        assert!(radio["adapter_injection_ok"].is_null());
+        assert!(!v.as_object().unwrap().contains_key("wfbAdapterInjectionOk"));
+
+        // A measured verdict rides the wire in both directions.
+        let mut p = minimal_payload();
+        p.radio = RadioBlock {
+            adapter_injection_ok: Some(false),
+            ..RadioBlock::absent()
+        };
+        p.wfb_adapter_injection_ok = Some(false);
+        let v = p.to_value();
+        assert_eq!(v["radio"]["adapter_injection_ok"], serde_json::json!(false));
+        assert_eq!(v["wfbAdapterInjectionOk"], serde_json::json!(false));
     }
 
     #[test]
@@ -606,7 +645,7 @@ mod tests {
             peripherals: None,
             radio: RadioBlock::absent(),
             wfb_adapter_chipset: None,
-            wfb_adapter_injection_ok: false,
+            wfb_adapter_injection_ok: None,
             lcd_active_page: None,
             ui_theme: None,
             lcd_touch_calibrated: None,

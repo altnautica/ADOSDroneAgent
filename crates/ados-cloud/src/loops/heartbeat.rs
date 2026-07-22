@@ -461,7 +461,10 @@ fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
         peripherals: None,
         radio: RadioBlock::absent(),
         wfb_adapter_chipset: None,
-        wfb_adapter_injection_ok: false,
+        // No radio view in the native base ⇒ no injection verdict: the key is
+        // omitted (never a fabricated false) until the radio enrichment folds
+        // a real scan outcome over the base.
+        wfb_adapter_injection_ok: None,
         lcd_active_page: None,
         ui_theme: None,
         lcd_touch_calibrated: None,

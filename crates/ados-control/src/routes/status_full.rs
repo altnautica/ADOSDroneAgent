@@ -829,7 +829,21 @@ fn rf_unverified_field(status: &Map<String, Value>) -> Value {
     if status.get("state").and_then(Value::as_str) == Some("stale") {
         return Value::Null;
     }
-    match status.get("rf_unverified") {
+    bool_or_null(status, "rf_unverified")
+}
+
+/// Forward a boolean verdict from the status view verbatim, or `null` when the
+/// view carries no boolean reading for it.
+///
+/// The absence of a verdict must never collapse to a confident `false`: the
+/// GCS resolves these fields three-state (degraded / ok / unknown), so a
+/// fabricated `false` for `adapter_usb_degraded` renders a green "USB link OK"
+/// for an adapter nothing ever enumerated, a fabricated `false` for
+/// `adapter_injection_ok` renders a red no-injection claim a pre-scan rig
+/// never measured, and a fabricated `false` for `phy_muted` asserts a healthy
+/// TX PHY on a view (the receive side) that has no TX PHY to read.
+fn bool_or_null(map: &Map<String, Value>, key: &str) -> Value {
+    match map.get(key) {
         Some(Value::Bool(b)) => Value::Bool(*b),
         _ => Value::Null,
     }
@@ -914,10 +928,14 @@ fn build_radio_block(wfb_status: Option<&Map<String, Value>>) -> Value {
         "reacquire_kills": get_or_null(status, "reacquire_kills"),
         "valid_rx_packets_per_s": get_or_null(status, "valid_rx_packets_per_s"),
         "adapter_chipset": get_or_null(status, "adapter_chipset"),
-        "adapter_injection_ok": json_truthy_default_false(status, "adapter_injection_ok"),
+        // Adapter + PHY verdicts forward verbatim as booleans, or `null` when
+        // the view has no reading — never a fabricated false, which the GCS's
+        // three-state resolvers would render as a measured green/red claim
+        // about hardware this view never examined.
+        "adapter_injection_ok": bool_or_null(status, "adapter_injection_ok"),
         "adapter_usb_speed_mbps": get_or_null(status, "adapter_usb_speed_mbps"),
-        "adapter_usb_degraded": json_truthy_default_false(status, "adapter_usb_degraded"),
-        "phy_muted": json_truthy_default_false(status, "phy_muted"),
+        "adapter_usb_degraded": bool_or_null(status, "adapter_usb_degraded"),
+        "phy_muted": bool_or_null(status, "phy_muted"),
         "tx_zombie_kills": get_or_null(status, "tx_zombie_kills"),
         "tx_bytes_per_s": get_or_null(status, "tx_bytes_per_s"),
         "restart_count": get_or_null(status, "restart_count"),
@@ -925,7 +943,9 @@ fn build_radio_block(wfb_status: Option<&Map<String, Value>>) -> Value {
 }
 
 /// The "no radio" skeleton the heartbeat carries when there is no WFB status view.
-/// Every metric is `null`; paired / injection / degraded / muted are `false`.
+/// Every metric is `null` and `paired` is `false`; the adapter / PHY verdicts are
+/// `null` too — with no radio view there is nothing to have measured them, and a
+/// `false` would claim a healthy USB link / unmuted PHY that was never examined.
 /// Mirrors the Python `build_radio_block` `if not wfb_status:` branch exactly.
 fn radio_absent_block() -> Value {
     json!({
@@ -964,10 +984,10 @@ fn radio_absent_block() -> Value {
         "reacquire_kills": null,
         "valid_rx_packets_per_s": null,
         "adapter_chipset": null,
-        "adapter_injection_ok": false,
+        "adapter_injection_ok": null,
         "adapter_usb_speed_mbps": null,
-        "adapter_usb_degraded": false,
-        "phy_muted": false,
+        "adapter_usb_degraded": null,
+        "phy_muted": null,
     })
 }
 
@@ -2018,10 +2038,62 @@ mod tests {
         let block = build_radio_block(None);
         assert_eq!(block["state"], json!("absent"));
         assert_eq!(block["paired"], json!(false));
-        assert_eq!(block["adapter_injection_ok"], json!(false));
         assert_eq!(block["bandwidth_mhz"], Value::Null);
         assert_eq!(block["rssi_dbm"], Value::Null);
         assert_eq!(block["channel"], Value::Null);
+        // With no radio view there is no adapter or PHY verdict: null, never a
+        // confident false that would read as a measured green USB link / red
+        // no-injection / unmuted PHY for hardware nothing examined.
+        for key in ["adapter_injection_ok", "adapter_usb_degraded", "phy_muted"] {
+            assert!(
+                block[key].is_null(),
+                "{key} must be null on the absent block, got {:?}",
+                block[key]
+            );
+        }
+    }
+
+    #[test]
+    fn radio_block_adapter_and_phy_verdicts_null_when_not_reported() {
+        // A view that carries no boolean reading for a verdict (a receive-side
+        // view, an older sidecar, a junk type) forwards null — the three-state
+        // consumer's unknown — never a fabricated false.
+        let no_fields = signals(&[("state", json!("connected"))]);
+        let block = build_radio_block(Some(&no_fields));
+        for key in ["adapter_injection_ok", "adapter_usb_degraded", "phy_muted"] {
+            assert!(
+                block[key].is_null(),
+                "{key} absent from the view must forward as null, got {:?}",
+                block[key]
+            );
+        }
+
+        let junk = signals(&[
+            ("state", json!("connected")),
+            ("adapter_injection_ok", json!("yes")),
+            ("adapter_usb_degraded", json!(1)),
+            ("phy_muted", json!("no")),
+        ]);
+        let block = build_radio_block(Some(&junk));
+        for key in ["adapter_injection_ok", "adapter_usb_degraded", "phy_muted"] {
+            assert!(
+                block[key].is_null(),
+                "{key} with a non-boolean reading must forward as null"
+            );
+        }
+
+        // Real booleans forward verbatim in BOTH directions, so a measured
+        // warning and a measured all-clear both stay live.
+        let measured = signals(&[
+            ("state", json!("connected")),
+            ("adapter_injection_ok", json!(false)),
+            ("adapter_usb_degraded", json!(true)),
+            ("phy_muted", json!(false)),
+        ]);
+        let block = build_radio_block(Some(&measured));
+        assert_eq!(block["adapter_injection_ok"], json!(false));
+        assert_eq!(block["adapter_usb_degraded"], json!(true));
+        assert_eq!(block["phy_muted"], json!(false));
     }
 
     #[test]

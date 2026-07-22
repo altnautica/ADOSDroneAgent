@@ -34,13 +34,12 @@
   "radio": {
     "acquire_state": null,
     "adapter_chipset": null,
-    "adapter_injection_ok": false,
+    "adapter_injection_ok": null,
     "auto_pair_enabled": null,
     "bandwidth_mhz": null,
     "bitrate_kbps": null,
     "channel": null,
     "channel_locked": null,
-    "rf_unverified": null,
     "driver": null,
     "fec_lost": null,
     "fec_recovered": null,
@@ -55,6 +54,7 @@
     "paired_with_device_id": null,
     "public_key_fingerprint": null,
     "reacquire_kills": null,
+    "rf_unverified": null,
     "rssi_dbm": null,
     "rx_silent_seconds": null,
     "snr_db": null,
@@ -76,6 +76,5 @@
   "uptimeSeconds": 10,
   "version": "0.49.3",
   "videoState": "stopped",
-  "videoWhepPort": 0,
-  "wfbAdapterInjectionOk": false
+  "videoWhepPort": 0
 }

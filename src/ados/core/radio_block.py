@@ -83,6 +83,19 @@ def _detect_radio_driver_name(interface: str | None) -> str | None:
     return None
 
 
+def verdict_or_none(wfb_status: dict[str, Any], key: str) -> bool | None:
+    """A boolean verdict forwarded verbatim, or None when there is no reading.
+
+    The absence of a verdict must never collapse to a confident False: the
+    GCS resolves these fields three-state (degraded / ok / unknown), so a
+    fabricated False renders a measured-looking green or red claim about
+    hardware this view never examined (a receive-side view, an older sidecar,
+    an unpaired never-scanned rig).
+    """
+    value = wfb_status.get(key)
+    return value if isinstance(value, bool) else None
+
+
 def build_radio_block(wfb_status: dict[str, Any] | None) -> dict[str, Any]:
     """Shape a forward-compatible `radio` heartbeat block.
 
@@ -129,10 +142,14 @@ def build_radio_block(wfb_status: dict[str, Any] | None) -> dict[str, Any]:
             "reacquire_kills": None,
             "valid_rx_packets_per_s": None,
             "adapter_chipset": None,
-            "adapter_injection_ok": False,
+            # None, not False, for the same reason: with no radio view no
+            # adapter was examined and no PHY was read, so a False here would
+            # claim a measured no-injection / healthy-USB-link / unmuted-PHY
+            # state that was never measured.
+            "adapter_injection_ok": None,
             "adapter_usb_speed_mbps": None,
-            "adapter_usb_degraded": False,
-            "phy_muted": False,
+            "adapter_usb_degraded": None,
+            "phy_muted": None,
         }
 
     iface = wfb_status.get("interface") or None
@@ -204,31 +221,33 @@ def build_radio_block(wfb_status: dict[str, Any] | None) -> dict[str, Any]:
         # reading" rather than claiming the transmit path was proven. A stale
         # sidecar never reaches here: the caller drops it and emits the absent
         # block.
-        "rf_unverified": (
-            wfb_status["rf_unverified"]
-            if isinstance(wfb_status.get("rf_unverified"), bool)
-            else None
-        ),
+        "rf_unverified": verdict_or_none(wfb_status, "rf_unverified"),
         "reacquire_kills": wfb_status.get("reacquire_kills"),
         "valid_rx_packets_per_s": wfb_status.get("valid_rx_packets_per_s"),
         # Selected radio adapter identity + injection verdict. chipset is
         # the label of the adapter the selector picked (null until a real
-        # RTL radio is verified); injection_ok is false when no
+        # RTL radio is verified); injection_ok False means no
         # injection-capable adapter was found/proven — the loud stranded
-        # radio link signal Mission Control renders.
+        # radio link signal Mission Control renders. Null (never a
+        # confident False) when the view carries no boolean reading, so a
+        # never-scanned rig or an older sidecar reads as "no verdict"
+        # rather than claiming a measured scan outcome.
         "adapter_chipset": wfb_status.get("adapter_chipset"),
-        "adapter_injection_ok": bool(wfb_status.get("adapter_injection_ok", False)),
+        "adapter_injection_ok": verdict_or_none(wfb_status, "adapter_injection_ok"),
         # Selected adapter's USB link health. A full-speed (12 Mbps) RTL
         # enumeration advances tx_bytes yet emits no usable RF; surface the
         # speed + degraded flag so Mission Control warns instead of showing a
-        # healthy link. Null/false when an older sidecar omits them.
+        # healthy link. Null when the view has no reading — a False here would
+        # render a measured-healthy green USB link for an adapter nothing ever
+        # enumerated.
         "adapter_usb_speed_mbps": wfb_status.get("adapter_usb_speed_mbps"),
-        "adapter_usb_degraded": bool(wfb_status.get("adapter_usb_degraded", False)),
+        "adapter_usb_degraded": verdict_or_none(wfb_status, "adapter_usb_degraded"),
         # TX PHY pinned at the muted not-permitted floor: it injects frames but
         # radiates nothing. Surface it so Mission Control flags a silent dead
-        # link instead of a healthy-looking radio. False on the receive side and
-        # on older sidecars that omit the field.
-        "phy_muted": bool(wfb_status.get("phy_muted", False)),
+        # link instead of a healthy-looking radio. Null on the receive side and
+        # on older sidecars that omit the field — those views have no TX PHY
+        # reading, so they carry no verdict rather than an asserted all-clear.
+        "phy_muted": verdict_or_none(wfb_status, "phy_muted"),
         # Radio-data-plane churn + transmit-rate observability. The live
         # sidecar the radio service writes carries these counters; surface
         # them so Mission Control sees a thrashing or zombie transmitter

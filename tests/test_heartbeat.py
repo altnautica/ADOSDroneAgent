@@ -108,11 +108,53 @@ def test_radio_block_no_injection_adapter_is_loud():
     assert block["adapter_injection_ok"] is False
 
 
-def test_radio_block_absent_defaults_injection_false():
-    """The absent block defaults injection_ok to a falsy verdict."""
+def test_radio_block_absent_reports_no_adapter_or_phy_verdicts():
+    """With no radio view there is nothing that measured the adapter or PHY.
+
+    The verdicts must read None (no reading) — never a confident False, which
+    a three-state consumer (degraded / ok / unknown) renders as a measured
+    green USB link / red no-injection / unmuted PHY for hardware nothing
+    ever examined.
+    """
     block = build_radio_block(None)
     assert block["adapter_chipset"] is None
+    assert block["adapter_injection_ok"] is None
+    assert block["adapter_usb_degraded"] is None
+    assert block["phy_muted"] is None
+
+
+def test_radio_block_adapter_and_phy_verdicts_null_when_not_reported():
+    """A view with no boolean reading forwards None, and booleans verbatim."""
+    # Keys absent from the view (receive side / older sidecar): no verdict.
+    sparse = {"state": "connected"}
+    block = build_radio_block(sparse)
+    assert block["adapter_injection_ok"] is None
+    assert block["adapter_usb_degraded"] is None
+    assert block["phy_muted"] is None
+
+    # Junk types never coerce into a verdict.
+    junk = {
+        "state": "connected",
+        "adapter_injection_ok": "yes",
+        "adapter_usb_degraded": 1,
+        "phy_muted": "no",
+    }
+    block = build_radio_block(junk)
+    assert block["adapter_injection_ok"] is None
+    assert block["adapter_usb_degraded"] is None
+    assert block["phy_muted"] is None
+
+    # Real booleans forward verbatim in both directions.
+    measured = {
+        "state": "connected",
+        "adapter_injection_ok": False,
+        "adapter_usb_degraded": True,
+        "phy_muted": False,
+    }
+    block = build_radio_block(measured)
     assert block["adapter_injection_ok"] is False
+    assert block["adapter_usb_degraded"] is True
+    assert block["phy_muted"] is False
 
 
 def test_radio_block_treats_sentinel_rssi_as_null():

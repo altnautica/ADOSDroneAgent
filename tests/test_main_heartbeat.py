@@ -191,11 +191,18 @@ class _FakeWfb:
 
 
 def test_heartbeat_payload_wfb_adapter_verdict_absent_defaults() -> None:
-    """No wfb manager → chipset null, injectionOk false (never absent)."""
+    """No wfb manager → chipset null and NO adapter verdicts.
+
+    A rig with no radio view never scanned an adapter and never enumerated a
+    USB link, so the hoisted verdicts read None — never a confident False the
+    GCS's three-state resolvers would render as a measured outcome.
+    """
     app = _fresh_app()
     payload = app._build_heartbeat_payload()
     assert payload["wfbAdapterChipset"] is None
-    assert payload["wfbAdapterInjectionOk"] is False
+    assert payload["wfbAdapterInjectionOk"] is None
+    assert payload["wfbAdapterUsbSpeedMbps"] is None
+    assert payload["wfbAdapterUsbDegraded"] is None
 
 
 def test_heartbeat_payload_wfb_adapter_verdict_reflected() -> None:
