@@ -52,6 +52,72 @@ def _read_install_result() -> dict | None:
 _WFB_STATS_FRESH_S = 10.0
 
 
+# The CRSF RC-lane sidecar's staleness window: the lane rewrites it ~1 Hz
+# while running and every 5 s while idling, so anything older than this is an
+# orphan of a dead service and must read absent — never a false-green block.
+_CRSF_STATS_FRESH_S = 10.0
+
+# The nested `crsf` heartbeat block carries exactly this field set, projected
+# from the lane's stats sidecar (same snake_case names; the receiver's generic
+# snake→camel remap owns the casing). A sidecar field outside this set (e.g.
+# the lane's derived flyable verdict) stays off the wire — the block is the
+# pinned contract, not a pass-through.
+_CRSF_BLOCK_FIELDS: tuple[str, ...] = (
+    "v",
+    "state",
+    "rssi_dbm",
+    "lq_uplink",
+    "lq_downlink",
+    "snr_db",
+    "band",
+    "packet_rate_hz",
+    "tx_power_dbm",
+    "tx_frames_per_s",
+    "rx_frames_per_s",
+    "rf_unverified",
+    "mode",
+    "channel_source",
+    "relay_role",
+)
+
+
+def _read_crsf_stats_sidecar() -> dict | None:
+    """Read the CRSF RC-lane sidecar when it exists and is fresh.
+
+    The lane runs as its own unit, so the heartbeat reads the state snapshot
+    it mirrors to ``/run/ados/crsf-stats.json``. Staleness-gated on the file
+    mtime exactly like the radio sidecar: a stopped lane's lingering tmpfs
+    file must never be reported as a live reading. ``None`` on a missing,
+    stale, or unreadable file. Best-effort; never raises.
+    """
+    from ados.core.paths import CRSF_STATS_JSON
+
+    try:
+        age_s = time.time() - CRSF_STATS_JSON.stat().st_mtime
+    except OSError:
+        return None
+    if age_s > _CRSF_STATS_FRESH_S:
+        return None
+    try:
+        data = json.loads(CRSF_STATS_JSON.read_text())
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def build_crsf_block(crsf_status: dict | None) -> dict | None:
+    """Project the lane sidecar onto the nested ``crsf`` heartbeat block.
+
+    Returns the pinned field set (a field the sidecar lacks reads ``None``,
+    kept as a nested null like the radio block's), or ``None`` when there is
+    no fresh sidecar — then the caller OMITS the block entirely so a node
+    without the lane (or with a dead lane service) carries no ``crsf`` key.
+    """
+    if not isinstance(crsf_status, dict):
+        return None
+    return {field: crsf_status.get(field) for field in _CRSF_BLOCK_FIELDS}
+
+
 # An offload-link sidecar not re-written within this window is treated as
 # absent, so a dead / hung reconciler (whose tmpfs file persists) never keeps a
 # drone reporting a frozen "offload" tier after the workstation is gone
@@ -663,6 +729,14 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
         payload["wfbFailoverState"] = read_wfb_failover_state()
     except Exception:
         pass
+
+    # CRSF RC-lane block — sourced cross-process from the lane service's
+    # stats sidecar, staleness-gated exactly like the radio block above.
+    # OPTIONAL + omit-when-absent: a node without the lane (or whose lane
+    # service died) carries no `crsf` key at all, never a fabricated block.
+    crsf_block = build_crsf_block(_read_crsf_stats_sidecar())
+    if crsf_block is not None:
+        payload["crsf"] = crsf_block
 
     # Inter-rig peer presence — sourced cross-process from
     # /run/ados/peer-presence.json, written by the HopListener every

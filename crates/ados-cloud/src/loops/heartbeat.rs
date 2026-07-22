@@ -24,7 +24,8 @@
 use std::time::Duration;
 
 use crate::heartbeat::{
-    ClusterSlave, ConfigErrorEntry, HeartbeatPayload, RadioBlock, RemoteAccess, VideoStreamHb,
+    ClusterSlave, ConfigErrorEntry, CrsfBlock, HeartbeatPayload, RadioBlock, RemoteAccess,
+    VideoStreamHb,
 };
 
 /// The compute-node heartbeat sidecar written by `ados-compute`
@@ -120,6 +121,52 @@ fn read_video_streams_sidecar_from(
 
 fn read_video_streams_sidecar(now_ms: i64) -> Option<Vec<VideoStreamHb>> {
     read_video_streams_sidecar_from(std::path::Path::new(VIDEO_STREAMS_SIDECAR), now_ms)
+}
+
+/// The CRSF RC-lane state sidecar written by `ados-crsf` (~1 Hz while running,
+/// a 5 s keep-alive while idling). Absent on a node without the lane.
+const CRSF_STATS_SIDECAR: &str = "/run/ados/crsf-stats.json";
+
+/// A CRSF sidecar not re-written within this window is treated as absent, so a
+/// dead lane service's lingering tmpfs file never keeps the heartbeat carrying
+/// a frozen lane state (operating rule 44). The sidecar body carries no write
+/// time, so the gate keys on the file mtime (the plugin-state precedent);
+/// double the lane's slowest (idle keep-alive) rewrite cadence.
+const CRSF_STATS_STALE: Duration = Duration::from_secs(10);
+
+/// Read + parse the CRSF lane sidecar at `path`, mtime-staleness-gated against
+/// `now`. `None` when the file is absent, unreadable, unparseable, or stale —
+/// the heartbeat then omits the `crsf` block entirely (never an all-null
+/// fabrication). A future mtime (clock skew) counts as fresh. The sidecar's
+/// own `v` field feeds the shared best-effort version-drift warning.
+fn read_crsf_sidecar_from(path: &std::path::Path, now: std::time::SystemTime) -> Option<CrsfBlock> {
+    let fresh = std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .map(|mtime| {
+            now.duration_since(mtime)
+                .map(|age| age <= CRSF_STATS_STALE)
+                .unwrap_or(true)
+        })
+        .unwrap_or(false);
+    if !fresh {
+        return None;
+    }
+    let text = std::fs::read_to_string(path).ok()?;
+    let block: CrsfBlock = serde_json::from_str(&text).ok()?;
+    if let (Some(got), Some(expected)) = (
+        block.v,
+        ados_protocol::contracts::sidecar_version("crsf-stats"),
+    ) {
+        ados_protocol::sidecar::check_sidecar_version("crsf-stats", got as u16, expected);
+    }
+    Some(block)
+}
+
+fn read_crsf_sidecar() -> Option<CrsfBlock> {
+    read_crsf_sidecar_from(
+        std::path::Path::new(CRSF_STATS_SIDECAR),
+        std::time::SystemTime::now(),
+    )
 }
 
 /// Local epoch ms for the staleness gate.
@@ -348,6 +395,9 @@ fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
     // None when the file is stale so a dead producer is not folded forever).
     let compute = read_compute_sidecar(now_epoch_ms()).unwrap_or_default();
     let video_streams = read_video_streams_sidecar(now_epoch_ms());
+    // Fold the CRSF RC-lane state (None on a node without the lane, and None
+    // when the file is stale so a dead lane service is not folded forever).
+    let crsf = read_crsf_sidecar();
     // Ferry every fresh plugin/feature state slice opaquely (empty map omitted).
     let plugin_state = {
         let slices = read_plugin_state_sidecars();
@@ -460,6 +510,7 @@ fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
         last_plugin_update_check_at: None,
         peripherals: None,
         radio: RadioBlock::absent(),
+        crsf,
         wfb_adapter_chipset: None,
         // No radio view in the native base ⇒ no injection verdict: the key is
         // omitted (never a fabricated false) until the radio enrichment folds
@@ -650,6 +701,43 @@ mod tests {
     fn an_absent_plugin_dir_is_an_empty_map() {
         let dir = std::env::temp_dir().join("ados-cloud-plugins-nope-does-not-exist");
         assert!(read_plugin_state_sidecars_from(&dir, std::time::SystemTime::now()).is_empty());
+    }
+
+    #[test]
+    fn a_fresh_crsf_sidecar_folds_and_a_stale_or_bad_one_reads_absent() {
+        let dir = std::env::temp_dir().join(format!("ados-cloud-crsf-{}", std::process::id()));
+        // The exact sidecar body the lane writes, including its extra derived
+        // `flyable` field — outside the pinned block, ignored by the parse.
+        write_named(
+            &dir,
+            "crsf-stats.json",
+            r#"{"v":1,"state":"link_ok","rssi_dbm":-51,"lq_uplink":99,"lq_downlink":97,
+                "snr_db":8,"band":null,"packet_rate_hz":150,"tx_power_dbm":20,
+                "tx_frames_per_s":149.8,"rx_frames_per_s":12.0,"rf_unverified":false,
+                "flyable":true,"mode":"crsf_rc","channel_source":"hid","relay_role":null}"#,
+        );
+        let path = dir.join("crsf-stats.json");
+        let fresh = read_crsf_sidecar_from(&path, std::time::SystemTime::now()).unwrap();
+        assert_eq!(fresh.state.as_deref(), Some("link_ok"));
+        assert_eq!(fresh.rssi_dbm, Some(-51));
+        assert_eq!(fresh.packet_rate_hz, Some(150));
+        assert_eq!(fresh.rf_unverified, Some(false));
+        assert_eq!(fresh.band, None);
+        assert_eq!(fresh.relay_role, None);
+        // Stale mtime (a reference `now` an hour later) → absent, so a dead
+        // lane service's lingering file stops asserting a live lane.
+        let later = std::time::SystemTime::now() + Duration::from_secs(3600);
+        assert!(read_crsf_sidecar_from(&path, later).is_none());
+        // Missing + malformed both read absent, never a default block.
+        assert!(
+            read_crsf_sidecar_from(&dir.join("nope.json"), std::time::SystemTime::now()).is_none()
+        );
+        write_named(&dir, "crsf-bad.json", "{ not json");
+        assert!(
+            read_crsf_sidecar_from(&dir.join("crsf-bad.json"), std::time::SystemTime::now())
+                .is_none()
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

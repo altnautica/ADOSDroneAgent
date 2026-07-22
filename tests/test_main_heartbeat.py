@@ -304,3 +304,103 @@ def test_heartbeat_payload_radio_churn_fields_ride_block() -> None:
     assert payload["radio"]["tx_zombie_kills"] == 4
     assert payload["radio"]["tx_bytes_per_s"] == 512000.0
     assert payload["radio"]["restart_count"] == 1
+
+
+def _write_crsf_sidecar(path: Path, *, state: str = "link_ok") -> None:
+    """Write a lane sidecar in the exact shape the CRSF service emits,
+    including its derived ``flyable`` field (outside the pinned heartbeat
+    block, so it must NOT be forwarded)."""
+    path.write_text(
+        json.dumps(
+            {
+                "v": 1,
+                "state": state,
+                "rssi_dbm": -51,
+                "lq_uplink": 99,
+                "lq_downlink": 97,
+                "snr_db": 8,
+                "band": None,
+                "packet_rate_hz": 150,
+                "tx_power_dbm": 20,
+                "tx_frames_per_s": 149.8,
+                "rx_frames_per_s": 12.0,
+                "rf_unverified": False,
+                "flyable": True,
+                "mode": "crsf_rc",
+                "channel_source": "hid",
+                "relay_role": None,
+            }
+        )
+    )
+
+
+def test_heartbeat_crsf_block_absent_without_a_sidecar(monkeypatch, tmp_path) -> None:
+    """A node without the CRSF lane (no sidecar file) carries no ``crsf`` key
+    at all — never a fabricated all-null block."""
+    import ados.core.paths as paths
+
+    monkeypatch.setattr(paths, "CRSF_STATS_JSON", tmp_path / "crsf-stats.json")
+    payload = _fresh_app()._build_heartbeat_payload()
+    assert "crsf" not in payload
+
+
+def test_heartbeat_crsf_block_projects_the_pinned_fields(monkeypatch, tmp_path) -> None:
+    """A fresh lane sidecar rides the heartbeat as the nested ``crsf`` block:
+    exactly the pinned field set (the sidecar's derived ``flyable`` stays off
+    the wire), snake_case, nested nulls kept."""
+    import ados.core.paths as paths
+
+    sidecar = tmp_path / "crsf-stats.json"
+    _write_crsf_sidecar(sidecar)
+    monkeypatch.setattr(paths, "CRSF_STATS_JSON", sidecar)
+    payload = _fresh_app()._build_heartbeat_payload()
+    crsf = payload["crsf"]
+    assert crsf["v"] == 1
+    assert crsf["state"] == "link_ok"
+    assert crsf["rssi_dbm"] == -51
+    assert crsf["lq_uplink"] == 99
+    assert crsf["lq_downlink"] == 97
+    assert crsf["snr_db"] == 8
+    assert crsf["band"] is None
+    assert crsf["packet_rate_hz"] == 150
+    assert crsf["tx_power_dbm"] == 20
+    assert crsf["tx_frames_per_s"] == 149.8
+    assert crsf["rx_frames_per_s"] == 12.0
+    assert crsf["rf_unverified"] is False
+    assert crsf["mode"] == "crsf_rc"
+    assert crsf["channel_source"] == "hid"
+    assert crsf["relay_role"] is None
+    assert "flyable" not in crsf
+    assert set(crsf) == {
+        "v",
+        "state",
+        "rssi_dbm",
+        "lq_uplink",
+        "lq_downlink",
+        "snr_db",
+        "band",
+        "packet_rate_hz",
+        "tx_power_dbm",
+        "tx_frames_per_s",
+        "rx_frames_per_s",
+        "rf_unverified",
+        "mode",
+        "channel_source",
+        "relay_role",
+    }
+
+
+def test_heartbeat_crsf_block_drops_a_stale_sidecar(monkeypatch, tmp_path) -> None:
+    """A sidecar older than the staleness window reads absent: a dead lane
+    service's lingering file must never be reported as a live lane."""
+    import os
+
+    import ados.core.paths as paths
+
+    sidecar = tmp_path / "crsf-stats.json"
+    _write_crsf_sidecar(sidecar)
+    stale = time.time() - 61.0
+    os.utime(sidecar, (stale, stale))
+    monkeypatch.setattr(paths, "CRSF_STATS_JSON", sidecar)
+    payload = _fresh_app()._build_heartbeat_payload()
+    assert "crsf" not in payload

@@ -180,6 +180,11 @@ WFB_STATS_JSON = ADOS_RUN_DIR / "wfb-stats.json"
 HOP_SUPERVISOR_JSON = ADOS_RUN_DIR / "hop-supervisor.json"
 PEER_PRESENCE_JSON = ADOS_RUN_DIR / "peer-presence.json"
 CAMERA_STATE_JSON = ADOS_RUN_DIR / "camera-state.json"
+# CRSF / ExpressLRS RC-lane state snapshot, written ~1 Hz by the ados-crsf
+# service while it runs (and on a slow keep-alive cadence while idling), read
+# staleness-gated by the heartbeat producer + the native lane-status route. An
+# orphaned file from a dead service must never be served as a live reading.
+CRSF_STATS_JSON = ADOS_RUN_DIR / "crsf-stats.json"
 # Management-link health, written by the supervisor's management-link guardian
 # each tick: the operator's management link state + repair-ladder progress.
 MGMT_LINK_JSON = ADOS_RUN_DIR / "mgmt-link.json"

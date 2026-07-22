@@ -9,7 +9,9 @@
 //! that matters is FIELD SET + CASING + NULL-STRIPPING, not the psutil-derived
 //! numbers.
 
-use ados_cloud::heartbeat::{CanBus, HeartbeatPayload, Peripheral, RadioBlock, RemoteAccess};
+use ados_cloud::heartbeat::{
+    CanBus, CrsfBlock, HeartbeatPayload, Peripheral, RadioBlock, RemoteAccess,
+};
 
 const VERSION: &str = "0.49.3";
 const DEVICE_ID: &str = "ados-test";
@@ -71,6 +73,8 @@ fn base_payload() -> HeartbeatPayload {
         last_plugin_update_check_at: None,
         peripherals: None,
         radio: RadioBlock::absent(),
+        // No fresh lane sidecar in the base ⇒ the whole block is omitted.
+        crsf: None,
         wfb_adapter_chipset: None,
         // No radio view in the base ⇒ no injection verdict (key omitted).
         wfb_adapter_injection_ok: None,
@@ -151,6 +155,25 @@ fn paired_full_matches_python_emit() {
     };
     payload.wfb_adapter_chipset = Some("RTL8812EU".to_string());
     payload.wfb_adapter_injection_ok = Some(true);
+    // A ground station with a live CRSF RC lane: the nested block carries the
+    // pinned field set, snake_case, with unmeasured fields as nested nulls.
+    payload.crsf = Some(CrsfBlock {
+        v: Some(1),
+        state: Some("link_ok".to_string()),
+        rssi_dbm: Some(-51),
+        lq_uplink: Some(99),
+        lq_downlink: Some(97),
+        snr_db: Some(8),
+        band: None,
+        packet_rate_hz: Some(150),
+        tx_power_dbm: Some(20),
+        tx_frames_per_s: Some(149.8),
+        rx_frames_per_s: Some(12.0),
+        rf_unverified: Some(false),
+        mode: Some("crsf_rc".to_string()),
+        channel_source: Some("hid".to_string()),
+        relay_role: None,
+    });
     payload.mission_control_url = Some("https://mc.example".to_string());
     payload.video_whep_url = Some("https://tunnel.example/main/".to_string());
     payload.peripherals = Some(vec![Peripheral {

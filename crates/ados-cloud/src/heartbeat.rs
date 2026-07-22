@@ -185,6 +185,65 @@ impl RadioBlock {
     }
 }
 
+/// The OPTIONAL nested `crsf` block: the CRSF/ExpressLRS RC control lane's
+/// state, projected from the lane service's stats sidecar
+/// (`/run/ados/crsf-stats.json`). Exactly the pinned sidecar field set,
+/// snake_case like the `radio` block (the receiver's generic snake→camel remap
+/// owns the casing). The whole block is ABSENT from the payload when the lane
+/// service is not running or its sidecar is stale — never a fabricated
+/// all-null block for a node without the lane. Inside a present block each
+/// field keeps its nested `null` when unmeasured (the Python projection keeps
+/// `None` values, matching the radio-block convention), so there is no
+/// `skip_serializing_if` on the fields.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CrsfBlock {
+    /// The sidecar schema version, forwarded so the receiver can gate on it.
+    pub v: Option<i64>,
+    /// `unconfigured|ready|link_ok|degraded|rf_unverified|disabled`.
+    pub state: Option<String>,
+    pub rssi_dbm: Option<i64>,
+    pub lq_uplink: Option<i64>,
+    pub lq_downlink: Option<i64>,
+    pub snr_db: Option<i64>,
+    pub band: Option<String>,
+    pub packet_rate_hz: Option<i64>,
+    pub tx_power_dbm: Option<i64>,
+    pub tx_frames_per_s: Option<f64>,
+    pub rx_frames_per_s: Option<f64>,
+    /// The transmit-proof verdict: `Some(false)` = a received-side proof
+    /// exists, `Some(true)` = transmitting provably unheard, `None` = no
+    /// verdict yet — never a fabricated false.
+    pub rf_unverified: Option<bool>,
+    pub mode: Option<String>,
+    pub channel_source: Option<String>,
+    pub relay_role: Option<String>,
+}
+
+impl CrsfBlock {
+    /// An all-`None` block: every field reads null. Used as the deserialize
+    /// fallback shape and by tests; the payload itself omits the block
+    /// entirely (rather than sending this) when there is no fresh sidecar.
+    pub fn absent() -> Self {
+        CrsfBlock {
+            v: None,
+            state: None,
+            rssi_dbm: None,
+            lq_uplink: None,
+            lq_downlink: None,
+            snr_db: None,
+            band: None,
+            packet_rate_hz: None,
+            tx_power_dbm: None,
+            tx_frames_per_s: None,
+            rx_frames_per_s: None,
+            rf_unverified: None,
+            mode: None,
+            channel_source: None,
+            relay_role: None,
+        }
+    }
+}
+
 /// The cloud status heartbeat payload.
 ///
 /// Field set + order mirrors the Python cloud loop's `payload` dict. Order does
@@ -321,6 +380,10 @@ pub struct HeartbeatPayload {
 
     // --- radio (always present; snake_case sub-block) ---
     pub radio: RadioBlock,
+    // --- CRSF RC lane (optional; snake_case sub-block, omitted when the lane
+    // service is not running or its sidecar is stale) ---
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crsf: Option<CrsfBlock>,
     // Adapter verdict hoisted to the root. Both halves strip when absent: a
     // rig with no radio view has no chipset AND no injection verdict, and an
     // asserted `false` would claim a measured no-injection scan outcome the
@@ -567,6 +630,50 @@ mod tests {
     }
 
     #[test]
+    fn crsf_block_is_omitted_when_absent_and_snake_case_when_present() {
+        // No fresh lane sidecar ⇒ the key is absent entirely — a node without
+        // the lane never carries a fabricated all-null block.
+        let p = minimal_payload();
+        assert!(!p.to_value().as_object().unwrap().contains_key("crsf"));
+
+        // A present block keeps snake_case keys and its nested nulls (the
+        // radio-block convention: unmeasured reads null inside the block).
+        let mut p = minimal_payload();
+        p.crsf = Some(CrsfBlock {
+            v: Some(1),
+            state: Some("link_ok".to_string()),
+            rssi_dbm: Some(-51),
+            rf_unverified: Some(false),
+            packet_rate_hz: Some(150),
+            ..CrsfBlock::absent()
+        });
+        let v = p.to_value();
+        let crsf = v.get("crsf").unwrap().as_object().unwrap();
+        assert_eq!(crsf["state"], "link_ok");
+        assert_eq!(crsf["rssi_dbm"], -51);
+        assert_eq!(crsf["packet_rate_hz"], 150);
+        assert_eq!(crsf["rf_unverified"], false);
+        // Unmeasured fields ride as nested nulls, under snake_case keys.
+        assert!(crsf["band"].is_null());
+        assert!(crsf["tx_frames_per_s"].is_null());
+        assert!(!crsf.contains_key("rssiDbm"));
+        assert!(!crsf.contains_key("packetRateHz"));
+    }
+
+    #[test]
+    fn crsf_rf_unverified_defaults_to_unknown_never_false() {
+        // A block with no liveness verdict carries null — never a confident
+        // false that would claim an unproven transmit path had been proven.
+        let mut p = minimal_payload();
+        p.crsf = Some(CrsfBlock {
+            state: Some("ready".to_string()),
+            ..CrsfBlock::absent()
+        });
+        let v = p.to_value();
+        assert!(v["crsf"]["rf_unverified"].is_null());
+    }
+
+    #[test]
     fn none_root_fields_are_omitted_not_null() {
         // temperature None must be absent, not JSON null (Convex v.optional).
         let p = minimal_payload();
@@ -644,6 +751,7 @@ mod tests {
             last_plugin_update_check_at: None,
             peripherals: None,
             radio: RadioBlock::absent(),
+            crsf: None,
             wfb_adapter_chipset: None,
             wfb_adapter_injection_ok: None,
             lcd_active_page: None,
