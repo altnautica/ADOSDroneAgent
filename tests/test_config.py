@@ -85,6 +85,32 @@ def test_regulatory_no_block_reads_unrestricted():
     assert cfg.network.regulatory.region is None
 
 
+def test_crsf_lane_defaults_off_and_unpinned():
+    """A fresh config has no CRSF pin and the lane opted out."""
+    cfg = ADOSConfig()
+    assert cfg.radio.crsf.enabled is False
+    assert cfg.radio.crsf.device == ""
+
+
+def test_crsf_pin_round_trips_through_a_full_save():
+    """The radio.crsf pin survives a model_dump() full-file rewrite.
+
+    Every config save rewrites the whole YAML from ``model_dump()``; a section
+    missing from the model would be silently dropped on the next write, erasing
+    the operator's pin. The section must therefore be modelled, not merely
+    tolerated by ``extra: ignore``.
+    """
+    data = {"radio": {"crsf": {"enabled": True, "device": "/dev/ttyUSB0"}}}
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        yaml.dump(data, f)
+        f.flush()
+        cfg = load_config(f.name)
+    assert cfg.radio.crsf.enabled is True
+    assert cfg.radio.crsf.device == "/dev/ttyUSB0"
+    dumped = cfg.model_dump()
+    assert dumped["radio"]["crsf"] == {"enabled": True, "device": "/dev/ttyUSB0"}
+
+
 def test_regulatory_region_round_trips():
     """A pinned operating region round-trips through the YAML loader unchanged."""
     data = {

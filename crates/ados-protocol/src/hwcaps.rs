@@ -204,6 +204,21 @@ pub struct UsbId {
     pub pid: u16,
 }
 
+/// Whether a USB `(vid, pid)` identifies a bridge commonly fronting an
+/// ExpressLRS / CRSF RC transmitter module: a CP2102 (`10c4:ea60`), a CH340
+/// (`1a86:7523`), or any Espressif native-USB device (`303a:*`, an
+/// ESP32-S3-based module).
+///
+/// A VID:PID alone CANNOT distinguish an RC module from a flight controller
+/// behind the same bridge (plenty of FCs ship on CP2102/CH340 UART bridges),
+/// so a match is only ever a HINT to be combined with stronger evidence:
+/// an explicit `radio.crsf.device` pin / lane opt-in in the config, or a
+/// failed MAVLink/MSP probe on the port. It must never disqualify a port
+/// outright on its own.
+pub fn is_rc_bridge_usb_id(vid: u16, pid: u16) -> bool {
+    matches!((vid, pid), (0x10C4, 0xEA60) | (0x1A86, 0x7523)) || vid == 0x303A
+}
+
 /// A serial port the agent may attach a flight controller (or other UART
 /// peripheral) to.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -262,6 +277,22 @@ mod tests {
         assert_eq!(Midr(0xd08 << 4).cortex_name(), Some("Cortex-A72"));
         assert_eq!(Midr(0xc07 << 4).cortex_name(), Some("Cortex-A7"));
         assert_eq!(Midr(0xfff << 4).cortex_name(), None);
+    }
+
+    #[test]
+    fn rc_bridge_ids_match_full_pairs_and_espressif_vendor() {
+        // The two UART bridges match on the full (vid, pid) pair only.
+        assert!(is_rc_bridge_usb_id(0x10C4, 0xEA60)); // CP2102
+        assert!(is_rc_bridge_usb_id(0x1A86, 0x7523)); // CH340
+        assert!(!is_rc_bridge_usb_id(0x10C4, 0x0001)); // other CP210x product
+        assert!(!is_rc_bridge_usb_id(0x1A86, 0x0001)); // other WCH product
+                                                       // Espressif native USB matches on the vendor (product ids vary).
+        assert!(is_rc_bridge_usb_id(0x303A, 0x1001));
+        assert!(is_rc_bridge_usb_id(0x303A, 0x0009));
+        // Common FC vendors never match.
+        assert!(!is_rc_bridge_usb_id(0x0483, 0x5740)); // STM native USB
+        assert!(!is_rc_bridge_usb_id(0x0403, 0x6001)); // FTDI
+        assert!(!is_rc_bridge_usb_id(0x1209, 0x5741)); // open-hardware FC
     }
 
     #[test]

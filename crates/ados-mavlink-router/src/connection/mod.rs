@@ -35,12 +35,13 @@ use crate::config::MavlinkConfig;
 use crate::param_cache::ParamCache;
 use crate::state::VehicleState;
 
+use ados_protocol::hwcaps::is_rc_bridge_usb_id;
 use framing::{count_msp_frame_starts, extract_frames};
 use send_scheduler::STREAM_DEFAULT;
 use transport::{
     fc_variant_for_port, is_candidate_port, now_iso, open_serial, parse_net_spec, persist_params,
-    probe_baud, split_serial, BoxedReadHalf, BoxedWriteHalf, NetSpec, ProbeOutcome, UdpAdapter,
-    BAUD_CANDIDATES, BAUD_FALLBACK,
+    probe_baud, same_device, split_serial, BoxedReadHalf, BoxedWriteHalf, NetSpec, ProbeOutcome,
+    UdpAdapter, BAUD_CANDIDATES, BAUD_FALLBACK,
 };
 
 /// Reconnect backoff bounds.
@@ -660,7 +661,8 @@ impl FcConnection {
         }
 
         let candidates = self.candidate_ports();
-        for port in candidates {
+        for cand in candidates {
+            let port = cand.name;
             // A configured baud skips the probe; otherwise probe the candidates.
             if self.cfg.baud_rate != 0 && !self.cfg.serial_port.is_empty() {
                 if let Some(stream) = open_serial(&port, self.cfg.baud_rate) {
@@ -668,9 +670,13 @@ impl FcConnection {
                 }
                 continue;
             }
+            // Whether the sweep heard a talking FC (MAVLink or MSP) on this
+            // port, even if the follow-up open failed.
+            let mut sweep_heard_fc = false;
             for &baud in BAUD_CANDIDATES {
                 match probe_baud(&port, baud).await {
                     ProbeOutcome::Heartbeat => {
+                        sweep_heard_fc = true;
                         if let Some(stream) = open_serial(&port, baud) {
                             return Some(split_serial(stream, port, baud));
                         }
@@ -679,12 +685,34 @@ impl FcConnection {
                         // The FC is emitting MSP, not MAVLink — no baud will yield
                         // a HEARTBEAT. Open here so the read loop surfaces the
                         // msp_detected hint, and stop sweeping the remaining bauds.
+                        sweep_heard_fc = true;
                         if let Some(stream) = open_serial(&port, baud) {
                             return Some(split_serial(stream, port, baud));
                         }
                         break;
                     }
                     ProbeOutcome::None => {}
+                }
+            }
+            // A silent port behind a known RC-bridge USB id (CP2102 / CH340 /
+            // ESP32-S3 — the bridges an ExpressLRS TX module enumerates behind)
+            // is NOT latched by the no-evidence fallback open: doing so pins the
+            // router to the RC module at the fallback baud and the real FC (which
+            // may enumerate later in the list) is never reached. The sweep above
+            // is the sanity check that keeps an FC behind the same bridge alive —
+            // a live FC proves itself with a HEARTBEAT or MSP traffic, and any
+            // other vendor keeps the fallback exactly as before.
+            if !sweep_heard_fc {
+                if let Some((vid, pid)) = cand.usb {
+                    if is_rc_bridge_usb_id(vid, pid) {
+                        tracing::info!(
+                            port = %port,
+                            vid = format_args!("{vid:04x}"),
+                            pid = format_args!("{pid:04x}"),
+                            "silent_rc_bridge_fallback_skipped"
+                        );
+                        continue;
+                    }
                 }
             }
             // Last-ditch: open at the fallback baud without a positive probe.
@@ -737,18 +765,103 @@ impl FcConnection {
         }
     }
 
-    fn candidate_ports(&self) -> Vec<String> {
+    /// The serial ports the FC link may open, with the pinned CRSF/ELRS device
+    /// (`radio.crsf.device`) excluded on BOTH paths: an RC transmitter module's
+    /// port must never be opened or baud-swept by the router, even when the FC
+    /// port is (mis)configured to the same node — the pin is the operator's
+    /// explicit statement that the device is the RC module, so it wins over a
+    /// contradictory `mavlink.serial_port`.
+    fn candidate_ports(&self) -> Vec<FcCandidate> {
+        let crsf_pin = self.cfg.crsf_device.trim();
         if !self.cfg.serial_port.is_empty() {
-            return vec![self.cfg.serial_port.clone()];
+            if !crsf_pin.is_empty() && same_device(&self.cfg.serial_port, crsf_pin) {
+                tracing::warn!(
+                    port = %self.cfg.serial_port,
+                    "fc_serial_port_is_the_pinned_crsf_device_no_fc_candidates"
+                );
+                return Vec::new();
+            }
+            return vec![FcCandidate {
+                name: self.cfg.serial_port.clone(),
+                usb: None,
+            }];
         }
         match tokio_serial::available_ports() {
             Ok(ports) => ports
                 .into_iter()
                 .filter(|p| is_candidate_port(&p.port_type, &p.port_name))
-                .map(|p| p.port_name)
+                .filter(|p| crsf_pin.is_empty() || !same_device(&p.port_name, crsf_pin))
+                .map(|p| FcCandidate {
+                    usb: match &p.port_type {
+                        tokio_serial::SerialPortType::UsbPort(info) => Some((info.vid, info.pid)),
+                        _ => None,
+                    },
+                    name: p.port_name,
+                })
                 .collect(),
             Err(_) => Vec::new(),
         }
+    }
+}
+
+/// A serial candidate for the FC link: the device path plus, when it came from
+/// USB enumeration, the backing USB id. The pinned-port path carries no id (an
+/// explicitly configured FC port is opened as configured, no vendor gating).
+struct FcCandidate {
+    name: String,
+    usb: Option<(u16, u16)>,
+}
+
+#[cfg(test)]
+mod crsf_exclusion_tests {
+    use super::*;
+    use crate::param_cache::ParamCache;
+    use crate::state::VehicleState;
+
+    fn conn_with(cfg: MavlinkConfig) -> std::sync::Arc<FcConnection> {
+        let state = std::sync::Arc::new(Mutex::new(VehicleState::default()));
+        let params = std::sync::Arc::new(Mutex::new(ParamCache::new(
+            "/tmp/ados-crsf-exclusion-params.json",
+        )));
+        FcConnection::new(cfg, state, params)
+    }
+
+    #[test]
+    fn pinned_fc_port_survives_when_distinct_from_the_crsf_pin() {
+        let c = conn_with(MavlinkConfig {
+            serial_port: "/dev/ttyACM0".into(),
+            crsf_device: "/dev/ttyUSB0".into(),
+            ..MavlinkConfig::default()
+        });
+        let cands = c.candidate_ports();
+        assert_eq!(cands.len(), 1);
+        assert_eq!(cands[0].name, "/dev/ttyACM0");
+        // An explicitly configured port carries no USB id (no vendor gating).
+        assert_eq!(cands[0].usb, None);
+    }
+
+    #[test]
+    fn crsf_pin_excludes_a_matching_configured_fc_port() {
+        // The pin is the operator's explicit statement that the device is the
+        // RC module; a contradictory FC config must not open it.
+        let c = conn_with(MavlinkConfig {
+            serial_port: "/dev/ttyUSB0".into(),
+            crsf_device: "/dev/ttyUSB0".into(),
+            ..MavlinkConfig::default()
+        });
+        assert!(c.candidate_ports().is_empty());
+    }
+
+    #[test]
+    fn no_pin_keeps_the_configured_port() {
+        let c = conn_with(MavlinkConfig {
+            serial_port: "/dev/ttyACM0".into(),
+            ..MavlinkConfig::default()
+        });
+        assert_eq!(c.cfg.crsf_device, "");
+        let cands = c.candidate_ports();
+        assert_eq!(cands.len(), 1);
+        assert_eq!(cands[0].name, "/dev/ttyACM0");
     }
 }
 

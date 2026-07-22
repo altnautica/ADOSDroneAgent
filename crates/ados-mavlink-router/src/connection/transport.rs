@@ -113,6 +113,21 @@ pub(crate) fn is_candidate_port(port_type: &SerialPortType, name: &str) -> bool 
         || SERIAL_PREFIXES.iter().any(|pre| name.starts_with(pre))
 }
 
+/// Whether two serial-device paths name the same device node. A literal match
+/// wins; otherwise both paths are canonicalized so a symlink spelling
+/// (`/dev/serial/by-id/…` vs `/dev/ttyUSB0`) still compares equal. When either
+/// path cannot be resolved (node absent, non-Linux host) the check degrades to
+/// the literal compare — it never guesses two distinct spellings equal.
+pub(crate) fn same_device(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => false,
+    }
+}
+
 /// Identify an MSP flight controller (Betaflight / iNav) from the USB descriptor
 /// of an opened serial port, by reading the device's `product`/`manufacturer`
 /// strings out of sysfs. Returns `Some("betaflight")` / `Some("inav")` for a
@@ -323,6 +338,33 @@ mod tests {
         assert!(!is_candidate_port(
             &SerialPortType::Unknown,
             "/dev/something-else"
+        ));
+    }
+
+    #[test]
+    fn same_device_matches_literal_and_resolved_paths() {
+        // Literal equality needs no filesystem.
+        assert!(same_device("/dev/ttyUSB0", "/dev/ttyUSB0"));
+        // Distinct unresolvable paths never compare equal.
+        assert!(!same_device("/dev/ttyUSB0", "/dev/ttyUSB1"));
+        assert!(!same_device("/dev/ttyUSB0", ""));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn same_device_resolves_a_symlink_spelling() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("ttyUSB0");
+        std::fs::write(&real, b"").unwrap();
+        let link = dir.path().join("by-id-link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(same_device(real.to_str().unwrap(), link.to_str().unwrap()));
+        // A symlink to a DIFFERENT node stays unequal.
+        let other = dir.path().join("ttyUSB1");
+        std::fs::write(&other, b"").unwrap();
+        assert!(!same_device(
+            other.to_str().unwrap(),
+            link.to_str().unwrap()
         ));
     }
 

@@ -590,6 +590,23 @@
       "title": "CloudflareTunnelConfig",
       "type": "object"
     },
+    "CrsfConfig": {
+      "description": "The ExpressLRS / CRSF RC control lane.\n\n``device`` pins the serial node the RC transmitter module is attached to\n(e.g. ``/dev/ttyUSB0``). A pinned device is excluded from flight-controller\nserial discovery and classified as the RC module by the hot-plug monitor,\nso plugging the module can never disturb the FC link. Empty = no pin.\n\n``enabled`` opts the lane in. It additionally allows the hot-plug monitor\nto classify a known RC-bridge USB id (CP2102/CH340/ESP32-S3) as the RC\nmodule even without a pin; with the lane off and no pin, a generic\nUSB-serial bridge stays an FC candidate (a VID alone cannot distinguish an\nFC behind the same bridge from an RC module).",
+      "properties": {
+        "device": {
+          "default": "",
+          "title": "Device",
+          "type": "string"
+        },
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        }
+      },
+      "title": "CrsfConfig",
+      "type": "object"
+    },
     "DiscoveryConfig": {
       "properties": {
         "mdns_enabled": {
@@ -1198,6 +1215,19 @@
         }
       },
       "title": "PerceptionServingConfig",
+      "type": "object"
+    },
+    "RadioConfig": {
+      "properties": {
+        "crsf": {
+          "$ref": "#/$defs/CrsfConfig",
+          "default": {
+            "device": "",
+            "enabled": false
+          }
+        }
+      },
+      "title": "RadioConfig",
       "type": "object"
     },
     "RecordingConfig": {
@@ -2198,6 +2228,15 @@
         "serving": {
           "detector_model": null,
           "enabled": "auto"
+        }
+      }
+    },
+    "radio": {
+      "$ref": "#/$defs/RadioConfig",
+      "default": {
+        "crsf": {
+          "device": "",
+          "enabled": false
         }
       }
     },

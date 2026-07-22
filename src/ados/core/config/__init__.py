@@ -11,6 +11,7 @@ per-domain files alongside this barrel:
 * ``video.py`` — :class:`VideoConfig`, :class:`CameraConfig`,
   :class:`RecordingConfig`
 * ``network.py`` — :class:`NetworkConfig` and friends
+* ``radio.py`` — :class:`RadioConfig`, :class:`CrsfConfig`
 * ``cloud.py`` — :class:`ServerConfig`, :class:`RemoteAccessConfig` and
   friends
 * ``security.py`` — :class:`SecurityConfig` and friends, plus
@@ -65,6 +66,7 @@ from .network import (
     RegulatoryConfig,
     WifiClientConfig,
 )
+from .radio import CrsfConfig, RadioConfig
 from .root import ADOSConfig
 from .security import (
     DEFAULT_CORS_ORIGINS,
@@ -110,6 +112,9 @@ __all__ = [
     "NetworkConfig",
     "RegulatoryConfig",
     "WifiClientConfig",
+    # radio
+    "CrsfConfig",
+    "RadioConfig",
     # cloud
     "CloudServerConfig",
     "CloudflareTunnelConfig",

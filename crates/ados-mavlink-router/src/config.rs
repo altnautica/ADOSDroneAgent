@@ -97,6 +97,14 @@ pub struct MavlinkConfig {
     /// session enables enforcement.
     #[serde(default = "default_ws_proxy_enforce_auth")]
     pub ws_proxy_enforce_auth: bool,
+    /// The serial device an ExpressLRS / CRSF RC module is pinned to
+    /// (`radio.crsf.device` in the config — the top-level `radio:` section, NOT
+    /// the `mavlink:` block, so it is skipped by the section deserializer and
+    /// filled in by the loader). Empty = no pin. A pinned device is excluded
+    /// from FC candidacy entirely: the router must never open or baud-sweep the
+    /// RC module's port, or it contends with the CRSF lane for the same tty.
+    #[serde(skip)]
+    pub crsf_device: String,
 }
 
 impl Default for MavlinkConfig {
@@ -109,6 +117,7 @@ impl Default for MavlinkConfig {
             component_id: default_component_id(),
             endpoints: default_endpoints(),
             ws_proxy_enforce_auth: default_ws_proxy_enforce_auth(),
+            crsf_device: String::new(),
         }
     }
 }
@@ -135,17 +144,35 @@ impl MavlinkConfig {
     /// Load from an explicit path, also returning the parse-error message so the
     /// startup path can publish it. `None` on success or a missing/unreadable
     /// file; `Some(msg)` on a present-but-malformed file.
+    ///
+    /// Reads the `mavlink:` section plus the one foreign field the router
+    /// gates on: `radio.crsf.device`, the pinned CRSF/ELRS serial device that
+    /// must be excluded from FC port candidacy.
     fn load_reporting(path: &Path) -> (Self, Option<String>) {
         #[derive(Debug, Default, Deserialize)]
         struct RawConfig {
             #[serde(default)]
             mavlink: MavlinkConfig,
+            #[serde(default)]
+            radio: RadioSection,
+        }
+        #[derive(Debug, Default, Deserialize)]
+        struct RadioSection {
+            #[serde(default)]
+            crsf: CrsfSection,
+        }
+        #[derive(Debug, Default, Deserialize)]
+        struct CrsfSection {
+            #[serde(default)]
+            device: String,
         }
         let Ok(text) = std::fs::read_to_string(path) else {
             return (MavlinkConfig::default(), None);
         };
         let (raw, error): (RawConfig, _) = ados_config::yaml_reporting(&text, "mavlink");
-        (raw.mavlink, error)
+        let mut cfg = raw.mavlink;
+        cfg.crsf_device = raw.radio.crsf.device.trim().to_string();
+        (cfg, error)
     }
 
     /// The first enabled WebSocket endpoint port, if any (the proxy bind port).
@@ -237,6 +264,38 @@ mod tests {
         let cfg = dir.path().join("config.yaml");
         write(&cfg, "mavlink:\n  serial_port: /dev/ttyACM0\n");
         assert!(!MavlinkConfig::load_from(&cfg).ws_proxy_enforce_auth);
+    }
+
+    #[test]
+    fn crsf_device_pin_reads_from_the_radio_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        write(
+            &cfg,
+            "mavlink:\n  serial_port: /dev/ttyACM0\nradio:\n  crsf:\n    device: \" /dev/ttyUSB0 \"\n",
+        );
+        let c = MavlinkConfig::load_from(&cfg);
+        // The pin is read from the top-level radio section and trimmed; the
+        // mavlink block itself is untouched by it.
+        assert_eq!(c.crsf_device, "/dev/ttyUSB0");
+        assert_eq!(c.serial_port, "/dev/ttyACM0");
+    }
+
+    #[test]
+    fn crsf_device_pin_defaults_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        // Missing file, and a config with no radio block, both read no pin.
+        assert_eq!(
+            MavlinkConfig::load_from(&dir.path().join("nope.yaml")).crsf_device,
+            ""
+        );
+        let cfg = dir.path().join("config.yaml");
+        write(&cfg, "mavlink:\n  serial_port: /dev/ttyACM0\n");
+        assert_eq!(MavlinkConfig::load_from(&cfg).crsf_device, "");
+        // A crsf block with no device also reads no pin.
+        let cfg2 = dir.path().join("config2.yaml");
+        write(&cfg2, "radio:\n  crsf:\n    enabled: true\n");
+        assert_eq!(MavlinkConfig::load_from(&cfg2).crsf_device, "");
     }
 
     #[test]

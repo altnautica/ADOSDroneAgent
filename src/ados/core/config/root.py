@@ -12,6 +12,7 @@ from .cloud import RemoteAccessConfig, ServerConfig
 from .ground_station import GroundStationConfig
 from .mavlink import MavlinkConfig
 from .network import NetworkConfig
+from .radio import RadioConfig
 from .security import SecurityConfig
 from .system import (
     AtlasConfig,
@@ -31,6 +32,7 @@ class ADOSConfig(BaseModel):
     mavlink: MavlinkConfig = MavlinkConfig()
     video: VideoConfig = VideoConfig()
     network: NetworkConfig = NetworkConfig()
+    radio: RadioConfig = RadioConfig()
     server: ServerConfig = ServerConfig()
     remote_access: RemoteAccessConfig = RemoteAccessConfig()
     security: SecurityConfig = SecurityConfig()
