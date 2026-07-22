@@ -1046,4 +1046,158 @@ Local:
         // The second hop had no detail → the key is absent (never a null/empty).
         assert!(hops[1].get("detail").is_none());
     }
+
+    // --- video diagnostics: end-to-end per-hop attribution (synthetic samples) --
+    // Hardware-free coverage of the exact mis-attribution the harness prevents:
+    // a synthetic pair of VideoSamples (the two window reads) → the per-hop
+    // findings → the verdict. `VideoSample`'s fields are private but reachable
+    // here (same module), so the samples are built directly.
+
+    fn sample(mtx_bytes: Option<i64>, serving: bool, wfb: &[(&str, Value)]) -> VideoSample {
+        let map: Map<String, Value> = wfb
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect();
+        VideoSample {
+            mtx_bytes_received: mtx_bytes,
+            mtx_serving: serving,
+            wfb: if map.is_empty() { None } else { Some(map) },
+        }
+    }
+
+    fn verdicts(hops: &[Value]) -> Vec<String> {
+        hops.iter()
+            .map(|h| h["verdict"].as_str().unwrap_or("?").to_string())
+            .collect()
+    }
+
+    #[test]
+    fn drone_all_hops_flow_when_mediamtx_advances_and_tx_injects() {
+        // Camera → mediamtx bytesReceived climbing, and the wfb TX bitrate > 0.
+        let s0 = sample(Some(1000), true, &[("bitrate_kbps", json!(4000))]);
+        let s1 = sample(Some(2000), true, &[("bitrate_kbps", json!(4000))]);
+        let (hops, dies) = resolve_hops(drone_hops(&s0, &s1));
+        assert_eq!(verdicts(&hops), vec!["flowing", "flowing"]);
+        assert_eq!(dies, Value::Null);
+    }
+
+    #[test]
+    fn drone_camera_dead_is_the_first_hop() {
+        // mediamtx bytesReceived flat → the camera→encoder→mediamtx hop stalled;
+        // the radio hop is starved (no_upstream), not blamed.
+        let s0 = sample(Some(1000), true, &[("bitrate_kbps", json!(0))]);
+        let s1 = sample(Some(1000), true, &[("bitrate_kbps", json!(0))]);
+        let (hops, dies) = resolve_hops(drone_hops(&s0, &s1));
+        assert_eq!(verdicts(&hops), vec!["stalled", "no_upstream"]);
+        assert_eq!(dies, json!("camera_to_mediamtx"));
+    }
+
+    #[test]
+    fn drone_tee_or_tx_dead_is_the_radio_hop() {
+        // mediamtx advances (camera fine) but the wfb TX bitrate is 0 → the fault
+        // is the tap → wfb_tx leg, attributed to the radio-injection hop.
+        let s0 = sample(Some(1000), true, &[("bitrate_kbps", json!(0))]);
+        let s1 = sample(Some(2000), true, &[("bitrate_kbps", json!(0))]);
+        let (hops, dies) = resolve_hops(drone_hops(&s0, &s1));
+        assert_eq!(verdicts(&hops), vec!["flowing", "stalled"]);
+        assert_eq!(dies, json!("mediamtx_to_radio_tx"));
+    }
+
+    #[test]
+    fn gs_deaf_link_stalls_at_decode_with_the_cause() {
+        // No decoded packets + link_diag=deaf → the RF→decode hop stalled, and the
+        // legible cause rides the hop detail.
+        let s0 = sample(
+            None,
+            true,
+            &[("packets_received", json!(0)), ("link_diag", json!("deaf"))],
+        );
+        let s1 = sample(
+            None,
+            true,
+            &[("packets_received", json!(0)), ("link_diag", json!("deaf"))],
+        );
+        let (hops, dies) = resolve_hops(gs_hops(&s0, &s1));
+        assert_eq!(hops[0]["verdict"], json!("stalled"));
+        assert_eq!(hops[0]["detail"], json!("link_diag=deaf"));
+        assert_eq!(dies, json!("rf_to_decode"));
+    }
+
+    #[test]
+    fn gs_fanout_dead_is_isolated_from_a_healthy_decode() {
+        // Decoding fine, but fanout_forwarded flat → the fault is the fan-out, not
+        // the decode. The served hop is then starved (no_upstream).
+        let s0 = sample(
+            Some(1000),
+            true,
+            &[
+                ("packets_received", json!(550)),
+                ("fanout_forwarded", json!(10000)),
+            ],
+        );
+        let s1 = sample(
+            Some(1000),
+            true,
+            &[
+                ("packets_received", json!(550)),
+                ("fanout_forwarded", json!(10000)),
+            ],
+        );
+        let (hops, dies) = resolve_hops(gs_hops(&s0, &s1));
+        assert_eq!(verdicts(&hops), vec!["flowing", "stalled", "no_upstream"]);
+        assert_eq!(dies, json!("decode_to_fanout"));
+    }
+
+    #[test]
+    fn gs_all_hops_flow_end_to_end() {
+        // Decode + fan-out + mediamtx ingest all advancing → every hop flows.
+        let s0 = sample(
+            Some(1000),
+            true,
+            &[
+                ("packets_received", json!(550)),
+                ("fanout_forwarded", json!(10000)),
+            ],
+        );
+        let s1 = sample(
+            Some(2000),
+            true,
+            &[
+                ("packets_received", json!(550)),
+                ("fanout_forwarded", json!(11000)),
+            ],
+        );
+        let (hops, dies) = resolve_hops(gs_hops(&s0, &s1));
+        assert_eq!(verdicts(&hops), vec!["flowing", "flowing", "flowing"]);
+        assert_eq!(dies, Value::Null);
+    }
+
+    #[test]
+    fn gs_served_hop_falls_back_to_whep_liveness_when_ingest_bytes_unreadable() {
+        // The ground mediamtx management API is auth-gated (mtx_bytes None), so the
+        // served hop uses the WHEP-serving liveness. Decode + fan-out flowing +
+        // WHEP serving → the served hop flows on the weaker (honest) signal.
+        let s0 = sample(
+            None,
+            true,
+            &[
+                ("packets_received", json!(550)),
+                ("fanout_forwarded", json!(10000)),
+            ],
+        );
+        let s1 = sample(
+            None,
+            true,
+            &[
+                ("packets_received", json!(550)),
+                ("fanout_forwarded", json!(11000)),
+            ],
+        );
+        let (hops, _dies) = resolve_hops(gs_hops(&s0, &s1));
+        assert_eq!(hops[2]["verdict"], json!("flowing"));
+        assert_eq!(
+            hops[2]["method"],
+            json!("WHEP endpoint serving (mediamtx API auth-gated)")
+        );
+    }
 }
