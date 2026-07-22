@@ -353,3 +353,25 @@ def test_profile_accepts_workstation_and_compute():
 
     with pytest.raises(ValueError):
         AgentConfig(profile="not-a-profile")
+
+
+def test_packaged_defaults_carry_no_orphan_top_level_keys():
+    """Every top-level key in the packaged defaults must be a config field.
+
+    The model ignores unknown keys (``extra: ignore``) and the config
+    persist path is a full model-dump rewrite, so a defaults block with
+    no matching model field is silently dropped at load and can never
+    round-trip through a write — dead config. Guard the 1:1
+    correspondence so the next orphan block cannot land.
+    """
+    from importlib.resources import files
+
+    text = files("ados.core").joinpath("defaults.yaml").read_text(encoding="utf-8")
+    data = yaml.safe_load(text)
+    assert isinstance(data, dict) and data, "packaged defaults must parse to a mapping"
+
+    orphans = sorted(set(data) - set(ADOSConfig.model_fields))
+    assert not orphans, (
+        f"defaults.yaml top-level keys with no ADOSConfig field: {orphans}; "
+        "declare a model field or delete the block"
+    )

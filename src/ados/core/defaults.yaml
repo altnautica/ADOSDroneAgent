@@ -85,12 +85,6 @@ api:
     host: "0.0.0.0"
     port: 8080
 
-ota:
-  channel: "stable"
-  check_interval: 24
-  auto_install: false
-  github_repo: "altnautica/ADOSDroneAgent"
-
 logging:
   level: "info"
   max_size_mb: 50
