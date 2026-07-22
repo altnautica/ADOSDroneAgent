@@ -69,6 +69,8 @@ fn native_routes() -> Vec<NativeRoute> {
         // Control-plane RTT echo + the FC-source picker enumeration.
         get("/api/ping"),
         get("/api/mavlink/ports"),
+        // Agent-config JSON Schema (the committed, build-time-embedded asset).
+        get("/api/config/schema"),
         // Pairing handshake.
         get("/api/pairing/info"),
         get("/api/pairing/code"),
@@ -445,13 +447,14 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            134,
+            135,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);
         // Every ported read route must be native (else auth-skipped on a paired
         // agent).
         for p in [
+            "/api/config/schema",
             "/api/params",
             "/api/services",
             "/api/fleet/enrollment",

@@ -1,0 +1,2374 @@
+{
+  "$defs": {
+    "AgentConfig": {
+      "properties": {
+        "device_id": {
+          "default": "",
+          "title": "Device Id",
+          "type": "string"
+        },
+        "name": {
+          "default": "my-drone",
+          "title": "Name",
+          "type": "string"
+        },
+        "profile": {
+          "default": "auto",
+          "title": "Profile",
+          "type": "string"
+        },
+        "tier": {
+          "default": "auto",
+          "title": "Tier",
+          "type": "string"
+        }
+      },
+      "title": "AgentConfig",
+      "type": "object"
+    },
+    "ApiConfig": {
+      "properties": {
+        "mission_control_url": {
+          "default": "",
+          "title": "Mission Control Url",
+          "type": "string"
+        },
+        "rest": {
+          "$ref": "#/$defs/RestApiConfig",
+          "default": {
+            "enabled": true,
+            "host": "0.0.0.0",
+            "port": 8080
+          }
+        }
+      },
+      "title": "ApiConfig",
+      "type": "object"
+    },
+    "ApiSecurityConfig": {
+      "properties": {
+        "api_key": {
+          "default": "",
+          "title": "Api Key",
+          "type": "string",
+          "x-secret": true
+        },
+        "cors_enabled": {
+          "default": true,
+          "title": "Cors Enabled",
+          "type": "boolean"
+        },
+        "cors_origins": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Cors Origins",
+          "type": "array"
+        },
+        "cors_origins_extra": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Cors Origins Extra",
+          "type": "array"
+        }
+      },
+      "title": "ApiSecurityConfig",
+      "type": "object"
+    },
+    "AtlasCameraConfig": {
+      "description": "One camera on the world-model rig (mirrors the Rust capture-core shape).\n\n``enabled`` gates whether the camera's frames are captured at all;\n``reconstruct`` is the per-camera hint about whether the stream feeds the\nworld-model reconstruction (a camera may be captured for situational video\nyet excluded from the splat).",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "reconstruct": {
+          "default": true,
+          "title": "Reconstruct",
+          "type": "boolean"
+        },
+        "role": {
+          "default": "primary",
+          "enum": [
+            "primary",
+            "aux",
+            "down",
+            "left",
+            "right",
+            "back",
+            "up"
+          ],
+          "title": "Role",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "AtlasCameraConfig",
+      "type": "object"
+    },
+    "AtlasConfig": {
+      "description": "ADOS Atlas world-model configuration.\n\nDefault off (``enabled``): a fresh agent runs no Atlas capture, no\ncompute-node services, and no perception offload until this is enabled. One\nflag keeps the whole program inert, the same shape as ``VisionConfig``. The\nremaining fields mirror the Rust ``atlas:`` block the native capture service\n(``ados-atlas``) reads, so the persisted YAML round-trips identically through\nboth halves rather than dropping fields the Rust side relies on.",
+      "properties": {
+        "cameras": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AtlasCameraConfig"
+          },
+          "title": "Cameras",
+          "type": "array"
+        },
+        "capture_profile": {
+          "default": "freeform",
+          "enum": [
+            "orbit",
+            "lawnmower",
+            "freeform",
+            "inspection"
+          ],
+          "title": "Capture Profile",
+          "type": "string"
+        },
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "hfov_deg": {
+          "default": 70.0,
+          "title": "Hfov Deg",
+          "type": "number"
+        },
+        "intrinsics": {
+          "additionalProperties": {
+            "$ref": "#/$defs/AtlasIntrinsicsOverride"
+          },
+          "default": {},
+          "title": "Intrinsics",
+          "type": "object"
+        },
+        "pose_tier": {
+          "default": "auto",
+          "enum": [
+            "auto",
+            "local",
+            "offload",
+            "hybrid"
+          ],
+          "title": "Pose Tier",
+          "type": "string"
+        },
+        "reconstruct_steps": {
+          "default": 30000,
+          "title": "Reconstruct Steps",
+          "type": "integer"
+        },
+        "selection": {
+          "$ref": "#/$defs/AtlasSelectionParams",
+          "default": {
+            "max_interval_ms": 2000,
+            "max_keyframes": 0,
+            "min_rotation_rad": 0.26,
+            "min_translation_m": 0.5
+          }
+        },
+        "socket_dir": {
+          "default": "/run/ados",
+          "title": "Socket Dir",
+          "type": "string"
+        }
+      },
+      "title": "AtlasConfig",
+      "type": "object"
+    },
+    "AtlasIntrinsicsOverride": {
+      "description": "A per-camera calibrated pinhole. Absent, the capture service derives an\nuncalibrated pinhole from the frame size and the field of view.",
+      "properties": {
+        "cx": {
+          "title": "Cx",
+          "type": "number"
+        },
+        "cy": {
+          "title": "Cy",
+          "type": "number"
+        },
+        "distortion_model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Distortion Model"
+        },
+        "distortion_params": {
+          "default": [],
+          "items": {
+            "type": "number"
+          },
+          "title": "Distortion Params",
+          "type": "array"
+        },
+        "fx": {
+          "title": "Fx",
+          "type": "number"
+        },
+        "fy": {
+          "title": "Fy",
+          "type": "number"
+        }
+      },
+      "required": [
+        "fx",
+        "fy",
+        "cx",
+        "cy"
+      ],
+      "title": "AtlasIntrinsicsOverride",
+      "type": "object"
+    },
+    "AtlasSelectionParams": {
+      "description": "Keyframe-selection thresholds (mirrors the Rust defaults).",
+      "properties": {
+        "max_interval_ms": {
+          "default": 2000,
+          "title": "Max Interval Ms",
+          "type": "integer"
+        },
+        "max_keyframes": {
+          "default": 0,
+          "title": "Max Keyframes",
+          "type": "integer"
+        },
+        "min_rotation_rad": {
+          "default": 0.26,
+          "title": "Min Rotation Rad",
+          "type": "number"
+        },
+        "min_translation_m": {
+          "default": 0.5,
+          "title": "Min Translation M",
+          "type": "number"
+        }
+      },
+      "title": "AtlasSelectionParams",
+      "type": "object"
+    },
+    "CameraConfig": {
+      "properties": {
+        "bitrate_kbps": {
+          "default": 4000,
+          "title": "Bitrate Kbps",
+          "type": "integer"
+        },
+        "codec": {
+          "default": "h264",
+          "title": "Codec",
+          "type": "string"
+        },
+        "codec_preference": {
+          "default": "auto",
+          "enum": [
+            "h264",
+            "h265",
+            "auto"
+          ],
+          "title": "Codec Preference",
+          "type": "string"
+        },
+        "expected": {
+          "default": "auto",
+          "enum": [
+            "auto",
+            "true",
+            "false"
+          ],
+          "title": "Expected",
+          "type": "string"
+        },
+        "fps": {
+          "default": 30,
+          "title": "Fps",
+          "type": "integer"
+        },
+        "height": {
+          "default": 720,
+          "title": "Height",
+          "type": "integer"
+        },
+        "source": {
+          "default": "csi",
+          "title": "Source",
+          "type": "string"
+        },
+        "width": {
+          "default": 1280,
+          "title": "Width",
+          "type": "integer"
+        }
+      },
+      "title": "CameraConfig",
+      "type": "object"
+    },
+    "CameraLeg": {
+      "description": "One entry of the optional ``video.cameras`` list \u2014 a single video leg the\nnode exposes as its own mediamtx path (and ``:8889/<id>/whep``). Present only\nwhen more than one stream is declared (a smart pod, a dual-camera rig); an\nabsent list falls back to the single ``video.camera`` block. The primary leg\nis always served at the fixed ``main`` path; secondary legs keep their ids.\n\n``id`` is the leg's immutable logical identity; ``source`` is its current\nlocator; ``match`` re-pins ``source`` \u2192 ``id`` across a device rename.\n``role`` is the transport plane (primary \u2192 the fixed ``main`` path / WFB /\ncloud); ``purpose`` is the consumer plane a plugin binds to. The management\nfields (``name`` / ``orientation`` / ``purpose`` / ``enabled`` / ``owner`` /\n``fov_deg`` / ``mount_pitch_deg`` / ``calibration`` / ``match``) are metadata\nsurfaced through the camera roster; the encode + radio pipeline reads none of\nthem, so an existing single-``role`` config resolves byte-identically.",
+      "properties": {
+        "bitrate_kbps": {
+          "default": 4000,
+          "title": "Bitrate Kbps",
+          "type": "integer"
+        },
+        "calibration": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Calibration"
+        },
+        "codec": {
+          "default": "h264",
+          "title": "Codec",
+          "type": "string"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "fov_deg": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Fov Deg"
+        },
+        "fps": {
+          "default": 30,
+          "title": "Fps",
+          "type": "integer"
+        },
+        "height": {
+          "default": 720,
+          "title": "Height",
+          "type": "integer"
+        },
+        "id": {
+          "default": "main",
+          "title": "Id",
+          "type": "string"
+        },
+        "match": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CameraMatch"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "mount_pitch_deg": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mount Pitch Deg"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "orientation": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Orientation"
+        },
+        "owner": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Owner"
+        },
+        "purpose": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Purpose",
+          "type": "array"
+        },
+        "role": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Role"
+        },
+        "source": {
+          "default": "csi",
+          "title": "Source",
+          "type": "string"
+        },
+        "width": {
+          "default": 1280,
+          "title": "Width",
+          "type": "integer"
+        }
+      },
+      "title": "CameraLeg",
+      "type": "object"
+    },
+    "CameraMatch": {
+      "description": "A physical fingerprint that re-pins a leg's logical ``id`` onto its\ncurrent ``source`` device after a hot-plug / reboot renamed the device node.\nUSB cameras carry a ``vid:pid[:serial]`` string; CSI cameras carry the sensor\nname plus the camera port index. Every field is optional \u2014 an absent match\nmeans the leg is pinned only by its ``source`` locator (a network URL never\nmoves). Mirrors the Rust ``CameraMatch``.",
+      "properties": {
+        "csi_port": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Csi Port"
+        },
+        "csi_sensor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Csi Sensor"
+        },
+        "usb": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Usb"
+        }
+      },
+      "title": "CameraMatch",
+      "type": "object"
+    },
+    "CellularConfig": {
+      "properties": {
+        "apn": {
+          "default": "",
+          "title": "Apn",
+          "type": "string"
+        },
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        }
+      },
+      "title": "CellularConfig",
+      "type": "object"
+    },
+    "CloudServerConfig": {
+      "properties": {
+        "mqtt_broker": {
+          "default": "mqtt.altnautica.com",
+          "title": "Mqtt Broker",
+          "type": "string"
+        },
+        "mqtt_port": {
+          "default": 443,
+          "title": "Mqtt Port",
+          "type": "integer"
+        },
+        "url": {
+          "default": "https://convex-site.altnautica.com",
+          "title": "Url",
+          "type": "string"
+        }
+      },
+      "title": "CloudServerConfig",
+      "type": "object"
+    },
+    "CloudflareTunnelConfig": {
+      "properties": {
+        "api_url": {
+          "default": "",
+          "title": "Api Url",
+          "type": "string"
+        },
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "mavlink_ws_url": {
+          "default": "",
+          "title": "Mavlink Ws Url",
+          "type": "string"
+        },
+        "service_name": {
+          "default": "cloudflared",
+          "title": "Service Name",
+          "type": "string"
+        },
+        "setup_url": {
+          "default": "",
+          "title": "Setup Url",
+          "type": "string"
+        },
+        "token_path": {
+          "default": "/etc/ados/secrets/cloudflare-tunnel-token",
+          "title": "Token Path",
+          "type": "string"
+        },
+        "video_whep_url": {
+          "default": "",
+          "title": "Video Whep Url",
+          "type": "string"
+        }
+      },
+      "title": "CloudflareTunnelConfig",
+      "type": "object"
+    },
+    "DiscoveryConfig": {
+      "properties": {
+        "mdns_enabled": {
+          "default": true,
+          "title": "Mdns Enabled",
+          "type": "boolean"
+        },
+        "service_type": {
+          "default": "_ados._tcp.local.",
+          "title": "Service Type",
+          "type": "string"
+        }
+      },
+      "title": "DiscoveryConfig",
+      "type": "object"
+    },
+    "DisplayConfig": {
+      "description": "Effective local-display primary path for the ground-station profile.\n\n``type`` is the operator-set selection. ``auto`` lets the agent pick\nthe strongest local renderer at runtime (HDMI > SPI LCD > none).\nExplicit values short-circuit detection: ``hdmi`` keeps the OLED /\nSPI LCD services from grabbing the panel on boards where the\noperator wants the Chromium kiosk to own the screen, ``lcd`` keeps\nthe kiosk off boards that boot with both an HDMI sink and an SPI\nLCD wired, ``none`` disables all local-display services entirely\n(headless deployment).\n\n``detected_type`` is runtime-only \u2014 it is populated by the heartbeat\nenrichment helper after probing what the OS actually exposes and is\nsurfaced to Mission Control as a read-only field. Operators should\nnot write to it via the config API.",
+      "properties": {
+        "detected_type": {
+          "anyOf": [
+            {
+              "enum": [
+                "auto",
+                "hdmi",
+                "lcd",
+                "none"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detected Type"
+        },
+        "type": {
+          "default": "auto",
+          "enum": [
+            "auto",
+            "hdmi",
+            "lcd",
+            "none"
+          ],
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "title": "DisplayConfig",
+      "type": "object"
+    },
+    "EndpointConfig": {
+      "properties": {
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "host": {
+          "default": "0.0.0.0",
+          "title": "Host",
+          "type": "string"
+        },
+        "port": {
+          "default": 8765,
+          "title": "Port",
+          "type": "integer"
+        },
+        "type": {
+          "default": "websocket",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "title": "EndpointConfig",
+      "type": "object"
+    },
+    "GroundStationConfig": {
+      "properties": {
+        "cloud_uplink": {
+          "default": "auto",
+          "enum": [
+            "auto",
+            "force_on",
+            "force_off"
+          ],
+          "title": "Cloud Uplink",
+          "type": "string"
+        },
+        "display": {
+          "$ref": "#/$defs/DisplayConfig"
+        },
+        "kiosk": {
+          "$ref": "#/$defs/KioskConfig"
+        },
+        "mesh": {
+          "$ref": "#/$defs/MeshConfig",
+          "default": {
+            "bat_iface": "bat0",
+            "carrier": "802.11s",
+            "channel": 1,
+            "interface_override": null,
+            "mesh_id": null,
+            "shared_key_path": "/etc/ados/mesh/psk.key"
+          }
+        },
+        "paired_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Paired At"
+        },
+        "paired_drone_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Paired Drone Id"
+        },
+        "role": {
+          "default": "direct",
+          "enum": [
+            "direct",
+            "relay",
+            "receiver"
+          ],
+          "title": "Role",
+          "type": "string"
+        },
+        "share_uplink": {
+          "default": false,
+          "title": "Share Uplink",
+          "type": "boolean"
+        },
+        "ui": {
+          "$ref": "#/$defs/GroundStationUiConfig"
+        },
+        "use_live_state_ipc": {
+          "default": true,
+          "title": "Use Live State Ipc",
+          "type": "boolean"
+        },
+        "wfb_receiver": {
+          "$ref": "#/$defs/WfbReceiverConfig",
+          "default": {
+            "accept_local_nic": true,
+            "listen_port": 5800
+          }
+        },
+        "wfb_relay": {
+          "$ref": "#/$defs/WfbRelayConfig",
+          "default": {
+            "receiver_mdns_service": "_ados-receiver._tcp",
+            "receiver_port": 5800
+          }
+        }
+      },
+      "title": "GroundStationConfig",
+      "type": "object"
+    },
+    "GroundStationUiConfig": {
+      "description": "OLED + buttons + screens UI config for the ground-station profile.\n\nPulled out of the legacy `/etc/ados/ground-station-ui.json` side-file\ninto the Pydantic model so it round-trips through save cycles and is\nconsumed live by the display service and button_service. The legacy file is\nmigrated once at load time and preserved on disk for rollback.\n\nField shapes are intentionally loose (`dict`) because the OLED, button\nmapping, and screen order schemas are still evolving. The REST handlers\nand services know the keys they care about.",
+      "properties": {
+        "buttons": {
+          "additionalProperties": true,
+          "title": "Buttons",
+          "type": "object"
+        },
+        "oled": {
+          "additionalProperties": true,
+          "title": "Oled",
+          "type": "object"
+        },
+        "screens": {
+          "additionalProperties": true,
+          "title": "Screens",
+          "type": "object"
+        }
+      },
+      "title": "GroundStationUiConfig",
+      "type": "object"
+    },
+    "HotspotConfig": {
+      "properties": {
+        "channel": {
+          "default": 6,
+          "title": "Channel",
+          "type": "integer"
+        },
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "password": {
+          "default": "altnautica",
+          "title": "Password",
+          "type": "string",
+          "x-secret": true
+        },
+        "ssid": {
+          "default": "ADOS-{device_id}",
+          "title": "Ssid",
+          "type": "string"
+        }
+      },
+      "title": "HotspotConfig",
+      "type": "object"
+    },
+    "KioskConfig": {
+      "description": "HDMI kiosk (Chromium-under-cage) configuration.\n\nThe single source of truth for the kiosk. The kiosk service reads\n``target_url`` (the page it points the browser at) and ``minimal_layer``\n(append ``?layer=minimal`` on low-RAM boards); the ``PUT\n/api/v1/ground-station/display`` write route and ``PUT /api/config``\npersist ``enabled`` / ``resolution`` / ``target_url`` here. Living in the\nPydantic model means it validates, round-trips through save cycles, shows\nup in config dumps, and is read from exactly one place instead of the old\n``ground-station-ui.json`` side-file the kiosk service never read.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "minimal_layer": {
+          "default": false,
+          "title": "Minimal Layer",
+          "type": "boolean"
+        },
+        "resolution": {
+          "default": "auto",
+          "title": "Resolution",
+          "type": "string"
+        },
+        "target_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target Url"
+        }
+      },
+      "title": "KioskConfig",
+      "type": "object"
+    },
+    "LoggingConfig": {
+      "properties": {
+        "flight_log_dir": {
+          "default": "/var/ados/logs/flights",
+          "title": "Flight Log Dir",
+          "type": "string"
+        },
+        "keep_count": {
+          "default": 5,
+          "title": "Keep Count",
+          "type": "integer"
+        },
+        "level": {
+          "default": "info",
+          "title": "Level",
+          "type": "string"
+        },
+        "max_size_mb": {
+          "default": 50,
+          "title": "Max Size Mb",
+          "type": "integer"
+        }
+      },
+      "title": "LoggingConfig",
+      "type": "object"
+    },
+    "LoraConfig": {
+      "properties": {
+        "bandwidth": {
+          "default": 125000,
+          "title": "Bandwidth",
+          "type": "integer"
+        },
+        "frequency": {
+          "default": 915000000,
+          "title": "Frequency",
+          "type": "integer"
+        },
+        "interface": {
+          "default": "",
+          "title": "Interface",
+          "type": "string"
+        },
+        "spreading_factor": {
+          "default": 7,
+          "title": "Spreading Factor",
+          "type": "integer"
+        }
+      },
+      "title": "LoraConfig",
+      "type": "object"
+    },
+    "MacPinConfig": {
+      "properties": {
+        "apply_live_allowed": {
+          "default": false,
+          "title": "Apply Live Allowed",
+          "type": "boolean"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "overrides": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "title": "Overrides",
+          "type": "object"
+        }
+      },
+      "title": "MacPinConfig",
+      "type": "object"
+    },
+    "MavlinkConfig": {
+      "properties": {
+        "baud_rate": {
+          "default": 57600,
+          "title": "Baud Rate",
+          "type": "integer"
+        },
+        "component_id": {
+          "default": 191,
+          "title": "Component Id",
+          "type": "integer"
+        },
+        "endpoints": {
+          "items": {
+            "$ref": "#/$defs/EndpointConfig"
+          },
+          "title": "Endpoints",
+          "type": "array"
+        },
+        "serial_port": {
+          "default": "",
+          "title": "Serial Port",
+          "type": "string"
+        },
+        "source": {
+          "default": "auto",
+          "enum": [
+            "auto",
+            "serial",
+            "udp",
+            "tcp"
+          ],
+          "title": "Source",
+          "type": "string"
+        },
+        "system_id": {
+          "default": 1,
+          "title": "System Id",
+          "type": "integer"
+        },
+        "ws_proxy_enforce_auth": {
+          "default": false,
+          "title": "Ws Proxy Enforce Auth",
+          "type": "boolean"
+        }
+      },
+      "title": "MavlinkConfig",
+      "type": "object"
+    },
+    "MeshConfig": {
+      "description": "batman-adv local mesh transport settings.\n\n`carrier` is the L2 technology on the second USB WiFi dongle:\n802.11s (native mesh, preferred) or IBSS (ad-hoc, fallback for\ndrivers without 802.11s). `mesh_id` and `shared_key_path` gate the\ndeployment so two adjacent sites on the same channel stay isolated.\n`shared_key_path` defaults to a device-derived key written on first\nboot by mesh_manager (0o600, never logged).",
+      "properties": {
+        "bat_iface": {
+          "default": "bat0",
+          "title": "Bat Iface",
+          "type": "string"
+        },
+        "carrier": {
+          "default": "802.11s",
+          "enum": [
+            "802.11s",
+            "ibss"
+          ],
+          "title": "Carrier",
+          "type": "string"
+        },
+        "channel": {
+          "default": 1,
+          "title": "Channel",
+          "type": "integer"
+        },
+        "interface_override": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Interface Override"
+        },
+        "mesh_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mesh Id"
+        },
+        "shared_key_path": {
+          "default": "/etc/ados/mesh/psk.key",
+          "title": "Shared Key Path",
+          "type": "string"
+        }
+      },
+      "title": "MeshConfig",
+      "type": "object"
+    },
+    "NetworkConfig": {
+      "properties": {
+        "cellular": {
+          "$ref": "#/$defs/CellularConfig",
+          "default": {
+            "apn": "",
+            "enabled": false
+          }
+        },
+        "hotspot": {
+          "$ref": "#/$defs/HotspotConfig",
+          "default": {
+            "channel": 6,
+            "enabled": false,
+            "password": "altnautica",
+            "ssid": "ADOS-{device_id}"
+          }
+        },
+        "mac_pin": {
+          "$ref": "#/$defs/MacPinConfig",
+          "default": {
+            "apply_live_allowed": false,
+            "enabled": true,
+            "overrides": {}
+          }
+        },
+        "regulatory": {
+          "$ref": "#/$defs/RegulatoryConfig",
+          "default": {
+            "ack_at": null,
+            "ack_operator": null,
+            "mode": "unrestricted",
+            "region": null
+          }
+        },
+        "wifi_client": {
+          "$ref": "#/$defs/WifiClientConfig",
+          "default": {
+            "enabled": false,
+            "password": "",
+            "ssid": ""
+          }
+        },
+        "wifi_selfheal": {
+          "$ref": "#/$defs/WifiSelfHealConfig",
+          "default": {
+            "cooldown_s": 60,
+            "enabled": true,
+            "fail_threshold": 2
+          }
+        }
+      },
+      "title": "NetworkConfig",
+      "type": "object"
+    },
+    "PairingConfig": {
+      "properties": {
+        "beacon_enabled": {
+          "default": true,
+          "title": "Beacon Enabled",
+          "type": "boolean"
+        },
+        "beacon_interval": {
+          "default": 30,
+          "title": "Beacon Interval",
+          "type": "integer"
+        },
+        "code_ttl": {
+          "default": 900,
+          "title": "Code Ttl",
+          "type": "integer"
+        },
+        "convex_url": {
+          "default": "",
+          "title": "Convex Url",
+          "type": "string"
+        },
+        "heartbeat_interval": {
+          "default": 60,
+          "title": "Heartbeat Interval",
+          "type": "integer"
+        },
+        "single_process_cloud_enabled": {
+          "default": false,
+          "title": "Single Process Cloud Enabled",
+          "type": "boolean"
+        },
+        "state_path": {
+          "default": "/etc/ados/pairing.json",
+          "title": "State Path",
+          "type": "string"
+        }
+      },
+      "title": "PairingConfig",
+      "type": "object"
+    },
+    "PerceptionConfig": {
+      "description": "Two-tier perception execution config (mirrors the Rust ``perception:``\nblock). ``offload`` is read on a drone, ``serving`` on a workstation; both\ndefault so a fresh agent needs no setup \u2014 a no-NPU drone + a workstation on\none LAN offload hands-free.",
+      "properties": {
+        "offload": {
+          "$ref": "#/$defs/PerceptionOffloadConfig",
+          "default": {
+            "compute_node_addr": null,
+            "enabled": "auto"
+          }
+        },
+        "serving": {
+          "$ref": "#/$defs/PerceptionServingConfig",
+          "default": {
+            "detector_model": null,
+            "enabled": "auto"
+          }
+        }
+      },
+      "title": "PerceptionConfig",
+      "type": "object"
+    },
+    "PerceptionOffloadConfig": {
+      "description": "Drone-side perception offload: where the heavy detector runs.\n\n``enabled`` is a tri-state: ``auto`` (offload when the board is NPU-less and a\nworkstation is reachable on the LAN \u2014 the default), ``on`` (force offload),\n``off`` (never offload). ``compute_node_addr`` pins a specific workstation\n(``host:port``); empty means auto-discover over mDNS. Mirrors the Rust\n``perception.offload`` block the reconciler reads.",
+      "properties": {
+        "compute_node_addr": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Compute Node Addr"
+        },
+        "enabled": {
+          "default": "auto",
+          "enum": [
+            "auto",
+            "on",
+            "off"
+          ],
+          "title": "Enabled",
+          "type": "string"
+        }
+      },
+      "title": "PerceptionOffloadConfig",
+      "type": "object"
+    },
+    "PerceptionServingConfig": {
+      "description": "Workstation-side offload serving: whether this node runs detectors for\nother drones and which one by default.\n\n``enabled`` tri-state: ``auto`` (auto-accept + serve LAN offload \u2014 the\ndefault), ``on`` (force serving), ``off`` (never serve). ``detector_model``\npicks the served detector by model id; empty means the daemon's default.",
+      "properties": {
+        "detector_model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detector Model"
+        },
+        "enabled": {
+          "default": "auto",
+          "enum": [
+            "auto",
+            "on",
+            "off"
+          ],
+          "title": "Enabled",
+          "type": "string"
+        }
+      },
+      "title": "PerceptionServingConfig",
+      "type": "object"
+    },
+    "RecordingConfig": {
+      "properties": {
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "max_duration_minutes": {
+          "default": 30,
+          "title": "Max Duration Minutes",
+          "type": "integer"
+        },
+        "path": {
+          "default": "/var/ados/recordings",
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "title": "RecordingConfig",
+      "type": "object"
+    },
+    "RegulatoryConfig": {
+      "properties": {
+        "ack_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ack At"
+        },
+        "ack_operator": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ack Operator"
+        },
+        "mode": {
+          "default": "unrestricted",
+          "enum": [
+            "unrestricted",
+            "region"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "region": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Region"
+        }
+      },
+      "title": "RegulatoryConfig",
+      "type": "object"
+    },
+    "RemoteAccessConfig": {
+      "properties": {
+        "cloudflare": {
+          "$ref": "#/$defs/CloudflareTunnelConfig",
+          "default": {
+            "api_url": "",
+            "enabled": false,
+            "mavlink_ws_url": "",
+            "service_name": "cloudflared",
+            "setup_url": "",
+            "token_path": "/etc/ados/secrets/cloudflare-tunnel-token",
+            "video_whep_url": ""
+          }
+        },
+        "provider": {
+          "default": "none",
+          "enum": [
+            "none",
+            "cloudflare"
+          ],
+          "title": "Provider",
+          "type": "string"
+        },
+        "public_urls": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Public Urls",
+          "type": "array"
+        }
+      },
+      "title": "RemoteAccessConfig",
+      "type": "object"
+    },
+    "RestApiConfig": {
+      "properties": {
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "host": {
+          "default": "0.0.0.0",
+          "title": "Host",
+          "type": "string"
+        },
+        "port": {
+          "default": 8080,
+          "title": "Port",
+          "type": "integer"
+        }
+      },
+      "title": "RestApiConfig",
+      "type": "object"
+    },
+    "SecurityConfig": {
+      "properties": {
+        "api": {
+          "$ref": "#/$defs/ApiSecurityConfig",
+          "default": {
+            "api_key": "",
+            "cors_enabled": true,
+            "cors_origins": [
+              "http://localhost:4000",
+              "http://127.0.0.1:4000",
+              "http://localhost:4001",
+              "http://127.0.0.1:4001"
+            ],
+            "cors_origins_extra": []
+          }
+        },
+        "hmac_enabled": {
+          "default": false,
+          "title": "Hmac Enabled",
+          "type": "boolean"
+        },
+        "hmac_secret": {
+          "default": "",
+          "title": "Hmac Secret",
+          "type": "string",
+          "x-secret": true
+        },
+        "setup_token_required": {
+          "default": false,
+          "title": "Setup Token Required",
+          "type": "boolean"
+        },
+        "tls": {
+          "$ref": "#/$defs/TlsConfig",
+          "default": {
+            "ca_path": "/etc/ados/certs/ca.crt",
+            "cert_path": "/etc/ados/certs/device.crt",
+            "enabled": true,
+            "key_path": "/etc/ados/certs/device.key"
+          }
+        },
+        "wireguard": {
+          "$ref": "#/$defs/WireguardConfig",
+          "default": {
+            "config_path": "/etc/wireguard/ados.conf",
+            "enabled": false
+          }
+        }
+      },
+      "title": "SecurityConfig",
+      "type": "object"
+    },
+    "SelfHostedServerConfig": {
+      "properties": {
+        "api_key": {
+          "default": "",
+          "title": "Api Key",
+          "type": "string",
+          "x-secret": true
+        },
+        "mqtt_broker": {
+          "default": "",
+          "title": "Mqtt Broker",
+          "type": "string"
+        },
+        "mqtt_port": {
+          "default": 8883,
+          "title": "Mqtt Port",
+          "type": "integer"
+        },
+        "url": {
+          "default": "",
+          "title": "Url",
+          "type": "string"
+        }
+      },
+      "title": "SelfHostedServerConfig",
+      "type": "object"
+    },
+    "ServerConfig": {
+      "properties": {
+        "cloud": {
+          "$ref": "#/$defs/CloudServerConfig",
+          "default": {
+            "mqtt_broker": "mqtt.altnautica.com",
+            "mqtt_port": 443,
+            "url": "https://convex-site.altnautica.com"
+          }
+        },
+        "heartbeat_interval": {
+          "default": 5,
+          "title": "Heartbeat Interval",
+          "type": "integer"
+        },
+        "mode": {
+          "default": "local",
+          "enum": [
+            "cloud",
+            "self_hosted",
+            "local"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "mqtt_password": {
+          "default": "",
+          "title": "Mqtt Password",
+          "type": "string",
+          "x-secret": true
+        },
+        "mqtt_transport": {
+          "default": "websockets",
+          "title": "Mqtt Transport",
+          "type": "string"
+        },
+        "mqtt_username": {
+          "default": "ados",
+          "title": "Mqtt Username",
+          "type": "string"
+        },
+        "self_hosted": {
+          "$ref": "#/$defs/SelfHostedServerConfig",
+          "default": {
+            "api_key": "",
+            "mqtt_broker": "",
+            "mqtt_port": 8883,
+            "url": ""
+          }
+        },
+        "telemetry_rate": {
+          "default": 2,
+          "title": "Telemetry Rate",
+          "type": "integer"
+        }
+      },
+      "title": "ServerConfig",
+      "type": "object"
+    },
+    "SwarmConfig": {
+      "properties": {
+        "default_formation": {
+          "default": "line",
+          "title": "Default Formation",
+          "type": "string"
+        },
+        "default_spacing": {
+          "default": 10,
+          "title": "Default Spacing",
+          "type": "integer"
+        },
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "lora": {
+          "$ref": "#/$defs/LoraConfig",
+          "default": {
+            "bandwidth": 125000,
+            "frequency": 915000000,
+            "interface": "",
+            "spreading_factor": 7
+          }
+        },
+        "role": {
+          "default": "auto",
+          "title": "Role",
+          "type": "string"
+        },
+        "wifi_direct": {
+          "$ref": "#/$defs/WifiDirectConfig",
+          "default": {
+            "enabled": false,
+            "interface": ""
+          }
+        }
+      },
+      "title": "SwarmConfig",
+      "type": "object"
+    },
+    "TlsConfig": {
+      "properties": {
+        "ca_path": {
+          "default": "/etc/ados/certs/ca.crt",
+          "title": "Ca Path",
+          "type": "string"
+        },
+        "cert_path": {
+          "default": "/etc/ados/certs/device.crt",
+          "title": "Cert Path",
+          "type": "string"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "key_path": {
+          "default": "/etc/ados/certs/device.key",
+          "title": "Key Path",
+          "type": "string",
+          "x-secret": true
+        }
+      },
+      "title": "TlsConfig",
+      "type": "object"
+    },
+    "UiConfig": {
+      "description": "UI presentation settings persisted on disk.\n\n`theme` drives the SPI LCD dashboard palette. The native display\nservice reads it on every render tick, so a flip from `dark` to\n`light` takes effect immediately without a service restart.",
+      "properties": {
+        "theme": {
+          "default": "dark",
+          "enum": [
+            "dark",
+            "light"
+          ],
+          "title": "Theme",
+          "type": "string"
+        }
+      },
+      "title": "UiConfig",
+      "type": "object"
+    },
+    "UsbRecoveryConfig": {
+      "description": "Camera USB-recovery tunables, consumed by the Rust supervisor's\ncamera-recovery reconciler (it reads config.yaml directly; this model keeps\nPython from dropping the keys and documents the schema). Default-ON for\ndetect + alert; destructive actions stay gated.",
+      "properties": {
+        "allow_hub_reset": {
+          "default": false,
+          "title": "Allow Hub Reset",
+          "type": "boolean"
+        },
+        "allow_ppps": {
+          "default": true,
+          "title": "Allow Ppps",
+          "type": "boolean"
+        },
+        "boot_reset_window_s": {
+          "default": 180,
+          "minimum": 1,
+          "title": "Boot Reset Window S",
+          "type": "integer"
+        },
+        "cold_boot_enum_aid": {
+          "default": false,
+          "title": "Cold Boot Enum Aid",
+          "type": "boolean"
+        },
+        "cooldown_schedule_s": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Cooldown Schedule S",
+          "type": "array"
+        },
+        "debounce_s": {
+          "default": 20,
+          "minimum": 1,
+          "title": "Debounce S",
+          "type": "integer"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "healthy_reset_s": {
+          "default": 120,
+          "minimum": 1,
+          "title": "Healthy Reset S",
+          "type": "integer"
+        },
+        "max_attempts": {
+          "default": 3,
+          "minimum": 1,
+          "title": "Max Attempts",
+          "type": "integer"
+        },
+        "tick_interval_s": {
+          "default": 5,
+          "minimum": 1,
+          "title": "Tick Interval S",
+          "type": "integer"
+        }
+      },
+      "title": "UsbRecoveryConfig",
+      "type": "object"
+    },
+    "VideoConfig": {
+      "properties": {
+        "camera": {
+          "$ref": "#/$defs/CameraConfig",
+          "default": {
+            "bitrate_kbps": 4000,
+            "codec": "h264",
+            "codec_preference": "auto",
+            "expected": "auto",
+            "fps": 30,
+            "height": 720,
+            "source": "csi",
+            "width": 1280
+          }
+        },
+        "cameras": {
+          "items": {
+            "$ref": "#/$defs/CameraLeg"
+          },
+          "title": "Cameras",
+          "type": "array"
+        },
+        "cloud_relay_url": {
+          "default": "",
+          "title": "Cloud Relay Url",
+          "type": "string"
+        },
+        "cloud_rtp_port": {
+          "default": 8000,
+          "title": "Cloud Rtp Port",
+          "type": "integer"
+        },
+        "lcd_fps_cap": {
+          "default": 15,
+          "maximum": 60,
+          "minimum": 1,
+          "title": "Lcd Fps Cap",
+          "type": "integer"
+        },
+        "mode": {
+          "default": "wfb",
+          "title": "Mode",
+          "type": "string"
+        },
+        "prefer_hw_encoder": {
+          "default": true,
+          "title": "Prefer Hw Encoder",
+          "type": "boolean"
+        },
+        "recording": {
+          "$ref": "#/$defs/RecordingConfig",
+          "default": {
+            "enabled": false,
+            "max_duration_minutes": 30,
+            "path": "/var/ados/recordings"
+          }
+        },
+        "usb_recovery": {
+          "$ref": "#/$defs/UsbRecoveryConfig",
+          "default": {
+            "allow_hub_reset": false,
+            "allow_ppps": true,
+            "boot_reset_window_s": 180,
+            "cold_boot_enum_aid": false,
+            "cooldown_schedule_s": [
+              10,
+              30,
+              60
+            ],
+            "debounce_s": 20,
+            "enabled": true,
+            "healthy_reset_s": 120,
+            "max_attempts": 3,
+            "tick_interval_s": 5
+          }
+        },
+        "use_gst_air_pipeline": {
+          "title": "Use Gst Air Pipeline",
+          "type": "boolean"
+        },
+        "wfb": {
+          "$ref": "#/$defs/WfbConfig",
+          "default": {
+            "adaptive_bitrate_enabled": true,
+            "auto_channel_enabled": false,
+            "auto_hop_enabled": true,
+            "auto_pair_enabled": true,
+            "band": "u-nii-3",
+            "channel": 149,
+            "fec_k": 8,
+            "fec_n": 12,
+            "hop_loss_threshold_percent": 10.0,
+            "hop_period_seconds": 60,
+            "hop_rssi_threshold_dbm": -75.0,
+            "interface": "",
+            "mcs_index": 1,
+            "paired_at": null,
+            "paired_with_device_id": null,
+            "reg_domain": "US",
+            "sei_latency": true,
+            "topology": "host_vbus",
+            "tx_power_dbm": 5,
+            "tx_power_max_dbm": 15,
+            "wfb_link_preset": "conservative"
+          }
+        }
+      },
+      "title": "VideoConfig",
+      "type": "object"
+    },
+    "VisionConfig": {
+      "properties": {
+        "auto_download": {
+          "default": true,
+          "title": "Auto Download",
+          "type": "boolean"
+        },
+        "backend": {
+          "default": "auto",
+          "title": "Backend",
+          "type": "string"
+        },
+        "confidence_threshold": {
+          "default": 0.5,
+          "title": "Confidence Threshold",
+          "type": "number"
+        },
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "models_cache_max_mb": {
+          "default": 500,
+          "title": "Models Cache Max Mb",
+          "type": "integer"
+        },
+        "models_dir": {
+          "default": "/opt/ados/models/vision",
+          "title": "Models Dir",
+          "type": "string"
+        },
+        "registry_url": {
+          "default": "https://raw.githubusercontent.com/altnautica/ADOSMissionControl/main/public/models/registry.json",
+          "title": "Registry Url",
+          "type": "string"
+        }
+      },
+      "title": "VisionConfig",
+      "type": "object"
+    },
+    "WfbConfig": {
+      "properties": {
+        "adaptive_bitrate_enabled": {
+          "default": true,
+          "title": "Adaptive Bitrate Enabled",
+          "type": "boolean"
+        },
+        "auto_channel_enabled": {
+          "default": false,
+          "title": "Auto Channel Enabled",
+          "type": "boolean"
+        },
+        "auto_hop_enabled": {
+          "default": true,
+          "title": "Auto Hop Enabled",
+          "type": "boolean"
+        },
+        "auto_pair_enabled": {
+          "default": true,
+          "title": "Auto Pair Enabled",
+          "type": "boolean"
+        },
+        "band": {
+          "default": "u-nii-3",
+          "enum": [
+            "u-nii-1",
+            "u-nii-3",
+            "all"
+          ],
+          "title": "Band",
+          "type": "string"
+        },
+        "channel": {
+          "default": 149,
+          "title": "Channel",
+          "type": "integer"
+        },
+        "fec_k": {
+          "default": 8,
+          "title": "Fec K",
+          "type": "integer"
+        },
+        "fec_n": {
+          "default": 12,
+          "title": "Fec N",
+          "type": "integer"
+        },
+        "hop_loss_threshold_percent": {
+          "default": 10.0,
+          "title": "Hop Loss Threshold Percent",
+          "type": "number"
+        },
+        "hop_period_seconds": {
+          "default": 60,
+          "title": "Hop Period Seconds",
+          "type": "integer"
+        },
+        "hop_rssi_threshold_dbm": {
+          "default": -75.0,
+          "title": "Hop Rssi Threshold Dbm",
+          "type": "number"
+        },
+        "interface": {
+          "default": "",
+          "title": "Interface",
+          "type": "string"
+        },
+        "mcs_index": {
+          "default": 1,
+          "title": "Mcs Index",
+          "type": "integer"
+        },
+        "paired_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Paired At"
+        },
+        "paired_with_device_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Paired With Device Id"
+        },
+        "reg_domain": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "US",
+          "title": "Reg Domain"
+        },
+        "sei_latency": {
+          "default": true,
+          "title": "Sei Latency",
+          "type": "boolean"
+        },
+        "topology": {
+          "default": "host_vbus",
+          "enum": [
+            "host_vbus",
+            "powered_hub",
+            "external_5v"
+          ],
+          "title": "Topology",
+          "type": "string"
+        },
+        "tx_power_dbm": {
+          "default": 5,
+          "title": "Tx Power Dbm",
+          "type": "integer"
+        },
+        "tx_power_max_dbm": {
+          "default": 15,
+          "title": "Tx Power Max Dbm",
+          "type": "integer"
+        },
+        "wfb_link_preset": {
+          "default": "conservative",
+          "enum": [
+            "conservative",
+            "balanced",
+            "aggressive"
+          ],
+          "title": "Wfb Link Preset",
+          "type": "string"
+        }
+      },
+      "title": "WfbConfig",
+      "type": "object"
+    },
+    "WfbReceiverConfig": {
+      "description": "Receiver-role WFB aggregator settings.\n\nOn `receiver` nodes, `wfb_rx -a` listens on `listen_port` for relay\nforwards and FEC-combines them with a local adapter stream if\n`accept_local_nic` is true.",
+      "properties": {
+        "accept_local_nic": {
+          "default": true,
+          "title": "Accept Local Nic",
+          "type": "boolean"
+        },
+        "listen_port": {
+          "default": 5800,
+          "title": "Listen Port",
+          "type": "integer"
+        }
+      },
+      "title": "WfbReceiverConfig",
+      "type": "object"
+    },
+    "WfbRelayConfig": {
+      "description": "Relay-role WFB forwarder settings.\n\nOn `relay` nodes, `wfb_rx -f` resolves the receiver via mDNS on the\nbatman-adv interface and forwards fragments to its UDP listen port.",
+      "properties": {
+        "receiver_mdns_service": {
+          "default": "_ados-receiver._tcp",
+          "title": "Receiver Mdns Service",
+          "type": "string"
+        },
+        "receiver_port": {
+          "default": 5800,
+          "title": "Receiver Port",
+          "type": "integer"
+        }
+      },
+      "title": "WfbRelayConfig",
+      "type": "object"
+    },
+    "WifiClientConfig": {
+      "properties": {
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "password": {
+          "default": "",
+          "title": "Password",
+          "type": "string",
+          "x-secret": true
+        },
+        "ssid": {
+          "default": "",
+          "title": "Ssid",
+          "type": "string"
+        }
+      },
+      "title": "WifiClientConfig",
+      "type": "object"
+    },
+    "WifiDirectConfig": {
+      "properties": {
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "interface": {
+          "default": "",
+          "title": "Interface",
+          "type": "string"
+        }
+      },
+      "title": "WifiDirectConfig",
+      "type": "object"
+    },
+    "WifiSelfHealConfig": {
+      "properties": {
+        "cooldown_s": {
+          "default": 60,
+          "title": "Cooldown S",
+          "type": "integer"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "fail_threshold": {
+          "default": 2,
+          "title": "Fail Threshold",
+          "type": "integer"
+        }
+      },
+      "title": "WifiSelfHealConfig",
+      "type": "object"
+    },
+    "WireguardConfig": {
+      "properties": {
+        "config_path": {
+          "default": "/etc/wireguard/ados.conf",
+          "title": "Config Path",
+          "type": "string",
+          "x-secret": true
+        },
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        }
+      },
+      "title": "WireguardConfig",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "agent": {
+      "$ref": "#/$defs/AgentConfig",
+      "default": {
+        "device_id": "",
+        "name": "my-drone",
+        "profile": "auto",
+        "tier": "auto"
+      }
+    },
+    "api": {
+      "$ref": "#/$defs/ApiConfig",
+      "default": {
+        "mission_control_url": "",
+        "rest": {
+          "enabled": true,
+          "host": "0.0.0.0",
+          "port": 8080
+        }
+      }
+    },
+    "atlas": {
+      "$ref": "#/$defs/AtlasConfig",
+      "default": {
+        "cameras": [],
+        "capture_profile": "freeform",
+        "enabled": false,
+        "hfov_deg": 70.0,
+        "intrinsics": {},
+        "pose_tier": "auto",
+        "reconstruct_steps": 30000,
+        "selection": {
+          "max_interval_ms": 2000,
+          "max_keyframes": 0,
+          "min_rotation_rad": 0.26,
+          "min_translation_m": 0.5
+        },
+        "socket_dir": "/run/ados"
+      }
+    },
+    "discovery": {
+      "$ref": "#/$defs/DiscoveryConfig",
+      "default": {
+        "mdns_enabled": true,
+        "service_type": "_ados._tcp.local."
+      }
+    },
+    "ground_station": {
+      "$ref": "#/$defs/GroundStationConfig",
+      "default": {
+        "cloud_uplink": "auto",
+        "display": {
+          "detected_type": null,
+          "type": "auto"
+        },
+        "kiosk": {
+          "enabled": false,
+          "minimal_layer": false,
+          "resolution": "auto",
+          "target_url": null
+        },
+        "mesh": {
+          "bat_iface": "bat0",
+          "carrier": "802.11s",
+          "channel": 1,
+          "interface_override": null,
+          "mesh_id": null,
+          "shared_key_path": "/etc/ados/mesh/psk.key"
+        },
+        "paired_at": null,
+        "paired_drone_id": null,
+        "role": "direct",
+        "share_uplink": false,
+        "ui": {
+          "buttons": {},
+          "oled": {},
+          "screens": {}
+        },
+        "use_live_state_ipc": true,
+        "wfb_receiver": {
+          "accept_local_nic": true,
+          "listen_port": 5800
+        },
+        "wfb_relay": {
+          "receiver_mdns_service": "_ados-receiver._tcp",
+          "receiver_port": 5800
+        }
+      }
+    },
+    "logging": {
+      "$ref": "#/$defs/LoggingConfig",
+      "default": {
+        "flight_log_dir": "/var/ados/logs/flights",
+        "keep_count": 5,
+        "level": "info",
+        "max_size_mb": 50
+      }
+    },
+    "mavlink": {
+      "$ref": "#/$defs/MavlinkConfig",
+      "default": {
+        "baud_rate": 57600,
+        "component_id": 191,
+        "endpoints": [
+          {
+            "enabled": true,
+            "host": "0.0.0.0",
+            "port": 8765,
+            "type": "websocket"
+          }
+        ],
+        "serial_port": "",
+        "source": "auto",
+        "system_id": 1,
+        "ws_proxy_enforce_auth": false
+      }
+    },
+    "network": {
+      "$ref": "#/$defs/NetworkConfig",
+      "default": {
+        "cellular": {
+          "apn": "",
+          "enabled": false
+        },
+        "hotspot": {
+          "channel": 6,
+          "enabled": false,
+          "password": "altnautica",
+          "ssid": "ADOS-{device_id}"
+        },
+        "mac_pin": {
+          "apply_live_allowed": false,
+          "enabled": true,
+          "overrides": {}
+        },
+        "regulatory": {
+          "ack_at": null,
+          "ack_operator": null,
+          "mode": "unrestricted",
+          "region": null
+        },
+        "wifi_client": {
+          "enabled": false,
+          "password": "",
+          "ssid": ""
+        },
+        "wifi_selfheal": {
+          "cooldown_s": 60,
+          "enabled": true,
+          "fail_threshold": 2
+        }
+      }
+    },
+    "pairing": {
+      "$ref": "#/$defs/PairingConfig",
+      "default": {
+        "beacon_enabled": true,
+        "beacon_interval": 30,
+        "code_ttl": 900,
+        "convex_url": "",
+        "heartbeat_interval": 60,
+        "single_process_cloud_enabled": false,
+        "state_path": "/etc/ados/pairing.json"
+      }
+    },
+    "perception": {
+      "$ref": "#/$defs/PerceptionConfig",
+      "default": {
+        "offload": {
+          "compute_node_addr": null,
+          "enabled": "auto"
+        },
+        "serving": {
+          "detector_model": null,
+          "enabled": "auto"
+        }
+      }
+    },
+    "remote_access": {
+      "$ref": "#/$defs/RemoteAccessConfig",
+      "default": {
+        "cloudflare": {
+          "api_url": "",
+          "enabled": false,
+          "mavlink_ws_url": "",
+          "service_name": "cloudflared",
+          "setup_url": "",
+          "token_path": "/etc/ados/secrets/cloudflare-tunnel-token",
+          "video_whep_url": ""
+        },
+        "provider": "none",
+        "public_urls": []
+      }
+    },
+    "security": {
+      "$ref": "#/$defs/SecurityConfig",
+      "default": {
+        "api": {
+          "api_key": "",
+          "cors_enabled": true,
+          "cors_origins": [
+            "http://localhost:4000",
+            "http://127.0.0.1:4000",
+            "http://localhost:4001",
+            "http://127.0.0.1:4001"
+          ],
+          "cors_origins_extra": []
+        },
+        "hmac_enabled": false,
+        "hmac_secret": "",
+        "setup_token_required": false,
+        "tls": {
+          "ca_path": "/etc/ados/certs/ca.crt",
+          "cert_path": "/etc/ados/certs/device.crt",
+          "enabled": true,
+          "key_path": "/etc/ados/certs/device.key"
+        },
+        "wireguard": {
+          "config_path": "/etc/wireguard/ados.conf",
+          "enabled": false
+        }
+      }
+    },
+    "server": {
+      "$ref": "#/$defs/ServerConfig",
+      "default": {
+        "cloud": {
+          "mqtt_broker": "mqtt.altnautica.com",
+          "mqtt_port": 443,
+          "url": "https://convex-site.altnautica.com"
+        },
+        "heartbeat_interval": 5,
+        "mode": "local",
+        "mqtt_password": "",
+        "mqtt_transport": "websockets",
+        "mqtt_username": "ados",
+        "self_hosted": {
+          "api_key": "",
+          "mqtt_broker": "",
+          "mqtt_port": 8883,
+          "url": ""
+        },
+        "telemetry_rate": 2
+      }
+    },
+    "swarm": {
+      "$ref": "#/$defs/SwarmConfig",
+      "default": {
+        "default_formation": "line",
+        "default_spacing": 10,
+        "enabled": false,
+        "lora": {
+          "bandwidth": 125000,
+          "frequency": 915000000,
+          "interface": "",
+          "spreading_factor": 7
+        },
+        "role": "auto",
+        "wifi_direct": {
+          "enabled": false,
+          "interface": ""
+        }
+      }
+    },
+    "ui": {
+      "$ref": "#/$defs/UiConfig"
+    },
+    "video": {
+      "$ref": "#/$defs/VideoConfig",
+      "default": {
+        "camera": {
+          "bitrate_kbps": 4000,
+          "codec": "h264",
+          "codec_preference": "auto",
+          "expected": "auto",
+          "fps": 30,
+          "height": 720,
+          "source": "csi",
+          "width": 1280
+        },
+        "cameras": [],
+        "cloud_relay_url": "",
+        "cloud_rtp_port": 8000,
+        "lcd_fps_cap": 15,
+        "mode": "wfb",
+        "prefer_hw_encoder": true,
+        "recording": {
+          "enabled": false,
+          "max_duration_minutes": 30,
+          "path": "/var/ados/recordings"
+        },
+        "usb_recovery": {
+          "allow_hub_reset": false,
+          "allow_ppps": true,
+          "boot_reset_window_s": 180,
+          "cold_boot_enum_aid": false,
+          "cooldown_schedule_s": [
+            10,
+            30,
+            60
+          ],
+          "debounce_s": 20,
+          "enabled": true,
+          "healthy_reset_s": 120,
+          "max_attempts": 3,
+          "tick_interval_s": 5
+        },
+        "use_gst_air_pipeline": false,
+        "wfb": {
+          "adaptive_bitrate_enabled": true,
+          "auto_channel_enabled": false,
+          "auto_hop_enabled": true,
+          "auto_pair_enabled": true,
+          "band": "u-nii-3",
+          "channel": 149,
+          "fec_k": 8,
+          "fec_n": 12,
+          "hop_loss_threshold_percent": 10.0,
+          "hop_period_seconds": 60,
+          "hop_rssi_threshold_dbm": -75.0,
+          "interface": "",
+          "mcs_index": 1,
+          "paired_at": null,
+          "paired_with_device_id": null,
+          "reg_domain": "US",
+          "sei_latency": true,
+          "topology": "host_vbus",
+          "tx_power_dbm": 5,
+          "tx_power_max_dbm": 15,
+          "wfb_link_preset": "conservative"
+        }
+      }
+    },
+    "vision": {
+      "$ref": "#/$defs/VisionConfig",
+      "default": {
+        "auto_download": true,
+        "backend": "auto",
+        "confidence_threshold": 0.5,
+        "enabled": false,
+        "models_cache_max_mb": 500,
+        "models_dir": "/opt/ados/models/vision",
+        "registry_url": "https://raw.githubusercontent.com/altnautica/ADOSMissionControl/main/public/models/registry.json"
+      }
+    }
+  },
+  "title": "ADOSConfig",
+  "type": "object"
+}

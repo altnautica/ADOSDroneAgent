@@ -24,6 +24,7 @@ pub mod camera_config;
 pub mod can;
 pub mod command;
 pub mod compute_status;
+pub mod config_schema;
 pub mod dashboard_pin;
 pub mod diagnostics;
 pub mod fleet;
@@ -120,6 +121,11 @@ pub fn build_router(state: AppState, net_native: bool, hid_native: bool) -> Rout
         // FC-source picker enumeration: the serial devices an FC could be on, for
         // the setup webapp + GCS dropdown (a filesystem scan, never a probe).
         .route("/api/mavlink/ports", get(mavlink_ports::list_ports))
+        // Agent-config JSON Schema: the committed, build-time-embedded shape of
+        // the config surface (types/enums/defaults + x-secret markers) so a
+        // schema-driven settings UI renders without hand-typed forms. Shape
+        // only, no live values; the values read stays on /api/config.
+        .route("/api/config/schema", get(config_schema::get_config_schema))
         // Pairing: the node-identity probe + the local pairing handshake. info /
         // code / claim are public (the auth-exempt set); unpair requires the key.
         .route("/api/pairing/info", get(pairing::get_pairing_info))
