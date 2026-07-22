@@ -557,26 +557,30 @@ fn drone_hops(s0: &VideoSample, s1: &VideoSample) -> Vec<HopFinding> {
             "mediamtx management API unreachable",
         ),
     };
-    // Hop 2: mediamtx → wfb tap → wfb_tx → radio, by the wfb TX bitrate (a drone
-    // injects only what the tap feeds it, so a non-zero TX bitrate proves the tap
-    // → TX leg is flowing). RF-radiated is a separate concern proved on the
-    // receiver's link_diag, not here (honest: this is the injection hop).
-    let tx_kbps = s1
-        .wfb_num("bitrate_kbps")
-        .or_else(|| s0.wfb_num("bitrate_kbps"));
-    let radio = match tx_kbps {
-        Some(k) => HopFinding {
+    // Hop 2: mediamtx → wfb tap → wfb_tx → radio, by the TX INJECTION RATE
+    // `tx_bytes_per_s` (the bytes wfb_tx is actually injecting; a drone injects
+    // only what the tap feeds it, so a non-zero TX rate proves the tap → TX leg is
+    // flowing). NOT `bitrate_kbps` — on a drone that is the RX-DECODE bitrate,
+    // which is 0 because a drone is the video SOURCE and decodes no inbound
+    // stream, so reading it here falsely reports a healthy transmitter as stalled
+    // (a false negative caught on the bench). RF-radiated is a separate concern
+    // proved on the receiver's link_diag, not here (this is the injection hop).
+    let tx_bps = s1
+        .wfb_num("tx_bytes_per_s")
+        .or_else(|| s0.wfb_num("tx_bytes_per_s"));
+    let radio = match tx_bps {
+        Some(bps) => HopFinding {
             name: "mediamtx_to_radio_tx",
             label: "Tap → wfb_tx (radio injection)",
-            method: "wfb-stats bitrate_kbps (TX)",
-            metric: format!("{k:.0} kbps injected"),
-            flowing: Some(k > 0.0),
+            method: "wfb-stats tx_bytes_per_s (TX injection rate)",
+            metric: format!("{} B/s injected", bps.max(0.0) as i64),
+            flowing: Some(bps > 0.0),
             detail: Some("RF reception is confirmed on the receiver's link_diag".to_string()),
         },
         None => hop_unknown(
             "mediamtx_to_radio_tx",
             "Tap → wfb_tx (radio injection)",
-            "wfb-stats bitrate_kbps (TX)",
+            "wfb-stats tx_bytes_per_s (TX injection rate)",
             "wfb-stats sidecar unavailable",
         ),
     };
@@ -1074,8 +1078,8 @@ Local:
     #[test]
     fn drone_all_hops_flow_when_mediamtx_advances_and_tx_injects() {
         // Camera → mediamtx bytesReceived climbing, and the wfb TX bitrate > 0.
-        let s0 = sample(Some(1000), true, &[("bitrate_kbps", json!(4000))]);
-        let s1 = sample(Some(2000), true, &[("bitrate_kbps", json!(4000))]);
+        let s0 = sample(Some(1000), true, &[("tx_bytes_per_s", json!(4000))]);
+        let s1 = sample(Some(2000), true, &[("tx_bytes_per_s", json!(4000))]);
         let (hops, dies) = resolve_hops(drone_hops(&s0, &s1));
         assert_eq!(verdicts(&hops), vec!["flowing", "flowing"]);
         assert_eq!(dies, Value::Null);
@@ -1085,8 +1089,8 @@ Local:
     fn drone_camera_dead_is_the_first_hop() {
         // mediamtx bytesReceived flat → the camera→encoder→mediamtx hop stalled;
         // the radio hop is starved (no_upstream), not blamed.
-        let s0 = sample(Some(1000), true, &[("bitrate_kbps", json!(0))]);
-        let s1 = sample(Some(1000), true, &[("bitrate_kbps", json!(0))]);
+        let s0 = sample(Some(1000), true, &[("tx_bytes_per_s", json!(0))]);
+        let s1 = sample(Some(1000), true, &[("tx_bytes_per_s", json!(0))]);
         let (hops, dies) = resolve_hops(drone_hops(&s0, &s1));
         assert_eq!(verdicts(&hops), vec!["stalled", "no_upstream"]);
         assert_eq!(dies, json!("camera_to_mediamtx"));
@@ -1096,8 +1100,8 @@ Local:
     fn drone_tee_or_tx_dead_is_the_radio_hop() {
         // mediamtx advances (camera fine) but the wfb TX bitrate is 0 → the fault
         // is the tap → wfb_tx leg, attributed to the radio-injection hop.
-        let s0 = sample(Some(1000), true, &[("bitrate_kbps", json!(0))]);
-        let s1 = sample(Some(2000), true, &[("bitrate_kbps", json!(0))]);
+        let s0 = sample(Some(1000), true, &[("tx_bytes_per_s", json!(0))]);
+        let s1 = sample(Some(2000), true, &[("tx_bytes_per_s", json!(0))]);
         let (hops, dies) = resolve_hops(drone_hops(&s0, &s1));
         assert_eq!(verdicts(&hops), vec!["flowing", "stalled"]);
         assert_eq!(dies, json!("mediamtx_to_radio_tx"));
