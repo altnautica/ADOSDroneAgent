@@ -40,10 +40,14 @@ pub struct GsChannelTruth {
 /// drone-side `AdapterInfo` so the panel reads one shape from either rig.
 ///
 /// Default (no adapter resolved yet) is the honest unknown: no chipset, no
-/// injection claim, no USB speed reading, not degraded. `usb_degraded` is never
-/// asserted without a real sub-high-speed reading — an unreadable or non-USB
-/// adapter is reported as unknown speed and NOT flagged, so the operator is
-/// never shown a fabricated fault.
+/// injection claim, no USB speed reading, no degraded verdict. A resolved
+/// adapter always carries a chipset (`From<&SelectedAdapter>` sets it), so
+/// `chipset.is_some()` is the resolved marker the sidecar keys its verdicts
+/// on: an unresolved record emits `null` for both `adapter_injection_ok` and
+/// `adapter_usb_degraded` — never a confident boolean about hardware nothing
+/// ever examined — and `usb_degraded` is asserted only alongside a real
+/// enumerated speed reading, so the operator is never shown a fabricated
+/// fault OR a fabricated all-clear.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GsAdapterInfo {
     pub chipset: Option<String>,
@@ -189,16 +193,24 @@ pub fn build_gs_stats(
         "link_state": state,
         "interface": interface,
         "adapter_chipset": adapter.chipset,
-        "adapter_injection_ok": adapter.injection_ok,
+        // A verdict only once an adapter was actually resolved (a chipset is
+        // recorded for every resolved adapter): an unresolved record reports
+        // `null`, never a confident boolean about hardware nothing examined.
+        // A resolved adapter's verdict rides verbatim — including the
+        // deliberate `false` the reg-blocked writer sets while no receive
+        // chain runs.
+        "adapter_injection_ok": adapter.chipset.is_some().then_some(adapter.injection_ok),
         // USB link health of the selected receive adapter, under the same keys the
         // drone-side sidecar uses so the panel reads one shape from either rig. An
         // adapter that enumerated below high-speed (e.g. 12 Mbps full-speed on a
         // flaky port) can pass monitor-mode setup and advance its counters while
         // carrying almost no usable RF, so a deaf ground station's CAUSE stays
         // legible instead of reading as a bare "0 received". `null` speed means
-        // no reading was available (not USB / unreadable), never a claim of zero.
+        // no reading was available (not USB / unreadable), never a claim of zero —
+        // and with no speed reading the degraded verdict is `null` too, because
+        // "not degraded" is a health claim only a real enumeration can back.
         "adapter_usb_speed_mbps": adapter.usb_speed_mbps,
-        "adapter_usb_degraded": adapter.usb_degraded,
+        "adapter_usb_degraded": adapter.usb_speed_mbps.map(|_| adapter.usb_degraded),
         // Back-compat alias: `channel` now reflects the LIVE interface channel.
         "channel": channels.actual,
         "actual_channel": channels.actual,
@@ -702,8 +714,9 @@ mod tests {
     fn gs_stats_reports_an_unknown_usb_speed_as_null_and_never_as_zero() {
         // No adapter resolved yet / a non-USB or unreadable adapter: the speed is
         // an explicit JSON null (no reading), never a confident 0 that would look
-        // like a measured dead link, and the degraded flag is NOT raised on an
-        // absent reading.
+        // like a measured dead link — and with no speed reading there is no
+        // degraded VERDICT either: the flag is null, never a false that a
+        // downstream three-state consumer renders as a measured-healthy green.
         let channels = GsChannelTruth {
             actual: 149,
             rendezvous: 149,
@@ -727,10 +740,51 @@ mod tests {
         );
         assert!(v["adapter_usb_speed_mbps"].is_null());
         assert_ne!(v["adapter_usb_speed_mbps"], 0);
-        assert_eq!(v["adapter_usb_degraded"], false);
-        // An unresolved adapter also makes no chipset or injection claim.
+        assert!(
+            v["adapter_usb_degraded"].is_null(),
+            "no enumeration ⇒ no degraded verdict, got {:?}",
+            v["adapter_usb_degraded"]
+        );
+        // An unresolved adapter also makes no chipset or injection claim: both
+        // read null, so the panel shows "not reported" instead of a fabricated
+        // red no-injection (or green all-clear) about hardware never examined.
         assert!(v["adapter_chipset"].is_null());
+        assert!(
+            v["adapter_injection_ok"].is_null(),
+            "no adapter resolved ⇒ no injection verdict, got {:?}",
+            v["adapter_injection_ok"]
+        );
+    }
+
+    #[test]
+    fn gs_stats_keeps_a_resolved_adapters_verdicts_as_real_booleans() {
+        // The three-state contract must not swallow real readings: a resolved
+        // adapter with an enumerated speed reports actual booleans, so the
+        // loud degraded / no-injection signals still fire when measured.
+        let channels = GsChannelTruth {
+            actual: 149,
+            rendezvous: 149,
+            operating: 149,
+        };
+        let adapter = GsAdapterInfo::new(Some("rtl88x2eu".to_string()), false, Some(12));
+        let v = build_gs_stats(
+            &LinkStats::default(),
+            "wlan1",
+            &adapter,
+            channels,
+            &GsRegSnapshot::default(),
+            &WfbConfig::default(),
+            STATE_SEARCHING,
+            "searching",
+            false,
+            0.0,
+            0,
+            0,
+            None,
+            0.0,
+        );
         assert_eq!(v["adapter_injection_ok"], false);
+        assert_eq!(v["adapter_usb_degraded"], true);
     }
 
     #[test]

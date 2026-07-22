@@ -33,6 +33,19 @@ pub(crate) struct AdapterInfo {
     pub(crate) usb_degraded: bool,
 }
 
+impl AdapterInfo {
+    /// The scanned-and-none-found record: the adapter scan RAN and proved no
+    /// injection-capable radio exists. Passing this (instead of `None`) keeps
+    /// the injection verdict a MEASURED `false` — the loud stranded-radio
+    /// signal — while the USB fields stay absent, because nothing enumerated
+    /// and there is no link-health reading to report. `None` means the scan
+    /// has not happened (unpaired / reg-blocked before selection), where no
+    /// verdict of any kind exists yet.
+    pub(crate) fn none_found() -> Self {
+        Self::default()
+    }
+}
+
 /// The truthful channel picture the sidecar surfaces, so the operator and the
 /// GCS see where the radio ACTUALLY is, not where it was configured to be.
 ///
@@ -195,14 +208,19 @@ pub(crate) fn build_stats_value(
     rates: &TxRates,
     bitrate: &BitrateSnapshot,
 ) -> serde_json::Value {
-    let (interface, chipset, injection_ok) = match adapter {
-        Some(a) => (a.interface.as_str(), a.chipset.as_str(), a.injection_ok),
-        None => ("", "", false),
+    let (interface, chipset) = match adapter {
+        Some(a) => (a.interface.as_str(), a.chipset.as_str()),
+        None => ("", ""),
     };
-    let (adapter_usb_speed_mbps, adapter_usb_degraded) = match adapter {
-        Some(a) => (a.usb_speed_mbps, a.usb_degraded),
-        None => (None, false),
-    };
+    // Adapter verdicts are three-state on the wire. `injection_ok` is a claim
+    // only when an adapter record exists (a real selection outcome, including
+    // the scanned-and-none-found record); `usb_degraded` only when a USB speed
+    // was actually enumerated. With no reading both are `null` — never a
+    // confident `false`, which would let an unpaired / pre-scan rig render a
+    // healthy green USB link (or a red no-injection claim) it never measured.
+    let adapter_injection_ok = adapter.map(|a| a.injection_ok);
+    let adapter_usb_speed_mbps = adapter.and_then(|a| a.usb_speed_mbps);
+    let adapter_usb_degraded = adapter.and_then(|a| a.usb_speed_mbps.map(|_| a.usb_degraded));
     // Pair identity: the fingerprint + paired flag come from the TX key on disk,
     // the peer id / paired-at / auto-pair flag from the persisted config block.
     let fingerprint = read_public_fingerprint(Path::new(WFB_TX_KEY));
@@ -256,10 +274,11 @@ pub(crate) fn build_stats_value(
         // link is proven OR while the transmit counter is flat (idle).
         "rf_unverified": channels.rf_unverified,
         "adapter_chipset": chipset,
-        "adapter_injection_ok": injection_ok,
+        "adapter_injection_ok": adapter_injection_ok,
         // USB link health of the selected adapter. A full-speed (12 Mbps)
         // enumeration on an RTL adapter means it can advance tx_bytes yet emit
         // no usable RF — surfaced so the GCS warns instead of showing "connected".
+        // `null` degraded = no enumeration happened, not a healthy link.
         "adapter_usb_speed_mbps": adapter_usb_speed_mbps,
         "adapter_usb_degraded": adapter_usb_degraded,
         "tx_power_dbm": effective_tx_dbm,
@@ -800,6 +819,121 @@ mod tests {
         assert_eq!(none_stats.enqueued(), 0);
 
         std::env::remove_var("ADOS_RUN_DIR");
+    }
+
+    #[test]
+    fn stats_report_no_adapter_verdicts_before_a_scan() {
+        // No adapter resolved (the unpaired / pre-scan writes pass `None`):
+        // the injection and USB-degraded verdicts must be JSON null — no
+        // reading — never a confident false. A false here is exactly what an
+        // unpaired rig used to write, and a downstream three-state consumer
+        // rendered it as a measured-healthy green USB link for hardware
+        // nothing ever enumerated.
+        let body = build_stats_value(
+            "unpaired",
+            &ChannelTruth::configured(149),
+            &RegSnapshot::default(),
+            5,
+            None,
+            &LinkStats::default(),
+            &WfbConfig::default(),
+            0,
+            &WatchdogCounters::default(),
+            &TxRates::default(),
+            &BitrateSnapshot::default(),
+        );
+        assert!(
+            body["adapter_injection_ok"].is_null(),
+            "no scan ⇒ no injection verdict, got {:?}",
+            body["adapter_injection_ok"]
+        );
+        assert!(
+            body["adapter_usb_degraded"].is_null(),
+            "no enumeration ⇒ no USB-degraded verdict, got {:?}",
+            body["adapter_usb_degraded"]
+        );
+        assert!(body["adapter_usb_speed_mbps"].is_null());
+    }
+
+    #[test]
+    fn stats_report_a_measured_no_adapter_verdict_after_a_scan() {
+        // The scan ran and proved no injection-capable radio: the injection
+        // verdict is a MEASURED false (the loud stranded-radio signal must
+        // still fire), while the USB fields stay null — nothing enumerated.
+        let body = build_stats_value(
+            "no_adapter",
+            &ChannelTruth::configured(149),
+            &RegSnapshot::default(),
+            5,
+            Some(&AdapterInfo::none_found()),
+            &LinkStats::default(),
+            &WfbConfig::default(),
+            0,
+            &WatchdogCounters::default(),
+            &TxRates::default(),
+            &BitrateSnapshot::default(),
+        );
+        assert_eq!(body["adapter_injection_ok"], false);
+        assert!(body["adapter_usb_degraded"].is_null());
+        assert!(body["adapter_usb_speed_mbps"].is_null());
+    }
+
+    #[test]
+    fn stats_report_a_resolved_adapters_verdicts_as_real_booleans() {
+        // The three-state contract must not swallow real readings: a selected
+        // adapter with an enumerated speed reports actual booleans in both
+        // directions, so the degraded warning and the healthy reading both
+        // stay live.
+        for (speed, degraded) in [(Some(12u32), true), (Some(480u32), false)] {
+            let adapter = AdapterInfo {
+                interface: "wlan1".to_string(),
+                chipset: "RTL8812EU".to_string(),
+                injection_ok: true,
+                usb_speed_mbps: speed,
+                usb_degraded: degraded,
+            };
+            let body = build_stats_value(
+                "connected",
+                &ChannelTruth::configured(149),
+                &RegSnapshot::default(),
+                5,
+                Some(&adapter),
+                &LinkStats::default(),
+                &WfbConfig::default(),
+                0,
+                &WatchdogCounters::default(),
+                &TxRates::default(),
+                &BitrateSnapshot::default(),
+            );
+            assert_eq!(body["adapter_injection_ok"], true);
+            assert_eq!(body["adapter_usb_degraded"], degraded);
+            assert_eq!(body["adapter_usb_speed_mbps"], speed.unwrap());
+        }
+        // An adapter whose USB speed could not be read has no degraded
+        // verdict, even though it was resolved: `usb_degraded` derives from
+        // the speed reading and must not outlive its absence.
+        let unread = AdapterInfo {
+            interface: "wlan1".to_string(),
+            chipset: "RTL8812EU".to_string(),
+            injection_ok: true,
+            usb_speed_mbps: None,
+            usb_degraded: false,
+        };
+        let body = build_stats_value(
+            "connected",
+            &ChannelTruth::configured(149),
+            &RegSnapshot::default(),
+            5,
+            Some(&unread),
+            &LinkStats::default(),
+            &WfbConfig::default(),
+            0,
+            &WatchdogCounters::default(),
+            &TxRates::default(),
+            &BitrateSnapshot::default(),
+        );
+        assert_eq!(body["adapter_injection_ok"], true);
+        assert!(body["adapter_usb_degraded"].is_null());
     }
 
     #[test]

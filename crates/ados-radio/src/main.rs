@@ -360,8 +360,10 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
             // No RTL injection-capable adapter could be proven. Fail LOUDLY with
             // the diagnostic counts (total detected + compatible-and-monitor),
             // and keep the sidecar's stranded-radio signal — adapter chipset
-            // null, adapter_injection_ok false — so the panel shows the warning
-            // rather than a false "connecting" with zero injected frames.
+            // null, adapter_injection_ok false (a MEASURED verdict: the scan
+            // ran and proved none) — so the panel shows the warning rather
+            // than a false "connecting" with zero injected frames. The USB
+            // link-health fields stay null: nothing enumerated.
             tracing::error!(
                 total_adapters = outcome.total(),
                 compatible = outcome.compatible_monitor(),
@@ -376,7 +378,9 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
                     ..RegSnapshot::default()
                 },
                 cfg.tx_power_dbm,
-                None, // None adapter → chipset "" + adapter_injection_ok false
+                // The scanned-and-none-found record: the injection verdict is
+                // a measured false, not the null an unscanned rig reports.
+                Some(&AdapterInfo::none_found()),
                 &LinkStats::default(),
                 cfg,
                 restart_count.load(Ordering::Relaxed),
