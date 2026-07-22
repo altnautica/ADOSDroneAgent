@@ -1126,7 +1126,9 @@ mod tests {
         std::fs::write(path, body).unwrap();
         if age_s > 0 {
             let when = std::time::SystemTime::now() - std::time::Duration::from_secs(age_s);
-            let times = std::fs::FileTimes::new().set_accessed(when).set_modified(when);
+            let times = std::fs::FileTimes::new()
+                .set_accessed(when)
+                .set_modified(when);
             std::fs::File::options()
                 .write(true)
                 .open(path)
