@@ -90,6 +90,7 @@ def test_crsf_lane_defaults_off_and_unpinned():
     cfg = ADOSConfig()
     assert cfg.radio.crsf.enabled is False
     assert cfg.radio.crsf.device == ""
+    assert cfg.radio.crsf.packet_rate_hz == 50
 
 
 def test_crsf_pin_round_trips_through_a_full_save():
@@ -100,15 +101,24 @@ def test_crsf_pin_round_trips_through_a_full_save():
     the operator's pin. The section must therefore be modelled, not merely
     tolerated by ``extra: ignore``.
     """
-    data = {"radio": {"crsf": {"enabled": True, "device": "/dev/ttyUSB0"}}}
+    data = {
+        "radio": {
+            "crsf": {"enabled": True, "device": "/dev/ttyUSB0", "packet_rate_hz": 150}
+        }
+    }
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
         yaml.dump(data, f)
         f.flush()
         cfg = load_config(f.name)
     assert cfg.radio.crsf.enabled is True
     assert cfg.radio.crsf.device == "/dev/ttyUSB0"
+    assert cfg.radio.crsf.packet_rate_hz == 150
     dumped = cfg.model_dump()
-    assert dumped["radio"]["crsf"] == {"enabled": True, "device": "/dev/ttyUSB0"}
+    assert dumped["radio"]["crsf"] == {
+        "enabled": True,
+        "device": "/dev/ttyUSB0",
+        "packet_rate_hz": 150,
+    }
 
 
 def test_regulatory_region_round_trips():

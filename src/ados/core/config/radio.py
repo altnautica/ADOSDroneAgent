@@ -25,10 +25,15 @@ class CrsfConfig(BaseModel):
     module even without a pin; with the lane off and no pin, a generic
     USB-serial bridge stays an FC candidate (a VID alone cannot distinguish an
     FC behind the same bridge from an RC module).
+
+    ``packet_rate_hz`` is the RC frame cadence the lane transmits at (the
+    protocol supports 50 to 500 frames per second; the service clamps an
+    out-of-range value and logs it).
     """
 
     enabled: bool = False
     device: str = ""
+    packet_rate_hz: int = 50
 
 
 class RadioConfig(BaseModel):
