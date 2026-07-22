@@ -12,6 +12,18 @@
 //! rigs. A configured port starting with `tcp:` or `udp:` opens a TCP or UDP
 //! MAVLink transport instead, for SITL bench and demo use.
 //!
+//! MAVLink-over-ELRS ingest: when the `radio.crsf` block declares the RC
+//! module runs its native MAVLink mode, the module is a plain bidirectional
+//! MAVLink byte pipe (the module firmware owns the CRSF air protocol
+//! internally — nothing here parses CRSF) and THIS router owns the carrier as
+//! its FC source: the pinned serial device at the fixed MAVLink-mode baud, or
+//! a UDP listen on the conventional port for the WiFi backpack. The resolved
+//! source replaces both the configured port and discovery — the RC lane
+//! service holds off the device in that mode, so the port has exactly one
+//! owner, and a fallback sweep would latch some other port while the module
+//! sat unused. In `crsf_rc` mode the ownership inverts: the RC lane service
+//! owns the pin and [`FcConnection::candidate_ports`] excludes it.
+//!
 //! The module is split by concern into siblings of this orchestrator:
 //! [`framing`] (MAVLink frame extraction), [`transport`] (serial discovery +
 //! TCP/UDP open + the write/persist helpers), and [`send_scheduler`] (the FC
@@ -31,7 +43,7 @@ use tokio::io::AsyncReadExt;
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::{broadcast, Mutex};
 
-use crate::config::MavlinkConfig;
+use crate::config::{CrsfMavlinkSource, MavlinkConfig, CRSF_MAVLINK_BAUD};
 use crate::param_cache::ParamCache;
 use crate::state::VehicleState;
 
@@ -39,9 +51,9 @@ use ados_protocol::hwcaps::is_rc_bridge_usb_id;
 use framing::{count_msp_frame_starts, extract_frames};
 use send_scheduler::STREAM_DEFAULT;
 use transport::{
-    fc_variant_for_port, is_candidate_port, now_iso, open_serial, parse_net_spec, persist_params,
-    probe_baud, same_device, split_serial, BoxedReadHalf, BoxedWriteHalf, NetSpec, ProbeOutcome,
-    UdpAdapter, BAUD_CANDIDATES, BAUD_FALLBACK,
+    fc_variant_for_port, is_candidate_port, now_iso, open_serial, open_udp_listen, parse_net_spec,
+    persist_params, probe_baud, same_device, split_serial, BoxedReadHalf, BoxedWriteHalf, NetSpec,
+    ProbeOutcome, UdpAdapter, BAUD_CANDIDATES, BAUD_FALLBACK,
 };
 
 /// Reconnect backoff bounds.
@@ -301,7 +313,19 @@ impl FcConnection {
     /// config's `source` field, falling back to the shape of `serial_port` for a
     /// config that predates the explicit field (a `udp:`/`tcp:` prefix is a
     /// network transport; a non-empty path is serial; empty is auto-detect).
+    ///
+    /// A resolved MAVLink-over-ELRS ingest owns the source slot first and
+    /// reports its live carrier class — `serial` for the module's USB-serial
+    /// port, `udp` for the WiFi-backpack listen. Both are true statements
+    /// about the open transport; the provenance (the `radio.crsf` block) is
+    /// visible on the port label (`fc_port` = the pinned device / the
+    /// `udpin:` bind) and on the RC lane's own status surface.
     pub fn source(&self) -> &'static str {
+        match self.cfg.crsf_mavlink_source() {
+            Some(CrsfMavlinkSource::Serial { .. }) => return "serial",
+            Some(CrsfMavlinkSource::BackpackUdp { .. }) => return "udp",
+            None => {}
+        }
         match self.cfg.source.trim().to_ascii_lowercase().as_str() {
             "serial" => "serial",
             "udp" => "udp",
@@ -653,6 +677,33 @@ impl FcConnection {
     /// the serial discovery + baud-probe path runs. Returns the read/write halves
     /// plus the port label and (serial only) baud on success.
     async fn open(&self) -> Option<(BoxedReadHalf, BoxedWriteHalf, String, u32)> {
+        // MAVLink-over-ELRS ingest: a resolved source REPLACES the configured
+        // port and discovery entirely. `radio.crsf.mode: mavlink` is the
+        // operator's explicit statement that the RC module is the MAVLink
+        // bearer (the same precedence the pin already wins over a
+        // contradictory `mavlink.serial_port` in RC mode), and falling
+        // through on an open failure would latch some other port while the
+        // module sat unused. A failed open is a failed attempt: the run
+        // loop's backoff owns the retry and the `source_unreachable` hint
+        // names the cause. No CRSF is parsed on this lane — the module
+        // firmware owns the air protocol; the host side is plain MAVLink
+        // bytes through the ordinary read loop and its heartbeat gate.
+        if let Some(src) = self.cfg.crsf_mavlink_source() {
+            return match src {
+                CrsfMavlinkSource::Serial { device } => {
+                    let device = device.to_string();
+                    match open_serial(&device, CRSF_MAVLINK_BAUD) {
+                        Some(stream) => Some(split_serial(stream, device, CRSF_MAVLINK_BAUD)),
+                        None => {
+                            tracing::warn!(device = %device, "fc_crsf_mavlink_serial_open_failed");
+                            None
+                        }
+                    }
+                }
+                CrsfMavlinkSource::BackpackUdp { port } => open_udp_listen(port).await,
+            };
+        }
+
         // SITL / network transport: detected from the configured connection
         // string, never from serial discovery (baud is not meaningful here).
         let configured = self.cfg.serial_port.trim();
@@ -862,6 +913,49 @@ mod crsf_exclusion_tests {
         let cands = c.candidate_ports();
         assert_eq!(cands.len(), 1);
         assert_eq!(cands[0].name, "/dev/ttyACM0");
+    }
+
+    /// A resolved MAVLink-over-ELRS ingest owns the FC source slot: the
+    /// snapshot reports the live carrier class (`serial` / `udp`), not the
+    /// operator's `mavlink.source` pick, while an unresolved lane leaves the
+    /// slot to the ordinary config path.
+    #[test]
+    fn crsf_mavlink_mode_owns_the_fc_source_slot() {
+        let serial = conn_with(MavlinkConfig {
+            crsf_enabled: true,
+            crsf_mode: "mavlink".into(),
+            crsf_device: "/dev/ttyUSB0".into(),
+            ..MavlinkConfig::default()
+        });
+        assert_eq!(serial.source(), "serial");
+
+        let backpack = conn_with(MavlinkConfig {
+            crsf_enabled: true,
+            crsf_mode: "mavlink".into(),
+            crsf_mavlink_transport: "backpack_wifi".into(),
+            ..MavlinkConfig::default()
+        });
+        assert_eq!(backpack.source(), "udp");
+
+        // RC mode (the default): the pin is an exclusion, never a source —
+        // the slot falls through to the configured/auto vocabulary.
+        let rc = conn_with(MavlinkConfig {
+            crsf_enabled: true,
+            crsf_device: "/dev/ttyUSB0".into(),
+            ..MavlinkConfig::default()
+        });
+        assert_eq!(rc.cfg.crsf_mavlink_source(), None);
+        assert_eq!(rc.source(), "auto");
+
+        // MAVLink mode on the serial carrier with no pin: unresolved — the
+        // slot is not claimed and discovery vocabulary stands.
+        let unpinned = conn_with(MavlinkConfig {
+            crsf_enabled: true,
+            crsf_mode: "mavlink".into(),
+            ..MavlinkConfig::default()
+        });
+        assert_eq!(unpinned.cfg.crsf_mavlink_source(), None);
+        assert_eq!(unpinned.source(), "auto");
     }
 }
 

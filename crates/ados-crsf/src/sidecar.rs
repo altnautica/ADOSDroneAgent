@@ -53,7 +53,9 @@ pub struct StatsInputs<'a> {
     pub tx_frames_per_s: Option<f64>,
     /// Measured received frames per second over the last interval.
     pub rx_frames_per_s: Option<f64>,
-    /// The lane mode while running (`"rc"` for the RC channel lane).
+    /// The configured lane mode (`crsf_rc` while the RC channel lane runs;
+    /// `mavlink` / `airport` while the lane stands aside for that mode's
+    /// owner).
     pub mode: Option<&'a str>,
     /// Where the transmitted channels come from, once a source has injected.
     pub channel_source: Option<&'a str>,

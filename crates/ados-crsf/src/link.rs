@@ -34,8 +34,12 @@ pub enum LaneState {
     Disabled,
     /// Enabled but no usable serial device is open.
     Unconfigured,
-    /// Device open; no liveness verdict yet (not transmitting, or still
-    /// inside the proof grace window).
+    /// Standing by with no liveness verdict. In `crsf_rc` mode: the device is
+    /// open but unproven (not transmitting, or still inside the proof grace
+    /// window). In `mavlink` mode: the lane itself — the module's port
+    /// belongs to the MAVLink router and this service transmits no RC, so
+    /// `ready` is the honest "alive, holding off" standby (written directly
+    /// by the mode gate, not derived).
     Ready,
     /// Fresh link statistics with healthy uplink quality.
     LinkOk,

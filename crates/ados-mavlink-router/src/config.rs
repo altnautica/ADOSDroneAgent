@@ -14,6 +14,16 @@ use serde::Deserialize;
 /// the systemd unit sets).
 pub const CONFIG_YAML: &str = "/etc/ados/config.yaml";
 
+/// The serial baud of an RC module running its native MAVLink mode. Fixed by
+/// the module firmware (distinct from the 420 kbaud CRSF RC framing rate),
+/// and deliberately absent from the discovery sweep: the MAVLink-over-ELRS
+/// serial source opens only a pinned device, never a guessed one.
+pub const CRSF_MAVLINK_BAUD: u32 = 460_800;
+
+/// The conventional MAVLink UDP port the RC module's WiFi backpack streams
+/// its MAVLink datagrams to on the host.
+pub const BACKPACK_UDP_PORT: u16 = 14550;
+
 fn default_baud_rate() -> u32 {
     57600
 }
@@ -100,11 +110,55 @@ pub struct MavlinkConfig {
     /// The serial device an ExpressLRS / CRSF RC module is pinned to
     /// (`radio.crsf.device` in the config — the top-level `radio:` section, NOT
     /// the `mavlink:` block, so it is skipped by the section deserializer and
-    /// filled in by the loader). Empty = no pin. A pinned device is excluded
-    /// from FC candidacy entirely: the router must never open or baud-sweep the
-    /// RC module's port, or it contends with the CRSF lane for the same tty.
+    /// filled in by the loader). Empty = no pin. In `crsf_rc` mode a pinned
+    /// device is excluded from FC candidacy entirely: the router must never
+    /// open or baud-sweep the RC module's port, or it contends with the CRSF
+    /// lane for the same tty. In `mavlink` mode the ownership inverts — the
+    /// pin names the serial carrier of the MAVLink-over-ELRS ingest source
+    /// this router owns (see [`MavlinkConfig::crsf_mavlink_source`]).
     #[serde(skip)]
     pub crsf_device: String,
+    /// Whether the `radio.crsf` lane is opted in (`radio.crsf.enabled`, filled
+    /// in by the loader like `crsf_device`). Gates the MAVLink-over-ELRS
+    /// source resolution: a lane that is not opted in never owns the FC
+    /// source slot regardless of its configured mode.
+    #[serde(skip)]
+    pub crsf_enabled: bool,
+    /// What the RC module carries (`radio.crsf.mode`, filled in by the
+    /// loader): `crsf_rc` (the RC lane service owns the port; this router only
+    /// excludes it), `mavlink` (the module runs its native MAVLink mode and
+    /// THIS router owns the carrier as its FC source), or `airport` (a
+    /// generic serial data pipe, no router involvement).
+    #[serde(skip)]
+    pub crsf_mode: String,
+    /// The carrier for `mode: mavlink` (`radio.crsf.mavlink_transport`, filled
+    /// in by the loader): `serial` (the pinned device at
+    /// [`CRSF_MAVLINK_BAUD`]) or `backpack_wifi` (a UDP listen on
+    /// [`BACKPACK_UDP_PORT`]).
+    #[serde(skip)]
+    pub crsf_mavlink_transport: String,
+}
+
+/// The resolved MAVLink-over-ELRS ingest source.
+///
+/// When the `radio.crsf` block declares the RC module runs its native MAVLink
+/// mode, the module is a plain bidirectional MAVLink byte pipe — the module
+/// firmware owns the CRSF air protocol internally, so nothing host-side
+/// parses CRSF on this lane — and this router owns the carrier as its FC
+/// source. The RC lane service (`ados-crsf`) holds off the device entirely in
+/// that mode (one owner per port; it stands by at state `ready` with the mode
+/// reported and transmits no RC).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrsfMavlinkSource<'a> {
+    /// The module's USB-serial port at the fixed MAVLink-mode baud
+    /// ([`CRSF_MAVLINK_BAUD`]). Resolves only from a pinned device: the baud
+    /// is not in the discovery sweep, so an unpinned module in MAVLink mode
+    /// is an unresolved source — never a discovery guess.
+    Serial { device: &'a str },
+    /// The module's WiFi-backpack UDP bridge: the backpack streams MAVLink
+    /// datagrams to the conventional port on the host, so the router listens
+    /// there and locks to the first peer that talks.
+    BackpackUdp { port: u16 },
 }
 
 impl Default for MavlinkConfig {
@@ -118,6 +172,9 @@ impl Default for MavlinkConfig {
             endpoints: default_endpoints(),
             ws_proxy_enforce_auth: default_ws_proxy_enforce_auth(),
             crsf_device: String::new(),
+            crsf_enabled: false,
+            crsf_mode: "crsf_rc".to_string(),
+            crsf_mavlink_transport: "serial".to_string(),
         }
     }
 }
@@ -145,9 +202,10 @@ impl MavlinkConfig {
     /// startup path can publish it. `None` on success or a missing/unreadable
     /// file; `Some(msg)` on a present-but-malformed file.
     ///
-    /// Reads the `mavlink:` section plus the one foreign field the router
-    /// gates on: `radio.crsf.device`, the pinned CRSF/ELRS serial device that
-    /// must be excluded from FC port candidacy.
+    /// Reads the `mavlink:` section plus the foreign `radio.crsf` fields the
+    /// router gates on: the pinned CRSF/ELRS serial device (excluded from FC
+    /// port candidacy in `crsf_rc` mode) and the lane's enable/mode/transport
+    /// (which resolve the MAVLink-over-ELRS ingest source in `mavlink` mode).
     fn load_reporting(path: &Path) -> (Self, Option<String>) {
         #[derive(Debug, Default, Deserialize)]
         struct RawConfig {
@@ -163,26 +221,60 @@ impl MavlinkConfig {
         }
         #[derive(Debug, Default, Deserialize)]
         struct CrsfSection {
+            #[serde(default)]
+            enabled: bool,
             // Nullable on disk (the config model writes `device: null` for
             // "no pin"); a bare String would fail the parse on the explicit
-            // null and take the whole mavlink section down with it.
+            // null and take the whole mavlink section down with it. The other
+            // string fields are Options for the same reason.
             #[serde(default)]
             device: Option<String>,
+            #[serde(default)]
+            mode: Option<String>,
+            #[serde(default)]
+            mavlink_transport: Option<String>,
         }
         let Ok(text) = std::fs::read_to_string(path) else {
             return (MavlinkConfig::default(), None);
         };
         let (raw, error): (RawConfig, _) = ados_config::yaml_reporting(&text, "mavlink");
         let mut cfg = raw.mavlink;
-        cfg.crsf_device = raw
-            .radio
-            .crsf
-            .device
+        let crsf = raw.radio.crsf;
+        cfg.crsf_device = crsf.device.as_deref().unwrap_or("").trim().to_string();
+        cfg.crsf_enabled = crsf.enabled;
+        // Absent enum-ish fields read their model defaults, matching the lane
+        // service's own parse of the same block.
+        cfg.crsf_mode = crsf.mode.as_deref().unwrap_or("crsf_rc").trim().to_string();
+        cfg.crsf_mavlink_transport = crsf
+            .mavlink_transport
             .as_deref()
-            .unwrap_or("")
+            .unwrap_or("serial")
             .trim()
             .to_string();
         (cfg, error)
+    }
+
+    /// Resolve the MAVLink-over-ELRS ingest source from the `radio.crsf`
+    /// block: `Some` only when the lane is opted in, its mode is `mavlink`,
+    /// AND the carrier resolves — the backpack carrier always does (the
+    /// listen port is fixed), the serial carrier only with a pinned device.
+    /// Matches the lane service's parse posture on an unknown
+    /// `mavlink_transport` value: it degrades to the serial carrier.
+    pub fn crsf_mavlink_source(&self) -> Option<CrsfMavlinkSource<'_>> {
+        if !self.crsf_enabled || self.crsf_mode != "mavlink" {
+            return None;
+        }
+        if self.crsf_mavlink_transport == "backpack_wifi" {
+            return Some(CrsfMavlinkSource::BackpackUdp {
+                port: BACKPACK_UDP_PORT,
+            });
+        }
+        let device = self.crsf_device.trim();
+        if device.is_empty() {
+            None
+        } else {
+            Some(CrsfMavlinkSource::Serial { device })
+        }
     }
 
     /// The first enabled WebSocket endpoint port, if any (the proxy bind port).
@@ -316,6 +408,123 @@ mod tests {
         let c3 = MavlinkConfig::load_from(&cfg3);
         assert_eq!(c3.crsf_device, "");
         assert_eq!(c3.serial_port, "/dev/ttyACM0");
+    }
+
+    #[test]
+    fn crsf_mavlink_source_resolves_serial_from_the_radio_section() {
+        // The lane opted in, in MAVLink mode, with a pinned device: the
+        // router owns the pin at the fixed MAVLink-mode baud.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        write(
+            &cfg,
+            "radio:\n  crsf:\n    enabled: true\n    device: /dev/ttyUSB0\n    mode: mavlink\n",
+        );
+        let c = MavlinkConfig::load_from(&cfg);
+        assert_eq!(
+            c.crsf_mavlink_source(),
+            Some(CrsfMavlinkSource::Serial {
+                device: "/dev/ttyUSB0"
+            })
+        );
+    }
+
+    #[test]
+    fn crsf_mavlink_serial_without_a_pin_does_not_resolve() {
+        // The fixed baud is not in the discovery sweep, so an unpinned module
+        // is an unresolved source — never a guessed port.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        write(
+            &cfg,
+            "radio:\n  crsf:\n    enabled: true\n    device: null\n    mode: mavlink\n",
+        );
+        assert_eq!(MavlinkConfig::load_from(&cfg).crsf_mavlink_source(), None);
+    }
+
+    #[test]
+    fn crsf_backpack_wifi_resolves_without_a_pin() {
+        // The backpack carrier is a fixed local UDP listen; no serial pin is
+        // involved, so it resolves on the mode + transport alone.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        write(
+            &cfg,
+            "radio:\n  crsf:\n    enabled: true\n    mode: mavlink\n    mavlink_transport: backpack_wifi\n",
+        );
+        assert_eq!(
+            MavlinkConfig::load_from(&cfg).crsf_mavlink_source(),
+            Some(CrsfMavlinkSource::BackpackUdp { port: 14550 })
+        );
+    }
+
+    #[test]
+    fn crsf_rc_mode_or_opted_out_lane_never_resolves_a_source() {
+        let dir = tempfile::tempdir().unwrap();
+        // Default mode (crsf_rc): the RC lane owns the port; no ingest source.
+        let rc = dir.path().join("rc.yaml");
+        write(
+            &rc,
+            "radio:\n  crsf:\n    enabled: true\n    device: /dev/ttyUSB0\n",
+        );
+        assert_eq!(MavlinkConfig::load_from(&rc).crsf_mavlink_source(), None);
+        // MAVLink mode but the lane opted out: no source either.
+        let off = dir.path().join("off.yaml");
+        write(
+            &off,
+            "radio:\n  crsf:\n    enabled: false\n    device: /dev/ttyUSB0\n    mode: mavlink\n",
+        );
+        assert_eq!(MavlinkConfig::load_from(&off).crsf_mavlink_source(), None);
+        // No radio block at all, and a missing file: both resolve nothing.
+        let bare = dir.path().join("bare.yaml");
+        write(&bare, "mavlink:\n  serial_port: /dev/ttyACM0\n");
+        assert_eq!(MavlinkConfig::load_from(&bare).crsf_mavlink_source(), None);
+        assert_eq!(
+            MavlinkConfig::load_from(&dir.path().join("nope.yaml")).crsf_mavlink_source(),
+            None
+        );
+    }
+
+    #[test]
+    fn unknown_mavlink_transport_degrades_to_the_serial_carrier() {
+        // The lane service parses an unknown transport as its serial default;
+        // the router must interpret the same block the same way.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        write(
+            &cfg,
+            "radio:\n  crsf:\n    enabled: true\n    device: /dev/ttyUSB0\n    mode: mavlink\n    mavlink_transport: carrier_pigeon\n",
+        );
+        assert_eq!(
+            MavlinkConfig::load_from(&cfg).crsf_mavlink_source(),
+            Some(CrsfMavlinkSource::Serial {
+                device: "/dev/ttyUSB0"
+            })
+        );
+    }
+
+    #[test]
+    fn crsf_mode_flip_re_resolves_on_the_next_config_load() {
+        // The router reads its config at startup; the persist path kicks the
+        // unit on a router-relevant crsf change. A flip must resolve cleanly
+        // in both directions from the same file.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        write(
+            &cfg,
+            "radio:\n  crsf:\n    enabled: true\n    device: /dev/ttyUSB0\n    mode: mavlink\n",
+        );
+        assert!(MavlinkConfig::load_from(&cfg)
+            .crsf_mavlink_source()
+            .is_some());
+        write(
+            &cfg,
+            "radio:\n  crsf:\n    enabled: true\n    device: /dev/ttyUSB0\n    mode: crsf_rc\n",
+        );
+        let back = MavlinkConfig::load_from(&cfg);
+        assert_eq!(back.crsf_mavlink_source(), None);
+        // Back in RC mode the pin is once again an exclusion, not a source.
+        assert_eq!(back.crsf_device, "/dev/ttyUSB0");
     }
 
     #[test]

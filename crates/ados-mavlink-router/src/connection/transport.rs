@@ -84,6 +84,13 @@ pub(crate) const BAUD_FALLBACK: u32 = 57600;
 /// margin while bounding the worst-case sweep over the candidate list.
 const PROBE_WINDOW: Duration = Duration::from_millis(1500);
 
+/// How long the WiFi-backpack UDP listen waits for the first datagram before
+/// the open attempt reports failure (the run loop backs off and retries). A
+/// live backpack streams continuously — MAVLink heartbeats at 1 Hz minimum —
+/// so a silent window means the module is not talking yet, not that the wait
+/// was too short.
+const BACKPACK_LISTEN_WINDOW: Duration = Duration::from_secs(3);
+
 /// The outcome of probing a single candidate baud.
 pub(crate) enum ProbeOutcome {
     /// A MAVLink HEARTBEAT decoded — this baud is the live FC link.
@@ -198,6 +205,58 @@ pub(crate) fn split_serial(
 ) -> (BoxedReadHalf, BoxedWriteHalf, String, u32) {
     let (rd, wr) = tokio::io::split(stream);
     (Box::pin(rd), Box::pin(wr), port, baud)
+}
+
+/// Open the MAVLink-over-ELRS WiFi-backpack ingest: bind the given local UDP
+/// port (all interfaces — the backpack arrives over WiFi), wait bounded for
+/// the first datagram, and lock the socket to that peer. `None` when the bind
+/// fails (the port is taken) or nothing talks within the window; the caller's
+/// reconnect backoff owns the retry.
+pub(crate) async fn open_udp_listen(
+    port: u16,
+) -> Option<(BoxedReadHalf, BoxedWriteHalf, String, u32)> {
+    let sock = match UdpSocket::bind(("0.0.0.0", port)).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(port, error = %e, "fc_udp_listen_bind_failed");
+            return None;
+        }
+    };
+    udp_listen_lock_first_peer(sock, BACKPACK_LISTEN_WINDOW).await
+}
+
+/// The testable half of [`open_udp_listen`]: peek the first datagram on an
+/// already-bound socket, connect the socket to its sender so the write half
+/// reaches the module, and wrap it as the duplex transport (label
+/// `udpin:<local-addr>`, baud 0). The first datagram is peeked, not consumed,
+/// so it stays queued for the read loop — the leading bytes of the MAVLink
+/// stream are never dropped by the handshake.
+pub(crate) async fn udp_listen_lock_first_peer(
+    sock: UdpSocket,
+    window: Duration,
+) -> Option<(BoxedReadHalf, BoxedWriteHalf, String, u32)> {
+    let local = sock.local_addr().ok()?;
+    let mut probe = [0u8; 1];
+    let peer = match tokio::time::timeout(window, sock.peek_from(&mut probe)).await {
+        Ok(Ok((_, peer))) => peer,
+        Ok(Err(e)) => {
+            tracing::warn!(local = %local, error = %e, "fc_udp_listen_peek_failed");
+            return None;
+        }
+        Err(_) => {
+            tracing::info!(local = %local, "fc_udp_listen_no_traffic");
+            return None;
+        }
+    };
+    if let Err(e) = sock.connect(peer).await {
+        tracing::warn!(local = %local, peer = %peer, error = %e, "fc_udp_listen_connect_failed");
+        return None;
+    }
+    tracing::info!(local = %local, peer = %peer, "fc_udp_listen_locked_to_peer");
+    let sock = std::sync::Arc::new(sock);
+    let (rd, wr) = tokio::io::split(UdpAdapter { sock });
+    let label = format!("udpin:{local}");
+    Some((Box::pin(rd), Box::pin(wr), label, 0))
 }
 
 /// A parsed network connection target.
@@ -366,6 +425,55 @@ mod tests {
             other.to_str().unwrap(),
             link.to_str().unwrap()
         ));
+    }
+
+    #[tokio::test]
+    async fn udp_listen_locks_to_the_first_peer_and_keeps_the_first_datagram() {
+        let listener = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        sender.send_to(b"first", addr).await.unwrap();
+
+        let (mut rd, mut wr, label, baud) = tokio::time::timeout(
+            Duration::from_secs(5),
+            udp_listen_lock_first_peer(listener, Duration::from_secs(5)),
+        )
+        .await
+        .expect("handshake must not hang")
+        .expect("a queued datagram must resolve the peer");
+        assert_eq!(label, format!("udpin:{addr}"));
+        assert_eq!(baud, 0, "a network transport reports no baud");
+
+        // The peeked datagram was preserved: the read half yields it whole.
+        let mut buf = [0u8; 16];
+        let n = tokio::time::timeout(Duration::from_secs(5), rd.read(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&buf[..n], b"first");
+
+        // The write half reaches the locked peer (the module's return path).
+        wr.write_all(b"reply").await.unwrap();
+        wr.flush().await.unwrap();
+        let mut rbuf = [0u8; 16];
+        let (n, from) = tokio::time::timeout(Duration::from_secs(5), sender.recv_from(&mut rbuf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&rbuf[..n], b"reply");
+        assert_eq!(from, addr);
+    }
+
+    #[tokio::test]
+    async fn udp_listen_reports_none_when_nothing_talks() {
+        // A silent window is an unresolved open, not a hang: the caller's
+        // backoff owns the retry.
+        let listener = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        assert!(
+            udp_listen_lock_first_peer(listener, Duration::from_millis(50))
+                .await
+                .is_none()
+        );
     }
 
     #[test]

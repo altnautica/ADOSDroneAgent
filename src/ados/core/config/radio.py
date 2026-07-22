@@ -43,10 +43,17 @@ class CrsfConfig(BaseModel):
     the lane never fabricates a power figure; the measured power comes back
     on link-statistics telemetry.
 
-    ``mode`` selects what the attached module carries: ``crsf_rc`` (the RC
-    channel lane this service transmits), ``mavlink`` (the module runs its
-    native MAVLink mode and is owned by the MAVLink router's serial/UDP
-    source, not this lane), or ``airport`` (a generic serial data pipe).
+    ``mode`` selects what the attached module carries — and who owns its
+    port: ``crsf_rc`` (the RC channel lane this service transmits; the
+    MAVLink router excludes the pin from FC candidacy), ``mavlink`` (the
+    module runs its native MAVLink mode as a plain bidirectional MAVLink byte
+    pipe — the module firmware owns the CRSF air protocol internally — and
+    the MAVLink router ingests the carrier as its FC source: the pinned
+    ``device`` at the fixed MAVLink-mode baud of 460800 when
+    ``mavlink_transport`` is ``serial``, or a UDP listen on port 14550 for
+    ``backpack_wifi``; the RC lane holds off the port entirely and stands by
+    at state ``ready`` with the mode reported), or ``airport`` (a generic
+    serial data pipe with no ADOS owner yet; the lane reads ``disabled``).
 
     ``channel_source`` decides what feeds the transmitted channels in
     ``crsf_rc`` mode: ``hid`` (the handset/gamepad path only — the default),

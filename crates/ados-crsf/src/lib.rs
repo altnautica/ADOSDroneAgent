@@ -7,6 +7,12 @@
 //! lane state — the received-side link-statistics proof, never a byte
 //! counter, decides whether the link reads up.
 //!
+//! Ownership is per `radio.crsf.mode`: this lane owns the port only in
+//! `crsf_rc`. In `mavlink` mode the module is a plain MAVLink byte pipe the
+//! MAVLink router ingests as its FC source, so this service holds off the
+//! device and stands by at `ready` (see the binary's module doc for the full
+//! split).
+//!
 //! Module map: `frame` (framing + CRC + stream parser), `channels` (the
 //! 16×11-bit RC payload), `scale` (input → channel maths), `telemetry` /
 //! `params` (typed payload codecs), `bank` (a validated channel-value set),
