@@ -22,6 +22,7 @@ import { useResource } from "@/hooks/use-resource";
 import { apiFetch } from "@/lib/api";
 import { DASH, fmtChannel, fmtDbm, fmtInt, fmtMbps } from "@/lib/format";
 import { fmtDb, fmtKbpsAsMbps, fmtLossPct, fmtMhz } from "@/lib/format-status";
+import { linkDiagView } from "@/lib/link-diag";
 import { cn } from "@/lib/utils";
 
 interface WfbStatus {
@@ -45,6 +46,16 @@ interface WfbStatus {
   packets_lost?: number | null;
   rx_silent_seconds?: number | null;
   restart_count?: number | null;
+  // The one-glance diagnosis + the RX counters that separate the failure modes
+  // a bare "0 received" hides. `fanout_forwarded` is ground-station-only (the
+  // receiver relaying decoded packets into the video pipeline).
+  link_diag?: string | null;
+  packets_all?: number | null;
+  decrypt_errors?: number | null;
+  packets_bad?: number | null;
+  session_packets?: number | null;
+  fanout_forwarded?: number | null;
+  fanout_drops?: number | null;
   adapter?: string | null;
   adapter_chipset?: string | null;
   chipset?: string | null;
@@ -130,6 +141,7 @@ export function LinkScreen() {
 
   const w = wfb.data;
   const tone = linkTone(w?.state, w?.active ?? undefined);
+  const diag = linkDiagView(w?.link_diag);
   const chipset = w?.adapter_chipset ?? w?.chipset ?? null;
   const bitrate =
     w?.bitrate_mbps != null ? fmtMbps(w.bitrate_mbps) : fmtKbpsAsMbps(w?.bitrate_kbps);
@@ -156,6 +168,39 @@ export function LinkScreen() {
         <EmptyNote>The WFB radio link is not available on this profile.</EmptyNote>
       ) : (
         <div className="flex flex-col gap-[0.15rem]">
+          <SectionHeader>Diagnosis</SectionHeader>
+          {diag ? (
+            <Row
+              label="Verdict"
+              left={<Dot tone={diag.tone} />}
+              value={diag.label}
+              tone={diag.tone}
+              hint={diag.hint}
+            />
+          ) : (
+            <Row label="Verdict" value={DASH} hint="Not yet classified" />
+          )}
+          <Row
+            label="RF frames seen"
+            value={fmtInt(w?.packets_all)}
+            hint="Captured off-air before decrypt (0 = a deaf radio)"
+            tone={w?.link_diag === "deaf" ? "warn" : undefined}
+          />
+          <Row
+            label="Decrypt errors"
+            value={fmtInt(w?.decrypt_errors)}
+            hint="Wrong key or wrong link id"
+            tone={(w?.decrypt_errors ?? 0) > 0 ? "warn" : undefined}
+          />
+          {w?.fanout_forwarded != null ? (
+            <Row
+              label="Forwarded"
+              value={fmtInt(w.fanout_forwarded)}
+              hint="Decoded packets relayed to the video pipeline"
+            />
+          ) : null}
+          <Row label="FEC recovered" value={fmtInt(w?.fec_recovered)} />
+
           <SectionHeader>Signal</SectionHeader>
           <TileGrid>
             <Tile label="RSSI" value={fmtDbm(w?.rssi_dbm)} tone={tone} />

@@ -6,7 +6,7 @@
 // translucently on top. Flight telemetry is provided here so its 5 Hz poll runs
 // only while the Feed is on screen.
 
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 
 import { FeedActionBar } from "@/components/feed/feed-action-bar";
 import { FeedHud } from "@/components/feed/feed-hud";
@@ -20,16 +20,25 @@ export function FeedScreen() {
   const cameras = useRoster();
   const activeCameraId = useFeedStore((s) => s.activeCameraId);
   const streamNonce = useFeedStore((s) => s.streamNonce);
+  const setActiveStreamLabel = useFeedStore((s) => s.setActiveStreamLabel);
 
-  const { whepUrl, reconnectKey } = useMemo(() => {
+  const { whepUrl, reconnectKey, activeLabel } = useMemo(() => {
     const active =
       cameras.find((c) => c.id === activeCameraId) ?? cameras[0] ?? null;
     const url = active?.whep_url ?? "/whep";
     return {
       whepUrl: url,
       reconnectKey: `${active?.id ?? "primary"}:${url}:${streamNonce}`,
+      activeLabel: active?.label ?? active?.name ?? active?.role ?? null,
     };
   }, [cameras, activeCameraId, streamNonce]);
+
+  // Publish the selected stream's label to the shared feed state so the top
+  // bar's video zone can name what is on screen (a ground station has an empty
+  // roster, so this is null there and the zone falls back to a generic label).
+  useEffect(() => {
+    setActiveStreamLabel(activeLabel);
+  }, [activeLabel, setActiveStreamLabel]);
 
   return (
     <FlightTelemetryProvider>

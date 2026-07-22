@@ -20,6 +20,14 @@ export interface LinkView {
   tx_power_dbm: number | null;
   /** e.g. "connected" | "connecting" | "degraded" | "rf_unverified". */
   state: string;
+  /** The one-glance link diagnosis the agent derives from its decode counters
+   *  ("healthy" | "searching" | "deaf" | "mis_keyed" | "jammed"). Null until the
+   *  agent classifies the link; absent on older agents. */
+  link_diag?: string | null;
+  /** Every frame captured off-air BEFORE decrypt (0 = a deaf radio, no RF). */
+  packets_all?: number | null;
+  /** Decrypt / session failures (wrong key or wrong link_id / channel_id). */
+  decrypt_errors?: number | null;
 }
 
 /** The distributed-RX role block. */
@@ -170,6 +178,25 @@ export interface RosterCamera {
   /** Per-leg WHEP endpoint, when the agent advertises one. The primary leg is
    *  reached through the fixed `/whep` proxy. */
   whep_url?: string;
+}
+
+/** A minimal, tolerant view of `GET /api/video/config` — only the blocks the
+ *  status strip's video zone reads. `encoder` is the box's OWN configured
+ *  encoder (honest as "the feed" only on a drone, the video source); `link`
+ *  carries the receiver's measured inbound video byte rate (honest on a ground
+ *  station). Unknown extra keys are tolerated. */
+export interface VideoConfigResponse {
+  encoder?: {
+    bitrate_kbps?: number | null;
+    width?: number | null;
+    height?: number | null;
+    fps?: number | null;
+    codec?: string | null;
+  };
+  link?: {
+    video_inbound_bytes_per_s?: number | null;
+    channel?: number | null;
+  };
 }
 
 /** The agent config is a nested JSON object (`GET /api/config`, sanitized

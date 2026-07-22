@@ -9,6 +9,7 @@
 
 import { AttitudeIndicator } from "@/components/feed/attitude-indicator";
 import { FeedTelemetryStrip } from "@/components/feed/feed-telemetry-strip";
+import { FeedWarningBanner } from "@/components/feed/feed-warning-banner";
 import { VerticalTape } from "@/components/feed/vertical-tape";
 import { useFlightTelemetryContext } from "@/hooks/flight-telemetry-context";
 import { useNavStore } from "@/stores/nav-store";
@@ -31,6 +32,12 @@ export function FeedHud() {
 
   return (
     <div className="pointer-events-none absolute inset-0 z-10">
+      {/* centre-top warning — shown only for an actionable condition (no RF /
+          key mismatch / interference / uplink offline / low battery) */}
+      <div className="absolute inset-x-0 top-[2.9rem] flex justify-center px-[1rem]">
+        <FeedWarningBanner />
+      </div>
+
       {/* artificial horizon, centred in the region between the top strip and
           the bottom dock */}
       <div className="absolute inset-x-0 bottom-[9.4rem] top-[2.6rem] flex items-center justify-center">

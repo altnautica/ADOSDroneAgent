@@ -46,6 +46,28 @@ export function fmtSats(v: number | null | undefined): string {
   return v == null || !Number.isFinite(v) || v > 200 ? DASH : `${Math.round(v)}`;
 }
 
+/** A GPS fix-type code → a short label (MAVLink GPS_FIX_TYPE). An unknown code
+ *  reads a dash rather than a fabricated fix quality. */
+export function fmtGpsFix(v: number | null | undefined): string {
+  switch (v) {
+    case 0:
+    case 1:
+      return "No fix";
+    case 2:
+      return "2D";
+    case 3:
+      return "3D";
+    case 4:
+      return "DGPS";
+    case 5:
+      return "RTK flt";
+    case 6:
+      return "RTK fix";
+    default:
+      return DASH;
+  }
+}
+
 /** Seconds → a compact "1d 2h", "3h 4m", "5m 6s" uptime string. */
 export function fmtUptime(seconds: number | null | undefined): string {
   if (seconds == null || seconds < 0) return DASH;

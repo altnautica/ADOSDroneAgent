@@ -15,6 +15,7 @@ import type {
   RosterCamera,
   SystemView,
   VehicleState,
+  VideoConfigResponse,
 } from "@/lib/types";
 
 export class ApiError extends Error {
@@ -162,6 +163,13 @@ export async function getDroneStatus(signal?: AbortSignal): Promise<GsStatus> {
     loss_percent: numOr(wfb.loss_percent, null),
     tx_power_dbm: numOr(wfb.tx_power_dbm, null),
     state: strOr(wfb.link_state, null) ?? strOr(wfb.state, null) ?? "unknown",
+    // The diagnostic trio the drone's /api/wfb already carries, mirrored onto the
+    // composite .link block so a drone surfaces the same one-glance verdict a
+    // ground station does. link_diag stays null (never fabricated) until the
+    // agent classifies the link.
+    link_diag: strOr(wfb.link_diag, null),
+    packets_all: numOr(wfb.packets_all, null),
+    decrypt_errors: numOr(wfb.decrypt_errors, null),
   };
 
   const network: NetworkView = {
@@ -199,6 +207,13 @@ export async function getDroneStatus(signal?: AbortSignal): Promise<GsStatus> {
  *  not the config shape the GET returns). */
 export function getConfig(signal?: AbortSignal): Promise<AgentConfig> {
   return apiFetch<AgentConfig>("/api/config", { signal });
+}
+
+/** The composite encoder + radio + link video snapshot (`GET /api/video/config`).
+ *  The status strip's video zone reads it for the honest data rate (a drone's own
+ *  encoder rate, or a ground station's measured inbound video byte rate). */
+export function getVideoConfig(signal?: AbortSignal): Promise<VideoConfigResponse> {
+  return apiFetch<VideoConfigResponse>("/api/video/config", { signal });
 }
 
 /** The radio link view (`GET /api/wfb`), the Link screen's tuning source. */

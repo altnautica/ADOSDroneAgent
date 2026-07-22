@@ -7,6 +7,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import { useFeedStore } from "@/stores/feed-store";
 import { startWhep, type WhepSession } from "@/lib/whep";
 
 const RETRY_MIN_MS = 1500;
@@ -26,6 +27,7 @@ export function VideoLayer({
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [state, setState] = useState<FeedState>("connecting");
+  const setVideoStatus = useFeedStore((s) => s.setVideoStatus);
 
   useEffect(() => {
     let cancelled = false;
@@ -34,11 +36,34 @@ export function VideoLayer({
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
     const controller = new AbortController();
 
+    // Publish the decoded resolution off the real <video> element so the strip's
+    // video zone shows the actual stream size (never a config-derived guess). A
+    // width of 0 means metadata is not in yet — publish live with a null size and
+    // let the resize/loadedmetadata listeners refine it.
+    const publishLive = () => {
+      const v = videoRef.current;
+      const w = v && v.videoWidth > 0 ? v.videoWidth : null;
+      const h = v && v.videoHeight > 0 ? v.videoHeight : null;
+      setVideoStatus("live", w, h);
+    };
+
+    const setBoth = (s: FeedState) => {
+      setState(s);
+      if (s === "live") publishLive();
+      else setVideoStatus(s, null, null);
+    };
+
+    const el = videoRef.current;
+    if (el) {
+      el.addEventListener("loadedmetadata", publishLive);
+      el.addEventListener("resize", publishLive);
+    }
+
     const connect = async () => {
-      const el = videoRef.current;
-      if (cancelled || !el) return;
-      setState("connecting");
-      const result = await startWhep(whepUrl, el, controller.signal);
+      const target = videoRef.current;
+      if (cancelled || !target) return;
+      setBoth("connecting");
+      const result = await startWhep(whepUrl, target, controller.signal);
       if (cancelled) {
         void result.session?.close();
         return;
@@ -46,17 +71,17 @@ export function VideoLayer({
       if (result.ok && result.session) {
         session = result.session;
         retryMs = RETRY_MIN_MS;
-        setState("live");
+        setBoth("live");
         // A source-less feed connects but never plays; surface that honestly.
         session.pc.addEventListener("connectionstatechange", () => {
           const cs = session?.pc.connectionState;
           if (cs === "failed" || cs === "disconnected") {
-            setState("error");
+            setBoth("error");
             scheduleRetry();
           }
         });
       } else {
-        setState("error");
+        setBoth("error");
         scheduleRetry();
       }
     };
@@ -78,9 +103,16 @@ export function VideoLayer({
       cancelled = true;
       controller.abort();
       if (retryTimer) clearTimeout(retryTimer);
+      if (el) {
+        el.removeEventListener("loadedmetadata", publishLive);
+        el.removeEventListener("resize", publishLive);
+      }
+      // Reset the shared state so a stale "live" never lingers after the feed
+      // unmounts (leaving the Feed screen).
+      setVideoStatus("connecting", null, null);
       void session?.close();
     };
-  }, [whepUrl, reconnectKey]);
+  }, [whepUrl, reconnectKey, setVideoStatus]);
 
   return (
     <div className="absolute inset-0 bg-black">
