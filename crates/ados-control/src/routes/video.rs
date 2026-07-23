@@ -504,6 +504,14 @@ fn rf_unverified_field(status: &Map<String, Value>, fresh: bool) -> Value {
 /// falls back to the configured value when the sidecar has no value yet. Every
 /// field is present (a `null` placeholder when unknown) so the panel never sees a
 /// missing key. Mirrors the Python `_link_snapshot` multi-process branch.
+///
+/// The whole snapshot is merged only when it is FRESH (mtime within
+/// [`LINK_STALE_AFTER_S`]). A stale snapshot's numbers describe a link that may be
+/// dead now, so every counter reads `null` (unknown) rather than a frozen
+/// last-known value — a stale advancing `tx_bytes_per_s` or a stale
+/// `channel_locked: true` is exactly the healthy-looking dead link operating rule
+/// 44 forbids. `channel` is the exception: when stale it falls back to the
+/// configured value (always truthful) so the panel keeps a channel number.
 fn link_snapshot(config_channel: i64, stats_path: &Path) -> Value {
     const FIELDS: [&str; 7] = [
         "tx_bytes_per_s",
@@ -530,14 +538,22 @@ fn link_snapshot(config_channel: i64, stats_path: &Path) -> Value {
         if let Some(ours) = ados_protocol::contracts::sidecar_version("wfb-stats") {
             ados_protocol::sidecar::check_sidecar_version("wfb-stats", got, ours);
         }
-        for f in FIELDS {
-            if let Some(v) = status.get(f) {
-                if !v.is_null() {
-                    link.insert(f.to_string(), v.clone());
+        // Merge the sidecar's counters ONLY when the snapshot is fresh. A stale
+        // snapshot describes a link that may be dead now, so every counter stays at
+        // its `null` placeholder (unknown) rather than a frozen last-known value —
+        // holding a stale advancing `tx_bytes_per_s` or a stale `channel_locked`
+        // renders a dead link as if live (operating rule 44). `channel` stays null
+        // when stale too and falls back to the configured value below.
+        let fresh = stats_age_seconds(stats_path).is_some_and(|age| age <= LINK_STALE_AFTER_S);
+        if fresh {
+            for f in FIELDS {
+                if let Some(v) = status.get(f) {
+                    if !v.is_null() {
+                        link.insert(f.to_string(), v.clone());
+                    }
                 }
             }
         }
-        let fresh = stats_age_seconds(stats_path).is_some_and(|age| age <= LINK_STALE_AFTER_S);
         link.insert(
             "rf_unverified".to_string(),
             rf_unverified_field(&status, fresh),
@@ -1196,13 +1212,56 @@ mod tests {
         write_stats_aged(&path, body, 30);
         let stale = link_snapshot(149, &path);
         assert_eq!(stale["rf_unverified"], Value::Null);
-        // The gate is scoped to the verdict: the sibling liveness counters keep
-        // their existing merge behaviour on a stale read.
-        assert_eq!(stale["tx_bytes_per_s"], json!(750000));
+        // The sibling liveness counters are gated on the SAME freshness window: a
+        // stale advancing tx_bytes is the frozen-last-known reading a dead link
+        // would show, so it reads null (unknown), never the last value.
+        assert_eq!(stale["tx_bytes_per_s"], Value::Null);
+        assert_eq!(stale["channel_locked"], Value::Null);
 
-        // The same body inside the ceiling still reports the real verdict.
+        // The same body inside the ceiling reports the real verdict AND the live
+        // counters.
         write_stats_aged(&path, body, 2);
-        assert_eq!(link_snapshot(149, &path)["rf_unverified"], json!(false));
+        let fresh = link_snapshot(149, &path);
+        assert_eq!(fresh["rf_unverified"], json!(false));
+        assert_eq!(fresh["tx_bytes_per_s"], json!(750000));
+        assert_eq!(fresh["channel_locked"], json!(true));
+    }
+
+    #[test]
+    fn link_snapshot_stale_counters_read_null_not_frozen() {
+        // A dead radio leaves its last-written sidecar on disk. Every liveness
+        // counter must read null on a stale snapshot — a frozen last-known value
+        // read as live is the healthy-looking dead link operating rule 44 forbids.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wfb-stats.json");
+        let body = r#"{"tx_bytes_per_s": 750000, "valid_rx_packets_per_s": 42.5,
+            "channel_locked": true, "acquire_state": "locked", "channel": 165,
+            "video_inbound_bytes_per_s": 900000, "rx_silent_seconds": 0.0}"#;
+
+        write_stats_aged(&path, body, 30);
+        let stale = link_snapshot(149, &path);
+        for key in [
+            "tx_bytes_per_s",
+            "valid_rx_packets_per_s",
+            "channel_locked",
+            "acquire_state",
+            "video_inbound_bytes_per_s",
+            "rx_silent_seconds",
+        ] {
+            assert_eq!(stale[key], Value::Null, "stale {key} must read null");
+        }
+        // Channel is the exception: it falls back to the configured value (always
+        // truthful) so the panel keeps a channel number, never the stale sidecar's.
+        assert_eq!(stale["channel"], json!(149));
+
+        // Inside the ceiling the same body reports the live counters verbatim.
+        write_stats_aged(&path, body, 2);
+        let fresh = link_snapshot(149, &path);
+        assert_eq!(fresh["tx_bytes_per_s"], json!(750000));
+        assert_eq!(fresh["valid_rx_packets_per_s"], json!(42.5));
+        assert_eq!(fresh["channel_locked"], json!(true));
+        assert_eq!(fresh["acquire_state"], json!("locked"));
+        assert_eq!(fresh["channel"], json!(165));
     }
 
     // ----- /api/v1/video/air-pipeline -----
