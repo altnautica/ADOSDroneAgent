@@ -39,8 +39,10 @@ pub const MAX_INJECT_TTL: Duration = Duration::from_millis(5000);
 
 /// How fresh the PIC arbiter's state sidecar must be to count as a live view.
 /// The arbiter daemon rewrites it on every transition and each watchdog tick
-/// (~5 s); beyond this window the arbiter is not reporting and the view reads
-/// unclaimed (no human input stack ⇒ the programmatic lane holds authority).
+/// (~5 s); beyond this window the arbiter is not reporting and the view is
+/// treated as unavailable, NOT as an affirmative unclaimed — so hybrid mode
+/// fails safe to a human/neutral hold rather than handing the programmatic
+/// lane authority on a missing verdict.
 pub const PIC_STALE_AFTER: Duration = Duration::from_secs(20);
 
 /// Clamp a requested TTL into the allowed window.
@@ -124,7 +126,8 @@ pub struct PicView {
 /// Read the PIC arbiter's state sidecar (`pic-state.json`), staleness-gated
 /// against its file mtime. `None` when the file is absent, unreadable,
 /// malformed, or older than [`PIC_STALE_AFTER`] relative to `now` — the
-/// arbiter is not reporting, which the caller treats as an unclaimed view.
+/// arbiter is not reporting, which the caller treats as unavailable and fails
+/// safe (never as an affirmative unclaimed that would grant the injector).
 pub fn read_pic_view(path: &Path, now: SystemTime) -> Option<PicView> {
     let meta = std::fs::metadata(path).ok()?;
     if let Ok(modified) = meta.modified() {
