@@ -11,6 +11,7 @@ import { useEffect, useMemo } from "react";
 import { DetectionOverlay } from "@/components/feed/detection-overlay";
 import { FeedActionBar } from "@/components/feed/feed-action-bar";
 import { FeedHud } from "@/components/feed/feed-hud";
+import { MiniMap } from "@/components/feed/mini-map";
 import { SkillBar } from "@/components/feed/skill-bar";
 import { StreamTabs } from "@/components/feed/stream-tabs";
 import { VideoLayer } from "@/components/shell/video-layer";
@@ -36,6 +37,11 @@ export function FeedScreen() {
     profile === "workstation" ||
     profile === "compute";
   useVisionDetections(visionCapable);
+
+  // Flight-nav aids (minimap / radar) show only where a flying vehicle's state is
+  // present: a drone reports its own, a ground station republishes the received
+  // drone's. A workstation/compute node has no vehicle, so they stay hidden there.
+  const flightNavCapable = profile === "drone" || profile === "ground_station";
 
   const { whepUrl, reconnectKey, activeLabel } = useMemo(() => {
     const active =
@@ -67,6 +73,7 @@ export function FeedScreen() {
         ) : null}
         <FeedHud />
         {cameras.length > 1 ? <StreamTabs cameras={cameras} /> : null}
+        {flightNavCapable ? <MiniMap /> : null}
         <SkillBar />
         <FeedActionBar />
       </div>
