@@ -23,6 +23,18 @@ export interface AgentConfig {
     hotspot?: { enabled?: boolean };
     cellular?: { enabled?: boolean; apn?: string };
     mac_pin?: { enabled?: boolean; apply_live_allowed?: boolean };
+    wifi_selfheal?: {
+      enabled?: boolean;
+      fail_threshold?: number;
+      cooldown_s?: number;
+    };
+  };
+  video?: {
+    usb_recovery?: {
+      enabled?: boolean;
+      allow_ppps?: boolean;
+      cold_boot_enum_aid?: boolean;
+    };
   };
   server?: {
     mode?: string;

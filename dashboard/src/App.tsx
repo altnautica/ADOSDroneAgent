@@ -33,6 +33,7 @@ import { NetworkSettings } from "@/routes/settings/network-settings";
 import { OffloadSettings } from "@/routes/settings/offload-settings";
 import { ProfileSettings } from "@/routes/settings/profile-settings";
 import { RegionSettings } from "@/routes/settings/region-settings";
+import { SelfHealSettings } from "@/routes/settings/self-heal-settings";
 import { VideoRoute } from "@/routes/video-route";
 
 // Code-split heavy routes. The telemetry page pulls in
@@ -147,6 +148,7 @@ export function App() {
                   <Route path="cellular" element={<CellularSettings />} />
                   <Route path="mac-pin" element={<MacPinSettings />} />
                   <Route path="cloud" element={<CloudSettings />} />
+                  <Route path="self-heal" element={<SelfHealSettings />} />
                   <Route path="display" element={<DisplaySettings />} />
                   <Route path="offload" element={<OffloadSettings />} />
                   <Route path="advanced" element={<AdvancedSettings />} />
