@@ -37,7 +37,7 @@ const SECTIONS: SectionLink[] = [
     to: "/settings/network",
     label: "Network",
     icon: Wifi,
-    blurb: "Wi-Fi client, hotspot toggle.",
+    blurb: "Uplink matrix, failover, Wi-Fi client, hotspot.",
   },
   {
     to: "/settings/cloud",

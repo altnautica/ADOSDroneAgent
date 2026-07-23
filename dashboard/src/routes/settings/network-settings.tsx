@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 
+import { NetworkUplinkPanel } from "@/components/network/network-uplink-panel";
 import { ConfirmDialog } from "@/components/settings/confirm-dialog";
 import { RiskBadge } from "@/components/settings/risk-badge";
 import { Card, CardContent } from "@/components/ui/card";
@@ -82,6 +83,8 @@ export function NetworkSettings() {
 
   return (
     <div className="space-y-6">
+      <NetworkUplinkPanel />
+
       <Card>
         <CardContent className="pt-5 pb-5 space-y-3">
           <div className="flex items-start justify-between gap-4">
