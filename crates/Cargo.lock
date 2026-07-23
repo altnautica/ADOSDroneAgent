@@ -160,6 +160,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "ados-config-tunnel"
+version = "0.1.0"
+dependencies = [
+ "ados-config",
+ "ados-protocol",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "serde_norway",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "ureq 2.12.1",
+]
+
+[[package]]
 name = "ados-control"
 version = "0.1.0"
 dependencies = [

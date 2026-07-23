@@ -1,0 +1,37 @@
+[package]
+name = "ados-config-tunnel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Config-over-radio substrate: a MAVLink-TUNNEL request/response channel that reads /api/config on the drone and proxies it over the low-rate control-plane bearer. Ships inert (opt-in), config request/response only."
+
+[lib]
+name = "ados_config_tunnel"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ados-tunnel-config"
+path = "src/main.rs"
+
+[dependencies]
+# The wire layer (TUNNEL codec + the L3 chunk framing/reassembler) and the
+# producer-side log-shipping layer.
+ados-protocol = { path = "../ados-protocol", features = ["mavlink", "tracing-layer"] }
+ados-config = { path = "../ados-config" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_norway = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+# HTTP-only (no TLS): the drone-side terminator calls the config surface on
+# localhost:8080. Blocking, so the async loop runs it on spawn_blocking.
+ureq = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+# Paused-clock harness for the reassembly-timeout and correlation tests.
+tokio = { workspace = true, features = ["test-util"] }

@@ -251,6 +251,13 @@ rust_const = "ados_crsf::paths::CRSF_STATS_JSON"
 description = "CRSF RC-lane state and link statistics: lane state, RSSI/LQ/SNR, frame rates, and the received-side liveness verdict."
 
 [[sidecar]]
+id = "tunnel-config"
+version = 1
+path = "/run/ados/tunnel-config.json"
+rust_const = "ados_config_tunnel::paths::TUNNEL_CONFIG_STATS_JSON"
+description = "Config-over-radio channel state: role (terminator/injector), enable + write gates, local bearer ports, and received-side frame/request/response/reject/timeout counters."
+
+[[sidecar]]
 id = "mesh-state"
 version = 1
 path = "/run/ados/mesh-state.json"

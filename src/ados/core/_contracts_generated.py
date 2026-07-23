@@ -38,6 +38,7 @@ SIDECAR_VERSIONS: dict[str, int] = {
     "wfb_failover": 1,
     "bind-state": 1,
     "crsf-stats": 1,
+    "tunnel-config": 1,
     "mesh-state": 1,
     "camera-state": 1,
     "video-streams": 2,
@@ -240,6 +241,13 @@ SIDECAR_CATALOG: dict[str, dict[str, object]] = {
         "transport": "/run/ados/crsf-stats.json",
         "status": "sidecar",
         "description": "CRSF RC-lane state and link statistics: lane state, RSSI/LQ/SNR, frame rates, and the received-side liveness verdict.",
+    },
+    "tunnel-config": {
+        "version": 1,
+        "wire": "json",
+        "transport": "/run/ados/tunnel-config.json",
+        "status": "sidecar",
+        "description": "Config-over-radio channel state: role (terminator/injector), enable + write gates, local bearer ports, and received-side frame/request/response/reject/timeout counters.",
     },
     "mesh-state": {
         "version": 1,
