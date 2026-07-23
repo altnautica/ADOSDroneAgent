@@ -79,14 +79,44 @@ export function postApply(payload: ApplyPayload) {
   });
 }
 
+// The PUT /api/config response. The handler returns HTTP 200 even for soft
+// failures: an unknown key or a bad value comes back as `{error}`, and a failed
+// disk write as `{persisted: false, persist_error}`. Curated pages must inspect
+// these, not just the HTTP status.
+export interface ConfigWriteResult {
+  status?: string;
+  key?: string;
+  value?: unknown;
+  persisted?: boolean;
+  persist_error?: string;
+  error?: string;
+  ok?: boolean;
+}
+
 // A single dot-path config write (the same PUT /api/config the GCS uses). Used
 // by the Offload settings page, whose keys are additive perception.* fields with
 // no batch-apply section — a per-key write is simpler and mirrors the GCS.
 export function putConfigValue(key: string, value: string) {
-  return apiFetch<{ ok?: boolean }>("/api/config", {
+  return apiFetch<ConfigWriteResult>("/api/config", {
     method: "PUT",
     body: { key, value },
   });
+}
+
+// putConfigValue that surfaces the agent's soft-error bodies as real failures so
+// a page can toast + roll back instead of silently swallowing them. The write
+// is a string; the agent coerces it to the leaf's live type (a bool key accepts
+// "true"/"false", an int key a numeric string, etc.).
+export async function putConfigChecked(
+  key: string,
+  value: string,
+): Promise<ConfigWriteResult> {
+  const res = await putConfigValue(key, value);
+  if (res.error) throw new Error(res.error);
+  if (res.persisted === false) {
+    throw new Error(res.persist_error || "The change was not saved to disk.");
+  }
+  return res;
 }
 
 // Helpers used by section pages to read suggested defaults from the

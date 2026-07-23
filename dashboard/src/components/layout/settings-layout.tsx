@@ -5,6 +5,7 @@ import {
   Monitor,
   Share2,
   ShieldAlert,
+  Signal,
   UserCog,
   Wifi,
   type LucideIcon,
@@ -38,6 +39,12 @@ const SECTIONS: SectionLink[] = [
     label: "Network",
     icon: Wifi,
     blurb: "Uplink matrix, failover, Wi-Fi client, hotspot.",
+  },
+  {
+    to: "/settings/cellular",
+    label: "Cellular",
+    icon: Signal,
+    blurb: "Modem status, APN, and data cap.",
   },
   {
     to: "/settings/cloud",

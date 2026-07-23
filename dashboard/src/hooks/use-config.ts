@@ -21,6 +21,7 @@ export interface AgentConfig {
   network?: {
     wifi_client?: { ssid?: string };
     hotspot?: { enabled?: boolean };
+    cellular?: { enabled?: boolean; apn?: string };
   };
   server?: {
     mode?: string;

@@ -25,6 +25,7 @@ import { OtaRoute } from "@/routes/ota-route";
 import { PairingRoute } from "@/routes/pairing-route";
 import { PeripheralsRoute } from "@/routes/peripherals-route";
 import { AdvancedSettings } from "@/routes/settings/advanced-settings";
+import { CellularSettings } from "@/routes/settings/cellular-settings";
 import { CloudSettings } from "@/routes/settings/cloud-settings";
 import { DisplaySettings } from "@/routes/settings/display-settings";
 import { NetworkSettings } from "@/routes/settings/network-settings";
@@ -142,6 +143,7 @@ export function App() {
                   <Route path="profile" element={<ProfileSettings />} />
                   <Route path="region" element={<RegionSettings />} />
                   <Route path="network" element={<NetworkSettings />} />
+                  <Route path="cellular" element={<CellularSettings />} />
                   <Route path="cloud" element={<CloudSettings />} />
                   <Route path="display" element={<DisplaySettings />} />
                   <Route path="offload" element={<OffloadSettings />} />
