@@ -30,7 +30,10 @@ pub struct LinkStatistics {
     pub active_antenna: u8,
     /// RF mode (packet-rate index; the mapping to Hz is module-specific).
     pub rf_mode: u8,
-    /// Uplink TX power, dBm.
+    /// Uplink TX power level: an INDEX into the CRSF power table, NOT a dBm or
+    /// mW value. Map it with [`Self::uplink_tx_power_mw`] to report real power;
+    /// the table is 0→0 mW, 1→10, 2→25, 3→100, 4→500, 5→1000, 6→2000, 7→250,
+    /// 8→50 (mW).
     pub uplink_tx_power: u8,
     /// Downlink RSSI, dBm (negative).
     pub downlink_rssi: i8,
@@ -87,6 +90,26 @@ impl LinkStatistics {
         } else {
             self.uplink_rssi_ant1
         }
+    }
+
+    /// The uplink TX power in milliwatts, mapping the wire `uplink_tx_power`
+    /// power-level INDEX through the CRSF link-statistics power table. Returns
+    /// `None` for an index outside the defined table — an honest "unknown",
+    /// never a fabricated figure. The table (index → mW): 0→0, 1→10, 2→25,
+    /// 3→100, 4→500, 5→1000, 6→2000, 7→250, 8→50.
+    pub fn uplink_tx_power_mw(&self) -> Option<u16> {
+        Some(match self.uplink_tx_power {
+            0 => 0,
+            1 => 10,
+            2 => 25,
+            3 => 100,
+            4 => 500,
+            5 => 1000,
+            6 => 2000,
+            7 => 250,
+            8 => 50,
+            _ => return None,
+        })
     }
 }
 
@@ -347,6 +370,44 @@ mod tests {
         assert_eq!(s.downlink_snr, -6);
         // Active antenna 1 selects the ant2 reading.
         assert_eq!(s.active_uplink_rssi(), -60);
+    }
+
+    #[test]
+    fn uplink_tx_power_index_maps_to_the_crsf_power_table_milliwatts() {
+        // The wire uplink_tx_power is a power-level INDEX; each entry maps to the
+        // CRSF link-statistics power table (mW), and an out-of-table index is an
+        // honest None, never a fabricated figure.
+        let mut s = LinkStatistics {
+            uplink_rssi_ant1: -51,
+            uplink_rssi_ant2: -60,
+            uplink_lq: 99,
+            uplink_snr: 8,
+            active_antenna: 0,
+            rf_mode: 4,
+            uplink_tx_power: 0,
+            downlink_rssi: -55,
+            downlink_lq: 97,
+            downlink_snr: 6,
+        };
+        for (index, mw) in [
+            (0u8, 0u16),
+            (1, 10),
+            (2, 25),
+            (3, 100),
+            (4, 500),
+            (5, 1000),
+            (6, 2000),
+            (7, 250),
+            (8, 50),
+        ] {
+            s.uplink_tx_power = index;
+            assert_eq!(s.uplink_tx_power_mw(), Some(mw), "index {index}");
+        }
+        // Indices past the table are unknown, not a value.
+        s.uplink_tx_power = 9;
+        assert_eq!(s.uplink_tx_power_mw(), None);
+        s.uplink_tx_power = 255;
+        assert_eq!(s.uplink_tx_power_mw(), None);
     }
 
     #[test]

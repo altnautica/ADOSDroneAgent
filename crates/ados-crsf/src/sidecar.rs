@@ -5,7 +5,7 @@
 //!
 //! ```json
 //! { "v": 1, "state": "…", "rssi_dbm": …, "lq_uplink": …, "lq_downlink": …,
-//!   "snr_db": …, "band": …, "packet_rate_hz": …, "tx_power_dbm": …,
+//!   "snr_db": …, "band": …, "packet_rate_hz": …, "tx_power_mw": …,
 //!   "tx_frames_per_s": …, "rx_frames_per_s": …, "rf_unverified": …,
 //!   "flyable": …, "mode": …, "channel_source": …, "pic": …, "relay_role": … }
 //! ```
@@ -91,9 +91,12 @@ pub fn build_stats_value(state: LaneState, inputs: &StatsInputs<'_>) -> Value {
         .link
         .map(|l| Value::from(l.uplink_snr))
         .unwrap_or(Value::Null);
-    let tx_power_dbm = inputs
+    // The wire uplink_tx_power is a power-table INDEX, not a dBm/mW value — map
+    // it to real milliwatts (null for an out-of-table index, never fabricated).
+    let tx_power_mw = inputs
         .link
-        .map(|l| Value::from(l.uplink_tx_power))
+        .and_then(|l| l.uplink_tx_power_mw())
+        .map(Value::from)
         .unwrap_or(Value::Null);
     json!({
         "v": CRSF_STATS_SIDECAR_VERSION,
@@ -104,7 +107,7 @@ pub fn build_stats_value(state: LaneState, inputs: &StatsInputs<'_>) -> Value {
         "snr_db": snr_db,
         "band": inputs.band,
         "packet_rate_hz": inputs.packet_rate_hz,
-        "tx_power_dbm": tx_power_dbm,
+        "tx_power_mw": tx_power_mw,
         "tx_frames_per_s": inputs.tx_frames_per_s,
         "rx_frames_per_s": inputs.rx_frames_per_s,
         "rf_unverified": state.rf_unverified_flag(),
@@ -189,7 +192,7 @@ mod tests {
         "snr_db",
         "band",
         "packet_rate_hz",
-        "tx_power_dbm",
+        "tx_power_mw",
         "tx_frames_per_s",
         "rx_frames_per_s",
         "rf_unverified",
@@ -208,7 +211,8 @@ mod tests {
             uplink_snr: 8,
             active_antenna: 0,
             rf_mode: 4,
-            uplink_tx_power: 20,
+            // Power-level index 3 → 100 mW in the CRSF power table.
+            uplink_tx_power: 3,
             downlink_rssi: -55,
             downlink_lq: 97,
             downlink_snr: 6,
@@ -269,7 +273,8 @@ mod tests {
         assert_eq!(v["lq_uplink"], 99);
         assert_eq!(v["lq_downlink"], 97);
         assert_eq!(v["snr_db"], 8);
-        assert_eq!(v["tx_power_dbm"], 20);
+        // Power index 3 maps to 100 mW (not the raw index, not dBm).
+        assert_eq!(v["tx_power_mw"], 100);
         assert_eq!(v["packet_rate_hz"], 50);
         assert_eq!(v["tx_frames_per_s"], 49.8);
         assert_eq!(v["rx_frames_per_s"], 12.0);
@@ -280,6 +285,33 @@ mod tests {
         assert_eq!(v["pic"], "unclaimed");
         assert!(v["band"].is_null());
         assert!(v["relay_role"].is_null());
+    }
+
+    #[test]
+    fn tx_power_maps_the_index_to_milliwatts_and_reads_null_for_an_unknown_index() {
+        // A valid power-level index maps to its table mW (index 5 → 1000 mW).
+        let mut link = sample_link();
+        link.uplink_tx_power = 5;
+        let v = build_stats_value(
+            LaneState::LinkOk,
+            &StatsInputs {
+                link: Some(&link),
+                ..Default::default()
+            },
+        );
+        assert_eq!(v["tx_power_mw"], 1000);
+
+        // An index outside the CRSF power table reads null, never a fabricated
+        // figure (the wire byte is an enum index, not a raw mW/dBm value).
+        link.uplink_tx_power = 42;
+        let v = build_stats_value(
+            LaneState::LinkOk,
+            &StatsInputs {
+                link: Some(&link),
+                ..Default::default()
+            },
+        );
+        assert!(v["tx_power_mw"].is_null());
     }
 
     #[test]
