@@ -148,16 +148,44 @@ export function App() {
                 <Route path="/settings" element={<SettingsLayout />}>
                   <Route index element={<Navigate to="profile" replace />} />
                   <Route path="profile" element={<ProfileSettings />} />
-                  <Route path="region" element={<RegionSettings />} />
+                  <Route
+                    path="region"
+                    element={
+                      <ProfileGate allow={["drone", "ground_station"]}>
+                        <RegionSettings />
+                      </ProfileGate>
+                    }
+                  />
                   <Route path="network" element={<NetworkSettings />} />
                   <Route path="cellular" element={<CellularSettings />} />
                   <Route path="mac-pin" element={<MacPinSettings />} />
                   <Route path="cloud" element={<CloudSettings />} />
                   <Route path="self-heal" element={<SelfHealSettings />} />
-                  <Route path="mavlink" element={<MavlinkSettings />} />
+                  <Route
+                    path="mavlink"
+                    element={
+                      <ProfileGate allow={["drone"]}>
+                        <MavlinkSettings />
+                      </ProfileGate>
+                    }
+                  />
                   <Route path="security" element={<SecuritySettings />} />
-                  <Route path="vision" element={<VisionSettings />} />
-                  <Route path="atlas-swarm" element={<AtlasSwarmSettings />} />
+                  <Route
+                    path="vision"
+                    element={
+                      <ProfileGate allow={["drone"]}>
+                        <VisionSettings />
+                      </ProfileGate>
+                    }
+                  />
+                  <Route
+                    path="atlas-swarm"
+                    element={
+                      <ProfileGate allow={["drone"]}>
+                        <AtlasSwarmSettings />
+                      </ProfileGate>
+                    }
+                  />
                   <Route path="discovery" element={<DiscoverySettings />} />
                   <Route path="display" element={<DisplaySettings />} />
                   <Route path="offload" element={<OffloadSettings />} />

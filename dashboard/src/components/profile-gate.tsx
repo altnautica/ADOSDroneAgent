@@ -6,7 +6,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useStatus } from "@/hooks/use-status";
 import type { GroundRole, Profile } from "@/lib/types";
 
-type AllowedProfile = "drone" | "ground_station";
+export type AllowedProfile = "drone" | "ground_station";
 
 interface ProfileGateProps {
   allow: AllowedProfile[];

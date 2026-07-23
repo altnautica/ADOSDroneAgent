@@ -19,6 +19,9 @@ import {
 } from "lucide-react";
 import { NavLink, Outlet } from "react-router-dom";
 
+import type { AllowedProfile } from "@/components/profile-gate";
+import { useStatus } from "@/hooks/use-status";
+import type { Profile } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 // The settings nav is grouped into two tiers: a small uppercase group header
@@ -47,6 +50,23 @@ interface SectionLink {
   icon: LucideIcon;
   blurb: string;
   group: SettingsGroup;
+  /** Profiles this page applies to. Absent = every profile. Mirrors the GCS
+   * node-settings gates and the route's own ProfileGate so the nav never
+   * offers a page whose writes are inert on this profile. During the
+   * pre-detect ("auto"/"unknown") phase every page stays visible. */
+  allow?: AllowedProfile[];
+}
+
+/** Whether a section shows on `profile`, matching the ProfileGate convention:
+ * ungated pages always show; during pre-detect every page shows; otherwise the
+ * concrete profile must be in the allow list. */
+function sectionVisible(
+  allow: AllowedProfile[] | undefined,
+  profile: Profile,
+): boolean {
+  if (!allow) return true;
+  if (profile === "auto" || profile === "unknown") return true;
+  return allow.includes(profile as AllowedProfile);
 }
 
 const SECTIONS: SectionLink[] = [
@@ -93,6 +113,9 @@ const SECTIONS: SectionLink[] = [
     icon: Route,
     blurb: "FC transport, endpoints, and IDs.",
     group: "Link & network",
+    // MAVLink routing is the FC-connected drone's surface; a ground station has
+    // no MAVLink router to configure.
+    allow: ["drone"],
   },
   // VIDEO & VISION
   {
@@ -101,6 +124,8 @@ const SECTIONS: SectionLink[] = [
     icon: Eye,
     blurb: "Detection engine, backend, and thresholds.",
     group: "Video & vision",
+    // The on-board vision engine runs on the drone; a ground station has none.
+    allow: ["drone"],
   },
   {
     to: "/settings/atlas-swarm",
@@ -108,6 +133,8 @@ const SECTIONS: SectionLink[] = [
     icon: Boxes,
     blurb: "World-model capture and swarm defaults.",
     group: "Video & vision",
+    // World-model capture and swarm coordination are drone-fleet surfaces.
+    allow: ["drone"],
   },
   {
     to: "/settings/offload",
@@ -131,6 +158,9 @@ const SECTIONS: SectionLink[] = [
     icon: Globe,
     blurb: "Operating-region RF posture: unrestricted or pinned.",
     group: "System & safety",
+    // The operating region governs the RF radio; only the radio profiles have
+    // a regulatory domain to set.
+    allow: ["drone", "ground_station"],
   },
   {
     to: "/settings/self-heal",
@@ -163,6 +193,9 @@ const SECTIONS: SectionLink[] = [
 ];
 
 export function SettingsLayout() {
+  const status = useStatus();
+  const profile: Profile = (status.data?.profile as Profile) ?? "auto";
+
   return (
     <div className="container mx-auto px-4 py-6 max-w-5xl">
       <header className="mb-6 flex items-start gap-3">
@@ -179,7 +212,9 @@ export function SettingsLayout() {
       <div className="grid grid-cols-1 md:grid-cols-[220px_1fr] gap-6">
         <nav className="space-y-4">
           {GROUP_ORDER.map((group) => {
-            const links = SECTIONS.filter((s) => s.group === group);
+            const links = SECTIONS.filter(
+              (s) => s.group === group && sectionVisible(s.allow, profile),
+            );
             if (links.length === 0) return null;
             return (
               <div key={group} className="space-y-1">
