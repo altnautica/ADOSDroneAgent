@@ -8,7 +8,7 @@
 use ados_radio::config::WfbConfig;
 use ados_radio::link_quality::LinkStats;
 
-use super::args::STATE_REG_BLOCKED;
+use super::args::{STATE_NO_INJECTION, STATE_REG_BLOCKED};
 
 /// The regulatory picture the receive sidecar surfaces, symmetric with the
 /// drone side. `domain` is the LIVE global country (`None` when unreadable);
@@ -143,6 +143,76 @@ pub fn write_reg_blocked_sidecar(
             serde_json::Value::String(reason.to_string()),
         );
     }
+    let _ = crate::sidecars::write_json_atomic(
+        std::path::Path::new(crate::paths::WFB_STATS_JSON),
+        &v,
+        0o644,
+    );
+    if let Some(em) = ingest {
+        em.emit_event(
+            "link.wfb_status",
+            ados_protocol::logd::Level::Info,
+            json_object_to_fields(&v),
+        );
+    }
+}
+
+/// Write a `no_injection` ground sidecar so a stuck receive plane self-reports
+/// its degraded state instead of going silent. The direct-role run loop lands in
+/// the no-injection retry arm when an adapter resolved but monitor-mode injection
+/// setup did not establish — typically a slow-USB adapter, which is exactly the
+/// operator-visible CAUSE this sidecar must carry. No receive chain runs, so the
+/// link-quality block defaults and injection is denied; the adapter's chipset +
+/// USB speed/degraded facts ride verbatim so the panel shows WHY the link is
+/// stuck rather than a blank (Rule 44). Atomic via the Contract E writer.
+///
+/// The regulatory gate has not run in this arm (it precedes `prepare_interface`),
+/// so the reg picture is the honest unknown default — never a stale claim from a
+/// prior generation.
+///
+/// When an `IngestEmitter` is passed, the SAME body ships to the logging store as
+/// a single full-snapshot `link.wfb_status` event right after the file write, so
+/// the durable read source and the on-disk sidecar stay in lockstep on this
+/// degraded-state write too — symmetric with the reg-blocked writer. Best-effort:
+/// an absent logging daemon drops the event without disturbing the retry loop.
+pub fn write_no_injection_sidecar(
+    interface: &str,
+    adapter: &GsAdapterInfo,
+    channel: u8,
+    cfg: &WfbConfig,
+    ingest: Option<&ados_protocol::logd::emitter::IngestEmitter>,
+) {
+    let snap = LinkStats::default();
+    // The chain is not running, so the live channel cannot be read; report the
+    // rendezvous home for actual/rendezvous/operating.
+    let channels = GsChannelTruth {
+        actual: channel,
+        rendezvous: channel,
+        operating: channel,
+    };
+    // No receive chain is running, so no injection is claimed. The USB facts are
+    // physical properties of the selected adapter and stay truthful here — a
+    // stuck no-injection arm on a slow-USB adapter must still show WHY.
+    let adapter = GsAdapterInfo {
+        injection_ok: false,
+        ..adapter.clone()
+    };
+    let v = build_gs_stats(
+        &snap,
+        interface,
+        &adapter,
+        channels,
+        &GsRegSnapshot::default(),
+        cfg,
+        STATE_NO_INJECTION,
+        crate::acquire::AcquireState::Searching.as_str(),
+        false, // not channel-locked
+        0.0,   // no valid decodes
+        0,     // no reacquire kills
+        0,     // no zombie kills
+        None,  // no silence window (the chain is not running)
+        0.0,   // no inbound video
+    );
     let _ = crate::sidecars::write_json_atomic(
         std::path::Path::new(crate::paths::WFB_STATS_JSON),
         &v,
@@ -321,7 +391,9 @@ fn json_to_mpv(value: &serde_json::Value) -> ados_protocol::logd::Value {
 
 #[cfg(test)]
 mod tests {
-    use super::super::args::{STATE_ACTIVE, STATE_REG_BLOCKED, STATE_SEARCHING};
+    use super::super::args::{
+        STATE_ACTIVE, STATE_NO_INJECTION, STATE_REG_BLOCKED, STATE_SEARCHING,
+    };
     use super::*;
 
     #[test]
@@ -897,6 +969,116 @@ mod tests {
             );
             assert_eq!(back["adapter_usb_degraded"], body["adapter_usb_degraded"]);
         }
+    }
+
+    #[test]
+    fn no_injection_state_string_is_bland_and_stable() {
+        // The sidecar surfaces this verbatim; keep it stable and tag-free.
+        assert_eq!(STATE_NO_INJECTION, "no_injection");
+    }
+
+    #[test]
+    fn no_injection_sidecar_carries_the_state_and_denies_injection() {
+        // The no-injection sidecar is written from the run loop when an adapter
+        // resolved but injection setup did not establish. It must surface the
+        // `no_injection` state and never claim injection while no receive chain
+        // runs. Assert the JSON shape build_gs_stats produces for that state,
+        // matching what the file writer serializes.
+        let channels = GsChannelTruth {
+            actual: 149,
+            rendezvous: 149,
+            operating: 149,
+        };
+        let adapter = GsAdapterInfo::new(Some("rtl88x2eu".to_string()), false, Some(480));
+        let v = build_gs_stats(
+            &LinkStats::default(),
+            "wlan1",
+            &adapter,
+            channels,
+            &GsRegSnapshot::default(),
+            &WfbConfig::default(),
+            STATE_NO_INJECTION,
+            crate::acquire::AcquireState::Searching.as_str(),
+            false,
+            0.0,
+            0,
+            0,
+            None,
+            0.0,
+        );
+        assert_eq!(v["state"], "no_injection");
+        assert_eq!(v["link_state"], "no_injection");
+        assert_eq!(v["adapter_injection_ok"], false);
+        assert_eq!(v["channel_locked"], false);
+        assert_eq!(v["valid_rx_packets_per_s"], 0.0);
+        assert_eq!(v["profile"], "ground_station");
+    }
+
+    #[test]
+    fn no_injection_sidecar_surfaces_the_slow_usb_cause() {
+        // The whole point of the write: a slow-USB adapter — exactly what lands a
+        // rig in the no-injection arm — must carry its USB speed + degraded flag
+        // so the operator sees WHY the receive plane is stuck, instead of the arm
+        // going silent (Rule 44).
+        let channels = GsChannelTruth {
+            actual: 149,
+            rendezvous: 149,
+            operating: 149,
+        };
+        let adapter = GsAdapterInfo::new(Some("rtl88x2eu".to_string()), false, Some(12));
+        let v = build_gs_stats(
+            &LinkStats::default(),
+            "wlan1",
+            &adapter,
+            channels,
+            &GsRegSnapshot::default(),
+            &WfbConfig::default(),
+            STATE_NO_INJECTION,
+            crate::acquire::AcquireState::Searching.as_str(),
+            false,
+            0.0,
+            0,
+            0,
+            None,
+            0.0,
+        );
+        assert_eq!(v["state"], "no_injection");
+        assert_eq!(v["adapter_usb_speed_mbps"], 12);
+        assert_eq!(v["adapter_usb_degraded"], true);
+    }
+
+    #[tokio::test]
+    async fn no_injection_sidecar_emits_the_status_event_when_given_an_emitter() {
+        // The no-injection write is a GS degraded-state path: passing an emitter
+        // must ship the same body to the store as a `link.wfb_status` event so a
+        // store-first read never lags the on-disk sidecar. The emitter records
+        // every enqueue regardless of a listening daemon; the unconditional emit
+        // fires after the best-effort file write, so the assertion holds whether
+        // or not the runtime sidecar path is writable in the test environment.
+        let dir = tempfile::tempdir().unwrap();
+        let emitter = ados_protocol::logd::emitter::IngestEmitter::with_socket(
+            "ados-groundlink",
+            dir.path().join("ingest.sock"),
+        );
+        let stats = emitter.stats();
+        let adapter = GsAdapterInfo::new(Some("rtl88x2eu".to_string()), false, Some(12));
+        write_no_injection_sidecar(
+            "wlan1",
+            &adapter,
+            149,
+            &WfbConfig::default(),
+            Some(&emitter),
+        );
+        assert_eq!(stats.enqueued(), 1);
+
+        // With no emitter the write enqueues nothing.
+        let none_emitter = ados_protocol::logd::emitter::IngestEmitter::with_socket(
+            "ados-groundlink",
+            dir.path().join("ingest2.sock"),
+        );
+        let none_stats = none_emitter.stats();
+        write_no_injection_sidecar("wlan1", &adapter, 149, &WfbConfig::default(), None);
+        assert_eq!(none_stats.enqueued(), 0);
     }
 
     #[tokio::test]

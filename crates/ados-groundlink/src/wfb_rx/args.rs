@@ -40,6 +40,13 @@ pub const STATE_SEARCHING: &str = "searching";
 /// permitted. Mirrors the drone-side `reg_blocked` state so the panel shows the
 /// regulatory conflict on either rig in one glance.
 pub const STATE_REG_BLOCKED: &str = "reg_blocked";
+/// A receive adapter was selected but injection setup did not establish (the
+/// usual cause is a slow-USB link that cannot carry usable RF). No receive chain
+/// is running, so a stuck receive plane surfaces this state — carrying the
+/// adapter's USB speed/degraded facts — instead of going silent while the run
+/// loop retries. Distinct from `reg_blocked` (a regulatory-gate refusal) and from
+/// `searching` (a chain is up, hunting for the channel).
+pub const STATE_NO_INJECTION: &str = "no_injection";
 
 /// Data-plane RX `wfb_rx` args for the ground profile. `-l 1000` enables the
 /// per-second stats lines on stdout (without it the monitor stays empty and the

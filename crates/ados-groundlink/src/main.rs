@@ -456,10 +456,27 @@ async fn receive_loop(
                 (sel.ifname, adapter)
             }
             Some(sel) => {
-                // No injection: keep the USB facts, since a slow USB link is
-                // exactly the reason injection setup fails.
-                manager.set_adapter(wfb_rx::GsAdapterInfo::from(&sel));
-                tracing::warn!(interface = %sel.ifname, "ground_wfb_adapter_no_injection");
+                // Injection setup did not establish. A slow USB link is the usual
+                // cause, so keep the USB facts and publish a `no_injection`
+                // sidecar carrying them: a stuck receive plane must self-report
+                // WHY it is deaf (Rule 44) rather than going silent while the run
+                // loop retries. Without this write a slow-USB adapter — exactly
+                // what lands a rig in this arm — reports nothing at all.
+                let adapter = wfb_rx::GsAdapterInfo::from(&sel);
+                manager.set_adapter(adapter.clone());
+                wfb_rx::write_no_injection_sidecar(
+                    &sel.ifname,
+                    &adapter,
+                    config.rendezvous_channel(),
+                    config,
+                    Some(&ingest),
+                );
+                tracing::warn!(
+                    interface = %sel.ifname,
+                    usb_speed_mbps = ?adapter.usb_speed_mbps,
+                    usb_degraded = adapter.usb_degraded,
+                    "ground_wfb_adapter_no_injection"
+                );
                 tokio::time::sleep(Duration::from_secs(backoff as u64)).await;
                 backoff = (backoff * 2.0).min(30.0);
                 continue;
