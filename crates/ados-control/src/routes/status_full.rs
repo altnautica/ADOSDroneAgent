@@ -48,6 +48,17 @@
 //!   never a fabricated block. Served as the full snake_case sidecar field set —
 //!   the richer set including `flyable` + `pic` + `fc_command_down_gated` the
 //!   cloud heartbeat projection drops — so the GCS reads these keys directly.
+//! - **`linked_peers` + `peerDeviceId`/`peerRssiDbm`** — the WFB peers this node
+//!   currently decodes a PresenceBeacon from, folded in from the
+//!   `linked-peers.json` sidecar (per-entry staleness-gated). This carries the
+//!   LOCAL-FIRST transitive-enrollment signal (a ground node's relayed drones)
+//!   onto the PRIMARY LAN path, so a GCS paired only to a ground node enrols each
+//!   relayed drone without the cloud relay — the same signal the cloud heartbeat
+//!   carries. The array entries use the snake_case shape the GCS reader consumes
+//!   (`device_id` / `role` / `channel` / `rssi_dbm` / `seen_at_unix`, remapping the
+//!   sidecar's `last_seen_unix`); the two scalars are the freshest-peer fallback.
+//!   PROFILE-AGNOSTIC (it reads the sidecar, not the profile); the keys are absent
+//!   when no fresh peer is decoded, never a fabricated block.
 //!
 //! Every read is fault-tolerant: an absent store / sidecar / config / systemctl
 //! degrades that block to the same empty/default shape the FastAPI route returns
@@ -171,6 +182,17 @@ pub async fn get_full_status(State(state): State<AppState>, headers: HeaderMap) 
 
     // Camera presence + USB-recovery, folded in only when the sidecars are fresh.
     for (k, v) in read_camera_status() {
+        payload.insert(k, v);
+    }
+
+    // Linked WFB peers + the freshest-peer scalars, folded in only when this node
+    // currently decodes a fresh PresenceBeacon from at least one WFB peer. This is
+    // the LOCAL-FIRST transitive-enrollment signal (a ground node's relayed drones)
+    // the cloud heartbeat carries, now on the PRIMARY LAN path (Rule 39), so a GCS
+    // paired only to a ground node enrols each relayed drone without the cloud
+    // relay. PROFILE-AGNOSTIC; the keys are absent on a drone / a peerless node / a
+    // node whose relay lane went quiet, never a fabricated block (operating rule 44).
+    for (k, v) in read_linked_peers() {
         payload.insert(k, v);
     }
 
@@ -1710,6 +1732,124 @@ fn read_crsf_status_in(path: &Path, now: std::time::SystemTime) -> Option<Value>
 }
 
 // ---------------------------------------------------------------------------
+// Linked WFB peers: the relay peer list + freshest-peer scalars.
+// ---------------------------------------------------------------------------
+
+/// The linked-WFB-peers snapshot sidecar filename under the run dir. The
+/// receive-side presence listener rewrites it ~every 5 s with every drone whose
+/// PresenceBeacon it currently decodes (the sibling the cloud heartbeat folds).
+const LINKED_PEERS_SIDECAR: &str = "linked-peers.json";
+
+/// A linked peer whose last decoded beacon is older than this reads as stale and
+/// is dropped, matching the receive listener's prune window
+/// (`LINKED_PEER_STALE_AFTER_S`) and the cloud heartbeat's fold of the same
+/// sidecar. Per-entry gating also covers the dead-writer case: a stale file's
+/// entries are all old, so the whole fold reads absent rather than republishing
+/// ghost peers (operating rule 44).
+const LINKED_PEER_STALE_S: f64 = 60.0;
+
+/// One raw peer row as the linked-peers sidecar writes it (snake_case, the
+/// receive listener's `LinkedPeer`). The sidecar's `version` / `wall_time_unix`
+/// header keys are ignored as unknown fields, exactly like the cloud fold.
+#[derive(Debug, Default, serde::Deserialize)]
+struct LinkedPeerRow {
+    #[serde(default)]
+    device_id: String,
+    #[serde(default)]
+    role: String,
+    #[serde(default)]
+    channel: u8,
+    #[serde(default)]
+    rssi_dbm: i8,
+    #[serde(default)]
+    last_seen_unix: f64,
+}
+
+/// The linked-peers sidecar document (the peer list plus header keys we ignore).
+#[derive(Debug, Default, serde::Deserialize)]
+struct LinkedPeersDoc {
+    #[serde(default)]
+    peers: Vec<LinkedPeerRow>,
+}
+
+/// The linked-WFB-peers fold for the consolidated body: the fresh peer set as the
+/// top-level `linked_peers` array plus the freshest peer's `peerDeviceId` /
+/// `peerRssiDbm` scalars, so a GCS paired LOCAL-FIRST to a ground node can
+/// transitively enrol each drone that node relays over WFB — the exact signal the
+/// cloud heartbeat carries, now on the PRIMARY LAN path (Rule 39).
+///
+/// Each array entry is served in the SNAKE_CASE shape the GCS
+/// `FullStatusResponse.linked_peers` reader consumes: `device_id` / `role` /
+/// `channel` / `rssi_dbm` / `seen_at_unix`. The sidecar writes the last-decode
+/// time as `last_seen_unix`; the reader keys on `seen_at_unix`, so it is REMAPPED
+/// on emit. The scalars `peerDeviceId` / `peerRssiDbm` are camelCase, the
+/// single-peer fallback the GCS reads until it prefers the list.
+///
+/// PROFILE-AGNOSTIC by construction — it reads the sidecar, not the profile — and
+/// staleness-gated per entry, so the fold is absent (no keys) on a drone / a
+/// peerless ground node / a node whose relay lane went quiet, never a fabricated
+/// block (operating rule 44).
+pub(crate) fn read_linked_peers() -> Vec<(String, Value)> {
+    read_linked_peers_in(&run_dir().join(LINKED_PEERS_SIDECAR), now_unix_secs())
+}
+
+/// The path + now injectable core of [`read_linked_peers`], so a test drives the
+/// freshness gate deterministically against a tempdir. Absent / unreadable /
+/// unparseable → nothing folded; each entry gated on the prune window (a future
+/// timestamp counts as fresh, tolerating clock skew, matching the cloud fold);
+/// the whole fold omitted when no fresh, id-bearing peer survives.
+fn read_linked_peers_in(path: &Path, now: f64) -> Vec<(String, Value)> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(doc) = serde_json::from_str::<LinkedPeersDoc>(&text) else {
+        return Vec::new();
+    };
+
+    let fresh: Vec<&LinkedPeerRow> = doc
+        .peers
+        .iter()
+        .filter(|p| !p.device_id.is_empty())
+        .filter(|p| p.last_seen_unix > 0.0 && (now - p.last_seen_unix) <= LINKED_PEER_STALE_S)
+        .collect();
+    if fresh.is_empty() {
+        return Vec::new();
+    }
+
+    // The freshest peer (max last-seen) backs the single-peer scalar fallback.
+    let freshest = fresh
+        .iter()
+        .max_by(|a, b| {
+            a.last_seen_unix
+                .partial_cmp(&b.last_seen_unix)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .expect("fresh is non-empty");
+
+    let entries: Vec<Value> = fresh
+        .iter()
+        .map(|p| {
+            json!({
+                "device_id": p.device_id,
+                "role": p.role,
+                "channel": p.channel,
+                "rssi_dbm": p.rssi_dbm,
+                // The sidecar writes `last_seen_unix`; the GCS reader keys on
+                // `seen_at_unix`. Remap on emit so this LAN producer stays in
+                // lockstep with the FullStatusResponse.linked_peers reader.
+                "seen_at_unix": p.last_seen_unix,
+            })
+        })
+        .collect();
+
+    vec![
+        ("linked_peers".to_string(), Value::Array(entries)),
+        ("peerDeviceId".to_string(), json!(freshest.device_id)),
+        ("peerRssiDbm".to_string(), json!(freshest.rssi_dbm)),
+    ]
+}
+
+// ---------------------------------------------------------------------------
 // logd query seam + shared helpers.
 // ---------------------------------------------------------------------------
 
@@ -2651,12 +2791,117 @@ mod tests {
         assert!(read_crsf_status_in(&path, std::time::SystemTime::now()).is_none());
     }
 
+    // -------- linked WFB peers fold --------
+
+    /// A ground node decoding fresh PresenceBeacons folds the peer list + the
+    /// freshest-peer scalars onto the body. The array entries carry EXACTLY the
+    /// snake_case key set the GCS `FullStatusResponse.linked_peers` reader consumes,
+    /// with the sidecar's `last_seen_unix` remapped to `seen_at_unix`. This pins the
+    /// LAN producer to the GCS reader so the two never drift apart.
+    #[test]
+    fn linked_peers_fold_the_fresh_set_and_scalars_snake_case() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = 1_700_000_000.0;
+        let older = now - 5.0;
+        std::fs::write(
+            dir.path().join("linked-peers.json"),
+            format!(
+                r#"{{"version":1,"wall_time_unix":{now},"peers":[
+                    {{"device_id":"drone-a","role":"drone","channel":149,"rssi_dbm":-51,"last_seen_unix":{now}}},
+                    {{"device_id":"drone-b","role":"drone","channel":157,"rssi_dbm":-63,"last_seen_unix":{older}}}
+                ]}}"#
+            ),
+        )
+        .unwrap();
+
+        let map: Map<String, Value> =
+            read_linked_peers_in(&dir.path().join("linked-peers.json"), now)
+                .into_iter()
+                .collect();
+
+        let peers = map.get("linked_peers").unwrap().as_array().unwrap();
+        assert_eq!(peers.len(), 2);
+
+        // The freshest peer (drone-a) leads the list (writer newest-first).
+        let entry = peers[0].as_object().unwrap();
+        // EXACTLY the snake_case entry key set the GCS reader keys on.
+        let mut keys: Vec<&str> = entry.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["channel", "device_id", "role", "rssi_dbm", "seen_at_unix"]
+        );
+        // The sidecar's `last_seen_unix` was remapped — never surfaced verbatim.
+        assert!(!entry.contains_key("last_seen_unix"));
+        assert_eq!(entry["device_id"], json!("drone-a"));
+        assert_eq!(entry["role"], json!("drone"));
+        assert_eq!(entry["channel"], json!(149));
+        assert_eq!(entry["rssi_dbm"], json!(-51));
+        assert_eq!(entry["seen_at_unix"], json!(now));
+
+        // The camelCase scalar fallback carries the freshest peer.
+        assert_eq!(map.get("peerDeviceId"), Some(&json!("drone-a")));
+        assert_eq!(map.get("peerRssiDbm"), Some(&json!(-51)));
+    }
+
+    /// Every entry past the prune window → nothing folded, so a quiet / dead lane
+    /// clears the surface rather than pinning ghost peers (operating rule 44).
+    #[test]
+    fn linked_peers_absent_when_every_entry_is_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = 1_700_000_000.0;
+        let stale = now - 120.0; // > the 60 s prune window
+        std::fs::write(
+            dir.path().join("linked-peers.json"),
+            format!(
+                r#"{{"version":1,"peers":[{{"device_id":"drone-a","role":"drone","channel":149,"rssi_dbm":-51,"last_seen_unix":{stale}}}]}}"#
+            ),
+        )
+        .unwrap();
+        assert!(read_linked_peers_in(&dir.path().join("linked-peers.json"), now).is_empty());
+    }
+
+    /// An id-less peer is dropped; a file of only id-less entries folds nothing.
+    #[test]
+    fn linked_peers_drop_idless_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = 1_700_000_000.0;
+        std::fs::write(
+            dir.path().join("linked-peers.json"),
+            format!(
+                r#"{{"peers":[{{"device_id":"","role":"drone","channel":149,"rssi_dbm":-51,"last_seen_unix":{now}}}]}}"#
+            ),
+        )
+        .unwrap();
+        assert!(read_linked_peers_in(&dir.path().join("linked-peers.json"), now).is_empty());
+    }
+
+    /// A missing sidecar (a drone / a peerless node) folds nothing — never a
+    /// fabricated block.
+    #[test]
+    fn linked_peers_absent_when_the_sidecar_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            read_linked_peers_in(&dir.path().join("linked-peers.json"), 1_700_000_000.0).is_empty()
+        );
+    }
+
+    /// A malformed sidecar folds nothing (never a 500, never garbage keys).
+    #[test]
+    fn linked_peers_absent_when_the_sidecar_is_malformed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("linked-peers.json");
+        std::fs::write(&path, b"not json {{{").unwrap();
+        assert!(read_linked_peers_in(&path, 1_700_000_000.0).is_empty());
+    }
+
     // -------- golden fixture (envelope shape) --------
 
     /// Golden-fixture parity: the consolidated body carries exactly the 17 stable
-    /// top-level keys (the camera keys AND the `crsf` RC-lane block are
-    /// conditionally folded in from their sidecars, so they are not part of the
-    /// always-present envelope). This pins the envelope the GCS reads.
+    /// top-level keys (the camera keys, the `crsf` RC-lane block, AND the
+    /// linked-WFB-peers keys are conditionally folded in from their sidecars, so
+    /// they are not part of the always-present envelope). This pins the envelope
+    /// the GCS reads.
     ///
     /// ```json
     /// {
