@@ -59,6 +59,16 @@ export interface AgentConfig {
       api_key?: string;
     };
   };
+  // GET /api/config redacts secrets: api_key comes back as the "***" sentinel
+  // when set, "" when unset. The dashboard only reads the set/unset state.
+  security?: {
+    hmac_enabled?: boolean;
+    setup_token_required?: boolean;
+    api?: {
+      api_key?: string;
+      cors_enabled?: boolean;
+    };
+  };
   // Two-tier perception execution: the drone-side offload target + the
   // workstation-side serving toggle. Read on the Offload settings page.
   perception?: {
