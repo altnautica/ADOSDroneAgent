@@ -17,6 +17,7 @@ import { SkillBar } from "@/components/feed/skill-bar";
 import { StreamTabs } from "@/components/feed/stream-tabs";
 import { VideoLayer } from "@/components/shell/video-layer";
 import { FlightTelemetryProvider } from "@/hooks/flight-telemetry-context";
+import { resolveActiveCameraId } from "@/lib/overlay-geometry";
 import { useProfile } from "@/hooks/use-profile";
 import { useRoster } from "@/hooks/use-roster";
 import { useVisionDetections } from "@/hooks/use-vision-detections";
@@ -68,7 +69,9 @@ export function FeedScreen() {
         <VideoLayer whepUrl={whepUrl} reconnectKey={reconnectKey} />
         {visionCapable ? (
           <DetectionOverlay
-            activeCameraId={activeCameraId}
+            // Follow the SAME leg the video shows — the resolved leg id, not the
+            // raw selection — so boxes draw on the headline leg with no click.
+            activeCameraId={resolveActiveCameraId(activeCameraId, cameras)}
             multiStream={cameras.length > 1}
           />
         ) : null}

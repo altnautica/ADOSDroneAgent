@@ -4,6 +4,7 @@ import type { CockpitDetectionBatch } from "@/stores/detections-store";
 import {
   computeRenderedRect,
   pickActiveBatch,
+  resolveActiveCameraId,
   scaleBoxToRect,
 } from "@/lib/overlay-geometry";
 
@@ -118,5 +119,38 @@ describe("pickActiveBatch", () => {
   it("draws nothing on a multi-stream node with no active leg or no match", () => {
     expect(pickActiveBatch(true, latest, byCamera, null)).toBeNull();
     expect(pickActiveBatch(true, latest, byCamera, "cam-9")).toBeNull();
+  });
+
+  it("draws the first leg's boxes on a 2-camera node with no tab clicked", () => {
+    // The regression: with no selection the overlay must follow the same leg the
+    // video shows (the first camera), not draw nothing. Resolve, then pick.
+    const cameras = [{ id: "cam-0" }, { id: "cam-1" }];
+    const resolved = resolveActiveCameraId(null, cameras);
+    expect(pickActiveBatch(true, latest, byCamera, resolved)).toBe(
+      byCamera["cam-0"],
+    );
+  });
+});
+
+describe("resolveActiveCameraId", () => {
+  const cameras = [{ id: "cam-0" }, { id: "cam-1" }];
+
+  it("follows the first leg when nothing is selected (no click)", () => {
+    expect(resolveActiveCameraId(null, cameras)).toBe("cam-0");
+  });
+
+  it("keeps the explicit selection when a leg is chosen", () => {
+    expect(resolveActiveCameraId("cam-1", cameras)).toBe("cam-1");
+  });
+
+  it("falls back to the first leg when the selection left the roster", () => {
+    // A stale selection (camera removed) must not diverge from the video, which
+    // also falls back to the first camera.
+    expect(resolveActiveCameraId("cam-9", cameras)).toBe("cam-0");
+  });
+
+  it("is null for an empty roster", () => {
+    expect(resolveActiveCameraId(null, [])).toBeNull();
+    expect(resolveActiveCameraId("cam-0", [])).toBeNull();
   });
 });

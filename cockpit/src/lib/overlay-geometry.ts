@@ -102,3 +102,23 @@ export function pickActiveBatch(
   if (activeCameraId == null) return null;
   return byCamera[activeCameraId] ?? null;
 }
+
+/**
+ * Resolve which camera leg the overlay should read boxes for, mirroring exactly
+ * how the video layer and stream tabs resolve the shown leg: the selected camera
+ * when it is still in the roster, else the first camera. This is what makes the
+ * overlay follow the SAME leg the video shows with no click — passing the raw
+ * `activeCameraId` (null until a tab is clicked) would make `pickActiveBatch`
+ * draw nothing on the headline leg even though the video is playing it. A stale
+ * selection (a camera that dropped out of the roster) falls back to the first
+ * leg, so the overlay never diverges from the video. Returns null only for an
+ * empty roster.
+ */
+export function resolveActiveCameraId(
+  activeCameraId: string | null,
+  cameras: readonly { id: string }[],
+): string | null {
+  const active =
+    cameras.find((c) => c.id === activeCameraId) ?? cameras[0] ?? null;
+  return active?.id ?? null;
+}
