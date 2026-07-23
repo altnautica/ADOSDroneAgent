@@ -472,6 +472,35 @@ def read_sidecar(job_id: str, *, root: Path | None = None) -> dict[str, Any] | N
         return None
 
 
+def read_sidecar_snapshot(
+    job_id: str, *, root: Path | None = None
+) -> tuple[dict[str, Any], float] | None:
+    """Read the sidecar payload AND its mtime from ONE open file handle.
+
+    The stream loop decides "did the job state change?" from the mtime and
+    then sends the payload; those two facts must describe the SAME file
+    version. Reading the content with ``read_sidecar`` and then ``stat()``ing
+    the mtime separately raced: a write (tmp + atomic rename) landing between
+    the two syscalls paired stale content with a fresh mtime, so the loop
+    streamed the previous payload under the new change token and then never
+    re-sent the real update (the reader saw the new mtime as already-seen).
+    Taking both from one open fd makes them a single consistent snapshot —
+    an atomic replace happens entirely before or entirely after the open, so
+    the fd always yields matching (payload, mtime).
+    """
+    path = sidecar_path(job_id, root=root)
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            mtime = os.fstat(handle.fileno()).st_mtime
+            payload = json.loads(handle.read())
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError) as exc:
+        log.warning("sidecar_read_failed", path=str(path), error=str(exc))
+        return None
+    return payload, mtime
+
+
 def clear_sidecar(job_id: str, *, root: Path | None = None) -> None:
     path = sidecar_path(job_id, root=root)
     try:
@@ -541,12 +570,9 @@ async def run_job_progress_stream(
     last_mtime: float = 0.0
     idle_since = time.monotonic()
     while True:
-        payload = read_sidecar(job_id, root=sidecar_root)
-        if payload is not None:
-            try:
-                mtime = sidecar_path(job_id, root=sidecar_root).stat().st_mtime
-            except FileNotFoundError:
-                mtime = 0.0
+        snapshot = read_sidecar_snapshot(job_id, root=sidecar_root)
+        if snapshot is not None:
+            payload, mtime = snapshot
             if mtime != last_mtime:
                 last_mtime = mtime
                 idle_since = time.monotonic()
