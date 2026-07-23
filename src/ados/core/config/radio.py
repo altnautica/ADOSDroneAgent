@@ -19,15 +19,18 @@ class CrsfConfig(BaseModel):
 
     ``device`` pins the serial node the RC transmitter module is attached to
     (e.g. ``/dev/ttyUSB0``). A pinned device is excluded from flight-controller
-    serial discovery and classified as the RC module by the hot-plug monitor,
-    so plugging the module can never disturb the FC link. ``None`` = no pin;
-    the lane probes for a known RC-bridge when enabled.
+    serial discovery and (in ``crsf_rc`` / ``airport`` mode) owned by the RC
+    lane, so plugging the module can never disturb the FC link. ``None`` = no
+    pin, and the lane stands by unconfigured: a device must be pinned for the
+    lane to run — it never auto-probes for a bridge.
 
-    ``enabled`` opts the lane in. It additionally allows the hot-plug monitor
-    to classify a known RC-bridge USB id (CP2102/CH340/ESP32-S3) as the RC
-    module even without a pin; with the lane off and no pin, a generic
-    USB-serial bridge stays an FC candidate (a VID alone cannot distinguish an
-    FC behind the same bridge from an RC module).
+    ``enabled`` opts the lane in. It is what makes the pinned ``device`` an
+    ADOS radio-lane port: while the lane is off the pin names nothing this
+    agent owns, so flight-controller discovery treats every serial node — the
+    pinned one included — as an FC candidate. Node classification is by the pin
+    and the lane ``mode`` alone, never by a USB bridge id: a bridge VID
+    (CP2102/CH340/ESP32-S3) cannot tell an FC behind that bridge apart from an
+    RC module, so only the pinned device is ever taken for the RC module.
 
     ``band`` selects the module's operating band class: ``dual`` (a dual-band
     Gemini module running both links), ``900`` (sub-GHz only), or ``2p4``
