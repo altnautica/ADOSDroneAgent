@@ -159,6 +159,16 @@ export interface VehicleState {
    *  Absent today (the vehicle snapshot carries no home), so the HUD renders a
    *  dash rather than fabricating a distance. */
   home_distance?: number | null;
+  /** Surround obstacle ranging (MAVLink OBSTACLE_DISTANCE) when the agent's
+   *  sensor stack surfaces a proximity sensor onto the snapshot. Absent on the
+   *  base wire today; the radar reads it tolerantly and paints sectors only when
+   *  real ranges are present (65535 = no reading for a sector). Distances are in
+   *  centimetres, one per `increment` degrees from `angle_offset`. */
+  obstacle?: {
+    distances_cm?: number[] | null;
+    increment_deg?: number | null;
+    angle_offset_deg?: number | null;
+  } | null;
   /** ISO 8601 stamp of the last message / heartbeat received. On-box the panel
    *  shares the agent's clock, so these gate attitude freshness reliably. */
   last_update?: string;

@@ -12,6 +12,7 @@ import { DetectionOverlay } from "@/components/feed/detection-overlay";
 import { FeedActionBar } from "@/components/feed/feed-action-bar";
 import { FeedHud } from "@/components/feed/feed-hud";
 import { MiniMap } from "@/components/feed/mini-map";
+import { ProximityRadar } from "@/components/feed/proximity-radar";
 import { SkillBar } from "@/components/feed/skill-bar";
 import { StreamTabs } from "@/components/feed/stream-tabs";
 import { VideoLayer } from "@/components/shell/video-layer";
@@ -74,6 +75,7 @@ export function FeedScreen() {
         <FeedHud />
         {cameras.length > 1 ? <StreamTabs cameras={cameras} /> : null}
         {flightNavCapable ? <MiniMap /> : null}
+        {flightNavCapable ? <ProximityRadar /> : null}
         <SkillBar />
         <FeedActionBar />
       </div>
