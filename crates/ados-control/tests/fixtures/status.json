@@ -22,6 +22,7 @@
   "fc_port": "",
   "fcSource": "auto",
   "fcLinkHint": "none",
+  "fcCommandDownGated": false,
   "fcVariant": null,
   "fcFirmware": "unknown",
   "fcReachable": false,

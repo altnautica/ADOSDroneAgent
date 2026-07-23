@@ -368,7 +368,13 @@ impl FcConnection {
     /// the bench gate. Because `open()` resolves a `CrsfMavlinkSource` iff
     /// `crsf_mavlink_source()` is `Some`, this predicate is exactly "the open
     /// transport is that source AND its command marker is off".
-    fn command_down_gated(&self) -> bool {
+    ///
+    /// Surfaced on the FC status snapshot (`fc_command_down_gated`) so a status
+    /// consumer can report "telemetry connected, commands gated" honestly: with
+    /// no writer a GCS command over this source is silently dropped, and a plain
+    /// `fc_connected: true` would mislead the operator into thinking it reached
+    /// the FC.
+    pub fn command_down_gated(&self) -> bool {
         self.cfg.crsf_mavlink_source().is_some() && !self.cfg.crsf_mavlink_command_enabled
     }
     pub fn param_priming(&self) -> bool {

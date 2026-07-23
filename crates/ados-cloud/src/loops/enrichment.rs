@@ -352,6 +352,13 @@ fn fold_fc(obj: &mut Map<String, Value>) {
             obj.insert("fcLinkHint".to_string(), json!(hint));
         }
     }
+    // Whether the open FC source runs telemetry-only with its host->FC
+    // command-down direction gated closed (a MAVLink-over-ELRS ingest). Carry it
+    // over cloud relay so a cloud-paired GCS renders "commands gated" rather than
+    // a bare connected boolean and never assumes a command reached the FC.
+    if let Some(gated) = map.get("fc_command_down_gated").and_then(Value::as_bool) {
+        obj.insert("fcCommandDownGated".to_string(), json!(gated));
+    }
     // The FC firmware family (betaflight/inav) from the USB descriptor, so a
     // cloud-relay GCS can badge an MSP FC instead of showing "not connected".
     if let Some(variant) = map.get("fc_variant").and_then(Value::as_str) {
@@ -705,6 +712,7 @@ ados-mavlink-router.service loaded active running ADOS MAVLink router
             "heartbeat_age_s": 0.5,
             "fc_source": "serial",
             "fc_link_hint": "none",
+            "fc_command_down_gated": true,
             "fc_variant": "betaflight",
             "fc_firmware": "betaflight"
         });
@@ -747,6 +755,7 @@ ados-mavlink-router.service loaded active running ADOS MAVLink router
             assert_eq!(obj.get("heartbeatAgeS"), Some(&json!(0.5)));
             assert_eq!(obj.get("fcSource"), Some(&json!("serial")));
             assert_eq!(obj.get("fcLinkHint"), Some(&json!("none")));
+            assert_eq!(obj.get("fcCommandDownGated"), Some(&json!(true)));
             assert_eq!(obj.get("fcVariant"), Some(&json!("betaflight")));
             assert_eq!(obj.get("fcFirmware"), Some(&json!("betaflight")));
         };

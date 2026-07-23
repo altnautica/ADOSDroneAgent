@@ -454,6 +454,16 @@ async fn build_extras(
     // A human-actionable hint for the not-alive case: msp_detected (the FC speaks
     // MSP, not MAVLink, on this port), no_heartbeat (open but silent), or none.
     extras.insert("fc_link_hint".into(), json!(fc.link_hint().await));
+    // Whether the open FC source is the MAVLink-over-ELRS ingest running
+    // telemetry-only, its host->FC command-down direction gated closed. When
+    // true the link can read alive (telemetry flows) yet a GCS command is
+    // silently dropped — surface it so a consumer never renders a bare
+    // "connected" as "commands are getting through". False for every ordinary
+    // FC source (serial / UDP / TCP / discovery), whose command path is open.
+    extras.insert(
+        "fc_command_down_gated".into(),
+        json!(fc.command_down_gated()),
+    );
     // The FC firmware family identified from the port's USB descriptor
     // (betaflight/inav), or null for a MAVLink/unknown FC — lets a consumer
     // badge "Betaflight (MSP)" instead of a misleading "not connected".

@@ -39,7 +39,7 @@ use crate::state::AppState;
 /// uptime + the FC-liveness detail (transport_open / mavlink_alive /
 /// heartbeat_age_s / fc_source / fc_link_hint). Mirrors the Python
 /// `_ipc_only_keys` set.
-const IPC_ONLY_KEYS: [&str; 11] = [
+const IPC_ONLY_KEYS: [&str; 12] = [
     "fc_connected",
     "fc_port",
     "fc_baud",
@@ -49,6 +49,7 @@ const IPC_ONLY_KEYS: [&str; 11] = [
     "heartbeat_age_s",
     "fc_source",
     "fc_link_hint",
+    "fc_command_down_gated",
     "fc_variant",
     "fc_firmware",
 ];
@@ -137,6 +138,7 @@ pub async fn get_status(State(state): State<AppState>) -> Json<Value> {
         "heartbeatAgeS": liveness.heartbeat_age_s,
         "fcSource": liveness.fc_source,
         "fcLinkHint": liveness.fc_link_hint,
+        "fcCommandDownGated": liveness.fc_command_down_gated,
         "fcVariant": liveness.fc_variant,
         "fcFirmware": liveness.fc_firmware,
         "fcReachable": fc_reachable,
@@ -425,6 +427,13 @@ pub(crate) struct FcLiveness {
     /// The not-alive diagnostic hint: `msp_detected` (the FC speaks MSP, not
     /// MAVLink, on this port), `no_heartbeat` (open but silent), or `none`.
     pub fc_link_hint: Value,
+    /// Whether the open FC source is the MAVLink-over-ELRS ingest running
+    /// telemetry-only with its host->FC command-down direction gated closed.
+    /// True means the link can read connected (telemetry flows) yet a GCS
+    /// command is silently dropped — so a consumer surfaces "commands gated"
+    /// rather than implying the command reached the FC. False for every
+    /// ordinary FC source, whose command path is open.
+    pub fc_command_down_gated: bool,
     /// The FC firmware family from the USB descriptor (`betaflight`/`inav`), or
     /// null for a MAVLink/unknown FC. Lets the GCS badge an MSP FC honestly.
     pub fc_variant: Value,
@@ -466,6 +475,13 @@ pub(crate) fn fc_liveness_from_snapshot(snapshot: Option<&Value>) -> FcLiveness 
             .cloned()
             .filter(|v| !v.is_null())
             .unwrap_or_else(|| json!("none")),
+        // Absent field (an older router snapshot) is honestly "not gated": an
+        // ordinary FC source is the overwhelming case, and only a resolved
+        // MAVLink-over-ELRS ingest is ever gated.
+        fc_command_down_gated: obj
+            .and_then(|m| m.get("fc_command_down_gated"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         fc_variant: obj
             .and_then(|m| m.get("fc_variant"))
             .cloned()
@@ -625,9 +641,32 @@ mod tests {
         assert_eq!(l.heartbeat_age_s, Value::Null);
         assert_eq!(l.fc_source, json!("auto"));
         assert_eq!(l.fc_link_hint, json!("none"));
+        // Absent field defaults to "not gated": an ordinary FC source is the case.
+        assert!(!l.fc_command_down_gated);
         assert_eq!(l.fc_variant, Value::Null);
         // The firmware family is always a concrete string, defaulting to unknown.
         assert_eq!(l.fc_firmware, json!("unknown"));
+    }
+
+    #[test]
+    fn fc_liveness_surfaces_a_command_down_gated_source_honestly() {
+        // A live MAVLink-over-ELRS ingest running telemetry-only: the link is
+        // alive (telemetry flows) yet the host->FC command direction is gated
+        // closed, so the surface must carry that fact — a bare connected boolean
+        // would imply a GCS command reaches the FC when it is silently dropped.
+        let snap = json!({
+            "transport_open": true,
+            "mavlink_alive": true,
+            "fc_source": "serial",
+            "fc_command_down_gated": true,
+        });
+        let l = fc_liveness_from_snapshot(Some(&snap));
+        assert!(l.transport_open);
+        assert!(l.mavlink_alive);
+        assert!(
+            l.fc_command_down_gated,
+            "an alive telemetry-only source reports the command path gated"
+        );
     }
 
     #[test]
