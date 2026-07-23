@@ -98,26 +98,30 @@ def _kick_crsf_service() -> None:
         log.debug("crsf_service_kick_failed", error=str(exc))
 
 
-def _router_view(crsf: dict[str, Any]) -> tuple[Any, Any]:
+def _router_view(crsf: dict[str, Any]) -> tuple[Any, Any, bool]:
     """The projection of the lane slice the MAVLink router consumes.
 
-    Two inputs decide the router's behaviour: the pinned ``device`` (excluded
-    from FC port candidacy in ``crsf_rc`` mode; opened as the FC source in
-    MAVLink mode) and the resolved MAVLink-over-ELRS ingest source —
+    Three inputs decide the router's behaviour: the pinned ``device``
+    (excluded from FC port candidacy in ``crsf_rc`` mode; opened as the FC
+    source in MAVLink mode), the resolved MAVLink-over-ELRS ingest source —
     ``enabled`` + ``mode: mavlink`` + the carrier (``backpack_wifi``, else
-    the serial default, matching the router's own parse of the block). The
-    router loads its config once at startup, so only a change to THIS view
-    warrants a unit restart; every other lane knob (packet rate, band,
-    channel source, TX power) is the lane's own business and must never
-    churn the FC link.
+    the serial default, matching the router's own parse of the block) — and
+    whether the host-to-FC command direction is opened for that source
+    (``mavlink_command_enabled``), which flips the router between installing
+    a writer and running the source telemetry-only. The router loads its
+    config once at startup, so only a change to THIS view warrants a unit
+    restart; every other lane knob (packet rate, band, channel source, TX
+    power) is the lane's own business and must never churn the FC link.
     """
     device = crsf.get("device")
     if bool(crsf.get("enabled", False)) and crsf.get("mode") == "mavlink":
         transport = crsf.get("mavlink_transport")
         source = "backpack_wifi" if transport == "backpack_wifi" else "serial"
+        command_enabled = bool(crsf.get("mavlink_command_enabled", False))
     else:
         source = None
-    return (device, source)
+        command_enabled = False
+    return (device, source, command_enabled)
 
 
 def _kick_mavlink_router() -> None:

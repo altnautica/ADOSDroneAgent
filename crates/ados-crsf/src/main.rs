@@ -13,15 +13,18 @@
 //!
 //! - **`crsf_rc`** — THIS service owns the pinned device (CRSF framing at
 //!   420 kbaud); the MAVLink router excludes the pin from FC candidacy.
-//! - **`mavlink`** — the module runs its native MAVLink mode: a plain
-//!   bidirectional MAVLink byte pipe (the module firmware owns the CRSF air
-//!   protocol internally). The MAVLink router owns the carrier as its FC
-//!   source — the pinned device at the fixed MAVLink-mode baud, or the WiFi
-//!   backpack's UDP listen — so this service NEVER opens the port. It stands
-//!   by at state `ready` with `mode: "mavlink"` reported: alive, honest about
-//!   why no RC is transmitted, and reclaiming the port on the next reload
-//!   that flips the mode back. The command socket is not served (channel
-//!   injection has no lane to land on and reads `503` at the control plane).
+//! - **`mavlink`** — the module runs its native MAVLink mode: a MAVLink byte
+//!   carrier (the module firmware owns the CRSF air protocol internally). The
+//!   MAVLink router ingests the carrier as its FC source — the pinned device
+//!   at the fixed MAVLink-mode baud, or the WiFi backpack's UDP listen — so
+//!   this service NEVER opens the port. It stands by at state `ready` with
+//!   `mode: "mavlink"` reported: alive, honest about why no RC is transmitted,
+//!   and reclaiming the port on the next reload that flips the mode back. The
+//!   router reads telemetry up but keeps the host->FC command-down direction
+//!   gated closed by default (`radio.crsf.mavlink_command_enabled`), so the
+//!   source is telemetry-only until that marker is set. The command socket is
+//!   not served (channel injection has no lane to land on and reads `503` at
+//!   the control plane).
 //! - **`airport`** — a generic serial data pipe with no ADOS owner yet; the
 //!   lane reads `disabled` with the mode reported.
 //!
@@ -232,14 +235,16 @@ async fn run_service_pass(
     // module to a different owner, so this lane must not touch the port —
     // driving RC frames onto it would corrupt the owner's traffic.
     //
-    //   - `mavlink`: the module runs its native MAVLink mode (a plain
-    //     bidirectional MAVLink byte pipe; the module firmware owns the CRSF
-    //     air protocol internally). The MAVLink router ingests the carrier as
-    //     its FC source — the pinned device at the fixed MAVLink-mode baud,
-    //     or the WiFi-backpack UDP listen — so this service holds off the
-    //     device entirely (one owner per port) and STANDS BY at `ready` with
-    //     the mode reported: alive, transmitting no RC, and reclaiming the
-    //     port on the next reload that flips the mode back.
+    //   - `mavlink`: the module runs its native MAVLink mode (a MAVLink byte
+    //     carrier; the module firmware owns the CRSF air protocol internally).
+    //     The MAVLink router ingests the carrier as its FC source — the pinned
+    //     device at the fixed MAVLink-mode baud, or the WiFi-backpack UDP
+    //     listen — so this service holds off the device entirely (one owner
+    //     per port) and STANDS BY at `ready` with the mode reported: alive,
+    //     transmitting no RC, and reclaiming the port on the next reload that
+    //     flips the mode back. The router keeps that source telemetry-only
+    //     (host->FC command-down gated by default) until
+    //     `radio.crsf.mavlink_command_enabled` is set.
     //   - `airport`: a generic serial data pipe with no ADOS owner yet; the
     //     lane reads `disabled` with the mode reported — it does not run.
     match cfg.mode {

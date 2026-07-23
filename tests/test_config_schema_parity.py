@@ -75,6 +75,7 @@ def test_committed_schema_shape_and_secret_markers() -> None:
     assert crsf["channel_source"]["default"] == "hid"
     assert crsf["mavlink_transport"]["enum"] == ["serial", "backpack_wifi"]
     assert crsf["mavlink_transport"]["default"] == "serial"
+    assert crsf["mavlink_command_enabled"]["default"] is False
     assert crsf["relay_role"]["enum"] == ["none", "repeater", "agent_last_mile"]
     assert crsf["relay_role"]["default"] == "none"
 

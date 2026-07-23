@@ -137,17 +137,35 @@ pub struct MavlinkConfig {
     /// [`BACKPACK_UDP_PORT`]).
     #[serde(skip)]
     pub crsf_mavlink_transport: String,
+    /// Whether the host->FC command direction is opened for the
+    /// MAVLink-over-ELRS source (`radio.crsf.mavlink_command_enabled`, filled
+    /// in by the loader). OFF by default and NOT implied by opting the lane in
+    /// or selecting `mode: mavlink`: a fresh MAVLink-over-ELRS source is
+    /// TELEMETRY-UP / COMMAND-DOWN gated — the router reads inbound MAVLink so
+    /// the drone appears and telemetry flows, but installs no writer, so the
+    /// host->FC direction is closed until this marker is explicitly set for a
+    /// bench-validated command lane. Applies solely to the MAVLink-over-ELRS
+    /// source; every other FC source (serial / UDP / TCP / discovery) is
+    /// unaffected. See [`crate::connection`] for the writer gate.
+    #[serde(skip)]
+    pub crsf_mavlink_command_enabled: bool,
 }
 
 /// The resolved MAVLink-over-ELRS ingest source.
 ///
 /// When the `radio.crsf` block declares the RC module runs its native MAVLink
-/// mode, the module is a plain bidirectional MAVLink byte pipe — the module
-/// firmware owns the CRSF air protocol internally, so nothing host-side
-/// parses CRSF on this lane — and this router owns the carrier as its FC
-/// source. The RC lane service (`ados-crsf`) holds off the device entirely in
-/// that mode (one owner per port; it stands by at state `ready` with the mode
-/// reported and transmits no RC).
+/// mode, the module is a MAVLink byte carrier — the module firmware owns the
+/// CRSF air protocol internally, so nothing host-side parses CRSF on this
+/// lane — and this router ingests the carrier as its FC source. The RC lane
+/// service (`ados-crsf`) holds off the device entirely in that mode (one
+/// owner per port; it stands by at state `ready` with the mode reported and
+/// transmits no RC).
+///
+/// The direction is asymmetric by default: the router reads inbound MAVLink
+/// (telemetry up), but the host->FC command-down direction is GATED CLOSED
+/// until `radio.crsf.mavlink_command_enabled` is set for a bench-validated
+/// command lane. With the marker off (the default) the connection installs no
+/// writer, so this source is telemetry-only — see [`crate::connection`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CrsfMavlinkSource<'a> {
     /// The module's USB-serial port at the fixed MAVLink-mode baud
@@ -175,6 +193,7 @@ impl Default for MavlinkConfig {
             crsf_enabled: false,
             crsf_mode: "crsf_rc".to_string(),
             crsf_mavlink_transport: "serial".to_string(),
+            crsf_mavlink_command_enabled: false,
         }
     }
 }
@@ -233,6 +252,8 @@ impl MavlinkConfig {
             mode: Option<String>,
             #[serde(default)]
             mavlink_transport: Option<String>,
+            #[serde(default)]
+            mavlink_command_enabled: bool,
         }
         let Ok(text) = std::fs::read_to_string(path) else {
             return (MavlinkConfig::default(), None);
@@ -251,6 +272,7 @@ impl MavlinkConfig {
             .unwrap_or("serial")
             .trim()
             .to_string();
+        cfg.crsf_mavlink_command_enabled = crsf.mavlink_command_enabled;
         (cfg, error)
     }
 
@@ -426,6 +448,32 @@ mod tests {
             Some(CrsfMavlinkSource::Serial {
                 device: "/dev/ttyUSB0"
             })
+        );
+    }
+
+    #[test]
+    fn crsf_mavlink_command_enabled_defaults_off_and_reads_explicit() {
+        let dir = tempfile::tempdir().unwrap();
+        // A MAVLink-over-ELRS source with no explicit marker is command-down
+        // gated: the flag reads false, so the connection runs it telemetry-only.
+        let gated = dir.path().join("gated.yaml");
+        write(
+            &gated,
+            "radio:\n  crsf:\n    enabled: true\n    device: /dev/ttyUSB0\n    mode: mavlink\n",
+        );
+        let c = MavlinkConfig::load_from(&gated);
+        assert!(c.crsf_mavlink_source().is_some());
+        assert!(!c.crsf_mavlink_command_enabled);
+        // The marker is read verbatim when present — the bench-gate switch.
+        let armed = dir.path().join("armed.yaml");
+        write(
+            &armed,
+            "radio:\n  crsf:\n    enabled: true\n    device: /dev/ttyUSB0\n    mode: mavlink\n    mavlink_command_enabled: true\n",
+        );
+        assert!(MavlinkConfig::load_from(&armed).crsf_mavlink_command_enabled);
+        // A missing file defaults the marker off.
+        assert!(
+            !MavlinkConfig::load_from(&dir.path().join("nope.yaml")).crsf_mavlink_command_enabled
         );
     }
 

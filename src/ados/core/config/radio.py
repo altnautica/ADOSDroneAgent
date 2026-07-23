@@ -46,14 +46,25 @@ class CrsfConfig(BaseModel):
     ``mode`` selects what the attached module carries — and who owns its
     port: ``crsf_rc`` (the RC channel lane this service transmits; the
     MAVLink router excludes the pin from FC candidacy), ``mavlink`` (the
-    module runs its native MAVLink mode as a plain bidirectional MAVLink byte
-    pipe — the module firmware owns the CRSF air protocol internally — and
-    the MAVLink router ingests the carrier as its FC source: the pinned
-    ``device`` at the fixed MAVLink-mode baud of 460800 when
-    ``mavlink_transport`` is ``serial``, or a UDP listen on port 14550 for
-    ``backpack_wifi``; the RC lane holds off the port entirely and stands by
-    at state ``ready`` with the mode reported), or ``airport`` (a generic
-    serial data pipe with no ADOS owner yet; the lane reads ``disabled``).
+    module runs its native MAVLink mode — the module firmware owns the CRSF
+    air protocol internally — and the MAVLink router ingests the carrier as
+    its FC source: the pinned ``device`` at the fixed MAVLink-mode baud of
+    460800 when ``mavlink_transport`` is ``serial``, or a UDP listen on port
+    14550 for ``backpack_wifi``; the RC lane holds off the port entirely and
+    stands by at state ``ready`` with the mode reported. By default this
+    source is telemetry-up / command-down gated — the router reads inbound
+    MAVLink so the drone appears and telemetry flows, but transmits nothing
+    toward the FC over the RC lane until ``mavlink_command_enabled`` is set;
+    see that field), or ``airport`` (a generic serial data pipe with no ADOS
+    owner yet; the lane reads ``disabled``).
+
+    ``mavlink_command_enabled`` opens the host-to-FC command direction for
+    ``mode: mavlink``. It is OFF by default and is NOT implied by opting the
+    lane in or selecting ``mode: mavlink``: a fresh MAVLink-over-ELRS source
+    ingests telemetry only, with the command-down direction gated closed,
+    until an operator explicitly sets this for a bench-validated command
+    lane. It applies solely to the MAVLink-over-ELRS source and never affects
+    any other flight-controller link.
 
     ``channel_source`` decides what feeds the transmitted channels in
     ``crsf_rc`` mode: ``hid`` (the handset/gamepad path only — the default),
@@ -77,6 +88,7 @@ class CrsfConfig(BaseModel):
     mode: Literal["crsf_rc", "mavlink", "airport"] = "crsf_rc"
     channel_source: Literal["hid", "inject", "hybrid"] = "hid"
     mavlink_transport: Literal["serial", "backpack_wifi"] = "serial"
+    mavlink_command_enabled: bool = False
     relay_role: Literal["none", "repeater", "agent_last_mile"] = "none"
 
 

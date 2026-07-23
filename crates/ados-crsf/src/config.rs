@@ -54,13 +54,17 @@ pub enum LaneMode {
     /// The RC channel lane this service transmits (the default).
     #[default]
     CrsfRc,
-    /// The module runs its native MAVLink mode: a plain bidirectional MAVLink
-    /// byte pipe (the module firmware owns the CRSF air protocol internally —
-    /// no CRSF parsing host-side). The MAVLink router owns the carrier as its
-    /// FC source — the pinned device at the fixed MAVLink-mode baud when
+    /// The module runs its native MAVLink mode: a MAVLink byte carrier (the
+    /// module firmware owns the CRSF air protocol internally — no CRSF parsing
+    /// host-side). The MAVLink router ingests the carrier as its FC source —
+    /// the pinned device at the fixed MAVLink-mode baud when
     /// `mavlink_transport` is `serial`, or a UDP listen on the conventional
     /// MAVLink port for `backpack_wifi` — so this lane never opens the port
-    /// and stands by at `ready` with the mode reported.
+    /// and stands by at `ready` with the mode reported. The router reads
+    /// telemetry up but keeps the host->FC command-down direction gated closed
+    /// by default (`radio.crsf.mavlink_command_enabled`), so the source is
+    /// telemetry-only until that marker is set for a bench-validated command
+    /// lane.
     Mavlink,
     /// A generic serial data pipe through the module.
     Airport,

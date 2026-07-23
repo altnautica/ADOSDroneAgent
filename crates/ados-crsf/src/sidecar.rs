@@ -55,7 +55,10 @@ pub struct StatsInputs<'a> {
     pub rx_frames_per_s: Option<f64>,
     /// The configured lane mode (`crsf_rc` while the RC channel lane runs;
     /// `mavlink` / `airport` while the lane stands aside for that mode's
-    /// owner).
+    /// owner). In `mavlink` mode the MAVLink router owns the carrier and, by
+    /// default, runs it telemetry-only — the host->FC command-down direction
+    /// is gated closed until `radio.crsf.mavlink_command_enabled` is set — so
+    /// this mode never denotes a live bidirectional command lane.
     pub mode: Option<&'a str>,
     /// Where the transmitted channels come from, once a source has injected.
     pub channel_source: Option<&'a str>,

@@ -13,16 +13,25 @@
 //! MAVLink transport instead, for SITL bench and demo use.
 //!
 //! MAVLink-over-ELRS ingest: when the `radio.crsf` block declares the RC
-//! module runs its native MAVLink mode, the module is a plain bidirectional
-//! MAVLink byte pipe (the module firmware owns the CRSF air protocol
-//! internally — nothing here parses CRSF) and THIS router owns the carrier as
-//! its FC source: the pinned serial device at the fixed MAVLink-mode baud, or
-//! a UDP listen on the conventional port for the WiFi backpack. The resolved
-//! source replaces both the configured port and discovery — the RC lane
-//! service holds off the device in that mode, so the port has exactly one
-//! owner, and a fallback sweep would latch some other port while the module
-//! sat unused. In `crsf_rc` mode the ownership inverts: the RC lane service
-//! owns the pin and [`FcConnection::candidate_ports`] excludes it.
+//! module runs its native MAVLink mode, the module is a MAVLink byte carrier
+//! (the module firmware owns the CRSF air protocol internally — nothing here
+//! parses CRSF) and THIS router ingests the carrier as its FC source: the
+//! pinned serial device at the fixed MAVLink-mode baud, or a UDP listen on the
+//! conventional port for the WiFi backpack. The resolved source replaces both
+//! the configured port and discovery — the RC lane service holds off the
+//! device in that mode, so the port has exactly one owner, and a fallback
+//! sweep would latch some other port while the module sat unused. In
+//! `crsf_rc` mode the ownership inverts: the RC lane service owns the pin and
+//! [`FcConnection::candidate_ports`] excludes it.
+//!
+//! This source's direction is asymmetric by default. The router reads inbound
+//! MAVLink (telemetry up, so the drone appears and telemetry flows), but the
+//! host->FC command-down direction is GATED CLOSED — [`FcConnection::run`]
+//! installs no writer for a MAVLink-over-ELRS source until
+//! `radio.crsf.mavlink_command_enabled` is set (see
+//! [`FcConnection::command_down_gated`]). With the marker off (the default and
+//! only current state) the source is telemetry-only; every other FC source
+//! (serial / UDP / TCP / discovery) keeps its full command path.
 //!
 //! The module is split by concern into siblings of this orchestrator:
 //! [`framing`] (MAVLink frame extraction), [`transport`] (serial discovery +
@@ -346,6 +355,22 @@ impl FcConnection {
             }
         }
     }
+    /// Whether the resolved FC source is the MAVLink-over-ELRS ingest with its
+    /// host->FC command-down direction gated closed (telemetry-only). True
+    /// ONLY when the source is a [`CrsfMavlinkSource`] AND the explicit
+    /// `radio.crsf.mavlink_command_enabled` marker is off — the default and
+    /// only current state. Every other FC source (serial / UDP / TCP /
+    /// discovery) returns false, so their command paths are untouched. When
+    /// true, [`Self::run`] installs no writer, so the send scheduler's
+    /// heartbeat, stream requests, param sweep, and any forwarded client bytes
+    /// are all suppressed for this source (send_bytes is a no-op with no
+    /// writer). Setting the marker flips this false, restoring the writer for
+    /// the bench gate. Because `open()` resolves a `CrsfMavlinkSource` iff
+    /// `crsf_mavlink_source()` is `Some`, this predicate is exactly "the open
+    /// transport is that source AND its command marker is off".
+    fn command_down_gated(&self) -> bool {
+        self.cfg.crsf_mavlink_source().is_some() && !self.cfg.crsf_mavlink_command_enabled
+    }
     pub fn param_priming(&self) -> bool {
         self.param_priming.load(Ordering::Relaxed)
     }
@@ -406,11 +431,28 @@ impl FcConnection {
             // polled blind spot of the byte sniff.
             *self.fc_variant.lock().await = fc_variant_for_port(&port);
             self.baud.store(baud, Ordering::Relaxed);
-            *self.writer.lock().await = Some(write_half);
+            if self.command_down_gated() {
+                // MAVLink-over-ELRS, telemetry-only: install NO writer. With no
+                // writer every send path is a no-op (send_bytes early-returns),
+                // so the companion heartbeat, stream-interval requests, param
+                // sweep, and any forwarded client bytes are all suppressed and
+                // the host->FC command direction stays closed over the RC lane
+                // — while the read loop below still ingests inbound telemetry.
+                // Dropping the write half closes the send side outright, a
+                // stronger guarantee than gating each send path since no code
+                // can smuggle a byte through an absent writer. Enabling the
+                // command marker restores the writer (the else branch) for the
+                // bench-validated command lane.
+                drop(write_half);
+                *self.writer.lock().await = None;
+                tracing::info!(port = %port, baud, "fc_connected_crsf_mavlink_command_down_gated");
+            } else {
+                *self.writer.lock().await = Some(write_half);
+                tracing::info!(port = %port, baud, "fc_connected");
+            }
             self.connected.store(true, Ordering::Relaxed);
             self.wrote_since_open.store(false, Ordering::Relaxed);
             *self.last_msg_at.lock().await = Instant::now();
-            tracing::info!(port = %port, baud, "fc_connected");
 
             tokio::select! {
                 _ = self.read_loop(read_half) => {}
@@ -956,6 +998,156 @@ mod crsf_exclusion_tests {
         });
         assert_eq!(unpinned.cfg.crsf_mavlink_source(), None);
         assert_eq!(unpinned.source(), "auto");
+    }
+}
+
+#[cfg(test)]
+mod command_gate_tests {
+    use super::*;
+    use crate::param_cache::ParamCache;
+    use crate::state::VehicleState;
+    use std::pin::Pin;
+    use std::sync::atomic::AtomicUsize;
+    use std::task::{Context, Poll};
+    use tokio::io::AsyncWrite;
+
+    fn conn_with(cfg: MavlinkConfig) -> std::sync::Arc<FcConnection> {
+        let state = std::sync::Arc::new(Mutex::new(VehicleState::default()));
+        let params = std::sync::Arc::new(Mutex::new(ParamCache::new(
+            "/tmp/ados-crsf-cmd-gate-params.json",
+        )));
+        FcConnection::new(cfg, state, params)
+    }
+
+    /// A write half that counts the bytes handed to it, standing in for the FC
+    /// carrier so a test can prove whether a send path reached the FC.
+    struct CountingWriter(std::sync::Arc<AtomicUsize>);
+    impl AsyncWrite for CountingWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            data: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            self.0.fetch_add(data.len(), Ordering::Relaxed);
+            Poll::Ready(Ok(data.len()))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// The gated default: the lane opted in, MAVLink mode, a pinned serial
+    /// carrier, and NO command marker — a live MAVLink-over-ELRS source that is
+    /// telemetry-only.
+    fn gated_mavlink_cfg() -> MavlinkConfig {
+        MavlinkConfig {
+            crsf_enabled: true,
+            crsf_mode: "mavlink".into(),
+            crsf_device: "/dev/ttyUSB0".into(),
+            ..MavlinkConfig::default()
+        }
+    }
+
+    #[test]
+    fn a_crsf_mavlink_source_defaults_to_command_down_gated() {
+        let c = conn_with(gated_mavlink_cfg());
+        assert!(c.cfg.crsf_mavlink_source().is_some(), "the source resolves");
+        assert!(
+            c.command_down_gated(),
+            "marker off + crsf mavlink source → command-down gated"
+        );
+    }
+
+    #[test]
+    fn the_command_marker_restores_the_writer_path() {
+        // Flipping the marker on is the bench-gate switch: the same source is
+        // no longer gated, so run() installs a writer for the command lane.
+        let mut cfg = gated_mavlink_cfg();
+        cfg.crsf_mavlink_command_enabled = true;
+        let c = conn_with(cfg);
+        assert!(c.cfg.crsf_mavlink_source().is_some());
+        assert!(
+            !c.command_down_gated(),
+            "marker on → writer restored (not gated)"
+        );
+    }
+
+    #[test]
+    fn other_fc_sources_are_never_command_down_gated() {
+        // A plain serial FC is not a CRSF source, so it is never gated — its
+        // command path stays open regardless of the marker's value.
+        for marker in [false, true] {
+            let serial = conn_with(MavlinkConfig {
+                serial_port: "/dev/ttyACM0".into(),
+                crsf_mavlink_command_enabled: marker,
+                ..MavlinkConfig::default()
+            });
+            assert_eq!(serial.cfg.crsf_mavlink_source(), None);
+            assert!(!serial.command_down_gated(), "marker={marker}");
+        }
+        // A UDP SITL transport: same — not a CRSF source, never gated.
+        let udp = conn_with(MavlinkConfig {
+            source: "udp".into(),
+            serial_port: "udp:127.0.0.1:14550".into(),
+            ..MavlinkConfig::default()
+        });
+        assert!(!udp.command_down_gated());
+    }
+
+    #[tokio::test]
+    async fn a_gated_source_installs_no_writer_and_suppresses_every_send_path() {
+        // Mirror run()'s gated branch: a gated source installs no writer. With
+        // the transport open (so the scheduler bodies run) the companion
+        // heartbeat, the stream requests, and a forwarded client command all
+        // reach a NULL writer — nothing is transmitted toward the FC, and no
+        // reconnect is raised (there was no writer to fail). Inbound telemetry
+        // is unaffected: the read loop never touches the writer.
+        let c = conn_with(gated_mavlink_cfg());
+        assert!(c.command_down_gated());
+        c.connected.store(true, Ordering::Relaxed);
+        assert!(
+            c.writer.lock().await.is_none(),
+            "the gated branch installs no writer"
+        );
+        c.send_heartbeat().await;
+        c.tick_streams().await;
+        c.send_bytes(b"\xfd\x00\x00\x00").await;
+        assert!(
+            c.writer.lock().await.is_none(),
+            "no send path creates a writer for a gated source"
+        );
+        let signalled = tokio::time::timeout(Duration::from_millis(50), c.reconnect.notified())
+            .await
+            .is_ok();
+        assert!(
+            !signalled,
+            "a gated source with no writer raises no reconnect"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ungated_source_writes_the_companion_heartbeat_to_the_fc() {
+        // The other side of the gate: a non-CRSF FC source installs a writer,
+        // so the send scheduler reaches the FC. Count the heartbeat bytes that
+        // land on the writer to prove the command path still works — the WFB /
+        // serial FC path must be unaffected by the CRSF gate.
+        let c = conn_with(MavlinkConfig {
+            serial_port: "/dev/ttyACM0".into(),
+            ..MavlinkConfig::default()
+        });
+        assert!(!c.command_down_gated());
+        let written = std::sync::Arc::new(AtomicUsize::new(0));
+        c.connected.store(true, Ordering::Relaxed);
+        *c.writer.lock().await = Some(Box::pin(CountingWriter(written.clone())));
+        c.send_heartbeat().await;
+        assert!(
+            written.load(Ordering::Relaxed) > 0,
+            "the FC command path wrote the heartbeat"
+        );
+        assert!(c.wrote_since_open.load(Ordering::Relaxed));
     }
 }
 

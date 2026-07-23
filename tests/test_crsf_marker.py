@@ -126,27 +126,51 @@ def test_sync_kicks_the_router_only_when_its_view_changes(monkeypatch, tmp_path)
     sync_after_config_write(_lane(mode="mavlink"), _lane(mode="mavlink", enabled=False))
     assert len(router_kicks) == 4
 
+    # Opening the host-to-FC command direction on a MAVLink-over-ELRS source
+    # changes the router's view (writer installed vs telemetry-only), so the
+    # router restarts to pick up the switch.
+    sync_after_config_write(
+        _lane(mode="mavlink"),
+        _lane(mode="mavlink", mavlink_command_enabled=True),
+    )
+    assert len(router_kicks) == 5
+
 
 def test_router_view_projection() -> None:
-    """The pure projection: (pin, resolved source)."""
+    """The pure projection: (pin, resolved source, command-down opened)."""
     view = crsf_marker._router_view
-    assert view({}) == (None, None)
-    assert view({"enabled": True, "device": "/dev/ttyUSB0"}) == ("/dev/ttyUSB0", None)
+    assert view({}) == (None, None, False)
+    assert view({"enabled": True, "device": "/dev/ttyUSB0"}) == ("/dev/ttyUSB0", None, False)
+    # A MAVLink-over-ELRS source defaults to telemetry-only: the command flag
+    # reads false until it is explicitly set.
     assert view({"enabled": True, "device": "/dev/ttyUSB0", "mode": "mavlink"}) == (
         "/dev/ttyUSB0",
         "serial",
+        False,
     )
     # An unknown transport degrades to the serial carrier, matching the
     # router's own parse of the block.
     assert view(
         {"enabled": True, "device": None, "mode": "mavlink", "mavlink_transport": "bogus"}
-    ) == (None, "serial")
+    ) == (None, "serial", False)
     assert view(
         {"enabled": True, "device": None, "mode": "mavlink", "mavlink_transport": "backpack_wifi"}
-    ) == (None, "backpack_wifi")
+    ) == (None, "backpack_wifi", False)
+    # Opening the command direction is part of the router's view: the same
+    # source with the marker set is a distinct projection, so a flip restarts
+    # the router.
+    assert view(
+        {"enabled": True, "device": "/dev/ttyUSB0", "mode": "mavlink", "mavlink_command_enabled": True}
+    ) == ("/dev/ttyUSB0", "serial", True)
+    # The command flag only matters while a source resolves: on a non-MAVLink
+    # mode it never leaks into the view.
+    assert view(
+        {"enabled": True, "device": "/dev/ttyUSB0", "mode": "crsf_rc", "mavlink_command_enabled": True}
+    ) == ("/dev/ttyUSB0", None, False)
     # Opted out, or any other mode: no resolved source.
-    assert view({"enabled": False, "mode": "mavlink"}) == (None, None)
+    assert view({"enabled": False, "mode": "mavlink"}) == (None, None, False)
     assert view({"enabled": True, "mode": "airport", "device": "/dev/ttyUSB0"}) == (
         "/dev/ttyUSB0",
         None,
+        False,
     )

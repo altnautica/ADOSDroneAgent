@@ -96,6 +96,7 @@ def test_crsf_lane_defaults_off_and_unpinned():
     assert cfg.radio.crsf.mode == "crsf_rc"
     assert cfg.radio.crsf.channel_source == "hid"
     assert cfg.radio.crsf.mavlink_transport == "serial"
+    assert cfg.radio.crsf.mavlink_command_enabled is False
     assert cfg.radio.crsf.relay_role == "none"
 
 
@@ -118,6 +119,7 @@ def test_crsf_pin_round_trips_through_a_full_save():
                 "mode": "mavlink",
                 "channel_source": "hybrid",
                 "mavlink_transport": "backpack_wifi",
+                "mavlink_command_enabled": True,
                 "relay_role": "repeater",
             }
         }
@@ -134,6 +136,7 @@ def test_crsf_pin_round_trips_through_a_full_save():
     assert cfg.radio.crsf.mode == "mavlink"
     assert cfg.radio.crsf.channel_source == "hybrid"
     assert cfg.radio.crsf.mavlink_transport == "backpack_wifi"
+    assert cfg.radio.crsf.mavlink_command_enabled is True
     assert cfg.radio.crsf.relay_role == "repeater"
     dumped = cfg.model_dump()
     assert dumped["radio"]["crsf"] == data["radio"]["crsf"]
