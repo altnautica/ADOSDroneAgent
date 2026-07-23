@@ -221,6 +221,13 @@ pub struct CrsfBlock {
     pub mode: Option<String>,
     pub channel_source: Option<String>,
     pub relay_role: Option<String>,
+    /// The MAVLink-over-ELRS command-down gate, projected from the lane sidecar's
+    /// `fc_command_down_gated`. `Some(true)` a MAVLink-over-ELRS source is
+    /// telemetry-only (command path gated closed), `Some(false)` the command path
+    /// is open, `None` no such source exists (nothing to gate) — never a
+    /// fabricated false. Lets a consumer reading ONLY the crsf lane see the ELRS
+    /// MAVLink command path's gate without the top-level FC status surface.
+    pub fc_command_down_gated: Option<bool>,
 }
 
 impl CrsfBlock {
@@ -244,6 +251,7 @@ impl CrsfBlock {
             mode: None,
             channel_source: None,
             relay_role: None,
+            fc_command_down_gated: None,
         }
     }
 }
@@ -649,6 +657,7 @@ mod tests {
             rssi_dbm: Some(-51),
             rf_unverified: Some(false),
             packet_rate_hz: Some(150),
+            fc_command_down_gated: Some(true),
             ..CrsfBlock::absent()
         });
         let v = p.to_value();
@@ -657,6 +666,9 @@ mod tests {
         assert_eq!(crsf["rssi_dbm"], -51);
         assert_eq!(crsf["packet_rate_hz"], 150);
         assert_eq!(crsf["rf_unverified"], false);
+        // The command-down gate rides the block as a real bool so a consumer of
+        // only the crsf lane can read the ELRS MAVLink command path's gate.
+        assert_eq!(crsf["fc_command_down_gated"], true);
         // Unmeasured fields ride as nested nulls, under snake_case keys.
         assert!(crsf["band"].is_null());
         assert!(crsf["tx_frames_per_s"].is_null());

@@ -714,7 +714,8 @@ mod tests {
             r#"{"v":1,"state":"link_ok","rssi_dbm":-51,"lq_uplink":99,"lq_downlink":97,
                 "snr_db":8,"band":null,"packet_rate_hz":150,"tx_power_mw":100,
                 "tx_frames_per_s":149.8,"rx_frames_per_s":12.0,"rf_unverified":false,
-                "flyable":true,"mode":"crsf_rc","channel_source":"hid","relay_role":null}"#,
+                "flyable":true,"mode":"crsf_rc","channel_source":"hid","relay_role":null,
+                "fc_command_down_gated":null}"#,
         );
         let path = dir.join("crsf-stats.json");
         let fresh = read_crsf_sidecar_from(&path, std::time::SystemTime::now()).unwrap();
@@ -726,6 +727,8 @@ mod tests {
         // the unmatched key), so a cloud-reached node showed no power (rule 44).
         assert_eq!(fresh.tx_power_mw, Some(100));
         assert_eq!(fresh.rf_unverified, Some(false));
+        // A crsf_rc lane has no MAVLink-over-ELRS command path to gate.
+        assert!(fresh.fc_command_down_gated.is_none());
         assert_eq!(fresh.band, None);
         assert_eq!(fresh.relay_role, None);
         // Stale mtime (a reference `now` an hour later) → absent, so a dead
@@ -741,6 +744,29 @@ mod tests {
             read_crsf_sidecar_from(&dir.join("crsf-bad.json"), std::time::SystemTime::now())
                 .is_none()
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_mavlink_standby_crsf_sidecar_carries_the_command_down_gate() {
+        // The exact body the lane writes while standing by in mavlink mode: the
+        // MAVLink router owns the carrier telemetry-only, so the command-down
+        // gate reads true. A consumer of only the crsf block must see it.
+        let dir = std::env::temp_dir().join(format!("ados-cloud-crsf-mav-{}", std::process::id()));
+        write_named(
+            &dir,
+            "crsf-stats.json",
+            r#"{"v":1,"state":"ready","rssi_dbm":null,"lq_uplink":null,"lq_downlink":null,
+                "snr_db":null,"band":null,"packet_rate_hz":null,"tx_power_mw":null,
+                "tx_frames_per_s":null,"rx_frames_per_s":null,"rf_unverified":null,
+                "flyable":false,"mode":"mavlink","channel_source":null,"pic":null,
+                "relay_role":null,"fc_command_down_gated":true}"#,
+        );
+        let path = dir.join("crsf-stats.json");
+        let fresh = read_crsf_sidecar_from(&path, std::time::SystemTime::now()).unwrap();
+        assert_eq!(fresh.state.as_deref(), Some("ready"));
+        assert_eq!(fresh.mode.as_deref(), Some("mavlink"));
+        assert_eq!(fresh.fc_command_down_gated, Some(true));
         std::fs::remove_dir_all(&dir).ok();
     }
 

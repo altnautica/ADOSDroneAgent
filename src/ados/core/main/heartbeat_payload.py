@@ -78,6 +78,7 @@ _CRSF_BLOCK_FIELDS: tuple[str, ...] = (
     "mode",
     "channel_source",
     "relay_role",
+    "fc_command_down_gated",
 )
 
 

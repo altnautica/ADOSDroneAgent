@@ -128,6 +128,7 @@
     "rf_unverified": false,
     "mode": "crsf_rc",
     "channel_source": "hid",
-    "relay_role": null
+    "relay_role": null,
+    "fc_command_down_gated": null
   }
 }

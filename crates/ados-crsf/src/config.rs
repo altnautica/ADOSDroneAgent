@@ -186,6 +186,14 @@ pub struct CrsfLaneConfig {
     pub mavlink_transport: MavlinkTransport,
     /// This node's part in an RC relay chain.
     pub relay_role: RelayRole,
+    /// Whether the host->FC command-down direction is opened for a
+    /// MAVLink-over-ELRS source (`radio.crsf.mavlink_command_enabled`). Off by
+    /// default: a MAVLink-over-ELRS source is telemetry-only until this is set
+    /// for a bench-validated command lane. The MAVLink router owns the carrier
+    /// and the actual writer gate in `mode: mavlink`; the lane reads the same
+    /// flag so it can report the gate honestly on its own status surface (see
+    /// [`Self::fc_command_down_gated`]).
+    pub mavlink_command_enabled: bool,
 }
 
 impl Default for CrsfLaneConfig {
@@ -200,6 +208,7 @@ impl Default for CrsfLaneConfig {
             channel_source: ChannelSourceMode::Hid,
             mavlink_transport: MavlinkTransport::Serial,
             relay_role: RelayRole::None,
+            mavlink_command_enabled: false,
         }
     }
 }
@@ -239,6 +248,8 @@ struct CrsfSection {
     mavlink_transport: Option<String>,
     #[serde(default)]
     relay_role: Option<String>,
+    #[serde(default)]
+    mavlink_command_enabled: bool,
 }
 
 /// Parse an optional enum-ish string field, warning (once, at load) and
@@ -316,7 +327,32 @@ impl CrsfLaneConfig {
                 crsf.relay_role.as_deref(),
                 RelayRole::parse,
             ),
+            mavlink_command_enabled: crsf.mavlink_command_enabled,
         }
+    }
+
+    /// Whether a MAVLink-over-ELRS command source exists on this lane and, if so,
+    /// whether its host->FC command-down direction is gated closed. Mirrors the
+    /// MAVLink router's `command_down_gated` predicate — both read the same
+    /// `radio.crsf` block — so a consumer reading ONLY this lane's status can see
+    /// the ELRS command path's gate without the top-level FC status surface.
+    ///
+    /// Tri-state, honest: `None` when NO MAVLink-over-ELRS source exists (any
+    /// non-`mavlink` mode, the lane disabled, or `mode: mavlink` with no
+    /// resolvable carrier) — there is no command path to gate; `Some(true)` when
+    /// a source exists and the gate is CLOSED (telemetry-only, the default);
+    /// `Some(false)` only when a source exists and the gate is OPEN
+    /// (`mavlink_command_enabled`, a bidirectional command lane).
+    pub fn fc_command_down_gated(&self) -> Option<bool> {
+        if !self.enabled || self.mode != LaneMode::Mavlink {
+            return None;
+        }
+        // Resolve the carrier exactly as the router's crsf_mavlink_source does:
+        // the backpack UDP listen always resolves; the serial carrier only with a
+        // pinned device. No carrier => no source => nothing to gate.
+        let source_resolves =
+            self.mavlink_transport == MavlinkTransport::BackpackWifi || !self.device.is_empty();
+        source_resolves.then_some(!self.mavlink_command_enabled)
     }
 }
 
@@ -385,6 +421,7 @@ mod tests {
         assert_eq!(cfg.channel_source, ChannelSourceMode::Hid);
         assert_eq!(cfg.mavlink_transport, MavlinkTransport::Serial);
         assert_eq!(cfg.relay_role, RelayRole::None);
+        assert!(!cfg.mavlink_command_enabled);
     }
 
     #[test]
@@ -393,7 +430,7 @@ mod tests {
         let path = write_file(
             &dir,
             "config.yaml",
-            "radio:\n  crsf:\n    enabled: true\n    device: \" /dev/ttyUSB0 \"\n    band: \"900\"\n    packet_rate_hz: 250\n    tx_power_dbm: 20\n    mode: mavlink\n    channel_source: hybrid\n    mavlink_transport: backpack_wifi\n    relay_role: repeater\n",
+            "radio:\n  crsf:\n    enabled: true\n    device: \" /dev/ttyUSB0 \"\n    band: \"900\"\n    packet_rate_hz: 250\n    tx_power_dbm: 20\n    mode: mavlink\n    channel_source: hybrid\n    mavlink_transport: backpack_wifi\n    relay_role: repeater\n    mavlink_command_enabled: true\n",
         );
         let cfg = CrsfLaneConfig::load_from(&path);
         assert!(cfg.enabled);
@@ -405,6 +442,63 @@ mod tests {
         assert_eq!(cfg.channel_source, ChannelSourceMode::Hybrid);
         assert_eq!(cfg.mavlink_transport, MavlinkTransport::BackpackWifi);
         assert_eq!(cfg.relay_role, RelayRole::Repeater);
+        assert!(cfg.mavlink_command_enabled);
+    }
+
+    #[test]
+    fn fc_command_down_gated_is_tri_state_and_mirrors_the_router() {
+        // No MAVLink-over-ELRS source -> None (nothing to gate). The RC channel
+        // lane, an unconfigured lane, and a disabled lane all read absent.
+        let rc = CrsfLaneConfig {
+            enabled: true,
+            device: "/dev/ttyUSB0".to_string(),
+            mode: LaneMode::CrsfRc,
+            ..Default::default()
+        };
+        assert_eq!(rc.fc_command_down_gated(), None);
+        let disabled = CrsfLaneConfig {
+            enabled: false,
+            device: "/dev/ttyUSB0".to_string(),
+            mode: LaneMode::Mavlink,
+            ..Default::default()
+        };
+        assert_eq!(disabled.fc_command_down_gated(), None);
+        // mode: mavlink with a serial carrier but no pinned device does not
+        // resolve a source (matching the router) -> None.
+        let no_device = CrsfLaneConfig {
+            enabled: true,
+            device: String::new(),
+            mode: LaneMode::Mavlink,
+            mavlink_transport: MavlinkTransport::Serial,
+            ..Default::default()
+        };
+        assert_eq!(no_device.fc_command_down_gated(), None);
+
+        // A resolved serial source, gate closed by default -> Some(true).
+        let serial_gated = CrsfLaneConfig {
+            enabled: true,
+            device: "/dev/ttyUSB0".to_string(),
+            mode: LaneMode::Mavlink,
+            mavlink_transport: MavlinkTransport::Serial,
+            mavlink_command_enabled: false,
+            ..Default::default()
+        };
+        assert_eq!(serial_gated.fc_command_down_gated(), Some(true));
+        // Same source with the command marker set -> the gate is open, Some(false).
+        let serial_open = CrsfLaneConfig {
+            mavlink_command_enabled: true,
+            ..serial_gated.clone()
+        };
+        assert_eq!(serial_open.fc_command_down_gated(), Some(false));
+        // The backpack carrier always resolves, even with no pinned device.
+        let backpack = CrsfLaneConfig {
+            enabled: true,
+            device: String::new(),
+            mode: LaneMode::Mavlink,
+            mavlink_transport: MavlinkTransport::BackpackWifi,
+            ..Default::default()
+        };
+        assert_eq!(backpack.fc_command_down_gated(), Some(true));
     }
 
     #[test]

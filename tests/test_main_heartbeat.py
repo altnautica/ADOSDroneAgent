@@ -329,6 +329,8 @@ def _write_crsf_sidecar(path: Path, *, state: str = "link_ok") -> None:
                 "mode": "crsf_rc",
                 "channel_source": "hid",
                 "relay_role": None,
+                # A crsf_rc lane has no MAVLink-over-ELRS command path to gate.
+                "fc_command_down_gated": None,
             }
         )
     )
@@ -370,6 +372,8 @@ def test_heartbeat_crsf_block_projects_the_pinned_fields(monkeypatch, tmp_path) 
     assert crsf["mode"] == "crsf_rc"
     assert crsf["channel_source"] == "hid"
     assert crsf["relay_role"] is None
+    # crsf_rc: no MAVLink-over-ELRS source, so no command gate to report.
+    assert crsf["fc_command_down_gated"] is None
     assert "flyable" not in crsf
     assert set(crsf) == {
         "v",
@@ -387,7 +391,45 @@ def test_heartbeat_crsf_block_projects_the_pinned_fields(monkeypatch, tmp_path) 
         "mode",
         "channel_source",
         "relay_role",
+        "fc_command_down_gated",
     }
+
+
+def test_heartbeat_crsf_block_carries_the_command_down_gate(monkeypatch, tmp_path) -> None:
+    """A MAVLink-over-ELRS lane standing by telemetry-only writes
+    ``fc_command_down_gated: true``; the projection forwards it so a consumer
+    of only the crsf block sees the ELRS command path is gated closed."""
+    import ados.core.paths as paths
+
+    sidecar = tmp_path / "crsf-stats.json"
+    sidecar.write_text(
+        json.dumps(
+            {
+                "v": 1,
+                "state": "ready",
+                "rssi_dbm": None,
+                "lq_uplink": None,
+                "lq_downlink": None,
+                "snr_db": None,
+                "band": None,
+                "packet_rate_hz": None,
+                "tx_power_mw": None,
+                "tx_frames_per_s": None,
+                "rx_frames_per_s": None,
+                "rf_unverified": None,
+                "flyable": False,
+                "mode": "mavlink",
+                "channel_source": None,
+                "pic": None,
+                "relay_role": None,
+                "fc_command_down_gated": True,
+            }
+        )
+    )
+    monkeypatch.setattr(paths, "CRSF_STATS_JSON", sidecar)
+    crsf = _fresh_app()._build_heartbeat_payload()["crsf"]
+    assert crsf["mode"] == "mavlink"
+    assert crsf["fc_command_down_gated"] is True
 
 
 def test_heartbeat_crsf_block_drops_a_stale_sidecar(monkeypatch, tmp_path) -> None:

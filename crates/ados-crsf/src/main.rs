@@ -257,6 +257,11 @@ async fn run_service_pass(
             let idle_inputs = StatsInputs {
                 mode: Some(cfg.mode.as_str()),
                 relay_role: cfg.relay_role.sidecar_str(),
+                // The router owns the carrier in this mode and keeps the
+                // host->FC command-down direction gated closed by default;
+                // report that gate on the lane's own status so a consumer of
+                // only this lane sees whether the ELRS command path is open.
+                fc_command_down_gated: cfg.fc_command_down_gated(),
                 ..StatsInputs::default()
             };
             return idle_with_sidecar(
@@ -509,6 +514,10 @@ async fn run_service_pass(
                 channel_source: source,
                 pic: pic_report,
                 relay_role: cfg.relay_role.sidecar_str(),
+                // None in this branch: the RC channel lane has no
+                // MAVLink-over-ELRS command source to gate (config-derived, so
+                // it stays honest if the predicate ever changes).
+                fc_command_down_gated: cfg.fc_command_down_gated(),
             };
             *latest_status.lock().await = build_stats_value(state, &inputs);
             write_stats_sidecar(state, &inputs, Some(&metrics));
@@ -768,6 +777,13 @@ mod shutdown_tests {
         let body = wait_for_state(&path, "ready").await;
         assert_eq!(body["mode"], "mavlink");
         assert_eq!(body["flyable"], false, "the RC lane transmits nothing");
+        // A resolved MAVLink-over-ELRS source with the command marker off (the
+        // default): the host->FC command-down direction is gated closed, and the
+        // lane reports it so a consumer of only this lane sees the gate.
+        assert_eq!(
+            body["fc_command_down_gated"], true,
+            "telemetry-only mavlink source reports its command gate closed"
+        );
         assert!(
             body["rf_unverified"].is_null(),
             "standing by carries no liveness verdict"

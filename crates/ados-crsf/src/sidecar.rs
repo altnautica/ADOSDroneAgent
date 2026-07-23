@@ -7,7 +7,8 @@
 //! { "v": 1, "state": "…", "rssi_dbm": …, "lq_uplink": …, "lq_downlink": …,
 //!   "snr_db": …, "band": …, "packet_rate_hz": …, "tx_power_mw": …,
 //!   "tx_frames_per_s": …, "rx_frames_per_s": …, "rf_unverified": …,
-//!   "flyable": …, "mode": …, "channel_source": …, "pic": …, "relay_role": … }
+//!   "flyable": …, "mode": …, "channel_source": …, "pic": …, "relay_role": …,
+//!   "fc_command_down_gated": … }
 //! ```
 //!
 //! `state` ∈ `unconfigured|ready|link_ok|degraded|rf_unverified|disabled`.
@@ -71,6 +72,15 @@ pub struct StatsInputs<'a> {
     pub pic: Option<&'a str>,
     /// The relay role, when this node participates in a relay chain.
     pub relay_role: Option<&'a str>,
+    /// The MAVLink-over-ELRS command-down gate, so a consumer reading ONLY this
+    /// lane sees whether the ELRS MAVLink command path is gated. `None` when no
+    /// MAVLink-over-ELRS source exists (the RC channel lane, or `mode: mavlink`
+    /// with no resolvable carrier) — nothing to gate; `Some(true)` when a source
+    /// exists and its host->FC command-down direction is gated closed
+    /// (telemetry-only, the default); `Some(false)` only when a source exists and
+    /// the gate is open. Sourced from [`crate::config::CrsfLaneConfig::fc_command_down_gated`],
+    /// which mirrors the MAVLink router's own `command_down_gated` predicate.
+    pub fc_command_down_gated: Option<bool>,
 }
 
 /// Build the sidecar body — the exact pinned field set, nothing more.
@@ -116,6 +126,7 @@ pub fn build_stats_value(state: LaneState, inputs: &StatsInputs<'_>) -> Value {
         "channel_source": inputs.channel_source,
         "pic": inputs.pic,
         "relay_role": inputs.relay_role,
+        "fc_command_down_gated": inputs.fc_command_down_gated,
     })
 }
 
@@ -183,7 +194,7 @@ mod tests {
 
     /// The pinned field set, in one place, so a drift in either direction
     /// (a missing field or an invented one) fails loudly.
-    const PINNED_FIELDS: [&str; 17] = [
+    const PINNED_FIELDS: [&str; 18] = [
         "v",
         "state",
         "rssi_dbm",
@@ -201,6 +212,7 @@ mod tests {
         "channel_source",
         "pic",
         "relay_role",
+        "fc_command_down_gated",
     ];
 
     fn sample_link() -> LinkStatistics {
@@ -266,6 +278,7 @@ mod tests {
             channel_source: Some("inject"),
             pic: Some("unclaimed"),
             relay_role: None,
+            fc_command_down_gated: None,
         };
         let v = build_stats_value(LaneState::LinkOk, &inputs);
         assert_eq!(v["state"], "link_ok");
@@ -285,6 +298,34 @@ mod tests {
         assert_eq!(v["pic"], "unclaimed");
         assert!(v["band"].is_null());
         assert!(v["relay_role"].is_null());
+        // The RC channel lane has no MAVLink-over-ELRS command path to gate.
+        assert!(v["fc_command_down_gated"].is_null());
+    }
+
+    #[test]
+    fn fc_command_down_gated_rides_the_body_tri_state() {
+        // A MAVLink-over-ELRS lane standing by telemetry-only: the gate reads
+        // true so a consumer of only this lane sees the command path is closed.
+        let inputs = StatsInputs {
+            mode: Some("mavlink"),
+            fc_command_down_gated: Some(true),
+            ..StatsInputs::default()
+        };
+        let v = build_stats_value(LaneState::Ready, &inputs);
+        assert_eq!(v["fc_command_down_gated"], true);
+
+        // With the command marker set the gate is open: false, not null.
+        let inputs = StatsInputs {
+            mode: Some("mavlink"),
+            fc_command_down_gated: Some(false),
+            ..StatsInputs::default()
+        };
+        let v = build_stats_value(LaneState::Ready, &inputs);
+        assert_eq!(v["fc_command_down_gated"], false);
+
+        // No source (default inputs): absent, never a fabricated false.
+        let v = build_stats_value(LaneState::Ready, &StatsInputs::default());
+        assert!(v["fc_command_down_gated"].is_null());
     }
 
     #[test]

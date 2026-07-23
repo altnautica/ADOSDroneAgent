@@ -173,6 +173,8 @@ fn paired_full_matches_python_emit() {
         mode: Some("crsf_rc".to_string()),
         channel_source: Some("hid".to_string()),
         relay_role: None,
+        // A crsf_rc lane has no MAVLink-over-ELRS command path to gate.
+        fc_command_down_gated: None,
     });
     payload.mission_control_url = Some("https://mc.example".to_string());
     payload.video_whep_url = Some("https://tunnel.example/main/".to_string());
