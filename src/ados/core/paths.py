@@ -313,6 +313,12 @@ DISPLAY_ENABLED_PATH = ADOS_ETC_DIR / "display.enabled"
 # that never enables the lane skips the unit cleanly. Reconciled by the config
 # persist path and by the installer, never hand-managed.
 CRSF_ENABLED_PATH = ADOS_ETC_DIR / "crsf-enabled"
+# Marker mirroring `radio.tunnel.enabled`: present ⇔ the config-over-radio
+# channel is opted in. The ados-tunnel-config systemd unit gates on it
+# (ConditionPathExists) so a node that never enables the channel skips the unit
+# cleanly. Reconciled by the config persist path and by the installer, never
+# hand-managed.
+TUNNEL_ENABLED_PATH = ADOS_ETC_DIR / "tunnel-enabled"
 # Probation marker for the apply-verify-auto-revert path. Written when a
 # boot-critical SPI-LCD overlay is applied blind on a board that declares
 # the panel but where it is not yet bound. Records the boot-config snapshot

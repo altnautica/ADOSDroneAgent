@@ -95,5 +95,39 @@ class CrsfConfig(BaseModel):
     relay_role: Literal["none", "repeater", "agent_last_mile"] = "none"
 
 
+class TunnelConfig(BaseModel):
+    """The config-over-radio channel (a MAVLink-TUNNEL request/response lane on
+    the low-rate WFB ``-p1`` control plane).
+
+    It lets a node reachable only over the radio link (WFB carries no IP) have
+    its ``/api/config`` read and written from the ground. It carries CONFIG
+    request/response ONLY — never armed-flight command authority (a separate,
+    gated concern) — and its only gate by riding ``-p1`` is the WFB pairing key
+    (a pairing-scope gate, not a flight-authorization gate).
+
+    ``enabled`` is the master opt-in. Off by default: the whole channel is
+    inert — the drone-side terminator acts on no config tunnel and the
+    ground-side injector refuses every request. It mirrors onto the
+    ``/etc/ados/tunnel-enabled`` marker the ``ados-tunnel-config`` unit gates
+    on, so an un-opted node never even runs the unit.
+
+    ``command_enabled`` opens config WRITES (``PUT /api/config``) over the
+    radio. Off by default and NOT implied by opting the channel in: a config
+    READ (``GET``) is served while writes are refused until an operator sets
+    this for a bench-validated write lane, after a safety review.
+
+    ``rx_port`` / ``tx_port`` are the LOCAL UDP ports the service binds/sends
+    on. They are dedicated ports (disjoint from the WFB plane ports) that an
+    ``ados-radio`` bearer bridge connects to the ``-p1`` control plane in a
+    separate, gated radio-integration step.
+    """
+
+    enabled: bool = False
+    command_enabled: bool = False
+    rx_port: int = 5820
+    tx_port: int = 5821
+
+
 class RadioConfig(BaseModel):
     crsf: CrsfConfig = CrsfConfig()
+    tunnel: TunnelConfig = TunnelConfig()

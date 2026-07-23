@@ -181,6 +181,18 @@ def _save_config_dict(data: dict[str, Any]) -> bool:
                 sync_after_config_write(previous_config, data)
             except Exception as exc:  # noqa: BLE001 — the write already landed
                 log.warning("crsf_config_sync_failed", error=str(exc))
+            # Keep the config-over-radio channel's enable marker + unit true to
+            # the persisted config (the marker mirrors radio.tunnel.enabled; the
+            # unit gets a no-block reload-or-restart only when the slice
+            # changed). Best-effort: a hiccup never fails the landed write.
+            try:
+                from ados.core.tunnel_marker import (
+                    sync_after_config_write as tunnel_sync_after_config_write,
+                )
+
+                tunnel_sync_after_config_write(previous_config, data)
+            except Exception as exc:  # noqa: BLE001 — the write already landed
+                log.warning("tunnel_config_sync_failed", error=str(exc))
             return True
         except (OSError, yaml.YAMLError) as exc:
             log.error(
