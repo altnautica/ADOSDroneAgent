@@ -431,6 +431,40 @@ mod tests {
     }
 
     #[test]
+    fn gps_decodes_a_known_byte_vector() {
+        // A hand-built CRSF GPS payload (type 0x02, 15 bytes, all multi-byte
+        // fields big-endian), decoded independently of the encoder to a known
+        // physical fix: lat/lon in degrees×1e7, ground speed raw, heading in
+        // 0.01°, altitude in metres with a +1000 offset, satellite count.
+        let payload = [
+            0x07, 0xBB, 0xDE, 0x22, // lat  = 129_752_610  → 12.9752610°
+            0x2E, 0x3F, 0x71, 0x94, // lon  = 775_909_780  → 77.5909780°
+            0x04, 0xD2, // ground speed = 1234 (raw wire units)
+            0x69, 0x87, // heading = 27015 → 270.15°
+            0x07, 0xBC, // altitude = 1980 → 980 m with the +1000 offset
+            0x0E, // satellites = 14
+        ];
+        let g = Gps::decode(&payload).unwrap();
+        assert_eq!(g.lat_1e7, 129_752_610);
+        assert_eq!(g.lon_1e7, 775_909_780);
+        assert_eq!(g.ground_speed, 1234);
+        assert_eq!(g.heading, 27_015);
+        assert_eq!(g.altitude, 1980);
+        assert_eq!(g.satellites, 14);
+        // The physical altitude is the wire value minus the +1000 m offset.
+        assert_eq!(i32::from(g.altitude) - 1000, 980);
+
+        // A southern/negative latitude decodes its two's-complement i32
+        // correctly (0xEBDEC570 big-endian = −337_722_000 → −33.7722°).
+        let south = [
+            0xEB, 0xDE, 0xC5, 0x70, // lat = −337_722_000
+            0x2E, 0x3F, 0x71, 0x94, // lon (unchanged)
+            0x04, 0xD2, 0x69, 0x87, 0x07, 0xBC, 0x0E,
+        ];
+        assert_eq!(Gps::decode(&south).unwrap().lat_1e7, -337_722_000);
+    }
+
+    #[test]
     fn battery_roundtrip_and_24_bit_capacity() {
         let batt = Battery {
             voltage: 168,            // 16.8 V
@@ -456,6 +490,28 @@ mod tests {
     }
 
     #[test]
+    fn battery_decodes_a_known_byte_vector() {
+        // A hand-built CRSF battery payload (type 0x08, 8 bytes, big-endian),
+        // decoded independently of the encoder to a known pack state: voltage in
+        // 0.1 V, current in 0.1 A, capacity used as a 24-bit mAh count, remaining
+        // charge in percent.
+        let payload = [
+            0x00, 0xA8, // voltage = 168 → 16.8 V
+            0x00, 0xFE, // current = 254 → 25.4 A
+            0x00, 0x0B, 0xB8, // capacity used = 3000 mAh (24-bit)
+            0x49, // remaining = 73%
+        ];
+        let b = Battery::decode(&payload).unwrap();
+        assert_eq!(b.voltage, 168);
+        assert_eq!(b.current, 254);
+        assert_eq!(b.capacity_used, 3000);
+        assert_eq!(b.remaining, 73);
+        // The documented scales: 0.1 V and 0.1 A per wire unit.
+        assert!((f64::from(b.voltage) / 10.0 - 16.8).abs() < 1e-9);
+        assert!((f64::from(b.current) / 10.0 - 25.4).abs() < 1e-9);
+    }
+
+    #[test]
     fn attitude_roundtrip_and_size() {
         let att = Attitude {
             pitch: -3141,
@@ -464,6 +520,24 @@ mod tests {
         };
         assert_eq!(att.encode_payload().len(), 6);
         roundtrip(Telemetry::Attitude(att));
+    }
+
+    #[test]
+    fn attitude_decodes_a_known_byte_vector() {
+        // A hand-built CRSF attitude payload (type 0x1E, 6 bytes: pitch, roll,
+        // yaw as big-endian signed i16), decoded independently of the encoder.
+        // The struct carries raw wire integers (the angle scale is bench-verified
+        // before a consumer renders it), so this proves the byte→i16 layout —
+        // in particular the two's-complement decode of the negative axes.
+        let payload = [
+            0xF3, 0xBB, // pitch = −3141
+            0x06, 0x22, // roll  =  1570
+            0x85, 0x49, // yaw   = −31415
+        ];
+        let a = Attitude::decode(&payload).unwrap();
+        assert_eq!(a.pitch, -3141);
+        assert_eq!(a.roll, 1570);
+        assert_eq!(a.yaw, -31415);
     }
 
     #[test]
