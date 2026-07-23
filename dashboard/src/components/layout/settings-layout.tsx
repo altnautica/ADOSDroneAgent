@@ -23,20 +23,22 @@ import { cn } from "@/lib/utils";
 
 // The settings nav is grouped into two tiers: a small uppercase group header
 // over its section links. The nav grew past a dozen entries once the curated
-// on-box config pages landed, so a flat list stopped being scannable.
+// on-box config pages landed, so a flat list stopped being scannable. The
+// group set + order mirrors the GCS node-settings sidebar so the on-box
+// dashboard and the GCS reach the same pages under the same headers.
 type SettingsGroup =
-  | "Node"
-  | "Connectivity"
-  | "System & safety"
+  | "Identity"
+  | "Link & network"
   | "Video & vision"
-  | "Device";
+  | "Cloud & remote"
+  | "System & safety";
 
 const GROUP_ORDER: readonly SettingsGroup[] = [
-  "Node",
-  "Connectivity",
-  "System & safety",
+  "Identity",
+  "Link & network",
   "Video & vision",
-  "Device",
+  "Cloud & remote",
+  "System & safety",
 ];
 
 interface SectionLink {
@@ -48,76 +50,51 @@ interface SectionLink {
 }
 
 const SECTIONS: SectionLink[] = [
+  // IDENTITY
   {
     to: "/settings/profile",
     label: "Profile",
     icon: UserCog,
     blurb: "Drone or ground station, role, restart on apply.",
-    group: "Node",
+    group: "Identity",
   },
-  {
-    to: "/settings/region",
-    label: "Region",
-    icon: Globe,
-    blurb: "Operating-region RF posture: unrestricted or pinned.",
-    group: "Node",
-  },
+  // LINK & NETWORK
   {
     to: "/settings/network",
     label: "Network",
     icon: Wifi,
     blurb: "Uplink matrix, failover, Wi-Fi client, hotspot.",
-    group: "Connectivity",
+    group: "Link & network",
   },
   {
     to: "/settings/cellular",
     label: "Cellular",
     icon: Signal,
     blurb: "Modem status, APN, and data cap.",
-    group: "Connectivity",
+    group: "Link & network",
   },
   {
     to: "/settings/mac-pin",
     label: "MAC pinning",
     icon: Fingerprint,
     blurb: "Adapter stability and stable-MAC pins.",
-    group: "Connectivity",
-  },
-  {
-    to: "/settings/cloud",
-    label: "Cloud",
-    icon: Cloud,
-    blurb: "Altnautica relay, self-hosted, or local-only.",
-    group: "Connectivity",
-  },
-  {
-    to: "/settings/self-heal",
-    label: "Self-heal",
-    icon: HeartPulse,
-    blurb: "Onboard Wi-Fi and camera auto-recovery.",
-    group: "System & safety",
-  },
-  {
-    to: "/settings/mavlink",
-    label: "MAVLink",
-    icon: Route,
-    blurb: "FC transport, endpoints, and IDs.",
-    group: "System & safety",
-  },
-  {
-    to: "/settings/security",
-    label: "Security",
-    icon: Lock,
-    blurb: "API key, MAVLink WS auth, dashboard PIN.",
-    group: "System & safety",
+    group: "Link & network",
   },
   {
     to: "/settings/discovery",
     label: "Discovery",
     icon: Radar,
     blurb: "Advertised reach names and mDNS.",
-    group: "System & safety",
+    group: "Link & network",
   },
+  {
+    to: "/settings/mavlink",
+    label: "MAVLink",
+    icon: Route,
+    blurb: "FC transport, endpoints, and IDs.",
+    group: "Link & network",
+  },
+  // VIDEO & VISION
   {
     to: "/settings/vision",
     label: "Vision",
@@ -139,19 +116,49 @@ const SECTIONS: SectionLink[] = [
     blurb: "Perception offload: drone target or workstation serving.",
     group: "Video & vision",
   },
+  // CLOUD & REMOTE
+  {
+    to: "/settings/cloud",
+    label: "Cloud",
+    icon: Cloud,
+    blurb: "Altnautica relay, self-hosted, or local-only.",
+    group: "Cloud & remote",
+  },
+  // SYSTEM & SAFETY
+  {
+    to: "/settings/region",
+    label: "Region",
+    icon: Globe,
+    blurb: "Operating-region RF posture: unrestricted or pinned.",
+    group: "System & safety",
+  },
+  {
+    to: "/settings/self-heal",
+    label: "Self-heal",
+    icon: HeartPulse,
+    blurb: "Onboard Wi-Fi and camera auto-recovery.",
+    group: "System & safety",
+  },
+  {
+    to: "/settings/security",
+    label: "Security",
+    icon: Lock,
+    blurb: "API key, MAVLink WS auth, dashboard PIN.",
+    group: "System & safety",
+  },
   {
     to: "/settings/display",
     label: "Display",
     icon: Monitor,
     blurb: "Local kiosk display selection.",
-    group: "Device",
+    group: "System & safety",
   },
   {
     to: "/settings/advanced",
     label: "Advanced",
     icon: Cpu,
     blurb: "Log level and board override.",
-    group: "Device",
+    group: "System & safety",
   },
 ];
 
