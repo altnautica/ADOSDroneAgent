@@ -43,6 +43,7 @@ pub mod gs_pic;
 pub mod gs_recording;
 pub mod gs_recording_list;
 pub mod gs_status;
+pub mod gs_tunnel_config;
 pub mod gs_ui_read;
 pub mod gs_ui_write;
 pub mod gs_wfb_pair;
@@ -548,6 +549,15 @@ pub fn build_router(state: AppState, net_native: bool, hid_native: bool) -> Rout
         .route(
             "/api/v1/ground-station/crsf/params",
             post(gs_crsf::post_crsf_param_write),
+        )
+        // Config-over-radio (relayed config): read the channel state sidecar,
+        // and forward a config request to a radio-linked drone's /api/config
+        // over the bearer. The seam the GCS calls for the "drone via ground
+        // node" case.
+        .route(
+            "/api/v1/ground-station/relayed/config",
+            get(gs_tunnel_config::get_relayed_config_status)
+                .post(gs_tunnel_config::post_relayed_config),
         );
 
     // Wi-Fi client writes (profile-agnostic) are served natively only where the

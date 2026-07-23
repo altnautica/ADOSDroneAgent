@@ -191,6 +191,9 @@ fn native_routes() -> Vec<NativeRoute> {
         get("/api/v1/ground-station/crsf"),
         post("/api/v1/ground-station/crsf/channels"),
         post("/api/v1/ground-station/crsf/params"),
+        // Config-over-radio (relayed config): status read + request forward.
+        get("/api/v1/ground-station/relayed/config"),
+        post("/api/v1/ground-station/relayed/config"),
         // Ground-station reads ported in the read-tail wave (profile-gated).
         get("/api/v1/ground-station/recording/list"),
         get("/api/v1/ground-station/ui"),
@@ -453,7 +456,7 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            138,
+            140,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);
@@ -586,6 +589,8 @@ mod tests {
         // a flight-critical channel injection would be served auth-skipped).
         assert!(has(Method::POST, "/api/v1/ground-station/crsf/channels"));
         assert!(has(Method::POST, "/api/v1/ground-station/crsf/params"));
+        assert!(has(Method::GET, "/api/v1/ground-station/relayed/config"));
+        assert!(has(Method::POST, "/api/v1/ground-station/relayed/config"));
         assert!(has(Method::POST, "/api/v1/ground-station/bluetooth/scan"));
         assert!(has(Method::POST, "/api/v1/ground-station/bluetooth/pair"));
         assert!(has(
