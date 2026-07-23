@@ -15,6 +15,7 @@
 import { useEffect } from "react";
 
 import { useFlightTelemetryContext } from "@/hooks/flight-telemetry-context";
+import { useTelemetryContext } from "@/hooks/telemetry-context";
 import {
   computeMapView,
   isValidFix,
@@ -40,9 +41,20 @@ function headingOrNull(h: number | null | undefined): number | null {
 
 export function MiniMap() {
   const { telemetry, live } = useFlightTelemetryContext();
+  const { status } = useTelemetryContext();
   const start = useTrackStore((s) => s.start);
   const samples = useTrackStore((s) => s.samples);
   const record = useTrackStore((s) => s.record);
+  const syncVehicle = useTrackStore((s) => s.syncVehicle);
+
+  // Reset the breadcrumb when the paired vehicle's identity changes (a
+  // mid-session re-pair on a ground station), so the trail + "start" never span
+  // two vehicles. The store ignores a null id (a transient drop) and adopts the
+  // first identity without clearing, so this is a no-op on a drone's own track.
+  const pairedDeviceId = status?.paired_drone?.device_id ?? null;
+  useEffect(() => {
+    syncVehicle(pairedDeviceId);
+  }, [pairedDeviceId, syncVehicle]);
 
   const pos = telemetry?.position ?? null;
   const fix = telemetry?.gps?.fix_type ?? null;
