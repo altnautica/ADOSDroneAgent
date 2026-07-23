@@ -2,25 +2,45 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ValidationError
 
 from ados.api.deps import get_agent_app
+from ados.core.config import SECRET_PATHS
 
 router = APIRouter()
 
 
-# Dot-paths the GET response redacts. PUT rejects writes to these paths
-# unless the caller provides something other than the redaction sentinel,
-# so a GET-then-PUT round trip cannot corrupt the real secret with the
-# literal "***" placeholder.
-_REDACTED_PATHS: tuple[str, ...] = (
-    "security.tls.key_path",
-    "security.api.api_key",
-    "security.wireguard.config_path",
-    "server.self_hosted.api_key",
-)
+# Every config path carrying a credential value is redacted on GET and
+# protected on PUT. The set is the single ``SECRET_PATHS`` list the schema's
+# ``x-secret`` markers are generated from, so the read/write surface and the
+# schema can never disagree about which fields are secret, and a newly
+# declared secret field is covered here without a second edit.
 _REDACTED_SENTINEL = "***"
+
+
+def _redact_secret_paths(data: dict[str, Any]) -> None:
+    """Overwrite every secret VALUE in the config dump with the sentinel.
+
+    Driven by ``SECRET_PATHS`` so a config read surface can never expose a
+    credential. An empty/unset value is left untouched: the read stays
+    truthful about set-vs-not-set (the ``x-secret`` UI intent) and there is no
+    secret to hide.
+    """
+    for dotted in SECRET_PATHS:
+        parts = dotted.split(".")
+        node: Any = data
+        for part in parts[:-1]:
+            if not isinstance(node, dict):
+                node = None
+                break
+            node = node.get(part)
+        if isinstance(node, dict):
+            leaf = parts[-1]
+            if node.get(leaf):
+                node[leaf] = _REDACTED_SENTINEL
 
 
 @router.get("/config")
@@ -36,19 +56,7 @@ async def get_config():
 
     if isinstance(data.get("agent"), dict):
         data["agent"]["board_override"] = read_board_override()
-    # Redact secrets
-    if "security" in data:
-        sec = data["security"]
-        if "tls" in sec:
-            sec["tls"]["key_path"] = _REDACTED_SENTINEL
-        if "api" in sec:
-            sec["api"]["api_key"] = (
-                _REDACTED_SENTINEL if sec["api"].get("api_key") else ""
-            )
-        if "wireguard" in sec:
-            sec["wireguard"]["config_path"] = _REDACTED_SENTINEL
-    if "server" in data and "self_hosted" in data["server"]:
-        data["server"]["self_hosted"]["api_key"] = _REDACTED_SENTINEL
+    _redact_secret_paths(data)
     return data
 
 
@@ -79,7 +87,7 @@ async def update_config(update: ConfigUpdate):
     app = get_agent_app()
 
     # Block writes that would corrupt a secret with the GET redaction sentinel.
-    if update.key in _REDACTED_PATHS and update.value == _REDACTED_SENTINEL:
+    if update.key in SECRET_PATHS and update.value == _REDACTED_SENTINEL:
         raise HTTPException(
             status_code=400,
             detail={

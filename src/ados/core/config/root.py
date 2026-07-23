@@ -26,6 +26,27 @@ from .system import (
 )
 from .video import VideoConfig
 
+# Dotted config paths whose stored VALUE is a credential (an API key, a
+# password, a secret-file path). One list feeds two surfaces so they can never
+# drift apart:
+#   * the schema emitter marks each path ``x-secret: true`` on its property
+#     node, so a schema-driven UI renders set/not-set instead of the value;
+#   * the ``GET /api/config`` read redacts each path to the ``***`` sentinel
+#     and the ``PUT`` refuses a write of that sentinel back onto a secret.
+# Declare a new secret field here (and regenerate the committed schema) and
+# every read surface covers it automatically — there is no second list to
+# keep in step.
+SECRET_PATHS: tuple[str, ...] = (
+    "security.tls.key_path",
+    "security.api.api_key",
+    "security.wireguard.config_path",
+    "server.self_hosted.api_key",
+    "security.hmac_secret",
+    "server.mqtt_password",
+    "network.wifi_client.password",
+    "network.hotspot.password",
+)
+
 
 class ADOSConfig(BaseModel):
     agent: AgentConfig = AgentConfig()

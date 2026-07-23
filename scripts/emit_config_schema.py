@@ -27,12 +27,13 @@ Two augmentations over the raw model emit:
   import could see ``ados.core.paths`` already loaded with host-flavoured
   constants.
 
-* **Secret markers.** Every field the config values-read redacts, plus every
-  plaintext credential the model carries, gets ``"x-secret": true`` on its
-  property node so a schema-driven UI renders set/not-set instead of the
-  value. The marker set must stay in step with the values-read redaction in
-  ``src/ados/api/routes/config.py``; a path that stops resolving on the model
-  fails the emit loudly rather than silently dropping a marker.
+* **Secret markers.** Every credential-bearing field gets ``"x-secret":
+  true`` on its property node so a schema-driven UI renders set/not-set
+  instead of the value. The path set is the shared ``SECRET_PATHS`` list
+  (``ados.core.config``) that also drives the ``GET /api/config`` redaction,
+  so the marker set and the read-surface redaction cannot disagree. A path
+  that stops resolving on the model fails the emit loudly rather than
+  silently dropping a marker.
 
 Known divergence: the values-read (``GET /api/config``) injects
 ``agent.board_override`` from a file on disk; it is not a model field, so the
@@ -62,24 +63,16 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from ados.core.config import ADOSConfig  # noqa: E402
+from ados.core.config import SECRET_PATHS, ADOSConfig  # noqa: E402
 
 # The committed schema file the native control surface embeds and serves.
 SCHEMA_PATH = ROOT / "schemas" / "agent-config.schema.json"
 
-# Dotted config paths whose VALUES must never render in a UI: the four paths
-# the values-read redacts today plus the plaintext credentials the model
-# carries. Each gets `x-secret: true` on its property node.
-SECRET_PATHS: tuple[str, ...] = (
-    "security.tls.key_path",
-    "security.api.api_key",
-    "security.wireguard.config_path",
-    "server.self_hosted.api_key",
-    "security.hmac_secret",
-    "server.mqtt_password",
-    "network.wifi_client.password",
-    "network.hotspot.password",
-)
+# ``SECRET_PATHS`` is the one canonical list of credential-bearing config
+# paths (defined beside the model in ``ados.core.config``). Each path gets
+# ``x-secret: true`` on its property node here, and the same list drives the
+# ``GET /api/config`` redaction — sharing it is what keeps the schema markers
+# and the read-surface redaction from ever disagreeing.
 
 
 def _deref(schema: dict[str, Any], node: dict[str, Any]) -> dict[str, Any]:

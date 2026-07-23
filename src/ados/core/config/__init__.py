@@ -67,7 +67,7 @@ from .network import (
     WifiClientConfig,
 )
 from .radio import CrsfConfig, RadioConfig
-from .root import ADOSConfig
+from .root import SECRET_PATHS, ADOSConfig
 from .security import (
     DEFAULT_CORS_ORIGINS,
     ApiSecurityConfig,
@@ -91,6 +91,7 @@ from .wfb import WfbConfig
 __all__ = [
     # root
     "ADOSConfig",
+    "SECRET_PATHS",
     "load_config",
     # agent
     "AgentConfig",
