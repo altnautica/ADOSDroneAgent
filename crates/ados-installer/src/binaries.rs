@@ -379,8 +379,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_has_twenty_two_entries() {
-        assert_eq!(PREBUILT.len(), 22);
+    fn catalog_has_twenty_three_entries() {
+        assert_eq!(PREBUILT.len(), 23);
+    }
+
+    #[test]
+    fn both_profiles_fetch_the_config_tunnel_binary() {
+        for profile in ["drone", "ground_station"] {
+            let svcs: Vec<&str> = for_profile(profile).iter().map(|b| b.service).collect();
+            assert!(
+                svcs.contains(&"ados-tunnel-config"),
+                "{profile} must fetch ados-tunnel-config for the config-over-radio channel"
+            );
+        }
     }
 
     #[test]
