@@ -2,11 +2,14 @@
 //!
 //! `POST /api/command` is the GCS's control path: it names one of a small fixed
 //! set of high-level commands (`arm`, `disarm`, `takeoff`, `land`, `rtl`,
-//! `mode`), and the route turns that into the corresponding MAVLink frame,
-//! writes it to `/run/ados/mavlink.sock` (which the router forwards to the FC),
-//! and correlates the flight controller's `COMMAND_ACK` so the response reports
-//! whether the FC accepted the command. `GET /api/commands` returns the catalog
-//! of those names with descriptions.
+//! `mode`, `killSwitch`, `pauseMission`, `resumeMission`), and the route turns
+//! that into the corresponding MAVLink frame, writes it to
+//! `/run/ados/mavlink.sock` (which the router forwards to the FC), and correlates
+//! the flight controller's `COMMAND_ACK` so the response reports whether the FC
+//! accepted the command. `GET /api/commands` returns the catalog of those names
+//! with descriptions. The command name match is case-insensitive (the route
+//! lowercases `cmd` before dispatch), so the fleet board's camelCase action names
+//! resolve to the same frame.
 //!
 //! ## Why this is the WORKING command path
 //!
@@ -28,14 +31,37 @@
 //! `rtl`/`mode` set a flight mode via `MAV_CMD_DO_SET_MODE` (176), and the mode
 //! encoding differs by autopilot family:
 //!
-//! | cmd      | command opcode                  | params (1..7)                         |
-//! |----------|---------------------------------|---------------------------------------|
-//! | arm      | MAV_CMD_COMPONENT_ARM_DISARM 400| p1=1.0, rest 0                        |
-//! | disarm   | MAV_CMD_COMPONENT_ARM_DISARM 400| p1=0.0, rest 0                        |
-//! | takeoff  | MAV_CMD_NAV_TAKEOFF 22          | p7=alt (default 10.0), rest 0         |
-//! | land     | MAV_CMD_NAV_LAND 21             | all 0                                 |
-//! | rtl      | MAV_CMD_DO_SET_MODE 176         | ArduPilot: p1=1, p2=6 · PX4: p1=1, p2=4, p3=5 |
-//! | mode N   | MAV_CMD_DO_SET_MODE 176         | ArduPilot: p1=1, p2=custom_mode · PX4: p1=1, p2=main, p3=sub |
+//! | cmd           | command opcode                  | params (1..7)                    |
+//! |---------------|---------------------------------|----------------------------------|
+//! | arm           | MAV_CMD_COMPONENT_ARM_DISARM 400| p1=1.0, rest 0                   |
+//! | disarm        | MAV_CMD_COMPONENT_ARM_DISARM 400| p1=0.0, rest 0                   |
+//! | takeoff       | MAV_CMD_NAV_TAKEOFF 22          | p7=alt (default 10.0), rest 0    |
+//! | land          | MAV_CMD_NAV_LAND 21             | all 0                            |
+//! | rtl           | MAV_CMD_DO_SET_MODE 176         | ArduPilot: p1=1, p2=6 · PX4: p1=1, p2=4, p3=5 |
+//! | mode N        | MAV_CMD_DO_SET_MODE 176         | ArduPilot: p1=1, p2=custom_mode · PX4: p1=1, p2=main, p3=sub |
+//! | killSwitch    | MAV_CMD_COMPONENT_ARM_DISARM 400| p1=0.0, p2=21196 (force), rest 0 |
+//! | pauseMission  | MAV_CMD_DO_PAUSE_CONTINUE 193   | p1=0.0 (pause), rest 0           |
+//! | resumeMission | MAV_CMD_DO_PAUSE_CONTINUE 193   | p1=1.0 (continue), rest 0        |
+//!
+//! ## killSwitch is a FORCE-DISARM, not a graceful stop
+//!
+//! `killSwitch` is an emergency motor cut: `MAV_CMD_COMPONENT_ARM_DISARM` with
+//! `param1=0` (disarm) and `param2=21196` — the MAVLink "force" magic that both
+//! ArduPilot and PX4 honour to disarm IMMEDIATELY, bypassing the normal
+//! land-detector / in-flight safety checks a plain `disarm` respects. The honest
+//! effect: the motors stop at once, so an airborne vehicle drops. It is the
+//! last-resort abort, distinct from `disarm` (which the FC refuses in flight) and
+//! from `rtl`/`land` (which fly the vehicle down under power). The catalog
+//! description says so plainly.
+//!
+//! ## pauseMission / resumeMission
+//!
+//! `pauseMission` and `resumeMission` both send `MAV_CMD_DO_PAUSE_CONTINUE` (193)
+//! — the one autopilot-agnostic pause/continue command ArduPilot and PX4 share —
+//! with `param1=0` to pause (hold position / brake) and `param1=1` to continue.
+//! They are a pair over one opcode exactly as `arm`/`disarm` are over
+//! `COMPONENT_ARM_DISARM`. A vehicle that is not running an auto mission will
+//! report the FC's own rejection in the `ack` block (honest, never masked).
 //!
 //! ## Flight-mode encoding: ArduPilot vs PX4
 //!
@@ -99,9 +125,11 @@ use crate::ipc::{FrameRead, MavlinkIpcClient};
 use crate::routes::detail;
 use crate::state::AppState;
 
-/// The command catalog: name → human description. Ported verbatim from the
-/// FastAPI `SIMPLE_COMMANDS` so `GET /api/commands` is byte-identical. Order is
-/// preserved (it is emitted as a JSON object; serde_json keeps insertion order).
+/// The command catalog: name → human description. The first six are the original
+/// text commands; the last three are agent-native additions the fleet board
+/// drives (kill / pause / resume). Order is preserved (it is emitted as a JSON
+/// object; serde_json keeps insertion order). The names are the canonical strings
+/// a caller sends; the dispatch match is case-insensitive.
 const SIMPLE_COMMANDS: &[(&str, &str)] = &[
     ("arm", "Arm the vehicle"),
     ("disarm", "Disarm the vehicle"),
@@ -109,6 +137,16 @@ const SIMPLE_COMMANDS: &[(&str, &str)] = &[
     ("land", "Land at current position"),
     ("rtl", "Return to launch"),
     ("mode", "Set flight mode (args: [mode_name])"),
+    (
+        "killSwitch",
+        "Emergency motor cut: force-disarm now, bypassing in-flight safety checks. \
+         Stops the motors immediately, so an airborne vehicle drops.",
+    ),
+    (
+        "pauseMission",
+        "Pause the current mission / auto flight (hold position)",
+    ),
+    ("resumeMission", "Resume a paused mission / auto flight"),
 ];
 
 /// The source identity stamped on every command frame: the agent/companion
@@ -134,6 +172,17 @@ const DEFAULT_TAKEOFF_ALT_M: f32 = 10.0;
 /// The custom-mode flag the DO_SET_MODE param1 carries, matching
 /// `MAV_MODE_FLAG_CUSTOM_MODE_ENABLED` (1).
 const CUSTOM_MODE_ENABLED: f32 = 1.0;
+
+/// The `COMPONENT_ARM_DISARM` `param2` "force" magic (21196). With this value
+/// both ArduPilot and PX4 disarm IMMEDIATELY, bypassing the in-flight / land-
+/// detector safety checks a plain disarm (`param2=0`) respects. `killSwitch`
+/// sends it to cut the motors as a last-resort abort — the vehicle drops if
+/// airborne, which the catalog description states plainly.
+const FORCE_DISARM_MAGIC: f32 = 21196.0;
+
+/// `DO_PAUSE_CONTINUE` `param1`: pause the current action (0) or continue it (1).
+const PAUSE_CONTINUE_PAUSE: f32 = 0.0;
+const PAUSE_CONTINUE_CONTINUE: f32 = 1.0;
 
 /// RTL's `custom_mode` in the ArduCopter mode table (`RTL → 6`). The `rtl`
 /// shortcut on ArduPilot sends this so it commands Return-to-Launch, identical
@@ -390,6 +439,29 @@ fn build_command(
                 json!({"status": "ok", "cmd": "rtl"}),
             ))
         }
+        "killswitch" => Ok((
+            // Emergency motor cut: disarm (param1=0) with the force magic
+            // (param2=21196) so the FC disarms in flight instead of refusing.
+            command_long(
+                MavCmd::MAV_CMD_COMPONENT_ARM_DISARM,
+                [0.0, FORCE_DISARM_MAGIC, 0.0, 0.0, 0.0, 0.0, 0.0],
+            ),
+            json!({"status": "ok", "cmd": "killSwitch"}),
+        )),
+        "pausemission" => Ok((
+            command_long(
+                MavCmd::MAV_CMD_DO_PAUSE_CONTINUE,
+                [PAUSE_CONTINUE_PAUSE, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            ),
+            json!({"status": "ok", "cmd": "pauseMission"}),
+        )),
+        "resumemission" => Ok((
+            command_long(
+                MavCmd::MAV_CMD_DO_PAUSE_CONTINUE,
+                [PAUSE_CONTINUE_CONTINUE, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            ),
+            json!({"status": "ok", "cmd": "resumeMission"}),
+        )),
         "mode" => {
             // `mode` needs a name; 400 "Mode name required" when args empty.
             let name = match args.first().and_then(arg_as_str) {
@@ -916,10 +988,71 @@ mod tests {
     }
 
     #[test]
-    fn catalog_has_the_six_simple_commands() {
-        assert_eq!(SIMPLE_COMMANDS.len(), 6);
+    fn catalog_lists_every_dispatchable_command() {
         let names: Vec<_> = SIMPLE_COMMANDS.iter().map(|(n, _)| *n).collect();
-        assert_eq!(names, ["arm", "disarm", "takeoff", "land", "rtl", "mode"]);
+        assert_eq!(
+            names,
+            [
+                "arm",
+                "disarm",
+                "takeoff",
+                "land",
+                "rtl",
+                "mode",
+                "killSwitch",
+                "pauseMission",
+                "resumeMission",
+            ]
+        );
+    }
+
+    #[test]
+    fn killswitch_is_a_force_disarm() {
+        // The board sends camelCase; the route lowercases before dispatch, so
+        // "killswitch" is what build_command matches. It force-disarms: disarm
+        // (param1=0) with the 21196 force magic in param2 so the FC cuts motors
+        // in flight instead of refusing.
+        let (d, body) = build_command("killswitch", &[], ARDUPILOT).unwrap();
+        assert_eq!(d.command, MavCmd::MAV_CMD_COMPONENT_ARM_DISARM);
+        assert_eq!(d.param1, 0.0, "disarm");
+        assert_eq!(
+            d.param2, 21196.0,
+            "force magic bypasses the in-flight guard"
+        );
+        assert_eq!(body["cmd"], json!("killSwitch"));
+        // It is deliberately NOT a plain disarm: the force magic is the whole
+        // point (a plain disarm carries param2=0 and the FC refuses it in flight).
+        let (plain, _b) = build_command("disarm", &[], ARDUPILOT).unwrap();
+        assert_eq!(plain.param2, 0.0);
+        assert_ne!(d.param2, plain.param2);
+    }
+
+    #[test]
+    fn pause_and_resume_are_do_pause_continue() {
+        // Both use the one autopilot-agnostic pause/continue opcode; param1
+        // distinguishes them (0 pause, 1 continue), the arm/disarm pattern.
+        let (pause, pbody) = build_command("pausemission", &[], ARDUPILOT).unwrap();
+        assert_eq!(pause.command, MavCmd::MAV_CMD_DO_PAUSE_CONTINUE);
+        assert_eq!(pause.param1, 0.0, "pause");
+        assert_eq!(pbody["cmd"], json!("pauseMission"));
+
+        let (resume, rbody) = build_command("resumemission", &[], ARDUPILOT).unwrap();
+        assert_eq!(resume.command, MavCmd::MAV_CMD_DO_PAUSE_CONTINUE);
+        assert_eq!(resume.param1, 1.0, "continue");
+        assert_eq!(rbody["cmd"], json!("resumeMission"));
+    }
+
+    #[test]
+    fn new_commands_are_autopilot_agnostic() {
+        // kill / pause / resume build the same frame on PX4 as on ArduPilot (no
+        // mode-table lookup), so the board drives them identically either family.
+        for cmd in ["killswitch", "pausemission", "resumemission"] {
+            let (ap, _a) = build_command(cmd, &[], ARDUPILOT).unwrap();
+            let (px4, _p) = build_command(cmd, &[], AUTOPILOT_PX4).unwrap();
+            assert_eq!(ap.command, px4.command, "{cmd}: same opcode either family");
+            assert_eq!(ap.param1, px4.param1, "{cmd}: same param1 either family");
+            assert_eq!(ap.param2, px4.param2, "{cmd}: same param2 either family");
+        }
     }
 
     // ── G7: COMMAND_ACK correlation ─────────────────────────────────────────

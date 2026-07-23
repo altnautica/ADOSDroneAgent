@@ -1619,7 +1619,8 @@ async fn commands_catalog_matches_the_simple_commands() {
     assert!(status.contains("200"), "{status}");
     let got: Value = serde_json::from_str(&body).unwrap();
     let commands = got["commands"].as_object().expect("commands object");
-    // The six SIMPLE_COMMANDS, verbatim, with their descriptions.
+    // The SIMPLE_COMMANDS catalog, verbatim, with their descriptions: the six
+    // original text commands plus the three agent-native fleet-board actions.
     let want = serde_json::json!({
         "arm": "Arm the vehicle",
         "disarm": "Disarm the vehicle",
@@ -1627,6 +1628,11 @@ async fn commands_catalog_matches_the_simple_commands() {
         "land": "Land at current position",
         "rtl": "Return to launch",
         "mode": "Set flight mode (args: [mode_name])",
+        "killSwitch": "Emergency motor cut: force-disarm now, bypassing in-flight \
+                       safety checks. Stops the motors immediately, so an airborne \
+                       vehicle drops.",
+        "pauseMission": "Pause the current mission / auto flight (hold position)",
+        "resumeMission": "Resume a paused mission / auto flight",
     });
     assert_eq!(
         &Value::Object(commands.clone()),
