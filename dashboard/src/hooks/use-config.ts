@@ -15,6 +15,20 @@ export interface AgentConfig {
   logging?: {
     level?: string;
   };
+  mavlink?: {
+    source?: "auto" | "serial" | "udp" | "tcp";
+    serial_port?: string;
+    baud_rate?: number;
+    system_id?: number;
+    component_id?: number;
+    ws_proxy_enforce_auth?: boolean;
+    endpoints?: Array<{
+      type?: string;
+      host?: string;
+      port?: number;
+      enabled?: boolean;
+    }>;
+  };
   ground_station?: {
     role?: string;
   };

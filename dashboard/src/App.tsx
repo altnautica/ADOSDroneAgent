@@ -29,6 +29,7 @@ import { CellularSettings } from "@/routes/settings/cellular-settings";
 import { CloudSettings } from "@/routes/settings/cloud-settings";
 import { DisplaySettings } from "@/routes/settings/display-settings";
 import { MacPinSettings } from "@/routes/settings/mac-pin-settings";
+import { MavlinkSettings } from "@/routes/settings/mavlink-settings";
 import { NetworkSettings } from "@/routes/settings/network-settings";
 import { OffloadSettings } from "@/routes/settings/offload-settings";
 import { ProfileSettings } from "@/routes/settings/profile-settings";
@@ -149,6 +150,7 @@ export function App() {
                   <Route path="mac-pin" element={<MacPinSettings />} />
                   <Route path="cloud" element={<CloudSettings />} />
                   <Route path="self-heal" element={<SelfHealSettings />} />
+                  <Route path="mavlink" element={<MavlinkSettings />} />
                   <Route path="display" element={<DisplaySettings />} />
                   <Route path="offload" element={<OffloadSettings />} />
                   <Route path="advanced" element={<AdvancedSettings />} />
