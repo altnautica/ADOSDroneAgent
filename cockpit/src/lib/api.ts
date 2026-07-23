@@ -239,6 +239,44 @@ export function getRoster(
   return apiFetch<{ cameras: RosterCamera[] }>("/api/video/roster", { signal });
 }
 
+/** The FC's `COMMAND_ACK` outcome the command route correlates after sending a
+ *  frame. `observed:false` means the command was sent but no ACK was seen (never
+ *  a fabricated success); an observed ACK carries the `MAV_RESULT` + name, whether
+ *  it was accepted, and any `STATUSTEXT` the FC reported for a rejection. */
+export interface CommandAck {
+  observed: boolean;
+  result?: number;
+  result_name?: string;
+  accepted?: boolean;
+  statustext?: string;
+}
+
+/** The `POST /api/command` response: the echoed command plus the correlated
+ *  ACK. `mode` / `altitude` echo the resolved argument for those commands. */
+export interface CommandResponse {
+  status?: string;
+  cmd?: string;
+  mode?: string;
+  altitude?: number;
+  ack?: CommandAck;
+}
+
+/** Send one high-level flight command (`POST /api/command`). The agent turns it
+ *  into a MAVLink COMMAND_LONG, writes it to the FC, and correlates the
+ *  `COMMAND_ACK` into `ack`. Throws {@link ApiError} on a 503 (no FC link) or 400
+ *  (unknown command / bad mode) so the caller can surface the honest failure. */
+export function sendCommand(
+  cmd: string,
+  args: (string | number)[] = [],
+  signal?: AbortSignal,
+): Promise<CommandResponse> {
+  return apiFetch<CommandResponse>("/api/command", {
+    method: "POST",
+    body: { cmd, args },
+    signal,
+  });
+}
+
 /** Start the ground-station video recorder
  *  (`POST /api/v1/ground-station/recording/start`). */
 export function startRecording(signal?: AbortSignal): Promise<unknown> {

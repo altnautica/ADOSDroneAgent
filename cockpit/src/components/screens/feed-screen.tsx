@@ -11,6 +11,7 @@ import { useEffect, useMemo } from "react";
 import { DetectionOverlay } from "@/components/feed/detection-overlay";
 import { FeedActionBar } from "@/components/feed/feed-action-bar";
 import { FeedHud } from "@/components/feed/feed-hud";
+import { SkillBar } from "@/components/feed/skill-bar";
 import { StreamTabs } from "@/components/feed/stream-tabs";
 import { VideoLayer } from "@/components/shell/video-layer";
 import { FlightTelemetryProvider } from "@/hooks/flight-telemetry-context";
@@ -66,6 +67,7 @@ export function FeedScreen() {
         ) : null}
         <FeedHud />
         {cameras.length > 1 ? <StreamTabs cameras={cameras} /> : null}
+        <SkillBar />
         <FeedActionBar />
       </div>
     </FlightTelemetryProvider>
