@@ -1311,6 +1311,15 @@
             "relay_role": "none",
             "tx_power_dbm": null
           }
+        },
+        "tunnel": {
+          "$ref": "#/$defs/TunnelConfig",
+          "default": {
+            "command_enabled": false,
+            "enabled": false,
+            "rx_port": 5820,
+            "tx_port": 5821
+          }
         }
       },
       "title": "RadioConfig",
@@ -1648,6 +1657,33 @@
         }
       },
       "title": "TlsConfig",
+      "type": "object"
+    },
+    "TunnelConfig": {
+      "description": "The config-over-radio channel (a MAVLink-TUNNEL request/response lane on\nthe low-rate WFB ``-p1`` control plane).\n\nIt lets a node reachable only over the radio link (WFB carries no IP) have\nits ``/api/config`` read and written from the ground. It carries CONFIG\nrequest/response ONLY \u2014 never armed-flight command authority (a separate,\ngated concern) \u2014 and its only gate by riding ``-p1`` is the WFB pairing key\n(a pairing-scope gate, not a flight-authorization gate).\n\n``enabled`` is the master opt-in. Off by default: the whole channel is\ninert \u2014 the drone-side terminator acts on no config tunnel and the\nground-side injector refuses every request. It mirrors onto the\n``/etc/ados/tunnel-enabled`` marker the ``ados-tunnel-config`` unit gates\non, so an un-opted node never even runs the unit.\n\n``command_enabled`` opens config WRITES (``PUT /api/config``) over the\nradio. Off by default and NOT implied by opting the channel in: a config\nREAD (``GET``) is served while writes are refused until an operator sets\nthis for a bench-validated write lane, after a safety review.\n\n``rx_port`` / ``tx_port`` are the LOCAL UDP ports the service binds/sends\non. They are dedicated ports (disjoint from the WFB plane ports) that an\n``ados-radio`` bearer bridge connects to the ``-p1`` control plane in a\nseparate, gated radio-integration step.",
+      "properties": {
+        "command_enabled": {
+          "default": false,
+          "title": "Command Enabled",
+          "type": "boolean"
+        },
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "rx_port": {
+          "default": 5820,
+          "title": "Rx Port",
+          "type": "integer"
+        },
+        "tx_port": {
+          "default": 5821,
+          "title": "Tx Port",
+          "type": "integer"
+        }
+      },
+      "title": "TunnelConfig",
       "type": "object"
     },
     "UiConfig": {
@@ -2331,6 +2367,12 @@
           "packet_rate_hz": 150,
           "relay_role": "none",
           "tx_power_dbm": null
+        },
+        "tunnel": {
+          "command_enabled": false,
+          "enabled": false,
+          "rx_port": 5820,
+          "tx_port": 5821
         }
       }
     },
