@@ -77,6 +77,16 @@ pub const TUNNEL_PAYLOAD_CAP: usize = 128;
 /// Largest body slice one chunk can carry (the payload cap minus the header).
 pub const MAX_CHUNK_DATA: usize = TUNNEL_PAYLOAD_CAP - L3_HEADER_LEN;
 
+// Compile-time invariants: the header + data cap exactly fill the tunnel
+// payload budget, and the payload_type is in the private application range.
+const _: () = assert!(L3_HEADER_LEN + MAX_CHUNK_DATA == TUNNEL_PAYLOAD_CAP);
+const _: () = assert!(CONFIG_TUNNEL_PAYLOAD_TYPE > 32767);
+#[cfg(feature = "mavlink")]
+const _: () = assert!(TUNNEL_PAYLOAD_CAP == crate::mavlink::TUNNEL_MAX_PAYLOAD);
+#[cfg(feature = "mavlink")]
+const _: () =
+    assert!(CONFIG_TUNNEL_PAYLOAD_TYPE > crate::mavlink::TUNNEL_RESERVED_PAYLOAD_TYPE_MAX);
+
 const FLAG_IS_RESPONSE: u8 = 0b0000_0001;
 const FLAG_IS_ERROR: u8 = 0b0000_0010;
 
@@ -410,17 +420,10 @@ mod tests {
 
     #[test]
     fn header_len_and_data_cap_fit_the_tunnel_budget() {
+        // The compile-time `const _` assertions above pin the budget/range
+        // invariants; this pins the concrete data cap the wire layout implies.
         assert_eq!(L3_HEADER_LEN + MAX_CHUNK_DATA, TUNNEL_PAYLOAD_CAP);
         assert_eq!(MAX_CHUNK_DATA, 116);
-        // The private payload_type is in the application range.
-        assert!(CONFIG_TUNNEL_PAYLOAD_TYPE > 32767);
-    }
-
-    #[cfg(feature = "mavlink")]
-    #[test]
-    fn payload_cap_matches_the_tunnel_constant() {
-        assert_eq!(TUNNEL_PAYLOAD_CAP, crate::mavlink::TUNNEL_MAX_PAYLOAD);
-        assert!(CONFIG_TUNNEL_PAYLOAD_TYPE > crate::mavlink::TUNNEL_RESERVED_PAYLOAD_TYPE_MAX);
     }
 
     #[test]
