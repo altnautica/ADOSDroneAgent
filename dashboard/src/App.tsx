@@ -28,6 +28,7 @@ import { AdvancedSettings } from "@/routes/settings/advanced-settings";
 import { CellularSettings } from "@/routes/settings/cellular-settings";
 import { CloudSettings } from "@/routes/settings/cloud-settings";
 import { DisplaySettings } from "@/routes/settings/display-settings";
+import { MacPinSettings } from "@/routes/settings/mac-pin-settings";
 import { NetworkSettings } from "@/routes/settings/network-settings";
 import { OffloadSettings } from "@/routes/settings/offload-settings";
 import { ProfileSettings } from "@/routes/settings/profile-settings";
@@ -144,6 +145,7 @@ export function App() {
                   <Route path="region" element={<RegionSettings />} />
                   <Route path="network" element={<NetworkSettings />} />
                   <Route path="cellular" element={<CellularSettings />} />
+                  <Route path="mac-pin" element={<MacPinSettings />} />
                   <Route path="cloud" element={<CloudSettings />} />
                   <Route path="display" element={<DisplaySettings />} />
                   <Route path="offload" element={<OffloadSettings />} />

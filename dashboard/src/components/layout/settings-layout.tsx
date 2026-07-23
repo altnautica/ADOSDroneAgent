@@ -1,6 +1,7 @@
 import {
   Cloud,
   Cpu,
+  Fingerprint,
   Globe,
   Monitor,
   Share2,
@@ -45,6 +46,12 @@ const SECTIONS: SectionLink[] = [
     label: "Cellular",
     icon: Signal,
     blurb: "Modem status, APN, and data cap.",
+  },
+  {
+    to: "/settings/mac-pin",
+    label: "MAC pinning",
+    icon: Fingerprint,
+    blurb: "Adapter stability and stable-MAC pins.",
   },
   {
     to: "/settings/cloud",
