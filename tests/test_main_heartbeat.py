@@ -321,7 +321,7 @@ def _write_crsf_sidecar(path: Path, *, state: str = "link_ok") -> None:
                 "snr_db": 8,
                 "band": None,
                 "packet_rate_hz": 150,
-                "tx_power_dbm": 20,
+                "tx_power_mw": 100,
                 "tx_frames_per_s": 149.8,
                 "rx_frames_per_s": 12.0,
                 "rf_unverified": False,
@@ -363,7 +363,7 @@ def test_heartbeat_crsf_block_projects_the_pinned_fields(monkeypatch, tmp_path) 
     assert crsf["snr_db"] == 8
     assert crsf["band"] is None
     assert crsf["packet_rate_hz"] == 150
-    assert crsf["tx_power_dbm"] == 20
+    assert crsf["tx_power_mw"] == 100
     assert crsf["tx_frames_per_s"] == 149.8
     assert crsf["rx_frames_per_s"] == 12.0
     assert crsf["rf_unverified"] is False
@@ -380,7 +380,7 @@ def test_heartbeat_crsf_block_projects_the_pinned_fields(monkeypatch, tmp_path) 
         "snr_db",
         "band",
         "packet_rate_hz",
-        "tx_power_dbm",
+        "tx_power_mw",
         "tx_frames_per_s",
         "rx_frames_per_s",
         "rf_unverified",

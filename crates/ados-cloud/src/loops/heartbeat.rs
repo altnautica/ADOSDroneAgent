@@ -712,7 +712,7 @@ mod tests {
             &dir,
             "crsf-stats.json",
             r#"{"v":1,"state":"link_ok","rssi_dbm":-51,"lq_uplink":99,"lq_downlink":97,
-                "snr_db":8,"band":null,"packet_rate_hz":150,"tx_power_dbm":20,
+                "snr_db":8,"band":null,"packet_rate_hz":150,"tx_power_mw":100,
                 "tx_frames_per_s":149.8,"rx_frames_per_s":12.0,"rf_unverified":false,
                 "flyable":true,"mode":"crsf_rc","channel_source":"hid","relay_role":null}"#,
         );
@@ -721,6 +721,10 @@ mod tests {
         assert_eq!(fresh.state.as_deref(), Some("link_ok"));
         assert_eq!(fresh.rssi_dbm, Some(-51));
         assert_eq!(fresh.packet_rate_hz, Some(150));
+        // The measured TX power carries under the sidecar's real key. A
+        // `tx_power_dbm` field here silently dropped it to null (serde ignored
+        // the unmatched key), so a cloud-reached node showed no power (rule 44).
+        assert_eq!(fresh.tx_power_mw, Some(100));
         assert_eq!(fresh.rf_unverified, Some(false));
         assert_eq!(fresh.band, None);
         assert_eq!(fresh.relay_role, None);

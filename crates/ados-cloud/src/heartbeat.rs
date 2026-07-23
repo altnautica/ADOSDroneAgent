@@ -207,7 +207,11 @@ pub struct CrsfBlock {
     pub snr_db: Option<i64>,
     pub band: Option<String>,
     pub packet_rate_hz: Option<i64>,
-    pub tx_power_dbm: Option<i64>,
+    /// Conducted TX power in MILLIWATTS, mapped from the module's power-table
+    /// index by the lane. Matches the sidecar + LAN route key `tx_power_mw`; a
+    /// `tx_power_dbm` here silently dropped the value (serde ignored the real
+    /// key), so a cloud-reached node showed no TX power (rule 44).
+    pub tx_power_mw: Option<i64>,
     pub tx_frames_per_s: Option<f64>,
     pub rx_frames_per_s: Option<f64>,
     /// The transmit-proof verdict: `Some(false)` = a received-side proof
@@ -233,7 +237,7 @@ impl CrsfBlock {
             snr_db: None,
             band: None,
             packet_rate_hz: None,
-            tx_power_dbm: None,
+            tx_power_mw: None,
             tx_frames_per_s: None,
             rx_frames_per_s: None,
             rf_unverified: None,

@@ -166,7 +166,7 @@ fn paired_full_matches_python_emit() {
         snr_db: Some(8),
         band: None,
         packet_rate_hz: Some(150),
-        tx_power_dbm: Some(20),
+        tx_power_mw: Some(100),
         tx_frames_per_s: Some(149.8),
         rx_frames_per_s: Some(12.0),
         rf_unverified: Some(false),

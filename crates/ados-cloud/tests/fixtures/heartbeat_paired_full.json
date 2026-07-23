@@ -122,7 +122,7 @@
     "snr_db": 8,
     "band": null,
     "packet_rate_hz": 150,
-    "tx_power_dbm": 20,
+    "tx_power_mw": 100,
     "tx_frames_per_s": 149.8,
     "rx_frames_per_s": 12.0,
     "rf_unverified": false,

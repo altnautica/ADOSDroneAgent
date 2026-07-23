@@ -71,7 +71,7 @@ _CRSF_BLOCK_FIELDS: tuple[str, ...] = (
     "snr_db",
     "band",
     "packet_rate_hz",
-    "tx_power_dbm",
+    "tx_power_mw",
     "tx_frames_per_s",
     "rx_frames_per_s",
     "rf_unverified",
