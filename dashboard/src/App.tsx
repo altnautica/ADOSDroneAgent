@@ -36,6 +36,7 @@ import { ProfileSettings } from "@/routes/settings/profile-settings";
 import { RegionSettings } from "@/routes/settings/region-settings";
 import { SecuritySettings } from "@/routes/settings/security-settings";
 import { SelfHealSettings } from "@/routes/settings/self-heal-settings";
+import { VisionSettings } from "@/routes/settings/vision-settings";
 import { VideoRoute } from "@/routes/video-route";
 
 // Code-split heavy routes. The telemetry page pulls in
@@ -153,6 +154,7 @@ export function App() {
                   <Route path="self-heal" element={<SelfHealSettings />} />
                   <Route path="mavlink" element={<MavlinkSettings />} />
                   <Route path="security" element={<SecuritySettings />} />
+                  <Route path="vision" element={<VisionSettings />} />
                   <Route path="display" element={<DisplaySettings />} />
                   <Route path="offload" element={<OffloadSettings />} />
                   <Route path="advanced" element={<AdvancedSettings />} />

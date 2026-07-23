@@ -69,6 +69,14 @@ export interface AgentConfig {
       cors_enabled?: boolean;
     };
   };
+  vision?: {
+    enabled?: boolean;
+    backend?: string;
+    confidence_threshold?: number;
+    models_dir?: string;
+    models_cache_max_mb?: number;
+    auto_download?: boolean;
+  };
   // Two-tier perception execution: the drone-side offload target + the
   // workstation-side serving toggle. Read on the Offload settings page.
   perception?: {
