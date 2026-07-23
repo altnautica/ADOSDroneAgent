@@ -321,6 +321,54 @@ mod tests {
     }
 
     #[test]
+    fn phase_timeouts_couple_to_budgets_and_the_watchdog_must_re_arm() {
+        use BindState::*;
+        // Each active phase's watchdog budget is the SAME constant the
+        // orchestrator uses as that phase's explicit tokio timeout, so the
+        // honest phase-named error fires at-or-before the generic watchdog (a
+        // biased select prefers the in-phase error on a tie). Pin the coupling.
+        assert_eq!(
+            OpeningTunnel.watchdog_budget(),
+            Some(super::super::TUNNEL_WAIT_TIMEOUT)
+        );
+        assert_eq!(
+            TransferringKeys.watchdog_budget(),
+            Some(super::super::KEY_TRANSFER_TIMEOUT)
+        );
+        assert_eq!(
+            ApplyingKeys.watchdog_budget(),
+            Some(super::super::KEY_TRANSFER_TIMEOUT)
+        );
+        assert_eq!(
+            RestartingServices.watchdog_budget(),
+            Some(super::super::RESTART_TIMEOUT)
+        );
+
+        // No phase's explicit timeout may EXCEED its watchdog budget, or the
+        // generic watchdog could fire before the in-phase honest error.
+        assert!(super::super::TUNNEL_WAIT_TIMEOUT <= OpeningTunnel.watchdog_budget().unwrap());
+        assert!(super::super::KEY_TRANSFER_TIMEOUT <= TransferringKeys.watchdog_budget().unwrap());
+        assert!(super::super::RESTART_TIMEOUT <= RestartingServices.watchdog_budget().unwrap());
+
+        // The worst-case healthy bind runs OpeningTunnel → (key transfer+apply)
+        // → RestartingServices in sequence; those budgets SUM past any single
+        // phase budget (30+90+60 = 180 > 120). A fixed global timer of one
+        // budget would wrongly trip a healthy bind — the historical 120<180
+        // wedge — which is exactly why the watchdog re-arms per phase. Guard
+        // that the sum still exceeds a single budget so the re-arming design
+        // stays necessary and correct.
+        let sequential_sum = super::super::TUNNEL_WAIT_TIMEOUT
+            + super::super::KEY_TRANSFER_TIMEOUT
+            + super::super::RESTART_TIMEOUT;
+        assert!(
+            sequential_sum > super::super::WAITING_PEER_WATCHDOG,
+            "sequential phase budgets ({sequential_sum:?}) must exceed any single \
+             budget ({:?}); a fixed global timer would trip a healthy bind",
+            super::super::WAITING_PEER_WATCHDOG
+        );
+    }
+
+    #[test]
     fn re_armed_watchdog_does_not_fire_on_a_phase_within_its_budget() {
         // A transition restamps `phase_entered_at` to now, so a freshly entered
         // phase is nowhere near its budget — the deadline-derived detector must not
