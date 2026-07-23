@@ -25,6 +25,7 @@ import { OtaRoute } from "@/routes/ota-route";
 import { PairingRoute } from "@/routes/pairing-route";
 import { PeripheralsRoute } from "@/routes/peripherals-route";
 import { AdvancedSettings } from "@/routes/settings/advanced-settings";
+import { AtlasSwarmSettings } from "@/routes/settings/atlas-swarm-settings";
 import { CellularSettings } from "@/routes/settings/cellular-settings";
 import { CloudSettings } from "@/routes/settings/cloud-settings";
 import { DisplaySettings } from "@/routes/settings/display-settings";
@@ -155,6 +156,7 @@ export function App() {
                   <Route path="mavlink" element={<MavlinkSettings />} />
                   <Route path="security" element={<SecuritySettings />} />
                   <Route path="vision" element={<VisionSettings />} />
+                  <Route path="atlas-swarm" element={<AtlasSwarmSettings />} />
                   <Route path="display" element={<DisplaySettings />} />
                   <Route path="offload" element={<OffloadSettings />} />
                   <Route path="advanced" element={<AdvancedSettings />} />
