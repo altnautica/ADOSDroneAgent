@@ -415,7 +415,24 @@ export function CellularSettings() {
   // than the raw config profile whose "auto" default misreads an as-yet
   // uncommitted ground station as a non-GS node and hides its live modem view.
   const status = useStatus();
+  const config = useConfig();
   const profile = status.data?.profile;
+
+  // Surface the config read state before the profile branch. The config-backed
+  // branch otherwise renders a blank page on a read error and empty fields
+  // while loading, both indistinguishable from "no cellular configured".
+  if (config.isLoading) {
+    return (
+      <p className="text-[11px] text-muted-foreground/70">Reading config…</p>
+    );
+  }
+  if (config.isError) {
+    return (
+      <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[11px] text-destructive">
+        Could not read the cellular config from this node.
+      </div>
+    );
+  }
 
   if (!profile) return null;
   return profile === "ground_station" ? <GsCellular /> : <ConfigOnlyCellular />;
