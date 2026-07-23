@@ -505,6 +505,12 @@ fn rf_unverified_field(status: &Map<String, Value>, fresh: bool) -> Value {
 /// field is present (a `null` placeholder when unknown) so the panel never sees a
 /// missing key. Mirrors the Python `_link_snapshot` multi-process branch.
 ///
+/// Alongside the liveness counters the block folds in the signals that EXPLAIN why
+/// a counter it carries should not be believed — the derived `state`/`link_state`,
+/// the muted-PHY + adapter-USB-health flags, and the `link_diag` verdict with its
+/// backing RX counters — so a consumer sees the reading AND its cause on one
+/// surface instead of re-deriving the verdict from a heuristic.
+///
 /// The whole snapshot is merged only when it is FRESH (mtime within
 /// [`LINK_STALE_AFTER_S`]). A stale snapshot's numbers describe a link that may be
 /// dead now, so every counter reads `null` (unknown) rather than a frozen
@@ -513,7 +519,8 @@ fn rf_unverified_field(status: &Map<String, Value>, fresh: bool) -> Value {
 /// 44 forbids. `channel` is the exception: when stale it falls back to the
 /// configured value (always truthful) so the panel keeps a channel number.
 fn link_snapshot(config_channel: i64, stats_path: &Path) -> Value {
-    const FIELDS: [&str; 7] = [
+    const FIELDS: [&str; 17] = [
+        // Liveness counters.
         "tx_bytes_per_s",
         "valid_rx_packets_per_s",
         "video_inbound_bytes_per_s",
@@ -521,6 +528,29 @@ fn link_snapshot(config_channel: i64, stats_path: &Path) -> Value {
         "channel_locked",
         "acquire_state",
         "channel",
+        // Derived link state. The radio writes the same string under both keys
+        // (`state` is the legacy name, `link_state` the state-machine name); a
+        // consumer keys off whichever it knows. Folded in so the panel reads the
+        // verdict beside the counters that back it, not from a separate surface.
+        "state",
+        "link_state",
+        // PHY / adapter-USB health — the signals that explain why an advancing
+        // `tx_bytes_per_s` should not be trusted: a muted PHY injects frames yet
+        // radiates nothing, and a full-speed (12 Mbps) USB enumeration lets an RTL
+        // adapter advance tx_bytes while emitting no usable RF.
+        "phy_muted",
+        "adapter_usb_speed_mbps",
+        "adapter_usb_degraded",
+        // Link-diagnostic verdict + its backing RX counters. `link_diag` is the
+        // one-glance cause (deaf / mis_keyed / jammed / healthy / searching); the
+        // counters separate the failure modes a bare "0 received" hides —
+        // `packets_all` captured off-air before decrypt, `decrypt_errors`,
+        // `packets_bad`, and valid `session_packets`.
+        "link_diag",
+        "packets_all",
+        "decrypt_errors",
+        "packets_bad",
+        "session_packets",
     ];
     let mut link = Map::new();
     for f in FIELDS {
@@ -1132,8 +1162,60 @@ mod tests {
         assert_eq!(link["channel"], json!(149));
         // A field not in the stats file stays null.
         assert_eq!(link["video_inbound_bytes_per_s"], Value::Null);
-        // Only the eight contract fields are present (the extra is dropped).
-        assert_eq!(link.as_object().unwrap().len(), 8);
+        // Only the contract fields are present (the extra is dropped): the 17
+        // merged fields plus the rf_unverified verdict.
+        assert_eq!(link.as_object().unwrap().len(), 18);
+    }
+
+    #[test]
+    fn link_snapshot_folds_the_false_healthy_explainer_fields() {
+        // The signals that explain why a carried counter should not be believed
+        // ride the link block too, gated on the SAME freshness window as the
+        // counters: a fresh snapshot surfaces the derived state, the muted-PHY +
+        // USB-health flags, and the link_diag verdict with its backing RX counters;
+        // a stale one reads them all null (unknown), never a frozen last-known.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wfb-stats.json");
+        let body = r#"{"state": "connected", "link_state": "connected",
+            "phy_muted": false, "adapter_usb_speed_mbps": 480,
+            "adapter_usb_degraded": false, "link_diag": "healthy",
+            "packets_all": 6400, "decrypt_errors": 0, "packets_bad": 2,
+            "session_packets": 6398, "tx_bytes_per_s": 750000}"#;
+        const EXPLAINERS: [&str; 10] = [
+            "state",
+            "link_state",
+            "phy_muted",
+            "adapter_usb_speed_mbps",
+            "adapter_usb_degraded",
+            "link_diag",
+            "packets_all",
+            "decrypt_errors",
+            "packets_bad",
+            "session_packets",
+        ];
+
+        write_stats_aged(&path, body, 2);
+        let fresh = link_snapshot(149, &path);
+        assert_eq!(fresh["state"], json!("connected"));
+        assert_eq!(fresh["link_state"], json!("connected"));
+        assert_eq!(fresh["phy_muted"], json!(false));
+        assert_eq!(fresh["adapter_usb_speed_mbps"], json!(480));
+        assert_eq!(fresh["adapter_usb_degraded"], json!(false));
+        assert_eq!(fresh["link_diag"], json!("healthy"));
+        assert_eq!(fresh["packets_all"], json!(6400));
+        assert_eq!(fresh["decrypt_errors"], json!(0));
+        assert_eq!(fresh["packets_bad"], json!(2));
+        assert_eq!(fresh["session_packets"], json!(6398));
+
+        write_stats_aged(&path, body, 30);
+        let stale = link_snapshot(149, &path);
+        for key in EXPLAINERS {
+            assert_eq!(
+                stale[key],
+                Value::Null,
+                "stale explainer {key} must read null"
+            );
+        }
     }
 
     /// Write a stats sidecar and back-date its mtime by `age_s` seconds, so the
