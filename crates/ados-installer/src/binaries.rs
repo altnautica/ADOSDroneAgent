@@ -251,6 +251,18 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
         gate: Gate::BestEffort,
         profiles: BOTH,
     },
+    // The config-over-radio channel service. ExecStart guard execs /bin/true
+    // until the binary lands, so a missing asset degrades nothing. Fetched on
+    // both profiles: the drone runs the terminator, the ground node the
+    // injector.
+    PrebuiltBinary {
+        service: "ados-tunnel-config",
+        asset: "ados-tunnel-config-aarch64",
+        release_tag: "prebuilt-tunnel-config",
+        dest: "/opt/ados/bin/ados-tunnel-config",
+        gate: Gate::BestEffort,
+        profiles: BOTH,
+    },
     // The video relay the pipeline streams through. It is a mirrored
     // third-party binary rather than an `ados-*` service, so it lands in the
     // system bin dir. Best-effort: a missing relay degrades video without

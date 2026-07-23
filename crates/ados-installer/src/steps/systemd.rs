@@ -62,6 +62,11 @@ const UNIVERSAL_UNITS: &[&str] = &[
     // path reconcile from `radio.crsf.enabled`, so a node that never opts the
     // lane in skips it cleanly at boot.
     "ados-crsf.service",
+    // Config-over-radio channel. Enabled cross-profile (drone terminator +
+    // ground injector); the unit gates on the /etc/ados/tunnel-enabled marker
+    // the installer + config persist path reconcile from `radio.tunnel.enabled`,
+    // so a node that never opts the channel in skips it cleanly at boot.
+    "ados-tunnel-config.service",
 ];
 
 /// Ground-station units enable-linked here (the START half is the `start`
@@ -787,6 +792,51 @@ fn reconcile_crsf_marker() {
     }
 }
 
+/// Parse `radio.tunnel.enabled` from config.yaml text. Absent / malformed /
+/// not-present → false (the config-over-radio channel is opt-in). Pure.
+pub fn parse_tunnel_enabled(text: &str) -> bool {
+    #[derive(serde::Deserialize, Default)]
+    struct Raw {
+        #[serde(default)]
+        radio: Radio,
+    }
+    #[derive(serde::Deserialize, Default)]
+    struct Radio {
+        #[serde(default)]
+        tunnel: Option<Tunnel>,
+    }
+    #[derive(serde::Deserialize, Default)]
+    struct Tunnel {
+        #[serde(default)]
+        enabled: bool,
+    }
+    serde_norway::from_str::<Raw>(text)
+        .ok()
+        .and_then(|r| r.radio.tunnel)
+        .map(|t| t.enabled)
+        .unwrap_or(false)
+}
+
+/// Reconcile the config-over-radio enable marker from the operator config: the
+/// `/etc/ados/tunnel-enabled` marker the ados-tunnel-config unit gates on
+/// (`ConditionPathExists`) mirrors `radio.tunnel.enabled`, so enabling the
+/// channel in config is sufficient — no manual systemctl. Idempotent; runs on
+/// every install so a partial state self-heals. The runtime half (a config
+/// write through the agent) reconciles the same marker and kicks the unit.
+fn reconcile_tunnel_marker() {
+    let enabled = std::fs::read_to_string(crate::env::CONFIG_YAML)
+        .map(|text| parse_tunnel_enabled(&text))
+        .unwrap_or(false);
+    let marker = Path::new(CONFIG_DIR).join("tunnel-enabled");
+    if enabled {
+        if let Err(e) = std::fs::write(&marker, b"") {
+            tracing::warn!(error = %e, "tunnel enable marker write failed");
+        }
+    } else {
+        let _ = std::fs::remove_file(&marker);
+    }
+}
+
 /// Reconcile the local logging and telemetry store unit against its
 /// fallback marker. The store is on by default (the log-view endpoints read
 /// it), so a fresh box with no marker enables it; the `logd-python-fallback`
@@ -1423,6 +1473,12 @@ impl Step for Systemd {
         //     systemctl (and an opted-out config leaves it cleanly skipped).
         reconcile_crsf_marker();
 
+        // 5a-ter. Mirror `radio.tunnel.enabled` onto the marker the
+        //     ados-tunnel-config unit's ConditionPathExists gates on, the same
+        //     idiom: an opted-in config has the unit up after this install with
+        //     no manual systemctl, an opted-out config leaves it skipped.
+        reconcile_tunnel_marker();
+
         // 5b. The logging and telemetry store is on by default (the log-view
         //     endpoints read it). Enable it unless the fallback marker pins it
         //     off; the start step brings it up after the supervisor.
@@ -1653,6 +1709,7 @@ mod tests {
         // ExecStart self-gates to /bin/true when the fallback marker is set, so
         // enabling it never forces the native path.
         assert!(UNIVERSAL_UNITS.contains(&"ados-plugin-host.service"));
+        assert!(UNIVERSAL_UNITS.contains(&"ados-tunnel-config.service"));
         // The supervisor is enabled separately, not in the universal list.
         assert!(!UNIVERSAL_UNITS.contains(&"ados-supervisor.service"));
     }
@@ -1876,6 +1933,27 @@ mod tests {
         assert!(!parse_crsf_enabled("radio: {}\n"));
         assert!(!parse_crsf_enabled("agent:\n  name: x\n"));
         assert!(!parse_crsf_enabled(": : not yaml"));
+    }
+
+    #[test]
+    fn parse_tunnel_enabled_gate() {
+        assert!(parse_tunnel_enabled(
+            "radio:\n  tunnel:\n    enabled: true\n"
+        ));
+        assert!(!parse_tunnel_enabled(
+            "radio:\n  tunnel:\n    enabled: false\n"
+        ));
+        // A tunnel block with other fields but no enabled reads opted out, as
+        // do an absent block, an unrelated config, and malformed YAML.
+        assert!(!parse_tunnel_enabled(
+            "radio:\n  tunnel:\n    command_enabled: true\n"
+        ));
+        assert!(parse_tunnel_enabled(
+            "radio:\n  tunnel:\n    enabled: true\n    command_enabled: true\n"
+        ));
+        assert!(!parse_tunnel_enabled("radio: {}\n"));
+        assert!(!parse_tunnel_enabled("agent:\n  name: x\n"));
+        assert!(!parse_tunnel_enabled(": : not yaml"));
     }
 
     #[test]

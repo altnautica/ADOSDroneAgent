@@ -182,6 +182,18 @@ pub const SERVICE_REGISTRY: &[ServiceDef] = &[
     // headless KEEP set. Hot-plugging the RC module's USB bridge restarts it
     // via the dedicated Elrs hot-plug class.
     def("ados-crsf", Hardware, Some("drone|ground_station"), None),
+    // Config-over-radio channel: a MAVLink-TUNNEL request/response lane on the
+    // -p1 control plane so a node reachable only over the radio can have its
+    // /api/config read/written from the ground. The unit gates on the
+    // /etc/ados/tunnel-enabled marker (mirroring radio.tunnel.enabled), so an
+    // un-opted node skips it cleanly. Cross-profile (drone terminator + ground
+    // injector), NOT in the headless KEEP set.
+    def(
+        "ados-tunnel-config",
+        Hardware,
+        Some("drone|ground_station"),
+        None,
+    ),
     // Ground-station-only services. ados-wfb-rx is the single-node RX path,
     // gated to the direct role so it does not grab the adapter the relay or
     // receiver units drive.
@@ -309,7 +321,7 @@ mod tests {
     #[test]
     fn registry_has_expected_shape() {
         let specs = build_specs();
-        assert_eq!(specs.len(), 34, "service count drifted from the catalog");
+        assert_eq!(specs.len(), 35, "service count drifted from the catalog");
         // Core tier members. ados-mavlink/api/cloud/health are the cross-profile
         // always-on core (the single cloud unit serves the gateway + heartbeat on
         // both profiles, spawning the ground-station bridge when the role resolves
@@ -366,6 +378,15 @@ mod tests {
         assert_eq!(crsf.profile_gate, Some("drone|ground_station"));
         assert_eq!(crsf.category, Category::Hardware);
         assert!(!crsf.headless_keep);
+        // The config-over-radio channel is a cross-profile Hardware unit
+        // (drone terminator + ground injector), never in the headless keep set.
+        let tunnel = specs
+            .iter()
+            .find(|s| s.name == "ados-tunnel-config")
+            .unwrap();
+        assert_eq!(tunnel.profile_gate, Some("drone|ground_station"));
+        assert_eq!(tunnel.category, Category::Hardware);
+        assert!(!tunnel.headless_keep);
     }
 
     #[test]
