@@ -648,6 +648,45 @@ pub fn tunnel_payload_type(frame: &[u8]) -> Option<u16> {
     Some(u16::from_le_bytes([frame[10], frame[11]]))
 }
 
+/// The opaque application `payload` carried by a `TUNNEL` frame, reconstructed
+/// to its declared length. The symmetric decode of [`build_tunnel_v2`]: it
+/// reads the `payload_length` field and zero-pads the (MAVLink2
+/// trailing-zero-truncated) wire bytes back to that length, so a caller gets
+/// exactly the `payload` slice that was built, even when the tail of that
+/// payload was zeros the transport truncated. Returns `None` when the frame is
+/// not a well-formed v2 TUNNEL.
+///
+/// The TUNNEL payload begins after the v2 header (10 bytes) and the fixed
+/// fields `payload_type`(u16) + `target_system`(u8) + `target_component`(u8) +
+/// `payload_length`(u8), i.e. at body offset 5. The declared length is the
+/// `payload_length` byte; the present wire bytes are however many survived
+/// trailing-zero truncation, and the rest are zeros.
+#[must_use]
+pub fn tunnel_payload(frame: &[u8]) -> Option<Vec<u8>> {
+    tunnel_payload_type(frame)?;
+    // frame = 10-byte v2 header, then `body_len` body bytes, then a 2-byte CRC.
+    let body_len = frame[1] as usize;
+    let body_end = 10usize.checked_add(body_len)?;
+    if frame.len() < body_end + 2 {
+        return None;
+    }
+    let body = &frame[10..body_end];
+    // body = payload_type(2) + target_system(1) + target_component(1) +
+    // payload_length(1) + payload… — the payload starts at body offset 5. When
+    // the payload (and its length byte) are all zeros, MAVLink2 trailing-zero
+    // truncation drops them, so an absent length byte reads as a declared 0.
+    let declared = body.get(4).copied().unwrap_or(0) as usize;
+    let present = body.get(5..).unwrap_or(&[]);
+    if present.len() > declared {
+        // A payload longer on the wire than its own declared length is
+        // malformed for this builder's frames.
+        return None;
+    }
+    let mut payload = present.to_vec();
+    payload.resize(declared, 0);
+    Some(payload)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1113,6 +1152,25 @@ mod tests {
         // byte 15. Confirm payload_length and the bytes round-trip.
         assert_eq!(frame[14] as usize, app_payload.len());
         assert_eq!(&frame[15..15 + app_payload.len()], app_payload);
+    }
+
+    #[test]
+    fn tunnel_payload_recovers_the_exact_bytes_including_trailing_zeros() {
+        // The decode half must reconstruct a payload whose tail is zeros that
+        // MAVLink2 trailing-zero truncation stripped off the wire.
+        let header = MavHeader::default();
+        for app in [
+            &b"chunk-header-and-body"[..],
+            &b""[..],
+            &[0xAD, 0x03, 1, 0, 9, 0, 0, 0, 0, 0, 0, 0][..], // ends in zeros
+            &vec![0u8; TUNNEL_MAX_PAYLOAD][..],              // all zeros, max width
+        ] {
+            let frame = build_tunnel_v2(header, 44480, 7, 1, app).expect("builds");
+            assert_eq!(tunnel_payload(&frame).as_deref(), Some(app));
+        }
+        // A non-TUNNEL frame yields None.
+        let hb = serialize_v2(header, &heartbeat()).unwrap();
+        assert_eq!(tunnel_payload(&hb), None);
     }
 
     #[test]
