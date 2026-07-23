@@ -7,7 +7,7 @@
 //! { "v": 1, "state": "…", "rssi_dbm": …, "lq_uplink": …, "lq_downlink": …,
 //!   "snr_db": …, "band": …, "packet_rate_hz": …, "tx_power_dbm": …,
 //!   "tx_frames_per_s": …, "rx_frames_per_s": …, "rf_unverified": …,
-//!   "flyable": …, "mode": …, "channel_source": …, "relay_role": … }
+//!   "flyable": …, "mode": …, "channel_source": …, "pic": …, "relay_role": … }
 //! ```
 //!
 //! `state` ∈ `unconfigured|ready|link_ok|degraded|rf_unverified|disabled`.
@@ -62,6 +62,13 @@ pub struct StatsInputs<'a> {
     pub mode: Option<&'a str>,
     /// Where the transmitted channels come from, once a source has injected.
     pub channel_source: Option<&'a str>,
+    /// The PIC arbiter's availability, as consulted by the hybrid authority
+    /// merge: `claimed` / `unclaimed` for a fresh report, `unavailable` when the
+    /// arbiter is not reporting (its sidecar absent / stale / malformed — hybrid
+    /// then holds SAFE), or `None` when the arbiter does not gate this lane
+    /// (fixed `hid` / `inject` modes). `unavailable` is never conflated with a
+    /// fresh `unclaimed`: a dead arbiter is a distinct, honest state.
+    pub pic: Option<&'a str>,
     /// The relay role, when this node participates in a relay chain.
     pub relay_role: Option<&'a str>,
 }
@@ -104,6 +111,7 @@ pub fn build_stats_value(state: LaneState, inputs: &StatsInputs<'_>) -> Value {
         "flyable": state.flyable(),
         "mode": inputs.mode,
         "channel_source": inputs.channel_source,
+        "pic": inputs.pic,
         "relay_role": inputs.relay_role,
     })
 }
@@ -172,7 +180,7 @@ mod tests {
 
     /// The pinned field set, in one place, so a drift in either direction
     /// (a missing field or an invented one) fails loudly.
-    const PINNED_FIELDS: [&str; 16] = [
+    const PINNED_FIELDS: [&str; 17] = [
         "v",
         "state",
         "rssi_dbm",
@@ -188,6 +196,7 @@ mod tests {
         "flyable",
         "mode",
         "channel_source",
+        "pic",
         "relay_role",
     ];
 
@@ -251,6 +260,7 @@ mod tests {
             rx_frames_per_s: Some(12.0),
             mode: Some("rc"),
             channel_source: Some("inject"),
+            pic: Some("unclaimed"),
             relay_role: None,
         };
         let v = build_stats_value(LaneState::LinkOk, &inputs);
@@ -267,8 +277,25 @@ mod tests {
         assert_eq!(v["flyable"], true);
         assert_eq!(v["mode"], "rc");
         assert_eq!(v["channel_source"], "inject");
+        assert_eq!(v["pic"], "unclaimed");
         assert!(v["band"].is_null());
         assert!(v["relay_role"].is_null());
+    }
+
+    #[test]
+    fn an_unavailable_arbiter_surfaces_honestly_and_never_as_unclaimed() {
+        // A dead / hung PIC arbiter is reported as its own distinct state, never
+        // conflated with a fresh unclaimed report.
+        let inputs = StatsInputs {
+            pic: Some("unavailable"),
+            ..Default::default()
+        };
+        let v = build_stats_value(LaneState::LinkOk, &inputs);
+        assert_eq!(v["pic"], "unavailable");
+        // When the arbiter does not gate the lane (fixed hid / inject modes)
+        // the field is null, never a fabricated verdict.
+        let v = build_stats_value(LaneState::LinkOk, &StatsInputs::default());
+        assert!(v["pic"].is_null());
     }
 
     #[test]

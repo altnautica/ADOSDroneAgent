@@ -447,16 +447,30 @@ async fn run_service_pass(
             prev_rx = rx_total;
             prev_at = now;
 
-            // Refresh the PIC arbiter view for the hybrid authority decision
-            // (a staleness-gated sidecar read; an absent/stale arbiter reads
-            // unclaimed).
+            // Refresh the PIC arbiter view for the hybrid authority decision (a
+            // staleness-gated sidecar read). A read that returns `None` — the
+            // arbiter's sidecar absent, unreadable, malformed, or stale — is
+            // passed through as-is: hybrid then holds SAFE (the injector never
+            // wins on a missing verdict), NOT collapsed to a fabricated
+            // unclaimed view.
+            let mut pic_report: Option<&str> = None;
             if cfg.channel_source != ChannelSourceMode::Inject {
                 let pic_path = ados_crsf::paths::run_path("pic-state.json");
                 let view = ados_crsf::sources::read_pic_view(
                     Path::new(&pic_path),
                     std::time::SystemTime::now(),
-                )
-                .unwrap_or_default();
+                );
+                // Surface the arbiter's availability honestly for hybrid — the
+                // only mode where its report gates authority. `unavailable`
+                // (arbiter not reporting, fail-safe hold) is never conflated
+                // with a fresh `unclaimed`.
+                if cfg.channel_source == ChannelSourceMode::Hybrid {
+                    pic_report = Some(match &view {
+                        None => "unavailable",
+                        Some(v) if v.claimed => "claimed",
+                        Some(_) => "unclaimed",
+                    });
+                }
                 merge.lock().await.set_pic(view);
             }
 
@@ -493,6 +507,7 @@ async fn run_service_pass(
                 rx_frames_per_s: Some(rx_fps),
                 mode: Some(cfg.mode.as_str()),
                 channel_source: source,
+                pic: pic_report,
                 relay_role: cfg.relay_role.sidecar_str(),
             };
             *latest_status.lock().await = build_stats_value(state, &inputs);

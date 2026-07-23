@@ -13,10 +13,15 @@
 //! The configured `channel_source` mode decides authority. In `hybrid` the
 //! PIC arbiter's holder wins: while a client holds the PIC claim the lane
 //! obeys that client's lane (the injector when the holder IS the injector's
-//! client id, the human HID path for any other holder); with no claim held
-//! the programmatic lane feeds. The losing source's values are stored but
-//! never transmitted — authority never silently falls through to the other
-//! source, because a source that did not win must not fly the aircraft.
+//! client id, the human HID path for any other holder); with a FRESH,
+//! affirmative "no claim held" report the programmatic lane feeds. A PIC
+//! arbiter that is NOT reporting (its sidecar absent, unreadable, malformed,
+//! or stale) is treated as UNKNOWN, never as "no human wants control": hybrid
+//! fails SAFE to the human/neutral hold, so a dead or hung arbiter can never
+//! hand the autonomous injector authority on a missing verdict. The losing
+//! source's values are stored but never transmitted — authority never silently
+//! falls through to the other source, because a source that did not win must
+//! not fly the aircraft.
 
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
@@ -141,32 +146,38 @@ pub fn read_pic_view(path: &Path, now: SystemTime) -> Option<PicView> {
 
 /// Decide which source has authority. Pure.
 ///
-/// `injector_id` is the client id attached to the currently-LIVE injected set
-/// (`None` when there is no live injection or it carried no id).
+/// `pic` is the PIC arbiter's report: `Some` when the arbiter is reporting a
+/// fresh claimed/unclaimed view, `None` when it is NOT reporting (its sidecar
+/// is absent, unreadable, malformed, or stale). `injector_id` is the client id
+/// attached to the currently-LIVE injected set (`None` when there is no live
+/// injection or it carried no id).
 pub fn resolve_authority(
     mode: ChannelSourceMode,
-    pic: &PicView,
+    pic: Option<&PicView>,
     injector_id: Option<&str>,
 ) -> Authority {
     match mode {
         ChannelSourceMode::Hid => Authority::Hid,
         ChannelSourceMode::Inject => Authority::Inject,
-        ChannelSourceMode::Hybrid => {
-            if pic.claimed {
-                // The PIC arbiter's holder wins: when the holder IS the
-                // injector's client, the programmatic lane flies; any other
-                // holder is the human input path.
-                match (pic.holder.as_deref(), injector_id) {
-                    (Some(holder), Some(injector)) if holder == injector => Authority::Inject,
-                    _ => Authority::Hid,
-                }
-            } else {
-                // Nobody holds PIC: the programmatic lane feeds. HID input
-                // without a PIC claim must not fly — the claim is the whole
-                // point of the arbiter.
-                Authority::Inject
-            }
-        }
+        ChannelSourceMode::Hybrid => match pic {
+            // The arbiter is not reporting (absent / stale / malformed): its
+            // verdict is UNKNOWN, so hybrid fails SAFE. This routes to the
+            // human/neutral hold — a live human HID stack keeps flying, no HID
+            // holds neutral — but the autonomous injector NEVER wins on a
+            // missing verdict. A dead or hung arbiter is not consent.
+            None => Authority::Hid,
+            // The PIC arbiter's holder wins: when the holder IS the injector's
+            // client, the programmatic lane flies; any other holder is the
+            // human input path.
+            Some(view) if view.claimed => match (view.holder.as_deref(), injector_id) {
+                (Some(holder), Some(injector)) if holder == injector => Authority::Inject,
+                _ => Authority::Hid,
+            },
+            // A FRESH, affirmative "no client holds the claim": the
+            // programmatic lane feeds. HID input without a PIC claim must not
+            // fly — the claim is the whole point of the arbiter.
+            Some(_) => Authority::Inject,
+        },
     }
 }
 
@@ -187,7 +198,12 @@ pub struct SourceMerge {
     mode: ChannelSourceMode,
     inject: Option<Injected>,
     hid: Option<ChannelBank>,
-    pic: PicView,
+    /// The PIC arbiter's latest report: `Some` for a fresh claimed/unclaimed
+    /// view, `None` when the arbiter is not reporting (absent / stale sidecar).
+    /// Starts `None` — before the first sidecar read the arbiter's verdict is
+    /// genuinely unknown, so a fresh hybrid merge holds SAFE (the injector does
+    /// not fly until the arbiter affirmatively reports).
+    pic: Option<PicView>,
 }
 
 impl SourceMerge {
@@ -196,7 +212,7 @@ impl SourceMerge {
             mode,
             inject: None,
             hid: None,
-            pic: PicView::default(),
+            pic: None,
         }
     }
 
@@ -268,18 +284,21 @@ impl SourceMerge {
     }
 
     /// Replace the PIC arbiter view (refreshed from its sidecar each tick).
-    pub fn set_pic(&mut self, view: PicView) {
+    /// `None` = the arbiter is not reporting (its sidecar was absent, stale, or
+    /// malformed on this read) — the hybrid merge then holds SAFE.
+    pub fn set_pic(&mut self, view: Option<PicView>) {
         self.pic = view;
     }
 
-    pub fn pic(&self) -> &PicView {
-        &self.pic
+    /// The last arbiter report, or `None` when the arbiter is not reporting.
+    pub fn pic(&self) -> Option<&PicView> {
+        self.pic.as_ref()
     }
 
     /// The source holding authority right now.
     pub fn authority(&self, now: Instant) -> Authority {
         let injector = self.live_inject(now).and_then(|i| i.client_id.as_deref());
-        resolve_authority(self.mode, &self.pic, injector)
+        resolve_authority(self.mode, self.pic.as_ref(), injector)
     }
 
     /// The channel set to transmit right now, plus the live source it came
@@ -338,11 +357,11 @@ mod tests {
             holder: Some("operator".into()),
         };
         assert_eq!(
-            resolve_authority(ChannelSourceMode::Hid, &claimed, Some("ai")),
+            resolve_authority(ChannelSourceMode::Hid, Some(&claimed), Some("ai")),
             Authority::Hid
         );
         assert_eq!(
-            resolve_authority(ChannelSourceMode::Inject, &claimed, None),
+            resolve_authority(ChannelSourceMode::Inject, Some(&claimed), None),
             Authority::Inject
         );
     }
@@ -355,7 +374,7 @@ mod tests {
             holder: Some("hdmi-kiosk".into()),
         };
         assert_eq!(
-            resolve_authority(ChannelSourceMode::Hybrid, &human, Some("ai-mission")),
+            resolve_authority(ChannelSourceMode::Hybrid, Some(&human), Some("ai-mission")),
             Authority::Hid
         );
         // The injector itself holding PIC keeps the programmatic lane.
@@ -364,7 +383,7 @@ mod tests {
             holder: Some("ai-mission".into()),
         };
         assert_eq!(
-            resolve_authority(ChannelSourceMode::Hybrid, &robot, Some("ai-mission")),
+            resolve_authority(ChannelSourceMode::Hybrid, Some(&robot), Some("ai-mission")),
             Authority::Inject
         );
         // A claim with no holder id (defensive) reads as the human path.
@@ -373,17 +392,40 @@ mod tests {
             holder: None,
         };
         assert_eq!(
-            resolve_authority(ChannelSourceMode::Hybrid, &anon, Some("ai-mission")),
+            resolve_authority(ChannelSourceMode::Hybrid, Some(&anon), Some("ai-mission")),
             Authority::Hid
         );
     }
 
     #[test]
     fn hybrid_unclaimed_pic_feeds_the_programmatic_lane() {
+        // A FRESH, affirmative unclaimed report — the arbiter IS reporting and
+        // says no one holds — lets the programmatic lane feed.
         let unclaimed = PicView::default();
         assert_eq!(
-            resolve_authority(ChannelSourceMode::Hybrid, &unclaimed, None),
+            resolve_authority(ChannelSourceMode::Hybrid, Some(&unclaimed), None),
             Authority::Inject
+        );
+    }
+
+    #[test]
+    fn hybrid_holds_safe_when_the_arbiter_is_unavailable() {
+        // A dead / hung PIC arbiter reports nothing (None). Hybrid must NOT hand
+        // the autonomous injector authority on a missing verdict — it holds to
+        // the human/neutral path even with a live injector id present.
+        assert_eq!(
+            resolve_authority(ChannelSourceMode::Hybrid, None, Some("ai-mission")),
+            Authority::Hid
+        );
+        // The fixed modes are the operator's explicit choice and ignore the
+        // arbiter entirely, reporting or not.
+        assert_eq!(
+            resolve_authority(ChannelSourceMode::Inject, None, Some("ai-mission")),
+            Authority::Inject
+        );
+        assert_eq!(
+            resolve_authority(ChannelSourceMode::Hid, None, None),
+            Authority::Hid
         );
     }
 
@@ -399,22 +441,77 @@ mod tests {
             .unwrap();
         merge.set_hid(hid).unwrap();
 
-        // Unclaimed: the injection flies.
+        // A fresh unclaimed report: the injection flies.
+        merge.set_pic(Some(PicView::default()));
         assert_eq!(merge.current(now), (injected, Some(ChannelSource::Inject)));
 
         // A human claims PIC: the HID path takes over on the same tick.
-        merge.set_pic(PicView {
+        merge.set_pic(Some(PicView {
             claimed: true,
             holder: Some("operator".into()),
-        });
+        }));
         assert_eq!(merge.current(now), (hid, Some(ChannelSource::Hid)));
 
         // The injector claims PIC: the programmatic lane wins again.
-        merge.set_pic(PicView {
+        merge.set_pic(Some(PicView {
             claimed: true,
             holder: Some("ai".into()),
-        });
+        }));
         assert_eq!(merge.current(now), (injected, Some(ChannelSource::Inject)));
+    }
+
+    #[test]
+    fn merge_hybrid_holds_safe_until_a_fresh_arbiter_report() {
+        // A brand-new merge has never heard from the arbiter (pic unavailable):
+        // the injector must not fly even with a live injected set.
+        let mut merge = SourceMerge::new(ChannelSourceMode::Hybrid);
+        let now = t0();
+        merge
+            .inject_all(
+                [CHANNEL_MAX; CHANNEL_COUNT],
+                DEFAULT_INJECT_TTL,
+                now,
+                Some("ai".into()),
+            )
+            .unwrap();
+        assert_eq!(merge.authority(now), Authority::Hid);
+        assert_eq!(merge.current(now), (ChannelBank::neutral(), None));
+
+        // A human is at the sticks while the arbiter is still down: HID keeps
+        // control, the injector still never wins.
+        let mut hid = ChannelBank::neutral();
+        hid[0] = CHANNEL_MAX;
+        merge.set_hid(hid).unwrap();
+        assert_eq!(merge.current(now), (hid, Some(ChannelSource::Hid)));
+
+        // A FRESH unclaimed report finally arrives: only now may the
+        // programmatic lane feed.
+        merge.clear_hid();
+        merge.set_pic(Some(PicView::default()));
+        assert_eq!(
+            merge.current(now),
+            ([CHANNEL_MAX; CHANNEL_COUNT], Some(ChannelSource::Inject))
+        );
+    }
+
+    #[test]
+    fn merge_hybrid_fails_safe_when_a_reporting_arbiter_goes_away() {
+        // The injector is flying under a fresh unclaimed report; then the
+        // arbiter dies (a later read returns None). The injector must lose
+        // authority immediately — a stale/absent verdict is never consent.
+        let mut merge = SourceMerge::new(ChannelSourceMode::Hybrid);
+        let now = t0();
+        let injected = [CHANNEL_MID; CHANNEL_COUNT];
+        merge
+            .inject_all(injected, DEFAULT_INJECT_TTL, now, Some("ai".into()))
+            .unwrap();
+        merge.set_pic(Some(PicView::default()));
+        assert_eq!(merge.current(now), (injected, Some(ChannelSource::Inject)));
+
+        // The arbiter stops reporting: fail safe, injector loses, neutral hold.
+        merge.set_pic(None);
+        assert_eq!(merge.authority(now), Authority::Hid);
+        assert_eq!(merge.current(now), (ChannelBank::neutral(), None));
     }
 
     #[test]
@@ -517,10 +614,10 @@ mod tests {
                 Some("ai".into()),
             )
             .unwrap();
-        merge.set_pic(PicView {
+        merge.set_pic(Some(PicView {
             claimed: true,
             holder: Some("ai".into()),
-        });
+        }));
         let late = now + Duration::from_secs(5);
         assert_eq!(merge.authority(late), Authority::Hid);
         assert_eq!(merge.current(late), (ChannelBank::neutral(), None));
