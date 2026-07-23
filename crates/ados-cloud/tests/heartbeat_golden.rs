@@ -95,6 +95,7 @@ fn base_payload() -> HeartbeatPayload {
         video_camera_source: None,
         video_pipeline_state: None,
         video_streams: None,
+        linked_peers: None,
         display_type: None,
         can_buses: None,
         compute_role: None,

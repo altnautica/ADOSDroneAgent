@@ -24,8 +24,8 @@
 use std::time::Duration;
 
 use crate::heartbeat::{
-    ClusterSlave, ConfigErrorEntry, CrsfBlock, HeartbeatPayload, RadioBlock, RemoteAccess,
-    VideoStreamHb,
+    ClusterSlave, ConfigErrorEntry, CrsfBlock, HeartbeatPayload, LinkedPeerHb, RadioBlock,
+    RemoteAccess, VideoStreamHb,
 };
 
 /// The compute-node heartbeat sidecar written by `ados-compute`
@@ -121,6 +121,76 @@ fn read_video_streams_sidecar_from(
 
 fn read_video_streams_sidecar(now_ms: i64) -> Option<Vec<VideoStreamHb>> {
     read_video_streams_sidecar_from(std::path::Path::new(VIDEO_STREAMS_SIDECAR), now_ms)
+}
+
+const LINKED_PEERS_SIDECAR: &str = "/run/ados/linked-peers.json";
+
+/// A linked-peer whose last beacon is older than this is dropped, matching the
+/// listener's 60 s prune window (`LINKED_PEER_STALE_AFTER_S`). Per-entry gating
+/// also covers the dead-writer case: a stale file's entries are all old, so the
+/// whole list reads absent rather than republishing ghost peers (Rule 44).
+const LINKED_PEER_STALE_MS: i64 = 60_000;
+
+/// One raw peer row as the `linked-peers.json` sidecar writes it (snake_case,
+/// the receive listener's `LinkedPeer`). Deserialized then remapped to the
+/// camelCase [`LinkedPeerHb`] wire shape; the sidecar's `version` /
+/// `wall_time_unix` header keys are ignored (unknown fields).
+#[derive(Debug, Default, serde::Deserialize)]
+struct LinkedPeersSidecarDoc {
+    #[serde(default)]
+    peers: Vec<LinkedPeerRow>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct LinkedPeerRow {
+    #[serde(default)]
+    device_id: String,
+    #[serde(default)]
+    role: String,
+    #[serde(default)]
+    channel: u8,
+    #[serde(default)]
+    rssi_dbm: i8,
+    #[serde(default)]
+    last_seen_unix: f64,
+}
+
+/// Read + parse the linked-peers sidecar, folding the fresh peer set onto the
+/// heartbeat as `linkedPeers[]` so a GCS paired only to this ground node can
+/// transitively enrol each relayed drone. Each entry is freshness-gated on the
+/// listener's prune window; `None` when absent, unparseable, or every entry is
+/// stale/id-less.
+fn read_linked_peers_sidecar_from(
+    path: &std::path::Path,
+    now_ms: i64,
+) -> Option<Vec<LinkedPeerHb>> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let doc: LinkedPeersSidecarDoc = serde_json::from_str(&text).ok()?;
+    let out: Vec<LinkedPeerHb> = doc
+        .peers
+        .into_iter()
+        .filter(|p| !p.device_id.is_empty())
+        .filter(|p| {
+            let seen_ms = (p.last_seen_unix * 1000.0) as i64;
+            seen_ms > 0 && now_ms.saturating_sub(seen_ms) <= LINKED_PEER_STALE_MS
+        })
+        .map(|p| LinkedPeerHb {
+            device_id: p.device_id,
+            role: p.role,
+            channel: p.channel,
+            rssi_dbm: p.rssi_dbm,
+            seen_at_unix: p.last_seen_unix,
+        })
+        .collect();
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+fn read_linked_peers_sidecar(now_ms: i64) -> Option<Vec<LinkedPeerHb>> {
+    read_linked_peers_sidecar_from(std::path::Path::new(LINKED_PEERS_SIDECAR), now_ms)
 }
 
 /// The CRSF RC-lane state sidecar written by `ados-crsf` (~1 Hz while running,
@@ -395,6 +465,10 @@ fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
     // None when the file is stale so a dead producer is not folded forever).
     let compute = read_compute_sidecar(now_epoch_ms()).unwrap_or_default();
     let video_streams = read_video_streams_sidecar(now_epoch_ms());
+    // Fold the WFB linked-peers list (None on a drone / a peerless ground node,
+    // and None when every entry is stale so a dead listener is not folded
+    // forever). A ground station relaying drones surfaces `linkedPeers[]` here.
+    let linked_peers = read_linked_peers_sidecar(now_epoch_ms());
     // Fold the CRSF RC-lane state (None on a node without the lane, and None
     // when the file is stale so a dead lane service is not folded forever).
     let crsf = read_crsf_sidecar();
@@ -533,6 +607,7 @@ fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
         video_camera_source: None,
         video_pipeline_state: None,
         video_streams,
+        linked_peers,
         display_type: None,
         can_buses: None,
         compute_role: compute.compute_role,
@@ -701,6 +776,64 @@ mod tests {
     fn an_absent_plugin_dir_is_an_empty_map() {
         let dir = std::env::temp_dir().join("ados-cloud-plugins-nope-does-not-exist");
         assert!(read_plugin_state_sidecars_from(&dir, std::time::SystemTime::now()).is_empty());
+    }
+
+    #[test]
+    fn linked_peers_fold_fresh_remap_camelcase_and_drop_stale_and_idless() {
+        let dir = std::env::temp_dir().join(format!("ados-cloud-linked-{}", std::process::id()));
+        let now_s = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        let now_ms = (now_s * 1000.0) as i64;
+        // A fresh peer, a stale one (2 min old, past the 60 s window), and an
+        // id-less entry — only the fresh, id-bearing peer survives.
+        let body = format!(
+            r#"{{"version":1,"wall_time_unix":{now_s},"peers":[
+                {{"device_id":"drone-a","role":"drone","channel":149,"rssi_dbm":-51,"last_seen_unix":{now_s}}},
+                {{"device_id":"drone-old","role":"drone","channel":157,"rssi_dbm":-70,"last_seen_unix":{}}},
+                {{"device_id":"","role":"drone","channel":153,"rssi_dbm":-60,"last_seen_unix":{now_s}}}
+            ]}}"#,
+            now_s - 120.0
+        );
+        write_named(&dir, "linked-peers.json", &body);
+        let out = read_linked_peers_sidecar_from(&dir.join("linked-peers.json"), now_ms).unwrap();
+        assert_eq!(out.len(), 1);
+        // The wire keys are the camelCase set the GCS `LinkedPeer` consumes and
+        // the strict cloud validator declares (nothing snake_case survives).
+        let v = serde_json::to_value(&out[0]).unwrap();
+        assert_eq!(v["deviceId"], "drone-a");
+        assert_eq!(v["role"], "drone");
+        assert_eq!(v["channel"], 149);
+        assert_eq!(v["rssiDbm"], -51);
+        assert!((v["seenAtUnix"].as_f64().unwrap() - now_s).abs() < 1.0);
+        for k in v.as_object().unwrap().keys() {
+            assert!(!k.contains('_'), "{k} must be camelCase on the wire");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn linked_peers_absent_when_missing_or_every_entry_stale() {
+        // A missing file reads None so a drone / a peerless ground node stays
+        // byte-identical (never an empty `linkedPeers`).
+        let missing = std::path::Path::new("/run/ados/does-not-exist-linked-peers.json");
+        assert!(read_linked_peers_sidecar_from(missing, 1_000_000).is_none());
+        // A file whose only peer is stale reads None — the dead-writer case
+        // never republishes a ghost peer as a confident list (Rule 44).
+        let dir =
+            std::env::temp_dir().join(format!("ados-cloud-linked-stale-{}", std::process::id()));
+        write_named(
+            &dir,
+            "linked-peers.json",
+            r#"{"peers":[{"device_id":"d","role":"drone","channel":1,"rssi_dbm":-1,"last_seen_unix":1.0}]}"#,
+        );
+        // A reference `now` far in the future puts the sole entry past the gate.
+        assert!(
+            read_linked_peers_sidecar_from(&dir.join("linked-peers.json"), 10_000_000_000)
+                .is_none()
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -445,6 +445,12 @@ pub struct HeartbeatPayload {
     /// `:8889/<id>/whep` URL against the node's reachable host.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub video_streams: Option<Vec<VideoStreamHb>>,
+    /// The WFB peers a ground station relays (the drones a GCS paired only to
+    /// this ground node transitively enrols), folded from the
+    /// /run/ados/linked-peers.json sidecar. Absent on a drone / a peerless
+    /// ground node so the heartbeat stays byte-identical.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub linked_peers: Option<Vec<LinkedPeerHb>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_type: Option<String>,
 
@@ -535,6 +541,27 @@ pub struct VideoStreamHb {
     /// dead — the GCS keeps it selectable). Absent on agents predating the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live: Option<bool>,
+}
+
+/// One WFB peer a ground station reports it relays, folded from the
+/// `/run/ados/linked-peers.json` sidecar the receive-side presence listener
+/// writes. A ground station can relay more than one drone, so the payload
+/// carries a LIST; each entry is exactly what the PresenceBeacon + the listener
+/// decode (device-id, role, channel, RSSI, last-seen), no richer identity than
+/// the wire itself provides. `rename_all = "camelCase"` maps the snake fields to
+/// the `deviceId`/`rssiDbm`/`seenAtUnix` wire keys the GCS `LinkedPeer` consumes
+/// and the strict cloud validator declares. Absent on a drone / a peerless
+/// ground node so the heartbeat stays byte-identical.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkedPeerHb {
+    pub device_id: String,
+    pub role: String,
+    pub channel: u8,
+    pub rssi_dbm: i8,
+    /// Wall-clock unix SECONDS of the last decoded beacon (the relay freshness
+    /// signal; the GCS multiplies by 1000 for a ms timestamp).
+    pub seen_at_unix: f64,
 }
 
 /// One FC CAN bus entry. The block is omitted from the payload when no CAN
@@ -787,6 +814,7 @@ mod tests {
             video_camera_source: None,
             video_pipeline_state: None,
             video_streams: None,
+            linked_peers: None,
             display_type: None,
             can_buses: None,
             compute_role: None,

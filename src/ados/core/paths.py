@@ -179,6 +179,11 @@ WFB_STATS_JSON = ADOS_RUN_DIR / "wfb-stats.json"
 # ~5 s (atomic tmpfile+rename).
 HOP_SUPERVISOR_JSON = ADOS_RUN_DIR / "hop-supervisor.json"
 PEER_PRESENCE_JSON = ADOS_RUN_DIR / "peer-presence.json"
+# The LIST of WFB peers this ground station currently relays, written ~5 s by
+# the receive-side presence listener (a ground station can relay more than one
+# drone, so this is the list; peer-presence.json is the drone's single-peer
+# source). Read by the heartbeat to surface linkedPeers[].
+LINKED_PEERS_JSON = ADOS_RUN_DIR / "linked-peers.json"
 CAMERA_STATE_JSON = ADOS_RUN_DIR / "camera-state.json"
 # CRSF / ExpressLRS RC-lane state snapshot, written ~1 Hz by the ados-crsf
 # service while it runs (and on a slow keep-alive cadence while idling), read

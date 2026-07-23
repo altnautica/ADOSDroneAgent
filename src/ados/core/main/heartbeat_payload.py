@@ -765,6 +765,63 @@ def build_heartbeat_payload(app: AgentApp) -> dict:  # noqa: C901
             payload["peerRssiDbm"] = peer.get("peer_rssi_dbm")
             payload["peerSeenAtUnix"] = last_seen
 
+    # Linked WFB peers — the LIST of drones a ground station relays, sourced
+    # cross-process from /run/ados/linked-peers.json (written by the receive-side
+    # presence listener). A ground station can relay more than one drone, so this
+    # is the list; the scalar peer* fields above are the single freshest-peer
+    # fallback the GCS consumes until every agent ships the list. Each entry is
+    # remapped to the camelCase wire shape the GCS `LinkedPeer` type consumes and
+    # the strict cloud validator declares. Absent entirely (never an empty array)
+    # when no peer is fresh, so a drone or a peerless ground node stays
+    # byte-identical. Entries carry only the fields the beacon + listener decode.
+    from ados.core.paths import LINKED_PEERS_JSON
+    try:
+        linked = _json.loads(LINKED_PEERS_JSON.read_text())
+    except (OSError, ValueError):
+        linked = None
+    if isinstance(linked, dict):
+        raw_peers = linked.get("peers")
+        entries: list[dict] = []
+        if isinstance(raw_peers, list):
+            for p in raw_peers:
+                if not isinstance(p, dict):
+                    continue
+                device_id = p.get("device_id")
+                if not isinstance(device_id, str) or not device_id:
+                    continue
+                seen = p.get("last_seen_unix")
+                # Freshness-gate each entry on the SAME window the listener
+                # prunes on, so a stale file (a dead writer) never republishes
+                # ghost peers as a confident list (Rule 44).
+                if not (
+                    isinstance(seen, (int, float))
+                    and (time.time() - float(seen)) <= _PEER_STALE_AFTER_S
+                ):
+                    continue
+                entries.append(
+                    {
+                        "deviceId": device_id,
+                        "role": p.get("role"),
+                        "channel": p.get("channel"),
+                        "rssiDbm": p.get("rssi_dbm"),
+                        "seenAtUnix": seen,
+                    }
+                )
+        if entries:
+            payload["linkedPeers"] = entries
+            # peer-presence.json is the DRONE's single-peer source and is absent
+            # on a ground station, so populate the scalar from the freshest
+            # linked peer here too. Keeps the existing scalar surface + the GCS
+            # single-peer fallback working on the ground node without a second
+            # sidecar. Honest: the freshest decode, not a stale guess.
+            if "peerDeviceId" not in payload:
+                top = entries[0]
+                payload["peerDeviceId"] = top["deviceId"]
+                payload["peerRole"] = top["role"]
+                payload["peerChannel"] = top["channel"]
+                payload["peerRssiDbm"] = top["rssiDbm"]
+                payload["peerSeenAtUnix"] = top["seenAtUnix"]
+
     # Camera state — sourced cross-process from
     # /run/ados/camera-state.json, written by the ados-video pipeline
     # on every discover_and_assign() pass. Surfaces "missing" on the

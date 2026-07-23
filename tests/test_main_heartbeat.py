@@ -446,3 +446,106 @@ def test_heartbeat_crsf_block_drops_a_stale_sidecar(monkeypatch, tmp_path) -> No
     monkeypatch.setattr(paths, "CRSF_STATS_JSON", sidecar)
     payload = _fresh_app()._build_heartbeat_payload()
     assert "crsf" not in payload
+
+
+def _write_linked_peers(path: Path, peers: list[dict]) -> None:
+    """Write a linked-peers sidecar in the shape the receive-side presence
+    listener emits (version + wall_time_unix header, snake_case peer rows)."""
+    path.write_text(
+        json.dumps({"version": 1, "wall_time_unix": time.time(), "peers": peers})
+    )
+
+
+def test_heartbeat_linked_peers_absent_without_a_sidecar(monkeypatch, tmp_path) -> None:
+    """A drone / a ground node relaying no drone (no sidecar) carries no
+    ``linkedPeers`` key at all — never an empty array."""
+    import ados.core.paths as paths
+
+    monkeypatch.setattr(paths, "LINKED_PEERS_JSON", tmp_path / "linked-peers.json")
+    payload = _fresh_app()._build_heartbeat_payload()
+    assert "linkedPeers" not in payload
+
+
+def test_heartbeat_linked_peers_projects_fresh_camelcase_and_drops_stale(
+    monkeypatch, tmp_path
+) -> None:
+    """A ground station relaying drones surfaces ``linkedPeers[]`` with the
+    camelCase wire keys the GCS consumes; a stale peer + an id-less entry are
+    dropped, and the single-peer scalar is populated from the freshest entry."""
+    import ados.core.paths as paths
+
+    # peer-presence.json (the drone's single-peer source) is absent on a ground
+    # station, so keep it pointed at an empty path — the scalar must come from
+    # the freshest linked peer instead.
+    monkeypatch.setattr(paths, "PEER_PRESENCE_JSON", tmp_path / "peer-presence.json")
+    sidecar = tmp_path / "linked-peers.json"
+    now = time.time()
+    _write_linked_peers(
+        sidecar,
+        [
+            {
+                "device_id": "drone-a",
+                "role": "drone",
+                "channel": 149,
+                "rssi_dbm": -51,
+                "last_seen_unix": now,
+            },
+            {
+                "device_id": "drone-old",
+                "role": "drone",
+                "channel": 157,
+                "rssi_dbm": -70,
+                "last_seen_unix": now - 120.0,
+            },
+            {
+                "device_id": "",
+                "role": "drone",
+                "channel": 153,
+                "rssi_dbm": -60,
+                "last_seen_unix": now,
+            },
+        ],
+    )
+    monkeypatch.setattr(paths, "LINKED_PEERS_JSON", sidecar)
+    payload = _fresh_app()._build_heartbeat_payload()
+
+    peers = payload["linkedPeers"]
+    assert len(peers) == 1
+    assert peers[0] == {
+        "deviceId": "drone-a",
+        "role": "drone",
+        "channel": 149,
+        "rssiDbm": -51,
+        "seenAtUnix": now,
+    }
+    # The scalar single-peer fallback is populated from the freshest linked
+    # peer, so the existing scalar surface + the GCS fallback still work.
+    assert payload["peerDeviceId"] == "drone-a"
+    assert payload["peerRssiDbm"] == -51
+    assert payload["peerChannel"] == 149
+    assert payload["peerRole"] == "drone"
+
+
+def test_heartbeat_linked_peers_absent_when_every_entry_is_stale(
+    monkeypatch, tmp_path
+) -> None:
+    """A sidecar whose peers are all older than the staleness window reads
+    absent: a dead listener's lingering file never republishes ghost peers."""
+    import ados.core.paths as paths
+
+    sidecar = tmp_path / "linked-peers.json"
+    _write_linked_peers(
+        sidecar,
+        [
+            {
+                "device_id": "drone-a",
+                "role": "drone",
+                "channel": 149,
+                "rssi_dbm": -51,
+                "last_seen_unix": time.time() - 120.0,
+            }
+        ],
+    )
+    monkeypatch.setattr(paths, "LINKED_PEERS_JSON", sidecar)
+    payload = _fresh_app()._build_heartbeat_payload()
+    assert "linkedPeers" not in payload
