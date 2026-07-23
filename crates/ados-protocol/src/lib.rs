@@ -61,5 +61,6 @@ pub mod rest;
 pub mod sidecar;
 pub mod state;
 pub mod tap;
+pub mod tunnel_config;
 pub mod wfb_tables;
 pub mod ws_ticket;
