@@ -351,6 +351,11 @@ async fn run_direct(
         let band = config.band.clone();
         tokio::spawn(presence::hop_supervisor_persist_loop(hop_cache, band));
     }
+    // Publish the decoded WFB peers (the drones this ground station relays) to
+    // /run/ados/linked-peers.json so the heartbeat can surface `linkedPeers[]`
+    // and a GCS paired to the ground node transitively enrols each drone as its
+    // own node. Service-wide, so the list survives receive-plane restarts.
+    tokio::spawn(presence::linked_peers_persist_loop(presence_cache.clone()));
 
     // The receive adapter is auto-detected inside the receive loop (config's
     // interface is often empty). The shared `resolved_iface` cell (created above

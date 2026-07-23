@@ -20,6 +20,17 @@ pub const WFB_STATS_JSON: &str = "/run/ados/wfb-stats.json";
 /// Read cross-process by the API layer and the on-box channel-hops UI page.
 pub const HOP_SUPERVISOR_JSON: &str = "/run/ados/hop-supervisor.json";
 
+/// Linked-WFB-peers snapshot: the list of drones this ground station currently
+/// decodes a PresenceBeacon from, each with the fields the beacon + listener
+/// already carry (device-id, role, channel, RSSI, last-seen). The receive-side
+/// control-plane listener writes it ~every 5 s; the heartbeat producers read it
+/// and surface `linkedPeers[]` so a GCS paired to the ground node can enrol each
+/// relayed drone as its own node. A ground station can relay more than one
+/// drone, so this is a LIST — the sibling of the single-peer `peer-presence.json`
+/// (which the drone writes about its one ground peer). Resolve via [`run_path`]
+/// so `ADOS_RUN_DIR` is honoured.
+pub const LINKED_PEERS_JSON: &str = "/run/ados/linked-peers.json";
+
 /// Mesh state snapshot: role, neighbours, gateway election, partition status.
 pub const MESH_STATE_JSON: &str = "/run/ados/mesh-state.json";
 
@@ -126,6 +137,7 @@ mod tests {
     fn contract_constants_match_python_layout() {
         assert_eq!(WFB_STATS_JSON, "/run/ados/wfb-stats.json");
         assert_eq!(HOP_SUPERVISOR_JSON, "/run/ados/hop-supervisor.json");
+        assert_eq!(LINKED_PEERS_JSON, "/run/ados/linked-peers.json");
         assert_eq!(MESH_STATE_JSON, "/run/ados/mesh-state.json");
         assert_eq!(WFB_RELAY_JSON, "/run/ados/wfb-relay.json");
         assert_eq!(WFB_RECEIVER_JSON, "/run/ados/wfb-receiver.json");

@@ -152,6 +152,47 @@ struct PeerState {
     hop_history: Vec<HopFollowEntry>,
     /// Wall-clock unix of the last recorded follow (0.0 until the first).
     last_hop_at: f64,
+    /// Every distinct WFB peer this receiver currently decodes a beacon from,
+    /// keyed by the peer's device-id. The fields above track only the FRESHEST
+    /// peer (the watchdog's presence signal); this map is the full set a ground
+    /// station relays, published to `linked-peers.json` for the heartbeat's
+    /// `linkedPeers[]`. A ground station can relay more than one drone, so the
+    /// heartbeat needs the list, not just the last-heard scalar. Pruned to the
+    /// fresh set at read time.
+    peers: std::collections::BTreeMap<String, LinkedPeer>,
+}
+
+/// Schema version for the `linked-peers.json` sidecar (a best-effort drift
+/// signal a reader can gate on, mirroring the inline `version` field the
+/// hop-supervisor sidecar carries). Bump on any breaking entry-shape change.
+pub const LINKED_PEERS_SIDECAR_VERSION: u16 = 1;
+
+/// A peer is dropped from the published list once its last decoded beacon is
+/// older than this. Matches the Python heartbeat's `_PEER_STALE_AFTER_S` so a
+/// peer that stops beaconing disappears from `linkedPeers[]` on both the
+/// listener-prune side and the reader-freshness side, never lingering as a
+/// stale confident entry (Rule 44 — a dead relay shows dead, not a green ghost).
+pub const LINKED_PEER_STALE_AFTER_S: f64 = 60.0;
+
+/// Persist cadence for `linked-peers.json` (5 s, matching the hop-supervisor
+/// persister: the GCS heartbeat is 5 s and the fleet list does not need
+/// sub-second freshness).
+pub const LINKED_PEERS_PERSIST_CADENCE: Duration = Duration::from_secs(5);
+
+/// One decoded WFB peer as it is published to `linked-peers.json`. The fields
+/// are exactly what the PresenceBeacon + the listener already carry (device-id,
+/// role, channel, RSSI) plus the wall-clock time of the last decode — the
+/// heartbeat's `linkedPeers[]` entry shape, no richer identity than the beacon
+/// itself carries. Serialized snake_case; the heartbeat producers remap to the
+/// camelCase wire keys (`deviceId`/`rssiDbm`/`seenAtUnix`).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LinkedPeer {
+    pub device_id: String,
+    pub role: String,
+    pub channel: u8,
+    pub rssi_dbm: i8,
+    /// Wall-clock unix seconds of the last decoded beacon from this peer.
+    pub last_seen_unix: f64,
 }
 
 /// Thread-safe presence cache. Implements the watchdog's `PresenceCache` so it
@@ -177,15 +218,50 @@ impl GsPresenceCache {
     fn record_peer(&self, device_id: String, role: String, channel: u8, rssi_dbm: i8) {
         let mut s = self.inner.lock().unwrap();
         let prev_channel = s.peer_channel;
+        let now = now_unix();
+        // The multi-peer map: upsert this peer keyed by its device-id so a ground
+        // station relaying several drones reports all of them. Keyed insert also
+        // means a re-heard peer refreshes (not duplicates) its entry.
+        s.peers.insert(
+            device_id.clone(),
+            LinkedPeer {
+                device_id: device_id.clone(),
+                role: role.clone(),
+                channel,
+                rssi_dbm,
+                last_seen_unix: now,
+            },
+        );
+        // The scalar fields track the FRESHEST peer (this beacon), the watchdog's
+        // presence + channel-follow signal — unchanged single-peer behaviour.
         s.peer_device_id = Some(device_id);
         s.peer_role = Some(role);
         s.peer_channel = Some(channel);
         s.peer_rssi_dbm = Some(rssi_dbm);
-        let now = now_unix();
         s.peer_last_seen_unix = Some(now);
         if prev_channel != Some(channel) {
             Self::push_follow(&mut s, prev_channel, channel, "periodic");
         }
+    }
+
+    /// The fresh set of decoded WFB peers (last beacon within
+    /// [`LINKED_PEER_STALE_AFTER_S`]), newest-first. Prunes stale entries from
+    /// the map as a side effect so a peer that stops beaconing is dropped, never
+    /// republished as a stale confident entry. Empty until a peer is heard.
+    pub fn linked_peers(&self) -> Vec<LinkedPeer> {
+        let mut s = self.inner.lock().unwrap();
+        let now = now_unix();
+        s.peers
+            .retain(|_, p| (now - p.last_seen_unix) <= LINKED_PEER_STALE_AFTER_S);
+        let mut out: Vec<LinkedPeer> = s.peers.values().cloned().collect();
+        // Freshest peer first, so a single-drone reader that takes `[0]` gets the
+        // most-recent decode.
+        out.sort_by(|a, b| {
+            b.last_seen_unix
+                .partial_cmp(&a.last_seen_unix)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        out
     }
 
     /// Record a verified HopAnnounce (writer side, from the listener).
@@ -678,6 +754,38 @@ pub async fn hop_supervisor_persist_loop(cache: GsPresenceCache, band: String) {
     }
 }
 
+/// Build the `linked-peers.json` payload from the fresh peer set, stamping
+/// `version` (a reader drift signal) + `wall_time_unix` (so a cross-process
+/// reader can age the whole file, not just the per-peer `last_seen_unix`). Pure
+/// so the shape is unit-testable without the filesystem.
+pub fn linked_peers_payload(peers: &[LinkedPeer]) -> serde_json::Value {
+    serde_json::json!({
+        "version": LINKED_PEERS_SIDECAR_VERSION,
+        "wall_time_unix": now_unix(),
+        "peers": peers,
+    })
+}
+
+/// Persist the linked-peers list to `/run/ados/linked-peers.json` on the
+/// [`LINKED_PEERS_PERSIST_CADENCE`], pruning stale peers each tick (via
+/// [`GsPresenceCache::linked_peers`]). Writes one immediate snapshot on entry so
+/// the heartbeat reads a valid (empty) file before the first beacon, then one
+/// every cadence tick. Best-effort: an I/O error is logged and the loop
+/// continues. Returns only on task cancellation. Only the direct receive plane
+/// runs the presence listener, so only it writes this file — no contention.
+pub async fn linked_peers_persist_loop(cache: GsPresenceCache) {
+    use std::path::PathBuf;
+    let owned = PathBuf::from(crate::paths::run_path("linked-peers.json"));
+    loop {
+        let peers = cache.linked_peers();
+        let payload = linked_peers_payload(&peers);
+        if let Err(e) = crate::sidecars::write_json_atomic(&owned, &payload, 0o644) {
+            tracing::debug!(error = %e, "ground_linked_peers_persist_failed");
+        }
+        tokio::time::sleep(LINKED_PEERS_PERSIST_CADENCE).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -725,6 +833,72 @@ mod tests {
         assert!((0.0..5.0).contains(&age), "age {age} not fresh");
         // Fresh within the watchdog's 30 s window → peer_present() true.
         assert!(cache.peer_present());
+    }
+
+    #[test]
+    fn linked_peers_empty_until_a_beacon_is_decoded() {
+        let cache = GsPresenceCache::new();
+        assert!(cache.linked_peers().is_empty());
+    }
+
+    #[test]
+    fn linked_peers_lists_every_decoded_drone_newest_first() {
+        // A ground station relaying two drones must report BOTH — the scalar
+        // fields only ever track the last-heard one, but the list carries all.
+        let cache = GsPresenceCache::new();
+        cache.record_peer("drone-a".into(), "drone".into(), 149, -60);
+        cache.record_peer("drone-b".into(), "drone".into(), 157, -48);
+        let peers = cache.linked_peers();
+        assert_eq!(peers.len(), 2);
+        // Newest decode (drone-b) is first.
+        assert_eq!(peers[0].device_id, "drone-b");
+        assert_eq!(peers[0].channel, 157);
+        assert_eq!(peers[0].rssi_dbm, -48);
+        assert_eq!(peers[0].role, "drone");
+        assert!(peers[0].last_seen_unix > 0.0);
+        assert_eq!(peers[1].device_id, "drone-a");
+        // The scalar watchdog surface still tracks the freshest peer only.
+        assert_eq!(cache.peer_channel(), Some(157));
+    }
+
+    #[test]
+    fn linked_peers_upserts_by_device_id_not_duplicates() {
+        // Re-hearing the same drone refreshes its entry (channel/rssi/last-seen)
+        // rather than appending a duplicate.
+        let cache = GsPresenceCache::new();
+        cache.record_peer("drone-a".into(), "drone".into(), 149, -60);
+        cache.record_peer("drone-a".into(), "drone".into(), 157, -45);
+        let peers = cache.linked_peers();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].channel, 157);
+        assert_eq!(peers[0].rssi_dbm, -45);
+    }
+
+    #[test]
+    fn linked_peers_payload_has_version_wall_time_and_snake_case_entries() {
+        // The heartbeat producers read this file's snake_case keys and remap to
+        // the camelCase wire shape; pin the on-disk keys so a producer reads the
+        // right ones.
+        let cache = GsPresenceCache::new();
+        cache.record_peer("drone-a".into(), "drone".into(), 149, -60);
+        let payload = linked_peers_payload(&cache.linked_peers());
+        assert_eq!(payload["version"], LINKED_PEERS_SIDECAR_VERSION);
+        assert!(payload["wall_time_unix"].as_f64().unwrap() > 0.0);
+        let entry = &payload["peers"][0];
+        assert_eq!(entry["device_id"], "drone-a");
+        assert_eq!(entry["role"], "drone");
+        assert_eq!(entry["channel"], 149);
+        assert_eq!(entry["rssi_dbm"], -60);
+        assert!(entry["last_seen_unix"].as_f64().unwrap() > 0.0);
+    }
+
+    #[test]
+    fn linked_peers_empty_payload_is_a_valid_empty_list() {
+        // Before any beacon, the persister still writes a valid file so the
+        // heartbeat reads an empty list, never a missing/garbage file.
+        let payload = linked_peers_payload(&[]);
+        assert_eq!(payload["version"], LINKED_PEERS_SIDECAR_VERSION);
+        assert!(payload["peers"].as_array().unwrap().is_empty());
     }
 
     #[test]
