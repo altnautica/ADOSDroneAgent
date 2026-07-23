@@ -39,6 +39,15 @@
 //! - **camera keys** — `cameraState` + `cameraUsbRecovery` folded in from their
 //!   sidecars when fresh, so a LAN-paired operator sees the camera-missing signal
 //!   the cloud heartbeat carries.
+//! - **`crsf`** — the CRSF/ExpressLRS RC control-lane state, folded in from the
+//!   lane's `crsf-stats.json` sidecar when it is live (mtime-fresh), the same way
+//!   the `radio` block is sourced from its sidecar. PROFILE-AGNOSTIC: a drone
+//!   running the ELRS relay lane surfaces it over the LOCAL-FIRST LAN path, not
+//!   just a ground station — so the tab lights up for every node the lane runs
+//!   on. Absent (the key omitted) when the lane is down or its sidecar stale,
+//!   never a fabricated block. Served as the full snake_case sidecar field set —
+//!   the richer set including `flyable` + `pic` + `fc_command_down_gated` the
+//!   cloud heartbeat projection drops — so the GCS reads these keys directly.
 //!
 //! Every read is fault-tolerant: an absent store / sidecar / config / systemctl
 //! degrades that block to the same empty/default shape the FastAPI route returns
@@ -163,6 +172,14 @@ pub async fn get_full_status(State(state): State<AppState>, headers: HeaderMap) 
     // Camera presence + USB-recovery, folded in only when the sidecars are fresh.
     for (k, v) in read_camera_status() {
         payload.insert(k, v);
+    }
+
+    // CRSF/ExpressLRS RC control-lane state, folded in only when the lane's
+    // sidecar is live — PROFILE-AGNOSTIC, so a drone running the relay lane
+    // surfaces it over the LAN path just like a ground station. Absent (the key
+    // omitted) when the lane is down / stale, never a fabricated block.
+    if let Some(crsf) = read_crsf_status() {
+        payload.insert("crsf".to_string(), crsf);
     }
 
     Json(Value::Object(payload))
@@ -1630,6 +1647,69 @@ fn sidecar_fresh(obj: &Map<String, Value>, now: f64, max_age_s: f64) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// CRSF RC-lane block: the lane's state sidecar, mtime-staleness-gated.
+// ---------------------------------------------------------------------------
+
+/// The CRSF/ExpressLRS RC control-lane state sidecar filename under the run dir.
+const CRSF_STATS_SIDECAR: &str = "crsf-stats.json";
+
+/// A CRSF sidecar not re-written within this window reads as absent, so a dead
+/// lane's lingering tmpfs file never keeps the status carrying a frozen state
+/// (operating rule 44). The lane rewrites it ~1 Hz while transmitting and every
+/// 5 s while idling; 10 s is the canonical consumer window that idle refresh
+/// cadence was sized to be half of, so a live idle lane never flaps to absent.
+/// The sidecar body carries no write time, so the gate keys on the file mtime
+/// (the same source the cloud heartbeat's crsf gate uses).
+const CRSF_STATS_STALE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The CRSF RC-lane status block for the consolidated body, or `None` (the key
+/// omitted) when the lane service is not running, its sidecar is stale, or the
+/// body is malformed — never a fabricated all-null block for a node without the
+/// lane. PROFILE-AGNOSTIC by construction: it reads the sidecar, not the profile,
+/// so a drone running the ELRS relay lane carries it exactly like a ground
+/// station. The full sidecar field set is served verbatim (the richer set incl.
+/// `flyable` + `pic` + `fc_command_down_gated` the cloud heartbeat projection
+/// drops); the LAN path can carry it and the GCS reads those snake_case keys.
+fn read_crsf_status() -> Option<Value> {
+    read_crsf_status_in(
+        &run_dir().join(CRSF_STATS_SIDECAR),
+        std::time::SystemTime::now(),
+    )
+}
+
+/// The path + now injectable core of [`read_crsf_status`], so a test drives the
+/// mtime staleness gate deterministically against a tempdir. Absent / unreadable
+/// / unparseable / non-object / stale all read `None`. A future mtime (clock
+/// skew) counts as fresh. Emits the shared best-effort version-drift warning
+/// (never rejects), then serves the object verbatim.
+fn read_crsf_status_in(path: &Path, now: std::time::SystemTime) -> Option<Value> {
+    let fresh = std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .map(|mtime| {
+            now.duration_since(mtime)
+                .map(|age| age <= CRSF_STATS_STALE)
+                .unwrap_or(true)
+        })
+        .unwrap_or(false);
+    if !fresh {
+        return None;
+    }
+    let text = std::fs::read_to_string(path).ok()?;
+    let doc = serde_json::from_str::<Value>(&text).ok()?;
+    if !doc.is_object() {
+        return None;
+    }
+    // Best-effort drift signal (never reject): warn on a producer/reader version
+    // mismatch, then serve the sidecar anyway. The writer const lives in the
+    // ados-crsf crate, so compare against the shared registry.
+    let got = doc.get("v").and_then(Value::as_u64).unwrap_or(0) as u16;
+    if let Some(ours) = ados_protocol::contracts::sidecar_version("crsf-stats") {
+        ados_protocol::sidecar::check_sidecar_version("crsf-stats", got, ours);
+    }
+    Some(doc)
+}
+
+// ---------------------------------------------------------------------------
 // logd query seam + shared helpers.
 // ---------------------------------------------------------------------------
 
@@ -2469,11 +2549,114 @@ mod tests {
         assert!(read_camera_status_in(dir.path(), now).is_empty());
     }
 
+    // -------- crsf RC-lane fold --------
+
+    /// A node running the CRSF lane carries the `crsf` block on `/api/status/full`
+    /// — the full snake_case sidecar field set served verbatim, including the
+    /// LAN-only richer set (`flyable` + `pic` + `fc_command_down_gated`) the cloud
+    /// heartbeat projection drops. Mirrors the handler's
+    /// `if let Some(crsf) = read_crsf_status()` fold.
+    #[test]
+    fn crsf_sidecar_folds_the_full_field_set_onto_the_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("crsf-stats.json");
+        let body = json!({
+            "v": 1,
+            "state": "link_ok",
+            "rssi_dbm": -51,
+            "lq_uplink": 99,
+            "lq_downlink": 97,
+            "snr_db": 8,
+            "band": null,
+            "packet_rate_hz": 150,
+            "tx_power_mw": 100,
+            "tx_frames_per_s": 149.6,
+            "rx_frames_per_s": 12.0,
+            "rf_unverified": false,
+            "flyable": true,
+            "mode": "crsf_rc",
+            "channel_source": "inject",
+            "pic": "unclaimed",
+            "relay_role": null,
+            "fc_command_down_gated": null,
+        });
+        std::fs::write(&path, serde_json::to_string(&body).unwrap()).unwrap();
+
+        let crsf =
+            read_crsf_status_in(&path, std::time::SystemTime::now()).expect("fresh sidecar → Some");
+
+        // Fold into a representative payload exactly as the handler does.
+        let mut payload = Map::new();
+        payload.insert("crsf".to_string(), crsf);
+        let out = &payload["crsf"];
+
+        // The whole sidecar body rides verbatim — the GCS reads these snake_case
+        // keys directly, including the LAN-only richer set.
+        assert_eq!(out, &body);
+        assert_eq!(out["flyable"], json!(true));
+        assert_eq!(out["pic"], json!("unclaimed"));
+        assert!(out["fc_command_down_gated"].is_null());
+        assert_eq!(out["rssi_dbm"], json!(-51));
+        assert_eq!(out["state"], json!("link_ok"));
+    }
+
+    /// A node with no CRSF lane (no sidecar) folds NO `crsf` key — never a
+    /// fabricated all-null block for a node without the lane.
+    #[test]
+    fn crsf_absent_when_the_lane_has_no_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut payload = Map::new();
+        if let Some(crsf) = read_crsf_status_in(
+            &dir.path().join("crsf-stats.json"),
+            std::time::SystemTime::now(),
+        ) {
+            payload.insert("crsf".to_string(), crsf);
+        }
+        assert!(
+            !payload.contains_key("crsf"),
+            "a node without the lane carries no crsf key"
+        );
+    }
+
+    /// A stale sidecar (a dead lane's orphaned file, past the staleness window)
+    /// folds NO `crsf` key, so a dropped lane clears the tab rather than pinning a
+    /// frozen reading (operating rule 44).
+    #[test]
+    fn crsf_absent_when_the_sidecar_is_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("crsf-stats.json");
+        std::fs::write(&path, r#"{"v":1,"state":"link_ok","flyable":true}"#).unwrap();
+        let future =
+            std::time::SystemTime::now() + CRSF_STATS_STALE + std::time::Duration::from_secs(5);
+        assert!(read_crsf_status_in(&path, future).is_none());
+    }
+
+    /// A malformed sidecar folds NO `crsf` key (never a 500, never a garbage
+    /// block).
+    #[test]
+    fn crsf_absent_when_the_sidecar_is_malformed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("crsf-stats.json");
+        std::fs::write(&path, b"not json {{{").unwrap();
+        assert!(read_crsf_status_in(&path, std::time::SystemTime::now()).is_none());
+    }
+
+    /// A non-object (well-formed JSON but an array/scalar) reads absent, not a
+    /// 500 — the same posture the sibling sidecar readers hold.
+    #[test]
+    fn crsf_absent_when_the_sidecar_is_not_an_object() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("crsf-stats.json");
+        std::fs::write(&path, b"[1,2,3]").unwrap();
+        assert!(read_crsf_status_in(&path, std::time::SystemTime::now()).is_none());
+    }
+
     // -------- golden fixture (envelope shape) --------
 
     /// Golden-fixture parity: the consolidated body carries exactly the 17 stable
-    /// top-level keys (the camera keys are conditionally folded in, so they are not
-    /// part of the always-present envelope). This pins the envelope the GCS reads.
+    /// top-level keys (the camera keys AND the `crsf` RC-lane block are
+    /// conditionally folded in from their sidecars, so they are not part of the
+    /// always-present envelope). This pins the envelope the GCS reads.
     ///
     /// ```json
     /// {
