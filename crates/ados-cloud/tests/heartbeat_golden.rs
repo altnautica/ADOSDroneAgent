@@ -152,6 +152,12 @@ fn paired_full_matches_python_emit() {
         paired_with_device_id: Some("ados-peer".to_string()),
         adapter_chipset: Some("RTL8812EU".to_string()),
         adapter_injection_ok: Some(true),
+        // The sidecar-only churn counters are present on a populated block (they
+        // ride the Python present branch); the golden asserts they serialize with
+        // values here, distinct from the absent block that omits them.
+        tx_zombie_kills: Some(2),
+        tx_bytes_per_s: Some(412345.6),
+        restart_count: Some(5),
         ..RadioBlock::absent()
     };
     payload.wfb_adapter_chipset = Some("RTL8812EU".to_string());
@@ -210,4 +216,54 @@ fn paired_full_matches_python_emit() {
         got, want,
         "paired-full heartbeat must match the Python emit"
     );
+}
+
+#[test]
+fn radio_block_base_carries_the_usb_phy_and_churn_fields() {
+    // The struct carries all six fields the Python producer emits. Their wire shape
+    // mirrors the Python producer branch-for-branch:
+    //
+    // - adapter-USB-health + muted-PHY: present as `null` on the absent block (a
+    //   `false` would claim a measured-healthy state nothing examined), matching
+    //   the Python absent branch which keeps them null.
+    // - the sidecar-only churn counters: OMITTED from the absent block (they mean
+    //   nothing without a live radio view), matching the Python absent branch which
+    //   drops them, then present once a live view populates them.
+    let absent = serde_json::to_value(RadioBlock::absent()).expect("serialize absent block");
+    for key in [
+        "adapter_usb_speed_mbps",
+        "adapter_usb_degraded",
+        "phy_muted",
+    ] {
+        assert_eq!(
+            absent[key],
+            serde_json::Value::Null,
+            "{key} must be null on the absent block, never a fabricated reading"
+        );
+    }
+    for key in ["tx_zombie_kills", "tx_bytes_per_s", "restart_count"] {
+        assert!(
+            absent.get(key).is_none(),
+            "{key} is sidecar-only and must be omitted from the absent block"
+        );
+    }
+
+    // A populated block carries every one of the six (values or nulls) — the struct
+    // can represent the full field set a live radio view supplies.
+    let populated = RadioBlock {
+        adapter_usb_speed_mbps: Some(480),
+        adapter_usb_degraded: Some(false),
+        phy_muted: Some(false),
+        tx_zombie_kills: Some(1),
+        tx_bytes_per_s: Some(750000.0),
+        restart_count: Some(3),
+        ..RadioBlock::absent()
+    };
+    let live = serde_json::to_value(&populated).expect("serialize populated block");
+    assert_eq!(live["adapter_usb_speed_mbps"], serde_json::json!(480));
+    assert_eq!(live["adapter_usb_degraded"], serde_json::json!(false));
+    assert_eq!(live["phy_muted"], serde_json::json!(false));
+    assert_eq!(live["tx_zombie_kills"], serde_json::json!(1));
+    assert_eq!(live["tx_bytes_per_s"], serde_json::json!(750000.0));
+    assert_eq!(live["restart_count"], serde_json::json!(3));
 }

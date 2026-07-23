@@ -137,6 +137,31 @@ pub struct RadioBlock {
     /// never-scanned rig) and serializes as JSON `null` so the three-state
     /// consumer reads "unknown" instead of a fabricated scan result.
     pub adapter_injection_ok: Option<bool>,
+    /// The selected adapter's USB link health. A full-speed (12 Mbps) RTL
+    /// enumeration advances `tx_bytes_per_s` yet emits no usable RF; the speed +
+    /// degraded flag let a consumer warn instead of reading the advancing counter
+    /// as a healthy link. `None` (never a confident `false` for `_degraded`) when
+    /// no enumeration happened — a `false` there claims a measured-healthy USB link
+    /// nothing examined.
+    pub adapter_usb_speed_mbps: Option<i64>,
+    pub adapter_usb_degraded: Option<bool>,
+    /// The TX PHY pinned at the muted not-permitted floor: it injects frames but
+    /// radiates nothing. `None` on a view with no TX PHY reading (the receive side,
+    /// an older sidecar) — never a fabricated `false` asserting a healthy PHY.
+    pub phy_muted: Option<bool>,
+    /// Radio-data-plane churn + transmit-rate observability, forwarded so a
+    /// cloud-reached node surfaces a thrashing or zombie transmitter. These three
+    /// are SIDECAR-ONLY: the Python `build_radio_block` OMITS them from the absent
+    /// block (they only mean anything with a live radio view), so they carry
+    /// `skip_serializing_if` to mirror that exactly — omitted (not `null`) on
+    /// `absent()`, present (value or null) once a live view populates them. A `None`
+    /// on a populated block still reads as "no reading" (never a fabricated zero).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx_zombie_kills: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx_bytes_per_s: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restart_count: Option<i64>,
 }
 
 impl RadioBlock {
@@ -181,6 +206,19 @@ impl RadioBlock {
             // Null, not false: with no radio view no adapter scan ever ran, so
             // there is no injection verdict to report.
             adapter_injection_ok: None,
+            // Null, not false: with no radio view no adapter USB speed was
+            // enumerated and no PHY was read, so a `false` would claim a measured
+            // healthy-USB-link / unmuted-PHY state nothing examined. These three
+            // serialize as `null`, matching the Python absent block.
+            adapter_usb_speed_mbps: None,
+            adapter_usb_degraded: None,
+            phy_muted: None,
+            // The churn counters are sidecar-only: `skip_serializing_if` OMITS them
+            // from the absent block (they mean nothing without a live radio view),
+            // exactly as the Python absent branch does.
+            tx_zombie_kills: None,
+            tx_bytes_per_s: None,
+            restart_count: None,
         }
     }
 }
