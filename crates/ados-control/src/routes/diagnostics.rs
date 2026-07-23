@@ -33,7 +33,7 @@
 //! between two reads, so the conformance diff masks them; the stable contract is
 //! the nested shape — every section + its keys present.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use axum::extract::State;
 use axum::Json;
@@ -451,25 +451,45 @@ pub async fn get_video_diagnostics(State(state): State<AppState>) -> Json<Value>
     let cfg = crate::config::PairingConfig::load_from(&state.pairing_paths.config);
     let (profile, role) = crate::profile::current_profile_and_role(&cfg.agent.profile);
 
+    // Two reads a window apart: each hop is judged by data actually moving between
+    // them, not by a process being alive (Rule 37 / the pipeline runbook).
     let s0 = VideoSample::take().await;
     tokio::time::sleep(std::time::Duration::from_millis(VIDEO_SAMPLE_WINDOW_MS)).await;
     let s1 = VideoSample::take().await;
 
+    Json(build_video_diagnostics(&profile, &role, &s0, &s1))
+}
+
+/// Assemble the video-diagnostics body from two window samples: the profile-aware
+/// hop set (drone = video-source hops, else ground-station = video-sink hops), the
+/// upstream-aware verdict, and the response envelope (`profile` / `role` /
+/// `canonical_path` / `window_s` / `hops` / `video_dies_at`).
+///
+/// Pure over the two samples — it reuses [`drone_hops`] / [`gs_hops`] /
+/// [`resolve_hops`] and invents no verdict of its own — so the whole pipeline
+/// verifier is drivable end to end from a controllable per-hop counter fixture
+/// (a synthetic `VideoSample` pair) with no live camera / radio / mediamtx.
+fn build_video_diagnostics(
+    profile: &str,
+    role: &Option<String>,
+    s0: &VideoSample,
+    s1: &VideoSample,
+) -> Value {
     let hops = if profile == "drone" {
-        drone_hops(&s0, &s1)
+        drone_hops(s0, s1)
     } else {
-        gs_hops(&s0, &s1)
+        gs_hops(s0, s1)
     };
     let (hop_values, video_dies_at) = resolve_hops(hops);
 
-    Json(json!({
+    json!({
         "profile": profile,
         "role": role,
         "canonical_path": "main",
-        "window_s": VIDEO_SAMPLE_WINDOW_MS as f64 / 1000.0,
+        "window_s": window_s(),
         "hops": hop_values,
         "video_dies_at": video_dies_at,
-    }))
+    })
 }
 
 /// One reading of every video-pipeline source the harness trusts, taken
@@ -486,15 +506,30 @@ struct VideoSample {
 }
 
 impl VideoSample {
+    /// Sample every trusted source once: the live mediamtx `main` counters (over
+    /// HTTP) and the wfb-stats sidecar (under `ADOS_RUN_DIR`). Delegates the sidecar
+    /// read to [`VideoSample::from_run_dir`] so the assembly is drivable from an
+    /// explicit run dir in a test.
     async fn take() -> Self {
         let (mtx_bytes_received, mtx_serving) = tokio::join!(
             crate::routes::status_full::mediamtx_main_bytes_received(),
             crate::routes::status_full::mediamtx_whep_serving(),
         );
+        Self::from_run_dir(&run_dir(), mtx_bytes_received, mtx_serving)
+    }
+
+    /// Build a sample from an explicit run dir (the wfb-stats sidecar source) plus
+    /// the two mediamtx readings. The wfb-stats sidecar is the canonical
+    /// received-side counter object (`packets_received` / `fanout_forwarded` /
+    /// `tx_bytes_per_s` / `link_diag`); reading it from an explicit dir — the
+    /// `build_mesh_block_at` pure-core idiom — lets a test drive the verifier from a
+    /// controllable sidecar fixture + injected mediamtx counters, with no live
+    /// pipeline and no process-global env. `take()` resolves the live sources.
+    fn from_run_dir(run_dir: &Path, mtx_bytes_received: Option<i64>, mtx_serving: bool) -> Self {
         Self {
             mtx_bytes_received,
             mtx_serving,
-            wfb: read_run_sidecar("wfb-stats.json"),
+            wfb: read_run_sidecar_at(run_dir, "wfb-stats.json"),
         }
     }
 
@@ -513,12 +548,17 @@ impl VideoSample {
     }
 }
 
-/// Read a `/run/ados/<name>` JSON sidecar object, honouring `ADOS_RUN_DIR`.
-/// `None` when absent / unparseable / not a JSON object.
-fn read_run_sidecar(name: &str) -> Option<Map<String, Value>> {
-    let run = std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string());
-    let path = Path::new(&run).join(name);
-    let text = std::fs::read_to_string(path).ok()?;
+/// The `/run/ados` directory, honouring the `ADOS_RUN_DIR` override (the same
+/// resolution the sibling routes use).
+fn run_dir() -> PathBuf {
+    PathBuf::from(std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string()))
+}
+
+/// Read a `<run_dir>/<name>` JSON sidecar object from an explicit dir. `None` when
+/// absent / unparseable / not a JSON object. Pure (no env read), so a test drives
+/// it with a tempdir without touching process-global env.
+fn read_run_sidecar_at(run_dir: &Path, name: &str) -> Option<Map<String, Value>> {
+    let text = std::fs::read_to_string(run_dir.join(name)).ok()?;
     match serde_json::from_str::<Value>(&text).ok()? {
         Value::Object(m) => Some(m),
         _ => None,
@@ -1205,3 +1245,11 @@ Local:
         );
     }
 }
+
+// The bytes-every-hop pipeline integration test lives in its own file (this one is
+// already large) but is a CHILD module of `diagnostics`, so it reaches the crate-
+// internal sampler seams (`VideoSample::from_run_dir`, `build_video_diagnostics`)
+// without widening the public surface.
+#[cfg(test)]
+#[path = "diagnostics_video_pipeline_e2e.rs"]
+mod video_pipeline_e2e;
