@@ -115,13 +115,27 @@ fn radio_present() -> bool {
 }
 
 /// The `radio.crsf` claim from the agent config: the pinned RC-module device
-/// and the lane opt-in. Read fresh on every poll so an operator pinning the
-/// device through the config surface reclassifies the node without a
-/// supervisor restart.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+/// and the lane mode (which owns the pinned port). Read fresh on every poll so
+/// an operator pinning the device or flipping the mode through the config
+/// surface reclassifies the node without a supervisor restart.
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct CrsfClaim {
     device: String,
-    enabled: bool,
+    /// What the module carries (`radio.crsf.mode`), which decides who owns the
+    /// pinned port: `crsf_rc` (the RC lane service owns it), `mavlink` (the
+    /// MAVLink router owns it as its FC source), or `airport`. Defaults to
+    /// `crsf_rc`, matching the config model, so a pinned device with no mode
+    /// set is the RC module.
+    mode: String,
+}
+
+impl Default for CrsfClaim {
+    fn default() -> Self {
+        Self {
+            device: String::new(),
+            mode: "crsf_rc".to_string(),
+        }
+    }
 }
 
 fn crsf_claim() -> CrsfClaim {
@@ -147,8 +161,11 @@ fn read_crsf_claim(path: &Path) -> CrsfClaim {
         // pin"); a bare String would fail the whole parse on the explicit null.
         #[serde(default)]
         device: Option<String>,
+        // The lane mode decides who owns the pinned port: `mavlink` hands it
+        // to the MAVLink router as its FC source, every other mode leaves it
+        // to the RC lane. Nullable on disk like `device`.
         #[serde(default)]
-        enabled: bool,
+        mode: Option<String>,
     }
     let Ok(text) = std::fs::read_to_string(path) else {
         return CrsfClaim::default();
@@ -167,7 +184,14 @@ fn read_crsf_claim(path: &Path) -> CrsfClaim {
                 .unwrap_or("")
                 .trim()
                 .to_string(),
-            enabled: raw.radio.crsf.enabled,
+            mode: raw
+                .radio
+                .crsf
+                .mode
+                .as_deref()
+                .unwrap_or("crsf_rc")
+                .trim()
+                .to_string(),
         },
         Err(e) => {
             tracing::debug!(error = %e, "hotplug config read failed; no crsf claim");
@@ -192,30 +216,38 @@ fn pin_node_name(pin: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Split the USB-serial tty inventory into `(fc, elrs)` presence. A node is
-/// claimed as the ELRS/CRSF RC module when the pin names it, or — only while
-/// the CRSF lane is enabled — when its backing USB id is a known RC-bridge id.
-/// Every unclaimed node keeps counting as FC presence.
+/// Split the USB-serial tty inventory into `(fc, elrs)` presence, keyed on the
+/// pin and the lane mode — pin-only, mode-aware ownership that mirrors the
+/// MAVLink router's. Only the PINNED node is ever the RC module, and only when
+/// the router does not own it:
 ///
-/// The claim is evaluated BEFORE the generic FC match and the two classes are
-/// exclusive per node, so plugging the RC module never flips `fc` (no
-/// spurious FC-service restart). The default posture is deliberately
-/// conservative: with no pin and the lane disabled, a generic CP2102/CH340
-/// bridge stays an FC candidate — a VID:PID alone cannot distinguish an FC
-/// behind such a bridge from an RC module behind the same one, so nothing is
-/// ever stolen from FC without explicit config.
+/// - **`mavlink` mode** hands the pinned module to the MAVLink router as its
+///   FC source, so the pinned node counts as FC presence — a replug restarts
+///   the FC link, which is what owns the carrier.
+/// - **every other mode** (`crsf_rc`, `airport`) leaves the pinned port to the
+///   RC lane service, so the pinned node counts as ELRS presence.
+/// - **every non-pinned node** is an FC candidate, in any mode. The USB id is
+///   NOT consulted: a VID:PID alone cannot distinguish an FC behind a
+///   CP2102/CH340/ESP32-S3 bridge from an RC module behind the same one, and
+///   the router excludes only the pinned node (never by bridge VID), so
+///   claiming an unpinned bridge as ELRS would steal a bridge-connected FC.
+///
+/// The two classes are exclusive per node, so plugging the RC module never
+/// flips `fc` (no spurious FC-service restart) and plugging an FC never flips
+/// `elrs`.
 fn classify_serial_nodes(
     nodes: &[(String, Option<(u16, u16)>)],
     pin_node: &str,
-    lane_enabled: bool,
+    mode: &str,
 ) -> (bool, bool) {
+    // In `mavlink` mode the router owns the pinned module as its FC source; in
+    // every other mode the RC lane owns/reserves the pinned port.
+    let router_owns_pin = mode == "mavlink";
     let mut fc = false;
     let mut elrs = false;
-    for (name, usb) in nodes {
+    for (name, _usb) in nodes {
         let pinned = !pin_node.is_empty() && name == pin_node;
-        let bridge = lane_enabled
-            && usb.is_some_and(|(v, p)| ados_protocol::hwcaps::is_rc_bridge_usb_id(v, p));
-        if pinned || bridge {
+        if pinned && !router_owns_pin {
             elrs = true;
         } else {
             fc = true;
@@ -230,7 +262,7 @@ fn snapshot() -> Presence {
     // A USB flight controller enumerates as a CDC-ACM / USB-serial node — but
     // so does an ELRS RC module's bridge, so the tty inventory is classified
     // node-by-node instead of read as one class-wide presence bool.
-    let (fc, elrs) = classify_serial_nodes(&hardware::serial_tty_nodes(), &pin_node, claim.enabled);
+    let (fc, elrs) = classify_serial_nodes(&hardware::serial_tty_nodes(), &pin_node, &claim.mode);
     Presence {
         camera: hardware::video_node_present(),
         fc,
@@ -324,12 +356,12 @@ mod tests {
     }
 
     #[test]
-    fn pinned_device_is_classified_elrs_ahead_of_the_generic_fc_match() {
-        // The pin claims the node BEFORE the generic ttyUSB FC match: the
-        // module alone reads (fc=false, elrs=true), never as an FC.
+    fn a_pinned_node_in_crsf_rc_mode_classifies_as_elrs() {
+        // The RC lane owns the pinned port in the default mode: the module
+        // alone reads (fc=false, elrs=true), never as an FC.
         let nodes = [node("ttyUSB0", Some((0x10C4, 0xEA60)))];
         assert_eq!(
-            classify_serial_nodes(&nodes, "ttyUSB0", false),
+            classify_serial_nodes(&nodes, "ttyUSB0", "crsf_rc"),
             (false, true)
         );
         // With an FC beside it, both classes are present and independent.
@@ -337,30 +369,99 @@ mod tests {
             node("ttyACM0", Some((0x0483, 0x5740))),
             node("ttyUSB0", Some((0x10C4, 0xEA60))),
         ];
-        assert_eq!(classify_serial_nodes(&both, "ttyUSB0", false), (true, true));
+        assert_eq!(
+            classify_serial_nodes(&both, "ttyUSB0", "crsf_rc"),
+            (true, true)
+        );
     }
 
     #[test]
-    fn enabled_lane_claims_a_known_rc_bridge_without_a_pin() {
-        let nodes = [node("ttyUSB0", Some((0x1A86, 0x7523)))];
-        assert_eq!(classify_serial_nodes(&nodes, "", true), (false, true));
-        // Espressif native USB (ESP32-S3 module) matches on the vendor.
-        let esp = [node("ttyACM1", Some((0x303A, 0x1001)))];
-        assert_eq!(classify_serial_nodes(&esp, "", true), (false, true));
-        // An enabled lane never claims a non-bridge vendor: the FC stays FC.
-        let fc = [node("ttyACM0", Some((0x0483, 0x5740)))];
-        assert_eq!(classify_serial_nodes(&fc, "", true), (true, false));
+    fn a_pinned_node_in_mavlink_mode_classifies_as_fc() {
+        // In mavlink mode the MAVLink router owns the pinned module as its FC
+        // source, so the pinned node counts as FC presence — a replug restarts
+        // the FC link (the owner), never the RC lane.
+        let nodes = [node("ttyUSB0", Some((0x10C4, 0xEA60)))];
+        assert_eq!(
+            classify_serial_nodes(&nodes, "ttyUSB0", "mavlink"),
+            (true, false)
+        );
+        // An FC beside it: both are FC, so ELRS stays absent.
+        let both = [
+            node("ttyACM0", Some((0x0483, 0x5740))),
+            node("ttyUSB0", Some((0x10C4, 0xEA60))),
+        ];
+        assert_eq!(
+            classify_serial_nodes(&both, "ttyUSB0", "mavlink"),
+            (true, false)
+        );
     }
 
     #[test]
-    fn unpinned_disabled_lane_never_steals_a_generic_bridge_from_fc() {
-        // The default posture: with no pin and the lane off, a CP2102/CH340
-        // bridge stays an FC candidate (a VID:PID cannot distinguish an FC
-        // behind the bridge from an RC module behind the same one).
+    fn a_pinned_node_in_airport_mode_stays_off_the_fc_link() {
+        // Only mavlink mode hands the pin to the router; airport leaves it to
+        // the RC lane, so the pinned node reads ELRS (never a spurious FC
+        // restart, since the router excludes the pin outside mavlink mode).
+        let nodes = [node("ttyUSB0", Some((0x10C4, 0xEA60)))];
+        assert_eq!(
+            classify_serial_nodes(&nodes, "ttyUSB0", "airport"),
+            (false, true)
+        );
+    }
+
+    #[test]
+    fn a_bridge_connected_fc_is_not_stolen_by_a_different_pinned_elrs() {
+        // The bridge-VID over-claim is gone: with an ELRS module pinned on one
+        // node, an FC behind a CP2102/CH340/ESP32-S3 bridge on ANOTHER node is
+        // still FC (not stolen by VID). Only the pinned node is ELRS.
+        let nodes = [
+            node("ttyUSB0", Some((0x10C4, 0xEA60))), // an FC behind a CP2102 bridge
+            node("ttyUSB1", Some((0x1A86, 0x7523))), // the pinned ELRS module
+        ];
+        assert_eq!(
+            classify_serial_nodes(&nodes, "ttyUSB1", "crsf_rc"),
+            (true, true)
+        );
+    }
+
+    #[test]
+    fn an_unpinned_bridge_node_is_an_fc_candidate_in_every_mode() {
+        // With no pin, a known RC-bridge node is an FC candidate regardless of
+        // mode — a VID:PID cannot distinguish an FC behind the bridge from an
+        // RC module behind the same one, and only a pin makes it ELRS.
         for usb in [(0x10C4, 0xEA60), (0x1A86, 0x7523), (0x303A, 0x1001)] {
-            let nodes = [node("ttyUSB0", Some(usb))];
-            assert_eq!(classify_serial_nodes(&nodes, "", false), (true, false));
+            for mode in ["crsf_rc", "mavlink", "airport"] {
+                let nodes = [node("ttyUSB0", Some(usb))];
+                assert_eq!(
+                    classify_serial_nodes(&nodes, "", mode),
+                    (true, false),
+                    "usb={usb:?} mode={mode}"
+                );
+            }
         }
+    }
+
+    #[test]
+    fn an_fc_replug_reads_fc_presence_so_the_fc_link_restarts() {
+        // A real FC on ttyACM0 with the RC module pinned on ttyUSB0 (RC mode):
+        // the FC reads fc=true, so its remove/add edge emits DevKind::Fc and
+        // restarts ados-mavlink — while the pinned module reads ELRS and never
+        // steals that restart.
+        let with_fc = [
+            node("ttyACM0", Some((0x0483, 0x5740))),
+            node("ttyUSB0", Some((0x10C4, 0xEA60))),
+        ];
+        assert_eq!(
+            classify_serial_nodes(&with_fc, "ttyUSB0", "crsf_rc"),
+            (true, true)
+        );
+        // The FC unplugged: fc drops to false (elrs still present) — a real
+        // presence transition on the FC class, which run() turns into a
+        // DevKind::Fc restart of the FC link.
+        let without_fc = [node("ttyUSB0", Some((0x10C4, 0xEA60)))];
+        assert_eq!(
+            classify_serial_nodes(&without_fc, "ttyUSB0", "crsf_rc"),
+            (false, true)
+        );
     }
 
     #[test]
@@ -369,11 +470,14 @@ mod tests {
         // while the pinned node is absent (truthful: not present).
         let nodes = [node("ttyUSB0", None)];
         assert_eq!(
-            classify_serial_nodes(&nodes, "ttyUSB1", false),
+            classify_serial_nodes(&nodes, "ttyUSB1", "crsf_rc"),
             (true, false)
         );
         // No nodes at all: neither class present.
-        assert_eq!(classify_serial_nodes(&[], "ttyUSB0", true), (false, false));
+        assert_eq!(
+            classify_serial_nodes(&[], "ttyUSB0", "crsf_rc"),
+            (false, false)
+        );
     }
 
     #[test]
@@ -401,6 +505,7 @@ mod tests {
     fn crsf_claim_reads_the_radio_section_and_defaults_empty() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.yaml");
+        // No mode set → the default crsf_rc (the RC lane owns the pin).
         std::fs::write(
             &cfg,
             "radio:\n  crsf:\n    enabled: true\n    device: \" /dev/ttyUSB0 \"\n",
@@ -410,10 +515,26 @@ mod tests {
             read_crsf_claim(&cfg),
             CrsfClaim {
                 device: "/dev/ttyUSB0".to_string(),
-                enabled: true,
+                mode: "crsf_rc".to_string(),
             }
         );
-        // Missing file / missing section / malformed file all read no claim.
+        // An explicit mavlink mode is read through, so the router-owned pin is
+        // classified as FC, not ELRS.
+        let mav = dir.path().join("mavlink.yaml");
+        std::fs::write(
+            &mav,
+            "radio:\n  crsf:\n    enabled: true\n    device: /dev/ttyUSB0\n    mode: mavlink\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_crsf_claim(&mav),
+            CrsfClaim {
+                device: "/dev/ttyUSB0".to_string(),
+                mode: "mavlink".to_string(),
+            }
+        );
+        // Missing file / missing section / malformed file all read the default
+        // claim (no pin, crsf_rc).
         assert_eq!(
             read_crsf_claim(&dir.path().join("nope.yaml")),
             CrsfClaim::default()
@@ -425,7 +546,7 @@ mod tests {
         std::fs::write(&bad, ": not yaml [\n").unwrap();
         assert_eq!(read_crsf_claim(&bad), CrsfClaim::default());
         // The config model writes `device: null` for "no pin"; the claim must
-        // read it as an enabled-but-unpinned lane, not fail the parse.
+        // read it as an unpinned lane at the default mode, not fail the parse.
         let nulled = dir.path().join("nulled.yaml");
         std::fs::write(
             &nulled,
@@ -436,7 +557,7 @@ mod tests {
             read_crsf_claim(&nulled),
             CrsfClaim {
                 device: String::new(),
-                enabled: true,
+                mode: "crsf_rc".to_string(),
             }
         );
     }
