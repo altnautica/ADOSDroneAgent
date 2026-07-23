@@ -34,11 +34,16 @@ use super::{
 };
 
 /// A recoverable bind failure. `phase` names the [`BindState`] the failure
-/// surfaced in so the GCS/LCD renders the right badge.
+/// surfaced in so the GCS/LCD renders the right badge. `reason`, when set,
+/// carries the precise failure cause the emitter should report instead of
+/// re-deriving it from the free-text `message` — the peer-evidence gate uses
+/// this so `no_peer_proof` / `stale_key` never fall through the string-matching
+/// classifier (Rule 44: name the true cause, don't guess it).
 #[derive(Debug, Clone)]
 pub struct BindError {
     pub message: String,
     pub phase: Option<String>,
+    pub reason: Option<BindFailReason>,
 }
 
 impl BindError {
@@ -46,6 +51,7 @@ impl BindError {
         Self {
             message: message.into(),
             phase: None,
+            reason: None,
         }
     }
 
@@ -53,6 +59,19 @@ impl BindError {
         Self {
             message: message.into(),
             phase: Some(phase.to_string()),
+            reason: None,
+        }
+    }
+
+    /// Build a failure that carries its precise, pre-classified cause. The
+    /// emitter surfaces this `reason` verbatim rather than re-deriving it from
+    /// the message, so a gate that already knows exactly why it refused to pair
+    /// reports that cause honestly.
+    pub fn with_reason(message: impl Into<String>, phase: &str, reason: BindFailReason) -> Self {
+        Self {
+            message: message.into(),
+            phase: Some(phase.to_string()),
+            reason: Some(reason),
         }
     }
 }
@@ -374,7 +393,11 @@ impl BindOrchestrator {
                 self.set_error(e.message.clone()).await;
                 self.set_state(BindState::Failed).await;
                 tracing::warn!(error = %e.message, phase = ?e.phase, "bind_session_failed");
-                let reason = BindFailReason::classify_error(&e.message, e.phase.as_deref());
+                // Prefer the gate's explicit, pre-classified cause; only fall
+                // back to string-matching the message when none was carried.
+                let reason = e.reason.unwrap_or_else(|| {
+                    BindFailReason::classify_error(&e.message, e.phase.as_deref())
+                });
                 self.emit_failed(
                     role,
                     reason,
@@ -557,29 +580,39 @@ impl BindOrchestrator {
                 let g = self.session.lock().await;
                 g.as_ref().and_then(|s| s.last_frame_at).is_some()
             };
-            if !frames_seen {
-                self.set_peer_verified(Some(false)).await;
-                return Err(BindError::with_phase(
-                    "bind protocol completed but no peer traffic was decoded on \
-                     the bind tunnel — refusing to pair without a real peer",
-                    "transferring_keys",
-                ));
-            }
-
             // 2. Drone only: the upstream key file must have been deposited by
             //    THIS session's transfer (the wire protocol copies it fresh on
             //    a real exchange). A pre-existing file from an earlier bind
-            //    means the conversation ended without a key transfer.
+            //    means the conversation ended without a key transfer. A GS never
+            //    reads this file, so short-circuit the stat off the drone path.
             let upstream = role.upstream_key();
-            if role == BindRole::Drone && !upstream_key_fresh(Path::new(upstream), session_start) {
-                self.set_peer_verified(Some(false)).await;
-                return Err(BindError::with_phase(
-                    format!(
-                        "bind protocol completed but {upstream} was not \
-                         refreshed by this session — no key was transferred"
-                    ),
-                    "transferring_keys",
-                ));
+            let key_fresh =
+                role != BindRole::Drone || upstream_key_fresh(Path::new(upstream), session_start);
+
+            // Both proofs run through one pure verdict so the invariant "never
+            // declare Paired without a real peer" is unit-testable off-rig.
+            match peer_evidence_verdict(role, frames_seen, key_fresh) {
+                PeerEvidence::Verified => {}
+                PeerEvidence::NoFrames => {
+                    self.set_peer_verified(Some(false)).await;
+                    return Err(BindError::with_reason(
+                        "bind protocol completed but no peer traffic was decoded on \
+                         the bind tunnel — refusing to pair without a real peer",
+                        "transferring_keys",
+                        BindFailReason::NoPeerProof,
+                    ));
+                }
+                PeerEvidence::StaleKey => {
+                    self.set_peer_verified(Some(false)).await;
+                    return Err(BindError::with_reason(
+                        format!(
+                            "bind protocol completed but {upstream} was not \
+                             refreshed by this session — no key was transferred"
+                        ),
+                        "transferring_keys",
+                        BindFailReason::StaleKey,
+                    ));
+                }
             }
             self.set_peer_verified(Some(true)).await;
             self.set_state(BindState::ApplyingKeys).await;
@@ -609,6 +642,7 @@ impl BindOrchestrator {
                         phase.as_deref().unwrap_or("unknown")
                     ),
                     phase,
+                    reason: Some(BindFailReason::Timeout),
                 });
             }
         };
@@ -881,6 +915,40 @@ impl BindOrchestrator {
     }
 }
 
+/// The peer-evidence verdict for a completed wire exchange. Pure so the
+/// invariant it encodes is unit-testable without a radio pair on a bench.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PeerEvidence {
+    /// Both proofs held: a real peer decoded traffic this session (and, drone
+    /// side, deposited a fresh key). The ONLY verdict that may reach Paired.
+    Verified,
+    /// No decoded peer traffic crossed the bind tunnel this session — the wire
+    /// protocol ran against a stale/leaked local endpoint, not a real peer.
+    NoFrames,
+    /// Drone side: frames were seen but the upstream key was not refreshed by
+    /// this session's transfer (a leftover from an earlier bind).
+    StaleKey,
+}
+
+/// Decide whether a completed wire exchange proved a real peer participated.
+/// `frames_seen` = the bind-TUN RX counter advanced this session (frames that
+/// passed FEC + decryption in wfb_rx; a local TCP loopback never traverses the
+/// TUN). `key_fresh` = (drone) the upstream key file was deposited by THIS
+/// session, or (gs) unconditionally true (the GS never reads that file).
+///
+/// INVARIANT: [`PeerEvidence::Verified`] — the only verdict the caller lets
+/// proceed to Paired — requires `frames_seen` AND `key_fresh`. Setting a state
+/// is not proof of the state; a peer must be proven, never assumed.
+fn peer_evidence_verdict(role: BindRole, frames_seen: bool, key_fresh: bool) -> PeerEvidence {
+    if !frames_seen {
+        return PeerEvidence::NoFrames;
+    }
+    if role == BindRole::Drone && !key_fresh {
+        return PeerEvidence::StaleKey;
+    }
+    PeerEvidence::Verified
+}
+
 /// Background poller: stamp `last_frame_at` when the bind TUN RX counter
 /// advances; self-exits when the session leaves the active set. Mirrors
 /// `_poll_peer_presence_forever`.
@@ -975,6 +1043,19 @@ struct InjectionPrepOutcome {
 #[cfg(target_os = "linux")]
 const BIND_PREP_MAX_ATTEMPTS: u32 = 3;
 
+/// Clear overall wall-clock ceiling on the whole injection-iface prep (across
+/// every candidate + every retry). Each interface command is already bounded to
+/// 5s and the retry loop to [`BIND_PREP_MAX_ATTEMPTS`], but only a single ceiling
+/// makes the total provable: with every tool timing out on every attempt the
+/// loop could otherwise run tens of seconds — and it runs in the Idle setup
+/// window, BEFORE the `OpeningTunnel` transition, so the per-phase no-progress
+/// watchdog does not cover it. A healthy prep verifies monitor mode in well
+/// under a second; this only bites when the interface tools hang, and lets the
+/// prep bail to an honest `monitor_unverified` precheck instead of stalling the
+/// bind.
+#[cfg(target_os = "linux")]
+const BIND_PREP_MAX_DURATION: std::time::Duration = std::time::Duration::from_secs(45);
+
 /// Put the WFB injection adapter(s) into MONITOR mode before the bind unit starts,
 /// and VERIFY the iface actually reached it (readback + retry) rather than firing
 /// the commands and hoping.
@@ -995,14 +1076,24 @@ const BIND_PREP_MAX_ATTEMPTS: u32 = 3;
 async fn prepare_injection_iface_for_bind() -> Vec<InjectionPrepOutcome> {
     let candidates = crate::mgmt_link_guardian::detection::collect_candidates().await;
     let mut outcomes = Vec::new();
+    // A single, clear wall-clock ceiling across all candidates + retries. If the
+    // interface tools hang, the prep bails to an honest unverified outcome
+    // rather than eating tens of seconds in the unwatched Idle setup window.
+    let deadline = Instant::now() + BIND_PREP_MAX_DURATION;
     for c in candidates
         .iter()
         .filter(|c| c.is_injection && !c.is_virtual)
     {
+        if Instant::now() >= deadline {
+            break;
+        }
         let iface = c.name.as_str();
         let mut injection_mode = "unknown".to_string();
         let mut monitor_verified = false;
         for attempt in 0..BIND_PREP_MAX_ATTEMPTS {
+            if Instant::now() >= deadline {
+                break;
+            }
             if attempt > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(500 * attempt as u64)).await;
             }
@@ -1157,6 +1248,52 @@ mod tests {
         let before_write = std::time::SystemTime::now() - std::time::Duration::from_secs(2);
         std::fs::write(&key, b"new").unwrap();
         assert!(upstream_key_fresh(&key, before_write));
+    }
+
+    #[test]
+    fn peer_evidence_never_verifies_without_proof_of_a_real_peer() {
+        // The load-bearing invariant behind Paired: a session may reach Verified
+        // (the only verdict the caller lets proceed to Paired) ONLY with decoded
+        // peer frames this session AND, drone-side, a freshly-transferred key.
+        // No frames → NoFrames for either role, never Verified.
+        assert_eq!(
+            peer_evidence_verdict(BindRole::Drone, false, true),
+            PeerEvidence::NoFrames
+        );
+        assert_eq!(
+            peer_evidence_verdict(BindRole::Gs, false, true),
+            PeerEvidence::NoFrames
+        );
+        // Drone with frames but a stale (leftover) key → StaleKey, never Verified.
+        assert_eq!(
+            peer_evidence_verdict(BindRole::Drone, true, false),
+            PeerEvidence::StaleKey
+        );
+        // Verified requires BOTH proofs on the drone ...
+        assert_eq!(
+            peer_evidence_verdict(BindRole::Drone, true, true),
+            PeerEvidence::Verified
+        );
+        // ... while the GS never gates on the drone-key file, so a decoded frame
+        // alone verifies it regardless of the key-fresh flag.
+        assert_eq!(
+            peer_evidence_verdict(BindRole::Gs, true, false),
+            PeerEvidence::Verified
+        );
+        assert_eq!(
+            peer_evidence_verdict(BindRole::Gs, true, true),
+            PeerEvidence::Verified
+        );
+        // Stated directly over the whole input space: Verified ⇒ frames_seen.
+        for role in [BindRole::Drone, BindRole::Gs] {
+            for key_fresh in [false, true] {
+                assert_ne!(
+                    peer_evidence_verdict(role, false, key_fresh),
+                    PeerEvidence::Verified,
+                    "verified without decoded frames ({role:?}, key_fresh={key_fresh})"
+                );
+            }
+        }
     }
 
     #[test]

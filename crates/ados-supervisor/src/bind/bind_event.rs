@@ -36,6 +36,14 @@ pub enum BindFailReason {
     RegBlocked,
     /// The peer never appeared during the bind window.
     NoPeer,
+    /// The wire protocol completed but no peer traffic was decoded on the bind
+    /// tunnel — the exchange ran against a stale/leaked local endpoint, not a
+    /// real peer, so the session refused to pair (the peer-evidence gate).
+    NoPeerProof,
+    /// The wire protocol completed but the upstream key file was not refreshed
+    /// by this session's transfer (a leftover key from an earlier bind) — no key
+    /// actually crossed the radio (the drone-side key-freshness gate).
+    StaleKey,
     /// The session timed out (the no-progress watchdog fired) with no peer.
     Timeout,
     /// The session was interrupted (cancelled by the caller or the control op).
@@ -51,6 +59,8 @@ impl BindFailReason {
             BindFailReason::NoTxKey => "no_tx_key",
             BindFailReason::RegBlocked => "reg_blocked",
             BindFailReason::NoPeer => "no_peer",
+            BindFailReason::NoPeerProof => "no_peer_proof",
+            BindFailReason::StaleKey => "stale_key",
             BindFailReason::Timeout => "timeout",
             BindFailReason::Interrupted => "interrupted",
             BindFailReason::Other => "other",
@@ -60,7 +70,11 @@ impl BindFailReason {
     /// Classify a protocol-error message into the reason taxonomy. The bind
     /// protocol surfaces failures as a human message + an optional phase; this
     /// maps the recognisable causes (a missing key artifact, a peer that never
-    /// connected) to a code and falls back to [`BindFailReason::Other`].
+    /// connected) to a code and falls back to [`BindFailReason::Other`]. It is
+    /// the fallback only: the peer-evidence gate carries its precise cause
+    /// ([`NoPeerProof`](Self::NoPeerProof) / [`StaleKey`](Self::StaleKey)) as an
+    /// explicit reason on the error, so those never reach the string-matching
+    /// path here.
     pub fn classify_error(message: &str, phase: Option<&str>) -> Self {
         let low = message.to_ascii_lowercase();
         if low.contains("key") && (low.contains("missing") || low.contains("not present")) {
@@ -163,6 +177,8 @@ mod tests {
         assert_eq!(BindFailReason::NoTxKey.as_str(), "no_tx_key");
         assert_eq!(BindFailReason::RegBlocked.as_str(), "reg_blocked");
         assert_eq!(BindFailReason::NoPeer.as_str(), "no_peer");
+        assert_eq!(BindFailReason::NoPeerProof.as_str(), "no_peer_proof");
+        assert_eq!(BindFailReason::StaleKey.as_str(), "stale_key");
         assert_eq!(BindFailReason::Timeout.as_str(), "timeout");
         assert_eq!(BindFailReason::Interrupted.as_str(), "interrupted");
         assert_eq!(BindFailReason::Other.as_str(), "other");
