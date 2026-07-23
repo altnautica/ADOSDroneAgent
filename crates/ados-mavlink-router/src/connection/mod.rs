@@ -754,8 +754,10 @@ impl FcConnection {
         }
 
         let candidates = self.candidate_ports();
-        for cand in candidates {
+        let candidate_count = candidates.len();
+        for (idx, cand) in candidates.into_iter().enumerate() {
             let port = cand.name;
+            let usb = cand.usb;
             // A configured baud skips the probe; otherwise probe the candidates.
             if self.cfg.baud_rate != 0 && !self.cfg.serial_port.is_empty() {
                 if let Some(stream) = open_serial(&port, self.cfg.baud_rate) {
@@ -789,24 +791,29 @@ impl FcConnection {
             }
             // A silent port behind a known RC-bridge USB id (CP2102 / CH340 /
             // ESP32-S3 — the bridges an ExpressLRS TX module enumerates behind)
-            // is NOT latched by the no-evidence fallback open: doing so pins the
-            // router to the RC module at the fallback baud and the real FC (which
-            // may enumerate later in the list) is never reached. The sweep above
-            // is the sanity check that keeps an FC behind the same bridge alive —
-            // a live FC proves itself with a HEARTBEAT or MSP traffic, and any
-            // other vendor keeps the fallback exactly as before.
-            if !sweep_heard_fc {
-                if let Some((vid, pid)) = cand.usb {
-                    if is_rc_bridge_usb_id(vid, pid) {
-                        tracing::info!(
-                            port = %port,
-                            vid = format_args!("{vid:04x}"),
-                            pid = format_args!("{pid:04x}"),
-                            "silent_rc_bridge_fallback_skipped"
-                        );
-                        continue;
-                    }
+            // is skipped by the no-evidence fallback open ONLY when the RC lane
+            // is genuinely in play as an UNPINNED `crsf_rc` module — the one case
+            // where a silent bridge candidate is more likely the RC transmitter
+            // than the flight controller (a pinned module is already removed by
+            // `candidate_ports`, and a `mavlink`-mode module is the FC carrier we
+            // WANT to open). The skip is otherwise fatal to a budget MSP flight
+            // controller: `probe_baud` is listen-only and a Betaflight / iNav FC
+            // is SILENT until the GCS polls it, so `sweep_heard_fc` is always
+            // false for a silent MSP FC, and an ungated skip would strand it (it
+            // never opens, so `fcReachable` never goes true). The sole/last
+            // remaining candidate is never skipped for the same reason — better
+            // to try it than to guarantee no FC.
+            let is_last = idx + 1 == candidate_count;
+            if !sweep_heard_fc && self.skip_silent_bridge_candidate(usb, is_last) {
+                if let Some((vid, pid)) = usb {
+                    tracing::info!(
+                        port = %port,
+                        vid = format_args!("{vid:04x}"),
+                        pid = format_args!("{pid:04x}"),
+                        "silent_rc_bridge_fallback_skipped"
+                    );
                 }
+                continue;
             }
             // Last-ditch: open at the fallback baud without a positive probe.
             if let Some(stream) = open_serial(&port, BAUD_FALLBACK) {
@@ -858,14 +865,54 @@ impl FcConnection {
         }
     }
 
-    /// The serial ports the FC link may open, with the pinned CRSF/ELRS device
-    /// (`radio.crsf.device`) excluded on BOTH paths: an RC transmitter module's
-    /// port must never be opened or baud-swept by the router, even when the FC
-    /// port is (mis)configured to the same node — the pin is the operator's
-    /// explicit statement that the device is the RC module, so it wins over a
-    /// contradictory `mavlink.serial_port`.
+    /// The RC lane is opted in as a plain RC transmitter (`crsf_rc`) with no
+    /// pinned device — the only configuration where a silent, RC-bridge-VID
+    /// serial candidate might actually be the RC module rather than a flight
+    /// controller. A pinned module is already removed by
+    /// [`Self::candidate_ports`], and a `mavlink`-mode module is the FC carrier
+    /// this router WANTS to open, so both sit outside this case. A DISABLED lane
+    /// is never in play at all.
+    fn crsf_rc_lane_unpinned(&self) -> bool {
+        self.cfg.crsf_enabled
+            && self.cfg.crsf_mode == "crsf_rc"
+            && self.cfg.crsf_device.trim().is_empty()
+    }
+
+    /// Whether a silent serial candidate (no heartbeat / MSP on the passive baud
+    /// sweep) should be skipped by the last-ditch fallback open because it is
+    /// most likely an unpinned `crsf_rc` RC transmitter module.
+    ///
+    /// True only when the RC lane is an unpinned `crsf_rc` lane
+    /// ([`Self::crsf_rc_lane_unpinned`]), the candidate is behind a known
+    /// RC-bridge USB id, AND it is not the sole/last remaining candidate. The
+    /// last-candidate exemption and the lane gate are the safety valves: a
+    /// silent MSP flight controller (Betaflight / iNav stays silent until the
+    /// GCS polls it) leaves no sweep evidence either, so an over-eager skip
+    /// would strand a real FC and leave `fcReachable` false forever.
+    fn skip_silent_bridge_candidate(&self, usb: Option<(u16, u16)>, is_last: bool) -> bool {
+        if is_last || !self.crsf_rc_lane_unpinned() {
+            return false;
+        }
+        matches!(usb, Some((vid, pid)) if is_rc_bridge_usb_id(vid, pid))
+    }
+
+    /// The serial ports the FC link may open. The pinned CRSF/ELRS device
+    /// (`radio.crsf.device`) is excluded on BOTH paths — an RC transmitter
+    /// module's port must never be opened or baud-swept by the router, even when
+    /// the FC port is (mis)configured to the same node — but ONLY while the CRSF
+    /// lane is opted in (`radio.crsf.enabled`): the pin is meaningful only for an
+    /// active lane, so a stale pin left over from a DISABLED lane must never drop
+    /// the flight controller.
     fn candidate_ports(&self) -> Vec<FcCandidate> {
-        let crsf_pin = self.cfg.crsf_device.trim();
+        // A stale device pin from a disabled lane names nothing this router owns,
+        // so it must not exclude the FC (an operator who turns the CRSF lane off
+        // but leaves `radio.crsf.device` set would otherwise lose the flight
+        // controller whenever the two happen to match).
+        let crsf_pin = if self.cfg.crsf_enabled {
+            self.cfg.crsf_device.trim()
+        } else {
+            ""
+        };
         if !self.cfg.serial_port.is_empty() {
             if !crsf_pin.is_empty() && same_device(&self.cfg.serial_port, crsf_pin) {
                 tracing::warn!(
@@ -924,6 +971,7 @@ mod crsf_exclusion_tests {
         let c = conn_with(MavlinkConfig {
             serial_port: "/dev/ttyACM0".into(),
             crsf_device: "/dev/ttyUSB0".into(),
+            crsf_enabled: true,
             ..MavlinkConfig::default()
         });
         let cands = c.candidate_ports();
@@ -935,14 +983,100 @@ mod crsf_exclusion_tests {
 
     #[test]
     fn crsf_pin_excludes_a_matching_configured_fc_port() {
-        // The pin is the operator's explicit statement that the device is the
-        // RC module; a contradictory FC config must not open it.
+        // With the lane ENABLED, the pin is the operator's explicit statement
+        // that the device is the RC module; a contradictory FC config must not
+        // open it.
         let c = conn_with(MavlinkConfig {
             serial_port: "/dev/ttyUSB0".into(),
             crsf_device: "/dev/ttyUSB0".into(),
+            crsf_enabled: true,
             ..MavlinkConfig::default()
         });
         assert!(c.candidate_ports().is_empty());
+    }
+
+    #[test]
+    fn disabled_lane_stale_pin_does_not_exclude_the_fc() {
+        // The lane is OFF but a stale `radio.crsf.device` pin still equals the
+        // operator's FC port. A disabled lane owns no device, so the pin must
+        // not drop the flight controller.
+        let c = conn_with(MavlinkConfig {
+            serial_port: "/dev/ttyACM0".into(),
+            crsf_device: "/dev/ttyACM0".into(),
+            crsf_enabled: false,
+            ..MavlinkConfig::default()
+        });
+        let cands = c.candidate_ports();
+        assert_eq!(cands.len(), 1);
+        assert_eq!(cands[0].name, "/dev/ttyACM0");
+    }
+
+    #[test]
+    fn silent_bridge_candidate_is_opened_when_the_rc_lane_is_disabled() {
+        // A budget Betaflight / iNav FC on a CH340 bridge is silent on the
+        // passive sweep. With the RC lane OFF there is no RC module to protect,
+        // so the fallback open MUST NOT be skipped or the FC never appears.
+        let c = conn_with(MavlinkConfig {
+            crsf_enabled: false,
+            ..MavlinkConfig::default()
+        });
+        // CH340 bridge id, not the last candidate: must still be openable.
+        assert!(!c.skip_silent_bridge_candidate(Some((0x1A86, 0x7523)), false));
+    }
+
+    #[test]
+    fn silent_bridge_candidate_is_skipped_only_for_an_unpinned_rc_lane() {
+        let c = conn_with(MavlinkConfig {
+            crsf_enabled: true,
+            crsf_mode: "crsf_rc".into(),
+            ..MavlinkConfig::default()
+        });
+        assert!(c.crsf_rc_lane_unpinned());
+        // Unpinned crsf_rc lane, CP2102 bridge VID, not the last candidate → skip.
+        assert!(c.skip_silent_bridge_candidate(Some((0x10C4, 0xEA60)), false));
+        // A non-bridge candidate (e.g. an ACM flight controller) is never skipped.
+        assert!(!c.skip_silent_bridge_candidate(None, false));
+    }
+
+    #[test]
+    fn the_sole_or_last_candidate_is_never_skipped() {
+        // A silent MSP FC leaves no sweep evidence, so the final candidate must
+        // always be tried even behind an RC-bridge id.
+        let c = conn_with(MavlinkConfig {
+            crsf_enabled: true,
+            crsf_mode: "crsf_rc".into(),
+            ..MavlinkConfig::default()
+        });
+        assert!(!c.skip_silent_bridge_candidate(Some((0x1A86, 0x7523)), true));
+    }
+
+    #[test]
+    fn an_enabled_lane_with_a_real_pin_still_opens_a_different_bridge_fc() {
+        // Lane enabled AND a real pin: `candidate_ports` already excludes the
+        // pinned RC module, so a DIFFERENT silent bridge candidate (the flight
+        // controller) must not be skipped — a pinned lane is no longer the
+        // "unpinned" case the skip guards.
+        let c = conn_with(MavlinkConfig {
+            crsf_enabled: true,
+            crsf_mode: "crsf_rc".into(),
+            crsf_device: "/dev/ttyUSB0".into(),
+            ..MavlinkConfig::default()
+        });
+        assert!(!c.crsf_rc_lane_unpinned());
+        assert!(!c.skip_silent_bridge_candidate(Some((0x1A86, 0x7523)), false));
+    }
+
+    #[test]
+    fn a_mavlink_mode_lane_never_skips_a_silent_bridge_candidate() {
+        // In `mavlink` mode the module IS the FC carrier the router wants to
+        // open, so the RC-protection skip must not fire.
+        let c = conn_with(MavlinkConfig {
+            crsf_enabled: true,
+            crsf_mode: "mavlink".into(),
+            ..MavlinkConfig::default()
+        });
+        assert!(!c.crsf_rc_lane_unpinned());
+        assert!(!c.skip_silent_bridge_candidate(Some((0x303A, 0x1001)), false));
     }
 
     #[test]
