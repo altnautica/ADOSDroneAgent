@@ -13,7 +13,24 @@ use std::process::Stdio;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
-use super::{BIND_TCP_PORT, DRONE_BIND_PEER_IP, WFB_BIND_CLIENT_SH, WFB_BIND_SERVER_SH};
+use super::{
+    BIND_TCP_PORT, DRONE_BIND_PEER_IP, KEY_TRANSFER_TIMEOUT, WFB_BIND_CLIENT_SH, WFB_BIND_SERVER_SH,
+};
+
+/// Seconds of margin the GS client's connect-retry runs past the key-transfer
+/// budget. The socat `retry`/`interval=1` loop must outlast the enclosing tokio
+/// transfer timeout so a real, slightly-late peer still connects — but only
+/// just, so a leaked client dies promptly instead of roaming for a day. Kept
+/// tiny (the tokio [`KEY_TRANSFER_TIMEOUT`] is the real bound; this is the belt).
+const GS_CLIENT_RETRY_MARGIN_S: u64 = 5;
+
+/// The bounded connect-retry count for the GS bind client. Derived from
+/// [`KEY_TRANSFER_TIMEOUT`] (+ a small margin) so it can never silently drift
+/// below the transfer budget — the coupling that stops the roaming-client bug
+/// from reappearing if the budget is retuned.
+fn gs_client_retry() -> u64 {
+    KEY_TRANSFER_TIMEOUT.as_secs() + GS_CLIENT_RETRY_MARGIN_S
+}
 
 /// Drone-side socat: listen on the tunnel rendezvous and hand the connection to
 /// the upstream server wrapper. Mirrors `_run_drone_server`'s command exactly.
@@ -26,16 +43,18 @@ pub fn drone_server_args() -> Vec<String> {
 }
 
 /// GS-side socat: connect to the drone's listener, handing off to the upstream
-/// client wrapper. The connect retry is bounded to the key-transfer budget
-/// (95 ≳ 90 s) rather than the predecessor's 24 h: a client that leaks past its
-/// session (a missed process-group kill, an aborted window) must die on its own
-/// instead of roaming for a day and phantom-connecting into a LATER drone bind
-/// window — a half-dead connection EOFs the drone's listener conversation,
-/// which exits 0 and used to mark that unrelated session Paired.
+/// client wrapper. The connect retry is bounded to just past the key-transfer
+/// budget (derived from [`KEY_TRANSFER_TIMEOUT`], not a hard-coded 95) rather
+/// than the predecessor's 24 h: a client that leaks past its session (a missed
+/// process-group kill, an aborted window) must die on its own instead of roaming
+/// for a day and phantom-connecting into a LATER drone bind window — a half-dead
+/// connection EOFs the drone's listener conversation, which exits 0 and used to
+/// mark that unrelated session Paired.
 pub fn gs_client_args() -> Vec<String> {
+    let retry = gs_client_retry();
     vec![
         "-d".into(),
-        format!("TCP4:{DRONE_BIND_PEER_IP}:{BIND_TCP_PORT},crlf,retry=95,interval=1"),
+        format!("TCP4:{DRONE_BIND_PEER_IP}:{BIND_TCP_PORT},crlf,retry={retry},interval=1"),
         format!("EXEC:{WFB_BIND_CLIENT_SH}"),
     ]
 }
@@ -161,6 +180,8 @@ mod tests {
 
     #[test]
     fn gs_client_retry_is_bounded_to_the_session_budget() {
+        // Today's constants (90 s budget + 5 s margin) still produce retry=95,
+        // but it is now DERIVED so it tracks the budget instead of drifting.
         assert_eq!(
             gs_client_args(),
             vec![
@@ -168,6 +189,24 @@ mod tests {
                 "TCP4:10.5.99.2:5555,crlf,retry=95,interval=1".to_string(),
                 "EXEC:/usr/bin/wfb_bind_client.sh".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn gs_client_retry_couples_to_the_transfer_budget_and_stays_bounded() {
+        // The roaming-client guard: the retry must OUTLAST the transfer budget
+        // (so a real, slightly-late peer still connects) yet stay bounded to a
+        // handful of seconds past it — never the predecessor's 24 h (86_400 s)
+        // that let a leaked client phantom-EOF a LATER drone's listener.
+        let retry = gs_client_retry();
+        let budget = KEY_TRANSFER_TIMEOUT.as_secs();
+        assert!(
+            retry > budget,
+            "retry ({retry}) must outlast the transfer budget ({budget})"
+        );
+        assert!(
+            retry <= budget + 30,
+            "retry ({retry}) must die promptly after the budget, not roam"
         );
     }
 }
