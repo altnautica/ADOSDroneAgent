@@ -48,8 +48,12 @@ export interface SetupStatus {
   video?: VideoInfo;
   hardware_check?: HardwareCheck;
   remote_access?: RemoteAccess;
-  access_urls?: AccessUrls;
+  access_urls?: SetupAccessUrl[];
   regulatory?: RegulatoryInfo;
+  // LAN-routable host the agent derived for clients elsewhere on the LAN.
+  // Prefers the resolvable system hostname, then the mDNS host, then an IP.
+  // Empty when no LAN identity could be derived.
+  lan_host?: string;
 }
 
 export interface ProfileSuggestion {
@@ -81,6 +85,11 @@ export interface CloudChoice {
 }
 
 export interface NetworkInfo {
+  // System hostname (may be empty). The mDNS reach name is `mdns_host`, which
+  // the agent only populates with the name avahi actually publishes.
+  hostname?: string;
+  mdns_host?: string;
+  local_ips?: string[];
   wifi_ssid?: string;
   hotspot_enabled?: boolean;
   uplink_kind?: string;
@@ -145,9 +154,18 @@ export interface RemoteAccess {
   hostname?: string;
 }
 
-export interface AccessUrls {
-  setup?: string;
-  dashboard?: string;
+// One node-advertised reach entry. The agent only lists names/URLs it has
+// derived as actually reachable (the mDNS entry uses the avahi-published
+// hostname, never a constructed one), so a consumer renders these verbatim.
+export interface SetupAccessUrl {
+  kind: "setup" | "api" | "mission_control" | "video" | "mavlink" | "cloud";
+  label: string;
+  url: string;
+  source: "local" | "hotspot" | "usb" | "mdns" | "cloud" | "configured";
+  primary?: boolean;
+  id?: string;
+  role?: string;
+  codec?: string;
 }
 
 // /api/v1/dashboard/snapshot

@@ -28,6 +28,7 @@ import { AdvancedSettings } from "@/routes/settings/advanced-settings";
 import { AtlasSwarmSettings } from "@/routes/settings/atlas-swarm-settings";
 import { CellularSettings } from "@/routes/settings/cellular-settings";
 import { CloudSettings } from "@/routes/settings/cloud-settings";
+import { DiscoverySettings } from "@/routes/settings/discovery-settings";
 import { DisplaySettings } from "@/routes/settings/display-settings";
 import { MacPinSettings } from "@/routes/settings/mac-pin-settings";
 import { MavlinkSettings } from "@/routes/settings/mavlink-settings";
@@ -157,6 +158,7 @@ export function App() {
                   <Route path="security" element={<SecuritySettings />} />
                   <Route path="vision" element={<VisionSettings />} />
                   <Route path="atlas-swarm" element={<AtlasSwarmSettings />} />
+                  <Route path="discovery" element={<DiscoverySettings />} />
                   <Route path="display" element={<DisplaySettings />} />
                   <Route path="offload" element={<OffloadSettings />} />
                   <Route path="advanced" element={<AdvancedSettings />} />

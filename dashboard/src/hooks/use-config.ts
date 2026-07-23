@@ -69,6 +69,10 @@ export interface AgentConfig {
       cors_enabled?: boolean;
     };
   };
+  discovery?: {
+    mdns_enabled?: boolean;
+    service_type?: string;
+  };
   vision?: {
     enabled?: boolean;
     backend?: string;
