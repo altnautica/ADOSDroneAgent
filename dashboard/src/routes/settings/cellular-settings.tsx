@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { useConfig } from "@/hooks/use-config";
+import { useStatus } from "@/hooks/use-status";
 import { putConfigChecked } from "@/lib/apply-actions";
 import {
   getModemStatus,
@@ -409,8 +410,12 @@ function ConfigOnlyCellular() {
 }
 
 export function CellularSettings() {
-  const config = useConfig();
-  const profile = config.data?.agent?.profile;
+  // Branch on the resolved profile the agent reports (the underscore form
+  // "ground_station"), the same source the sidebar and route gates use, rather
+  // than the raw config profile whose "auto" default misreads an as-yet
+  // uncommitted ground station as a non-GS node and hides its live modem view.
+  const status = useStatus();
+  const profile = status.data?.profile;
 
   if (!profile) return null;
   return profile === "ground_station" ? <GsCellular /> : <ConfigOnlyCellular />;
