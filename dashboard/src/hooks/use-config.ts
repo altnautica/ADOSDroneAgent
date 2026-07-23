@@ -52,6 +52,11 @@ export interface AgentConfig {
   };
   server?: {
     mode?: string;
+    // Cloud-relay forwarding throttles: telemetry updates/sec and seconds
+    // between cloud heartbeats. They govern the relay path only, not the FC's
+    // own MAVLink stream rates.
+    telemetry_rate?: number;
+    heartbeat_interval?: number;
     self_hosted?: {
       url?: string;
       mqtt_broker?: string;

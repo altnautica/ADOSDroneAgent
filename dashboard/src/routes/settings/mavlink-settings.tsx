@@ -141,6 +141,41 @@ export function MavlinkSettings() {
         </CardContent>
       </Card>
 
+      {/* Cloud-relay forwarding rates — the agent's own throttles for the relay
+          path, distinct from the flight controller's own stream rates. */}
+      <Card>
+        <CardContent className="pt-5 pb-5 space-y-5">
+          <div>
+            <div className="text-sm font-semibold">Cloud relay forwarding</div>
+            <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
+              How fast the agent forwards telemetry and heartbeats to a cloud or
+              self-hosted relay. These do not change the flight controller's own
+              stream rates.
+            </p>
+          </div>
+          <ConfigNumberField
+            configKey="server.telemetry_rate"
+            id="server-telemetry-rate"
+            label="Telemetry rate (Hz)"
+            hint="Telemetry updates per second the agent forwards to the relay. Applies only when a cloud or self-hosted relay is configured."
+            value={config.data?.server?.telemetry_rate}
+            integer
+            min={1}
+            max={50}
+          />
+          <ConfigNumberField
+            configKey="server.heartbeat_interval"
+            id="server-heartbeat-interval"
+            label="Heartbeat interval (s)"
+            hint="Seconds between the agent's cloud heartbeats."
+            value={config.data?.server?.heartbeat_interval}
+            integer
+            min={1}
+            max={3600}
+          />
+        </CardContent>
+      </Card>
+
       {/* Advertised endpoints — read-only (the list is not a single-key write). */}
       <Card>
         <CardContent className="pt-5 pb-5 space-y-2">
@@ -177,10 +212,10 @@ export function MavlinkSettings() {
           </div>
           <p className="text-xs text-muted-foreground leading-relaxed">
             Message signing is owned by Mission Control in the browser; the agent
-            does not persist key material, so there is nothing to set here.
-            Stream rates are negotiated per connection, not stored in the agent
-            config. MAVLink WebSocket authentication enforcement lives on the
-            Security page.
+            does not persist key material, so there is nothing to set here. The
+            flight controller's own MAVLink stream rates are negotiated per
+            connection, not stored in the agent config. MAVLink WebSocket
+            authentication enforcement lives on the Security page.
           </p>
         </CardContent>
       </Card>
