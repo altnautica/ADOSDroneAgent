@@ -130,12 +130,17 @@ pub struct PicView {
 /// safe (never as an affirmative unclaimed that would grant the injector).
 pub fn read_pic_view(path: &Path, now: SystemTime) -> Option<PicView> {
     let meta = std::fs::metadata(path).ok()?;
-    if let Ok(modified) = meta.modified() {
-        if let Ok(age) = now.duration_since(modified) {
-            if age > PIC_STALE_AFTER {
-                return None;
-            }
-        }
+    // Fail CLOSED on an unreadable or future mtime. An errored metadata read, or
+    // a `now` that has stepped behind the file's mtime (a backward wall-clock
+    // correction on an RTC-less SBC after boot), yields None so the arbiter reads
+    // as NOT reporting (safe hold). Previously such a case skipped the staleness
+    // gate and returned a fresh view, which — if that view were an affirmative
+    // "unclaimed" — could hand the autonomous injector authority from a dead or
+    // hung arbiter, the exact outcome this fail-safe exists to prevent.
+    let modified = meta.modified().ok()?;
+    let age = now.duration_since(modified).ok()?;
+    if age > PIC_STALE_AFTER {
+        return None;
     }
     let text = std::fs::read_to_string(path).ok()?;
     let value: serde_json::Value = serde_json::from_str(&text).ok()?;
@@ -690,5 +695,16 @@ mod tests {
         std::fs::write(&path, r#"{"state":"claimed","claimed_by":"op-a"}"#).unwrap();
         let future = SystemTime::now() + PIC_STALE_AFTER + Duration::from_secs(5);
         assert!(read_pic_view(&path, future).is_none(), "stale view dropped");
+
+        // A backward wall-clock step: `now` is BEHIND the file's just-written
+        // mtime, so the freshness math errors. This must fail CLOSED (None),
+        // never return the view as fresh, or a dead arbiter's lingering
+        // "unclaimed" could hand the injector authority.
+        std::fs::write(&path, r#"{"state":"unclaimed","claimed_by":null}"#).unwrap();
+        let stepped_back = SystemTime::now() - Duration::from_secs(60);
+        assert!(
+            read_pic_view(&path, stepped_back).is_none(),
+            "future mtime (backward clock step) fails closed"
+        );
     }
 }
