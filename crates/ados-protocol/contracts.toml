@@ -141,6 +141,23 @@ status = "metadata"
 description = "MAVLink frame broadcast socket; framing versioning defers to external MAVLink v1/v2."
 
 [[contract]]
+id = "mavlink.ingest"
+version = 0
+wire = "binary"
+transport = "unix-stream"
+status = "metadata"
+description = "Off-board MAVLink frames into a node's republish fan-out; the opposite direction to mavlink.socket, and versioned by external MAVLink v1/v2 the same way."
+
+[[contract]]
+id = "aux.frame"
+version = 1
+wire = "binary"
+transport = "udp"
+status = "active"
+rust_const = "ados_protocol::aux_mux::AUX_VERSION"
+description = "Auxiliary radio lane multiplex header (magic, version, channel, length) letting MAVLink, status, and identity share one datagram pipe."
+
+[[contract]]
 id = "rest.openapi"
 version = 0
 wire = "json"
