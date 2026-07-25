@@ -147,6 +147,9 @@ pub async fn get_full_status(State(state): State<AppState>, headers: HeaderMap) 
             None => Value::Null,
         },
     );
+    // Derived before the inserts below move `fc_liveness`'s fields out.
+    let fc_reachable = super::status::derive_fc_reachable(&fc_liveness);
+    let fc_variant = fc_liveness.fc_variant.clone();
     payload.insert("health".to_string(), health);
     payload.insert("fc_connected".to_string(), fc_connected);
     payload.insert("fc_port".to_string(), fc_port);
@@ -159,6 +162,14 @@ pub async fn get_full_status(State(state): State<AppState>, headers: HeaderMap) 
     payload.insert("heartbeatAgeS".to_string(), fc_liveness.heartbeat_age_s);
     payload.insert("fcSource".to_string(), fc_liveness.fc_source);
     payload.insert("fcLinkHint".to_string(), fc_liveness.fc_link_hint);
+    // The honest connected-or-reachable verdict, and the protocol family it was
+    // identified as. `/api/status` has carried both for a while; the full
+    // payload did not, so a LAN-polling consumer had no way to tell a healthy
+    // MSP flight controller (which never emits a MAVLink heartbeat, so
+    // `fc_connected` stays false) from an absent one, and reported "no flight
+    // controller" over a working link.
+    payload.insert("fcReachable".to_string(), json!(fc_reachable));
+    payload.insert("fcVariant".to_string(), fc_variant);
     payload.insert(
         "fcCommandDownGated".to_string(),
         json!(fc_liveness.fc_command_down_gated),
