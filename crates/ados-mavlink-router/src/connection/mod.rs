@@ -214,6 +214,34 @@ impl FcConnection {
         self.raw_tx.subscribe()
     }
 
+    /// Publish a frame that arrived from off-board onto the fan-out, as if it
+    /// had come off a local flight controller.
+    ///
+    /// This exists for a node that has no flight controller of its own but does
+    /// receive a vehicle's frames some other way — a ground station decoding
+    /// them off the radio's auxiliary lane. Publishing here is what makes every
+    /// existing consumer work unchanged: the IPC socket, the TCP and UDP
+    /// transports, and the WebSocket transport all read this one fan-out, so a
+    /// ground control station connected to such a node sees the vehicle exactly
+    /// as it would on a direct link.
+    ///
+    /// **It publishes and nothing else.** It deliberately does not stamp the
+    /// heartbeat clock, set the connected flag, learn a target system id, or
+    /// update the vehicle state, all of which the local read loop does for a
+    /// frame off a real link. Doing any of that here would make a node with no
+    /// flight controller report that it has one — the link surfaces would read
+    /// "connected" while `fc_port` named nothing, and an operator would be told
+    /// a vehicle is attached to the wrong box. Relaying someone else's frames
+    /// is not the same claim as having a flight controller, and this seam keeps
+    /// the two apart.
+    ///
+    /// Returns whether any consumer was subscribed. `false` means the frame was
+    /// dropped for want of a listener, which is a normal idle state (no ground
+    /// control station connected) and not an error.
+    pub fn inject_frame(&self, frame: Vec<u8>) -> bool {
+        self.frame_tx.send(frame).is_ok()
+    }
+
     /// Whether the FC transport is open: the serial node / network socket has
     /// been opened and not yet torn down. This is NOT proof the FC is talking —
     /// see [`Self::mavlink_alive`]. Kept distinct so a consumer can render

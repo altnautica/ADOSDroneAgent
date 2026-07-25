@@ -15,6 +15,7 @@ pub mod aux_tee;
 pub mod config;
 pub mod connection;
 pub mod demo;
+pub mod frame_ingest;
 pub mod param_cache;
 pub mod proxies;
 pub mod state;

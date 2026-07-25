@@ -20,6 +20,7 @@ use tokio::sync::{Mutex, Notify};
 use ados_mavlink_router::aux_tee::{self, TeeCounters};
 use ados_mavlink_router::config::MavlinkConfig;
 use ados_mavlink_router::connection::FcConnection;
+use ados_mavlink_router::frame_ingest::{self, IngestCounters, INGEST_QUEUE_DEPTH};
 use ados_mavlink_router::param_cache::ParamCache;
 use ados_mavlink_router::proxies::{run_tcp_proxy, run_udp_proxy, run_ws_proxy, WsProxyAuth};
 use ados_mavlink_router::state::{firmware_family, VehicleState};
@@ -173,6 +174,9 @@ async fn main() {
     // snapshot. Absent on a profile that does not run the tee, which reads as
     // "not running" rather than as a lane that forwarded nothing.
     let mut aux_tee_counters: Option<Arc<TeeCounters>> = None;
+    // Set when the republish seam runs, on the same "absent means not running"
+    // reading as the tee counters above.
+    let mut frame_ingest_counters: Option<Arc<IngestCounters>> = None;
 
     // FC connect + read loop. In demo mode a synthetic source feeds the same
     // fan-out, state, and proxy paths a serial FC would; the serial path is
@@ -276,6 +280,59 @@ async fn main() {
         );
     }
 
+    // The mirror of the tee, on the receiving rig. A ground station has no
+    // flight controller of its own; the vehicle's frames arrive over the radio,
+    // are decoded by the ground data plane, and enter here. Publishing them to
+    // the fan-out is what makes the transports this router already serves carry
+    // the vehicle, so a ground control station connected to the ground station
+    // sees it over the ports it already uses. Ground-station profile only: a
+    // drone has its own flight controller and must never take frames from
+    // off-board as if they were its own.
+    if cfg.is_ground_station() {
+        let ingest_sock = format!(
+            "{dir}/{}",
+            ados_protocol::mavlink_ingest::MAVLINK_INGEST_SOCK_NAME
+        );
+        // Bound only as an inbound frame reader. The broadcast direction is
+        // deliberately unused: this socket exists to carry frames INTO the
+        // fan-out, and a consumer wanting frames back out has the MAVLink
+        // socket and the transports already.
+        match IpcBroadcast::bind(
+            &ingest_sock,
+            INGEST_QUEUE_DEPTH,
+            false,
+            Some(INGEST_QUEUE_DEPTH),
+        )
+        .await
+        {
+            Ok((server, inbound)) => {
+                let inbound = inbound.expect("inbound channel requested");
+                let counters = Arc::new(IngestCounters::default());
+                frame_ingest_counters = Some(counters.clone());
+                // Held for the process lifetime: dropping the server closes the
+                // socket and the ground data plane would find nothing to
+                // connect to.
+                let server = Arc::new(server);
+                let fc = fc.clone();
+                let cancel = cancel.clone();
+                tasks.push(tokio::spawn(async move {
+                    let _server = server;
+                    frame_ingest::run(inbound, fc, counters, cancel).await
+                }));
+            }
+            Err(e) => {
+                // Not fatal: without this seam the ground station still serves
+                // its own surfaces, it just cannot relay a vehicle. Say so
+                // loudly rather than starting up looking healthy.
+                tracing::error!(
+                    path = %ingest_sock,
+                    error = %e,
+                    "mavlink_frame_ingest_bind_failed"
+                );
+            }
+        }
+    }
+
     // MAVLink socket client commands -> FC.
     {
         let fc = fc.clone();
@@ -347,6 +404,7 @@ async fn main() {
         let state_ipc = state_ipc.clone();
         let mavlink_ipc_stats = mavlink_ipc.clone();
         let aux_tee_counters = aux_tee_counters.clone();
+        let frame_ingest_counters = frame_ingest_counters.clone();
         let cancel = cancel.clone();
         tasks.push(tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_millis(100));
@@ -383,7 +441,7 @@ async fn main() {
                         }
                         let extras = build_extras(
                             &fc, &state, &params, started, mavlink_drops, state_drops,
-                            aux_tee_counters.as_ref(),
+                            aux_tee_counters.as_ref(), frame_ingest_counters.as_ref(),
                         )
                         .await;
                         let wire = { state.lock().await.to_wire_with(&extras) };
@@ -456,6 +514,7 @@ async fn build_extras(
     mavlink_drops: u64,
     state_drops: u64,
     aux_tee_counters: Option<&Arc<TeeCounters>>,
+    frame_ingest_counters: Option<&Arc<IngestCounters>>,
 ) -> Map<String, Value> {
     let cached = params.lock().await.count();
     // The expected param count and the decoded autopilot code, read under one
@@ -548,6 +607,18 @@ async fn build_extras(
     if let Some(counters) = aux_tee_counters {
         extras.insert(
             "aux_mavlink_tee".into(),
+            serde_json::to_value(counters.snapshot()).unwrap_or(Value::Null),
+        );
+    }
+    // The receiving half's tally: what the republish seam accepted from
+    // off-board, what it rejected, and what went nowhere for want of a
+    // listener. Present only where the seam runs (a ground station), so its
+    // absence reads as "not running on this profile" rather than as a seam that
+    // received nothing. Published counts frames handed to the fan-out, which is
+    // not by itself proof a ground control station rendered them.
+    if let Some(counters) = frame_ingest_counters {
+        extras.insert(
+            "mavlink_frame_ingest".into(),
             serde_json::to_value(counters.snapshot()).unwrap_or(Value::Null),
         );
     }

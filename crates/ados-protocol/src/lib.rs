@@ -37,6 +37,10 @@
 //! - [`dashboard_session`] — self-contained HMAC session tokens the dashboard
 //!   PIN gate mints, keyed off the pairing key + the PIN salt so a reset revokes
 //!   every live session; accepted as an alternative data-plane credential.
+//! - [`mavlink_ingest`] — the client for a node's MAVLink republish seam, over
+//!   which frames received off-board (a ground station's radio lane) enter that
+//!   node's own frame fan-out. The mirror of the MAVLink socket's inbound path,
+//!   which travels toward a flight controller rather than away from one.
 
 pub mod atlas;
 pub mod aux_egress;
@@ -54,6 +58,7 @@ pub mod ipc;
 pub mod logd;
 #[cfg(feature = "mavlink")]
 pub mod mavlink;
+pub mod mavlink_ingest;
 pub mod mcp_token;
 pub mod offload;
 pub mod offload_link;

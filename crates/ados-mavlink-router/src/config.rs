@@ -353,6 +353,13 @@ impl MavlinkConfig {
         self.profile == "drone"
     }
 
+    /// Whether this node is a ground station, and so runs the ground-only
+    /// paths. Note this is not the negation of [`Self::is_drone`]: the other
+    /// profiles are neither, and must not pick up either side's paths.
+    pub fn is_ground_station(&self) -> bool {
+        self.profile == "ground-station"
+    }
+
     /// Resolve the MAVLink-over-ELRS ingest source from the `radio.crsf`
     /// block: `Some` only when the lane is opted in, its mode is `mavlink`,
     /// AND the carrier resolves — the backpack carrier always does (the
