@@ -14,6 +14,11 @@ use serde::Deserialize;
 /// the systemd unit sets).
 pub const CONFIG_YAML: &str = "/etc/ados/config.yaml";
 
+/// On-disk profile marker the installer writes, and the fallback when the
+/// config's `agent.profile` is absent or left on `auto` (overridable via the
+/// `ADOS_PROFILE_CONF` env var).
+pub const PROFILE_CONF: &str = "/etc/ados/profile.conf";
+
 /// The serial baud of an RC module running its native MAVLink mode. Fixed by
 /// the module firmware (distinct from the 420 kbaud CRSF RC framing rate),
 /// and deliberately absent from the discovery sweep: the MAVLink-over-ELRS
@@ -53,6 +58,9 @@ fn default_endpoints() -> Vec<EndpointConfig> {
 }
 fn default_ws_proxy_enforce_auth() -> bool {
     false
+}
+fn default_profile() -> String {
+    "drone".to_string()
 }
 
 /// A network entry point. v1 ships only the `websocket` type.
@@ -149,6 +157,12 @@ pub struct MavlinkConfig {
     /// unaffected. See [`crate::connection`] for the writer gate.
     #[serde(skip)]
     pub crsf_mavlink_command_enabled: bool,
+    /// The resolved agent profile (`drone` / `ground-station` / other), filled
+    /// in by the loader from the top-level `agent:` section with the on-disk
+    /// profile marker as the fallback. This router runs on both flight-
+    /// controller-bearing profiles, so the drone-only paths gate on it.
+    #[serde(skip)]
+    pub profile: String,
 }
 
 /// The resolved MAVLink-over-ELRS ingest source.
@@ -194,8 +208,54 @@ impl Default for MavlinkConfig {
             crsf_mode: "crsf_rc".to_string(),
             crsf_mavlink_transport: "serial".to_string(),
             crsf_mavlink_command_enabled: false,
+            profile: default_profile(),
         }
     }
+}
+
+/// Resolve the agent profile as `drone` / `ground-station` / the raw value.
+///
+/// Order: the config's `agent.profile`, then the on-disk profile marker, then
+/// `drone`. An absent, empty, `auto` or unrecognised value collapses to `drone`,
+/// which is the same resolution the process supervisor applies when it decides
+/// which units to start at all — so a rig cannot end up with this service
+/// running under one notion of its profile and gating features on another.
+///
+/// Mirrors the sibling bearer services' profile gate rather than sharing it:
+/// each service resolves its own, and converging the several copies is a
+/// codebase-wide cleanup of its own.
+pub fn resolve_profile(config_profile: Option<&str>, profile_conf: &Path) -> String {
+    let from_config = config_profile.map(str::trim).filter(|v| !v.is_empty());
+    if let Some(v) = from_config {
+        match v {
+            "drone" => return "drone".to_string(),
+            "ground_station" | "ground-station" => return "ground-station".to_string(),
+            // Anything else (including `auto`) falls through to the marker.
+            _ => {}
+        }
+    }
+    if let Ok(text) = std::fs::read_to_string(profile_conf) {
+        for line in text.lines() {
+            let stripped = line.trim();
+            if stripped.is_empty() || stripped.starts_with('#') {
+                continue;
+            }
+            let Some(value) = stripped
+                .strip_prefix("profile:")
+                .or_else(|| stripped.strip_prefix("profile="))
+            else {
+                continue;
+            };
+            let value = value.trim().trim_matches(|c| c == '"' || c == '\'');
+            return match value {
+                "ground_station" | "ground-station" => "ground-station".to_string(),
+                "workstation" => "workstation".to_string(),
+                "compute" => "compute".to_string(),
+                _ => "drone".to_string(),
+            };
+        }
+    }
+    default_profile()
 }
 
 impl MavlinkConfig {
@@ -232,6 +292,15 @@ impl MavlinkConfig {
             mavlink: MavlinkConfig,
             #[serde(default)]
             radio: RadioSection,
+            #[serde(default)]
+            agent: AgentSection,
+        }
+        #[derive(Debug, Default, Deserialize)]
+        struct AgentSection {
+            // Nullable on disk like the CRSF strings below, and commonly left
+            // on `auto`, which resolves from the on-disk profile marker.
+            #[serde(default)]
+            profile: Option<String>,
         }
         #[derive(Debug, Default, Deserialize)]
         struct RadioSection {
@@ -273,7 +342,15 @@ impl MavlinkConfig {
             .trim()
             .to_string();
         cfg.crsf_mavlink_command_enabled = crsf.mavlink_command_enabled;
+        let profile_conf =
+            std::env::var("ADOS_PROFILE_CONF").unwrap_or_else(|_| PROFILE_CONF.to_string());
+        cfg.profile = resolve_profile(raw.agent.profile.as_deref(), Path::new(&profile_conf));
         (cfg, error)
+    }
+
+    /// Whether this node is a drone, and so runs the drone-only paths.
+    pub fn is_drone(&self) -> bool {
+        self.profile == "drone"
     }
 
     /// Resolve the MAVLink-over-ELRS ingest source from the `radio.crsf`
@@ -342,6 +419,69 @@ mod tests {
         assert_eq!(c.baud_rate, 921600);
         // endpoints omitted -> default websocket 8765
         assert_eq!(c.websocket_port(), Some(8765));
+        // The foreign `agent:` section is read for the profile gate.
+        assert_eq!(c.profile, "drone");
+        assert!(c.is_drone());
+    }
+
+    #[test]
+    fn an_explicit_profile_wins_over_the_marker_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("profile.conf");
+        write(&marker, "profile: ground_station\n");
+        // The config is explicit, so the marker is not consulted.
+        assert_eq!(resolve_profile(Some("drone"), &marker), "drone");
+        // And the hyphen form is the wire spelling of a ground station.
+        assert_eq!(
+            resolve_profile(Some("ground_station"), &dir.path().join("absent")),
+            "ground-station"
+        );
+    }
+
+    #[test]
+    fn an_auto_or_absent_profile_falls_back_to_the_marker_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("profile.conf");
+        write(&marker, "# a comment\nprofile: ground_station\n");
+        assert_eq!(resolve_profile(Some("auto"), &marker), "ground-station");
+        assert_eq!(resolve_profile(None, &marker), "ground-station");
+        assert_eq!(resolve_profile(Some(""), &marker), "ground-station");
+        // The legacy key=value spelling reads the same.
+        let legacy = dir.path().join("legacy.conf");
+        write(&legacy, "profile=drone\n");
+        assert_eq!(resolve_profile(Some("auto"), &legacy), "drone");
+    }
+
+    #[test]
+    fn an_unresolvable_profile_reads_as_a_drone() {
+        // Matches how the process supervisor resolves the same question when it
+        // decides which units to start, so a sloppy config cannot leave this
+        // service running with one notion of its profile and gating on another.
+        let dir = tempfile::tempdir().unwrap();
+        let absent = dir.path().join("absent.conf");
+        assert_eq!(resolve_profile(None, &absent), "drone");
+        assert_eq!(resolve_profile(Some("auto"), &absent), "drone");
+        assert_eq!(resolve_profile(Some("nonsense"), &absent), "drone");
+        // A marker with no profile line is no answer either.
+        let empty = dir.path().join("empty.conf");
+        write(&empty, "# nothing here\n");
+        assert_eq!(resolve_profile(Some("auto"), &empty), "drone");
+    }
+
+    #[test]
+    fn the_other_profiles_are_not_mistaken_for_drones() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("profile.conf");
+        for (written, expected) in [("workstation", "workstation"), ("compute", "compute")] {
+            write(&marker, &format!("profile: {written}\n"));
+            let resolved = resolve_profile(Some("auto"), &marker);
+            assert_eq!(resolved, expected);
+            let cfg = MavlinkConfig {
+                profile: resolved,
+                ..Default::default()
+            };
+            assert!(!cfg.is_drone());
+        }
     }
 
     #[test]

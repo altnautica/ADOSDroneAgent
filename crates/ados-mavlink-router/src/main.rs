@@ -17,6 +17,7 @@ use ados_protocol::state::encode_v2;
 use serde_json::{json, Map, Value};
 use tokio::sync::{Mutex, Notify};
 
+use ados_mavlink_router::aux_tee::{self, TeeCounters};
 use ados_mavlink_router::config::MavlinkConfig;
 use ados_mavlink_router::connection::FcConnection;
 use ados_mavlink_router::param_cache::ParamCache;
@@ -168,6 +169,10 @@ async fn main() {
 
     let started = Instant::now();
     let mut tasks = Vec::new();
+    // Set when the aux MAVLink tee runs, so its counters ride the state
+    // snapshot. Absent on a profile that does not run the tee, which reads as
+    // "not running" rather than as a lane that forwarded nothing.
+    let mut aux_tee_counters: Option<Arc<TeeCounters>> = None;
 
     // FC connect + read loop. In demo mode a synthetic source feeds the same
     // fan-out, state, and proxy paths a serial FC would; the serial path is
@@ -242,6 +247,35 @@ async fn main() {
         }));
     }
 
+    // FC frames -> the radio's auxiliary lane, so a ground station linked over
+    // the radio gets the vehicle's MAVLink without a shared network. Drone
+    // profile only: a ground station is the receiving end of this lane, and its
+    // own radio service does not serve the aux transmit pair at all.
+    if cfg.is_drone() {
+        let counters = Arc::new(TeeCounters::default());
+        aux_tee_counters = Some(counters.clone());
+        // Another consumer of the same fan-out the IPC socket reads. A slow aux
+        // lane makes this receiver lag and shed, never the producer stall.
+        let frames = fc.subscribe();
+        let egress = ados_protocol::aux_egress::AuxEgress::new(format!("{dir}/radio-aux.sock"));
+        let cancel = cancel.clone();
+        tasks.push(tokio::spawn(async move {
+            aux_tee::run(
+                frames,
+                egress,
+                counters,
+                aux_tee::ShaperConfig::default(),
+                cancel,
+            )
+            .await
+        }));
+    } else {
+        tracing::info!(
+            profile = %cfg.profile,
+            "mavlink_aux_tee_skipped_for_profile"
+        );
+    }
+
     // MAVLink socket client commands -> FC.
     {
         let fc = fc.clone();
@@ -312,6 +346,7 @@ async fn main() {
         let params = params.clone();
         let state_ipc = state_ipc.clone();
         let mavlink_ipc_stats = mavlink_ipc.clone();
+        let aux_tee_counters = aux_tee_counters.clone();
         let cancel = cancel.clone();
         tasks.push(tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_millis(100));
@@ -348,6 +383,7 @@ async fn main() {
                         }
                         let extras = build_extras(
                             &fc, &state, &params, started, mavlink_drops, state_drops,
+                            aux_tee_counters.as_ref(),
                         )
                         .await;
                         let wire = { state.lock().await.to_wire_with(&extras) };
@@ -419,6 +455,7 @@ async fn build_extras(
     started: Instant,
     mavlink_drops: u64,
     state_drops: u64,
+    aux_tee_counters: Option<&Arc<TeeCounters>>,
 ) -> Map<String, Value> {
     let cached = params.lock().await.count();
     // The expected param count and the decoded autopilot code, read under one
@@ -503,6 +540,17 @@ async fn build_extras(
     extras.insert("param_expected_count".into(), json!(expected));
     extras.insert("ipc_mavlink_drops".into(), json!(mavlink_drops));
     extras.insert("ipc_state_drops".into(), json!(state_drops));
+    // The MAVLink-over-radio tee's full tally: what it forwarded and, just as
+    // importantly, everything it dropped and why. Present only where the tee
+    // runs, so its absence reads as "not running on this profile" rather than
+    // as a lane that carried nothing. Forwarded counts datagrams handed to the
+    // kernel, which is not by itself proof the radio radiated them.
+    if let Some(counters) = aux_tee_counters {
+        extras.insert(
+            "aux_mavlink_tee".into(),
+            serde_json::to_value(counters.snapshot()).unwrap_or(Value::Null),
+        );
+    }
     extras.insert("params".into(), Value::Object(params_blob));
     extras
 }
