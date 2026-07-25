@@ -1,6 +1,6 @@
 //! Ground-side `WfbRxManager`: the receive run loop.
 //!
-//! Spawns the three radio C subprocesses the receive side needs and drives the
+//! Spawns the four radio C subprocesses the receive side needs and drives the
 //! liveness machinery from chunk 2:
 //!   - **data RX** `wfb_rx -p 0 -c 127.0.0.1 -u 5599 -K <rx.key> -l 1000 <iface>`
 //!     decodes the FEC video stream to the internal fan-out port; stdout carries
@@ -13,6 +13,12 @@
 //!   - **tx control** `wfb_tx -p 1 -u 5810 -K <rx.key> -k 1 -n 2 -B 20 -M <mcs>
 //!     <iface>` transmits HopAck/Presence back over the air from the loopback
 //!     ingress 5810.
+//!   - **aux RX** `wfb_rx -p 2 -c 127.0.0.1 -u 5603 -K <rx.key> -l 1000
+//!     <iface>` decodes the general-purpose application lane the drone
+//!     radiates on `-p 2`, delivering to the port the aux consumer binds. This
+//!     is the lane anything other than video and the tiny control frames rides,
+//!     so it is spawned unconditionally: a linked ground station has to be able
+//!     to receive whatever the drone sends it.
 //!
 //! Process-group isolation (`setsid`/`killpg`) follows the same discipline as
 //! `ados_radio::process::WfbProcess` so the orphan-child bug class is
@@ -49,9 +55,9 @@ pub mod seams;
 pub mod stats;
 
 pub use args::{
-    data_rx_args, gs_rx_control_args, gs_tx_control_args, DATA_RX_PORT, DEFAULT_REG_DOMAIN,
-    RX_CONTROL_PORT, RX_HEALTH_POLL_INTERVAL_S, STATE_ACTIVE, STATE_NO_INJECTION,
-    STATE_REG_BLOCKED, STATE_SEARCHING, TX_CONTROL_PORT,
+    data_rx_args, gs_atlas_rx_args, gs_rx_control_args, gs_tx_control_args, ATLAS_RX_PORT,
+    DATA_RX_PORT, DEFAULT_REG_DOMAIN, RX_CONTROL_PORT, RX_HEALTH_POLL_INTERVAL_S, STATE_ACTIVE,
+    STATE_NO_INJECTION, STATE_REG_BLOCKED, STATE_SEARCHING, TX_CONTROL_PORT,
 };
 pub use loops::{stats_reader_loop, zombie_watchdog};
 pub use seams::{DataRxHandle, IwChannelSetter, SharedValidCounter, SystemClock};
@@ -309,7 +315,7 @@ impl WfbRxManager {
     pub async fn spawn_receive_chain(
         &self,
         iface: &str,
-    ) -> std::io::Result<(GsWfbProcess, GsWfbProcess, GsWfbProcess)> {
+    ) -> std::io::Result<(GsWfbProcess, GsWfbProcess, GsWfbProcess, GsWfbProcess)> {
         let rx_key = rx_key_path();
         // Data RX: stdout piped for the stats reader, in its own process group.
         let data_rx = GsWfbProcess::spawn(
@@ -333,7 +339,22 @@ impl WfbRxManager {
             Some("/run/ados/wfb-gs-tx-control.log"),
         )
         .await?;
-        Ok((data_rx, rx_control, tx_control))
+        // Aux application lane. The drone half has always been complete
+        // (`wfb_tx -p 2` behind the radio-aux socket) but this receiver was
+        // written, unit-tested, and then never spawned, so nothing on the
+        // ground ever decoded p2 and the lane carried no traffic in either
+        // direction. It is spawned unconditionally rather than behind the aux
+        // consumer's enable flag: a linked ground station must be able to
+        // receive whatever the drone chooses to send, and an idle wfb_rx with
+        // no inbound frames costs essentially nothing.
+        let aux_rx = GsWfbProcess::spawn(
+            "wfb_rx",
+            &gs_atlas_rx_args(iface, &rx_key, ATLAS_RX_PORT),
+            Stdout::Null,
+            Some("/run/ados/wfb-gs-aux-rx.log"),
+        )
+        .await?;
+        Ok((data_rx, rx_control, tx_control, aux_rx))
     }
 
     /// Build the chunk-2 watchdog for this receive generation, wired to the

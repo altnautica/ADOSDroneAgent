@@ -25,7 +25,14 @@ pub const TX_CONTROL_PORT: u16 = 5810;
 /// GS Atlas-aux egress: the drone radiates small Atlas events on radio_id 2 (the
 /// aux application stream); the GS decodes them to this loopback port, where the
 /// Atlas relay reads and re-POSTs them onto the LAN.
-pub const ATLAS_RX_PORT: u16 = 5604;
+/// MUST equal the aux consumer's listen port (`atlas.listen_port`, default
+/// 5603). `wfb_rx -p 2` decodes the aux lane to this loopback port and the
+/// consumer reads from it, so a mismatch silently drops every aux frame: the
+/// receiver decodes into a port nobody is bound to. It read 5604 against a
+/// consumer on 5603 until the lane was first wired up, which nothing caught
+/// because the receiver was never spawned in production. `aux_rx_port_matches_
+/// the_consumer_listen_port` below pins the two together.
+pub const ATLAS_RX_PORT: u16 = 5603;
 /// wfb stats poll interval: the zombie watchdog cadence.
 pub const RX_HEALTH_POLL_INTERVAL_S: f64 = 5.0;
 
@@ -168,8 +175,22 @@ mod tests {
         assert_eq!(a[0], "-p");
         assert_eq!(a[1], "2");
         let u = a.iter().position(|x| x == "-u").unwrap();
-        assert_eq!(a[u + 1], "5604");
+        assert_eq!(a[u + 1], ATLAS_RX_PORT.to_string());
         assert_eq!(a.last().unwrap(), "wlan1");
+    }
+
+    #[test]
+    fn aux_rx_port_matches_the_consumer_listen_port() {
+        // The receiver decodes the aux lane to ATLAS_RX_PORT and the aux
+        // consumer binds atlas.listen_port. If these ever diverge the lane goes
+        // silent with no error anywhere: frames arrive over the air, decode
+        // fine, and land on a port nobody reads. Pin them together so the next
+        // person to change one is forced to change the other.
+        assert_eq!(
+            ATLAS_RX_PORT,
+            crate::gs_config::default_atlas_listen_port(),
+            "aux receive port must equal the aux consumer's listen port"
+        );
     }
 
     #[test]

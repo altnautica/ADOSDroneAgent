@@ -22,7 +22,7 @@ fn default_true() -> bool {
 fn default_bat_iface() -> String {
     "bat0".to_string()
 }
-fn default_atlas_listen_port() -> u16 {
+pub(crate) fn default_atlas_listen_port() -> u16 {
     // The loopback port the WFB aux receiver re-emits decoded application frames
     // on (`wfb_rx -p 3 -u <aux_rx_port>`, `video.wfb.aux_rx_port`, default 5603).
     // The drone radiates Atlas events on the aux tx ingress (5602); the GS reads
