@@ -39,6 +39,7 @@
 //!   every live session; accepted as an alternative data-plane credential.
 
 pub mod atlas;
+pub mod aux_mux;
 pub mod capabilities;
 pub mod compute;
 pub mod contracts;
