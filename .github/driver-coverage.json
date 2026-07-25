@@ -1,0 +1,62 @@
+{
+  "_comment": [
+    "Which prebuilt RTL8812EU kernel-module flavor serves which board profile.",
+    "",
+    "`driver-matrix.json` says WHICH KERNELS CI builds a module for. This file",
+    "says WHICH BOARDS each of those kernels serves, and — just as important —",
+    "which boards deliberately have no prebuilt at all. `tests/test_driver_coverage.py`",
+    "keeps the two in step: every board profile under src/ados/hal/boards/ must be",
+    "classified here exactly once, every flavor named here must exist in the matrix,",
+    "and every matrix row must be named here. So adding a board, renaming a flavor",
+    "or deleting a row fails CI instead of silently costing a board its fast path.",
+    "",
+    "Coverage is per KERNEL IMAGE, not per board: one row serves every board that",
+    "runs that kernel. A board whose kernel is not in the matrix still works — it",
+    "falls back to the on-device DKMS build (several minutes) instead of fetching",
+    "a verified module (seconds).",
+    "",
+    "`builds_on_device` is a first-class answer, not a backlog. We do not publish",
+    "kernel modules for hardware we cannot test on."
+  ],
+
+  "flavors": {
+    "rpi-v8": ["cm3", "cm4", "rpi3", "rpi4b", "zero2w"],
+    "rpi-2712": ["cm5", "rpi5"],
+    "radxa-a733": ["cubie-a7s", "cubie-a7z"],
+    "radxa-rk356x": ["radxa-cm3", "rk3566"],
+    "armbian-rk35xx": ["orange-pi-5", "rk3588s2", "rock-5c-lite"]
+  },
+
+  "builds_on_device": [
+    "beagley-ai",
+    "generic-arm64",
+    "jetson-nano",
+    "jetson-orin-nano",
+    "rdk-x3",
+    "rk3576",
+    "rv1126b"
+  ],
+
+  "_notes": {
+    "cubie-a7z": [
+      "Mapped to radxa-a733 because that row builds the Allwinner A733 BSP kernel",
+      "(5.15.147-21-a733) both A733 boards run on the Radxa bullseye image.",
+      "",
+      "An Armbian community image for the same silicon runs a DIFFERENT kernel",
+      "(6.6.98-vendor-sun60iw2) which this row does NOT cover — a module must",
+      "vermagic-match exactly, and same-SoC is not same-kernel. That kernel is",
+      "deliberately left on the DKMS fallback: its headers are published only on",
+      "the Armbian BETA feed (linux-headers-vendor-sun60iw2; absent from the",
+      "stable feed entirely), and monitor-mode injection is broken on it anyway,",
+      "so a prebuilt module would build fast and still not carry a radio link.",
+      "Adding it later means a new matrix row pointing at the beta feed."
+    ],
+    "builds_on_device": [
+      "No matrix row: either the kernel line is not one we run, or we have no",
+      "unit of that board to validate a published module against. These boards",
+      "compile the driver locally at install time and work; they are just slower",
+      "to provision. Moving one out of this list means adding a matrix row AND",
+      "confirming the built module loads on real hardware."
+    ]
+  }
+}

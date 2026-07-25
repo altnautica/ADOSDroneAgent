@@ -16,10 +16,11 @@
 # quirk) and the DT compatible reports "brcm,bcm2837" (collides with the
 # Pi 3 / CM3), so neither is a safe auto-detect substring.
 #
-# Prebuilt RTL8812EU driver: served by the CI `rpi-v8` flavor
-# (linux-headers-rpi-v8, debian:trixie container) which already covers
-# "Pi 3 / 4 / 400 / Zero 2 W" — no new driver-matrix row is needed; the
-# DKMS fallback also applies.
+# Prebuilt RTL8812EU driver: see `.github/driver-coverage.json`, which maps
+# every board profile to the matrix flavor that builds its kernel (this one
+# rides `rpi-v8`) and is enforced by tests/test_driver_coverage.py. Keeping
+# the mapping there rather than in prose here means a renamed flavor or an
+# unclassified new board fails CI instead of going unnoticed.
 #
 # Sources:
 #   https://github.com/raspberrypi/linux/blob/rpi-6.6.y/arch/arm/boot/dts/broadcom/bcm2837-rpi-zero-2-w.dts
