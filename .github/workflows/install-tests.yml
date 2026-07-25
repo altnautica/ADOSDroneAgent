@@ -67,3 +67,8 @@ jobs:
 
       - name: compile every device-tree overlay
         run: bash scripts/test/compile_overlays.sh
+
+      # bats is installed above but no suite was ever executed, so the
+      # checked-in .bats files never gated a push. Run all of them.
+      - name: bats suites
+        run: bats scripts/test/*.bats

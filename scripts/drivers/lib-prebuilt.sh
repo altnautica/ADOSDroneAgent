@@ -100,37 +100,60 @@ try_prebuilt_install() {
     local tmp; tmp="$(mktemp -d)" || return 1
 
     # 1. manifest (+ its sidecar SHA256/signature, verified like any artifact).
-    if ! ados_fetch "${base}/drivers-manifest.json" "${tmp}/drivers-manifest.json" 20; then
-        info "No prebuilt driver manifest reachable; will build from source."
-        rm -rf "${tmp}"; return 1
-    fi
-    ados_fetch "${base}/drivers-manifest.json.sha256" "${tmp}/drivers-manifest.json.sha256" 15 2>/dev/null || true
-    ados_fetch "${base}/drivers-manifest.json.minisig" "${tmp}/drivers-manifest.json.minisig" 15 2>/dev/null || true
-    if [ -f "${tmp}/drivers-manifest.json.sha256" ]; then
-        ados_verify_artifact "${tmp}/drivers-manifest.json" "${pubkey}" "prebuilt" "${allow_unsigned}" \
-            || { warn "prebuilt manifest failed verification; building from source."; rm -rf "${tmp}"; return 1; }
+    # A manifest that is unreachable or unverifiable is NOT fatal: the asset
+    # filename is deterministic, so step 2 falls back to probing for it
+    # directly. Losing the manifest must not cost a board its fast path.
+    local row file sha vermagic manifest_ok=0
+    if ados_fetch "${base}/drivers-manifest.json" "${tmp}/drivers-manifest.json" 20; then
+        ados_fetch "${base}/drivers-manifest.json.sha256" "${tmp}/drivers-manifest.json.sha256" 15 2>/dev/null || true
+        ados_fetch "${base}/drivers-manifest.json.minisig" "${tmp}/drivers-manifest.json.minisig" 15 2>/dev/null || true
+        if [ -f "${tmp}/drivers-manifest.json.sha256" ] \
+            && ! ados_verify_artifact "${tmp}/drivers-manifest.json" "${pubkey}" "prebuilt" "${allow_unsigned}"; then
+            warn "prebuilt manifest failed verification; ignoring it."
+        else
+            manifest_ok=1
+        fi
+    else
+        info "No prebuilt driver manifest reachable; probing for the asset directly."
     fi
 
     # 2. match this exact kernel + arch.
-    local row file sha vermagic
-    row="$(_pb_manifest_match "${tmp}/drivers-manifest.json" "${module}" "${kver}" "${karch}")" || {
-        info "No prebuilt ${module} for ${kver}/${karch}; building from source."
-        rm -rf "${tmp}"; return 1
-    }
-    file="$(printf '%s' "${row}" | cut -f1)"
-    sha="$(printf '%s' "${row}" | cut -f2)"
-    vermagic="$(printf '%s' "${row}" | cut -f3)"
-    [ -n "${file}" ] || { rm -rf "${tmp}"; return 1; }
+    if [ "${manifest_ok}" = "1" ] \
+        && row="$(_pb_manifest_match "${tmp}/drivers-manifest.json" "${module}" "${kver}" "${karch}")"; then
+        file="$(printf '%s' "${row}" | cut -f1)"
+        sha="$(printf '%s' "${row}" | cut -f2)"
+        vermagic="$(printf '%s' "${row}" | cut -f3)"
+    fi
+    # Direct-asset fallback. The publisher names every module
+    # `<module>-<kver>-<arch>.ko` and always ships a `.sha256` beside it, but
+    # the manifest is REGENERATED from only the current build rows — so a
+    # still-published module for an older kernel stops being advertised the
+    # moment upstream bumps. Probing the deterministic name recovers those
+    # boards. Safety is unchanged: the sha256 sidecar is mandatory below and
+    # the vermagic strict-compare against the running kernel still gates the
+    # install; the manifest only ever contributed a redundant vermagic copy.
+    if [ -z "${file:-}" ]; then
+        file="${module}-${kver}-${karch}.ko"
+        sha=""
+        vermagic=""
+        info "No manifest row for ${kver}/${karch}; probing ${file} directly."
+    fi
 
     # 3. download the .ko + its sidecars.
     if ! ados_fetch "${base}/${file}" "${tmp}/${file}" 60; then
-        warn "prebuilt ${file} download failed; building from source."
+        info "No prebuilt ${module} for ${kver}/${karch}; building from source."
         rm -rf "${tmp}"; return 1
     fi
     # Prefer the published sha256 sidecar; synthesize one from the manifest
     # hash when the sidecar is absent so ados_verify_sha256 always has input.
     if ! ados_fetch "${base}/${file}.sha256" "${tmp}/${file}.sha256" 15 2>/dev/null; then
         [ -n "${sha}" ] && printf '%s  %s\n' "${sha}" "${file}" > "${tmp}/${file}.sha256"
+    fi
+    # Fail closed: with neither a sidecar nor a manifest hash there is nothing
+    # to verify the module against, so never install it.
+    if [ ! -f "${tmp}/${file}.sha256" ]; then
+        warn "prebuilt ${file} has no sha256 to verify against; building from source."
+        rm -rf "${tmp}"; return 1
     fi
     ados_fetch "${base}/${file}.minisig" "${tmp}/${file}.minisig" 15 2>/dev/null || true
 
