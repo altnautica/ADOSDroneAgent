@@ -179,17 +179,49 @@ def _read_wfb_stats_sidecar() -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def classify_wfb_module_path(path: str) -> str | None:
+    """Classify a loaded-module path as ``"dkms"`` or ``"prebuilt"``.
+
+    The two install paths are distinct and must not be conflated:
+
+    * **DKMS** builds on the device and installs under
+      ``/lib/modules/<kver>/updates/dkms/<mod>.ko`` (Debian's
+      ``DEST_MODULE_LOCATION``) or ``/lib/modules/<kver>/extra/``.
+    * **Prebuilt** places a verified CI-built module at the *bare*
+      ``/lib/modules/<kver>/updates/<mod>.ko`` (see
+      ``scripts/drivers/lib-prebuilt.sh``) — no ``dkms/`` segment.
+
+    Matching a bare ``/updates/`` as DKMS therefore reports every
+    prebuilt board as ``"dkms"``, which is what this function exists to
+    prevent: the heartbeat is a status surface and must not misreport
+    how the radio driver got there.
+
+    Returns ``None`` when the path matches no known install location, so
+    the caller falls through to the breadcrumb / install-result record
+    rather than guessing. Pure.
+    """
+    if not path:
+        return None
+    # DKMS first: its install location is a strict SUBSET of the prebuilt
+    # one (`/updates/dkms/` also contains `/updates/`), so order decides.
+    # The bare `/dkms/` segment also covers a module resolved straight out
+    # of the DKMS build tree (`/var/lib/dkms/<pkg>/<ver>/.../module/`).
+    if "/dkms/" in path or "/extra/" in path:
+        return "dkms"
+    if "/updates/" in path:
+        return "prebuilt"
+    return None
+
+
 def _wfb_module_source_from_modinfo() -> str | None:
     """Authoritative radio-module source from the loaded module's path.
 
-    Runs ``modinfo -n <module>`` and classifies the returned path. The
-    Wi-Fi driver is always built on the device via DKMS now, which installs
-    under ``/lib/modules/*/updates/dkms/`` or ``/lib/modules/*/extra/``, so
-    any such on-disk path ⇒ ``"dkms"``.
+    Runs ``modinfo -n <module>`` and classifies the returned path via
+    :func:`classify_wfb_module_path`.
 
     Returns ``None`` when modinfo is absent, the module is not loaded,
-    the command times out, or the path does not match the pattern.
-    Best-effort; never raises.
+    the command times out, or the path matches no known install
+    location. Best-effort; never raises.
     """
     try:
         result = subprocess.run(
@@ -203,12 +235,7 @@ def _wfb_module_source_from_modinfo() -> str | None:
         return None
     if result.returncode != 0:
         return None
-    path = (result.stdout or "").strip()
-    if not path:
-        return None
-    if "/updates/" in path or "/extra/" in path or "dkms" in path:
-        return "dkms"
-    return None
+    return classify_wfb_module_path((result.stdout or "").strip())
 
 
 def _resolve_wfb_module_source() -> str:

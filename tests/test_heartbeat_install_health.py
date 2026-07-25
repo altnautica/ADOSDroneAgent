@@ -75,11 +75,12 @@ def test_wfb_module_source_none_when_no_sources(
     assert payload["wfbModuleSource"] == "none"
 
 
-def test_wfb_module_source_modinfo_updates_is_dkms(
+def test_wfb_module_source_modinfo_updates_dkms_is_dkms(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The driver is always a DKMS build now; a modinfo path under
-    updates/ (where DKMS installs, e.g. updates/dkms/) classifies as dkms."""
+    """A modinfo path under updates/dkms/ (Debian's DKMS install
+    location) classifies as dkms, NOT prebuilt — even though it also
+    contains the bare '/updates/' the prebuilt path uses."""
 
     def fake_run(*_args, **_kwargs):  # noqa: ANN002, ANN003
         return subprocess.CompletedProcess(
@@ -94,6 +95,47 @@ def test_wfb_module_source_modinfo_updates_is_dkms(
     monkeypatch.setattr(hp, "WFB_MODULE_SOURCE", tmp_path / "wfb-module-source")
     payload = _fresh_app()._build_heartbeat_payload()
     assert payload["wfbModuleSource"] == "dkms"
+
+
+def test_wfb_module_source_modinfo_bare_updates_is_prebuilt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A modinfo path at the BARE updates/ location is a PREBUILT module.
+
+    Regression pin: the classifier used to match any '/updates/' as dkms,
+    so every prebuilt board reported wfbModuleSource=dkms in the
+    heartbeat. Real observed path from a Pi 4B that fetched the verified
+    CI-built module (dkms status on that box is empty).
+    """
+
+    def fake_run(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        return subprocess.CompletedProcess(
+            args=["modinfo"],
+            returncode=0,
+            stdout="/lib/modules/6.18.34+rpt-rpi-v8/updates/8812eu.ko\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(hp.subprocess, "run", fake_run)
+    monkeypatch.setattr(hp, "INSTALL_RESULT", tmp_path / "install-result.json")
+    monkeypatch.setattr(hp, "WFB_MODULE_SOURCE", tmp_path / "wfb-module-source")
+    payload = _fresh_app()._build_heartbeat_payload()
+    assert payload["wfbModuleSource"] == "prebuilt"
+
+
+def test_classify_wfb_module_path_table() -> None:
+    """Pure classifier: the two real install locations plus the misses."""
+    assert hp.classify_wfb_module_path("/lib/modules/6.1.0/updates/8812eu.ko") == (
+        "prebuilt"
+    )
+    assert hp.classify_wfb_module_path(
+        "/lib/modules/5.15.147-21-a733/updates/dkms/8812eu.ko.xz"
+    ) == "dkms"
+    assert hp.classify_wfb_module_path("/lib/modules/6.1.0/extra/8812eu.ko") == "dkms"
+    assert hp.classify_wfb_module_path("") is None
+    assert hp.classify_wfb_module_path("/lib/modules/6.1.0/kernel/net/8812eu.ko") is (
+        None
+    )
 
 
 def test_wfb_module_source_modinfo_dkms_extra(
