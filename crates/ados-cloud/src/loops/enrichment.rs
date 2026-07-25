@@ -337,6 +337,14 @@ fn fold_fc(obj: &mut Map<String, Value>) {
     if let Some(connected) = map.get("fc_connected").and_then(Value::as_bool) {
         obj.insert("fcConnected".to_string(), json!(connected));
     }
+    // The honest connected-or-reachable verdict: true for a healthy MSP flight
+    // controller (Betaflight/iNav), which never emits the MAVLink heartbeat
+    // fc_connected gates on. The router computes it once from the same inputs
+    // as fc_connected, so every consumer — the direct-connect status route and
+    // this cloud/relay path alike — reads the identical answer.
+    if let Some(reachable) = map.get("fc_reachable").and_then(Value::as_bool) {
+        obj.insert("fcReachable".to_string(), json!(reachable));
+    }
     if let Some(port) = map.get("fc_port").and_then(Value::as_str) {
         if !port.is_empty() {
             obj.insert("fcPort".to_string(), json!(port));

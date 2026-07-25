@@ -202,7 +202,11 @@ pub struct NodeStatus {
     pub bt: Option<u8>,
 
     // ── flight controller ────────────────────────────────────────────────
-    /// Whether the agent considers a flight controller connected.
+    /// The honest connected-or-reachable verdict: true for a live MAVLink
+    /// heartbeat, and also true for a healthy MSP flight controller
+    /// (Betaflight/iNav), which never emits a MAVLink heartbeat but is
+    /// reachable and drivable over the byte-transparent proxy. False only
+    /// when no flight controller is evidenced at all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fc: Option<bool>,
     /// Whether MAVLink heartbeats are actually arriving. Distinct from [`Self::fc`]

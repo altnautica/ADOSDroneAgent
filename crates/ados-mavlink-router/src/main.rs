@@ -505,6 +505,21 @@ async fn main() {
 /// counts from the two IPC servers, carried on the snapshot so a silently
 /// pruned client is observable to Mission Control (it never sees an error of
 /// its own when it is dropped for falling behind).
+/// The honest connected-or-reachable verdict, from the same four inputs
+/// `/api/status` and `/api/status/full` already gate on. True for a live
+/// MAVLink heartbeat, and also true for a healthy MSP flight controller
+/// (Betaflight/iNav) with its transport open — an MSP board never emits a
+/// MAVLink heartbeat, so it would otherwise read as absent despite being
+/// reachable and drivable over the byte-transparent proxy.
+fn compute_fc_reachable(
+    mavlink_alive: bool,
+    transport_open: bool,
+    has_fc_variant: bool,
+    fc_link_hint: &str,
+) -> bool {
+    mavlink_alive || (transport_open && (has_fc_variant || fc_link_hint == "msp_detected"))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn build_extras(
     fc: &Arc<FcConnection>,
@@ -549,7 +564,8 @@ async fn build_extras(
     extras.insert("fc_source".into(), json!(fc.source()));
     // A human-actionable hint for the not-alive case: msp_detected (the FC speaks
     // MSP, not MAVLink, on this port), no_heartbeat (open but silent), or none.
-    extras.insert("fc_link_hint".into(), json!(fc.link_hint().await));
+    let fc_link_hint = fc.link_hint().await;
+    extras.insert("fc_link_hint".into(), json!(fc_link_hint));
     // Whether the open FC source is the MAVLink-over-ELRS ingest running
     // telemetry-only, its host->FC command-down direction gated closed. When
     // true the link can read alive (telemetry flows) yet a GCS command is
@@ -568,6 +584,21 @@ async fn build_extras(
         "fc_variant".into(),
         fc_variant.as_ref().map(|v| json!(v)).unwrap_or(Value::Null),
     );
+    // The honest connected-or-reachable verdict, computed once here (the
+    // router owns every input) so every consumer reads the SAME answer
+    // instead of re-deriving it from the parts. `/api/status` and
+    // `/api/status/full` recompute it from these identical fields today; this
+    // is additionally the field the compact aux-lane node-status snapshot
+    // reads, so a relayed MSP flight controller (Betaflight/iNav, which never
+    // emits a MAVLink heartbeat) is reachable-and-drivable over the radio the
+    // same way it already is over a direct LAN connection.
+    let fc_reachable = compute_fc_reachable(
+        mavlink_alive,
+        transport_open,
+        fc_variant.is_some(),
+        fc_link_hint,
+    );
+    extras.insert("fc_reachable".into(), json!(fc_reachable));
     // The canonical firmware family (ardupilot/px4/betaflight/inav/unknown):
     // the MSP variant above, or — for a MAVLink FC — the live-heartbeat
     // autopilot code that names ArduPilot vs PX4 (which fc_variant cannot).
@@ -641,5 +672,49 @@ async fn wait_for_shutdown() {
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+#[cfg(test)]
+mod fc_reachable_tests {
+    use super::compute_fc_reachable;
+
+    #[test]
+    fn a_live_mavlink_heartbeat_is_reachable() {
+        assert!(compute_fc_reachable(true, true, false, "none"));
+        // Even a heartbeat with a stale/odd transport_open reading counts —
+        // a HEARTBEAT decoding at all is definitive evidence of a live link.
+        assert!(compute_fc_reachable(true, false, false, "none"));
+    }
+
+    #[test]
+    fn an_identified_msp_fc_on_an_open_port_is_reachable_without_a_heartbeat() {
+        // The exact case this fix targets: Betaflight/iNav never emit a
+        // MAVLink heartbeat, so mavlink_alive stays false forever on an MSP
+        // board, yet it is present and drivable over the byte-transparent
+        // proxy.
+        assert!(compute_fc_reachable(false, true, true, "none"));
+    }
+
+    #[test]
+    fn an_open_port_with_only_the_msp_detected_hint_is_reachable() {
+        // The hint path: transport open, no decoded variant string yet, but
+        // the link monitor's own sniff already says "this looks like MSP".
+        assert!(compute_fc_reachable(false, true, false, "msp_detected"));
+    }
+
+    #[test]
+    fn an_open_port_with_neither_a_heartbeat_nor_msp_evidence_is_not_reachable() {
+        // A port that is open but silent, with nothing identifying an FC
+        // behind it, must read as absent — this is the "port open, no
+        // MAVLink" amber state, not a connected one.
+        assert!(!compute_fc_reachable(false, true, false, "none"));
+        assert!(!compute_fc_reachable(false, true, false, "no_heartbeat"));
+    }
+
+    #[test]
+    fn a_closed_transport_is_never_reachable_regardless_of_stale_hints() {
+        assert!(!compute_fc_reachable(false, false, true, "msp_detected"));
+        assert!(!compute_fc_reachable(false, false, false, "none"));
     }
 }

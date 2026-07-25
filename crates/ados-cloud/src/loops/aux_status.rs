@@ -252,7 +252,12 @@ fn project(
         .with_agent(Some(uptime_s), Some(version))
         .with_board(board_name.as_deref(), board_soc.as_deref(), *board_tier)
         .with_fc(
-            bool_of("fcConnected"),
+            // Prefer the honest connected-or-reachable verdict so an MSP
+            // flight controller relayed over the aux lane reads the same way
+            // it already does on a direct connection; fall back to the raw
+            // heartbeat-gated field for the narrow window before every node
+            // has rolled the router build that publishes fc_reachable.
+            bool_of("fcReachable").or_else(|| bool_of("fcConnected")),
             bool_of("mavlinkAlive"),
             str_of("fcVariant"),
             str_of("fcFirmware"),
