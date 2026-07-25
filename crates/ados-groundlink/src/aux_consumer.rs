@@ -49,6 +49,9 @@ use std::time::{Duration, Instant};
 
 use ados_protocol::aux_mux::{self, AuxChannel, AuxDecodeError};
 use ados_protocol::mavlink_ingest::{IngestError, MavlinkIngest};
+use ados_protocol::node_status::{NodeIdentity, NodeStatus};
+
+use crate::aux_peers::AuxPeerCache;
 use serde::Serialize;
 use tokio::net::UdpSocket;
 use tokio::sync::Notify;
@@ -103,6 +106,9 @@ struct AuxCountersInner {
     decode_unknown_channel: AtomicU64,
     decode_damaged: AtomicU64,
     decode_overlong: AtomicU64,
+    status_undecodable: AtomicU64,
+    status_out_of_order: AtomicU64,
+    identity_undecodable: AtomicU64,
     recv_errors: AtomicU64,
     bind_failures: AtomicU64,
 }
@@ -135,6 +141,9 @@ impl AuxCounters {
             decode_unknown_channel: c.decode_unknown_channel.load(Ordering::Relaxed),
             decode_damaged: c.decode_damaged.load(Ordering::Relaxed),
             decode_overlong: c.decode_overlong.load(Ordering::Relaxed),
+            status_undecodable: c.status_undecodable.load(Ordering::Relaxed),
+            status_out_of_order: c.status_out_of_order.load(Ordering::Relaxed),
+            identity_undecodable: c.identity_undecodable.load(Ordering::Relaxed),
             recv_errors: c.recv_errors.load(Ordering::Relaxed),
             bind_failures: c.bind_failures.load(Ordering::Relaxed),
         }
@@ -186,6 +195,18 @@ pub struct AuxCountersSnapshot {
     /// Datagrams declaring a payload larger than one aux frame may carry. Our
     /// magic and version matched, so this is damage rather than foreign traffic.
     pub decode_overlong: u64,
+    /// Status datagrams whose body did not decode as a node snapshot: a
+    /// malformed payload, or a schema version this build does not speak. A
+    /// SUB-TALLY of `status_frames`, not a terminal outcome, so it is
+    /// deliberately absent from [`AuxCountersSnapshot::accounted`].
+    pub status_undecodable: u64,
+    /// Status snapshots dropped for arriving older than the one already held.
+    /// Normal in small numbers on a datagram lane; a sustained climb means the
+    /// lane is reordering badly. Also a sub-tally of `status_frames`.
+    pub status_out_of_order: u64,
+    /// Identity datagrams whose body did not decode. Sub-tally of
+    /// `identity_frames`.
+    pub identity_undecodable: u64,
     /// Failed reads on the loopback socket.
     pub recv_errors: u64,
     /// Failed attempts to bind the lane's loopback port. A non-zero value with
@@ -207,7 +228,11 @@ impl AuxCountersSnapshot {
     ///
     /// `mavlink_frames` is deliberately excluded, being the subtotal that
     /// `mavlink_republished + republish_errors + republish_lane_down` splits
-    /// into. Counting both would double every MAVLink datagram.
+    /// into. Counting both would double every MAVLink datagram. The status and
+    /// identity decode tallies (`status_undecodable`, `status_out_of_order`,
+    /// `identity_undecodable`) are excluded on the same grounds: they describe
+    /// what happened to a datagram already counted by `status_frames` /
+    /// `identity_frames`, so adding them would double-count it.
     pub fn accounted(&self) -> u64 {
         self.mavlink_republished
             + self.republish_errors
@@ -305,6 +330,7 @@ async fn dispatch(
     ingest: &MavlinkIngest,
     counters: &AuxCounters,
     gate: &mut SeamGate,
+    peers: &AuxPeerCache,
 ) {
     let c = &counters.0;
     counters.bump(&c.datagrams_received);
@@ -361,11 +387,29 @@ async fn dispatch(
                 }
             }
         }
-        // Counted, not dropped silently: the drone may already be sending these
-        // before anything on this side consumes them, and the count is how that
-        // is known rather than guessed.
-        AuxChannel::Status => counters.bump(&c.status_frames),
-        AuxChannel::Identity => counters.bump(&c.identity_frames),
+        // The relayed node describing itself. Decoded into the peer cache, whose
+        // sidecar is what lets this node answer what it is relaying; a body that
+        // does not decode is counted rather than dropped silently, because a
+        // peer sending frames this build cannot read is a version mismatch worth
+        // seeing.
+        AuxChannel::Status => {
+            counters.bump(&c.status_frames);
+            match NodeStatus::decode(payload) {
+                Some(status) => {
+                    if !peers.record_status(status) {
+                        counters.bump(&c.status_out_of_order);
+                    }
+                }
+                None => counters.bump(&c.status_undecodable),
+            }
+        }
+        AuxChannel::Identity => {
+            counters.bump(&c.identity_frames);
+            match NodeIdentity::decode(payload) {
+                Some(identity) => peers.record_identity(identity),
+                None => counters.bump(&c.identity_undecodable),
+            }
+        }
     }
 }
 
@@ -378,6 +422,7 @@ pub async fn run_aux_consumer(
     listen_port: u16,
     ingest: Arc<MavlinkIngest>,
     counters: AuxCounters,
+    peers: AuxPeerCache,
     cancel: Arc<Notify>,
 ) -> std::io::Result<()> {
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, listen_port));
@@ -409,7 +454,7 @@ pub async fn run_aux_consumer(
             received = sock.recv_from(&mut buf) => match received {
                 Ok((n, _from)) => {
                     consecutive_errors = 0;
-                    dispatch(&buf[..n], &ingest, &counters, &mut gate).await;
+                    dispatch(&buf[..n], &ingest, &counters, &mut gate, &peers).await;
                 }
                 Err(e) => {
                     counters.bump(&counters.0.recv_errors);
@@ -445,6 +490,7 @@ pub async fn supervise_aux_consumer(
     listen_port: u16,
     ingest: Arc<MavlinkIngest>,
     counters: AuxCounters,
+    peers: AuxPeerCache,
     cancel: Arc<Notify>,
 ) {
     let mut backoff = BIND_BACKOFF_MIN;
@@ -453,6 +499,7 @@ pub async fn supervise_aux_consumer(
             listen_port,
             ingest.clone(),
             counters.clone(),
+            peers.clone(),
             cancel.clone(),
         )
         .await
@@ -532,10 +579,11 @@ mod tests {
         let ingest = MavlinkIngest::new(&sock);
         let counters = AuxCounters::new();
         let mut gate = SeamGate::default();
+        let peers = AuxPeerCache::new();
 
         let frame = heartbeat();
         let datagram = aux_mux::encode(AuxChannel::Mavlink, &frame).unwrap();
-        dispatch(&datagram, &ingest, &counters, &mut gate).await;
+        dispatch(&datagram, &ingest, &counters, &mut gate, &peers).await;
 
         assert_eq!(seam.recv().await.unwrap(), frame);
         let snap = counters.snapshot();
@@ -559,10 +607,11 @@ mod tests {
         let ingest = MavlinkIngest::new(&sock);
         let counters = AuxCounters::new();
         let mut gate = SeamGate::default();
+        let peers = AuxPeerCache::new();
 
         let mut truncated = aux_mux::encode(AuxChannel::Mavlink, &heartbeat()).unwrap();
         truncated.truncate(truncated.len() - 3);
-        dispatch(&truncated, &ingest, &counters, &mut gate).await;
+        dispatch(&truncated, &ingest, &counters, &mut gate, &peers).await;
 
         let snap = counters.snapshot();
         assert_eq!(snap.datagrams_received, 1);
@@ -573,7 +622,7 @@ mod tests {
         // A healthy frame after the damaged one still gets through: the lane
         // does not latch shut on one bad datagram.
         let good = aux_mux::encode(AuxChannel::Mavlink, &heartbeat()).unwrap();
-        dispatch(&good, &ingest, &counters, &mut gate).await;
+        dispatch(&good, &ingest, &counters, &mut gate, &peers).await;
         assert_eq!(seam.recv().await.unwrap(), heartbeat());
         server.abort();
     }
@@ -585,15 +634,17 @@ mod tests {
         let ingest = MavlinkIngest::with_timeout(&sock, Duration::from_millis(50));
         let counters = AuxCounters::new();
         let mut gate = SeamGate::default();
+        let peers = AuxPeerCache::new();
 
         dispatch(
             b"some other application's datagram",
             &ingest,
             &counters,
             &mut gate,
+            &peers,
         )
         .await;
-        dispatch(b"\xAD", &ingest, &counters, &mut gate).await;
+        dispatch(b"\xAD", &ingest, &counters, &mut gate, &peers).await;
 
         let snap = counters.snapshot();
         assert_eq!(snap.decode_foreign, 1);
@@ -610,19 +661,20 @@ mod tests {
         let ingest = MavlinkIngest::with_timeout(&sock, Duration::from_millis(50));
         let counters = AuxCounters::new();
         let mut gate = SeamGate::default();
+        let peers = AuxPeerCache::new();
 
         let mut wrong_version = aux_mux::encode(AuxChannel::Mavlink, b"x").unwrap();
         wrong_version[2] = 0x99;
-        dispatch(&wrong_version, &ingest, &counters, &mut gate).await;
+        dispatch(&wrong_version, &ingest, &counters, &mut gate, &peers).await;
 
         let mut unknown_channel = aux_mux::encode(AuxChannel::Mavlink, b"x").unwrap();
         unknown_channel[3] = 0x7F;
-        dispatch(&unknown_channel, &ingest, &counters, &mut gate).await;
+        dispatch(&unknown_channel, &ingest, &counters, &mut gate, &peers).await;
 
         let mut overlong = aux_mux::encode(AuxChannel::Mavlink, b"x").unwrap();
         overlong[4] = 0xFF;
         overlong[5] = 0xFF;
-        dispatch(&overlong, &ingest, &counters, &mut gate).await;
+        dispatch(&overlong, &ingest, &counters, &mut gate, &peers).await;
 
         let snap = counters.snapshot();
         assert_eq!(snap.decode_unsupported_version, 1);
@@ -641,15 +693,16 @@ mod tests {
         let ingest = MavlinkIngest::new(&sock);
         let counters = AuxCounters::new();
         let mut gate = SeamGate::default();
+        let peers = AuxPeerCache::new();
 
         for ch in [AuxChannel::Status, AuxChannel::Identity] {
             let d = aux_mux::encode(ch, b"a compact snapshot").unwrap();
-            dispatch(&d, &ingest, &counters, &mut gate).await;
+            dispatch(&d, &ingest, &counters, &mut gate, &peers).await;
         }
         // The MAVLink one after them still republishes, proving the ignore is
         // per-channel and not a lane that stopped.
         let d = aux_mux::encode(AuxChannel::Mavlink, &heartbeat()).unwrap();
-        dispatch(&d, &ingest, &counters, &mut gate).await;
+        dispatch(&d, &ingest, &counters, &mut gate, &peers).await;
 
         assert_eq!(seam.recv().await.unwrap(), heartbeat());
         let snap = counters.snapshot();
@@ -670,10 +723,11 @@ mod tests {
         ));
         let counters = AuxCounters::new();
         let mut gate = SeamGate::default();
+        let peers = AuxPeerCache::new();
 
         let d = aux_mux::encode(AuxChannel::Mavlink, &heartbeat()).unwrap();
         for _ in 0..5 {
-            dispatch(&d, &ingest, &counters, &mut gate).await;
+            dispatch(&d, &ingest, &counters, &mut gate, &peers).await;
         }
 
         let snap = counters.snapshot();
@@ -699,6 +753,7 @@ mod tests {
         );
         let counters = AuxCounters::new();
         let mut gate = SeamGate::default();
+        let peers = AuxPeerCache::new();
 
         let mut wrong_version = aux_mux::encode(AuxChannel::Mavlink, b"x").unwrap();
         wrong_version[2] = 0x99;
@@ -726,7 +781,7 @@ mod tests {
         ];
         let sent = datagrams.len() as u64;
         for d in &datagrams {
-            dispatch(d, &ingest, &counters, &mut gate).await;
+            dispatch(d, &ingest, &counters, &mut gate, &peers).await;
         }
 
         let snap = counters.snapshot();
@@ -765,6 +820,7 @@ mod tests {
             port,
             Arc::new(MavlinkIngest::new(&sock)),
             counters.clone(),
+            AuxPeerCache::new(),
             cancel.clone(),
         ));
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -817,9 +873,15 @@ mod tests {
         ));
 
         assert!(
-            run_aux_consumer(port, ingest.clone(), counters.clone(), cancel.clone())
-                .await
-                .is_err(),
+            run_aux_consumer(
+                port,
+                ingest.clone(),
+                counters.clone(),
+                AuxPeerCache::new(),
+                cancel.clone(),
+            )
+            .await
+            .is_err(),
             "binding a taken port must report an error"
         );
 
@@ -832,6 +894,7 @@ mod tests {
             port,
             ingest,
             counters.clone(),
+            AuxPeerCache::new(),
             cancel.clone(),
         ));
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -842,5 +905,71 @@ mod tests {
             "the failed bind must be counted"
         );
         drop(held);
+    }
+
+    /// A status frame must actually REACH the cache, not merely be counted.
+    ///
+    /// The counter and the cache are updated in the same arm, so a wiring
+    /// regression that dropped the decode would still leave `status_frames`
+    /// climbing and the surface silently empty. This asserts the surface.
+    #[tokio::test]
+    async fn status_and_identity_frames_reach_the_peer_cache() {
+        let ingest = MavlinkIngest::new("/nonexistent/ingest.sock");
+        let counters = AuxCounters::new();
+        let mut gate = SeamGate::default();
+        let peers = AuxPeerCache::new();
+
+        let (status_body, _) = ados_protocol::node_status::NodeStatus::new("drone-a", 3)
+            .with_fc(Some(true), Some(true), None, Some("ardupilot"))
+            .encode()
+            .unwrap();
+        let identity_body = ados_protocol::node_status::NodeIdentity::build(
+            "drone-a",
+            Some("Alpha"),
+            Some("drone"),
+            Some("1.2.3"),
+        )
+        .encode()
+        .unwrap();
+
+        for (channel, body) in [
+            (AuxChannel::Status, status_body),
+            (AuxChannel::Identity, identity_body),
+        ] {
+            let framed = aux_mux::encode(channel, &body).unwrap();
+            dispatch(&framed, &ingest, &counters, &mut gate, &peers).await;
+        }
+
+        let snap = counters.snapshot();
+        assert_eq!(snap.status_frames, 1);
+        assert_eq!(snap.identity_frames, 1);
+        assert_eq!(snap.status_undecodable, 0);
+        assert_eq!(snap.identity_undecodable, 0);
+
+        let published = peers.peers_payload(crate::aux_peers::test_now());
+        assert_eq!(published.len(), 1, "the peer must be published");
+        assert_eq!(published[0]["device_id"], "drone-a");
+        assert_eq!(published[0]["name"], "Alpha");
+        assert_eq!(published[0]["status"]["fc_firmware"], "ardupilot");
+    }
+
+    /// A status body this build cannot read is counted, not silently dropped:
+    /// a peer running a newer schema is a version mismatch worth seeing.
+    #[tokio::test]
+    async fn an_undecodable_status_body_is_counted_separately() {
+        let ingest = MavlinkIngest::new("/nonexistent/ingest.sock");
+        let counters = AuxCounters::new();
+        let mut gate = SeamGate::default();
+        let peers = AuxPeerCache::new();
+
+        let framed = aux_mux::encode(AuxChannel::Status, b"not msgpack").unwrap();
+        dispatch(&framed, &ingest, &counters, &mut gate, &peers).await;
+
+        let snap = counters.snapshot();
+        assert_eq!(snap.status_frames, 1, "the datagram is still accounted for");
+        assert_eq!(snap.status_undecodable, 1);
+        assert!(peers.peers_payload(0.0).is_empty());
+        // The sub-tally must not disturb the whole-lane accounting invariant.
+        assert_eq!(snap.accounted(), snap.datagrams_received);
     }
 }

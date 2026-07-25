@@ -16,6 +16,7 @@
 pub mod acquire;
 pub mod atlas_relay;
 pub mod aux_consumer;
+pub mod aux_peers;
 pub mod cmdsock;
 pub mod fanout;
 pub mod gs_config;

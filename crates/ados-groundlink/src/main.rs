@@ -377,10 +377,20 @@ async fn run_direct(
     // lane once and fan out in-process, not bind the port twice.
     let aux_counters = ados_groundlink::AuxCounters::new();
     let aux_shutdown = Arc::new(Notify::new());
+    // The relayed-node cache: status and identity frames the linked drone pushes
+    // over the lane, held per device id with the age of each. Its sidecar is what
+    // lets this node describe what it relays to an operator who is paired only
+    // here, and it feeds the peer identity into the linked-peers surface.
+    let aux_peers = ados_groundlink::aux_peers::AuxPeerCache::new();
     let aux_task = tokio::spawn(ados_groundlink::supervise_aux_consumer(
         wfb_rx::ATLAS_RX_PORT,
         Arc::new(ados_protocol::mavlink_ingest::MavlinkIngest::at_default_path()),
         aux_counters.clone(),
+        aux_peers.clone(),
+        aux_shutdown.clone(),
+    ));
+    let aux_peers_task = tokio::spawn(ados_groundlink::aux_peers::persist_loop(
+        aux_peers.clone(),
         aux_shutdown.clone(),
     ));
 
@@ -408,6 +418,10 @@ async fn run_direct(
     aux_shutdown.notify_waiters();
     tokio::time::sleep(Duration::from_millis(100)).await;
     aux_task.abort();
+    // The persister waits on the same signal, but `notify_waiters` only wakes a
+    // task already parked on it, so the abort is what reliably reaps it if the
+    // signal landed while it was mid-write.
+    aux_peers_task.abort();
 
     // Restore the resolved injection adapter to managed mode on the way out.
     restore_managed_if_resolved(&resolved_iface).await;
