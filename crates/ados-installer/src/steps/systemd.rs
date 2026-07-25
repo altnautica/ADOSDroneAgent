@@ -817,6 +817,57 @@ pub fn parse_tunnel_enabled(text: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Parse `network.hotspot.enabled` from config.yaml text. Absent / malformed /
+/// not-present → false (the ground-station setup AP is opt-in). Pure.
+pub fn parse_hotspot_enabled(text: &str) -> bool {
+    #[derive(serde::Deserialize, Default)]
+    struct Raw {
+        #[serde(default)]
+        network: Network,
+    }
+    #[derive(serde::Deserialize, Default)]
+    struct Network {
+        #[serde(default)]
+        hotspot: Option<Hotspot>,
+    }
+    #[derive(serde::Deserialize, Default)]
+    struct Hotspot {
+        #[serde(default)]
+        enabled: bool,
+    }
+    serde_norway::from_str::<Raw>(text)
+        .ok()
+        .and_then(|r| r.network.hotspot)
+        .map(|h| h.enabled)
+        .unwrap_or(false)
+}
+
+/// Reconcile the ground-station setup-AP enable marker from the operator
+/// config: the `/etc/ados/hotspot-enabled` marker the ados-dnsmasq-gs unit
+/// gates on (`ConditionPathExists`) mirrors `network.hotspot.enabled`.
+///
+/// Without it the DHCP/DNS unit starts whenever hostapd's unit is active — but
+/// the hostapd service stays `active` even when the operator never opted in
+/// (it idles in place rather than exiting, so the supervisor does not read a
+/// clean exit as a crash). dnsmasq then binds the AP address on an interface
+/// that is, on a box using its onboard radio as a WiFi client, already carrying
+/// a lease — and fails on every restart, leaving a permanently failed unit on a
+/// perfectly healthy ground station. Idempotent; runs on every install so a
+/// partial state self-heals.
+fn reconcile_hotspot_marker() {
+    let enabled = std::fs::read_to_string(crate::env::CONFIG_YAML)
+        .map(|text| parse_hotspot_enabled(&text))
+        .unwrap_or(false);
+    let marker = Path::new(CONFIG_DIR).join("hotspot-enabled");
+    if enabled {
+        if let Err(e) = std::fs::write(&marker, b"") {
+            tracing::warn!(error = %e, "hotspot enable marker write failed");
+        }
+    } else {
+        let _ = std::fs::remove_file(&marker);
+    }
+}
+
 /// Reconcile the config-over-radio enable marker from the operator config: the
 /// `/etc/ados/tunnel-enabled` marker the ados-tunnel-config unit gates on
 /// (`ConditionPathExists`) mirrors `radio.tunnel.enabled`, so enabling the
@@ -1479,6 +1530,15 @@ impl Step for Systemd {
         //     no manual systemctl, an opted-out config leaves it skipped.
         reconcile_tunnel_marker();
 
+        // 5a-quater. Mirror `network.hotspot.enabled` onto the marker the
+        //     ados-dnsmasq-gs unit's ConditionPathExists gates on. hostapd
+        //     idles-in-place rather than exiting when the operator has not
+        //     opted in, so its unit stays active and cannot itself gate the
+        //     DHCP/DNS unit; without this marker dnsmasq starts anyway and
+        //     fails forever trying to bind an interface that is serving as a
+        //     WiFi client.
+        reconcile_hotspot_marker();
+
         // 5b. The logging and telemetry store is on by default (the log-view
         //     endpoints read it). Enable it unless the fallback marker pins it
         //     off; the start step brings it up after the supervisor.
@@ -1954,6 +2014,30 @@ mod tests {
         assert!(!parse_tunnel_enabled("radio: {}\n"));
         assert!(!parse_tunnel_enabled("agent:\n  name: x\n"));
         assert!(!parse_tunnel_enabled(": : not yaml"));
+    }
+
+    #[test]
+    fn parse_hotspot_enabled_gate() {
+        assert!(parse_hotspot_enabled(
+            "network:\n  hotspot:\n    enabled: true\n"
+        ));
+        assert!(!parse_hotspot_enabled(
+            "network:\n  hotspot:\n    enabled: false\n"
+        ));
+        // A hotspot block carrying only its AP settings reads opted out: the
+        // setup AP is opt-in, and only `enabled` opts it in. This is the
+        // default posture on a fresh ground station, and it is what keeps the
+        // DHCP/DNS unit cleanly skipped rather than failing to bind an
+        // interface already serving as a WiFi client.
+        assert!(!parse_hotspot_enabled(
+            "network:\n  hotspot:\n    channel: 6\n    password: x\n"
+        ));
+        assert!(parse_hotspot_enabled(
+            "network:\n  hotspot:\n    enabled: true\n    channel: 6\n"
+        ));
+        assert!(!parse_hotspot_enabled("network: {}\n"));
+        assert!(!parse_hotspot_enabled("agent:\n  name: x\n"));
+        assert!(!parse_hotspot_enabled(": : not yaml"));
     }
 
     #[test]

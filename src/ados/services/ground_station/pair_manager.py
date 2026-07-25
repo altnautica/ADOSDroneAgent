@@ -193,6 +193,18 @@ def _save_config_dict(data: dict[str, Any]) -> bool:
                 tunnel_sync_after_config_write(previous_config, data)
             except Exception as exc:  # noqa: BLE001 — the write already landed
                 log.warning("tunnel_config_sync_failed", error=str(exc))
+            # Keep the ground-station setup AP's enable marker + units true to
+            # the persisted config (the marker mirrors network.hotspot.enabled;
+            # the units are kicked only when the slice changed). Best-effort: a
+            # hiccup never fails the landed write.
+            try:
+                from ados.core.hotspot_marker import (
+                    sync_after_config_write as hotspot_sync_after_config_write,
+                )
+
+                hotspot_sync_after_config_write(previous_config, data)
+            except Exception as exc:  # noqa: BLE001 — the write already landed
+                log.warning("hotspot_config_sync_failed", error=str(exc))
             return True
         except (OSError, yaml.YAMLError) as exc:
             log.error(

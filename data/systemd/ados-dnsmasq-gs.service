@@ -4,6 +4,14 @@ After=ados-hostapd.service
 PartOf=ados-supervisor.service
 Requires=ados-hostapd.service
 ConditionPathExists=/etc/ados/dnsmasq-gs.conf
+# The setup AP is opt-in. hostapd's unit cannot gate this one: when the
+# operator has not opted in, hostapd idles in place instead of exiting (so the
+# supervisor does not read a clean exit as a crash), which leaves its unit
+# `active` and satisfies Requires=. Gate on the marker mirroring
+# network.hotspot.enabled instead, or dnsmasq starts on a box whose onboard
+# radio is a WiFi client, fails to bind an address already carrying a lease,
+# and burns its restart budget into a permanently failed unit.
+ConditionPathExists=/etc/ados/hotspot-enabled
 StartLimitInterval=60s
 StartLimitBurst=5
 

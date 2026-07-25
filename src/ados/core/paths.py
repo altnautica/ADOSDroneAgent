@@ -324,6 +324,13 @@ CRSF_ENABLED_PATH = ADOS_ETC_DIR / "crsf-enabled"
 # cleanly. Reconciled by the config persist path and by the installer, never
 # hand-managed.
 TUNNEL_ENABLED_PATH = ADOS_ETC_DIR / "tunnel-enabled"
+# Marker mirroring `network.hotspot.enabled`: present ⇔ the ground-station
+# setup AP is opted in. The ados-dnsmasq-gs systemd unit gates on it
+# (ConditionPathExists) because hostapd's unit idles-in-place rather than
+# exiting when the operator has not opted in, so it stays `active` and cannot
+# itself gate the DHCP/DNS unit. Reconciled by the config persist path and by
+# the installer, never hand-managed.
+HOTSPOT_ENABLED_PATH = ADOS_ETC_DIR / "hotspot-enabled"
 # Probation marker for the apply-verify-auto-revert path. Written when a
 # boot-critical SPI-LCD overlay is applied blind on a board that declares
 # the panel but where it is not yet bound. Records the boot-config snapshot

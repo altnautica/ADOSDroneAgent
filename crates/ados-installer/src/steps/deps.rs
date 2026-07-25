@@ -49,6 +49,11 @@ pub fn core_packages() -> &'static [&'static str] {
         "gstreamer1.0-libav",
         "gstreamer1.0-rtsp",
         "iw",
+        // Radio kill-switch control. A soft-blocked adapter shows up as a
+        // present-but-silent radio, and `iw` cannot clear that state, so keep
+        // the tool that can alongside it. A standalone package on Debian 13,
+        // not part of util-linux, so it is not guaranteed by the base image.
+        "rfkill",
         "ethtool",
         "wireless-regdb",
     ]
