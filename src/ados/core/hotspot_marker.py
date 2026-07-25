@@ -115,6 +115,15 @@ def sync_after_config_write(
     marker_changed = reconcile_hotspot_marker(current)
     prev_slice = _hotspot_slice(previous)
     cur_slice = _hotspot_slice(current)
-    if marker_changed or prev_slice != cur_slice:
-        _kick("ados-hostapd.service", "try-restart")
+    if not (marker_changed or prev_slice != cur_slice):
+        return
+    _kick("ados-hostapd.service", "try-restart")
+    if bool(cur_slice.get("enabled", False)):
         _kick("ados-dnsmasq-gs.service", "reload-or-restart")
+    else:
+        # Opting the AP back out: clear any latched failure so the now
+        # condition-skipped unit stops reporting `failed`. systemd remembers
+        # a unit's last failure until it is reset, so without this an
+        # operator who turns the AP off still sees a failed unit.
+        _kick("ados-dnsmasq-gs.service", "reset-failed")
+        _kick("ados-dnsmasq-gs.service", "stop")

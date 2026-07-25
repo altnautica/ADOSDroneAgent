@@ -855,6 +855,7 @@ pub fn parse_hotspot_enabled(text: &str) -> bool {
 /// perfectly healthy ground station. Idempotent; runs on every install so a
 /// partial state self-heals.
 fn reconcile_hotspot_marker() {
+    const GATED_UNIT: &str = "ados-dnsmasq-gs.service";
     let enabled = std::fs::read_to_string(crate::env::CONFIG_YAML)
         .map(|text| parse_hotspot_enabled(&text))
         .unwrap_or(false);
@@ -865,6 +866,13 @@ fn reconcile_hotspot_marker() {
         }
     } else {
         let _ = std::fs::remove_file(&marker);
+        // Clear any latched failure before the gate takes effect. systemd
+        // remembers a unit's last failed state until it is reset, so a box
+        // upgrading from the version that started this unit unconditionally
+        // would keep reporting a failed unit forever even though the
+        // condition now skips it cleanly — exactly the false status surface
+        // this gate exists to remove.
+        let _ = exec::run("systemctl", &["reset-failed", GATED_UNIT]);
     }
 }
 

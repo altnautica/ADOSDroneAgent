@@ -80,6 +80,29 @@ def test_sync_kicks_only_when_the_hotspot_slice_changes(monkeypatch, tmp_path) -
     assert ("ados-hostapd.service", "try-restart") in kicks
 
 
+def test_opting_out_clears_a_latched_dnsmasq_failure(monkeypatch, tmp_path) -> None:
+    """Turning the AP off must reset the unit's remembered failure.
+
+    systemd keeps a unit's last failed state until it is reset, so without
+    this an operator who opts the AP back out still sees a failed unit
+    even though the condition now skips it cleanly.
+    """
+    marker = tmp_path / "hotspot-enabled"
+    marker.touch()
+    monkeypatch.setattr(paths, "HOTSPOT_ENABLED_PATH", marker)
+    kicks: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        hotspot_marker, "_kick", lambda unit, verb: kicks.append((unit, verb))
+    )
+
+    sync_after_config_write(_enabled(True), _enabled(False))
+    assert not marker.exists()
+    assert ("ados-dnsmasq-gs.service", "reset-failed") in kicks
+    assert ("ados-dnsmasq-gs.service", "stop") in kicks
+    # Never a restart on the way out — that would re-run the failing start.
+    assert ("ados-dnsmasq-gs.service", "reload-or-restart") not in kicks
+
+
 def test_sync_kicks_on_a_same_posture_slice_edit(monkeypatch, tmp_path) -> None:
     """A channel/password edit with enabled unchanged still restarts the AP."""
     marker = tmp_path / "hotspot-enabled"
