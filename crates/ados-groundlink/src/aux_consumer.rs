@@ -370,20 +370,42 @@ async fn dispatch(
 
     match channel {
         AuxChannel::Mavlink => {
-            counters.bump(&c.mavlink_frames);
+            // One datagram carries several frames: the lane's loss tracks
+            // packets per second rather than bytes, so the drone batches. Split
+            // on the header-derived boundary, which needs no dialect knowledge
+            // and so cannot desynchronise on a message id this build lacks.
+            let split = ados_protocol::aux_mux::split_frames(payload);
+            // A payload that yields no whole frame is forwarded intact rather
+            // than dropped. A drone build that predates batching sends exactly
+            // one frame per datagram, and a frame this splitter cannot measure
+            // is still a frame the router may be able to read. Dropping it here
+            // would lose real traffic to make the split look tidy.
+            let frames: Vec<&[u8]> = if split.is_empty() {
+                vec![payload]
+            } else {
+                split
+            };
             let now = Instant::now();
             if !gate.may_attempt(now) {
-                counters.bump(&c.republish_lane_down);
+                // Count every frame the datagram carried, not the datagram, so
+                // sent and republished totals stay comparable.
+                for _ in &frames {
+                    counters.bump(&c.mavlink_frames);
+                    counters.bump(&c.republish_lane_down);
+                }
                 return;
             }
-            match ingest.send_frame(payload).await {
-                Ok(()) => {
-                    gate.on_success();
-                    counters.bump(&c.mavlink_republished);
-                }
-                Err(e) => {
-                    gate.on_failure(now, &e);
-                    counters.bump(&c.republish_errors);
+            for frame in frames {
+                counters.bump(&c.mavlink_frames);
+                match ingest.send_frame(frame).await {
+                    Ok(()) => {
+                        gate.on_success();
+                        counters.bump(&c.mavlink_republished);
+                    }
+                    Err(e) => {
+                        gate.on_failure(now, &e);
+                        counters.bump(&c.republish_errors);
+                    }
                 }
             }
         }
@@ -624,6 +646,72 @@ mod tests {
         let good = aux_mux::encode(AuxChannel::Mavlink, &heartbeat()).unwrap();
         dispatch(&good, &ingest, &counters, &mut gate, &peers).await;
         assert_eq!(seam.recv().await.unwrap(), heartbeat());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_batched_datagram_republishes_every_frame_it_carried() {
+        // The drone packs several frames into one datagram because the lane
+        // loses packets rather than bytes. Each must reach the seam separately
+        // or the republished stream is one corrupt blob.
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("mavlink-ingest.sock");
+        let (mut seam, server) = fake_seam(sock.clone());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let ingest = MavlinkIngest::new(&sock);
+        let counters = AuxCounters::new();
+        let mut gate = SeamGate::default();
+        let peers = AuxPeerCache::new();
+
+        // A WELL-FORMED v2 frame: 10 header bytes, a 9-byte payload, 2 checksum.
+        // The `heartbeat()` fixture above declares a 9-byte payload but is only
+        // 12 bytes long, so it is not a whole frame and cannot be split out of a
+        // batch. That is fine for the single-frame test (the fallback forwards
+        // an unsplittable payload intact) but a batch needs real boundaries.
+        let mut frame = vec![0xFD, 0x09, 0x00, 0x00, 0x07, 0x01, 0x01, 0x00, 0x00, 0x00];
+        frame.extend_from_slice(&[0x11; 9]);
+        frame.extend_from_slice(&[0xAA, 0xBB]);
+        assert_eq!(frame.len(), 21, "a v2 frame with a 9-byte payload");
+
+        let mut batch = Vec::new();
+        for _ in 0..3 {
+            batch.extend_from_slice(&frame);
+        }
+        let datagram = aux_mux::encode(AuxChannel::Mavlink, &batch).unwrap();
+        dispatch(&datagram, &ingest, &counters, &mut gate, &peers).await;
+
+        for _ in 0..3 {
+            assert_eq!(seam.recv().await.unwrap(), frame);
+        }
+        let snap = counters.snapshot();
+        assert_eq!(snap.datagrams_received, 1, "one datagram arrived");
+        assert_eq!(snap.mavlink_frames, 3, "carrying three frames");
+        assert_eq!(snap.mavlink_republished, 3);
+        assert_eq!(snap.republish_errors, 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_payload_that_is_not_splittable_is_still_forwarded() {
+        // A drone build predating batching sends one frame per datagram. If the
+        // splitter cannot measure it we forward it intact rather than drop it.
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("mavlink-ingest.sock");
+        let (mut seam, server) = fake_seam(sock.clone());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let ingest = MavlinkIngest::new(&sock);
+        let counters = AuxCounters::new();
+        let mut gate = SeamGate::default();
+        let peers = AuxPeerCache::new();
+
+        let opaque = b"not-a-mavlink-frame".to_vec();
+        let datagram = aux_mux::encode(AuxChannel::Mavlink, &opaque).unwrap();
+        dispatch(&datagram, &ingest, &counters, &mut gate, &peers).await;
+
+        assert_eq!(seam.recv().await.unwrap(), opaque);
+        assert_eq!(counters.snapshot().mavlink_republished, 1);
         server.abort();
     }
 

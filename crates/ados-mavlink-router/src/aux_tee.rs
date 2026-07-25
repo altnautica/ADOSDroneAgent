@@ -79,6 +79,19 @@ const STX_V1: u8 = 0xFE;
 /// stream's budget.
 pub const DEFAULT_BUDGET_BYTES_PER_SEC: f64 = 16_384.0;
 
+/// How long a partly-filled batch waits for company before it goes out.
+///
+/// The auxiliary lane's loss is driven by PACKETS per second, not bytes per
+/// second: measured on a live link, an identical 2.4 KB/s lost 15% when sent as
+/// ten small datagrams a second and 0% as two large ones. Every datagram is a
+/// separate radio transmission at the lane's minimal FEC, so the fix is to send
+/// fewer, fuller datagrams rather than to shed frames.
+///
+/// 50 ms bounds the added latency at well under a control cycle while letting a
+/// 10 Hz telemetry stream pack several frames per transmission. A batch that
+/// fills first goes immediately, so a burst never waits.
+const BATCH_WINDOW: Duration = Duration::from_millis(50);
+
 /// Burst allowance. Lets a short spike (a mode change, a parameter response
 /// burst) through without shedding, while the sustained rate stays capped.
 pub const DEFAULT_BURST_BYTES: f64 = 32_768.0;
@@ -425,6 +438,11 @@ pub async fn run(
     let mut shaper = RateShaper::new(shaper_config);
     let mut gate = LaneGate::default();
     let mut last_report = TeeCountersSnapshot::default();
+    // Frames accumulate here and leave as one datagram. `batched` is the frame
+    // count in flight so the counters still report frames, not datagrams.
+    let mut batch: Vec<u8> = Vec::with_capacity(AUX_MAX_PAYLOAD);
+    let mut batched: u64 = 0;
+    let mut batch_deadline: Option<Instant> = None;
     let mut report_tick = tokio::time::interval_at(
         tokio::time::Instant::now() + COUNTER_REPORT_INTERVAL,
         COUNTER_REPORT_INTERVAL,
@@ -437,11 +455,19 @@ pub async fn run(
     );
 
     loop {
+        // A partly-filled batch must not sit forever on a quiet link, so the
+        // select waits on its deadline as well as on the next frame.
+        let flush_at = batch_deadline.unwrap_or_else(|| Instant::now() + BATCH_WINDOW);
         let frame = tokio::select! {
             biased;
             _ = cancel.notified() => break,
             _ = report_tick.tick() => {
                 last_report = report(&counters, last_report);
+                continue;
+            }
+            _ = tokio::time::sleep_until(flush_at.into()), if batch_deadline.is_some() => {
+                flush(&egress, &mut batch, &mut batched, &counters, &mut gate).await;
+                batch_deadline = None;
                 continue;
             }
             received = frames.recv() => match received {
@@ -488,31 +514,73 @@ pub async fn run(
             }
         }
 
+        // Budget is charged per frame, so shedding stays per-frame and the
+        // priority reserve keeps meaning what it did. Only the carrier changes.
         let cost = AUX_HEADER_LEN + frame.len();
         if !shaper.admit(Instant::now(), cost, frame_priority(&frame)) {
             counters.dropped_rate_limit.fetch_add(1, Ordering::Relaxed);
             continue;
         }
 
-        match egress.send(AuxChannel::Mavlink, &frame).await {
-            Ok(()) => {
-                counters.frames_forwarded.fetch_add(1, Ordering::Relaxed);
-                counters
-                    .bytes_forwarded
-                    .fetch_add(cost as u64, Ordering::Relaxed);
-            }
-            Err(error) => {
-                counters.send_errors.fetch_add(1, Ordering::Relaxed);
-                // The send path already dropped its socket, so the next frame
-                // re-opens; back off first so a persistent fault does not turn
-                // into an open storm.
-                gate.on_failure(Instant::now(), &error);
-            }
+        // Batch rather than send one datagram per frame. Flush first if this
+        // frame would not fit, so a datagram never exceeds the lane's budget.
+        if !batch.is_empty() && batch.len() + frame.len() > AUX_MAX_PAYLOAD {
+            flush(&egress, &mut batch, &mut batched, &counters, &mut gate).await;
+        }
+        batch.extend_from_slice(&frame);
+        batched += 1;
+        if batch_deadline.is_none() {
+            batch_deadline = Some(Instant::now() + BATCH_WINDOW);
+        }
+        // A full batch goes now; a partial one waits out the window above.
+        if batch.len() >= AUX_MAX_PAYLOAD {
+            flush(&egress, &mut batch, &mut batched, &counters, &mut gate).await;
+            batch_deadline = None;
         }
     }
 
+    // Whatever is still buffered when the loop ends has been admitted by the
+    // shaper already, so it is owed a send attempt rather than a silent drop.
+    flush(&egress, &mut batch, &mut batched, &counters, &mut gate).await;
+
     report(&counters, last_report);
     tracing::info!("mavlink_aux_tee_stopped");
+}
+
+/// Send the accumulated batch as one auxiliary-lane datagram.
+///
+/// Counters still tally FRAMES, not datagrams, so the numbers stay comparable
+/// across the change and a reader is never misled into thinking traffic fell
+/// when only the carrier got fuller.
+async fn flush(
+    egress: &AuxEgress,
+    batch: &mut Vec<u8>,
+    batched: &mut u64,
+    counters: &Arc<TeeCounters>,
+    gate: &mut LaneGate,
+) {
+    if batch.is_empty() {
+        return;
+    }
+    let frames = *batched;
+    let bytes = (AUX_HEADER_LEN + batch.len()) as u64;
+    match egress.send(AuxChannel::Mavlink, batch).await {
+        Ok(()) => {
+            counters
+                .frames_forwarded
+                .fetch_add(frames, Ordering::Relaxed);
+            counters.bytes_forwarded.fetch_add(bytes, Ordering::Relaxed);
+        }
+        Err(error) => {
+            counters.send_errors.fetch_add(1, Ordering::Relaxed);
+            // The send path already dropped its socket, so the next batch
+            // re-opens; back off first so a persistent fault does not turn
+            // into an open storm.
+            gate.on_failure(Instant::now(), &error);
+        }
+    }
+    batch.clear();
+    *batched = 0;
 }
 
 #[cfg(test)]
@@ -784,6 +852,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn several_frames_ride_one_datagram() {
+        // The reason batching exists: the lane loses PACKETS, not bytes. On a
+        // live link the identical byte rate lost 15% as ten small datagrams a
+        // second and 0% as two large ones. So a burst of frames must leave as
+        // markedly fewer datagrams than frames, and every frame must survive.
+        let frame = v2_frame(0, 9);
+        let shaper = ShaperConfig {
+            budget_bytes_per_sec: 1_000_000.0,
+            burst_bytes: 1_000_000.0,
+            bulk_reserve_bytes: 0.0,
+        };
+        let (counters, received) = run_tee(vec![frame.clone(); 20], false, shaper).await;
+
+        assert_eq!(
+            counters.frames_forwarded, 20,
+            "no frame is lost to batching"
+        );
+        assert!(
+            received.len() < 20,
+            "20 frames must not leave as 20 datagrams, got {}",
+            received.len()
+        );
+
+        // And the batch splits back into exactly what went in.
+        let out: Vec<Vec<u8>> = received
+            .iter()
+            .flat_map(|d| {
+                aux_mux::split_frames(aux_mux::decode(d).unwrap().1)
+                    .into_iter()
+                    .map(|f| f.to_vec())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(out.len(), 20);
+        assert!(out.iter().all(|f| *f == frame));
+    }
+
+    #[tokio::test]
+    async fn no_datagram_exceeds_the_lane_payload_budget() {
+        // A batch must flush before it would overflow, or the encode refuses and
+        // the whole batch is lost rather than one frame.
+        let frame = v2_frame(0, 9);
+        let shaper = ShaperConfig {
+            budget_bytes_per_sec: 1_000_000.0,
+            burst_bytes: 1_000_000.0,
+            bulk_reserve_bytes: 0.0,
+        };
+        // 60 frames of ~21 bytes is over the 1200-byte payload budget, so the
+        // batch must flush mid-run. Kept under the harness broadcast channel's
+        // 64 slots: pushing more sheds frames as lagged before the tee sees
+        // them, which would test the harness rather than the batching.
+        let (counters, received) = run_tee(vec![frame; 60], false, shaper).await;
+        assert_eq!(counters.frames_forwarded + counters.dropped_lagged, 60);
+        assert!(
+            received.len() > 1,
+            "the batch must flush before overflowing"
+        );
+        for d in &received {
+            let (_, payload) = aux_mux::decode(d).expect("every datagram decodes");
+            assert!(
+                payload.len() <= AUX_MAX_PAYLOAD,
+                "datagram payload {} exceeds the lane budget",
+                payload.len()
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn frames_over_the_byte_budget_are_shed_rather_than_queued() {
         // A bucket that admits two frames and no more within the test's span.
         let frame = v2_frame(0, 9);
@@ -797,9 +933,15 @@ mod tests {
 
         assert_eq!(counters.frames_forwarded, 2);
         assert_eq!(counters.dropped_rate_limit, 8);
+        // Frames are batched into datagrams, so count FRAMES on the wire rather
+        // than datagrams: the budget is a ceiling on what is admitted, and the
+        // carrier it rides is a separate concern.
+        let on_wire: usize = received
+            .iter()
+            .map(|d| aux_mux::split_frames(aux_mux::decode(d).unwrap().1).len())
+            .sum();
         assert_eq!(
-            received.len(),
-            2,
+            on_wire, 2,
             "the budget is a ceiling: the rest are dropped, not buffered"
         );
     }
@@ -824,9 +966,16 @@ mod tests {
 
         assert_eq!(counters.dropped_rate_limit, 5, "five bulk frames shed");
         assert_eq!(counters.frames_forwarded, 4, "one bulk plus three beats");
+        // Split each datagram back into frames: a batch may carry several, and
+        // the guarantee under test is about frames surviving, not datagrams.
         let payloads: Vec<Vec<u8>> = received
             .iter()
-            .map(|d| aux_mux::decode(d).unwrap().1.to_vec())
+            .flat_map(|d| {
+                aux_mux::split_frames(aux_mux::decode(d).unwrap().1)
+                    .into_iter()
+                    .map(|f| f.to_vec())
+                    .collect::<Vec<_>>()
+            })
             .collect();
         assert_eq!(
             payloads.iter().filter(|p| *p == &beat).count(),

@@ -142,6 +142,60 @@ pub fn decode(frame: &[u8]) -> Result<(AuxChannel, &[u8]), AuxDecodeError> {
     Ok((channel, &frame[AUX_HEADER_LEN..]))
 }
 
+// MAVLink frame boundaries live here rather than in the dialect-backed
+// `mavlink` module because splitting a batch needs only the header, and the
+// ground station must not pull an entire dialect crate in to receive frames
+// it merely forwards.
+
+/// Total on-wire byte length of the MAVLink frame starting at `bytes[0]`, or
+/// `None` when the slice does not yet hold a whole frame.
+///
+/// Reads only the header, never the dialect, so a message id this build does
+/// not know still yields a correct boundary. That matters wherever frames are
+/// concatenated: a dialect-dependent split would desynchronise the whole batch
+/// on the first unknown message.
+///
+/// v2: 10 header bytes + payload + 2 checksum, plus a 13-byte signature when
+/// the incompat flag bit 0 is set. v1: 6 header bytes + payload + 2 checksum.
+pub fn frame_len(bytes: &[u8]) -> Option<usize> {
+    match bytes.first()? {
+        0xFD => {
+            let payload = *bytes.get(1)? as usize;
+            let signed = (*bytes.get(2)? & 0x01) != 0;
+            Some(12 + payload + if signed { 13 } else { 0 })
+        }
+        0xFE => Some(8 + *bytes.get(1)? as usize),
+        _ => None,
+    }
+}
+
+/// Split a buffer of back-to-back MAVLink frames into whole frames.
+///
+/// Several frames are batched into one radio datagram, because the auxiliary
+/// lane's loss is driven by packets per second rather than bytes per second:
+/// measured on a live link, the same byte rate lost 15% as many small datagrams
+/// and 0% as a few large ones. Batching preserves the frames that a
+/// packet-rate cap would otherwise shed.
+///
+/// Stops at the first byte that does not begin a complete, recognisable frame
+/// and returns what was whole, so a truncated tail is dropped rather than
+/// mis-split into garbage.
+pub fn split_frames(buf: &[u8]) -> Vec<&[u8]> {
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    while at < buf.len() {
+        let Some(len) = frame_len(&buf[at..]) else {
+            break;
+        };
+        if len == 0 || at + len > buf.len() {
+            break;
+        }
+        out.push(&buf[at..at + len]);
+        at += len;
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,6 +269,95 @@ mod tests {
                 actual: 9
             }
         );
+    }
+
+    /// Build a minimal well-formed MAVLink v2 frame with `payload` bytes.
+    fn v2(payload_len: u8, signed: bool) -> Vec<u8> {
+        let mut f = vec![
+            0xFD,
+            payload_len,
+            if signed { 0x01 } else { 0x00 },
+            0,
+            0,
+            1,
+            1,
+            0,
+            0,
+            0,
+        ];
+        f.extend(std::iter::repeat_n(0xAB, payload_len as usize));
+        f.extend_from_slice(&[0, 0]); // checksum
+        if signed {
+            f.extend(std::iter::repeat_n(0u8, 13));
+        }
+        f
+    }
+
+    /// Build a minimal well-formed MAVLink v1 frame.
+    fn v1(payload_len: u8) -> Vec<u8> {
+        let mut f = vec![0xFE, payload_len, 0, 1, 1, 0];
+        f.extend(std::iter::repeat_n(0xCD, payload_len as usize));
+        f.extend_from_slice(&[0, 0]);
+        f
+    }
+
+    #[test]
+    fn frame_len_reads_v1_v2_and_the_signature_block() {
+        assert_eq!(frame_len(&v2(10, false)), Some(22));
+        assert_eq!(frame_len(&v2(10, true)), Some(35));
+        assert_eq!(frame_len(&v1(10)), Some(18));
+        assert_eq!(frame_len(b"\x00junk"), None);
+        assert_eq!(frame_len(&[]), None);
+    }
+
+    #[test]
+    fn splits_a_batch_back_into_the_frames_that_went_in() {
+        // The whole point of batching: the lane loses packets, not bytes, so
+        // several frames ride one datagram. Split must return exactly what was
+        // concatenated or the republished stream is corrupt.
+        let frames = vec![v2(5, false), v1(9), v2(0, false), v2(3, true)];
+        let mut batch = Vec::new();
+        for f in &frames {
+            batch.extend_from_slice(f);
+        }
+        let out = split_frames(&batch);
+        assert_eq!(out.len(), frames.len());
+        for (got, want) in out.iter().zip(frames.iter()) {
+            assert_eq!(*got, want.as_slice());
+        }
+    }
+
+    #[test]
+    fn a_single_frame_batch_is_unchanged() {
+        let f = v2(12, false);
+        assert_eq!(split_frames(&f), vec![f.as_slice()]);
+    }
+
+    #[test]
+    fn drops_a_truncated_tail_and_keeps_the_whole_frames() {
+        // A datagram clipped in transit must not be mis-split into garbage: the
+        // frames that arrived whole are kept, the partial one is discarded.
+        let good = v2(8, false);
+        let mut batch = good.clone();
+        let partial = v2(20, false);
+        batch.extend_from_slice(&partial[..6]);
+        let out = split_frames(&batch);
+        assert_eq!(out, vec![good.as_slice()]);
+    }
+
+    #[test]
+    fn stops_at_an_unrecognisable_byte_rather_than_scanning_on() {
+        let mut batch = v2(4, false);
+        batch.push(0x00);
+        batch.extend_from_slice(&v1(4));
+        // Everything after the junk byte is abandoned: resyncing by scanning
+        // could lock onto a payload byte that happens to look like a header.
+        assert_eq!(split_frames(&batch).len(), 1);
+    }
+
+    #[test]
+    fn an_empty_buffer_yields_no_frames() {
+        assert!(split_frames(&[]).is_empty());
     }
 
     #[test]
