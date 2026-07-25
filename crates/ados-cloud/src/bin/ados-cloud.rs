@@ -27,7 +27,8 @@ use ados_cloud::config::CloudConfig;
 use ados_cloud::dispatch::install::DownloadSource;
 use ados_cloud::ground_station::{bridge as gs_bridge, CloudRelayBridge};
 use ados_cloud::loops::{
-    atlas_forwarder, atlas_jobs, beacon, command_poll, enrichment, heartbeat, offload_reconciler,
+    atlas_forwarder, atlas_jobs, aux_status, beacon, command_poll, enrichment, heartbeat,
+    offload_reconciler,
 };
 use ados_cloud::mqtt::transport::TransportConfig;
 use ados_cloud::mqtt::{MavlinkMqttRelay, MspMqttRelay, WS_PATH};
@@ -204,6 +205,13 @@ async fn main() -> Result<()> {
         // offload-link sidecar it writes drives the reported perception tier.
         // INERT off a drone / when perception.offload is disabled.
         tokio::spawn(offload_reconciler::run(config.clone(), shutdown_rx.clone())),
+        // ── Auxiliary-lane status publisher ────────────────────
+        // Push this node's compact status + identity over the radio's auxiliary
+        // lane, so a ground station relaying it can describe it to an operator
+        // who is paired only to the ground station. The radio link carries no
+        // IP, so the node cannot be asked; it states. Rate-limited, bounded, and
+        // silent once the lane is refused, so it can never disturb video.
+        tokio::spawn(aux_status::run(config.clone(), shutdown_rx.clone())),
         // ── Atlas reconstruct-job cloud sync ───────────────────
         // On a workstation/compute node, read the reconstruct-job sidecar
         // ados-compute writes and POST each job to {convex}/agent/atlas-jobs so

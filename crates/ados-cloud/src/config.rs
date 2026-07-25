@@ -157,15 +157,84 @@ impl Default for PairingSection {
     }
 }
 
-/// The `video.wfb:` slice the auto-pair supervisor reads. Only the arm flag is
-/// typed; every other wfb field is tolerated.
-#[derive(Debug, Clone, Default, Deserialize)]
+/// Default cadence for the auxiliary-lane status snapshot, in seconds.
+fn default_aux_status_interval_s() -> f64 {
+    1.0
+}
+
+/// Default cadence for the auxiliary-lane identity frame, in seconds. Identity
+/// does not change, so it is sent far less often than status; it exists to let a
+/// ground station name its peer, and to re-answer that after a restart.
+fn default_aux_identity_interval_s() -> f64 {
+    10.0
+}
+
+/// Default gate for publishing status on the auxiliary lane.
+fn default_aux_status_enabled() -> bool {
+    true
+}
+
+/// Floor on either auxiliary-lane cadence, in seconds.
+///
+/// A misconfigured `0` (or a negative) would otherwise spin the producer as fast
+/// as the scheduler allows and flood a lane shared with video and MAVLink. The
+/// floor is applied when the interval is read, so no config value can turn the
+/// status producer into a busy loop.
+pub const AUX_MIN_INTERVAL_S: f64 = 0.2;
+
+/// The `video.wfb:` slice the auto-pair supervisor and the auxiliary-lane status
+/// producer read. Only the typed fields below are read; every other wfb field is
+/// tolerated.
+#[derive(Debug, Clone, Deserialize)]
 pub struct WfbSection {
     /// Whether auto-pair is armed. Default false — the operator arms it via the
     /// GCS / captive portal / REST, and a successful pair disarms it again.
     /// Mirrors the Python `video.wfb.auto_pair_enabled`.
     #[serde(default)]
     pub auto_pair_enabled: bool,
+    /// Whether this node publishes its status + identity on the auxiliary lane
+    /// so a ground station can describe it. Default on: a relayed node with no
+    /// description is the problem this solves, and the frames are small and
+    /// rate-limited. An operator who wants the lane carrying only MAVLink turns
+    /// this off without disabling the lane itself.
+    #[serde(default = "default_aux_status_enabled")]
+    pub aux_status_enabled: bool,
+    /// Seconds between status snapshots. Clamped by [`AUX_MIN_INTERVAL_S`].
+    #[serde(default = "default_aux_status_interval_s")]
+    pub aux_status_interval_s: f64,
+    /// Seconds between identity frames. Clamped by [`AUX_MIN_INTERVAL_S`].
+    #[serde(default = "default_aux_identity_interval_s")]
+    pub aux_identity_interval_s: f64,
+}
+
+impl Default for WfbSection {
+    /// Hand-written rather than derived: a derived `Default` would leave both
+    /// intervals at `0.0`, and because the enclosing sections are
+    /// `#[serde(default)]`, a config file with no `video.wfb:` block would then
+    /// produce a zero-interval producer. The floor in
+    /// [`WfbSection::status_interval`] would still catch it, but a default that
+    /// is only safe because something downstream clamps it is a trap waiting for
+    /// the next reader.
+    fn default() -> Self {
+        Self {
+            auto_pair_enabled: false,
+            aux_status_enabled: default_aux_status_enabled(),
+            aux_status_interval_s: default_aux_status_interval_s(),
+            aux_identity_interval_s: default_aux_identity_interval_s(),
+        }
+    }
+}
+
+impl WfbSection {
+    /// The status cadence, floored so no config value can spin the producer.
+    pub fn status_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs_f64(self.aux_status_interval_s.max(AUX_MIN_INTERVAL_S))
+    }
+
+    /// The identity cadence, floored on the same basis.
+    pub fn identity_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs_f64(self.aux_identity_interval_s.max(AUX_MIN_INTERVAL_S))
+    }
 }
 
 fn default_camera_width() -> u32 {

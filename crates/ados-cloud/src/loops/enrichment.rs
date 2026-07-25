@@ -67,6 +67,23 @@ pub struct CpuSample {
 /// doc. The radio block is intentionally NOT built here: the heartbeat keeps its
 /// honest `RadioBlock::absent()` (radio enrichment is a separate producer).
 pub fn build_native_enrichment(prev_cpu: &mut Option<CpuSample>) -> Value {
+    build_native_enrichment_with(prev_cpu, true)
+}
+
+/// [`build_native_enrichment`] with the service fleet made optional.
+///
+/// Every other source here is a file read; the service fleet is a `systemctl`
+/// fork with a multi-second timeout, which is by far the most expensive part of
+/// a tick. A caller sampling faster than the heartbeat does (the auxiliary-lane
+/// status producer runs at 1 Hz by default, five times the heartbeat rate) would
+/// otherwise fork `systemctl` every second on a small board for a fleet that
+/// changes minute to minute.
+///
+/// Passing `false` omits the `services` key entirely rather than emitting an
+/// empty list, so a caller that skipped the sample is indistinguishable from one
+/// whose `systemctl` failed: both mean "not measured this tick", and neither may
+/// be read as "no services".
+pub fn build_native_enrichment_with(prev_cpu: &mut Option<CpuSample>, services: bool) -> Value {
     let mut obj = Map::new();
 
     // ── Resources from /proc ──────────────────────────────────────────────
@@ -79,7 +96,9 @@ pub fn build_native_enrichment(prev_cpu: &mut Option<CpuSample>) -> Value {
     fold_fc(&mut obj);
 
     // ── Service fleet from systemctl ──────────────────────────────────────
-    fold_services(&mut obj);
+    if services {
+        fold_services(&mut obj);
+    }
 
     Value::Object(obj)
 }
