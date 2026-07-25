@@ -221,8 +221,70 @@ jobs:
           fi
           echo "publishing $(echo "${rows}" | wc -l) driver row(s):"
           echo "${rows}"
-          # Fold every produced per-row JSON into drivers-manifest.json.
-          jq -s '{generated: now | todate, drivers: .}' ${rows} > rel/drivers-manifest.json
+          # Stamp each fresh row with the kernel line it belongs to (the
+          # matrix flavor, carried in the row filename) and when it was
+          # published, so the retention below can bound per LINE. Every
+          # flavor shares one module name, so grouping on the module alone
+          # would let one line's kernel history evict another line's only row.
+          NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          : > /tmp/fresh.ndjson
+          for r in ${rows}; do
+            fl="$(basename "${r}" .json)"; fl="${fl#row-}"
+            jq -c --arg flavor "${fl}" --arg ts "${NOW}" \
+              '. + {flavor: $flavor, published: $ts}' "${r}" >> /tmp/fresh.ndjson
+          done
+
+          # MERGE with what is already published rather than replacing it.
+          # The module assets are never pruned, but a from-scratch manifest
+          # drops every kernel this run did not rebuild, so a board one
+          # apt-upgrade behind stops being served a module that is still
+          # sitting on the release. Carry those rows forward, the fresh build
+          # winning per (module, arch, kver), bounded per kernel line.
+          KEEP_PER_LINE=6
+          if curl -fsSL --max-time 30 \
+               "https://github.com/${GITHUB_REPOSITORY}/releases/download/prebuilt-drivers/drivers-manifest.json" \
+               -o /tmp/published.json 2>/dev/null; then
+            echo "merging with the published manifest ($(jq '.drivers | length' /tmp/published.json) row(s))"
+          else
+            echo "no published manifest reachable; publishing this run's rows only"
+            echo '{"drivers":[]}' > /tmp/published.json
+          fi
+
+          # Drop carried-over rows whose asset is no longer downloadable so the
+          # manifest never advertises something that 404s.
+          : > /tmp/carried.ndjson
+          jq -r '.drivers[]? | @base64' /tmp/published.json > /tmp/carried.b64 || : > /tmp/carried.b64
+          while IFS= read -r enc; do
+            [ -n "${enc}" ] || continue
+            row="$(printf '%s' "${enc}" | base64 -d)"
+            f="$(printf '%s' "${row}" | jq -r '.file // empty')"
+            [ -n "${f}" ] || continue
+            if [ -f "rel/${f}" ]; then
+              printf '%s\n' "${row}" >> /tmp/carried.ndjson
+            elif curl -fsIL --max-time 20 \
+                 "https://github.com/${GITHUB_REPOSITORY}/releases/download/prebuilt-drivers/${f}" \
+                 >/dev/null 2>&1; then
+              printf '%s\n' "${row}" >> /tmp/carried.ndjson
+            else
+              echo "dropping stale manifest row (asset gone): ${f}"
+            fi
+          done < /tmp/carried.b64
+
+          # Fresh rows last so they win the per-(module,arch,kver) dedupe, then
+          # keep the newest KEEP_PER_LINE per kernel line. Rows published before
+          # this stamping carry no flavor and group under "legacy" until their
+          # own line is rebuilt, which re-stamps them.
+          jq -s --argjson keep "${KEEP_PER_LINE}" '
+            ((.[0] // []) + (.[1] // []))
+            | group_by(.module + "/" + .arch + "/" + .kver)
+            | map(last)
+            | group_by((.flavor // "legacy") + "/" + .module + "/" + .arch)
+            | map(sort_by(.published // "") | reverse | .[0:$keep])
+            | flatten
+            | {generated: now | todate, drivers: .}
+          ' <(jq -s '.' /tmp/carried.ndjson) <(jq -s '.' /tmp/fresh.ndjson) \
+            > rel/drivers-manifest.json
+          echo "manifest now advertises $(jq '.drivers | length' rel/drivers-manifest.json) row(s)"
           ( cd rel && sha256sum drivers-manifest.json > drivers-manifest.json.sha256 )
           cat rel/drivers-manifest.json
 
