@@ -304,12 +304,24 @@ fn expand_status(s: &NodeStatus) -> Value {
 ///
 /// Writes one document immediately so a reader sees a valid (empty) file before
 /// the first frame, rather than an absent one it would have to treat as a fault.
-pub async fn persist_loop(cache: AuxPeerCache, cancel: Arc<tokio::sync::Notify>) {
+pub async fn persist_loop(
+    cache: AuxPeerCache,
+    presence: Option<crate::presence::GsPresenceCache>,
+    cancel: Arc<tokio::sync::Notify>,
+) {
     let path = std::path::PathBuf::from(crate::paths::run_path(AUX_PEERS_SIDECAR));
     loop {
-        let payload = cache.sidecar_payload(now_unix());
+        let now = now_unix();
+        let payload = cache.sidecar_payload(now);
         if let Err(e) = crate::sidecars::write_json_atomic(&path, &payload, 0o644) {
             tracing::debug!(error = %e, "aux_peers_persist_failed");
+        }
+        // Hand the freshly-learned identities to the linked-peers surface, which
+        // is beacon-driven and so can carry a signal reading for a peer it cannot
+        // name. Pushing the CURRENT fresh set each tick (rather than accumulating)
+        // means an identity whose peer went quiet drops out on its own.
+        if let Some(p) = &presence {
+            p.set_aux_identities(cache.fresh_identities(now));
         }
         tokio::select! {
             _ = cancel.notified() => break,

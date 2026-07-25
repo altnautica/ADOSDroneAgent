@@ -391,6 +391,7 @@ async fn run_direct(
     ));
     let aux_peers_task = tokio::spawn(ados_groundlink::aux_peers::persist_loop(
         aux_peers.clone(),
+        Some(presence_cache.clone()),
         aux_shutdown.clone(),
     ));
 

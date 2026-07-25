@@ -160,6 +160,14 @@ struct PeerState {
     /// heartbeat needs the list, not just the last-heard scalar. Pruned to the
     /// fresh set at read time.
     peers: std::collections::BTreeMap<String, LinkedPeer>,
+    /// Identities learned from the auxiliary lane (device id -> optional name).
+    ///
+    /// A separate map from `peers` on purpose: these come from a different
+    /// source with different evidence. A beacon proves an RF decode and carries
+    /// a channel and an RSSI; an identity frame proves the peer is speaking and
+    /// carries a name, but says nothing about signal. Keeping them apart is what
+    /// stops the enrichment from inventing radio telemetry it never measured.
+    aux_identities: std::collections::BTreeMap<String, Option<String>>,
 }
 
 /// Schema version for the `linked-peers.json` sidecar (a best-effort drift
@@ -193,6 +201,14 @@ pub struct LinkedPeer {
     pub rssi_dbm: i8,
     /// Wall-clock unix seconds of the last decoded beacon from this peer.
     pub last_seen_unix: f64,
+    /// The peer's human-facing name, learned from the auxiliary lane's identity
+    /// frame rather than the beacon. The beacon is a fixed 68 bytes with its
+    /// identity field already full, so a name cannot travel on it.
+    ///
+    /// Additive and skipped when absent: existing readers ignore unknown keys,
+    /// and the field is present only when the peer actually told us its name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 /// Thread-safe presence cache. Implements the watchdog's `PresenceCache` so it
@@ -230,6 +246,9 @@ impl GsPresenceCache {
                 channel,
                 rssi_dbm,
                 last_seen_unix: now,
+                // Beacons carry no name; the auxiliary lane supplies it at read
+                // time, so this stays absent rather than being invented here.
+                name: None,
             },
         );
         // The scalar fields track the FRESHEST peer (this beacon), the watchdog's
@@ -248,12 +267,48 @@ impl GsPresenceCache {
     /// [`LINKED_PEER_STALE_AFTER_S`]), newest-first. Prunes stale entries from
     /// the map as a side effect so a peer that stops beaconing is dropped, never
     /// republished as a stale confident entry. Empty until a peer is heard.
+    /// Replace the set of identities learned from the auxiliary lane.
+    ///
+    /// Called with the current fresh set, so an identity whose peer stopped
+    /// speaking disappears rather than lingering as a confident label.
+    pub fn set_aux_identities(&self, identities: Vec<(String, Option<String>)>) {
+        let mut s = self.inner.lock().unwrap();
+        s.aux_identities = identities.into_iter().collect();
+    }
+
     pub fn linked_peers(&self) -> Vec<LinkedPeer> {
         let mut s = self.inner.lock().unwrap();
         let now = now_unix();
         s.peers
             .retain(|_, p| (now - p.last_seen_unix) <= LINKED_PEER_STALE_AFTER_S);
+        let aux = s.aux_identities.clone();
         let mut out: Vec<LinkedPeer> = s.peers.values().cloned().collect();
+
+        // Enrich each beacon-derived row with what the auxiliary lane learned.
+        //
+        // A beacon carries a device id, but a node with no persistent id emits an
+        // empty one, and a row with an empty id is dropped by every downstream
+        // reader — so the peer vanishes entirely despite being audibly present.
+        // The identity frame is the only place the real id can come from in that
+        // case, so it is adopted here.
+        //
+        // Only when there is exactly ONE identity to adopt. With several peers
+        // and no id on the beacon there is no way to tell which is which, and a
+        // guess would attach one node's identity to another node's signal.
+        let sole_aux_id = (aux.len() == 1).then(|| aux.iter().next().expect("len is 1"));
+        for peer in out.iter_mut() {
+            if peer.device_id.is_empty() {
+                if let Some((id, name)) = sole_aux_id {
+                    peer.device_id = id.clone();
+                    peer.name = name.clone();
+                }
+                continue;
+            }
+            if let Some(name) = aux.get(&peer.device_id) {
+                peer.name = name.clone();
+            }
+        }
+
         // Freshest peer first, so a single-drone reader that takes `[0]` gets the
         // most-recent decode.
         out.sort_by(|a, b| {
@@ -1367,5 +1422,93 @@ mod tests {
             vec![("wlan1".to_string(), 161)],
             "the coordinated follow must retune the receive iface to the announced channel"
         );
+    }
+
+    #[test]
+    fn an_aux_identity_fills_an_idless_beacon_row() {
+        // The null-peer case. A node with no persistent id emits an empty one in
+        // its beacon, and every downstream reader drops an id-less row, so an
+        // audibly-present peer vanishes. The identity frame is the only place the
+        // real id can come from.
+        let cache = GsPresenceCache::new();
+        cache.record_peer(String::new(), "drone".into(), 149, -55);
+        assert_eq!(cache.linked_peers()[0].device_id, "");
+
+        cache.set_aux_identities(vec![("drone-a".into(), Some("Alpha".into()))]);
+        let peers = cache.linked_peers();
+        assert_eq!(peers[0].device_id, "drone-a");
+        assert_eq!(peers[0].name.as_deref(), Some("Alpha"));
+        // The measured radio values are untouched: the identity frame carries no
+        // signal information and must not be allowed to invent any.
+        assert_eq!(peers[0].channel, 149);
+        assert_eq!(peers[0].rssi_dbm, -55);
+    }
+
+    #[test]
+    fn an_aux_identity_names_a_matching_beacon_row() {
+        let cache = GsPresenceCache::new();
+        cache.record_peer("drone-a".into(), "drone".into(), 157, -48);
+        cache.set_aux_identities(vec![("drone-a".into(), Some("Alpha".into()))]);
+        let peers = cache.linked_peers();
+        assert_eq!(peers[0].device_id, "drone-a");
+        assert_eq!(peers[0].name.as_deref(), Some("Alpha"));
+    }
+
+    #[test]
+    fn an_idless_row_is_not_guessed_at_when_several_peers_are_known() {
+        // With more than one identity and no id on the beacon there is no way to
+        // tell which is which, and a guess would attach one node's identity to
+        // another node's signal.
+        let cache = GsPresenceCache::new();
+        cache.record_peer(String::new(), "drone".into(), 149, -55);
+        cache.set_aux_identities(vec![
+            ("drone-a".into(), Some("Alpha".into())),
+            ("drone-b".into(), Some("Bravo".into())),
+        ]);
+        let peers = cache.linked_peers();
+        assert_eq!(
+            peers[0].device_id, "",
+            "an ambiguous id must not be guessed"
+        );
+        assert_eq!(peers[0].name, None);
+    }
+
+    #[test]
+    fn an_identity_for_an_unheard_peer_does_not_invent_a_row() {
+        // An identity proves the peer is speaking, not that this receiver decoded
+        // its beacon. Publishing a row would require a channel and an RSSI that
+        // were never measured.
+        let cache = GsPresenceCache::new();
+        cache.set_aux_identities(vec![("drone-a".into(), Some("Alpha".into()))]);
+        assert!(cache.linked_peers().is_empty());
+    }
+
+    #[test]
+    fn a_withdrawn_identity_stops_naming_the_peer() {
+        // The setter takes the current fresh set, so a peer that went quiet loses
+        // its label rather than keeping it as a confident stale claim.
+        let cache = GsPresenceCache::new();
+        cache.record_peer("drone-a".into(), "drone".into(), 157, -48);
+        cache.set_aux_identities(vec![("drone-a".into(), Some("Alpha".into()))]);
+        assert_eq!(cache.linked_peers()[0].name.as_deref(), Some("Alpha"));
+
+        cache.set_aux_identities(vec![]);
+        assert_eq!(cache.linked_peers()[0].name, None);
+    }
+
+    #[test]
+    fn the_name_is_omitted_from_the_sidecar_when_absent() {
+        // Additive by construction: a peer with no name serializes exactly the
+        // shape existing readers already parse.
+        let cache = GsPresenceCache::new();
+        cache.record_peer("drone-a".into(), "drone".into(), 157, -48);
+        let payload = linked_peers_payload(&cache.linked_peers());
+        let entry = &payload["peers"][0];
+        assert!(entry.get("name").is_none());
+        assert_eq!(entry["device_id"], "drone-a");
+
+        cache.set_aux_identities(vec![("drone-a".into(), Some("Alpha".into()))]);
+        let payload = linked_peers_payload(&cache.linked_peers());
+        assert_eq!(payload["peers"][0]["name"], "Alpha");
     }
 }
