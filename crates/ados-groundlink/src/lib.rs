@@ -15,6 +15,7 @@
 
 pub mod acquire;
 pub mod atlas_relay;
+pub mod aux_consumer;
 pub mod cmdsock;
 pub mod fanout;
 pub mod gs_config;
@@ -34,6 +35,9 @@ pub mod wfb_rx;
 
 pub use acquire::{AcquireState, ChannelAcquirer};
 pub use atlas_relay::{run_atlas_relay, AtlasRelayStats};
+pub use aux_consumer::{
+    run_aux_consumer, supervise_aux_consumer, AuxCounters, AuxCountersSnapshot,
+};
 pub use fanout::{run_default_fanout, run_fanout};
 pub use gs_config::{AtlasRelayConfig, GroundStationConfig};
 pub use mesh::{get_current_role, MeshSnapshot};

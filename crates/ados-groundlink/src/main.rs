@@ -357,6 +357,33 @@ async fn run_direct(
     // own node. Service-wide, so the list survives receive-plane restarts.
     tokio::spawn(presence::linked_peers_persist_loop(presence_cache.clone()));
 
+    // The auxiliary application lane's consumer. The receive chain decodes that
+    // lane to a loopback port every generation, but the port is bound once for
+    // the service: the generations respawn on link loss, and re-binding a UDP
+    // port on that cadence risks losing the bind to its own lingering socket.
+    // The counters live at service scope for the same reason and are handed to
+    // each generation's stats reader, so the sidecar carries a running total
+    // rather than one that resets whenever the video link blinks.
+    //
+    // Drone MAVLink arriving here is republished onto this node's own MAVLink
+    // plane, so a ground control station connected to this ground station sees
+    // the vehicle over the ports it already uses.
+    //
+    // Deliberately confined to this role. The Atlas relay reads the SAME decoded
+    // aux port in the relay role, and only one process may hold a UDP bind, so
+    // running both would leave the loser dead. They do not meet today because
+    // the Atlas relay is spawned only for the relay role and this only for
+    // direct. Anything that later wants both on one node has to demultiplex the
+    // lane once and fan out in-process, not bind the port twice.
+    let aux_counters = ados_groundlink::AuxCounters::new();
+    let aux_shutdown = Arc::new(Notify::new());
+    let aux_task = tokio::spawn(ados_groundlink::supervise_aux_consumer(
+        wfb_rx::ATLAS_RX_PORT,
+        Arc::new(ados_protocol::mavlink_ingest::MavlinkIngest::at_default_path()),
+        aux_counters.clone(),
+        aux_shutdown.clone(),
+    ));
+
     // The receive adapter is auto-detected inside the receive loop (config's
     // interface is often empty). The shared `resolved_iface` cell (created above
     // for the hop follower) is the seam the loop writes once it resolves the
@@ -367,7 +394,7 @@ async fn run_direct(
 
     // Run the receive loop until a shutdown signal arrives.
     tokio::select! {
-        _ = receive_loop(&config, presence_cache, resolved_iface.clone()) => {}
+        _ = receive_loop(&config, presence_cache, resolved_iface.clone(), aux_counters) => {}
         _ = sigterm.recv() => {
             tracing::info!("received SIGTERM");
         }
@@ -375,6 +402,12 @@ async fn run_direct(
             tracing::info!("received SIGINT");
         }
     }
+
+    // The consumer self-stops on the shared signal; the abort is a no-op if it
+    // already returned, and reaps it on the path where no signal fired.
+    aux_shutdown.notify_waiters();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    aux_task.abort();
 
     // Restore the resolved injection adapter to managed mode on the way out.
     restore_managed_if_resolved(&resolved_iface).await;
@@ -407,6 +440,7 @@ async fn receive_loop(
     config: &WfbConfig,
     presence_cache: GsPresenceCache,
     resolved_iface: Arc<Mutex<Option<String>>>,
+    aux_counters: ados_groundlink::AuxCounters,
 ) {
     let mut manager = WfbRxManager::new(config.clone());
     let clock: Arc<dyn ados_groundlink::watchdog::Clock> = Arc::new(SystemClock::default());
@@ -632,6 +666,7 @@ async fn receive_loop(
                 zombie_kills.clone(),
                 Some(ingest.clone()),
                 fanout_counters.clone(),
+                aux_counters.clone(),
             ))
         });
 

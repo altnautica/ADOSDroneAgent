@@ -46,6 +46,7 @@ pub async fn stats_reader_loop(
     zombie_kills: Arc<AtomicU32>,
     ingest: Option<IngestEmitter>,
     fanout: crate::fanout::FanoutCounters,
+    aux: crate::aux_consumer::AuxCounters,
 ) {
     use tokio::io::AsyncBufReadExt;
     let mut lines = tokio::io::BufReader::new(stdout).lines();
@@ -128,6 +129,17 @@ pub async fn stats_reader_loop(
             if let Some(obj) = payload.as_object_mut() {
                 obj.insert("fanout_forwarded".to_string(), fanout.forwarded().into());
                 obj.insert("fanout_drops".to_string(), fanout.drops().into());
+                // The auxiliary application lane's full tally, under one key.
+                // The video counters above describe the video decoder; these
+                // describe the separate lane carrying the drone's MAVLink, so a
+                // healthy video link with a dead aux lane (or the reverse) is
+                // legible instead of reading as one undifferentiated "link".
+                // Serialisation of a flat counter struct cannot fail; a null
+                // would be a lie about the lane, so the entry is skipped rather
+                // than written as one on the impossible branch.
+                if let Ok(v) = serde_json::to_value(aux.snapshot()) {
+                    obj.insert("aux_lane".to_string(), v);
+                }
             }
             let path = Path::new(crate::paths::WFB_STATS_JSON);
             if let Err(e) = crate::sidecars::write_json_atomic(path, &payload, 0o644) {
