@@ -158,6 +158,15 @@ rust_const = "ados_protocol::aux_mux::AUX_VERSION"
 description = "Auxiliary radio lane multiplex header (magic, version, channel, length) letting MAVLink, status, and identity share one datagram pipe."
 
 [[contract]]
+id = "aux.node_status"
+version = 1
+wire = "msgpack"
+transport = "udp"
+status = "active"
+rust_const = "ados_protocol::node_status::NODE_STATUS_VERSION"
+description = "Compact node status and identity carried on the auxiliary lane's status and identity channels, so a ground station can describe the node it relays."
+
+[[contract]]
 id = "rest.openapi"
 version = 0
 wire = "json"

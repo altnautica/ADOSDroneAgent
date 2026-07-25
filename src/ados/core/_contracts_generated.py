@@ -22,6 +22,7 @@ CONTRACT_VERSIONS: dict[str, int] = {
     "mavlink.socket": 0,
     "mavlink.ingest": 0,
     "aux.frame": 1,
+    "aux.node_status": 1,
     "rest.openapi": 0,
     "state.v1": 1,
     "ws_ticket": 1,
@@ -149,6 +150,13 @@ CONTRACT_CATALOG: dict[str, dict[str, object]] = {
         "transport": "udp",
         "status": "active",
         "description": "Auxiliary radio lane multiplex header (magic, version, channel, length) letting MAVLink, status, and identity share one datagram pipe.",
+    },
+    "aux.node_status": {
+        "version": 1,
+        "wire": "msgpack",
+        "transport": "udp",
+        "status": "active",
+        "description": "Compact node status and identity carried on the auxiliary lane's status and identity channels, so a ground station can describe the node it relays.",
     },
     "rest.openapi": {
         "version": 0,

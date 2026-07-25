@@ -60,6 +60,7 @@ pub mod logd;
 pub mod mavlink;
 pub mod mavlink_ingest;
 pub mod mcp_token;
+pub mod node_status;
 pub mod offload;
 pub mod offload_link;
 pub mod pairing_posture;
