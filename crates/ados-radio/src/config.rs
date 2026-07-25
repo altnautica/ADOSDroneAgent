@@ -62,6 +62,9 @@ fn default_reg_gate_strict() -> bool {
 // control plane radio_id 1 (UDP 5803 tx / 5810 rx). The auxiliary pair takes
 // radio_id 2/3 on UDP 5602 (tx ingress) / 5603 (rx re-emit) so it can never
 // collide with the data or control planes on the shared adapter.
+fn default_aux_enable() -> bool {
+    true
+}
 fn default_aux_tx_port() -> u16 {
     5602
 }
@@ -361,12 +364,16 @@ pub struct WfbConfig {
     /// Whether the auxiliary application stream is permitted to start. This is
     /// the config-level allow flag, NOT a boot-time spawn: even with this true
     /// the aux pair stays down until something explicitly opens it (the
-    /// safe-by-default invariant). Off by default. When false this is a hard
-    /// dead-switch: an `open` request on the radio aux command socket is REFUSED
-    /// (no process spawned), so a deployment can forbid the aux pair outright. An
-    /// `open` succeeds only when this flag is true AND a caller explicitly opens
-    /// the stream.
-    #[serde(default)]
+    /// safe-by-default invariant). ON by default, because the aux lane is how a
+    /// linked ground station receives everything that is neither video nor a
+    /// tiny control frame, and a node that cannot carry its own capability over
+    /// the radio is not much use in the field. Nothing is spawned and no frame
+    /// is radiated until a consumer explicitly opens the stream, so permitting
+    /// it costs nothing on a deployment that never uses it. Set false for a hard
+    /// dead-switch: an `open` on the radio aux command socket is then REFUSED
+    /// with no process spawned, so a deployment can still forbid the pair
+    /// outright. `guard_aux_ports` also forces this false on a port collision.
+    #[serde(default = "default_aux_enable")]
     pub aux_enable: bool,
     /// UDP port the auxiliary tx ingress reads application frames from
     /// (radio_id 2). Defaults clear of the data/control ports.
@@ -422,7 +429,7 @@ impl Default for WfbConfig {
             auto_pair_enabled: true,
             paired_with_device_id: None,
             paired_at: None,
-            aux_enable: false,
+            aux_enable: default_aux_enable(),
             aux_tx_port: default_aux_tx_port(),
             aux_rx_port: default_aux_rx_port(),
             aux_fec_k: default_aux_fec_k(),
@@ -928,13 +935,14 @@ mod tests {
     }
 
     #[test]
-    fn aux_stream_defaults_are_safe_off_and_clear_of_other_planes() {
-        // Safe-by-default: the aux allow flag is off, and even when later turned
-        // on nothing starts at boot (the process layer enforces that). The aux
-        // ports must never collide with the data (5600) or control (5803/5810)
-        // ports.
+    fn aux_stream_defaults_are_permitted_and_clear_of_other_planes() {
+        // The aux allow flag is ON so a linked ground station can receive
+        // capability over the radio, but permitting is not starting: nothing
+        // spawns and nothing radiates until a consumer explicitly opens the
+        // stream (the process layer enforces that). The aux ports must never
+        // collide with the data (5600) or control (5803/5810) ports.
         let c = WfbConfig::default();
-        assert!(!c.aux_enable);
+        assert!(c.aux_enable);
         assert_eq!(c.aux_tx_port, 5602);
         assert_eq!(c.aux_rx_port, 5603);
         assert_eq!(c.aux_fec_k, 1);
