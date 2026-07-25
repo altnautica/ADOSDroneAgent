@@ -62,7 +62,15 @@ async def get_config():
 
 class ConfigUpdate(BaseModel):
     key: str
-    value: str
+    # Accept a native JSON scalar as well as a string. A boolean field is
+    # naturally written as `{"value": true}`, and rejecting that with a 422
+    # that demands `"true"` is a papercut every caller hits once. Strings
+    # stay first-class because shell and form callers can only send text;
+    # they are coerced to the leaf's current type below.
+    # Ordered widest-to-narrowest for Pydantic's smart union: an exact type
+    # match wins, so `true` stays a bool rather than becoming the string
+    # "True".
+    value: bool | int | float | str
 
 
 @router.put("/config")
@@ -118,15 +126,24 @@ async def update_config(update: ConfigUpdate):
         return {"error": f"Key not found: {update.key}"}
 
     current = getattr(parent, last)
+    raw = update.value
     try:
-        if isinstance(current, bool):
-            val = update.value.lower() in ("true", "1", "yes")
-        elif isinstance(current, int):
-            val = int(update.value)
-        elif isinstance(current, float):
-            val = float(update.value)
+        if isinstance(raw, str):
+            # Text callers (shell, HTML forms, the setup webapp) can only
+            # send strings, so coerce to whatever the leaf currently holds.
+            if isinstance(current, bool):
+                val = raw.strip().lower() in ("true", "1", "yes", "on")
+            elif isinstance(current, int):
+                val = int(raw)
+            elif isinstance(current, float):
+                val = float(raw)
+            else:
+                val = raw
         else:
-            val = update.value
+            # A native JSON scalar is taken at face value; the Pydantic
+            # re-validation below is the gate, and it also normalises the
+            # cross-numeric cases (an int written to a float field).
+            val = raw
     except (ValueError, TypeError) as e:
         return {"error": f"Invalid value: {e}"}
 
@@ -138,7 +155,11 @@ async def update_config(update: ConfigUpdate):
     try:
         snapshot = parent.model_dump()
         snapshot[last] = val
-        parent_cls(**snapshot)
+        validated = parent_cls(**snapshot)
+        # Take Pydantic's canonical coercion back, so an int sent to a float
+        # field is stored as a float rather than leaving the in-memory model
+        # and the YAML disagreeing about the type.
+        val = getattr(validated, last, val)
     except ValidationError as e:
         raise HTTPException(
             status_code=422,

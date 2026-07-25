@@ -75,6 +75,50 @@ def test_update_config(client):
     assert data["status"] == "ok"
 
 
+def test_update_config_accepts_a_native_json_boolean(client):
+    """A bool field written as JSON `true` must not 422.
+
+    Regression pin: `value` used to be typed `str`, so the natural way to
+    write a boolean setting was rejected and callers had to discover that
+    only the STRING "true" worked.
+    """
+    resp = client.put(
+        "/api/config", json={"key": "swarm.enabled", "value": True}
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["status"] == "ok"
+    assert data["value"] is True
+    assert client.get("/api/config").json()["swarm"]["enabled"] is True
+
+
+def test_update_config_still_accepts_a_string_boolean(client):
+    """Text-only callers (shell, forms) keep working unchanged."""
+    for text, expected in (("true", True), ("false", False), ("on", True)):
+        resp = client.put(
+            "/api/config", json={"key": "swarm.enabled", "value": text}
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["value"] is expected
+
+
+def test_update_config_accepts_a_native_json_int(client):
+    resp = client.put(
+        "/api/config", json={"key": "mavlink.baud_rate", "value": 115200}
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["value"] == 115200
+    assert client.get("/api/config").json()["mavlink"]["baud_rate"] == 115200
+
+
+def test_update_config_rejects_a_value_its_field_cannot_hold(client):
+    """Native scalars still go through Pydantic validation, not around it."""
+    resp = client.put(
+        "/api/config", json={"key": "mavlink.baud_rate", "value": "not-a-number"}
+    )
+    assert resp.status_code != 200 or "error" in resp.json()
+
+
 # ─── GET /api/config secret redaction ─────────────────────────────────────────
 
 
