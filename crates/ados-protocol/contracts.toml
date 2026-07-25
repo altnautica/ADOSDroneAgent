@@ -284,6 +284,13 @@ rust_const = "ados_config_tunnel::paths::TUNNEL_CONFIG_STATS_JSON"
 description = "Config-over-radio channel state: role (terminator/injector), enable + write gates, local bearer ports, and received-side frame/request/response/reject/timeout counters."
 
 [[sidecar]]
+id = "relayed-status"
+version = 1
+path = "/run/ados/relayed-status.json"
+rust_const = "ados_groundlink::aux_peers::AUX_PEERS_SIDECAR_VERSION"
+description = "Nodes a ground station relays, as they describe themselves over the radio auxiliary lane: identity, a compact status snapshot, and the arrival time of each so a reader can tell fresh from stale."
+
+[[sidecar]]
 id = "mesh-state"
 version = 1
 path = "/run/ados/mesh-state.json"

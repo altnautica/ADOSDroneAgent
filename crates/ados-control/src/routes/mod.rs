@@ -42,6 +42,7 @@ pub mod gs_pairing;
 pub mod gs_pic;
 pub mod gs_recording;
 pub mod gs_recording_list;
+pub mod gs_relayed_status;
 pub mod gs_status;
 pub mod gs_tunnel_config;
 pub mod gs_ui_read;
@@ -558,6 +559,13 @@ pub fn build_router(state: AppState, net_native: bool, hid_native: bool) -> Rout
             "/api/v1/ground-station/relayed/config",
             get(gs_tunnel_config::get_relayed_config_status)
                 .post(gs_tunnel_config::post_relayed_config),
+        )
+        // Relayed-node status: what this ground station knows about the nodes it
+        // relays, from the descriptions they push over the radio's auxiliary
+        // lane. The read counterpart to the relayed-config forward above.
+        .route(
+            "/api/v1/ground-station/relayed/status",
+            get(gs_relayed_status::get_relayed_status),
         );
 
     // Wi-Fi client writes (profile-agnostic) are served natively only where the

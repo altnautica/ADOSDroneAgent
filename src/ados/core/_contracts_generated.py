@@ -42,6 +42,7 @@ SIDECAR_VERSIONS: dict[str, int] = {
     "bind-state": 1,
     "crsf-stats": 1,
     "tunnel-config": 1,
+    "relayed-status": 1,
     "mesh-state": 1,
     "camera-state": 1,
     "video-streams": 2,
@@ -272,6 +273,13 @@ SIDECAR_CATALOG: dict[str, dict[str, object]] = {
         "transport": "/run/ados/tunnel-config.json",
         "status": "sidecar",
         "description": "Config-over-radio channel state: role (terminator/injector), enable + write gates, local bearer ports, and received-side frame/request/response/reject/timeout counters.",
+    },
+    "relayed-status": {
+        "version": 1,
+        "wire": "json",
+        "transport": "/run/ados/relayed-status.json",
+        "status": "sidecar",
+        "description": "Nodes a ground station relays, as they describe themselves over the radio auxiliary lane: identity, a compact status snapshot, and the arrival time of each so a reader can tell fresh from stale.",
     },
     "mesh-state": {
         "version": 1,
