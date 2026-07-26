@@ -129,6 +129,31 @@ pub fn frame_carries_command_authority(frame: &[u8]) -> bool {
     )
 }
 
+/// Split a client's raw bytes into whole MAVLink frames before the aux-uplink
+/// command gate inspects them.
+///
+/// A raw TCP read (or a UDP datagram some client libraries pipeline several
+/// messages into) is not frame-aligned: one `send_client_bytes` call can
+/// carry more than one MAVLink frame concatenated back to back. Classifying
+/// only the header at the START of the buffer — as a naive
+/// `frame_carries_command_authority(data)` call would — checks just the
+/// FIRST frame's id and then treats the gate decision as covering the whole
+/// buffer, so a command frame appended after a harmless one in the same read
+/// would ride through ungated. Uses [`ados_protocol::aux_mux::split_frames`],
+/// the same self-delimiting v1/v2 splitter [`crate::aux_tee`]'s batching and
+/// the aux-uplink consumer already rely on; falls back to the buffer as a
+/// single frame when nothing splits (an older client, or a read that landed
+/// on a v1/v2 boundary this parser does not recognise), so ordinary traffic
+/// is never dropped by this step.
+pub fn split_client_frames(data: &[u8]) -> Vec<&[u8]> {
+    let split = ados_protocol::aux_mux::split_frames(data);
+    if split.is_empty() {
+        vec![data]
+    } else {
+        split
+    }
+}
+
 /// The FC serial link plus its shared state. Cheap to wrap in an `Arc`; every
 /// method takes `&self` and uses interior mutability so the run loop and the
 /// periodic sender tasks share one connection.
