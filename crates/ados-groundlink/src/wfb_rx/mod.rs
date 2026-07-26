@@ -55,9 +55,10 @@ pub mod seams;
 pub mod stats;
 
 pub use args::{
-    data_rx_args, gs_atlas_rx_args, gs_rx_control_args, gs_tx_control_args, ATLAS_RX_PORT,
-    DATA_RX_PORT, DEFAULT_REG_DOMAIN, RX_CONTROL_PORT, RX_HEALTH_POLL_INTERVAL_S, STATE_ACTIVE,
-    STATE_NO_INJECTION, STATE_REG_BLOCKED, STATE_SEARCHING, TX_CONTROL_PORT,
+    data_rx_args, gs_atlas_rx_args, gs_aux_tx_args, gs_rx_control_args, gs_tx_control_args,
+    ATLAS_RX_PORT, AUX_TX_PORT, DATA_RX_PORT, DEFAULT_REG_DOMAIN, RX_CONTROL_PORT,
+    RX_HEALTH_POLL_INTERVAL_S, STATE_ACTIVE, STATE_NO_INJECTION, STATE_REG_BLOCKED,
+    STATE_SEARCHING, TX_CONTROL_PORT,
 };
 pub use loops::{stats_reader_loop, zombie_watchdog};
 pub use seams::{DataRxHandle, IwChannelSetter, SharedValidCounter, SystemClock};
@@ -315,7 +316,13 @@ impl WfbRxManager {
     pub async fn spawn_receive_chain(
         &self,
         iface: &str,
-    ) -> std::io::Result<(GsWfbProcess, GsWfbProcess, GsWfbProcess, GsWfbProcess)> {
+    ) -> std::io::Result<(
+        GsWfbProcess,
+        GsWfbProcess,
+        GsWfbProcess,
+        GsWfbProcess,
+        GsWfbProcess,
+    )> {
         let rx_key = rx_key_path();
         // Data RX: stdout piped for the stats reader, in its own process group.
         let data_rx = GsWfbProcess::spawn(
@@ -354,7 +361,21 @@ impl WfbRxManager {
             Some("/run/ados/wfb-gs-aux-rx.log"),
         )
         .await?;
-        Ok((data_rx, rx_control, tx_control, aux_rx))
+        // Aux UPLINK. The counterpart to the receiver above, and the half that
+        // made the lane one-directional: the drone has always listened on
+        // radio_id 3, but nothing on the ground ever transmitted there, so a
+        // client's request could reach the ground station and go no further.
+        // Spawned unconditionally for the same reason as the receiver — a
+        // linked ground station must be able to answer the drone it can hear,
+        // and an idle wfb_tx with no ingress traffic costs essentially nothing.
+        let aux_tx = GsWfbProcess::spawn(
+            "wfb_tx",
+            &gs_aux_tx_args(iface, &rx_key, self.config.mcs_index),
+            Stdout::Null,
+            Some("/run/ados/wfb-gs-aux-tx.log"),
+        )
+        .await?;
+        Ok((data_rx, rx_control, tx_control, aux_rx, aux_tx))
     }
 
     /// Build the chunk-2 watchdog for this receive generation, wired to the

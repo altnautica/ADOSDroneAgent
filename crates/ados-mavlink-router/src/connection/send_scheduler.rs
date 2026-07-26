@@ -93,6 +93,29 @@ impl FcConnection {
         }
     }
 
+    /// Write raw bytes toward the flight controller on behalf of a connected
+    /// GCS client (the three [`crate::proxies`] transports). Prefers the
+    /// local FC writer exactly like [`Self::send_bytes`]; when none exists
+    /// and an aux-uplink sender is installed (this node is relaying a linked
+    /// drone rather than driving a local FC), forwards there instead of
+    /// dropping the client's bytes silently.
+    ///
+    /// Deliberately distinct from `send_bytes`, which this router's own
+    /// heartbeat/stream-interval/param-sweep housekeeping also calls: those
+    /// exist to talk to a directly-attached FC and must stay a silent no-op
+    /// with none installed, not start radiating this router's own internal
+    /// traffic onto a client's uplink.
+    pub async fn send_client_bytes(&self, data: &[u8]) {
+        let has_writer = { self.writer.lock().await.is_some() };
+        if has_writer {
+            self.send_bytes(data).await;
+            return;
+        }
+        if let Some(uplink) = self.aux_uplink.lock().await.as_ref() {
+            uplink.send(data);
+        }
+    }
+
     async fn send_msg(&self, msg: &MavMessage) -> bool {
         match mavlink::serialize_v2(self.our_header(), msg) {
             Ok(bytes) => {

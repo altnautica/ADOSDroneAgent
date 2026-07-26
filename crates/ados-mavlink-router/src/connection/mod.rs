@@ -109,7 +109,11 @@ pub struct FcConnection {
     /// carries bytes, so a polling MSP GCS receives the FC's responses while the
     /// MAVLink frame path stays byte-unchanged.
     raw_tx: broadcast::Sender<Vec<u8>>,
-    writer: Mutex<Option<BoxedWriteHalf>>,
+    // pub(crate): visible crate-wide only so a sibling module's tests (e.g.
+    // aux_uplink_consumer's) can install a fake writer and assert what
+    // send_bytes actually wrote, the same way connection::send_scheduler's
+    // own tests already do from inside this module.
+    pub(crate) writer: Mutex<Option<BoxedWriteHalf>>,
     /// Raised by a write/flush failure to ask the run loop to tear down the
     /// current link and re-open it (installing a fresh writer). A transient FC
     /// write error must not permanently declare the FC disconnected, so the run
@@ -118,7 +122,9 @@ pub struct FcConnection {
     seq: AtomicU8,
     /// FC system id learned from inbound heartbeats (default 1 = ArduPilot).
     target_system: AtomicU8,
-    connected: AtomicBool,
+    // pub(crate): same reasoning as `writer` above — a sibling module's tests
+    // need to mark a fake link live.
+    pub(crate) connected: AtomicBool,
     /// True once a write to the FC has succeeded since the current link opened.
     /// Drives the reconnect backoff: a session that proved writable resets to
     /// the minimum, while a port that opens but never accepts a write backs off.
@@ -168,6 +174,13 @@ pub struct FcConnection {
     /// from "a client's own PARAM_REQUEST_LIST is actively feeding the
     /// cache" — see the comment at its use site.
     param_last_cached_count: AtomicUsize,
+    /// The ground station's aux-uplink sender, when this node is relaying a
+    /// linked drone rather than driving a local flight controller. `None` on
+    /// a drone (which always has, or is trying to reach, a real FC writer)
+    /// and on a ground station before the receive chain has come up. See
+    /// [`Self::send_bytes`] for how this becomes the fallback destination for
+    /// a client's outbound MAVLink.
+    aux_uplink: Mutex<Option<crate::aux_uplink::AuxUplinkSender>>,
 }
 
 impl FcConnection {
@@ -207,6 +220,7 @@ impl FcConnection {
             param_last_request: Mutex::new(None),
             param_sweep_started: Mutex::new(None),
             param_last_cached_count: AtomicUsize::new(0),
+            aux_uplink: Mutex::new(None),
         })
     }
 
@@ -410,6 +424,14 @@ impl FcConnection {
     /// the FC.
     pub fn command_down_gated(&self) -> bool {
         self.cfg.crsf_mavlink_source().is_some() && !self.cfg.crsf_mavlink_command_enabled
+    }
+    /// Install the aux-uplink sender a ground station uses in place of a local
+    /// FC writer. Called once, from `main.rs`, only when this node is a
+    /// ground station — a drone always has (or is trying to open) its own FC
+    /// writer and must never fall back to radiating a client's bytes onto its
+    /// own aux uplink transmitter.
+    pub async fn set_aux_uplink(&self, sender: crate::aux_uplink::AuxUplinkSender) {
+        *self.aux_uplink.lock().await = Some(sender);
     }
     pub fn param_priming(&self) -> bool {
         self.param_priming.load(Ordering::Relaxed)

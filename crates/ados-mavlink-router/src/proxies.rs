@@ -4,8 +4,10 @@
 //! ports 14550/14551), and WebSocket (port 8765) proxies: a GCS connects
 //! directly and exchanges raw MAVLink frames with the FC, bypassing the cloud
 //! relay. Each proxy relays the FC frame stream (via [`FcConnection::subscribe`])
-//! out to its clients and forwards client bytes back to the FC with
-//! [`FcConnection::send_bytes`]. The WebSocket proxy ([`run_ws_proxy`]) carries
+//! out to its clients and forwards client bytes back with
+//! [`FcConnection::send_client_bytes`] — to the local FC when one is attached,
+//! or onto the aux uplink toward a relayed drone when this node is a ground
+//! station relaying one instead. The WebSocket proxy ([`run_ws_proxy`]) carries
 //! MAVLink in binary WebSocket frames, the way a browser GCS connects.
 
 use std::collections::HashMap;
@@ -268,7 +270,7 @@ async fn handle_tcp_client(fc: Arc<FcConnection>, stream: tokio::net::TcpStream)
     loop {
         match rd.read(&mut buf).await {
             Ok(0) | Err(_) => break,
-            Ok(n) => fc.send_bytes(&buf[..n]).await,
+            Ok(n) => fc.send_client_bytes(&buf[..n]).await,
         }
     }
     writer.abort();
@@ -339,7 +341,7 @@ pub async fn run_udp_proxy(fc: Arc<FcConnection>, port: u16, cancel: Arc<Notify>
                         // drop the least-recently-seen entries.
                         cap_peers(&mut map, UDP_MAX_PEERS);
                     }
-                    fc.send_bytes(&buf[..n]).await;
+                    fc.send_client_bytes(&buf[..n]).await;
                 }
             }
             _ = cancel.notified() => {
@@ -526,7 +528,7 @@ async fn handle_ws_client(
     // client -> FC (binary frames only; ignore text/ping/pong).
     while let Some(msg) = read.next().await {
         match msg {
-            Ok(Message::Binary(data)) => fc.send_bytes(&data).await,
+            Ok(Message::Binary(data)) => fc.send_client_bytes(&data).await,
             Ok(Message::Close(_)) | Err(_) => break,
             _ => {}
         }

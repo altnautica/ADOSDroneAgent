@@ -18,6 +18,8 @@ use serde_json::{json, Map, Value};
 use tokio::sync::{Mutex, Notify};
 
 use ados_mavlink_router::aux_tee::{self, TeeCounters};
+use ados_mavlink_router::aux_uplink;
+use ados_mavlink_router::aux_uplink_consumer;
 use ados_mavlink_router::config::MavlinkConfig;
 use ados_mavlink_router::connection::FcConnection;
 use ados_mavlink_router::frame_ingest::{self, IngestCounters, INGEST_QUEUE_DEPTH};
@@ -29,6 +31,20 @@ const MAVLINK_QUEUE_DEPTH: usize = 256;
 const STATE_QUEUE_DEPTH: usize = 32;
 const TCP_PROXY_PORT: u16 = 5760;
 const UDP_PROXY_PORTS: &[u16] = &[14550, 14551];
+/// The ground station's aux-uplink loopback ingress — must equal
+/// `ados-groundlink`'s `wfb_rx::args::AUX_TX_PORT`, the port its
+/// unconditionally-spawned `wfb_tx -p3` reads from. The two crates do not
+/// depend on each other, so this travels as a plain matching literal rather
+/// than a shared const (the existing convention for this port pair — see
+/// `ados-radio`'s `default_aux_tx_port()` / `ados-groundlink`'s
+/// `ATLAS_RX_PORT`, cross-referenced only in comments and tests, never a
+/// shared dependency).
+const AUX_UPLINK_PORT: u16 = 5602;
+/// The drone's own aux-uplink re-emit loopback — must equal `ados-radio`'s
+/// `WfbConfig::aux_rx_port` (default 5603), the port its `wfb_rx -p3`
+/// re-emits decoded uplink datagrams to. Same cross-crate literal-matching
+/// convention as `AUX_UPLINK_PORT` above.
+const AUX_UPLINK_REEMIT_PORT: u16 = 5603;
 
 fn run_dir() -> String {
     std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string())
@@ -262,14 +278,34 @@ async fn main() {
         // lane makes this receiver lag and shed, never the producer stall.
         let frames = fc.subscribe();
         let egress = ados_protocol::aux_egress::AuxEgress::new(format!("{dir}/radio-aux.sock"));
-        let cancel = cancel.clone();
+        let tee_cancel = cancel.clone();
         tasks.push(tokio::spawn(async move {
             aux_tee::run(
                 frames,
                 egress,
                 counters,
                 aux_tee::ShaperConfig::default(),
-                cancel,
+                tee_cancel,
+            )
+            .await
+        }));
+
+        // The other half of the same pair: a ground station's outbound
+        // MAVLink (a client's arm/mode/param/mission command, relayed over
+        // the radio) arrives decoded on this loopback — the drone's own
+        // `wfb_rx -p3` has always run and re-emitted here, but until now
+        // nothing read the port, so it landed in a void. Injecting into the
+        // FC via `send_bytes` is what actually closes the ground-to-drone
+        // half of the relay.
+        let uplink_counters = aux_uplink_consumer::AuxUplinkConsumerCounters::new();
+        let uplink_fc = fc.clone();
+        let uplink_cancel = cancel.clone();
+        tasks.push(tokio::spawn(async move {
+            aux_uplink_consumer::run(
+                AUX_UPLINK_REEMIT_PORT,
+                uplink_fc,
+                uplink_counters,
+                uplink_cancel,
             )
             .await
         }));
@@ -331,6 +367,17 @@ async fn main() {
                 );
             }
         }
+
+        // The other half of the same relay: a connected client's outbound
+        // MAVLink (arm, mode, param read/write, mission commands, ...) used
+        // to reach this ground station and go no further — `send_bytes`
+        // wrote to a local FC that does not exist, and silently dropped
+        // everything. This installs the fallback `send_client_bytes` uses:
+        // frame + batch + radiate on the aux uplink (radio_id 3) toward
+        // whichever drone the ground station's WFB link has bound, closing
+        // the ground-to-drone half of the relay (the drone-to-ground half
+        // has run since the aux downlink lane was wired up).
+        fc.set_aux_uplink(aux_uplink::spawn(AUX_UPLINK_PORT)).await;
     }
 
     // MAVLink socket client commands -> FC.
@@ -341,7 +388,7 @@ async fn main() {
             loop {
                 tokio::select! {
                     cmd = inbound.recv() => match cmd {
-                        Some(data) => fc.send_bytes(&data).await,
+                        Some(data) => fc.send_client_bytes(&data).await,
                         None => break,
                     },
                     _ = cancel.notified() => break,

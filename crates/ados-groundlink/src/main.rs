@@ -578,7 +578,7 @@ async fn receive_loop(
         }
 
         // Spawn the receive chain for this generation.
-        let (mut data_rx, _rx_control, _tx_control, _aux_rx) =
+        let (mut data_rx, _rx_control, _tx_control, _aux_rx, _aux_tx) =
             match manager.spawn_receive_chain(&interface).await {
                 Ok(chain) => chain,
                 Err(e) => {

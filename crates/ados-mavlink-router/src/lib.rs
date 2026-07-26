@@ -12,6 +12,8 @@
 //! parity with the Python producer.
 
 pub mod aux_tee;
+pub mod aux_uplink;
+pub mod aux_uplink_consumer;
 pub mod config;
 pub mod connection;
 pub mod demo;

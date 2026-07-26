@@ -33,6 +33,13 @@ pub const TX_CONTROL_PORT: u16 = 5810;
 /// because the receiver was never spawned in production. `aux_rx_port_matches_
 /// the_consumer_listen_port` below pins the two together.
 pub const ATLAS_RX_PORT: u16 = 5603;
+/// GS aux-uplink loopback ingress: whatever is written here is radiated on
+/// radio_id 3, the ground→drone half of the aux pair. Mirrors the drone's
+/// `aux_tx_port` default (the two rigs never share a host, so the same number
+/// on both sides is the symmetric choice, not a collision). Deliberately
+/// distinct from `ATLAS_RX_PORT` so the uplink ingress can never be fed by the
+/// downlink egress.
+pub const AUX_TX_PORT: u16 = 5602;
 /// wfb stats poll interval: the zombie watchdog cadence.
 pub const RX_HEALTH_POLL_INTERVAL_S: f64 = 5.0;
 
@@ -90,6 +97,37 @@ pub fn gs_atlas_rx_args(iface: &str, rx_key: &Path, atlas_port: u16) -> Vec<Stri
         rx_key.to_string_lossy().into_owned(),
         "-l".into(),
         "1000".into(),
+        iface.into(),
+    ]
+}
+
+/// GS aux-uplink TX `wfb_tx` args: radio_id 3, loopback ingress `aux_tx_port`,
+/// light FEC. The ground→drone half of the aux pair, and the mirror of
+/// `gs_atlas_rx_args`: the drone egresses on p2 and listens on p3, so the
+/// ground listens on p2 and egresses on p3.
+///
+/// Without this the aux lane was downlink-only. The drone has always run
+/// `wfb_rx -p 3` re-emitting to its own loopback, but nothing on the ground
+/// ever transmitted on that radio_id, so a ground station could hear a drone
+/// and never answer it — every byte a connected client sent toward the drone
+/// was handed to the ground's own (absent) flight-controller writer and
+/// silently dropped.
+pub fn gs_aux_tx_args(iface: &str, rx_key: &Path, mcs_index: u8) -> Vec<String> {
+    vec![
+        "-p".into(),
+        "3".into(),
+        "-u".into(),
+        AUX_TX_PORT.to_string(),
+        "-K".into(),
+        rx_key.to_string_lossy().into_owned(),
+        "-k".into(),
+        "1".into(),
+        "-n".into(),
+        "2".into(),
+        "-B".into(),
+        "20".into(),
+        "-M".into(),
+        mcs_index.to_string(),
         iface.into(),
     ]
 }
@@ -190,6 +228,42 @@ mod tests {
             ATLAS_RX_PORT,
             crate::gs_config::default_atlas_listen_port(),
             "aux receive port must equal the aux consumer's listen port"
+        );
+    }
+
+    #[test]
+    fn gs_aux_tx_uses_radio_id_3_and_the_uplink_ingress() {
+        // The ground transmits the aux uplink on p3 (the radio_id the drone's
+        // `wfb_rx` listens on), reading from its own loopback ingress.
+        let a = gs_aux_tx_args("wlan1", Path::new("/k"), 1);
+        assert_eq!(a[0], "-p");
+        assert_eq!(a[1], "3");
+        let u = a.iter().position(|x| x == "-u").unwrap();
+        assert_eq!(a[u + 1], AUX_TX_PORT.to_string());
+        let k = a.iter().position(|x| x == "-k").unwrap();
+        assert_eq!(a[k + 1], "1"); // light FEC, same ratio as the drone's aux
+        assert_eq!(a.last().unwrap(), "wlan1");
+    }
+
+    #[test]
+    fn the_aux_pair_is_opposite_on_the_ground_to_the_drone() {
+        // The whole point of the pair: each rig receives on the radio_id its
+        // peer transmits on. If these two ever end up equal the lane talks to
+        // itself and the link goes silent in one direction with no error.
+        let rx = gs_atlas_rx_args("wlan1", Path::new("/k"), ATLAS_RX_PORT);
+        let tx = gs_aux_tx_args("wlan1", Path::new("/k"), 1);
+        assert_eq!(rx[1], "2", "ground receives the downlink on p2");
+        assert_eq!(tx[1], "3", "ground transmits the uplink on p3");
+        assert_ne!(rx[1], tx[1]);
+    }
+
+    #[test]
+    fn the_uplink_ingress_is_not_the_downlink_egress() {
+        // Feeding the transmit ingress from the receive egress would loop every
+        // decoded downlink frame straight back over the air.
+        assert_ne!(
+            AUX_TX_PORT, ATLAS_RX_PORT,
+            "aux uplink ingress must differ from the downlink egress"
         );
     }
 
