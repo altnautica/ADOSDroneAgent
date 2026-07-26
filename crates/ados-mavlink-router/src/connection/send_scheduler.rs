@@ -209,6 +209,25 @@ impl FcConnection {
             }
             return;
         }
+
+        // `due` only means PARAM_RATE_LIMIT has elapsed since our own last
+        // sweep send — it says nothing about whether the download actually
+        // needs help. Compare the cache size now against its size the last
+        // time we checked: if it grew at all in that window, something (our
+        // own prior sweep response still landing, or a downstream client's
+        // own PARAM_REQUEST_LIST) is genuinely still making progress, and
+        // injecting a competing PARAM_REQUEST_LIST here would livelock it —
+        // the FC tracks queued-parameter state PER LINK, not per requester,
+        // so a second request on this link restarts its enumeration from
+        // index 0, undoing exactly the progress that is happening. Only fire
+        // once the cache has genuinely stalled across a full rate-limit
+        // window, which is what this housekeeping sweep exists to recover
+        // from in the first place.
+        let last_cached = self.param_last_cached_count.swap(cached, Ordering::Relaxed);
+        if cached > last_cached {
+            return;
+        }
+
         let target = self.target_system.load(Ordering::Relaxed);
         let req = MavMessage::PARAM_REQUEST_LIST(PARAM_REQUEST_LIST_DATA {
             target_system: target,
@@ -310,6 +329,65 @@ mod tests {
         assert!(
             !signalled,
             "no writer means nothing to fail and no reconnect to raise"
+        );
+    }
+
+    /// Backdate `param_last_request` past `PARAM_RATE_LIMIT` without mocking
+    /// the clock (this crate's tokio features don't include `test-util`) —
+    /// `Instant::elapsed()` reads real wall-clock time regardless, so a
+    /// stored `Instant` in the past makes the rate-limit check `due` exactly
+    /// as if real time had elapsed.
+    fn long_ago() -> Instant {
+        Instant::now()
+            .checked_sub(PARAM_RATE_LIMIT + Duration::from_secs(1))
+            .expect("PARAM_RATE_LIMIT + 1s must not underflow Instant::now()")
+    }
+
+    #[tokio::test]
+    async fn sweep_defers_while_a_clients_own_download_is_making_progress() {
+        let conn = test_connection();
+        conn.connected.store(true, Ordering::Relaxed);
+        conn.state.lock().await.param_count = 100;
+
+        // A sweep already fired once, and PARAM_RATE_LIMIT has fully elapsed
+        // since — a naive time-only gate would fire again here. But the cache
+        // has grown since the last check, via a downstream client's own
+        // PARAM_REQUEST_LIST landing real, ongoing progress.
+        let backdated = long_ago();
+        *conn.param_last_request.lock().await = Some(backdated);
+        conn.param_priming.store(true, Ordering::Relaxed);
+        for i in 0..40 {
+            conn.params.lock().await.set(&format!("P{i}"), i as f64, 9);
+        }
+
+        conn.tick_param_sweep().await;
+
+        assert_eq!(
+            *conn.param_last_request.lock().await,
+            Some(backdated),
+            "a growing cache must not be interrupted by the sweep's own competing \
+             PARAM_REQUEST_LIST — the FC tracks queued-parameter state per link, so a \
+             second request would restart its enumeration from index 0"
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_fires_again_once_genuinely_stalled() {
+        let conn = test_connection();
+        conn.connected.store(true, Ordering::Relaxed);
+        conn.state.lock().await.param_count = 100;
+
+        let backdated = long_ago();
+        *conn.param_last_request.lock().await = Some(backdated);
+        conn.param_priming.store(true, Ordering::Relaxed);
+        // No cache growth at all since the last check — genuinely stalled.
+
+        conn.tick_param_sweep().await;
+
+        let after = *conn.param_last_request.lock().await;
+        assert!(
+            after.is_some_and(|t| t != backdated),
+            "a genuinely stalled sweep must still retry once the rate limit elapses"
         );
     }
 

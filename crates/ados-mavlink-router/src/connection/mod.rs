@@ -43,7 +43,7 @@ mod framing;
 mod send_scheduler;
 mod transport;
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use ados_protocol::mavlink::ardupilotmega::MavMessage;
@@ -163,6 +163,11 @@ pub struct FcConnection {
     param_sweep_send_failed: AtomicBool,
     param_last_request: Mutex<Option<Instant>>,
     param_sweep_started: Mutex<Option<Instant>>,
+    /// Param cache size as of the last time the sweep checked whether it was
+    /// due to send. Lets `tick_param_sweep` tell "genuinely stalled" apart
+    /// from "a client's own PARAM_REQUEST_LIST is actively feeding the
+    /// cache" — see the comment at its use site.
+    param_last_cached_count: AtomicUsize,
 }
 
 impl FcConnection {
@@ -201,6 +206,7 @@ impl FcConnection {
             param_sweep_send_failed: AtomicBool::new(false),
             param_last_request: Mutex::new(None),
             param_sweep_started: Mutex::new(None),
+            param_last_cached_count: AtomicUsize::new(0),
         })
     }
 
@@ -517,6 +523,7 @@ impl FcConnection {
             self.param_priming.store(false, Ordering::Relaxed);
             *self.param_sweep_started.lock().await = None;
             *self.param_last_request.lock().await = None;
+            self.param_last_cached_count.store(0, Ordering::Relaxed);
             tracing::warn!("fc_disconnected");
 
             // A session that proved writable (at least one write to the FC
