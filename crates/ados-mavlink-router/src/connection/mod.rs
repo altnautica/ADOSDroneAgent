@@ -94,6 +94,41 @@ const MSP_WINDOW: Duration = Duration::from_secs(2);
 /// Frame fan-out channel capacity (raw frames awaiting consumers).
 const FRAME_CHANNEL_CAP: usize = 1024;
 
+/// MAVLink message ids that give write authority over the vehicle: a mode
+/// change, arm/disarm and every other `COMMAND_LONG`/`COMMAND_INT` vehicle
+/// command, manual control and RC channel override, and a direct
+/// attitude/position setpoint. Deliberately narrower than "every message a
+/// client can send" — a param request, mission read, or heartbeat is not
+/// here, so the aux-uplink relay carries that traffic immediately (proven
+/// live by the parameter download this lane exists to fix) while a message
+/// that makes the vehicle physically do something stays gated until
+/// `radio.relay.command_enabled` is explicitly set. The same staged-authority
+/// split as [`FcConnection::command_down_gated`], drawn per-message instead
+/// of per-source because this lane, unlike the MAVLink-over-ELRS source,
+/// must carry SOME traffic (params/mission) by default for the relay to be
+/// useful at all.
+pub const AUX_UPLINK_COMMAND_MESSAGE_IDS: &[u32] = &[
+    11, // SET_MODE
+    69, // MANUAL_CONTROL
+    70, // RC_CHANNELS_OVERRIDE
+    75, // COMMAND_INT
+    76, // COMMAND_LONG
+    82, // SET_ATTITUDE_TARGET
+    84, // SET_POSITION_TARGET_LOCAL_NED
+    86, // SET_POSITION_TARGET_GLOBAL_INT
+];
+
+/// Whether `frame` is one of [`AUX_UPLINK_COMMAND_MESSAGE_IDS`]. A header this
+/// build cannot read (too short, an unrecognised magic) is never treated as a
+/// command — it cannot be a recognised one either way, and refusing it would
+/// misreport a framing issue as a safety gate.
+pub fn frame_carries_command_authority(frame: &[u8]) -> bool {
+    matches!(
+        crate::aux_tee::mavlink_message_id(frame),
+        Some(id) if AUX_UPLINK_COMMAND_MESSAGE_IDS.contains(&id)
+    )
+}
+
 /// The FC serial link plus its shared state. Cheap to wrap in an `Arc`; every
 /// method takes `&self` and uses interior mutability so the run loop and the
 /// periodic sender tasks share one connection.
@@ -424,6 +459,15 @@ impl FcConnection {
     /// the FC.
     pub fn command_down_gated(&self) -> bool {
         self.cfg.crsf_mavlink_source().is_some() && !self.cfg.crsf_mavlink_command_enabled
+    }
+    /// Whether the aux-uplink relay's command authority is currently closed
+    /// (`radio.relay.command_enabled` is false, the default). Mirrors
+    /// [`Self::command_down_gated`]'s status-surface role for the aux relay:
+    /// true means a param/mission/read frame still crosses the lane, but a
+    /// vehicle-command frame ([`frame_carries_command_authority`]) is
+    /// refused at [`Self::send_client_bytes`] rather than radiated.
+    pub fn relay_command_gated(&self) -> bool {
+        !self.cfg.relay_command_enabled
     }
     /// Install the aux-uplink sender a ground station uses in place of a local
     /// FC writer. Called once, from `main.rs`, only when this node is a

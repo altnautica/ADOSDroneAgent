@@ -623,6 +623,18 @@ async fn build_extras(
         "fc_command_down_gated".into(),
         json!(fc.command_down_gated()),
     );
+    // Whether a vehicle-command frame (mode/arm/manual-control/setpoint) is
+    // refused on the aux-uplink relay rather than radiated toward a linked
+    // drone. True by default — a fresh relay carries param/mission/read
+    // traffic immediately but stays command-gated until
+    // `radio.relay.command_enabled` is explicitly set. Meaningless (always
+    // true) off a ground station, since only that profile ever installs an
+    // aux-uplink sender; surfaced unconditionally for parity with
+    // `fc_command_down_gated` above.
+    extras.insert(
+        "aux_uplink_command_gated".into(),
+        json!(fc.relay_command_gated()),
+    );
     // The FC firmware family identified from the port's USB descriptor
     // (betaflight/inav), or null for a MAVLink/unknown FC — lets a consumer
     // badge "Betaflight (MSP)" instead of a misleading "not connected".

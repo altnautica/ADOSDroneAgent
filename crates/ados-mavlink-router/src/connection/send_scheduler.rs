@@ -98,7 +98,10 @@ impl FcConnection {
     /// local FC writer exactly like [`Self::send_bytes`]; when none exists
     /// and an aux-uplink sender is installed (this node is relaying a linked
     /// drone rather than driving a local FC), forwards there instead of
-    /// dropping the client's bytes silently.
+    /// dropping the client's bytes silently — unless `data` carries vehicle
+    /// command authority ([`super::frame_carries_command_authority`]) and
+    /// the relay's command marker is still off, in which case it is refused
+    /// rather than radiated (see [`super::AUX_UPLINK_COMMAND_MESSAGE_IDS`]).
     ///
     /// Deliberately distinct from `send_bytes`, which this router's own
     /// heartbeat/stream-interval/param-sweep housekeeping also calls: those
@@ -109,6 +112,10 @@ impl FcConnection {
         let has_writer = { self.writer.lock().await.is_some() };
         if has_writer {
             self.send_bytes(data).await;
+            return;
+        }
+        if self.relay_command_gated() && super::frame_carries_command_authority(data) {
+            tracing::info!(len = data.len(), "aux_uplink_command_gated_refused_frame");
             return;
         }
         if let Some(uplink) = self.aux_uplink.lock().await.as_ref() {
@@ -443,5 +450,119 @@ mod tests {
             }
             other => panic!("expected REQUEST_DATA_STREAM, got {other:?}"),
         }
+    }
+
+    fn command_long_bytes() -> Vec<u8> {
+        let msg = MavMessage::COMMAND_LONG(COMMAND_LONG_DATA {
+            target_system: 1,
+            target_component: 1,
+            command: ados_protocol::mavlink::ardupilotmega::MavCmd::MAV_CMD_COMPONENT_ARM_DISARM,
+            confirmation: 0,
+            param1: 1.0,
+            param2: 0.0,
+            param3: 0.0,
+            param4: 0.0,
+            param5: 0.0,
+            param6: 0.0,
+            param7: 0.0,
+        });
+        mavlink::serialize_v2(
+            MavHeader {
+                system_id: 255,
+                component_id: 190,
+                sequence: 0,
+            },
+            &msg,
+        )
+        .unwrap()
+    }
+
+    fn param_request_list_bytes() -> Vec<u8> {
+        let msg = MavMessage::PARAM_REQUEST_LIST(PARAM_REQUEST_LIST_DATA {
+            target_system: 1,
+            target_component: 1,
+        });
+        mavlink::serialize_v2(
+            MavHeader {
+                system_id: 255,
+                component_id: 190,
+                sequence: 0,
+            },
+            &msg,
+        )
+        .unwrap()
+    }
+
+    /// Spawns a real aux-uplink sender against a loopback listener, the same
+    /// setup `aux_uplink`'s own tests use, so `send_client_bytes`'s fallback
+    /// path is exercised end to end rather than mocked.
+    async fn test_uplink() -> (crate::aux_uplink::AuxUplinkSender, tokio::net::UdpSocket) {
+        let listener = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        (crate::aux_uplink::spawn(port), listener)
+    }
+
+    #[tokio::test]
+    async fn a_command_frame_is_refused_on_a_gated_relay() {
+        let conn = test_connection();
+        let (sender, listener) = test_uplink().await;
+        conn.set_aux_uplink(sender).await;
+        assert!(conn.relay_command_gated(), "default marker is off");
+
+        conn.send_client_bytes(&command_long_bytes()).await;
+
+        let mut buf = [0u8; 256];
+        let outcome =
+            tokio::time::timeout(Duration::from_millis(150), listener.recv_from(&mut buf)).await;
+        assert!(
+            outcome.is_err(),
+            "a command-authority frame must never reach the aux uplink while gated"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_param_frame_crosses_the_gated_relay() {
+        let conn = test_connection();
+        let (sender, listener) = test_uplink().await;
+        conn.set_aux_uplink(sender).await;
+        assert!(conn.relay_command_gated(), "default marker is off");
+
+        let frame = param_request_list_bytes();
+        conn.send_client_bytes(&frame).await;
+
+        let mut buf = [0u8; 256];
+        let (n, _) = tokio::time::timeout(Duration::from_millis(300), listener.recv_from(&mut buf))
+            .await
+            .expect("a param frame must cross the relay even while command-gated")
+            .unwrap();
+        let (_, payload) = ados_protocol::aux_mux::decode(&buf[..n]).unwrap();
+        assert_eq!(payload, frame, "the exact bytes must reach the uplink");
+    }
+
+    #[tokio::test]
+    async fn enabling_the_relay_marker_lets_a_command_frame_through() {
+        let state = std::sync::Arc::new(Mutex::new(VehicleState::default()));
+        let params = std::sync::Arc::new(Mutex::new(ParamCache::new(
+            "/tmp/ados-test-params-relay-armed.json",
+        )));
+        let cfg = MavlinkConfig {
+            relay_command_enabled: true,
+            ..Default::default()
+        };
+        let conn = FcConnection::new(cfg, state, params);
+        let (sender, listener) = test_uplink().await;
+        conn.set_aux_uplink(sender).await;
+        assert!(!conn.relay_command_gated(), "marker is on");
+
+        let frame = command_long_bytes();
+        conn.send_client_bytes(&frame).await;
+
+        let mut buf = [0u8; 256];
+        let (n, _) = tokio::time::timeout(Duration::from_millis(300), listener.recv_from(&mut buf))
+            .await
+            .expect("the command marker on must let the frame through")
+            .unwrap();
+        let (_, payload) = ados_protocol::aux_mux::decode(&buf[..n]).unwrap();
+        assert_eq!(payload, frame);
     }
 }
