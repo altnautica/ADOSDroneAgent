@@ -49,7 +49,6 @@ pytest tests/path/to/test_file.py -k test_name
 ruff check src/ados/path tests/path
 mypy src
 ados --help
-ados --help
 ```
 
 Use `python3` for one-off local scripts when a Python command is needed.
@@ -64,7 +63,12 @@ Use `python3` for one-off local scripts when a Python command is needed.
 - HAL and board profiles: `src/ados/hal/`
 - Built-in plugins and runner: `src/ados/plugins/`
 - SDK and test helpers: `src/ados/sdk/`
-- Web assets served by the agent: `src/ados/webapp/`
+- Dashboard SPA: `src/ados/dashboard/`
+- Cockpit SPA: `src/ados/cockpit/`
+- Bootstrap and profile detection: `src/ados/bootstrap/`
+- Compute service: `src/ados/compute/`
+- Security (HMAC, certs, firewall): `src/ados/security/`
+- Data files (plugin catalog, param metadata): `src/ados/data/`
 - Setup facade and terminal status data: `src/ados/setup/`
 - Tests: `tests/`
 
