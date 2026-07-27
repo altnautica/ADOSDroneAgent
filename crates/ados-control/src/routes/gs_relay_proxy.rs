@@ -20,14 +20,16 @@
 //!
 //! ## Bounded failure
 //!
-//! The proxy's per-call timeout is 5 seconds. A timeout returns a 504 Gateway
+//! The proxy's per-call timeout is 10 seconds. A timeout returns a 504 Gateway
 //! Timeout to the HTTP caller, so an operator sees the wedge rather than a
-//! hung request. An egress failure (radio pair not open) returns a 502 Bad
-//! Gateway. An encode failure (request too large for one aux frame) returns a
-//! 413.
+//! hung request. A response that arrived only in part — the radio dropped a
+//! fragment — is also a 504, but says so: "the drone never answered" and "the
+//! radio dropped a fragment" are different faults with different operator
+//! actions. An egress failure (radio pair not open) returns a 502 Bad Gateway.
+//! An encode failure (request too large for one aux frame) returns a 413.
 
 use axum::body::{Body, Bytes};
-use axum::extract::{Path, State};
+use axum::extract::{Path, RawQuery, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -40,8 +42,9 @@ use crate::state::AppState;
 /// request.
 pub async fn handle(
     State(state): State<AppState>,
-    Path((_peer_device_id, path)): Path<(String, String)>,
+    Path((peer_device_id, path)): Path<(String, String)>,
     method: axum::http::Method,
+    RawQuery(raw_query): RawQuery,
     body: Bytes,
 ) -> Response {
     if !is_ground_station(&state) {
@@ -81,10 +84,24 @@ pub async fn handle(
     };
 
     // Build the full path the drone's HTTP API will see. The wildcard capture
-    // strips the leading slash, so re-add it: `/api/pairing/info`.
-    let full_path = format!("/{}", path);
+    // strips the leading slash, so re-add it: `/api/pairing/info`. The query
+    // string travels too — `/api/logs?limit=5` reaching the drone as
+    // `/api/logs` would silently serve endpoint defaults instead of what the
+    // caller asked for.
+    let full_path = match raw_query.as_deref().filter(|q| !q.is_empty()) {
+        Some(q) => format!("/{path}?{q}"),
+        None => format!("/{path}"),
+    };
 
-    match proxy.call(rpc_method, full_path.as_bytes(), &body).await {
+    match proxy
+        .call(
+            peer_device_id.as_bytes(),
+            rpc_method,
+            full_path.as_bytes(),
+            &body,
+        )
+        .await
+    {
         Ok(resp) => {
             let status =
                 StatusCode::from_u16(resp.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
@@ -94,18 +111,23 @@ pub async fn handle(
             let (status, msg) = match e {
                 ados_protocol::aux_rpc_proxy::RpcError::Encode => (
                     StatusCode::PAYLOAD_TOO_LARGE,
-                    "request exceeds one aux frame",
+                    "request exceeds one aux frame".to_string(),
                 ),
-                ados_protocol::aux_rpc_proxy::RpcError::Send(_) => {
-                    (StatusCode::BAD_GATEWAY, "aux egress failed to send request")
-                }
+                ados_protocol::aux_rpc_proxy::RpcError::Send(_) => (
+                    StatusCode::BAD_GATEWAY,
+                    "aux egress failed to send request".to_string(),
+                ),
                 ados_protocol::aux_rpc_proxy::RpcError::Timeout => (
                     StatusCode::GATEWAY_TIMEOUT,
-                    "no response from the linked drone within the bound",
+                    "no response from the linked drone within the bound".to_string(),
+                ),
+                ados_protocol::aux_rpc_proxy::RpcError::Incomplete { received, total } => (
+                    StatusCode::GATEWAY_TIMEOUT,
+                    format!("relay response incomplete: {received}/{total} fragments"),
                 ),
                 ados_protocol::aux_rpc_proxy::RpcError::ChannelClosed => (
                     StatusCode::SERVICE_UNAVAILABLE,
-                    "relay-proxy channel closed mid-call",
+                    "relay-proxy channel closed mid-call".to_string(),
                 ),
             };
             (status, Json(serde_json::json!({ "detail": msg }))).into_response()

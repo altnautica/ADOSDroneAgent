@@ -50,6 +50,34 @@ fn run_dir() -> String {
     std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string())
 }
 
+/// This node's own device id file, mirroring `ados-control`'s
+/// `config::DEVICE_ID_FILE`. Defined locally rather than depending on
+/// `ados-control`: the router must not pull the whole HTTP control surface in
+/// to read one path.
+const DEVICE_ID_FILE: &str = "/etc/ados/device-id";
+
+/// Resolve this drone's device id, so a relay-proxy request addressed to a
+/// peer is only answered by the peer it names.
+///
+/// Same precedence as `ados-control`: the provisioned file wins, then
+/// `ADOS_DEVICE_ID`, then empty. Empty means every request is accepted, which
+/// preserves the single-drone behaviour on a box that has no id yet.
+fn own_device_id() -> Arc<str> {
+    let from_file = std::fs::read_to_string(DEVICE_ID_FILE)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let resolved = from_file
+        .or_else(|| {
+            std::env::var("ADOS_DEVICE_ID")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_default();
+    Arc::from(resolved.as_str())
+}
+
 /// Demo mode: drive synthetic telemetry instead of opening a serial FC. Enabled
 /// by the `--demo` argument or `ADOS_MAVLINK_DEMO=1`. Off by default, so the
 /// production unit (no argument, no env) keeps the serial path.
@@ -305,11 +333,21 @@ async fn main() {
         let uplink_egress = Arc::new(ados_protocol::aux_egress::AuxEgress::new(
             std::path::Path::new(&format!("{dir}/radio-aux.sock")),
         ));
+        let uplink_device_id = own_device_id();
+        if uplink_device_id.is_empty() {
+            tracing::warn!(
+                path = DEVICE_ID_FILE,
+                "aux_rpc_own_device_id_unresolved_accepting_every_target"
+            );
+        } else {
+            tracing::info!(device_id = %uplink_device_id, "aux_rpc_own_device_id_resolved");
+        }
         tasks.push(tokio::spawn(async move {
             aux_uplink_consumer::run(
                 AUX_UPLINK_REEMIT_PORT,
                 uplink_fc,
                 Some(uplink_egress),
+                uplink_device_id,
                 uplink_counters,
                 uplink_cancel,
             )

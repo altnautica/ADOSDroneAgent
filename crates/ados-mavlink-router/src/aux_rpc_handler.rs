@@ -40,8 +40,17 @@ const HTTP_PORT: u16 = 8080;
 /// (config writes, param loads) while surfacing a wedge to the operator.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Pause between response fragments.
+///
+/// Back-to-back 1.2 KB datagrams into `wfb_tx`'s UDP ingress can overrun its
+/// socket buffer and are dropped silently with no error to the sender, which
+/// would present on the ground as a permanently `Incomplete` call. 25
+/// fragments × 5 ms = 125 ms, comfortably inside the ground station's
+/// 10-second call bound.
+const FRAGMENT_PACING: Duration = Duration::from_millis(5);
+
 /// Handle one RPC request: forward to the local HTTP API and send the
-/// response back over the aux egress.
+/// response back over the aux egress, fragmented if it does not fit one frame.
 ///
 /// Runs as its own task so the uplink consumer's read loop never stalls behind
 /// a slow HTTP call. A failure at any stage still sends a Response with a 5xx
@@ -55,24 +64,50 @@ pub async fn handle(request: &RpcRequest<'_>, egress: &AuxEgress) {
         (503u16, Vec::new())
     });
 
-    let response_payload = match aux_rpc::encode_response(id, status, &body) {
-        Some(p) => p,
+    let fragments = encode_fragments(id, status, &body);
+    let last = fragments.len().saturating_sub(1);
+    for (index, payload) in fragments.into_iter().enumerate() {
+        if let Err(e) = egress.send(AuxChannel::Response, &payload).await {
+            tracing::warn!(error = %e, request_id = id, index, "aux_rpc_response_send_failed");
+            return;
+        }
+        if index < last {
+            tokio::time::sleep(FRAGMENT_PACING).await;
+        }
+    }
+}
+
+/// Encode a response body as the aux payloads that will carry it.
+///
+/// A body past the ground station's reassembly ceiling becomes a single 413
+/// fragment: truncating is wrong, because the ground would reassemble garbage
+/// and report it as the drone's answer.
+fn encode_fragments(id: u32, status: u16, body: &[u8]) -> Vec<Vec<u8>> {
+    let oversized: &[u8] = b"response exceeds the relay reassembly ceiling";
+    let (status, chunks) = match aux_rpc::split_response(body) {
+        Some(c) => (status, c),
         None => {
-            // Response body too large for one aux frame. Truncate is wrong —
-            // the caller would decode it as 200 with garbage. Send a 413.
             tracing::warn!(
                 len = body.len(),
                 request_id = id,
                 "aux_rpc_response_too_large"
             );
-            aux_rpc::encode_response(id, 413, b"response body exceeds one aux frame")
-                .unwrap_or_default()
+            (413u16, vec![oversized])
         }
     };
 
-    if let Err(e) = egress.send(AuxChannel::Response, &response_payload).await {
-        tracing::warn!(error = %e, request_id = id, "aux_rpc_response_send_failed");
-    }
+    let total = chunks.len() as u16;
+    chunks
+        .iter()
+        .enumerate()
+        .filter_map(|(index, chunk)| {
+            let payload = aux_rpc::encode_response_fragment(id, status, index as u16, total, chunk);
+            if payload.is_none() {
+                tracing::warn!(request_id = id, index, "aux_rpc_fragment_encode_failed");
+            }
+            payload
+        })
+        .collect()
 }
 
 /// A minimal HTTP/1.1 client for localhost. No TLS, no redirects, no
@@ -90,11 +125,7 @@ async fn http_call(
             .await
             .map_err(|e| HttpError::Connect(e.to_string()))?;
 
-        // Build the HTTP/1.1 request.
-        let request = format!(
-            "{method_str} {path_str} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {body_len}\r\nConnection: close\r\n\r\n",
-            body_len = body.len(),
-        );
+        let request = build_request_head(method_str, path_str, body.len());
         stream
             .write_all(request.as_bytes())
             .await
@@ -120,6 +151,25 @@ async fn http_call(
     tokio::time::timeout(HTTP_TIMEOUT, work)
         .await
         .map_err(|_| HttpError::Timeout)?
+}
+
+/// Build the HTTP/1.1 request line and headers.
+///
+/// The wire frame carries no headers, so a body's content-type is synthesised
+/// rather than forwarded: the lane only ever carries JSON, and every GCS write
+/// already sets `Content-Type: application/json` on its own transport. The
+/// Rust front's axum `Json<T>` extractors reject a body with no
+/// `application/json` content-type before the handler runs, so a relayed write
+/// would 415 without this.
+fn build_request_head(method: &str, path: &str, body_len: usize) -> String {
+    let content_type = if body_len == 0 {
+        ""
+    } else {
+        "Content-Type: application/json\r\n"
+    };
+    format!(
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\n{content_type}Content-Length: {body_len}\r\nConnection: close\r\n\r\n"
+    )
 }
 
 /// Parse a raw HTTP/1.1 response into (status, body). Extracts the status
@@ -178,6 +228,78 @@ impl std::error::Error for HttpError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The measured `/api/services` size on a live drone — the endpoint whose
+    /// 413 was the reason fragmentation exists.
+    const MEASURED_SERVICES_BYTES: usize = 2631;
+
+    #[test]
+    fn a_small_body_travels_as_one_fragment() {
+        let frags = encode_fragments(7, 200, br#"{"ok":true}"#);
+        assert_eq!(frags.len(), 1);
+        let dec = aux_rpc::decode_response(&frags[0]).unwrap();
+        assert_eq!(dec.status, 200);
+        assert_eq!(dec.total, 1);
+        assert_eq!(dec.body, br#"{"ok":true}"#);
+    }
+
+    #[test]
+    fn a_services_sized_body_fragments_and_reassembles() {
+        let body: Vec<u8> = (0..MEASURED_SERVICES_BYTES)
+            .map(|i| (i % 251) as u8)
+            .collect();
+        let frags = encode_fragments(7, 200, &body);
+        let expected = MEASURED_SERVICES_BYTES.div_ceil(aux_rpc::MAX_RESPONSE_FRAGMENT);
+        assert_eq!(frags.len(), expected);
+
+        let mut rejoined = Vec::new();
+        for (i, payload) in frags.iter().enumerate() {
+            let dec = aux_rpc::decode_response(payload).unwrap();
+            assert_eq!(dec.index, i as u16);
+            assert_eq!(dec.total, expected as u16);
+            assert_eq!(
+                dec.status, 200,
+                "status repeats identically on every fragment"
+            );
+            rejoined.extend_from_slice(dec.body);
+        }
+        assert_eq!(rejoined, body);
+    }
+
+    #[test]
+    fn an_empty_body_still_travels_as_one_fragment() {
+        let frags = encode_fragments(7, 204, b"");
+        assert_eq!(frags.len(), 1);
+        let dec = aux_rpc::decode_response(&frags[0]).unwrap();
+        assert_eq!(dec.status, 204);
+        assert!(dec.body.is_empty());
+    }
+
+    #[test]
+    fn a_body_past_the_ceiling_becomes_a_single_413() {
+        let body = vec![b'x'; 90_000];
+        let frags = encode_fragments(7, 200, &body);
+        assert_eq!(frags.len(), 1);
+        let dec = aux_rpc::decode_response(&frags[0]).unwrap();
+        assert_eq!(dec.status, 413, "never truncate a body into a fake 200");
+        assert_eq!(dec.total, 1);
+        assert_eq!(dec.body, b"response exceeds the relay reassembly ceiling");
+    }
+
+    #[test]
+    fn a_request_with_a_body_declares_json_and_one_without_does_not() {
+        let write = build_request_head("PUT", "/api/config", 40);
+        assert!(
+            write.contains("Content-Type: application/json\r\n"),
+            "axum Json<T> rejects a body with no content-type before the handler runs"
+        );
+        assert!(write.starts_with("PUT /api/config HTTP/1.1\r\n"));
+        assert!(write.contains("Content-Length: 40\r\n"));
+
+        let read = build_request_head("GET", "/api/logs?limit=5", 0);
+        assert!(!read.contains("Content-Type"));
+        assert!(read.starts_with("GET /api/logs?limit=5 HTTP/1.1\r\n"));
+    }
 
     #[test]
     fn parses_a_200_response_with_a_body() {

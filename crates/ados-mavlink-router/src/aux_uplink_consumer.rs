@@ -50,6 +50,10 @@ struct CountersInner {
     non_mavlink_channel: AtomicU64,
     /// Relay-proxy Request frames received. Sub-tally of `datagrams_received`.
     rpc_requests: AtomicU64,
+    /// Relay-proxy Request frames addressed to a different device id, dropped
+    /// without an answer so the requesting ground station's call falls to its
+    /// own timeout rather than getting this drone's answer for another drone.
+    rpc_requests_not_for_us: AtomicU64,
     /// Relay-proxy Request frames whose body did not decode as an RPC request.
     rpc_undecodable: AtomicU64,
 }
@@ -66,6 +70,7 @@ pub struct AuxUplinkConsumerSnapshot {
     pub decode_damaged: u64,
     pub non_mavlink_channel: u64,
     pub rpc_requests: u64,
+    pub rpc_requests_not_for_us: u64,
     pub rpc_undecodable: u64,
 }
 
@@ -84,6 +89,7 @@ impl AuxUplinkConsumerCounters {
             decode_damaged: c.decode_damaged.load(Ordering::Relaxed),
             non_mavlink_channel: c.non_mavlink_channel.load(Ordering::Relaxed),
             rpc_requests: c.rpc_requests.load(Ordering::Relaxed),
+            rpc_requests_not_for_us: c.rpc_requests_not_for_us.load(Ordering::Relaxed),
             rpc_undecodable: c.rpc_undecodable.load(Ordering::Relaxed),
         }
     }
@@ -91,14 +97,16 @@ impl AuxUplinkConsumerCounters {
 
 /// Bind `port` (the drone's aux-uplink re-emit loopback — `WfbConfig::aux_rx_port`,
 /// default 5603) and inject every decoded MAVLink frame into `fc`. Relay-proxy
-/// Request frames are forwarded to the local HTTP API via
-/// [`crate::aux_rpc_handler`]. Runs until `cancel` fires; a bind failure is
-/// logged and the task exits (the uplink is simply unavailable, matching how a
-/// missing aux receiver already degrades elsewhere in this pipeline).
+/// Request frames addressed to `own_device_id` (or broadcast) are forwarded to
+/// the local HTTP API via [`crate::aux_rpc_handler`]. Runs until `cancel`
+/// fires; a bind failure is logged and the task exits (the uplink is simply
+/// unavailable, matching how a missing aux receiver already degrades elsewhere
+/// in this pipeline).
 pub async fn run(
     port: u16,
     fc: Arc<FcConnection>,
     egress: Option<Arc<AuxEgress>>,
+    own_device_id: Arc<str>,
     counters: AuxUplinkConsumerCounters,
     cancel: Arc<Notify>,
 ) {
@@ -121,7 +129,7 @@ pub async fn run(
                 match recvd {
                     Ok(n) => {
                         counters.0.datagrams_received.fetch_add(1, Ordering::Relaxed);
-                        dispatch(&buf[..n], &fc, &counters, &egress).await;
+                        dispatch(&buf[..n], &fc, &counters, &egress, &own_device_id).await;
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "aux_uplink_consumer_recv_failed");
@@ -138,6 +146,7 @@ async fn dispatch(
     fc: &Arc<FcConnection>,
     counters: &AuxUplinkConsumerCounters,
     egress: &Option<Arc<AuxEgress>>,
+    own_device_id: &str,
 ) {
     let (channel, inner) = match aux_mux::decode(payload) {
         Ok(v) => v,
@@ -177,6 +186,17 @@ async fn dispatch(
             counters.0.rpc_requests.fetch_add(1, Ordering::Relaxed);
             match ados_protocol::aux_rpc::decode_request(inner) {
                 Ok(request) => {
+                    // An empty target is a broadcast every drone answers; a
+                    // named target that is not us is dropped WITHOUT an answer,
+                    // so the ground never mistakes this drone's response for
+                    // the one it asked for.
+                    if !request.target.is_empty() && request.target != own_device_id.as_bytes() {
+                        counters
+                            .0
+                            .rpc_requests_not_for_us
+                            .fetch_add(1, Ordering::Relaxed);
+                        return;
+                    }
                     if let Some(egress) = egress {
                         let id = request.id;
                         let method = request.method;
@@ -187,6 +207,7 @@ async fn dispatch(
                             let req = ados_protocol::aux_rpc::RpcRequest {
                                 id,
                                 method,
+                                target: &[],
                                 path: &path,
                                 body: &body,
                             };
@@ -224,6 +245,9 @@ mod tests {
     use std::task::{Context, Poll};
     use tokio::io::AsyncWrite;
     use tokio::sync::Mutex;
+
+    /// This drone's own device id, as `/etc/ados/device-id` would carry it.
+    const OWN_ID: &str = "77735cd38937";
 
     fn heartbeat_bytes() -> Vec<u8> {
         let msg = MavMessage::HEARTBEAT(HEARTBEAT_DATA {
@@ -285,7 +309,7 @@ mod tests {
         let frame = heartbeat_bytes();
         let datagram = aux_mux::encode(AuxChannel::Mavlink, &frame).unwrap();
 
-        dispatch(&datagram, &fc, &counters, &None).await;
+        dispatch(&datagram, &fc, &counters, &None, OWN_ID).await;
 
         assert_eq!(*captured.lock().unwrap(), frame);
         let snap = counters.snapshot();
@@ -303,7 +327,7 @@ mod tests {
         *fc.writer.lock().await = Some(Box::pin(CapturingWriter(captured.clone())));
 
         let counters = AuxUplinkConsumerCounters::new();
-        dispatch(b"not-an-aux-frame-at-all", &fc, &counters, &None).await;
+        dispatch(b"not-an-aux-frame-at-all", &fc, &counters, &None, OWN_ID).await;
 
         assert!(
             captured.lock().unwrap().is_empty(),
@@ -325,7 +349,7 @@ mod tests {
         batch.extend_from_slice(&one);
         let datagram = aux_mux::encode(AuxChannel::Mavlink, &batch).unwrap();
 
-        dispatch(&datagram, &fc, &counters, &None).await;
+        dispatch(&datagram, &fc, &counters, &None, OWN_ID).await;
 
         assert_eq!(
             *captured.lock().unwrap(),
@@ -334,5 +358,52 @@ mod tests {
         );
         assert_eq!(counters.snapshot().mavlink_frames, 2);
         assert_eq!(counters.snapshot().mavlink_injected, 2);
+    }
+
+    #[tokio::test]
+    async fn a_request_addressed_to_another_drone_is_dropped_unanswered() {
+        let (fc, _captured) = test_connection();
+        let counters = AuxUplinkConsumerCounters::new();
+        let payload = ados_protocol::aux_rpc::encode_request(
+            ados_protocol::aux_rpc::RpcMethod::Get,
+            1,
+            b"deadbeefcafe",
+            b"/api/pairing/info",
+            &[],
+        )
+        .unwrap();
+        let datagram = aux_mux::encode(AuxChannel::Request, &payload).unwrap();
+
+        dispatch(&datagram, &fc, &counters, &None, OWN_ID).await;
+
+        let snap = counters.snapshot();
+        assert_eq!(snap.rpc_requests, 1);
+        assert_eq!(
+            snap.rpc_requests_not_for_us, 1,
+            "answering another drone's request would hand the ground the wrong node's data"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_request_for_us_or_broadcast_is_accepted() {
+        for target in [OWN_ID.as_bytes(), b""] {
+            let (fc, _captured) = test_connection();
+            let counters = AuxUplinkConsumerCounters::new();
+            let payload = ados_protocol::aux_rpc::encode_request(
+                ados_protocol::aux_rpc::RpcMethod::Get,
+                1,
+                target,
+                b"/api/pairing/info",
+                &[],
+            )
+            .unwrap();
+            let datagram = aux_mux::encode(AuxChannel::Request, &payload).unwrap();
+
+            dispatch(&datagram, &fc, &counters, &None, OWN_ID).await;
+
+            let snap = counters.snapshot();
+            assert_eq!(snap.rpc_requests, 1);
+            assert_eq!(snap.rpc_requests_not_for_us, 0, "target {target:?}");
+        }
     }
 }

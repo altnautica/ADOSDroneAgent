@@ -167,6 +167,14 @@ fn native_routes() -> Vec<NativeRoute> {
         get("/api/v1/ground-station/wfb/atlas-relay/status"),
         get("/api/v1/ground-station/wfb/receiver/relays"),
         get("/api/v1/ground-station/wfb/receiver/combined"),
+        // Relay-proxy to a WFB-linked drone (profile-gated). A wildcard tail:
+        // whatever path the drone's own API serves rides through unchanged.
+        // Registering it here is what puts a lane that spends radio airtime
+        // behind the same auth edge and rate limiter as its siblings.
+        get("/api/v1/ground-station/relay-proxy/{peer_device_id}/{*path}"),
+        post("/api/v1/ground-station/relay-proxy/{peer_device_id}/{*path}"),
+        put("/api/v1/ground-station/relay-proxy/{peer_device_id}/{*path}"),
+        delete("/api/v1/ground-station/relay-proxy/{peer_device_id}/{*path}"),
         // Ground-station mesh (profile-gated).
         get("/api/v1/ground-station/role"),
         get("/api/v1/ground-station/mesh"),
@@ -328,19 +336,42 @@ pub fn is_native(method: &Method, path: &str) -> bool {
 }
 
 /// Match a request path against a native-route template. A segment wrapped in
-/// `{...}` matches any single non-empty segment; every other segment must match
-/// literally, and both must have the same number of segments. A param-free
-/// template reduces to literal equality, so the existing exact routes are
-/// unaffected. Mirrors how axum's router matches `{param}` placeholders, so the
-/// auth gate and the router agree on what is native.
+/// `{...}` matches any single non-empty segment; a final `{*name}` segment
+/// matches one or more remaining segments; every other segment must match
+/// literally. A param-free template reduces to literal equality, so the
+/// existing exact routes are unaffected. Mirrors how axum's router matches
+/// `{param}` and `{*wildcard}` placeholders, so the auth gate and the router
+/// agree on what is native.
 fn path_matches_template(template: &str, actual: &str) -> bool {
-    let t = template.split('/');
-    let a = actual.split('/');
-    let (tc, ac): (Vec<&str>, Vec<&str>) = (t.collect(), a.collect());
+    let tc: Vec<&str> = template.split('/').collect();
+    let ac: Vec<&str> = actual.split('/').collect();
+
+    let wildcard_tail = tc
+        .last()
+        .is_some_and(|s| s.starts_with("{*") && s.ends_with('}'));
+    if wildcard_tail {
+        // The wildcard must have at least one segment to swallow; everything
+        // before it matches segment-for-segment.
+        if ac.len() < tc.len() {
+            return false;
+        }
+        let head = tc.len() - 1;
+        if ac[head..].iter().all(|s| s.is_empty()) {
+            return false;
+        }
+        return segments_match(&tc[..head], &ac[..head]);
+    }
+
     if tc.len() != ac.len() {
         return false;
     }
-    tc.iter().zip(ac.iter()).all(|(ts, seg)| {
+    segments_match(&tc, &ac)
+}
+
+/// Segment-for-segment comparison, where `{param}` matches any non-empty
+/// segment. Both slices must already be the same length.
+fn segments_match(template: &[&str], actual: &[&str]) -> bool {
+    template.iter().zip(actual.iter()).all(|(ts, seg)| {
         if ts.starts_with('{') && ts.ends_with('}') && ts.len() >= 2 {
             !seg.is_empty()
         } else {
@@ -437,6 +468,47 @@ mod tests {
     }
 
     #[test]
+    fn a_wildcard_tail_template_swallows_the_remaining_segments() {
+        let t = "/api/v1/ground-station/relay-proxy/{peer_device_id}/{*path}";
+        // One tail segment and many both match; the peer id is a single segment.
+        assert!(path_matches_template(
+            t,
+            "/api/v1/ground-station/relay-proxy/77735cd38937/healthz"
+        ));
+        assert!(path_matches_template(
+            t,
+            "/api/v1/ground-station/relay-proxy/77735cd38937/api/status/full"
+        ));
+        // The tail must exist: without it the route is not this one, and a
+        // wildcard that matched nothing would hand the auth edge a path axum
+        // never routes here.
+        assert!(!path_matches_template(
+            t,
+            "/api/v1/ground-station/relay-proxy/77735cd38937"
+        ));
+        assert!(!path_matches_template(
+            t,
+            "/api/v1/ground-station/relay-proxy/77735cd38937/"
+        ));
+        // A different prefix is not this route.
+        assert!(!path_matches_template(
+            t,
+            "/api/v1/ground-station/status/77735cd38937/healthz"
+        ));
+    }
+
+    #[test]
+    fn the_relay_proxy_lane_is_native_under_every_method_it_serves() {
+        // Missing from the native set, this lane would be served with the
+        // front's auth SKIPPED and outside the rate limiter its siblings share.
+        let p = "/api/v1/ground-station/relay-proxy/77735cd38937/api/services";
+        for m in [Method::GET, Method::POST, Method::PUT, Method::DELETE] {
+            assert!(is_native(&m, p), "{m} {p} must be native");
+        }
+        assert!(!is_native(&Method::PATCH, p));
+    }
+
+    #[test]
     fn permanent_prefix_match_needs_a_segment_boundary() {
         // The exact prefix and a child path match.
         assert!(is_permanent_python_path("/api/vision"));
@@ -457,7 +529,7 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            141,
+            145,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);

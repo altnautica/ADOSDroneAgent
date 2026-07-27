@@ -491,28 +491,21 @@ async fn dispatch(
             counters.bump(&c.request_frames);
             tracing::debug!("ground_aux_unexpected_request_channel");
         }
-        // A relay-proxy HTTP response, drone → ground. Forwards the payload
-        // to the proxy's process via the IPC ingest if one is registered;
-        // without one the datagram is counted and dropped — a rig running no
-        // proxy caller still receives these when a paired drone is answering
-        // requests another GS instance sent over a shared link, and silence
-        // would hide that the lane is alive.
+        // A relay-proxy HTTP response fragment, drone → ground. Forwards the
+        // payload to the proxy's process via the IPC ingest if one is
+        // registered; without one the datagram is counted and dropped — a rig
+        // running no proxy caller still receives these when a paired drone is
+        // answering requests another GS instance sent over a shared link, and
+        // silence would hide that the lane is alive.
         AuxChannel::Response => {
             counters.bump(&c.response_frames);
+            // Decode to validate only: `payload` is already the exact wire
+            // form the proxy's reader decodes, so it is forwarded verbatim
+            // rather than round-tripped through the encoder.
             match ados_protocol::aux_rpc::decode_response(payload) {
-                Ok(response) => {
+                Ok(_) => {
                     if let Some(ingest) = response_ingest {
-                        // Forward the decoded RPC payload so the proxy's
-                        // reader can match it to a pending caller. The
-                        // aux_rpc::encode_response round-trips the decoded
-                        // response back to wire form for the IPC frame.
-                        if let Some(rpc_payload) = ados_protocol::aux_rpc::encode_response(
-                            response.id,
-                            response.status,
-                            response.body,
-                        ) {
-                            ingest.send(&rpc_payload).await;
-                        }
+                        ingest.send(payload).await;
                     } else {
                         counters.bump(&c.response_orphan);
                     }
