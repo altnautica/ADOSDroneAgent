@@ -123,8 +123,9 @@ struct AuxCountersInner {
     /// payload. Sub-tally of `response_frames`, not a terminal outcome, so it
     /// is deliberately absent from [`AuxCountersSnapshot::accounted`].
     response_undecodable: AtomicU64,
-    /// Response datagrams delivered to the proxy, whose caller matched their
-    /// request id. Sub-tally of `response_frames`.
+    /// Response datagrams forwarded to the relay proxy's ingest. Sub-tally of
+    /// `response_frames`, and the pair to `response_orphan`: between them every
+    /// decoded Response is accounted for.
     response_dispatched: AtomicU64,
     /// Response datagrams whose id matched no pending caller. Normal in small
     /// numbers on a reordering lane (the caller timed out and removed itself
@@ -244,8 +245,8 @@ pub struct AuxCountersSnapshot {
     /// Response datagrams whose body did not decode as a relay-proxy response.
     /// Sub-tally of `response_frames`.
     pub response_undecodable: u64,
-    /// Response datagrams delivered to the proxy, whose caller matched their
-    /// request id. Sub-tally of `response_frames`.
+    /// Response datagrams forwarded to the relay proxy's ingest. Sub-tally of
+    /// `response_frames`.
     pub response_dispatched: u64,
     /// Response datagrams whose id matched no pending caller. Sub-tally of
     /// `response_frames`.
@@ -506,6 +507,13 @@ async fn dispatch(
                 Ok(_) => {
                     if let Some(ingest) = response_ingest {
                         ingest.send(payload).await;
+                        // Until now this was never bumped, so it read a
+                        // permanent 0 and a working lane looked identical to a
+                        // dead one — during exactly the kind of incident this
+                        // counter exists to settle. `send` is best-effort and
+                        // reports nothing back, so this counts what was handed
+                        // to the proxy's ingest, not what the proxy read.
+                        counters.bump(&c.response_dispatched);
                     } else {
                         counters.bump(&c.response_orphan);
                     }
@@ -1156,6 +1164,31 @@ mod tests {
         assert_eq!(snap.status_undecodable, 1);
         assert!(peers.peers_payload(0.0).is_empty());
         // The sub-tally must not disturb the whole-lane accounting invariant.
+        assert_eq!(snap.accounted(), snap.datagrams_received);
+    }
+
+    /// The tally read a permanent 0 before this: nothing ever bumped it, so a
+    /// relay lane carrying answers and one carrying none looked identical on
+    /// the ground rig's counters.
+    #[tokio::test]
+    async fn a_response_forwarded_to_the_proxy_is_counted_as_dispatched() {
+        use ados_protocol::aux_rpc::encode_response_fragment;
+        use ados_protocol::aux_rpc_proxy::AuxRpcResponseIngest;
+
+        let ingest = MavlinkIngest::new("/nonexistent/ingest.sock");
+        let counters = AuxCounters::new();
+        let mut gate = SeamGate::default();
+        let peers = AuxPeerCache::new();
+        let proxy = AuxRpcResponseIngest::new("/nonexistent/proxy.sock");
+
+        let fragment = encode_response_fragment(9, 200, 0, 1, br#"{"ok":true}"#).unwrap();
+        let framed = aux_mux::encode(AuxChannel::Response, &fragment).unwrap();
+        dispatch(&framed, &ingest, &counters, &mut gate, &peers, Some(&proxy)).await;
+
+        let snap = counters.snapshot();
+        assert_eq!(snap.response_frames, 1);
+        assert_eq!(snap.response_dispatched, 1);
+        assert_eq!(snap.response_orphan, 0, "an ingest was registered");
         assert_eq!(snap.accounted(), snap.datagrams_received);
     }
 }

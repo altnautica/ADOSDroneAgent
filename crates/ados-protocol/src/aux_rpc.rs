@@ -169,6 +169,11 @@ pub enum RpcCodecError {
     BadMethod(u8),
     /// The declared lengths do not match the bytes actually present.
     LengthMismatch { declared: usize, actual: usize },
+    /// The fragment's own index/total pair is impossible. Kept separate from
+    /// [`Self::LengthMismatch`], whose fields are byte counts: overloading it
+    /// to carry a (total, index) pair made every log line read as a length
+    /// fault and hid the real one.
+    BadFragmentIndex { index: u16, total: u16 },
 }
 
 /// Encode a request as an aux payload (the bytes that go inside the aux
@@ -325,10 +330,7 @@ pub fn decode_response(payload: &[u8]) -> Result<RpcResponse<'_>, RpcCodecError>
         });
     }
     if total == 0 || index >= total {
-        return Err(RpcCodecError::LengthMismatch {
-            declared: total as usize,
-            actual: index as usize,
-        });
+        return Err(RpcCodecError::BadFragmentIndex { index, total });
     }
     let body = &payload[12..12 + frag_len];
     Ok(RpcResponse {
@@ -548,6 +550,22 @@ mod tests {
                 declared: 62,
                 actual: 12
             }
+        );
+    }
+
+    #[test]
+    fn an_impossible_index_total_pair_is_its_own_fault_not_a_length_fault() {
+        // index 3 of total 2. Reported as a length mismatch, the numbers read
+        // as byte counts and the real fault is invisible in the log line.
+        let mut bad = Vec::new();
+        bad.extend_from_slice(&1u32.to_be_bytes());
+        bad.extend_from_slice(&200u16.to_be_bytes());
+        bad.extend_from_slice(&3u16.to_be_bytes());
+        bad.extend_from_slice(&2u16.to_be_bytes());
+        bad.extend_from_slice(&0u16.to_be_bytes());
+        assert_eq!(
+            decode_response(&bad).unwrap_err(),
+            RpcCodecError::BadFragmentIndex { index: 3, total: 2 }
         );
     }
 

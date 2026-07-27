@@ -236,6 +236,23 @@ impl AuxEgress {
         Ok(())
     }
 
+    /// One write attempt against the socket currently installed. `Ok(None)`
+    /// means there was none to write to.
+    async fn try_send_frame(&self, frame: &[u8]) -> Result<Option<()>, AuxEgressError> {
+        let mut guard = self.conn.lock().await;
+        let Some(sock) = guard.as_ref() else {
+            return Ok(None);
+        };
+        match sock.send(frame).await {
+            Ok(_) => Ok(Some(())),
+            Err(e) => {
+                // Self-heal: drop the dead socket so the next send re-opens.
+                *guard = None;
+                Err(AuxEgressError::Send(e.to_string()))
+            }
+        }
+    }
+
     /// Frame `payload` for `channel` and emit it as one aux datagram.
     ///
     /// An oversized payload is rejected BEFORE anything is opened, so a producer
@@ -245,20 +262,20 @@ impl AuxEgress {
     pub async fn send(&self, channel: AuxChannel, payload: &[u8]) -> Result<(), AuxEgressError> {
         let frame =
             aux_mux::encode(channel, payload).ok_or(AuxEgressError::TooLarge(payload.len()))?;
+        // `ensure_open` installs its socket under the same lock a write takes,
+        // so it cannot be called with that lock held. That leaves a window in
+        // which a SIBLING call's failed write nulls the socket between our open
+        // and our write. That is the sibling's self-heal working, not this
+        // call's failure, so re-open once rather than reporting a spurious
+        // `Unavailable("socket closed")` to a caller that did nothing wrong.
         self.ensure_open().await?;
-        let mut guard = self.conn.lock().await;
-        let result = match guard.as_ref() {
-            Some(sock) => sock.send(&frame).await,
-            None => return Err(AuxEgressError::Unavailable("socket closed".into())),
-        };
-        match result {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                // Self-heal: drop the dead socket so the next send re-opens.
-                *guard = None;
-                Err(AuxEgressError::Send(e.to_string()))
-            }
+        if self.try_send_frame(&frame).await?.is_some() {
+            return Ok(());
         }
+        self.ensure_open().await?;
+        self.try_send_frame(&frame)
+            .await?
+            .ok_or_else(|| AuxEgressError::Unavailable("socket closed".into()))
     }
 }
 

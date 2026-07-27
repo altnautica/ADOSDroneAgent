@@ -17,9 +17,10 @@ use ados_protocol::state::encode_v2;
 use serde_json::{json, Map, Value};
 use tokio::sync::{Mutex, Notify};
 
+use ados_mavlink_router::aux_rpc_dedupe::RequestDedupe;
 use ados_mavlink_router::aux_tee::{self, TeeCounters};
 use ados_mavlink_router::aux_uplink;
-use ados_mavlink_router::aux_uplink_consumer;
+use ados_mavlink_router::aux_uplink_consumer::{self, AuxUplinkConsumerCounters};
 use ados_mavlink_router::config::MavlinkConfig;
 use ados_mavlink_router::connection::FcConnection;
 use ados_mavlink_router::frame_ingest::{self, IngestCounters, INGEST_QUEUE_DEPTH};
@@ -221,6 +222,10 @@ async fn main() {
     // Set when the republish seam runs, on the same "absent means not running"
     // reading as the tee counters above.
     let mut frame_ingest_counters: Option<Arc<IngestCounters>> = None;
+    // Set when the relay-proxy uplink runs, on the same reading as the two
+    // above: absent means the lane is not running on this profile, which is not
+    // the same signal as a lane that received nothing.
+    let mut aux_rpc_counters: Option<AuxUplinkConsumerCounters> = None;
 
     // FC connect + read loop. In demo mode a synthetic source feeds the same
     // fan-out, state, and proxy paths a serial FC would; the serial path is
@@ -325,7 +330,14 @@ async fn main() {
         // nothing read the port, so it landed in a void. Injecting into the
         // FC via `send_bytes` is what actually closes the ground-to-drone
         // half of the relay.
-        let uplink_counters = aux_uplink_consumer::AuxUplinkConsumerCounters::new();
+        let uplink_counters = AuxUplinkConsumerCounters::new();
+        aux_rpc_counters = Some(uplink_counters.clone());
+        // One dedupe cache for the whole process. The ground retransmits a
+        // Request datagram it has no answer for — the only way to survive an
+        // uplink that loses a fifth of its packets to the video TX burst — so
+        // without this a retried PUT would execute twice. Shared by every
+        // spawned handler, hence the Arc.
+        let uplink_dedupe = Arc::new(RequestDedupe::new());
         let uplink_fc = fc.clone();
         let uplink_cancel = cancel.clone();
         // The drone's own AuxEgress for sending RPC responses back over the
@@ -348,6 +360,7 @@ async fn main() {
                 uplink_fc,
                 Some(uplink_egress),
                 uplink_device_id,
+                uplink_dedupe,
                 uplink_counters,
                 uplink_cancel,
             )
@@ -495,6 +508,7 @@ async fn main() {
         let state_ipc = state_ipc.clone();
         let mavlink_ipc_stats = mavlink_ipc.clone();
         let aux_tee_counters = aux_tee_counters.clone();
+        let aux_rpc_counters = aux_rpc_counters.clone();
         let frame_ingest_counters = frame_ingest_counters.clone();
         let cancel = cancel.clone();
         tasks.push(tokio::spawn(async move {
@@ -533,6 +547,7 @@ async fn main() {
                         let extras = build_extras(
                             &fc, &state, &params, started, mavlink_drops, state_drops,
                             aux_tee_counters.as_ref(), frame_ingest_counters.as_ref(),
+                            aux_rpc_counters.as_ref(),
                         )
                         .await;
                         let wire = { state.lock().await.to_wire_with(&extras) };
@@ -621,6 +636,7 @@ async fn build_extras(
     state_drops: u64,
     aux_tee_counters: Option<&Arc<TeeCounters>>,
     frame_ingest_counters: Option<&Arc<IngestCounters>>,
+    aux_rpc_counters: Option<&AuxUplinkConsumerCounters>,
 ) -> Map<String, Value> {
     let cached = params.lock().await.count();
     // The expected param count and the decoded autopilot code, read under one
@@ -756,6 +772,17 @@ async fn build_extras(
             serde_json::to_value(counters.snapshot()).unwrap_or(Value::Null),
         );
     }
+    // The relay-proxy uplink's tally: how many HTTP requests crossed the radio,
+    // how many were dropped as another node's, and — the pair that says whether
+    // the ground's retransmission is working — how many arrived as duplicates
+    // or were answered from the dedupe cache. Present only on the drone
+    // profile, which is the only one that consumes the uplink.
+    if let Some(counters) = aux_rpc_counters {
+        extras.insert(
+            "aux_rpc".into(),
+            serde_json::to_value(counters.snapshot()).unwrap_or(Value::Null),
+        );
+    }
     extras.insert("params".into(), Value::Object(params_blob));
     extras
 }
@@ -819,5 +846,79 @@ mod fc_reachable_tests {
     fn a_closed_transport_is_never_reachable_regardless_of_stale_hints() {
         assert!(!compute_fc_reachable(false, false, true, "msp_detected"));
         assert!(!compute_fc_reachable(false, false, false, "none"));
+    }
+}
+
+#[cfg(test)]
+mod extras_key_set_tests {
+    use super::*;
+
+    /// Every key `build_extras` can emit, sorted.
+    ///
+    /// `ados-control` sorts each of these into exactly one of three buckets —
+    /// `IPC_ONLY_KEYS` (stripped from telemetry), `AGENT_DIAGNOSTIC_KEYS`
+    /// (survives the FC-down honesty gate), or neither (vehicle-sourced, so
+    /// gated) — and it cannot depend on this crate to verify its list is
+    /// complete. Pinning the set here is that seam: add an extra without
+    /// classifying it over there and this test fails.
+    const EXPECTED_EXTRAS_KEYS: [&str; 25] = [
+        "aux_mavlink_tee",
+        "aux_rpc",
+        "aux_uplink_command_gated",
+        "fc_baud",
+        "fc_command_down_gated",
+        "fc_connected",
+        "fc_firmware",
+        "fc_link_hint",
+        "fc_port",
+        "fc_reachable",
+        "fc_source",
+        "fc_variant",
+        "heartbeat_age_s",
+        "ipc_mavlink_drops",
+        "ipc_state_drops",
+        "mavlink_alive",
+        "mavlink_frame_ingest",
+        "param_cached_count",
+        "param_expected_count",
+        "param_priming",
+        "param_sweep_send_failed",
+        "param_sweep_timed_out",
+        "params",
+        "service_uptime",
+        "transport_open",
+    ];
+
+    #[tokio::test]
+    async fn build_extras_emits_exactly_the_classified_key_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(Mutex::new(VehicleState::default()));
+        let params = Arc::new(Mutex::new(ParamCache::new(dir.path().join("params.json"))));
+        let fc = FcConnection::new(MavlinkConfig::default(), state.clone(), params.clone());
+
+        // Every optional counter present at once. No single profile does this
+        // (tee + rpc are drone-only, ingest is ground-station-only), but the pin
+        // is about the key SET, not about one profile's subset of it.
+        let extras = build_extras(
+            &fc,
+            &state,
+            &params,
+            Instant::now(),
+            0,
+            0,
+            Some(&Arc::new(TeeCounters::default())),
+            Some(&Arc::new(IngestCounters::default())),
+            Some(&AuxUplinkConsumerCounters::new()),
+        )
+        .await;
+
+        let mut keys: Vec<&str> = extras.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys, EXPECTED_EXTRAS_KEYS,
+            "a snapshot key changed; classify it in ados-control's IPC_ONLY_KEYS \
+             or AGENT_DIAGNOSTIC_KEYS (or neither, if it is vehicle-sourced) \
+             before updating this pin"
+        );
     }
 }

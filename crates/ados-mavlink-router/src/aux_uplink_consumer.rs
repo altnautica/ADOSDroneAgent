@@ -25,8 +25,9 @@
 //! arriving damaged, which is worth telling apart.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use ados_protocol::aux_egress::AuxEgress;
 use ados_protocol::aux_mux::{self, AuxChannel, AuxDecodeError};
@@ -34,17 +35,31 @@ use serde::Serialize;
 use tokio::net::UdpSocket;
 use tokio::sync::Notify;
 
+use crate::aux_rpc_dedupe::RequestDedupe;
 use crate::connection::FcConnection;
 
 /// Largest datagram read in one go. Matches `ados_protocol::aux_mux::AUX_MAX_PAYLOAD`
 /// plus header room; a datagram over this size cannot be one of ours anyway.
 const BUF_SIZE: usize = 4096;
 
+/// A wedged or flow-controlled FC must not stall the recv loop that also feeds
+/// the relay-proxy Request lane. Ordering matters for MAVLink so this is a
+/// bound, not a spawn: a write that exceeds it is dropped and counted.
+const FC_WRITE_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Receive-buffer size asked of the kernel for the uplink socket.
+const AUX_RECV_BUFFER_BYTES: usize = 4 * 1024 * 1024;
+
 #[derive(Default)]
 struct CountersInner {
     datagrams_received: AtomicU64,
     mavlink_frames: AtomicU64,
     mavlink_injected: AtomicU64,
+    /// MAVLink frames dropped because the FC write did not finish inside
+    /// [`FC_WRITE_TIMEOUT`]. Non-zero means the FC link is wedged or flow-
+    /// controlled; the uplink itself is fine, and bounding the write is what
+    /// keeps a relay-proxy Request behind it from being dropped by the kernel.
+    mavlink_write_timeouts: AtomicU64,
     decode_foreign: AtomicU64,
     decode_damaged: AtomicU64,
     non_mavlink_channel: AtomicU64,
@@ -56,6 +71,14 @@ struct CountersInner {
     rpc_requests_not_for_us: AtomicU64,
     /// Relay-proxy Request frames whose body did not decode as an RPC request.
     rpc_undecodable: AtomicU64,
+    /// Relay-proxy Request frames whose id was already in flight. The ground
+    /// retransmits an unanswered Request, so a duplicate that arrives while the
+    /// original is still running is dropped — the original answers both.
+    rpc_requests_duplicate: AtomicU64,
+    /// Relay-proxy Request frames answered from the dedupe cache instead of by
+    /// re-running the HTTP call. This is what makes the ground's retransmission
+    /// safe: a retried write replays the first answer rather than writing twice.
+    rpc_requests_replayed: AtomicU64,
 }
 
 #[derive(Clone, Default)]
@@ -66,12 +89,15 @@ pub struct AuxUplinkConsumerSnapshot {
     pub datagrams_received: u64,
     pub mavlink_frames: u64,
     pub mavlink_injected: u64,
+    pub mavlink_write_timeouts: u64,
     pub decode_foreign: u64,
     pub decode_damaged: u64,
     pub non_mavlink_channel: u64,
     pub rpc_requests: u64,
     pub rpc_requests_not_for_us: u64,
     pub rpc_undecodable: u64,
+    pub rpc_requests_duplicate: u64,
+    pub rpc_requests_replayed: u64,
 }
 
 impl AuxUplinkConsumerCounters {
@@ -85,28 +111,50 @@ impl AuxUplinkConsumerCounters {
             datagrams_received: c.datagrams_received.load(Ordering::Relaxed),
             mavlink_frames: c.mavlink_frames.load(Ordering::Relaxed),
             mavlink_injected: c.mavlink_injected.load(Ordering::Relaxed),
+            mavlink_write_timeouts: c.mavlink_write_timeouts.load(Ordering::Relaxed),
             decode_foreign: c.decode_foreign.load(Ordering::Relaxed),
             decode_damaged: c.decode_damaged.load(Ordering::Relaxed),
             non_mavlink_channel: c.non_mavlink_channel.load(Ordering::Relaxed),
             rpc_requests: c.rpc_requests.load(Ordering::Relaxed),
             rpc_requests_not_for_us: c.rpc_requests_not_for_us.load(Ordering::Relaxed),
             rpc_undecodable: c.rpc_undecodable.load(Ordering::Relaxed),
+            rpc_requests_duplicate: c.rpc_requests_duplicate.load(Ordering::Relaxed),
+            rpc_requests_replayed: c.rpc_requests_replayed.load(Ordering::Relaxed),
         }
+    }
+
+    /// A retransmitted Request dropped because its original is still running.
+    ///
+    /// Bumped from [`crate::aux_rpc_handler`], which owns the dedupe verdict and
+    /// is therefore the only place that can tell these two outcomes apart; the
+    /// tally lives here so it rides the one uplink snapshot with everything else
+    /// about the lane.
+    pub fn note_rpc_duplicate(&self) {
+        self.0
+            .rpc_requests_duplicate
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A retransmitted Request answered from the cache rather than re-executed.
+    pub fn note_rpc_replayed(&self) {
+        self.0.rpc_requests_replayed.fetch_add(1, Ordering::Relaxed);
     }
 }
 
 /// Bind `port` (the drone's aux-uplink re-emit loopback — `WfbConfig::aux_rx_port`,
 /// default 5603) and inject every decoded MAVLink frame into `fc`. Relay-proxy
 /// Request frames addressed to `own_device_id` (or broadcast) are forwarded to
-/// the local HTTP API via [`crate::aux_rpc_handler`]. Runs until `cancel`
-/// fires; a bind failure is logged and the task exits (the uplink is simply
-/// unavailable, matching how a missing aux receiver already degrades elsewhere
-/// in this pipeline).
+/// the local HTTP API via [`crate::aux_rpc_handler`], with `dedupe` making the
+/// ground's retransmissions idempotent. Runs until `cancel` fires; a bind
+/// failure is logged and the task exits (the uplink is simply unavailable,
+/// matching how a missing aux receiver already degrades elsewhere in this
+/// pipeline).
 pub async fn run(
     port: u16,
     fc: Arc<FcConnection>,
     egress: Option<Arc<AuxEgress>>,
     own_device_id: Arc<str>,
+    dedupe: Arc<RequestDedupe>,
     counters: AuxUplinkConsumerCounters,
     cancel: Arc<Notify>,
 ) {
@@ -118,6 +166,7 @@ pub async fn run(
             return;
         }
     };
+    set_recv_buffer(&sock);
     tracing::info!(port, "aux_uplink_consumer_started");
 
     let mut buf = [0u8; BUF_SIZE];
@@ -129,7 +178,7 @@ pub async fn run(
                 match recvd {
                     Ok(n) => {
                         counters.0.datagrams_received.fetch_add(1, Ordering::Relaxed);
-                        dispatch(&buf[..n], &fc, &counters, &egress, &own_device_id).await;
+                        dispatch(&buf[..n], &fc, &counters, &egress, &own_device_id, &dedupe).await;
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "aux_uplink_consumer_recv_failed");
@@ -141,12 +190,68 @@ pub async fn run(
     tracing::info!(port, "aux_uplink_consumer_stopped");
 }
 
+/// Ask the kernel for [`AUX_RECV_BUFFER_BYTES`] of receive buffer on the
+/// uplink socket.
+///
+/// Relay-proxy Request datagrams share this socket with batched MAVLink, and a
+/// burst that lands while the loop is mid-dispatch survives only if the kernel
+/// holds it. Until now the only reason the buffer was large was an unrelated
+/// best-effort `net.core.rmem_default` the installer raises for video, which is
+/// not a contract this lane can rely on. The kernel clamps the request to
+/// `rmem_max` and reports back double the value it kept (its own bookkeeping
+/// overhead), so what was actually obtained is logged rather than assumed.
+/// Failure is non-fatal: the default buffer still works, it just tolerates a
+/// smaller burst.
+fn set_recv_buffer(sock: &UdpSocket) {
+    let opts = socket2::SockRef::from(sock);
+    if let Err(e) = opts.set_recv_buffer_size(AUX_RECV_BUFFER_BYTES) {
+        tracing::warn!(
+            error = %e,
+            requested = AUX_RECV_BUFFER_BYTES,
+            "aux_uplink_consumer_rcvbuf_set_failed"
+        );
+        return;
+    }
+    match opts.recv_buffer_size() {
+        Ok(actual) => tracing::info!(
+            requested = AUX_RECV_BUFFER_BYTES,
+            actual,
+            "aux_uplink_consumer_rcvbuf"
+        ),
+        Err(e) => tracing::warn!(error = %e, "aux_uplink_consumer_rcvbuf_read_failed"),
+    }
+}
+
+/// Latches the first target/own-id mismatch, so a busy shared link cannot
+/// flood the journal with a line that only matters the first time.
+static TARGET_MISMATCH_LOGGED: AtomicBool = AtomicBool::new(false);
+
+/// Report the first request this drone dropped as another node's.
+///
+/// A drop for a genuinely different drone is routine on a shared link, but this
+/// code path is also the only visible symptom of the failure that is not: a
+/// ground station that knows this drone by one id while `/etc/ados/device-id`
+/// holds another (an 8-char pairing id against a 12-char device id, say) has
+/// every one of its calls silently discarded. Carrying both values turns a mute
+/// lane into a one-line diagnosis.
+fn warn_target_mismatch_once(target: &[u8], own_device_id: &str) {
+    if TARGET_MISMATCH_LOGGED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    tracing::warn!(
+        target_id = %String::from_utf8_lossy(target),
+        own_id = %own_device_id,
+        "aux_rpc_target_mismatch"
+    );
+}
+
 async fn dispatch(
     payload: &[u8],
     fc: &Arc<FcConnection>,
     counters: &AuxUplinkConsumerCounters,
     egress: &Option<Arc<AuxEgress>>,
     own_device_id: &str,
+    dedupe: &Arc<RequestDedupe>,
 ) {
     let (channel, inner) = match aux_mux::decode(payload) {
         Ok(v) => v,
@@ -174,7 +279,19 @@ async fn dispatch(
                 .mavlink_frames
                 .fetch_add(frames.len() as u64, Ordering::Relaxed);
             for frame in frames {
-                fc.send_bytes(frame).await;
+                // Bounded, not spawned: MAVLink frame order must be preserved,
+                // and the recv loop this runs on is the same one the relay-proxy
+                // Request lane depends on.
+                if tokio::time::timeout(FC_WRITE_TIMEOUT, fc.send_bytes(frame))
+                    .await
+                    .is_err()
+                {
+                    counters
+                        .0
+                        .mavlink_write_timeouts
+                        .fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
                 counters.0.mavlink_injected.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -186,15 +303,21 @@ async fn dispatch(
             counters.0.rpc_requests.fetch_add(1, Ordering::Relaxed);
             match ados_protocol::aux_rpc::decode_request(inner) {
                 Ok(request) => {
-                    // An empty target is a broadcast every drone answers; a
-                    // named target that is not us is dropped WITHOUT an answer,
-                    // so the ground never mistakes this drone's response for
-                    // the one it asked for.
-                    if !request.target.is_empty() && request.target != own_device_id.as_bytes() {
+                    // An unresolved local id cannot adjudicate a target, so accept
+                    // everything and let the operator see it in the counter —
+                    // dropping every request on a drone that simply has not been
+                    // provisioned yet is a far worse failure. A named target that
+                    // is not us is still dropped WITHOUT an answer, so the ground
+                    // never mistakes this drone's response for the one it asked for.
+                    let addressed_elsewhere = !own_device_id.is_empty()
+                        && !request.target.is_empty()
+                        && request.target != own_device_id.as_bytes();
+                    if addressed_elsewhere {
                         counters
                             .0
                             .rpc_requests_not_for_us
                             .fetch_add(1, Ordering::Relaxed);
+                        warn_target_mismatch_once(request.target, own_device_id);
                         return;
                     }
                     if let Some(egress) = egress {
@@ -203,6 +326,8 @@ async fn dispatch(
                         let path = request.path.to_vec();
                         let body = request.body.to_vec();
                         let egress = Arc::clone(egress);
+                        let dedupe = Arc::clone(dedupe);
+                        let counters = counters.clone();
                         tokio::spawn(async move {
                             let req = ados_protocol::aux_rpc::RpcRequest {
                                 id,
@@ -211,7 +336,7 @@ async fn dispatch(
                                 path: &path,
                                 body: &body,
                             };
-                            crate::aux_rpc_handler::handle(&req, &egress).await;
+                            crate::aux_rpc_handler::handle(&req, &egress, &dedupe, &counters).await;
                         });
                     } else {
                         tracing::debug!("aux_rpc_request_no_egress");
@@ -298,6 +423,28 @@ mod tests {
         (fc, std::sync::Arc::new(std::sync::Mutex::new(Vec::new())))
     }
 
+    fn dedupe() -> Arc<RequestDedupe> {
+        Arc::new(RequestDedupe::new())
+    }
+
+    /// Never completes a write, standing in for a wedged or flow-controlled FC.
+    struct StallingWriter;
+    impl AsyncWrite for StallingWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _data: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Poll::Pending
+        }
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Pending
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
     #[tokio::test]
     async fn a_decoded_uplink_frame_is_injected_into_the_fc_writer() {
         let (fc, captured) = test_connection();
@@ -309,7 +456,7 @@ mod tests {
         let frame = heartbeat_bytes();
         let datagram = aux_mux::encode(AuxChannel::Mavlink, &frame).unwrap();
 
-        dispatch(&datagram, &fc, &counters, &None, OWN_ID).await;
+        dispatch(&datagram, &fc, &counters, &None, OWN_ID, &dedupe()).await;
 
         assert_eq!(*captured.lock().unwrap(), frame);
         let snap = counters.snapshot();
@@ -327,7 +474,15 @@ mod tests {
         *fc.writer.lock().await = Some(Box::pin(CapturingWriter(captured.clone())));
 
         let counters = AuxUplinkConsumerCounters::new();
-        dispatch(b"not-an-aux-frame-at-all", &fc, &counters, &None, OWN_ID).await;
+        dispatch(
+            b"not-an-aux-frame-at-all",
+            &fc,
+            &counters,
+            &None,
+            OWN_ID,
+            &dedupe(),
+        )
+        .await;
 
         assert!(
             captured.lock().unwrap().is_empty(),
@@ -349,7 +504,7 @@ mod tests {
         batch.extend_from_slice(&one);
         let datagram = aux_mux::encode(AuxChannel::Mavlink, &batch).unwrap();
 
-        dispatch(&datagram, &fc, &counters, &None, OWN_ID).await;
+        dispatch(&datagram, &fc, &counters, &None, OWN_ID, &dedupe()).await;
 
         assert_eq!(
             *captured.lock().unwrap(),
@@ -374,7 +529,7 @@ mod tests {
         .unwrap();
         let datagram = aux_mux::encode(AuxChannel::Request, &payload).unwrap();
 
-        dispatch(&datagram, &fc, &counters, &None, OWN_ID).await;
+        dispatch(&datagram, &fc, &counters, &None, OWN_ID, &dedupe()).await;
 
         let snap = counters.snapshot();
         assert_eq!(snap.rpc_requests, 1);
@@ -399,11 +554,61 @@ mod tests {
             .unwrap();
             let datagram = aux_mux::encode(AuxChannel::Request, &payload).unwrap();
 
-            dispatch(&datagram, &fc, &counters, &None, OWN_ID).await;
+            dispatch(&datagram, &fc, &counters, &None, OWN_ID, &dedupe()).await;
 
             let snap = counters.snapshot();
             assert_eq!(snap.rpc_requests, 1);
             assert_eq!(snap.rpc_requests_not_for_us, 0, "target {target:?}");
         }
+    }
+
+    /// The regression every other target test misses: they all fix `OWN_ID`,
+    /// but a drone with no `/etc/ados/device-id` reports an empty own id and
+    /// used to drop every named request — 100% failure on an unprovisioned
+    /// node, while the startup log claimed the opposite.
+    #[tokio::test]
+    async fn a_named_request_is_accepted_when_our_own_id_is_unresolved() {
+        let (fc, _captured) = test_connection();
+        let counters = AuxUplinkConsumerCounters::new();
+        let payload = ados_protocol::aux_rpc::encode_request(
+            ados_protocol::aux_rpc::RpcMethod::Get,
+            1,
+            b"deadbeefcafe",
+            b"/api/pairing/info",
+            &[],
+        )
+        .unwrap();
+        let datagram = aux_mux::encode(AuxChannel::Request, &payload).unwrap();
+
+        dispatch(&datagram, &fc, &counters, &None, "", &dedupe()).await;
+
+        let snap = counters.snapshot();
+        assert_eq!(snap.rpc_requests, 1);
+        assert_eq!(
+            snap.rpc_requests_not_for_us, 0,
+            "an unresolved local id cannot adjudicate a target, so it must fail open"
+        );
+    }
+
+    /// The recv loop that feeds the relay-proxy Request lane must not park
+    /// behind a flight controller that has stopped accepting writes.
+    #[tokio::test(start_paused = true)]
+    async fn a_wedged_fc_write_is_bounded_and_counted() {
+        let (fc, _captured) = test_connection();
+        fc.connected
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        *fc.writer.lock().await = Some(Box::pin(StallingWriter));
+
+        let counters = AuxUplinkConsumerCounters::new();
+        let datagram = aux_mux::encode(AuxChannel::Mavlink, &heartbeat_bytes()).unwrap();
+
+        dispatch(&datagram, &fc, &counters, &None, OWN_ID, &dedupe()).await;
+
+        let snap = counters.snapshot();
+        assert_eq!(snap.mavlink_write_timeouts, 1);
+        assert_eq!(
+            snap.mavlink_injected, 0,
+            "a write that never completed is not an injection"
+        );
     }
 }

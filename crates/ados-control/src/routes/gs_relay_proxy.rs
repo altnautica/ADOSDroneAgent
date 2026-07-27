@@ -93,6 +93,16 @@ pub async fn handle(
         None => format!("/{path}"),
     };
 
+    if !path_is_safe(&full_path) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "detail": "relay path contains control characters"
+            })),
+        )
+            .into_response();
+    }
+
     match proxy
         .call(
             peer_device_id.as_bytes(),
@@ -108,6 +118,14 @@ pub async fn handle(
             (status, Body::from(resp.body)).into_response()
         }
         Err(e) => {
+            // Without this the lane's only witness is the one HTTP caller that
+            // happened to be waiting; a failing radio left no trace anywhere.
+            tracing::warn!(
+                error = %e,
+                peer = %peer_device_id,
+                path = %full_path,
+                "relay_proxy_call_failed"
+            );
             let (status, msg) = match e {
                 ados_protocol::aux_rpc_proxy::RpcError::Encode => (
                     StatusCode::PAYLOAD_TOO_LARGE,
@@ -129,6 +147,10 @@ pub async fn handle(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "relay-proxy channel closed mid-call".to_string(),
                 ),
+                ados_protocol::aux_rpc_proxy::RpcError::Busy => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "relay-proxy saturated; retry shortly".to_string(),
+                ),
             };
             (status, Json(serde_json::json!({ "detail": msg }))).into_response()
         }
@@ -143,4 +165,44 @@ fn is_ground_station(state: &AppState) -> bool {
         &state.pairing_paths.mesh_role,
     );
     profile == "ground-station"
+}
+
+/// Whether a relay path may be forwarded.
+///
+/// axum percent-decodes the wildcard capture, so `%0D%0A` in the URL arrives as
+/// literal CRLF. The drone interpolates this path straight into the request
+/// line of the HTTP/1.1 request it makes against its OWN API — a call that
+/// arrives over genuine loopback and is therefore fully on-box trusted — so an
+/// unfiltered control character is header injection into a trusted context.
+/// The drone rejects it independently; neither end may trust the other's
+/// validation.
+fn path_is_safe(path: &str) -> bool {
+    !path.bytes().any(|b| b < 0x20 || b == 0x7F)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::path_is_safe;
+
+    #[test]
+    fn an_ordinary_path_with_a_query_string_is_forwarded() {
+        assert!(path_is_safe("/api/version"));
+        assert!(path_is_safe("/api/logs?limit=5&level=warn"));
+        assert!(path_is_safe("/api/status/full"));
+    }
+
+    #[test]
+    fn a_decoded_crlf_is_rejected_before_it_reaches_the_radio() {
+        // `%0d%0aX-Injected:%201` after percent-decoding.
+        assert!(!path_is_safe("/api/version\r\nX-Injected: 1"));
+        assert!(!path_is_safe("/api/version\nX-Injected: 1"));
+        assert!(!path_is_safe("/api/version\rX-Injected: 1"));
+    }
+
+    #[test]
+    fn other_control_characters_are_rejected_too() {
+        assert!(!path_is_safe("/api/\0version"));
+        assert!(!path_is_safe("/api/\tversion"));
+        assert!(!path_is_safe("/api/version\x7f"));
+    }
 }

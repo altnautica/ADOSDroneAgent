@@ -230,6 +230,12 @@ pub async fn get_status(State(state): State<AppState>) -> Response {
         },
         "role": role_block,
         "mesh": mesh_block,
+        // Relay-proxy lane health. Null on a node that never built a proxy
+        // (no aux egress), which is itself the answer an operator needs.
+        "relay_proxy": match &state.aux_rpc_proxy {
+            Some(p) => serde_json::to_value(p.stats()).unwrap_or(Value::Null),
+            None => Value::Null,
+        },
     });
 
     Json(body).into_response()

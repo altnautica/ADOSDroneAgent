@@ -15,9 +15,11 @@
 //!   detector persists, degrading to an empty object when that file is absent (a
 //!   fresh boot, or a host with no detector running — the same shape the FastAPI
 //!   route emits when its own HAL detect raises).
-//! - **`/api/telemetry`** is the vehicle-state dict alone: the snapshot with the
-//!   four runtime-only extras (`fc_connected`, `fc_port`, `fc_baud`,
-//!   `service_uptime`) stripped, mirroring the Python `vehicle_state_dict`.
+//! - **`/api/telemetry`** is the vehicle-state dict with the runtime-only extras
+//!   in `IPC_ONLY_KEYS` stripped. When the snapshot reports `mavlink_alive:
+//!   false` the vehicle fields are withheld — they would be stale defaults — and
+//!   only the agent's own diagnostics in `AGENT_DIAGNOSTIC_KEYS` are reported.
+//!   A ground station has no flight controller, so that is its steady state.
 //!
 //! With no agent running (an empty snapshot, no store, no board sidecar), both
 //! routes return a valid, GCS-parseable body rather than failing: status reports
@@ -52,6 +54,40 @@ const IPC_ONLY_KEYS: [&str; 12] = [
     "fc_command_down_gated",
     "fc_variant",
     "fc_firmware",
+];
+
+/// Runtime extras that describe the AGENT's own operation rather than the
+/// vehicle's state.
+///
+/// The honesty gate in [`project_telemetry`] blanks vehicle fields when no
+/// HEARTBEAT is decoding, because a stale reading rendered as live is a lie.
+/// These keys are not vehicle readings — they are counters and flags the agent
+/// maintains about itself, true whether or not a flight controller is attached
+/// — so blanking them is backwards. A ground station never decodes a HEARTBEAT
+/// at all, which left `mavlink_frame_ingest` unreadable through any HTTP
+/// surface from the day it was added.
+///
+/// This is an ALLOWLIST on purpose. A key added to the producer's snapshot and
+/// not listed here stays gated, which is the safe direction: a new vehicle
+/// field must never leak past the gate, while a new counter merely stays
+/// invisible until someone classifies it. `params` is deliberately absent — it
+/// carries values the flight controller reported, so it is vehicle-sourced, and
+/// `GET /api/params` already serves it ungated.
+///
+/// Disjoint from [`IPC_ONLY_KEYS`] by construction; a test pins that.
+const AGENT_DIAGNOSTIC_KEYS: [&str; 12] = [
+    "aux_mavlink_tee",
+    "aux_rpc",
+    "aux_uplink_command_gated",
+    "fc_reachable",
+    "ipc_mavlink_drops",
+    "ipc_state_drops",
+    "mavlink_frame_ingest",
+    "param_cached_count",
+    "param_expected_count",
+    "param_priming",
+    "param_sweep_send_failed",
+    "param_sweep_timed_out",
 ];
 
 /// External binaries the video pipeline may use, checked by presence on `PATH`.
@@ -355,25 +391,34 @@ fn iso8601_from_unix_secs(secs: i64) -> String {
     format!("{year:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}+00:00")
 }
 
-/// Strip the four runtime-only extras from a snapshot, leaving the vehicle-state
-/// dict. An absent or non-object snapshot projects to `{}`.
+/// Project a state snapshot into the vehicle-state dict: the runtime-only extras
+/// in [`IPC_ONLY_KEYS`] are stripped, and when the FC link is not alive the
+/// vehicle fields are withheld too, leaving only [`AGENT_DIAGNOSTIC_KEYS`]. An
+/// absent or non-object snapshot projects to `{}`.
 ///
 /// Shared with the consolidated `/api/status/full` route, whose `telemetry` block
 /// is the same vehicle-state projection.
 pub(crate) fn project_telemetry(snapshot: Option<Value>) -> Value {
     match snapshot {
         Some(Value::Object(map)) => {
-            // Honesty gate: when the FC link is explicitly not alive, the vehicle
-            // fields are stale or default (no fresh HEARTBEAT decoded), so surface
-            // nothing rather than zeros-as-live (0 alt, 0 battery, 360 heading,
-            // HDOP 655). Absence of the flag (an older snapshot) keeps the prior
-            // behavior — staleness cannot be proven, so the fields pass through.
-            if map.get("mavlink_alive").and_then(Value::as_bool) == Some(false) {
-                return json!({});
-            }
+            // Honesty gate: when the FC link is explicitly not alive, the
+            // vehicle fields are stale or default (0 alt, 0 battery, 360
+            // heading, HDOP 655), so they must not surface as live. The agent's
+            // own diagnostics are not vehicle readings and stay true either
+            // way, so they survive — on a ground station, which never decodes a
+            // HEARTBEAT, they are the ONLY thing this route can honestly
+            // report. Absence of the flag (an older snapshot) keeps the prior
+            // behavior: staleness cannot be proven, so the fields pass through.
+            let fc_down = map.get("mavlink_alive").and_then(Value::as_bool) == Some(false);
             let projected: Map<String, Value> = map
                 .into_iter()
-                .filter(|(k, _)| !IPC_ONLY_KEYS.contains(&k.as_str()))
+                .filter(|(k, _)| {
+                    if fc_down {
+                        AGENT_DIAGNOSTIC_KEYS.contains(&k.as_str())
+                    } else {
+                        !IPC_ONLY_KEYS.contains(&k.as_str())
+                    }
+                })
                 .collect();
             Value::Object(projected)
         }
@@ -740,18 +785,85 @@ mod tests {
     }
 
     #[test]
-    fn telemetry_blanks_when_mavlink_not_alive() {
-        // Transport open but the link is not alive: the vehicle fields are stale
-        // defaults, so telemetry must surface nothing rather than zeros-as-live.
+    fn telemetry_withholds_vehicle_fields_but_reports_agent_diagnostics_when_mavlink_not_alive() {
+        // Transport open but the link is not alive: the vehicle fields are
+        // stale defaults and must not surface, while the agent's own counters
+        // stay true and are exactly what an operator needs in this state.
         let snapshot = json!({
             "armed": false,
             "mode": "STABILIZE",
             "battery": {"voltage": 0.0},
+            "attitude": {"roll": 0.0, "pitch": 0.0, "yaw": 0.0},
+            "params": {"SYSID_THISMAV": 1.0},
             "transport_open": true,
             "mavlink_alive": false,
             "fc_link_hint": "no_heartbeat",
+            "fc_reachable": false,
+            "ipc_state_drops": 4,
+            "aux_rpc": {"rpc_requests": 12},
+            "mavlink_frame_ingest": {"published": 900},
         });
+        let tel = project_telemetry(Some(snapshot));
+        let obj = tel.as_object().unwrap();
+
+        for k in ["armed", "mode", "battery", "params"] {
+            assert!(
+                !obj.contains_key(k),
+                "{k} is vehicle-sourced and must stay gated"
+            );
+        }
+        // The cockpit SPA decides "is the vehicle live" from the presence of
+        // `attitude` (cockpit/src/hooks/use-flight-telemetry.ts isLive), so this
+        // key surfacing here would make a dead link render as flying.
+        assert!(!obj.contains_key("attitude"));
+        for k in ["transport_open", "mavlink_alive", "fc_link_hint"] {
+            assert!(!obj.contains_key(k), "{k} is never part of telemetry");
+        }
+
+        assert_eq!(obj["fc_reachable"], json!(false));
+        assert_eq!(obj["ipc_state_drops"], json!(4));
+        assert_eq!(obj["aux_rpc"], json!({"rpc_requests": 12}));
+        assert_eq!(
+            obj["mavlink_frame_ingest"],
+            json!({"published": 900}),
+            "a ground station never decodes a HEARTBEAT, so this is the only \
+             state in which its ingest counters are ever readable"
+        );
+    }
+
+    #[test]
+    fn telemetry_with_no_diagnostics_is_still_empty_when_mavlink_not_alive() {
+        // The degenerate snapshot keeps the old shape: nothing to report.
+        let snapshot = json!({"armed": false, "mavlink_alive": false});
         assert_eq!(project_telemetry(Some(snapshot)), json!({}));
+    }
+
+    #[test]
+    fn an_agent_diagnostic_is_reported_on_a_live_link_too() {
+        // The gate changes what is withheld when the link is down; it must not
+        // change anything about the live case.
+        let snapshot = json!({
+            "armed": true,
+            "mavlink_alive": true,
+            "aux_rpc": {"rpc_requests": 3},
+        });
+        let tel = project_telemetry(Some(snapshot));
+        let obj = tel.as_object().unwrap();
+        assert_eq!(obj["armed"], json!(true));
+        assert_eq!(obj["aux_rpc"], json!({"rpc_requests": 3}));
+        assert!(!obj.contains_key("mavlink_alive"));
+    }
+
+    #[test]
+    fn the_two_key_classifications_do_not_overlap() {
+        // An IPC-only extra that also claimed to be a surfaced diagnostic would
+        // appear when the FC is down and vanish when it is up.
+        for k in AGENT_DIAGNOSTIC_KEYS {
+            assert!(
+                !IPC_ONLY_KEYS.contains(&k),
+                "{k} cannot be both an IPC-only extra and a surfaced diagnostic"
+            );
+        }
     }
 
     #[test]

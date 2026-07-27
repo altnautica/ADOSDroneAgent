@@ -20,6 +20,15 @@ anyhow = { workspace = true }
 time = { version = "0.3", features = ["std", "formatting"] }
 tokio-tungstenite = "0.24"
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+# Explicit SO_RCVBUF on the aux-uplink socket, so the relay-proxy Request lane's
+# burst tolerance is this crate's own contract rather than a side effect of the
+# installer's video sysctl. socket2 is pure Rust (libc only, no C build), so it
+# cross-compiles to the musl SBC target cleanly.
+socket2 = { version = "0.5", features = ["all"] }
 
 [dev-dependencies]
 tempfile = "3"
+# Paused-clock harness for the FC-write-timeout test, which must not spend a
+# real half-second. Dev-only: resolver 2 keeps test-util out of the shipped
+# binary's features.
+tokio = { workspace = true, features = ["test-util"] }

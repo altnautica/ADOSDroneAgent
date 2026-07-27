@@ -56,14 +56,15 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::aux_egress::AuxEgress;
-use crate::aux_mux::AuxChannel;
+use crate::aux_mux::{self, AuxChannel};
 use crate::aux_rpc::{self, RpcMethod};
 use crate::frame::HEADER_SIZE;
+use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{oneshot, Mutex, Notify};
@@ -80,6 +81,29 @@ use tokio::sync::{oneshot, Mutex, Notify};
 /// 503 rather than an ambiguous ground-side timeout that says nothing about
 /// which hop failed.
 pub const RPC_DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Resend schedule for the Request datagram, as gaps between attempts.
+///
+/// The drone's radio is half-duplex and spends ~60% of its airtime injecting
+/// video, so an uplink datagram that lands inside a TX burst is lost at the
+/// PHY before it ever reaches a socket. Video frames pace at ~33 ms (30 fps)
+/// and bursts run ~10-20 ms, so these gaps are deliberately non-harmonic with
+/// the frame period and each is well clear of a single burst; the growth
+/// escapes a multi-frame fade. 5 attempts at a measured ~35% per-attempt loss
+/// leaves ~0.5% residual.
+///
+/// Retransmission is only safe because the drone deduplicates on request id
+/// and replays its cached response instead of re-executing the HTTP call.
+const RPC_RETRY_DELAYS: [Duration; 4] = [
+    Duration::from_millis(150),
+    Duration::from_millis(250),
+    Duration::from_millis(400),
+    Duration::from_millis(700),
+];
+
+/// Most concurrent in-flight calls. Beyond this the proxy sheds load rather
+/// than queueing radio work it cannot deliver.
+const MAX_PENDING_CALLS: usize = 256;
 
 /// The default Unix socket path for the Response IPC seam.
 pub const DEFAULT_RESPONSE_SOCK: &str = "/run/ados/aux-rpc-responses.sock";
@@ -111,6 +135,10 @@ pub enum RpcError {
     /// The consumer torn down between the request and the response, so the
     /// pending entry was removed. The caller may retry.
     ChannelClosed,
+    /// Too many calls already in flight. Shedding here is honest: the lane
+    /// cannot deliver them, and queueing would only convert a fast 503 into a
+    /// slow timeout.
+    Busy,
 }
 
 impl std::fmt::Display for RpcError {
@@ -123,6 +151,7 @@ impl std::fmt::Display for RpcError {
                 write!(f, "relay response incomplete: {received}/{total} fragments")
             }
             Self::ChannelClosed => write!(f, "aux consumer channel closed before response"),
+            Self::Busy => write!(f, "relay proxy has too many calls in flight"),
         }
     }
 }
@@ -135,6 +164,11 @@ struct PendingCall {
     sender: oneshot::Sender<RpcResponseOwned>,
     /// Seeded by the first fragment that arrives; `None` until then.
     assembly: Option<Assembly>,
+    /// Set by the first Response fragment carrying this id, whether or not it
+    /// was usable. Any such fragment proves the Request datagram reached the
+    /// drone, so it is the stop signal for [`RPC_RETRY_DELAYS`]: resending
+    /// after it would only duplicate work the drone has already done.
+    response_started: bool,
 }
 
 /// Partial reassembly state for one response.
@@ -145,6 +179,45 @@ struct Assembly {
     frags: Vec<Option<Vec<u8>>>,
 }
 
+/// Lane health for one proxy. `AuxRpcProxy` had no counters at all, so a
+/// failing relay was invisible to everything except the single HTTP caller
+/// that happened to be waiting on it.
+#[derive(Default)]
+pub struct RpcProxyCounters {
+    calls_started: AtomicU64,
+    calls_ok: AtomicU64,
+    calls_timeout: AtomicU64,
+    calls_incomplete: AtomicU64,
+    calls_send_error: AtomicU64,
+    calls_channel_closed: AtomicU64,
+    calls_busy: AtomicU64,
+    retransmits: AtomicU64,
+    fragments_received: AtomicU64,
+    fragments_duplicate: AtomicU64,
+    responses_out_of_range: AtomicU64,
+    /// Live pending-map size, tracked as its own atomic rather than read as a
+    /// map length so [`AuxRpcProxy::stats`] stays synchronous and a status
+    /// handler never has to await the pending mutex.
+    pending_now: AtomicU64,
+}
+
+/// A point-in-time read of [`RpcProxyCounters`], shaped for the status route.
+#[derive(Debug, Default, Clone, Copy, Serialize, PartialEq, Eq)]
+pub struct RpcProxyStats {
+    pub calls_started: u64,
+    pub calls_ok: u64,
+    pub calls_timeout: u64,
+    pub calls_incomplete: u64,
+    pub calls_send_error: u64,
+    pub calls_channel_closed: u64,
+    pub calls_busy: u64,
+    pub retransmits: u64,
+    pub fragments_received: u64,
+    pub fragments_duplicate: u64,
+    pub responses_out_of_range: u64,
+    pub pending_now: u64,
+}
+
 /// One pending caller, keyed by request id. Cheap to clone; every clone shares
 /// the same pending map and egress.
 #[derive(Clone)]
@@ -152,6 +225,7 @@ pub struct AuxRpcProxy {
     egress: Arc<AuxEgress>,
     pending: Arc<Mutex<HashMap<u32, PendingCall>>>,
     next_id: Arc<AtomicU32>,
+    counters: Arc<RpcProxyCounters>,
     timeout: Duration,
 }
 
@@ -164,10 +238,21 @@ impl AuxRpcProxy {
     /// A proxy with an explicit per-call timeout (tests use a short one so a
     /// no-response case does not cost seconds).
     pub fn with_timeout(egress: AuxEgress, timeout: Duration) -> Self {
+        // A restart must not reuse the id space a still-in-flight response
+        // belongs to: correlation is the bare id with no echo of the request,
+        // so a collision silently hands one caller another call's body.
+        // Seeding from the clock makes reuse within a response window
+        // vanishingly unlikely without a wire change.
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos() ^ std::process::id())
+            .unwrap_or(1)
+            | 1;
         Self {
             egress: Arc::new(egress),
             pending: Arc::new(Mutex::new(HashMap::new())),
-            next_id: Arc::new(AtomicU32::new(1)),
+            next_id: Arc::new(AtomicU32::new(seed)),
+            counters: Arc::new(RpcProxyCounters::default()),
             timeout,
         }
     }
@@ -203,37 +288,118 @@ impl AuxRpcProxy {
             aux_rpc::encode_request(method, id, target, path, body).ok_or(RpcError::Encode)?;
 
         let (tx, rx) = oneshot::channel::<RpcResponseOwned>();
-        self.pending.lock().await.insert(
+        {
+            let mut pending = self.pending.lock().await;
+            if pending.len() >= MAX_PENDING_CALLS {
+                self.counters.calls_busy.fetch_add(1, Ordering::Relaxed);
+                return Err(RpcError::Busy);
+            }
+            pending.insert(
+                id,
+                PendingCall {
+                    sender: tx,
+                    assembly: None,
+                    response_started: false,
+                },
+            );
+        }
+        self.counters.pending_now.fetch_add(1, Ordering::Relaxed);
+        self.counters.calls_started.fetch_add(1, Ordering::Relaxed);
+
+        // Armed from here on: every exit below either removes the entry itself
+        // and disarms, or is a cancellation the guard has to clean up for us.
+        let mut guard = PendingGuard {
+            pending: Arc::clone(&self.pending),
+            counters: Arc::clone(&self.counters),
             id,
-            PendingCall {
-                sender: tx,
-                assembly: None,
-            },
-        );
+            armed: true,
+        };
 
         if let Err(e) = self.egress.send(AuxChannel::Request, &payload).await {
-            self.pending.lock().await.remove(&id);
+            guard.disarm();
+            self.remove_pending(id).await;
+            self.counters
+                .calls_send_error
+                .fetch_add(1, Ordering::Relaxed);
             return Err(RpcError::Send(e.to_string()));
         }
 
-        match tokio::time::timeout(self.timeout, rx).await {
-            Ok(Ok(resp)) => Ok(resp),
-            Ok(Err(_)) => {
-                self.pending.lock().await.remove(&id);
-                Err(RpcError::ChannelClosed)
-            }
-            Err(_) => {
-                // Some fragments in flight is a different fault from silence.
-                let partial = self.pending.lock().await.remove(&id);
-                match partial.and_then(|p| p.assembly) {
-                    Some(a) => Err(RpcError::Incomplete {
-                        received: a.received,
-                        total: a.total,
-                    }),
-                    None => Err(RpcError::Timeout),
+        // One datagram on a lane that loses 20-40% of the uplink is a coin
+        // flip, so resend on a growing schedule until either the response
+        // starts arriving or the caller's bound elapses.
+        let deadline = tokio::time::Instant::now() + self.timeout;
+        let mut attempt = 0usize;
+        tokio::pin!(rx);
+
+        loop {
+            let wake = match RPC_RETRY_DELAYS.get(attempt).copied() {
+                Some(d) => (tokio::time::Instant::now() + d).min(deadline),
+                None => deadline,
+            };
+            tokio::select! {
+                biased;
+                res = &mut rx => {
+                    guard.disarm();
+                    return match res {
+                        Ok(resp) => {
+                            self.counters.calls_ok.fetch_add(1, Ordering::Relaxed);
+                            Ok(resp)
+                        }
+                        Err(_) => {
+                            self.remove_pending(id).await;
+                            self.counters
+                                .calls_channel_closed
+                                .fetch_add(1, Ordering::Relaxed);
+                            Err(RpcError::ChannelClosed)
+                        }
+                    };
+                }
+                _ = tokio::time::sleep_until(wake) => {
+                    if tokio::time::Instant::now() >= deadline {
+                        guard.disarm();
+                        // Some fragments in flight is a different fault from silence.
+                        let partial = self.remove_pending(id).await;
+                        return match partial.and_then(|p| p.assembly) {
+                            Some(a) => {
+                                self.counters
+                                    .calls_incomplete
+                                    .fetch_add(1, Ordering::Relaxed);
+                                Err(RpcError::Incomplete {
+                                    received: a.received,
+                                    total: a.total,
+                                })
+                            }
+                            None => {
+                                self.counters.calls_timeout.fetch_add(1, Ordering::Relaxed);
+                                Err(RpcError::Timeout)
+                            }
+                        };
+                    }
+                    attempt += 1;
+                    let started = self
+                        .pending
+                        .lock()
+                        .await
+                        .get(&id)
+                        .map(|p| p.response_started)
+                        .unwrap_or(false);
+                    if !started {
+                        self.counters.retransmits.fetch_add(1, Ordering::Relaxed);
+                        let _ = self.egress.send(AuxChannel::Request, &payload).await;
+                    }
                 }
             }
         }
+    }
+
+    /// Remove one pending entry and keep `pending_now` honest. Every removal
+    /// outside `dispatch_response` goes through here.
+    async fn remove_pending(&self, id: u32) -> Option<PendingCall> {
+        let removed = self.pending.lock().await.remove(&id);
+        if removed.is_some() {
+            self.counters.pending_now.fetch_sub(1, Ordering::Relaxed);
+        }
+        removed
     }
 
     /// Route a decoded response fragment to its pending caller, reassembling
@@ -244,17 +410,28 @@ impl AuxRpcProxy {
     /// no-op: the caller already gave up (timeout) or the proxy was reset,
     /// both expected on a reordering lane.
     pub async fn dispatch_response(&self, response: &aux_rpc::RpcResponse<'_>) {
+        self.counters
+            .fragments_received
+            .fetch_add(1, Ordering::Relaxed);
         let mut pending = self.pending.lock().await;
         // Taken out of the map for the duration: a fragment that does not
         // complete the call is put back untouched.
         let Some(mut call) = pending.remove(&response.id) else {
             return;
         };
+        // Before any other work: a fragment bearing this id proves the Request
+        // datagram landed, so the resend loop must stop even if this particular
+        // fragment turns out to be unusable.
+        call.response_started = true;
 
         if call.assembly.is_none() {
             if response.total == 0 || response.total as usize > aux_rpc::MAX_RESPONSE_FRAGMENTS {
                 // A fragment count we cannot bound. Complete the caller with an
                 // honest gateway error rather than buffering whatever arrives.
+                self.counters
+                    .responses_out_of_range
+                    .fetch_add(1, Ordering::Relaxed);
+                self.counters.pending_now.fetch_sub(1, Ordering::Relaxed);
                 let _ = call.sender.send(RpcResponseOwned {
                     status: 502,
                     body: b"relay response fragment count out of range".to_vec(),
@@ -279,6 +456,9 @@ impl AuxRpcProxy {
                 && index < assembly.total as usize
                 && assembly.frags[index].is_none();
             if !usable {
+                self.counters
+                    .fragments_duplicate
+                    .fetch_add(1, Ordering::Relaxed);
                 pending.insert(response.id, call);
                 return;
             }
@@ -296,10 +476,30 @@ impl AuxRpcProxy {
         for frag in assembly.frags.into_iter().flatten() {
             body.extend_from_slice(&frag);
         }
+        self.counters.pending_now.fetch_sub(1, Ordering::Relaxed);
         let _ = call.sender.send(RpcResponseOwned {
             status: assembly.status,
             body,
         });
+    }
+
+    /// A synchronous read of the lane's counters, for the status route.
+    pub fn stats(&self) -> RpcProxyStats {
+        let c = &self.counters;
+        RpcProxyStats {
+            calls_started: c.calls_started.load(Ordering::Relaxed),
+            calls_ok: c.calls_ok.load(Ordering::Relaxed),
+            calls_timeout: c.calls_timeout.load(Ordering::Relaxed),
+            calls_incomplete: c.calls_incomplete.load(Ordering::Relaxed),
+            calls_send_error: c.calls_send_error.load(Ordering::Relaxed),
+            calls_channel_closed: c.calls_channel_closed.load(Ordering::Relaxed),
+            calls_busy: c.calls_busy.load(Ordering::Relaxed),
+            retransmits: c.retransmits.load(Ordering::Relaxed),
+            fragments_received: c.fragments_received.load(Ordering::Relaxed),
+            fragments_duplicate: c.fragments_duplicate.load(Ordering::Relaxed),
+            responses_out_of_range: c.responses_out_of_range.load(Ordering::Relaxed),
+            pending_now: c.pending_now.load(Ordering::Relaxed),
+        }
     }
 
     /// Drop every pending caller. Used on shutdown so a caller awaiting a
@@ -312,6 +512,7 @@ impl AuxRpcProxy {
                 body: Vec::new(),
             });
         }
+        self.counters.pending_now.store(0, Ordering::Relaxed);
     }
 
     /// Spawn the reader task that LISTENS on the Response IPC socket and
@@ -332,6 +533,47 @@ impl AuxRpcProxy {
         tokio::spawn(async move {
             run_response_listener(proxy, sock_path, cancel).await;
         })
+    }
+}
+
+/// Removes its pending entry when dropped, however the call ends — including a
+/// cancelled future, which ordinary post-await cleanup never reaches. An axum
+/// handler whose client disconnects drops the call future mid-flight, and
+/// without this the entry (with its `oneshot::Sender` and up to a 76 KB
+/// `Assembly`) leaks for the life of the process.
+///
+/// The map is behind an async mutex, so the removal is scheduled rather than
+/// taken inline; `Handle::try_current` keeps a drop outside the runtime from
+/// panicking.
+struct PendingGuard {
+    pending: Arc<Mutex<HashMap<u32, PendingCall>>>,
+    counters: Arc<RpcProxyCounters>,
+    id: u32,
+    armed: bool,
+}
+
+impl PendingGuard {
+    /// Called on any path that already removed the entry itself.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let pending = Arc::clone(&self.pending);
+        let counters = Arc::clone(&self.counters);
+        let id = self.id;
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                if pending.lock().await.remove(&id).is_some() {
+                    counters.pending_now.fetch_sub(1, Ordering::Relaxed);
+                }
+            });
+        }
     }
 }
 
@@ -370,6 +612,9 @@ async fn run_response_listener(proxy: AuxRpcProxy, sock_path: PathBuf, cancel: A
             }
         }
     }
+    // Shutdown: complete every waiter now rather than leaving each one to burn
+    // its full 10-second bound against a consumer that is already gone.
+    proxy.reset().await;
     tracing::info!("aux_rpc_response_listener_stopped");
     let _ = std::fs::remove_file(&sock_path);
 }
@@ -405,10 +650,10 @@ async fn read_one_frame(stream: &mut UnixStream) -> std::io::Result<Vec<u8>> {
     let mut header = [0u8; HEADER_SIZE];
     stream.read_exact(&mut header).await?;
     let len = u32::from_be_bytes(header) as usize;
-    if len > 4096 {
+    if len > aux_mux::AUX_MAX_PAYLOAD {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "response frame exceeds 4096 bytes",
+            "response frame exceeds the aux payload maximum",
         ));
     }
     let mut payload = vec![0u8; len];
@@ -928,5 +1173,145 @@ mod tests {
 
         cancel.notify_waiters();
         let _ = listener_handle.await;
+    }
+
+    #[tokio::test]
+    async fn a_lost_request_datagram_is_retransmitted_until_the_drone_answers() {
+        let (egress, mut sent) = loopback_egress().await;
+        let proxy = AuxRpcProxy::with_timeout(egress, Duration::from_secs(3));
+
+        let proxy_for_consumer = proxy.clone();
+        let consumer = tokio::spawn(async move {
+            // The half-duplex radio swallowed the first two attempts while the
+            // drone was mid video burst. The third is the one that lands.
+            let (_, first) = sent.recv().await.expect("first attempt");
+            let (_, second) = sent.recv().await.expect("first retransmit");
+            let (_, third) = sent.recv().await.expect("second retransmit");
+            assert_eq!(first, second, "a retransmit must be the identical datagram");
+            assert_eq!(second, third);
+            let request = aux_rpc::decode_request(&third).unwrap();
+            proxy_for_consumer
+                .dispatch_response(&one_fragment(request.id, 200, b"late-but-answered"))
+                .await;
+        });
+
+        let result = proxy
+            .call(b"77735cd38937", RpcMethod::Get, b"/api/version", &[])
+            .await
+            .expect("a retransmitted request must still complete");
+        consumer.await.unwrap();
+        assert_eq!(result.body, b"late-but-answered");
+        assert!(
+            proxy.stats().retransmits >= 2,
+            "one datagram on a 20-40% loss lane is a coin flip; it must be resent"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_response_that_has_started_arriving_stops_the_retransmits() {
+        let (egress, mut sent) = loopback_egress().await;
+        let proxy = AuxRpcProxy::with_timeout(egress, Duration::from_millis(600));
+
+        let proxy_for_consumer = proxy.clone();
+        let consumer = tokio::spawn(async move {
+            let (_, payload) = sent.recv().await.expect("request datagram");
+            let id = aux_rpc::decode_request(&payload).unwrap().id;
+            // Fragment 0 of 2 lands; fragment 1 never does. The call still
+            // fails Incomplete, but the request demonstrably got through, so
+            // resending it would only duplicate the drone's work.
+            proxy_for_consumer
+                .dispatch_response(&aux_rpc::RpcResponse {
+                    id,
+                    status: 200,
+                    index: 0,
+                    total: 2,
+                    body: b"aa",
+                })
+                .await;
+            tokio::time::sleep(Duration::from_millis(450)).await;
+            sent.try_recv().is_ok()
+        });
+
+        let err = proxy
+            .call(&[], RpcMethod::Get, b"/api/x", &[])
+            .await
+            .unwrap_err();
+        let resent = consumer.await.unwrap();
+        assert_eq!(
+            err,
+            RpcError::Incomplete {
+                received: 1,
+                total: 2
+            }
+        );
+        assert!(!resent, "no second Request datagram may leave the ground");
+        assert_eq!(proxy.stats().retransmits, 0);
+    }
+
+    #[tokio::test]
+    async fn a_saturated_proxy_sheds_load_instead_of_queueing_radio_work() {
+        let (egress, _sent) = loopback_egress().await;
+        let proxy = AuxRpcProxy::with_timeout(egress, Duration::from_millis(200));
+        {
+            let mut pending = proxy.pending.lock().await;
+            for id in 0..MAX_PENDING_CALLS as u32 {
+                let (tx, _rx) = oneshot::channel::<RpcResponseOwned>();
+                pending.insert(
+                    id,
+                    PendingCall {
+                        sender: tx,
+                        assembly: None,
+                        response_started: false,
+                    },
+                );
+            }
+        }
+
+        let err = proxy
+            .call(&[], RpcMethod::Get, b"/api/x", &[])
+            .await
+            .unwrap_err();
+        assert_eq!(err, RpcError::Busy);
+        assert_eq!(err.to_string(), "relay proxy has too many calls in flight");
+        assert_eq!(proxy.stats().calls_busy, 1);
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_call_does_not_leak_its_pending_entry() {
+        // An axum handler whose client disconnects drops the call future
+        // mid-flight. Post-await cleanup never runs on that path.
+        let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        sock.connect(("127.0.0.1", 9u16)).await.unwrap();
+        let egress = AuxEgress::connected_for_test(sock);
+        let proxy = AuxRpcProxy::with_timeout(egress, Duration::from_secs(60));
+
+        let proxy_call = proxy.clone();
+        let handle =
+            tokio::spawn(async move { proxy_call.call(&[], RpcMethod::Get, b"/api/x", &[]).await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(proxy.pending.lock().await.len(), 1);
+
+        handle.abort();
+        // The guard schedules its removal rather than taking the async mutex
+        // inline, so give the spawned cleanup a turn.
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert!(
+            proxy.pending.lock().await.is_empty(),
+            "a dropped call future must not leak its sender and assembly forever"
+        );
+        assert_eq!(proxy.stats().pending_now, 0);
+    }
+
+    #[tokio::test]
+    async fn the_request_id_seed_is_not_a_fixed_one() {
+        // Two proxies standing in for two process starts: if both began at 1, a
+        // stale in-flight response from before a restart would silently
+        // complete a different new caller.
+        let (egress_a, _a) = loopback_egress().await;
+        let (egress_b, _b) = loopback_egress().await;
+        let a = AuxRpcProxy::with_timeout(egress_a, Duration::from_millis(50));
+        let b = AuxRpcProxy::with_timeout(egress_b, Duration::from_millis(50));
+        assert_ne!(a.next_id.load(Ordering::Relaxed), 1);
+        assert_ne!(b.next_id.load(Ordering::Relaxed), 1);
     }
 }
