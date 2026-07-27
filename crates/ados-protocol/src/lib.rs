@@ -45,6 +45,7 @@
 pub mod atlas;
 pub mod aux_egress;
 pub mod aux_mux;
+pub mod aux_rpc;
 pub mod capabilities;
 pub mod compute;
 pub mod contracts;

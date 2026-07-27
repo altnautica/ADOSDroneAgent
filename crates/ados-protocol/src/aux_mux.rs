@@ -67,6 +67,15 @@ pub enum AuxChannel {
     Status = 2,
     /// Node identity and capability advertisement.
     Identity = 3,
+    /// Relay-proxy HTTP request, ground → drone over the uplink (radio_id 3).
+    /// A ground station paired to a drone only over WFB has no IP reach to the
+    /// linked drone, so a proxy request rides the aux uplink instead. The
+    /// drone's `aux_uplink_consumer` decodes and dispatches against its own
+    /// HTTP API, then radiates a [`AuxChannel::Response`] back.
+    Request = 4,
+    /// Relay-proxy HTTP response, drone → ground over the downlink (radio_id
+    /// 2). Carries the same request id the matching `Request` was sent with.
+    Response = 5,
 }
 
 impl AuxChannel {
@@ -77,6 +86,8 @@ impl AuxChannel {
             1 => Some(Self::Mavlink),
             2 => Some(Self::Status),
             3 => Some(Self::Identity),
+            4 => Some(Self::Request),
+            5 => Some(Self::Response),
             _ => None,
         }
     }
@@ -206,6 +217,8 @@ mod tests {
             AuxChannel::Mavlink,
             AuxChannel::Status,
             AuxChannel::Identity,
+            AuxChannel::Request,
+            AuxChannel::Response,
         ] {
             let body = b"payload bytes";
             let framed = encode(ch, body).expect("within budget");
@@ -367,6 +380,8 @@ mod tests {
         assert_eq!(AuxChannel::Mavlink as u8, 1);
         assert_eq!(AuxChannel::Status as u8, 2);
         assert_eq!(AuxChannel::Identity as u8, 3);
+        assert_eq!(AuxChannel::Request as u8, 4);
+        assert_eq!(AuxChannel::Response as u8, 5);
         assert_eq!(AuxChannel::from_u8(1), Some(AuxChannel::Mavlink));
         assert_eq!(AuxChannel::from_u8(0), None);
     }
