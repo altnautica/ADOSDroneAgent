@@ -240,6 +240,12 @@ impl AuxRpcProxy {
 /// The listener loop: bind, accept connections, read length-prefixed Response
 /// payloads, dispatch to pending callers.
 async fn run_response_listener(proxy: AuxRpcProxy, sock_path: PathBuf, cancel: Arc<Notify>) {
+    // Remove a stale socket file from a previous process. A leftover file from
+    // an unclean shutdown prevents the new bind from succeeding, which would
+    // silently disable the response dispatch path for the whole process
+    // lifetime. Removing first is the same pattern the mavlink state socket uses.
+    let _ = std::fs::remove_file(&sock_path);
+
     let listener = match UnixListener::bind(&sock_path) {
         Ok(l) => l,
         Err(e) => {
