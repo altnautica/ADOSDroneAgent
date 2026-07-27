@@ -29,8 +29,8 @@ from dataclasses import dataclass
 logging.disable(logging.CRITICAL)
 
 # Import the real builder under test.
-from ados.services.video import encoder as enc  # noqa: E402
 from ados.hal.camera import CameraInfo, CameraType  # noqa: E402
+from ados.services.video import encoder as enc  # noqa: E402
 
 
 class _NullLog:
