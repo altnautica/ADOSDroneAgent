@@ -337,20 +337,29 @@ where
     // listener binds the IPC socket that the ados-groundlink aux consumer
     // forwards Response frames to.
     let state = if is_ground_station {
-        let aux_egress = ados_protocol::aux_egress::AuxEgress::new(std::path::Path::new(
-            "/run/ados/radio-aux.sock",
-        ));
-        let proxy = Arc::new(ados_protocol::aux_rpc_proxy::AuxRpcProxy::new(aux_egress));
-        let _reader_cancel = Arc::new(tokio::sync::Notify::new());
-        let reader_cancel = _reader_cancel.clone();
-        let proxy_clone = Arc::clone(&proxy);
-        tokio::spawn(async move {
-            proxy_clone.spawn_response_listener(
-                ados_protocol::aux_rpc_proxy::DEFAULT_RESPONSE_SOCK,
-                reader_cancel,
-            );
-        });
-        state.with_aux_rpc_proxy(proxy)
+        // The ground station's wfb_rx manager spawns `wfb_tx -p3` whose loopback
+        // ingress is AUX_TX_PORT = 5602 (ados-groundlink::wfb_rx::args). Connect
+        // directly to it rather than going through the `radio-aux.sock` command
+        // socket, which does not exist on the ground station (the radio lifecycle
+        // is managed by the groundlink process, not the ados-radio command socket).
+        match ados_protocol::aux_egress::AuxEgress::connected_to_udp(5602).await {
+            Ok(aux_egress) => {
+                let proxy = Arc::new(ados_protocol::aux_rpc_proxy::AuxRpcProxy::new(aux_egress));
+                let reader_cancel = Arc::new(tokio::sync::Notify::new());
+                let proxy_clone = Arc::clone(&proxy);
+                tokio::spawn(async move {
+                    proxy_clone.spawn_response_listener(
+                        ados_protocol::aux_rpc_proxy::DEFAULT_RESPONSE_SOCK,
+                        reader_cancel,
+                    );
+                });
+                state.with_aux_rpc_proxy(proxy)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "aux_egress_connect_failed_relay_proxy_unavailable");
+                state
+            }
+        }
     } else {
         state
     };

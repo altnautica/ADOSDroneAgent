@@ -130,6 +130,28 @@ impl AuxEgress {
         }
     }
 
+    /// Production: a client connected directly to a UDP target port, skipping
+    /// the radio command-socket handshake. Used on a ground station where the
+    /// `wfb_tx -p3 -u<port>` process is already running (spawned by the
+    /// groundlink receive chain), so the aux TX ingress is a plain UDP port
+    /// with no `radio-aux.sock` command socket to negotiate through.
+    ///
+    /// The drone side still uses the command-socket path ([`Self::new`]) because
+    /// the radio service owns the open/close lifecycle there.
+    pub async fn connected_to_udp(target_port: u16) -> Result<Self, AuxEgressError> {
+        let sock = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .map_err(|e| AuxEgressError::Unavailable(e.to_string()))?;
+        sock.connect(("127.0.0.1", target_port))
+            .await
+            .map_err(|e| AuxEgressError::Unavailable(e.to_string()))?;
+        Ok(Self {
+            cmd_sock: PathBuf::new(),
+            request_timeout: AUX_REQUEST_TIMEOUT,
+            conn: Mutex::new(Some(sock)),
+        })
+    }
+
     /// Whether the egress socket is currently held open by this client.
     pub async fn is_open(&self) -> bool {
         self.conn.lock().await.is_some()
