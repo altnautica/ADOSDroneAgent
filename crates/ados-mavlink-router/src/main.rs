@@ -300,10 +300,16 @@ async fn main() {
         let uplink_counters = aux_uplink_consumer::AuxUplinkConsumerCounters::new();
         let uplink_fc = fc.clone();
         let uplink_cancel = cancel.clone();
+        // The drone's own AuxEgress for sending RPC responses back over the
+        // aux downlink (radio_id 2). Same command socket the aux_tee uses.
+        let uplink_egress = Arc::new(ados_protocol::aux_egress::AuxEgress::new(
+            std::path::Path::new(&format!("{dir}/radio-aux.sock")),
+        ));
         tasks.push(tokio::spawn(async move {
             aux_uplink_consumer::run(
                 AUX_UPLINK_REEMIT_PORT,
                 uplink_fc,
+                Some(uplink_egress),
                 uplink_counters,
                 uplink_cancel,
             )

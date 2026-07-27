@@ -211,6 +211,10 @@ pub struct AppState {
     /// When this daemon started, the status route's uptime fallback when the
     /// state snapshot carries no `service_uptime`.
     started: Instant,
+    /// The relay-proxy caller, present only on a ground-station-profile node.
+    /// When `None`, the relay-proxy route returns 503 — the node is not a
+    /// ground station or the proxy was not initialised.
+    pub aux_rpc_proxy: Option<Arc<ados_protocol::aux_rpc_proxy::AuxRpcProxy>>,
 }
 
 impl AppState {
@@ -240,7 +244,18 @@ impl AppState {
             dashboard_pin,
             mcp_tokens,
             started: Instant::now(),
+            aux_rpc_proxy: None,
         }
+    }
+
+    /// Attach a relay-proxy caller and reader. Ground-station-profile nodes
+    /// call this at startup; other profiles leave it as `None`.
+    pub fn with_aux_rpc_proxy(
+        mut self,
+        proxy: Arc<ados_protocol::aux_rpc_proxy::AuxRpcProxy>,
+    ) -> Self {
+        self.aux_rpc_proxy = Some(proxy);
+        self
     }
 
     /// The agent version reported by `/healthz`, `/api/version`, and the status

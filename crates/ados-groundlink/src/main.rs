@@ -387,6 +387,9 @@ async fn run_direct(
         Arc::new(ados_protocol::mavlink_ingest::MavlinkIngest::at_default_path()),
         aux_counters.clone(),
         aux_peers.clone(),
+        Some(ados_protocol::aux_rpc_proxy::AuxRpcResponseIngest::new(
+            ados_protocol::aux_rpc_proxy::DEFAULT_RESPONSE_SOCK,
+        )),
         aux_shutdown.clone(),
     ));
     let aux_peers_task = tokio::spawn(ados_groundlink::aux_peers::persist_loop(

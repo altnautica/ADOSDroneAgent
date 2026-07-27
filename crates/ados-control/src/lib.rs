@@ -332,6 +332,29 @@ where
     let net_native = is_ground_station;
     let hid_native = is_ground_station;
 
+    // Build the relay-proxy caller on ground-station-profile nodes only. The
+    // proxy's AuxEgress talks to the radio's aux command socket; the response
+    // listener binds the IPC socket that the ados-groundlink aux consumer
+    // forwards Response frames to.
+    let state = if is_ground_station {
+        let aux_egress = ados_protocol::aux_egress::AuxEgress::new(std::path::Path::new(
+            "/run/ados/radio-aux.sock",
+        ));
+        let proxy = Arc::new(ados_protocol::aux_rpc_proxy::AuxRpcProxy::new(aux_egress));
+        let _reader_cancel = Arc::new(tokio::sync::Notify::new());
+        let reader_cancel = _reader_cancel.clone();
+        let proxy_clone = Arc::clone(&proxy);
+        tokio::spawn(async move {
+            proxy_clone.spawn_response_listener(
+                ados_protocol::aux_rpc_proxy::DEFAULT_RESPONSE_SOCK,
+                reader_cancel,
+            );
+        });
+        state.with_aux_rpc_proxy(proxy)
+    } else {
+        state
+    };
+
     // The proxied-route auth decision: the ported Python auth + HMAC middlewares
     // the front runs on every forwarded (non-native) route, so the front is the
     // single authenticator for the whole surface. The `security:` slice (read

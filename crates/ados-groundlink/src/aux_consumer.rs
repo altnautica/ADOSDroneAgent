@@ -109,6 +109,27 @@ struct AuxCountersInner {
     status_undecodable: AtomicU64,
     status_out_of_order: AtomicU64,
     identity_undecodable: AtomicU64,
+    /// Datagrams that decoded as the relay-proxy Response channel. Routed to the
+    /// registered proxy if any; otherwise counted and dropped. A ground rig
+    /// running no proxy caller still receives these when a peer buildAnswers
+    /// requests the ground sends, and silence would hide the lane is alive.
+    response_frames: AtomicU64,
+    /// Datagrams that decoded as the relay-proxy Request channel. The ground
+    /// rig never receives this channel — Requests only travel ground→drone —
+    /// so a non-zero count means a peer is sending the wrong direction or a
+    /// frame was misrouted. Counted for visibility, not alarmed on.
+    request_frames: AtomicU64,
+    /// Response datagrams whose body did not decode as a relay-proxy response
+    /// payload. Sub-tally of `response_frames`, not a terminal outcome, so it
+    /// is deliberately absent from [`AuxCountersSnapshot::accounted`].
+    response_undecodable: AtomicU64,
+    /// Response datagrams delivered to the proxy, whose caller matched their
+    /// request id. Sub-tally of `response_frames`.
+    response_dispatched: AtomicU64,
+    /// Response datagrams whose id matched no pending caller. Normal in small
+    /// numbers on a reordering lane (the caller timed out and removed itself
+    /// between send and response). Sub-tally of `response_frames`.
+    response_orphan: AtomicU64,
     recv_errors: AtomicU64,
     bind_failures: AtomicU64,
 }
@@ -144,6 +165,11 @@ impl AuxCounters {
             status_undecodable: c.status_undecodable.load(Ordering::Relaxed),
             status_out_of_order: c.status_out_of_order.load(Ordering::Relaxed),
             identity_undecodable: c.identity_undecodable.load(Ordering::Relaxed),
+            response_frames: c.response_frames.load(Ordering::Relaxed),
+            request_frames: c.request_frames.load(Ordering::Relaxed),
+            response_undecodable: c.response_undecodable.load(Ordering::Relaxed),
+            response_dispatched: c.response_dispatched.load(Ordering::Relaxed),
+            response_orphan: c.response_orphan.load(Ordering::Relaxed),
             recv_errors: c.recv_errors.load(Ordering::Relaxed),
             bind_failures: c.bind_failures.load(Ordering::Relaxed),
         }
@@ -166,6 +192,14 @@ pub struct AuxCountersSnapshot {
     /// Datagrams that decoded as the identity channel, counted and ignored on
     /// the same footing as the status channel.
     pub identity_frames: u64,
+    /// Datagrams that decoded as the relay-proxy Response channel. Routed to
+    /// the registered proxy if any, otherwise counted and dropped.
+    pub response_frames: u64,
+    /// Datagrams that decoded as the relay-proxy Request channel. The ground
+    /// never receives this channel — Requests travel ground→drone only — so a
+    /// non-zero count means a peer is sending the wrong direction or a frame
+    /// was misrouted. Counted for visibility, not alarmed on.
+    pub request_frames: u64,
     /// MAVLink frames the republish seam accepted. Not proof a ground control
     /// station was connected or rendered them.
     pub mavlink_republished: u64,
@@ -207,6 +241,15 @@ pub struct AuxCountersSnapshot {
     /// Identity datagrams whose body did not decode. Sub-tally of
     /// `identity_frames`.
     pub identity_undecodable: u64,
+    /// Response datagrams whose body did not decode as a relay-proxy response.
+    /// Sub-tally of `response_frames`.
+    pub response_undecodable: u64,
+    /// Response datagrams delivered to the proxy, whose caller matched their
+    /// request id. Sub-tally of `response_frames`.
+    pub response_dispatched: u64,
+    /// Response datagrams whose id matched no pending caller. Sub-tally of
+    /// `response_frames`.
+    pub response_orphan: u64,
     /// Failed reads on the loopback socket.
     pub recv_errors: u64,
     /// Failed attempts to bind the lane's loopback port. A non-zero value with
@@ -239,6 +282,8 @@ impl AuxCountersSnapshot {
             + self.republish_lane_down
             + self.status_frames
             + self.identity_frames
+            + self.response_frames
+            + self.request_frames
             + self.decode_foreign
             + self.decode_runt
             + self.decode_unsupported_version
@@ -311,6 +356,10 @@ fn report(counters: &AuxCounters, last: AuxCountersSnapshot) -> AuxCountersSnaps
             republish_lane_down = now.republish_lane_down,
             status_frames = now.status_frames,
             identity_frames = now.identity_frames,
+            response_frames = now.response_frames,
+            request_frames = now.request_frames,
+            response_dispatched = now.response_dispatched,
+            response_orphan = now.response_orphan,
             decode_foreign = now.decode_foreign,
             decode_damaged = now.decode_damaged,
             recv_errors = now.recv_errors,
@@ -331,6 +380,7 @@ async fn dispatch(
     counters: &AuxCounters,
     gate: &mut SeamGate,
     peers: &AuxPeerCache,
+    response_ingest: Option<&ados_protocol::aux_rpc_proxy::AuxRpcResponseIngest>,
 ) {
     let c = &counters.0;
     counters.bump(&c.datagrams_received);
@@ -432,6 +482,44 @@ async fn dispatch(
                 None => counters.bump(&c.identity_undecodable),
             }
         }
+        // A relay-proxy HTTP request. The ground never receives this channel
+        // — Requests travel ground→drone only — so a non-zero count means a
+        // peer is sending the wrong direction or a frame was misrouted.
+        // Counted for visibility, not alarmed on, because the only thing the
+        // ground could do with a Request it received is drop it.
+        AuxChannel::Request => {
+            counters.bump(&c.request_frames);
+            tracing::debug!("ground_aux_unexpected_request_channel");
+        }
+        // A relay-proxy HTTP response, drone → ground. Forwards the payload
+        // to the proxy's process via the IPC ingest if one is registered;
+        // without one the datagram is counted and dropped — a rig running no
+        // proxy caller still receives these when a paired drone is answering
+        // requests another GS instance sent over a shared link, and silence
+        // would hide that the lane is alive.
+        AuxChannel::Response => {
+            counters.bump(&c.response_frames);
+            match ados_protocol::aux_rpc::decode_response(payload) {
+                Ok(response) => {
+                    if let Some(ingest) = response_ingest {
+                        // Forward the decoded RPC payload so the proxy's
+                        // reader can match it to a pending caller. The
+                        // aux_rpc::encode_response round-trips the decoded
+                        // response back to wire form for the IPC frame.
+                        if let Some(rpc_payload) = ados_protocol::aux_rpc::encode_response(
+                            response.id,
+                            response.status,
+                            response.body,
+                        ) {
+                            ingest.send(&rpc_payload).await;
+                        }
+                    } else {
+                        counters.bump(&c.response_orphan);
+                    }
+                }
+                Err(_) => counters.bump(&c.response_undecodable),
+            }
+        }
     }
 }
 
@@ -439,12 +527,15 @@ async fn dispatch(
 ///
 /// Returns `Err` only when the port could not be bound; the caller supervises
 /// the retry. Takes an already-built republish client so a test can point the
-/// consumer at a stand-in seam.
+/// consumer at a stand-in seam. `proxy` is `None` on a rig with no relay-
+/// proxy caller registered — Response datagrams it receives anyway are
+/// counted and dropped rather than silently swallowed.
 pub async fn run_aux_consumer(
     listen_port: u16,
     ingest: Arc<MavlinkIngest>,
     counters: AuxCounters,
     peers: AuxPeerCache,
+    response_ingest: Option<ados_protocol::aux_rpc_proxy::AuxRpcResponseIngest>,
     cancel: Arc<Notify>,
 ) -> std::io::Result<()> {
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, listen_port));
@@ -476,7 +567,7 @@ pub async fn run_aux_consumer(
             received = sock.recv_from(&mut buf) => match received {
                 Ok((n, _from)) => {
                     consecutive_errors = 0;
-                    dispatch(&buf[..n], &ingest, &counters, &mut gate, &peers).await;
+                    dispatch(&buf[..n], &ingest, &counters, &mut gate, &peers, response_ingest.as_ref()).await;
                 }
                 Err(e) => {
                     counters.bump(&counters.0.recv_errors);
@@ -513,6 +604,7 @@ pub async fn supervise_aux_consumer(
     ingest: Arc<MavlinkIngest>,
     counters: AuxCounters,
     peers: AuxPeerCache,
+    response_ingest: Option<ados_protocol::aux_rpc_proxy::AuxRpcResponseIngest>,
     cancel: Arc<Notify>,
 ) {
     let mut backoff = BIND_BACKOFF_MIN;
@@ -522,6 +614,7 @@ pub async fn supervise_aux_consumer(
             ingest.clone(),
             counters.clone(),
             peers.clone(),
+            response_ingest.clone(),
             cancel.clone(),
         )
         .await
@@ -605,7 +698,7 @@ mod tests {
 
         let frame = heartbeat();
         let datagram = aux_mux::encode(AuxChannel::Mavlink, &frame).unwrap();
-        dispatch(&datagram, &ingest, &counters, &mut gate, &peers).await;
+        dispatch(&datagram, &ingest, &counters, &mut gate, &peers, None).await;
 
         assert_eq!(seam.recv().await.unwrap(), frame);
         let snap = counters.snapshot();
@@ -633,7 +726,7 @@ mod tests {
 
         let mut truncated = aux_mux::encode(AuxChannel::Mavlink, &heartbeat()).unwrap();
         truncated.truncate(truncated.len() - 3);
-        dispatch(&truncated, &ingest, &counters, &mut gate, &peers).await;
+        dispatch(&truncated, &ingest, &counters, &mut gate, &peers, None).await;
 
         let snap = counters.snapshot();
         assert_eq!(snap.datagrams_received, 1);
@@ -644,7 +737,7 @@ mod tests {
         // A healthy frame after the damaged one still gets through: the lane
         // does not latch shut on one bad datagram.
         let good = aux_mux::encode(AuxChannel::Mavlink, &heartbeat()).unwrap();
-        dispatch(&good, &ingest, &counters, &mut gate, &peers).await;
+        dispatch(&good, &ingest, &counters, &mut gate, &peers, None).await;
         assert_eq!(seam.recv().await.unwrap(), heartbeat());
         server.abort();
     }
@@ -679,7 +772,7 @@ mod tests {
             batch.extend_from_slice(&frame);
         }
         let datagram = aux_mux::encode(AuxChannel::Mavlink, &batch).unwrap();
-        dispatch(&datagram, &ingest, &counters, &mut gate, &peers).await;
+        dispatch(&datagram, &ingest, &counters, &mut gate, &peers, None).await;
 
         for _ in 0..3 {
             assert_eq!(seam.recv().await.unwrap(), frame);
@@ -708,7 +801,7 @@ mod tests {
 
         let opaque = b"not-a-mavlink-frame".to_vec();
         let datagram = aux_mux::encode(AuxChannel::Mavlink, &opaque).unwrap();
-        dispatch(&datagram, &ingest, &counters, &mut gate, &peers).await;
+        dispatch(&datagram, &ingest, &counters, &mut gate, &peers, None).await;
 
         assert_eq!(seam.recv().await.unwrap(), opaque);
         assert_eq!(counters.snapshot().mavlink_republished, 1);
@@ -730,9 +823,10 @@ mod tests {
             &counters,
             &mut gate,
             &peers,
+            None,
         )
         .await;
-        dispatch(b"\xAD", &ingest, &counters, &mut gate, &peers).await;
+        dispatch(b"\xAD", &ingest, &counters, &mut gate, &peers, None).await;
 
         let snap = counters.snapshot();
         assert_eq!(snap.decode_foreign, 1);
@@ -753,16 +847,24 @@ mod tests {
 
         let mut wrong_version = aux_mux::encode(AuxChannel::Mavlink, b"x").unwrap();
         wrong_version[2] = 0x99;
-        dispatch(&wrong_version, &ingest, &counters, &mut gate, &peers).await;
+        dispatch(&wrong_version, &ingest, &counters, &mut gate, &peers, None).await;
 
         let mut unknown_channel = aux_mux::encode(AuxChannel::Mavlink, b"x").unwrap();
         unknown_channel[3] = 0x7F;
-        dispatch(&unknown_channel, &ingest, &counters, &mut gate, &peers).await;
+        dispatch(
+            &unknown_channel,
+            &ingest,
+            &counters,
+            &mut gate,
+            &peers,
+            None,
+        )
+        .await;
 
         let mut overlong = aux_mux::encode(AuxChannel::Mavlink, b"x").unwrap();
         overlong[4] = 0xFF;
         overlong[5] = 0xFF;
-        dispatch(&overlong, &ingest, &counters, &mut gate, &peers).await;
+        dispatch(&overlong, &ingest, &counters, &mut gate, &peers, None).await;
 
         let snap = counters.snapshot();
         assert_eq!(snap.decode_unsupported_version, 1);
@@ -785,12 +887,12 @@ mod tests {
 
         for ch in [AuxChannel::Status, AuxChannel::Identity] {
             let d = aux_mux::encode(ch, b"a compact snapshot").unwrap();
-            dispatch(&d, &ingest, &counters, &mut gate, &peers).await;
+            dispatch(&d, &ingest, &counters, &mut gate, &peers, None).await;
         }
         // The MAVLink one after them still republishes, proving the ignore is
         // per-channel and not a lane that stopped.
         let d = aux_mux::encode(AuxChannel::Mavlink, &heartbeat()).unwrap();
-        dispatch(&d, &ingest, &counters, &mut gate, &peers).await;
+        dispatch(&d, &ingest, &counters, &mut gate, &peers, None).await;
 
         assert_eq!(seam.recv().await.unwrap(), heartbeat());
         let snap = counters.snapshot();
@@ -815,7 +917,7 @@ mod tests {
 
         let d = aux_mux::encode(AuxChannel::Mavlink, &heartbeat()).unwrap();
         for _ in 0..5 {
-            dispatch(&d, &ingest, &counters, &mut gate, &peers).await;
+            dispatch(&d, &ingest, &counters, &mut gate, &peers, None).await;
         }
 
         let snap = counters.snapshot();
@@ -869,7 +971,7 @@ mod tests {
         ];
         let sent = datagrams.len() as u64;
         for d in &datagrams {
-            dispatch(d, &ingest, &counters, &mut gate, &peers).await;
+            dispatch(d, &ingest, &counters, &mut gate, &peers, None).await;
         }
 
         let snap = counters.snapshot();
@@ -909,6 +1011,7 @@ mod tests {
             Arc::new(MavlinkIngest::new(&sock)),
             counters.clone(),
             AuxPeerCache::new(),
+            None,
             cancel.clone(),
         ));
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -966,6 +1069,7 @@ mod tests {
                 ingest.clone(),
                 counters.clone(),
                 AuxPeerCache::new(),
+                None,
                 cancel.clone(),
             )
             .await
@@ -983,6 +1087,7 @@ mod tests {
             ingest,
             counters.clone(),
             AuxPeerCache::new(),
+            None,
             cancel.clone(),
         ));
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1025,7 +1130,7 @@ mod tests {
             (AuxChannel::Identity, identity_body),
         ] {
             let framed = aux_mux::encode(channel, &body).unwrap();
-            dispatch(&framed, &ingest, &counters, &mut gate, &peers).await;
+            dispatch(&framed, &ingest, &counters, &mut gate, &peers, None).await;
         }
 
         let snap = counters.snapshot();
@@ -1051,7 +1156,7 @@ mod tests {
         let peers = AuxPeerCache::new();
 
         let framed = aux_mux::encode(AuxChannel::Status, b"not msgpack").unwrap();
-        dispatch(&framed, &ingest, &counters, &mut gate, &peers).await;
+        dispatch(&framed, &ingest, &counters, &mut gate, &peers, None).await;
 
         let snap = counters.snapshot();
         assert_eq!(snap.status_frames, 1, "the datagram is still accounted for");

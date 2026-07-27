@@ -35,6 +35,9 @@ pub mod watchdog;
 pub mod wfb_rx;
 
 pub use acquire::{AcquireState, ChannelAcquirer};
+pub use ados_protocol::aux_rpc_proxy::{
+    AuxRpcProxy, AuxRpcResponseIngest, RpcError, RpcResponseOwned, RPC_DEFAULT_TIMEOUT,
+};
 pub use atlas_relay::{run_atlas_relay, AtlasRelayStats};
 pub use aux_consumer::{
     run_aux_consumer, supervise_aux_consumer, AuxCounters, AuxCountersSnapshot,

@@ -11,6 +11,7 @@
 //! I/O so it can be unit-tested against constructed messages for byte-level
 //! parity with the Python producer.
 
+pub mod aux_rpc_handler;
 pub mod aux_tee;
 pub mod aux_uplink;
 pub mod aux_uplink_consumer;

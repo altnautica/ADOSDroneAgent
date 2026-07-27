@@ -28,6 +28,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use ados_protocol::aux_egress::AuxEgress;
 use ados_protocol::aux_mux::{self, AuxChannel, AuxDecodeError};
 use serde::Serialize;
 use tokio::net::UdpSocket;
@@ -47,6 +48,10 @@ struct CountersInner {
     decode_foreign: AtomicU64,
     decode_damaged: AtomicU64,
     non_mavlink_channel: AtomicU64,
+    /// Relay-proxy Request frames received. Sub-tally of `datagrams_received`.
+    rpc_requests: AtomicU64,
+    /// Relay-proxy Request frames whose body did not decode as an RPC request.
+    rpc_undecodable: AtomicU64,
 }
 
 #[derive(Clone, Default)]
@@ -60,6 +65,8 @@ pub struct AuxUplinkConsumerSnapshot {
     pub decode_foreign: u64,
     pub decode_damaged: u64,
     pub non_mavlink_channel: u64,
+    pub rpc_requests: u64,
+    pub rpc_undecodable: u64,
 }
 
 impl AuxUplinkConsumerCounters {
@@ -76,18 +83,22 @@ impl AuxUplinkConsumerCounters {
             decode_foreign: c.decode_foreign.load(Ordering::Relaxed),
             decode_damaged: c.decode_damaged.load(Ordering::Relaxed),
             non_mavlink_channel: c.non_mavlink_channel.load(Ordering::Relaxed),
+            rpc_requests: c.rpc_requests.load(Ordering::Relaxed),
+            rpc_undecodable: c.rpc_undecodable.load(Ordering::Relaxed),
         }
     }
 }
 
 /// Bind `port` (the drone's aux-uplink re-emit loopback — `WfbConfig::aux_rx_port`,
-/// default 5603) and inject every decoded MAVLink frame into `fc`. Runs until
-/// `cancel` fires; a bind failure is logged and the task exits (the uplink is
-/// simply unavailable, matching how a missing aux receiver already degrades
-/// elsewhere in this pipeline).
+/// default 5603) and inject every decoded MAVLink frame into `fc`. Relay-proxy
+/// Request frames are forwarded to the local HTTP API via
+/// [`crate::aux_rpc_handler`]. Runs until `cancel` fires; a bind failure is
+/// logged and the task exits (the uplink is simply unavailable, matching how a
+/// missing aux receiver already degrades elsewhere in this pipeline).
 pub async fn run(
     port: u16,
     fc: Arc<FcConnection>,
+    egress: Option<Arc<AuxEgress>>,
     counters: AuxUplinkConsumerCounters,
     cancel: Arc<Notify>,
 ) {
@@ -110,7 +121,7 @@ pub async fn run(
                 match recvd {
                     Ok(n) => {
                         counters.0.datagrams_received.fetch_add(1, Ordering::Relaxed);
-                        dispatch(&buf[..n], &fc, &counters).await;
+                        dispatch(&buf[..n], &fc, &counters, &egress).await;
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "aux_uplink_consumer_recv_failed");
@@ -122,7 +133,12 @@ pub async fn run(
     tracing::info!(port, "aux_uplink_consumer_stopped");
 }
 
-async fn dispatch(payload: &[u8], fc: &Arc<FcConnection>, counters: &AuxUplinkConsumerCounters) {
+async fn dispatch(
+    payload: &[u8],
+    fc: &Arc<FcConnection>,
+    counters: &AuxUplinkConsumerCounters,
+    egress: &Option<Arc<AuxEgress>>,
+) {
     let (channel, inner) = match aux_mux::decode(payload) {
         Ok(v) => v,
         Err(AuxDecodeError::BadMagic) => {
@@ -134,28 +150,63 @@ async fn dispatch(payload: &[u8], fc: &Arc<FcConnection>, counters: &AuxUplinkCo
             return;
         }
     };
-    if channel != AuxChannel::Mavlink {
-        counters
-            .0
-            .non_mavlink_channel
-            .fetch_add(1, Ordering::Relaxed);
-        return;
-    }
 
-    // A sender may batch several frames into one datagram (see
-    // `aux_uplink::run`'s own batching); split on the header-derived
-    // boundary, which needs no dialect knowledge. A payload that yields no
-    // whole frame is injected intact rather than dropped — an older sender
-    // that predates batching sends exactly one frame per datagram.
-    let split = aux_mux::split_frames(inner);
-    let frames: Vec<&[u8]> = if split.is_empty() { vec![inner] } else { split };
-    counters
-        .0
-        .mavlink_frames
-        .fetch_add(frames.len() as u64, Ordering::Relaxed);
-    for frame in frames {
-        fc.send_bytes(frame).await;
-        counters.0.mavlink_injected.fetch_add(1, Ordering::Relaxed);
+    match channel {
+        AuxChannel::Mavlink => {
+            // A sender may batch several frames into one datagram (see
+            // `aux_uplink::run`'s own batching); split on the header-derived
+            // boundary, which needs no dialect knowledge. A payload that yields no
+            // whole frame is injected intact rather than dropped — an older sender
+            // that predates batching sends exactly one frame per datagram.
+            let split = aux_mux::split_frames(inner);
+            let frames: Vec<&[u8]> = if split.is_empty() { vec![inner] } else { split };
+            counters
+                .0
+                .mavlink_frames
+                .fetch_add(frames.len() as u64, Ordering::Relaxed);
+            for frame in frames {
+                fc.send_bytes(frame).await;
+                counters.0.mavlink_injected.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        AuxChannel::Request => {
+            // A relay-proxy HTTP request from the ground station. Forward it to
+            // the drone's own HTTP API and send the response back over the aux
+            // downlink. Runs in a spawned task so the uplink consumer's read
+            // loop never stalls behind a slow HTTP call.
+            counters.0.rpc_requests.fetch_add(1, Ordering::Relaxed);
+            match ados_protocol::aux_rpc::decode_request(inner) {
+                Ok(request) => {
+                    if let Some(egress) = egress {
+                        let id = request.id;
+                        let method = request.method;
+                        let path = request.path.to_vec();
+                        let body = request.body.to_vec();
+                        let egress = Arc::clone(egress);
+                        tokio::spawn(async move {
+                            let req = ados_protocol::aux_rpc::RpcRequest {
+                                id,
+                                method,
+                                path: &path,
+                                body: &body,
+                            };
+                            crate::aux_rpc_handler::handle(&req, &egress).await;
+                        });
+                    } else {
+                        tracing::debug!("aux_rpc_request_no_egress");
+                    }
+                }
+                Err(_) => {
+                    counters.0.rpc_undecodable.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+        _ => {
+            counters
+                .0
+                .non_mavlink_channel
+                .fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -234,7 +285,7 @@ mod tests {
         let frame = heartbeat_bytes();
         let datagram = aux_mux::encode(AuxChannel::Mavlink, &frame).unwrap();
 
-        dispatch(&datagram, &fc, &counters).await;
+        dispatch(&datagram, &fc, &counters, &None).await;
 
         assert_eq!(*captured.lock().unwrap(), frame);
         let snap = counters.snapshot();
@@ -252,7 +303,7 @@ mod tests {
         *fc.writer.lock().await = Some(Box::pin(CapturingWriter(captured.clone())));
 
         let counters = AuxUplinkConsumerCounters::new();
-        dispatch(b"not-an-aux-frame-at-all", &fc, &counters).await;
+        dispatch(b"not-an-aux-frame-at-all", &fc, &counters, &None).await;
 
         assert!(
             captured.lock().unwrap().is_empty(),
@@ -274,7 +325,7 @@ mod tests {
         batch.extend_from_slice(&one);
         let datagram = aux_mux::encode(AuxChannel::Mavlink, &batch).unwrap();
 
-        dispatch(&datagram, &fc, &counters).await;
+        dispatch(&datagram, &fc, &counters, &None).await;
 
         assert_eq!(
             *captured.lock().unwrap(),

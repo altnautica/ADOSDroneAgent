@@ -59,4 +59,5 @@ target/
 **/*.rs.bk
 
 # Local agent tooling directory (not part of the project)
-.omp/
+.opencode/
+opencode.jsonc

@@ -42,6 +42,7 @@ pub mod gs_pairing;
 pub mod gs_pic;
 pub mod gs_recording;
 pub mod gs_recording_list;
+pub mod gs_relay_proxy;
 pub mod gs_relayed_status;
 pub mod gs_status;
 pub mod gs_tunnel_config;
@@ -85,7 +86,7 @@ pub mod ws_ticket;
 use axum::extract::DefaultBodyLimit;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post, put};
+use axum::routing::{any, delete, get, post, put};
 use axum::{Json, Router};
 use serde_json::json;
 
@@ -566,6 +567,12 @@ pub fn build_router(state: AppState, net_native: bool, hid_native: bool) -> Rout
         .route(
             "/api/v1/ground-station/relayed/status",
             get(gs_relayed_status::get_relayed_status),
+        )
+        // Relay-proxy: forward an HTTP-shaped request to a WFB-linked drone
+        // the ground station has no IP reach to. Profile-gated below.
+        .route(
+            "/api/v1/ground-station/relay-proxy/:peer_device_id/*path",
+            any(gs_relay_proxy::handle),
         );
 
     // Wi-Fi client writes (profile-agnostic) are served natively only where the
