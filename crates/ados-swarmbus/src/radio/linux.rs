@@ -49,6 +49,15 @@ impl Radio {
     /// realistic causes are all operational and all distinguishable that way: the
     /// adapter is not in monitor mode, the radio manager has not selected it yet, or
     /// the process lacks `CAP_NET_RAW`.
+    ///
+    /// # Panics
+    ///
+    /// MUST be called from inside a Tokio runtime. The receive half is an
+    /// [`AsyncFd`], and registering one without a reactor panics rather than
+    /// returning an error. The service always runs under `#[tokio::main]`, so this
+    /// only bites a caller that opens the radio from a bare thread or a plain
+    /// `#[test]` — and only once it gets past the `CAP_NET_RAW` check, which is why
+    /// an unprivileged host never sees it.
     pub fn open(iface: &str, fleet_id: u16) -> io::Result<Self> {
         let ifindex = if_nametoindex(iface)?;
         let tx = open_tx(ifindex)?;
@@ -274,34 +283,63 @@ mod tests {
         std::mem::align_of::<usize>() - std::mem::size_of::<u16>()
     }
 
+    /// Asserted on `raw_os_error()`, deliberately not on `ErrorKind`. Since Rust
+    /// 1.55 an errno with no stable `ErrorKind` maps to `Uncategorized`, which is
+    /// unnameable in stable code and is NOT equal to `Other` — so
+    /// `matches!(err.kind(), … | ErrorKind::Other | …)` silently stops matching
+    /// the very errors it was written to catch. `if_nametoindex` on an absent
+    /// interface yields `ENODEV`, which is exactly such an errno. This test only
+    /// runs on Linux, so a host-only workspace never executes it and CI is the
+    /// first place the mismatch shows.
     #[test]
     fn an_absent_interface_is_reported_rather_than_panicking() {
         let err = if_nametoindex("nonexistent-swarm-iface0").unwrap_err();
-        assert!(matches!(
-            err.kind(),
-            io::ErrorKind::NotFound | io::ErrorKind::Other | io::ErrorKind::InvalidInput
-        ));
-        // A name with an interior nul is rejected before it reaches the kernel.
-        assert_eq!(
-            if_nametoindex("wlan\0x").unwrap_err().kind(),
-            io::ErrorKind::InvalidInput
+        let errno = err
+            .raw_os_error()
+            .expect("an absent interface must surface a real OS error, not a fabricated one");
+        assert!(
+            errno == libc::ENODEV || errno == libc::ENXIO,
+            "unexpected errno {errno} for an absent interface: {err}"
         );
+
+        // A name with an interior nul is rejected before it reaches the kernel, so
+        // it carries OUR error kind and no errno at all. That absence is the
+        // assertion: an errno here would mean the guard let the name through.
+        let nul = if_nametoindex("wlan\0x").unwrap_err();
+        assert_eq!(nul.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(nul.raw_os_error(), None);
     }
 
-    /// Opening a raw packet socket needs CAP_NET_RAW, so this cannot assert success
-    /// in a test environment — but it must fail with a permission error rather than
-    /// panicking or hanging.
-    #[test]
-    fn opening_without_privileges_fails_cleanly() {
-        match Radio::open("lo", 1) {
-            Ok(_) => {}
-            Err(e) => assert!(
-                matches!(
-                    e.kind(),
-                    io::ErrorKind::PermissionDenied | io::ErrorKind::NotFound
-                ),
-                "unexpected error kind: {e}"
-            ),
-        }
+    /// `Radio::open` must fail cleanly at the syscall rather than panicking or
+    /// hanging when the process lacks `CAP_NET_RAW`, and must succeed when it has
+    /// it. Both outcomes are legitimate here, so the assertion is on the shape of
+    /// the failure, not on which branch is taken.
+    ///
+    /// `#[tokio::test]`, not `#[test]`: a PRIVILEGED runner (root in a container,
+    /// and the agent's own service account on a board) gets past the permission
+    /// check and reaches the `AsyncFd` registration, which panics without a
+    /// reactor. An unprivileged runner fails earlier and never reaches it, so a
+    /// plain `#[test]` passes on CI and panics for anyone running as root.
+    ///
+    /// Same `raw_os_error()` discipline as above: a sandbox that refuses
+    /// `AF_PACKET` outright answers `EAFNOSUPPORT`, another errno with no stable
+    /// `ErrorKind`.
+    #[tokio::test]
+    async fn opening_the_radio_either_succeeds_or_fails_with_a_real_errno() {
+        let Err(e) = Radio::open("lo", 1) else {
+            // Privileged: the sockets opened. `lo` is not a monitor interface, but
+            // AF_PACKET binds to any interface, so this is the expected root path.
+            return;
+        };
+        let errno = e
+            .raw_os_error()
+            .expect("a refused raw socket must surface a real OS error");
+        assert!(
+            errno == libc::EPERM
+                || errno == libc::EACCES
+                || errno == libc::EAFNOSUPPORT
+                || errno == libc::ENODEV,
+            "unexpected errno {errno} opening a raw packet socket: {e}"
+        );
     }
 }
