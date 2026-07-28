@@ -41,8 +41,9 @@ const MAV_AUTOPILOT_PX4: i64 = 12;
 /// `GET /api/mavlink/signing/capability` → whether the connected FC supports
 /// MAVLink v2 signing.
 ///
-/// Reads the FC connection flag, the autopilot id, and the cached param tree from
-/// the live state snapshot, then runs the strict capability check. Returns
+/// Reads the FC connection flag and the autopilot id from the live state snapshot
+/// and the cached param tree from the router's on-disk cache, then runs the strict
+/// capability check. Returns
 /// `{supported, reason, firmware_name, firmware_version, signing_params_present}`.
 /// The `reason` enum: `ok | fc_not_connected | firmware_not_supported |
 /// firmware_too_old | firmware_px4_no_persistent_store | msp_protocol`. An absent
@@ -51,25 +52,24 @@ pub async fn capability(State(state): State<AppState>) -> Json<Value> {
     let snapshot = state.state.snapshot();
     let connected = fc_connected_from_snapshot(snapshot.as_ref());
     let autopilot = autopilot_from_snapshot(snapshot.as_ref());
-    let signing_params_present = signing_params_present_from_snapshot(snapshot.as_ref());
+    let params = crate::param_store::read_param_blob(&state.params_path);
     Json(detect_capability(
         connected,
         autopilot,
-        signing_params_present,
+        signing_params_present(&params),
     ))
 }
 
 /// `GET /api/mavlink/signing/require` → the current `SIGNING_REQUIRE` param value
-/// from the cached param blob.
+/// from the cached param map.
 ///
-/// Returns `{require: bool}` when the param has been seen in the current session,
-/// or `{require: null}` when it has not. The boolean is `value != 0` (the Python
-/// `bool(int(value))`). An absent snapshot or an absent param both read as
-/// `{require: null}`. Guaranteed-200, never 500.
+/// Returns `{require: bool}` when the param has been seen, or `{require: null}`
+/// when it has not. The boolean is `value != 0` (the Python `bool(int(value))`).
+/// An absent cache or an absent param both read as `{require: null}`.
+/// Guaranteed-200, never 500.
 pub async fn require(State(state): State<AppState>) -> Json<Value> {
-    let snapshot = state.state.snapshot();
-    let value = signing_require_param(snapshot.as_ref());
-    Json(get_require(value))
+    let params = crate::param_store::read_param_blob(&state.params_path);
+    Json(get_require(params.get("SIGNING_REQUIRE")))
 }
 
 /// `GET /api/mavlink/signing/counters` → the observational signed-frame counters.
@@ -111,30 +111,13 @@ fn autopilot_from_snapshot(snapshot: Option<&Value>) -> i64 {
         .unwrap_or(0)
 }
 
-/// Whether any `SIGNING_*` param is present in the snapshot's cached param blob.
-/// The blob is a dict (`{PARAM_NAME: value}`); a non-dict or absent blob reads as
-/// an empty map. Mirrors the Python `_cached_params` (returns the `params` dict or
-/// `{}`) feeding `detect_capability`'s `SIGNING_*` scan.
-fn signing_params_present_from_snapshot(snapshot: Option<&Value>) -> bool {
-    cached_params(snapshot)
-        .map(|params| params.keys().any(|name| name.starts_with("SIGNING_")))
-        .unwrap_or(false)
-}
-
-/// The cached param blob from a snapshot, as a JSON object, or `None` when the
-/// snapshot is absent / the `params` key is absent / it is not an object. Mirrors
-/// the Python `_cached_params` returning the dict or `{}`.
-fn cached_params(snapshot: Option<&Value>) -> Option<&serde_json::Map<String, Value>> {
-    snapshot
-        .and_then(Value::as_object)
-        .and_then(|m| m.get("params"))
-        .and_then(Value::as_object)
-}
-
-/// The raw `SIGNING_REQUIRE` param value from a snapshot's cached param blob, or
-/// `None` when absent. Mirrors the Python `(params or {}).get("SIGNING_REQUIRE")`.
-fn signing_require_param(snapshot: Option<&Value>) -> Option<&Value> {
-    cached_params(snapshot).and_then(|params| params.get("SIGNING_REQUIRE"))
+/// Whether any `SIGNING_*` param is present in the cached param map. An empty map
+/// (no cache file, an unreadable one, or an FC that has not answered a
+/// `PARAM_REQUEST_LIST` yet) reads as not present. Mirrors the Python
+/// `_cached_params` (returns the params dict or `{}`) feeding
+/// `detect_capability`'s `SIGNING_*` scan.
+fn signing_params_present(params: &serde_json::Map<String, Value>) -> bool {
+    params.keys().any(|name| name.starts_with("SIGNING_"))
 }
 
 /// Build the require-read body from the raw param value, mirroring the Python
@@ -383,29 +366,25 @@ mod tests {
         );
     }
 
-    #[test]
-    fn signing_params_present_scans_the_param_blob() {
-        // A SIGNING_* param present.
-        let snap = json!({ "params": { "SIGNING_REQUIRE": 1.0, "FOO": 2.0 } });
-        assert!(signing_params_present_from_snapshot(Some(&snap)));
-        // No SIGNING_* param.
-        let snap = json!({ "params": { "FOO": 2.0 } });
-        assert!(!signing_params_present_from_snapshot(Some(&snap)));
-        // Absent / non-dict params read as empty.
-        assert!(!signing_params_present_from_snapshot(Some(&json!({}))));
-        assert!(!signing_params_present_from_snapshot(Some(
-            &json!({"params": "not a dict"})
-        )));
-        assert!(!signing_params_present_from_snapshot(None));
+    /// A `{name: value}` param map, the shape `crate::param_store` projects.
+    fn param_map(body: Value) -> serde_json::Map<String, Value> {
+        body.as_object().cloned().unwrap()
     }
 
     #[test]
-    fn signing_require_param_reads_the_blob() {
-        let snap = json!({ "params": { "SIGNING_REQUIRE": 1.0 } });
-        assert_eq!(signing_require_param(Some(&snap)), Some(&json!(1.0)));
-        // Absent param / absent blob both read as None.
-        assert_eq!(signing_require_param(Some(&json!({"params": {}}))), None);
-        assert_eq!(signing_require_param(None), None);
+    fn signing_params_present_scans_the_param_map() {
+        // A SIGNING_* param present.
+        assert!(signing_params_present(&param_map(
+            json!({ "SIGNING_REQUIRE": 1.0, "FOO": 2.0 })
+        )));
+        // No SIGNING_* param.
+        assert!(!signing_params_present(&param_map(json!({ "FOO": 2.0 }))));
+        // An empty map — no cache file, or an FC that has answered nothing yet.
+        assert!(!signing_params_present(&serde_json::Map::new()));
+        // A name that merely CONTAINS the prefix is not a signing param.
+        assert!(!signing_params_present(&param_map(
+            json!({ "FOO_SIGNING_X": 1.0 })
+        )));
     }
 
     // ── counters: the golden parity fixture ──────────────────────────────────

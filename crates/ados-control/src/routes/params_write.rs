@@ -4,8 +4,20 @@
 //! `{"value": <number>}`; the route turns it into a MAVLink `PARAM_SET` frame
 //! and writes it to `/run/ados/mavlink.sock`, which the router forwards to the
 //! FC. ArduPilot saves the value to EEPROM on receipt and echoes a `PARAM_VALUE`
-//! back; the route then polls the cached param blob for up to two seconds to
-//! confirm the new value landed and reports that as the `ack`.
+//! back; the route then polls the router's on-disk parameter cache for up to two
+//! seconds to confirm the new value landed and reports that as the `ack`.
+//!
+//! ## Why the cache FILE and not the state snapshot
+//!
+//! The parameter map used to ride the 10 Hz vehicle-state snapshot in full — ~24 KB
+//! against ArduPilot's ~700 parameters, which alone made a relayed read need ~21
+//! aux-lane fragments — and both the known-param guard and the ack poll read it
+//! from there. The map now lives only in the file the router persists atomically
+//! ([`crate::param_store`]). The router writes that file the instant a value
+//! actually changes outside a `PARAM_REQUEST_LIST` sweep precisely so this ack poll
+//! still sees the echo inside its window; during a sweep the write is debounced,
+//! which is the only period a two-second ack could miss and is also the one period
+//! no operator write is in flight.
 //!
 //! ## Why this is the WORKING write path
 //!
@@ -35,11 +47,11 @@
 //! The FastAPI route resolves a per-name `param_type`: it reads the type from the
 //! in-process param cache when present, else falls back to `0` for a param it has
 //! only seen a value for. The native front sits in front of the standalone API
-//! process and holds no in-process param cache with type metadata — its only
-//! production-reachable source is the state-IPC snapshot's `params` blob, a
-//! `{name: value}` map with no type. So the only reachable known-param path here
-//! is the value-only fallback (the FastAPI `known_type = 0` branch). MAVLink's
-//! `MAV_PARAM_TYPE` enum has no `0` member (values run `UINT8 = 1 .. REAL64 = 10`),
+//! process and holds no in-process param cache with type metadata — it projects the
+//! router's cache as a `{name: value}` map with no type. So the only reachable
+//! known-param path here is the value-only fallback (the FastAPI `known_type = 0`
+//! branch). MAVLink's `MAV_PARAM_TYPE` enum has no `0` member (values run
+//! `UINT8 = 1 .. REAL64 = 10`),
 //! and ArduPilot ignores the field on a `PARAM_SET` — it infers the canonical type
 //! from its own param table. The frame therefore carries `MAV_PARAM_TYPE_REAL32`
 //! (the float type, the same type the router stamps when it re-emits a
@@ -143,10 +155,9 @@ pub async fn set_param(
     }
 
     // 2. The parameter must be one the agent has already observed. The native
-    //    front's only param source is the state-IPC snapshot's `params` blob; a
-    //    name absent from it is refused with the FastAPI 404 message.
-    let snapshot = state.state.snapshot();
-    if !param_known(snapshot.as_ref(), &name) {
+    //    front's only param source is the router's on-disk cache; a name absent
+    //    from it is refused with the FastAPI 404 message.
+    if !param_known(&state, &name) {
         return ParamError {
             status: StatusCode::NOT_FOUND,
             detail: format!(
@@ -199,27 +210,22 @@ pub async fn set_param(
         .into_response();
     }
 
-    // Poll the cached param blob for up to two seconds for the FC's PARAM_VALUE
-    // echo. The router updates the snapshot's `params` blob as PARAM_VALUE frames
-    // arrive; this reads the live snapshot each tick, the native equivalent of the
-    // FastAPI route polling its in-process cache.
+    // Poll the cached params for up to two seconds for the FC's PARAM_VALUE echo.
+    // The router rewrites its cache file as PARAM_VALUE frames land; this re-reads
+    // it each tick, the native equivalent of the FastAPI route polling its
+    // in-process cache.
     let (ack, cached_value) = poll_for_ack(&state, &name, target).await;
 
     tracing::info!(param = %name, value = target, ack, "param_set");
     Json(build_set_response(&name, target, ack, cached_value)).into_response()
 }
 
-/// Whether the agent has already observed `name` (it is present in the state-IPC
-/// snapshot's `params` blob). The blob is a `{name: value}` object; a missing
-/// blob, a non-object blob, or an absent snapshot all read as "not known",
-/// mirroring the FastAPI route's refusal to write a param it has never seen.
-fn param_known(snapshot: Option<&Value>, name: &str) -> bool {
-    snapshot
-        .and_then(Value::as_object)
-        .and_then(|m| m.get("params"))
-        .and_then(Value::as_object)
-        .map(|params| params.contains_key(name))
-        .unwrap_or(false)
+/// Whether the agent has already observed `name` (it is present in the router's
+/// on-disk parameter cache). A missing, unreadable, or malformed cache reads as
+/// "not known", mirroring the FastAPI route's refusal to write a param it has never
+/// seen.
+fn param_known(state: &AppState, name: &str) -> bool {
+    crate::param_store::read_param_blob(&state.params_path).contains_key(name)
 }
 
 /// Build the `PARAM_SET` message for a known param + a finite value.
@@ -247,19 +253,19 @@ fn build_param_set(name: &str, value: f64) -> MavMessage {
     })
 }
 
-/// Poll the cached param blob for the FC's `PARAM_VALUE` echo for up to two
-/// seconds, returning `(ack, cached_value)`.
+/// Poll the cached param for the FC's `PARAM_VALUE` echo for up to two seconds,
+/// returning `(ack, cached_value)`.
 ///
-/// Each tick reads the live state-IPC snapshot's `params[name]`; the echo counts
-/// as an `ack` once the cached value lands within [`ACK_TOLERANCE`] of the target.
-/// Mirrors the FastAPI route's `while ... < deadline` loop: the cached value is
-/// reported even when the ack times out (so the caller sees the last value seen),
-/// and the loop sleeps [`ACK_POLL_INTERVAL`] between reads.
+/// Each tick re-reads the router's cache file; the echo counts as an `ack` once the
+/// cached value lands within [`ACK_TOLERANCE`] of the target. Mirrors the FastAPI
+/// route's `while ... < deadline` loop: the cached value is reported even when the
+/// ack times out (so the caller sees the last value seen), and the loop sleeps
+/// [`ACK_POLL_INTERVAL`] between reads.
 async fn poll_for_ack(state: &AppState, name: &str, target: f64) -> (bool, Option<f64>) {
     let deadline = tokio::time::Instant::now() + ACK_POLL_TIMEOUT;
     let mut cached_value: Option<f64> = None;
     loop {
-        cached_value = cached_param_value(state.state.snapshot().as_ref(), name).or(cached_value);
+        cached_value = cached_param_value(state, name).or(cached_value);
         if let Some(v) = cached_value {
             if (v - target).abs() < ACK_TOLERANCE {
                 return (true, Some(v));
@@ -272,15 +278,12 @@ async fn poll_for_ack(state: &AppState, name: &str, target: f64) -> (bool, Optio
     }
 }
 
-/// Read `params[name]` out of a snapshot as a number, or `None` when the snapshot
-/// is absent / the blob is missing or not an object / the param is absent or
-/// non-numeric. Mirrors the FastAPI route reading the cached value back.
-fn cached_param_value(snapshot: Option<&Value>, name: &str) -> Option<f64> {
-    snapshot
-        .and_then(Value::as_object)
-        .and_then(|m| m.get("params"))
-        .and_then(Value::as_object)
-        .and_then(|params| params.get(name))
+/// Read the cached value of `name` as a number, or `None` when the cache is
+/// missing / unreadable or the param is absent or non-numeric. Mirrors the FastAPI
+/// route reading the cached value back.
+fn cached_param_value(state: &AppState, name: &str) -> Option<f64> {
+    crate::param_store::read_param_blob(&state.params_path)
+        .get(name)
         .and_then(Value::as_f64)
 }
 
@@ -336,6 +339,27 @@ mod tests {
                 dir.join("mcp-token.json"),
             )),
         )
+        .with_params_path(dir.join("params.json"))
+    }
+
+    /// Write a router-shaped parameter cache at the path `test_state` reads — the
+    /// `{name: {value, param_type, last_updated}}` document the MAVLink router
+    /// persists.
+    fn write_cache(dir: &std::path::Path, entries: &[(&str, f64)]) {
+        let doc: serde_json::Map<String, Value> = entries
+            .iter()
+            .map(|(name, value)| {
+                (
+                    (*name).to_string(),
+                    json!({ "value": value, "param_type": 9, "last_updated": 1.0 }),
+                )
+            })
+            .collect();
+        std::fs::write(
+            dir.join("params.json"),
+            serde_json::to_vec(&Value::Object(doc)).unwrap(),
+        )
+        .unwrap();
     }
 
     /// Decode a built PARAM_SET message back into its data for the parity asserts.
@@ -434,33 +458,41 @@ mod tests {
         );
     }
 
-    // ── param_known ──────────────────────────────────────────────────────────
+    // ── param_known / cached_param_value ─────────────────────────────────────
 
     #[test]
-    fn param_known_reads_the_snapshot_params_blob() {
-        let snap = json!({ "params": { "WPNAV_SPEED": 500.0 } });
-        assert!(param_known(Some(&snap), "WPNAV_SPEED"));
-        assert!(!param_known(Some(&snap), "DOES_NOT_EXIST"));
-        // Absent snapshot / absent or non-object blob all read as not-known.
-        assert!(!param_known(None, "WPNAV_SPEED"));
-        assert!(!param_known(Some(&json!({})), "WPNAV_SPEED"));
-        assert!(!param_known(
-            Some(&json!({ "params": "nope" })),
-            "WPNAV_SPEED"
-        ));
+    fn param_known_reads_the_on_disk_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        // No cache file yet: nothing is known, so no write is allowed.
+        assert!(!param_known(&state, "WPNAV_SPEED"));
+
+        write_cache(dir.path(), &[("WPNAV_SPEED", 500.0)]);
+        assert!(param_known(&state, "WPNAV_SPEED"));
+        assert!(!param_known(&state, "DOES_NOT_EXIST"));
+    }
+
+    #[test]
+    fn param_known_treats_a_corrupt_cache_as_nothing_known() {
+        // A truncated write must never be read as "this param exists" — that would
+        // let a PARAM_SET through for a name the agent has never actually seen.
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        std::fs::write(dir.path().join("params.json"), b"{ truncated").unwrap();
+        assert!(!param_known(&state, "WPNAV_SPEED"));
     }
 
     #[test]
     fn cached_param_value_reads_a_numeric_param() {
-        let snap = json!({ "params": { "WPNAV_SPEED": 750.0 } });
-        assert_eq!(cached_param_value(Some(&snap), "WPNAV_SPEED"), Some(750.0));
-        // Absent param / absent blob / non-numeric all read as None.
-        assert_eq!(cached_param_value(Some(&snap), "OTHER"), None);
-        assert_eq!(cached_param_value(None, "WPNAV_SPEED"), None);
-        assert_eq!(
-            cached_param_value(Some(&json!({ "params": { "X": "nope" } })), "X"),
-            None
-        );
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        // Absent cache reads as None.
+        assert_eq!(cached_param_value(&state, "WPNAV_SPEED"), None);
+
+        write_cache(dir.path(), &[("WPNAV_SPEED", 750.0)]);
+        assert_eq!(cached_param_value(&state, "WPNAV_SPEED"), Some(750.0));
+        // A name absent from the cache reads as None.
+        assert_eq!(cached_param_value(&state, "OTHER"), None);
     }
 
     // ── the handler: the guard order + the write-path 503 ────────────────────
@@ -488,10 +520,10 @@ mod tests {
     async fn unknown_param_is_a_404() {
         let dir = tempfile::tempdir().unwrap();
         let state = test_state(dir.path());
-        // A snapshot with an empty params blob → the name is unknown.
+        // No cache file at all → the name is unknown.
         state
             .state
-            .set_snapshot_for_test(json!({ "fc_connected": true, "params": {} }));
+            .set_snapshot_for_test(json!({ "fc_connected": true }));
         let resp = set_param(
             Path("NO_SUCH_PARAM".to_string()),
             State(state),
@@ -511,10 +543,10 @@ mod tests {
     async fn known_param_with_fc_disconnected_is_a_503() {
         let dir = tempfile::tempdir().unwrap();
         let state = test_state(dir.path());
-        state.state.set_snapshot_for_test(json!({
-            "fc_connected": false,
-            "params": { "WPNAV_SPEED": 500.0 },
-        }));
+        write_cache(dir.path(), &[("WPNAV_SPEED", 500.0)]);
+        state
+            .state
+            .set_snapshot_for_test(json!({ "fc_connected": false }));
         let resp = set_param(
             Path("WPNAV_SPEED".to_string()),
             State(state),
@@ -532,10 +564,10 @@ mod tests {
     async fn send_failure_with_no_mavlink_socket_is_a_503() {
         let dir = tempfile::tempdir().unwrap();
         let state = test_state(dir.path());
-        state.state.set_snapshot_for_test(json!({
-            "fc_connected": true,
-            "params": { "WPNAV_SPEED": 500.0 },
-        }));
+        write_cache(dir.path(), &[("WPNAV_SPEED", 500.0)]);
+        state
+            .state
+            .set_snapshot_for_test(json!({ "fc_connected": true }));
         let resp = set_param(
             Path("WPNAV_SPEED".to_string()),
             State(state),
@@ -576,10 +608,8 @@ mod tests {
         let pairing = Arc::new(PairingState::with_path(dir.path().join("pairing.json")));
         let stateipc = StateIpcClient::disconnected();
         // The cache already holds the target, so the first poll tick acks.
-        stateipc.set_snapshot_for_test(json!({
-            "fc_connected": true,
-            "params": { "WPNAV_SPEED": 750.0 },
-        }));
+        write_cache(dir.path(), &[("WPNAV_SPEED", 750.0)]);
+        stateipc.set_snapshot_for_test(json!({ "fc_connected": true }));
         let mavlink = MavlinkIpcClient::new(sock.clone());
         let logd = LogdQueryClient::new(dir.path().join("absent-logd.sock"));
         let pairing_paths = PairingPaths {
@@ -603,7 +633,8 @@ mod tests {
             std::sync::Arc::new(crate::mcp::McpTokenStore::with_path(
                 dir.path().join("mcp-token.json"),
             )),
-        );
+        )
+        .with_params_path(dir.path().join("params.json"));
 
         let resp = set_param(
             Path("WPNAV_SPEED".to_string()),

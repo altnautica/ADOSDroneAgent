@@ -340,15 +340,15 @@ class _MockBackend:
 
 
 @pytest.mark.asyncio
-async def test_server_handles_load_then_infer(tmp_path):
-    sock_path = str(tmp_path / "vision-mock.sock")
+async def test_server_handles_load_then_infer(unix_socket_dir):
+    sock_path = str(unix_socket_dir / "vision-mock.sock")
     backend = _MockBackend()
     server = SidecarServer(sock_path, backend, _SilentLog())
     serve_task = asyncio.create_task(server.serve_forever())
 
     # Wait for the socket to appear.
     for _ in range(200):
-        if (tmp_path / "vision-mock.sock").exists():
+        if (unix_socket_dir / "vision-mock.sock").exists():
             break
         await asyncio.sleep(0.01)
 
@@ -377,13 +377,13 @@ async def test_server_handles_load_then_infer(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_server_returns_error_for_unknown_op(tmp_path):
-    sock_path = str(tmp_path / "vision-err.sock")
+async def test_server_returns_error_for_unknown_op(unix_socket_dir):
+    sock_path = str(unix_socket_dir / "vision-err.sock")
     server = SidecarServer(sock_path, _MockBackend(), _SilentLog())
     serve_task = asyncio.create_task(server.serve_forever())
 
     for _ in range(200):
-        if (tmp_path / "vision-err.sock").exists():
+        if (unix_socket_dir / "vision-err.sock").exists():
             break
         await asyncio.sleep(0.01)
 

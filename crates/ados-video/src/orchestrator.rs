@@ -32,6 +32,7 @@ use crate::discover::{self, DiscoveryResult};
 use crate::encoder::{EncoderEnv, EncoderKind};
 use crate::mediamtx::{MediamtxManager, MAIN_PATH};
 use crate::process::ManagedProcess;
+use crate::profile::{EncoderControl, EncoderSettings, EncoderState, VideoProfile};
 use crate::shutdown::Shutdown;
 use crate::wfb_tee::{
     wfb_tee_output_is_stalled, wfb_tee_progress_is_stale, ProgressTracker, WFB_TEE_PROGRESS_TIMEOUT,
@@ -174,6 +175,21 @@ pub struct VideoOrchestrator {
     /// Override for the video-streams sidecar path. `None` ⇒ the canonical
     /// `/run/ados/video-streams.json` contract path. Set only in tests.
     pub(crate) video_streams_path: Option<std::path::PathBuf>,
+
+    /// The HERO profile's settings, captured from the `video.camera` block
+    /// before any attention switch mutates [`Self::camera_cfg`]. Every profile
+    /// resolution reads this, never the possibly-already-switched live values,
+    /// so switching hero → thumbnail → hero returns to the configured values
+    /// rather than latching whatever the last switch left behind.
+    pub(crate) hero_base: EncoderSettings,
+    /// The shared handle the encoder command socket requests through and this
+    /// orchestrator acknowledges on. The ONE entry point for both the operator's
+    /// hero choice and the adaptive ladder's bitrate clamp.
+    pub(crate) encoder_control: Arc<EncoderControl>,
+
+    /// Override for the attention-state sidecar path. `None` ⇒ the canonical
+    /// `/run/ados/video-profile.json`. Set only in tests.
+    pub(crate) video_profile_path: Option<std::path::PathBuf>,
 }
 
 impl VideoOrchestrator {
@@ -186,6 +202,18 @@ impl VideoOrchestrator {
     ) -> Self {
         let now = Instant::now();
         let legs = config.resolve_legs(&camera_cfg);
+
+        // Attention profile, resolved before the first encoder command is
+        // built. The `video.camera` block IS the hero profile, so capture it
+        // now; the boot profile then overwrites the live capture settings so a
+        // fleet node cold-starts at 320x180/1 fps instead of grabbing 48% of the
+        // shared channel's airtime before the ground station can demote it.
+        let mut camera_cfg = camera_cfg;
+        let hero_base = crate::profile::base_settings(VideoProfile::Hero, &camera_cfg);
+        let boot = crate::profile::boot_profile(&config.mode);
+        let boot_settings = crate::profile::base_settings(boot, &camera_cfg);
+        apply_settings_to(&mut camera_cfg, boot_settings);
+
         Self {
             config,
             camera_cfg,
@@ -226,7 +254,97 @@ impl VideoOrchestrator {
             env: EncoderEnv::detect(),
             camera_state_path: None,
             video_streams_path: None,
+            hero_base,
+            encoder_control: EncoderControl::new(boot, boot_settings),
+            video_profile_path: None,
         }
+    }
+
+    /// The shared encoder-control handle. `main` hands this to the encoder
+    /// command socket server; it is the only way another process retargets the
+    /// encoder.
+    pub fn encoder_control(&self) -> Arc<EncoderControl> {
+        Arc::clone(&self.encoder_control)
+    }
+
+    /// The attention-state sidecar path (canonical unless overridden in tests).
+    fn video_profile_path(&self) -> &std::path::Path {
+        self.video_profile_path
+            .as_deref()
+            .unwrap_or_else(|| std::path::Path::new(crate::profile::VIDEO_PROFILE_SIDECAR))
+    }
+
+    /// Publish the attention state so the out-of-process readers (the state
+    /// snapshot that feeds the swarm beacon's hero bit, the adaptive ladder's
+    /// self-heal check) see what the encoder is actually running.
+    pub(crate) fn publish_encoder_state(&self, state: &EncoderState) {
+        if let Err(e) = crate::profile::write_sidecar(self.video_profile_path(), state) {
+            tracing::warn!(error = %e, "video_profile_sidecar_write_failed");
+        }
+    }
+
+    /// The settings the currently-desired profile + ceiling resolve to.
+    pub(crate) fn desired_encoder_settings(&self) -> (crate::profile::Desired, EncoderSettings) {
+        let d = self.encoder_control.desired();
+        let mut s = match d.profile {
+            VideoProfile::Hero => self.hero_base,
+            VideoProfile::Thumbnail => self.camera_cfg.thumbnail,
+        };
+        if let Some(c) = d.ceiling_kbps {
+            s.bitrate_kbps = s.bitrate_kbps.min(c);
+        }
+        (d, s)
+    }
+
+    /// The encoder settings currently live in [`Self::camera_cfg`].
+    pub(crate) fn live_encoder_settings(&self) -> EncoderSettings {
+        EncoderSettings {
+            width: self.camera_cfg.width,
+            height: self.camera_cfg.height,
+            fps: self.camera_cfg.fps,
+            bitrate_kbps: self.camera_cfg.bitrate_kbps,
+        }
+    }
+
+    /// Reconcile the encoder against the desired profile + bitrate ceiling.
+    ///
+    /// Idempotent: resolved settings equal to what is already live acknowledge
+    /// without touching a process. Otherwise ONLY the encoder child is
+    /// restarted — mediamtx, the wfb tap, the cloud push and the vision tap all
+    /// keep running, which is what makes an attention switch cost a sub-second
+    /// encoder respawn instead of a full pipeline cold start.
+    pub(crate) async fn apply_desired_encoder(&mut self) {
+        let (desired, target) = self.desired_encoder_settings();
+        let state = EncoderState::new(desired.profile, desired.ceiling_kbps, target);
+
+        if target == self.live_encoder_settings() {
+            self.encoder_control
+                .note_applied(state, desired.generation, false);
+            self.publish_encoder_state(&state);
+            return;
+        }
+
+        apply_settings_to(&mut self.camera_cfg, target);
+        tracing::info!(
+            profile = %desired.profile,
+            width = target.width,
+            height = target.height,
+            fps = target.fps,
+            bitrate_kbps = target.bitrate_kbps,
+            "video_attention_profile_change"
+        );
+
+        // A pipeline that is not Running has no encoder to swap: the new
+        // settings are already in `camera_cfg`, so the next cold start builds
+        // its command from them. Acknowledge honestly either way.
+        let restarted = if self.state == PipelineState::Running {
+            self.restart_encoder_only().await
+        } else {
+            false
+        };
+        self.encoder_control
+            .note_applied(state, desired.generation, restarted);
+        self.publish_encoder_state(&state);
     }
 
     /// Re-persist the camera-state sidecar from the last-known discovery
@@ -583,6 +701,16 @@ impl VideoOrchestrator {
         let mut telemetry_tick = tokio::time::interval(Duration::from_secs(1));
         telemetry_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+        // Attention switches are applied the moment they are requested, not on
+        // the next 5 s health tick: a hero promotion racing a 5 s tick would
+        // leave the operator staring at a 1 fps thumbnail of the aircraft they
+        // just selected.
+        let mut desired_rx = self.encoder_control.subscribe_desired();
+        // Close the startup window: the command socket is served before the cold
+        // start, so a switch may already be pending. Subscribe first (so nothing
+        // arriving from here on is missed), then reconcile once.
+        self.apply_desired_encoder().await;
+
         loop {
             tokio::select! {
                 _ = shutdown.wait() => {
@@ -594,6 +722,16 @@ impl VideoOrchestrator {
                 }
                 _ = telemetry_tick.tick() => {
                     self.emit_telemetry(&telemetry);
+                }
+                res = desired_rx.changed() => {
+                    if res.is_err() {
+                        // Unreachable while this orchestrator holds the control
+                        // Arc, but a closed channel returns Err immediately
+                        // forever — park on shutdown rather than spin the loop.
+                        shutdown.wait().await;
+                        break;
+                    }
+                    self.apply_desired_encoder().await;
                 }
             }
         }
@@ -955,6 +1093,17 @@ fn liveness_on_flat(is_network_pull: bool) -> Option<bool> {
     }
 }
 
+/// Write resolved attention settings into the live capture config the encoder
+/// command builder reads. Only the four encode knobs move; source, codec and
+/// codec preference are the operator's and never touched by an attention
+/// switch.
+pub(crate) fn apply_settings_to(cfg: &mut CameraConfig, s: EncoderSettings) {
+    cfg.width = s.width;
+    cfg.height = s.height;
+    cfg.fps = s.fps;
+    cfg.bitrate_kbps = s.bitrate_kbps;
+}
+
 /// Sleep up to `dur`, waking early on shutdown or (when `wake_on_camera`) on a
 /// camera-plugged SIGUSR1. A zero / negative duration returns immediately.
 /// Mirrors `_sleep_or_wake_on_camera` fused with shutdown awareness.
@@ -991,6 +1140,201 @@ mod tests {
             CameraConfig::default(),
             std::path::Path::new("/tmp"),
         )
+    }
+
+    // --- attention profile (hero / thumbnail) -------------------------------
+
+    #[test]
+    fn a_wfb_node_cold_starts_the_encoder_at_thumbnail_not_hero() {
+        // The whole point of the boot default: 24 aircraft powering up together
+        // must not each build a 1280x720/30fps/4000kbps encoder command.
+        let o = test_orch();
+        assert_eq!(o.config.mode, "wfb");
+        assert_eq!(
+            o.live_encoder_settings(),
+            EncoderSettings {
+                width: 320,
+                height: 180,
+                fps: 1,
+                bitrate_kbps: 50
+            }
+        );
+        // The hero settings are captured, not lost, so a promotion restores the
+        // configured values exactly.
+        assert_eq!(
+            o.hero_base,
+            EncoderSettings {
+                width: 1280,
+                height: 720,
+                fps: 30,
+                bitrate_kbps: 4000
+            }
+        );
+        assert_eq!(
+            o.encoder_control().desired().profile,
+            VideoProfile::Thumbnail
+        );
+    }
+
+    #[test]
+    fn a_node_off_the_shared_channel_cold_starts_at_hero() {
+        let cfg = AgentVideoConfig {
+            mode: "cloud".into(),
+            ..Default::default()
+        };
+        let o = VideoOrchestrator::new(cfg, CameraConfig::default(), std::path::Path::new("/tmp"));
+        assert_eq!(o.live_encoder_settings(), o.hero_base);
+        assert_eq!(o.encoder_control().desired().profile, VideoProfile::Hero);
+    }
+
+    #[tokio::test]
+    async fn applying_a_promotion_moves_the_capture_settings_and_publishes_the_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let sidecar = dir.path().join("video-profile.json");
+        let mut o = test_orch();
+        o.video_profile_path = Some(sidecar.clone());
+
+        o.encoder_control().request_profile(VideoProfile::Hero);
+        o.apply_desired_encoder().await;
+
+        assert_eq!(o.live_encoder_settings(), o.hero_base);
+        let published = crate::profile::read_state_from(&sidecar).unwrap();
+        assert_eq!(published.profile, VideoProfile::Hero);
+        assert_eq!(published.bitrate_kbps, 4000);
+        // Nothing was restarted: the pipeline is not Running, so the new
+        // settings simply become what the next cold start builds from.
+        assert!(!o.encoder_control().applied().restarted);
+
+        // Demotion returns the configured thumbnail values.
+        o.encoder_control().request_profile(VideoProfile::Thumbnail);
+        o.apply_desired_encoder().await;
+        assert_eq!(o.live_encoder_settings().fps, 1);
+        assert_eq!(
+            crate::profile::read_state_from(&sidecar).unwrap().profile,
+            VideoProfile::Thumbnail
+        );
+    }
+
+    #[tokio::test]
+    async fn an_adaptive_clamp_and_a_promotion_compose_without_either_clobbering() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut o = test_orch();
+        o.video_profile_path = Some(dir.path().join("video-profile.json"));
+
+        // The ladder clamps first (thumbnail is already below the clamp, so the
+        // clamp is inert), then the operator promotes.
+        o.encoder_control().request_ceiling(Some(1200));
+        o.apply_desired_encoder().await;
+        assert_eq!(o.live_encoder_settings().bitrate_kbps, 50);
+
+        o.encoder_control().request_profile(VideoProfile::Hero);
+        o.apply_desired_encoder().await;
+        // Hero geometry, but the ladder's clamp survived the promotion.
+        let live = o.live_encoder_settings();
+        assert_eq!((live.width, live.height, live.fps), (1280, 720, 30));
+        assert_eq!(live.bitrate_kbps, 1200);
+
+        // Clearing the clamp restores the hero profile's nominal bitrate.
+        o.encoder_control().request_ceiling(None);
+        o.apply_desired_encoder().await;
+        assert_eq!(o.live_encoder_settings().bitrate_kbps, 4000);
+    }
+
+    #[tokio::test]
+    async fn re_applying_the_same_profile_is_a_no_op_not_an_encoder_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut o = test_orch();
+        o.video_profile_path = Some(dir.path().join("video-profile.json"));
+        // Pretend the pipeline is up: an idempotent apply must short-circuit
+        // BEFORE the restart path, which would otherwise try to spawn ffmpeg.
+        o.state = PipelineState::Running;
+        let generation = o.encoder_control().request_profile(VideoProfile::Thumbnail);
+        o.apply_desired_encoder().await;
+        let applied = o.encoder_control().applied();
+        assert_eq!(applied.generation, generation);
+        assert!(!applied.restarted);
+        assert_eq!(applied.state.profile, VideoProfile::Thumbnail);
+    }
+
+    /// The seam the whole phase rests on: an out-of-process caller dials the
+    /// encoder command socket and the REAL orchestrator applier retargets the
+    /// REAL capture settings, with the sidecar the swarm beacon reads following
+    /// along. Everything here is production code except the loop body, which is
+    /// copied from `run`'s select! arm.
+    #[tokio::test]
+    async fn a_socket_promotion_retargets_the_real_orchestrator_and_the_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("video-encoder.sock");
+        let sidecar = dir.path().join("video-profile.json");
+
+        let mut o = test_orch();
+        o.video_profile_path = Some(sidecar.clone());
+        let control = o.encoder_control();
+        let shutdown = Shutdown::new();
+
+        tokio::spawn({
+            let control = Arc::clone(&control);
+            let sock = sock.clone();
+            let shutdown = shutdown.clone();
+            async move { crate::profile::serve(control, &sock, shutdown).await }
+        });
+
+        let mut desired_rx = control.subscribe_desired();
+        let stop = shutdown.clone();
+        let applier = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = stop.wait() => break,
+                    res = desired_rx.changed() => {
+                        if res.is_err() { break; }
+                        o.apply_desired_encoder().await;
+                    }
+                }
+            }
+            o
+        });
+
+        for _ in 0..200 {
+            if sock.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let applied = crate::profile::set_profile_at(&sock, VideoProfile::Hero)
+            .await
+            .expect("the promotion round-trips");
+        assert_eq!(applied.profile, VideoProfile::Hero);
+        assert_eq!(applied.bitrate_kbps, 4000);
+
+        // The adaptive ladder's clamp rides the same socket and composes.
+        let clamped = crate::profile::set_bitrate_ceiling_at(&sock, Some(1200))
+            .await
+            .expect("the clamp round-trips");
+        assert_eq!(clamped.bitrate_kbps, 1200);
+        assert_eq!(clamped.width, 1280, "a clamp never changes geometry");
+
+        // The sidecar the state snapshot (and thus the beacon's hero bit) reads.
+        let published = crate::profile::read_state_from(&sidecar).unwrap();
+        assert_eq!(published.profile, VideoProfile::Hero);
+        assert_eq!(published.ceiling_kbps, Some(1200));
+
+        shutdown.trigger();
+        let o = tokio::time::timeout(Duration::from_secs(5), applier)
+            .await
+            .expect("the applier stops")
+            .unwrap();
+        // The encoder command builder reads these four fields, so this IS the
+        // proof the next spawn produces hero geometry at the clamped bitrate.
+        assert_eq!(
+            o.live_encoder_settings(),
+            EncoderSettings {
+                width: 1280,
+                height: 720,
+                fps: 30,
+                bitrate_kbps: 1200
+            }
+        );
     }
 
     fn leg(id: &str, source: &str, role: &str, primary: bool, pull: bool) -> ResolvedLeg {

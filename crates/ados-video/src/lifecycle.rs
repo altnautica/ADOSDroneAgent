@@ -43,6 +43,14 @@ impl VideoOrchestrator {
             return true;
         }
 
+        // Cold-start from the CURRENTLY DESIRED attention state, not from
+        // whatever the last run left in `camera_cfg`. A hero promotion that
+        // arrived while the pipeline was down (or during startup, before the run
+        // loop began watching) is honoured by the very first encoder command
+        // rather than silently deferred to the next switch.
+        let (_, desired_settings) = self.desired_encoder_settings();
+        crate::orchestrator::apply_settings_to(&mut self.camera_cfg, desired_settings);
+
         // Reap any stale encoder from a prior cycle by process group.
         if let Some(mut enc) = self.encoder.take() {
             if enc.is_running() {
@@ -101,68 +109,12 @@ impl VideoOrchestrator {
         };
         self.encoder_type = Some(kind);
 
-        // Build the encoder command.
-        let params = EncoderParams::from_camera_config(kind, &self.camera_cfg);
-        let cmd = match build_encoder_command(
-            &params,
-            &device_path,
-            &pipe_uri,
-            Some(&primary),
-            &self.env,
-        ) {
-            Ok(c) if !c.is_empty() => c,
-            Ok(_) => {
-                tracing::error!("encoder_command_empty");
-                self.state = PipelineState::Error;
-                return false;
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "encoder_command_build_failed");
-                self.state = PipelineState::Error;
-                return false;
-            }
-        };
-
-        // Optional SEI wrap upstream of mediamtx so every consumer sees the
-        // same wall-clock marker on the same frame.
-        let cmd = if self.sei_latency_on() {
-            tracing::info!(encoder = ?kind, "sei_inject_upstream_of_mediamtx");
-            wrap_with_sei_inject(&cmd, &pipe_uri, &self.env)
-        } else {
-            cmd
-        };
-
-        // Opt-in pre-encode vision tap: augment the encoder command with a
-        // strictly-appended second rawvideo output to the vision sink, WITHOUT
-        // changing the existing encode/RTSP output bytes. No-op (returns the
-        // command unchanged) unless the command is a raw ffmpeg invocation
-        // ending in the RTSP output — bash-pipeline / gstreamer / SEI-wrapped
-        // commands fall back to the decoupled third-ffmpeg tap below, which
-        // never touches the encoder. Off by default.
-        let cmd = if self.vision_enabled() && self.config.vision.raw_tap {
-            let v = &self.config.vision;
-            let augmented = augment_encoder_with_raw_tap(
-                &cmd,
-                &pipe_uri,
-                v.fps,
-                v.width,
-                v.height,
-                v.pixel_format(),
-                &v.sink,
-            );
-            if augmented.len() != cmd.len() {
-                tracing::info!(
-                    sink = %v.sink,
-                    "vision_raw_tap_spliced_into_encoder"
-                );
-            } else {
-                tracing::info!(
-                    "vision_raw_tap_requested_but_command_not_eligible; using decoupled tap"
-                );
-            }
-            augmented
-        } else {
-            cmd
+        // Build the encoder command. Shared with the attention-switch
+        // encoder-only respawn below, so a hero/thumbnail change produces
+        // byte-identical argv to a cold start at the same settings.
+        let Some(cmd) = self.build_primary_encoder_command(&primary, &device_path, kind) else {
+            self.state = PipelineState::Error;
+            return false;
         };
 
         // Configure + start mediamtx (gates on the RTSP port internally). The
@@ -223,6 +175,21 @@ impl VideoOrchestrator {
         // switcher can advertise each `:8889/<id>/whep` leg.
         self.refresh_video_streams();
 
+        // Publish the attention state the encoder actually cold-started with,
+        // so the swarm beacon's hero bit and the adaptive ladder's self-heal
+        // check read truth from the first frame onward.
+        let (desired, settings) = self.desired_encoder_settings();
+        self.encoder_control.note_applied(
+            crate::profile::EncoderState::new(desired.profile, desired.ceiling_kbps, settings),
+            desired.generation,
+            true,
+        );
+        self.publish_encoder_state(&crate::profile::EncoderState::new(
+            desired.profile,
+            desired.ceiling_kbps,
+            settings,
+        ));
+
         // Bring up the owned encoders for any LOCAL secondary legs (each
         // publishes its camera into its own mediamtx path). Additive + isolated.
         self.start_secondary_encoders().await;
@@ -253,6 +220,146 @@ impl VideoOrchestrator {
                 tracing::debug!("vision_tap_deferred: mediamtx path not ready at stream start");
             }
         }
+        true
+    }
+
+    /// Build the primary leg's encoder argv from the CURRENT capture settings.
+    ///
+    /// Factored out of [`Self::start_stream`] so the attention-switch respawn
+    /// ([`Self::restart_encoder_only`]) reuses the identical composition — the
+    /// optional SEI wrap and the opt-in pre-encode vision-tap splice included.
+    /// Duplicating it would let a hero switch silently drop the vision tap.
+    /// `None` on any build failure (already logged).
+    fn build_primary_encoder_command(
+        &self,
+        primary: &CameraInfo,
+        device_path: &str,
+        kind: crate::encoder::EncoderKind,
+    ) -> Option<Vec<String>> {
+        let pipe_uri = self.pipe_uri();
+        let params = EncoderParams::from_camera_config(kind, &self.camera_cfg);
+        let cmd = match build_encoder_command(
+            &params,
+            device_path,
+            &pipe_uri,
+            Some(primary),
+            &self.env,
+        ) {
+            Ok(c) if !c.is_empty() => c,
+            Ok(_) => {
+                tracing::error!("encoder_command_empty");
+                return None;
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "encoder_command_build_failed");
+                return None;
+            }
+        };
+
+        // Optional SEI wrap upstream of mediamtx so every consumer sees the
+        // same wall-clock marker on the same frame.
+        let cmd = if self.sei_latency_on() {
+            tracing::info!(encoder = ?kind, "sei_inject_upstream_of_mediamtx");
+            wrap_with_sei_inject(&cmd, &pipe_uri, &self.env)
+        } else {
+            cmd
+        };
+
+        // Opt-in pre-encode vision tap: augment the encoder command with a
+        // strictly-appended second rawvideo output to the vision sink, WITHOUT
+        // changing the existing encode/RTSP output bytes. No-op (returns the
+        // command unchanged) unless the command is a raw ffmpeg invocation
+        // ending in the RTSP output — bash-pipeline / gstreamer / SEI-wrapped
+        // commands fall back to the decoupled third-ffmpeg tap, which never
+        // touches the encoder. Off by default.
+        if self.vision_enabled() && self.config.vision.raw_tap {
+            let v = &self.config.vision;
+            let augmented = augment_encoder_with_raw_tap(
+                &cmd,
+                &pipe_uri,
+                v.fps,
+                v.width,
+                v.height,
+                v.pixel_format(),
+                &v.sink,
+            );
+            if augmented.len() != cmd.len() {
+                tracing::info!(sink = %v.sink, "vision_raw_tap_spliced_into_encoder");
+            } else {
+                tracing::info!(
+                    "vision_raw_tap_requested_but_command_not_eligible; using decoupled tap"
+                );
+            }
+            Some(augmented)
+        } else {
+            Some(cmd)
+        }
+    }
+
+    /// Respawn ONLY the encoder child against the current capture settings.
+    ///
+    /// This is what an attention switch (hero ⇄ thumbnail) and an adaptive
+    /// bitrate clamp actuate. mediamtx, the wfb tap, the cloud push, the SEI tap
+    /// and the vision tap all keep running: the encoder reconnects to the same
+    /// mediamtx `main` publisher slot within its startup grace, so the cost is a
+    /// sub-second gap rather than a full pipeline cold start.
+    ///
+    /// Returns `true` when a new encoder was spawned. On failure the pipeline is
+    /// left encoder-less and the run loop's existing health ladder cold-starts
+    /// it — the same recovery path an encoder crash takes.
+    pub async fn restart_encoder_only(&mut self) -> bool {
+        // The same lock the cold start and the health-check restart take, so an
+        // attention switch can never interleave with a pipeline restart.
+        let lock = std::sync::Arc::clone(&self.restart_lock);
+        let _guard = lock.lock().await;
+
+        let Some(primary) = self.last_cameras.primary_camera_info() else {
+            tracing::warn!("encoder_restart_skipped: no primary camera in the last discovery");
+            return false;
+        };
+        let Some(kind) = self.encoder_type else {
+            tracing::warn!("encoder_restart_skipped: no encoder backend detected yet");
+            return false;
+        };
+        let device_path = primary.device_path.clone();
+        let Some(cmd) = self.build_primary_encoder_command(&primary, &device_path, kind) else {
+            return false;
+        };
+
+        if let Some(mut enc) = self.encoder.take() {
+            if enc.is_running() {
+                enc.terminate(Duration::from_secs(5)).await;
+            }
+        }
+        // The outgoing encoder held the mediamtx publisher slot; sweep any
+        // straggler so the incoming one is not refused the path.
+        kill_orphans(&self.pipe_uri()).await;
+
+        let program = cmd[0].clone();
+        let args: Vec<String> = cmd[1..].to_vec();
+        let mut enc = match ManagedProcess::spawn("encoder", &program, &args) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!(error = %e, encoder = ?kind, "encoder_respawn_failed");
+                self.last_start_error = StartError::EncoderSpawnFailed;
+                return false;
+            }
+        };
+        if let Some(stderr) = enc.take_stderr() {
+            tokio::spawn(crate::stderr_drain::drain_plain(stderr, "encoder"));
+        }
+        self.encoder = Some(enc);
+
+        // Re-arm the startup-grace window: the fresh encoder has not published
+        // yet, and without this the inbound-flow watchdog reads the respawn gap
+        // as a stall and cold-starts the whole pipeline underneath us.
+        let now = Instant::now();
+        self.started_at = now;
+        self.first_packet_seen = false;
+        self.inbound_bytes_value = -1;
+        self.inbound_bytes_changed_at = now;
+        self.video_inbound_bytes_per_s = 0.0;
+        tracing::info!(encoder = ?kind, "encoder_respawned_for_attention_change");
         true
     }
 

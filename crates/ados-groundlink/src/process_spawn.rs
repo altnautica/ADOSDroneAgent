@@ -1,8 +1,9 @@
 //! Ground-side wfb subprocess spawn with process-group isolation.
 //!
 //! The receive side forks `wfb_rx`/`wfb_tx` C binaries with GS-specific args
-//! (data RX on 5599, rx-control on 5803, tx-control on 5810) that differ from
-//! the drone-side arg sets in `ados_radio::process`. The setsid/killpg
+//! (per-slot video/aux/control receivers, plus the single tx-control on 5810
+//! and aux-uplink on 5602) that differ from the drone-side arg sets in
+//! `ados_radio::process`. The setsid/killpg
 //! discipline is the same structural fix: the child becomes its own process
 //! group leader so a terminate kills the whole group atomically and a `Drop`
 //! killpg guarantees the C binary never outlives its Rust owner (the

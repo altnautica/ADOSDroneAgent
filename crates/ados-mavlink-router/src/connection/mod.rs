@@ -41,6 +41,7 @@
 
 mod framing;
 mod send_scheduler;
+pub mod swarm_setpoint;
 mod transport;
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicUsize, Ordering};
@@ -93,6 +94,14 @@ const MSP_WINDOW: Duration = Duration::from_secs(2);
 
 /// Frame fan-out channel capacity (raw frames awaiting consumers).
 const FRAME_CHANNEL_CAP: usize = 1024;
+
+/// Cadence floor for the parameter-cache disk write while a `PARAM_REQUEST_LIST`
+/// sweep is downloading. A sweep delivers hundreds of `PARAM_VALUE` frames back
+/// to back and the cache is written whole-file, so a write per parameter would be
+/// hundreds of rewrites of the same document. See
+/// [`FcConnection::record_param`] for why a change OUTSIDE a sweep does not wait
+/// for this.
+const PARAM_SAVE_DEBOUNCE: Duration = Duration::from_secs(2);
 
 /// MAVLink message ids that give write authority over the vehicle: a mode
 /// change, arm/disarm and every other `COMMAND_LONG`/`COMMAND_INT` vehicle
@@ -512,6 +521,41 @@ impl FcConnection {
         self.param_sweep_send_failed.load(Ordering::Relaxed)
     }
 
+    /// Fold a decoded `PARAM_VALUE` into the cache and decide whether the file is
+    /// written now, returning the bytes plus their destination when it is.
+    ///
+    /// The on-disk cache became the ONLY parameter source an HTTP surface can
+    /// read the moment the map left the 10 Hz state snapshot, and one of those
+    /// surfaces (`POST /api/params/{name}`) polls it for two seconds waiting for
+    /// the FC to echo the value it just wrote. Under a flat
+    /// [`PARAM_SAVE_DEBOUNCE`] that ack would be a coin flip, so a genuine change
+    /// arriving outside a sweep is written at once. During a sweep
+    /// (`param_priming`) the debounce holds, which is where the write volume
+    /// actually is.
+    ///
+    /// Serialising happens under the params lock; the caller does the blocking
+    /// write off-reactor via [`persist_params`], so neither the lock nor a worker
+    /// thread is held across disk I/O.
+    async fn record_param(
+        &self,
+        name: &str,
+        value: f64,
+        param_type: i64,
+        since_save: &mut Instant,
+    ) -> Option<(std::path::PathBuf, Vec<u8>)> {
+        let mut pc = self.params.lock().await;
+        let changed = pc.set(name, value, param_type);
+        let sweeping = self.param_priming.load(Ordering::Relaxed);
+        let write_now = (changed && !sweeping) || since_save.elapsed() >= PARAM_SAVE_DEBOUNCE;
+        if !write_now {
+            return None;
+        }
+        *since_save = Instant::now();
+        pc.serialize()
+            .ok()
+            .map(|body| (pc.path().to_path_buf(), body))
+    }
+
     /// Whether a HEARTBEAT with this source identity is our OWN injected
     /// companion heartbeat — identified by the FULL (system_id, component_id)
     /// pair, never system_id alone. A companion computer shares the vehicle's
@@ -677,19 +721,11 @@ impl FcConnection {
                         };
                         if let Some((name, value, ptype)) = persist {
                             // Same off-reactor persistence as the live read loop:
-                            // snapshot the bytes under the lock, then write them
-                            // off the reactor.
-                            let snapshot = {
-                                let mut pc = self.params.lock().await;
-                                pc.set(&name, value as f64, ptype);
-                                if since_save.elapsed() >= Duration::from_secs(2) {
-                                    since_save = Instant::now();
-                                    pc.serialize().ok().map(|body| (pc.path().to_path_buf(), body))
-                                } else {
-                                    None
-                                }
-                            };
-                            if let Some((path, body)) = snapshot {
+                            // serialise under the lock, then write off the reactor.
+                            if let Some((path, body)) = self
+                                .record_param(&name, value as f64, ptype, &mut since_save)
+                                .await
+                            {
                                 persist_params(path, body);
                             }
                         }
@@ -821,23 +857,13 @@ impl FcConnection {
                         st.update_from_message(&msg, &now)
                     };
                     if let Some((name, value, ptype)) = persist {
-                        // Persist periodically, not on every parameter, to bound IO.
                         // Serialise under the lock, release it, then do the disk
                         // write off-reactor so neither the params lock nor a
                         // worker thread is held across blocking I/O.
-                        let snapshot = {
-                            let mut pc = self.params.lock().await;
-                            pc.set(&name, value as f64, ptype);
-                            if since_save.elapsed() >= Duration::from_secs(2) {
-                                since_save = Instant::now();
-                                pc.serialize()
-                                    .ok()
-                                    .map(|body| (pc.path().to_path_buf(), body))
-                            } else {
-                                None
-                            }
-                        };
-                        if let Some((path, body)) = snapshot {
+                        if let Some((path, body)) = self
+                            .record_param(&name, value as f64, ptype, &mut since_save)
+                            .await
+                        {
                             persist_params(path, body);
                         }
                     }

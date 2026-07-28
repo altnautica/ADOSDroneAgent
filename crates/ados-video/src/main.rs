@@ -87,6 +87,23 @@ async fn main() {
         spawn_ctrl_c_handler(shutdown.clone());
     }
 
+    // The encoder command socket: the ONE cross-process entry point through
+    // which the operator's hero choice (ados-control) and the adaptive-bitrate
+    // ladder (ados-radio) retarget this encoder. Served before the cold start so
+    // a promotion issued during startup is queued rather than refused.
+    {
+        let control = orch.encoder_control();
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            ados_video::profile::serve(
+                control,
+                Path::new(ados_video::profile::VIDEO_ENCODER_SOCK),
+                shutdown,
+            )
+            .await;
+        });
+    }
+
     // Cold start. A failed start lands the orchestrator in Error; the run
     // loop's retry-from-error path then takes over (USB hotplug, late mediamtx,
     // etc.), so a cold-start failure is not fatal to the service.

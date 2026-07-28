@@ -115,11 +115,11 @@ async def _serve_one_reply(sock_path: str, reply: dict) -> asyncio.AbstractServe
 
 @pytest.mark.asyncio
 async def test_forward_start_bind_happy_path(
-    tmp_path: Path,
+    unix_socket_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A successful reply round-trips into the session dict."""
-    sock_path = str(tmp_path / "supervisor.sock")
+    sock_path = str(unix_socket_dir / "supervisor.sock")
     monkeypatch.setattr(bind_client, "SUPERVISOR_SOCK", sock_path)
     server = await _serve_one_reply(
         sock_path, {"ok": True, "session": {"state": "paired"}}
@@ -140,11 +140,11 @@ async def test_forward_start_bind_happy_path(
 
 @pytest.mark.asyncio
 async def test_forward_start_bind_busy_raises(
-    tmp_path: Path,
+    unix_socket_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An E_BIND_IN_PROGRESS reply surfaces as BindBusyError."""
-    sock_path = str(tmp_path / "supervisor.sock")
+    sock_path = str(unix_socket_dir / "supervisor.sock")
     monkeypatch.setattr(bind_client, "SUPERVISOR_SOCK", sock_path)
     server = await _serve_one_reply(
         sock_path, {"ok": False, "error": "E_BIND_IN_PROGRESS"}

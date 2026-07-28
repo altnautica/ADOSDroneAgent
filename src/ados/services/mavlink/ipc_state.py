@@ -5,19 +5,69 @@ to ``/run/ados/state.sock`` at ~10 Hz (newline-JSON v1 / length-prefixed
 msgpack v2, decoded by :class:`ados.core.ipc.StateIPCClient`). The snapshot
 carries the vehicle dict (heartbeat, attitude, gps, battery, rc, ...) plus a
 set of service extras (``fc_connected``, ``fc_port``, ``fc_baud``,
-``service_uptime``, the param-sweep flags, and the ``params`` blob).
+``service_uptime``, the param-sweep flags, and ``param_generation``).
 
 These shims wrap that snapshot dict and expose the small attribute surface
 the API layer, the MQTT gateway, and the cloud heartbeat already expect from
 the former in-process objects (``.connected`` / ``.port`` / ``.baud`` on the
-FC handle, ``.to_dict()`` / ``.armed`` / ``.params`` on the vehicle state,
+FC handle, ``.to_dict()`` / ``.armed`` on the vehicle state,
 ``.get_all()`` / ``.get()`` / ``.count`` on the param cache). They are
 passive: feed them with :meth:`IpcVehicleState.update_from_dict` from a
 ``StateIPCClient`` state handler, or share a single :class:`IpcVehicleState`
 across all three so the param cache and FC handle read the same snapshot.
+
+The parameter VALUES are the one thing not on that snapshot. They used to ride
+it as a ``params`` blob — ~24 KB against ArduPilot's ~700 parameters,
+republished ten times a second with no delta and no cap, which alone made a
+relayed telemetry read need ~21 radio fragments and deliver 85% of the time.
+:class:`IpcParamCache` therefore reads the file the router already persists
+atomically at :data:`DEFAULT_PARAMS_PATH`, and the snapshot carries only the
+``param_generation`` counter a consumer compares against its own last-seen
+value to decide whether to refetch.
 """
 
 from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+
+#: Where the native router persists its parameter cache. Mirrors the Rust
+#: ``ados_mavlink_router::param_cache::DEFAULT_PARAMS_PATH``; the two processes
+#: share no code, so the constant is duplicated rather than imported.
+DEFAULT_PARAMS_PATH = "/var/lib/ados/params.json"
+
+
+def params_path() -> Path:
+    """The parameter-cache path, honouring the ``ADOS_PARAMS_JSON`` override."""
+    return Path(os.environ.get("ADOS_PARAMS_JSON") or DEFAULT_PARAMS_PATH)
+
+
+def read_param_blob(path: Path | None = None) -> dict[str, float]:
+    """The cached parameters as ``{name: value}``, read off disk.
+
+    Degrades to ``{}`` on every failure — an absent file (no router has run yet,
+    or the FC has never answered a ``PARAM_REQUEST_LIST``), an unreadable file, a
+    truncated document, or a root that is not an object. Entries whose ``value``
+    is missing or non-numeric are skipped individually: one corrupt entry must
+    not discard the other 699.
+    """
+    try:
+        raw = json.loads((path or params_path()).read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, float] = {}
+    for name, entry in raw.items():
+        if not isinstance(entry, dict):
+            continue
+        value = entry.get("value")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        out[name] = float(value)
+    return out
+
 
 # Service extras the router rides alongside the vehicle keys. Stripped from
 # ``to_dict()`` so the telemetry surface returns only vehicle-state fields.
@@ -39,7 +89,11 @@ _EXTRA_KEYS = frozenset(
         "param_sweep_send_failed",
         "param_cached_count",
         "param_expected_count",
-        "params",
+        # The parameter map's change counter, which replaced the map itself.
+        "param_generation",
+        # The drone's video attention profile ("hero" / "thumbnail"): an
+        # agent-owned RF allocation, not a vehicle reading.
+        "video_profile",
     }
 )
 
@@ -176,9 +230,15 @@ class IpcVehicleState:
         return int(self._nested("battery", "remaining", -1))
 
     @property
-    def params(self) -> dict[str, float]:
-        blob = self._d.get("params")
-        return dict(blob) if isinstance(blob, dict) else {}
+    def param_generation(self) -> int:
+        """The router's parameter-map change counter.
+
+        Replaced the ``params`` blob on the snapshot. A consumer holds its
+        last-seen value and refetches the map (``GET /api/params``) once when this
+        moves; the router restarting resets it to 0, which reads as a mismatch and
+        costs exactly one refetch.
+        """
+        return int(self._d.get("param_generation", 0) or 0)
 
     @property
     def param_count(self) -> int:
@@ -203,9 +263,15 @@ class _ParamEntry:
 
 
 class IpcParamCache:
-    """Param-cache view over the router snapshot's ``params`` blob.
+    """Param-cache view over the router's on-disk cache.
 
-    The blob carries name → value only, so type metadata reads as 0 (which
+    Reads :func:`read_param_blob` on every call rather than holding a copy: the
+    router rewrites that file as values change (immediately for a single change
+    outside a ``PARAM_REQUEST_LIST`` sweep, debounced during one), and a held copy
+    would go stale exactly when a write-then-read round trip needs it fresh. These
+    are HTTP request paths, not a hot loop.
+
+    The projection carries name → value only, so type metadata reads as 0 (which
     ArduPilot accepts and resolves from its canonical type table on write).
     """
 
@@ -213,21 +279,15 @@ class IpcParamCache:
         self._vs = vehicle_state
 
     def get(self, name: str) -> float | None:
-        value = self._vs.params.get(name)
-        if value is None:
-            return None
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return None
+        return read_param_blob().get(name)
 
     def get_all(self) -> dict[str, float]:
-        return self._vs.params
+        return read_param_blob()
 
     def get_all_detailed(self) -> dict[str, dict]:
         return {
             name: {"value": value, "param_type": 0, "last_updated": 0.0}
-            for name, value in self._vs.params.items()
+            for name, value in read_param_blob().items()
         }
 
     @property
@@ -235,11 +295,11 @@ class IpcParamCache:
         cached = self._vs.snapshot.get("param_cached_count")
         if isinstance(cached, (int, float)):
             return int(cached)
-        return len(self._vs.params)
+        return len(read_param_blob())
 
     @property
     def _params(self) -> dict[str, _ParamEntry]:
-        return {name: _ParamEntry(value) for name, value in self._vs.params.items()}
+        return {name: _ParamEntry(value) for name, value in read_param_blob().items()}
 
 
 class IpcFcConnection:

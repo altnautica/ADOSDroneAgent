@@ -61,10 +61,21 @@ fn key_str(key_path: &Path) -> String {
 }
 
 /// Data-plane `wfb_tx` args (radio_id 0, UDP 5600, video FEC k/n from config).
-pub fn data_tx_args(iface: &str, cfg: &WfbConfig, key_path: &Path) -> Vec<String> {
+/// `link_id` is this drone's own (`link_id(fleet_id, fleet_slot)`): the video
+/// downlink is transmitted under the drone's identity so each drone in a fleet
+/// occupies its own `channel_id` on the shared channel.
+///
+/// `-C` binds the wfb-ng 24.08 management socket ([`crate::tx_cmd`]) on
+/// `8000 + radio_port`, so the adaptive controller can retune FEC and MCS on the
+/// running transmitter instead of killing and respawning it (a 1-2 s video gap).
+pub fn data_tx_args(iface: &str, cfg: &WfbConfig, key_path: &Path, link_id: u32) -> Vec<String> {
     vec![
         "-p".into(),
         "0".into(),
+        "-i".into(),
+        link_id.to_string(),
+        "-C".into(),
+        crate::tx_cmd::control_port(0).to_string(),
         "-u".into(),
         "5600".into(),
         "-K".into(),
@@ -82,10 +93,17 @@ pub fn data_tx_args(iface: &str, cfg: &WfbConfig, key_path: &Path) -> Vec<String
 }
 
 /// Control-plane `wfb_tx` args (radio_id 1, UDP 5803, light FEC k=1/n=2).
-pub fn tx_control_args(iface: &str, cfg: &WfbConfig, key_path: &Path) -> Vec<String> {
+/// `link_id` is this drone's own: HopAck / PresenceBeacon travel downlink, so
+/// they are keyed to the drone that emitted them. `-C` binds this plane's own
+/// management socket (see [`data_tx_args`]).
+pub fn tx_control_args(iface: &str, cfg: &WfbConfig, key_path: &Path, link_id: u32) -> Vec<String> {
     vec![
         "-p".into(),
         "1".into(),
+        "-i".into(),
+        link_id.to_string(),
+        "-C".into(),
+        crate::tx_cmd::control_port(1).to_string(),
         "-u".into(),
         "5803".into(),
         "-K".into(),
@@ -103,10 +121,15 @@ pub fn tx_control_args(iface: &str, cfg: &WfbConfig, key_path: &Path) -> Vec<Str
 }
 
 /// Control-plane `wfb_rx` args (radio_id 1, re-emit HopAck on 127.0.0.1:5810).
-pub fn rx_control_args(iface: &str, key_path: &Path) -> Vec<String> {
+/// `link_id` is the GROUND STATION's (`link_id(fleet_id, SLOT_GROUND)`), not
+/// this drone's: the uplink is a single shared transmitter every drone in the
+/// fleet listens to, so a fleet-wide command is one transmission, not N.
+pub fn rx_control_args(iface: &str, key_path: &Path, link_id: u32) -> Vec<String> {
     vec![
         "-p".into(),
         "1".into(),
+        "-i".into(),
+        link_id.to_string(),
         "-c".into(),
         "127.0.0.1".into(),
         "-u".into(),
@@ -124,10 +147,16 @@ pub fn rx_control_args(iface: &str, key_path: &Path) -> Vec<String> {
 /// goes to **127.0.0.1:5601** — deliberately NOT 5600 (the data-plane TX's
 /// video ingress) so the stats receiver can never inject into the video path.
 /// Uses the **rx** key (decrypts the GS uplink).
-pub fn stats_rx_args(iface: &str, rx_key_path: &Path) -> Vec<String> {
+///
+/// `link_id` is this drone's OWN: the stats receiver listens to the drone's own
+/// downlink `channel_id` to measure what it is transmitting, so keying it to
+/// the ground slot would report the uplink's health as the video link's.
+pub fn stats_rx_args(iface: &str, rx_key_path: &Path, link_id: u32) -> Vec<String> {
     vec![
         "-p".into(),
         "0".into(),
+        "-i".into(),
+        link_id.to_string(),
         "-c".into(),
         "127.0.0.1".into(),
         "-u".into(),
@@ -145,10 +174,17 @@ pub fn stats_rx_args(iface: &str, rx_key_path: &Path) -> Vec<String> {
 /// UDP ingress port, with its own (light) Reed-Solomon ratio and MCS. The aux
 /// pair shares the injection adapter but never the radio_id, so it can never
 /// collide with the data or control planes on the air.
-pub fn aux_tx_args(iface: &str, cfg: &WfbConfig, key_path: &Path) -> Vec<String> {
+///
+/// `link_id` is this drone's own — the aux downlink is the drone talking. `-C`
+/// binds this plane's own management socket (see [`data_tx_args`]).
+pub fn aux_tx_args(iface: &str, cfg: &WfbConfig, key_path: &Path, link_id: u32) -> Vec<String> {
     vec![
         "-p".into(),
         "2".into(),
+        "-i".into(),
+        link_id.to_string(),
+        "-C".into(),
+        crate::tx_cmd::control_port(2).to_string(),
         "-u".into(),
         cfg.aux_tx_port.to_string(),
         "-K".into(),
@@ -169,10 +205,15 @@ pub fn aux_tx_args(iface: &str, cfg: &WfbConfig, key_path: &Path) -> Vec<String>
 /// on 127.0.0.1:`aux_rx_port`). The re-emit port is deliberately distinct from
 /// the aux tx ingress (`aux_tx_port`) so the receive side can never feed back into
 /// the transmit ingress. Uses the same key path as the aux tx.
-pub fn aux_rx_args(iface: &str, cfg: &WfbConfig, key_path: &Path) -> Vec<String> {
+///
+/// `link_id` is the GROUND STATION's: like the control uplink, the aux uplink is
+/// one shared transmitter the whole fleet receives.
+pub fn aux_rx_args(iface: &str, cfg: &WfbConfig, key_path: &Path, link_id: u32) -> Vec<String> {
     vec![
         "-p".into(),
         "3".into(),
+        "-i".into(),
+        link_id.to_string(),
         "-c".into(),
         "127.0.0.1".into(),
         "-u".into(),
@@ -199,8 +240,9 @@ impl WfbProcess {
         iface: &str,
         cfg: &WfbConfig,
         key_path: &Path,
+        link_id: u32,
     ) -> std::io::Result<Self> {
-        Self::spawn_in_group("wfb_tx", &data_tx_args(iface, cfg, key_path), None).await
+        Self::spawn_in_group("wfb_tx", &data_tx_args(iface, cfg, key_path, link_id), None).await
     }
 
     /// Spawn the **tx-control** `wfb_tx` (over-the-air HopAnnounce/PresenceBeacon
@@ -209,20 +251,26 @@ impl WfbProcess {
         iface: &str,
         cfg: &WfbConfig,
         key_path: &Path,
+        link_id: u32,
     ) -> std::io::Result<Self> {
         Self::spawn_in_group(
             "wfb_tx",
-            &tx_control_args(iface, cfg, key_path),
+            &tx_control_args(iface, cfg, key_path, link_id),
             Some(TX_CONTROL_LOG),
         )
         .await
     }
 
     /// Spawn the **rx-control** `wfb_rx` (receives HopAck off the air → 5810).
-    pub async fn spawn_rx_control(iface: &str, key_path: &Path) -> std::io::Result<Self> {
+    /// `link_id` is the ground station's — the shared uplink.
+    pub async fn spawn_rx_control(
+        iface: &str,
+        key_path: &Path,
+        link_id: u32,
+    ) -> std::io::Result<Self> {
         Self::spawn_in_group(
             "wfb_rx",
-            &rx_control_args(iface, key_path),
+            &rx_control_args(iface, key_path, link_id),
             Some(RX_CONTROL_LOG),
         )
         .await
@@ -230,9 +278,14 @@ impl WfbProcess {
 
     /// Spawn the **stats** `wfb_rx` (data plane, port 5601) with stdout PIPED so
     /// the caller can read the per-second PKT/RX_ANT stats lines.
-    pub async fn spawn_stats_rx(iface: &str, rx_key_path: &Path) -> std::io::Result<Self> {
+    pub async fn spawn_stats_rx(
+        iface: &str,
+        rx_key_path: &Path,
+        link_id: u32,
+    ) -> std::io::Result<Self> {
         // stderr → null (we only want stdout's stats stream); stdout piped.
-        Self::spawn_in_group_piped_stdout("wfb_rx", &stats_rx_args(iface, rx_key_path)).await
+        Self::spawn_in_group_piped_stdout("wfb_rx", &stats_rx_args(iface, rx_key_path, link_id))
+            .await
     }
 
     /// Spawn the **auxiliary tx** `wfb_tx` (radio_id 2, application ingress).
@@ -242,25 +295,28 @@ impl WfbProcess {
         iface: &str,
         cfg: &WfbConfig,
         key_path: &Path,
+        link_id: u32,
     ) -> std::io::Result<Self> {
         Self::spawn_in_group(
             "wfb_tx",
-            &aux_tx_args(iface, cfg, key_path),
+            &aux_tx_args(iface, cfg, key_path, link_id),
             Some(AUX_TX_LOG),
         )
         .await
     }
 
     /// Spawn the **auxiliary rx** `wfb_rx` (radio_id 3, re-emit decoded frames on
-    /// 127.0.0.1:`aux_rx_port`). stderr → truncated log file.
+    /// 127.0.0.1:`aux_rx_port`). stderr → truncated log file. `link_id` is the
+    /// ground station's — the shared aux uplink.
     pub async fn spawn_aux_rx(
         iface: &str,
         cfg: &WfbConfig,
         key_path: &Path,
+        link_id: u32,
     ) -> std::io::Result<Self> {
         Self::spawn_in_group(
             "wfb_rx",
-            &aux_rx_args(iface, cfg, key_path),
+            &aux_rx_args(iface, cfg, key_path, link_id),
             Some(AUX_RX_LOG),
         )
         .await
@@ -374,6 +430,33 @@ impl Drop for WfbProcess {
     }
 }
 
+/// The wfb-ng radio port (`-p`) the video data plane occupies. Also selects its
+/// management-socket port via [`crate::tx_cmd::control_port`] — MUST stay equal
+/// to the `-p` value [`data_tx_args`] pushes, or a live retune would be sent to
+/// the wrong transmitter.
+const DATA_RADIO_PORT: u8 = 0;
+
+/// Tally of how the live data-plane retunes were applied.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ApplyCounters {
+    /// Applied over the `wfb_tx` management socket — no video interruption.
+    pub tx_cmd: u64,
+    /// Applied by killing and respawning the data plane — a 1-2 s video gap.
+    pub respawn: u64,
+    /// Management-socket attempts that failed and forced the respawn fallback.
+    pub tx_cmd_failed: u64,
+}
+
+/// Which half of the retained data-plane trio a retune actually changed. Only
+/// the changed half is pushed: re-sending an unchanged FEC ratio would restart
+/// the receiver's FEC session for nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Retune {
+    Fec,
+    Modulation,
+    Both,
+}
+
 /// The drone's radio subprocesses, spawned and torn down in lock-step. The
 /// control plane MUST restart with the data plane on every channel hop so
 /// HopAnnounce/HopAck keep flowing on the new channel; the stats RX likewise
@@ -402,9 +485,27 @@ pub struct RadioProcesses {
     /// control planes (an adaptive FEC/MCS change restarts only the data plane).
     iface: String,
     tx_key_path: PathBuf,
+    /// This node's own wfb-ng `link_id` (`link_id(fleet_id, fleet_slot)`), the
+    /// key for every process the drone TRANSMITS on plus the stats RX that
+    /// listens to its own downlink. Retained rather than recomputed so a channel
+    /// hop or an FEC/MCS respawn re-keys IDENTICALLY: `respawn_data_tx` rebuilds
+    /// its cfg view from `WfbConfig::default()`, whose fleet fields are the
+    /// unprovisioned defaults, and re-deriving from that would silently move a
+    /// live transmitter onto the ground station's `channel_id`.
+    own_link_id: u32,
+    /// The ground station's `link_id` (`link_id(fleet_id, SLOT_GROUND)`), the key
+    /// for every process the drone RECEIVES the shared uplink on. One uplink
+    /// transmitter serves the whole fleet, so this is the same value on every
+    /// drone in a fleet.
+    uplink_link_id: u32,
     data_fec_k: u8,
     data_fec_n: u8,
     data_mcs_index: u8,
+    /// Which path the live data-plane retunes took (management socket vs
+    /// respawn). Reported through the heartbeat: a rig whose `respawn` counter
+    /// grows is a rig where `-C` never reached the transmitter, and every tier
+    /// change there costs a 1-2 s video gap.
+    applies: ApplyCounters,
 }
 
 /// The auxiliary stream's retained tunables, captured at open so the pair can be
@@ -450,20 +551,32 @@ impl RadioProcesses {
     /// Spawn the data plane + both control planes, and (when `/etc/ados/wfb/rx.key`
     /// exists) the stats RX with a reader task that updates `link` from the
     /// `wfb_rx` stats stream.
+    ///
+    /// The two fleet link ids are derived once from `cfg` here and retained: the
+    /// transmit side and the stats receiver key to this drone's own slot, the
+    /// two uplink receivers key to the ground station's shared slot 0.
     pub async fn spawn(
         iface: &str,
         cfg: &WfbConfig,
         key_path: &Path,
         link: std::sync::Arc<tokio::sync::Mutex<crate::link_quality::LinkStats>>,
     ) -> std::io::Result<Self> {
-        let data_tx = WfbProcess::spawn_data_tx(iface, cfg, key_path).await?;
-        let tx_control = WfbProcess::spawn_tx_control(iface, cfg, key_path).await?;
-        let rx_control = WfbProcess::spawn_rx_control(iface, key_path).await?;
+        let own_link_id = crate::config::link_id(cfg.fleet_id, cfg.fleet_slot);
+        let uplink_link_id = crate::config::link_id(cfg.fleet_id, crate::config::SLOT_GROUND);
+        let data_tx = WfbProcess::spawn_data_tx(iface, cfg, key_path, own_link_id).await?;
+        let tx_control = WfbProcess::spawn_tx_control(iface, cfg, key_path, own_link_id).await?;
+        let rx_control = WfbProcess::spawn_rx_control(iface, key_path, uplink_link_id).await?;
 
         // Stats RX is best-effort + gated on the rx key (the GS-uplink decryptor).
         // Without it the link block stays at default sentinels — same as Python.
         let (stats_rx, stats_reader) = if Path::new(crate::paths::WFB_RX_KEY).exists() {
-            match WfbProcess::spawn_stats_rx(iface, Path::new(crate::paths::WFB_RX_KEY)).await {
+            match WfbProcess::spawn_stats_rx(
+                iface,
+                Path::new(crate::paths::WFB_RX_KEY),
+                own_link_id,
+            )
+            .await
+            {
                 Ok(mut p) => {
                     let stdout = p.take_stdout();
                     let reader = stdout.map(|out| tokio::spawn(stats_reader_loop(out, link)));
@@ -478,6 +591,14 @@ impl RadioProcesses {
             (None, None)
         };
 
+        tracing::info!(
+            fleet_id = cfg.fleet_id,
+            fleet_slot = cfg.fleet_slot,
+            own_link_id,
+            uplink_link_id,
+            "wfb_fleet_identity"
+        );
+
         Ok(Self {
             data_tx,
             tx_control,
@@ -491,9 +612,12 @@ impl RadioProcesses {
             aux_settings: None,
             iface: iface.to_string(),
             tx_key_path: key_path.to_path_buf(),
+            own_link_id,
+            uplink_link_id,
             data_fec_k: cfg.fec_k,
             data_fec_n: cfg.fec_n,
             data_mcs_index: cfg.mcs_index,
+            applies: ApplyCounters::default(),
         })
     }
 
@@ -520,18 +644,88 @@ impl RadioProcesses {
         self.data_mcs_index
     }
 
+    /// How the live data-plane retunes have been applied since this group came
+    /// up. Surfaced through the bitrate snapshot onto `wfb-stats.json`.
+    pub fn apply_counters(&self) -> ApplyCounters {
+        self.applies
+    }
+
+    /// Push the retained data-plane trio onto the RUNNING `wfb_tx` over its
+    /// wfb-ng 24.08 management socket. No process restart, so no video gap.
+    ///
+    /// Only ever sends the MCS index and the FEC pair. `set_radio` replaces the
+    /// whole injected radiotap header, so [`crate::tx_cmd::RadioSettings::with_mcs`]
+    /// re-states the pinned 20 MHz width and the spawn-time GI / STBC / LDPC /
+    /// VHT values — a rate change can never silently retune the channel width.
+    async fn tx_cmd_apply(&self, what: Retune) -> Result<(), crate::tx_cmd::TxCmdError> {
+        let client = crate::tx_cmd::TxCmdClient::for_radio_port(DATA_RADIO_PORT);
+        if matches!(what, Retune::Fec | Retune::Both) {
+            client.set_fec(self.data_fec_k, self.data_fec_n).await?;
+        }
+        if matches!(what, Retune::Modulation | Retune::Both) {
+            client
+                .set_radio(&crate::tx_cmd::RadioSettings::with_mcs(self.data_mcs_index))
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Apply the already-updated retained trio to the live data plane, preferring
+    /// the management socket and falling back to a respawn.
+    ///
+    /// The fallback is not optional: a `wfb_tx` too old for `-C`, a control socket
+    /// that failed to bind, or a transmitter that has died all land here, and the
+    /// operator's or the ladder's intent must still take effect. The respawn is
+    /// the historical path and carries its historical cost (a 1-2 s video gap),
+    /// which is why the two paths are counted separately.
+    async fn apply_retained(&mut self, what: Retune) -> bool {
+        match self.tx_cmd_apply(what).await {
+            Ok(()) => {
+                self.applies.tx_cmd += 1;
+                true
+            }
+            Err(e) => {
+                self.applies.tx_cmd_failed += 1;
+                tracing::warn!(
+                    error = %e,
+                    port = crate::tx_cmd::control_port(DATA_RADIO_PORT),
+                    "data_plane_tx_cmd_failed_falling_back_to_respawn"
+                );
+                if self.respawn_data_tx().await {
+                    self.applies.respawn += 1;
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    /// The retained `link_id` every transmitter in this group is keyed to (this
+    /// drone's fleet slot).
+    pub fn own_link_id(&self) -> u32 {
+        self.own_link_id
+    }
+
+    /// The retained `link_id` the two uplink receivers are keyed to (the ground
+    /// station's slot 0).
+    pub fn uplink_link_id(&self) -> u32 {
+        self.uplink_link_id
+    }
+
     /// Apply a new Reed-Solomon `(k, n)` ratio to the live data plane.
     ///
-    /// `wfb_tx` has no runtime FEC knob, so the only correct application is to
-    /// kill the data-tx process and respawn it with the new `-k`/`-n` args. The
-    /// two control planes and the stats RX carry their own fixed FEC and are
-    /// left running, so an FEC change does not interrupt HopAnnounce/HopAck or
-    /// the link-quality stream. Returns `false` on an invalid ratio or a respawn
-    /// failure; on a respawn failure the previous data tunables are restored in
-    /// the retained state so a later respawn does not silently keep the rejected
-    /// values, and the data plane is left dead for the supervisor to restart the
-    /// whole group (the same fail-safe path the watchdog kills take). A no-op
-    /// when the ratio already matches the running data plane.
+    /// Applied on the RUNNING transmitter through the `wfb_tx` management socket
+    /// (`set_fec`, which restarts only the FEC session — no video gap), falling
+    /// back to kill-and-respawn when that socket does not answer. The two control
+    /// planes and the stats RX carry their own fixed FEC and are never touched, so
+    /// an FEC change does not interrupt HopAnnounce/HopAck or the link-quality
+    /// stream. Returns `false` on an invalid ratio, or when both the live path and
+    /// the respawn fallback failed; in that case the previous data tunables are
+    /// restored in the retained state so a later respawn does not silently keep
+    /// the rejected values, and the data plane is left dead for the supervisor to
+    /// restart the whole group (the same fail-safe path the watchdog kills take).
+    /// A no-op when the ratio already matches the running data plane.
     pub async fn set_fec(&mut self, fec_k: u8, fec_n: u8) -> bool {
         if !fec_ratio_valid(fec_k, fec_n) {
             tracing::warn!(k = fec_k, n = fec_n, "set_fec_invalid");
@@ -544,21 +738,25 @@ impl RadioProcesses {
         let old_n = self.data_fec_n;
         self.data_fec_k = fec_k;
         self.data_fec_n = fec_n;
-        if self.respawn_data_tx().await {
+        if self.apply_retained(Retune::Fec).await {
             tracing::info!(k = fec_k, n = fec_n, "set_fec_applied");
             true
         } else {
             self.data_fec_k = old_k;
             self.data_fec_n = old_n;
-            tracing::warn!(k = fec_k, n = fec_n, "set_fec_respawn_failed");
+            tracing::warn!(k = fec_k, n = fec_n, "set_fec_apply_failed");
             false
         }
     }
 
-    /// Apply a new MCS index to the live data plane (same restart-on-change path
-    /// as [`set_fec`](Self::set_fec)). The accepted range is 0..=7 (the
-    /// RTL8812EU VHT80 range); `wfb_tx` rejects anything wider. A no-op when the
-    /// index already matches the running data plane.
+    /// Apply a new MCS index to the live data plane (same live-then-respawn path
+    /// as [`set_fec`](Self::set_fec), via `set_radio`). The accepted range is
+    /// 0..=7 (the RTL8812EU range); `wfb_tx` rejects anything wider. A no-op when
+    /// the index already matches the running data plane.
+    ///
+    /// This is the only radio knob varied at runtime. The channel width rides
+    /// along pinned at 20 MHz and the TX power is left to the adapter's own
+    /// ramp-until-accepted path — see [`crate::tx_cmd`].
     pub async fn set_mcs(&mut self, mcs: u8) -> bool {
         if !mcs_index_valid(mcs) {
             tracing::warn!(mcs, "set_mcs_out_of_range");
@@ -569,28 +767,29 @@ impl RadioProcesses {
         }
         let old_mcs = self.data_mcs_index;
         self.data_mcs_index = mcs;
-        if self.respawn_data_tx().await {
+        if self.apply_retained(Retune::Modulation).await {
             tracing::info!(mcs, "set_mcs_applied");
             true
         } else {
             self.data_mcs_index = old_mcs;
-            tracing::warn!(mcs, "set_mcs_respawn_failed");
+            tracing::warn!(mcs, "set_mcs_apply_failed");
             false
         }
     }
 
     /// Pin a full manual link tier — the `(mcs_index, fec_k, fec_n)` trio — onto
-    /// the live data plane in a single respawn.
+    /// the live data plane in one operation.
     ///
     /// This is the manual half of the auto/manual tier control: the operator
     /// fixes the radio rate + redundancy and the adaptive controller is held off
-    /// (the caller disables it). Applying the trio together means one data-plane
-    /// restart for all three knobs instead of three. Validates the FEC ratio and
-    /// the MCS range up front; on an invalid input it changes nothing and returns
-    /// `false`. A no-op (returns `true` without a restart) when the trio already
-    /// matches the running data plane. On a respawn failure the previous trio is
-    /// restored in the retained state and the data plane is left dead for the
-    /// supervisor to restart the whole group.
+    /// (the caller disables it). Only the halves that actually changed are pushed,
+    /// so pinning a tier that differs in MCS alone does not needlessly restart the
+    /// receiver's FEC session. Validates the FEC ratio and the MCS range up front;
+    /// on an invalid input it changes nothing and returns `false`. A no-op
+    /// (returns `true` without touching the radio) when the trio already matches
+    /// the running data plane. When both the live path and the respawn fallback
+    /// fail, the previous trio is restored in the retained state and the data
+    /// plane is left dead for the supervisor to restart the whole group.
     pub async fn set_manual_tier(&mut self, mcs: u8, fec_k: u8, fec_n: u8) -> bool {
         if !mcs_index_valid(mcs) {
             tracing::warn!(mcs, "set_manual_tier_mcs_out_of_range");
@@ -600,21 +799,29 @@ impl RadioProcesses {
             tracing::warn!(k = fec_k, n = fec_n, "set_manual_tier_fec_invalid");
             return false;
         }
-        if mcs == self.data_mcs_index && fec_k == self.data_fec_k && fec_n == self.data_fec_n {
+        let fec_changed = fec_k != self.data_fec_k || fec_n != self.data_fec_n;
+        let mcs_changed = mcs != self.data_mcs_index;
+        if !fec_changed && !mcs_changed {
             return true;
         }
+        // At least one half changed, so this covers every reachable case.
+        let what = match (fec_changed, mcs_changed) {
+            (true, true) => Retune::Both,
+            (true, false) => Retune::Fec,
+            _ => Retune::Modulation,
+        };
         let (old_mcs, old_k, old_n) = (self.data_mcs_index, self.data_fec_k, self.data_fec_n);
         self.data_mcs_index = mcs;
         self.data_fec_k = fec_k;
         self.data_fec_n = fec_n;
-        if self.respawn_data_tx().await {
+        if self.apply_retained(what).await {
             tracing::info!(mcs, k = fec_k, n = fec_n, "set_manual_tier_applied");
             true
         } else {
             self.data_mcs_index = old_mcs;
             self.data_fec_k = old_k;
             self.data_fec_n = old_n;
-            tracing::warn!(mcs, k = fec_k, n = fec_n, "set_manual_tier_respawn_failed");
+            tracing::warn!(mcs, k = fec_k, n = fec_n, "set_manual_tier_apply_failed");
             false
         }
     }
@@ -676,14 +883,22 @@ impl RadioProcesses {
             return true;
         }
         let key_path = self.tx_key_path.clone();
-        let aux_tx = match WfbProcess::spawn_aux_tx(&self.iface, cfg, &key_path).await {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!(error = %e, "aux_tx_spawn_failed");
-                return false;
-            }
-        };
-        let aux_rx = match WfbProcess::spawn_aux_rx(&self.iface, cfg, &key_path).await {
+        let aux_tx =
+            match WfbProcess::spawn_aux_tx(&self.iface, cfg, &key_path, self.own_link_id).await {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(error = %e, "aux_tx_spawn_failed");
+                    return false;
+                }
+            };
+        let aux_rx = match WfbProcess::spawn_aux_rx(
+            &self.iface,
+            cfg,
+            &key_path,
+            self.uplink_link_id,
+        )
+        .await
+        {
             Ok(p) => p,
             Err(e) => {
                 tracing::warn!(error = %e, "aux_rx_spawn_failed");
@@ -747,8 +962,10 @@ impl RadioProcesses {
         }
         let aux_cfg = settings.to_cfg();
         let key_path = self.tx_key_path.clone();
-        let aux_tx = WfbProcess::spawn_aux_tx(&self.iface, &aux_cfg, &key_path).await;
-        let aux_rx = WfbProcess::spawn_aux_rx(&self.iface, &aux_cfg, &key_path).await;
+        let aux_tx =
+            WfbProcess::spawn_aux_tx(&self.iface, &aux_cfg, &key_path, self.own_link_id).await;
+        let aux_rx =
+            WfbProcess::spawn_aux_rx(&self.iface, &aux_cfg, &key_path, self.uplink_link_id).await;
         match (aux_tx, aux_rx) {
             (Ok(tx), Ok(rx)) => {
                 self.aux_tx = Some(tx);
@@ -796,29 +1013,40 @@ impl RadioProcesses {
         let data_cfg =
             data_cfg_from_retained(cfg, self.data_fec_k, self.data_fec_n, self.data_mcs_index);
         let key_path = self.tx_key_path.clone();
-        let data_tx = match WfbProcess::spawn_data_tx(&self.iface, &data_cfg, &key_path).await {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!(error = %e, "respawn_group_data_tx_failed");
-                return false;
-            }
-        };
-        let tx_control = match WfbProcess::spawn_tx_control(&self.iface, cfg, &key_path).await {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!(error = %e, "respawn_group_tx_control_failed");
-                return false;
-            }
-        };
-        let rx_control = match WfbProcess::spawn_rx_control(&self.iface, &key_path).await {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!(error = %e, "respawn_group_rx_control_failed");
-                return false;
-            }
-        };
+        let data_tx =
+            match WfbProcess::spawn_data_tx(&self.iface, &data_cfg, &key_path, self.own_link_id)
+                .await
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(error = %e, "respawn_group_data_tx_failed");
+                    return false;
+                }
+            };
+        let tx_control =
+            match WfbProcess::spawn_tx_control(&self.iface, cfg, &key_path, self.own_link_id).await
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(error = %e, "respawn_group_tx_control_failed");
+                    return false;
+                }
+            };
+        let rx_control =
+            match WfbProcess::spawn_rx_control(&self.iface, &key_path, self.uplink_link_id).await {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(error = %e, "respawn_group_rx_control_failed");
+                    return false;
+                }
+            };
         let (stats_rx, stats_reader) = if Path::new(crate::paths::WFB_RX_KEY).exists() {
-            match WfbProcess::spawn_stats_rx(&self.iface, Path::new(crate::paths::WFB_RX_KEY)).await
+            match WfbProcess::spawn_stats_rx(
+                &self.iface,
+                Path::new(crate::paths::WFB_RX_KEY),
+                self.own_link_id,
+            )
+            .await
             {
                 Ok(mut p) => {
                     let stdout = p.take_stdout();
@@ -845,8 +1073,11 @@ impl RadioProcesses {
         // primary link is healthy regardless of the additive aux pair.
         if let Some(settings) = self.aux_settings {
             let aux_cfg = settings.to_cfg();
-            let aux_tx = WfbProcess::spawn_aux_tx(&self.iface, &aux_cfg, &key_path).await;
-            let aux_rx = WfbProcess::spawn_aux_rx(&self.iface, &aux_cfg, &key_path).await;
+            let aux_tx =
+                WfbProcess::spawn_aux_tx(&self.iface, &aux_cfg, &key_path, self.own_link_id).await;
+            let aux_rx =
+                WfbProcess::spawn_aux_rx(&self.iface, &aux_cfg, &key_path, self.uplink_link_id)
+                    .await;
             match (aux_tx, aux_rx) {
                 (Ok(tx), Ok(rx)) => {
                     self.aux_tx = Some(tx);
@@ -875,6 +1106,12 @@ impl RadioProcesses {
     /// Kill ONLY the data-tx process and respawn it from the retained iface/key
     /// and current data tunables. Leaves the control planes + stats RX running.
     /// Returns `false` if the respawn fails (the data plane is then dead).
+    ///
+    /// The cfg view is a `WfbConfig::default()` overlay carrying only the data
+    /// tunables, so the fleet identity CANNOT be re-derived from it — the
+    /// retained `own_link_id` is passed explicitly. Deriving it from the overlay
+    /// would key the respawned transmitter to the unprovisioned default
+    /// `link_id(1, 0)`, i.e. onto the ground station's uplink `channel_id`.
     async fn respawn_data_tx(&mut self) -> bool {
         let cfg = WfbConfig {
             fec_k: self.data_fec_k,
@@ -883,7 +1120,9 @@ impl RadioProcesses {
             ..WfbConfig::default()
         };
         self.data_tx.kill().await;
-        match WfbProcess::spawn_data_tx(&self.iface, &cfg, &self.tx_key_path).await {
+        match WfbProcess::spawn_data_tx(&self.iface, &cfg, &self.tx_key_path, self.own_link_id)
+            .await
+        {
             Ok(p) => {
                 self.data_tx = p;
                 true
@@ -947,6 +1186,77 @@ fn now_iso() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{link_id, FLEET_MAX_SLOTS, SLOT_GROUND};
+
+    /// Read the value following `flag` in an arg vector.
+    fn arg_after(args: &[String], flag: &str) -> String {
+        args[args.iter().position(|x| x == flag).unwrap() + 1].clone()
+    }
+
+    /// The wfb-ng `channel_id` an arg vector resolves to:
+    /// `(link_id << 8) + radio_port`. This is the value `rx.cpp` compiles into
+    /// its per-instance BPF, so two arg vectors sharing one is two transmitters
+    /// thrashing each other's FEC decoder.
+    fn channel_id_of(args: &[String]) -> u64 {
+        let link: u64 = arg_after(args, "-i").parse().unwrap();
+        let port: u64 = arg_after(args, "-p").parse().unwrap();
+        (link << 8) + port
+    }
+
+    /// Every `wfb_tx` plane binds a management socket, and each one's `-C` port
+    /// MUST be `control_port` of that plane's own `-p` radio port. A drift here
+    /// would send a data-plane retune to the control plane's transmitter — the
+    /// video would keep its old rate while HopAck traffic silently changed rung.
+    /// The three `wfb_rx` builders are deliberately excluded: `-C` is a `wfb_tx`
+    /// flag and `wfb_rx` would reject it.
+    #[test]
+    fn every_tx_plane_binds_its_own_management_port() {
+        let cfg = WfbConfig::default();
+        let key = Path::new("/etc/ados/wfb/tx.key");
+        let planes = [
+            data_tx_args("wlan1", &cfg, key, link_id(1, 3)),
+            tx_control_args("wlan1", &cfg, key, link_id(1, 3)),
+            aux_tx_args("wlan1", &cfg, key, link_id(1, 3)),
+        ];
+        let mut seen = Vec::new();
+        for args in &planes {
+            let radio_port: u8 = arg_after(args, "-p").parse().unwrap();
+            let ctl: u16 = arg_after(args, "-C").parse().unwrap();
+            assert_eq!(
+                ctl,
+                crate::tx_cmd::control_port(radio_port),
+                "radio port {radio_port} bound the wrong management port"
+            );
+            seen.push(ctl);
+        }
+        // And no two planes share one, or a retune would hit both.
+        seen.sort_unstable();
+        let uniq = seen.len();
+        seen.dedup();
+        assert_eq!(seen.len(), uniq, "two tx planes share a management port");
+        // The data plane is the one the adaptive ladder drives.
+        assert_eq!(
+            crate::tx_cmd::control_port(DATA_RADIO_PORT),
+            arg_after(&planes[0], "-C").parse::<u16>().unwrap()
+        );
+    }
+
+    /// The three `wfb_rx` builders must NOT carry `-C`.
+    #[test]
+    fn receive_planes_carry_no_management_port() {
+        let cfg = WfbConfig::default();
+        let key = Path::new("/etc/ados/wfb/rx.key");
+        for args in [
+            rx_control_args("wlan1", key, link_id(1, 0)),
+            stats_rx_args("wlan1", key, link_id(1, 3)),
+            aux_rx_args("wlan1", &cfg, key, link_id(1, 0)),
+        ] {
+            assert!(
+                !args.iter().any(|a| a == "-C"),
+                "wfb_rx has no -C option: {args:?}"
+            );
+        }
+    }
 
     #[test]
     fn respawn_data_cfg_reuses_retained_tunables_not_boot_config() {
@@ -969,26 +1279,35 @@ mod tests {
         // Everything else still comes from the boot config (channel preserved).
         assert_eq!(data_cfg.channel, 149);
         // The data-plane args carry the retained trio, not the boot defaults.
-        let args = data_tx_args("wlan1", &data_cfg, Path::new("/etc/ados/wfb/tx.key"));
-        let pos = |flag: &str| {
-            args.iter()
-                .position(|a| a == flag)
-                .map(|i| args[i + 1].clone())
-        };
-        assert_eq!(pos("-k").as_deref(), Some("4"));
-        assert_eq!(pos("-n").as_deref(), Some("8"));
-        assert_eq!(pos("-M").as_deref(), Some("5"));
+        let args = data_tx_args(
+            "wlan1",
+            &data_cfg,
+            Path::new("/etc/ados/wfb/tx.key"),
+            link_id(1, 3),
+        );
+        assert_eq!(arg_after(&args, "-k"), "4");
+        assert_eq!(arg_after(&args, "-n"), "8");
+        assert_eq!(arg_after(&args, "-M"), "5");
     }
 
     #[test]
     fn data_tx_args_match_python() {
         let cfg = WfbConfig::default();
-        let a = data_tx_args("wlan1", &cfg, Path::new("/etc/ados/wfb/tx.key"));
+        let a = data_tx_args(
+            "wlan1",
+            &cfg,
+            Path::new("/etc/ados/wfb/tx.key"),
+            link_id(1, 3),
+        );
         assert_eq!(
             a,
             vec![
                 "-p",
                 "0",
+                "-i",
+                "259", // link_id(1, 3) = (1 << 8) | 3
+                "-C",
+                "8000", // TX_CMD_PORT_BASE + radio_port 0
                 "-u",
                 "5600",
                 "-K",
@@ -1008,14 +1327,23 @@ mod tests {
 
     #[test]
     fn tx_control_args_match_python() {
-        // wfb_tx -p 1 -u 5803 -K <key> -k 1 -n 2 -B 20 -M <mcs> <iface>
+        // wfb_tx -p 1 -i <link> -C 8001 -u 5803 -K <key> -k 1 -n 2 -B 20 -M <mcs> <iface>
         let cfg = WfbConfig::default();
-        let a = tx_control_args("wlan1", &cfg, Path::new("/etc/ados/wfb/tx.key"));
+        let a = tx_control_args(
+            "wlan1",
+            &cfg,
+            Path::new("/etc/ados/wfb/tx.key"),
+            link_id(1, 3),
+        );
         assert_eq!(
             a,
             vec![
                 "-p",
                 "1",
+                "-i",
+                "259",
+                "-C",
+                "8001", // TX_CMD_PORT_BASE + radio_port 1
                 "-u",
                 "5803",
                 "-K",
@@ -1035,13 +1363,19 @@ mod tests {
 
     #[test]
     fn rx_control_args_match_python() {
-        // wfb_rx -p 1 -c 127.0.0.1 -u 5810 -K <key> -l 1000 <iface>
-        let a = rx_control_args("wlan1", Path::new("/etc/ados/wfb/tx.key"));
+        // wfb_rx -p 1 -i <ground link> -c 127.0.0.1 -u 5810 -K <key> -l 1000 <iface>
+        let a = rx_control_args(
+            "wlan1",
+            Path::new("/etc/ados/wfb/tx.key"),
+            link_id(1, SLOT_GROUND),
+        );
         assert_eq!(
             a,
             vec![
                 "-p",
                 "1",
+                "-i",
+                "256", // link_id(1, 0) — the shared uplink, not this drone's slot
                 "-c",
                 "127.0.0.1",
                 "-u",
@@ -1088,13 +1422,15 @@ mod tests {
             mcs_index: 5,
             ..WfbConfig::default()
         };
-        let a = data_tx_args("wlan1", &cfg, Path::new("/etc/ados/wfb/tx.key"));
-        let k = a[a.iter().position(|x| x == "-k").unwrap() + 1].clone();
-        let n = a[a.iter().position(|x| x == "-n").unwrap() + 1].clone();
-        let m = a[a.iter().position(|x| x == "-M").unwrap() + 1].clone();
-        assert_eq!(k, "8");
-        assert_eq!(n, "10");
-        assert_eq!(m, "5");
+        let a = data_tx_args(
+            "wlan1",
+            &cfg,
+            Path::new("/etc/ados/wfb/tx.key"),
+            link_id(1, 1),
+        );
+        assert_eq!(arg_after(&a, "-k"), "8");
+        assert_eq!(arg_after(&a, "-n"), "10");
+        assert_eq!(arg_after(&a, "-M"), "5");
     }
 
     #[test]
@@ -1112,18 +1448,12 @@ mod tests {
     #[test]
     fn control_planes_use_lighter_fec_than_data() {
         let cfg = WfbConfig::default();
-        let data = data_tx_args("wlan1", &cfg, Path::new("/k"));
-        let ctrl = tx_control_args("wlan1", &cfg, Path::new("/k"));
+        let link = link_id(1, 1);
+        let data = data_tx_args("wlan1", &cfg, Path::new("/k"), link);
+        let ctrl = tx_control_args("wlan1", &cfg, Path::new("/k"), link);
         // data plane: k=8 n=12; control plane: k=1 n=2.
-        let data_k = data[data.iter().position(|x| x == "-k").unwrap() + 1].clone();
-        let ctrl_k = ctrl[ctrl.iter().position(|x| x == "-k").unwrap() + 1].clone();
-        assert_eq!(data_k, "8");
-        assert_eq!(ctrl_k, "1");
-    }
-
-    /// Read the value following `flag` in an arg vector.
-    fn arg_after(args: &[String], flag: &str) -> String {
-        args[args.iter().position(|x| x == flag).unwrap() + 1].clone()
+        assert_eq!(arg_after(&data, "-k"), "8");
+        assert_eq!(arg_after(&ctrl, "-k"), "1");
     }
 
     #[test]
@@ -1132,7 +1462,12 @@ mod tests {
         // with the aux ingress port and the light aux FEC, riding the data-plane
         // MCS by default.
         let cfg = WfbConfig::default();
-        let a = aux_tx_args("wlan1", &cfg, Path::new("/etc/ados/wfb/tx.key"));
+        let a = aux_tx_args(
+            "wlan1",
+            &cfg,
+            Path::new("/etc/ados/wfb/tx.key"),
+            link_id(1, 1),
+        );
         assert_eq!(arg_after(&a, "-p"), "2");
         assert_eq!(arg_after(&a, "-u"), cfg.aux_tx_port.to_string());
         assert_eq!(arg_after(&a, "-k"), cfg.aux_fec_k.to_string());
@@ -1147,7 +1482,12 @@ mod tests {
         // The aux rx must sit on radio_id 3 and re-emit on loopback at the aux rx
         // port — distinct from the aux tx ingress so receive can't feed transmit.
         let cfg = WfbConfig::default();
-        let a = aux_rx_args("wlan1", &cfg, Path::new("/etc/ados/wfb/tx.key"));
+        let a = aux_rx_args(
+            "wlan1",
+            &cfg,
+            Path::new("/etc/ados/wfb/tx.key"),
+            link_id(1, SLOT_GROUND),
+        );
         assert_eq!(arg_after(&a, "-p"), "3");
         assert_eq!(arg_after(&a, "-c"), "127.0.0.1");
         assert_eq!(arg_after(&a, "-u"), cfg.aux_rx_port.to_string());
@@ -1162,7 +1502,7 @@ mod tests {
             aux_mcs_index: Some(5),
             ..WfbConfig::default()
         };
-        let a = aux_tx_args("wlan1", &cfg, Path::new("/k"));
+        let a = aux_tx_args("wlan1", &cfg, Path::new("/k"), link_id(1, 1));
         // The aux pair uses the override, not the data-plane MCS.
         assert_eq!(arg_after(&a, "-M"), "5");
     }
@@ -1174,11 +1514,14 @@ mod tests {
         // plane's frames, so this is a hard invariant.
         let cfg = WfbConfig::default();
         let key = Path::new("/k");
-        let data_id = arg_after(&data_tx_args("wlan1", &cfg, key), "-p");
-        let ctrl_id = arg_after(&tx_control_args("wlan1", &cfg, key), "-p");
-        let aux_tx_id = arg_after(&aux_tx_args("wlan1", &cfg, key), "-p");
-        let aux_rx_id = arg_after(&aux_rx_args("wlan1", &cfg, key), "-p");
-        let ids = [data_id, ctrl_id, aux_tx_id, aux_rx_id];
+        let own = link_id(1, 1);
+        let up = link_id(1, SLOT_GROUND);
+        let ids = [
+            arg_after(&data_tx_args("wlan1", &cfg, key, own), "-p"),
+            arg_after(&tx_control_args("wlan1", &cfg, key, own), "-p"),
+            arg_after(&aux_tx_args("wlan1", &cfg, key, own), "-p"),
+            arg_after(&aux_rx_args("wlan1", &cfg, key, up), "-p"),
+        ];
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {
                 assert_ne!(ids[i], ids[j], "radio_id collision between planes");
@@ -1198,12 +1541,111 @@ mod tests {
             mcs_index: 3,
         };
         let cfg = s.to_cfg();
-        let a = aux_tx_args("wlan1", &cfg, Path::new("/k"));
+        let a = aux_tx_args("wlan1", &cfg, Path::new("/k"), link_id(1, 1));
         assert_eq!(arg_after(&a, "-u"), "5620");
         assert_eq!(arg_after(&a, "-k"), "2");
         assert_eq!(arg_after(&a, "-n"), "4");
         assert_eq!(arg_after(&a, "-M"), "3");
-        let r = aux_rx_args("wlan1", &cfg, Path::new("/k"));
+        let r = aux_rx_args("wlan1", &cfg, Path::new("/k"), link_id(1, SLOT_GROUND));
         assert_eq!(arg_after(&r, "-u"), "5621");
+    }
+
+    #[test]
+    fn every_builder_emits_the_link_id_immediately_after_the_radio_port() {
+        // `-i` must follow the `-p` pair in every builder. Position is not
+        // cosmetic here: an arg vector that carries `-p` but drops `-i` silently
+        // falls back to wfb-ng's default link_id 0, which every un-keyed process
+        // in radio range also uses — the exact FEC-thrash collision the fleet
+        // addressing exists to prevent. A positional assertion catches a builder
+        // that was extended without threading the id.
+        let cfg = WfbConfig::default();
+        let key = Path::new("/k");
+        let own = link_id(7, 9);
+        let up = link_id(7, SLOT_GROUND);
+        let cases: [(&str, Vec<String>, u32); 6] = [
+            ("data_tx", data_tx_args("wlan1", &cfg, key, own), own),
+            ("tx_control", tx_control_args("wlan1", &cfg, key, own), own),
+            ("rx_control", rx_control_args("wlan1", key, up), up),
+            ("stats_rx", stats_rx_args("wlan1", key, own), own),
+            ("aux_tx", aux_tx_args("wlan1", &cfg, key, own), own),
+            ("aux_rx", aux_rx_args("wlan1", &cfg, key, up), up),
+        ];
+        for (name, args, want) in cases {
+            let p = args
+                .iter()
+                .position(|x| x == "-p")
+                .unwrap_or_else(|| panic!("{name}: no -p"));
+            assert_eq!(args[p + 2], "-i", "{name}: -i must follow the -p pair");
+            assert_eq!(args[p + 3], want.to_string(), "{name}: wrong link_id");
+        }
+    }
+
+    #[test]
+    fn drone_transmit_and_uplink_receive_carry_different_link_ids() {
+        // The asymmetry the whole fleet design rests on: a drone TRANSMITS under
+        // its own slot but RECEIVES the ground station's single shared uplink.
+        // If the receive side were keyed to the drone's own slot it would listen
+        // to a channel_id nobody transmits on and the uplink would go silent;
+        // if the transmit side were keyed to slot 0 every drone in the fleet
+        // would collide on one channel_id.
+        let cfg = WfbConfig::default();
+        let key = Path::new("/k");
+        let own = link_id(1, 5);
+        let up = link_id(1, SLOT_GROUND);
+        assert_ne!(own, up);
+
+        let tx = arg_after(&tx_control_args("wlan1", &cfg, key, own), "-i");
+        let rx = arg_after(&rx_control_args("wlan1", key, up), "-i");
+        assert_eq!(tx, own.to_string());
+        assert_eq!(rx, up.to_string());
+        assert_ne!(tx, rx, "control TX and control RX must not share a link_id");
+
+        let aux_tx = arg_after(&aux_tx_args("wlan1", &cfg, key, own), "-i");
+        let aux_rx = arg_after(&aux_rx_args("wlan1", &cfg, key, up), "-i");
+        assert_ne!(aux_tx, aux_rx, "aux TX and aux RX must not share a link_id");
+
+        // The stats receiver is the exception among receivers: it listens to
+        // this drone's OWN downlink to measure what it is transmitting.
+        assert_eq!(arg_after(&stats_rx_args("wlan1", key, own), "-i"), tx);
+    }
+
+    #[test]
+    fn no_two_slots_in_a_fleet_share_a_transmit_channel_id() {
+        // Every drone's four planes must land on their own channel_id across the
+        // whole 24-slot fleet plus the ground station's uplink pair. Asserted at
+        // the argv level (what the process actually receives), not just on the
+        // `link_id` helper.
+        let cfg = WfbConfig::default();
+        let key = Path::new("/k");
+        let fleet = 1u16;
+        let up = link_id(fleet, SLOT_GROUND);
+        let mut seen = std::collections::BTreeSet::new();
+
+        // The ground station's two uplink transmitters (control p1, aux p3).
+        assert!(seen.insert(channel_id_of(&tx_control_args("wlan1", &cfg, key, up))));
+        assert!(seen.insert(channel_id_of(&aux_tx_args("wlan1", &cfg, key, up))));
+
+        for slot in 1..=FLEET_MAX_SLOTS {
+            let own = link_id(fleet, slot);
+            for args in [
+                data_tx_args("wlan1", &cfg, key, own),
+                tx_control_args("wlan1", &cfg, key, own),
+                aux_tx_args("wlan1", &cfg, key, own),
+            ] {
+                let ch = channel_id_of(&args);
+                assert!(seen.insert(ch), "duplicate channel_id {ch} at slot {slot}");
+            }
+            // The stats RX is the one receiver that MUST share a channel_id: it
+            // listens to this drone's own data plane to measure it. Sharing here
+            // is the invariant, not a collision — pin it so a future edit cannot
+            // point the stats receiver at some other slot's video.
+            assert_eq!(
+                channel_id_of(&stats_rx_args("wlan1", key, own)),
+                channel_id_of(&data_tx_args("wlan1", &cfg, key, own)),
+                "the stats RX must listen on this drone's own data channel_id"
+            );
+        }
+        // 2 ground uplink transmitters + 24 slots x 3 distinct transmit planes.
+        assert_eq!(seen.len(), 2 + FLEET_MAX_SLOTS as usize * 3);
     }
 }

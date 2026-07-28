@@ -1181,7 +1181,8 @@ mod tests {
         let peers = AuxPeerCache::new();
         let proxy = AuxRpcResponseIngest::new("/nonexistent/proxy.sock");
 
-        let fragment = encode_response_fragment(9, 200, 0, 1, br#"{"ok":true}"#).unwrap();
+        let fragment =
+            encode_response_fragment(b"77735cd38937", 9, 200, 0, 1, 11, br#"{"ok":true}"#).unwrap();
         let framed = aux_mux::encode(AuxChannel::Response, &fragment).unwrap();
         dispatch(&framed, &ingest, &counters, &mut gate, &peers, Some(&proxy)).await;
 

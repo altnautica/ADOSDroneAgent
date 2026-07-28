@@ -33,6 +33,20 @@ pub const WFB_KEY_FILE_BYTES: usize = 64;
 /// Offset of the peer-public half used for the fingerprint.
 pub const WFB_PUBLIC_HALF_OFFSET: usize = 32;
 
+/// The fleet addressing a bind assigns, persisted alongside the pair state.
+///
+/// A drone's slot is ISSUED by the ground station's `FleetRegistry` at pair
+/// time and written here; it is never negotiated at runtime. Two drones sharing
+/// a slot share a wfb-ng `channel_id`, and the `Aggregator` re-inits its FEC
+/// decoder on every foreign session packet, so the pair thrash each other about
+/// once a second — which presents as unexplained link loss, not as a config
+/// fault. The ground station always takes slot 0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FleetIdentity {
+    pub fleet_id: u16,
+    pub fleet_slot: u8,
+}
+
 /// Outcome of a successful [`apply_keypair`].
 #[derive(Debug, Clone)]
 pub struct PairResult {
@@ -155,13 +169,20 @@ fn set_str(map: &mut Mapping, key: &str, val: &str) {
 
 /// Apply the pair fields to an in-memory config mapping. Pure — split out from
 /// the I/O so it is unit-testable without root / a real config path. Mirrors
-/// `_persist_pair_state`'s field logic exactly (set vs pop, the GS mirror).
+/// `_persist_pair_state`'s field logic exactly (set vs pop, the GS mirror), plus
+/// the fleet addressing the bind assigned.
+///
+/// `fleet` is `None` when the caller has no assignment to write, and the
+/// existing `video.wfb.fleet_id` / `fleet_slot` are then left untouched rather
+/// than cleared: a re-pair that carries no assignment must not silently strip a
+/// flying drone's slot, which would park its radio on the next restart.
 pub fn apply_pair_fields(
     root: &mut Mapping,
     role: BindRole,
     peer_device_id: Option<&str>,
     paired_at: Option<&str>,
     auto_pair_enabled: Option<bool>,
+    fleet: Option<FleetIdentity>,
 ) {
     {
         let wfb = ensure_map(ensure_map(root, "video"), "wfb");
@@ -181,6 +202,16 @@ pub fn apply_pair_fields(
             wfb.insert(
                 Value::String("auto_pair_enabled".to_string()),
                 Value::Bool(b),
+            );
+        }
+        if let Some(f) = fleet {
+            wfb.insert(
+                Value::String("fleet_id".to_string()),
+                Value::Number(f.fleet_id.into()),
+            );
+            wfb.insert(
+                Value::String("fleet_slot".to_string()),
+                Value::Number(f.fleet_slot.into()),
             );
         }
     }
@@ -236,6 +267,7 @@ pub fn persist_pair_state(
     peer_device_id: Option<&str>,
     paired_at: Option<&str>,
     auto_pair_enabled: Option<bool>,
+    fleet: Option<FleetIdentity>,
 ) -> bool {
     #[cfg(target_os = "linux")]
     {
@@ -267,6 +299,7 @@ pub fn persist_pair_state(
         peer_device_id,
         paired_at,
         auto_pair_enabled,
+        fleet,
     );
 
     let body = match serde_norway::to_string(&Value::Mapping(root)) {
@@ -472,6 +505,11 @@ pub fn persist_video_cameras(
 /// the `Err(String)` path is what the orchestrator wraps into a phase-tagged
 /// `BindError` at `RESTARTING_SERVICES`.
 ///
+/// `fleet` is the addressing the ground station issued for this pair — slot 0
+/// on a GS, the registry-allocated drone slot on a drone. `None` leaves any
+/// existing `video.wfb.fleet_id` / `fleet_slot` alone, so a bind that carries
+/// no assignment never strips a drone's slot.
+///
 /// The stop → confirm-inactive → write → start sequence runs inside a spawned
 /// task that this function JOINS rather than awaiting inline. A `JoinHandle`
 /// await is cancellation-safe: if the caller's future is dropped mid-apply (a
@@ -483,6 +521,7 @@ pub async fn apply_keypair(
     blob: &[u8],
     role: BindRole,
     peer_device_id: Option<&str>,
+    fleet: Option<FleetIdentity>,
 ) -> Result<PairResult, String> {
     validate_blob(blob)?;
 
@@ -492,7 +531,7 @@ pub async fn apply_keypair(
     let blob = blob.to_vec();
     let peer_device_id = peer_device_id.map(|s| s.to_string());
     let handle = tokio::spawn(async move {
-        apply_keypair_inner(pm, &blob, role, peer_device_id.as_deref()).await
+        apply_keypair_inner(pm, &blob, role, peer_device_id.as_deref(), fleet).await
     });
     // Joining propagates the inner result; a JoinError (the task panicked) is the
     // only way to land here without a result, surfaced as a write failure.
@@ -510,6 +549,7 @@ async fn apply_keypair_inner(
     blob: &[u8],
     role: BindRole,
     peer_device_id: Option<&str>,
+    fleet: Option<FleetIdentity>,
 ) -> Result<PairResult, String> {
     // Stop the consumer unit BEFORE writing the key, and confirm it actually
     // went inactive. The prior write-then-restart order raced the supervisor's
@@ -548,6 +588,7 @@ async fn apply_keypair_inner(
         peer_device_id,
         Some(&paired_at),
         Some(false),
+        fleet,
     );
 
     // Best-effort setup-complete sentinel (captive_dns stops redirecting).
@@ -610,6 +651,7 @@ mod tests {
             &[0u8; 10],
             BindRole::Drone,
             None,
+            None,
         )
         .await
         .expect_err("a 10-byte blob must be rejected");
@@ -666,6 +708,10 @@ mod tests {
             Some("dev-123"),
             Some("2026-05-29T00:00:00+00:00"),
             Some(false),
+            Some(FleetIdentity {
+                fleet_id: 4,
+                fleet_slot: 7,
+            }),
         );
         let wfb = root
             .get("video")
@@ -682,11 +728,13 @@ mod tests {
             &Value::String("2026-05-29T00:00:00+00:00".into())
         );
         assert_eq!(wfb.get("auto_pair_enabled").unwrap(), &Value::Bool(false));
+        assert_eq!(wfb.get("fleet_id").unwrap(), &Value::Number(4.into()));
+        assert_eq!(wfb.get("fleet_slot").unwrap(), &Value::Number(7.into()));
         // Drone never writes the ground_station mirror.
         assert!(root.get("ground_station").is_none());
 
         // Clearing (unpair shape): peer None + paired_at None → keys removed.
-        apply_pair_fields(&mut root, BindRole::Drone, None, None, Some(true));
+        apply_pair_fields(&mut root, BindRole::Drone, None, None, Some(true), None);
         let wfb = root
             .get("video")
             .and_then(Value::as_mapping)
@@ -699,6 +747,71 @@ mod tests {
     }
 
     #[test]
+    fn a_bind_with_no_assignment_leaves_an_existing_slot_intact() {
+        // The failure this guards: a re-pair that carries no fleet assignment
+        // must not strip a drone's slot. `fleet_slot: 0` on a drone profile is
+        // the ground station's slot, which fails the drone-side identity gate —
+        // so a cleared slot parks the radio and the drone silently stops
+        // radiating on the next restart.
+        let mut root = Mapping::new();
+        apply_pair_fields(
+            &mut root,
+            BindRole::Drone,
+            Some("dev-1"),
+            Some("ts"),
+            Some(false),
+            Some(FleetIdentity {
+                fleet_id: 2,
+                fleet_slot: 5,
+            }),
+        );
+        apply_pair_fields(
+            &mut root,
+            BindRole::Drone,
+            Some("dev-1"),
+            Some("ts-2"),
+            Some(false),
+            None,
+        );
+        let wfb = root
+            .get("video")
+            .and_then(Value::as_mapping)
+            .and_then(|m| m.get("wfb"))
+            .and_then(Value::as_mapping)
+            .unwrap();
+        assert_eq!(wfb.get("fleet_id").unwrap(), &Value::Number(2.into()));
+        assert_eq!(wfb.get("fleet_slot").unwrap(), &Value::Number(5.into()));
+    }
+
+    #[test]
+    fn a_reassignment_overwrites_the_previous_slot() {
+        // The other half of the rule above: an assignment that IS supplied wins,
+        // so a drone moved to a new slot re-keys instead of keeping the old one
+        // and colliding with whoever now holds it.
+        let mut root = Mapping::new();
+        for slot in [5u8, 9u8] {
+            apply_pair_fields(
+                &mut root,
+                BindRole::Drone,
+                Some("dev-1"),
+                Some("ts"),
+                Some(false),
+                Some(FleetIdentity {
+                    fleet_id: 2,
+                    fleet_slot: slot,
+                }),
+            );
+        }
+        let wfb = root
+            .get("video")
+            .and_then(Value::as_mapping)
+            .and_then(|m| m.get("wfb"))
+            .and_then(Value::as_mapping)
+            .unwrap();
+        assert_eq!(wfb.get("fleet_slot").unwrap(), &Value::Number(9.into()));
+    }
+
+    #[test]
     fn apply_fields_gs_mirrors_ground_station() {
         let mut root = Mapping::new();
         apply_pair_fields(
@@ -707,6 +820,10 @@ mod tests {
             Some("drone-9"),
             Some("ts"),
             Some(false),
+            Some(FleetIdentity {
+                fleet_id: 1,
+                fleet_slot: 0,
+            }),
         );
         let gs = root
             .get("ground_station")
@@ -717,6 +834,14 @@ mod tests {
             &Value::String("drone-9".into())
         );
         assert_eq!(gs.get("paired_at").unwrap(), &Value::String("ts".into()));
+        // A ground station always takes slot 0; it is not an aircraft.
+        let wfb = root
+            .get("video")
+            .and_then(Value::as_mapping)
+            .and_then(|m| m.get("wfb"))
+            .and_then(Value::as_mapping)
+            .unwrap();
+        assert_eq!(wfb.get("fleet_slot").unwrap(), &Value::Number(0.into()));
     }
 
     #[test]
@@ -738,6 +863,10 @@ mod tests {
             Some("peer-1"),
             Some("ts-1"),
             Some(false),
+            Some(FleetIdentity {
+                fleet_id: 3,
+                fleet_slot: 11,
+            }),
         );
         // On Linux as non-root this returns false; on the dev host it writes.
         if cfg!(target_os = "linux") {

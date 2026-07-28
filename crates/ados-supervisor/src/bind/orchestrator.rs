@@ -237,11 +237,19 @@ impl BindOrchestrator {
     /// until a peer is found and the handshake succeeds, `cancel` fires, the
     /// watchdog trips, or the protocol raises. Concurrent calls fail fast with
     /// [`BindStartError::Busy`].
+    ///
+    /// `fleet` is the addressing to persist alongside the key once the bind
+    /// lands. A drone's slot is issued by the ground station's `FleetRegistry`
+    /// at pair time and passed in by the caller that triggered this bind — it is
+    /// never derived on the drone, because a slot a drone picked for itself
+    /// could collide with a flying peer's `channel_id`. `None` leaves whatever
+    /// the config already carries.
     pub async fn start_local_bind<F>(
         &self,
         role: BindRole,
         peer_device_id: Option<String>,
         source: &str,
+        fleet: Option<keys::FleetIdentity>,
         cancel: F,
     ) -> Result<Value, BindStartError>
     where
@@ -318,7 +326,7 @@ impl BindOrchestrator {
         // unit's monitor-mode churn through every retry AND the cleanup restart.
         let _reg_guard = AbortOnDrop(tokio::spawn(bind_window_reg_guard(self.events.clone())));
 
-        let run = self.run_session(role, peer_device_id);
+        let run = self.run_session(role, peer_device_id, fleet);
         tokio::pin!(cancel);
         let internal_cancel = self.cancel.clone();
 
@@ -421,6 +429,7 @@ impl BindOrchestrator {
         &self,
         role: BindRole,
         peer_device_id: Option<String>,
+        fleet: Option<keys::FleetIdentity>,
     ) -> Result<(), BindError> {
         // Pre-flight: every external dep must be present BEFORE we touch the
         // radio so a missing artifact fails fast with a structured error.
@@ -502,7 +511,7 @@ impl BindOrchestrator {
 
         // try { … } finally { stop bind_unit }: the bind unit is stopped on
         // BOTH success and failure once it has been started.
-        let result = self.tunnel_and_transfer(role, peer_device_id).await;
+        let result = self.tunnel_and_transfer(role, peer_device_id, fleet).await;
         self.pm.stop(role.bind_unit()).await;
         result
     }
@@ -515,6 +524,7 @@ impl BindOrchestrator {
         &self,
         role: BindRole,
         peer_device_id: Option<String>,
+        fleet: Option<keys::FleetIdentity>,
     ) -> Result<(), BindError> {
         let bind_iface = role.bind_iface();
         if !iface::wait_for_iface(bind_iface, TUNNEL_WAIT_TIMEOUT).await {
@@ -651,7 +661,13 @@ impl BindOrchestrator {
         self.set_state(BindState::RestartingServices).await;
         match tokio::time::timeout(
             RESTART_TIMEOUT,
-            keys::apply_keypair(self.pm.clone(), &blob, role, peer_device_id.as_deref()),
+            keys::apply_keypair(
+                self.pm.clone(),
+                &blob,
+                role,
+                peer_device_id.as_deref(),
+                fleet,
+            ),
         )
         .await
         {
@@ -1357,6 +1373,7 @@ mod tests {
                 BindRole::Drone,
                 None,
                 "operator",
+                None,
                 std::future::pending::<()>(),
             )
             .await
@@ -1386,7 +1403,13 @@ mod tests {
             *orch.session.lock().await = Some(s);
         }
         let busy = orch
-            .start_local_bind(BindRole::Gs, None, "operator", std::future::pending::<()>())
+            .start_local_bind(
+                BindRole::Gs,
+                None,
+                "operator",
+                None,
+                std::future::pending::<()>(),
+            )
             .await;
         assert_eq!(busy, Err(BindStartError::Busy));
     }
@@ -1487,6 +1510,7 @@ mod tests {
                 BindRole::Drone,
                 None,
                 "operator",
+                None,
                 std::future::pending::<()>(),
             )
             .await

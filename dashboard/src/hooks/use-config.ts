@@ -96,7 +96,7 @@ export interface AgentConfig {
   swarm?: {
     enabled?: boolean;
     role?: string;
-    default_formation?: string;
+    default_formation?: "line" | "column" | "wedge" | "grid" | "circle";
     default_spacing?: number;
   };
   // Two-tier perception execution: the drone-side offload target + the

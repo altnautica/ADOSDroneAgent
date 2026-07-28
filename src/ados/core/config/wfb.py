@@ -9,6 +9,20 @@ from pydantic import BaseModel, model_validator
 
 class WfbConfig(BaseModel):
     interface: str = ""
+    # Fleet this node belongs to. Every node that must hear every other
+    # node shares it. 1..65535; 0 is reserved as "unprovisioned" and is
+    # rejected at radio load time. Combined with fleet_slot it fills the
+    # wfb-ng 24-bit link_id space exactly (link_id = fleet_id << 8 |
+    # fleet_slot), so two fleets can share one channel with no
+    # channel_id collision.
+    fleet_id: int = 1
+    # This node's slot within the fleet. 0 = ground station, 1..24 =
+    # drones. Every drone's slot MUST be unique within a fleet: two
+    # transmitters sharing a channel_id re-init each other's FEC decoder
+    # about once a second, which presents as unexplained link loss.
+    # Issued by the ground station's fleet registry at pair time and
+    # written into this config; never negotiated at runtime.
+    fleet_slot: int = 0
     # Home / rendezvous channel. Both drone and ground start here and
     # return here on link loss, so the two sides deterministically meet
     # before any hopping. 149 (U-NII-3) is non-DFS and enabled under
@@ -103,17 +117,36 @@ class WfbConfig(BaseModel):
     wfb_link_preset: Literal[
         "conservative", "balanced", "aggressive"
     ] = "conservative"
-    # Closed-loop adaptive bitrate + FEC ladder. When true, a 1 Hz
-    # background controller watches the
-    # link quality monitor and steps a four-tier ladder
-    # (4 Mbps/8-12 -> 3 Mbps/8-14 -> 2 Mbps/8-16 -> 1.2 Mbps/4-12)
-    # up or down based on packet loss + RSSI hysteresis. Each tier
-    # change costs ~1-2 s of pipeline blackout; the controller
-    # paces itself so the link can settle before the next decision.
+    # Closed-loop adaptive bitrate + FEC + MCS controller. When true, a
+    # 1 Hz background controller watches the link quality monitor and
+    # drives two ladders: a four-tier bitrate/FEC ladder
+    # (4 Mbps/8-12 -> 3 Mbps/8-14 -> 2 Mbps/8-16 -> 1.2 Mbps/4-12) on
+    # packet loss + RSSI hysteresis, and a five-rung MCS ladder on
+    # measured SNR. Each rung's bitrate is applied to the video encoder
+    # as a ceiling, so a degrading link emits FEWER on-air bytes.
+    # Changes go to the RUNNING wfb_tx over its wfb-ng 24.08 management
+    # socket (bound with -C), so the routine case costs no pipeline
+    # blackout; the historical kill-and-respawn (~1-2 s of blackout) is
+    # only the fallback when that socket does not answer. The controller
+    # still paces itself so the link can settle before the next decision.
     # Default on: a drone-only rig with no received-side stats holds
     # the rung (cold-start guard), so it is inert until a ground
     # station is present. Pin a manual tier via REST or GCS to disable.
     adaptive_bitrate_enabled: bool = True
+    # Cap on the top rung the adaptive MCS ladder may select. The ladder
+    # is SNR >= 30 dB -> MCS 5, >= 24 -> 4, >= 21 -> 3, >= 15 -> 2, else
+    # MCS 1, holding ~10 dB of margin over each rung's required SNR.
+    # Range 1..5; values outside are clamped at radio load time.
+    #
+    # Default 3, not the ladder's ceiling of 5, on purpose: the rung
+    # table is arithmetic from standard 802.11n required-SNR figures,
+    # not a measurement of the vendored rtl8812eu driver, and OpenIPC's
+    # adaptive-link (the working production reference for this loop)
+    # ships a profile table that tops out at MCS 2 in the field.
+    # Anything above 3 is bench-only until the characterisation sweep in
+    # product/specs/ados-agent-rust-hybrid/wfb-video-pipeline-runbook.md
+    # measures which rungs this driver actually applies and holds.
+    adaptive_mcs_max: int = 3
     # Periodic + reactive coordinated frequency hopping. Operator
     # picks a band (the existing `band` field above) and the agent
     # autonomously moves the WFB-ng link to the quietest channel

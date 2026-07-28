@@ -50,6 +50,37 @@ const POSE_TIER_OPTIONS = [
   },
 ];
 
+/** The built-in formation generators. A free-text name produced no
+ * formation at all, so the model now rejects anything outside this set —
+ * the field offers exactly what the agent accepts. */
+const FORMATION_OPTIONS = [
+  {
+    value: "line" as const,
+    label: "Line",
+    description: "Abreast, perpendicular to the heading.",
+  },
+  {
+    value: "column" as const,
+    label: "Column",
+    description: "Nose to tail along the heading.",
+  },
+  {
+    value: "wedge" as const,
+    label: "Wedge",
+    description: "V, anchored on the lead slot.",
+  },
+  {
+    value: "grid" as const,
+    label: "Grid",
+    description: "Rows and columns around the anchor.",
+  },
+  {
+    value: "circle" as const,
+    label: "Circle",
+    description: "Evenly spaced on a ring around the anchor.",
+  },
+];
+
 function AtlasSection() {
   const config = useConfig();
   const atlas = config.data?.atlas;
@@ -184,14 +215,15 @@ function SwarmSection() {
             placeholder="auto"
             value={swarm.role}
           />
-          <div className="border-t border-border pt-5">
-            <ConfigTextField
+          <div className="border-t border-border pt-5 space-y-2">
+            <div className="text-sm font-medium">Default formation</div>
+            <p className="text-xs text-muted-foreground">
+              The formation preset the node starts with.
+            </p>
+            <ConfigEnumField
               configKey="swarm.default_formation"
-              id="swarm-formation"
-              label="Default formation"
-              hint="The default formation name (e.g. line)."
-              placeholder="line"
               value={swarm.default_formation}
+              options={FORMATION_OPTIONS}
             />
           </div>
           <div className="border-t border-border pt-5">

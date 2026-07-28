@@ -4,7 +4,7 @@
 //! Mirrors the Python `VehicleState` (services/mavlink/state.py): the same
 //! fields, the same message-to-field scaling, and the same `to_dict` wire
 //! shape. The runtime extras the service merges onto the snapshot
-//! (`fc_connected`, `param_priming`, the `params` blob, ...) are added by the
+//! (`fc_connected`, `param_priming`, `param_generation`, ...) are added by the
 //! caller via [`VehicleState::to_wire_with`]; this type owns only the
 //! vehicle-derived fields so it stays I/O-free and unit-testable.
 
@@ -235,8 +235,10 @@ pub struct VehicleState {
     // Timestamps (ISO-8601 UTC strings, supplied by the caller)
     pub last_heartbeat: String,
     pub last_update: String,
-    // Param cache (in-memory mirror)
-    pub params: Map<String, Value>,
+    // The FC-advertised parameter total. The VALUES are not mirrored here: the
+    // persistent [`crate::param_cache::ParamCache`] owns them, and this type's
+    // copy was never serialised into `to_wire`, so it was a second 700-entry map
+    // built one allocation per `PARAM_VALUE` frame for no reader.
     pub param_count: i64,
 }
 
@@ -284,7 +286,6 @@ impl Default for VehicleState {
             rc_rssi: 0,
             last_heartbeat: String::new(),
             last_update: String::new(),
-            params: Map::new(),
             param_count: 0,
         }
     }
@@ -400,7 +401,6 @@ impl VehicleState {
             }
             MavMessage::PARAM_VALUE(m) => {
                 let name = param_id_to_string(&m.param_id);
-                self.params.insert(name.clone(), json!(m.param_value));
                 self.param_count = m.param_count as i64;
                 Some((name, m.param_value, m.param_type as i64))
             }
@@ -460,7 +460,7 @@ impl VehicleState {
 
     /// The full state-socket payload: the vehicle snapshot with the service's
     /// runtime extras merged on top (`fc_connected`, `service_uptime`, the
-    /// param-sweep flags, the `params` blob, ...). The Python producer builds
+    /// param-sweep flags, `param_generation`, ...). The Python producer builds
     /// this in `__main__.py`; the merge order is the same (extras overwrite).
     pub fn to_wire_with(&self, extras: &Map<String, Value>) -> Value {
         let mut wire = self.to_wire();
@@ -670,7 +670,6 @@ mod tests {
         assert_eq!(name, "WPNAV");
         assert_eq!(value, 1234.5);
         assert_eq!(s.param_count, 700);
-        assert_eq!(s.params.get("WPNAV"), Some(&json!(1234.5f32)));
     }
 
     #[test]

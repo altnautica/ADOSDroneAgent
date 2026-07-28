@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use ados_protocol::aux_egress::AuxEgress;
 use ados_protocol::aux_mux::AuxChannel;
-use ados_protocol::aux_rpc::{self, RpcMethod, RpcRequest};
+use ados_protocol::aux_rpc::{self, ResponseSymbols, RpcMethod, RpcRequest};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -72,11 +72,17 @@ static RESPONSE_SEND_SLOT: tokio::sync::Semaphore = tokio::sync::Semaphore::cons
 /// duplicate of a running call is dropped and the original answers both, and a
 /// duplicate of a finished one re-sends the cached fragments without re-running
 /// the HTTP call, so a retried `PUT` can never write twice.
+///
+/// `own_device_id` is stamped on every fragment. A fleet shares one radio key,
+/// so a broadcast request id can be answered by more than one aircraft, and the
+/// ground needs to know which one this is before it feeds the symbols to a
+/// decoder that cannot tell two bodies apart.
 pub async fn handle(
     request: &RpcRequest<'_>,
     egress: &AuxEgress,
     dedupe: &RequestDedupe,
     counters: &AuxUplinkConsumerCounters,
+    own_device_id: &str,
 ) {
     let id = request.id;
     let fragments = match dedupe.admit(id) {
@@ -103,7 +109,7 @@ pub async fn handle(
                     (status, Vec::new())
                 }
             };
-            let fragments = encode_fragments(id, status, &body);
+            let fragments = encode_fragments(own_device_id.as_bytes(), id, status, &body);
             if fragments.is_empty() {
                 // Nothing encodable to cache or to send. Reopening the id lets
                 // the ground's next retransmit make a real attempt instead of
@@ -146,43 +152,56 @@ async fn send_fragments(id: u32, egress: &AuxEgress, fragments: &[Vec<u8>]) {
 /// Encode a response body as the aux payloads that will carry it.
 ///
 /// A body past the ground station's reassembly ceiling becomes a single 413
-/// fragment: truncating is wrong, because the ground would reassemble garbage
+/// answer: truncating is wrong, because the ground would reassemble garbage
 /// and report it as the drone's answer.
-fn encode_fragments(id: u32, status: u16, body: &[u8]) -> Vec<Vec<u8>> {
-    let oversized: &[u8] = b"response exceeds the relay reassembly ceiling";
-    let (status, chunks) = match aux_rpc::split_response(body) {
-        Some(c) => (status, c),
+fn encode_fragments(sender: &[u8], id: u32, status: u16, body: &[u8]) -> Vec<Vec<u8>> {
+    const OVERSIZED: &[u8] = b"response exceeds the relay reassembly ceiling";
+    let (status, symbols) = match aux_rpc::split_response(body) {
+        Some(s) => (status, s),
         None => {
             tracing::warn!(
                 len = body.len(),
                 request_id = id,
                 "aux_rpc_response_too_large"
             );
-            (413u16, vec![oversized])
+            // The refusal is 45 bytes, so this arm always encodes; the fallback
+            // exists only because `split_response` is fallible in principle.
+            match aux_rpc::split_response(OVERSIZED) {
+                Some(s) => (413u16, s),
+                None => return Vec::new(),
+            }
         }
     };
 
-    encode_all(id, status, &chunks)
+    encode_all(sender, id, status, &symbols)
 }
 
-/// Encode every chunk, or none of them.
+/// Encode every symbol, or none of them.
 ///
 /// A fragment that failed to encode used to be skipped, which sent a short
 /// response whose surviving fragments still advertise the original `total`: the
 /// ground then waits out its entire call bound for a fragment that is never
 /// coming. Sending nothing instead lets its retransmit try again immediately.
-fn encode_all(id: u32, status: u16, chunks: &[&[u8]]) -> Vec<Vec<u8>> {
-    let total = chunks.len() as u16;
-    let mut out = Vec::with_capacity(chunks.len());
-    for (index, chunk) in chunks.iter().copied().enumerate() {
-        match aux_rpc::encode_response_fragment(id, status, index as u16, total, chunk) {
+fn encode_all(sender: &[u8], id: u32, status: u16, symbols: &ResponseSymbols) -> Vec<Vec<u8>> {
+    let total = symbols.symbols.len() as u16;
+    let mut out = Vec::with_capacity(symbols.symbols.len());
+    for (index, symbol) in symbols.symbols.iter().enumerate() {
+        match aux_rpc::encode_response_fragment(
+            sender,
+            id,
+            status,
+            index as u16,
+            total,
+            symbols.oti,
+            symbol,
+        ) {
             Some(payload) => out.push(payload),
             None => {
                 tracing::error!(
                     request_id = id,
                     index,
                     total,
-                    len = chunk.len(),
+                    len = symbol.len(),
                     "aux_rpc_fragment_encode_failed"
                 );
                 return Vec::new();
@@ -386,14 +405,40 @@ mod tests {
     /// 413 was the reason fragmentation exists.
     const MEASURED_SERVICES_BYTES: usize = 2631;
 
+    /// This drone's device id, stamped on every fragment it emits.
+    const OWN_ID: &[u8] = b"77735cd38937";
+
+    /// Rebuild a response from the fragments the handler produced, the way the
+    /// ground station does.
+    fn reassemble(frags: &[Vec<u8>], skip: &[usize]) -> Option<(u16, Vec<u8>)> {
+        let mut decoder: Option<aux_rpc::ResponseDecoder> = None;
+        for (i, payload) in frags.iter().enumerate() {
+            if skip.contains(&i) {
+                continue;
+            }
+            let dec = aux_rpc::decode_response(payload).unwrap();
+            assert_eq!(
+                dec.sender, OWN_ID,
+                "every fragment names the answering drone"
+            );
+            assert_eq!(dec.index, i as u16);
+            assert_eq!(dec.total, frags.len() as u16);
+            let d = decoder.get_or_insert_with(|| aux_rpc::ResponseDecoder::new(dec.oti).unwrap());
+            if let aux_rpc::FragmentOutcome::Complete(body) = d.push(dec.index, dec.body) {
+                return Some((dec.status, body));
+            }
+        }
+        None
+    }
+
     #[test]
-    fn a_small_body_travels_as_one_fragment() {
-        let frags = encode_fragments(7, 200, br#"{"ok":true}"#);
-        assert_eq!(frags.len(), 1);
-        let dec = aux_rpc::decode_response(&frags[0]).unwrap();
-        assert_eq!(dec.status, 200);
-        assert_eq!(dec.total, 1);
-        assert_eq!(dec.body, br#"{"ok":true}"#);
+    fn a_small_body_travels_as_one_symbol_plus_its_repair_set() {
+        let frags = encode_fragments(OWN_ID, 7, 200, br#"{"ok":true}"#);
+        assert_eq!(frags.len(), 1 + aux_rpc::RPC_REPAIR_SYMBOLS as usize);
+        assert_eq!(
+            reassemble(&frags, &[]),
+            Some((200, br#"{"ok":true}"#.to_vec()))
+        );
     }
 
     #[test]
@@ -401,42 +446,40 @@ mod tests {
         let body: Vec<u8> = (0..MEASURED_SERVICES_BYTES)
             .map(|i| (i % 251) as u8)
             .collect();
-        let frags = encode_fragments(7, 200, &body);
-        let expected = MEASURED_SERVICES_BYTES.div_ceil(aux_rpc::MAX_RESPONSE_FRAGMENT);
-        assert_eq!(frags.len(), expected);
-
-        let mut rejoined = Vec::new();
-        for (i, payload) in frags.iter().enumerate() {
-            let dec = aux_rpc::decode_response(payload).unwrap();
-            assert_eq!(dec.index, i as u16);
-            assert_eq!(dec.total, expected as u16);
-            assert_eq!(
-                dec.status, 200,
-                "status repeats identically on every fragment"
-            );
-            rejoined.extend_from_slice(dec.body);
-        }
-        assert_eq!(rejoined, body);
+        let frags = encode_fragments(OWN_ID, 7, 200, &body);
+        let systematic = MEASURED_SERVICES_BYTES.div_ceil(aux_rpc::MAX_RESPONSE_FRAGMENT);
+        assert_eq!(
+            frags.len(),
+            systematic + aux_rpc::RPC_REPAIR_SYMBOLS as usize
+        );
+        assert_eq!(reassemble(&frags, &[]), Some((200, body.clone())));
+        // The repair symbols are the point: losing any two still answers.
+        assert_eq!(reassemble(&frags, &[0, 2]), Some((200, body)));
     }
 
     #[test]
     fn an_empty_body_still_travels_as_one_fragment() {
-        let frags = encode_fragments(7, 204, b"");
-        assert_eq!(frags.len(), 1);
+        let frags = encode_fragments(OWN_ID, 7, 204, b"");
+        assert_eq!(frags.len(), 1, "a 204 has no symbols to protect");
         let dec = aux_rpc::decode_response(&frags[0]).unwrap();
         assert_eq!(dec.status, 204);
+        assert_eq!(dec.sender, OWN_ID);
         assert!(dec.body.is_empty());
+        assert_eq!(reassemble(&frags, &[]), Some((204, Vec::new())));
     }
 
     #[test]
-    fn a_body_past_the_ceiling_becomes_a_single_413() {
+    fn a_body_past_the_ceiling_becomes_a_413() {
         let body = vec![b'x'; 90_000];
-        let frags = encode_fragments(7, 200, &body);
-        assert_eq!(frags.len(), 1);
-        let dec = aux_rpc::decode_response(&frags[0]).unwrap();
-        assert_eq!(dec.status, 413, "never truncate a body into a fake 200");
-        assert_eq!(dec.total, 1);
-        assert_eq!(dec.body, b"response exceeds the relay reassembly ceiling");
+        let frags = encode_fragments(OWN_ID, 7, 200, &body);
+        assert_eq!(
+            reassemble(&frags, &[]),
+            Some((
+                413,
+                b"response exceeds the relay reassembly ceiling".to_vec()
+            )),
+            "never truncate a body into a fake 200"
+        );
     }
 
     #[test]
@@ -561,17 +604,28 @@ mod tests {
 
     #[test]
     fn one_unencodable_fragment_cancels_the_whole_response() {
-        let good: &[u8] = b"first";
-        let second: &[u8] = b"second";
-        let oversized = vec![0u8; aux_rpc::MAX_RESPONSE_FRAGMENT + 1];
-        let too_big: &[u8] = &oversized;
+        // MAX_RESPONSE_FRAGMENT budgets a worst-case device id, so a symbol one
+        // byte past it is the first that cannot be framed for a sender whose id
+        // is actually that long. A shorter id leaves slack and would still fit.
+        let worst_case_sender = vec![b'a'; ados_protocol::node_status::MAX_DEVICE_ID];
+        let oversized = aux_rpc::ResponseSymbols {
+            oti: 8,
+            symbols: vec![
+                b"first".to_vec(),
+                vec![0u8; aux_rpc::MAX_RESPONSE_FRAGMENT + 1],
+            ],
+        };
         assert_eq!(
-            encode_all(7, 200, &[good, too_big]),
+            encode_all(&worst_case_sender, 7, 200, &oversized),
             Vec::<Vec<u8>>::new(),
             "a short send whose total still says 2 makes the ground wait out its call bound"
         );
+        let fits = aux_rpc::ResponseSymbols {
+            oti: 11,
+            symbols: vec![b"first!".to_vec(), b"second".to_vec()],
+        };
         assert_eq!(
-            encode_all(7, 200, &[good, second]).len(),
+            encode_all(OWN_ID, 7, 200, &fits).len(),
             2,
             "the all-or-nothing guard must not reject an encodable response"
         );

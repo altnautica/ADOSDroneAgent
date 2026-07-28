@@ -26,13 +26,13 @@ from ados.services.wfb.cmd_client import (
 
 @pytest.mark.asyncio
 async def test_unreachable_socket_raises_unavailable(
-    tmp_path: Path,
+    unix_socket_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An absent command socket raises RadioCmdUnavailableError so the REST
     layer can fall back to the packaged manager."""
     monkeypatch.setattr(
-        cmd_client, "WFB_CMD_SOCK", str(tmp_path / "does-not-exist.sock")
+        cmd_client, "WFB_CMD_SOCK", str(unix_socket_dir / "does-not-exist.sock")
     )
     with pytest.raises(RadioCmdUnavailableError):
         await cmd_client.set_fec(8, 12)
@@ -74,12 +74,12 @@ async def _capture_one_request(
 
 @pytest.mark.asyncio
 async def test_set_tx_power_round_trips_effective_dbm(
-    tmp_path: Path,
+    unix_socket_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A successful TX-power reply returns the effective dBm the driver
     accepted."""
-    sock_path = str(tmp_path / "wfb-cmd.sock")
+    sock_path = str(unix_socket_dir / "wfb-cmd.sock")
     monkeypatch.setattr(cmd_client, "WFB_CMD_SOCK", sock_path)
     sink: list[dict] = []
     server = await _capture_one_request(
@@ -97,11 +97,11 @@ async def test_set_tx_power_round_trips_effective_dbm(
 
 @pytest.mark.asyncio
 async def test_set_tx_power_null_effective_when_all_rejected(
-    tmp_path: Path,
+    unix_socket_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A null ``effective_dbm`` (every ramp step rejected) maps to None."""
-    sock_path = str(tmp_path / "wfb-cmd.sock")
+    sock_path = str(unix_socket_dir / "wfb-cmd.sock")
     monkeypatch.setattr(cmd_client, "WFB_CMD_SOCK", sock_path)
     server = await _serve_one_reply(sock_path, {"ok": True, "effective_dbm": None})
     try:
@@ -113,11 +113,11 @@ async def test_set_tx_power_null_effective_when_all_rejected(
 
 @pytest.mark.asyncio
 async def test_failed_apply_raises_cmd_error(
-    tmp_path: Path,
+    unix_socket_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An ``ok: false`` reply raises RadioCmdError carrying the server code."""
-    sock_path = str(tmp_path / "wfb-cmd.sock")
+    sock_path = str(unix_socket_dir / "wfb-cmd.sock")
     monkeypatch.setattr(cmd_client, "WFB_CMD_SOCK", sock_path)
     server = await _serve_one_reply(
         sock_path, {"ok": False, "error": "E_SET_FEC_FAILED"}
@@ -133,11 +133,11 @@ async def test_failed_apply_raises_cmd_error(
 
 @pytest.mark.asyncio
 async def test_set_tier_manual_sends_full_trio(
-    tmp_path: Path,
+    unix_socket_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The manual tier request carries the mode + the full mcs/fec trio."""
-    sock_path = str(tmp_path / "wfb-cmd.sock")
+    sock_path = str(unix_socket_dir / "wfb-cmd.sock")
     monkeypatch.setattr(cmd_client, "WFB_CMD_SOCK", sock_path)
     sink: list[dict] = []
     server = await _capture_one_request(sock_path, {"ok": True}, sink)
@@ -159,11 +159,11 @@ async def test_set_tier_manual_sends_full_trio(
 
 @pytest.mark.asyncio
 async def test_set_tier_auto_sends_mode_only(
-    tmp_path: Path,
+    unix_socket_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The auto tier request carries only the mode."""
-    sock_path = str(tmp_path / "wfb-cmd.sock")
+    sock_path = str(unix_socket_dir / "wfb-cmd.sock")
     monkeypatch.setattr(cmd_client, "WFB_CMD_SOCK", sock_path)
     sink: list[dict] = []
     server = await _capture_one_request(sock_path, {"ok": True}, sink)

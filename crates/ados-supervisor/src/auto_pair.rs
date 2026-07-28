@@ -338,7 +338,14 @@ async fn run_with_failover(
             let cancel = async move {
                 let _ = cancel_rx.changed().await;
             };
-            match orch.start_local_bind(role, None, "auto", cancel).await {
+            // No fleet assignment: an auto re-bind is unattended, so there is no
+            // operator round-trip to the ground station's registry to source one
+            // from. `None` leaves whatever slot the config already carries, which
+            // is the right outcome for a rig re-binding to the same fleet.
+            match orch
+                .start_local_bind(role, None, "auto", None, cancel)
+                .await
+            {
                 Ok(session) => {
                     let state = session.get("state").and_then(|s| s.as_str()).unwrap_or("");
                     if state == "paired" {

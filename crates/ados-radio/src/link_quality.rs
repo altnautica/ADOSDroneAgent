@@ -51,6 +51,21 @@ pub struct LinkStats {
     pub rssi_max: f64,
     pub noise_dbm: f64,
     pub snr_db: f64,
+    /// The MCS index frames actually ARRIVED at, from the receiving driver's
+    /// radiotap header — i.e. the peer's real transmit rung, not a configured
+    /// value. `None` until a frame decodes, never a confident 0: MCS 0 is a real
+    /// (slowest) rung, so a 0 here would read as a measurement.
+    ///
+    /// This is the only honest source for "what modulation is this link running
+    /// at" on a pure receiver: a ground station has no transmitter on the video
+    /// radio port and cannot ask the drone's `wfb_tx` what it applied. It is also
+    /// what catches a driver that accepts a `set_radio` and then ignores the rung
+    /// (see the MCS ladder characterisation sweep in the WFB video runbook).
+    pub mcs_index: Option<u8>,
+    /// The channel width frames arrived at, in MHz. Pinned at 20 by every ADOS
+    /// transmitter; surfaced so a peer running something else is visible rather
+    /// than presenting as unexplained loss.
+    pub bandwidth_mhz: Option<u8>,
     /// Decoded DATA packets this interval — the true "link is up" counter.
     pub packets_received: i64,
     /// All packets captured off-air this interval (pre-decrypt). `0` = deaf radio.
@@ -80,6 +95,8 @@ impl Default for LinkStats {
             rssi_max: -100.0,
             noise_dbm: -95.0,
             snr_db: 0.0,
+            mcs_index: None,
+            bandwidth_mhz: None,
             packets_received: 0,
             packets_all: 0,
             decrypt_errors: 0,
@@ -102,6 +119,11 @@ struct RxAnt {
     rssi_avg: i64,
     rssi_max: i64,
     snr_avg: i64,
+    /// PHY rate frames arrived at, from the `<freq>:<mcs>:<bw>` group. `None`
+    /// when the group is malformed — a missing rate must not discard an
+    /// otherwise-good RSSI/SNR reading.
+    mcs_index: Option<u8>,
+    bandwidth_mhz: Option<u8>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -117,8 +139,16 @@ struct Pkt {
     b_outgoing: i64,
 }
 
-/// Parse the colon-delimited tail of an `RX_ANT` line:
-/// `<cnt>:<rmin>:<ravg>:<rmax>:<smin>:<savg>:<smax>[:extra...]`.
+/// Parse an `RX_ANT` line.
+///
+/// `<ts>\tRX_ANT\t<freq>:<mcs>:<bw>\t<antenna_id_hex>\t<cnt>:<rmin>:<ravg>:<rmax>:<smin>:<savg>:<smax>`
+///
+/// Emitted by `vendor/wfb-ng/src/rx.cpp:495-496`, whose format string is
+/// `"%llu\tRX_ANT\t%u:%u:%u\t%llx\t%d:%d:%d:%d:%d:%d:%d"` over
+/// `freq, mcs_index, bandwidth, antenna_id, count_all, rssi_{min,avg,max},
+/// snr_{min,avg,max}`. The `<freq>:<mcs>:<bw>` group is the receiving driver's
+/// own report of the PHY parameters the frames came in on, which makes `mcs`
+/// there the peer's REAL transmit rung.
 fn parse_rx_ant(line: &str) -> Option<RxAnt> {
     let cols: Vec<&str> = line.trim_end().split('\t').collect();
     if cols.len() < 5 || cols[1] != "RX_ANT" {
@@ -128,11 +158,21 @@ fn parse_rx_ant(line: &str) -> Option<RxAnt> {
     if f.len() < 7 {
         return None;
     }
+    // The PHY group is best-effort: a malformed rate must never cost us the
+    // signal-strength reading, which is what the link state machine runs on.
+    let phy: Vec<&str> = cols[2].split(':').collect();
+    let (mcs_index, bandwidth_mhz) = if phy.len() >= 3 {
+        (phy[1].parse().ok(), phy[2].parse().ok())
+    } else {
+        (None, None)
+    };
     Some(RxAnt {
         rssi_min: f[1].parse().ok()?,
         rssi_avg: f[2].parse().ok()?,
         rssi_max: f[3].parse().ok()?,
         snr_avg: f[5].parse().ok()?,
+        mcs_index,
+        bandwidth_mhz,
     })
 }
 
@@ -249,6 +289,11 @@ impl LinkQualityMonitor {
             rssi_max,
             noise_dbm: noise,
             snr_db: snr,
+            // Measured PHY parameters: only ever what a decoded frame reported.
+            // `last_rx` absent means nothing has arrived, so these stay None —
+            // MCS 0 is a real rung and must never stand in for "unmeasured".
+            mcs_index: self.last_rx.and_then(|rx| rx.mcs_index),
+            bandwidth_mhz: self.last_rx.and_then(|rx| rx.bandwidth_mhz),
             packets_received: pkt.data,
             packets_all: pkt.all,
             decrypt_errors: pkt.dec_err,
@@ -284,6 +329,67 @@ mod tests {
         assert_eq!(s.rssi_max, -50.0);
         assert_eq!(s.snr_db, 12.0);
         assert_eq!(s.noise_dbm, -72.0); // rssi_avg - snr = -60 - 12
+    }
+
+    /// The `<freq>:<mcs>:<bw>` group is the receiving driver's report of the PHY
+    /// rate frames arrived at — the peer's REAL transmit rung. This is the only
+    /// honest `mcs_index` a pure receiver (a ground station) can produce, and it
+    /// is what catches a driver that accepted a `set_radio` and ignored the rung.
+    #[test]
+    fn rx_ant_surfaces_the_measured_phy_rate() {
+        let mut m = LinkQualityMonitor::new();
+        let s = m
+            .feed_line("12345\tRX_ANT\t5745:3:20\t0\t100:-70:-60:-50:8:12:16", TS)
+            .expect("rx_ant parses");
+        assert_eq!(s.mcs_index, Some(3));
+        assert_eq!(s.bandwidth_mhz, Some(20));
+    }
+
+    /// MCS 0 is a real (slowest) rung, so it must round-trip as `Some(0)` and
+    /// never be confused with "no measurement".
+    #[test]
+    fn measured_mcs_zero_is_a_reading_not_an_absence() {
+        let mut m = LinkQualityMonitor::new();
+        let s = m
+            .feed_line("12345\tRX_ANT\t5745:0:20\t0\t100:-70:-60:-50:8:12:16", TS)
+            .expect("rx_ant parses");
+        assert_eq!(s.mcs_index, Some(0));
+    }
+
+    /// With nothing decoded the PHY fields stay absent — the same honesty gate
+    /// the signal-strength fields use. A confident 0 here would render as "this
+    /// link is running at MCS 0" on a link that has received nothing at all.
+    #[test]
+    fn phy_rate_is_absent_until_a_frame_decodes() {
+        let m = LinkQualityMonitor::new();
+        assert!(m.current().mcs_index.is_none());
+        assert!(m.current().bandwidth_mhz.is_none());
+        // A PKT line alone carries no PHY group, so it must not invent one.
+        let mut m = LinkQualityMonitor::new();
+        let s = m
+            .feed_line("12345\tPKT\t200:300000:0:1:180:170:5:20:0:160:250000", TS)
+            .expect("pkt parses");
+        assert!(s.mcs_index.is_none());
+    }
+
+    /// A malformed PHY group must not discard the RSSI/SNR reading the link state
+    /// machine runs on — it degrades to no rate, not to no sample.
+    #[test]
+    fn malformed_phy_group_still_yields_signal_strength() {
+        let mut m = LinkQualityMonitor::new();
+        let s = m
+            .feed_line("12345\tRX_ANT\t5745\t0\t100:-70:-60:-50:8:12:16", TS)
+            .expect("rx_ant still parses");
+        assert_eq!(s.rssi_dbm, -60.0);
+        assert_eq!(s.snr_db, 12.0);
+        assert!(s.mcs_index.is_none());
+        // A non-numeric rate likewise drops only the rate.
+        let s = m
+            .feed_line("12345\tRX_ANT\t5745:x:20\t0\t100:-70:-60:-50:8:12:16", TS)
+            .expect("rx_ant still parses");
+        assert_eq!(s.snr_db, 12.0);
+        assert!(s.mcs_index.is_none());
+        assert_eq!(s.bandwidth_mhz, Some(20));
     }
 
     #[test]

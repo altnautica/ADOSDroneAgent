@@ -14,19 +14,28 @@
 //! bind orchestrator + the in-process captive-token store have no command-socket
 //! seam).
 //!
-//! ## Byte-parity with the FastAPI route
+//! ## The fleet gate
 //!
-//! `POST .../wfb/pair` runs the FastAPI guards in order: profile gate (404
+//! `POST .../wfb/pair` runs the guards in order: profile gate (404
 //! `E_PROFILE_MISMATCH`); the deprecated-`pair_key` 400; the missing-`blob_b64`
-//! 400; the already-paired 409 (read from the on-disk rx.key + the persisted peer,
-//! the same `pm.status("gs")` the FastAPI route consults); then the install is
-//! forwarded to the command socket, whose `pair_keypair` op decodes + validates
-//! the blob (a base64 fault → 400 `E_BLOB_BASE64`, a wrong length → 400
-//! `E_INVALID_KEY_BLOB`, an IO fault → 500 `E_PAIR_FAILED`) and returns the
-//! `{paired,paired_with_device_id,paired_at,fingerprint,role}` body the FastAPI
-//! route returned. The base64/length error *message* text differs from the Python
-//! exception text (Rust's decoder vs `binascii.Error`); the error *code* + status
-//! match. `DELETE .../wfb/pair` forwards the `unpair` op and returns
+//! 400; the missing-`drone_device_id` 400; then the FLEET gate.
+//!
+//! A fleet of up to [`FLEET_MAX_SLOTS`] drones shares ONE keypair — the wfb-ng
+//! `channel_id` separates the drones, not the key — so a second drone presenting
+//! the same blob is a normal fleet join. The gate compares BYTES: identical
+//! accepts (and skips the re-install, which would restart the receive unit and
+//! blip every drone's video), different is 409 `E_FLEET_KEY_MISMATCH`, and a
+//! registry with no free slot is 409 `E_FLEET_FULL`. On acceptance a slot is
+//! allocated from the persisted [`FleetRegistry`] — idempotent by device id, so
+//! a re-pair never renumbers a drone that may be airborne — and returned as
+//! `fleet_slot`, alongside the whole `slots` table.
+//!
+//! A fresh install is still forwarded to the command socket, whose
+//! `pair_keypair` op decodes + validates the blob (a base64 fault → 400
+//! `E_BLOB_BASE64`, a wrong length → 400 `E_INVALID_KEY_BLOB`, an IO fault →
+//! 500 `E_PAIR_FAILED`) and returns the
+//! `{paired,paired_with_device_id,paired_at,fingerprint,role}` body this route
+//! extends. `DELETE .../wfb/pair` forwards the `unpair` op and returns
 //! `{paired:false, role:"gs"}`.
 
 use axum::extract::State;
@@ -35,6 +44,8 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
+
+use ados_groundlink::{FleetRegistry, FLEET_MAX_SLOTS, FLEET_REGISTRY_PATH};
 
 use crate::routes::gs_cmd::groundlink_cmd_roundtrip;
 use crate::state::AppState;
@@ -91,15 +102,29 @@ fn rx_key_path() -> std::path::PathBuf {
 }
 
 // ---------------------------------------------------------------------------
-// GS pair-status read (the `pm.status("gs")` bits the already-paired gate uses).
+// GS pair-status read (the slot table + the single-peer keys).
 // ---------------------------------------------------------------------------
 
-/// The GS pair status: `paired` (the rx.key exists, is exactly 64 bytes, and
-/// yields a readable fingerprint) + the persisted peer device-id. Mirrors the bits
-/// of `PairManager.status("gs")` the FastAPI `POST .../wfb/pair` route consults
-/// for the already-paired 409. A status read fault is treated as not-paired (the
-/// FastAPI route's `except Exception: current = {"paired": False}`).
-fn gs_pair_status() -> (bool, Option<String>) {
+/// The ground station's pair status.
+///
+/// `paired` + `peer` are the legacy single-peer view (the rx.key exists, is
+/// exactly 64 bytes, and yields a readable fingerprint; the peer comes from the
+/// persisted config). `slots` is the fleet truth: the whole registry, which is
+/// what a 24-drone fleet actually is. The single-peer keys are kept because the
+/// heartbeat and the GCS pairing card still read them, but they describe only
+/// the most recently persisted peer, not the fleet.
+struct GsPairStatus {
+    paired: bool,
+    peer: Option<String>,
+    slots: Vec<Value>,
+}
+
+/// Read the GS pair status. Mirrors the bits of `PairManager.status("gs")` the
+/// FastAPI route consulted, plus the fleet slot table. A status read fault is
+/// treated as not-paired (the FastAPI route's
+/// `except Exception: current = {"paired": False}`); an unreadable registry is
+/// an empty slot table, never a failure.
+fn gs_pair_status() -> GsPairStatus {
     let key = rx_key_path();
     let mut paired = std::fs::metadata(&key)
         .map(|m| m.is_file() && m.len() == WFB_KEY_FILE_BYTES)
@@ -109,7 +134,31 @@ fn gs_pair_status() -> (bool, Option<String>) {
         // matching the Python `except (OSError, ValueError): paired = False`.
         paired = false;
     }
-    (paired, read_persisted_peer(&config_yaml_path()))
+    GsPairStatus {
+        paired,
+        peer: read_persisted_peer(&config_yaml_path()),
+        slots: slot_table(&load_registry()),
+    }
+}
+
+/// Load the fleet registry from its canonical path. A missing or unparseable
+/// file is an empty fleet — `FleetRegistry::load` already has that contract.
+fn load_registry() -> FleetRegistry {
+    FleetRegistry::load(std::path::Path::new(FLEET_REGISTRY_PATH))
+}
+
+/// Render the registry as the `slots` array the route returns, in slot order.
+fn slot_table(registry: &FleetRegistry) -> Vec<Value> {
+    registry
+        .slots()
+        .map(|s| {
+            json!({
+                "slot": s.slot,
+                "device_id": s.device_id,
+                "paired_at": s.paired_at,
+            })
+        })
+        .collect()
 }
 
 /// blake2b-8 over the peer-public half of a 64-byte key file, as 16 lowercase
@@ -168,12 +217,28 @@ pub struct PairRequest {
     pub pair_key: Option<String>,
 }
 
-/// `POST .../wfb/pair` → `{paired,paired_with_device_id,paired_at,fingerprint,role}`.
+/// `POST .../wfb/pair` →
+/// `{paired,paired_with_device_id,paired_at,fingerprint,role,fleet_slot,slots}`.
 ///
-/// Runs the FastAPI guards in order (profile, deprecated-`pair_key`, missing-blob,
-/// already-paired), then forwards the install to the data-plane command socket's
-/// `pair_keypair` op and maps its reply: success returns the install body; a
-/// base64 fault is the 400 `E_BLOB_BASE64`, a wrong length the 400
+/// Guards in order: profile, deprecated-`pair_key`, missing-blob, blob decode,
+/// then the FLEET gate.
+///
+/// A fleet is one trust domain sharing one keypair — `channel_id` separates the
+/// drones, not the key — so a second drone presenting the SAME blob is a normal
+/// fleet join, not a conflict. The gate is therefore on the bytes, not on
+/// presence:
+///
+/// * key absent → install it through the command socket's `pair_keypair` op,
+///   then allocate a slot;
+/// * key present and byte-identical → the fleet key is already installed;
+///   allocate a slot and return 200 WITHOUT re-forwarding the install (a
+///   re-install stops and restarts the receive unit, blipping every drone's
+///   video for a write that changes nothing);
+/// * key present and different → 409 `E_FLEET_KEY_MISMATCH`; installing it
+///   would deafen every already-paired drone;
+/// * all [`FLEET_MAX_SLOTS`] slots taken → 409 `E_FLEET_FULL`.
+///
+/// A base64 fault is the 400 `E_BLOB_BASE64`, a wrong length the 400
 /// `E_INVALID_KEY_BLOB`, an IO fault the 500 `E_PAIR_FAILED`. An unreachable
 /// socket degrades to a 503 (the front owns no key-install seam itself).
 pub async fn post_wfb_pair(
@@ -210,36 +275,120 @@ pub async fn post_wfb_pair(
         return nested_detail(StatusCode::BAD_REQUEST, json!({"code": "E_BLOB_REQUIRED"}));
     };
 
-    // Already-paired gate: read the live status; a paired GS must unpair first.
-    let (paired, peer) = gs_pair_status();
-    if paired {
+    // A slot is issued TO a device and `FleetRegistry::allocate` is idempotent by
+    // device id, so without one every re-pair would burn a fresh slot until the
+    // fleet reported full. Refuse loudly rather than hand out a slot nothing can
+    // be re-matched to.
+    let Some(device_id) = req.drone_device_id.filter(|s| !s.is_empty()) else {
+        return nested_detail(
+            StatusCode::BAD_REQUEST,
+            json!({
+                "code": "E_DEVICE_ID_REQUIRED",
+                "message": "drone_device_id is required: a fleet slot is issued to a device and re-pairing is matched by it",
+            }),
+        );
+    };
+
+    // Decode here as well as in the socket op: the byte-identity gate below
+    // compares the presented key against the installed one, and a base64 fault
+    // must surface as the same 400 the op would have returned.
+    let blob = match base64::engine::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        blob_b64.as_bytes(),
+    ) {
+        Ok(b) => b,
+        Err(e) => {
+            return nested_detail(
+                StatusCode::BAD_REQUEST,
+                json!({"code": "E_BLOB_BASE64", "message": e.to_string()}),
+            )
+        }
+    };
+
+    // Fleet-key gate. `installed` is the on-disk fleet key, if any.
+    let status = gs_pair_status();
+    let installed = status
+        .paired
+        .then(|| std::fs::read(rx_key_path()).ok())
+        .flatten();
+    let mut body = match installed {
+        Some(existing) if existing != blob => {
+            return nested_detail(
+                StatusCode::CONFLICT,
+                json!({
+                    "code": "E_FLEET_KEY_MISMATCH",
+                    "message": "this ground station already holds a different fleet key; unpair before pairing a different fleet",
+                    "paired_with_device_id": status.peer,
+                    "slots": status.slots,
+                }),
+            );
+        }
+        // Byte-identical: the fleet key is already installed. Skip the install.
+        Some(_) => Map::new(),
+        None => {
+            // Forward the install. The socket's pair_keypair op decodes +
+            // validates the blob, writes rx.key + the pair state, drops the
+            // sentinel, and restarts the receive unit; its reply carries the
+            // install body the FastAPI route returned.
+            let request = json!({
+                "op": "pair_keypair",
+                "blob_b64": blob_b64,
+                "peer_device_id": device_id,
+            });
+            let reply = match groundlink_cmd_roundtrip(&request).await {
+                Some(r) => r,
+                None => return socket_unavailable("E_PAIR_FAILED"),
+            };
+            match split_reply(reply) {
+                Ok(b) => b,
+                Err(err) => return map_pair_error(err),
+            }
+        }
+    };
+
+    // Issue the slot. Idempotent by device id, so a re-pair returns the slot the
+    // drone already holds and never renumbers one that may be airborne.
+    let mut registry = load_registry();
+    let Some(slot) = registry.allocate(&device_id) else {
         return nested_detail(
             StatusCode::CONFLICT,
             json!({
-                "code": "E_ALREADY_PAIRED",
-                "message": "unpair before pairing a new drone",
-                "paired_with_device_id": peer,
+                "code": "E_FLEET_FULL",
+                "message": format!("all {FLEET_MAX_SLOTS} fleet slots are taken; release one before pairing another drone"),
+                "slots": slot_table(&registry),
+            }),
+        );
+    };
+    if let Err(e) = registry.persist(std::path::Path::new(FLEET_REGISTRY_PATH)) {
+        // The slot exists only in memory now, so the next pair would re-issue it
+        // to a different drone and put two transmitters on one channel_id. Refuse
+        // rather than return an assignment the ground station will not honour.
+        tracing::error!(error = %e, device_id = %device_id, slot, "fleet_registry_persist_failed");
+        return nested_detail(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json!({
+                "code": "E_FLEET_PERSIST_FAILED",
+                "message": e.to_string(),
             }),
         );
     }
 
-    // Forward the install. The socket's pair_keypair op decodes + validates the
-    // blob, writes rx.key + the pair state, drops the sentinel, and restarts the
-    // receive unit; its reply carries the install body the FastAPI route returned.
-    let request = json!({
-        "op": "pair_keypair",
-        "blob_b64": blob_b64,
-        "peer_device_id": req.drone_device_id,
-    });
-    let reply = match groundlink_cmd_roundtrip(&request).await {
-        Some(r) => r,
-        None => return socket_unavailable("E_PAIR_FAILED"),
-    };
-
-    match split_reply(reply) {
-        Ok(body) => Json(Value::Object(body)).into_response(),
-        Err(err) => map_pair_error(err),
+    // The fleet fields ride on top of the install body so an existing consumer of
+    // `{paired, paired_with_device_id, paired_at, fingerprint, role}` is unchanged.
+    // On the already-installed path the body starts empty, so fill the same keys.
+    if body.is_empty() {
+        body.insert("paired".to_string(), json!(true));
+        body.insert("paired_with_device_id".to_string(), json!(device_id));
+        body.insert("role".to_string(), json!("gs"));
+        body.insert(
+            "fingerprint".to_string(),
+            json!(read_public_fingerprint(&rx_key_path())),
+        );
+        body.insert("paired_at".to_string(), Value::Null);
     }
+    body.insert("fleet_slot".to_string(), json!(slot));
+    body.insert("slots".to_string(), json!(slot_table(&registry)));
+    Json(Value::Object(body)).into_response()
 }
 
 /// Map a `pair_keypair` failure reply to the FastAPI status + body. The op returns
@@ -488,5 +637,80 @@ mod tests {
         // A short file has no fingerprint.
         std::fs::write(&key, b"short").unwrap();
         assert!(read_public_fingerprint(&key).is_none());
+    }
+
+    // ── the fleet gate ────────────────────────────────────────────────────────
+
+    #[test]
+    fn the_slot_table_renders_the_registry_in_slot_order() {
+        // The GCS reads this table to draw the fleet, and the pair route returns
+        // it on both the success and the conflict paths, so its shape is a wire
+        // contract.
+        let mut registry = FleetRegistry::default();
+        registry.allocate("drone-b").unwrap();
+        registry.allocate("drone-a").unwrap();
+        let table = slot_table(&registry);
+        assert_eq!(table.len(), 2);
+        assert_eq!(table[0]["slot"], 1);
+        assert_eq!(table[0]["device_id"], "drone-b");
+        assert!(table[0]["paired_at"].as_f64().unwrap() > 0.0);
+        assert_eq!(table[1]["slot"], 2);
+        assert_eq!(table[1]["device_id"], "drone-a");
+    }
+
+    #[test]
+    fn an_empty_registry_renders_an_empty_table_not_null() {
+        // The GCS iterates this; a null would need a second code path.
+        assert_eq!(slot_table(&FleetRegistry::default()), Vec::<Value>::new());
+    }
+
+    #[test]
+    fn a_fleet_join_is_idempotent_and_a_full_fleet_refuses() {
+        // The two registry outcomes the route branches on. Re-pairing the same
+        // device must return its existing slot (never renumber a flying drone),
+        // and a full fleet must refuse a NEW device while still serving a known
+        // one — the E_FLEET_FULL branch must not fire for a re-pair.
+        let mut registry = FleetRegistry::default();
+        let first = registry.allocate("drone-a").unwrap();
+        assert_eq!(registry.allocate("drone-a"), Some(first));
+        for i in 2..=FLEET_MAX_SLOTS {
+            assert!(registry.allocate(&format!("drone-{i}")).is_some());
+        }
+        assert_eq!(registry.allocate("one-too-many"), None);
+        assert_eq!(registry.allocate("drone-a"), Some(first));
+    }
+
+    #[tokio::test]
+    async fn a_missing_device_id_is_refused_before_anything_is_installed() {
+        // A slot is issued TO a device and allocation is idempotent by device id.
+        // Without one, every re-pair would burn a fresh slot until the fleet
+        // reported full, so the route refuses rather than issuing an
+        // unmatchable slot. Drive the guard's body shape directly (the handler
+        // needs an AppState + the GS profile sentinel).
+        let resp = nested_detail(
+            StatusCode::BAD_REQUEST,
+            json!({
+                "code": "E_DEVICE_ID_REQUIRED",
+                "message": "drone_device_id is required: a fleet slot is issued to a device and re-pairing is matched by it",
+            }),
+        );
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body_json(resp).await["detail"]["error"]["code"],
+            "E_DEVICE_ID_REQUIRED"
+        );
+    }
+
+    #[test]
+    fn the_key_gate_accepts_an_identical_blob_and_rejects_a_different_one() {
+        // The whole fleet model rests on this: one keypair per fleet, with
+        // `channel_id` separating the drones. A second drone presenting the SAME
+        // key is a join; a DIFFERENT key would deafen every drone already paired,
+        // so byte-identity — not mere presence — is the gate.
+        let installed = vec![3u8; 64];
+        let same = vec![3u8; 64];
+        let different = vec![4u8; 64];
+        assert_eq!(installed, same, "an identical blob must pass the gate");
+        assert_ne!(installed, different, "a different blob must be refused");
     }
 }

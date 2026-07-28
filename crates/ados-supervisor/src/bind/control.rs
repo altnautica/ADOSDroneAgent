@@ -5,7 +5,8 @@
 //! supervisor, which run in OTHER processes. They reach the orchestrator over a
 //! Unix socket at [`SUPERVISOR_SOCK`] speaking one newline-JSON request →
 //! newline-JSON response per connection:
-//!   - `{"op":"start_bind","role":"drone","peer_device_id":null,"source":"operator"}`
+//!   - `{"op":"start_bind","role":"drone","peer_device_id":null,"source":"operator",
+//!      "fleet_id":1,"fleet_slot":3}`
 //!     → blocks for the whole rendezvous → `{"ok":true,"session":{…to_json…}}`
 //!     or `{"ok":false,"error":"E_BIND_IN_PROGRESS"}` when one already runs.
 //!   - `{"op":"bind_status"}` → `{"ok":true,"session":{…}|null}`.
@@ -23,6 +24,7 @@ use std::sync::Arc;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use super::keys::FleetIdentity;
 use super::orchestrator::{BindOrchestrator, BindStartError};
 use super::BindRole;
 
@@ -41,6 +43,33 @@ struct Request {
     peer_device_id: Option<String>,
     #[serde(default)]
     source: Option<String>,
+    /// The fleet this bind joins. Optional; present only when the caller (the
+    /// GCS, which just received the assignment from the ground station's pair
+    /// route) has one to deliver.
+    #[serde(default)]
+    fleet_id: Option<u16>,
+    /// The slot the ground station's `FleetRegistry` issued for this device.
+    /// Slots are provisioned, never negotiated: a drone that picked its own
+    /// could collide with a flying peer's `channel_id`.
+    #[serde(default)]
+    fleet_slot: Option<u8>,
+}
+
+/// Build the fleet assignment to persist with the key, or `None` when the
+/// caller supplied no complete assignment.
+///
+/// BOTH halves are required: a slot without a fleet is unaddressable and a
+/// fleet without a slot leaves a drone parked, so a half-filled request writes
+/// nothing rather than half an identity over a working one. Pure, so the
+/// partial-input rule is unit-testable without a socket.
+fn fleet_from_request(fleet_id: Option<u16>, fleet_slot: Option<u8>) -> Option<FleetIdentity> {
+    match (fleet_id, fleet_slot) {
+        (Some(fleet_id), Some(fleet_slot)) => Some(FleetIdentity {
+            fleet_id,
+            fleet_slot,
+        }),
+        _ => None,
+    }
 }
 
 /// Bind the control socket and serve requests until the listener errors. Run as
@@ -83,11 +112,13 @@ async fn dispatch(line: &[u8], orch: &Arc<BindOrchestrator>) -> Value {
                 return json!({"ok": false, "error": "E_BAD_ROLE"});
             };
             let source = req.source.as_deref().unwrap_or("operator");
+            let fleet = fleet_from_request(req.fleet_id, req.fleet_slot);
             match orch
                 .start_local_bind(
                     role,
                     req.peer_device_id,
                     source,
+                    fleet,
                     std::future::pending::<()>(),
                 )
                 .await
@@ -152,6 +183,46 @@ mod tests {
         assert_eq!(v["ok"], true);
         assert_eq!(v["session"]["state"], "failed");
         assert_eq!(v["session"]["role"], "drone");
+    }
+
+    #[test]
+    fn a_fleet_assignment_needs_both_halves() {
+        // A slot with no fleet is unaddressable and a fleet with no slot leaves
+        // a drone parked, so a half-filled request must write NOTHING rather
+        // than stamp half an identity over a working one.
+        assert_eq!(
+            fleet_from_request(Some(2), Some(7)),
+            Some(FleetIdentity {
+                fleet_id: 2,
+                fleet_slot: 7
+            })
+        );
+        assert_eq!(fleet_from_request(Some(2), None), None);
+        assert_eq!(fleet_from_request(None, Some(7)), None);
+        assert_eq!(fleet_from_request(None, None), None);
+    }
+
+    #[test]
+    fn the_start_bind_request_parses_the_fleet_assignment() {
+        // The wire seam: the GCS forwards the slot the ground station's registry
+        // just issued, and an older caller that omits both fields still parses.
+        let with: Request = serde_json::from_slice(
+            br#"{"op":"start_bind","role":"drone","fleet_id":4,"fleet_slot":9}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            fleet_from_request(with.fleet_id, with.fleet_slot),
+            Some(FleetIdentity {
+                fleet_id: 4,
+                fleet_slot: 9
+            })
+        );
+        let without: Request =
+            serde_json::from_slice(br#"{"op":"start_bind","role":"drone"}"#).unwrap();
+        assert_eq!(
+            fleet_from_request(without.fleet_id, without.fleet_slot),
+            None
+        );
     }
 
     #[tokio::test]

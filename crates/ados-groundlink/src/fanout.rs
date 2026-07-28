@@ -31,8 +31,6 @@ use std::sync::Arc;
 
 use tokio::net::UdpSocket;
 
-/// Internal listen port: the wfb decoder emits here, the fan-out reads here.
-pub const INTERNAL_LISTEN_PORT: u16 = 5599;
 /// Downstream port for the mediamtx-gs ffmpeg ingest.
 pub const MEDIAMTX_PORT: u16 = 5600;
 /// Downstream port for the on-device LCD video tap.
@@ -178,12 +176,21 @@ const ERROR_BACKOFF_THRESHOLD: u32 = 8;
 /// receive plane down and respawns it.
 const ERROR_BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
 
-/// The default ground-station fan-out wiring: listen on the internal port,
+/// The default ground-station fan-out wiring: listen on `slot`'s video egress,
 /// forward to the mediamtx ingest and the LCD tap, all on localhost. `counters`
 /// is the shared handle the stats reader also holds so the sidecar surfaces the
 /// forwarded/drop totals.
-pub async fn run_default_fanout(counters: FanoutCounters) -> std::io::Result<()> {
-    let listen: SocketAddr = (std::net::Ipv4Addr::LOCALHOST, INTERNAL_LISTEN_PORT).into();
+///
+/// The two downstream ports are single-stream surfaces (one mediamtx ingest,
+/// one LCD tap), so exactly one slot is fanned out: the primary. Other slots'
+/// video is decoded onto `VIDEO_RX_PORT_BASE + slot` and read there by the
+/// per-drone video ingest, never through this hop.
+pub async fn run_default_fanout(slot: u8, counters: FanoutCounters) -> std::io::Result<()> {
+    let listen: SocketAddr = (
+        std::net::Ipv4Addr::LOCALHOST,
+        crate::wfb_rx::video_rx_port(slot),
+    )
+        .into();
     let targets = [
         (std::net::Ipv4Addr::LOCALHOST, MEDIAMTX_PORT).into(),
         (std::net::Ipv4Addr::LOCALHOST, LCD_PORT).into(),

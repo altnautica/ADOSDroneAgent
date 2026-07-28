@@ -328,6 +328,7 @@ async fn dispatch(
                         let egress = Arc::clone(egress);
                         let dedupe = Arc::clone(dedupe);
                         let counters = counters.clone();
+                        let sender = own_device_id.to_owned();
                         tokio::spawn(async move {
                             let req = ados_protocol::aux_rpc::RpcRequest {
                                 id,
@@ -336,7 +337,10 @@ async fn dispatch(
                                 path: &path,
                                 body: &body,
                             };
-                            crate::aux_rpc_handler::handle(&req, &egress, &dedupe, &counters).await;
+                            crate::aux_rpc_handler::handle(
+                                &req, &egress, &dedupe, &counters, &sender,
+                            )
+                            .await;
                         });
                     } else {
                         tracing::debug!("aux_rpc_request_no_egress");

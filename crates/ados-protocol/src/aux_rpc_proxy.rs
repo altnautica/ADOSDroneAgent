@@ -103,7 +103,13 @@ const RPC_RETRY_DELAYS: [Duration; 4] = [
 
 /// Most concurrent in-flight calls. Beyond this the proxy sheds load rather
 /// than queueing radio work it cannot deliver.
-const MAX_PENDING_CALLS: usize = 256;
+///
+/// A fleet-wide operation is 24 targeted calls issued concurrently (there is
+/// no broadcast fan-in; see [`AuxRpcProxy::call`]), and an operator surface
+/// polling several endpoints per drone multiplies that again. 256 was sized
+/// for one linked drone and a 24-drone poll would exhaust it, turning a
+/// working lane into a wall of `Busy`.
+const MAX_PENDING_CALLS: usize = 1024;
 
 /// The default Unix socket path for the Response IPC seam.
 pub const DEFAULT_RESPONSE_SOCK: &str = "/run/ados/aux-rpc-responses.sock";
@@ -162,12 +168,21 @@ impl std::error::Error for RpcError {}
 /// arrived so far.
 struct PendingCall {
     sender: oneshot::Sender<RpcResponseOwned>,
-    /// Seeded by the first fragment that arrives; `None` until then.
+    /// The device id this call was addressed to; `None` for a broadcast.
+    ///
+    /// One fleet key covers up to 24 drones, so a request id is only unique
+    /// per sender. A fragment from any other aircraft is a different answer,
+    /// and RaptorQ has no per-object checksum that would catch the splice —
+    /// the caller would get a cleanly-decoded body belonging to neither drone.
+    expected_sender: Option<Box<str>>,
+    /// Seeded by the first usable fragment that arrives; `None` until then.
     assembly: Option<Assembly>,
-    /// Set by the first Response fragment carrying this id, whether or not it
-    /// was usable. Any such fragment proves the Request datagram reached the
-    /// drone, so it is the stop signal for [`RPC_RETRY_DELAYS`]: resending
-    /// after it would only duplicate work the drone has already done.
+    /// Set by the first Response fragment carrying this id *from the expected
+    /// sender*, whether or not it was usable. Any such fragment proves the
+    /// Request datagram reached the drone, so it is the stop signal for
+    /// [`RPC_RETRY_DELAYS`]: resending after it would only duplicate work the
+    /// drone has already done. Another drone's fragment proves nothing about
+    /// ours, so it deliberately does not set this.
     response_started: bool,
 }
 
@@ -175,8 +190,15 @@ struct PendingCall {
 struct Assembly {
     status: u16,
     total: u16,
+    /// Symbols accepted so far. Only meaningful as the `received` half of an
+    /// [`RpcError::Incomplete`] report: the call completes on whatever count
+    /// RaptorQ finds sufficient, not on reaching `total`.
     received: usize,
-    frags: Vec<Option<Vec<u8>>>,
+    /// Fragment indices already fed to the decoder. The fragment ceiling
+    /// ([`aux_rpc::MAX_RESPONSE_FRAGMENTS`]) is 64, so the whole set is one
+    /// word and a re-delivered fragment costs a bit test rather than a scan.
+    accepted: u64,
+    decoder: aux_rpc::ResponseDecoder,
 }
 
 /// Lane health for one proxy. `AuxRpcProxy` had no counters at all, so a
@@ -194,6 +216,14 @@ pub struct RpcProxyCounters {
     retransmits: AtomicU64,
     fragments_received: AtomicU64,
     fragments_duplicate: AtomicU64,
+    /// Fragments dropped because the drone that sent them is not the one this
+    /// call addressed. Non-zero means two aircraft answered one id, which on a
+    /// shared fleet key is the failure that would otherwise splice two bodies.
+    fragments_wrong_sender: AtomicU64,
+    /// Fragments dropped because the symbol was not the size or id this
+    /// response's geometry allows: radio damage, or the two ends disagreeing
+    /// on the wire layout across an upgrade.
+    fragments_bad_symbol: AtomicU64,
     responses_out_of_range: AtomicU64,
     /// Live pending-map size, tracked as its own atomic rather than read as a
     /// map length so [`AuxRpcProxy::stats`] stays synchronous and a status
@@ -214,6 +244,8 @@ pub struct RpcProxyStats {
     pub retransmits: u64,
     pub fragments_received: u64,
     pub fragments_duplicate: u64,
+    pub fragments_wrong_sender: u64,
+    pub fragments_bad_symbol: u64,
     pub responses_out_of_range: u64,
     pub pending_now: u64,
 }
@@ -286,6 +318,15 @@ impl AuxRpcProxy {
     ) -> Result<RpcResponseOwned, RpcError> {
         let payload =
             aux_rpc::encode_request(method, id, target, path, body).ok_or(RpcError::Encode)?;
+        // An empty target is a broadcast, which any linked drone may answer,
+        // so there is no single sender to hold its fragments to. A target that
+        // is not UTF-8 is not a device id any drone will ever send back, and
+        // the lossy conversion makes that mismatch — the safe direction.
+        let expected_sender = (!target.is_empty()).then(|| {
+            String::from_utf8_lossy(target)
+                .into_owned()
+                .into_boxed_str()
+        });
 
         let (tx, rx) = oneshot::channel::<RpcResponseOwned>();
         {
@@ -298,6 +339,7 @@ impl AuxRpcProxy {
                 id,
                 PendingCall {
                     sender: tx,
+                    expected_sender,
                     assembly: None,
                     response_started: false,
                 },
@@ -402,13 +444,18 @@ impl AuxRpcProxy {
         removed
     }
 
-    /// Route a decoded response fragment to its pending caller, reassembling
-    /// the body and completing the call once every fragment has arrived.
+    /// Route a decoded response fragment to its pending caller, completing the
+    /// call as soon as RaptorQ can rebuild the body from what has arrived.
     ///
     /// Called by the response reader task when it decodes a Response payload
     /// off the IPC socket. A fragment whose id matches no pending entry is a
     /// no-op: the caller already gave up (timeout) or the proxy was reset,
     /// both expected on a reordering lane.
+    ///
+    /// Completion is on sufficiency, not on `total`: a response carries `k`
+    /// systematic plus [`aux_rpc::RPC_REPAIR_SYMBOLS`] repair symbols, and
+    /// waiting for every index is exactly the geometric loss decay the repair
+    /// symbols exist to remove.
     pub async fn dispatch_response(&self, response: &aux_rpc::RpcResponse<'_>) {
         self.counters
             .fragments_received
@@ -419,68 +466,96 @@ impl AuxRpcProxy {
         let Some(mut call) = pending.remove(&response.id) else {
             return;
         };
-        // Before any other work: a fragment bearing this id proves the Request
-        // datagram landed, so the resend loop must stop even if this particular
-        // fragment turns out to be unusable.
+
+        // Ahead of everything, and deliberately ahead of `response_started`:
+        // another drone answering this id says nothing about whether ours got
+        // the request, so letting it stop the resend loop guarantees a timeout.
+        if call
+            .expected_sender
+            .as_deref()
+            .is_some_and(|expected| response.sender != expected.as_bytes())
+        {
+            self.counters
+                .fragments_wrong_sender
+                .fetch_add(1, Ordering::Relaxed);
+            pending.insert(response.id, call);
+            return;
+        }
+
+        // A fragment bearing this id from our drone proves the Request
+        // datagram landed, so the resend loop must stop even if this
+        // particular fragment turns out to be unusable.
         call.response_started = true;
 
         if call.assembly.is_none() {
-            if response.total == 0 || response.total as usize > aux_rpc::MAX_RESPONSE_FRAGMENTS {
-                // A fragment count we cannot bound. Complete the caller with an
-                // honest gateway error rather than buffering whatever arrives.
+            let bounded =
+                response.total > 0 && response.total as usize <= aux_rpc::MAX_RESPONSE_FRAGMENTS;
+            let seeded = bounded
+                .then(|| aux_rpc::ResponseDecoder::new(response.oti))
+                .flatten();
+            let Some(decoder) = seeded else {
+                // A fragment count or a transfer length we cannot bound, both
+                // numbers the radio handed us. Complete the caller with an
+                // honest gateway error rather than sizing a decoder from them.
                 self.counters
                     .responses_out_of_range
                     .fetch_add(1, Ordering::Relaxed);
                 self.counters.pending_now.fetch_sub(1, Ordering::Relaxed);
                 let _ = call.sender.send(RpcResponseOwned {
                     status: 502,
-                    body: b"relay response fragment count out of range".to_vec(),
+                    body: b"relay response geometry out of range".to_vec(),
                 });
                 return;
-            }
+            };
             call.assembly = Some(Assembly {
                 status: response.status,
                 total: response.total,
                 received: 0,
-                frags: vec![None; response.total as usize],
+                accepted: 0,
+                decoder,
             });
         }
 
         let index = response.index as usize;
-        {
-            let assembly = call.assembly.as_mut().expect("seeded above");
-            // A stale fragment from a recycled id must not corrupt the buffer,
-            // an out-of-range index must not index past the slots, and the lane
-            // may re-deliver so a duplicate must not double-count.
-            let usable = assembly.total == response.total
-                && index < assembly.total as usize
-                && assembly.frags[index].is_none();
-            if !usable {
+        // `total` is capped at MAX_RESPONSE_FRAGMENTS (64), so every in-range
+        // index owns a distinct bit; the mask exists only to keep the shift
+        // defined for an out-of-range one, which `fresh` then rejects.
+        let bit = 1u64 << (index % 64);
+        let assembly = call.assembly.as_mut().expect("seeded above");
+        // A stale fragment from a recycled id must not reach the decoder, an
+        // out-of-range index must not be accepted, and the lane may re-deliver
+        // so a duplicate must not be counted or decoded twice.
+        let fresh = assembly.total == response.total
+            && index < assembly.total as usize
+            && assembly.accepted & bit == 0;
+        let outcome = fresh.then(|| assembly.decoder.push(response.index, response.body));
+        if matches!(outcome, Some(aux_rpc::FragmentOutcome::Pending)) {
+            assembly.accepted |= bit;
+            assembly.received += 1;
+        }
+        let status = assembly.status;
+
+        match outcome {
+            None => {
                 self.counters
                     .fragments_duplicate
                     .fetch_add(1, Ordering::Relaxed);
                 pending.insert(response.id, call);
-                return;
             }
-            assembly.frags[index] = Some(response.body.to_vec());
-            assembly.received += 1;
-            if assembly.received < assembly.total as usize {
+            Some(aux_rpc::FragmentOutcome::BadSymbol) => {
+                self.counters
+                    .fragments_bad_symbol
+                    .fetch_add(1, Ordering::Relaxed);
                 pending.insert(response.id, call);
-                return;
+            }
+            Some(aux_rpc::FragmentOutcome::Pending) => {
+                pending.insert(response.id, call);
+            }
+            Some(aux_rpc::FragmentOutcome::Complete(body)) => {
+                self.counters.pending_now.fetch_sub(1, Ordering::Relaxed);
+                let _ = call.sender.send(RpcResponseOwned { status, body });
             }
         }
-
-        let assembly = call.assembly.expect("seeded above");
-        let len: usize = assembly.frags.iter().flatten().map(Vec::len).sum();
-        let mut body = Vec::with_capacity(len);
-        for frag in assembly.frags.into_iter().flatten() {
-            body.extend_from_slice(&frag);
-        }
-        self.counters.pending_now.fetch_sub(1, Ordering::Relaxed);
-        let _ = call.sender.send(RpcResponseOwned {
-            status: assembly.status,
-            body,
-        });
     }
 
     /// A synchronous read of the lane's counters, for the status route.
@@ -497,6 +572,8 @@ impl AuxRpcProxy {
             retransmits: c.retransmits.load(Ordering::Relaxed),
             fragments_received: c.fragments_received.load(Ordering::Relaxed),
             fragments_duplicate: c.fragments_duplicate.load(Ordering::Relaxed),
+            fragments_wrong_sender: c.fragments_wrong_sender.load(Ordering::Relaxed),
+            fragments_bad_symbol: c.fragments_bad_symbol.load(Ordering::Relaxed),
             responses_out_of_range: c.responses_out_of_range.load(Ordering::Relaxed),
             pending_now: c.pending_now.load(Ordering::Relaxed),
         }
@@ -748,15 +825,51 @@ mod tests {
         (egress, rx)
     }
 
-    /// A single-fragment response, the common case.
-    fn one_fragment(id: u32, status: u16, body: &[u8]) -> aux_rpc::RpcResponse<'_> {
-        aux_rpc::RpcResponse {
-            id,
-            status,
-            index: 0,
-            total: 1,
-            body,
+    /// The device id the tests address, and the one their drone answers with.
+    const DRONE: &[u8] = b"77735cd38937";
+
+    /// The encoded aux payloads for one response, exactly as a drone emits
+    /// them: RaptorQ symbols, each stamped with the sender's device id.
+    fn response_payloads(sender: &[u8], id: u32, status: u16, body: &[u8]) -> Vec<Vec<u8>> {
+        let split = aux_rpc::split_response(body).unwrap();
+        let total = split.symbols.len() as u16;
+        split
+            .symbols
+            .iter()
+            .enumerate()
+            .map(|(index, symbol)| {
+                aux_rpc::encode_response_fragment(
+                    sender,
+                    id,
+                    status,
+                    index as u16,
+                    total,
+                    split.oti,
+                    symbol,
+                )
+                .unwrap()
+            })
+            .collect()
+    }
+
+    /// Decode one encoded fragment and hand it to the proxy, the way the
+    /// response listener does.
+    async fn deliver(proxy: &AuxRpcProxy, payload: &[u8]) {
+        let fragment = aux_rpc::decode_response(payload).unwrap();
+        proxy.dispatch_response(&fragment).await;
+    }
+
+    /// Deliver every fragment of one response.
+    async fn deliver_body(proxy: &AuxRpcProxy, sender: &[u8], id: u32, status: u16, body: &[u8]) {
+        for payload in response_payloads(sender, id, status, body) {
+            deliver(proxy, &payload).await;
         }
+    }
+
+    /// Sniff the id of the single call the proxy currently has in flight.
+    async fn pending_id(proxy: &AuxRpcProxy) -> u32 {
+        let pending = proxy.pending.lock().await;
+        *pending.keys().next().expect("one pending caller")
     }
 
     #[tokio::test]
@@ -770,18 +883,16 @@ mod tests {
             assert_eq!(channel, AuxChannel::Request);
             let request = aux_rpc::decode_request(&payload).unwrap();
             assert_eq!(request.method, RpcMethod::Get);
-            assert_eq!(request.target, b"77735cd38937");
+            assert_eq!(request.target, DRONE);
             assert_eq!(request.path, b"/api/pairing/info");
             assert!(request.body.is_empty());
 
             let body = br#"{"device_id":"abc"}"#;
-            proxy_for_consumer
-                .dispatch_response(&one_fragment(request.id, 200, body))
-                .await;
+            deliver_body(&proxy_for_consumer, DRONE, request.id, 200, body).await;
         });
 
         let result = proxy
-            .call(b"77735cd38937", RpcMethod::Get, b"/api/pairing/info", &[])
+            .call(DRONE, RpcMethod::Get, b"/api/pairing/info", &[])
             .await
             .expect("call must succeed");
 
@@ -791,37 +902,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_three_fragment_response_in_order_completes_with_the_whole_body() {
+    async fn a_multi_fragment_response_completes_on_its_systematic_symbols_alone() {
         let (egress, mut sent) = loopback_egress().await;
         let proxy = AuxRpcProxy::with_timeout(egress, Duration::from_millis(500));
 
         let body: Vec<u8> = (0..3000u32).map(|i| (i % 251) as u8).collect();
         let expected = body.clone();
-        let proxy_for_consumer = proxy.clone();
-        let consumer = tokio::spawn(async move {
-            let (_, payload) = sent.recv().await.expect("request datagram");
-            let id = aux_rpc::decode_request(&payload).unwrap().id;
-            let chunks = aux_rpc::split_response(&body).unwrap();
-            let total = chunks.len() as u16;
-            assert_eq!(total, 3);
-            for (i, chunk) in chunks.iter().enumerate() {
-                proxy_for_consumer
-                    .dispatch_response(&aux_rpc::RpcResponse {
-                        id,
-                        status: 200,
-                        index: i as u16,
-                        total,
-                        body: chunk,
-                    })
-                    .await;
-            }
+        let proxy_call = proxy.clone();
+        let call = tokio::spawn(async move {
+            proxy_call
+                .call(DRONE, RpcMethod::Get, b"/api/services", &[])
+                .await
         });
 
-        let result = proxy
-            .call(&[], RpcMethod::Get, b"/api/services", &[])
-            .await
-            .expect("call must succeed");
-        consumer.await.unwrap();
+        let (_, payload) = sent.recv().await.expect("request datagram");
+        let id = aux_rpc::decode_request(&payload).unwrap().id;
+        let fragments = response_payloads(DRONE, id, 200, &body);
+        assert_eq!(fragments.len(), 3 + aux_rpc::RPC_REPAIR_SYMBOLS as usize);
+        // Only the systematic symbols. The repair symbols are the cushion, not
+        // a prerequisite: a caller that waited for all seven would be back to
+        // the geometric loss decay they exist to remove.
+        for fragment in &fragments[..3] {
+            deliver(&proxy, fragment).await;
+        }
+
+        let result = call.await.unwrap().expect("call must succeed");
         assert_eq!(result.status, 200);
         assert_eq!(result.body, expected);
     }
@@ -833,30 +938,139 @@ mod tests {
 
         let body: Vec<u8> = (0..3000u32).map(|i| (i % 251) as u8).collect();
         let expected = body.clone();
-        let proxy_for_consumer = proxy.clone();
-        let consumer = tokio::spawn(async move {
-            let (_, payload) = sent.recv().await.expect("request datagram");
-            let id = aux_rpc::decode_request(&payload).unwrap().id;
-            let chunks = aux_rpc::split_response(&body).unwrap();
-            for i in [2usize, 0, 1] {
-                proxy_for_consumer
-                    .dispatch_response(&aux_rpc::RpcResponse {
-                        id,
-                        status: 200,
-                        index: i as u16,
-                        total: 3,
-                        body: chunks[i],
-                    })
-                    .await;
-            }
+        let proxy_call = proxy.clone();
+        let call = tokio::spawn(async move {
+            proxy_call
+                .call(DRONE, RpcMethod::Get, b"/api/services", &[])
+                .await
         });
 
-        let result = proxy
-            .call(&[], RpcMethod::Get, b"/api/services", &[])
-            .await
-            .expect("call must succeed");
-        consumer.await.unwrap();
+        let (_, payload) = sent.recv().await.expect("request datagram");
+        let id = aux_rpc::decode_request(&payload).unwrap().id;
+        let mut fragments = response_payloads(DRONE, id, 200, &body);
+        fragments.reverse();
+        for fragment in &fragments {
+            deliver(&proxy, fragment).await;
+        }
+
+        let result = call.await.unwrap().expect("call must succeed");
         assert_eq!(result.body, expected);
+    }
+
+    #[tokio::test]
+    async fn a_thirty_kilobyte_response_completes_after_losing_four_fragments() {
+        // The measured `/api/status/full`. All-or-nothing reassembly of its 26
+        // fragments at the measured 0.7% per-fragment loss succeeded 17/20 on
+        // the bench; the four repair symbols are what remove that decay.
+        let (egress, mut sent) = loopback_egress().await;
+        let proxy = AuxRpcProxy::with_timeout(egress, Duration::from_secs(2));
+
+        let body: Vec<u8> = (0..29_339u32).map(|i| (i % 251) as u8).collect();
+        let expected = body.clone();
+        let proxy_call = proxy.clone();
+        let call = tokio::spawn(async move {
+            proxy_call
+                .call(DRONE, RpcMethod::Get, b"/api/status/full", &[])
+                .await
+        });
+
+        let (_, payload) = sent.recv().await.expect("request datagram");
+        let id = aux_rpc::decode_request(&payload).unwrap().id;
+        let mut fragments = response_payloads(DRONE, id, 200, &body);
+        assert_eq!(fragments.len(), 30, "26 systematic + 4 repair");
+        // Reordered by the lane, and four of them never arrive.
+        fragments.rotate_left(7);
+        fragments.truncate(26);
+        for fragment in &fragments {
+            deliver(&proxy, fragment).await;
+        }
+
+        let result = call.await.unwrap().expect("26 of 30 must be enough");
+        assert_eq!(result.body, expected);
+        assert_eq!(proxy.stats().calls_ok, 1);
+    }
+
+    #[tokio::test]
+    async fn a_fragment_from_another_drone_is_dropped_and_counted() {
+        // 24 drones share one fleet key, so a request id is only unique per
+        // sender. Splicing a second drone's symbols into this call's decoder
+        // yields a cleanly-decoded body belonging to neither aircraft —
+        // RaptorQ has no per-object checksum that would catch it.
+        let (egress, mut sent) = loopback_egress().await;
+        let proxy = AuxRpcProxy::with_timeout(egress, Duration::from_millis(300));
+
+        let proxy_call = proxy.clone();
+        let call =
+            tokio::spawn(
+                async move { proxy_call.call(DRONE, RpcMethod::Get, b"/api/x", &[]).await },
+            );
+
+        let (_, payload) = sent.recv().await.expect("request datagram");
+        let id = aux_rpc::decode_request(&payload).unwrap().id;
+        let imposter = response_payloads(b"ados-elsewhere", id, 200, b"not-your-answer");
+        for fragment in &imposter {
+            deliver(&proxy, fragment).await;
+        }
+
+        let err = call.await.unwrap().unwrap_err();
+        let stats = proxy.stats();
+        assert_eq!(
+            err,
+            RpcError::Timeout,
+            "an imposter must not complete a call"
+        );
+        assert_eq!(stats.fragments_wrong_sender, imposter.len() as u64);
+        assert_eq!(stats.calls_ok, 0);
+        assert!(
+            stats.retransmits > 0,
+            "another drone's answer proves nothing about ours, so the resend \
+             loop must keep running"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_addressed_drone_still_completes_the_call_after_an_imposter() {
+        // Dropping the wrong sender's fragments must not poison the pending
+        // entry: the real answer, arriving second, still has to land.
+        let (egress, mut sent) = loopback_egress().await;
+        let proxy = AuxRpcProxy::with_timeout(egress, Duration::from_secs(2));
+
+        let proxy_call = proxy.clone();
+        let call =
+            tokio::spawn(
+                async move { proxy_call.call(DRONE, RpcMethod::Get, b"/api/x", &[]).await },
+            );
+
+        let (_, payload) = sent.recv().await.expect("request datagram");
+        let id = aux_rpc::decode_request(&payload).unwrap().id;
+        for fragment in &response_payloads(b"ados-elsewhere", id, 200, b"wrong-drone") {
+            deliver(&proxy, fragment).await;
+        }
+        deliver_body(&proxy, DRONE, id, 200, b"right-drone").await;
+
+        let result = call.await.unwrap().expect("the addressed drone answered");
+        assert_eq!(result.body, b"right-drone");
+    }
+
+    #[tokio::test]
+    async fn a_broadcast_call_accepts_whichever_drone_answers() {
+        // An empty target is a broadcast: there is no single sender to hold
+        // the fragments to, and gating one would break the diagnostic call
+        // that does not know a device id yet.
+        let (egress, mut sent) = loopback_egress().await;
+        let proxy = AuxRpcProxy::with_timeout(egress, Duration::from_millis(500));
+
+        let proxy_call = proxy.clone();
+        let call =
+            tokio::spawn(async move { proxy_call.call(&[], RpcMethod::Get, b"/api/x", &[]).await });
+
+        let (_, payload) = sent.recv().await.expect("request datagram");
+        let id = aux_rpc::decode_request(&payload).unwrap().id;
+        deliver_body(&proxy, b"ados-anyone", id, 200, b"answered").await;
+
+        let result = call.await.unwrap().expect("call must succeed");
+        assert_eq!(result.body, b"answered");
+        assert_eq!(proxy.stats().fragments_wrong_sender, 0);
     }
 
     #[tokio::test]
@@ -864,31 +1078,26 @@ mod tests {
         let (egress, mut sent) = loopback_egress().await;
         let proxy = AuxRpcProxy::with_timeout(egress, Duration::from_millis(400));
 
-        let proxy_for_consumer = proxy.clone();
-        let consumer = tokio::spawn(async move {
-            let (_, payload) = sent.recv().await.expect("request datagram");
-            let id = aux_rpc::decode_request(&payload).unwrap().id;
-            // Fragment 0 twice, then 1: a naive counter would complete after
-            // the duplicate with fragment 1 still missing.
-            for (index, chunk) in [(0u16, &b"aa"[..]), (0, b"aa"), (1, b"bb")] {
-                proxy_for_consumer
-                    .dispatch_response(&aux_rpc::RpcResponse {
-                        id,
-                        status: 200,
-                        index,
-                        total: 2,
-                        body: chunk,
-                    })
-                    .await;
-            }
-        });
+        let body: Vec<u8> = (0..2000u32).map(|i| (i % 251) as u8).collect();
+        let expected = body.clone();
+        let proxy_call = proxy.clone();
+        let call =
+            tokio::spawn(
+                async move { proxy_call.call(DRONE, RpcMethod::Get, b"/api/x", &[]).await },
+            );
 
-        let result = proxy
-            .call(&[], RpcMethod::Get, b"/api/x", &[])
-            .await
-            .expect("call must succeed");
-        consumer.await.unwrap();
-        assert_eq!(result.body, b"aabb");
+        let (_, payload) = sent.recv().await.expect("request datagram");
+        let id = aux_rpc::decode_request(&payload).unwrap().id;
+        let fragments = response_payloads(DRONE, id, 200, &body);
+        // Symbol 0 twice, then 1: a naive counter would report two received
+        // with symbol 1 still missing.
+        for i in [0usize, 0, 1] {
+            deliver(&proxy, &fragments[i]).await;
+        }
+
+        let result = call.await.unwrap().expect("call must succeed");
+        assert_eq!(result.body, expected);
+        assert_eq!(proxy.stats().fragments_duplicate, 1);
     }
 
     #[tokio::test]
@@ -896,23 +1105,17 @@ mod tests {
         let (egress, mut sent) = loopback_egress().await;
         let proxy = AuxRpcProxy::with_timeout(egress, Duration::from_millis(120));
 
+        let body: Vec<u8> = (0..3000u32).map(|i| (i % 251) as u8).collect();
         let proxy_for_consumer = proxy.clone();
         let consumer = tokio::spawn(async move {
             let (_, payload) = sent.recv().await.expect("request datagram");
             let id = aux_rpc::decode_request(&payload).unwrap().id;
-            proxy_for_consumer
-                .dispatch_response(&aux_rpc::RpcResponse {
-                    id,
-                    status: 200,
-                    index: 0,
-                    total: 3,
-                    body: b"aa",
-                })
-                .await;
+            let fragments = response_payloads(DRONE, id, 200, &body);
+            deliver(&proxy_for_consumer, &fragments[0]).await;
         });
 
         let err = proxy
-            .call(&[], RpcMethod::Get, b"/api/x", &[])
+            .call(DRONE, RpcMethod::Get, b"/api/x", &[])
             .await
             .unwrap_err();
         consumer.await.unwrap();
@@ -920,12 +1123,12 @@ mod tests {
             err,
             RpcError::Incomplete {
                 received: 1,
-                total: 3
+                total: 7
             }
         );
         assert_eq!(
             err.to_string(),
-            "relay response incomplete: 1/3 fragments",
+            "relay response incomplete: 1/7 fragments",
             "the operator must be able to tell a dropped fragment from silence"
         );
     }
@@ -942,21 +1145,96 @@ mod tests {
             proxy_for_consumer
                 .dispatch_response(&aux_rpc::RpcResponse {
                     id,
+                    sender: DRONE,
                     status: 200,
                     index: 0,
                     total: 65,
+                    oti: 2,
                     body: b"aa",
                 })
                 .await;
         });
 
         let result = proxy
-            .call(&[], RpcMethod::Get, b"/api/x", &[])
+            .call(DRONE, RpcMethod::Get, b"/api/x", &[])
             .await
             .expect("the caller must be completed, not left hanging");
         consumer.await.unwrap();
         assert_eq!(result.status, 502);
-        assert_eq!(result.body, b"relay response fragment count out of range");
+        assert_eq!(result.body, b"relay response geometry out of range");
+        assert_eq!(proxy.stats().responses_out_of_range, 1);
+    }
+
+    #[tokio::test]
+    async fn a_transfer_length_past_the_ceiling_completes_with_502() {
+        // `oti` is a number the radio handed us and RaptorQ sizes its matrices
+        // from it. A corrupt one must be refused, not allocated for.
+        let (egress, mut sent) = loopback_egress().await;
+        let proxy = AuxRpcProxy::with_timeout(egress, Duration::from_millis(400));
+
+        let proxy_for_consumer = proxy.clone();
+        let consumer = tokio::spawn(async move {
+            let (_, payload) = sent.recv().await.expect("request datagram");
+            let id = aux_rpc::decode_request(&payload).unwrap().id;
+            proxy_for_consumer
+                .dispatch_response(&aux_rpc::RpcResponse {
+                    id,
+                    sender: DRONE,
+                    status: 200,
+                    index: 0,
+                    total: 2,
+                    oti: u32::MAX,
+                    body: b"aa",
+                })
+                .await;
+        });
+
+        let result = proxy
+            .call(DRONE, RpcMethod::Get, b"/api/x", &[])
+            .await
+            .expect("the caller must be completed, not left hanging");
+        consumer.await.unwrap();
+        assert_eq!(result.status, 502);
+        assert_eq!(proxy.stats().responses_out_of_range, 1);
+    }
+
+    #[tokio::test]
+    async fn a_symbol_of_the_wrong_size_is_dropped_and_counted() {
+        // Radio damage, or two ends on different builds. Feeding it to RaptorQ
+        // would corrupt a matrix that assumes every symbol is one size.
+        let (egress, mut sent) = loopback_egress().await;
+        let proxy = AuxRpcProxy::with_timeout(egress, Duration::from_millis(200));
+
+        let proxy_for_consumer = proxy.clone();
+        let consumer = tokio::spawn(async move {
+            let (_, payload) = sent.recv().await.expect("request datagram");
+            let id = aux_rpc::decode_request(&payload).unwrap().id;
+            proxy_for_consumer
+                .dispatch_response(&aux_rpc::RpcResponse {
+                    id,
+                    sender: DRONE,
+                    status: 200,
+                    index: 0,
+                    total: 5,
+                    oti: 64,
+                    body: b"only-nine",
+                })
+                .await;
+        });
+
+        let err = proxy
+            .call(DRONE, RpcMethod::Get, b"/api/x", &[])
+            .await
+            .unwrap_err();
+        consumer.await.unwrap();
+        assert_eq!(
+            err,
+            RpcError::Incomplete {
+                received: 0,
+                total: 5
+            }
+        );
+        assert_eq!(proxy.stats().fragments_bad_symbol, 1);
     }
 
     #[tokio::test]
@@ -1006,9 +1284,9 @@ mod tests {
     async fn a_response_for_an_unknown_id_is_a_noop() {
         let (egress, _sent) = loopback_egress().await;
         let proxy = AuxRpcProxy::with_timeout(egress, Duration::from_millis(50));
-        proxy
-            .dispatch_response(&one_fragment(9999, 200, b"orphan"))
-            .await;
+        for fragment in &response_payloads(DRONE, 9999, 200, b"orphan") {
+            deliver(&proxy, fragment).await;
+        }
         assert!(proxy.pending.lock().await.is_empty());
     }
 
@@ -1024,9 +1302,7 @@ mod tests {
                 assert_eq!(ch, AuxChannel::Request);
                 let request = aux_rpc::decode_request(&payload).unwrap();
                 let body = format!("{}", request.id).into_bytes();
-                proxy_consumer
-                    .dispatch_response(&one_fragment(request.id, 200, &body))
-                    .await;
+                deliver_body(&proxy_consumer, DRONE, request.id, 200, &body).await;
             }
         });
 
@@ -1110,15 +1386,12 @@ mod tests {
         // Write a matching Response via the ingest. The call's request id was
         // assigned by the proxy (starts at 1), so we sniff it from the
         // pending map.
-        let pending_id = {
-            let pending = proxy.pending.lock().await;
-            *pending.keys().next().expect("one pending caller")
-        };
+        let id = pending_id(&proxy).await;
 
         let ingest = AuxRpcResponseIngest::new(&sock_path);
-        let resp_payload =
-            aux_rpc::encode_response_fragment(pending_id, 200, 0, 1, br#"{"ok":true}"#).unwrap();
-        ingest.send(&resp_payload).await;
+        for payload in response_payloads(DRONE, id, 200, br#"{"ok":true}"#) {
+            ingest.send(&payload).await;
+        }
 
         let result = tokio::time::timeout(Duration::from_secs(2), call_handle)
             .await
@@ -1151,25 +1424,20 @@ mod tests {
             tokio::spawn(async move { proxy_call.call(&[], RpcMethod::Get, b"/api/x", &[]).await });
         tokio::time::sleep(Duration::from_millis(20)).await;
 
-        let id = {
-            let pending = proxy.pending.lock().await;
-            *pending.keys().next().expect("one pending caller")
-        };
+        let id = pending_id(&proxy).await;
 
+        let body: Vec<u8> = (0..2000u32).map(|i| (i % 251) as u8).collect();
+        let fragments = response_payloads(DRONE, id, 200, &body);
         let ingest = AuxRpcResponseIngest::new(&sock_path);
-        ingest
-            .send(&aux_rpc::encode_response_fragment(id, 200, 0, 2, b"aa").unwrap())
-            .await;
+        ingest.send(&fragments[0]).await;
         ingest.send(b"not-a-fragment").await;
-        ingest
-            .send(&aux_rpc::encode_response_fragment(id, 200, 1, 2, b"bb").unwrap())
-            .await;
+        ingest.send(&fragments[1]).await;
 
         let result = tokio::time::timeout(Duration::from_secs(3), call_handle)
             .await
             .expect("the call must complete within the bound")
             .unwrap();
-        assert_eq!(result.unwrap().body, b"aabb");
+        assert_eq!(result.unwrap().body, body);
 
         cancel.notify_waiters();
         let _ = listener_handle.await;
@@ -1190,13 +1458,18 @@ mod tests {
             assert_eq!(first, second, "a retransmit must be the identical datagram");
             assert_eq!(second, third);
             let request = aux_rpc::decode_request(&third).unwrap();
-            proxy_for_consumer
-                .dispatch_response(&one_fragment(request.id, 200, b"late-but-answered"))
-                .await;
+            deliver_body(
+                &proxy_for_consumer,
+                DRONE,
+                request.id,
+                200,
+                b"late-but-answered",
+            )
+            .await;
         });
 
         let result = proxy
-            .call(b"77735cd38937", RpcMethod::Get, b"/api/version", &[])
+            .call(DRONE, RpcMethod::Get, b"/api/version", &[])
             .await
             .expect("a retransmitted request must still complete");
         consumer.await.unwrap();
@@ -1212,28 +1485,22 @@ mod tests {
         let (egress, mut sent) = loopback_egress().await;
         let proxy = AuxRpcProxy::with_timeout(egress, Duration::from_millis(600));
 
+        let body: Vec<u8> = (0..3000u32).map(|i| (i % 251) as u8).collect();
         let proxy_for_consumer = proxy.clone();
         let consumer = tokio::spawn(async move {
             let (_, payload) = sent.recv().await.expect("request datagram");
             let id = aux_rpc::decode_request(&payload).unwrap().id;
-            // Fragment 0 of 2 lands; fragment 1 never does. The call still
+            // One symbol of seven lands; the rest never do. The call still
             // fails Incomplete, but the request demonstrably got through, so
             // resending it would only duplicate the drone's work.
-            proxy_for_consumer
-                .dispatch_response(&aux_rpc::RpcResponse {
-                    id,
-                    status: 200,
-                    index: 0,
-                    total: 2,
-                    body: b"aa",
-                })
-                .await;
+            let fragments = response_payloads(DRONE, id, 200, &body);
+            deliver(&proxy_for_consumer, &fragments[0]).await;
             tokio::time::sleep(Duration::from_millis(450)).await;
             sent.try_recv().is_ok()
         });
 
         let err = proxy
-            .call(&[], RpcMethod::Get, b"/api/x", &[])
+            .call(DRONE, RpcMethod::Get, b"/api/x", &[])
             .await
             .unwrap_err();
         let resent = consumer.await.unwrap();
@@ -1241,7 +1508,7 @@ mod tests {
             err,
             RpcError::Incomplete {
                 received: 1,
-                total: 2
+                total: 7
             }
         );
         assert!(!resent, "no second Request datagram may leave the ground");
@@ -1260,6 +1527,7 @@ mod tests {
                     id,
                     PendingCall {
                         sender: tx,
+                        expected_sender: None,
                         assembly: None,
                         response_started: false,
                     },

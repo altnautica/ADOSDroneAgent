@@ -24,6 +24,11 @@ thiserror = { workspace = true }
 getrandom = { workspace = true }
 tokio = { workspace = true }
 ureq = { workspace = true }
+# Forward error correction for relay-proxy RPC response fragments
+# (`aux_rpc::response`). Apache-2.0/MIT, so GPLv3-compatible. RFC 6330 RaptorQ,
+# pure Rust with no C dependency; a 30 KB body encodes in under 2 ms on the
+# drone's Cortex-A53, which is noise against the 5 ms per-fragment radio pacing.
+raptorq = "2"
 # The MAVLink dialect is a large, slow-to-compile generated enum, and most
 # consumers (e.g. the TUI) do not need it, so it is behind the `mavlink`
 # feature. Renamed to avoid clashing with this crate's own `mavlink` module.

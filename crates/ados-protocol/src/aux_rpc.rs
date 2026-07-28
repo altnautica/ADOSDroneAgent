@@ -36,13 +36,19 @@
 //!   byte 10+T+N..       body bytes
 //!
 //! RpcResponseFragment
-//!   byte 0..4     id (u32 BE) — matches the request's
-//!   byte 4..6     status (u16 BE) — HTTP status, repeated identically on every
-//!                 fragment so a reassembler can seed from whichever arrives first
-//!   byte 6..8     frag_index (u16 BE, 0-based)
-//!   byte 8..10    frag_total (u16 BE, >= 1)
-//!   byte 10..12   frag_len (u16 BE) — bytes in THIS fragment
-//!   byte 12..     fragment bytes
+//!   byte 0              sender_len (u8, <= MAX_DEVICE_ID)
+//!   byte 1..1+S         sender device id (UTF-8) — which drone answered
+//!   byte 1+S..5+S       id (u32 BE) — matches the request's
+//!   byte 5+S..7+S       status (u16 BE) — HTTP status, repeated identically on
+//!                       every fragment so a reassembler can seed from
+//!                       whichever arrives first
+//!   byte 7+S..9+S       frag_index (u16 BE, 0-based; also the RaptorQ
+//!                       encoding-symbol id)
+//!   byte 9+S..11+S      frag_total (u16 BE, >= 1)
+//!   byte 11+S..15+S     oti (u32 BE) — the RaptorQ transfer length, identical
+//!                       on every fragment of one response
+//!   byte 15+S..17+S     frag_len (u16 BE) — symbol bytes in THIS fragment
+//!   byte 17+S..         symbol bytes
 //! ```
 //!
 //! ## Requests are single-frame; responses fragment
@@ -54,8 +60,10 @@
 //!
 //! Responses do not fit: measured against a live drone, `/api/services` is
 //! 2 631 B, `/api/config` 5 101 B, and `/api/status/full` 29 339 B, all past the
-//! 1 188-byte fragment budget. A response is therefore chunked by
-//! [`split_response`] and reassembled on the ground.
+//! [`response::MAX_RESPONSE_FRAGMENT`] budget. A response is therefore
+//! forward-error-corrected and chunked by [`split_response`]; see
+//! [`response`] for why a fragment is a RaptorQ symbol and why it names its
+//! sender.
 //!
 //! ## Why `AUX_VERSION` is not bumped for this layout change
 //!
@@ -72,7 +80,17 @@
 //! counter; a 32-bit space at a few calls per second does not roll in any
 //! realistic session. Every response fragment carries the same id back
 //! unchanged, so a pending-request map on the ground can match a fragment to
-//! its caller without sequencing across radio reordering.
+//! its caller without sequencing across radio reordering. The id alone is not
+//! enough to identify the answering drone once a fleet shares one key, which
+//! is what the fragment's `sender` field is for.
+
+pub mod response;
+
+pub use response::{
+    decode_response, encode_response_fragment, split_response, FragmentOutcome, ResponseDecoder,
+    ResponseSymbols, RpcResponse, MAX_RESPONSE_BODY, MAX_RESPONSE_FRAGMENT, MAX_RESPONSE_FRAGMENTS,
+    RPC_REPAIR_SYMBOLS, RPC_RESPONSE_OVERHEAD_BASE,
+};
 
 use crate::aux_mux::AUX_MAX_PAYLOAD;
 use crate::node_status::MAX_DEVICE_ID;
@@ -84,16 +102,6 @@ use crate::node_status::MAX_DEVICE_ID;
 /// cap `aux_mux::encode` enforces on every channel's payload);
 /// [`encode_request`] rejects anything that does not fit one frame.
 pub const RPC_REQUEST_OVERHEAD_BASE: usize = 10;
-
-/// Largest body one response fragment can carry (12 bytes of fragment header).
-pub const MAX_RESPONSE_FRAGMENT: usize = AUX_MAX_PAYLOAD - 12;
-
-/// Most fragments one response may be split into.
-///
-/// 64 × [`MAX_RESPONSE_FRAGMENT`] = 76 032 B. The largest endpoint measured on
-/// a live drone (`/api/status/full`, 29 339 B) needs 25, so this is real
-/// headroom while still bounding a runaway reassembly buffer on the ground.
-pub const MAX_RESPONSE_FRAGMENTS: usize = 64;
 
 /// HTTP method tag, encoded as a single byte on the wire.
 ///
@@ -146,19 +154,6 @@ pub struct RpcRequest<'a> {
     pub body: &'a [u8],
 }
 
-/// A decoded response fragment. Borrows the original payload buffer.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RpcResponse<'a> {
-    pub id: u32,
-    pub status: u16,
-    /// 0-based position of this fragment within the response.
-    pub index: u16,
-    /// Total fragment count for this response; always >= 1.
-    pub total: u16,
-    /// This fragment's slice of the body, not the whole body.
-    pub body: &'a [u8],
-}
-
 /// Why a frame could not be decoded. Distinct variants so a caller can count
 /// transport damage separately from foreign traffic on a shared lane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,6 +169,10 @@ pub enum RpcCodecError {
     /// to carry a (total, index) pair made every log line read as a length
     /// fault and hid the real one.
     BadFragmentIndex { index: u16, total: u16 },
+    /// A response fragment claims a sender id longer than [`MAX_DEVICE_ID`].
+    /// Its own fault rather than a length mismatch: the prefix indexes the
+    /// buffer, so an unchecked one reads the symbol out of the sender's bytes.
+    BadSenderLen(u8),
 }
 
 /// Encode a request as an aux payload (the bytes that go inside the aux
@@ -264,84 +263,6 @@ pub fn decode_request(payload: &[u8]) -> Result<RpcRequest<'_>, RpcCodecError> {
     })
 }
 
-/// Split a response body into the fragments that will carry it.
-///
-/// An empty body yields exactly one empty chunk, so a 204 still travels as
-/// `total = 1` and the ground side completes the call instead of waiting for a
-/// fragment that never comes. Returns `None` when the body needs more than
-/// [`MAX_RESPONSE_FRAGMENTS`] — the caller emits a 413 rather than a body the
-/// ground cannot bound.
-pub fn split_response(body: &[u8]) -> Option<Vec<&[u8]>> {
-    if body.is_empty() {
-        return Some(vec![&body[..0]]);
-    }
-    let count = body.len().div_ceil(MAX_RESPONSE_FRAGMENT);
-    if count > MAX_RESPONSE_FRAGMENTS {
-        return None;
-    }
-    Some(body.chunks(MAX_RESPONSE_FRAGMENT).collect())
-}
-
-/// Encode one response fragment as an aux payload.
-///
-/// Returns `None` when the fragment does not fit one aux datagram, when
-/// `total` is zero, or when `index` is not inside `total`.
-pub fn encode_response_fragment(
-    id: u32,
-    status: u16,
-    index: u16,
-    total: u16,
-    chunk: &[u8],
-) -> Option<Vec<u8>> {
-    if total == 0 || index >= total {
-        return None;
-    }
-    if chunk.len() > u16::MAX as usize {
-        return None;
-    }
-    let encoded_len = 12 + chunk.len();
-    if encoded_len > AUX_MAX_PAYLOAD {
-        return None;
-    }
-    let mut out = Vec::with_capacity(encoded_len);
-    out.extend_from_slice(&id.to_be_bytes());
-    out.extend_from_slice(&status.to_be_bytes());
-    out.extend_from_slice(&index.to_be_bytes());
-    out.extend_from_slice(&total.to_be_bytes());
-    out.extend_from_slice(&(chunk.len() as u16).to_be_bytes());
-    out.extend_from_slice(chunk);
-    Some(out)
-}
-
-/// Decode an aux payload as a response fragment.
-pub fn decode_response(payload: &[u8]) -> Result<RpcResponse<'_>, RpcCodecError> {
-    if payload.len() < 12 {
-        return Err(RpcCodecError::TooShort);
-    }
-    let id = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
-    let status = u16::from_be_bytes([payload[4], payload[5]]);
-    let index = u16::from_be_bytes([payload[6], payload[7]]);
-    let total = u16::from_be_bytes([payload[8], payload[9]]);
-    let frag_len = u16::from_be_bytes([payload[10], payload[11]]) as usize;
-    if 12 + frag_len != payload.len() {
-        return Err(RpcCodecError::LengthMismatch {
-            declared: 12 + frag_len,
-            actual: payload.len(),
-        });
-    }
-    if total == 0 || index >= total {
-        return Err(RpcCodecError::BadFragmentIndex { index, total });
-    }
-    let body = &payload[12..12 + frag_len];
-    Ok(RpcResponse {
-        id,
-        status,
-        index,
-        total,
-        body,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,25 +299,11 @@ mod tests {
     #[test]
     fn round_trips_a_post_with_a_body() {
         let path = b"/api/config";
-        let body = br#"{"key":"agent.name","value":"skynodea7s"}"#;
+        let body = br#"{"key":"agent.name","value":"example-drone"}"#;
         let enc = encode_request(RpcMethod::Post, 1, b"77735cd38937", path, body).unwrap();
         let dec = decode_request(&enc).unwrap();
         assert_eq!(dec.method, RpcMethod::Post);
         assert_eq!(dec.path, path);
-        assert_eq!(dec.body, body);
-    }
-
-    #[test]
-    fn round_trips_a_single_fragment_response() {
-        let body = br#"{"device_id":"abc","name":"Skynode A7S"}"#;
-        let chunks = split_response(body).unwrap();
-        assert_eq!(chunks.len(), 1);
-        let enc = encode_response_fragment(42, 200, 0, 1, chunks[0]).unwrap();
-        let dec = decode_response(&enc).unwrap();
-        assert_eq!(dec.id, 42);
-        assert_eq!(dec.status, 200);
-        assert_eq!(dec.index, 0);
-        assert_eq!(dec.total, 1);
         assert_eq!(dec.body, body);
     }
 
@@ -408,50 +315,6 @@ mod tests {
         assert_eq!(dec.method, RpcMethod::Get);
         assert!(dec.path.is_empty());
         assert!(dec.body.is_empty());
-    }
-
-    #[test]
-    fn an_empty_body_still_produces_one_fragment() {
-        // A 204 must complete the caller, not leave it waiting for a fragment
-        // that never comes.
-        let chunks = split_response(&[]).unwrap();
-        assert_eq!(chunks.len(), 1);
-        assert!(chunks[0].is_empty());
-        let enc = encode_response_fragment(7, 204, 0, 1, chunks[0]).unwrap();
-        let dec = decode_response(&enc).unwrap();
-        assert_eq!(dec.status, 204);
-        assert_eq!(dec.total, 1);
-        assert!(dec.body.is_empty());
-    }
-
-    #[test]
-    fn a_three_kilobyte_body_splits_into_three_fragments_that_rejoin() {
-        let body: Vec<u8> = (0..3000u32).map(|i| (i % 251) as u8).collect();
-        let chunks = split_response(&body).unwrap();
-        assert_eq!(chunks.len(), 3);
-        let total = chunks.len() as u16;
-        let mut rejoined = Vec::new();
-        for (i, chunk) in chunks.iter().enumerate() {
-            let enc = encode_response_fragment(1, 200, i as u16, total, chunk).unwrap();
-            let dec = decode_response(&enc).unwrap();
-            assert_eq!(dec.total, total);
-            assert_eq!(dec.index, i as u16);
-            assert_eq!(dec.status, 200);
-            rejoined.extend_from_slice(dec.body);
-        }
-        assert_eq!(rejoined, body);
-    }
-
-    #[test]
-    fn a_body_past_the_reassembly_ceiling_does_not_split() {
-        let body = vec![0u8; 77_000];
-        assert!(split_response(&body).is_none());
-        // The largest body that still fits fragments exactly to the ceiling.
-        let at_ceiling = vec![0u8; MAX_RESPONSE_FRAGMENT * MAX_RESPONSE_FRAGMENTS];
-        assert_eq!(
-            split_response(&at_ceiling).unwrap().len(),
-            MAX_RESPONSE_FRAGMENTS
-        );
     }
 
     #[test]
@@ -467,50 +330,12 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_fragment_larger_than_one_aux_frame() {
-        let big = vec![0u8; MAX_RESPONSE_FRAGMENT + 1];
-        assert!(encode_response_fragment(1, 200, 0, 1, &big).is_none());
-        let fits = vec![0u8; MAX_RESPONSE_FRAGMENT];
-        let enc = encode_response_fragment(1, 200, 0, 1, &fits).unwrap();
-        assert_eq!(
-            decode_response(&enc).unwrap().body.len(),
-            MAX_RESPONSE_FRAGMENT
-        );
-    }
-
-    #[test]
-    fn rejects_a_fragment_whose_index_is_outside_its_total() {
-        assert!(encode_response_fragment(1, 200, 3, 3, b"x").is_none());
-        assert!(encode_response_fragment(1, 200, 0, 0, b"x").is_none());
-        // Hand-built frame claiming index 4 of 2 must not decode.
-        let mut bad = Vec::new();
-        bad.extend_from_slice(&1u32.to_be_bytes());
-        bad.extend_from_slice(&200u16.to_be_bytes());
-        bad.extend_from_slice(&4u16.to_be_bytes());
-        bad.extend_from_slice(&2u16.to_be_bytes());
-        bad.extend_from_slice(&1u16.to_be_bytes());
-        bad.push(b'x');
-        assert!(decode_response(&bad).is_err());
-    }
-
-    #[test]
     fn rejects_a_truncated_request() {
         let full = encode_request(RpcMethod::Post, 9, b"abc", b"/api/x", b"payload").unwrap();
         let mut truncated = full.clone();
         truncated.truncate(5);
         assert_eq!(
             decode_request(&truncated).unwrap_err(),
-            RpcCodecError::TooShort
-        );
-    }
-
-    #[test]
-    fn rejects_a_truncated_response() {
-        let full = encode_response_fragment(9, 200, 0, 1, b"body").unwrap();
-        let mut truncated = full.clone();
-        truncated.truncate(4);
-        assert_eq!(
-            decode_response(&truncated).unwrap_err(),
             RpcCodecError::TooShort
         );
     }
@@ -532,40 +357,6 @@ mod tests {
                 declared: 110,
                 actual: 10
             }
-        );
-    }
-
-    #[test]
-    fn catches_a_length_mismatch_in_a_response() {
-        // Claimed frag_len = 50 but the payload ends after the header.
-        let mut bad = Vec::new();
-        bad.extend_from_slice(&1u32.to_be_bytes());
-        bad.extend_from_slice(&200u16.to_be_bytes());
-        bad.extend_from_slice(&0u16.to_be_bytes());
-        bad.extend_from_slice(&1u16.to_be_bytes());
-        bad.extend_from_slice(&50u16.to_be_bytes());
-        assert_eq!(
-            decode_response(&bad).unwrap_err(),
-            RpcCodecError::LengthMismatch {
-                declared: 62,
-                actual: 12
-            }
-        );
-    }
-
-    #[test]
-    fn an_impossible_index_total_pair_is_its_own_fault_not_a_length_fault() {
-        // index 3 of total 2. Reported as a length mismatch, the numbers read
-        // as byte counts and the real fault is invisible in the log line.
-        let mut bad = Vec::new();
-        bad.extend_from_slice(&1u32.to_be_bytes());
-        bad.extend_from_slice(&200u16.to_be_bytes());
-        bad.extend_from_slice(&3u16.to_be_bytes());
-        bad.extend_from_slice(&2u16.to_be_bytes());
-        bad.extend_from_slice(&0u16.to_be_bytes());
-        assert_eq!(
-            decode_response(&bad).unwrap_err(),
-            RpcCodecError::BadFragmentIndex { index: 3, total: 2 }
         );
     }
 
@@ -603,14 +394,11 @@ mod tests {
     }
 
     #[test]
-    fn frame_budgets_account_for_fixed_overhead() {
-        // Request overhead with an empty target is 10 bytes (1 method + 4 id +
-        // 1 target_len + 2 path_len + 2 body_len); a response fragment's is 12
-        // (4 id + 2 status + 2 index + 2 total + 2 frag_len).
+    fn request_budget_accounts_for_fixed_overhead() {
+        // Request overhead with an empty target is 10 bytes: 1 method + 4 id +
+        // 1 target_len + 2 path_len + 2 body_len.
         assert_eq!(RPC_REQUEST_OVERHEAD_BASE, 10);
-        assert_eq!(MAX_RESPONSE_FRAGMENT, 1200 - 12);
-        // The ceiling must cover the largest endpoint measured on a live drone
-        // (/api/status/full at 29 339 B) with headroom.
-        const { assert!(MAX_RESPONSE_FRAGMENT * MAX_RESPONSE_FRAGMENTS > 29_339) };
+        let enc = encode_request(RpcMethod::Get, 1, &[], &[], &[]).unwrap();
+        assert_eq!(enc.len(), RPC_REQUEST_OVERHEAD_BASE);
     }
 }

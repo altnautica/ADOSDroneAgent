@@ -291,6 +291,11 @@ pub(crate) fn build_stats_value(
         "mcs_index": bitrate.mcs_index,
         "fec_k": bitrate.fec_k,
         "fec_n": bitrate.fec_n,
+        // The adaptive SNR/MCS ladder's configured top rung. Without it the
+        // operator cannot tell a link-limited rung from a policy-limited one:
+        // MCS 3 at 35 dB reads as "the link is bad" unless the panel can also
+        // say "the ladder is capped at 3".
+        "mcs_ladder_cap": bitrate.mcs_ladder_cap,
         // Received-side lock proof, never hardcoded: a transmit-only end has no
         // decode stats of its own, so this is true only when a verified return
         // signal (a control-plane ack or a peer beacon) was heard recently.
@@ -324,18 +329,31 @@ pub(crate) fn build_stats_value(
         // valid-decode rate (0 on a drone-only rig with no rx.key).
         "tx_bytes_per_s": (rates.tx_bytes_per_s * 10.0).round() / 10.0,
         "valid_rx_packets_per_s": (rates.valid_rx_packets_per_s * 100.0).round() / 100.0,
-        // Adaptive bitrate / FEC controller intent. `recommended_bitrate_kbps`
-        // is the controller's chosen rung bitrate; the actual encoder restart is
-        // a cross-process no-op here (the encoder lives in another service), so
-        // the panel shows controller intent regardless. `link_preset` is the
-        // operator-facing preset that seeded the MCS/FEC trio at bring-up.
+        // Adaptive bitrate / FEC / MCS controller. `recommended_bitrate_kbps` is
+        // the rung the controller chose; `encoder_bitrate_kbps` is what
+        // `ados-video` reports actually running (the rung applied as a ceiling
+        // under the hero/thumbnail profile, i.e. `min(profile, ceiling)`), so the
+        // panel can tell intent from reality. `null` there means `ados-video`
+        // published no state — an unreachable encoder, NOT an unclamped one.
+        // `link_preset` is the operator-facing preset that seeded the MCS/FEC
+        // trio at bring-up.
         "link_preset": bitrate.link_preset,
         "adaptive_bitrate_enabled": bitrate.adaptive_bitrate_enabled,
         "recommended_bitrate_kbps": bitrate.recommended_bitrate_kbps,
+        "encoder_bitrate_kbps": bitrate.encoder_bitrate_kbps,
         // The rung the controller currently recommends (the GCS shows the ladder
         // position alongside the live FEC so an adaptive step is legible).
         "recommended_tier_idx": bitrate.tier_idx,
         "recommended_tier_name": bitrate.tier_name,
+        // How the live FEC/MCS retunes were applied. `tx_cmd_applies` went over
+        // the running transmitter's wfb-ng 24.08 management socket (no video
+        // gap); `respawn_applies` fell back to kill-and-respawn (a 1-2 s gap).
+        // A rig where the respawn counter grows is a rig where `-C` never
+        // reached wfb_tx — the single most useful signal for diagnosing "why
+        // does video stutter on every tier change".
+        "tx_cmd_applies": bitrate.tx_cmd_applies,
+        "respawn_applies": bitrate.respawn_applies,
+        "tx_cmd_failures": bitrate.tx_cmd_failures,
         // Link-quality block (from the stats wfb_rx). Signal-strength fields are
         // null until a return signal is actually decoded (see `measured` above)
         // so the no-measurement sentinel never masquerades as a real reading;

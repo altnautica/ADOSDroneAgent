@@ -23,13 +23,23 @@ fn default_bat_iface() -> String {
     "bat0".to_string()
 }
 pub(crate) fn default_atlas_listen_port() -> u16 {
-    // The loopback port the WFB aux receiver re-emits decoded application frames
-    // on (`wfb_rx -p 3 -u <aux_rx_port>`, `video.wfb.aux_rx_port`, default 5603).
-    // The drone radiates Atlas events on the aux tx ingress (5602); the GS reads
-    // the decoded side here. Kept distinct from the tx ingress so the relay can
-    // never feed back into the transmit path.
-    5603
+    // The loopback port the ground station's WFB aux receiver re-emits decoded
+    // application frames on. That egress is per fleet slot now
+    // (`wfb_rx -p 2 -u <AUX_RX_PORT_BASE + slot>`), so the default follows the
+    // FIRST drone slot rather than the retired fixed 5603. A ground station
+    // hearing a drone on another slot sets `ground_station.atlas.listen_port` to
+    // that slot's port.
+    //
+    // Kept pinned to the same helper the receive chain spawns with
+    // (`wfb_rx::aux_rx_port`) by `the_atlas_relay_listens_where_the_aux_lane_
+    // decodes` below: when these two diverge the lane goes silent with no error
+    // anywhere — frames arrive over the air, decode fine, and land on a port
+    // nobody is bound to. That exact bug shipped once.
+    crate::wfb_rx::aux_rx_port(FIRST_DRONE_SLOT)
 }
+
+/// The lowest drone slot a fleet issues. Slot 0 is the ground station itself.
+pub(crate) const FIRST_DRONE_SLOT: u8 = ados_radio::config::SLOT_GROUND + 1;
 
 /// Relay-role config (`ground_station.wfb_relay`).
 #[derive(Debug, Clone, Deserialize)]
@@ -93,10 +103,11 @@ impl Default for MeshConfig {
 /// node has `enabled` set AND a configured `compute_base_url`. A non-Atlas ground
 /// station therefore reads the same defaults and behaves byte-identically.
 /// `listen_port` is the loopback port the WFB aux receiver delivers decoded Atlas
-/// datagrams to (`video.wfb.aux_rx_port`, default 5603); `compute_base_url` is the
-/// compute node's `atlas_event_router` base URL each decoded event is re-POSTed to
-/// (v1 is config-provided — mDNS auto-resolve of the `workstation` profile is a
-/// later wave).
+/// datagrams to. That egress is per fleet slot (`AUX_RX_PORT_BASE + slot`), so it
+/// defaults to the first drone slot's port and is overridden when the drone of
+/// interest holds another slot. `compute_base_url` is the compute node's
+/// `atlas_event_router` base URL each decoded event is re-POSTed to; when unset
+/// the relay auto-resolves the `workstation` profile over mDNS.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AtlasRelayConfig {
     #[serde(default)]
@@ -181,7 +192,10 @@ mod tests {
         assert_eq!(c.mesh.bat_iface, "bat0");
         // Atlas relay is inert by default.
         assert!(!c.atlas.enabled);
-        assert_eq!(c.atlas.listen_port, 5603);
+        assert_eq!(
+            c.atlas.listen_port,
+            crate::wfb_rx::aux_rx_port(FIRST_DRONE_SLOT)
+        );
         assert!(c.atlas.compute_base_url.is_none());
     }
 
@@ -205,8 +219,35 @@ mod tests {
         std::fs::write(&cfg, "ground_station:\n  atlas:\n    enabled: true\n").unwrap();
         let c = GroundStationConfig::load_from(&cfg);
         assert!(c.atlas.enabled);
-        assert_eq!(c.atlas.listen_port, 5603);
+        assert_eq!(
+            c.atlas.listen_port,
+            crate::wfb_rx::aux_rx_port(FIRST_DRONE_SLOT)
+        );
         assert!(c.atlas.compute_base_url.is_none());
+    }
+
+    #[test]
+    fn the_atlas_relay_listens_where_the_aux_lane_decodes() {
+        // The receive chain spawns `wfb_rx -p 2 -u aux_rx_port(slot)` and the
+        // Atlas relay binds `ground_station.atlas.listen_port`. If those two ever
+        // diverge the lane goes silent with NO error anywhere: frames arrive over
+        // the air, decode fine, and land on a port nobody is bound to. It read
+        // 5604 against a consumer on 5603 once, which nothing caught because the
+        // receiver was never spawned in production. Pin them together so the next
+        // person to move one is forced to move the other.
+        assert_eq!(
+            default_atlas_listen_port(),
+            crate::wfb_rx::aux_rx_port(FIRST_DRONE_SLOT),
+            "the Atlas relay default must equal the first slot's aux egress"
+        );
+        // And the default must land inside the guarded per-slot span, so an
+        // operator aux port can never be handed the same number.
+        assert!(ados_radio::config::is_fleet_rx_port(
+            default_atlas_listen_port()
+        ));
+        // Slot 0 is the ground station and never radiates a downlink, so the
+        // default must not point at it.
+        assert_ne!(FIRST_DRONE_SLOT, ados_radio::config::SLOT_GROUND);
     }
 
     #[test]

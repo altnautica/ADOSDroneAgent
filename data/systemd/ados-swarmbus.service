@@ -1,0 +1,55 @@
+[Unit]
+Description=ADOS Swarm State Bus
+# Reads the flight controller's fused state from the MAVLink router's state
+# socket to fill its own beacon, and injects on the monitor interface the radio
+# manager selects, so it starts after both. Neither is a hard requirement: the
+# bus binds its publish socket regardless and retries the radio, so a node whose
+# radio comes up late is not left needing a manual restart.
+After=ados-mavlink.service ados-wfb.service
+PartOf=ados-supervisor.service
+# Skip cleanly when the binary was not fetched for this profile rather than
+# crash-looping "binary missing"; the installer's health gate is the loud
+# failure for a binary that SHOULD be present.
+ConditionPathExists=/opt/ados/bin/ados-swarmbus
+StartLimitInterval=60s
+StartLimitBurst=5
+
+[Service]
+# Join the shared accounting slice so MemoryCurrent/CPUUsage are observable per
+# unit (the slice sets MemoryAccounting=yes).
+Slice=ados.slice
+Type=simple
+# The native bus is the only implementation; there is no Python fallback. exec
+# the binary when present (failing loudly if it is absent rather than running a
+# stale path); the installer provisions it best-effort. `exec` replaces the shell
+# image so the chosen binary owns the cgroup + restart track.
+ExecStart=/bin/sh -c 'if [ -x /opt/ados/bin/ados-swarmbus ]; then exec /opt/ados/bin/ados-swarmbus; else echo "ados-swarmbus binary missing; reinstall to fetch it" >&2; exit 1; fi'
+Restart=on-failure
+RestartSec=3
+Environment=ADOS_CONFIG=/etc/ados/config.yaml
+EnvironmentFile=-/etc/ados/env
+
+# Raw 802.11 injection and capture on the monitor interface: an AF_PACKET raw
+# socket with a kernel BPF attached. CAP_NET_RAW is the whole privilege
+# requirement, and it is the reason this is not a fully unprivileged unit.
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=yes
+ProtectSystem=strict
+# /run/ados: binds swarm.sock, reads state.sock + the radio's wfb-stats.json.
+# /var/lib/ados: reads the ground station's fleet.json for the slot -> device-id
+# join. /etc: reads the fleet key (/etc/drone.key) and the agent config.
+ReadWritePaths=/run/ados
+ReadOnlyPaths=/var/lib/ados /etc/ados /etc/drone.key
+
+# One 20-byte beacon at 2 Hz and a table capped at 64 entries: the working set is
+# kilobytes, so the ceiling exists to catch a leak, not to bound real use.
+MemoryMax=32M
+CPUQuota=10%
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-swarmbus
+
+[Install]
+WantedBy=ados-supervisor.service

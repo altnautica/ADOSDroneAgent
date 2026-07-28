@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["ados-protocol", "ados-config", "ados-capabilities-codegen", "ados-tui", "ados-supervisor", "ados-mavlink-router", "ados-radio", "ados-crsf", "ados-config-tunnel", "ados-video", "ados-plugin-host", "ados-sdk", "ados-cloud", "ados-groundlink", "ados-net", "ados-hid", "ados-gpio", "ados-display", "ados-vision", "ados-hal-probe", "ados-macpin", "ados-installer", "ados-logd", "ados-control", "ados-compute", "ados-atlas", "ados-atlas-transport", "ados-offload"]
+members = ["ados-protocol", "ados-config", "ados-capabilities-codegen", "ados-tui", "ados-supervisor", "ados-mavlink-router", "ados-radio", "ados-crsf", "ados-config-tunnel", "ados-video", "ados-plugin-host", "ados-sdk", "ados-cloud", "ados-groundlink", "ados-net", "ados-hid", "ados-gpio", "ados-display", "ados-vision", "ados-hal-probe", "ados-macpin", "ados-installer", "ados-logd", "ados-control", "ados-compute", "ados-atlas", "ados-atlas-transport", "ados-offload", "ados-swarmbus", "ados-swarm-control"]
 
 [workspace.package]
 version = "0.1.0"
@@ -31,6 +31,10 @@ hex = "0.4"
 thiserror = "2"
 getrandom = "0.2"
 toml = "0.8"
+# Non-poisoning sync primitives. `lock()` yields the guard directly, so a call
+# site reads as locking rather than as error handling; already in the tree
+# transitively. Async coordination stays on `tokio::sync`.
+parking_lot = "0.12"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "sync", "time", "process", "signal", "fs"] }
 # HTTP-only (no TLS): the REST client targets the agent on localhost:8080.
 ureq = { version = "2", default-features = false, features = ["json"] }

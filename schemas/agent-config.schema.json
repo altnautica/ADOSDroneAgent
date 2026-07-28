@@ -311,6 +311,15 @@
           "title": "Source",
           "type": "string"
         },
+        "thumbnail": {
+          "$ref": "#/$defs/CameraThumbnailProfile",
+          "default": {
+            "bitrate_kbps": 50,
+            "fps": 1,
+            "height": 180,
+            "width": 320
+          }
+        },
         "width": {
           "default": 1280,
           "title": "Width",
@@ -510,6 +519,33 @@
         }
       },
       "title": "CameraMatch",
+      "type": "object"
+    },
+    "CameraThumbnailProfile": {
+      "description": "The non-hero encoder profile \u2014 what a drone streams while some OTHER\ndrone holds the operator's attention.\n\nADOS runs a whole fleet on ONE 20 MHz channel, so video is allocated by\nattention: exactly one drone is the \"hero\" and encodes at the full\n``CameraConfig`` settings (1280x720 / 30 fps / 4000 kbps); every other\nregistered drone drops to this profile. Both ride the existing p0 pipeline\nand the existing ``wfb_tx`` \u2014 switching restarts only the encoder, it adds\nno radio port, no second encoder process and no ground-side receiver.\n\nThe measured airtime arithmetic these numbers exist to satisfy (bench:\nch149, 20 MHz, MCS 1, 13.0 Mbps PHY):\n\n* 1 hero  = 4.165 Mbps payload x 1.5 FEC = 6.25 Mbps on air = **48%**\n* 1 control-only drone (telemetry + aux) = **2.4%**\n* 1 thumbnail's video = **~0.4%**\n\nSo 1 hero + 23 thumbnails = 48 + 23*0.4 + 23*2.4 = **~112% at MCS 1** \u2014\nstill over the channel. Committed fleet size at MCS 1 alone is **8**\n(1 hero + 7 thumbnails = ~68%). Reaching 24 requires the adaptive-MCS\nladder: at MCS 3 (26.0 Mbps) the same 24-drone fleet lands at ~56%.\nDo not read \"24 drones\" as a supported MCS-1 configuration.\n\nMirrors the Rust ``CameraProfile`` in ``ados-video/src/config.rs``.",
+      "properties": {
+        "bitrate_kbps": {
+          "default": 50,
+          "title": "Bitrate Kbps",
+          "type": "integer"
+        },
+        "fps": {
+          "default": 1,
+          "title": "Fps",
+          "type": "integer"
+        },
+        "height": {
+          "default": 180,
+          "title": "Height",
+          "type": "integer"
+        },
+        "width": {
+          "default": 320,
+          "title": "Width",
+          "type": "integer"
+        }
+      },
+      "title": "CameraThumbnailProfile",
       "type": "object"
     },
     "CellularConfig": {
@@ -966,32 +1002,6 @@
       "title": "LoggingConfig",
       "type": "object"
     },
-    "LoraConfig": {
-      "properties": {
-        "bandwidth": {
-          "default": 125000,
-          "title": "Bandwidth",
-          "type": "integer"
-        },
-        "frequency": {
-          "default": 915000000,
-          "title": "Frequency",
-          "type": "integer"
-        },
-        "interface": {
-          "default": "",
-          "title": "Interface",
-          "type": "string"
-        },
-        "spreading_factor": {
-          "default": 7,
-          "title": "Spreading Factor",
-          "type": "integer"
-        }
-      },
-      "title": "LoraConfig",
-      "type": "object"
-    },
     "MacPinConfig": {
       "properties": {
         "apply_live_allowed": {
@@ -1034,6 +1044,11 @@
           },
           "title": "Endpoints",
           "type": "array"
+        },
+        "legacy_stream_request": {
+          "default": false,
+          "title": "Legacy Stream Request",
+          "type": "boolean"
         },
         "serial_port": {
           "default": "",
@@ -1594,6 +1609,13 @@
       "properties": {
         "default_formation": {
           "default": "line",
+          "enum": [
+            "line",
+            "column",
+            "wedge",
+            "grid",
+            "circle"
+          ],
           "title": "Default Formation",
           "type": "string"
         },
@@ -1607,19 +1629,45 @@
           "title": "Enabled",
           "type": "boolean"
         },
-        "lora": {
-          "$ref": "#/$defs/LoraConfig",
+        "flock": {
+          "$ref": "#/$defs/SwarmFlockConfig",
           "default": {
-            "bandwidth": 125000,
-            "frequency": 915000000,
-            "interface": "",
-            "spreading_factor": 7
+            "alignment": 60,
+            "cohesion": 40,
+            "neighbors": 7,
+            "radius_m": 30,
+            "separation_gain": 150
           }
+        },
+        "mode": {
+          "default": "hold",
+          "enum": [
+            "hold",
+            "flocking",
+            "formation"
+          ],
+          "title": "Mode",
+          "type": "string"
         },
         "role": {
           "default": "auto",
           "title": "Role",
           "type": "string"
+        },
+        "separation": {
+          "$ref": "#/$defs/SwarmSeparationConfig",
+          "default": {
+            "hard_m": 4,
+            "radius_m": 8
+          }
+        },
+        "tasks": {
+          "$ref": "#/$defs/SwarmTasksConfig",
+          "default": {
+            "assigned_task_id": null,
+            "bundle_position": null,
+            "enabled": false
+          }
         },
         "wifi_direct": {
           "$ref": "#/$defs/WifiDirectConfig",
@@ -1630,6 +1678,91 @@
         }
       },
       "title": "SwarmConfig",
+      "type": "object"
+    },
+    "SwarmFlockConfig": {
+      "description": "Olfati-Saber alpha-lattice flocking weights.\n\nThe three gains are integer PERCENTAGES of the underlying float\nweight (``cohesion = 40`` means 0.40): the GCS config primitives\ncarry no float field, so expressing them as bounded integers keeps\none validation path on both sides. A consumer divides by 100.",
+      "properties": {
+        "alignment": {
+          "default": 60,
+          "title": "Alignment",
+          "type": "integer"
+        },
+        "cohesion": {
+          "default": 40,
+          "title": "Cohesion",
+          "type": "integer"
+        },
+        "neighbors": {
+          "default": 7,
+          "title": "Neighbors",
+          "type": "integer"
+        },
+        "radius_m": {
+          "default": 30,
+          "title": "Radius M",
+          "type": "integer"
+        },
+        "separation_gain": {
+          "default": 150,
+          "title": "Separation Gain",
+          "type": "integer"
+        }
+      },
+      "title": "SwarmFlockConfig",
+      "type": "object"
+    },
+    "SwarmSeparationConfig": {
+      "description": "Collision-avoidance layer \u2014 the one swarm layer that is a safety\nfunction rather than a behaviour.\n\n``radius_m`` is where repulsion starts; ``hard_m`` is where the\nhorizontal solution is abandoned for a deterministic climb-and-hold.\n``hard_m`` must stay below ``radius_m`` or repulsion never engages\nbefore the hard floor does.",
+      "properties": {
+        "hard_m": {
+          "default": 4,
+          "title": "Hard M",
+          "type": "integer"
+        },
+        "radius_m": {
+          "default": 8,
+          "title": "Radius M",
+          "type": "integer"
+        }
+      },
+      "title": "SwarmSeparationConfig",
+      "type": "object"
+    },
+    "SwarmTasksConfig": {
+      "description": "Consensus-based task allocation (CBBA) participation.\n\n``enabled`` is the operator's switch. The two assignment fields are\nAGENT-WRITTEN status mirrors persisted into the config tree (the\nsame pattern ``video.wfb.paired_with_device_id`` uses), so a surface\nreading the config can show the current assignment without a second\ntransport. Both stay ``None`` until a swarm runtime writes them \u2014\nnever a fabricated default.",
+      "properties": {
+        "assigned_task_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Assigned Task Id"
+        },
+        "bundle_position": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bundle Position"
+        },
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        }
+      },
+      "title": "SwarmTasksConfig",
       "type": "object"
     },
     "TlsConfig": {
@@ -1778,6 +1911,12 @@
             "fps": 30,
             "height": 720,
             "source": "csi",
+            "thumbnail": {
+              "bitrate_kbps": 50,
+              "fps": 1,
+              "height": 180,
+              "width": 320
+            },
             "width": 1280
           }
         },
@@ -1850,6 +1989,7 @@
           "$ref": "#/$defs/WfbConfig",
           "default": {
             "adaptive_bitrate_enabled": true,
+            "adaptive_mcs_max": 3,
             "auto_channel_enabled": false,
             "auto_hop_enabled": true,
             "auto_pair_enabled": true,
@@ -1857,6 +1997,8 @@
             "channel": 149,
             "fec_k": 8,
             "fec_n": 12,
+            "fleet_id": 1,
+            "fleet_slot": 0,
             "hop_loss_threshold_percent": 10.0,
             "hop_period_seconds": 60,
             "hop_rssi_threshold_dbm": -75.0,
@@ -1924,6 +2066,11 @@
           "title": "Adaptive Bitrate Enabled",
           "type": "boolean"
         },
+        "adaptive_mcs_max": {
+          "default": 3,
+          "title": "Adaptive Mcs Max",
+          "type": "integer"
+        },
         "auto_channel_enabled": {
           "default": false,
           "title": "Auto Channel Enabled",
@@ -1962,6 +2109,16 @@
         "fec_n": {
           "default": 12,
           "title": "Fec N",
+          "type": "integer"
+        },
+        "fleet_id": {
+          "default": 1,
+          "title": "Fleet Id",
+          "type": "integer"
+        },
+        "fleet_slot": {
+          "default": 0,
+          "title": "Fleet Slot",
           "type": "integer"
         },
         "hop_loss_threshold_percent": {
@@ -2286,6 +2443,7 @@
             "type": "websocket"
           }
         ],
+        "legacy_stream_request": false,
         "serial_port": "",
         "source": "auto",
         "system_id": 1,
@@ -2449,13 +2607,24 @@
         "default_formation": "line",
         "default_spacing": 10,
         "enabled": false,
-        "lora": {
-          "bandwidth": 125000,
-          "frequency": 915000000,
-          "interface": "",
-          "spreading_factor": 7
+        "flock": {
+          "alignment": 60,
+          "cohesion": 40,
+          "neighbors": 7,
+          "radius_m": 30,
+          "separation_gain": 150
         },
+        "mode": "hold",
         "role": "auto",
+        "separation": {
+          "hard_m": 4,
+          "radius_m": 8
+        },
+        "tasks": {
+          "assigned_task_id": null,
+          "bundle_position": null,
+          "enabled": false
+        },
         "wifi_direct": {
           "enabled": false,
           "interface": ""
@@ -2476,6 +2645,12 @@
           "fps": 30,
           "height": 720,
           "source": "csi",
+          "thumbnail": {
+            "bitrate_kbps": 50,
+            "fps": 1,
+            "height": 180,
+            "width": 320
+          },
           "width": 1280
         },
         "cameras": [],
@@ -2508,6 +2683,7 @@
         "use_gst_air_pipeline": false,
         "wfb": {
           "adaptive_bitrate_enabled": true,
+          "adaptive_mcs_max": 3,
           "auto_channel_enabled": false,
           "auto_hop_enabled": true,
           "auto_pair_enabled": true,
@@ -2515,6 +2691,8 @@
           "channel": 149,
           "fec_k": 8,
           "fec_n": 12,
+          "fleet_id": 1,
+          "fleet_slot": 0,
           "hop_loss_threshold_percent": 10.0,
           "hop_period_seconds": 60,
           "hop_rssi_threshold_dbm": -75.0,

@@ -38,14 +38,13 @@ const STREAM_RATES: &[(u32, f32)] = &[
     (65, 4.0),  // RC_CHANNELS
 ];
 
-/// Legacy data-stream groups requested via `REQUEST_DATA_STREAM`, alongside the
-/// modern `SET_MESSAGE_INTERVAL` above: `(MAV_DATA_STREAM id, Hz)`. Some
-/// firmwares (iNav, older ArduPilot, Betaflight's MAVLink telemetry) honor only
-/// this legacy mechanism and ignore `SET_MESSAGE_INTERVAL`; ArduPilot 4.1+ does
-/// the reverse. The two requests are therefore mutually exclusive per firmware
-/// and never double-rate the same message. `MAV_DATA_STREAM_ALL` (id 0) is
-/// deliberately omitted: it would overlap the specific groups and double-rate on
-/// any firmware that honored both.
+/// Legacy data-stream groups requested via `REQUEST_DATA_STREAM`: `(MAV_DATA_STREAM
+/// id, Hz)`. Sent only when `mavlink.legacy_stream_request` is on; see
+/// [`FcConnection::tick_streams`]. Some firmwares (iNav, older ArduPilot,
+/// Betaflight's MAVLink telemetry) honor only this legacy mechanism and ignore
+/// `SET_MESSAGE_INTERVAL`, which is what the flag is for.
+/// `MAV_DATA_STREAM_ALL` (id 0) is deliberately omitted: it would overlap the
+/// specific groups and double-rate on any firmware that honored both.
 const STREAM_GROUPS: &[(u8, u16)] = &[
     (2, 2),   // EXTENDED_STATUS — SYS_STATUS, GPS_RAW_INT
     (6, 5),   // POSITION — GLOBAL_POSITION_INT
@@ -147,7 +146,7 @@ impl FcConnection {
         }
     }
 
-    async fn send_msg(&self, msg: &MavMessage) -> bool {
+    pub(super) async fn send_msg(&self, msg: &MavMessage) -> bool {
         match mavlink::serialize_v2(self.our_header(), msg) {
             Ok(bytes) => {
                 self.send_bytes(&bytes).await;
@@ -215,19 +214,32 @@ impl FcConnection {
             });
             self.send_msg(&cmd).await;
         }
-        // Belt-and-suspenders for firmwares that honor only the legacy
-        // REQUEST_DATA_STREAM mechanism (iNav / older ArduPilot / Betaflight).
-        // Harmless on ArduPilot 4.1+, which ignores it in favor of the interval
-        // requests above; see STREAM_GROUPS.
-        for &(stream_id, rate_hz) in STREAM_GROUPS {
-            let req = MavMessage::REQUEST_DATA_STREAM(REQUEST_DATA_STREAM_DATA {
-                target_system: target,
-                target_component: 1,
-                req_stream_id: stream_id,
-                req_message_rate: rate_hz,
-                start_stop: 1,
-            });
-            self.send_msg(&req).await;
+        // The legacy `REQUEST_DATA_STREAM` groups, off by default.
+        //
+        // This used to be sent unconditionally, on the assumption that a firmware
+        // honors either the interval requests above or the legacy groups but never
+        // both. Measured MAVLink ingest on ArduPilot was 66.5 frames/s against the
+        // 29 Hz the interval requests sum to — consistent with ArduPilot honoring
+        // BOTH paths and streaming roughly twice the telemetry that was asked for,
+        // on a radio link whose airtime is the binding constraint for a fleet.
+        // Default-off therefore halves the request traffic and the ingest it
+        // provokes.
+        //
+        // The flag, not a deletion, because the legacy path is the ONLY one iNav /
+        // Betaflight / pre-4.1 ArduPilot honor: if a firmware turns out to answer
+        // only `REQUEST_DATA_STREAM`, its ingest collapses instead of halving, and
+        // setting `mavlink.legacy_stream_request: true` is the rollback.
+        if self.cfg.legacy_stream_request {
+            for &(stream_id, rate_hz) in STREAM_GROUPS {
+                let req = MavMessage::REQUEST_DATA_STREAM(REQUEST_DATA_STREAM_DATA {
+                    target_system: target,
+                    target_component: 1,
+                    req_stream_id: stream_id,
+                    req_message_rate: rate_hz,
+                    start_stop: 1,
+                });
+                self.send_msg(&req).await;
+            }
         }
         *self.last_stream_req.lock().await = Some(Instant::now());
     }
@@ -338,6 +350,93 @@ mod tests {
         let state = std::sync::Arc::new(Mutex::new(VehicleState::default()));
         let params = std::sync::Arc::new(Mutex::new(ParamCache::new("/tmp/ados-test-params.json")));
         FcConnection::new(MavlinkConfig::default(), state, params)
+    }
+
+    /// A write half that forwards everything written to it down a channel, so a
+    /// send cadence can be asserted on the frames it actually put on the wire.
+    /// A channel rather than a shared buffer keeps the sync `poll_write` free of
+    /// any lock.
+    struct CapturingWriter(std::sync::mpsc::Sender<Vec<u8>>);
+
+    impl AsyncWrite for CapturingWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            data: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            let _ = self.0.send(data.to_vec());
+            Poll::Ready(Ok(data.len()))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// Run one `tick_streams` on an open link and return the MAVLink message ids
+    /// it wrote, in order.
+    async fn stream_request_message_ids(legacy_stream_request: bool) -> Vec<u32> {
+        let state = std::sync::Arc::new(Mutex::new(VehicleState::default()));
+        let params = std::sync::Arc::new(Mutex::new(ParamCache::new("/tmp/ados-test-params.json")));
+        let cfg = MavlinkConfig {
+            legacy_stream_request,
+            ..MavlinkConfig::default()
+        };
+        let conn = FcConnection::new(cfg, state, params);
+        let (tx, rx) = std::sync::mpsc::channel();
+        conn.connected.store(true, Ordering::Relaxed);
+        *conn.writer.lock().await = Some(Box::pin(CapturingWriter(tx)));
+
+        conn.tick_streams().await;
+
+        // Drop the writer so the channel closes and the drain terminates.
+        *conn.writer.lock().await = None;
+        let mut buf: Vec<u8> = rx.into_iter().flatten().collect();
+        crate::connection::framing::extract_frames(&mut buf)
+            .iter()
+            .filter_map(|frame| crate::aux_tee::mavlink_message_id(frame))
+            .collect()
+    }
+
+    /// `COMMAND_LONG` (the `SET_MESSAGE_INTERVAL` carrier) and the legacy
+    /// `REQUEST_DATA_STREAM`.
+    const COMMAND_LONG_ID: u32 = 76;
+    const REQUEST_DATA_STREAM_ID: u32 = 66;
+
+    #[tokio::test]
+    async fn stream_refresh_omits_the_legacy_request_by_default() {
+        let ids = stream_request_message_ids(false).await;
+        assert_eq!(
+            ids.iter().filter(|&&id| id == COMMAND_LONG_ID).count(),
+            STREAM_RATES.len(),
+            "every per-message interval request must still be sent"
+        );
+        assert!(
+            !ids.contains(&REQUEST_DATA_STREAM_ID),
+            "the legacy REQUEST_DATA_STREAM loop must be off by default: measured \
+             ingest of 66.5 f/s against the 29 Hz asked for showed ArduPilot honoring \
+             both paths, so sending both doubles the telemetry on a shared radio"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_refresh_sends_the_legacy_request_when_the_flag_is_on() {
+        let ids = stream_request_message_ids(true).await;
+        assert_eq!(
+            ids.iter().filter(|&&id| id == COMMAND_LONG_ID).count(),
+            STREAM_RATES.len(),
+            "the interval requests are unaffected by the flag"
+        );
+        assert_eq!(
+            ids.iter()
+                .filter(|&&id| id == REQUEST_DATA_STREAM_ID)
+                .count(),
+            STREAM_GROUPS.len(),
+            "the rollback for a firmware that honors only REQUEST_DATA_STREAM must \
+             send every legacy group"
+        );
     }
 
     #[tokio::test]

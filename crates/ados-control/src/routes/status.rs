@@ -70,12 +70,37 @@ const IPC_ONLY_KEYS: [&str; 12] = [
 /// This is an ALLOWLIST on purpose. A key added to the producer's snapshot and
 /// not listed here stays gated, which is the safe direction: a new vehicle
 /// field must never leak past the gate, while a new counter merely stays
-/// invisible until someone classifies it. `params` is deliberately absent — it
-/// carries values the flight controller reported, so it is vehicle-sourced, and
-/// `GET /api/params` already serves it ungated.
+/// invisible until someone classifies it.
+///
+/// `param_generation` is here because it is the agent's own count of how many
+/// times its parameter cache changed — the signal a consumer compares against its
+/// last-seen value to decide whether to refetch `GET /api/params`. Withholding it
+/// while the FC is down would strand every consumer on a stale map. The parameter
+/// VALUES are deliberately not on the snapshot at all any more (they were ~24 KB
+/// republished at 10 Hz); `GET /api/params` serves them ungated from the router's
+/// on-disk cache.
+///
+/// `swarm` is here for the same reason and is the strongest case of it: the swarm
+/// bus's counters (`beacons_tx` / `beacons_rx` / `beacons_bad_magic` /
+/// `beacons_bad_tag` / `beacons_stale_dropped` / `neighbors_now`) describe the
+/// agent's own radio plane, and the node most likely to be diagnosed with them is a
+/// ground station — which never decodes a HEARTBEAT, so the gate would blank them
+/// permanently on exactly the node that needs them. The live table itself is served
+/// from `/run/ados/swarm.sock` via `GET /api/swarm/neighbors` rather than from this
+/// snapshot; the classification exists so folding the counters in alongside the aux
+/// counters is a producer-side change with nothing left to remember here.
+///
+/// `swarm_precedence` and `swarm_emergency` are here for a sharper version of the
+/// same reason. They are what the onboard-autonomy layer says about ITSELF — which
+/// control layer is actually flying the aircraft, and whether its separation layer
+/// has taken over — not readings off the vehicle. Gating them would blank the
+/// operator's only truthful view of mode precedence on a ground station, and
+/// mode-transition ambiguity is precisely the failure that field exists to prevent:
+/// a blank is indistinguishable from `hold`, which would read as "nothing has
+/// intervened" at exactly the moment something has.
 ///
 /// Disjoint from [`IPC_ONLY_KEYS`] by construction; a test pins that.
-const AGENT_DIAGNOSTIC_KEYS: [&str; 12] = [
+const AGENT_DIAGNOSTIC_KEYS: [&str; 17] = [
     "aux_mavlink_tee",
     "aux_rpc",
     "aux_uplink_command_gated",
@@ -85,9 +110,14 @@ const AGENT_DIAGNOSTIC_KEYS: [&str; 12] = [
     "mavlink_frame_ingest",
     "param_cached_count",
     "param_expected_count",
+    "param_generation",
     "param_priming",
     "param_sweep_send_failed",
     "param_sweep_timed_out",
+    "swarm",
+    "swarm_emergency",
+    "swarm_precedence",
+    "video_profile",
 ];
 
 /// External binaries the video pipeline may use, checked by presence on `PATH`.
@@ -795,6 +825,8 @@ mod tests {
             "battery": {"voltage": 0.0},
             "attitude": {"roll": 0.0, "pitch": 0.0, "yaw": 0.0},
             "params": {"SYSID_THISMAV": 1.0},
+            "param_generation": 12,
+            "video_profile": "thumbnail",
             "transport_open": true,
             "mavlink_alive": false,
             "fc_link_hint": "no_heartbeat",
@@ -828,6 +860,18 @@ mod tests {
             json!({"published": 900}),
             "a ground station never decodes a HEARTBEAT, so this is the only \
              state in which its ingest counters are ever readable"
+        );
+        // The parameter-cache change counter must survive the gate: it is the
+        // agent's own bookkeeping, and withholding it would strand a consumer on a
+        // stale parameter map for as long as the FC stayed down. A stray `params`
+        // blob on the snapshot stays gated (asserted above) — the values are
+        // vehicle-sourced and served by `GET /api/params`.
+        assert_eq!(obj["param_generation"], json!(12));
+        assert_eq!(
+            obj["video_profile"],
+            json!("thumbnail"),
+            "the attention profile is an agent-owned RF allocation, true whether or \
+             not an FC is attached"
         );
     }
 

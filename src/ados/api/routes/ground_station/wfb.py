@@ -8,6 +8,7 @@ Covers:
 
 from __future__ import annotations
 
+import base64
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -17,6 +18,7 @@ from ados.api.routes.ground_station._common import (
     PairRequest,
     WfbUpdate,
 )
+from ados.core.paths import WFB_RX_KEY_PATH
 
 router = APIRouter(prefix="/v1/ground-station", tags=["ground-station"])
 
@@ -86,8 +88,6 @@ async def post_wfb_pair(req: PairRequest) -> dict[str, Any]:
     For the local-bind protocol, callers should hit
     `POST /api/wfb/pair/local-bind` instead.
     """
-    import base64
-
     _gs._require_ground_profile()
 
     if req.pair_key and not req.blob_b64:
@@ -113,29 +113,40 @@ async def post_wfb_pair(req: PairRequest) -> dict[str, Any]:
     pm = _gs._pair_manager()
 
     try:
-        current = await pm.status("gs")
-    except Exception:
-        current = {"paired": False}
-
-    if current.get("paired"):
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "code": "E_ALREADY_PAIRED",
-                    "message": "unpair before pairing a new drone",
-                    "paired_with_device_id": current.get("paired_with_device_id"),
-                }
-            },
-        )
-
-    try:
         blob = base64.b64decode(req.blob_b64, validate=True)
     except (ValueError, TypeError) as exc:
         raise HTTPException(
             status_code=400,
             detail={"error": {"code": "E_BLOB_BASE64", "message": str(exc)}},
         ) from exc
+
+    # Fleet gate. A fleet of up to 24 drones shares ONE keypair -- the wfb-ng
+    # channel_id separates the drones, not the key -- so a second drone
+    # presenting the same blob is a normal fleet join, not a conflict. Only a
+    # DIFFERENT key is refused: installing it would deafen every drone already
+    # paired to this ground station.
+    #
+    # Slot issuance is NOT done here. This handler is shadowed by the native
+    # Rust route (`ados-control`'s `post_wfb_pair`), which owns the FleetRegistry
+    # at /var/lib/ados/fleet.json and returns the assigned `fleet_slot`. A second
+    # allocator in this path would hand out colliding slots.
+    try:
+        installed = WFB_RX_KEY_PATH.read_bytes()
+    except OSError:
+        installed = b""
+    if installed and installed != blob:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": {
+                    "code": "E_FLEET_KEY_MISMATCH",
+                    "message": (
+                        "this ground station already holds a different fleet "
+                        "key; unpair before pairing a different fleet"
+                    ),
+                }
+            },
+        )
 
     try:
         return await pm.apply_keypair(blob, "gs", req.drone_device_id)

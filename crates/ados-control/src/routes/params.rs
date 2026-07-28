@@ -1,15 +1,25 @@
 //! Flight-controller parameter routes.
 //!
-//! `GET /api/params` is the full cached FC parameter list, served from the
-//! vehicle-state IPC snapshot the MAVLink router publishes on
-//! `/run/ados/state.sock`. The native front sits in front of the standalone API
-//! process, which (like that process) holds no in-process parameter cache or
-//! vehicle-state object — so the only production-reachable source is the IPC
-//! snapshot. The router writes a `params` blob (a `{name: value}` object), the
-//! cached/expected counts (`param_cached_count` / `param_expected_count`), and
-//! the three param-sweep flags (`param_priming` / `param_sweep_timed_out` /
-//! `param_sweep_send_failed`) into that snapshot; this route reads them straight
-//! back out and reshapes them into the body the Telemetry page expects.
+//! `GET /api/params` is the full cached FC parameter list. The parameter MAP comes
+//! from the MAVLink router's on-disk cache ([`crate::param_store`]); the
+//! sweep-progress envelope around it comes from the vehicle-state IPC snapshot the
+//! router publishes on `/run/ados/state.sock`.
+//!
+//! The map used to ride in that snapshot too, as a `params` blob republished on
+//! every 100 ms state publish with no delta and no size cap — ~24 KB against
+//! ArduPilot's ~700 parameters, which alone made a relayed `/api/telemetry` need
+//! ~21 aux-lane fragments and deliver 85% of the time. The snapshot now carries
+//! only a `param_generation` counter; the map is read from the file the router
+//! already persists atomically, and a consumer refetches this route once when the
+//! counter moves. The native front sits in front of the standalone API process,
+//! which holds no in-process parameter cache or vehicle-state object, so that file
+//! is the only production-reachable source.
+//!
+//! The counts and flags stay on the snapshot, because they are live link state
+//! rather than cache contents: the router writes the cached/expected counts
+//! (`param_cached_count` / `param_expected_count`) and the three param-sweep flags
+//! (`param_priming` / `param_sweep_timed_out` / `param_sweep_send_failed`) there,
+//! and this route reads them straight back out.
 //!
 //! The body carries a `priming` flag and a `progress` block so the dashboard can
 //! render an in-flight progress bar between the `PARAM_REQUEST_LIST` sweep firing
@@ -19,9 +29,9 @@
 //! raised at the link layer. The dashboard reads these to swap the spinner for an
 //! actionable empty state instead of looping forever.
 //!
-//! With no router running (an absent snapshot), the route returns the same empty
-//! shape the FastAPI route returns when its own snapshot source is empty:
-//! `params:{}`, the counts zero, the flags false, and a `progress` of
+//! With no router running (an absent snapshot and no cache file), the route
+//! returns the same empty shape the FastAPI route returns when its own source is
+//! empty: `params:{}`, the counts zero, the flags false, and a `progress` of
 //! `{got:0, expected:0}` — a valid, GCS-parseable body, never a 500.
 //!
 //! `GET /api/params/{name}` (a single parameter by name) is a path-param route
@@ -35,43 +45,40 @@ use serde_json::{json, Map, Value};
 use crate::state::AppState;
 
 /// `GET /api/params` → the full cached FC parameter list plus the sweep-progress
-/// envelope, read from the vehicle-state IPC snapshot.
+/// envelope: the map from the router's on-disk cache, the envelope from the
+/// vehicle-state IPC snapshot.
 ///
 /// The body is `{"params": {name: value}, "count": …, "cached": …, "priming": …,
 /// "priming_timeout": …, "priming_send_failed": …, "progress": {"got": …,
 /// "expected": …}}`. `count` is the FC-advertised total when known, else the
 /// cached count; `cached` is how many parameters have landed; `progress.got` is
 /// the cached count and `progress.expected` the advertised total. An absent
-/// snapshot degrades every field to its empty/zero/false default rather than
-/// failing — guaranteed-200, never 500.
+/// snapshot or an absent cache file degrades every field to its empty/zero/false
+/// default rather than failing — guaranteed-200, never 500.
 pub async fn get_all_params(State(state): State<AppState>) -> Json<Value> {
     let snapshot = state.state.snapshot();
-    Json(build_params_body(snapshot.as_ref()))
+    let params = crate::param_store::read_param_blob(&state.params_path);
+    Json(build_params_body(snapshot.as_ref(), params))
 }
 
-/// Build the parameter-list body from a state-IPC snapshot, mirroring the FastAPI
-/// route's IPC-snapshot fallback (the production path on the multi-process
-/// supervisor, where no in-process param cache or vehicle state exists).
+/// Build the parameter-list body from the cached map plus a state-IPC snapshot,
+/// mirroring the FastAPI route's IPC-snapshot fallback (the production path on the
+/// multi-process supervisor, where no in-process param cache or vehicle state
+/// exists).
 ///
-/// * `params` is the snapshot's `params` blob when it is a JSON object, else `{}`
-///   (a non-object / null / absent blob degrades to empty, matching the Python
-///   `isinstance(..., dict)` guard).
-/// * `cached` / `expected` are the `param_cached_count` / `param_expected_count`
-///   integers, each defaulting to `0` when absent, null, non-numeric, or already
-///   zero (the Python `int(ipc.get(k, 0) or 0)` coercion, truncating toward zero).
+/// * `params` is the flattened `{name: value}` map [`crate::param_store`] read off
+///   disk, already degraded to empty for a missing or unreadable cache.
+/// * `cached` / `expected` are the snapshot's `param_cached_count` /
+///   `param_expected_count` integers, each defaulting to `0` when absent, null,
+///   non-numeric, or already zero (the Python `int(ipc.get(k, 0) or 0)` coercion,
+///   truncating toward zero).
 /// * `count` is `expected` when it is non-zero, else `cached` (Python
 ///   `expected or cached`).
 /// * the three priming flags come from the snapshot when it carries
 ///   `param_priming`, else all three are `false` (the Python `_resolve_priming_flags`
 ///   fallback when the snapshot has not yet reported the sweep state).
-fn build_params_body(snapshot: Option<&Value>) -> Value {
+fn build_params_body(snapshot: Option<&Value>, params: Map<String, Value>) -> Value {
     let obj = snapshot.and_then(Value::as_object);
-
-    let params = obj
-        .and_then(|m| m.get("params"))
-        .filter(|v| v.is_object())
-        .cloned()
-        .unwrap_or_else(|| json!({}));
 
     let cached = int_or_zero(obj, "param_cached_count");
     let expected = int_or_zero(obj, "param_expected_count");
@@ -80,7 +87,7 @@ fn build_params_body(snapshot: Option<&Value>) -> Value {
     let (priming, priming_timeout, priming_send_failed) = resolve_priming_flags(obj);
 
     json!({
-        "params": params,
+        "params": Value::Object(params),
         "count": count,
         "cached": cached,
         "priming": priming,
@@ -149,6 +156,67 @@ fn truthy(value: Option<&Value>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::PairingState;
+    use crate::ipc::{LogdQueryClient, MavlinkIpcClient, StateIpcClient};
+    use crate::state::PairingPaths;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    /// The two-parameter cache the golden body is built from.
+    fn two_params() -> Map<String, Value> {
+        json!({ "WPNAV_SPEED": 500.0, "ATC_RAT_RLL_P": 0.135 })
+            .as_object()
+            .cloned()
+            .unwrap()
+    }
+
+    /// Build an `AppState` for a handler test: a disconnected state client (the
+    /// test primes its snapshot directly), the parameter cache pointed at `dir`,
+    /// and inert paths/clients for the rest.
+    fn test_state(dir: &Path) -> AppState {
+        let pairing = Arc::new(PairingState::with_path(dir.join("pairing.json")));
+        let pairing_paths = PairingPaths {
+            config: dir.join("config.yaml"),
+            pairing_json: dir.join("pairing.json"),
+            wfb_key_dir: dir.join("wfb"),
+            bind_state: dir.join("bind-state.json"),
+            profile_conf: dir.join("profile.conf"),
+            mesh_role: dir.join("mesh-role"),
+        };
+        AppState::new(
+            pairing,
+            StateIpcClient::disconnected(),
+            MavlinkIpcClient::new(dir.join("absent-mavlink.sock")),
+            LogdQueryClient::new(dir.join("absent-logd.sock")),
+            dir.join("board.json"),
+            pairing_paths,
+            Arc::new(crate::dashboard_pin::DashboardPin::with_path(
+                dir.join("dashboard-pin.json"),
+            )),
+            Arc::new(crate::mcp::McpTokenStore::with_path(
+                dir.join("mcp-token.json"),
+            )),
+        )
+        .with_params_path(dir.join("params.json"))
+    }
+
+    /// Write a router-shaped parameter cache at the path `test_state` reads.
+    fn write_cache(dir: &Path, entries: &[(&str, f64)]) {
+        let doc: Map<String, Value> = entries
+            .iter()
+            .map(|(name, value)| {
+                (
+                    (*name).to_string(),
+                    json!({ "value": value, "param_type": 9, "last_updated": 1.0 }),
+                )
+            })
+            .collect();
+        std::fs::write(
+            dir.join("params.json"),
+            serde_json::to_vec(&Value::Object(doc)).unwrap(),
+        )
+        .unwrap();
+    }
 
     /// The golden production body for a representative snapshot: a two-parameter
     /// cache mid-sweep, with the FC having advertised 700 total. This is the exact
@@ -164,17 +232,14 @@ mod tests {
             "fc_port": "/dev/ttyACM0",
             "fc_baud": 115200,
             "service_uptime": 42.0,
-            "params": {
-                "WPNAV_SPEED": 500.0,
-                "ATC_RAT_RLL_P": 0.135,
-            },
+            "param_generation": 2,
             "param_cached_count": 2,
             "param_expected_count": 700,
             "param_priming": true,
             "param_sweep_timed_out": false,
             "param_sweep_send_failed": false,
         });
-        let body = build_params_body(Some(&snapshot));
+        let body = build_params_body(Some(&snapshot), two_params());
         let expected = json!({
             "params": {
                 "WPNAV_SPEED": 500.0,
@@ -192,7 +257,7 @@ mod tests {
 
     #[test]
     fn absent_snapshot_is_the_empty_default_shape() {
-        let body = build_params_body(None);
+        let body = build_params_body(None, Map::new());
         let expected = json!({
             "params": {},
             "count": 0,
@@ -210,11 +275,10 @@ mod tests {
         // The FC has not yet advertised a total (expected 0) but parameters have
         // already landed: count must report the cached number, not zero.
         let snapshot = json!({
-            "params": { "A": 1.0 },
             "param_cached_count": 5,
             "param_expected_count": 0,
         });
-        let body = build_params_body(Some(&snapshot));
+        let body = build_params_body(Some(&snapshot), two_params());
         assert_eq!(body["count"], json!(5));
         assert_eq!(body["cached"], json!(5));
         assert_eq!(body["progress"], json!({ "got": 5, "expected": 0 }));
@@ -223,29 +287,11 @@ mod tests {
     #[test]
     fn count_prefers_expected_when_non_zero() {
         let snapshot = json!({
-            "params": {},
             "param_cached_count": 3,
             "param_expected_count": 700,
         });
-        let body = build_params_body(Some(&snapshot));
+        let body = build_params_body(Some(&snapshot), Map::new());
         assert_eq!(body["count"], json!(700));
-    }
-
-    #[test]
-    fn a_non_object_params_blob_degrades_to_empty() {
-        // A null / list / string params blob is not a dict, so it degrades to {}.
-        for blob in [json!(null), json!([1, 2, 3]), json!("nope")] {
-            let snapshot = json!({ "params": blob });
-            let body = build_params_body(Some(&snapshot));
-            assert_eq!(
-                body["params"],
-                json!({}),
-                "blob {blob} should degrade to an empty object"
-            );
-        }
-        // A snapshot with no params key at all also degrades to {}.
-        let body = build_params_body(Some(&json!({ "param_cached_count": 0 })));
-        assert_eq!(body["params"], json!({}));
     }
 
     #[test]
@@ -253,11 +299,10 @@ mod tests {
         // No param_priming key in the snapshot → all three flags read false,
         // even when the *_timed_out / *_send_failed keys happen to be present.
         let snapshot = json!({
-            "params": {},
             "param_sweep_timed_out": true,
             "param_sweep_send_failed": true,
         });
-        let body = build_params_body(Some(&snapshot));
+        let body = build_params_body(Some(&snapshot), Map::new());
         assert_eq!(body["priming"], json!(false));
         assert_eq!(body["priming_timeout"], json!(false));
         assert_eq!(body["priming_send_failed"], json!(false));
@@ -266,12 +311,11 @@ mod tests {
     #[test]
     fn priming_flags_read_from_the_snapshot_when_present() {
         let snapshot = json!({
-            "params": {},
             "param_priming": false,
             "param_sweep_timed_out": true,
             "param_sweep_send_failed": false,
         });
-        let body = build_params_body(Some(&snapshot));
+        let body = build_params_body(Some(&snapshot), Map::new());
         assert_eq!(body["priming"], json!(false));
         assert_eq!(body["priming_timeout"], json!(true));
         assert_eq!(body["priming_send_failed"], json!(false));
@@ -280,11 +324,8 @@ mod tests {
     #[test]
     fn counts_coerce_null_and_missing_to_zero() {
         // A null count, or a missing count, both read as 0 (the Python `or 0`).
-        let snapshot = json!({
-            "params": {},
-            "param_cached_count": Value::Null,
-        });
-        let body = build_params_body(Some(&snapshot));
+        let snapshot = json!({ "param_cached_count": Value::Null });
+        let body = build_params_body(Some(&snapshot), Map::new());
         assert_eq!(body["cached"], json!(0));
         assert_eq!(body["count"], json!(0));
         assert_eq!(body["progress"], json!({ "got": 0, "expected": 0 }));
@@ -306,12 +347,14 @@ mod tests {
         // serde_json::Map is a BTreeMap on this build (no preserve_order feature),
         // so it sorts keys — the body is compared semantically, not by literal key
         // order. What the contract fixes is the *set* of keys present.
-        let body = build_params_body(Some(&json!({
-            "params": {},
-            "param_cached_count": 1,
-            "param_expected_count": 2,
-            "param_priming": true,
-        })));
+        let body = build_params_body(
+            Some(&json!({
+                "param_cached_count": 1,
+                "param_expected_count": 2,
+                "param_priming": true,
+            })),
+            Map::new(),
+        );
         let obj = body.as_object().unwrap();
         for key in [
             "params",
@@ -325,5 +368,63 @@ mod tests {
             assert!(obj.contains_key(key), "body must carry {key}");
         }
         assert_eq!(obj.len(), 7, "body carries exactly the seven envelope keys");
+    }
+
+    // ── the handler, against a real cache file ─────────────────────────────────
+
+    #[tokio::test]
+    async fn the_route_serves_the_on_disk_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        write_cache(
+            dir.path(),
+            &[("WPNAV_SPEED", 500.0), ("ATC_RAT_RLL_P", 0.135)],
+        );
+        // The snapshot carries the counter and the counts, NOT the map.
+        state.state.set_snapshot_for_test(json!({
+            "param_generation": 7,
+            "param_cached_count": 2,
+            "param_expected_count": 700,
+        }));
+
+        let Json(body) = get_all_params(State(state)).await;
+        assert_eq!(body["params"]["WPNAV_SPEED"], json!(500.0));
+        assert_eq!(body["params"]["ATC_RAT_RLL_P"], json!(0.135));
+        assert_eq!(body["cached"], json!(2));
+        assert_eq!(body["count"], json!(700));
+    }
+
+    #[tokio::test]
+    async fn a_missing_cache_file_is_an_empty_map_not_a_failure() {
+        // No file at all: a fresh boot before the router has persisted anything.
+        // The envelope still reports whatever the snapshot knows, and the body is
+        // the same 200 the route always returned for an empty source.
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        state
+            .state
+            .set_snapshot_for_test(json!({ "param_cached_count": 0 }));
+
+        let Json(body) = get_all_params(State(state)).await;
+        assert_eq!(body["params"], json!({}));
+        assert_eq!(body["count"], json!(0));
+        assert_eq!(body["priming"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn the_route_does_not_read_a_params_blob_off_the_snapshot() {
+        // The blob is gone from the producer, so a stale one appearing on the
+        // snapshot must NOT be served: the file is the single source. This fails
+        // on the plausible bug of leaving the old snapshot read in place as a
+        // fallback, which would serve a map nothing writes any more.
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        state.state.set_snapshot_for_test(json!({
+            "params": { "GHOST": 1.0 },
+            "param_cached_count": 1,
+        }));
+
+        let Json(body) = get_all_params(State(state)).await;
+        assert_eq!(body["params"], json!({}));
     }
 }

@@ -39,9 +39,12 @@ pub const PRESENCE_CADENCE: Duration = Duration::from_secs(10);
 /// trap that asymmetry avoids.
 pub const PRESENCE_EMIT_PORT: u16 = 5810;
 
-/// The control-plane port the listener binds for inbound beacons (the same port
-/// `wfb_rx_control` re-emits decoded HopAnnounce/Presence frames on).
-pub const PRESENCE_LISTEN_PORT: u16 = 5803;
+/// The control-plane port the listener binds for inbound beacons from fleet
+/// slot `slot` (the same port that slot's `wfb_rx -p 1` re-emits decoded
+/// HopAnnounce/Presence frames on).
+pub const fn presence_listen_port(slot: u8) -> u16 {
+    ados_radio::config::CONTROL_RX_PORT_BASE + slot as u16
+}
 
 /// HopAck echo destination: `wfb_tx_control`'s loopback ingress (the same port
 /// the presence emit uses). The drone broadcasts a HopAnnounce and waits for a
@@ -440,10 +443,10 @@ where
     }
 }
 
-/// Listen for inbound control frames on the control port, verify the HMAC, and
-/// update `cache`. Two frame classes share this port (`wfb_rx_control` re-emits
-/// both): a 51-byte HopAnnounce and a 68-byte PresenceBeacon. The listener
-/// length-gates first, then dispatches:
+/// Listen for inbound control frames on every registered slot's control port,
+/// verify the HMAC, and update `cache`. Two frame classes share each port
+/// (`wfb_rx_control` re-emits both): a 51-byte HopAnnounce and a 68-byte
+/// PresenceBeacon. The listener length-gates first, then dispatches:
 ///
 /// * **HopAnnounce (51 B):** verify the HMAC, then echo the verbatim frame back
 ///   as a HopAck to `wfb_tx_control`'s loopback ingress so the drone's "acked"
@@ -454,19 +457,66 @@ where
 /// * **PresenceBeacon (68 B):** verify the HMAC, drop a frame carrying our own
 ///   device-id (the self-pair guard), then record the peer.
 ///
-/// Returns only on a fatal bind error or cancellation.
+/// One socket per slot, one reader task each, all under this single generation:
+/// the cache, the self-pair guard and the restart accounting stay singular
+/// while the receive plane fans out per drone. Every bind happens before any
+/// reader starts, so a port already held (a leaked previous generation) is a
+/// fatal error the supervisor backs off and retries rather than a half-bound
+/// listener that silently hears only some of the fleet.
+///
+/// Returns only on a fatal bind error, or when any slot's reader ends.
 pub async fn listen_loop(
     cache: GsPresenceCache,
     follower: Option<HopFollower>,
+    slots: &[u8],
 ) -> std::io::Result<()> {
     let own_device_id = read_device_id();
-    let sock = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, PRESENCE_LISTEN_PORT)).await?;
-    let ack_target = (std::net::Ipv4Addr::LOCALHOST, HOP_ACK_ECHO_PORT);
+    let mut socks = Vec::with_capacity(slots.len());
+    for &slot in slots {
+        let port = presence_listen_port(slot);
+        socks.push((
+            slot,
+            UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, port)).await?,
+        ));
+    }
+    if socks.is_empty() {
+        return Err(std::io::Error::other(
+            "presence listener asked to bind zero fleet slots",
+        ));
+    }
     tracing::info!(
-        port = PRESENCE_LISTEN_PORT,
+        slots = ?slots,
         "ground_presence_listen_started"
     );
 
+    let mut readers = tokio::task::JoinSet::new();
+    for (slot, sock) in socks {
+        readers.spawn(listen_on_slot(
+            sock,
+            slot,
+            cache.clone(),
+            follower.clone(),
+            own_device_id.clone(),
+        ));
+    }
+    // A reader only ends on a fault, so the first completion ends the whole
+    // generation; the remaining readers are aborted when the JoinSet drops, and
+    // the supervisor re-binds every slot from scratch.
+    readers.join_next().await;
+    Err(std::io::Error::other(
+        "a presence slot reader ended; re-binding the whole listener",
+    ))
+}
+
+/// One slot's receive loop. Never returns under normal operation.
+async fn listen_on_slot(
+    sock: UdpSocket,
+    slot: u8,
+    cache: GsPresenceCache,
+    follower: Option<HopFollower>,
+    own_device_id: String,
+) {
+    let ack_target = (std::net::Ipv4Addr::LOCALHOST, HOP_ACK_ECHO_PORT);
     let mut buf = [0u8; 256];
     loop {
         // A recv error must NOT end the listener: this loop is the sole writer of
@@ -477,7 +527,7 @@ pub async fn listen_loop(
         let (len, _addr) = match sock.recv_from(&mut buf).await {
             Ok(v) => v,
             Err(e) => {
-                tracing::warn!(error = %e, "ground_presence_recv_failed");
+                tracing::warn!(error = %e, slot, "ground_presence_recv_failed");
                 continue;
             }
         };
@@ -550,18 +600,24 @@ fn write_listener_health_to(path: &std::path::Path, health: &ListenerHealth) {
     }
 }
 
-/// Supervise the presence listener for the whole service lifetime.
+/// Supervise the presence listener for the whole service lifetime, binding one
+/// control port per registered fleet `slot`.
 ///
-/// `listen_loop` only returns on a fatal socket-bind error now (its recv loop
-/// continues over transient errors), so a return is a genuine fault: the
-/// supervisor re-binds after a bounded, resetting backoff. The listener handle
-/// is awaited rather than dropped, so a panic in the listen path surfaces as a
-/// `JoinError` here (logged + counted) instead of being silently swallowed. The
-/// restart accounting is published to a GS sidecar so a flapping listener is
-/// visible to the REST/heartbeat layer.
+/// `listen_loop` only returns on a fatal socket error (its per-slot recv loops
+/// continue over transient errors), so a return is a genuine fault: the
+/// supervisor re-binds every slot after a bounded, resetting backoff. The
+/// listener handle is awaited rather than dropped, so a panic in the listen path
+/// surfaces as a `JoinError` here (logged + counted) instead of being silently
+/// swallowed. The restart accounting is published to a GS sidecar so a flapping
+/// listener is visible to the REST/heartbeat layer — one sidecar for the whole
+/// fleet, because there is one listener generation covering every slot.
 ///
 /// This loop itself never returns; spawn it for the service lifetime.
-pub async fn listen_supervisor(cache: GsPresenceCache, follower: Option<HopFollower>) {
+pub async fn listen_supervisor(
+    cache: GsPresenceCache,
+    follower: Option<HopFollower>,
+    slots: Vec<u8>,
+) {
     let mut backoff = LISTEN_BACKOFF_START;
     let mut health = ListenerHealth {
         starts: 0,
@@ -582,7 +638,12 @@ pub async fn listen_supervisor(cache: GsPresenceCache, follower: Option<HopFollo
         );
 
         let generation_start = std::time::Instant::now();
-        let handle = tokio::spawn(listen_loop(cache.clone(), follower.clone()));
+        let handle = {
+            let cache = cache.clone();
+            let follower = follower.clone();
+            let slots = slots.clone();
+            tokio::spawn(async move { listen_loop(cache, follower, &slots).await })
+        };
 
         // Await the generation so a panic is observed (not dropped). A clean
         // return is a fatal bind error path; a JoinError is a panic.
@@ -847,11 +908,21 @@ mod tests {
 
     #[test]
     fn presence_ports_are_asymmetric() {
-        // The trap: emit to 5810 (tx_control ingress), listen on 5803. They must
-        // never be the same value or the GS self-pairs over loopback.
+        // The trap: emit to 5810 (the single tx_control ingress), listen on the
+        // per-slot control egress. If a listen port ever equalled the emit port
+        // the GS would self-pair with its own device-id over loopback, so the
+        // whole per-slot range must stay clear of it.
         assert_eq!(PRESENCE_EMIT_PORT, 5810);
-        assert_eq!(PRESENCE_LISTEN_PORT, 5803);
-        assert_ne!(PRESENCE_EMIT_PORT, PRESENCE_LISTEN_PORT);
+        for slot in 0..=ados_radio::config::FLEET_MAX_SLOTS {
+            assert_ne!(PRESENCE_EMIT_PORT, presence_listen_port(slot));
+            assert_ne!(HOP_ACK_ECHO_PORT, presence_listen_port(slot));
+        }
+        // Distinct per slot: two slots sharing a listen port would collide on
+        // the bind and leave one drone's control lane unheard.
+        let ports: std::collections::BTreeSet<u16> = (1..=ados_radio::config::FLEET_MAX_SLOTS)
+            .map(presence_listen_port)
+            .collect();
+        assert_eq!(ports.len(), ados_radio::config::FLEET_MAX_SLOTS as usize);
     }
 
     #[test]

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from ados.core.paths import FLIGHT_LOGS_DIR, PAIRING_JSON
 
@@ -152,25 +152,88 @@ class DiscoveryConfig(BaseModel):
     service_type: str = "_ados._tcp.local."
 
 
-class LoraConfig(BaseModel):
-    interface: str = ""
-    frequency: int = 915000000
-    bandwidth: int = 125000
-    spreading_factor: int = 7
-
-
 class WifiDirectConfig(BaseModel):
     enabled: bool = False
     interface: str = ""
 
 
+class SwarmFlockConfig(BaseModel):
+    """Olfati-Saber alpha-lattice flocking weights.
+
+    The three gains are integer PERCENTAGES of the underlying float
+    weight (``cohesion = 40`` means 0.40): the GCS config primitives
+    carry no float field, so expressing them as bounded integers keeps
+    one validation path on both sides. A consumer divides by 100.
+    """
+
+    cohesion: int = 40
+    alignment: int = 60
+    separation_gain: int = 150
+    # Neighbours beyond this range contribute nothing to the flocking
+    # terms; ``neighbors`` further caps how many of the nearest ones
+    # are weighted, so a dense cluster cannot dominate the solution.
+    radius_m: int = 30
+    neighbors: int = 7
+
+
+class SwarmSeparationConfig(BaseModel):
+    """Collision-avoidance layer — the one swarm layer that is a safety
+    function rather than a behaviour.
+
+    ``radius_m`` is where repulsion starts; ``hard_m`` is where the
+    horizontal solution is abandoned for a deterministic climb-and-hold.
+    ``hard_m`` must stay below ``radius_m`` or repulsion never engages
+    before the hard floor does.
+    """
+
+    radius_m: int = 8
+    hard_m: int = 4
+
+    @model_validator(mode="after")
+    def _hard_below_radius(self) -> SwarmSeparationConfig:
+        if self.hard_m >= self.radius_m:
+            raise ValueError(
+                "swarm.separation.hard_m must be less than "
+                "swarm.separation.radius_m"
+            )
+        return self
+
+
+class SwarmTasksConfig(BaseModel):
+    """Consensus-based task allocation (CBBA) participation.
+
+    ``enabled`` is the operator's switch. The two assignment fields are
+    AGENT-WRITTEN status mirrors persisted into the config tree (the
+    same pattern ``video.wfb.paired_with_device_id`` uses), so a surface
+    reading the config can show the current assignment without a second
+    transport. Both stay ``None`` until a swarm runtime writes them —
+    never a fabricated default.
+    """
+
+    enabled: bool = False
+    assigned_task_id: str | None = None
+    bundle_position: int | None = None
+
+
 class SwarmConfig(BaseModel):
     enabled: bool = False
-    lora: LoraConfig = LoraConfig()
     wifi_direct: WifiDirectConfig = WifiDirectConfig()
     role: str = "auto"
-    default_formation: str = "line"
+    # Closed set, matching the built-in formation generators. A free
+    # string here was typo-prone and silently produced no formation at
+    # all, so the model rejects an unknown name at load time.
+    default_formation: Literal[
+        "line", "column", "wedge", "grid", "circle"
+    ] = "line"
     default_spacing: int = 10
+    # The operator-commandable behaviour mode, set per node or fanned
+    # across a selection from the GCS. Hard separation and operator
+    # direct command are precedence LEVELS the runtime arbitrates into,
+    # not modes anyone commands, so neither is a value here.
+    mode: Literal["hold", "flocking", "formation"] = "hold"
+    flock: SwarmFlockConfig = SwarmFlockConfig()
+    separation: SwarmSeparationConfig = SwarmSeparationConfig()
+    tasks: SwarmTasksConfig = SwarmTasksConfig()
 
 
 # Mirrors `ados.setup.models.UiConfig` shape so the persisted YAML

@@ -19,6 +19,7 @@ pub mod aux_consumer;
 pub mod aux_peers;
 pub mod cmdsock;
 pub mod fanout;
+pub mod fleet;
 pub mod gs_config;
 pub mod mdns;
 pub mod mesh;
@@ -43,6 +44,7 @@ pub use aux_consumer::{
     run_aux_consumer, supervise_aux_consumer, AuxCounters, AuxCountersSnapshot,
 };
 pub use fanout::{run_default_fanout, run_fanout};
+pub use fleet::{FleetRegistry, FleetSlot, FLEET_MAX_SLOTS, FLEET_REGISTRY_PATH};
 pub use gs_config::{AtlasRelayConfig, GroundStationConfig};
 pub use mesh::{get_current_role, MeshSnapshot};
 pub use pairing::{decrypt_invite, encrypt_invite, InviteBundle};

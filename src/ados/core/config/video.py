@@ -65,6 +65,39 @@ def _default_use_gst_air_pipeline() -> bool:
         return False
 
 
+class CameraThumbnailProfile(BaseModel):
+    """The non-hero encoder profile — what a drone streams while some OTHER
+    drone holds the operator's attention.
+
+    ADOS runs a whole fleet on ONE 20 MHz channel, so video is allocated by
+    attention: exactly one drone is the "hero" and encodes at the full
+    ``CameraConfig`` settings (1280x720 / 30 fps / 4000 kbps); every other
+    registered drone drops to this profile. Both ride the existing p0 pipeline
+    and the existing ``wfb_tx`` — switching restarts only the encoder, it adds
+    no radio port, no second encoder process and no ground-side receiver.
+
+    The measured airtime arithmetic these numbers exist to satisfy (bench:
+    ch149, 20 MHz, MCS 1, 13.0 Mbps PHY):
+
+    * 1 hero  = 4.165 Mbps payload x 1.5 FEC = 6.25 Mbps on air = **48%**
+    * 1 control-only drone (telemetry + aux) = **2.4%**
+    * 1 thumbnail's video = **~0.4%**
+
+    So 1 hero + 23 thumbnails = 48 + 23*0.4 + 23*2.4 = **~112% at MCS 1** —
+    still over the channel. Committed fleet size at MCS 1 alone is **8**
+    (1 hero + 7 thumbnails = ~68%). Reaching 24 requires the adaptive-MCS
+    ladder: at MCS 3 (26.0 Mbps) the same 24-drone fleet lands at ~56%.
+    Do not read "24 drones" as a supported MCS-1 configuration.
+
+    Mirrors the Rust ``CameraProfile`` in ``ados-video/src/config.rs``.
+    """
+
+    width: int = 320
+    height: int = 180
+    fps: int = 1
+    bitrate_kbps: int = 50
+
+
 class CameraConfig(BaseModel):
     source: str = "csi"
     codec: str = "h264"
@@ -88,6 +121,12 @@ class CameraConfig(BaseModel):
     # last-known-good record exists), so a camera-less drone never triggers a
     # spurious recovery while a cold-boot enumeration failure still does.
     expected: Literal["auto", "true", "false"] = "auto"
+    # The non-hero encoder profile. ``width`` / ``height`` / ``fps`` /
+    # ``bitrate_kbps`` above ARE the hero profile (unchanged defaults); this
+    # block is what the drone falls back to when the operator's attention is on
+    # a different aircraft. See :class:`CameraThumbnailProfile` for the airtime
+    # arithmetic that fixes these numbers.
+    thumbnail: CameraThumbnailProfile = CameraThumbnailProfile()
 
 
 class CameraMatch(BaseModel):

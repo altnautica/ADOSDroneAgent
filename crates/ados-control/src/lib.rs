@@ -20,6 +20,7 @@ pub mod hw_local;
 pub mod ipc;
 pub mod mcp;
 pub mod pairing_store;
+pub mod param_store;
 pub mod profile;
 pub mod proxy;
 pub mod proxy_auth;
@@ -39,6 +40,7 @@ use crate::auth::PairingState;
 use crate::ipc::logd_client::{default_logd_socket, LogdQueryClient};
 use crate::ipc::mavlink_client::{default_mavlink_socket, MavlinkIpcClient};
 use crate::ipc::state_client::{default_state_socket, StateIpcClient};
+use crate::ipc::swarm_client::{default_swarm_socket, SwarmIpcClient};
 use crate::routes::build_router;
 use crate::serve::{bind_tcp, bind_unix, serve_tcp, serve_unix, tcp_app, unix_app};
 use crate::state::{AppState, PairingPaths};
@@ -108,6 +110,10 @@ pub struct DaemonPaths {
     /// The vehicle-state socket the status + telemetry routes read. Injectable so
     /// a test points it at a mock-IPC socket in a tempdir.
     pub state_socket: PathBuf,
+    /// The swarm neighbour-table socket `ados-swarmbus` publishes on, read by
+    /// `/api/swarm/neighbors` and `/api/status/full`. Injectable so a test points it
+    /// at a mock-IPC socket in a tempdir.
+    pub swarm_socket: PathBuf,
     /// The MAVLink command socket the command route writes frames to (the router
     /// forwards them to the FC). Injectable so a test points it at a mock-IPC
     /// socket in a tempdir.
@@ -118,6 +124,11 @@ pub struct DaemonPaths {
     /// The HAL board sidecar (`/run/ados/board.json`) the status route reads the
     /// full board dict from. Injectable for tests.
     pub board_path: PathBuf,
+    /// The MAVLink router's on-disk parameter cache
+    /// (`/var/lib/ados/params.json`) the `/api/params*` reads and the signing
+    /// reads project. It replaced the state snapshot's `params` blob, which used
+    /// to carry the whole map on every 10 Hz publish. Injectable for tests.
+    pub params_path: PathBuf,
     /// The agent config (`/etc/ados/config.yaml`) the pairing-info route projects
     /// for device identity, profile, and the radio peer. Injectable for tests.
     pub config_path: PathBuf,
@@ -170,6 +181,9 @@ impl Default for DaemonPaths {
         // The MAVLink command socket resolves under `ADOS_RUN_DIR` the same way,
         // defaulting to `/run/ados/mavlink.sock`.
         let mavlink_socket = default_mavlink_socket();
+        // The swarm neighbour-table socket resolves under `ADOS_RUN_DIR` the same
+        // way, defaulting to `/run/ados/swarm.sock`.
+        let swarm_socket = default_swarm_socket();
         // The logging-store query socket resolves under `ADOS_RUN_DIR` the same
         // way, defaulting to `/run/ados/logd-query.sock`.
         let logd_query_socket = default_logd_socket();
@@ -188,6 +202,9 @@ impl Default for DaemonPaths {
         // The board sidecar resolves under `ADOS_RUN_DIR`, defaulting to
         // `/run/ados/board.json` (the detector persists the HAL board dict there).
         let board_path = Path::new(&run_dir).join("board.json");
+        // The router's parameter cache honours `ADOS_PARAMS_JSON`, defaulting to
+        // `/var/lib/ados/params.json` — the file the router persists atomically.
+        let params_path = crate::param_store::default_params_path();
         // The profile/role sentinels honour `ADOS_PROFILE_CONF` / `ADOS_MESH_ROLE`
         // (the same overrides `crate::profile` resolves under), defaulting to
         // `/etc/ados/profile.conf` + `/etc/ados/mesh/role`.
@@ -200,9 +217,11 @@ impl Default for DaemonPaths {
             dashboard_pin_path,
             mcp_token_path,
             state_socket,
+            swarm_socket,
             mavlink_socket,
             logd_query_socket,
             board_path,
+            params_path,
             config_path,
             wfb_key_dir,
             bind_state_path,
@@ -270,6 +289,12 @@ where
     // absent socket; an idle agent (no socket) leaves the snapshot empty, which
     // the routes degrade to rather than fail. The handle stops it on shutdown.
     let (state_client, state_handle) = StateIpcClient::spawn(paths.state_socket.clone());
+    // The swarm neighbour-table reader. Same posture as the state reader: it
+    // reconnects on EOF / an absent socket, and a node not running the bus leaves
+    // nothing published, which the routes degrade to. Spawned on EVERY profile — a
+    // drone answering `/api/swarm/neighbors` with the ground station powered off is
+    // the decentralization proof, so this is deliberately not profile-gated.
+    let (swarm_client, swarm_handle) = SwarmIpcClient::spawn(paths.swarm_socket.clone());
     // The MAVLink command client the command route writes frames through. It
     // connects lazily on the first command and reuses the connection; an absent
     // socket (an idle agent) surfaces as a 503 at command time, not here.
@@ -311,7 +336,9 @@ where
         pairing_paths,
         Arc::clone(&dashboard_pin),
         Arc::clone(&mcp_tokens),
-    );
+    )
+    .with_params_path(paths.params_path.clone())
+    .with_swarm(swarm_client);
 
     // Native-vs-residual gates for the profile-conditional route groups, resolved
     // once at startup (the profile is fixed for the process). The Wi-Fi client
@@ -353,6 +380,14 @@ where
                         reader_cancel,
                     );
                 });
+                // Fleet attention reconciler: auto-promotes a one-drone fleet to
+                // the full video profile (every drone boots to thumbnail, so the
+                // existing single-drone product would otherwise sit at 320x180)
+                // and re-issues any demotion a hero selection could not confirm.
+                // Idle — zero radio traffic — once the fleet agrees.
+                tokio::spawn(crate::routes::gs_fleet_hero::run_hero_reconciler(
+                    Arc::clone(&proxy),
+                ));
                 state.with_aux_rpc_proxy(proxy)
             }
             Err(e) => {
@@ -447,8 +482,9 @@ where
     }
     sd_stopping();
 
-    // Stop the state reader before exiting so its task does not outlive the run.
+    // Stop the IPC readers before exiting so their tasks do not outlive the run.
     state_handle.shutdown().await;
+    swarm_handle.shutdown().await;
 
     // tmpfs cleanup: a stale socket path confuses a probing reader on restart.
     let _ = std::fs::remove_file(&paths.control_socket);

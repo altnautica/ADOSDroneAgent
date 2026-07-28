@@ -35,15 +35,43 @@ def test_registry_covers_the_migrated_routes():
     assert wave1 <= names, f"missing wave-1 routes: {wave1 - names}"
 
 
-def test_non_sandboxed_routes_are_read_only_gets():
-    # The default-run set (everything not sandboxed) must be side-effect-free GET
-    # reads, so a routine conformance run never mutates a live agent. Write routes
-    # are present but carry require_sandbox=True (POST/PUT), skipped by default.
+# Non-GET cases that are nonetheless safe to fire against a live agent because
+# the route has no side effect at all. Keeping them out of the sandbox is the
+# point: a 501 stub is exactly the kind of fixed-envelope response the two
+# transports must agree on, and sandboxing it would stop exercising it on a
+# routine run. Anything added here needs a comment on its RouteCase saying why
+# it cannot mutate.
+SIDE_EFFECT_FREE_NON_GETS = {
+    # POST /api/can/passthrough is a deliberate 501 stub with a fixed
+    # {error, message} envelope and no side effect on either transport.
+    "can-passthrough",
+}
+
+
+def test_non_sandboxed_routes_are_side_effect_free():
+    # The default-run set (everything not sandboxed) must be side-effect-free, so
+    # a routine conformance run never mutates a live agent. Write routes are
+    # present but carry require_sandbox=True (POST/PUT/DELETE), skipped by
+    # default. A non-GET escapes the sandbox only by being named above, so a new
+    # mutating route registered without require_sandbox still fails here.
     for case in registered_cases():
         if case.require_sandbox:
             assert case.method in ("POST", "PUT", "DELETE")
-        else:
-            assert case.method == "GET"
+        elif case.method != "GET":
+            assert case.name in SIDE_EFFECT_FREE_NON_GETS, (
+                f"non-sandboxed {case.method} {case.path} ({case.name}) is not "
+                "a documented side-effect-free route"
+            )
+
+
+def test_the_side_effect_free_allowlist_is_not_stale():
+    # An allowlist entry that no longer matches a registered non-GET case is a
+    # hole: the next mutating route with that name would be waved through.
+    non_gets = {c.name for c in registered_cases() if c.method != "GET"}
+    assert SIDE_EFFECT_FREE_NON_GETS <= non_gets, (
+        "stale allowlist entries: "
+        f"{SIDE_EFFECT_FREE_NON_GETS - non_gets}"
+    )
 
 
 def test_write_routes_are_sandboxed():

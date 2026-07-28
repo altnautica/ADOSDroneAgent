@@ -22,11 +22,13 @@ use ados_mavlink_router::aux_tee::{self, TeeCounters};
 use ados_mavlink_router::aux_uplink;
 use ados_mavlink_router::aux_uplink_consumer::{self, AuxUplinkConsumerCounters};
 use ados_mavlink_router::config::MavlinkConfig;
+use ados_mavlink_router::connection::swarm_setpoint::{self, SwarmSetpointStatus};
 use ados_mavlink_router::connection::FcConnection;
 use ados_mavlink_router::frame_ingest::{self, IngestCounters, INGEST_QUEUE_DEPTH};
 use ados_mavlink_router::param_cache::ParamCache;
 use ados_mavlink_router::proxies::{run_tcp_proxy, run_udp_proxy, run_ws_proxy, WsProxyAuth};
 use ados_mavlink_router::state::{firmware_family, VehicleState};
+use ados_swarm_control::ModePrecedence;
 
 const MAVLINK_QUEUE_DEPTH: usize = 256;
 const STATE_QUEUE_DEPTH: usize = 32;
@@ -501,11 +503,40 @@ async fn main() {
     }
 
     // 10 Hz state publish: vehicle snapshot + the service runtime extras.
+    // Onboard swarm autonomy. The loop reads the swarm neighbour table off
+    // `/run/ados/swarm.sock`, runs the control laws at 10 Hz and commands the FC
+    // through this router's own send path. `SwarmSetpointStatus` is the reverse
+    // direction: the active precedence level and the emergency condition, which the
+    // state snapshot below republishes for `ados-swarmbus` to fold into the beacon.
+    // Returns immediately when the swarm is disabled or no drone slot is assigned,
+    // so an operator who has not turned it on pays for no socket and no timer.
+    let swarm_status: Option<Arc<SwarmSetpointStatus>> = {
+        let status = Arc::new(SwarmSetpointStatus::default());
+        let fc = fc.clone();
+        let state = state.clone();
+        let swarm_sock = format!("{dir}/swarm.sock");
+        let handle = status.clone();
+        let cancel = cancel.clone();
+        tasks.push(tokio::spawn(async move {
+            swarm_setpoint::run(
+                fc,
+                state,
+                swarm_sock,
+                ados_mavlink_router::config::CONFIG_YAML.to_string(),
+                handle,
+                cancel,
+            )
+            .await
+        }));
+        Some(status)
+    };
+
     {
         let fc = fc.clone();
         let state = state.clone();
         let params = params.clone();
         let state_ipc = state_ipc.clone();
+        let swarm_status = swarm_status.clone();
         let mavlink_ipc_stats = mavlink_ipc.clone();
         let aux_tee_counters = aux_tee_counters.clone();
         let aux_rpc_counters = aux_rpc_counters.clone();
@@ -547,7 +578,7 @@ async fn main() {
                         let extras = build_extras(
                             &fc, &state, &params, started, mavlink_drops, state_drops,
                             aux_tee_counters.as_ref(), frame_ingest_counters.as_ref(),
-                            aux_rpc_counters.as_ref(),
+                            aux_rpc_counters.as_ref(), swarm_status.as_ref(),
                         )
                         .await;
                         let wire = { state.lock().await.to_wire_with(&extras) };
@@ -637,8 +668,13 @@ async fn build_extras(
     aux_tee_counters: Option<&Arc<TeeCounters>>,
     frame_ingest_counters: Option<&Arc<IngestCounters>>,
     aux_rpc_counters: Option<&AuxUplinkConsumerCounters>,
+    swarm: Option<&Arc<SwarmSetpointStatus>>,
 ) -> Map<String, Value> {
-    let cached = params.lock().await.count();
+    // The cached param count and the map's change counter, read under one lock.
+    let (cached, param_generation) = {
+        let pc = params.lock().await;
+        (pc.count(), pc.generation())
+    };
     // The expected param count and the decoded autopilot code, read under one
     // lock. `autopilot` is the already-decoded HEARTBEAT discriminator (3 =
     // ArduPilot, 12 = PX4) used to name the MAVLink firmware family below.
@@ -646,7 +682,6 @@ async fn build_extras(
         let s = state.lock().await;
         (s.param_count, s.autopilot)
     };
-    let params_blob = params.lock().await.get_all();
     let mut extras = Map::new();
     // The gated truth: fc_connected = transport_open && mavlink_alive. A port
     // that opens but never hears a HEARTBEAT reads transport_open:true but
@@ -747,6 +782,15 @@ async fn build_extras(
     );
     extras.insert("param_cached_count".into(), json!(cached));
     extras.insert("param_expected_count".into(), json!(expected));
+    // The parameter map's change counter, NOT the map. The map used to ride here
+    // in full — ~24 KB of JSON, no delta, no cap, republished ten times a second
+    // — which alone made a relayed `/api/telemetry` need ~21 aux fragments and
+    // fail 15% of the time. A consumer compares this counter against its own
+    // last-seen value and refetches `GET /api/params` (served from the router's
+    // on-disk cache) once on a mismatch. Restart-safe by being wrong in the
+    // harmless direction: the counter restarts at 0, which reads as a mismatch
+    // and costs exactly one refetch.
+    extras.insert("param_generation".into(), json!(param_generation));
     extras.insert("ipc_mavlink_drops".into(), json!(mavlink_drops));
     extras.insert("ipc_state_drops".into(), json!(state_drops));
     // The MAVLink-over-radio tee's full tally: what it forwarded and, just as
@@ -783,8 +827,56 @@ async fn build_extras(
             serde_json::to_value(counters.snapshot()).unwrap_or(Value::Null),
         );
     }
-    extras.insert("params".into(), Value::Object(params_blob));
+    // The drone's video attention profile, so the swarm beacon's hero bit and the
+    // fleet view read one source of truth. Owned by `ados-video`, which stamps
+    // the sidecar on every encoder profile apply; this republishes it.
+    extras.insert("video_profile".into(), json!(video_profile()));
+    // The onboard-autonomy layer's two outputs. `ados-swarmbus` reads both out of
+    // this snapshot and folds them into the outgoing beacon, which is how a
+    // neighbour and the operator screen learn which layer is ACTUALLY flying this
+    // aircraft rather than which one it was commanded into. Absent (the swarm
+    // disabled, or no drone slot assigned) reads as the honest pre-Phase-5 state.
+    let (precedence, emergency) = match swarm {
+        Some(s) => (s.precedence_wire(), s.emergency()),
+        None => (ModePrecedence::Hold.as_wire(), false),
+    };
+    extras.insert(
+        ados_swarm_control::EXTRA_PRECEDENCE.into(),
+        json!(precedence),
+    );
+    // A real JSON bool, not 0/1: the beacon builder reads a non-bool as false, and
+    // for a safety flag that is the wrong direction to fail in.
+    extras.insert(ados_swarm_control::EXTRA_EMERGENCY.into(), json!(emergency));
     extras
+}
+
+/// The sidecar `ados-video` stamps on every encoder profile apply. Read here
+/// rather than tracked, so a video restart cannot desync the two services.
+const VIDEO_PROFILE_SIDECAR: &str = "/run/ados/video-profile.json";
+
+/// The drone's current video attention profile: `"hero"` (full-rate stream) or
+/// `"thumbnail"` (1 fps). Anything other than a readable sidecar naming `hero`
+/// reads as `thumbnail`, which is the correct boot default — a fleet powering up
+/// together must not put 24 drones on a hero's worth of airtime each.
+///
+/// A tmpfs read at the 10 Hz publish cadence, so the value lags an encoder apply
+/// by up to one tick. That is deliberate: the alternative is another IPC hop for
+/// a single string.
+fn video_profile() -> &'static str {
+    let named_hero = std::fs::read_to_string(VIDEO_PROFILE_SIDECAR)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|v| {
+            v.get("profile")
+                .and_then(Value::as_str)
+                .map(|p| p == "hero")
+        })
+        .unwrap_or(false);
+    if named_hero {
+        "hero"
+    } else {
+        "thumbnail"
+    }
 }
 
 /// Resolve when the service receives SIGTERM or SIGINT.
@@ -861,7 +953,7 @@ mod extras_key_set_tests {
     /// gated) — and it cannot depend on this crate to verify its list is
     /// complete. Pinning the set here is that seam: add an extra without
     /// classifying it over there and this test fails.
-    const EXPECTED_EXTRAS_KEYS: [&str; 25] = [
+    const EXPECTED_EXTRAS_KEYS: [&str; 28] = [
         "aux_mavlink_tee",
         "aux_rpc",
         "aux_uplink_command_gated",
@@ -881,12 +973,15 @@ mod extras_key_set_tests {
         "mavlink_frame_ingest",
         "param_cached_count",
         "param_expected_count",
+        "param_generation",
         "param_priming",
         "param_sweep_send_failed",
         "param_sweep_timed_out",
-        "params",
         "service_uptime",
+        "swarm_emergency",
+        "swarm_precedence",
         "transport_open",
+        "video_profile",
     ];
 
     #[tokio::test]
@@ -909,6 +1004,7 @@ mod extras_key_set_tests {
             Some(&Arc::new(TeeCounters::default())),
             Some(&Arc::new(IngestCounters::default())),
             Some(&AuxUplinkConsumerCounters::new()),
+            Some(&Arc::new(SwarmSetpointStatus::default())),
         )
         .await;
 
@@ -919,6 +1015,103 @@ mod extras_key_set_tests {
             "a snapshot key changed; classify it in ados-control's IPC_ONLY_KEYS \
              or AGENT_DIAGNOSTIC_KEYS (or neither, if it is vehicle-sourced) \
              before updating this pin"
+        );
+    }
+
+    /// Serialized size of an extras map with the WALL-CLOCK keys removed.
+    ///
+    /// `service_uptime` and `heartbeat_age_s` are floats formatted from
+    /// `Instant::now()`, so their digit count differs between two calls made
+    /// microseconds apart and the raw byte delta jitters by a couple of bytes.
+    /// Measuring the payload-diet property against a clock made this assertion
+    /// flaky by construction; the property itself is about the parameter cache, so
+    /// the clocks are simply not part of it.
+    fn sized_without_clocks(mut extras: Map<String, Value>) -> usize {
+        extras.remove("service_uptime");
+        extras.remove("heartbeat_age_s");
+        serde_json::to_vec(&Value::Object(extras)).unwrap().len()
+    }
+
+    /// The payload-diet proof for the `params` blob removal.
+    ///
+    /// The blob rode the 10 Hz state publish in full, so the snapshot grew
+    /// linearly with the FC's parameter count — ~24 KB against ArduPilot's ~700
+    /// parameters, which is ~21 aux fragments on a relayed read and the measured
+    /// 85% delivery. This measures both shapes against one populated cache: the
+    /// current extras, and the same extras with the blob put back. It fails on
+    /// the plausible bug (re-adding the map, or letting the counter carry values)
+    /// because the current shape's size must not move with the cache size.
+    #[tokio::test]
+    async fn extras_size_does_not_grow_with_the_cached_parameter_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(Mutex::new(VehicleState::default()));
+        let params = Arc::new(Mutex::new(ParamCache::new(dir.path().join("params.json"))));
+        let fc = FcConnection::new(MavlinkConfig::default(), state.clone(), params.clone());
+
+        let empty = build_extras(
+            &fc,
+            &state,
+            &params,
+            Instant::now(),
+            0,
+            0,
+            Some(&Arc::new(TeeCounters::default())),
+            Some(&Arc::new(IngestCounters::default())),
+            Some(&AuxUplinkConsumerCounters::new()),
+            None,
+        )
+        .await;
+        let empty_len = sized_without_clocks(empty);
+
+        // An ArduPilot-scale parameter set: 700 names of realistic length.
+        {
+            let mut pc = params.lock().await;
+            for i in 0..700 {
+                pc.set(&format!("ATC_RAT_RLL_P_{i:03}"), 0.135 + i as f64, 9);
+            }
+        }
+        let full = build_extras(
+            &fc,
+            &state,
+            &params,
+            Instant::now(),
+            0,
+            0,
+            Some(&Arc::new(TeeCounters::default())),
+            Some(&Arc::new(IngestCounters::default())),
+            Some(&AuxUplinkConsumerCounters::new()),
+            None,
+        )
+        .await;
+
+        // The pre-diet shape: the same extras carrying the whole `{name: value}`
+        // map, which is exactly what `params` used to insert.
+        let mut pre_diet = full.clone();
+        // (`full` is consumed by the measurement below, so the variant is built first.)
+        let blob: Map<String, Value> = (0..700)
+            .map(|i| (format!("ATC_RAT_RLL_P_{i:03}"), json!(0.135 + i as f64)))
+            .collect();
+        pre_diet.insert("params".into(), Value::Object(blob));
+
+        let full_len = sized_without_clocks(full);
+        let pre_diet_len = sized_without_clocks(pre_diet);
+        println!(
+            "extras JSON bytes: {empty_len} empty cache, {full_len} with 700 params, \
+             {pre_diet_len} with the pre-diet `params` blob"
+        );
+
+        // The counter is a scalar, so 700 parameters may only widen the snapshot
+        // by the counter's own digits.
+        assert!(
+            full_len - empty_len <= 4,
+            "extras grew {} bytes for 700 cached params; the map is back on the \
+             10 Hz publish",
+            full_len - empty_len
+        );
+        // And the shape it replaced was an order of magnitude larger.
+        assert!(
+            pre_diet_len > 20_000 && pre_diet_len > full_len * 15,
+            "pre-diet {pre_diet_len} B vs current {full_len} B"
         );
     }
 }

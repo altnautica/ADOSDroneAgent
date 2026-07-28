@@ -1,24 +1,37 @@
 //! Ground-side `WfbRxManager`: the receive run loop.
 //!
-//! Spawns the four radio C subprocesses the receive side needs and drives the
-//! liveness machinery from chunk 2:
-//!   - **data RX** `wfb_rx -p 0 -c 127.0.0.1 -u 5599 -K <rx.key> -l 1000 <iface>`
-//!     decodes the FEC video stream to the internal fan-out port; stdout carries
-//!     the per-second `PKT`/`RX_ANT` stats lines the link monitor parses.
-//!   - **rx control** `wfb_rx -p 1 -c 127.0.0.1 -u 5803 -K <rx.key> -l 1000
-//!     <iface>` decodes inbound HopAnnounce/Presence frames onto the listener's
-//!     port. NOTE: the GS uses **5803** here, not the drone side's 5810. The
-//!     ports are mirrored between rigs, so the drone-side `ados_radio::process`
-//!     arg builders are NOT reused verbatim.
-//!   - **tx control** `wfb_tx -p 1 -u 5810 -K <rx.key> -k 1 -n 2 -B 20 -M <mcs>
-//!     <iface>` transmits HopAck/Presence back over the air from the loopback
-//!     ingress 5810.
-//!   - **aux RX** `wfb_rx -p 2 -c 127.0.0.1 -u 5603 -K <rx.key> -l 1000
-//!     <iface>` decodes the general-purpose application lane the drone
-//!     radiates on `-p 2`, delivering to the port the aux consumer binds. This
-//!     is the lane anything other than video and the tiny control frames rides,
-//!     so it is spawned unconditionally: a linked ground station has to be able
-//!     to receive whatever the drone sends it.
+//! Spawns the radio C subprocesses the receive side needs and drives the
+//! liveness machinery from chunk 2. The receive half is PER FLEET SLOT: the
+//! ground station runs one video / aux / control receiver for every registered
+//! drone, all bound to the same interface. That is legal because `wfb_rx` opens
+//! a promiscuous, non-exclusive pcap handle and compiles a per-instance kernel
+//! BPF on `channel_id` (`vendor/wfb-ng/src/rx.cpp:70,84`), so N drones need N
+//! receivers, not N radios. The transmit half is SINGULAR: one control TX and
+//! one aux TX keyed to the ground station's own slot 0, which every drone
+//! receives, so a fleet-wide command is one transmission rather than N.
+//!
+//! Per slot S (`link_id(fleet_id, S)`):
+//!   - **data RX** `wfb_rx -p 0 -i <link> -c 127.0.0.1 -u <VIDEO_RX_PORT_BASE+S>
+//!     -K <rx.key> -l 1000 <iface>` decodes the FEC video stream. Only the
+//!     PRIMARY slot's instance pipes stdout: its per-second `PKT`/`RX_ANT`
+//!     stats lines drive the link monitor and its liveness anchors the
+//!     generation.
+//!   - **rx control** `wfb_rx -p 1 -i <link> -c 127.0.0.1 -u
+//!     <CONTROL_RX_PORT_BASE+S> …` decodes inbound HopAnnounce/Presence frames
+//!     onto the port the presence listener binds for that slot.
+//!   - **aux RX** `wfb_rx -p 2 -i <link> -c 127.0.0.1 -u <AUX_RX_PORT_BASE+S> …`
+//!     decodes the general-purpose application lane the drone radiates on
+//!     `-p 2`, delivering to the port that slot's aux consumer binds. This is
+//!     the lane anything other than video and the tiny control frames rides, so
+//!     it is spawned unconditionally: a linked ground station has to be able to
+//!     receive whatever the drone sends it.
+//!
+//! Ground-station transmit, once per fleet (`link_id(fleet_id, 0)`):
+//!   - **tx control** `wfb_tx -p 1 -i <link> -u 5810 -K <rx.key> -k 1 -n 2
+//!     -B 20 -M <mcs> <iface>` transmits HopAck/Presence back over the air from
+//!     the loopback ingress 5810.
+//!   - **aux TX** `wfb_tx -p 3 -i <link> -u 5602 …` carries the uplink half of
+//!     the aux pair.
 //!
 //! Process-group isolation (`setsid`/`killpg`) follows the same discipline as
 //! `ados_radio::process::WfbProcess` so the orphan-child bug class is
@@ -55,8 +68,8 @@ pub mod seams;
 pub mod stats;
 
 pub use args::{
-    data_rx_args, gs_atlas_rx_args, gs_aux_tx_args, gs_rx_control_args, gs_tx_control_args,
-    ATLAS_RX_PORT, AUX_TX_PORT, DATA_RX_PORT, DEFAULT_REG_DOMAIN, RX_CONTROL_PORT,
+    aux_rx_port, control_rx_port, data_rx_args, gs_atlas_rx_args, gs_aux_tx_args,
+    gs_rx_control_args, gs_tx_control_args, video_rx_port, AUX_TX_PORT, DEFAULT_REG_DOMAIN,
     RX_HEALTH_POLL_INTERVAL_S, STATE_ACTIVE, STATE_NO_INJECTION, STATE_REG_BLOCKED,
     STATE_SEARCHING, TX_CONTROL_PORT,
 };
@@ -72,6 +85,52 @@ pub use stats::{
 pub use crate::watchdog::SharedRxHealth;
 
 use args::rx_key_path;
+
+/// One generation's primary receive chain: the anchor slot's three receivers
+/// plus the fleet's two single ground transmitters.
+///
+/// `video`'s stdout is piped — it is both the stats stream and the liveness
+/// anchor, so the generation ends when it exits. Every other field is held only
+/// so its `Drop` (killpg) tears the process group down with the generation.
+pub struct PrimaryChain {
+    /// The fleet slot this chain is anchored on (the lowest registered slot).
+    pub slot: u8,
+    pub video: GsWfbProcess,
+    pub aux: GsWfbProcess,
+    pub control: GsWfbProcess,
+    pub tx_control: GsWfbProcess,
+    pub aux_tx: GsWfbProcess,
+}
+
+/// The receive trio for one non-primary fleet slot. Additive to the primary
+/// chain: spawned when the slot registers, dropped (killpg) when it releases or
+/// when the generation ends.
+pub struct SlotReceivers {
+    pub slot: u8,
+    pub video: GsWfbProcess,
+    pub aux: GsWfbProcess,
+    pub control: GsWfbProcess,
+}
+
+/// The fleet slots this ground station receives on, ascending.
+///
+/// An EMPTY registry resolves to the single default drone slot rather than the
+/// empty set: a ground station with no registered drone must still hear the
+/// first drone provisioned into the fleet, and `FleetRegistry::allocate` issues
+/// slot 1 first, so slot 1 is where that drone will be. Returning nothing would
+/// leave a freshly-imaged ground station structurally deaf with no error.
+pub fn fleet_slots(registry: &crate::fleet::FleetRegistry) -> Vec<u8> {
+    let slots: Vec<u8> = registry.slots().map(|s| s.slot).collect();
+    if slots.is_empty() {
+        vec![FIRST_DRONE_SLOT]
+    } else {
+        slots
+    }
+}
+
+/// The slot `FleetRegistry::allocate` issues first, and the slot an empty
+/// registry falls back to.
+pub const FIRST_DRONE_SLOT: u8 = 1;
 
 /// The receive manager. Holds the config + the shared liveness state the run
 /// loop wires together.
@@ -308,42 +367,51 @@ impl WfbRxManager {
         Ok(())
     }
 
-    /// Spawn the receive subprocesses for `iface` and return their handles. The
-    /// data RX has its stdout piped for the stats reader; both control planes
-    /// log stderr to truncated files via `WfbProcess`. Adapter detection and
-    /// monitor-mode setup stay in Python and are assumed already applied to
+    /// The fleet this receive plane belongs to. Every `link_id` the chain is
+    /// keyed with is derived from it.
+    pub fn fleet_id(&self) -> u16 {
+        self.config.fleet_id
+    }
+
+    /// Spawn the receive chain anchored on `primary_slot`, plus the two single
+    /// ground transmitters.
+    ///
+    /// The primary slot's video RX has its stdout piped: it is the generation's
+    /// stats stream AND its liveness anchor (the channel acquirer sweeps for
+    /// this link, and the generation ends when it exits). Every other process —
+    /// the primary's aux + control receivers and the two transmitters — is
+    /// additive and torn down with the generation.
+    ///
+    /// The two transmitters are keyed to the ground station's own slot 0 and
+    /// there is exactly ONE of each regardless of fleet size: every drone's
+    /// uplink receiver listens on that same `channel_id`, so a fleet-wide
+    /// command is one transmission, not N.
+    ///
+    /// Adapter detection and monitor-mode setup are assumed already applied to
     /// `iface`.
     pub async fn spawn_receive_chain(
         &self,
         iface: &str,
-    ) -> std::io::Result<(
-        GsWfbProcess,
-        GsWfbProcess,
-        GsWfbProcess,
-        GsWfbProcess,
-        GsWfbProcess,
-    )> {
+        primary_slot: u8,
+    ) -> std::io::Result<PrimaryChain> {
         let rx_key = rx_key_path();
+        let fleet = self.config.fleet_id;
+        let ground = ados_radio::config::link_id(fleet, ados_radio::config::SLOT_GROUND);
+        let drone = ados_radio::config::link_id(fleet, primary_slot);
+
         // Data RX: stdout piped for the stats reader, in its own process group.
-        let data_rx = GsWfbProcess::spawn(
+        let video = GsWfbProcess::spawn(
             "wfb_rx",
-            &data_rx_args(iface, &rx_key, DATA_RX_PORT),
+            &data_rx_args(iface, &rx_key, video_rx_port(primary_slot), drone),
             Stdout::Piped,
             None,
         )
         .await?;
-        let rx_control = GsWfbProcess::spawn(
+        let control = GsWfbProcess::spawn(
             "wfb_rx",
-            &gs_rx_control_args(iface, &rx_key),
+            &gs_rx_control_args(iface, &rx_key, control_rx_port(primary_slot), drone),
             Stdout::Null,
             Some("/run/ados/wfb-gs-rx-control.log"),
-        )
-        .await?;
-        let tx_control = GsWfbProcess::spawn(
-            "wfb_tx",
-            &gs_tx_control_args(iface, &rx_key, self.config.mcs_index),
-            Stdout::Null,
-            Some("/run/ados/wfb-gs-tx-control.log"),
         )
         .await?;
         // Aux application lane. The drone half has always been complete
@@ -354,11 +422,18 @@ impl WfbRxManager {
         // consumer's enable flag: a linked ground station must be able to
         // receive whatever the drone chooses to send, and an idle wfb_rx with
         // no inbound frames costs essentially nothing.
-        let aux_rx = GsWfbProcess::spawn(
+        let aux = GsWfbProcess::spawn(
             "wfb_rx",
-            &gs_atlas_rx_args(iface, &rx_key, ATLAS_RX_PORT),
+            &gs_atlas_rx_args(iface, &rx_key, aux_rx_port(primary_slot), drone),
             Stdout::Null,
             Some("/run/ados/wfb-gs-aux-rx.log"),
+        )
+        .await?;
+        let tx_control = GsWfbProcess::spawn(
+            "wfb_tx",
+            &gs_tx_control_args(iface, &rx_key, self.config.mcs_index, ground),
+            Stdout::Null,
+            Some("/run/ados/wfb-gs-tx-control.log"),
         )
         .await?;
         // Aux UPLINK. The counterpart to the receiver above, and the half that
@@ -370,12 +445,67 @@ impl WfbRxManager {
         // and an idle wfb_tx with no ingress traffic costs essentially nothing.
         let aux_tx = GsWfbProcess::spawn(
             "wfb_tx",
-            &gs_aux_tx_args(iface, &rx_key, self.config.mcs_index),
+            &gs_aux_tx_args(iface, &rx_key, self.config.mcs_index, ground),
             Stdout::Null,
             Some("/run/ados/wfb-gs-aux-tx.log"),
         )
         .await?;
-        Ok((data_rx, rx_control, tx_control, aux_rx, aux_tx))
+        Ok(PrimaryChain {
+            slot: primary_slot,
+            video,
+            aux,
+            control,
+            tx_control,
+            aux_tx,
+        })
+    }
+
+    /// Spawn the receive trio for one NON-primary fleet slot: video (p0), aux
+    /// (p2) and control (p1), each keyed to that slot's `link_id` and decoding
+    /// to that slot's loopback egress ports.
+    ///
+    /// All instances bind the SAME `iface` as the primary chain. That is legal,
+    /// not a workaround: `wfb_rx` opens a promiscuous, non-exclusive pcap handle
+    /// and compiles a per-instance kernel BPF on `channel_id`
+    /// (`vendor/wfb-ng/src/rx.cpp:70,84`), so each receiver sees only its own
+    /// drone's frames and N drones need N receivers, not N radios.
+    ///
+    /// stdout is discarded: only the primary slot's video RX drives the stats
+    /// reader and the channel acquirer.
+    pub async fn spawn_slot_receivers(
+        &self,
+        iface: &str,
+        slot: u8,
+    ) -> std::io::Result<SlotReceivers> {
+        let rx_key = rx_key_path();
+        let drone = ados_radio::config::link_id(self.config.fleet_id, slot);
+        let video = GsWfbProcess::spawn(
+            "wfb_rx",
+            &data_rx_args(iface, &rx_key, video_rx_port(slot), drone),
+            Stdout::Null,
+            Some(&format!("/run/ados/wfb-gs-video-rx-{slot}.log")),
+        )
+        .await?;
+        let aux = GsWfbProcess::spawn(
+            "wfb_rx",
+            &gs_atlas_rx_args(iface, &rx_key, aux_rx_port(slot), drone),
+            Stdout::Null,
+            Some(&format!("/run/ados/wfb-gs-aux-rx-{slot}.log")),
+        )
+        .await?;
+        let control = GsWfbProcess::spawn(
+            "wfb_rx",
+            &gs_rx_control_args(iface, &rx_key, control_rx_port(slot), drone),
+            Stdout::Null,
+            Some(&format!("/run/ados/wfb-gs-rx-control-{slot}.log")),
+        )
+        .await?;
+        Ok(SlotReceivers {
+            slot,
+            video,
+            aux,
+            control,
+        })
     }
 
     /// Build the chunk-2 watchdog for this receive generation, wired to the
@@ -438,5 +568,47 @@ mod tests {
         // reads empty as "do not restrict").
         let m = WfbRxManager::new(WfbConfig::default());
         assert!(m.enabled_channels().is_empty());
+    }
+
+    #[test]
+    fn an_empty_registry_still_yields_one_receivable_slot() {
+        // A freshly-imaged ground station has no registry. Returning the empty
+        // set would spawn ZERO receivers and leave the rig structurally deaf
+        // with nothing logged as wrong, so it falls back to the slot
+        // `FleetRegistry::allocate` issues first — where the first provisioned
+        // drone will be.
+        let slots = fleet_slots(&crate::fleet::FleetRegistry::default());
+        assert_eq!(slots, vec![FIRST_DRONE_SLOT]);
+
+        let mut registry = crate::fleet::FleetRegistry::default();
+        assert_eq!(registry.allocate("first-drone"), Some(FIRST_DRONE_SLOT));
+    }
+
+    #[test]
+    fn registered_slots_drive_the_receive_chain_in_ascending_order() {
+        // The lowest slot is the PRIMARY (its video RX anchors the generation),
+        // so the order is load-bearing, not cosmetic.
+        let mut registry = crate::fleet::FleetRegistry::default();
+        registry.allocate("drone-a").unwrap();
+        registry.allocate("drone-b").unwrap();
+        registry.allocate("drone-c").unwrap();
+        registry.release("drone-a");
+        // Slot 1 is free again, so the survivors are 2 and 3 and the primary
+        // becomes 2 — never a stale 1 pointing at a released drone.
+        assert_eq!(fleet_slots(&registry), vec![2, 3]);
+    }
+
+    #[test]
+    fn each_slot_decodes_to_its_own_three_ports() {
+        // A shared egress would cross two drones' lanes: N H.264 streams on one
+        // port is an undecodable mux, and one aux port would blend two vehicles'
+        // MAVLink into one ingest.
+        let mut seen = std::collections::BTreeSet::new();
+        for slot in 1..=ados_radio::config::FLEET_MAX_SLOTS {
+            assert!(seen.insert(video_rx_port(slot)));
+            assert!(seen.insert(aux_rx_port(slot)));
+            assert!(seen.insert(control_rx_port(slot)));
+        }
+        assert_eq!(seen.len(), ados_radio::config::FLEET_MAX_SLOTS as usize * 3);
     }
 }

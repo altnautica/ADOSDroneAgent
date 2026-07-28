@@ -45,6 +45,19 @@ ados-macpin = { path = "../ados-macpin" }
 # carries only the recorder logic + the process-group teardown; this surface is
 # the thin REST wrapper over its start()/stop().
 ados-video = { path = "../ados-video" }
+# The ground station's fleet slot registry, read per request by the fleet-hero
+# route so it enumerates the same slot table the pair route writes and the
+# receive-chain reconciler drives. Read-only here; groundlink owns the writes.
+ados-groundlink = { path = "../ados-groundlink" }
+# The swarm state bus: this surface serves its published neighbour table on
+# `GET /api/swarm/neighbors` and folds it into `/api/status/full`. Depended on for
+# the PUBLISHED SHAPE (`publish::normalise_payload` + `empty_payload`), so the
+# producer and the HTTP surface cannot drift apart on a contract Mission Control is
+# typed against. No radio code is reachable from here.
+ados-swarmbus = { path = "../ados-swarmbus" }
+# Non-poisoning blocking locks for the IPC snapshot cells. No guard crosses an
+# await; async coordination stays on `tokio::sync`.
+parking_lot = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # Dynamic msgpack values for the vision-socket envelope (designate route).

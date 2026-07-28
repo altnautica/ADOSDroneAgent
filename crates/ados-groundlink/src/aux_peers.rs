@@ -64,9 +64,13 @@ pub const STATUS_STALE_AFTER_S: f64 = 15.0;
 /// A peer with no frame of any kind inside this window is dropped entirely.
 pub const PEER_STALE_AFTER_S: f64 = 120.0;
 
-/// Most peers held at once. One radio pair carries one peer today; the cap is
-/// what stops a misbehaving transmitter from growing the map without bound.
-pub const MAX_PEERS: usize = 8;
+/// Most peers held at once.
+///
+/// A fleet is up to `FLEET_MAX_SLOTS` (24) drones on one ground radio, and the
+/// cap has to clear that with room for a re-pair that has not yet aged its old
+/// entry out. What it still stops is a misbehaving transmitter growing the map
+/// without bound.
+pub const MAX_PEERS: usize = 64;
 
 /// How often the sidecar is rewritten.
 pub const PERSIST_CADENCE: Duration = Duration::from_secs(2);

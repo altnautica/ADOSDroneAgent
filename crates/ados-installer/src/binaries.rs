@@ -199,6 +199,22 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
         gate: Gate::BestEffort,
         profiles: DRONE,
     },
+    // The decentralized swarm state bus. Fetched on BOTH FC-bearing profiles,
+    // matching its supervisor gate: a drone broadcasts its beacon and a ground
+    // station listens so the operator's fleet view is local-first. Best-effort
+    // rather than Hard: the unit `ConditionPathExists`-gates on the binary, so a
+    // fetch miss leaves single-drone operation entirely intact — the bus adds fleet
+    // awareness and onboard separation input, and neither is on the C2 path. A
+    // missing binary on a node that is part of a real fleet is caught by the health
+    // gate, not by aborting every install.
+    PrebuiltBinary {
+        service: "ados-swarmbus",
+        asset: "ados-swarmbus-aarch64",
+        release_tag: "prebuilt-swarmbus",
+        dest: "/opt/ados/bin/ados-swarmbus",
+        gate: Gate::BestEffort,
+        profiles: BOTH,
+    },
     // The local logging and telemetry store. Best-effort: a missing store
     // degrades recordkeeping (the agent falls back to journald) without
     // aborting the install. The unit ships deployed-but-not-enabled, so the
@@ -379,8 +395,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_has_twenty_three_entries() {
-        assert_eq!(PREBUILT.len(), 23);
+    fn catalog_has_twenty_four_entries() {
+        assert_eq!(PREBUILT.len(), 24);
+    }
+
+    /// Both FC-bearing profiles fetch the swarm bus, matching its supervisor gate. A
+    /// ground station that fetched only the drone half would have no fleet view of its
+    /// own and would fall back to a cloud round-trip for something every node already
+    /// hears on the air.
+    #[test]
+    fn both_fc_profiles_fetch_the_swarm_bus() {
+        for profile in ["drone", "ground_station"] {
+            let svcs: Vec<&str> = for_profile(profile).iter().map(|b| b.service).collect();
+            assert!(
+                svcs.contains(&"ados-swarmbus"),
+                "{profile} must fetch ados-swarmbus"
+            );
+        }
+        // Best-effort, not Hard: a fetch miss must leave single-drone operation intact
+        // rather than abort the install. The bus is not on the C2 path.
+        let bus = PREBUILT
+            .iter()
+            .find(|b| b.service == "ados-swarmbus")
+            .expect("ados-swarmbus must be in the catalog");
+        assert_eq!(bus.gate, Gate::BestEffort);
+        // The path the unit's ConditionPathExists + ExecStart name, or the unit
+        // silently never starts.
+        assert_eq!(bus.dest, "/opt/ados/bin/ados-swarmbus");
+        assert_eq!(bus.asset, "ados-swarmbus-aarch64");
     }
 
     #[test]

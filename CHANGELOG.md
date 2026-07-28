@@ -4,6 +4,193 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.255] - 2026-07-28
+
+Fleet release: one ground station, one RTL8812EU per node, up to 24 drones on one
+20 MHz channel. Single-drone behaviour is unchanged when the fleet has one member.
+
+### Added
+
+- **Fleet addressing.** `video.wfb.fleet_id` (u16, default 1) and
+  `video.wfb.fleet_slot` (0 = ground station, 1..=24 = drones) compose into the
+  wfb-ng `link_id` as `fleet_id << 8 | slot`, filling the 24-bit space exactly, so
+  two fleets can share a channel with no `channel_id` collision. Every one of the
+  eleven `wfb_tx`/`wfb_rx` argv builders now passes `-i <link_id>`, and every
+  spawn and respawn path retains the ids it was keyed with so a channel hop or an
+  FEC/MCS change re-keys identically. A wrong or missing slot fails the config
+  load loudly and the node does not radiate, because a duplicate `channel_id`
+  makes two transmitters re-init each other's FEC decoder about once a second,
+  which presents as unexplained link loss rather than as a config error.
+- **N receivers on one ground radio.** `wfb_rx` compiles a per-instance kernel BPF
+  on `channel_id` onto a promiscuous, non-exclusive pcap handle, so one adapter
+  carries every drone: the ground station now reconciles video (p0), aux (p2) and
+  control (p1) receivers against the fleet registry, one set per registered slot,
+  all bound to the same interface. Per-slot loopback egress at
+  `VIDEO_RX_PORT_BASE + slot` / `AUX_RX_PORT_BASE + slot` /
+  `CONTROL_RX_PORT_BASE + slot`, with the whole span guarded against an operator
+  aux port. The uplink stays ONE transmitter on the ground slot that every drone
+  receives, so a fleet-wide command is one transmission, not N.
+- **Fleet registry** (`/var/lib/ados/fleet.json`): lowest-free-slot allocation,
+  idempotent by device id so re-pairing never renumbers a flying drone, released
+  slots reused, atomic temp-file-plus-rename persist.
+- **One fleet key.** Pairing a second drone with a byte-identical key blob is
+  accepted and issued the next free slot instead of being refused; the pair status
+  returns the whole slot table. A differing blob is `E_FLEET_KEY_MISMATCH`, a full
+  fleet is `E_FLEET_FULL`, and `E_ALREADY_PAIRED` is gone. A fleet is one trust
+  domain by design — the swarm bus requires every drone to decrypt every other
+  drone's beacon.
+- **`ados-swarmbus`**: a decentralized state bus. Every drone broadcasts a
+  20-byte beacon at 2 Hz with 0-100 ms of jitter, and every node — drones and the
+  ground station — hears every other node with no ground station in the path. Own
+  magic (`0xAD03`) in the position wfb-ng's BPF reads, one pcap handle and
+  userspace demultiplexing rather than N receivers per aircraft,
+  ChaCha20-Poly1305 under a fleet-shared key. 87 bytes on air, 0.84% of one
+  channel at N=24. Neighbour table with staleness pruning, constant-velocity dead
+  reckoning and k-nearest queries; `GET /api/swarm/neighbors` on both profiles.
+- **`ados-swarm-control`**: onboard swarm autonomy. Separation, flocking
+  (Olfati-Saber alpha-lattice), named formations and CBBA task allocation,
+  arbitrated by a fixed precedence ladder -- hard separation > operator direct >
+  formation > flocking > hold -- into `SET_POSITION_TARGET_GLOBAL_INT` setpoints
+  at 10 Hz against dead-reckoned neighbour positions. Every control law is a pure
+  function over a local NED frame, so the whole layer is testable with no radio,
+  no socket and no flight controller. Adds no radio traffic of its own.
+- `ados-mavlink-router` runs the loop (`connection::swarm_setpoint`): it reads the
+  neighbour table off `/run/ados/swarm.sock`, interpolates the 2 Hz feed up to the
+  10 Hz control rate, and commands the FC through the existing `send_msg` path
+  only while the FC itself reports GUIDED. The active precedence level and the
+  emergency condition are republished as the `swarm_precedence` /
+  `swarm_emergency` snapshot keys, which `ados-swarmbus` folds into the outgoing
+  beacon -- so `GET /api/swarm/neighbors` reports which layer is ACTUALLY flying
+  each aircraft rather than which one it was commanded into.
+- The five built-in formations (`line`, `column`, `wedge`, `grid`, `circle`) are
+  generated from the slot set a drone can hear, so any fleet size from 1 to 24 is
+  valid and a released slot leaves no hole in the shape.
+- Four flight-gate scenarios run as ordinary tests and as
+  `cargo run -p ados-swarm-control --example swarm_scenarios`: collision course,
+  8-drone flocking to a 500 m target, wedge station keeping, and swarm-bus loss.
+  Measured: minimum separation 4.14 m against the 4 m floor, 8/8 arrivals within
+  4.5 m of target, 0.001 m steady-state station error, and a silent drone dropped
+  after 2.5 s with zero setpoints emitted thereafter. This is the control-law
+  gate, NOT the SITL gate -- software-in-the-loop with a real autopilot per
+  aircraft is still required before flight.
+- **Attention-based video.** A `thumbnail` encoder profile (320x180, 1 fps,
+  50 kbps) beside the existing `hero` defaults (1280x720, 30 fps, 4000 kbps), both
+  on the existing p0 pipeline and the existing `wfb_tx` — no new radio port, no
+  second encoder, no new ground-side receiver. `POST /api/video/profile` on a
+  drone; `POST /api/v1/ground-station/fleet/hero` promotes one drone and demotes
+  every other registered slot concurrently, retrying each failure once and
+  reporting 207 with per-slot outcomes rather than blocking the new hero's
+  promotion. A channel-sharing node boots to `thumbnail` so a fleet powering up
+  together never has 24 transmitters at 48% airtime each; a one-slot fleet is
+  auto-promoted, preserving today's single-drone behaviour.
+- **Live MCS and FEC control.** A `wfb_tx_cmd` client (`ados-radio::tx_cmd`)
+  replaces the kill-and-respawn path, removing the 1-2 s video blackout per tier
+  change. Bandwidth, GI, STBC and LDPC are passed through unchanged on every
+  `set_radio` call, so a rate change can never silently retune the channel width.
+  The respawn path stays as the fallback when the control socket is unreachable.
+- **MCS now tracks measured SNR** instead of sitting statically at 1 (13.0 Mbps,
+  the second-lowest rung) against a measured 35 dB at bench. Five rungs, 10 dB of
+  margin held on each, down on two bad samples and up only after thirty good ones
+  — losing range is instant and dangerous, gaining it is not urgent. Capped at
+  MCS 3 by default because OpenIPC's production table tops out at MCS 2 in the
+  field; anything higher is bench-only until the radio is characterised.
+- The adaptive ladder now applies its tier bitrate to the encoder. It previously
+  retuned FEC only, so a degrading link emitted MORE on-air bytes (rescue tier is
+  3x FEC) on an already-strained channel. Ladder and profile compose through one
+  applier as `min(profile, ceiling)`, so a hero on a bad link is clamped and a
+  50 kbps thumbnail is never raised to the rescue tier.
+
+### Changed
+
+- **The FC parameter map is off the 10 Hz state publish.** `build_extras` inserted
+  the entire parameter cache into every 100 ms snapshot with no delta and no size
+  cap, which is why `/api/telemetry` measured ~25 KB and its relayed delivery sat
+  at 85%. Replaced by a `param_generation` counter: 20 615 B -> 1 114 B with 700
+  cached parameters, an 18.5x reduction, and the extras size no longer grows with
+  the parameter count at all. `/api/params` and every other parameter reader now
+  read the atomically-persisted `/var/lib/ados/params.json` instead.
+- **RPC responses carry their sender and are RaptorQ-coded.** A broadcast reply
+  previously completed a pending call on the first fragment matching a 32-bit id
+  regardless of who sent it, so with N drones answering, two drones' fragments
+  spliced into one buffer. Fragments now carry the sender device id and a
+  mismatched sender is dropped and counted. Reassembly takes any k of k+4
+  symbols instead of demanding every index: at the measured 0.7% per-fragment
+  loss a 30 KB body goes from ~17% failure to under 0.001%, for 13% more bytes on
+  air. `MAX_PENDING_CALLS` 256 -> 1024 and `MAX_PEERS` 8 -> 64 for a 24-drone
+  fleet poll.
+- Telemetry stream requests no longer duplicate. `tick_streams` sent both
+  `SET_MESSAGE_INTERVAL` and the legacy `REQUEST_DATA_STREAM` every refresh on the
+  assumption that a firmware honours one or the other; measured ingest of
+  66.5 frames/s against 29 Hz asked for shows ArduPilot honouring both. The legacy
+  loop is now behind `mavlink.legacy_stream_request`, default false.
+- `swarm.lora` and its `LoraConfig` are deleted. No driver, no consumer, and LoRa
+  is absent from the agent entirely, so the new swarm UI would have surfaced a
+  field nothing reads. `swarm.flock.*`, `swarm.separation.*`, `swarm.tasks.*` and
+  `swarm.mode` take its place, and `swarm.default_formation` is now a closed enum
+  over the five built-ins instead of free text.
+
+### Fixed
+
+- The slot-indexed deconfliction climb measured its offset from each drone's OWN
+  altitude, which does not deconflict: two vehicles at different heights can be
+  commanded to the same altitude, and a pair held on a collision course ratchets
+  ~40 m upward over 90 s, one step per re-engagement. Exactly one of a pair now
+  climbs -- the lower slot, to a fixed offset above the HOLDER's altitude -- so the
+  target is stationary across re-engagements and the ordering depends on slot
+  alone. A vehicle already below its offender holds rather than climbing through it.
+- The ground-station Atlas relay defaulted its listen port to the retired fixed
+  aux egress 5603 while the aux lane now decodes per slot, which is the silent
+  failure mode the port pin existed to prevent: frames arrive, decode fine, and
+  land on a port nobody is bound to. The default now derives from the first drone
+  slot's aux egress and the two are pinned together again by test.
+- The parameter cache wrote on a flat 2 s debounce, which would have made the
+  parameter-write acknowledgement a coin flip once `/api/params` began reading the
+  file. A change arriving outside a `PARAM_REQUEST_LIST` sweep is now written
+  immediately; the debounce still holds during a sweep, which is where the write
+  volume is.
+
+### Notes
+
+- **Committed fleet size is 8 at MCS 1 and 24 only with the adaptive ladder
+  holding MCS 3.** The airtime arithmetic does not close otherwise: one hero at
+  48% plus 23 control-only drones is 103% of one channel at MCS 1. If the radio
+  sweep cannot hold MCS 3 at real range, the honest size is 8 per channel.
+- **The MCS rung table is arithmetic from standard 802.11 required-SNR figures,
+  not a measurement of this driver.** The bench sweep procedure is in the WFB
+  video pipeline runbook and must run before the ladder is trusted above MCS 3.
+- Only MCS is varied at runtime. Channel width stays pinned at 20 MHz (the
+  vendored RTL8812EU has no narrowband symbol compiled in, and 40 MHz has open
+  upstream defects on this chipset) and TX power stays static (the existing
+  ramp-until-accepted plus readback is evidence the driver honours only a couple
+  of levels).
+- The separation layer is enforced as a braking-aware closing-rate constraint
+  applied last, not as an additive force. The plan's repulsive potential peaks at
+  0.19 m/s as a neighbour reaches the 4 m floor, so a summed potential field is
+  outvoted two orders of magnitude by any goal-seeking term and cannot hold that
+  floor; "applied last and overrides" is implemented as an override.
+- Flocking cohesion acts only on neighbours beyond the separation radius. An
+  ungated cohesion gain against an independent repulsion gain puts the lattice
+  equilibrium at 1.65 m, well inside the safety floor; gating restores the
+  equilibrium to the separation radius with both of the plan's gains unchanged.
+- `swarm.*` gains are integer percentages (`cohesion = 40` is 0.40) because the
+  GCS config primitives have no float field. The conversion happens once, at the
+  crate boundary.
+- No leader election is built. The operator screen is the single authority by
+  construction; electing a leader over a lossy broadcast invites a split brain
+  that still hears peers but has lost the operator, for no benefit.
+
+### Removed
+
+- `E_ALREADY_PAIRED` on the ground-station pair route, along with its branches:
+  refusing a second drone was the behaviour a fleet exists to lift.
+- `ParamCache::get_all()` and `VehicleState.params`. The former's only production
+  caller was the removed extras insert; the latter was a second in-memory
+  700-entry map that nothing serialized and nothing read, costing one clone and
+  one allocation per `PARAM_VALUE` frame for no reader.
+- The fixed `DATA_RX_PORT` / `ATLAS_RX_PORT` / `RX_CONTROL_PORT` receive
+  constants, replaced by the per-slot port helpers. Every consumer moved with
+  them.
+
 ## [0.99.21] - 2026-06-29
 
 ### Added

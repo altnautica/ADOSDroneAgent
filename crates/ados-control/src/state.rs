@@ -16,7 +16,7 @@ use std::time::Instant;
 
 use crate::auth::PairingState;
 use crate::dashboard_pin::DashboardPin;
-use crate::ipc::{LogdQueryClient, MavlinkIpcClient, StateIpcClient};
+use crate::ipc::{LogdQueryClient, MavlinkIpcClient, StateIpcClient, SwarmIpcClient};
 use crate::routes::status::process_uptime_seconds;
 
 /// The agent version string, resolved live on each call (through
@@ -198,6 +198,12 @@ pub struct AppState {
     /// route reports an empty board object — the same shape the FastAPI route
     /// emits when its own HAL detect raises.
     pub board_path: PathBuf,
+    /// The MAVLink router's on-disk parameter cache. The router persists it
+    /// atomically and it is now the ONLY reachable parameter source: the map left
+    /// the 10 Hz state snapshot, which carries just a `param_generation` counter.
+    /// Set from [`crate::param_store::default_params_path`] at startup and
+    /// overridable with [`AppState::with_params_path`].
+    pub params_path: PathBuf,
     /// The on-disk paths the pairing routes read + write.
     pub pairing_paths: PairingPaths,
     /// The dashboard-access PIN store the `pin/*` routes read + write, and the
@@ -208,6 +214,15 @@ pub struct AppState {
     /// accept flag is on) the LAN-edge auth consults on a would-be-401. Shared
     /// (same `Arc`) with the edge so the routes and the gate read one record.
     pub mcp_tokens: Arc<crate::mcp::McpTokenStore>,
+    /// The swarm neighbour-table reader. Holds the last table `ados-swarmbus`
+    /// published on `/run/ados/swarm.sock`, which `/api/swarm/neighbors` serves and
+    /// `/api/status/full` folds in. Cheap to clone (the payload is behind an `Arc`).
+    ///
+    /// Not an `Option`, unlike [`aux_rpc_proxy`](Self::aux_rpc_proxy): the client is
+    /// always present and degrades in place, because the route is profile-agnostic
+    /// by design. A drone answering it with the ground station powered off is the
+    /// decentralization proof, so there is no profile on which it should 503.
+    pub swarm: SwarmIpcClient,
     /// When this daemon started, the status route's uptime fallback when the
     /// state snapshot carries no `service_uptime`.
     started: Instant,
@@ -243,9 +258,18 @@ impl AppState {
             pairing_paths,
             dashboard_pin,
             mcp_tokens,
+            params_path: crate::param_store::default_params_path(),
             started: Instant::now(),
+            swarm: SwarmIpcClient::disconnected(),
             aux_rpc_proxy: None,
         }
+    }
+
+    /// Point the parameter-cache reads at an explicit file. The daemon calls this
+    /// with the resolved `DaemonPaths` entry; a test points it at a tempdir.
+    pub fn with_params_path(mut self, path: PathBuf) -> Self {
+        self.params_path = path;
+        self
     }
 
     /// Attach a relay-proxy caller and reader. Ground-station-profile nodes
@@ -255,6 +279,14 @@ impl AppState {
         proxy: Arc<ados_protocol::aux_rpc_proxy::AuxRpcProxy>,
     ) -> Self {
         self.aux_rpc_proxy = Some(proxy);
+        self
+    }
+
+    /// Attach a live swarm neighbour-table reader. The daemon calls this at startup
+    /// with the reader spawned against the runtime socket; a test leaves the
+    /// disconnected client and primes it directly.
+    pub fn with_swarm(mut self, swarm: SwarmIpcClient) -> Self {
+        self.swarm = swarm;
         self
     }
 

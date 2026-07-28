@@ -7,6 +7,11 @@ use serde::Deserialize;
 fn default_channel() -> u8 {
     149
 }
+/// Default fleet. A single-drone rig never has to think about fleets, so the
+/// unconfigured node lands in fleet 1 rather than the reserved 0.
+fn default_fleet_id() -> u16 {
+    1
+}
 fn default_band() -> String {
     "u-nii-3".to_string()
 }
@@ -28,6 +33,12 @@ fn default_hop_rssi_threshold() -> f32 {
 }
 fn default_mcs_index() -> u8 {
     1
+}
+/// Default cap on the adaptive MCS ladder's top rung. Mirrors
+/// [`crate::mcs_ladder::DEFAULT_LADDER_MAX_MCS`]; kept as a `serde` default fn so
+/// an absent YAML key resolves the same way an absent field does in `Default`.
+fn default_adaptive_mcs_max() -> u8 {
+    crate::mcs_ladder::DEFAULT_LADDER_MAX_MCS
 }
 fn default_fec_k() -> u8 {
     8
@@ -288,6 +299,22 @@ pub struct WfbConfig {
     pub channel: u8,
     #[serde(default)]
     pub interface: String,
+    /// Fleet this node belongs to. Every node that must hear every other node
+    /// shares it. Range 1..=65535; 0 is reserved as "unprovisioned" and is
+    /// rejected at load time. Combined with [`fleet_slot`](Self::fleet_slot)
+    /// through [`link_id`] it fills the wfb-ng 24-bit `link_id` space exactly,
+    /// so two fleets can share one channel with no `channel_id` collision.
+    #[serde(default = "default_fleet_id")]
+    pub fleet_id: u16,
+    /// This node's slot within the fleet. [`SLOT_GROUND`] (0) is the ground
+    /// station; 1..=[`FLEET_MAX_SLOTS`] are drones. Every drone's slot MUST be
+    /// unique within a fleet: two transmitters sharing a `channel_id` thrash
+    /// each other's FEC decoder roughly once a second (the wfb-ng `Aggregator`
+    /// re-inits FEC on any foreign session packet), which presents as
+    /// unexplained link loss. Slots are issued by the ground station's fleet
+    /// registry at pair time, never negotiated at runtime.
+    #[serde(default)]
+    pub fleet_slot: u8,
     #[serde(default = "default_band")]
     pub band: String,
     #[serde(default = "default_true")]
@@ -325,6 +352,19 @@ pub struct WfbConfig {
     /// station is present. Operators pin a manual trio to disable it.
     #[serde(default = "default_true")]
     pub adaptive_bitrate_enabled: bool,
+    /// Cap on the top rung the adaptive SNR/MCS ladder may select.
+    ///
+    /// Defaults to 3, not the hard ceiling of 5. The rung table in
+    /// [`crate::mcs_ladder`] is arithmetic from standard 802.11n required-SNR
+    /// figures, not a measurement of the vendored `rtl8812eu`; OpenIPC's
+    /// `adaptive-link` — the working production reference for this loop — ships a
+    /// profile table that tops out at MCS 2 in the field. Anything above 3 is
+    /// bench-only until the characterisation sweep in
+    /// `product/specs/ados-agent-rust-hybrid/wfb-video-pipeline-runbook.md`
+    /// measures which rungs this driver actually applies and holds. Clamped into
+    /// `1..=5` on read, so a typo can never radiate an unmeasured rung.
+    #[serde(default = "default_adaptive_mcs_max")]
+    pub adaptive_mcs_max: u8,
     /// Operator-facing link preset; overrides `mcs_index`/`fec_k`/`fec_n` via
     /// [`WfbConfig::apply_link_preset`]. `conservative` (the default) is a no-op
     /// so a rig with explicitly-tuned values keeps them.
@@ -407,6 +447,8 @@ impl Default for WfbConfig {
         Self {
             channel: default_channel(),
             interface: String::new(),
+            fleet_id: default_fleet_id(),
+            fleet_slot: SLOT_GROUND,
             band: default_band(),
             auto_hop_enabled: true,
             periodic_hop_enabled: false,
@@ -420,6 +462,7 @@ impl Default for WfbConfig {
             tx_power_max_dbm: default_tx_power_max_dbm(),
             topology: default_topology(),
             adaptive_bitrate_enabled: true,
+            adaptive_mcs_max: default_adaptive_mcs_max(),
             wfb_link_preset: default_link_preset(),
             reg_domain: default_reg_domain(),
             reg_gate_strict: default_reg_gate_strict(),
@@ -440,6 +483,106 @@ impl Default for WfbConfig {
     }
 }
 
+/// Largest drone slot a fleet issues. Slots run 1..=24; slot 0 is the ground
+/// station. The ceiling is an airtime budget, not a protocol limit — the
+/// `link_id` space holds 256 slots per fleet.
+pub const FLEET_MAX_SLOTS: u8 = 24;
+
+/// The ground station's fleet slot. A ground station is not an aircraft: it
+/// never carries a drone slot and never emits a swarm beacon.
+pub const SLOT_GROUND: u8 = 0;
+
+/// wfb-ng `link_id` for a fleet slot. 16 bits of fleet plus 8 bits of slot
+/// fills the 24-bit `link_id` space exactly, so two fleets can operate side by
+/// side on one channel with no `channel_id` collision
+/// (`channel_id = (link_id << 8) + radio_port`).
+pub const fn link_id(fleet_id: u16, slot: u8) -> u32 {
+    ((fleet_id as u32) << 8) | slot as u32
+}
+
+/// Base loopback egress port for a per-slot ground-station video receiver
+/// (`wfb_rx -p 0`). Slot S decodes to `VIDEO_RX_PORT_BASE + S`.
+pub const VIDEO_RX_PORT_BASE: u16 = 5900;
+/// Base loopback egress port for a per-slot ground-station aux receiver
+/// (`wfb_rx -p 2`). Slot S decodes to `AUX_RX_PORT_BASE + S`.
+pub const AUX_RX_PORT_BASE: u16 = 5930;
+/// Base loopback egress port for a per-slot ground-station control receiver
+/// (`wfb_rx -p 1`). Slot S decodes to `CONTROL_RX_PORT_BASE + S`.
+pub const CONTROL_RX_PORT_BASE: u16 = 5960;
+
+/// The whole loopback span the per-slot receive instances own, inclusive. An
+/// operator-settable aux port inside it would be fed by (or would inject into)
+/// a fleet receiver, so the load-time guard rejects it.
+///
+/// The bases sit above the fixed single-instance plane ports (5599-5603, 5803,
+/// 5810) deliberately: the drone's own aux defaults are 5602/5603 and the
+/// ground station's uplink ingress ports are 5602/5810, all of which would
+/// otherwise land inside a per-slot range.
+pub const FLEET_RX_PORT_FIRST: u16 = VIDEO_RX_PORT_BASE + 1;
+pub const FLEET_RX_PORT_LAST: u16 = CONTROL_RX_PORT_BASE + FLEET_MAX_SLOTS as u16;
+
+/// True when `port` falls inside the per-slot fleet receiver span.
+pub const fn is_fleet_rx_port(port: u16) -> bool {
+    port >= FLEET_RX_PORT_FIRST && port <= FLEET_RX_PORT_LAST
+}
+
+/// Why a fleet identity is unusable. Each variant is a hard load-time refusal,
+/// never a silent fallback: a wrong slot is the FEC-thrash failure mode, which
+/// presents as unexplained link loss rather than as a config error.
+#[derive(Debug, PartialEq, Eq)]
+pub enum FleetIdentityError {
+    /// `fleet_id` is the reserved "unprovisioned" value 0.
+    UnprovisionedFleet,
+    /// `fleet_slot` exceeds [`FLEET_MAX_SLOTS`].
+    SlotOutOfRange(u8),
+    /// A drone profile carries the ground station's slot 0.
+    DroneWithoutSlot,
+    /// A ground-station profile carries a drone slot.
+    GroundWithDroneSlot(u8),
+}
+
+impl std::fmt::Display for FleetIdentityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnprovisionedFleet => {
+                write!(f, "video.wfb.fleet_id is 0 (reserved as unprovisioned)")
+            }
+            Self::SlotOutOfRange(s) => write!(
+                f,
+                "video.wfb.fleet_slot {s} exceeds the maximum fleet slot {FLEET_MAX_SLOTS}"
+            ),
+            Self::DroneWithoutSlot => write!(
+                f,
+                "video.wfb.fleet_slot is 0 on a drone profile; slot 0 is the ground station"
+            ),
+            Self::GroundWithDroneSlot(s) => write!(
+                f,
+                "video.wfb.fleet_slot {s} on a ground-station profile; a ground station holds slot 0"
+            ),
+        }
+    }
+}
+
+/// Validate a fleet identity for a profile. Pure so it is unit-testable without
+/// touching a config file; `None` means the identity is usable.
+pub fn fleet_identity_error(
+    fleet_id: u16,
+    fleet_slot: u8,
+    is_ground_station: bool,
+) -> Option<FleetIdentityError> {
+    if fleet_id == 0 {
+        return Some(FleetIdentityError::UnprovisionedFleet);
+    }
+    if fleet_slot > FLEET_MAX_SLOTS {
+        return Some(FleetIdentityError::SlotOutOfRange(fleet_slot));
+    }
+    match (is_ground_station, fleet_slot) {
+        (false, SLOT_GROUND) => Some(FleetIdentityError::DroneWithoutSlot),
+        (true, s) if s != SLOT_GROUND => Some(FleetIdentityError::GroundWithDroneSlot(s)),
+        _ => None,
+    }
+}
+
 /// The UDP ports the data, stats, and control planes own on the shared adapter:
 /// data ingress 5600, data stats 5601, control tx 5803, control rx 5810. The
 /// auxiliary pair must never reuse one of these (it would inject into, or steal
@@ -457,11 +600,19 @@ pub enum AuxPortCollision {
     RxReservesPlanePort(u16),
     /// The aux tx and rx ports are the same (receive would feed transmit).
     TxRxSame(u16),
+    /// The aux tx ingress port sits inside the per-slot fleet receiver span, so
+    /// a fleet receiver would inject decoded frames straight into the aux
+    /// transmitter.
+    TxReservesFleetRxPort(u16),
+    /// The aux rx re-emit port sits inside the per-slot fleet receiver span, so
+    /// the aux receiver and a fleet receiver would both write to one port.
+    RxReservesFleetRxPort(u16),
 }
 
 /// Validate the auxiliary UDP ports against the reserved data/control/stats
-/// ports and against each other. Pure (no I/O) so it is unit-testable; returns
-/// the first collision found, or `None` when the aux ports are clear.
+/// ports, the per-slot fleet receiver span, and against each other. Pure (no
+/// I/O) so it is unit-testable; returns the first collision found, or `None`
+/// when the aux ports are clear.
 pub fn aux_port_collision(aux_tx_port: u16, aux_rx_port: u16) -> Option<AuxPortCollision> {
     if aux_tx_port == aux_rx_port {
         return Some(AuxPortCollision::TxRxSame(aux_tx_port));
@@ -471,6 +622,12 @@ pub fn aux_port_collision(aux_tx_port: u16, aux_rx_port: u16) -> Option<AuxPortC
     }
     if RESERVED_PLANE_PORTS.contains(&aux_rx_port) {
         return Some(AuxPortCollision::RxReservesPlanePort(aux_rx_port));
+    }
+    if is_fleet_rx_port(aux_tx_port) {
+        return Some(AuxPortCollision::TxReservesFleetRxPort(aux_tx_port));
+    }
+    if is_fleet_rx_port(aux_rx_port) {
+        return Some(AuxPortCollision::RxReservesFleetRxPort(aux_rx_port));
     }
     None
 }
@@ -1033,5 +1190,139 @@ mod tests {
         // The explicit aux MCS overrides the data-plane rate.
         assert_eq!(c.aux_mcs_index, Some(3));
         assert_eq!(c.aux_mcs(), 3);
+    }
+
+    #[test]
+    fn fleet_defaults_are_fleet_one_ground_slot() {
+        let c = WfbConfig::default();
+        assert_eq!(c.fleet_id, 1);
+        assert_eq!(c.fleet_slot, SLOT_GROUND);
+    }
+
+    #[test]
+    fn fleet_identity_reads_from_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        std::fs::write(
+            &cfg,
+            "video:\n  wfb:\n    fleet_id: 7\n    fleet_slot: 12\n",
+        )
+        .unwrap();
+        let c = WfbConfig::load_from(&cfg);
+        assert_eq!(c.fleet_id, 7);
+        assert_eq!(c.fleet_slot, 12);
+    }
+
+    #[test]
+    fn link_id_is_unique_per_slot_and_never_collides_across_radio_ports() {
+        // Two transmitters sharing a channel_id thrash each other's FEC decoder,
+        // so every (slot, radio_port) pair in a fleet must map to a distinct
+        // channel_id. channel_id = (link_id << 8) + radio_port.
+        let mut seen = std::collections::BTreeSet::new();
+        for slot in 0..=FLEET_MAX_SLOTS {
+            for radio_port in 0u32..4 {
+                let channel_id = (link_id(1, slot) << 8) + radio_port;
+                assert!(
+                    seen.insert(channel_id),
+                    "duplicate channel_id for slot {slot} port {radio_port}"
+                );
+            }
+        }
+        assert_ne!(link_id(1, SLOT_GROUND), link_id(1, 1));
+    }
+
+    #[test]
+    fn link_id_separates_fleets_sharing_a_channel() {
+        // 16 bits of fleet over 8 bits of slot fills the 24-bit link_id space
+        // exactly, so no slot in fleet A can alias a slot in fleet B.
+        assert_eq!(link_id(1, 0), 0x000100);
+        assert_eq!(link_id(1, 24), 0x000118);
+        assert_eq!(link_id(2, 0), 0x000200);
+        assert_ne!(link_id(1, 255), link_id(2, 0));
+        assert_eq!(link_id(u16::MAX, u8::MAX), 0x00FF_FFFF);
+    }
+
+    #[test]
+    fn fleet_identity_rejects_unprovisioned_and_out_of_range() {
+        assert_eq!(
+            fleet_identity_error(0, 1, false),
+            Some(FleetIdentityError::UnprovisionedFleet)
+        );
+        assert_eq!(
+            fleet_identity_error(1, FLEET_MAX_SLOTS + 1, false),
+            Some(FleetIdentityError::SlotOutOfRange(FLEET_MAX_SLOTS + 1))
+        );
+    }
+
+    #[test]
+    fn fleet_identity_is_profile_aware() {
+        // A drone with the ground station's slot would key its transmitters onto
+        // the uplink channel_id — the FEC-thrash failure mode.
+        assert_eq!(
+            fleet_identity_error(1, SLOT_GROUND, false),
+            Some(FleetIdentityError::DroneWithoutSlot)
+        );
+        assert_eq!(
+            fleet_identity_error(1, 3, true),
+            Some(FleetIdentityError::GroundWithDroneSlot(3))
+        );
+        assert_eq!(fleet_identity_error(1, 1, false), None);
+        assert_eq!(fleet_identity_error(1, FLEET_MAX_SLOTS, false), None);
+        assert_eq!(fleet_identity_error(1, SLOT_GROUND, true), None);
+    }
+
+    #[test]
+    fn aux_ports_may_not_land_in_the_fleet_receiver_span() {
+        // A fleet receiver decoding into the aux transmit ingress would radiate
+        // every decoded downlink frame straight back over the air.
+        assert_eq!(
+            aux_port_collision(VIDEO_RX_PORT_BASE + 1, 5613),
+            Some(AuxPortCollision::TxReservesFleetRxPort(
+                VIDEO_RX_PORT_BASE + 1
+            ))
+        );
+        assert_eq!(
+            aux_port_collision(5612, CONTROL_RX_PORT_BASE + FLEET_MAX_SLOTS as u16),
+            Some(AuxPortCollision::RxReservesFleetRxPort(
+                CONTROL_RX_PORT_BASE + FLEET_MAX_SLOTS as u16
+            ))
+        );
+        // The span starts above the fixed plane ports, so the shipped defaults
+        // (drone aux 5602/5603, ground uplink 5602/5810) stay clear of it.
+        assert!(!is_fleet_rx_port(VIDEO_RX_PORT_BASE));
+        assert!(!is_fleet_rx_port(default_aux_tx_port()));
+        assert!(!is_fleet_rx_port(default_aux_rx_port()));
+        assert!(!is_fleet_rx_port(5810));
+        assert_eq!(
+            aux_port_collision(default_aux_tx_port(), default_aux_rx_port()),
+            None
+        );
+    }
+
+    #[test]
+    fn fleet_receiver_ranges_do_not_overlap_each_other() {
+        let video: Vec<u16> = (1..=FLEET_MAX_SLOTS)
+            .map(|s| VIDEO_RX_PORT_BASE + s as u16)
+            .collect();
+        let aux: Vec<u16> = (1..=FLEET_MAX_SLOTS)
+            .map(|s| AUX_RX_PORT_BASE + s as u16)
+            .collect();
+        let control: Vec<u16> = (1..=FLEET_MAX_SLOTS)
+            .map(|s| CONTROL_RX_PORT_BASE + s as u16)
+            .collect();
+        let mut all: Vec<u16> = video
+            .iter()
+            .chain(aux.iter())
+            .chain(control.iter())
+            .copied()
+            .collect();
+        let total = all.len();
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(all.len(), total, "per-slot receiver ports must be distinct");
+        for p in &all {
+            assert!(is_fleet_rx_port(*p));
+            assert!(!RESERVED_PLANE_PORTS.contains(p));
+        }
     }
 }

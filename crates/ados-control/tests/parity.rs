@@ -100,6 +100,10 @@ async fn start_full(
         mcp_token_path: dir.join("mcp-token.json"),
         state_socket,
         mavlink_socket,
+        // The swarm bus is not running in the harness, so this points at an absent
+        // socket: `/api/swarm/neighbors` then serves the degraded, null-identified
+        // empty table, which is the shape the golden test pins.
+        swarm_socket: dir.join("absent-swarm.sock"),
         // Point the pairing-route reads at the same temp dir so a test can seed a
         // config / wfb key / bind-state sidecar; absent files degrade to the
         // documented defaults (board "unknown", empty device id, null bind_state).
@@ -112,6 +116,10 @@ async fn start_full(
         // paths.
         logd_query_socket: dir.join("logd-query.sock"),
         board_path: dir.join("board.json"),
+        // The MAVLink router's parameter cache, in the same temp dir. Absent by
+        // default → the `/api/params*` reads serve the empty shape; a test seeds a
+        // `params.json` to exercise the populated path.
+        params_path: dir.join("params.json"),
         // The pairing-info profile resolver's sentinels, in the same temp dir.
         // Absent by default → the resolver falls back to the config's explicit
         // profile; a test seeds `mesh-role` to exercise a ground-station role.

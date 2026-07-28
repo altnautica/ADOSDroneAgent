@@ -46,10 +46,24 @@ def test_load_config_from_yaml():
     assert cfg.logging.level == "info"
 
 
-def test_load_config_no_file():
-    """Loading from a non-existent path should return defaults."""
-    cfg = load_config("/tmp/nonexistent-ados-config-12345.yaml")
+def test_load_config_no_file(monkeypatch, tmp_path):
+    """With no config file anywhere in the search order, pure defaults load.
+
+    The search order is explicit path -> ``CONFIG_YAML`` -> ``./config.yaml`` ->
+    defaults, so passing only a bogus explicit path is not enough: on a machine
+    that has an agent installed (``/etc/ados/config.yaml``, or ``~/.ados/
+    config.yaml`` on a rootless macOS install) the second candidate wins and the
+    test read that host's real node name. Both remaining candidates are pointed
+    at empty ground here so the assertion is about the defaults, not the host.
+    """
+    monkeypatch.setattr(
+        "ados.core.config.CONFIG_YAML", tmp_path / "absent" / "config.yaml"
+    )
+    monkeypatch.chdir(tmp_path)
+    cfg = load_config(str(tmp_path / "nonexistent-ados-config.yaml"))
     assert cfg.agent.name == "my-drone"
+    assert cfg.mavlink.baud_rate == 57600
+    assert cfg.logging.level == "info"
 
 
 def test_config_extra_ignored():
@@ -451,3 +465,65 @@ def test_packaged_defaults_carry_no_orphan_top_level_keys():
         f"defaults.yaml top-level keys with no ADOSConfig field: {orphans}; "
         "declare a model field or delete the block"
     )
+
+
+def test_swarm_defaults_carry_the_behaviour_blocks():
+    """The swarm block ships the flocking / separation / task subtrees.
+
+    The GCS Swarm settings page binds directly to these dot-paths, so a
+    missing subtree renders "not set" rows the operator cannot write.
+    """
+    swarm = ADOSConfig().swarm
+    assert swarm.mode == "hold"
+    assert swarm.default_formation == "line"
+    # Gains are integer percentages of the float weight the runtime uses.
+    assert (swarm.flock.cohesion, swarm.flock.alignment) == (40, 60)
+    assert swarm.flock.separation_gain == 150
+    assert (swarm.flock.radius_m, swarm.flock.neighbors) == (30, 7)
+    assert (swarm.separation.radius_m, swarm.separation.hard_m) == (8, 4)
+    # Agent-written assignment mirrors stay unset until a runtime writes them.
+    assert swarm.tasks.enabled is False
+    assert swarm.tasks.assigned_task_id is None
+    assert swarm.tasks.bundle_position is None
+
+
+def test_swarm_rejects_a_formation_outside_the_builtin_set():
+    """An unknown formation name produced no formation at all, silently."""
+    with pytest.raises(ValueError):
+        ADOSConfig(swarm={"default_formation": "diamond"})
+
+
+def test_swarm_separation_hard_floor_must_sit_inside_the_repulsion_radius():
+    """hard_m >= radius_m means the hard floor fires before repulsion ever
+    engages — the safety layer inverted. Reject it at load."""
+    with pytest.raises(ValueError):
+        ADOSConfig(swarm={"separation": {"radius_m": 4, "hard_m": 8}})
+    # The boundary is exclusive: equal radii leave zero repulsion band.
+    with pytest.raises(ValueError):
+        ADOSConfig(swarm={"separation": {"radius_m": 6, "hard_m": 6}})
+    assert ADOSConfig(swarm={"separation": {"radius_m": 6, "hard_m": 5}})
+
+
+def test_swarm_has_no_lora_subtree():
+    """LoRa had no driver and no consumer anywhere in the agent; the dead
+    subtree is gone rather than left for a UI to surface."""
+    assert "lora" not in ADOSConfig.model_fields["swarm"].annotation.model_fields
+
+
+def test_camera_hero_defaults_are_unchanged_and_thumbnail_is_the_small_profile():
+    """The fleet shares one 20 MHz channel, so exactly one drone streams full
+    video. The top-level camera fields ARE the hero profile and must not have
+    moved; the new ``thumbnail`` block is what every other drone runs."""
+    cam = ADOSConfig().video.camera
+    assert (cam.width, cam.height, cam.fps, cam.bitrate_kbps) == (1280, 720, 30, 4000)
+    thumb = cam.thumbnail
+    assert (thumb.width, thumb.height, thumb.fps, thumb.bitrate_kbps) == (320, 180, 1, 50)
+
+
+def test_camera_thumbnail_is_overridable_per_field():
+    """A partial ``thumbnail:`` block keeps the remaining defaults, so an
+    operator tuning one knob never silently resets the other three."""
+    cfg = ADOSConfig(video={"camera": {"thumbnail": {"fps": 2}}})
+    thumb = cfg.video.camera.thumbnail
+    assert thumb.fps == 2
+    assert (thumb.width, thumb.height, thumb.bitrate_kbps) == (320, 180, 50)

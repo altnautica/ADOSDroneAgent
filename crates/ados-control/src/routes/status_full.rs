@@ -215,6 +215,17 @@ pub async fn get_full_status(State(state): State<AppState>, headers: HeaderMap) 
         payload.insert("crsf".to_string(), crsf);
     }
 
+    // The swarm neighbour table, folded in only when `ados-swarmbus` has actually
+    // published one. PROFILE-AGNOSTIC: a drone carries its own fleet view over the
+    // LAN path, which is the whole point of a decentralized bus. The key is OMITTED
+    // rather than emitted as `[]` when the bus is silent, because an empty array
+    // would claim "this node hears no neighbours" — a different fact from "this node
+    // runs no swarm bus" (operating rule 44). A client that wants the counters, or
+    // the degraded shape explicitly, reads `/api/swarm/neighbors`.
+    if let Some(neighbors) = super::swarm::neighbors_for_full_status(&state) {
+        payload.insert("neighbors".to_string(), neighbors);
+    }
+
     Json(Value::Object(payload))
 }
 

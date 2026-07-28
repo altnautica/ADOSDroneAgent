@@ -182,10 +182,12 @@ name = "ados-control"
 version = "0.1.0"
 dependencies = [
  "ados-config",
+ "ados-groundlink",
  "ados-hid",
  "ados-macpin",
  "ados-offload",
  "ados-protocol",
+ "ados-swarmbus",
  "ados-video",
  "anyhow",
  "axum",
@@ -200,6 +202,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "nix 0.29.0",
+ "parking_lot",
  "rmp-serde",
  "rmpv",
  "sd-notify",
@@ -428,6 +431,8 @@ version = "0.1.0"
 dependencies = [
  "ados-config",
  "ados-protocol",
+ "ados-swarm-control",
+ "ados-swarmbus",
  "anyhow",
  "futures-util",
  "serde",
@@ -512,6 +517,7 @@ dependencies = [
  "hex",
  "hmac",
  "mavlink",
+ "raptorq",
  "rmp-serde",
  "rmpv",
  "rustls",
@@ -533,6 +539,7 @@ version = "0.1.0"
 dependencies = [
  "ados-config",
  "ados-protocol",
+ "ados-video",
  "anyhow",
  "async-trait",
  "blake2",
@@ -589,6 +596,41 @@ dependencies = [
  "serde_norway",
  "tempfile",
  "time",
+ "tokio",
+ "tracing",
+ "tracing-journald",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "ados-swarm-control"
+version = "0.1.0"
+dependencies = [
+ "ados-config",
+ "ados-swarmbus",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
+name = "ados-swarmbus"
+version = "0.1.0"
+dependencies = [
+ "ados-protocol",
+ "ados-radio",
+ "anyhow",
+ "chacha20poly1305",
+ "getrandom 0.2.17",
+ "libc",
+ "parking_lot",
+ "sd-notify",
+ "serde",
+ "serde_json",
+ "serde_norway",
+ "sha2",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-journald",
@@ -4565,7 +4607,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -4703,6 +4745,12 @@ checksum = "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
 dependencies = [
  "getrandom 0.3.4",
 ]
+
+[[package]]
+name = "raptorq"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4d4215fb79ef19442a0c71616aabb0715a386e6a16ed9031775ee3e3f20e7502"
 
 [[package]]
 name = "ratatui"

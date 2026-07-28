@@ -59,6 +59,9 @@ fn default_endpoints() -> Vec<EndpointConfig> {
 fn default_ws_proxy_enforce_auth() -> bool {
     false
 }
+fn default_legacy_stream_request() -> bool {
+    false
+}
 fn default_profile() -> String {
     "drone".to_string()
 }
@@ -115,6 +118,13 @@ pub struct MavlinkConfig {
     /// session enables enforcement.
     #[serde(default = "default_ws_proxy_enforce_auth")]
     pub ws_proxy_enforce_auth: bool,
+    /// Whether the legacy `REQUEST_DATA_STREAM` group requests are sent
+    /// alongside the modern `SET_MESSAGE_INTERVAL` per-message requests on every
+    /// stream refresh. OFF by default — see
+    /// [`crate::connection::FcConnection::tick_streams`] for the measurement
+    /// that made it a flag.
+    #[serde(default = "default_legacy_stream_request")]
+    pub legacy_stream_request: bool,
     /// The serial device an ExpressLRS / CRSF RC module is pinned to
     /// (`radio.crsf.device` in the config — the top-level `radio:` section, NOT
     /// the `mavlink:` block, so it is skipped by the section deserializer and
@@ -220,6 +230,7 @@ impl Default for MavlinkConfig {
             component_id: default_component_id(),
             endpoints: default_endpoints(),
             ws_proxy_enforce_auth: default_ws_proxy_enforce_auth(),
+            legacy_stream_request: default_legacy_stream_request(),
             crsf_device: String::new(),
             crsf_enabled: false,
             crsf_mode: "crsf_rc".to_string(),

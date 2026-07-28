@@ -1,0 +1,29 @@
+[package]
+name = "ados-swarm-control"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Onboard swarm autonomy: the separation / flocking / formation control laws and CBBA task allocation, arbitrated by a fixed precedence ladder into SET_POSITION_TARGET_GLOBAL_INT setpoints. Consumes the swarm neighbour table; adds no radio traffic of its own."
+
+[lib]
+name = "ados_swarm_control"
+path = "src/lib.rs"
+
+[dependencies]
+# The `swarm:` config slice is read through the loud-fail helpers so a malformed
+# block surfaces on the Health view instead of silently defaulting the autonomy
+# layer off (see ados-config's module docs).
+ados-config = { path = "../ados-config" }
+# The transport half of the swarm layer: the beacon wire format, the neighbour
+# table this crate flies on, and `ModePrecedence` (which is wire format, so the
+# crate that puts bytes on the air owns it). One-directional: ados-swarmbus does
+# not depend on this crate.
+ados-swarmbus = { path = "../ados-swarmbus" }
+serde = { workspace = true }
+# The swarm IPC payload is newline-JSON; this crate parses the control-side half.
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

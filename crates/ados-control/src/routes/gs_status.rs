@@ -377,6 +377,15 @@ fn link_view_from(path: &Path) -> Value {
     base.insert("packets_all".to_string(), json!(0));
     base.insert("decrypt_errors".to_string(), json!(0));
 
+    // Live modulation rung + the adaptive ladder's configured cap. `null` until
+    // the radio writes its first snapshot — never a confident 0, which would
+    // read as MCS 0 (the slowest rung) rather than "not measured yet". The
+    // Mission Control Radio settings page renders these beside `snr_db` as the
+    // read-only "auto (MCS N at X dB)" row: the ACTIVE rung, not the commanded
+    // one, and the cap so a policy-limited rung is not misread as a bad link.
+    base.insert("mcs_index".to_string(), Value::Null);
+    base.insert("mcs_ladder_cap".to_string(), Value::Null);
+
     let age_s = match std::fs::metadata(path).and_then(|m| m.modified()) {
         Ok(mtime) => mtime.elapsed().map(|d| d.as_secs_f64()).unwrap_or(0.0),
         Err(_) => return Value::Object(base),
@@ -489,6 +498,23 @@ fn link_view_from(path: &Path) -> Value {
             .get("decrypt_errors")
             .and_then(json_to_i64)
             .unwrap_or(0)),
+    );
+    // Modulation: pass the sidecar's numbers through, `null` when absent.
+    merged.insert(
+        "mcs_index".to_string(),
+        payload
+            .get("mcs_index")
+            .filter(|v| v.is_number())
+            .cloned()
+            .unwrap_or(Value::Null),
+    );
+    merged.insert(
+        "mcs_ladder_cap".to_string(),
+        payload
+            .get("mcs_ladder_cap")
+            .filter(|v| v.is_number())
+            .cloned()
+            .unwrap_or(Value::Null),
     );
     // tx_power_dbm: the payload value when present (not null), else the (null) base.
     let payload_tx = payload.get("tx_power_dbm").cloned();
@@ -1203,6 +1229,10 @@ mod tests {
             "link_diag": null,
             "packets_all": 0,
             "decrypt_errors": 0,
+            // Never a confident 0 before the radio has written a snapshot: MCS 0
+            // is a real (slowest) rung, so 0 would be a false reading.
+            "mcs_index": null,
+            "mcs_ladder_cap": null,
         });
         assert_eq!(view, want);
     }
@@ -1230,6 +1260,8 @@ mod tests {
             "link_diag": "healthy",
             "packets_all": 640,
             "decrypt_errors": 0,
+            "mcs_index": 3,
+            "mcs_ladder_cap": 3,
         });
         std::fs::write(&stats, serde_json::to_string(&payload).unwrap()).unwrap();
         let view = link_view_from(&stats);
@@ -1247,6 +1279,11 @@ mod tests {
         assert_eq!(view["link_diag"], json!("healthy"));
         assert_eq!(view["packets_all"], json!(640));
         assert_eq!(view["decrypt_errors"], json!(0));
+        // Modulation: the live rung and the ladder cap the Radio settings page
+        // reads beside snr_db.
+        assert_eq!(view["mcs_index"], json!(3));
+        assert_eq!(view["mcs_ladder_cap"], json!(3));
+        assert_eq!(view["snr_db"], json!(28.0));
     }
 
     #[test]

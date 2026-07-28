@@ -28,6 +28,9 @@ struct Entry {
 pub struct ParamCache {
     path: PathBuf,
     params: BTreeMap<String, Entry>,
+    /// Bumped once per [`set`](ParamCache::set) that actually changed an entry.
+    /// Deliberately NOT persisted — see [`generation`](ParamCache::generation).
+    generation: u64,
 }
 
 fn now_unix() -> f64 {
@@ -43,6 +46,7 @@ impl ParamCache {
         Self {
             path: path.as_ref().to_path_buf(),
             params: BTreeMap::new(),
+            generation: 0,
         }
     }
 
@@ -62,7 +66,19 @@ impl ParamCache {
     }
 
     /// Insert or update a parameter (does not persist; call [`save`](Self::save)).
-    pub fn set(&mut self, name: &str, value: f64, param_type: i64) {
+    ///
+    /// Returns whether the entry actually changed — a new name, a different
+    /// value, or a different `param_type`. A repeat `PARAM_VALUE` carrying what
+    /// is already cached refreshes `last_updated` and returns `false`, leaving
+    /// [`generation`](Self::generation) alone: an FC re-announcing the same 700
+    /// values must not make every consumer re-download the map. The value
+    /// comparison is on the bit pattern so a NaN never reads as "changed
+    /// again" on every frame (`NaN != NaN` under `PartialEq`).
+    pub fn set(&mut self, name: &str, value: f64, param_type: i64) -> bool {
+        let changed = match self.params.get(name) {
+            Some(prev) => prev.value.to_bits() != value.to_bits() || prev.param_type != param_type,
+            None => true,
+        };
         self.params.insert(
             name.to_string(),
             Entry {
@@ -71,15 +87,26 @@ impl ParamCache {
                 last_updated: now_unix(),
             },
         );
+        if changed {
+            self.generation += 1;
+        }
+        changed
     }
 
-    /// All parameters as a `{ name: value }` JSON object (the `params` blob the
-    /// state snapshot carries).
-    pub fn get_all(&self) -> Map<String, Value> {
-        self.params
-            .iter()
-            .map(|(k, e)| (k.clone(), json!(e.value)))
-            .collect()
+    /// How many times a cached parameter actually changed since this process
+    /// started.
+    ///
+    /// This replaces the whole parameter map in the 10 Hz state snapshot: the
+    /// map was ~24 KB of JSON republished ten times a second with no delta and
+    /// no cap, which is what made a relayed `/api/telemetry` need ~21 radio
+    /// fragments. A consumer instead compares this counter against its own
+    /// last-seen value and refetches `GET /api/params` once on a mismatch.
+    ///
+    /// Deliberately NOT persisted and NOT bumped by [`load`](Self::load): a
+    /// restart starting back at 0 reads as a mismatch to every consumer, which
+    /// triggers exactly the one refetch a restart warrants.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// The on-disk path this cache persists to.
@@ -173,7 +200,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn set_get_count_and_get_all() {
+    fn set_get_and_count() {
         let dir = tempfile::tempdir().unwrap();
         let mut c = ParamCache::new(dir.path().join("params.json"));
         assert_eq!(c.count(), 0);
@@ -182,9 +209,72 @@ mod tests {
         assert_eq!(c.count(), 2);
         assert_eq!(c.get("WPNAV_SPEED"), Some(500.0));
         assert_eq!(c.get("MISSING"), None);
-        let all = c.get_all();
-        assert_eq!(all.get("WPNAV_SPEED"), Some(&json!(500.0)));
-        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn generation_starts_at_zero_and_counts_only_real_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = ParamCache::new(dir.path().join("params.json"));
+        assert_eq!(c.generation(), 0, "a fresh cache has seen no change");
+
+        // A new name is a change.
+        assert!(c.set("WPNAV_SPEED", 500.0, 9));
+        assert_eq!(c.generation(), 1);
+
+        // The FC re-announcing the value already cached is NOT a change. This is
+        // the case that matters: a PARAM_REQUEST_LIST sweep re-sends every
+        // parameter, and bumping the counter for each would make every consumer
+        // refetch the whole map on every sweep.
+        assert!(!c.set("WPNAV_SPEED", 500.0, 9));
+        assert!(!c.set("WPNAV_SPEED", 500.0, 9));
+        assert_eq!(c.generation(), 1, "an identical write must not bump");
+
+        // A different value is a change.
+        assert!(c.set("WPNAV_SPEED", 750.0, 9));
+        assert_eq!(c.generation(), 2);
+
+        // So is the same value under a different declared type: the on-disk cache
+        // records `param_type`, so a consumer that refetched would see a
+        // different document.
+        assert!(c.set("WPNAV_SPEED", 750.0, 6));
+        assert_eq!(c.generation(), 3);
+
+        // A second name is its own change.
+        assert!(c.set("ATC_RAT_RLL_P", 0.135, 9));
+        assert_eq!(c.generation(), 4);
+    }
+
+    #[test]
+    fn generation_is_not_persisted_and_load_does_not_bump_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("params.json");
+        {
+            let mut c = ParamCache::new(&path);
+            c.set("FOO", 1.5, 9);
+            c.set("BAR", -2.0, 6);
+            assert_eq!(c.generation(), 2);
+            c.save().unwrap();
+        }
+        // A restart reads the values back but starts the counter at 0, which
+        // reads as a mismatch to every consumer and costs one refetch — the
+        // correct behaviour, since a restart may have lost cache entries.
+        let mut reloaded = ParamCache::new(&path);
+        reloaded.load().unwrap();
+        assert_eq!(reloaded.count(), 2);
+        assert_eq!(reloaded.generation(), 0);
+    }
+
+    #[test]
+    fn a_nan_value_does_not_bump_the_generation_on_every_write() {
+        // `NaN != NaN` under PartialEq, so a naive comparison would report a
+        // change on every re-announcement of a NaN parameter and hold every
+        // consumer in a permanent refetch loop.
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = ParamCache::new(dir.path().join("params.json"));
+        assert!(c.set("BROKEN", f64::NAN, 9));
+        assert_eq!(c.generation(), 1);
+        assert!(!c.set("BROKEN", f64::NAN, 9));
+        assert_eq!(c.generation(), 1);
     }
 
     #[test]

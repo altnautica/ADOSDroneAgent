@@ -15,30 +15,41 @@ use std::path::{Path, PathBuf};
 /// domain (the -100 dBm "not permitted" sentinel).
 pub const DEFAULT_REG_DOMAIN: &str = "US";
 
-/// Internal data-RX egress port (the fan-out reads here). Differs from the
-/// drone side's 5601 stats port.
-pub const DATA_RX_PORT: u16 = 5599;
-/// GS rx-control egress (decoded HopAnnounce/Presence → the listener's port).
-pub const RX_CONTROL_PORT: u16 = 5803;
-/// GS tx-control loopback ingress (HopAck/Presence out over the air).
+/// Per-slot loopback egress port for a drone's video (`wfb_rx -p 0`). The
+/// ground station runs one receiver per registered fleet slot, so each needs
+/// its own egress: N H.264 streams cannot share one UDP port — they would
+/// interleave into an undecodable mux. The fan-out reads the primary slot's
+/// port here.
+pub const fn video_rx_port(slot: u8) -> u16 {
+    ados_radio::config::VIDEO_RX_PORT_BASE + slot as u16
+}
+
+/// Per-slot loopback egress port for a drone's aux application lane
+/// (`wfb_rx -p 2`): MAVLink, relayed status, and RPC responses. One aux
+/// consumer binds each of these.
+pub const fn aux_rx_port(slot: u8) -> u16 {
+    ados_radio::config::AUX_RX_PORT_BASE + slot as u16
+}
+
+/// Per-slot loopback egress port for a drone's control lane (`wfb_rx -p 1`):
+/// decoded HopAnnounce / PresenceBeacon frames. The presence listener binds one
+/// of these per registered slot.
+pub const fn control_rx_port(slot: u8) -> u16 {
+    ados_radio::config::CONTROL_RX_PORT_BASE + slot as u16
+}
+
+/// GS tx-control loopback ingress (HopAck/Presence out over the air). NOT
+/// per-slot: the ground station runs exactly one control transmitter keyed to
+/// its own slot 0, which every drone in the fleet receives, so a fleet-wide
+/// control frame is one transmission rather than N.
 pub const TX_CONTROL_PORT: u16 = 5810;
-/// GS Atlas-aux egress: the drone radiates small Atlas events on radio_id 2 (the
-/// aux application stream); the GS decodes them to this loopback port, where the
-/// Atlas relay reads and re-POSTs them onto the LAN.
-/// MUST equal the aux consumer's listen port (`atlas.listen_port`, default
-/// 5603). `wfb_rx -p 2` decodes the aux lane to this loopback port and the
-/// consumer reads from it, so a mismatch silently drops every aux frame: the
-/// receiver decodes into a port nobody is bound to. It read 5604 against a
-/// consumer on 5603 until the lane was first wired up, which nothing caught
-/// because the receiver was never spawned in production. `aux_rx_port_matches_
-/// the_consumer_listen_port` below pins the two together.
-pub const ATLAS_RX_PORT: u16 = 5603;
 /// GS aux-uplink loopback ingress: whatever is written here is radiated on
 /// radio_id 3, the ground→drone half of the aux pair. Mirrors the drone's
 /// `aux_tx_port` default (the two rigs never share a host, so the same number
-/// on both sides is the symmetric choice, not a collision). Deliberately
-/// distinct from `ATLAS_RX_PORT` so the uplink ingress can never be fed by the
-/// downlink egress.
+/// on both sides is the symmetric choice, not a collision). NOT per-slot, for
+/// the same reason as [`TX_CONTROL_PORT`]: one uplink transmitter serves the
+/// whole fleet. Deliberately outside the per-slot receive span so the uplink
+/// ingress can never be fed by a downlink egress.
 pub const AUX_TX_PORT: u16 = 5602;
 /// wfb stats poll interval: the zombie watchdog cadence.
 pub const RX_HEALTH_POLL_INTERVAL_S: f64 = 5.0;
@@ -64,11 +75,20 @@ pub const STATE_NO_INJECTION: &str = "no_injection";
 
 /// Data-plane RX `wfb_rx` args for the ground profile. `-l 1000` enables the
 /// per-second stats lines on stdout (without it the monitor stays empty and the
-/// link reports disabled). Egress to the internal fan-out port 5599.
-pub fn data_rx_args(iface: &str, rx_key: &Path, channel_port: u16) -> Vec<String> {
+/// link reports disabled).
+///
+/// `link_id` is the TRANSMITTING DRONE's (`link_id(fleet_id, slot)`): the ground
+/// station runs one of these per registered slot, each with its own
+/// `channel_id`, all bound to the same interface. That is legal because
+/// `wfb_rx` opens a promiscuous, non-exclusive pcap handle and compiles a
+/// per-instance BPF on `channel_id` (`vendor/wfb-ng/src/rx.cpp:70,84`), so N
+/// receivers on one adapter each see only their own drone's frames.
+pub fn data_rx_args(iface: &str, rx_key: &Path, channel_port: u16, link_id: u32) -> Vec<String> {
     vec![
         "-p".into(),
         "0".into(),
+        "-i".into(),
+        link_id.to_string(),
         "-c".into(),
         "127.0.0.1".into(),
         "-u".into(),
@@ -85,10 +105,14 @@ pub fn data_rx_args(iface: &str, rx_key: &Path, channel_port: u16) -> Vec<String
 /// drone radiates small Atlas events on), decoded to `atlas_port`. Mirrors
 /// `data_rx_args` with the aux radio_id; the asymmetric-by-direction aux pair
 /// means the GS receives on `-p 2` (the drone egresses on p2), never p3.
-pub fn gs_atlas_rx_args(iface: &str, rx_key: &Path, atlas_port: u16) -> Vec<String> {
+///
+/// `link_id` is the transmitting drone's — one instance per registered slot.
+pub fn gs_atlas_rx_args(iface: &str, rx_key: &Path, atlas_port: u16, link_id: u32) -> Vec<String> {
     vec![
         "-p".into(),
         "2".into(),
+        "-i".into(),
+        link_id.to_string(),
         "-c".into(),
         "127.0.0.1".into(),
         "-u".into(),
@@ -112,10 +136,16 @@ pub fn gs_atlas_rx_args(iface: &str, rx_key: &Path, atlas_port: u16) -> Vec<Stri
 /// and never answer it — every byte a connected client sent toward the drone
 /// was handed to the ground's own (absent) flight-controller writer and
 /// silently dropped.
-pub fn gs_aux_tx_args(iface: &str, rx_key: &Path, mcs_index: u8) -> Vec<String> {
+///
+/// `link_id` is the ground station's own (`link_id(fleet_id, SLOT_GROUND)`).
+/// There is exactly ONE of these regardless of fleet size: every drone's aux
+/// receiver keys to slot 0, so a fleet-wide uplink is one transmission, not N.
+pub fn gs_aux_tx_args(iface: &str, rx_key: &Path, mcs_index: u8, link_id: u32) -> Vec<String> {
     vec![
         "-p".into(),
         "3".into(),
+        "-i".into(),
+        link_id.to_string(),
         "-u".into(),
         AUX_TX_PORT.to_string(),
         "-K".into(),
@@ -132,15 +162,25 @@ pub fn gs_aux_tx_args(iface: &str, rx_key: &Path, mcs_index: u8) -> Vec<String> 
     ]
 }
 
-/// GS rx-control `wfb_rx` args: radio_id 1, decode to the listener's port 5803.
-pub fn gs_rx_control_args(iface: &str, rx_key: &Path) -> Vec<String> {
+/// GS rx-control `wfb_rx` args: radio_id 1, decode to `control_port`.
+///
+/// `link_id` is the transmitting drone's — one instance per registered slot,
+/// each decoding to its own loopback port.
+pub fn gs_rx_control_args(
+    iface: &str,
+    rx_key: &Path,
+    control_port: u16,
+    link_id: u32,
+) -> Vec<String> {
     vec![
         "-p".into(),
         "1".into(),
+        "-i".into(),
+        link_id.to_string(),
         "-c".into(),
         "127.0.0.1".into(),
         "-u".into(),
-        RX_CONTROL_PORT.to_string(),
+        control_port.to_string(),
         "-K".into(),
         rx_key.to_string_lossy().into_owned(),
         "-l".into(),
@@ -150,10 +190,16 @@ pub fn gs_rx_control_args(iface: &str, rx_key: &Path) -> Vec<String> {
 }
 
 /// GS tx-control `wfb_tx` args: radio_id 1, loopback ingress 5810, light FEC.
-pub fn gs_tx_control_args(iface: &str, rx_key: &Path, mcs_index: u8) -> Vec<String> {
+///
+/// `link_id` is the ground station's own. Like the aux uplink there is exactly
+/// ONE of these: a HopAck / PresenceBeacon reaches the whole fleet in one
+/// transmission.
+pub fn gs_tx_control_args(iface: &str, rx_key: &Path, mcs_index: u8, link_id: u32) -> Vec<String> {
     vec![
         "-p".into(),
         "1".into(),
+        "-i".into(),
+        link_id.to_string(),
         "-u".into(),
         TX_CONTROL_PORT.to_string(),
         "-K".into(),
@@ -181,21 +227,33 @@ pub(super) fn rx_key_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ados_radio::config::WfbConfig;
+    use ados_radio::config::{link_id, WfbConfig, FLEET_MAX_SLOTS, SLOT_GROUND};
+
+    /// Read the value following `flag` in an arg vector.
+    fn arg_after(args: &[String], flag: &str) -> String {
+        args[args.iter().position(|x| x == flag).unwrap() + 1].clone()
+    }
 
     #[test]
     fn data_rx_args_match_python() {
-        // wfb_rx -p 0 -c 127.0.0.1 -u 5599 -K <rx.key> -l 1000 <iface>
-        let a = data_rx_args("wlan1", Path::new("/etc/ados/wfb/rx.key"), DATA_RX_PORT);
+        // wfb_rx -p 0 -i <drone link> -c 127.0.0.1 -u <slot port> -K <rx.key> -l 1000 <iface>
+        let a = data_rx_args(
+            "wlan1",
+            Path::new("/etc/ados/wfb/rx.key"),
+            video_rx_port(1),
+            link_id(1, 1),
+        );
         assert_eq!(
             a,
             vec![
                 "-p",
                 "0",
+                "-i",
+                "257", // link_id(1, 1)
                 "-c",
                 "127.0.0.1",
                 "-u",
-                "5599",
+                "5901",
                 "-K",
                 "/etc/ados/wfb/rx.key",
                 "-l",
@@ -206,42 +264,62 @@ mod tests {
     }
 
     #[test]
-    fn gs_atlas_rx_uses_radio_id_2_and_the_atlas_port() {
+    fn gs_atlas_rx_uses_radio_id_2_and_the_slot_aux_port() {
         // The drone egresses Atlas events on the aux radio_id 2; the GS receives
-        // on p2 (NOT p3), decoding to ATLAS_RX_PORT.
-        let a = gs_atlas_rx_args("wlan1", Path::new("/etc/ados/wfb/rx.key"), ATLAS_RX_PORT);
+        // on p2 (NOT p3), decoding to that slot's aux port.
+        let a = gs_atlas_rx_args(
+            "wlan1",
+            Path::new("/etc/ados/wfb/rx.key"),
+            aux_rx_port(3),
+            link_id(1, 3),
+        );
         assert_eq!(a[0], "-p");
         assert_eq!(a[1], "2");
-        let u = a.iter().position(|x| x == "-u").unwrap();
-        assert_eq!(a[u + 1], ATLAS_RX_PORT.to_string());
+        assert_eq!(arg_after(&a, "-u"), aux_rx_port(3).to_string());
         assert_eq!(a.last().unwrap(), "wlan1");
     }
 
     #[test]
-    fn aux_rx_port_matches_the_consumer_listen_port() {
-        // The receiver decodes the aux lane to ATLAS_RX_PORT and the aux
-        // consumer binds atlas.listen_port. If these ever diverge the lane goes
-        // silent with no error anywhere: frames arrive over the air, decode
-        // fine, and land on a port nobody reads. Pin them together so the next
-        // person to change one is forced to change the other.
-        assert_eq!(
-            ATLAS_RX_PORT,
-            crate::gs_config::default_atlas_listen_port(),
-            "aux receive port must equal the aux consumer's listen port"
-        );
+    fn the_three_per_slot_egress_ranges_never_overlap_or_alias_a_fixed_port() {
+        // The receive plane decodes into these ports and the consumers bind them.
+        // An overlap silently crosses two lanes (video frames arriving at the aux
+        // consumer); an alias onto a fixed transmit ingress feeds the radio its
+        // own downlink. Both are silent — nothing errors, the lane just carries
+        // the wrong bytes — so the disjointness is pinned here.
+        let mut seen = std::collections::BTreeSet::new();
+        for slot in 1..=FLEET_MAX_SLOTS {
+            for port in [
+                video_rx_port(slot),
+                aux_rx_port(slot),
+                control_rx_port(slot),
+            ] {
+                assert!(seen.insert(port), "duplicate egress port {port}");
+                assert!(
+                    ados_radio::config::is_fleet_rx_port(port),
+                    "{port} must be inside the guarded fleet receive span"
+                );
+            }
+        }
+        assert_eq!(seen.len(), FLEET_MAX_SLOTS as usize * 3);
+        // The two single-transmitter ingress ports sit outside the span, so an
+        // operator aux-port guard rejecting the span cannot reject them.
+        assert!(!seen.contains(&TX_CONTROL_PORT));
+        assert!(!seen.contains(&AUX_TX_PORT));
+        assert!(!ados_radio::config::is_fleet_rx_port(TX_CONTROL_PORT));
+        assert!(!ados_radio::config::is_fleet_rx_port(AUX_TX_PORT));
     }
 
     #[test]
     fn gs_aux_tx_uses_radio_id_3_and_the_uplink_ingress() {
         // The ground transmits the aux uplink on p3 (the radio_id the drone's
-        // `wfb_rx` listens on), reading from its own loopback ingress.
-        let a = gs_aux_tx_args("wlan1", Path::new("/k"), 1);
+        // `wfb_rx` listens on), reading from its own loopback ingress, keyed to
+        // the ground station's own slot so every drone hears it.
+        let a = gs_aux_tx_args("wlan1", Path::new("/k"), 1, link_id(1, SLOT_GROUND));
         assert_eq!(a[0], "-p");
         assert_eq!(a[1], "3");
-        let u = a.iter().position(|x| x == "-u").unwrap();
-        assert_eq!(a[u + 1], AUX_TX_PORT.to_string());
-        let k = a.iter().position(|x| x == "-k").unwrap();
-        assert_eq!(a[k + 1], "1"); // light FEC, same ratio as the drone's aux
+        assert_eq!(arg_after(&a, "-i"), link_id(1, SLOT_GROUND).to_string());
+        assert_eq!(arg_after(&a, "-u"), AUX_TX_PORT.to_string());
+        assert_eq!(arg_after(&a, "-k"), "1"); // light FEC, same ratio as the drone's aux
         assert_eq!(a.last().unwrap(), "wlan1");
     }
 
@@ -250,42 +328,105 @@ mod tests {
         // The whole point of the pair: each rig receives on the radio_id its
         // peer transmits on. If these two ever end up equal the lane talks to
         // itself and the link goes silent in one direction with no error.
-        let rx = gs_atlas_rx_args("wlan1", Path::new("/k"), ATLAS_RX_PORT);
-        let tx = gs_aux_tx_args("wlan1", Path::new("/k"), 1);
+        let rx = gs_atlas_rx_args("wlan1", Path::new("/k"), aux_rx_port(1), link_id(1, 1));
+        let tx = gs_aux_tx_args("wlan1", Path::new("/k"), 1, link_id(1, SLOT_GROUND));
         assert_eq!(rx[1], "2", "ground receives the downlink on p2");
         assert_eq!(tx[1], "3", "ground transmits the uplink on p3");
         assert_ne!(rx[1], tx[1]);
     }
 
     #[test]
-    fn the_uplink_ingress_is_not_the_downlink_egress() {
-        // Feeding the transmit ingress from the receive egress would loop every
+    fn the_uplink_ingress_is_not_a_downlink_egress() {
+        // Feeding the transmit ingress from a receive egress would loop every
         // decoded downlink frame straight back over the air.
-        assert_ne!(
-            AUX_TX_PORT, ATLAS_RX_PORT,
-            "aux uplink ingress must differ from the downlink egress"
-        );
+        for slot in 1..=FLEET_MAX_SLOTS {
+            assert_ne!(AUX_TX_PORT, aux_rx_port(slot));
+            assert_ne!(TX_CONTROL_PORT, control_rx_port(slot));
+        }
     }
 
     #[test]
-    fn gs_rx_control_uses_5803_not_drone_side_5810() {
-        // The GS rx-control egress is 5803 (the listener's port), the mirror of
-        // the drone side's 5810. This is the asymmetry the task flags.
-        let a = gs_rx_control_args("wlan1", Path::new("/k"));
-        let u = a.iter().position(|x| x == "-u").unwrap();
-        assert_eq!(a[u + 1], "5803");
+    fn gs_rx_control_decodes_to_the_slot_control_port() {
+        // The GS rx-control egress is per slot now; the drone side's mirror is
+        // its own fixed 5810.
+        let a = gs_rx_control_args("wlan1", Path::new("/k"), control_rx_port(2), link_id(1, 2));
+        assert_eq!(arg_after(&a, "-u"), control_rx_port(2).to_string());
         assert_eq!(a[1], "1"); // radio_id 1
+        assert_eq!(arg_after(&a, "-i"), link_id(1, 2).to_string());
     }
 
     #[test]
     fn gs_tx_control_uses_5810_and_light_fec() {
-        let a = gs_tx_control_args("wlan1", Path::new("/k"), 3);
-        let u = a.iter().position(|x| x == "-u").unwrap();
-        assert_eq!(a[u + 1], "5810");
-        let k = a.iter().position(|x| x == "-k").unwrap();
-        assert_eq!(a[k + 1], "1"); // light FEC k=1
-        let m = a.iter().position(|x| x == "-M").unwrap();
-        assert_eq!(a[m + 1], "3"); // mcs passed through
+        let a = gs_tx_control_args("wlan1", Path::new("/k"), 3, link_id(1, SLOT_GROUND));
+        assert_eq!(arg_after(&a, "-u"), "5810");
+        assert_eq!(arg_after(&a, "-k"), "1"); // light FEC k=1
+        assert_eq!(arg_after(&a, "-M"), "3"); // mcs passed through
+        assert_eq!(arg_after(&a, "-i"), link_id(1, SLOT_GROUND).to_string());
+    }
+
+    #[test]
+    fn the_ground_uplink_and_a_drone_downlink_never_share_a_channel_id() {
+        // The ground's two transmitters key to slot 0; every drone receiver keys
+        // to that drone's slot. If a ground transmitter ever picked up a drone's
+        // link_id the two would share a channel_id and thrash each other's FEC
+        // session — the failure that presents as unexplained link loss.
+        let ground = link_id(1, SLOT_GROUND);
+        let ctrl = arg_after(
+            &gs_tx_control_args("wlan1", Path::new("/k"), 1, ground),
+            "-i",
+        );
+        let aux = arg_after(&gs_aux_tx_args("wlan1", Path::new("/k"), 1, ground), "-i");
+        assert_eq!(ctrl, ground.to_string());
+        assert_eq!(aux, ground.to_string());
+        for slot in 1..=FLEET_MAX_SLOTS {
+            let drone = link_id(1, slot);
+            assert_ne!(ctrl, drone.to_string());
+            let video = arg_after(
+                &data_rx_args("wlan1", Path::new("/k"), video_rx_port(slot), drone),
+                "-i",
+            );
+            assert_eq!(video, drone.to_string());
+        }
+    }
+
+    #[test]
+    fn every_receive_builder_emits_the_link_id_after_the_radio_port() {
+        // Same invariant as the drone side: a builder extended without threading
+        // the id silently falls back to wfb-ng's default link_id 0.
+        let drone = link_id(4, 6);
+        let ground = link_id(4, SLOT_GROUND);
+        let key = Path::new("/k");
+        let cases: [(&str, Vec<String>, u32); 5] = [
+            (
+                "data_rx",
+                data_rx_args("wlan1", key, video_rx_port(6), drone),
+                drone,
+            ),
+            (
+                "atlas_rx",
+                gs_atlas_rx_args("wlan1", key, aux_rx_port(6), drone),
+                drone,
+            ),
+            (
+                "rx_control",
+                gs_rx_control_args("wlan1", key, control_rx_port(6), drone),
+                drone,
+            ),
+            ("aux_tx", gs_aux_tx_args("wlan1", key, 1, ground), ground),
+            (
+                "tx_control",
+                gs_tx_control_args("wlan1", key, 1, ground),
+                ground,
+            ),
+        ];
+        for (name, args, want) in cases {
+            let p = args
+                .iter()
+                .position(|x| x == "-p")
+                .unwrap_or_else(|| panic!("{name}: no -p"));
+            assert_eq!(args[p + 2], "-i", "{name}: -i must follow the -p pair");
+            assert_eq!(args[p + 3], want.to_string(), "{name}: wrong link_id");
+        }
     }
 
     #[test]

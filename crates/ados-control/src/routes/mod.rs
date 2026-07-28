@@ -32,6 +32,7 @@ pub mod gs_bluetooth;
 pub mod gs_camera_write;
 pub mod gs_cmd;
 pub mod gs_crsf;
+pub mod gs_fleet_hero;
 pub mod gs_gamepad_write;
 pub mod gs_input_read;
 pub mod gs_mesh;
@@ -72,9 +73,11 @@ pub mod signing;
 pub mod signing_write;
 pub mod status;
 pub mod status_full;
+pub mod swarm;
 pub mod system;
 pub mod system_resources;
 pub mod video;
+pub mod video_profile;
 pub mod vision;
 pub mod vision_detector;
 pub mod vision_upload;
@@ -314,6 +317,12 @@ pub fn build_router(state: AppState, net_native: bool, hid_native: bool) -> Rout
         // The consolidated status: agent info, services, resources, video,
         // telemetry, radio, and mesh in one round-trip.
         .route("/api/status/full", get(status_full::get_full_status))
+        // The swarm neighbour table: every node in this fleet whose beacon this node
+        // currently hears. PROFILE-AGNOSTIC on purpose — a drone answering this with
+        // the ground station powered off is what makes the bus decentralized rather
+        // than a ground-station fan-out. Guaranteed 200; a node not running the bus
+        // answers with a structurally-complete, null-identified empty table.
+        .route("/api/swarm/neighbors", get(swarm::get_neighbors))
         // System resources: CPU / memory / swap / disk / per-sensor temperatures
         // from the logging store's hardware snapshot (the LCD + GCS resource read).
         .route("/api/system", get(system_resources::get_system_resources))
@@ -344,6 +353,13 @@ pub fn build_router(state: AppState, net_native: bool, hid_native: bool) -> Rout
         .route(
             "/api/video/roster",
             get(camera_config::get_video_cameras).put(camera_config::put_video_cameras),
+        )
+        // Attention profile: which of hero (full video) / thumbnail (320x180 at
+        // 1 fps) this drone's encoder runs. One fleet shares one 20 MHz channel,
+        // so exactly one drone streams full video at a time.
+        .route(
+            "/api/video/profile",
+            post(video_profile::post_video_profile),
         )
         // Ground-station profile reads (404 off a drone): the status snapshot, the
         // stored radio config, and the three distributed-receive role reads.
@@ -524,6 +540,13 @@ pub fn build_router(state: AppState, net_native: bool, hid_native: bool) -> Rout
         .route(
             "/api/v1/ground-station/camera/switch",
             post(gs_camera_write::post_camera_switch),
+        )
+        // Fleet attention: promote the named drone and demote every other
+        // registered slot concurrently. 207 with per-slot outcomes when a drone
+        // will not answer — a stuck demotion never blocks the new hero.
+        .route(
+            "/api/v1/ground-station/fleet/hero",
+            post(gs_fleet_hero::post_fleet_hero),
         )
         // Ground-station UI config writes (display PUT shares its read path): OLED +
         // buttons + screens, each persisted + SIGHUP to the display service.

@@ -44,6 +44,48 @@ pub fn is_network_url(source: &str) -> bool {
         || s.starts_with("https://")
 }
 
+fn default_thumbnail_width() -> u32 {
+    320
+}
+fn default_thumbnail_height() -> u32 {
+    180
+}
+fn default_thumbnail_fps() -> u32 {
+    1
+}
+fn default_thumbnail_bitrate_kbps() -> u32 {
+    50
+}
+
+/// The `video.camera.thumbnail:` sub-block — the non-hero encoder profile, what
+/// a drone streams while some OTHER drone holds the operator's attention. The
+/// hero profile is the top-level [`CameraConfig`] `width`/`height`/`fps`/
+/// `bitrate_kbps` (unchanged defaults). Mirrors the Python
+/// `CameraThumbnailProfile`; the airtime arithmetic that fixes these numbers is
+/// documented on [`crate::profile`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub struct CameraProfile {
+    #[serde(default = "default_thumbnail_width")]
+    pub width: u32,
+    #[serde(default = "default_thumbnail_height")]
+    pub height: u32,
+    #[serde(default = "default_thumbnail_fps")]
+    pub fps: u32,
+    #[serde(default = "default_thumbnail_bitrate_kbps")]
+    pub bitrate_kbps: u32,
+}
+
+impl Default for CameraProfile {
+    fn default() -> Self {
+        Self {
+            width: default_thumbnail_width(),
+            height: default_thumbnail_height(),
+            fps: default_thumbnail_fps(),
+            bitrate_kbps: default_thumbnail_bitrate_kbps(),
+        }
+    }
+}
+
 /// Camera capture/encode settings. Mirrors the Python `CameraConfig`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CameraConfig {
@@ -64,6 +106,11 @@ pub struct CameraConfig {
     /// Operator wire-codec preference: "h264" | "h265" | "auto".
     #[serde(default = "default_codec_preference")]
     pub codec_preference: String,
+    /// The non-hero encoder profile (`video.camera.thumbnail:`). The fields
+    /// above ARE the hero profile; this is what the drone falls back to while
+    /// the operator's attention is on a different aircraft.
+    #[serde(default)]
+    pub thumbnail: CameraProfile,
 }
 
 impl Default for CameraConfig {
@@ -76,6 +123,7 @@ impl Default for CameraConfig {
             fps: default_fps(),
             bitrate_kbps: default_bitrate_kbps(),
             codec_preference: default_codec_preference(),
+            thumbnail: CameraProfile::default(),
         }
     }
 }
@@ -253,7 +301,9 @@ pub struct ResolvedLeg {
 impl ResolvedLeg {
     /// A [`CameraConfig`] view of this leg, so a secondary local-encode leg can
     /// reuse the same encoder command builder as the primary. `codec_preference`
-    /// defaults to `"auto"` (the leg carries only the concrete `codec`).
+    /// defaults to `"auto"` (the leg carries only the concrete `codec`), and the
+    /// `thumbnail` attention profile is the default and unread: only the PRIMARY
+    /// leg rides the shared radio channel, so only it is attention-switched.
     pub fn to_camera_config(&self) -> CameraConfig {
         CameraConfig {
             source: self.source.clone(),
@@ -263,6 +313,7 @@ impl ResolvedLeg {
             fps: self.fps,
             bitrate_kbps: self.bitrate_kbps,
             codec_preference: "auto".to_string(),
+            thumbnail: CameraProfile::default(),
         }
     }
 

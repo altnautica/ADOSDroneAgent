@@ -117,6 +117,20 @@ async fn main() {
         return;
     }
 
+    // Fleet identity gate. A drone that radiates on the wrong `link_id` shares a
+    // `channel_id` with whoever owns it — the ground station, or another drone —
+    // and the wfb-ng `Aggregator` re-inits its FEC decoder on every foreign
+    // session packet, so the two thrash each other roughly once a second. That
+    // presents as unexplained link loss, never as a config fault, so the radio
+    // REFUSES to come up on an unusable identity rather than defaulting one.
+    //
+    // Parking (rather than exiting) means a slot written by the pair flow is
+    // picked up on the next poll without a service restart: a freshly bound
+    // drone self-heals.
+    let Some(cfg) = wait_for_fleet_identity(cfg).await else {
+        return;
+    };
+
     // Shutdown is a latching watch flag, not a one-shot `Notify`: once SIGTERM
     // flips it to `true` the value STAYS set, so a select arm that loses a race
     // on the first signal (e.g. a watchdog task finishing in the same poll) still
@@ -148,6 +162,54 @@ async fn run_list_adapters() {
         // Serialization of a Vec<WifiAdapterInfo> cannot fail in practice; emit
         // an empty array rather than nothing so the caller always parses JSON.
         Err(_) => println!("[]"),
+    }
+}
+
+/// Park until this drone's configured fleet identity is usable, then return the
+/// config to bring the radio up with. `None` means SIGTERM/SIGINT arrived while
+/// parked.
+///
+/// The first pass reuses the already-loaded `cfg` (the caller has folded the
+/// link preset onto it); every retry re-reads `/etc/ados/config.yaml` and
+/// re-applies the preset, so a slot written by the pair flow while this loop is
+/// parked is picked up without a service restart.
+async fn wait_for_fleet_identity(cfg: WfbConfig) -> Option<WfbConfig> {
+    let mut cfg = cfg;
+    let mut logged = false;
+    loop {
+        let Some(err) = ados_radio::config::fleet_identity_error(
+            cfg.fleet_id,
+            cfg.fleet_slot,
+            /* is_ground_station = */ false,
+        ) else {
+            if logged {
+                tracing::info!(
+                    fleet_id = cfg.fleet_id,
+                    fleet_slot = cfg.fleet_slot,
+                    "wfb_fleet_identity_recovered"
+                );
+                ados_config::write_config_status("radio", None);
+            }
+            return Some(cfg);
+        };
+        // Log + publish once per fault, not once per poll: the status sidecar is
+        // level-triggered and a 5 s log loop would bury the rest of the journal.
+        if !logged {
+            tracing::error!(
+                fleet_id = cfg.fleet_id,
+                fleet_slot = cfg.fleet_slot,
+                reason = %err,
+                "wfb_fleet_identity_invalid: radio parked, not radiating"
+            );
+            ados_config::write_config_status("radio", Some(&err.to_string()));
+            logged = true;
+        }
+        tokio::select! {
+            _ = wait_for_shutdown() => return None,
+            _ = tokio::time::sleep(KEY_WAIT_INTERVAL) => {}
+        }
+        cfg = WfbConfig::load_from(Path::new(CONFIG_YAML));
+        cfg.apply_link_preset();
     }
 }
 
@@ -1080,18 +1142,24 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
             }
         });
 
-        // Adaptive bitrate / FEC controller. Off by default (it only refreshes
-        // the snapshot when disabled); when enabled it restarts only the data
-        // plane to apply a new FEC on sustained link degradation. It never ends
-        // on its own, so it is not part of the respawn-trigger select arm —
-        // it's aborted alongside the other siblings on respawn/shutdown.
+        // Adaptive bitrate / FEC / MCS controller. Off by default (it only
+        // refreshes the snapshot when disabled); when enabled it retunes the data
+        // plane's FEC and modulation on the running transmitter through the
+        // wfb_tx management socket, and publishes the rung's bitrate to the video
+        // encoder as a ceiling. It never ends on its own, so it is not part of
+        // the respawn-trigger select arm — it's aborted alongside the other
+        // siblings on respawn/shutdown.
         let bc_cancel = task_cancel.clone();
         let bc_link = link.clone();
         let bc_proc = proc.clone();
         let bc_snapshot = bitrate_snapshot.clone();
         let bc_enabled = adaptive_enabled.clone();
+        // The ladder's top-rung cap and the rung wfb_tx was actually spawned on,
+        // so the ladder starts believing reality rather than its own default.
+        let bc_mcs_cap = cfg.adaptive_mcs_max;
+        let bc_mcs_start = cfg.mcs_index;
         let bitrate_ctrl = tokio::spawn(async move {
-            BitrateController::new(bc_enabled)
+            BitrateController::new(bc_enabled, bc_mcs_cap, bc_mcs_start)
                 .run(bc_link, bc_proc, bc_snapshot, bc_cancel)
                 .await;
         });

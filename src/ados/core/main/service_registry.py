@@ -122,8 +122,10 @@ async def register_services(app: AgentApp) -> None:  # noqa: C901
     # systemd unit (or, under `ados demo`, as a subprocess) and publishes
     # the live vehicle snapshot to `/run/ados/state.sock` at ~10 Hz. This
     # process reads that snapshot through read-only shims that present the
-    # same attribute surface the API layer expects (`.connected`, `.params`,
-    # `.get_all()`, `.to_dict()`).
+    # same attribute surface the API layer expects (`.connected`,
+    # `.get_all()`, `.to_dict()`). The parameter VALUES are the exception:
+    # they left the snapshot (~24 KB republished at 10 Hz) and the param-cache
+    # shim reads the file the router persists at `/var/lib/ados/params.json`.
     from ados.core.ipc import StateIPCClient
     from ados.services.mavlink.ipc_state import (
         IpcFcConnection,

@@ -114,6 +114,18 @@ pub const SERVICE_REGISTRY: &[ServiceDef] = &[
     // router on a drone/GS still crash-loops visibly, and the installer
     // Hard-gates the binary's fetch + re-checks its presence in the health gate.
     def_keep("ados-mavlink", Core, Some("drone|ground_station"), None),
+    // The decentralized swarm state bus: every drone broadcasts a 20-byte
+    // position/velocity beacon at 2 Hz and every node in the fleet hears every
+    // other node. Core on both FC-bearing profiles, and gated the same way
+    // ados-mavlink is, because the two are the same seam seen from either end:
+    // a drone fills its beacon from the router's state socket, and a ground
+    // station listens so the operator's fleet view is local-first. Deliberately
+    // NOT gated to drone alone — a receive-only ground station is what makes the
+    // fleet view work without a cloud round-trip, and its slot 0 never emits a
+    // beacon because a ground station is not an aircraft. In the headless KEEP
+    // set: onboard collision avoidance reads this table, so a lean flight node
+    // that keeps ados-mavlink must keep the bus that feeds separation.
+    def_keep("ados-swarmbus", Core, Some("drone|ground_station"), None),
     def("ados-api", Core, None, None),
     def("ados-cloud", Core, None, None),
     def("ados-health", Core, None, None),
@@ -321,7 +333,7 @@ mod tests {
     #[test]
     fn registry_has_expected_shape() {
         let specs = build_specs();
-        assert_eq!(specs.len(), 35, "service count drifted from the catalog");
+        assert_eq!(specs.len(), 36, "service count drifted from the catalog");
         // Core tier members. ados-mavlink/api/cloud/health are the cross-profile
         // always-on core (the single cloud unit serves the gateway + heartbeat on
         // both profiles, spawning the ground-station bridge when the role resolves
@@ -336,6 +348,7 @@ mod tests {
             core,
             vec![
                 "ados-mavlink",
+                "ados-swarmbus",
                 "ados-api",
                 "ados-cloud",
                 "ados-health",
@@ -392,9 +405,9 @@ mod tests {
     #[test]
     fn headless_keep_set_is_exactly_the_lean_core() {
         // The lean headless profile boots only the Rust core: the MAVLink
-        // router, the camera encode, the radio TX, and the native HTTP front.
-        // Everything else (FastAPI, cloud, health, GS units, on-demand) is NOT
-        // in the KEEP set, so the headless gate blocks it.
+        // router, the swarm state bus, the camera encode, the radio TX, and the
+        // native HTTP front. Everything else (FastAPI, cloud, health, GS units,
+        // on-demand) is NOT in the KEEP set, so the headless gate blocks it.
         let specs = build_specs();
         let kept: Vec<_> = specs
             .iter()
@@ -403,7 +416,13 @@ mod tests {
             .collect();
         assert_eq!(
             kept,
-            vec!["ados-mavlink", "ados-video", "ados-wfb", "ados-control"],
+            vec![
+                "ados-mavlink",
+                "ados-swarmbus",
+                "ados-video",
+                "ados-wfb",
+                "ados-control"
+            ],
             "headless KEEP set drifted"
         );
         // ados-api (FastAPI) is explicitly NOT kept: headless is zero-Python.
@@ -426,6 +445,32 @@ mod tests {
         assert_eq!(mav.category, Category::Core);
         assert_eq!(mav.profile_gate, Some("drone|ground_station"));
         assert_eq!(mav.role_gate, None);
+    }
+
+    #[test]
+    fn the_swarm_bus_is_core_on_both_fc_profiles_and_kept_headless() {
+        // Gated exactly like ados-mavlink, and for the same reason: the bus is that
+        // seam seen from either end. A drone fills its beacon from the router's
+        // state socket; a ground station listens so the operator's fleet view is
+        // local-first. Gating it to `drone` alone would make the fleet view depend
+        // on a cloud round-trip, and gating it wider would start it on an FC-less
+        // compute node that never fetches the binary.
+        let specs = build_specs();
+        let bus = specs
+            .iter()
+            .find(|s| s.name == "ados-swarmbus")
+            .expect("ados-swarmbus must be in the registry");
+        assert_eq!(bus.category, Category::Core);
+        assert_eq!(bus.profile_gate, Some("drone|ground_station"));
+        assert_eq!(bus.role_gate, None);
+        // Onboard collision avoidance reads this table, so a lean headless flight
+        // node that keeps the router must keep the bus that feeds separation.
+        assert!(bus.headless_keep);
+        let mav = specs.iter().find(|s| s.name == "ados-mavlink").unwrap();
+        assert_eq!(
+            bus.profile_gate, mav.profile_gate,
+            "same gate as the router"
+        );
     }
 
     #[test]

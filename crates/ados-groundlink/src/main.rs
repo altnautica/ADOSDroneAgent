@@ -34,12 +34,18 @@ use ados_radio::config::WfbConfig;
 use ados_radio::link_quality::LinkStats;
 
 use ados_groundlink::wfb_rx::{
-    self, DataRxHandle, IwChannelSetter, SharedValidCounter, SystemClock, WfbRxManager,
+    self, DataRxHandle, IwChannelSetter, SharedValidCounter, SlotReceivers, SystemClock,
+    WfbRxManager,
 };
-use ados_groundlink::{fanout, mesh, presence, receiver, relay, GsPresenceCache};
+use ados_groundlink::{
+    fanout, mesh, presence, receiver, relay, FleetRegistry, GsPresenceCache, FLEET_REGISTRY_PATH,
+};
 
 const CONFIG_YAML: &str = "/etc/ados/config.yaml";
 const RX_KEY: &str = ados_radio::paths::WFB_RX_KEY;
+/// Poll interval while the configured fleet identity is unusable, and the
+/// cadence the receive generation re-reads the fleet registry on.
+const FLEET_RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
 
 /// The run role the service dispatches on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -244,10 +250,11 @@ async fn run_relay_or_receiver(
 /// mDNS (retrying until it answers or shutdown). Inert by default → a non-Atlas
 /// ground station never reads the block and is byte-unchanged.
 ///
-/// The relay reads the decoded WFB aux datagrams (the `wfb_rx` re-emit loopback
-/// port, `ground_station.atlas.listen_port`, default 5603) and re-POSTs each
-/// framed Atlas event onto the LAN into the compute node's event router, so the
-/// field RF lane reaches the same receiver the direct-LAN bearer uses.
+/// The relay reads the decoded WFB aux datagrams (the `wfb_rx -p 2` re-emit
+/// loopback port, `ground_station.atlas.listen_port`, defaulting to the first
+/// drone slot's `AUX_RX_PORT_BASE + slot`) and re-POSTs each framed Atlas event
+/// onto the LAN into the compute node's event router, so the field RF lane
+/// reaches the same receiver the direct-LAN bearer uses.
 fn maybe_spawn_atlas_relay(
     is_relay: bool,
     shutdown: Arc<Notify>,
@@ -305,13 +312,29 @@ async fn run_direct(
     sigterm: &mut tokio::signal::unix::Signal,
     sigint: &mut tokio::signal::unix::Signal,
 ) -> Result<()> {
-    let config = WfbConfig::load_from(std::path::Path::new(CONFIG_YAML));
+    let config = match wait_for_fleet_identity(sigterm, sigint).await {
+        Some(c) => c,
+        None => return Ok(()),
+    };
     tracing::info!(
         channel = config.channel,
         band = %config.band,
         interface = %config.interface,
+        fleet_id = config.fleet_id,
         "ground-station data-plane starting (direct role)"
     );
+
+    // The fleet slots this ground station receives on, read once for the
+    // service. The registry only changes at pair/unpair time, and both paths
+    // restart this unit, so a service-scope read is the reconcile point for the
+    // consumers that must hold a UDP bind for the whole service lifetime (the
+    // presence listener and the per-slot aux consumers). The receive-chain
+    // processes themselves are reconciled inside the generation loop, which is
+    // free to churn them without dropping a bind.
+    let service_slots = wfb_rx::fleet_slots(&FleetRegistry::load(std::path::Path::new(
+        FLEET_REGISTRY_PATH,
+    )));
+    tracing::info!(slots = ?service_slots, "ground_fleet_slots");
 
     // The presence listen loop + cache run for the whole service lifetime (the
     // listener feeds the per-generation watchdog its peer-presence signal). The
@@ -334,6 +357,7 @@ async fn run_direct(
     tokio::spawn(presence::listen_supervisor(
         presence_cache.clone(),
         Some(hop_follower),
+        service_slots.clone(),
     ));
     {
         // The beacon's channel is a hint; the configured channel is a safe
@@ -382,16 +406,28 @@ async fn run_direct(
     // lets this node describe what it relays to an operator who is paired only
     // here, and it feeds the peer identity into the linked-peers surface.
     let aux_peers = ados_groundlink::aux_peers::AuxPeerCache::new();
-    let aux_task = tokio::spawn(ados_groundlink::supervise_aux_consumer(
-        wfb_rx::ATLAS_RX_PORT,
-        Arc::new(ados_protocol::mavlink_ingest::MavlinkIngest::at_default_path()),
-        aux_counters.clone(),
-        aux_peers.clone(),
-        Some(ados_protocol::aux_rpc_proxy::AuxRpcResponseIngest::new(
-            ados_protocol::aux_rpc_proxy::DEFAULT_RESPONSE_SOCK,
-        )),
-        aux_shutdown.clone(),
-    ));
+    // One consumer per registered slot: the receive plane decodes each drone's
+    // aux lane to its own loopback egress, so a single bind would hear exactly
+    // one drone and every other drone's MAVLink, relayed status and RPC
+    // responses would land on a port nobody reads. They share the counters, the
+    // peer cache, the MAVLink ingest and the RPC response ingest, all of which
+    // are already keyed per device id, so the fleet reports as one aggregate.
+    let mavlink_ingest = Arc::new(ados_protocol::mavlink_ingest::MavlinkIngest::at_default_path());
+    let aux_tasks: Vec<tokio::task::JoinHandle<()>> = service_slots
+        .iter()
+        .map(|&slot| {
+            tokio::spawn(ados_groundlink::supervise_aux_consumer(
+                wfb_rx::aux_rx_port(slot),
+                mavlink_ingest.clone(),
+                aux_counters.clone(),
+                aux_peers.clone(),
+                Some(ados_protocol::aux_rpc_proxy::AuxRpcResponseIngest::new(
+                    ados_protocol::aux_rpc_proxy::DEFAULT_RESPONSE_SOCK,
+                )),
+                aux_shutdown.clone(),
+            ))
+        })
+        .collect();
     let aux_peers_task = tokio::spawn(ados_groundlink::aux_peers::persist_loop(
         aux_peers.clone(),
         Some(presence_cache.clone()),
@@ -417,11 +453,14 @@ async fn run_direct(
         }
     }
 
-    // The consumer self-stops on the shared signal; the abort is a no-op if it
-    // already returned, and reaps it on the path where no signal fired.
+    // The consumers self-stop on the shared signal; the aborts are no-ops for
+    // any that already returned, and reap the ones on the path where no signal
+    // fired.
     aux_shutdown.notify_waiters();
     tokio::time::sleep(Duration::from_millis(100)).await;
-    aux_task.abort();
+    for t in &aux_tasks {
+        t.abort();
+    }
     // The persister waits on the same signal, but `notify_waiters` only wakes a
     // task already parked on it, so the abort is what reliably reaps it if the
     // signal landed while it was mid-write.
@@ -430,6 +469,59 @@ async fn run_direct(
     // Restore the resolved injection adapter to managed mode on the way out.
     restore_managed_if_resolved(&resolved_iface).await;
     Ok(())
+}
+
+/// Block until `/etc/ados/config.yaml` carries a usable ground-station fleet
+/// identity, then return the loaded config. `None` means a shutdown signal
+/// arrived while parked.
+///
+/// A rejected identity is a hard refusal, not a defaulted value: a ground
+/// station keyed to a drone slot would share a `channel_id` with that drone and
+/// re-init its FEC session roughly once a second (the wfb-ng `Aggregator`
+/// re-inits on every foreign session packet), which presents as unexplained
+/// link loss rather than as a config fault. Parking and re-reading — rather
+/// than exiting — means an identity written by the pair flow is picked up
+/// without a service restart.
+async fn wait_for_fleet_identity(
+    sigterm: &mut tokio::signal::unix::Signal,
+    sigint: &mut tokio::signal::unix::Signal,
+) -> Option<WfbConfig> {
+    let mut logged = false;
+    loop {
+        let config = WfbConfig::load_from(std::path::Path::new(CONFIG_YAML));
+        let Some(err) = ados_radio::config::fleet_identity_error(
+            config.fleet_id,
+            config.fleet_slot,
+            /* is_ground_station = */ true,
+        ) else {
+            if logged {
+                tracing::info!(
+                    fleet_id = config.fleet_id,
+                    fleet_slot = config.fleet_slot,
+                    "ground_fleet_identity_recovered"
+                );
+                ados_config::write_config_status("ground_station", None);
+            }
+            return Some(config);
+        };
+        // Log + publish once per fault, not once per poll: the sidecar is
+        // level-triggered and a 5 s log loop would bury the rest of the journal.
+        if !logged {
+            tracing::error!(
+                fleet_id = config.fleet_id,
+                fleet_slot = config.fleet_slot,
+                reason = %err,
+                "ground_fleet_identity_invalid: receive plane parked"
+            );
+            ados_config::write_config_status("ground_station", Some(&err.to_string()));
+            logged = true;
+        }
+        tokio::select! {
+            _ = sigterm.recv() => return None,
+            _ = sigint.recv() => return None,
+            _ = tokio::time::sleep(FLEET_RECONCILE_INTERVAL) => {}
+        }
+    }
 }
 
 /// Restore the receive-plane adapter to managed mode on shutdown when one was
@@ -580,21 +672,52 @@ async fn receive_loop(
             continue;
         }
 
-        // Spawn the receive chain for this generation.
-        let (mut data_rx, _rx_control, _tx_control, _aux_rx, _aux_tx) =
-            match manager.spawn_receive_chain(&interface).await {
-                Ok(chain) => chain,
-                Err(e) => {
-                    tracing::error!(error = %e, "ground_wfb_rx_failed_to_start");
-                    tokio::time::sleep(Duration::from_secs(backoff as u64)).await;
-                    backoff = (backoff * 2.0).min(5.0);
-                    continue;
+        // Resolve this generation's fleet slots and spawn the receive chain.
+        // The lowest registered slot is the PRIMARY: its video RX carries the
+        // stats stream, anchors the generation's liveness, and is the link the
+        // channel acquirer sweeps for. Every other registered slot gets its own
+        // additive video/aux/control trio on the same interface.
+        let mut slots = wfb_rx::fleet_slots(&FleetRegistry::load(std::path::Path::new(
+            FLEET_REGISTRY_PATH,
+        )));
+        slots.sort_unstable();
+        let primary_slot = slots[0];
+        let mut chain = match manager.spawn_receive_chain(&interface, primary_slot).await {
+            Ok(chain) => chain,
+            Err(e) => {
+                tracing::error!(error = %e, slot = primary_slot, "ground_wfb_rx_failed_to_start");
+                tokio::time::sleep(Duration::from_secs(backoff as u64)).await;
+                backoff = (backoff * 2.0).min(5.0);
+                continue;
+            }
+        };
+        // Secondary slots are best-effort: a failure to spawn one drone's
+        // receivers must not take the whole fleet's receive plane down, and the
+        // reconcile tick below retries it on the next pass.
+        let mut secondaries: std::collections::BTreeMap<u8, SlotReceivers> =
+            std::collections::BTreeMap::new();
+        for &slot in &slots[1..] {
+            match manager.spawn_slot_receivers(&interface, slot).await {
+                Ok(r) => {
+                    secondaries.insert(slot, r);
                 }
-            };
+                Err(e) => tracing::error!(error = %e, slot, "ground_slot_rx_failed_to_start"),
+            }
+        }
+        tracing::info!(
+            fleet_id = manager.fleet_id(),
+            primary_slot,
+            slots = ?slots,
+            "ground_receive_chain_spawned"
+        );
         backoff = 1.0;
 
-        let stdout = data_rx.take_stdout();
-        let rx_handle = DataRxHandle::new(data_rx);
+        let stdout = chain.video.take_stdout();
+        // The rest of the chain (the primary's aux + control receivers and the
+        // two ground transmitters) is held for the generation's lifetime; its
+        // `Drop` killpg's each process group when this iteration ends.
+        let _primary_rest = (chain.aux, chain.control, chain.tx_control, chain.aux_tx);
+        let rx_handle = DataRxHandle::new(chain.video);
 
         // Shared liveness state for this generation.
         let counter = SharedValidCounter::new();
@@ -607,12 +730,16 @@ async fn receive_loop(
         // values instead of hardcoded zeros.
         let rx_health = wfb_rx::SharedRxHealth::new();
 
-        // Fan-out as a sub-service (5599 → 5600 mediamtx + 5605 LCD), aborted
-        // with the generation. The shared counters are read by the stats reader
-        // so the wfb-stats sidecar surfaces the forwarded/drop totals (the
-        // fan-out hop, otherwise blind to the cross-process diagnostics).
+        // Fan-out as a sub-service (the primary slot's video egress → 5600
+        // mediamtx + 5605 LCD), aborted with the generation. The shared counters
+        // are read by the stats reader so the wfb-stats sidecar surfaces the
+        // forwarded/drop totals (the fan-out hop, otherwise blind to the
+        // cross-process diagnostics).
         let fanout_counters = fanout::FanoutCounters::new();
-        let fanout_task = tokio::spawn(fanout::run_default_fanout(fanout_counters.clone()));
+        let fanout_task = tokio::spawn(fanout::run_default_fanout(
+            primary_slot,
+            fanout_counters.clone(),
+        ));
 
         // 1 Hz receive-link telemetry for this generation: ship the link's
         // RSSI / SNR / uncorrected-FEC (the uplink command radio, mirroring the
@@ -715,8 +842,62 @@ async fn receive_loop(
             watchdog.run().await;
         });
 
+        // Re-read the fleet registry on a slow tick and add/remove the SECONDARY
+        // slots' receivers in place. Pairing a 25th drone must not interrupt the
+        // other 24, so a registry change reconciles inside the generation rather
+        // than restarting the whole chain. Dropping a `SlotReceivers` killpg's
+        // its three process groups, which is the despawn.
+        //
+        // Returning from this arm ENDS the generation, and it only returns when
+        // the PRIMARY slot is released: the primary's video RX is the stats
+        // stream and the channel acquirer's target, so a new primary has to be
+        // chosen by a fresh generation.
+        let reconcile = async {
+            let mut tick = tokio::time::interval(FLEET_RECONCILE_INTERVAL);
+            tick.tick().await; // the first tick completes immediately
+            loop {
+                tick.tick().await;
+                let want: std::collections::BTreeSet<u8> = wfb_rx::fleet_slots(
+                    &FleetRegistry::load(std::path::Path::new(FLEET_REGISTRY_PATH)),
+                )
+                .into_iter()
+                .collect();
+                if !want.contains(&primary_slot) {
+                    tracing::info!(primary_slot, "ground_primary_slot_released");
+                    return;
+                }
+                secondaries.retain(|slot, _| {
+                    let keep = want.contains(slot);
+                    if !keep {
+                        tracing::info!(slot, "ground_slot_rx_despawned");
+                    }
+                    keep
+                });
+                // Collect the missing slots before spawning: the filter borrows
+                // `secondaries` and the insert needs it mutably, so the two
+                // cannot overlap.
+                let missing: Vec<u8> = want
+                    .iter()
+                    .copied()
+                    .filter(|s| *s != primary_slot && !secondaries.contains_key(s))
+                    .collect();
+                for slot in missing {
+                    match manager.spawn_slot_receivers(&interface, slot).await {
+                        Ok(r) => {
+                            secondaries.insert(slot, r);
+                            tracing::info!(slot, "ground_slot_rx_spawned");
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, slot, "ground_slot_rx_failed_to_start")
+                        }
+                    }
+                }
+            }
+        };
+
         // The generation ends when any of: the data RX exits, the zombie
-        // watchdog kills it, or the valid-packet watchdog terminates it.
+        // watchdog kills it, the valid-packet watchdog terminates it, or the
+        // primary slot leaves the fleet.
         // `&mut` the watchdog handles so the arm that did NOT win is not
         // dropped-and-detached here — a dropped JoinHandle leaves the task
         // running, so the zombie + valid-packet watchdogs would pile up across
@@ -728,6 +909,7 @@ async fn receive_loop(
             }
             _ = &mut zombie_task => {}
             _ = &mut watchdog_task => {}
+            _ = reconcile => {}
         }
 
         // Tear down the generation's sub-tasks before respawning. The two

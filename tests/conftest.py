@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import shutil
+import tempfile
+from collections.abc import Iterator
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -36,6 +40,38 @@ def _isolate_agent_globals(tmp_path, monkeypatch):
     monkeypatch.setattr(profile, "PROFILE_CONF", tmp_path / "profile.conf")
     yield
     deps._agent_app = None
+
+
+def _short_tmp_root() -> str:
+    """The shortest writable temp root available, for AF_UNIX paths.
+
+    A unix socket address is capped at ``sizeof(sun_path)`` — 104 bytes on
+    macOS/BSD, 108 on Linux — and the kernel counts the literal string, not the
+    resolved path. pytest's ``tmp_path`` on macOS is ~122 characters
+    (``/private/var/folders/<2>/<28>/T/pytest-of-<user>/pytest-<n>/<testname>0``)
+    before a filename is appended, so any test binding a socket under it fails
+    with ``OSError: AF_UNIX path too long``. ``/tmp`` keeps the whole address
+    around 30 bytes on both platforms.
+    """
+    for candidate in ("/tmp", tempfile.gettempdir()):
+        probe = Path(candidate)
+        if probe.is_dir():
+            return candidate
+    return tempfile.gettempdir()
+
+
+@pytest.fixture
+def unix_socket_dir() -> Iterator[Path]:
+    """A per-test directory short enough to hold an AF_UNIX socket path.
+
+    Use this instead of ``tmp_path`` for any socket a test actually binds. The
+    directory is removed afterwards, sockets and all.
+    """
+    path = Path(tempfile.mkdtemp(prefix="ados-s", dir=_short_tmp_root()))
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 @pytest.fixture

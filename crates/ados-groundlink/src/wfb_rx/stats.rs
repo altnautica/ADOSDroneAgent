@@ -302,7 +302,26 @@ pub fn build_gs_stats(
         // renders the headroom from either rig's stats.
         "tx_power_max_dbm": cfg.tx_power_max_dbm,
         "topology": cfg.topology,
-        "mcs_index": cfg.mcs_index,
+        // The MCS the link is ACTUALLY running at, measured off-air from the
+        // receiving driver's radiotap header (`RX_ANT`'s `<freq>:<mcs>:<bw>`
+        // group) — i.e. the drone's real transmit rung, not this node's own
+        // configured uplink rate. Every other field in the link block a reader
+        // pairs this with (`snr_db`, `rssi_dbm`, `loss_percent`) is a receive-side
+        // measurement of the drone's downlink, so a config echo here would report
+        // the ground station's uplink rung as the video link's and would sit at
+        // the boot value forever while the drone's adaptive ladder moved.
+        //
+        // Not wrapped in `measured` like its neighbours: it carries its own
+        // honesty gate (`None` until a frame decoded and reported a PHY group),
+        // and an `RX_ANT` line only exists for frames actually received.
+        //
+        // Single-drone truth: only the primary slot's `wfb_rx` feeds the stats
+        // reader, so on a multi-slot fleet this is the PRIMARY drone's rung, not
+        // a fleet aggregate. Per-drone measured MCS needs a stats stream per slot.
+        "mcs_index": snap.mcs_index,
+        // The channel width frames arrived at. Pinned at 20 MHz by every ADOS
+        // transmitter, so anything else is a peer worth noticing.
+        "bandwidth_mhz": snap.bandwidth_mhz,
         "profile": "ground_station",
         "rx_silent_seconds": rx_silent_seconds,
         "rx_zombie_kills": rx_zombie_kills,
@@ -456,9 +475,58 @@ mod tests {
         assert_eq!(v["rx_zombie_kills"], 1);
         assert_eq!(v["valid_rx_packets_per_s"], 12.5);
         assert_eq!(v["video_inbound_bytes_per_s"], 508000.0);
-        // mcs/topology/tx_power mirrored from config.
-        assert_eq!(v["mcs_index"], cfg.mcs_index);
         assert_eq!(v["topology"], cfg.topology);
+        // The MCS is MEASURED off-air, not mirrored from config. This snapshot is
+        // `LinkStats::default()` (nothing decoded), so it must be null — reporting
+        // `cfg.mcs_index` here would pin the GS's own configured uplink rung to a
+        // block whose every other reading measures the drone's downlink, and it
+        // would never move while the drone's adaptive ladder did.
+        assert!(v["mcs_index"].is_null());
+        assert!(v["bandwidth_mhz"].is_null());
+    }
+
+    /// With a real decode the measured PHY rate reaches the sidecar, and it is
+    /// the drone's rung — deliberately NOT the ground station's configured value.
+    #[test]
+    fn gs_stats_reports_the_measured_phy_rate_not_the_configured_one() {
+        // Config says MCS 1; the drone's adaptive ladder has climbed to 3.
+        let cfg = WfbConfig {
+            mcs_index: 1,
+            ..WfbConfig::default()
+        };
+        let snap = LinkStats {
+            packets_received: 42,
+            mcs_index: Some(3),
+            bandwidth_mhz: Some(20),
+            ..LinkStats::default()
+        };
+        let v = build_gs_stats(
+            &snap,
+            "wlan1",
+            &GsAdapterInfo::new(Some("rtl88x2eu".to_string()), true, Some(480)),
+            GsChannelTruth {
+                actual: 149,
+                rendezvous: 149,
+                operating: 149,
+            },
+            &GsRegSnapshot {
+                domain: Some("US".to_string()),
+                verified: true,
+                enabled_channels: vec![149],
+            },
+            &cfg,
+            "active",
+            "locked",
+            true,
+            0.0,  // valid_rx_packets_per_s
+            0,    // reacquire_kills
+            0,    // rx_zombie_kills
+            None, // rx_silent_seconds
+            0.0,  // video_inbound_bytes_per_s
+        );
+        assert_eq!(v["mcs_index"], 3, "must report the measured rung");
+        assert_ne!(v["mcs_index"], cfg.mcs_index, "must not echo config");
+        assert_eq!(v["bandwidth_mhz"], 20);
     }
 
     #[test]

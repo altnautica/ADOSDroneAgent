@@ -14,7 +14,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from ados.core.paths import WFB_KEY_DIR
 from ados.services.wfb.key_mgr import (
+    RX_KEY_NAME,
+    TX_KEY_NAME,
     WFB_KEY_FILE_BYTES,
     generate_key_pair,
     get_key_paths,
@@ -75,9 +78,20 @@ def test_load_key_empty(tmp_path: Path) -> None:
 
 
 def test_get_key_paths_default() -> None:
+    """The default resolves to the canonical WFB key dir, tx.key / rx.key.
+
+    Asserted against ``ados.core.paths.WFB_KEY_DIR`` rather than a literal
+    ``/etc/ados/wfb``: that base is deliberately platform-resolved (Linux FHS
+    ``/etc/ados``, ``$HOME/.ados`` on a rootless macOS install, or an
+    ``ADOS_ETC_DIR`` override), so a hardcoded Linux path made this test assert
+    the host OS instead of the contract.
+    """
     tx, rx = get_key_paths()
-    assert tx == "/etc/ados/wfb/tx.key"
-    assert rx == "/etc/ados/wfb/rx.key"
+    assert tx == str(WFB_KEY_DIR / "tx.key")
+    assert rx == str(WFB_KEY_DIR / "rx.key")
+    assert Path(tx).name == TX_KEY_NAME
+    assert Path(rx).name == RX_KEY_NAME
+    assert Path(tx).parent == Path(rx).parent
 
 
 def test_get_key_paths_custom() -> None:

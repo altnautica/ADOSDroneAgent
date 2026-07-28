@@ -19,7 +19,8 @@ per-domain files alongside this barrel:
 * ``api.py`` — :class:`ApiConfig`, :class:`RestApiConfig`
 * ``system.py`` — :class:`VisionConfig`,
   :class:`LoggingConfig`, :class:`PairingConfig`, :class:`DiscoveryConfig`,
-  :class:`SwarmConfig`, :class:`LoraConfig`,
+  :class:`SwarmConfig`, :class:`SwarmFlockConfig`,
+  :class:`SwarmSeparationConfig`, :class:`SwarmTasksConfig`,
   :class:`WifiDirectConfig`, :class:`UiConfig`
 * ``ground_station.py`` — ground-station-profile-only models
 * ``root.py`` — :class:`ADOSConfig` (top-level)
@@ -78,9 +79,11 @@ from .security import (
 from .system import (
     DiscoveryConfig,
     LoggingConfig,
-    LoraConfig,
     PairingConfig,
     SwarmConfig,
+    SwarmFlockConfig,
+    SwarmSeparationConfig,
+    SwarmTasksConfig,
     UiConfig,
     VisionConfig,
     WifiDirectConfig,
@@ -131,9 +134,11 @@ __all__ = [
     # system
     "DiscoveryConfig",
     "LoggingConfig",
-    "LoraConfig",
     "PairingConfig",
     "SwarmConfig",
+    "SwarmFlockConfig",
+    "SwarmSeparationConfig",
+    "SwarmTasksConfig",
     "UiConfig",
     "VisionConfig",
     "WifiDirectConfig",

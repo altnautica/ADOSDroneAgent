@@ -45,6 +45,17 @@ class MavlinkConfig(BaseModel):
     # default: the proxy logs an unauthorized connection but still admits it, so
     # enabling enforcement is an explicit, deliberate step.
     ws_proxy_enforce_auth: bool = False
+    # Whether the legacy `REQUEST_DATA_STREAM` group requests are sent alongside
+    # the modern `SET_MESSAGE_INTERVAL` per-message requests on every stream
+    # refresh. OFF by default: measured MAVLink ingest on ArduPilot was 66.5
+    # frames/s against the 29 Hz the interval requests sum to, which is consistent
+    # with the firmware honoring BOTH paths and streaming roughly twice the
+    # telemetry that was asked for — on a radio link whose airtime is the binding
+    # constraint for a fleet. The legacy path is the ONLY one iNav / Betaflight /
+    # pre-4.1 ArduPilot honor, so it stays a flag rather than a deletion: if a
+    # firmware's ingest collapses instead of halving, setting this true is the
+    # rollback. Read by the native router, which owns the FC link.
+    legacy_stream_request: bool = False
 
     @model_validator(mode="before")
     @classmethod

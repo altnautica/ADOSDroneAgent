@@ -145,6 +145,8 @@ fn native_routes() -> Vec<NativeRoute> {
         get("/api/wfb/pair/failover-status"),
         // Consolidated status.
         get("/api/status/full"),
+        // The swarm neighbour table (profile-agnostic: served on drones too).
+        get("/api/swarm/neighbors"),
         // System resources snapshot (CPU/memory/swap/disk/temperatures).
         get("/api/system"),
         // Composite triage snapshot (LCD Diagnostics + GCS remote-display).
@@ -160,6 +162,9 @@ fn native_routes() -> Vec<NativeRoute> {
         // Distinct path from the legacy /api/video/cameras switchable enumeration.
         get("/api/video/roster"),
         put("/api/video/roster"),
+        // Drone attention-profile write: hero / thumbnail. Retargets the local
+        // encoder through ados-video's command socket.
+        post("/api/video/profile"),
         // Ground-station status + radio (profile-gated).
         get("/api/v1/ground-station/status"),
         get("/api/v1/ground-station/wfb"),
@@ -274,6 +279,9 @@ fn native_routes() -> Vec<NativeRoute> {
         post("/api/v1/ground-station/recording/start"),
         post("/api/v1/ground-station/recording/stop"),
         post("/api/v1/ground-station/camera/switch"),
+        // Fleet attention: promote one drone to the full video profile and
+        // demote every other registered slot, in one operation.
+        post("/api/v1/ground-station/fleet/hero"),
         // Ground-station UI config writes (display PUT shares its read path).
         put("/api/v1/ground-station/ui/oled"),
         put("/api/v1/ground-station/ui/buttons"),
@@ -529,7 +537,7 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            145,
+            148,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);
@@ -549,6 +557,7 @@ mod tests {
             "/api/wfb/pair",
             "/api/wfb/pair/failover-status",
             "/api/status/full",
+            "/api/swarm/neighbors",
             "/api/video/latency",
             "/api/v1/video/air-pipeline",
             "/api/video/config",
@@ -614,6 +623,8 @@ mod tests {
         assert!(has(Method::DELETE, "/api/v1/network/mac/{iface}"));
         // The operator camera-roster write.
         assert!(has(Method::PUT, "/api/video/roster"));
+        // The drone attention-profile write (hero / thumbnail).
+        assert!(has(Method::POST, "/api/video/profile"));
         // The WFB radio writes + the GS network priority + GS wfb config writes.
         assert!(has(Method::POST, "/api/wfb/channel"));
         assert!(has(Method::PUT, "/api/wfb/tx-power"));
@@ -646,6 +657,9 @@ mod tests {
         assert!(has(Method::POST, "/api/v1/ground-station/recording/start"));
         assert!(has(Method::POST, "/api/v1/ground-station/recording/stop"));
         assert!(has(Method::POST, "/api/v1/ground-station/camera/switch"));
+        // Fleet hero selection: it spends radio airtime on up to 24 targeted
+        // RPCs, so it must sit behind the same auth edge and rate limiter.
+        assert!(has(Method::POST, "/api/v1/ground-station/fleet/hero"));
         assert!(has(Method::PUT, "/api/v1/ground-station/ui/oled"));
         assert!(has(Method::PUT, "/api/v1/ground-station/ui/buttons"));
         assert!(has(Method::PUT, "/api/v1/ground-station/ui/screens"));

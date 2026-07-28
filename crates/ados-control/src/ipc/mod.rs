@@ -19,12 +19,18 @@
 //! the logging store's query socket (the continuous collector samples them), so
 //! the surface never probes the host itself. A missing store degrades the route
 //! to its zero-valued health default rather than failing it.
+//!
+//! [`swarm_client`] is the read side of the swarm-bus seam: `ados-swarmbus` owns
+//! `/run/ados/swarm.sock` and publishes the fleet's neighbour table there at 2 Hz.
+//! Same posture as the state client — read-only, absent socket is normal, the route
+//! degrades to a structurally-complete empty table rather than failing.
 
 pub mod atlas_control_client;
 pub mod logd_client;
 pub mod mavlink_client;
 pub mod plugin_control_client;
 pub mod state_client;
+pub mod swarm_client;
 pub mod vision_client;
 
 pub use atlas_control_client::{AtlasControlClient, AtlasControlError};
@@ -32,4 +38,5 @@ pub use logd_client::LogdQueryClient;
 pub use mavlink_client::{AckStream, FrameRead, MavlinkIpcClient};
 pub use plugin_control_client::{PluginControlClient, PluginControlError};
 pub use state_client::StateIpcClient;
+pub use swarm_client::{default_swarm_socket, SwarmIpcClient, SwarmIpcHandle};
 pub use vision_client::VisionIpcClient;

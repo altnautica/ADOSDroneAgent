@@ -1,0 +1,64 @@
+[package]
+name = "ados-swarmbus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Decentralized swarm state bus: a 20-byte position/velocity beacon every node in a fleet broadcasts at 2 Hz on the shared monitor interface, plus the neighbour table the onboard autonomy layer flies against."
+
+[lib]
+name = "ados_swarmbus"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ados-swarmbus"
+path = "src/bin/ados-swarmbus.rs"
+
+[dependencies]
+# `tracing-layer` pulls in the LogdLayer so the daemon's logs reach the durable
+# ados-logd Black Box store, not just journald (Rule 41). `ipc` + `state` carry
+# the swarm.sock broadcast server and the state.sock reader the own-beacon body
+# is filled from.
+ados-protocol = { path = "../ados-protocol", features = ["tracing-layer"] }
+# The single source of truth for fleet addressing: FLEET_MAX_SLOTS, SLOT_GROUND,
+# the fleet-identity validator, and the WfbConfig defaults this service reads the
+# same three fields out of. Depended on for CONSTANTS, never for its config
+# loader — `WfbConfig::load_from` publishes the *radio* service's config-status
+# sidecar, and a second writer would clobber it.
+ados-radio = { path = "../ados-radio" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_norway = { workspace = true }
+# The neighbour table is shared between the receive, transmit and publish loops.
+# Critical sections are microseconds long and no guard is held across an await, so
+# a non-poisoning blocking lock is right; `tokio::sync` would add an await to
+# every counter bump.
+parking_lot = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+# ChaCha20-Poly1305 AEAD over the beacon payload, keyed by the fleet's shared
+# secret. Pure-Rust (RustCrypto), no `ring` — the same primitive and crate
+# version the mesh invite bundle uses.
+chacha20poly1305 = "0.10"
+# SHA-256 for the domain-separated fleet-key derivation off /etc/drone.key,
+# matching `ados_radio::hop::derive_pair_key`'s construction.
+sha2 = { workspace = true }
+# Nonce prefixes and the per-transmission beacon jitter. The jitter *policy* is a
+# pure function of a supplied random word so it is unit-testable off-target; this
+# only supplies the word.
+getrandom = { workspace = true }
+
+# Linux-only edges: the AF_PACKET raw socket the beacon is injected on and
+# received from (with the in-kernel BPF attached), systemd journald, and systemd
+# readiness notify. Confined to a target section so the frame codec, the cipher,
+# the neighbour table, the dead-reckoning and the jitter schedule all still build
+# and `cargo test` on a non-Linux dev host.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+sd-notify = { workspace = true }
+tracing-journald = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

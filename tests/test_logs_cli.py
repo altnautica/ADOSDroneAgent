@@ -367,7 +367,7 @@ def test_off_box_falls_back_to_the_env_key(monkeypatch) -> None:
 # --- real unix-socket transport (no mocks) ------------------------------
 
 
-def _stub_unix_server(tmp_path):
+def _stub_unix_server(socket_dir):
     """A tiny HTTP server bound to a unix socket that answers the three call
     shapes the CLI makes: a JSON envelope on /v1/query, a streamed jsonl body on
     /v1/export, and an SSE stream on /v1/tail. Returns (socket_path, server)."""
@@ -376,7 +376,7 @@ def _stub_unix_server(tmp_path):
     import os
     import socketserver
 
-    sock = os.path.join(tmp_path, "logd-query.sock")
+    sock = os.path.join(socket_dir, "logd-query.sock")
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, *_a):  # silence the test server
@@ -417,10 +417,10 @@ def _stub_unix_server(tmp_path):
     return sock, server
 
 
-def test_real_unix_socket_query_export_and_tail(tmp_path) -> None:
+def test_real_unix_socket_query_export_and_tail(unix_socket_dir) -> None:
     import threading
 
-    sock, server = _stub_unix_server(str(tmp_path))
+    sock, server = _stub_unix_server(str(unix_socket_dir))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
