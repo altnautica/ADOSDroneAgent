@@ -155,7 +155,7 @@ fn slot_table(registry: &FleetRegistry) -> Vec<Value> {
             json!({
                 "slot": s.slot,
                 "device_id": s.device_id,
-                "paired_at": s.paired_at,
+                "paired_at_ms": s.paired_at_ms,
             })
         })
         .collect()
@@ -653,7 +653,7 @@ mod tests {
         assert_eq!(table.len(), 2);
         assert_eq!(table[0]["slot"], 1);
         assert_eq!(table[0]["device_id"], "drone-b");
-        assert!(table[0]["paired_at"].as_f64().unwrap() > 0.0);
+        assert!(table[0]["paired_at_ms"].as_u64().unwrap() > 0);
         assert_eq!(table[1]["slot"], 2);
         assert_eq!(table[1]["device_id"], "drone-a");
     }

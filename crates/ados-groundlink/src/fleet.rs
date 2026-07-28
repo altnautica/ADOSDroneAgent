@@ -37,8 +37,19 @@ pub const FLEET_REGISTRY_PATH: &str = "/var/lib/ados/fleet.json";
 pub struct FleetSlot {
     pub slot: u8,
     pub device_id: String,
-    /// Unix seconds (fractional), matching the `paired_at` the pair routes emit.
-    pub paired_at: f64,
+    /// When the slot was issued, as INTEGER unix milliseconds.
+    ///
+    /// Integer ms, not fractional seconds, because this value is persisted as
+    /// JSON and compared for equality. `SystemTime::as_secs_f64()` at a present-day
+    /// epoch (~1.79e9) has an f64 ULP of about 2.4e-7, so a nanosecond-derived
+    /// timestamp is not representable and does not reliably survive a JSON
+    /// round-trip: it lost 1 ULP intermittently, which made
+    /// `FleetRegistry`'s own `PartialEq` unreliable after `persist` + `load`.
+    /// Integer ms is exact in both f64 and JSON out to the year 285000, so
+    /// exactness is structural here rather than a convention a later edit can
+    /// quietly break. Millisecond resolution is far more than a pair timestamp
+    /// needs.
+    pub paired_at_ms: u64,
 }
 
 /// The slot table, keyed by slot so iteration is always in slot order (the
@@ -80,7 +91,7 @@ impl FleetRegistry {
     /// grows. `None` when all [`FLEET_MAX_SLOTS`] slots are taken — the caller
     /// surfaces that as `E_FLEET_FULL` rather than evicting a registered drone.
     ///
-    /// `paired_at` on an existing entry is left alone: the field records when
+    /// `paired_at_ms` on an existing entry is left alone: the field records when
     /// the slot was first issued, which is what makes a re-pair observably
     /// idempotent rather than looking like a new registration.
     pub fn allocate(&mut self, device_id: &str) -> Option<u8> {
@@ -93,7 +104,7 @@ impl FleetRegistry {
             FleetSlot {
                 slot,
                 device_id: device_id.to_string(),
-                paired_at: now_unix(),
+                paired_at_ms: now_unix_ms(),
             },
         );
         Some(slot)
@@ -146,13 +157,13 @@ impl FleetRegistry {
     }
 }
 
-/// Wall clock as fractional unix seconds, the `paired_at` encoding the pair
-/// routes already use.
-fn now_unix() -> f64 {
+/// Wall clock as integer unix milliseconds. See [`FleetSlot::paired_at_ms`] for
+/// why this is not fractional seconds.
+fn now_unix_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -185,14 +196,14 @@ mod tests {
     }
 
     #[test]
-    fn re_pair_keeps_the_original_paired_at() {
-        // paired_at records when the slot was ISSUED. If a re-pair rewrote it,
+    fn re_pair_keeps_the_original_paired_at_ms() {
+        // paired_at_ms records when the slot was ISSUED. If a re-pair rewrote it,
         // an idempotent re-pair would be indistinguishable from a fresh one.
         let mut reg = FleetRegistry::default();
         reg.allocate("drone-a").unwrap();
-        let issued = reg.slots().next().unwrap().paired_at;
+        let issued = reg.slots().next().unwrap().paired_at_ms;
         reg.allocate("drone-a").unwrap();
-        assert_eq!(reg.slots().next().unwrap().paired_at, issued);
+        assert_eq!(reg.slots().next().unwrap().paired_at_ms, issued);
     }
 
     #[test]
@@ -256,6 +267,56 @@ mod tests {
     }
 
     #[test]
+    fn a_present_day_timestamp_survives_the_json_round_trip_bit_for_bit() {
+        // Regression. `paired_at` used to be fractional unix seconds from
+        // `Duration::as_secs_f64()`. At a present-day epoch (~1.79e9) the f64 ULP
+        // is about 2.4e-7, so a nanosecond-derived value is not representable and
+        // did not reliably survive serialization: roughly one run in three lost
+        // 1 ULP, which broke `FleetRegistry`'s own `PartialEq` after
+        // `persist` + `load` and made the failure look like flaky infrastructure
+        // rather than a representation bug.
+        //
+        // Integer milliseconds are exact in f64 and in JSON, so the round trip is
+        // lossless by construction. Every millisecond across a full second is
+        // checked, because the old failure depended on the low digits.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fleet.json");
+        let base_ms: u64 = 1_785_251_808_084;
+        for offset in 0..1000 {
+            let mut reg = FleetRegistry::default();
+            reg.allocate("drone-a").unwrap();
+            // Overwrite the clock-derived value with a known one.
+            let stamped = base_ms + offset;
+            reg.by_slot.get_mut(&1).unwrap().paired_at_ms = stamped;
+            reg.persist(&path).unwrap();
+
+            let loaded = FleetRegistry::load(&path);
+            assert_eq!(
+                loaded.slots().next().unwrap().paired_at_ms,
+                stamped,
+                "timestamp {stamped} did not round-trip"
+            );
+            assert_eq!(loaded, reg, "registry equality broke at {stamped}");
+        }
+    }
+
+    #[test]
+    fn the_issued_timestamp_is_whole_milliseconds() {
+        // A fractional value here would reintroduce the round-trip loss above, so
+        // the type is the guard: `u64` cannot carry a fraction. This pins that the
+        // clock helper feeds it a plausible present-day millisecond value rather
+        // than seconds, which would silently date every pair to 1970.
+        let mut reg = FleetRegistry::default();
+        reg.allocate("drone-a").unwrap();
+        let ms = reg.slots().next().unwrap().paired_at_ms;
+        // Sanity band: after 2020-01-01 and before 2100-01-01, in MILLISECONDS.
+        assert!(
+            ms > 1_577_836_800_000 && ms < 4_102_444_800_000,
+            "paired_at_ms {ms} is not a present-day millisecond timestamp"
+        );
+    }
+
+    #[test]
     fn a_missing_or_corrupt_file_loads_empty() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("absent.json");
@@ -283,6 +344,6 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(v["1"]["slot"], 1);
         assert_eq!(v["1"]["device_id"], "ados-abc123");
-        assert!(v["1"]["paired_at"].as_f64().unwrap() > 0.0);
+        assert!(v["1"]["paired_at_ms"].as_u64().unwrap() > 0);
     }
 }

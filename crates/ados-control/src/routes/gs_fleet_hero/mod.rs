@@ -289,7 +289,7 @@ pub(super) mod tests_support {
             .map(|(i, id)| FleetSlot {
                 slot: (i + 1) as u8,
                 device_id: (*id).to_string(),
-                paired_at: 0.0,
+                paired_at_ms: 0,
             })
             .collect()
     }

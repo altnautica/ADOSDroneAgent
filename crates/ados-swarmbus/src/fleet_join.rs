@@ -104,12 +104,12 @@ mod tests {
   "1": {
     "slot": 1,
     "device_id": "ados-abc123",
-    "paired_at": 1700000000.0
+    "paired_at_ms": 1700000000000
   },
   "24": {
     "slot": 24,
     "device_id": "ados-def456",
-    "paired_at": 1700000001.0
+    "paired_at_ms": 1700000001000
   }
 }"#;
         let doc: Value = serde_json::from_str(persisted).expect("the registry parses");
@@ -129,8 +129,8 @@ mod tests {
     fn a_slots_wrapped_registry_map_is_also_accepted() {
         let doc = json!({
             "slots": {
-                "1": {"slot": 1, "device_id": "ados-abc123", "paired_at": 1.7e9},
-                "3": {"slot": 3, "device_id": "ados-def456", "paired_at": 1.7e9},
+                "1": {"slot": 1, "device_id": "ados-abc123", "paired_at_ms": 1_700_000_000_000u64},
+                "3": {"slot": 3, "device_id": "ados-def456", "paired_at_ms": 1_700_000_000_000u64},
             }
         });
         let got = device_ids_from_value(&doc);
@@ -143,8 +143,8 @@ mod tests {
     #[test]
     fn an_array_of_slot_rows_joins_at_either_nesting() {
         let rows = json!([
-            {"slot": 2, "device_id": "ados-two", "paired_at": 0.0},
-            {"slot": 7, "device_id": "ados-seven", "paired_at": 0.0},
+            {"slot": 2, "device_id": "ados-two", "paired_at_ms": 0},
+            {"slot": 7, "device_id": "ados-seven", "paired_at_ms": 0},
         ]);
         for doc in [rows.clone(), json!({"slots": rows})] {
             let got = device_ids_from_value(&doc);
@@ -232,7 +232,7 @@ mod tests {
         // And a well-formed one reads.
         std::fs::write(
             &path,
-            r#"{"slots":{"1":{"slot":1,"device_id":"ados-abc123","paired_at":1700000000.0}}}"#,
+            r#"{"slots":{"1":{"slot":1,"device_id":"ados-abc123","paired_at_ms":1700000000000}}}"#,
         )
         .unwrap();
         assert_eq!(load_device_ids(&path).get(&1).unwrap(), "ados-abc123");
