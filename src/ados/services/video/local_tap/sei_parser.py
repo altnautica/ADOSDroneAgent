@@ -59,13 +59,19 @@ def _iter_nal_units(stream: bytes) -> Any:
         i += 1
 
     if annexb_idx >= 0:
-        # Annex-B: split on start codes.
-        positions: list[int] = []
+        # Annex-B: split on start codes. Each entry is
+        # ``(payload_start, start_code_start)`` — BOTH are needed, because a
+        # start code is either 3 or 4 bytes and the previous NAL ends where the
+        # next start code BEGINS. Deriving that from the payload start alone
+        # (`next_start - 4`) silently assumes the 4-byte form and truncates the
+        # previous NAL by one byte whenever the next start code is the 3-byte
+        # form, which `h264parse` emits depending on upstream caps.
+        positions: list[tuple[int, int]] = []
         i = annexb_idx
         while i + 2 < n:
             if stream[i] == 0 and stream[i + 1] == 0:
                 if stream[i + 2] == 1:
-                    positions.append(i + 3)
+                    positions.append((i + 3, i))
                     i += 3
                     continue
                 if (
@@ -73,18 +79,22 @@ def _iter_nal_units(stream: bytes) -> Any:
                     and stream[i + 2] == 0
                     and stream[i + 3] == 1
                 ):
-                    positions.append(i + 4)
+                    positions.append((i + 4, i))
                     i += 4
                     continue
             i += 1
-        for idx, start in enumerate(positions):
-            end = (
-                positions[idx + 1] - 4
-                if idx + 1 < len(positions)
-                else n
-            )
-            # Trim a trailing 00 00 in case the next start code is
-            # 00 00 01 (3-byte form).
+        for idx, (start, _sc) in enumerate(positions):
+            end = positions[idx + 1][1] if idx + 1 < len(positions) else n
+            # Trim Annex-B `trailing_zero_8bits` padding between the end of the
+            # rbsp and the next start code. This is safe now that `end` is exact:
+            # an rbsp always ends on a non-zero byte (it carries
+            # `rbsp_stop_one_bit`, 0x80 for our markers), so any zero byte here
+            # is padding and never payload. It was NOT safe before: with `end`
+            # one byte low it pointed past a real trailing 0x00, and this loop
+            # then ate it — dropping two bytes off the SEI, failing its own
+            # length check, and discarding the marker. That lost the latency
+            # sample for roughly one timestamp in 250 (any ns value whose low
+            # byte is 0x00) on a 3-byte-start-code stream, silently.
             while end > start and stream[end - 1] == 0:
                 end -= 1
             if end <= start:

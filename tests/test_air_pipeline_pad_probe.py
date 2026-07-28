@@ -93,6 +93,64 @@ def test_inject_sei_with_3_byte_start_code():
     assert parsed is not None
 
 
+def test_three_byte_start_code_round_trips_a_timestamp_ending_in_a_zero_byte():
+    """Regression: a ns value whose LOW BYTE is 0x00, behind a 3-byte start code.
+
+    ``_iter_nal_units`` computed the previous NAL's end as
+    ``next_payload_start - 4``, which assumes every start code is the 4-byte
+    form. Behind a 3-byte start code that landed one byte early, and the
+    ``trailing_zero_8bits`` trim then removed a legitimate trailing 0x00 payload
+    byte as if it were padding. The SEI arrived two bytes short, failed its own
+    declared-length check and was discarded, so the marker silently vanished for
+    roughly one timestamp in 250 — about 0.4% of frames, or every frame on an
+    encoder that always emits 3-byte start codes.
+
+    It only ever failed for some clock values, so the original assertion
+    (live clock, ``is not None``) passed locally and flaked in CI. This pins the
+    exact class of value instead of sampling the clock and hoping.
+    """
+    pipe = _make_minimal_pipeline_for_probe()
+    real = time.time_ns
+    import time as _time
+
+    # Every low byte, both start-code forms. 0x00 is the case that regressed;
+    # the rest guard against a fix that trades one boundary for another.
+    for low in (0x00, 0x01, 0x02, 0x03, 0x7F, 0x80, 0xFF):
+        target_ns = 0x18C6_7F5B_0638_E200 | low
+        try:
+            _time.time_ns = lambda ns=target_ns: ns  # type: ignore[assignment]
+            three = pipe._inject_sei_into_au(b"\x00\x00\x01" + bytes([0x65, 0x88]))
+            four = pipe._inject_sei_into_au(
+                b"\x00\x00\x00\x01" + bytes([0x65, 0x88])
+            )
+        finally:
+            _time.time_ns = real  # type: ignore[assignment]
+        assert lt.parse_sei_latency_ns(three) == target_ns, (
+            f"3-byte start code lost the timestamp for low byte {low:#04x}"
+        )
+        assert lt.parse_sei_latency_ns(four) == target_ns, (
+            f"4-byte start code lost the timestamp for low byte {low:#04x}"
+        )
+
+
+def test_annexb_trailing_zero_padding_is_still_trimmed():
+    """The zero-trim must keep working for real `trailing_zero_8bits` padding.
+
+    The fix above makes the NAL end exact, which is what makes trimming safe:
+    an rbsp always ends on a non-zero byte because it carries
+    `rbsp_stop_one_bit`, so a zero here is padding. This pins that the trim was
+    narrowed rather than removed — a parser that stopped trimming would read
+    padding as payload and overrun the SEI's declared length.
+    """
+    from ados.services.video.sei_injector import build_sei_nal
+
+    target_ns = 0x0000_0001_0000_1234
+    sei = build_sei_nal(target_ns)
+    # rbsp, then two bytes of Annex-B padding, then a 3-byte start code.
+    stream = sei + b"\x00\x00" + b"\x00\x00\x01" + bytes([0x65, 0x88])
+    assert lt.parse_sei_latency_ns(stream) == target_ns
+
+
 def test_inject_sei_handles_emulation_prevention_round_trip():
     """A ns value with 00 00 NN bytes must still round-trip.
 
