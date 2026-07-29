@@ -531,8 +531,7 @@ mod tests {
         let script = dir.join("fake-onnx-vision");
         write_script(
             &script,
-            "echo 'fake-onnx-vision: /lib/aarch64-linux-gnu/libc.so.6: version \
-             \x27GLIBC_2.34\x27 not found (required by fake-onnx-vision)' >&2\nexit 1",
+            "printf '%s\\n' \"fake-onnx-vision: /lib/aarch64-linux-gnu/libc.so.6: version GLIBC_2.34 not found (required by fake-onnx-vision)\" >&2\nexit 1",
         );
         assert!(
             !binary_execs_on_this_host(&script),
@@ -546,7 +545,9 @@ mod tests {
         let script = dir.join("fake-working-vision");
         // Sleeps well past the probe's deadline, mirroring a real service that
         // stays up — the probe must kill it and report success, not hang.
-        write_script(&script, "sleep 5");
+        // `exec` replaces the shell with `sleep` so the probe's kill() reaps
+        // the actual long-lived process instead of orphaning it.
+        write_script(&script, "exec sleep 5");
         assert!(
             binary_execs_on_this_host(&script),
             "a binary still running past the deadline was accepted by the loader"
