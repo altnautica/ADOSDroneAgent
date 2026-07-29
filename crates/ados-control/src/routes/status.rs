@@ -679,15 +679,13 @@ mod tests {
     fn perception_fields_maps_board_caps_to_a_tier() {
         // An NPU board (npu_tops > 0) with a confirmed live backend runs
         // detection locally.
-        let (npu, accel, tier, _target) =
-            perception_fields(&json!({ "npu_tops": 6.0 }), true);
+        let (npu, accel, tier, _target) = perception_fields(&json!({ "npu_tops": 6.0 }), true);
         assert_eq!(npu, 6.0);
         assert!(accel);
         assert_eq!(tier, "local");
         // A CPU board with no NPU + no paired node has no perception tier (no
         // offload-link sidecar in the test env ⇒ compute_node_paired false).
-        let (npu, accel, tier, _target) =
-            perception_fields(&json!({ "npu_tops": 0.0 }), true);
+        let (npu, accel, tier, _target) = perception_fields(&json!({ "npu_tops": 0.0 }), true);
         assert_eq!(npu, 0.0);
         assert!(!accel);
         assert_eq!(tier, "none");
@@ -716,8 +714,7 @@ mod tests {
         // detections. The declared capability must not outrun the live
         // signal — `has_accelerator` (the raw hardware fact) stays true, but
         // the tier degrades to `none` rather than lying `local`.
-        let (npu, accel, tier, _target) =
-            perception_fields(&json!({ "npu_tops": 3.0 }), false);
+        let (npu, accel, tier, _target) = perception_fields(&json!({ "npu_tops": 3.0 }), false);
         assert_eq!(npu, 3.0);
         assert!(accel, "hasAccelerator is the raw hardware declaration");
         assert_eq!(tier, "none");
