@@ -216,10 +216,66 @@ fn install_service(
     install_one_with_retry(b, tmp_dir, channel, sink)
 }
 
+/// Whether a freshly-placed binary can actually `execve` on this host — probes
+/// for the dynamic-linker rejection a glibc floor mismatch produces (the
+/// CI-built onnx `ados-vision` links against whatever glibc its `ubuntu-22.04-arm`
+/// build runner ships; a board running an older base image, e.g. Debian 11
+/// Bullseye's glibc 2.31, rejects it at `execve` time with `GLIBC_x not found`
+/// on stderr). That rejection happens before the program's own code runs, so a
+/// short bounded wait distinguishes it cleanly from a binary that actually
+/// starts: the loader either fails within milliseconds, or the process is
+/// still alive when the deadline elapses (killed immediately — a fresh install
+/// already tears down and restarts services around this point, so a killed
+/// probe process is harmless). A spawn failure for any OTHER reason (missing
+/// file, permission) is not what this probes for — treat it as "runs" so the
+/// caller's existing error paths (the retry loop, the Hard/BestEffort gate)
+/// handle it instead of this probe silently swallowing an unrelated fault.
+fn binary_execs_on_this_host(path: &Path) -> bool {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    let mut child = match Command::new(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return true,
+    };
+
+    let deadline = Instant::now() + Duration::from_millis(400);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let mut stderr = String::new();
+                if let Some(mut s) = child.stderr.take() {
+                    let _ = s.read_to_string(&mut stderr);
+                }
+                let linker_rejected = !status.success() && stderr.contains("GLIBC_");
+                return !linker_rejected;
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    // Still running past the deadline: the loader accepted it.
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => return true,
+        }
+    }
+}
+
 /// Install the onnx-enabled `ados-vision` binary together with the ONNX Runtime
-/// shared library it dlopens at start. Both must land — if the runtime library
-/// cannot be fetched, the onnx binary would fail to start, so this returns `Err`
-/// and the caller falls back to the default vision build.
+/// shared library it dlopens at start. Both must land, AND the binary must
+/// actually execve on this host — if the runtime library cannot be fetched, or
+/// the placed binary is rejected by the dynamic loader (a glibc floor
+/// mismatch), this returns `Err` and the caller falls back to the default
+/// vision build.
 fn install_onnx_vision(
     tmp_dir: &Path,
     channel: Channel,
@@ -232,7 +288,16 @@ fn install_onnx_vision(
         channel,
         sink,
     )
-    .map_err(|e| anyhow::anyhow!("ONNX Runtime library fetch failed: {e}"))
+    .map_err(|e| anyhow::anyhow!("ONNX Runtime library fetch failed: {e}"))?;
+
+    if !binary_execs_on_this_host(Path::new(binaries::PREBUILT_VISION_ONNX.dest)) {
+        anyhow::bail!(
+            "onnx vision binary rejected by the dynamic loader on this host \
+             (glibc floor mismatch — the board's base image is older than the \
+             onnx build's glibc floor)"
+        );
+    }
+    Ok(())
 }
 
 /// `<dest>.dl` sibling used as the verify-then-rename staging path. It lives in
@@ -452,5 +517,53 @@ mod tests {
         // edge tolerates unsigned; stable does not.
         assert!(allow_unsigned_for(Channel::Edge));
         assert!(!allow_unsigned_for(Channel::Stable));
+    }
+
+    /// Write an executable shell script at `path` with `body` as its content.
+    fn write_script(path: &Path, body: &str) {
+        std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        set_executable(path).unwrap();
+    }
+
+    #[test]
+    fn exec_probe_detects_a_glibc_rejection() {
+        let dir = tempdir().unwrap();
+        let script = dir.join("fake-onnx-vision");
+        write_script(
+            &script,
+            "echo 'fake-onnx-vision: /lib/aarch64-linux-gnu/libc.so.6: version \
+             \x27GLIBC_2.34\x27 not found (required by fake-onnx-vision)' >&2\nexit 1",
+        );
+        assert!(
+            !binary_execs_on_this_host(&script),
+            "a GLIBC_-tagged nonzero exit must read as a linker rejection"
+        );
+    }
+
+    #[test]
+    fn exec_probe_accepts_a_binary_that_actually_starts() {
+        let dir = tempdir().unwrap();
+        let script = dir.join("fake-working-vision");
+        // Sleeps well past the probe's deadline, mirroring a real service that
+        // stays up — the probe must kill it and report success, not hang.
+        write_script(&script, "sleep 5");
+        assert!(
+            binary_execs_on_this_host(&script),
+            "a binary still running past the deadline was accepted by the loader"
+        );
+    }
+
+    #[test]
+    fn exec_probe_treats_an_unrelated_nonzero_exit_as_runnable() {
+        let dir = tempdir().unwrap();
+        let script = dir.join("fake-crashing-vision");
+        // Fails fast, but for a reason that has nothing to do with the dynamic
+        // loader (e.g. a real startup error against a missing config) — the
+        // probe's job is narrowly the GLIBC_ signature, not "did it exit 0".
+        write_script(&script, "echo 'config not found' >&2\nexit 1");
+        assert!(
+            binary_execs_on_this_host(&script),
+            "a non-GLIBC_ failure must not be misread as a linker rejection"
+        );
     }
 }
