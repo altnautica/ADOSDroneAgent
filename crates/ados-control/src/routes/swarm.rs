@@ -120,6 +120,7 @@ mod tests {
                 "beacons_stale_dropped": 0,
                 "neighbors_now": 1,
             },
+            "slots": [],
         })
     }
 

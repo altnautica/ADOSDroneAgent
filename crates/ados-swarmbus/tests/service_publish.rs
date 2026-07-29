@@ -119,7 +119,10 @@ async fn the_service_publishes_the_contract_without_a_working_radio() {
         .keys()
         .map(String::as_str)
         .collect();
-    assert_eq!(keys, vec!["counters", "fleet_id", "neighbors", "slot"]);
+    assert_eq!(
+        keys,
+        vec!["counters", "fleet_id", "neighbors", "slot", "slots"]
+    );
     for k in COUNTER_KEYS {
         assert!(first["counters"].get(k).is_some(), "counters missing {k}");
     }

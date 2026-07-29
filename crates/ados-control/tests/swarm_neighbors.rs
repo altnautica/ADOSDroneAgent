@@ -293,6 +293,10 @@ async fn a_peers_on_air_beacon_becomes_the_published_http_body() {
                 "beacons_stale_dropped": 0,
                 "neighbors_now": 2,
             },
+            "slots": [
+                {"slot": 3, "device_id": "ados-abc123"},
+                {"slot": 9, "device_id": "ados-def456"},
+            ],
         }),
         "the published contract drifted"
     );

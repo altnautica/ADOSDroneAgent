@@ -16,6 +16,14 @@
 //! - **Derived fields are computed here, not on the client.** `heading_deg` and
 //!   `age_ms` are emitted so every consumer agrees on them; two clients deriving
 //!   heading with different argument orders would mirror the map.
+//! - **`neighbors` is who is heard; `slots` is who is registered.** The
+//!   `neighbors` array holds only slots this node's radio has actually received a
+//!   beacon from since it started; `slots` holds the fleet's whole registered-slot
+//!   table (slot → device id) regardless of whether that slot is currently
+//!   beaconing. The two differ exactly when a drone is lost, which is the
+//!   operator-facing fact `slots` exists to carry — a slot present in `slots` but
+//!   absent from `neighbors` is a drone the fleet issued a slot to and has since
+//!   stopped hearing.
 
 use std::collections::BTreeMap;
 use std::time::Instant;
@@ -68,6 +76,10 @@ pub fn neighbors_payload(
         "slot": table.own_slot(),
         "neighbors": neighbors,
         "counters": counters_value(table.counters(), table.len()),
+        "slots": device_ids
+            .iter()
+            .map(|(slot, device_id)| json!({"slot": slot, "device_id": device_id}))
+            .collect::<Vec<Value>>(),
     })
 }
 
@@ -91,13 +103,18 @@ pub fn counters_value(c: SwarmCounters, neighbors_now: usize) -> Value {
 /// reader cannot know the fleet identity of a service that is not running, and
 /// reporting the defaults would make an unprovisioned node indistinguishable from a
 /// correctly-provisioned fleet-1 node with no neighbours. The counters are all
-/// zero, which is honest — nothing has been transmitted or received.
+/// zero, which is honest — nothing has been transmitted or received. `slots` is
+/// an empty array rather than null: an empty registry is an honest description of
+/// a node with no registry of its own (every drone, and a ground station that has
+/// paired nobody), whereas `fleet_id`/`slot` being empty would be a guess about a
+/// fleet identity this degraded body cannot know.
 pub fn empty_payload() -> Value {
     json!({
         "fleet_id": Value::Null,
         "slot": Value::Null,
         "neighbors": [],
         "counters": counters_value(SwarmCounters::default(), 0),
+        "slots": [],
     })
 }
 
@@ -115,7 +132,7 @@ pub fn normalise_payload(published: Option<&Value>) -> Value {
     let Value::Object(mut out) = empty_payload() else {
         unreachable!("empty_payload is an object")
     };
-    for key in ["fleet_id", "slot", "neighbors", "counters"] {
+    for key in ["fleet_id", "slot", "neighbors", "counters", "slots"] {
         if let Some(v) = src.get(key) {
             out.insert(key.to_string(), v.clone());
         }
@@ -173,6 +190,11 @@ pub const COUNTER_KEYS: [&str; 6] = [
     "beacons_stale_dropped",
     "neighbors_now",
 ];
+
+/// The keys the contract requires on a slot-table row. Exported so the shape is
+/// asserted from one list rather than a hand-copied one per test, same as
+/// [`NEIGHBOR_KEYS`] and [`COUNTER_KEYS`].
+pub const SLOT_KEYS: [&str; 2] = ["slot", "device_id"];
 
 #[cfg(test)]
 mod tests {
@@ -256,6 +278,7 @@ mod tests {
                     "beacons_stale_dropped": 0,
                     "neighbors_now": 1,
                 },
+                "slots": [{"slot": 3, "device_id": "ados-abc123"}],
             })
         );
     }
@@ -269,11 +292,12 @@ mod tests {
         let payload = neighbors_payload(1, &table_with_one(t0), &ids(), t0);
         assert_exact_keys(
             &payload,
-            &["fleet_id", "slot", "neighbors", "counters"],
+            &["fleet_id", "slot", "neighbors", "counters", "slots"],
             "payload",
         );
         assert_exact_keys(&payload["neighbors"][0], &NEIGHBOR_KEYS, "neighbor row");
         assert_exact_keys(&payload["counters"], &COUNTER_KEYS, "counters");
+        assert_exact_keys(&payload["slots"][0], &SLOT_KEYS, "slot row");
     }
 
     /// A missing reading must be `null`. A fabricated `-100 dBm` or `""` would
@@ -398,9 +422,10 @@ mod tests {
         assert_eq!(p["fleet_id"], Value::Null, "a guessed fleet id is a lie");
         assert_eq!(p["slot"], Value::Null);
         assert_eq!(p["neighbors"], json!([]));
+        assert_eq!(p["slots"], json!([]));
         assert_exact_keys(
             &p,
-            &["fleet_id", "slot", "neighbors", "counters"],
+            &["fleet_id", "slot", "neighbors", "counters", "slots"],
             "payload",
         );
         assert_exact_keys(&p["counters"], &COUNTER_KEYS, "counters");
@@ -430,12 +455,13 @@ mod tests {
         assert_eq!(got["fleet_id"], json!(7), "carried through");
         assert_eq!(got["slot"], Value::Null, "omitted, so degraded");
         assert_eq!(got["neighbors"], json!([{"slot": 2}]));
+        assert_eq!(got["slots"], json!([]), "omitted, so degraded");
         assert_eq!(got["counters"]["beacons_rx"], json!(9));
         assert_eq!(got["counters"]["beacons_tx"], json!(0), "filled");
         assert_exact_keys(&got["counters"], &COUNTER_KEYS, "counters");
         assert_exact_keys(
             &got,
-            &["fleet_id", "slot", "neighbors", "counters"],
+            &["fleet_id", "slot", "neighbors", "counters", "slots"],
             "payload",
         );
 
@@ -458,5 +484,29 @@ mod tests {
         );
         let decoded: Value = serde_json::from_slice(&line[..line.len() - 1]).unwrap();
         assert_eq!(decoded, payload);
+    }
+
+    /// A slot the fleet registered but has not heard from must still appear in
+    /// `slots` — that is the entire point of the key — while `neighbors` carries
+    /// only slots this node has actually heard a beacon from.
+    #[test]
+    fn a_registered_slot_with_no_beacon_appears_in_slots_but_not_neighbors() {
+        let t0 = Instant::now();
+        let device_ids = BTreeMap::from([
+            (3u8, "ados-abc123".to_string()),
+            (9u8, "ados-def456".to_string()),
+        ]);
+        let table = table_with_one(t0); // only slot 3 has ever beaconed
+        let payload = neighbors_payload(1, &table, &device_ids, t0);
+        assert_eq!(payload["slots"].as_array().unwrap().len(), 2);
+        assert_eq!(payload["neighbors"].as_array().unwrap().len(), 1);
+    }
+
+    /// The degraded and normalised paths must default `slots` to an empty array,
+    /// same as every other array-shaped key.
+    #[test]
+    fn slots_defaults_to_empty_when_no_registry_is_known() {
+        assert_eq!(empty_payload()["slots"], json!([]));
+        assert_eq!(normalise_payload(None)["slots"], json!([]));
     }
 }
