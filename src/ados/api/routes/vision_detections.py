@@ -38,6 +38,20 @@ is a vision/detection MQTT topic published by ``ados-cloud`` (alongside
 the existing ``ados/{device_id}/...`` topics) that the GCS subscribes to
 for cross-network detections. The browser-side store contract
 (``setBatch``) is identical, so wiring that path later is additive.
+
+WFB-RELAY FOLLOW-UP (partially built here): a drone reached only over the
+ground station's WFB relay proxy (``gs_relay_proxy.rs``) has no path for
+this route either — that proxy is a unary request/response tunnel over
+``aux_rpc`` (``AUX_MAX_PAYLOAD`` bounds the *request*; a WebSocket upgrade
+cannot cross it, only a single HTTP request/response pair can). Rather than
+build a new duplex radio-multiplexed WS tunnel (a real feature in its own
+right — see the aux lane's app mux), ``GET
+/vision/detections/latest`` below gives the relay case a poll target that
+rides the *existing, working* unary tunnel: same last-state broadcast
+socket, one frame read per call instead of a subscription. The GCS relay
+branch polls it every ~250ms (~4 Hz, inside the plugin's own 6 Hz ceiling
+and the stated 3-4/s click-to-track usability floor). A true low-latency
+push tunnel over the radio remains a follow-up.
 """
 
 from __future__ import annotations
@@ -46,7 +60,7 @@ import asyncio
 import struct
 
 import structlog
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
 from ados.core import paths as _paths
 
@@ -172,3 +186,49 @@ async def ws_vision_detections(websocket: WebSocket) -> None:
             await websocket.close()
         except RuntimeError:
             pass
+
+
+
+@router.get("/vision/detections/latest")
+async def get_latest_detection() -> dict:
+    """Return the single most-recent detection batch, or ``{"detections": []}``.
+
+    A poll target for a caller that cannot hold a WebSocket open — chiefly
+    the ground-station WFB relay proxy (see the module docstring's
+    WFB-RELAY FOLLOW-UP note), which only tunnels one request/response pair
+    at a time. Connects to the same last-state broadcast socket the WS route
+    streams from, reads exactly one frame (the replayed most-recent batch),
+    and disconnects — no long-lived connection held per poll.
+
+    Auth is inherited from the agent's normal HTTP middleware (the same
+    ``X-ADOS-Key`` gate every other REST route sits behind); this is a plain
+    GET; it does not use the WebSocket ticket scheme.
+    """
+    sock_path = str(VISION_DETECTIONS_SOCK)
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_unix_connection(sock_path), timeout=1.0
+        )
+    except (FileNotFoundError, ConnectionRefusedError, OSError, TimeoutError):
+        # Vision isn't running (or isn't up yet) on this board. Honest empty
+        # reading, not a fabricated batch (Rule 44) — mirrors the WS route's
+        # "no live detections" close rather than erroring the poll loop.
+        return {"detections": []}
+    try:
+        header = await asyncio.wait_for(reader.readexactly(_HEADER_SIZE), timeout=1.0)
+        (length,) = struct.unpack("!I", header)
+        if length == 0 or length > _MAX_FRAME_SIZE:
+            log.warning("vision_detections_latest_bad_frame_len", length=length)
+            return {"detections": []}
+        body = await asyncio.wait_for(reader.readexactly(length), timeout=1.0)
+    except (asyncio.IncompleteReadError, ConnectionResetError, OSError, TimeoutError):
+        return {"detections": []}
+    finally:
+        try:
+            writer.close()
+        except Exception:
+            pass
+    batch = _msgpack_loads(body)
+    if batch is None:
+        raise HTTPException(status_code=502, detail="malformed detection batch")
+    return batch

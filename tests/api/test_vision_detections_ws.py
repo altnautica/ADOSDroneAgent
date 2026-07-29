@@ -218,3 +218,49 @@ def test_paired_valid_header_accepts(paired_client):
         assert got["frame_id"] == 7
     finally:
         engine.stop()
+
+
+def test_get_latest_returns_most_recent_batch(unpaired_client):
+    """The poll endpoint reads exactly one frame from the last-state
+    broadcast and returns it as JSON, matching what the WS route would
+    forward."""
+    client, sock_path = unpaired_client
+    engine = _FakeEngineSocket(sock_path, [_frame(SAMPLE_BATCH)])
+    engine.start()
+    try:
+        resp = client.get("/api/vision/detections/latest")
+        assert resp.status_code == 200
+        assert resp.json()["frame_id"] == 7
+        assert resp.json()["detections"][0]["class_label"] == "weed"
+    finally:
+        engine.stop()
+
+
+def test_get_latest_returns_empty_detections_when_socket_absent():
+    """No engine socket present → an honest empty reading (Rule 44), never
+    a hang or a fabricated batch — the poll loop's steady state until
+    vision comes up or is enabled."""
+    from ados.api.server import create_app
+    from tests.api_runtime_utils import build_api_runtime
+
+    base = Path(tempfile.mkdtemp(prefix="advws-latest-"))
+    absent_sock = base / "absent.sock"
+    try:
+        import ados.api.routes.vision_detections as route_mod
+
+        original = route_mod.VISION_DETECTIONS_SOCK
+        route_mod.VISION_DETECTIONS_SOCK = absent_sock
+        try:
+            app_double = build_api_runtime(uptime_seconds=0.0)
+            app_double.pairing_manager.is_paired = False
+            client = TestClient(create_app(app_double))
+            resp = client.get("/api/vision/detections/latest")
+            assert resp.status_code == 200
+            assert resp.json() == {"detections": []}
+        finally:
+            route_mod.VISION_DETECTIONS_SOCK = original
+    finally:
+        try:
+            base.rmdir()
+        except OSError:
+            pass

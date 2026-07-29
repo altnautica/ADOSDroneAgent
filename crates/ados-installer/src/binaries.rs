@@ -360,9 +360,19 @@ pub const PREBUILT_VISION_ONNX_RUNTIME: PrebuiltBinary = PrebuiltBinary {
 /// case-insensitively against the device-tree model string, mirroring the board
 /// profiles that declare `compute.local_inference: onnx` (Cortex-A76-class,
 /// NPU-less boards a CPU YOLO runs usefully on). Keep this list in step with
-/// those YAML profiles. NPU-class boards are intentionally excluded — they run
-/// the accelerator sidecar, not the CPU ONNX build.
-const ONNX_VISION_BOARD_SUBSTRINGS: &[&str] = &["raspberry pi 5", "compute module 5", "cm5"];
+/// those YAML profiles. NPU-class boards are normally excluded — they run the
+/// accelerator sidecar, not the CPU ONNX build — but `sun60iw2` (Allwinner A733,
+/// Radxa Cubie A7S) is a deliberate exception: its VIP9000 NPU has no in-tree
+/// backend (no TIM-VX support yet — see `cubie-a7s.yaml`'s Rule-44 note), so it
+/// runs the CPU ONNX build like an NPU-less board until that backend lands.
+const ONNX_VISION_BOARD_SUBSTRINGS: &[&str] = &[
+    "raspberry pi 5",
+    "compute module 5",
+    "cm5",
+    "sun60iw2",
+    "cubie a7s",
+    "a733",
+];
 
 /// Whether the board model declares CPU-ONNX local inference and should fetch the
 /// onnx-enabled vision build. Pure, case-insensitive substring match.
@@ -664,9 +674,12 @@ mod tests {
         assert!(board_prefers_onnx_vision("Raspberry Pi 5 Model B Rev 1.0"));
         assert!(board_prefers_onnx_vision("Raspberry Pi Compute Module 5"));
         assert!(board_prefers_onnx_vision("Raspberry Pi CM5"));
-        // NPU boards run the sidecar, not the CPU ONNX build.
+        // A733/Cubie A7S: NPU present but no in-tree backend yet, so it is a
+        // deliberate exception to the "NPU boards run the sidecar" rule below.
+        assert!(board_prefers_onnx_vision("sun60iw2"));
+        assert!(board_prefers_onnx_vision("Radxa Cubie A7S"));
+        // NPU boards WITH an in-tree backend run the sidecar, not the CPU ONNX build.
         assert!(!board_prefers_onnx_vision("Radxa ROCK 5C Lite (RK3582)"));
-        assert!(!board_prefers_onnx_vision("NVIDIA Jetson Orin Nano"));
         // Weaker / unknown boards stay on the default build.
         assert!(!board_prefers_onnx_vision("Raspberry Pi 4 Model B"));
         assert!(!board_prefers_onnx_vision(""));

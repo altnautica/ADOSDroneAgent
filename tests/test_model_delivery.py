@@ -137,6 +137,33 @@ def test_board_family_siblings_and_display_names() -> None:
     assert board_family("rk3566") == "generic"
 
 
+# ── A733 / cubie-a7s: no accelerator backend in-tree, resolves to the CPU family ──
+def test_board_family_a733_resolves_to_cpu_not_generic() -> None:
+    # The A733's VIP9000 NPU has no in-tree ados-vision backend (Rule 44), so it must
+    # NOT land in an accelerator family; it resolves to "cpu" — the board_match token
+    # plugin manifests (e.g. follow-me's coco-person) actually declare for the
+    # non-accelerator variant. "generic" would match no declared variant at all.
+    assert board_family("cubie-a7s") == "cpu"
+    assert board_family("Radxa Cubie A7S") == "cpu"
+    assert board_family("Allwinner A733") == "cpu"
+    assert board_family("sun60iw2") == "cpu"
+    assert board_family("sun60i-a733") == "cpu"
+
+
+def test_select_ref_for_board_a733_picks_the_cpu_variant_not_refs_zero(tmp_path) -> None:
+    # Regression for the actual bug: with refs shaped exactly like a real manifest
+    # (rk3588/rknn listed first, cpu/onnx second — see follow-me's coco-person model),
+    # an A733 board must resolve the cpu/onnx variant. Before the board_family fix this
+    # SoC matched neither "rk3588" nor "generic" and silently fell through to refs[0]
+    # (the rk3588/rknn variant, which the A733 cannot run).
+    mgr = _mgr(tmp_path)
+    refs = [_ref(runtime="rknn", board_match="rk3588"),
+            _ref(runtime="onnx", board_match="cpu")]
+    picked = mgr.select_ref_for_board(refs, "cubie-a7s")
+    assert picked.runtime == "onnx"
+    assert picked.board_match == "cpu"
+
+
 # ── private-registry auth headers (network-free) ───────────────────────────────
 def test_registry_auth_headers(tmp_path) -> None:
     creds = tmp_path / "model-registry-auth.json"

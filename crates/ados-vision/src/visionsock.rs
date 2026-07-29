@@ -188,10 +188,21 @@ async fn dispatch(engine: &Arc<VisionEngine>, env: &Envelope) -> (Value, Option<
 
 async fn handle_list_models(engine: &Arc<VisionEngine>) -> Result<Value> {
     // The engine's registered models, encoded as a msgpack Vec<ModelInfo> in a
-    // binary field so the control-plane relay returns them unchanged.
+    // binary field so the control-plane relay returns them unchanged. The
+    // backend name + whether it actually runs inference ride alongside as
+    // top-level fields, so a caller can ask "is a real backend loaded" (the
+    // `/api/status` perception-tier honesty check) even when no model is
+    // registered — `models` alone answers nothing in that case.
     let models = engine.list_models().await;
     let bytes = rmp_serde::to_vec_named(&models).map_err(|e| anyhow!("encode models: {e}"))?;
-    Ok(ok_map(&[("models", Value::Binary(bytes))]))
+    Ok(ok_map(&[
+        ("models", Value::Binary(bytes)),
+        ("backend", Value::from(engine.backend_name())),
+        (
+            "backend_inference_capable",
+            Value::Boolean(engine.is_inference_capable()),
+        ),
+    ]))
 }
 
 async fn handle_register(engine: &Arc<VisionEngine>, args: &Value) -> Result<Value> {

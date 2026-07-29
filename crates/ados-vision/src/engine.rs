@@ -201,6 +201,17 @@ impl VisionEngine {
         self.backend.name()
     }
 
+    /// Whether the engine's loaded backend runs real inference (not the mock).
+    /// The same fact [`Self::list_models`] folds into each model's
+    /// `is_inference_capable`, exposed standalone so a caller can ask before —
+    /// or without ever — registering a model. The `/api/status` perception-tier
+    /// honesty check needs exactly this: whether `select_backend` actually
+    /// resolved to a real backend on this build/board, independent of whether
+    /// vision has any model configured.
+    pub fn is_inference_capable(&self) -> bool {
+        self.backend.is_inference_capable()
+    }
+
     /// Subscribe to published frame descriptors. Used by `vision.sock`
     /// `subscribe_frames` to stream descriptors to a plugin.
     pub fn subscribe_frames(&self) -> broadcast::Receiver<FrameDescriptor> {

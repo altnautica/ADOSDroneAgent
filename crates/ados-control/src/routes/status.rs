@@ -33,6 +33,7 @@ use axum::extract::State;
 use axum::Json;
 use serde_json::{json, Map, Value};
 
+use crate::ipc::VisionIpcClient;
 use crate::state::AppState;
 
 /// The runtime-only keys the state snapshot carries alongside the vehicle state.
@@ -182,7 +183,9 @@ pub async fn get_status(State(state): State<AppState>) -> Json<Value> {
     // renders "port open · no MAVLink", heartbeatAgeS validates the link is live,
     // fcSource reflects the picker choice. Present alongside the legacy snake
     // fc_connected (which is now the gated truth, not transport-open).
-    let (npu_tops, has_accelerator, perception_tier, offload_target) = perception_fields(&board);
+    let backend_inference_capable = live_backend_inference_capable().await;
+    let (npu_tops, has_accelerator, perception_tier, offload_target) =
+        perception_fields(&board, backend_inference_capable);
 
     let liveness = fc_liveness_from_snapshot(snapshot.as_ref());
     // Honest reachability: true for a live MAVLink FC OR a detected MSP FC on an
@@ -275,19 +278,37 @@ pub(crate) fn derive_health(signals: Option<&Map<String, Value>>) -> Value {
 /// Shared with the consolidated `/api/status/full` route, which serves the same
 /// board block from the same sidecar.
 /// Derive the perception capability + tier from the board block (the same board
-/// sidecar [`read_board`] returns). `npu_tops` is the board's declared NPU
-/// throughput; the tier is the canonical `ados_offload::pick_tier` decision (NOT
-/// a second implementation), so `/api/status` reports the same tier the drone
-/// runs on. An NPU board — or a board whose profile declares CPU-ONNX local
-/// inference (`has_local_inference`) — reads `local`; an NPU-less board with no
-/// such declaration and no offload path reads `none`; the offload-link the
-/// reconciler writes (a paired reachable workstation) folds in when present. The
-/// offload target stays null until a workstation is paired — never a fabricated
-/// reach (Rule 44). Returns `(npu_tops, has_accelerator, tier)`.
+/// sidecar [`read_board`] returns) plus the vision engine's live-reported
+/// backend capability. `npu_tops` is the board's declared NPU throughput; the
+/// tier is the canonical `ados_offload::pick_tier` decision (NOT a second
+/// implementation), so `/api/status` reports the same tier the drone runs on.
 ///
-/// Shared with the consolidated `/api/status/full` route so both report the same
-/// perception fields.
-pub(crate) fn perception_fields(board: &Value) -> (f64, bool, &'static str, Option<String>) {
+/// A declared capability alone is NOT enough to claim `local`: a board can
+/// declare an NPU (`npu_tops > 0`) with no in-tree backend for that silicon
+/// (e.g. the A733's VIP9000 has none), or a CPU-ONNX profile
+/// (`has_local_inference`) on a binary that was not built with the `onnx`
+/// feature — `select_backend` then resolves to `MockBackend`, which loads
+/// every model but returns zero detections. Both branches
+/// are therefore gated on `backend_inference_capable`, the engine's own
+/// `is_inference_capable()` read live over `/run/ados/vision.sock`
+/// (`live_backend_inference_capable`) — an NPU board or an ONNX-declared board
+/// reads `local` only when the backend actually running says so; an
+/// unreachable engine (vision disabled, or not up yet) is `false`, never a
+/// fabricated `true`. An NPU-less, non-ONNX board with no offload path reads
+/// `none`; the offload-link the reconciler writes (a paired reachable
+/// workstation) folds in when present. The offload target stays null until a
+/// workstation is paired — never a fabricated reach (Rule 44). Returns
+/// `(npu_tops, has_accelerator, tier, offload_target)`. `has_accelerator`
+/// itself stays the raw hardware declaration (unaffected by
+/// `backend_inference_capable`) — it answers "does this board have NPU
+/// hardware", a distinct question from the tier.
+///
+/// Shared with the consolidated `/api/status/full` route so both report the
+/// same perception fields from the same live backend read.
+pub(crate) fn perception_fields(
+    board: &Value,
+    backend_inference_capable: bool,
+) -> (f64, bool, &'static str, Option<String>) {
     let npu_tops = board
         .get("npu_tops")
         .and_then(|v| v.as_f64())
@@ -312,8 +333,8 @@ pub(crate) fn perception_fields(board: &Value) -> (f64, bool, &'static str, Opti
         .map(|l| (l.paired, l.bearer_acceptable))
         .unwrap_or((false, false));
     let tier = ados_offload::pick_tier(&ados_offload::TierInputs::for_drone(
-        has_accelerator,
-        local_inference_capable,
+        has_accelerator && backend_inference_capable,
+        local_inference_capable && backend_inference_capable,
         paired,
         bearer_ok,
     ));
@@ -327,6 +348,31 @@ pub(crate) fn perception_fields(board: &Value) -> (f64, bool, &'static str, Opti
     // reach we are not really using).
     let offload_target = link.filter(|l| l.is_offload_path()).and_then(|l| l.target);
     (npu_tops, has_accelerator, tier_str, offload_target)
+}
+
+/// Whether the vision engine's actually-loaded backend runs real inference,
+/// read LIVE over `/run/ados/vision.sock`'s `vision.list_models` reply — the
+/// engine folds `backend_inference_capable` into that reply unconditionally
+/// (see `VisionEngine::is_inference_capable`), so this is answered even when
+/// no model is registered. An unreachable engine (vision disabled, the
+/// service not up yet, or mid-restart) degrades to `false`: with nothing
+/// loaded there is certainly no live inference to report, and a stale `true`
+/// would be exactly the fabricated capability Rule 44 forbids.
+///
+/// Shared by `/api/status` and `/api/status/full` so both feed
+/// [`perception_fields`] the same live signal.
+pub(crate) async fn live_backend_inference_capable() -> bool {
+    match VisionIpcClient::default_socket().list_models().await {
+        Ok(resp) => resp
+            .as_map()
+            .and_then(|m| {
+                m.iter()
+                    .find(|(k, _)| k.as_str() == Some("backend_inference_capable"))
+            })
+            .and_then(|(_, v)| v.as_bool())
+            .unwrap_or(false),
+        Err(_) => false,
+    }
 }
 
 /// Local epoch ms for the offload-link staleness gate.
@@ -631,29 +677,61 @@ mod tests {
 
     #[test]
     fn perception_fields_maps_board_caps_to_a_tier() {
-        // An NPU board (npu_tops > 0) runs detection locally.
-        let (npu, accel, tier, _target) = perception_fields(&json!({ "npu_tops": 6.0 }));
+        // An NPU board (npu_tops > 0) with a confirmed live backend runs
+        // detection locally.
+        let (npu, accel, tier, _target) =
+            perception_fields(&json!({ "npu_tops": 6.0 }), true);
         assert_eq!(npu, 6.0);
         assert!(accel);
         assert_eq!(tier, "local");
         // A CPU board with no NPU + no paired node has no perception tier (no
         // offload-link sidecar in the test env ⇒ compute_node_paired false).
-        let (npu, accel, tier, _target) = perception_fields(&json!({ "npu_tops": 0.0 }));
+        let (npu, accel, tier, _target) =
+            perception_fields(&json!({ "npu_tops": 0.0 }), true);
         assert_eq!(npu, 0.0);
         assert!(!accel);
         assert_eq!(tier, "none");
         // A board block with no npu_tops key degrades to no-accelerator/none.
-        let (_npu, accel, tier, _target) = perception_fields(&json!({}));
+        let (_npu, accel, tier, _target) = perception_fields(&json!({}), true);
         assert!(!accel);
         assert_eq!(tier, "none");
         // A CPU-strong board with no NPU but the profile-declared ONNX local
-        // inference reads `local` (runs the detector on-board), with the
-        // accelerator flag still false (it has no NPU).
-        let (npu, accel, tier, _target) =
-            perception_fields(&json!({ "npu_tops": 0.0, "has_local_inference": true }));
+        // inference reads `local` (runs the detector on-board) when the live
+        // backend confirms it, with the accelerator flag still false (it has
+        // no NPU).
+        let (npu, accel, tier, _target) = perception_fields(
+            &json!({ "npu_tops": 0.0, "has_local_inference": true }),
+            true,
+        );
         assert_eq!(npu, 0.0);
         assert!(!accel);
         assert_eq!(tier, "local");
+    }
+
+    #[test]
+    fn perception_fields_never_claims_local_without_a_live_backend() {
+        // A declared NPU (npu_tops > 0) with no in-tree
+        // backend for it (e.g. the A733's VIP9000) resolves `select_backend`
+        // to MockBackend, which loads every model and returns zero
+        // detections. The declared capability must not outrun the live
+        // signal — `has_accelerator` (the raw hardware fact) stays true, but
+        // the tier degrades to `none` rather than lying `local`.
+        let (npu, accel, tier, _target) =
+            perception_fields(&json!({ "npu_tops": 3.0 }), false);
+        assert_eq!(npu, 3.0);
+        assert!(accel, "hasAccelerator is the raw hardware declaration");
+        assert_eq!(tier, "none");
+        // Same dishonesty for the CPU-ONNX declaration: a board profile can
+        // declare `has_local_inference` while the deployed binary was not
+        // built with the `onnx` feature, so no real backend loaded.
+        let (_npu, _accel, tier, _target) = perception_fields(
+            &json!({ "npu_tops": 0.0, "has_local_inference": true }),
+            false,
+        );
+        assert_eq!(tier, "none");
+        // An unreachable engine (vision disabled / not up) resolves the same
+        // live signal to `false` upstream in `live_backend_inference_capable`,
+        // so this case also covers "vision is off".
     }
 
     #[test]

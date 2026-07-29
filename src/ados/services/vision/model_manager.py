@@ -131,17 +131,31 @@ def sha256_file(path: str | Path, chunk: int = 1 << 20) -> str:
 
 
 def board_family(board_id: str | None) -> str:
-    """Map a board identifier to the model ``board_match`` family (rk3588 | orin | generic).
+    """Map a board identifier to the model ``board_match`` family (rk3588 | orin | cpu | generic).
 
     Substring-matched + case-insensitive so a SoC string ("RK3582"), a board slug
     ("rock-5c-lite") or a display name ("Radxa ROCK 5C Lite (RK3582)") all resolve. The
     RK3588 family covers the rk3588/rk3582 NPU-class siblings (the small rk356x NPU is NOT
-    in this family — it falls through to generic)."""
+    in this family — it falls through to generic).
+
+    The A733 (Radxa Cubie A7S, and its A7Z sibling on the same SoC) carries a Vivante
+    VIP9000 NPU with no in-tree ados-vision backend (Rule 44 — see cubie-a7s.yaml's
+    ``compute.npu_tops`` comment), so it is deliberately NOT routed into an accelerator
+    family; it resolves to ``cpu``, the CPU-ONNX ``board_match`` token every plugin's
+    ``board_variants`` catalog actually declares for its non-accelerator model (see
+    ``ADOSExtensions/extensions/follow-me/manifest.yaml``'s ``coco-person`` model:
+    ``board_match: rk3588``/``runtime: rknn`` + ``board_match: cpu``/``runtime: onnx`` — no
+    manifest declares a bare ``"generic"`` entry). Falling through to the bare ``generic``
+    default here would match no declared variant, so ``resolve_model_ref`` would silently
+    pick ``refs[0]`` — the wrong, accelerator-only model this board cannot run — instead of
+    resolving the CPU model."""
     b = (board_id or "").lower()
     if any(k in b for k in ("orin", "tegra", "jetson")):
         return "orin"
     if any(k in b for k in ("rk3588", "rk3582", "orange-pi-5", "rock-5c", "rock5c")):
         return "rk3588"
+    if any(k in b for k in ("a733", "sun60i", "cubie-a7s", "cubie a7s")):
+        return "cpu"
     return "generic"
 
 

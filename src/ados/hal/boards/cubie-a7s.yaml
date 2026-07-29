@@ -64,7 +64,23 @@ compute:
   core_type: "Cortex-A76 x2 + Cortex-A55 x6"
   max_freq_mhz: 2000
   gpu: "Imagination BXM-4-64 MC1"
-  npu_tops: 3.0            # Vivante VIP9000, INT8 (ACUITY / TIM-VX toolchain, NOT RKNN)
+  # Vivante VIP9000, INT8 (ACUITY / TIM-VX toolchain, NOT RKNN). This is a
+  # HARDWARE capability declaration only: there is no VIP9000/TIM-VX backend
+  # in-tree yet, so `ados-vision`'s `select_backend` cannot use this NPU (its
+  # "auto" picker only routes to the accelerator sidecar for rk*/tegra/jetson
+  # SoCs — a733/sun60iw2 matches neither) and falls through to the CPU-ONNX
+  # backend (below) or, on a build without the `onnx` feature, the
+  # detection-less mock. `npu_tops` therefore must NEVER be read alone as
+  # "local inference is running": `/api/status`'s `perceptionTier` gates on
+  # the vision engine's LIVE-reported backend capability
+  # (`crates/ados-control/src/routes/status.rs::live_backend_inference_capable`),
+  # not this static field.
+  npu_tops: 3.0
+  # No VIP9000 backend in-tree (see above) ⇒ the Cortex-A76 pair runs
+  # detection instead via the in-process ONNX CPU backend, once ados-vision
+  # ships built with `--features onnx`. Declared the same key/value
+  # shape cm5.yaml / rpi5.yaml use for their CPU-ONNX path.
+  local_inference: onnx
   hw_encoder: ["h264"]
   hw_decoder: ["h264", "h265", "vp9"]
   ram_mb: 4096
