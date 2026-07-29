@@ -4,6 +4,22 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.258] - 2026-07-29
+
+### Fixed
+
+- **`mediamtx` UDP RTSP transport collided with `wfb_tx`'s control-port range.**
+  mediamtx's default `rtsp: true` also opens UDP RTP/RTCP listeners
+  (`rtpAddress`/`rtcpAddress`, mediamtx's own defaults `:8000`/`:8001`) for the
+  `udp` RTSP transport, which nothing on this box uses (the encoder publishes
+  over the TCP RTSP listener; WebRTC is the client-facing path). Those two UDP
+  ports fall inside `ados-radio`'s `wfb_tx` control-port range
+  (`TX_CMD_PORT_BASE=8000..8003`), so whichever service won the race at boot
+  claimed the port and the loser crash-looped (`wfb_data_tx_exited_respawning`
+  every ~3s when `mediamtx` won). `ados-video`'s generated `mediamtx.yml` now
+  sets `rtspTransports: [tcp]`, so mediamtx never opens the UDP pair and the
+  collision cannot occur regardless of start order.
+
 ## [0.99.255] - 2026-07-28
 
 Fleet release: one ground station, one RTL8812EU per node, up to 24 drones on one

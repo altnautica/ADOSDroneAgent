@@ -98,6 +98,17 @@ struct MediamtxConfig {
     rtsp: bool,
     #[serde(rename = "rtspAddress")]
     rtsp_address: String,
+    // mediamtx's `rtsp: true` default also opens UDP RTP/RTCP listeners
+    // (`rtpAddress`/`rtcpAddress`, mediamtx's own defaults `:8000`/`:8001`)
+    // for the "udp" RTSP transport — unwanted here (the encoder publishes
+    // over the TCP RTSP listener above; no client on this box reads RTSP at
+    // all, let alone over UDP) and a real collision: `:8000`-`:8003` is
+    // ados-radio's wfb_tx control-port range (`TX_CMD_PORT_BASE`,
+    // collision-free by construction only if nothing else claims it).
+    // Restricting to `tcp` stops mediamtx from binding those UDP ports at
+    // all, so wfb_tx's control sockets never race it for 8000/8001.
+    #[serde(rename = "rtspTransports")]
+    rtsp_transports: Vec<String>,
     webrtc: bool,
     #[serde(rename = "webrtcAddress")]
     webrtc_address: String,
@@ -192,6 +203,7 @@ pub fn mediamtx_config_yaml(params: &ConfigParams) -> String {
         api_address: format!(":{}", params.api_port),
         rtsp: true,
         rtsp_address: format!(":{}", params.rtsp_port),
+        rtsp_transports: vec!["tcp".into()],
         webrtc: true,
         webrtc_address: format!(":{}", params.webrtc_port),
         webrtc_allow_origin: "*".into(),
@@ -546,6 +558,10 @@ mod tests {
         assert_eq!(v["hlsAddress"], ":8888");
         assert_eq!(v["api"], true);
         assert_eq!(v["rtsp"], true);
+        // UDP RTSP transport disabled: mediamtx's own default `rtpAddress`/
+        // `rtcpAddress` (:8000/:8001) collide with ados-radio's wfb_tx
+        // control-port range.
+        assert_eq!(v["rtspTransports"], Value::from(vec!["tcp"]));
         assert_eq!(v["webrtc"], true);
         assert_eq!(v["hls"], true);
         assert_eq!(v["logLevel"], "warn");
