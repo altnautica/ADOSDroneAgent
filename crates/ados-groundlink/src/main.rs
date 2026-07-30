@@ -413,9 +413,12 @@ async fn run_direct(
     // peer cache, the MAVLink ingest and the RPC response ingest, all of which
     // are already keyed per device id, so the fleet reports as one aggregate.
     let mavlink_ingest = Arc::new(ados_protocol::mavlink_ingest::MavlinkIngest::at_default_path());
-    let aux_tasks: Vec<tokio::task::JoinHandle<()>> = service_slots
-        .iter()
-        .map(|&slot| {
+    let spawn_aux_consumer = {
+        let mavlink_ingest = mavlink_ingest.clone();
+        let aux_counters = aux_counters.clone();
+        let aux_peers = aux_peers.clone();
+        let aux_shutdown = aux_shutdown.clone();
+        move |slot: u8| -> tokio::task::JoinHandle<()> {
             tokio::spawn(ados_groundlink::supervise_aux_consumer(
                 wfb_rx::aux_rx_port(slot),
                 mavlink_ingest.clone(),
@@ -426,8 +429,58 @@ async fn run_direct(
                 )),
                 aux_shutdown.clone(),
             ))
+        }
+    };
+    let aux_tasks: Arc<Mutex<std::collections::HashMap<u8, tokio::task::JoinHandle<()>>>> =
+        Arc::new(Mutex::new(std::collections::HashMap::new()));
+    {
+        let mut bound = aux_tasks.lock().await;
+        for &slot in &service_slots {
+            bound.insert(slot, spawn_aux_consumer(slot));
+        }
+    }
+
+    // A slot can be issued long after this service started. The pair route
+    // deliberately skips re-installing the receive unit when the fleet key is
+    // unchanged, which is exactly the normal case for the second and every
+    // subsequent drone joining, so those pairings never reach a service restart.
+    // The receive plane already reconciles its own processes on this cadence, so
+    // without a matching reconcile here a late-joining drone got a `wfb_rx`
+    // decoding its lane correctly onto a loopback port with nothing bound to it:
+    // its MAVLink, relayed status and every RPC response fragment landed
+    // nowhere, and a relay call to it timed out looking exactly like a dead
+    // radio.
+    //
+    // Additive only. An existing consumer is never dropped, so the
+    // whole-service-lifetime bind the initial read was written to guarantee is
+    // preserved; re-binding a UDP port on the generation cadence is what that
+    // design was avoiding. A released slot leaves its consumer parked on a port
+    // no one transmits to, which costs nothing and keeps the bind warm if the
+    // slot is later reissued.
+    let aux_reconcile = {
+        let aux_tasks = aux_tasks.clone();
+        let spawn_aux_consumer = spawn_aux_consumer.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(FLEET_RECONCILE_INTERVAL);
+            tick.tick().await; // the first tick completes immediately
+            loop {
+                tick.tick().await;
+                let want = wfb_rx::fleet_slots(&FleetRegistry::load(std::path::Path::new(
+                    FLEET_REGISTRY_PATH,
+                )));
+                let mut bound = aux_tasks.lock().await;
+                let have: std::collections::BTreeSet<u8> = bound.keys().copied().collect();
+                for slot in aux_slots_to_bind(&want, &have) {
+                    bound.insert(slot, spawn_aux_consumer(slot));
+                    tracing::info!(
+                        slot,
+                        port = wfb_rx::aux_rx_port(slot),
+                        "ground_aux_consumer_spawned"
+                    );
+                }
+            }
         })
-        .collect();
+    };
     let aux_peers_task = tokio::spawn(ados_groundlink::aux_peers::persist_loop(
         aux_peers.clone(),
         Some(presence_cache.clone()),
@@ -458,7 +511,10 @@ async fn run_direct(
     // fired.
     aux_shutdown.notify_waiters();
     tokio::time::sleep(Duration::from_millis(100)).await;
-    for t in &aux_tasks {
+    // Stop the reconciler before reaping, so it cannot spawn a fresh consumer
+    // into the map while the shutdown path is draining it.
+    aux_reconcile.abort();
+    for t in aux_tasks.lock().await.values() {
         t.abort();
     }
     // The persister waits on the same signal, but `notify_waiters` only wakes a
@@ -469,6 +525,20 @@ async fn run_direct(
     // Restore the resolved injection adapter to managed mode on the way out.
     restore_managed_if_resolved(&resolved_iface).await;
     Ok(())
+}
+
+/// The registered slots that have no auxiliary consumer yet.
+///
+/// Additive by design: a slot that is bound but no longer registered is
+/// deliberately left alone rather than torn down. Holding the UDP bind for the
+/// whole service lifetime is what keeps a consumer from losing its port to its
+/// own lingering socket, and a slot that is later reissued finds its reader
+/// already warm.
+fn aux_slots_to_bind(want: &[u8], bound: &std::collections::BTreeSet<u8>) -> Vec<u8> {
+    want.iter()
+        .copied()
+        .filter(|s| !bound.contains(s))
+        .collect()
 }
 
 /// Block until `/etc/ados/config.yaml` carries a usable ground-station fleet
@@ -948,6 +1018,37 @@ mod tests {
 
     fn args(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_slot_registered_after_start_still_gets_a_consumer() {
+        use std::collections::BTreeSet;
+
+        // The service started with one drone paired.
+        let bound: BTreeSet<u8> = [1u8].into_iter().collect();
+
+        // A second drone pairs. Its slot is issued and the receive plane spawns
+        // a wfb_rx for it, but the pair route does not restart this unit when
+        // the fleet key is unchanged, so nothing else would notice. Before the
+        // reconcile, slot 2 decoded onto a port with no reader.
+        assert_eq!(
+            aux_slots_to_bind(&[1, 2], &bound),
+            vec![2],
+            "a slot issued after start must be picked up"
+        );
+
+        // A whole fleet joining at once is bound in one pass.
+        assert_eq!(aux_slots_to_bind(&[1, 2, 3, 4], &bound), vec![2, 3, 4]);
+
+        // Steady state does nothing: no rebinding of a live port.
+        let all: BTreeSet<u8> = [1u8, 2, 3, 4].into_iter().collect();
+        assert!(aux_slots_to_bind(&[1, 2, 3, 4], &all).is_empty());
+
+        // A released slot is NOT torn down, and does not come back as work.
+        assert!(
+            aux_slots_to_bind(&[1], &all).is_empty(),
+            "a deregistered slot must not be rebound or reaped here"
+        );
     }
 
     #[test]
