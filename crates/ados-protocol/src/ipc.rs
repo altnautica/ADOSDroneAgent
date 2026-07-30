@@ -49,11 +49,15 @@ pub struct IpcBroadcast {
     last: Arc<Mutex<Option<Vec<u8>>>>,
     keep_last: bool,
     accept_task: JoinHandle<()>,
-    /// Monotonic count of clients evicted for falling behind (a full outbound
-    /// queue) or disconnecting mid-broadcast. A slow consumer is otherwise
-    /// pruned silently; surfacing this counter lets the owning service report
-    /// the eviction the same way the radio TX-liveness watchdog surfaces a
-    /// stalled link — a silent drop is itself the failure mode to detect.
+    /// Monotonic count of clients evicted for falling behind — a full outbound
+    /// queue, and only that. A consumer that simply disconnected is pruned
+    /// without advancing this counter, so the number means "a consumer could
+    /// not keep up" rather than "a client went away". A slow consumer is
+    /// otherwise pruned silently; surfacing this counter lets the owning
+    /// service report the eviction the same way the radio TX-liveness watchdog
+    /// surfaces a stalled link — a silent drop is itself the failure mode to
+    /// detect, and a counter that also ticks on normal disconnects would drown
+    /// that signal.
     dropped_clients: Arc<AtomicU64>,
 }
 
@@ -206,13 +210,25 @@ impl IpcBroadcast {
         for client in clients.drain(..) {
             match client.tx.try_send(buf.clone()) {
                 Ok(()) => keep.push(client),
-                // Slow (queue full) or gone (closed): abort both tasks so a
-                // dropped MAVLink client can no longer inject commands and
-                // nothing is leaked, then drop the handle.
-                Err(_) => {
+                // Queue full: the consumer is genuinely not draining. Evict it
+                // and count it — a slow consumer is a real fault, and this
+                // counter is the only producer-visible signal that it happened.
+                Err(mpsc::error::TrySendError::Full(_)) => {
                     client.reader.abort();
                     client.writer.abort();
                     dropped += 1;
+                }
+                // Channel closed: the consumer already went away. That is a
+                // normal disconnect, NOT a slow client, so it is pruned without
+                // touching the eviction counter. Counting it reported every
+                // short-lived reader as a fault: `ados-cloud` opens a fresh
+                // connection per enrichment tick (~1 Hz), reads the replayed
+                // last-state and closes, which alone logged ~86k spurious
+                // `ipc_slow_client_evicted` warnings a day and buried the real
+                // evictions in the noise.
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    client.reader.abort();
+                    client.writer.abort();
                 }
             }
         }
@@ -234,8 +250,9 @@ impl IpcBroadcast {
         self.queue_depth
     }
 
-    /// Monotonic count of clients evicted for falling behind (a full outbound
-    /// queue) or disconnecting during a broadcast, since this server was bound.
+    /// Monotonic count of clients evicted for falling behind — a full outbound
+    /// queue — since this server was bound. A client that disconnected cleanly
+    /// is not counted here.
     ///
     /// A slow consumer is pruned without an error reaching it, so this counter
     /// is the producer-visible signal that an eviction happened. The owning
@@ -565,6 +582,45 @@ mod tests {
             .broadcast(encode_frame(b"tail", MAVLINK_MAX_FRAME).unwrap())
             .await;
         assert_eq!(server.dropped_clients(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_clean_disconnect_is_not_counted_as_a_slow_client() {
+        // The state-socket shape: replay the last buffer on connect, which is
+        // what a short-lived reader comes for.
+        let path = temp_sock("cleandisconnect");
+        let (server, _inbound) = IpcBroadcast::bind(&path, 32, true, None).await.unwrap();
+        server
+            .broadcast(encode_frame(b"snapshot", MAVLINK_MAX_FRAME).unwrap())
+            .await;
+
+        // This is exactly the `ados-cloud` enrichment pattern: connect, take the
+        // replayed snapshot, disconnect. Repeated at ~1 Hz it used to log an
+        // `ipc_slow_client_evicted` every second on a perfectly healthy agent.
+        for _ in 0..3u32 {
+            let client = connect_with_retry(&path, 10, Duration::from_millis(20))
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            drop(client);
+            tokio::time::sleep(Duration::from_millis(30)).await;
+
+            // Two broadcasts: the first may still find the queue writable
+            // before the writer task notices the peer is gone, the second is
+            // guaranteed to meet a closed channel.
+            for _ in 0..2u32 {
+                server
+                    .broadcast(encode_frame(b"tick", MAVLINK_MAX_FRAME).unwrap())
+                    .await;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+
+        // The departed clients are pruned...
+        assert_eq!(server.client_count().await, 0);
+        // ...but none of them was slow, so the eviction counter must be
+        // untouched. Before the Full/Closed split this read 3.
+        assert_eq!(server.dropped_clients(), 0);
     }
 
     #[tokio::test]
