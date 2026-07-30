@@ -14,6 +14,7 @@
 //! silently dropped.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use ados_protocol::frame::{decode_len, HEADER_SIZE, PLUGIN_MAX_FRAME};
 use ados_protocol::framebus::methods;
@@ -25,6 +26,19 @@ use tokio::net::UnixStream;
 
 /// The vision socket file name under the runtime dir.
 pub const VISION_SOCKET_NAME: &str = "vision.sock";
+
+/// Wall bound on one vision request, covering connect, write and both reads.
+///
+/// The engine answers off a local socket, so a healthy reply lands in well
+/// under a millisecond; this exists purely for the pathological case where the
+/// engine accepts the connection and then never replies. That case is not an
+/// I/O error, so without a bound it is an unbounded hang rather than a failure.
+/// It matters because this client is no longer only on the infrequent designate
+/// path: `/api/status` and `/api/status/full` call it on every poll, and the
+/// GCS polls those continuously, so one wedged-but-alive engine would stall
+/// every poller indefinitely. A timeout surfaces as [`VisionError::Io`], which
+/// the status path already degrades to `false` and the designate route to a 503.
+const VISION_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The default vision socket path, honouring `ADOS_RUN_DIR` like the other IPC
 /// clients so a test points it at a tempdir. Defaults to `/run/ados/vision.sock`.
@@ -108,22 +122,35 @@ impl VisionIpcClient {
             .encode_frame()
             .map_err(|e| VisionError::Frame(format!("encode envelope: {e}")))?;
 
-        let mut stream = UnixStream::connect(&self.socket_path).await?;
-        stream.write_all(&frame).await?;
-        stream.flush().await?;
+        let exchange = async {
+            let mut stream = UnixStream::connect(&self.socket_path).await?;
+            stream.write_all(&frame).await?;
+            stream.flush().await?;
 
-        let mut header = [0u8; HEADER_SIZE];
-        stream.read_exact(&mut header).await?;
-        let len = decode_len(header, PLUGIN_MAX_FRAME, false)
-            .map_err(|e| VisionError::Frame(format!("response length: {e}")))?;
-        let mut body = vec![0u8; len];
-        stream.read_exact(&mut body).await?;
-        let resp = Envelope::from_msgpack(&body)
-            .map_err(|e| VisionError::Frame(format!("decode envelope: {e}")))?;
-        if let Some(err) = resp.error {
-            return Err(VisionError::Rpc(err));
+            let mut header = [0u8; HEADER_SIZE];
+            stream.read_exact(&mut header).await?;
+            let len = decode_len(header, PLUGIN_MAX_FRAME, false)
+                .map_err(|e| VisionError::Frame(format!("response length: {e}")))?;
+            let mut body = vec![0u8; len];
+            stream.read_exact(&mut body).await?;
+            let resp = Envelope::from_msgpack(&body)
+                .map_err(|e| VisionError::Frame(format!("decode envelope: {e}")))?;
+            if let Some(err) = resp.error {
+                return Err(VisionError::Rpc(err));
+            }
+            Ok(resp.args)
+        };
+
+        match tokio::time::timeout(VISION_REQUEST_TIMEOUT, exchange).await {
+            Ok(result) => result,
+            Err(_) => Err(VisionError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "vision engine did not answer {method} within {}s",
+                    VISION_REQUEST_TIMEOUT.as_secs()
+                ),
+            ))),
         }
-        Ok(resp.args)
     }
 }
 
@@ -143,6 +170,34 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, VisionError::Io(_)), "expected Io: {err:?}");
+    }
+
+    /// An engine that accepts the connection and then goes silent must not hang
+    /// the caller. This is the case a plain `Err(_) => false` cannot catch: a
+    /// stalled read is not an I/O error, and `/api/status` runs this on every
+    /// poll, so an unbounded read would stall every poller indefinitely.
+    /// Waits out the real bound (a couple of seconds) rather than pulling in
+    /// tokio's `test-util` feature just to virtualise the clock.
+    #[tokio::test]
+    async fn a_silent_engine_times_out_instead_of_hanging() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("silent.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        // Accept, then hold the connection open forever without replying.
+        let _engine = tokio::spawn(async move {
+            let _stream = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+
+        let err = VisionIpcClient::new(path).list_models().await.unwrap_err();
+        match err {
+            VisionError::Io(e) => assert_eq!(
+                e.kind(),
+                std::io::ErrorKind::TimedOut,
+                "a silent engine must surface as a timeout"
+            ),
+            other => panic!("expected a timeout, got {other:?}"),
+        }
     }
 
     /// A round-trip against a mock engine: the client sends a request envelope and
