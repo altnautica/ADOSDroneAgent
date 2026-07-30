@@ -11,7 +11,15 @@
 //!
 //! 2. **Video receive-queue watchdog**: reads the UDP 5600 kernel rx_queue
 //!    from `/proc/net/udp` every 5s. If the queue exceeds 256 KiB continuously
-//!    for 15s, `wfb_tx` is wedged reading from the socket — kill it.
+//!    for 15s AND `wfb_tx` is making no read progress (`/proc/<pid>/io rchar`
+//!    flat), it is wedged reading from the socket — kill it. A deep queue that
+//!    IS being drained is backpressure, not a wedge: the encoder is offering
+//!    more than the link can carry, and a kill neither drains it nor slows the
+//!    encoder, so that case is logged and left alone.
+//!
+//! Both watchdogs therefore hold the same contract: one counter alone never
+//! justifies a kill. Flat TX needs confirmed ingress; a deep queue needs
+//! confirmed non-drain.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -26,6 +34,11 @@ const RECVQ_BACKLOG_THRESHOLD_BYTES: u64 = 256 * 1024;
 const RECVQ_SUSTAINED_THRESHOLD: Duration = Duration::from_secs(15);
 /// Log "upstream silent" at most once per this interval.
 const UPSTREAM_SILENT_LOG_INTERVAL: Duration = Duration::from_secs(300);
+/// Log a backed-up-but-draining video queue at most once per this interval.
+/// Shorter than the upstream-silent interval because backpressure is actionable
+/// (lower the encoder ceiling, or raise the modulation rate) rather than merely
+/// informational, but still slow enough not to flood the log store.
+const BACKPRESSURE_LOG_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Snapshot used to detect counter progress.
 #[derive(Debug, Default, Clone)]
@@ -184,14 +197,39 @@ pub async fn tx_health_watchdog<P: LivePid>(
 }
 
 /// Watch the UDP 5600 kernel receive queue. Returns when the queue has been
-/// sustained over 256 KiB for 15s (wfb_tx is not draining its socket). Updates
-/// the shared counters with the live `tx_video_stalled` flag, the last observed
-/// queue depth, and the stall-kill count on fire.
-pub async fn video_recvq_watchdog(
+/// sustained over 256 KiB for 15s **while `wfb_tx` is not draining it**.
+/// Updates the shared counters with the live `tx_video_stalled` flag, the last
+/// observed queue depth, and the stall-kill count on fire.
+///
+/// A deep queue on its own is not evidence of a wedge, and treating it as such
+/// is the Rule-37 error in reverse: process liveness is not proof of work, but
+/// neither is a backlog proof of death. Two very different conditions produce
+/// the same queue depth:
+///
+/// - **Wedged**: `wfb_tx` has stopped reading the socket. `rchar` is flat.
+///   Killing it is the correct and only recovery.
+/// - **Backpressured**: `wfb_tx` is reading as fast as the air allows, but the
+///   encoder is offering more than the current MCS and FEC can carry. `rchar`
+///   advances. The process is healthy and killing it fixes nothing — it drops
+///   the link for the duration of a full radio-group respawn, resets the
+///   adaptive bitrate controller to its configured starting rung, and leaves
+///   the encoder still over-feeding, so the queue refills and the kill repeats
+///   on a fixed period. Observed on a bench rig as 26 consecutive kills at 23s
+///   intervals, each costing about 3s of video and taking the auxiliary lane
+///   down with it.
+///
+/// So the ingress signal (`/proc/<pid>/io` `rchar`) is the required second
+/// check, exactly as [`tx_health_watchdog`] uses it. Backpressure is logged
+/// periodically instead, because the answer to it is to lower the encoder
+/// ceiling or raise the modulation rate, not to restart anything.
+pub async fn video_recvq_watchdog<P: LivePid>(
+    pid_source: P,
     counters: CounterHandle,
     cancel: std::sync::Arc<tokio::sync::Notify>,
 ) -> WatchdogFired {
     let mut high_since: Option<Instant> = None;
+    let mut prev_rchar: u64 = 0;
+    let mut last_backpressure_log = Instant::now() - BACKPRESSURE_LOG_INTERVAL;
 
     loop {
         tokio::select! {
@@ -199,23 +237,88 @@ pub async fn video_recvq_watchdog(
             _ = cancel.notified() => return WatchdogFired::Cancelled,
         }
         let q = read_udp_recvq(5600).await.unwrap_or(0);
+
+        // Resolve the live data-tx PID per tick for the same reason
+        // `tx_health_watchdog` does: a respawn hands the data plane a new PID,
+        // and reading a dead or OS-recycled one would poison the signal. A
+        // missing PID carries the previous value forward, which reads as "not
+        // draining" — correct, since a data plane that is not running is
+        // certainly not emptying the socket.
+        let pid = pid_source.data_tx_pid().await.unwrap_or(0);
+        let live_rchar = if pid == 0 {
+            None
+        } else {
+            read_rchar(pid).await
+        };
+        let rchar = select_rchar(live_rchar, prev_rchar);
+        let draining = rchar > prev_rchar;
+        prev_rchar = rchar;
+
+        let tick = recvq_tick_decision(q, draining);
         {
             let mut c = counters.lock().await;
             c.tx_video_recvq_bytes = q;
-            // The live "video queue currently backed up" flag, mirroring the
-            // Python `_tx_video_stalled` heartbeat field.
-            c.tx_video_stalled = q > RECVQ_BACKLOG_THRESHOLD_BYTES;
+            // Report a stall only for a genuine wedge. A backpressured link is
+            // busy, not stalled, and a surface that calls it stalled trains the
+            // operator to ignore the flag that also means a real wedge.
+            c.tx_video_stalled = tick == RecvqTick::Wedged;
         }
-        if q > RECVQ_BACKLOG_THRESHOLD_BYTES {
-            let since = high_since.get_or_insert_with(Instant::now);
-            if since.elapsed() >= RECVQ_SUSTAINED_THRESHOLD {
-                tracing::warn!(queue_bytes = q, "wfb_tx_video_recvq_kill");
-                counters.lock().await.tx_video_stall_kills += 1;
-                return WatchdogFired::RecvqBacklog;
+
+        match tick {
+            RecvqTick::Wedged => {
+                let since = high_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= RECVQ_SUSTAINED_THRESHOLD {
+                    tracing::warn!(
+                        queue_bytes = q,
+                        pid,
+                        "wfb_tx_video_recvq_kill: queue sustained with no drain progress"
+                    );
+                    counters.lock().await.tx_video_stall_kills += 1;
+                    return WatchdogFired::RecvqBacklog;
+                }
             }
-        } else {
-            high_since = None;
+            RecvqTick::Backpressured => {
+                // The process is working through the backlog, so a kill would
+                // interrupt real progress. Reset the wedge timer: a kill must
+                // require a fresh uninterrupted window of genuinely-stuck ticks.
+                high_since = None;
+                if last_backpressure_log.elapsed() >= BACKPRESSURE_LOG_INTERVAL {
+                    tracing::warn!(
+                        queue_bytes = q,
+                        pid,
+                        "wfb_tx_video_backpressured: draining, offered rate exceeds link capacity"
+                    );
+                    last_backpressure_log = Instant::now();
+                }
+            }
+            RecvqTick::Clear => high_since = None,
         }
+    }
+}
+
+/// What one receive-queue poll concludes. Split out as a pure decision so the
+/// wedge-versus-backpressure rule is testable without a live `/proc`, matching
+/// [`aux_tick_decision`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecvqTick {
+    /// Below the backlog threshold. Nothing to do.
+    Clear,
+    /// Deep, but `wfb_tx` is reading it. Healthy and saturated: report, never
+    /// restart.
+    Backpressured,
+    /// Deep with no read progress. Sustained, this is a wedge.
+    Wedged,
+}
+
+/// Classify one poll. `draining` is whether the data plane's `rchar` advanced
+/// since the previous poll, i.e. whether it read anything at all.
+fn recvq_tick_decision(queue_bytes: u64, draining: bool) -> RecvqTick {
+    if queue_bytes <= RECVQ_BACKLOG_THRESHOLD_BYTES {
+        RecvqTick::Clear
+    } else if draining {
+        RecvqTick::Backpressured
+    } else {
+        RecvqTick::Wedged
     }
 }
 
@@ -534,6 +637,47 @@ mod tests {
         // the watchdog maps to the rchar-skip path via select_rchar.
         src.respawn_to(0);
         assert_eq!(LivePid::data_tx_pid(&src).await, None);
+    }
+
+    #[test]
+    fn a_drained_queue_is_backpressure_not_a_wedge() {
+        let deep = RECVQ_BACKLOG_THRESHOLD_BYTES + 1;
+
+        // The production case this exists for: ~3 MB queued while wfb_tx reads
+        // steadily, because the encoder offers more than the link can carry.
+        // Killing here drops the link, resets the bitrate ladder and changes
+        // nothing about the offered rate, so it must never be a wedge.
+        assert_eq!(
+            recvq_tick_decision(3_127_808, true),
+            RecvqTick::Backpressured,
+            "a deep queue that is being drained must never be called a wedge"
+        );
+        assert_eq!(recvq_tick_decision(deep, true), RecvqTick::Backpressured);
+
+        // Same depth, no read progress: genuinely stuck, and a kill is the only
+        // recovery.
+        assert_eq!(recvq_tick_decision(deep, false), RecvqTick::Wedged);
+        assert_eq!(recvq_tick_decision(3_127_808, false), RecvqTick::Wedged);
+
+        // Below the threshold nothing fires, draining or not.
+        assert_eq!(recvq_tick_decision(0, false), RecvqTick::Clear);
+        assert_eq!(recvq_tick_decision(0, true), RecvqTick::Clear);
+        // The threshold itself is not "over" it.
+        assert_eq!(
+            recvq_tick_decision(RECVQ_BACKLOG_THRESHOLD_BYTES, false),
+            RecvqTick::Clear,
+            "the threshold is exclusive, matching the original > comparison"
+        );
+    }
+
+    #[test]
+    fn only_a_wedge_reports_the_video_queue_as_stalled() {
+        // The flag the sidecar, heartbeat and GCS read must mean "stuck", not
+        // merely "busy" — otherwise it is permanently true on a saturated link
+        // and the operator learns to ignore it.
+        let deep = RECVQ_BACKLOG_THRESHOLD_BYTES + 1;
+        assert!(recvq_tick_decision(deep, false) == RecvqTick::Wedged);
+        assert!(recvq_tick_decision(deep, true) != RecvqTick::Wedged);
     }
 
     #[test]

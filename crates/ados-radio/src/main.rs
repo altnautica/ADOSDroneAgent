@@ -1099,8 +1099,13 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
 
         let recvq_cancel = task_cancel.clone();
         let recvq_counters = counters.clone();
-        let mut watchdog2 =
-            tokio::spawn(async move { video_recvq_watchdog(recvq_counters, recvq_cancel).await });
+        // Same shared process handle as watchdog1, and for the same reason: the
+        // queue watchdog now cross-checks read progress on the live data-tx PID
+        // before calling a deep queue a wedge, so it must follow respawns too.
+        let recvq_proc = proc.clone();
+        let mut watchdog2 = tokio::spawn(async move {
+            video_recvq_watchdog(recvq_proc, recvq_counters, recvq_cancel).await
+        });
 
         // Auxiliary application-stream liveness watchdog. Idles while the aux pair
         // is closed (the safe-by-default boot state) and, when a plugin has opened
