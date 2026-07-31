@@ -40,6 +40,99 @@ pub struct BitrateController {
     encoder_sidecar: PathBuf,
 }
 
+/// Where this tick's link measurement came from.
+///
+/// Surfaced on the snapshot so an operator can tell a rung chosen from a real
+/// measurement apart from one chosen from congestion or held for want of any
+/// signal at all — the three cases previously looked identical from outside.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SampleSource {
+    /// Measured by this node's own receiver. Authoritative for a node that has
+    /// one (a ground station receiving video).
+    Local,
+    /// Reported by the peer that receives our transmission. The only honest
+    /// measurement available to a transmit-only node.
+    Peer,
+    /// No usable measurement this tick.
+    None,
+}
+
+impl SampleSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Peer => "peer",
+            Self::None => "none",
+        }
+    }
+}
+
+/// One tick's resolved link measurement.
+pub struct ResolvedSample {
+    pub loss_percent: f64,
+    pub rssi_dbm: f64,
+    pub snr_db: f64,
+    pub source: SampleSource,
+}
+
+impl ResolvedSample {
+    /// Whether the ladders may act on this sample.
+    pub fn has_sample(&self) -> bool {
+        self.source != SampleSource::None
+    }
+}
+
+/// Pick this tick's measurement.
+///
+/// A node that measures its own link is authoritative for itself, so a real
+/// local sample always wins. A transmit-only node has no local sample by
+/// construction — a single radio in monitor mode cannot capture its own
+/// injected frames — so it falls back to what the receiving peer reported.
+///
+/// The peer sample must be BOTH fresh and an actual measurement. Feedback most
+/// often stops because the link got worse, so treating an old report as current
+/// would hold the rate high at exactly the moment it should fall; and a peer
+/// that heard nothing is reporting deafness, not a clean link.
+pub fn resolve_sample(
+    local: &LinkStats,
+    peer: Option<&ados_protocol::link_feedback::LinkFeedbackSidecar>,
+    now_unix_ms: u64,
+) -> ResolvedSample {
+    let local_real = !local.timestamp.is_empty() && local.packets_received > 0;
+    if local_real {
+        return ResolvedSample {
+            loss_percent: local.loss_percent,
+            rssi_dbm: local.rssi_dbm,
+            snr_db: local.snr_db,
+            source: SampleSource::Local,
+        };
+    }
+    if let Some(p) = peer {
+        if p.is_usable_at(now_unix_ms) {
+            return ResolvedSample {
+                loss_percent: p.loss_percent,
+                rssi_dbm: p.rssi_dbm,
+                snr_db: p.snr_db,
+                source: SampleSource::Peer,
+            };
+        }
+    }
+    ResolvedSample {
+        loss_percent: local.loss_percent,
+        rssi_dbm: local.rssi_dbm,
+        snr_db: local.snr_db,
+        source: SampleSource::None,
+    }
+}
+
+/// Current wall clock in epoch milliseconds, for the freshness comparison.
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// Whether the encoder ceiling needs (re)publishing.
 ///
 /// `observed` is `ados-video`'s own published ceiling: `Some(live)` when it has
@@ -168,14 +261,27 @@ impl BitrateController {
         snapshot: &SnapshotHandle,
         counters: &crate::watchdog::CounterHandle,
     ) {
-        let (loss, rssi, snr, has_sample) = {
+        // Cold-start: with no real sample yet (empty timestamp, 0 packets), hold
+        // the rung so default sentinels never force a step-down. Same guard the
+        // reactive-hop path uses for the drone-only-rig case.
+        //
+        // A transmit-only node never leaves that sentinel, which used to freeze
+        // BOTH ladders for the whole flight — most damagingly the step-down, so
+        // an over-fed link had no way to shed rate. The receiving peer does
+        // measure the link and reports it on the aux lane, so fall back to that
+        // sample when there is no local one.
+        // Read the peer report BEFORE taking the link lock: it is blocking file
+        // I/O, and the link mutex is on the receive path's hot loop. Holding it
+        // across a disk read would make a slow filesystem a receive stall.
+        let peer = ados_protocol::link_feedback::read_sidecar_from(
+            &ados_protocol::link_feedback::sidecar_path(),
+        );
+        let sample = {
             let s = link.lock().await;
-            // Cold-start: with no real sample yet (empty timestamp, 0 packets),
-            // hold the rung so default sentinels never force a step-down. Same
-            // guard the reactive-hop path uses for the drone-only-rig case.
-            let has_sample = !s.timestamp.is_empty() && s.packets_received > 0;
-            (s.loss_percent, s.rssi_dbm, s.snr_db, has_sample)
+            resolve_sample(&s, peer.as_ref(), now_unix_ms())
         };
+        let (loss, rssi, snr) = (sample.loss_percent, sample.rssi_dbm, sample.snr_db);
+        let has_sample = sample.has_sample();
 
         let enabled = self.enabled.load(Ordering::Relaxed);
         if enabled && has_sample {
@@ -293,6 +399,7 @@ impl BitrateController {
             snap.tx_cmd_applies = applies.tx_cmd;
             snap.respawn_applies = applies.respawn;
             snap.tx_cmd_failures = applies.tx_cmd_failed;
+            snap.sample_source = sample.source.as_str();
         }
 
         self.reconcile_encoder_ceiling(want_ceiling, observed.as_ref())
@@ -335,7 +442,110 @@ impl BitrateController {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ados_protocol::link_feedback::{LinkFeedback, LinkFeedbackSidecar};
     use std::sync::atomic::AtomicBool;
+
+    /// What a transmit-only drone's own stats look like: the permanent
+    /// no-measurement sentinel, because its radio cannot hear itself.
+    fn transmit_only_sentinel() -> LinkStats {
+        LinkStats::default()
+    }
+
+    fn ground_measured() -> LinkStats {
+        LinkStats {
+            packets_received: 485,
+            loss_percent: 3.0,
+            rssi_dbm: -46.0,
+            snr_db: 20.0,
+            timestamp: "2026-07-31T12:00:00Z".to_string(),
+            ..LinkStats::default()
+        }
+    }
+
+    fn peer_report(loss: f64, at_ms: u64) -> LinkFeedbackSidecar {
+        LinkFeedbackSidecar::stamped(
+            &LinkFeedback {
+                loss_percent: loss,
+                rssi_dbm: -36.0,
+                snr_db: 12.4,
+                packets_received: 485,
+                fec_failed: 25,
+                bitrate_kbps: 2242,
+                has_measurement: true,
+            },
+            at_ms,
+        )
+    }
+
+    #[test]
+    fn a_transmit_only_node_uses_the_peers_report() {
+        // The regression this guards is the whole reason the contract exists:
+        // with only the local sentinel the ladder had no sample, both ladders
+        // froze, and an over-fed link could never shed rate.
+        let peer = peer_report(24.29, 10_000);
+        let s = resolve_sample(&transmit_only_sentinel(), Some(&peer), 10_500);
+        assert_eq!(s.source, SampleSource::Peer);
+        assert!(s.has_sample(), "the ladder must be able to act");
+        assert!((s.loss_percent - 24.29).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_local_measurement_beats_a_peer_report() {
+        // A node with its own receiver is authoritative for its own link.
+        let peer = peer_report(99.0, 10_000);
+        let s = resolve_sample(&ground_measured(), Some(&peer), 10_500);
+        assert_eq!(s.source, SampleSource::Local);
+        assert_eq!(s.loss_percent, 3.0);
+    }
+
+    #[test]
+    fn a_stale_peer_report_is_not_a_sample() {
+        // Feedback usually stops because the link got WORSE. Holding the last
+        // good report would keep the rate high exactly when it should fall.
+        let peer = peer_report(2.0, 10_000);
+        let s = resolve_sample(&transmit_only_sentinel(), Some(&peer), 99_000);
+        assert_eq!(s.source, SampleSource::None);
+        assert!(!s.has_sample());
+    }
+
+    #[test]
+    fn a_peer_that_heard_nothing_is_not_a_clean_link() {
+        let deaf = LinkFeedbackSidecar::stamped(
+            &LinkFeedback {
+                loss_percent: 0.0,
+                rssi_dbm: -100.0,
+                snr_db: 0.0,
+                packets_received: 0,
+                fec_failed: 0,
+                bitrate_kbps: 0,
+                has_measurement: false,
+            },
+            10_000,
+        );
+        let s = resolve_sample(&transmit_only_sentinel(), Some(&deaf), 10_100);
+        assert_eq!(
+            s.source,
+            SampleSource::None,
+            "a deaf receiver reporting 0% loss must not read as a perfect link"
+        );
+    }
+
+    #[test]
+    fn no_peer_report_at_all_leaves_the_node_without_a_sample() {
+        let s = resolve_sample(&transmit_only_sentinel(), None, 10_000);
+        assert_eq!(s.source, SampleSource::None);
+        assert!(
+            !s.has_sample(),
+            "falls through to the congestion path, not to a fabricated sample"
+        );
+    }
+
+    #[test]
+    fn the_source_is_reportable_so_a_held_rung_is_explainable() {
+        assert_eq!(SampleSource::Local.as_str(), "local");
+        assert_eq!(SampleSource::Peer.as_str(), "peer");
+        assert_eq!(SampleSource::None.as_str(), "none");
+    }
 
     #[test]
     fn shared_enable_handle_is_read_live_not_captured() {

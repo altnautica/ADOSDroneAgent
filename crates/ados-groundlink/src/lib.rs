@@ -21,6 +21,7 @@ pub mod cmdsock;
 pub mod fanout;
 pub mod fleet;
 pub mod gs_config;
+pub mod link_feedback;
 pub mod mdns;
 pub mod mesh;
 pub mod mesh_events;

@@ -71,6 +71,17 @@ struct CountersInner {
     rpc_requests_not_for_us: AtomicU64,
     /// Relay-proxy Request frames whose body did not decode as an RPC request.
     rpc_undecodable: AtomicU64,
+    /// Ground-measured link-quality reports received. A drone cannot measure
+    /// its own downlink, so this counter is how an operator tells "the ladder
+    /// has no sample because the ground is not reporting" apart from "the
+    /// ladder has a sample and chose to hold".
+    link_feedback_frames: AtomicU64,
+    /// Reports that arrived but did not decode. A lane delivering damage is a
+    /// different fault from a silent one; kept separate so neither hides the
+    /// other.
+    link_feedback_undecodable: AtomicU64,
+    /// Reports that decoded but could not be published for the ladder to read.
+    link_feedback_write_errors: AtomicU64,
     /// Relay-proxy Request frames whose id was already in flight. The ground
     /// retransmits an unanswered Request, so a duplicate that arrives while the
     /// original is still running is dropped — the original answers both.
@@ -96,6 +107,9 @@ pub struct AuxUplinkConsumerSnapshot {
     pub rpc_requests: u64,
     pub rpc_requests_not_for_us: u64,
     pub rpc_undecodable: u64,
+    pub link_feedback_frames: u64,
+    pub link_feedback_undecodable: u64,
+    pub link_feedback_write_errors: u64,
     pub rpc_requests_duplicate: u64,
     pub rpc_requests_replayed: u64,
 }
@@ -118,6 +132,9 @@ impl AuxUplinkConsumerCounters {
             rpc_requests: c.rpc_requests.load(Ordering::Relaxed),
             rpc_requests_not_for_us: c.rpc_requests_not_for_us.load(Ordering::Relaxed),
             rpc_undecodable: c.rpc_undecodable.load(Ordering::Relaxed),
+            link_feedback_frames: c.link_feedback_frames.load(Ordering::Relaxed),
+            link_feedback_undecodable: c.link_feedback_undecodable.load(Ordering::Relaxed),
+            link_feedback_write_errors: c.link_feedback_write_errors.load(Ordering::Relaxed),
             rpc_requests_duplicate: c.rpc_requests_duplicate.load(Ordering::Relaxed),
             rpc_requests_replayed: c.rpc_requests_replayed.load(Ordering::Relaxed),
         }
@@ -353,6 +370,40 @@ async fn dispatch(
                 }
             }
         }
+        AuxChannel::LinkFeedback => {
+            // The ground station reporting what it actually decoded of our
+            // downlink. This is the only honest loss measurement a transmitting
+            // drone can obtain — its own radio is in monitor mode and cannot
+            // capture its own injected frames — so publish it for the radio
+            // service's adaptive bitrate ladder to read.
+            counters
+                .0
+                .link_feedback_frames
+                .fetch_add(1, Ordering::Relaxed);
+            match ados_protocol::link_feedback::LinkFeedback::decode(inner) {
+                Ok(fb) => {
+                    let sidecar = ados_protocol::link_feedback::LinkFeedbackSidecar::now(&fb);
+                    let path = ados_protocol::link_feedback::sidecar_path();
+                    if let Err(e) = ados_protocol::link_feedback::write_sidecar_to(&path, &sidecar)
+                    {
+                        counters
+                            .0
+                            .link_feedback_write_errors
+                            .fetch_add(1, Ordering::Relaxed);
+                        tracing::debug!(error = %e, "link_feedback_sidecar_write_failed");
+                    }
+                }
+                Err(_) => {
+                    // Undecodable is counted separately from "not received":
+                    // a lane delivering damage is a different fault from a
+                    // silent one, and the ladder must not act on either.
+                    counters
+                        .0
+                        .link_feedback_undecodable
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
         _ => {
             counters
                 .0
@@ -519,6 +570,96 @@ mod tests {
         );
         assert_eq!(counters.snapshot().mavlink_frames, 2);
         assert_eq!(counters.snapshot().mavlink_injected, 2);
+    }
+
+    /// `ADOS_RUN_DIR` is process-global, so the sidecar tests serialise on it
+    /// the same way the radio crate's sidecar tests do.
+    static RUN_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn feedback_datagram(fb: &ados_protocol::link_feedback::LinkFeedback) -> Vec<u8> {
+        aux_mux::encode(AuxChannel::LinkFeedback, &fb.encode()).unwrap()
+    }
+
+    fn measured_feedback() -> ados_protocol::link_feedback::LinkFeedback {
+        ados_protocol::link_feedback::LinkFeedback {
+            loss_percent: 24.29,
+            rssi_dbm: -36.0,
+            snr_db: 12.4,
+            packets_received: 485,
+            fec_failed: 25,
+            bitrate_kbps: 2242,
+            has_measurement: true,
+        }
+    }
+
+    // The env guard must span the dispatch await: it serialises a
+    // process-global variable, so releasing it before the call would let a
+    // sibling test retarget ADOS_RUN_DIR mid-dispatch.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_link_feedback_report_is_published_for_the_bitrate_ladder() {
+        let _guard = RUN_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("ados-lfd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("ADOS_RUN_DIR", &dir);
+
+        let (fc, _captured) = test_connection();
+        let counters = AuxUplinkConsumerCounters::new();
+        dispatch(
+            &feedback_datagram(&measured_feedback()),
+            &fc,
+            &counters,
+            &None,
+            OWN_ID,
+            &dedupe(),
+        )
+        .await;
+
+        let snap = counters.snapshot();
+        assert_eq!(snap.link_feedback_frames, 1);
+        assert_eq!(snap.link_feedback_undecodable, 0);
+        assert_eq!(snap.link_feedback_write_errors, 0);
+        assert_eq!(
+            snap.non_mavlink_channel, 0,
+            "a handled channel must not also count as unhandled"
+        );
+
+        let written =
+            ados_protocol::link_feedback::read_sidecar_from(&dir.join("link-feedback.json"))
+                .expect("the ladder's input must be on disk");
+        assert!((written.loss_percent - 24.29).abs() < 0.01);
+        assert!(written.has_measurement);
+
+        std::env::remove_var("ADOS_RUN_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_damaged_link_feedback_report_is_counted_and_not_published() {
+        let _guard = RUN_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("ados-lfd-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("ADOS_RUN_DIR", &dir);
+
+        let (fc, _captured) = test_connection();
+        let counters = AuxUplinkConsumerCounters::new();
+        // Truncated record: decoding it as zeros would hand the ladder an
+        // artificially clean link and push the rate the wrong way.
+        let truncated = aux_mux::encode(AuxChannel::LinkFeedback, &[1u8, 0, 0, 0]).unwrap();
+        dispatch(&truncated, &fc, &counters, &None, OWN_ID, &dedupe()).await;
+
+        let snap = counters.snapshot();
+        assert_eq!(snap.link_feedback_frames, 1);
+        assert_eq!(snap.link_feedback_undecodable, 1);
+        assert!(
+            ados_protocol::link_feedback::read_sidecar_from(&dir.join("link-feedback.json"))
+                .is_none(),
+            "a damaged report must never reach the ladder"
+        );
+
+        std::env::remove_var("ADOS_RUN_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

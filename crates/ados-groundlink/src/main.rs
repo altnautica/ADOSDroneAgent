@@ -858,6 +858,18 @@ async fn receive_loop(
             })
         };
 
+        // 1 Hz link-quality feedback to the transmitting drone. The drone cannot
+        // measure its own downlink, so its adaptive bitrate ladder has no loss
+        // sample to step on; this receiver has one and reports it up the aux
+        // uplink. Aborted with the generation, exactly like the telemetry task,
+        // so a receive chain that is being torn down stops asserting a link
+        // quality it is no longer measuring.
+        let feedback_task = {
+            let link = link.clone();
+            let port = config.aux_tx_port;
+            tokio::spawn(ados_groundlink::link_feedback::run(link, port))
+        };
+
         // Stats reader: feeds the counter + LinkStats + the sidecar. Carries the
         // rendezvous home, the regulatory snapshot the gate resolved, and the
         // resolved adapter facts so the sidecar surfaces the truthful channel,
@@ -989,6 +1001,7 @@ async fn receive_loop(
         watchdog_task.abort();
         fanout_task.abort();
         telemetry_task.abort();
+        feedback_task.abort();
         if let Some(t) = stats_task {
             t.abort();
         }

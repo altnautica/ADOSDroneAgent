@@ -55,7 +55,7 @@ use tokio::sync::Mutex;
 
 use crate::config::WfbConfig;
 
-pub use controller::BitrateController;
+pub use controller::{resolve_sample, BitrateController, ResolvedSample, SampleSource};
 pub use tiers::{BitrateTier, Hysteresis, TierAction, DEFAULT_TIERS};
 
 /// Step-down trip thresholds + the consecutive bad-sample count required.
@@ -117,6 +117,10 @@ pub struct BitrateSnapshot {
     pub respawn_applies: u64,
     /// Management-socket attempts that failed and forced a respawn.
     pub tx_cmd_failures: u64,
+    /// Which measurement drove this tick: this node's own receiver, the peer's
+    /// report of what it decoded, or nothing. Without it a rung held for want
+    /// of any signal is indistinguishable from one chosen on a good sample.
+    pub sample_source: &'static str,
 }
 
 impl BitrateSnapshot {
@@ -137,6 +141,7 @@ impl BitrateSnapshot {
             // No sample yet: 0.0 is the same no-measurement sentinel `LinkStats`
             // starts at, and the sidecar gates it behind a real decode.
             snr_db: 0.0,
+            sample_source: SampleSource::None.as_str(),
             mcs_ladder_cap: crate::mcs_ladder::clamp_cap(cfg.adaptive_mcs_max),
             encoder_bitrate_kbps: None,
             tx_cmd_applies: 0,

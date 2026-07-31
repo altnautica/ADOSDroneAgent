@@ -119,6 +119,11 @@ struct AuxCountersInner {
     /// so a non-zero count means a peer is sending the wrong direction or a
     /// frame was misrouted. Counted for visibility, not alarmed on.
     request_frames: AtomicU64,
+    /// Datagrams that decoded as the link-feedback channel. A ground station is
+    /// the SENDER of this channel, never a receiver, so a non-zero count means a
+    /// peer is sending the wrong direction or a frame was misrouted. Counted for
+    /// visibility, not alarmed on — same posture as `request_frames`.
+    link_feedback_frames: AtomicU64,
     /// Response datagrams whose body did not decode as a relay-proxy response
     /// payload. Sub-tally of `response_frames`, not a terminal outcome, so it
     /// is deliberately absent from [`AuxCountersSnapshot::accounted`].
@@ -168,6 +173,7 @@ impl AuxCounters {
             identity_undecodable: c.identity_undecodable.load(Ordering::Relaxed),
             response_frames: c.response_frames.load(Ordering::Relaxed),
             request_frames: c.request_frames.load(Ordering::Relaxed),
+            link_feedback_frames: c.link_feedback_frames.load(Ordering::Relaxed),
             response_undecodable: c.response_undecodable.load(Ordering::Relaxed),
             response_dispatched: c.response_dispatched.load(Ordering::Relaxed),
             response_orphan: c.response_orphan.load(Ordering::Relaxed),
@@ -201,6 +207,7 @@ pub struct AuxCountersSnapshot {
     /// non-zero count means a peer is sending the wrong direction or a frame
     /// was misrouted. Counted for visibility, not alarmed on.
     pub request_frames: u64,
+    pub link_feedback_frames: u64,
     /// MAVLink frames the republish seam accepted. Not proof a ground control
     /// station was connected or rendered them.
     pub mavlink_republished: u64,
@@ -285,6 +292,7 @@ impl AuxCountersSnapshot {
             + self.identity_frames
             + self.response_frames
             + self.request_frames
+            + self.link_feedback_frames
             + self.decode_foreign
             + self.decode_runt
             + self.decode_unsupported_version
@@ -359,6 +367,7 @@ fn report(counters: &AuxCounters, last: AuxCountersSnapshot) -> AuxCountersSnaps
             identity_frames = now.identity_frames,
             response_frames = now.response_frames,
             request_frames = now.request_frames,
+            link_feedback_frames = now.link_feedback_frames,
             response_dispatched = now.response_dispatched,
             response_orphan = now.response_orphan,
             decode_foreign = now.decode_foreign,
@@ -520,6 +529,14 @@ async fn dispatch(
                 }
                 Err(_) => counters.bump(&c.response_undecodable),
             }
+        }
+        // Ground-measured link quality, ground → drone. This node is the sender
+        // of that channel, so receiving one means a peer sent the wrong
+        // direction or a frame was misrouted. Counted and dropped, never acted
+        // on: a ground station applying a link-quality report would be reacting
+        // to its own measurement echoed back at it.
+        AuxChannel::LinkFeedback => {
+            counters.bump(&c.link_feedback_frames);
         }
     }
 }

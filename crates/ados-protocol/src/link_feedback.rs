@@ -137,6 +137,110 @@ impl LinkFeedback {
     }
 }
 
+/// Where the drone publishes the last feedback record it received.
+///
+/// The receiving process (the MAVLink router, which owns the aux uplink) and
+/// the consuming process (the radio service, which owns the bitrate ladder) are
+/// separate, so the sample crosses via a sidecar file rather than a socket —
+/// the same shape the encoder-ceiling reconcile already uses, and readable by
+/// an operator running `cat` during a bench session.
+pub const LINK_FEEDBACK_SIDECAR: &str = "/run/ados/link-feedback.json";
+
+/// The sidecar path, honouring the `ADOS_RUN_DIR` override so a test (and a
+/// sim-bench run) can point the writer and the reader at the same temp dir
+/// rather than the real `/run/ados`.
+pub fn sidecar_path() -> std::path::PathBuf {
+    match std::env::var("ADOS_RUN_DIR") {
+        Ok(dir) if !dir.trim().is_empty() => {
+            std::path::PathBuf::from(dir).join("link-feedback.json")
+        }
+        _ => std::path::PathBuf::from(LINK_FEEDBACK_SIDECAR),
+    }
+}
+
+/// How long a received sample stays usable.
+///
+/// A stale sample is worse than none: the ladder would hold a rate chosen for a
+/// link state that has since changed, and the most likely reason feedback
+/// stopped arriving is that the link got WORSE — so treating an old sample as
+/// current would hold the rate high exactly when it should fall. Three missed
+/// 1 Hz reports is the trip.
+pub const FEEDBACK_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// The on-disk form: the received record plus when it arrived.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LinkFeedbackSidecar {
+    pub version: u8,
+    /// Wall-clock milliseconds since the epoch when this record was received.
+    pub received_at_unix_ms: u64,
+    pub loss_percent: f64,
+    pub rssi_dbm: f64,
+    pub snr_db: f64,
+    pub packets_received: u32,
+    pub fec_failed: u32,
+    pub bitrate_kbps: u32,
+    pub has_measurement: bool,
+}
+
+impl LinkFeedbackSidecar {
+    /// Stamp a received record with the current wall clock.
+    pub fn now(fb: &LinkFeedback) -> Self {
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        Self::stamped(fb, ms)
+    }
+
+    /// Stamp with an explicit time (the seam the tests drive).
+    pub fn stamped(fb: &LinkFeedback, received_at_unix_ms: u64) -> Self {
+        Self {
+            version: LINK_FEEDBACK_VERSION,
+            received_at_unix_ms,
+            loss_percent: fb.loss_percent,
+            rssi_dbm: fb.rssi_dbm,
+            snr_db: fb.snr_db,
+            packets_received: fb.packets_received,
+            fec_failed: fb.fec_failed,
+            bitrate_kbps: fb.bitrate_kbps,
+            has_measurement: fb.has_measurement,
+        }
+    }
+
+    /// Whether this record is recent enough to act on, given a current epoch-ms
+    /// reading. A record stamped in the future (a clock step) is treated as
+    /// stale, not as infinitely fresh.
+    pub fn is_fresh_at(&self, now_unix_ms: u64) -> bool {
+        let age = now_unix_ms.saturating_sub(self.received_at_unix_ms);
+        now_unix_ms >= self.received_at_unix_ms && age <= FEEDBACK_STALE_AFTER.as_millis() as u64
+    }
+
+    /// Whether this record is a usable ladder input right now: fresh AND an
+    /// actual measurement. Both gates in one place so no caller can apply one
+    /// and forget the other.
+    pub fn is_usable_at(&self, now_unix_ms: u64) -> bool {
+        self.has_measurement && self.is_fresh_at(now_unix_ms)
+    }
+}
+
+/// Read the sidecar, or `None` when it is absent or unparseable.
+pub fn read_sidecar_from(path: &std::path::Path) -> Option<LinkFeedbackSidecar> {
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Write the sidecar via a temp file and rename, so a reader mid-tick never
+/// observes a half-written record.
+pub fn write_sidecar_to(path: &std::path::Path, s: &LinkFeedbackSidecar) -> std::io::Result<()> {
+    let body = serde_json::to_vec(s)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, &body)?;
+    std::fs::rename(&tmp, path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,6 +318,62 @@ mod tests {
             LinkFeedback::decode(&buf),
             Err(LinkFeedbackError::UnsupportedVersion(0x7F))
         );
+    }
+
+    #[test]
+    fn a_fresh_measurement_is_usable() {
+        let s = LinkFeedbackSidecar::stamped(&sample(), 10_000);
+        assert!(s.is_usable_at(10_500));
+        assert!(s.is_usable_at(13_000), "3s is the edge, still usable");
+    }
+
+    #[test]
+    fn a_stale_record_is_not_usable() {
+        // The failure this guards: feedback stops because the link got WORSE,
+        // and holding the last good sample would keep the rate high exactly
+        // when it should fall.
+        let s = LinkFeedbackSidecar::stamped(&sample(), 10_000);
+        assert!(!s.is_usable_at(13_001));
+        assert!(!s.is_usable_at(60_000));
+    }
+
+    #[test]
+    fn a_record_stamped_in_the_future_is_stale_not_infinitely_fresh() {
+        let s = LinkFeedbackSidecar::stamped(&sample(), 50_000);
+        assert!(!s.is_usable_at(10_000));
+    }
+
+    #[test]
+    fn a_fresh_non_measurement_is_not_usable() {
+        let deaf = LinkFeedback {
+            has_measurement: false,
+            ..sample()
+        };
+        let s = LinkFeedbackSidecar::stamped(&deaf, 10_000);
+        assert!(s.is_fresh_at(10_100), "it did arrive recently");
+        assert!(
+            !s.is_usable_at(10_100),
+            "but a receiver that heard nothing is not a loss measurement"
+        );
+    }
+
+    #[test]
+    fn the_sidecar_round_trips_through_a_file() {
+        let dir = std::env::temp_dir().join(format!("ados-lf-{}", std::process::id()));
+        let path = dir.join("link-feedback.json");
+        let s = LinkFeedbackSidecar::stamped(&sample(), 1234);
+        write_sidecar_to(&path, &s).expect("write");
+        let back = read_sidecar_from(&path).expect("read");
+        assert_eq!(back.received_at_unix_ms, 1234);
+        assert!((back.loss_percent - 24.29).abs() < 0.001);
+        assert!(back.has_measurement);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_sidecar_reads_as_none_rather_than_a_default() {
+        let missing = std::path::Path::new("/nonexistent/ados/link-feedback.json");
+        assert!(read_sidecar_from(missing).is_none());
     }
 
     #[test]

@@ -345,6 +345,14 @@ pub(crate) fn build_stats_value(
         // position alongside the live FEC so an adaptive step is legible).
         "recommended_tier_idx": bitrate.tier_idx,
         "recommended_tier_name": bitrate.tier_name,
+        // Which measurement drove the rung: "local" (this node's own receiver),
+        // "peer" (the receiving station's report of what it decoded, the only
+        // honest source for a transmit-only node), or "none" (no usable sample,
+        // so the rung is held or driven by queue congestion). Without this a
+        // rung held for want of any signal is indistinguishable from one chosen
+        // on a good sample — which is exactly how a permanently top-rung ladder
+        // read as healthy.
+        "sample_source": bitrate.sample_source,
         // How the live FEC/MCS retunes were applied. `tx_cmd_applies` went over
         // the running transmitter's wfb-ng 24.08 management socket (no video
         // gap); `respawn_applies` fell back to kill-and-respawn (a 1-2 s gap).
