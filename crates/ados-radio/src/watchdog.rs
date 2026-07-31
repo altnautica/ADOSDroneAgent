@@ -60,6 +60,13 @@ pub struct WatchdogCounters {
     pub tx_zombie_kills: u64,
     pub tx_video_stall_kills: u64,
     pub tx_video_stalled: bool,
+    /// Live "the video queue is deep but `wfb_tx` is still draining it" flag:
+    /// the encoder is offering more than the link carries. Distinct from
+    /// `tx_video_stalled`, which means nothing is draining at all. The adaptive
+    /// bitrate ladder reads this as its congestion signal, which is the only
+    /// closed-loop feedback available on a drone — it transmits its own downlink
+    /// and cannot hear it, so it has no loss or RSSI sample to work from.
+    pub tx_video_backpressured: bool,
     pub tx_video_recvq_bytes: u64,
     /// Live PHY-mute flag (the heartbeat sets it each tick): the TX PHY reads
     /// back at the muted not-permitted floor, so wfb_tx injects but radiates
@@ -262,6 +269,7 @@ pub async fn video_recvq_watchdog<P: LivePid>(
             // busy, not stalled, and a surface that calls it stalled trains the
             // operator to ignore the flag that also means a real wedge.
             c.tx_video_stalled = tick == RecvqTick::Wedged;
+            c.tx_video_backpressured = tick == RecvqTick::Backpressured;
         }
 
         match tick {

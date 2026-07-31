@@ -165,6 +165,141 @@ impl Hysteresis {
         self.clean_streak = self.clean_streak.saturating_sub(1);
         TierAction::Hold
     }
+
+    /// Fold one locally-measured congestion observation through the same
+    /// machinery as [`decide`](Self::decide).
+    ///
+    /// This exists for the case where there is no link sample at all. A drone
+    /// transmits its downlink and cannot hear it, so it has no loss or RSSI to
+    /// fold in, and `decide` never runs — which left the ladder pinned to its
+    /// starting rung with no way down even while the encoder was plainly
+    /// over-feeding the link.
+    ///
+    /// Congestion is measurable without hearing anything: the transmit queue
+    /// backs up while the radio is still draining it, which says directly that
+    /// more is being offered than the air is carrying. `congested` is that
+    /// observation, and a clear queue is the honest inverse — the link is
+    /// comfortably carrying the current rate, so a higher rung is worth trying.
+    ///
+    /// Shares the streaks, cooldowns and rung bounds with `decide` so the two
+    /// can never race each other along the ladder, and so a step up still costs
+    /// a long clear run while a step down is quick. Together with the step-up
+    /// path this closes the loop: it settles on the highest rung the link
+    /// actually sustains, rather than ratcheting to the floor and staying there.
+    pub fn decide_congestion(&mut self, congested: bool, now: Instant) -> TierAction {
+        if congested {
+            self.bad_streak += 1;
+            self.clean_streak = 0;
+            let cooldown_ok = self
+                .last_down_at
+                .is_none_or(|t| now.duration_since(t) >= STEP_DOWN_COOLDOWN);
+            if self.bad_streak >= STEP_DOWN_REQUIRED_BAD_SAMPLES
+                && self.current_tier_idx + 1 < self.tier_count
+                && cooldown_ok
+            {
+                self.current_tier_idx += 1;
+                self.last_down_at = Some(now);
+                self.bad_streak = 0;
+                self.last_action_reason = "tx_queue_congested".to_string();
+                return TierAction::StepDown;
+            }
+            return TierAction::Hold;
+        }
+
+        self.clean_streak += 1;
+        self.bad_streak = 0;
+        let cooldown_ok = self
+            .last_up_at
+            .is_none_or(|t| now.duration_since(t) >= STEP_UP_COOLDOWN);
+        if self.clean_streak >= STEP_UP_REQUIRED_CLEAN_SAMPLES
+            && self.current_tier_idx > 0
+            && cooldown_ok
+        {
+            self.current_tier_idx -= 1;
+            self.last_up_at = Some(now);
+            self.clean_streak = 0;
+            self.last_action_reason = "tx_queue_clear".to_string();
+            return TierAction::StepUp;
+        }
+        TierAction::Hold
+    }
+}
+
+#[cfg(test)]
+mod congestion_tests {
+    use super::*;
+
+    /// The drone case: no link sample ever arrives, so `decide` never runs and
+    /// the ladder used to sit on its starting rung for the whole flight. A
+    /// sustained backed-up transmit queue must be able to shed rate on its own.
+    #[test]
+    fn sustained_congestion_steps_down_without_any_link_sample() {
+        let mut h = Hysteresis::new(DEFAULT_TIERS.len(), 0);
+        let t0 = Instant::now();
+
+        // Below the required streak nothing moves.
+        for _ in 0..STEP_DOWN_REQUIRED_BAD_SAMPLES - 1 {
+            assert_eq!(h.decide_congestion(true, t0), TierAction::Hold);
+        }
+        assert_eq!(h.current_tier_idx(), 0);
+
+        // The streak completes and the ladder sheds a rung.
+        assert_eq!(h.decide_congestion(true, t0), TierAction::StepDown);
+        assert_eq!(h.current_tier_idx(), 1);
+        assert_eq!(h.last_action_reason(), "tx_queue_congested");
+    }
+
+    /// A clear queue is the honest inverse and must be able to recover the rung,
+    /// otherwise a brief burst of congestion would ratchet the drone to the
+    /// floor for the rest of the flight.
+    #[test]
+    fn a_clear_queue_recovers_the_rung_so_it_does_not_ratchet_down() {
+        let mut h = Hysteresis::new(DEFAULT_TIERS.len(), 1);
+        let t0 = Instant::now();
+        let later = t0 + STEP_UP_COOLDOWN;
+
+        for _ in 0..STEP_UP_REQUIRED_CLEAN_SAMPLES - 1 {
+            assert_eq!(h.decide_congestion(false, later), TierAction::Hold);
+        }
+        assert_eq!(h.decide_congestion(false, later), TierAction::StepUp);
+        assert_eq!(h.current_tier_idx(), 0);
+        assert_eq!(h.last_action_reason(), "tx_queue_clear");
+    }
+
+    /// Recovery must cost far more evidence than shedding does, or the loop
+    /// oscillates across rungs instead of settling. Checked at compile time so
+    /// retuning the constants cannot quietly invert it.
+    const _: () = assert!(STEP_UP_REQUIRED_CLEAN_SAMPLES > STEP_DOWN_REQUIRED_BAD_SAMPLES);
+
+    /// A single clear sample must not wipe out an in-progress bad streak, and
+    /// vice versa — the streaks are shared with `decide` for exactly this.
+    #[test]
+    fn an_interleaved_sample_resets_the_opposing_streak() {
+        let mut h = Hysteresis::new(DEFAULT_TIERS.len(), 0);
+        let t0 = Instant::now();
+
+        for _ in 0..STEP_DOWN_REQUIRED_BAD_SAMPLES - 1 {
+            h.decide_congestion(true, t0);
+        }
+        assert!(h.bad_streak() > 0);
+        h.decide_congestion(false, t0);
+        assert_eq!(h.bad_streak(), 0, "a clear queue clears the bad streak");
+        // And the rung did not move on that single clear sample.
+        assert_eq!(h.current_tier_idx(), 0);
+    }
+
+    /// Congestion at the bottom rung has nowhere to go and must simply hold,
+    /// not error or wrap.
+    #[test]
+    fn congestion_at_the_floor_holds() {
+        let last = DEFAULT_TIERS.len() - 1;
+        let mut h = Hysteresis::new(DEFAULT_TIERS.len(), last);
+        let t0 = Instant::now();
+        for _ in 0..STEP_DOWN_REQUIRED_BAD_SAMPLES * 3 {
+            assert_eq!(h.decide_congestion(true, t0), TierAction::Hold);
+        }
+        assert_eq!(h.current_tier_idx(), last);
+    }
 }
 
 #[cfg(test)]

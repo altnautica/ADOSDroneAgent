@@ -128,6 +128,7 @@ impl BitrateController {
         link: Arc<Mutex<LinkStats>>,
         proc: Arc<Mutex<RadioProcesses>>,
         snapshot: SnapshotHandle,
+        counters: crate::watchdog::CounterHandle,
         cancel: Arc<Notify>,
     ) {
         tracing::info!(
@@ -140,7 +141,7 @@ impl BitrateController {
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(self.tick_interval) => {
-                    self.tick(&link, &proc, &snapshot).await;
+                    self.tick(&link, &proc, &snapshot, &counters).await;
                 }
                 _ = cancel.notified() => {
                     tracing::info!("bitrate_controller_stopped");
@@ -165,6 +166,7 @@ impl BitrateController {
         link: &Arc<Mutex<LinkStats>>,
         proc: &Arc<Mutex<RadioProcesses>>,
         snapshot: &SnapshotHandle,
+        counters: &crate::watchdog::CounterHandle,
     ) {
         let (loss, rssi, snr, has_sample) = {
             let s = link.lock().await;
@@ -227,6 +229,37 @@ impl BitrateController {
                     );
                 }
                 self.mcs.observe(live);
+            }
+        } else if enabled {
+            // No link sample. On a drone that is the permanent state, not a
+            // cold start: it transmits its own downlink and a single radio in
+            // monitor mode cannot capture its own injected frames, so
+            // `packets_received` never leaves zero. Gating everything on a
+            // sample therefore froze BOTH ladders for the whole flight — most
+            // damagingly the step-down, so a link that was visibly over-fed had
+            // no way to shed rate.
+            //
+            // Congestion needs no receiver. A transmit queue that stays deep
+            // while the radio drains it says directly that more is being
+            // offered than the air is carrying, so drive the bitrate ladder
+            // from that instead. The modulation ladder stays parked, because
+            // its input is SNR and there is no honest local substitute for it —
+            // guessing a rung would risk raising the rate on a weak link.
+            let congested = counters.lock().await.tx_video_backpressured;
+            let action = self.hysteresis.decide_congestion(congested, Instant::now());
+            if action != TierAction::Hold {
+                let tier = self.tiers[self.hysteresis.current_tier_idx()];
+                tracing::info!(
+                    tier = tier.name,
+                    reason = self.hysteresis.last_action_reason(),
+                    fec_k = tier.fec_k,
+                    fec_n = tier.fec_n,
+                    bitrate_kbps = tier.bitrate_kbps,
+                    "bitrate_tier_change"
+                );
+                if !proc.lock().await.set_fec(tier.fec_k, tier.fec_n).await {
+                    tracing::warn!(tier = tier.name, "bitrate_tier_set_fec_failed");
+                }
             }
         }
 
