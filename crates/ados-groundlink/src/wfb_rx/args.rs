@@ -51,6 +51,9 @@ pub const TX_CONTROL_PORT: u16 = 5810;
 /// whole fleet. Deliberately outside the per-slot receive span so the uplink
 /// ingress can never be fed by a downlink egress.
 pub const AUX_TX_PORT: u16 = 5602;
+// Kept as the DEFAULT only. `gs_aux_tx_args` takes the resolved value, because
+// the port is operator-settable and the writers into this lane resolve it from
+// config; a constant here is correct at exactly one setting.
 /// wfb stats poll interval: the zombie watchdog cadence.
 pub const RX_HEALTH_POLL_INTERVAL_S: f64 = 5.0;
 
@@ -140,14 +143,30 @@ pub fn gs_atlas_rx_args(iface: &str, rx_key: &Path, atlas_port: u16, link_id: u3
 /// `link_id` is the ground station's own (`link_id(fleet_id, SLOT_GROUND)`).
 /// There is exactly ONE of these regardless of fleet size: every drone's aux
 /// receiver keys to slot 0, so a fleet-wide uplink is one transmission, not N.
-pub fn gs_aux_tx_args(iface: &str, rx_key: &Path, mcs_index: u8, link_id: u32) -> Vec<String> {
+///
+/// `aux_tx_port` is the operator-configured ingress, NOT a constant. It used to
+/// be the literal [`AUX_TX_PORT`] while the three processes that write into
+/// this lane — the MAVLink router's uplink sender, the control surface's
+/// relay-proxy egress, and the link-feedback emitter — all resolved it from
+/// config. An operator who changed the setting moved all three writers and left
+/// the transmitter on the old number, so every GCS command, every relay call
+/// and every feedback sample went to a port nothing was reading, with no error
+/// anywhere. Taking the resolved value means the transmitter and its writers
+/// cannot disagree.
+pub fn gs_aux_tx_args(
+    iface: &str,
+    rx_key: &Path,
+    mcs_index: u8,
+    link_id: u32,
+    aux_tx_port: u16,
+) -> Vec<String> {
     vec![
         "-p".into(),
         "3".into(),
         "-i".into(),
         link_id.to_string(),
         "-u".into(),
-        AUX_TX_PORT.to_string(),
+        aux_tx_port.to_string(),
         "-K".into(),
         rx_key.to_string_lossy().into_owned(),
         "-k".into(),
@@ -310,11 +329,58 @@ mod tests {
     }
 
     #[test]
+    fn the_uplink_transmitter_follows_the_configured_ingress_port() {
+        // The regression this guards: the transmitter held a constant while the
+        // three processes that write into this lane resolved the port from
+        // config. An operator who changed the setting moved every writer and
+        // left the transmitter behind, so GCS commands, relay calls and link
+        // feedback all went to a port nothing was reading — with no error
+        // anywhere, which reads as a dead radio.
+        let a = gs_aux_tx_args("wlan1", Path::new("/k"), 1, link_id(1, SLOT_GROUND), 6002);
+        assert_eq!(
+            arg_after(&a, "-u"),
+            "6002",
+            "the transmitter must bind the operator's port, not a constant"
+        );
+    }
+
+    #[test]
+    fn the_transmitter_and_its_writers_resolve_the_same_port() {
+        // The writers resolve through ados_protocol::aux_ports; the transmitter
+        // takes the value passed to it. Same config text must yield the same
+        // number on both sides, or the lane silently goes nowhere.
+        let text = "video:\n  wfb:\n    aux_tx_port: 6002\n";
+        let writers = ados_protocol::aux_ports::AuxPorts::from_yaml(text).tx;
+        let a = gs_aux_tx_args(
+            "wlan1",
+            Path::new("/k"),
+            1,
+            link_id(1, SLOT_GROUND),
+            writers,
+        );
+        assert_eq!(arg_after(&a, "-u"), writers.to_string());
+        assert_eq!(writers, 6002);
+
+        // And the defaults agree, so an unconfigured box is coherent too.
+        let default_writers = ados_protocol::aux_ports::AuxPorts::default().tx;
+        assert_eq!(
+            default_writers, AUX_TX_PORT,
+            "the transmitter's default and the writers' default must be one number"
+        );
+    }
+
+    #[test]
     fn gs_aux_tx_uses_radio_id_3_and_the_uplink_ingress() {
         // The ground transmits the aux uplink on p3 (the radio_id the drone's
         // `wfb_rx` listens on), reading from its own loopback ingress, keyed to
         // the ground station's own slot so every drone hears it.
-        let a = gs_aux_tx_args("wlan1", Path::new("/k"), 1, link_id(1, SLOT_GROUND));
+        let a = gs_aux_tx_args(
+            "wlan1",
+            Path::new("/k"),
+            1,
+            link_id(1, SLOT_GROUND),
+            AUX_TX_PORT,
+        );
         assert_eq!(a[0], "-p");
         assert_eq!(a[1], "3");
         assert_eq!(arg_after(&a, "-i"), link_id(1, SLOT_GROUND).to_string());
@@ -329,7 +395,13 @@ mod tests {
         // peer transmits on. If these two ever end up equal the lane talks to
         // itself and the link goes silent in one direction with no error.
         let rx = gs_atlas_rx_args("wlan1", Path::new("/k"), aux_rx_port(1), link_id(1, 1));
-        let tx = gs_aux_tx_args("wlan1", Path::new("/k"), 1, link_id(1, SLOT_GROUND));
+        let tx = gs_aux_tx_args(
+            "wlan1",
+            Path::new("/k"),
+            1,
+            link_id(1, SLOT_GROUND),
+            AUX_TX_PORT,
+        );
         assert_eq!(rx[1], "2", "ground receives the downlink on p2");
         assert_eq!(tx[1], "3", "ground transmits the uplink on p3");
         assert_ne!(rx[1], tx[1]);
@@ -375,7 +447,10 @@ mod tests {
             &gs_tx_control_args("wlan1", Path::new("/k"), 1, ground),
             "-i",
         );
-        let aux = arg_after(&gs_aux_tx_args("wlan1", Path::new("/k"), 1, ground), "-i");
+        let aux = arg_after(
+            &gs_aux_tx_args("wlan1", Path::new("/k"), 1, ground, AUX_TX_PORT),
+            "-i",
+        );
         assert_eq!(ctrl, ground.to_string());
         assert_eq!(aux, ground.to_string());
         for slot in 1..=FLEET_MAX_SLOTS {
@@ -412,7 +487,11 @@ mod tests {
                 gs_rx_control_args("wlan1", key, control_rx_port(6), drone),
                 drone,
             ),
-            ("aux_tx", gs_aux_tx_args("wlan1", key, 1, ground), ground),
+            (
+                "aux_tx",
+                gs_aux_tx_args("wlan1", key, 1, ground, AUX_TX_PORT),
+                ground,
+            ),
             (
                 "tx_control",
                 gs_tx_control_args("wlan1", key, 1, ground),

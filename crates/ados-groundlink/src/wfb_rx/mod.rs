@@ -445,7 +445,13 @@ impl WfbRxManager {
         // and an idle wfb_tx with no ingress traffic costs essentially nothing.
         let aux_tx = GsWfbProcess::spawn(
             "wfb_tx",
-            &gs_aux_tx_args(iface, &rx_key, self.config.mcs_index, ground),
+            &gs_aux_tx_args(
+                iface,
+                &rx_key,
+                self.config.mcs_index,
+                ground,
+                self.config.aux_tx_port,
+            ),
             Stdout::Null,
             Some("/run/ados/wfb-gs-aux-tx.log"),
         )
