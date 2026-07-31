@@ -42,6 +42,7 @@
 //!   node's own frame fan-out. The mirror of the MAVLink socket's inbound path,
 //!   which travels toward a flight controller rather than away from one.
 
+pub mod ap_country;
 pub mod atlas;
 pub mod aux_egress;
 pub mod aux_mux;

@@ -66,6 +66,42 @@ _UNAMBIGUOUS_CHARSET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 _AP_PASSPHRASE_LEN = 12
 
 
+# Country advertised when the operator has pinned no region. Matches the radio
+# reconciler's own default so the two halves of a stock box agree; it was a
+# hardcoded "IN" while the radio defaulted to "US", so a stock box declared two
+# different jurisdictions at once. Mirrors the Rust `DEFAULT_AP_COUNTRY`.
+_DEFAULT_AP_COUNTRY = "US"
+
+
+def _resolve_ap_country(config_path: str = "/etc/ados/config.yaml") -> str:
+    """The country hostapd should advertise, from the operator's pinned region.
+
+    The region counts only when the operator has actually opted into a
+    jurisdiction (``mode: region``), mirroring how the radio reads it. Anything
+    unusable falls back rather than reaching hostapd, which refuses to start on
+    a bad country code and so takes the access point down rather than
+    degrading it.
+    """
+    try:
+        import yaml
+
+        with open(config_path, encoding="utf-8") as fh:
+            raw = yaml.safe_load(fh) or {}
+    except (OSError, ValueError, ImportError):
+        return _DEFAULT_AP_COUNTRY
+    if not isinstance(raw, dict):
+        return _DEFAULT_AP_COUNTRY
+    reg = ((raw.get("network") or {}).get("regulatory")) or {}
+    if not isinstance(reg, dict):
+        return _DEFAULT_AP_COUNTRY
+    if str(reg.get("mode") or "").strip().lower() != "region":
+        return _DEFAULT_AP_COUNTRY
+    region = str(reg.get("region") or "").strip().upper()
+    if len(region) == 2 and region.isalpha():
+        return region
+    return _DEFAULT_AP_COUNTRY
+
+
 def generate_ap_passphrase() -> str:
     """Draw a fresh per-unit AP passphrase, legal for WPA2-PSK.
 
@@ -230,7 +266,7 @@ class HostapdManager:
             f"ssid={self._ssid}",
             "hw_mode=g",
             f"channel={self._channel}",
-            "country_code=IN",
+            f"country_code={_resolve_ap_country()}",
             "ieee80211n=1",
             "ieee80211d=1",
             "wmm_enabled=1",

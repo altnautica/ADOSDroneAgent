@@ -56,6 +56,13 @@ pub struct HostapdManager {
     interface: String,
     configured_passphrase: String,
     passphrase: String,
+    /// The country hostapd advertises.
+    ///
+    /// Was a hardcoded `IN` while the radio's own reconciler defaulted to
+    /// `US`, so a stock box ran its access point and its radio under two
+    /// different declared jurisdictions. Resolved from the same operator
+    /// setting the radio reads, so the two agree.
+    country_code: String,
     hostapd_conf_path: PathBuf,
     dnsmasq_conf_path: PathBuf,
     passphrase_path: PathBuf,
@@ -102,6 +109,7 @@ impl HostapdManager {
             interface: AP_IFACE.to_string(),
             configured_passphrase,
             passphrase: String::new(),
+            country_code: ados_protocol::ap_country::load(),
             hostapd_conf_path,
             dnsmasq_conf_path,
             passphrase_path,
@@ -205,7 +213,7 @@ impl HostapdManager {
             format!("ssid={}", self.ssid),
             "hw_mode=g".to_string(),
             format!("channel={}", self.channel),
-            "country_code=IN".to_string(),
+            format!("country_code={}", self.country_code),
             "ieee80211n=1".to_string(),
             "ieee80211d=1".to_string(),
             "wmm_enabled=1".to_string(),
@@ -492,6 +500,20 @@ mod tests {
     }
 
     #[test]
+    fn the_ap_country_follows_the_operators_pinned_region() {
+        // It was a hardcoded IN while the radio's own reconciler defaulted to
+        // US, so a stock box declared two different jurisdictions at once.
+        assert_eq!(ados_protocol::ap_country::from_yaml(""), "US");
+        assert_eq!(
+            ados_protocol::ap_country::from_yaml(
+                "network:\n  regulatory:\n    mode: region\n    region: IN\n"
+            ),
+            "IN",
+            "an operator who pins a region still gets it"
+        );
+    }
+
+    #[test]
     fn a_generated_passphrase_is_stable_across_restarts() {
         // A generated value that is not written is a DIFFERENT passphrase on
         // every restart: the operator reads one off the installer card, the
@@ -590,6 +612,9 @@ mod tests {
             dir.path().join("ap-passphrase"),
         );
         m.ensure_passphrase(); // → the configured "altnautica"
+                               // Pin the country so the golden body does not depend on the host's
+                               // /etc/ados/config.yaml. An unpinned unit resolves to the same default.
+        m.country_code = "US".to_string();
         m.write_config().unwrap();
 
         let expected = "# ADOS Ground Station hostapd config for ADOS-GS-58C2\n\
@@ -598,7 +623,7 @@ driver=nl80211\n\
 ssid=ADOS-GS-58C2\n\
 hw_mode=g\n\
 channel=6\n\
-country_code=IN\n\
+country_code=US\n\
 ieee80211n=1\n\
 ieee80211d=1\n\
 wmm_enabled=1\n\
