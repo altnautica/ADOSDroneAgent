@@ -32,6 +32,7 @@ pub mod gs_bluetooth;
 pub mod gs_camera_write;
 pub mod gs_cmd;
 pub mod gs_crsf;
+pub mod gs_fleet_enroll;
 pub mod gs_fleet_hero;
 pub mod gs_fleet_slot;
 pub mod gs_gamepad_write;

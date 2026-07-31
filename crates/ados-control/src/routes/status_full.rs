@@ -1775,12 +1775,12 @@ const LINKED_PEER_STALE_S: f64 = 60.0;
 /// One raw peer row as the linked-peers sidecar writes it (snake_case, the
 /// receive listener's `LinkedPeer`). The sidecar's `version` / `wall_time_unix`
 /// header keys are ignored as unknown fields, exactly like the cloud fold.
-#[derive(Debug, Default, serde::Deserialize)]
-struct LinkedPeerRow {
+#[derive(Debug, Default, Clone, serde::Deserialize)]
+pub(crate) struct LinkedPeerRow {
     #[serde(default)]
-    device_id: String,
+    pub(crate) device_id: String,
     #[serde(default)]
-    role: String,
+    pub(crate) role: String,
     #[serde(default)]
     channel: u8,
     #[serde(default)]
@@ -1822,20 +1822,29 @@ pub(crate) fn read_linked_peers() -> Vec<(String, Value)> {
 /// unparseable → nothing folded; each entry gated on the prune window (a future
 /// timestamp counts as fresh, tolerating clock skew, matching the cloud fold);
 /// the whole fold omitted when no fresh, id-bearing peer survives.
-fn read_linked_peers_in(path: &Path, now: f64) -> Vec<(String, Value)> {
+/// Every fresh, id-bearing peer row the sidecar currently holds.
+///
+/// Split out so the fleet-enrolment reconciler gates on the SAME freshness
+/// window as this status fold rather than carrying its own copy. Two
+/// independently-maintained staleness gates over one sidecar drift apart, and
+/// the direction that matters here is the silent one: a slot issued to a peer
+/// this fold already considers gone.
+pub(crate) fn fresh_linked_peer_rows_in(path: &Path, now: f64) -> Vec<LinkedPeerRow> {
     let Ok(text) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
     let Ok(doc) = serde_json::from_str::<LinkedPeersDoc>(&text) else {
         return Vec::new();
     };
-
-    let fresh: Vec<&LinkedPeerRow> = doc
-        .peers
-        .iter()
+    doc.peers
+        .into_iter()
         .filter(|p| !p.device_id.is_empty())
         .filter(|p| p.last_seen_unix > 0.0 && (now - p.last_seen_unix) <= LINKED_PEER_STALE_S)
-        .collect();
+        .collect()
+}
+
+fn read_linked_peers_in(path: &Path, now: f64) -> Vec<(String, Value)> {
+    let fresh = fresh_linked_peer_rows_in(path, now);
     if fresh.is_empty() {
         return Vec::new();
     }
@@ -1974,7 +1983,7 @@ fn de_chunk(body: &[u8]) -> Vec<u8> {
 
 /// The runtime dir (`ADOS_RUN_DIR`, default `/run/ados`), the root the sidecars
 /// resolve under.
-fn run_dir() -> PathBuf {
+pub(crate) fn run_dir() -> PathBuf {
     PathBuf::from(std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string()))
 }
 
@@ -2043,7 +2052,7 @@ fn now_unix_micros() -> i64 {
 
 /// The current wall-clock time in seconds (float) since the Unix epoch, matching
 /// the Python `time.time()` used for the sidecar freshness gate.
-fn now_unix_secs() -> f64 {
+pub(crate) fn now_unix_secs() -> f64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

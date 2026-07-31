@@ -407,6 +407,14 @@ where
                 tokio::spawn(crate::routes::gs_fleet_slot::run_slot_reconciler(
                     Arc::clone(&proxy),
                 ));
+                // Fleet enrolment: a slot was only ever issued by the pair
+                // route, but the unattended auto-bind that pairs a rig in the
+                // field has no device id to allocate against and never called
+                // it. Both reconcilers above therefore had an empty registry to
+                // work from on every auto-bound fleet, and the per-pair relay
+                // secret they key on was never minted. Registers each drone the
+                // ground station can actually hear.
+                tokio::spawn(crate::routes::gs_fleet_enroll::run_enroll_reconciler());
                 state
                     .with_aux_rpc_proxy(proxy)
                     .with_aux_response_listener(listener)
