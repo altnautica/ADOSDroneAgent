@@ -112,6 +112,53 @@ pub fn is_on_box(peer_is_loopback: bool, has_forwarding_header: bool) -> bool {
     peer_is_loopback && !has_forwarding_header
 }
 
+/// Whether an UNPAIRED node should answer a request from this peer.
+///
+/// An unpaired node accepts every route from anyone, including flight control,
+/// for as long as it stays unpaired. That is defensible on a bench, where
+/// physical presence on the LAN is the gate. It is not defensible on a unit a
+/// customer powers on in an office or a hotel and does not pair immediately.
+///
+/// The obvious remedy — bind only loopback and link-local until paired — cannot
+/// be used here, and the reason is worth stating so nobody reaches for it again.
+/// A headless node has exactly two operator lifelines and NEITHER is loopback or
+/// link-local: the AP hotspot on `192.168.4.1` (the primary first-boot route)
+/// and the USB gadget on `192.168.7.1`. Binding them away would leave a fresh
+/// unit reachable only from a shell the customer does not have, which is a
+/// worse failure than the exposure it closes. There is also no runtime re-bind:
+/// listeners are bound once at startup, so a bind keyed on pairing would need a
+/// service restart at the exact moment the operator is mid-claim on that socket.
+///
+/// So the gate is drawn here, at the peer address, where the decision is
+/// re-evaluated per request and follows pairing state in both directions with no
+/// restart. The honest limitation is that this is request-layer defence: the
+/// port stays open and an unauthorised peer receives a refusal rather than
+/// finding nothing listening.
+///
+/// Returns true for loopback, IPv4/IPv6 link-local, and the two agent-owned
+/// provisioning subnets. Everything else is refused while unpaired.
+pub fn unpaired_peer_allowed(peer: &std::net::IpAddr) -> bool {
+    match peer {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_link_local()
+                // The AP hotspot the operator joins on first boot.
+                || v4.octets()[..3] == [192, 168, 4]
+                // The USB gadget network, the headless fallback.
+                || v4.octets()[..3] == [192, 168, 7]
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()
+                // fe80::/10 — link-local unicast.
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+                // An IPv4 lifeline arriving mapped onto v6.
+                || v6
+                    .to_ipv4_mapped()
+                    .is_some_and(|m| unpaired_peer_allowed(&std::net::IpAddr::V4(m)))
+        }
+    }
+}
+
 /// Load the pairing posture from a `pairing.json`. An absent file, an
 /// unreadable file, or a state that is not `paired:true` with a non-empty
 /// `api_key` is treated as unpaired (open), matching the agent: when not paired,
@@ -136,6 +183,71 @@ pub fn load_pairing(path: &Path) -> Pairing {
 
 #[cfg(test)]
 mod tests {
+    use std::net::IpAddr;
+
+    /// The two lifelines a headless unpaired unit is actually reached from.
+    /// These are the reason this is a peer filter and not a narrowed bind: a
+    /// literal loopback+link-local bind would remove both and leave a fresh
+    /// device unreachable to its own operator.
+    #[test]
+    fn the_first_boot_lifelines_are_allowed_while_unpaired() {
+        for ip in [
+            "127.0.0.1",    // on-box
+            "::1",          // on-box, v6
+            "192.168.4.1",  // the AP hotspot itself
+            "192.168.4.37", // a phone joined to the hotspot
+            "192.168.7.1",  // the USB gadget
+            "192.168.7.42", // a laptop on the USB gadget net
+            "169.254.11.9", // IPv4 link-local
+            "fe80::1",      // IPv6 link-local
+        ] {
+            let addr: IpAddr = ip.parse().unwrap();
+            assert!(
+                unpaired_peer_allowed(&addr),
+                "{ip} is a first-boot reach path and must not be refused"
+            );
+        }
+    }
+
+    /// The exposure being closed: an ordinary LAN peer must not command an
+    /// unpaired aircraft.
+    #[test]
+    fn an_ordinary_lan_peer_is_refused_while_unpaired() {
+        for ip in [
+            "192.168.200.50", // the office LAN this is typically on
+            "192.168.1.10",
+            "10.0.0.5",
+            "172.16.4.4",
+            "8.8.8.8",
+            "2001:db8::1",
+        ] {
+            let addr: IpAddr = ip.parse().unwrap();
+            assert!(
+                !unpaired_peer_allowed(&addr),
+                "{ip} must not reach a non-public route on an unpaired device"
+            );
+        }
+    }
+
+    /// A neighbouring subnet must not be admitted by a sloppy prefix match.
+    #[test]
+    fn adjacent_subnets_are_not_mistaken_for_the_lifelines() {
+        for ip in ["192.168.40.1", "192.168.70.1", "192.168.5.1", "192.168.6.1"] {
+            let addr: IpAddr = ip.parse().unwrap();
+            assert!(!unpaired_peer_allowed(&addr), "{ip} must not be allowed");
+        }
+    }
+
+    /// A lifeline arriving mapped onto v6 is the same lifeline. The listener is
+    /// dual-stack, so this is a real shape, not a hypothetical.
+    #[test]
+    fn an_ipv4_lifeline_mapped_onto_v6_is_still_allowed() {
+        let mapped: IpAddr = "::ffff:192.168.4.20".parse().unwrap();
+        assert!(unpaired_peer_allowed(&mapped));
+        let mapped_lan: IpAddr = "::ffff:192.168.200.50".parse().unwrap();
+        assert!(!unpaired_peer_allowed(&mapped_lan));
+    }
+
     use super::*;
     use std::io::Write;
     use std::path::PathBuf;

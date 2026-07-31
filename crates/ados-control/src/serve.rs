@@ -199,6 +199,43 @@ async fn tcp_edge(State(edge): State<EdgeAuth>, mut request: Request, next: Next
         );
     }
 
+    // While UNPAIRED the node answers every route to anyone, flight control
+    // included, for as long as it stays unpaired. Narrow that to the peers a
+    // fresh device is actually reached from.
+    //
+    // Public paths stay open to everyone deliberately: `/api/pairing/{info,code,
+    // claim}` is how a device is claimed over the LAN, which is the documented
+    // local-first flow. Refusing those would trade an exposure for an
+    // unpairable device. So the LAN can still discover and claim; what it can no
+    // longer do while unpaired is fly the aircraft or rewrite its config.
+    //
+    // Checked before the native/proxied split so it covers both surfaces, and
+    // read per request through the TTL-cached pairing state, so the posture
+    // widens the moment the device is paired and narrows again on unpair with no
+    // restart — which a bind-time decision cannot do. See
+    // `pairing_posture::unpaired_peer_allowed` for why this is not a bind.
+    if !auth::is_public(&path)
+        && matches!(
+            edge.pairing.current(),
+            ados_protocol::pairing_posture::Pairing::Unpaired
+        )
+    {
+        let peer_ip = request.extensions().get::<PeerAddr>().map(|p| p.0.ip());
+        let allowed =
+            peer_ip.is_some_and(|ip| ados_protocol::pairing_posture::unpaired_peer_allowed(&ip));
+        if !allowed {
+            tracing::warn!(
+                path = %path,
+                peer = ?peer_ip,
+                "unpaired_peer_refused"
+            );
+            return detail(
+                StatusCode::FORBIDDEN,
+                "This device is not paired yet. Pair it first, or reach it over its hotspot or USB connection.",
+            );
+        }
+    }
+
     // Strip any client-supplied on-box header first (it cannot be trusted), then
     // set it only when the front's own check passes — for every request, native
     // or proxied, so the forwarded value is always trustworthy.

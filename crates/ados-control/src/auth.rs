@@ -123,18 +123,6 @@ impl Default for PairingState {
     }
 }
 
-/// The endpoints that are public on both edges (no key, no rate limit even on
-/// TCP) so a fresh GCS can read the version, walk the local pairing handshake
-/// before it holds a key, and a liveness probe can always hit `/healthz`. This
-/// is the native surface's exempt set, narrower than the Python middleware's
-/// (no setup/static paths live here). `/api/time` is deliberately NOT public.
-///
-/// The ground-station WebSocket relays are exempt here too: a WebSocket
-/// handshake is upgraded past the HTTP key gate, and a browser cannot set the
-/// `X-ADOS-Key` header on it, so the edge must let the upgrade reach the handler,
-/// which then enforces the WebSocket auth contract itself (a header key OR a
-/// scoped one-shot ticket). Mirrors the residual handlers, which authenticated
-/// inside the handler for the same reason.
 /// The header the relay stamps on a request that crossed the radio.
 pub const RELAYED_HEADER: &str = "x-ados-relayed";
 
@@ -186,6 +174,18 @@ pub fn relay_forbidden(path: &str) -> bool {
     )
 }
 
+/// The endpoints that are public on both edges (no key, no rate limit even on
+/// TCP) so a fresh GCS can read the version, walk the local pairing handshake
+/// before it holds a key, and a liveness probe can always hit `/healthz`. This
+/// is the native surface's exempt set, narrower than the Python middleware's
+/// (no setup/static paths live here). `/api/time` is deliberately NOT public.
+///
+/// The ground-station WebSocket relays are exempt here too: a WebSocket
+/// handshake is upgraded past the HTTP key gate, and a browser cannot set the
+/// `X-ADOS-Key` header on it, so the edge must let the upgrade reach the handler,
+/// which then enforces the WebSocket auth contract itself (a header key OR a
+/// scoped one-shot ticket). Mirrors the residual handlers, which authenticated
+/// inside the handler for the same reason.
 pub fn is_public(path: &str) -> bool {
     matches!(
         path,
@@ -273,6 +273,30 @@ mod tests {
     /// turn radio range into a standing API key that keeps working long after
     /// the caller is out of range. Refusing unpair is what breaks the chain —
     /// claim on its own hands out nothing while a pairing is intact.
+    /// Claiming a device over the LAN is the documented local-first flow, so
+    /// the pairing handshake must stay public. The unpaired-peer filter refuses
+    /// non-public routes from an ordinary LAN peer; if these were gated too, a
+    /// fresh device could not be paired from the network it sits on - trading an
+    /// exposure for an unpairable unit.
+    #[test]
+    fn the_pairing_handshake_stays_public_so_lan_claiming_still_works() {
+        for path in [
+            "/api/pairing/info",
+            "/api/pairing/code",
+            "/api/pairing/claim",
+            "/healthz",
+        ] {
+            assert!(
+                is_public(path),
+                "{path} must stay reachable to claim a device"
+            );
+        }
+        // The routes that actually command the aircraft are NOT public, so on an
+        // unpaired device they fall to the peer filter.
+        assert!(!is_public("/api/command"));
+        assert!(!is_public("/api/config"));
+    }
+
     #[test]
     fn a_relayed_caller_cannot_unpair_and_then_claim() {
         assert!(
