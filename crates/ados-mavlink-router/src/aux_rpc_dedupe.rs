@@ -34,10 +34,17 @@ use std::time::{Duration, Instant};
 
 /// Most requests remembered at once.
 ///
-/// The ground bounds itself to 256 concurrent calls and answers each within
-/// 10 s, so 64 covers every request that can still be retransmitted on a lane
-/// carrying a realistic call rate.
-const DEDUPE_MAX_ENTRIES: usize = 64;
+/// Sized against the ground's own concurrency bound, which is 1024 pending
+/// calls. A drone only ever dedupes the traffic addressed to it plus the
+/// broadcasts, so it sees a fraction of that, but the cap has to leave room for
+/// every request that could still be retransmitted rather than be derived from
+/// a hoped-for call rate: overflowing it evicts in-flight markers, and losing
+/// one of those lets a resend re-execute a write.
+///
+/// Entries are tiny — an id, an instant and a discriminant — and the payloads
+/// they may hold are separately bounded by [`DEDUPE_MAX_BYTES`], so raising the
+/// count does not raise the memory ceiling.
+const DEDUPE_MAX_ENTRIES: usize = 256;
 
 /// Most cached response payload held at once. A maximum-size response is 64
 /// fragments of ~1.2 KB (~77 KB), so this holds at least three of the largest
@@ -120,14 +127,40 @@ impl Inner {
             .retain(|r| now.saturating_duration_since(r.touched()) < DEDUPE_TTL);
     }
 
+    /// Drop the oldest record matching `pred` and report the bytes it freed.
+    /// `None` when nothing matches.
+    fn drop_oldest_completed(&mut self) -> Option<usize> {
+        let idx = self
+            .records
+            .iter()
+            .position(|r| !matches!(r.entry, Entry::InFlight))?;
+        Some(self.records.remove(idx).entry.bytes())
+    }
+
     fn enforce_bounds(&mut self) {
+        // Make room out of completed records first. An in-flight marker is the
+        // only thing standing between a retransmit and a SECOND execution of
+        // the same request, so evicting one turns the next resend of an
+        // unfinished write from a dropped duplicate into a fresh call.
         while self.records.len() > DEDUPE_MAX_ENTRIES {
-            self.records.remove(0);
+            if self.drop_oldest_completed().is_none() {
+                // Everything is in flight, so the cap is genuinely exceeded by
+                // live calls rather than by cached answers. Shed the oldest
+                // rather than grow without bound.
+                self.records.remove(0);
+            }
         }
         let mut bytes = self.total_bytes();
-        while bytes > DEDUPE_MAX_BYTES && !self.records.is_empty() {
-            let dropped = self.records.remove(0);
-            bytes -= dropped.entry.bytes();
+        while bytes > DEDUPE_MAX_BYTES {
+            // Only a completed record holds a payload, so only a completed
+            // record can free bytes. Evicting in-flight markers here freed
+            // nothing and could not end the loop on its own terms, so it walked
+            // the cache shedding exactly the entries that guarantee
+            // idempotency.
+            match self.drop_oldest_completed() {
+                Some(freed) => bytes -= freed,
+                None => break,
+            }
         }
     }
 }
@@ -267,7 +300,33 @@ mod tests {
     }
 
     #[test]
-    fn a_sixty_fifth_request_evicts_the_oldest() {
+    fn an_in_flight_marker_is_never_evicted_to_make_room() {
+        let d = RequestDedupe::new();
+        // One request is still running. Its marker is what makes a retransmit a
+        // dropped duplicate instead of a second execution.
+        let running = 9_999u32;
+        assert!(matches!(d.admit(running), Admit::Fresh));
+
+        // Now flood the cache with completed answers, well past both caps.
+        let big = frags(1, 100 * 1024);
+        for id in 0..(DEDUPE_MAX_ENTRIES as u32 + 16) {
+            d.admit(id);
+            d.complete(id, &big);
+        }
+
+        // The in-flight marker survived, so a resend of that request is still
+        // refused. Before preferring completed records for eviction, the
+        // byte-cap loop would shed zero-byte in-flight markers that could never
+        // reduce the byte total, and this read Fresh — re-running the write.
+        assert!(
+            matches!(d.admit(running), Admit::Duplicate),
+            "an unfinished request must still be deduplicated after cache pressure"
+        );
+        assert!(d.lock().total_bytes() <= DEDUPE_MAX_BYTES);
+    }
+
+    #[test]
+    fn one_past_the_cap_evicts_the_oldest() {
         let d = RequestDedupe::new();
         for id in 0..DEDUPE_MAX_ENTRIES as u32 {
             assert!(matches!(d.admit(id), Admit::Fresh));
