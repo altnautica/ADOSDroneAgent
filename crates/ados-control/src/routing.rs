@@ -84,6 +84,10 @@ fn native_routes() -> Vec<NativeRoute> {
         // Operator cloud-export trigger: writes the push-request file the cloud
         // service consumes (a thin trigger; the response is the brief poll result).
         post("/api/logs/push"),
+        // The per-pair relay credential a ground station offers over the radio.
+        // Reachable over the relay on purpose: it is the only path to a drone
+        // paired by radio alone, and it must work before any credential exists.
+        post("/api/relay/peer-secret"),
         // Vision designate (operator click-to-follow).
         post("/api/vision/designate"),
         // Vision engine status: the registered-model read-back for the GCS hub.
@@ -537,7 +541,7 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            148,
+            149,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);

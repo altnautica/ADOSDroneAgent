@@ -321,8 +321,27 @@ impl AuxRpcProxy {
         path: &[u8],
         body: &[u8],
     ) -> Result<RpcResponseOwned, RpcError> {
+        self.call_with_ticket(target, method, path, body, &[]).await
+    }
+
+    /// As [`Self::call`], but carrying a per-pair relay ticket.
+    ///
+    /// An EMPTY ticket is byte-identical on the wire to [`Self::call`], so a
+    /// caller that has no credential for this drone -- or is talking to one
+    /// that predates the credential -- is indistinguishable from before. That
+    /// is what allows the ticket to be attached per-drone rather than needing a
+    /// fleet-wide flag day.
+    pub async fn call_with_ticket(
+        &self,
+        target: &[u8],
+        method: RpcMethod,
+        path: &[u8],
+        body: &[u8],
+        ticket: &[u8],
+    ) -> Result<RpcResponseOwned, RpcError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        self.call_with_id(id, target, method, path, body).await
+        self.call_with_id(id, target, method, path, body, ticket)
+            .await
     }
 
     async fn call_with_id(
@@ -332,9 +351,10 @@ impl AuxRpcProxy {
         method: RpcMethod,
         path: &[u8],
         body: &[u8],
+        ticket: &[u8],
     ) -> Result<RpcResponseOwned, RpcError> {
-        let payload =
-            aux_rpc::encode_request(method, id, target, path, body).ok_or(RpcError::Encode)?;
+        let payload = aux_rpc::encode_request_with_ticket(method, id, target, path, body, ticket)
+            .ok_or(RpcError::Encode)?;
         // An empty target is a broadcast, which any linked drone may answer,
         // so there is no single sender to hold its fragments to. A target that
         // is not UTF-8 is not a device id any drone will ever send back, and

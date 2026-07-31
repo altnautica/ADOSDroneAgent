@@ -58,6 +58,46 @@ const DRONE_CONFIG_PATH: &[u8] = b"/api/config";
 /// The config key holding a node's fleet slot.
 const FLEET_SLOT_KEY: &str = "video.wfb.fleet_slot";
 
+/// The drone-side route that accepts the per-pair relay secret.
+///
+/// A dedicated route rather than a config key: a credential written into the
+/// config file is a credential displayed by every surface that renders config
+/// and written by every path that logs it.
+const DRONE_RELAY_SECRET_PATH: &[u8] = b"/api/relay/peer-secret";
+
+/// One drone that should be told the secret its ground station issued it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecretDelivery {
+    pub device_id: String,
+    pub secret: String,
+}
+
+/// Which drones still need their relay secret.
+///
+/// Pure, like [`decide_tick`] beside it. `acknowledged` holds the device ids
+/// that have already confirmed the secret this ground station holds for them, so
+/// the steady state is silent -- a reconciler that restates a credential on
+/// every tick forever is a standing airtime cost and a standing exposure.
+///
+/// A registry entry with no secret is skipped rather than treated as an empty
+/// one. Those exist: the field is optional so an older registry loads, and such
+/// an entry is issued a secret the next time it is allocated, not here.
+pub fn decide_secret_tick(
+    slots: &[FleetSlot],
+    acknowledged: &std::collections::BTreeSet<String>,
+) -> Vec<SecretDelivery> {
+    slots
+        .iter()
+        .filter(|s| !acknowledged.contains(&s.device_id))
+        .filter_map(|s| {
+            s.relay_secret.as_ref().map(|secret| SecretDelivery {
+                device_id: s.device_id.clone(),
+                secret: secret.clone(),
+            })
+        })
+        .collect()
+}
+
 /// One drone that should be told its slot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlotAssignment {
@@ -85,16 +125,84 @@ pub fn decide_tick(slots: &[FleetSlot], confirmed: &BTreeMap<String, u8>) -> Vec
 /// answered with an error is retried rather than recorded as agreeing.
 pub async fn deliver(proxy: &Arc<AuxRpcProxy>, assignment: &SlotAssignment) -> Result<(), String> {
     let body = json!({ "key": FLEET_SLOT_KEY, "value": assignment.slot }).to_string();
+    let ticket = mint_ticket(&assignment.device_id);
     match proxy
-        .call(
+        .call_with_ticket(
             assignment.device_id.as_bytes(),
             RpcMethod::Put,
             DRONE_CONFIG_PATH,
             body.as_bytes(),
+            ticket.as_bytes(),
         )
         .await
     {
         Ok(resp) if (200..300).contains(&resp.status) => Ok(()),
+        Ok(resp) => Err(format!("drone answered HTTP {}", resp.status)),
+        Err(e) => Err(format!("{e}")),
+    }
+}
+
+/// Mint a relay ticket for `device_id` from the secret the registry holds.
+///
+/// Empty when this ground station has no secret for that drone, which encodes
+/// byte-identically to the request it always sent. That is the compatibility
+/// hinge: a drone running a build that predates the ticket field would refuse a
+/// frame carrying one, and this is what guarantees it never receives one.
+pub fn mint_ticket(device_id: &str) -> String {
+    let Some(secret) = registered_slots()
+        .into_iter()
+        .find(|s| s.device_id == device_id)
+        .and_then(|s| s.relay_secret)
+    else {
+        return String::new();
+    };
+    ados_protocol::relay_ticket::RelayTicketIssuer::from_secret(secret.as_bytes()).mint_at(
+        device_id,
+        ados_protocol::relay_ticket::DEFAULT_TTL_SECONDS,
+        now_unix_secs(),
+    )
+}
+
+/// Wall-clock unix seconds. The drone checks the ticket's expiry against its own
+/// wall clock, so the stamp has to come from the same kind of clock.
+fn now_unix_secs() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Offer one drone the relay secret its ground station issued it.
+///
+/// Sent WITHOUT a ticket, necessarily: the drone cannot verify one until it
+/// holds the secret this call is delivering. That is the trust-on-first-use
+/// window the scheme states plainly, and it is bounded by the drone's own
+/// first-write-wins rule -- a drone that already holds a secret answers 409 and
+/// keeps what it has.
+pub async fn deliver_secret(
+    proxy: &Arc<AuxRpcProxy>,
+    delivery: &SecretDelivery,
+) -> Result<(), String> {
+    let body = json!({ "secret": delivery.secret }).to_string();
+    match proxy
+        .call(
+            delivery.device_id.as_bytes(),
+            RpcMethod::Post,
+            DRONE_RELAY_SECRET_PATH,
+            body.as_bytes(),
+        )
+        .await
+    {
+        // 200 covers both "accepted" and "already held" -- the drone treats a
+        // restatement as a no-op, and so does this.
+        Ok(resp) if (200..300).contains(&resp.status) => Ok(()),
+        // 409 means the drone holds a DIFFERENT secret: it is paired to another
+        // ground station, or was and never unpaired. Retrying cannot fix it, so
+        // it is reported as settled rather than chased forever.
+        Ok(resp) if resp.status == 409 => {
+            Err("drone already holds a different relay secret; unpair it to re-key".to_string())
+        }
         Ok(resp) => Err(format!("drone answered HTTP {}", resp.status)),
         Err(e) => Err(format!("{e}")),
     }
@@ -111,9 +219,40 @@ pub async fn run_slot_reconciler(proxy: Arc<AuxRpcProxy>) {
     // strictly safer than trusting a persisted claim about a drone that may
     // have been re-flashed while we were down.
     let mut confirmed: BTreeMap<String, u8> = BTreeMap::new();
+    // Which drones have taken the relay secret. In memory for the same reason
+    // the slot acknowledgements are: on restart the ground station re-offers
+    // once, which the drone answers as already-held at no cost, and that is
+    // strictly safer than trusting a persisted claim about a drone that may have
+    // been re-flashed while we were down.
+    let mut secret_acked: std::collections::BTreeSet<String> = Default::default();
     loop {
         tick.tick().await;
         let slots = registered_slots();
+
+        // The secret goes first. Slot delivery now carries a ticket, and the
+        // drone cannot verify one until it holds the secret -- so offering the
+        // credential before the call that depends on it is what keeps the very
+        // first reconcile from being refused by the gate it just armed.
+        let present_ids: std::collections::BTreeSet<&str> =
+            slots.iter().map(|s| s.device_id.as_str()).collect();
+        secret_acked.retain(|device_id| present_ids.contains(device_id.as_str()));
+        for delivery in decide_secret_tick(&slots, &secret_acked) {
+            match deliver_secret(&proxy, &delivery).await {
+                Ok(()) => {
+                    tracing::info!(device_id = %delivery.device_id, "relay_secret_delivered");
+                    secret_acked.insert(delivery.device_id);
+                }
+                Err(e) => {
+                    // A drone that is off, rebooting or out of range is the
+                    // ordinary case this reconciler exists for.
+                    tracing::debug!(
+                        device_id = %delivery.device_id,
+                        error = %e,
+                        "relay_secret_delivery_deferred"
+                    );
+                }
+            }
+        }
         // A drone that left the fleet stops being tracked, so its slot can be
         // reissued to someone else without a stale acknowledgement suppressing
         // the delivery.
@@ -200,6 +339,52 @@ mod tests {
                 slot: 1
             }]
         );
+    }
+
+    fn slot_with_secret(device_id: &str, slot: u8, secret: &str) -> FleetSlot {
+        FleetSlot {
+            slot,
+            device_id: device_id.to_string(),
+            paired_at_ms: 0,
+            relay_secret: Some(secret.to_string()),
+        }
+    }
+
+    #[test]
+    fn a_drone_that_has_not_taken_the_secret_is_offered_it() {
+        let slots = vec![slot_with_secret("aaaa", 1, "ff")];
+        let got = decide_secret_tick(&slots, &Default::default());
+        assert_eq!(
+            got,
+            vec![SecretDelivery {
+                device_id: "aaaa".into(),
+                secret: "ff".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_credential_is_not_restated_forever() {
+        // A reconciler that re-offers a secret on every tick is both a standing
+        // airtime cost and a standing exposure, since the offer necessarily
+        // travels unauthenticated.
+        let slots = vec![slot_with_secret("aaaa", 1, "ff")];
+        let acked = std::collections::BTreeSet::from(["aaaa".to_string()]);
+        assert!(decide_secret_tick(&slots, &acked).is_empty());
+    }
+
+    #[test]
+    fn a_registration_with_no_secret_is_skipped_not_sent_an_empty_one() {
+        // The field is optional so an older registry loads; such an entry is
+        // issued a secret when it is next allocated, not handed an empty string.
+        let slots = vec![slot("aaaa", 1)];
+        assert!(decide_secret_tick(&slots, &Default::default()).is_empty());
+    }
+
+    #[test]
+    fn a_departed_drone_is_not_offered_a_credential() {
+        let acked = std::collections::BTreeSet::from(["ghost".to_string()]);
+        assert!(decide_secret_tick(&[], &acked).is_empty());
     }
 
     #[test]
