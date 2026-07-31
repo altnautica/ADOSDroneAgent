@@ -418,6 +418,7 @@ async fn run_direct(
         let aux_shutdown = aux_shutdown.clone();
         move |slot: u8| -> tokio::task::JoinHandle<()> {
             tokio::spawn(ados_groundlink::supervise_aux_consumer(
+                slot,
                 wfb_rx::aux_rx_port(slot),
                 mavlink_ingest.clone(),
                 aux_counters.clone(),

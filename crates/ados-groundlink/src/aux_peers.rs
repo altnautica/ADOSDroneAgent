@@ -124,11 +124,52 @@ fn seq_is_newer(candidate: u32, held: u32) -> bool {
 #[derive(Debug, Default, Clone)]
 pub struct AuxPeerCache {
     inner: Arc<Mutex<BTreeMap<String, PeerRecord>>>,
+    /// The MAVLink system id most recently seen on each fleet slot.
+    ///
+    /// Kept apart from the status-derived records above because it comes from a
+    /// different source with different evidence: a status frame is a node
+    /// describing itself, while this is read off the MAVLink header of traffic
+    /// that node's flight controller actually produced. Only the second can
+    /// answer whether two aircraft are addressable apart, which is the question
+    /// that matters here -- two flight controllers on one system id are ONE
+    /// vehicle to a ground station, and a command sent to that id is accepted by
+    /// both of them.
+    system_ids: Arc<Mutex<BTreeMap<u8, u8>>>,
 }
 
 impl AuxPeerCache {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Note the MAVLink system id seen on `slot`.
+    ///
+    /// Returns the set of OTHER slots already presenting the same id, so the
+    /// caller can report a collision the first time it becomes observable. It
+    /// returns rather than logs because the decision of how loudly to report
+    /// belongs to the consumer, which knows whether this is the first sighting.
+    pub fn observe_system_id(&self, slot: u8, system_id: u8) -> Vec<u8> {
+        let mut map = self.system_ids.lock().unwrap();
+        let previous = map.insert(slot, system_id);
+        // Nothing to say when this slot has not changed what it presents; the
+        // collision, if any, was already reported when it first appeared.
+        if previous == Some(system_id) {
+            return Vec::new();
+        }
+        map.iter()
+            .filter(|(other_slot, other_id)| **other_slot != slot && **other_id == system_id)
+            .map(|(other_slot, _)| *other_slot)
+            .collect()
+    }
+
+    /// Every slot's currently-observed MAVLink system id, in slot order.
+    pub fn system_ids_by_slot(&self) -> Vec<(u8, u8)> {
+        self.system_ids
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(s, i)| (*s, *i))
+            .collect()
     }
 
     /// Record a decoded status frame.
