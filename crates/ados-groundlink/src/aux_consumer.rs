@@ -788,6 +788,71 @@ mod tests {
         server.abort();
     }
 
+    /// A MAVLink v2 heartbeat with an explicit system id, so two drones can be
+    /// given the SAME one — which is the shipped default.
+    fn heartbeat_from(system_id: u8) -> Vec<u8> {
+        let mut f = heartbeat();
+        f[5] = system_id;
+        f
+    }
+
+    #[tokio::test]
+    async fn two_drones_on_the_default_system_id_are_indistinguishable_at_the_seam() {
+        // CHARACTERISATION, not an endorsement: this pins what the code does
+        // today so the gap is executable rather than prose.
+        //
+        // Every slot's consumer writes into ONE shared MavlinkIngest, and
+        // `send_frame` takes raw bytes with no producer identity. The slot IS
+        // known at the call site — each consumer binds `aux_rx_port(slot)` —
+        // but `dispatch` never receives it, so it is dropped before the send
+        // and the payload is forwarded verbatim.
+        //
+        // Two drones both on the shipped default system id 1 therefore arrive
+        // as one vehicle, and a command addressed to system id 1 is accepted by
+        // BOTH. That is the safety-relevant half.
+        //
+        // Fixing it means rewriting or tagging the system id here, which
+        // changes what every GCS and FC sees in both directions, so it is a
+        // product decision rather than a quiet patch.
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("mavlink-ingest.sock");
+        let (mut seam, server) = fake_seam(sock.clone());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let ingest = MavlinkIngest::new(&sock);
+        let counters = AuxCounters::new();
+        let mut gate = SeamGate::default();
+        let peers = AuxPeerCache::new();
+
+        // Slot 1 and slot 2, both on the default system id.
+        let from_slot_1 = heartbeat_from(1);
+        let from_slot_2 = heartbeat_from(1);
+
+        for frame in [&from_slot_1, &from_slot_2] {
+            let datagram = aux_mux::encode(AuxChannel::Mavlink, frame).unwrap();
+            dispatch(&datagram, &ingest, &counters, &mut gate, &peers, None).await;
+        }
+
+        let first = seam.recv().await.unwrap();
+        let second = seam.recv().await.unwrap();
+
+        assert_eq!(
+            first, second,
+            "two drones' frames are byte-identical at the seam, so nothing \
+             downstream can tell them apart"
+        );
+        assert_eq!(
+            first[5], 1,
+            "the system id is forwarded verbatim; no slot identity is applied"
+        );
+
+        // Both were republished, and the counters are fleet aggregates with no
+        // per-drone breakdown — so the collision is invisible in the numbers too.
+        let snap = counters.snapshot();
+        assert_eq!(snap.mavlink_republished, 2);
+        server.abort();
+    }
+
     #[tokio::test]
     async fn a_damaged_frame_of_ours_is_counted_as_damage_not_dropped_silently() {
         // Past the magic and version checks, so this is our frame arriving
