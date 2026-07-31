@@ -174,6 +174,23 @@ fn read_camera_state(path: &str, now: f64) -> Option<String> {
 /// liveness is flat, and `idle` when legs exist but none reported. An absent or
 /// stale sidecar reads as unknown, never as `stopped` — the producer does not
 /// know the pipeline stopped, only that nobody said otherwise.
+/// How many video legs the streams sidecar advertises, staleness-gated.
+///
+/// This is the only way a ground station learns that the drone it relays serves
+/// more than one camera: the radio carries no IP, so the ground node cannot ask.
+/// An absent or stale sidecar reads as `None` (unknown), never as one leg — a
+/// pod shipping two concurrent legs must not be reported as single-camera
+/// merely because nobody could read the file.
+fn read_video_leg_count(path: &str, now: f64) -> Option<u8> {
+    let doc: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    let updated = doc.get("updated_at_unix").and_then(Value::as_f64)?;
+    if updated <= 0.0 || now - updated > VIDEO_STREAMS_STALE_S {
+        return None;
+    }
+    let streams = doc.get("streams").and_then(Value::as_array)?;
+    u8::try_from(streams.len()).ok()
+}
+
 fn read_video_state(path: &str, now: f64) -> Option<String> {
     let doc: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
     let updated = doc.get("updated_at_unix").and_then(Value::as_f64)?;
@@ -226,6 +243,8 @@ struct Sample {
     enrichment: Value,
     camera: Option<String>,
     video: Option<String>,
+    /// How many video legs the node serves; `None` when unreadable.
+    video_legs: Option<u8>,
     board: (Option<String>, Option<String>, Option<u8>),
 }
 
@@ -237,6 +256,7 @@ fn gather(prev_cpu: &mut Option<CpuSample>, with_services: bool, now: f64) -> Sa
         enrichment: enrichment::build_native_enrichment_with(prev_cpu, with_services),
         camera: read_camera_state(CAMERA_STATE_SIDECAR, now),
         video: read_video_state(VIDEO_STREAMS_SIDECAR, now),
+        video_legs: read_video_leg_count(VIDEO_STREAMS_SIDECAR, now),
         board: read_board(BOARD_SIDECAR),
     }
 }
@@ -280,7 +300,11 @@ fn project(
             f32_of("diskPercent"),
             f32_of("temperature"),
         )
-        .with_payload(sample.camera.as_deref(), sample.video.as_deref());
+        .with_payload(
+            sample.camera.as_deref(),
+            sample.video.as_deref(),
+            sample.video_legs,
+        );
 
     if let Some(s) = services {
         status = status.with_services(s.running, s.failed, s.other, &s.failed_names);
@@ -506,6 +530,7 @@ mod tests {
             enrichment,
             camera: Some("ready".to_string()),
             video: Some("streaming".to_string()),
+            video_legs: Some(1),
             board: (
                 Some("rock-5c-lite".to_string()),
                 Some("rk3588s2".to_string()),
@@ -579,6 +604,7 @@ mod tests {
             enrichment: json!({}),
             camera: None,
             video: None,
+            video_legs: None,
             board: (None, None, None),
         };
         let s = project("abcdef123456", 1, 10, "1.2.3", &sample, None);
@@ -592,6 +618,44 @@ mod tests {
         // and identity signal even when every sensor read failed.
         assert_eq!(s.id, "abcdef123456");
         assert_eq!(s.sq, 1);
+    }
+
+    #[test]
+    fn the_video_leg_count_is_read_and_staleness_gated() {
+        // A ground station has no other way to learn this: the radio carries no
+        // IP, so it cannot ask the drone how many cameras it serves. Two legs
+        // must arrive as two, and a sidecar nobody is refreshing must read as
+        // unknown rather than keep asserting its last count.
+        let dir = tempfile::tempdir().unwrap();
+        let vid = dir.path().join("video-streams.json");
+        let now = 1_700_000_000.0;
+        std::fs::write(
+            &vid,
+            json!({"updated_at_unix": now, "streams": [
+                {"id": "main", "live": true},
+                {"id": "thermal", "live": true},
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(read_video_leg_count(vid.to_str().unwrap(), now), Some(2));
+        assert_eq!(
+            read_video_leg_count(vid.to_str().unwrap(), now + 120.0),
+            None
+        );
+        assert_eq!(
+            read_video_leg_count("/nonexistent/video-streams.json", now),
+            None
+        );
+
+        // A node serving nothing reports zero legs, which is a real answer and
+        // must not be confused with the unreadable case above.
+        std::fs::write(
+            &vid,
+            json!({"updated_at_unix": now, "streams": []}).to_string(),
+        )
+        .unwrap();
+        assert_eq!(read_video_leg_count(vid.to_str().unwrap(), now), Some(0));
     }
 
     #[test]

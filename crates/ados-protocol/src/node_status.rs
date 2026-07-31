@@ -259,6 +259,15 @@ pub struct NodeStatus {
     /// Video pipeline state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vs: Option<String>,
+    /// How many video legs the node is serving.
+    ///
+    /// A ground station relays a drone it cannot otherwise interrogate — the
+    /// radio carries no IP — so without this it cannot tell a single-camera
+    /// drone from a pod shipping two concurrent legs, and any surface that
+    /// needs to know has to assume. Absent means the drone did not say, which
+    /// is deliberately distinct from a reported `1`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vn: Option<u8>,
 }
 
 /// The fields a snapshot sheds, lowest value first, when it will not fit.
@@ -273,6 +282,7 @@ const TRIM_LADDER: &[fn(&mut NodeStatus)] = &[
     |s| {
         s.cs = None;
         s.vs = None;
+        s.vn = None;
     },
     |s| {
         s.bs = None;
@@ -373,9 +383,19 @@ impl NodeStatus {
     }
 
     /// Set the payload states, clipping each string.
-    pub fn with_payload(mut self, camera: Option<&str>, video: Option<&str>) -> Self {
+    ///
+    /// `video_legs` is how many video legs the node serves. `None` when the node
+    /// could not read its own stream list: a ground station reading this must
+    /// show "unknown", never assume one camera.
+    pub fn with_payload(
+        mut self,
+        camera: Option<&str>,
+        video: Option<&str>,
+        video_legs: Option<u8>,
+    ) -> Self {
         self.cs = clip_opt(camera, MAX_SHORT);
         self.vs = clip_opt(video, MAX_SHORT);
+        self.vn = video_legs;
         self
     }
 
@@ -439,7 +459,7 @@ mod tests {
             .with_fc(Some(true), Some(true), Some(&long), Some(&long))
             .with_services(u16::MAX, u16::MAX, u16::MAX, &names)
             .with_resources(Some(99.9), Some(99.9), Some(99.9), Some(99.9))
-            .with_payload(Some(&long), Some(&long))
+            .with_payload(Some(&long), Some(&long), Some(u8::MAX))
     }
 
     #[test]
@@ -501,7 +521,7 @@ mod tests {
             )
             .with_services(12, 1, 2, &["ados-video".to_string()])
             .with_resources(Some(12.5), Some(48.0), Some(31.2), Some(52.0))
-            .with_payload(Some("ready"), Some("streaming"));
+            .with_payload(Some("ready"), Some("streaming"), Some(2));
         let (bytes, trimmed) = s.encode().unwrap();
         assert_eq!(trimmed, 0);
         assert_eq!(NodeStatus::decode(&bytes).unwrap(), s);
@@ -517,13 +537,29 @@ mod tests {
             .with_fc(Some(true), Some(true), None, Some("ardupilot"))
             .with_services(14, 0, 3, &[])
             .with_resources(Some(12.5), Some(48.0), Some(31.2), Some(52.0))
-            .with_payload(Some("ready"), Some("streaming"));
+            .with_payload(Some("ready"), Some("streaming"), Some(2));
         let (bytes, _) = s.encode().unwrap();
         assert!(
             bytes.len() < AUX_MAX_PAYLOAD / 3,
             "realistic snapshot grew to {} bytes",
             bytes.len()
         );
+    }
+
+    #[test]
+    fn the_video_leg_count_crosses_the_lane_and_unknown_stays_unknown() {
+        // A ground station cannot reach a relayed drone over IP, so this frame
+        // is the only way it learns the drone serves more than one camera.
+        // Reporting two must survive the round trip, and a drone that could not
+        // read its own stream list must arrive as absent — not as a plausible
+        // `1`, which is what made a two-leg pod read as single-camera.
+        let two = NodeStatus::new("abcdef123456", 1).with_payload(None, None, Some(2));
+        let back = NodeStatus::decode(&two.encode().unwrap().0).unwrap();
+        assert_eq!(back.vn, Some(2));
+
+        let unknown = NodeStatus::new("abcdef123456", 1).with_payload(None, None, None);
+        let back = NodeStatus::decode(&unknown.encode().unwrap().0).unwrap();
+        assert_eq!(back.vn, None, "unknown must not decode as a count");
     }
 
     #[test]

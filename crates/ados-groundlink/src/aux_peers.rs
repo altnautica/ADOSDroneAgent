@@ -301,6 +301,7 @@ fn expand_status(s: &NodeStatus) -> Value {
     put("temperature_c", json!(s.tc));
     put("camera_state", json!(s.cs));
     put("video_state", json!(s.vs));
+    put("video_stream_count", json!(s.vn));
     Value::Object(m)
 }
 
@@ -342,6 +343,22 @@ mod tests {
         NodeStatus::new(id, seq)
             .with_resources(Some(12.5), None, None, None)
             .with_services(4, 1, 0, &["ados-vision".to_string()])
+    }
+
+    #[test]
+    fn the_video_leg_count_reaches_the_sidecar_and_absent_stays_absent() {
+        // The ground station's camera surfaces read this file, and it is the
+        // only place the count exists on this side of the radio. A drone that
+        // reported nothing must leave the key OUT, so a reader shows unknown
+        // rather than inferring a single camera from a missing field.
+        let reported = expand_status(&status("drone-a", 1).with_payload(None, None, Some(2)));
+        assert_eq!(reported["video_stream_count"], 2);
+
+        let silent = expand_status(&status("drone-a", 1).with_payload(None, None, None));
+        assert!(
+            silent.get("video_stream_count").is_none(),
+            "an unreported count must be absent, not a value"
+        );
     }
 
     #[test]

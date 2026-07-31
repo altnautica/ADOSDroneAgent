@@ -8,18 +8,29 @@
 //!
 //! - **`POST /api/v1/ground-station/camera/switch`** — `{camera_id}`.
 //!   Returns `{camera_id, accepted, reason}` on a multi-camera drone; a
-//!   single-camera (or unspecified) drone is a `501`; a malformed/out-of-range
+//!   single-camera drone, or one whose camera count this station cannot
+//!   establish, is a `501` naming which of those it is; a malformed/out-of-range
 //!   id is a `400`; an unreachable MAVLink IPC bus is a `503`.
 //!
-//! ## The live path is the 501
+//! ## Where the camera count comes from
 //!
-//! The paired drone's camera count is not yet wired into its heartbeat, so the
-//! count is fixed at 1 (single-camera) — the exact constant the FastAPI
-//! `_paired_drone_camera_count` returns. So the live behaviour is the `501`
-//! ("drone does not advertise multi-camera support"), which the GCS surfaces as
-//! "not supported by this drone". The full switch path (build the 534 frame +
-//! send it) is reproduced below so the route is byte-faithful the day the count
-//! source is wired in; only the constant changes, not the route.
+//! The radio carries no IP, so a ground station cannot ask the drone it relays
+//! anything. The drone therefore PUSHES its video-leg count up the auxiliary
+//! lane on its status frame, and the groundlink daemon lands it in the
+//! relayed-status sidecar; this route reads it from there.
+//!
+//! It used to be a hardcoded `1`, which made the route answer `501` on every
+//! request ever made to it — including from a drone flying an optical pod with
+//! two concurrent legs, which was told its second camera did not exist. The
+//! three outcomes are now distinguished, because "this drone has one camera"
+//! and "this station does not know how many cameras that drone has" call for
+//! different things from the operator:
+//!
+//! * a relayed drone reporting more than one leg → the switch is dispatched;
+//! * a relayed drone reporting exactly one leg → `501`, single-camera;
+//! * nothing relayed, no count reported, or more than one drone relayed (the
+//!   request names none, so there is no way to tell which one it means) →
+//!   `501` saying the count is unknown and why.
 //!
 //! ## The frame source + target identity
 //!
@@ -68,11 +79,26 @@ const SOURCE_COMPONENT_ID: u8 = 190;
 const TARGET_SYSTEM: u8 = 1;
 const TARGET_COMPONENT: u8 = 1;
 
-/// The number of cameras the paired drone advertises. Fixed at 1 (single-camera)
-/// — the drone agent does not yet publish a camera count into its heartbeat, so
-/// this mirrors the FastAPI `_paired_drone_camera_count` constant. When the count
-/// source is wired in, only this changes; the `501`-vs-`200` decision keys on it.
-const PAIRED_DRONE_CAMERA_COUNT: u32 = 1;
+/// How stale the relayed-status sidecar may be before its contents stop counting
+/// as current.
+///
+/// The groundlink daemon rewrites it every [`ados_groundlink::aux_peers::PERSIST_CADENCE`]
+/// (2 s). A file that has stopped being rewritten means that daemon is gone, and
+/// its last contents describe a fleet that may no longer be there — so past this
+/// window the count reads as unknown rather than as its last value.
+const RELAYED_STATUS_STALE_S: f64 = 20.0;
+
+/// What this ground station can say about the camera count of the drone it
+/// relays.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CameraCount {
+    /// One relayed drone reported how many video legs it serves.
+    Known(u32),
+    /// The count could not be established, for the stated reason. Carried as
+    /// text because the operator's next move differs per reason and a bare
+    /// "unsupported" hides which one it was.
+    Unknown(&'static str),
+}
 
 /// The `POST .../camera/switch` request body. Mirrors the FastAPI
 /// `CameraSwitchRequest`: a required `camera_id` (1..=32 chars). The valid form
@@ -100,22 +126,29 @@ pub async fn post_camera_switch(
         return profile_mismatch();
     }
 
-    let count = PAIRED_DRONE_CAMERA_COUNT;
-    if count <= 1 {
-        // The live path: a single-camera (or unspecified) drone. The FastAPI
-        // route raises a 501 with a BARE-STRING detail here (not an error
-        // object), which the GCS surfaces as "not supported by this drone".
-        tracing::info!(
-            camera_count = count,
-            requested = %req.camera_id,
-            "camera switch unsupported"
-        );
-        return (
-            StatusCode::NOT_IMPLEMENTED,
-            Json(json!("drone does not advertise multi-camera support")),
-        )
-            .into_response();
-    }
+    let count = match resolve_camera_count() {
+        CameraCount::Known(n) if n > 1 => n,
+        CameraCount::Known(n) => {
+            // A drone that told us it serves one leg. This is a real answer, not
+            // a default, so it keeps the historical wording.
+            tracing::info!(
+                camera_count = n,
+                requested = %req.camera_id,
+                "camera switch unsupported"
+            );
+            return unsupported("drone does not advertise multi-camera support");
+        }
+        CameraCount::Unknown(why) => {
+            // Not the same thing as a single-camera drone: nobody said. Say so,
+            // rather than reporting the drone as having one camera.
+            tracing::info!(
+                reason = why,
+                requested = %req.camera_id,
+                "camera switch camera count unknown"
+            );
+            return unsupported(why);
+        }
+    };
 
     // Resolve the ground-side id to a 1-based MAVLink source index; a malformed
     // or out-of-range id is the FastAPI 400 with the error-object detail.
@@ -149,6 +182,90 @@ pub async fn post_camera_switch(
     // The CameraSwitchResponse: accepted, no reason.
     Json(json!({"camera_id": req.camera_id, "accepted": true, "reason": Value::Null}))
         .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// The relayed drone's camera count.
+// ---------------------------------------------------------------------------
+
+/// The relayed-status sidecar the groundlink daemon writes
+/// (`/run/ados/relayed-status.json`), honouring `ADOS_RUN_DIR`.
+fn relayed_status_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(
+        std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string()),
+    )
+    .join(ados_groundlink::aux_peers::AUX_PEERS_SIDECAR)
+}
+
+/// Resolve the camera count of the drone this station relays.
+fn resolve_camera_count() -> CameraCount {
+    let Ok(text) = std::fs::read_to_string(relayed_status_path()) else {
+        return CameraCount::Unknown(
+            "no drone is relayed over the radio link, so its camera count is unknown",
+        );
+    };
+    camera_count_from_sidecar(&text, now_unix())
+}
+
+/// The pure core: resolve the count from a relayed-status document at a given
+/// wall clock. Split out so every branch is testable without a live daemon.
+fn camera_count_from_sidecar(text: &str, now: f64) -> CameraCount {
+    let Ok(doc) = serde_json::from_str::<Value>(text) else {
+        return CameraCount::Unknown(
+            "the relayed-drone status file could not be read, so the camera count is unknown",
+        );
+    };
+    // A file nobody is rewriting describes a fleet that may no longer be there.
+    let written = doc
+        .get("wall_time_unix")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    if written <= 0.0 || now - written > RELAYED_STATUS_STALE_S {
+        return CameraCount::Unknown(
+            "the relayed-drone status is stale, so the camera count is unknown",
+        );
+    }
+    let peers = doc.get("peers").and_then(Value::as_array);
+    let counts: Vec<u32> = peers
+        .map(|list| {
+            list.iter()
+                .filter_map(|p| {
+                    // `peers_payload` omits the status block entirely once it
+                    // goes stale, so a count found here is a current one.
+                    p.get("status")?
+                        .get("video_stream_count")?
+                        .as_u64()
+                        .and_then(|n| u32::try_from(n).ok())
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    match counts.len() {
+        0 => CameraCount::Unknown(
+            "the relayed drone has not reported how many cameras it serves, so the camera count is unknown",
+        ),
+        1 => CameraCount::Known(counts[0]),
+        // The request names no drone and the command targets one autopilot, so
+        // with several relayed there is no way to tell which one it means.
+        // Guessing would switch the wrong aircraft's camera.
+        _ => CameraCount::Unknown(
+            "more than one drone is relayed and this request names none, so the camera count is unknown",
+        ),
+    }
+}
+
+fn now_unix() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+/// The `501`, carrying a bare-string detail (not an error object) — the shape
+/// the GCS renders verbatim as the reason the switch is unavailable.
+fn unsupported(reason: &str) -> Response {
+    (StatusCode::NOT_IMPLEMENTED, Json(json!(reason))).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -398,11 +515,98 @@ mod tests {
         );
     }
 
+    // ── the relayed drone's camera count ─────────────────────────────────────
+
+    /// A relayed-status document with one peer reporting `legs` video legs.
+    fn sidecar_with_legs(legs: u64, now: f64) -> String {
+        json!({
+            "version": 1,
+            "wall_time_unix": now,
+            "peers": [{
+                "device_id": "abcdef123456",
+                "status_fresh": true,
+                "status": {"camera_state": "ready", "video_stream_count": legs},
+            }],
+        })
+        .to_string()
+    }
+
     #[test]
-    fn the_live_count_is_one_so_the_live_path_is_the_501() {
-        // The count is the single-camera constant the FastAPI route returns, so
-        // the live behaviour is the 501. This pins the constant so a change to it
-        // is a deliberate edit (the day the heartbeat carries a camera count).
-        assert_eq!(PAIRED_DRONE_CAMERA_COUNT, 1);
+    fn a_two_leg_drone_is_reported_as_multi_camera() {
+        // The defect this closes: the count was a hardcoded 1, so a drone flying
+        // a pod with two concurrent legs was told its cameras did not exist and
+        // the switch route answered 501 to every request ever made to it.
+        assert_eq!(
+            camera_count_from_sidecar(&sidecar_with_legs(2, 1000.0), 1000.0),
+            CameraCount::Known(2)
+        );
+    }
+
+    #[test]
+    fn a_single_leg_drone_is_a_real_answer_not_a_default() {
+        assert_eq!(
+            camera_count_from_sidecar(&sidecar_with_legs(1, 1000.0), 1000.0),
+            CameraCount::Known(1)
+        );
+    }
+
+    #[test]
+    fn an_unknown_count_is_never_reported_as_one_camera() {
+        // The three ways the count is genuinely unknown. Each must say so —
+        // collapsing them into "this drone has one camera" is the fabrication.
+        let unreadable = camera_count_from_sidecar("{not json", 1000.0);
+        let stale = camera_count_from_sidecar(&sidecar_with_legs(2, 100.0), 1000.0);
+        let silent = camera_count_from_sidecar(
+            &json!({"wall_time_unix": 1000.0, "peers": [{"device_id": "a", "status": {}}]})
+                .to_string(),
+            1000.0,
+        );
+        for got in [&unreadable, &stale, &silent] {
+            match got {
+                CameraCount::Unknown(why) => assert!(
+                    why.contains("unknown"),
+                    "the reason must say the count is unknown: {why}"
+                ),
+                CameraCount::Known(n) => panic!("unknown count reported as {n} cameras"),
+            }
+        }
+        // And specifically: a stale file must not keep serving its last count.
+        assert!(matches!(stale, CameraCount::Unknown(_)));
+    }
+
+    #[test]
+    fn no_relayed_peer_is_unknown_not_single_camera() {
+        let empty = json!({"wall_time_unix": 1000.0, "peers": []}).to_string();
+        assert!(matches!(
+            camera_count_from_sidecar(&empty, 1000.0),
+            CameraCount::Unknown(_)
+        ));
+    }
+
+    #[test]
+    fn several_relayed_drones_refuse_rather_than_guess_which_one() {
+        // The command targets one autopilot and the request names no drone, so
+        // picking one would switch the wrong aircraft's camera.
+        let two = json!({
+            "wall_time_unix": 1000.0,
+            "peers": [
+                {"device_id": "a", "status": {"video_stream_count": 2}},
+                {"device_id": "b", "status": {"video_stream_count": 3}},
+            ],
+        })
+        .to_string();
+        match camera_count_from_sidecar(&two, 1000.0) {
+            CameraCount::Unknown(why) => assert!(why.contains("more than one drone")),
+            CameraCount::Known(n) => panic!("guessed {n} cameras across two drones"),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_unknown_501_still_carries_a_bare_string_detail() {
+        // The GCS renders the detail verbatim, so the reason has to survive as a
+        // bare string exactly like the single-camera one.
+        let resp = unsupported("the relayed drone has not reported ... camera count is unknown");
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        assert!(body_json(resp).await.is_string());
     }
 }
