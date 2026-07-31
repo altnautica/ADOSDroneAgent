@@ -1147,6 +1147,7 @@ from ados.cli.plugin import plugin_group  # noqa: E402
 from ados.cli.profile import profile_group  # noqa: E402
 from ados.cli.radio import radio_group  # noqa: E402
 from ados.cli.rust import rust_group  # noqa: E402
+from ados.cli.support import support_bundle  # noqa: E402
 
 # Primitive operator commands stay on the primary help surface. The advanced
 # groups keep working (log RCA, service toggles, plugins, …) but are hidden so
@@ -1155,6 +1156,7 @@ cli.add_command(pair)
 cli.add_command(unpair)
 cli.add_command(help_command)
 cli.add_command(logs_group)
+cli.add_command(support_bundle)
 
 for _group in (
     diag_group,

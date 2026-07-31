@@ -20,6 +20,7 @@ _PRIMARY: list[tuple[str, str]] = [
     ("ados update", "update the agent"),
     ("ados uninstall", "remove the agent"),
     ("ados logs", "view agent logs"),
+    ("ados support-bundle", "collect one redacted archive for a support request"),
     ("ados help", "show this overview"),
 ]
 
