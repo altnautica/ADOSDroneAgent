@@ -70,9 +70,20 @@ pub struct FleetRegistry {
 
 impl FleetRegistry {
     /// Read the registry from `path`. A missing file is an empty fleet (the
-    /// pre-first-pair state); so is an unparseable one — a corrupt registry must
-    /// not wedge the ground station into refusing every pair, and the next
-    /// successful [`persist`](Self::persist) rewrites it cleanly.
+    /// pre-first-pair state).
+    ///
+    /// An unparseable one also starts empty — a corrupt registry must not wedge
+    /// the ground station into refusing every pair — but it is QUARANTINED
+    /// first, because starting empty alone was quietly destructive. The next
+    /// successful [`persist`](Self::persist) rewrites the file, so every other
+    /// drone's slot assignment was gone and those slots were free to be issued
+    /// again to different devices. Two drones on one slot share a `channel_id`
+    /// and thrash each other's FEC decoder, which is the precise failure the
+    /// slot registry exists to prevent, and it would have arrived with only a
+    /// warning in the log to explain it.
+    ///
+    /// Moving the file aside keeps the assignments recoverable by hand and
+    /// leaves evidence that outlives the log.
     pub fn load(path: &Path) -> Self {
         let Ok(body) = std::fs::read(path) else {
             return Self::default();
@@ -80,10 +91,12 @@ impl FleetRegistry {
         match serde_json::from_slice::<Self>(&body) {
             Ok(reg) => reg,
             Err(e) => {
-                tracing::warn!(
+                let quarantined = quarantine(path);
+                tracing::error!(
                     path = %path.display(),
                     error = %e,
-                    "fleet_registry_unparseable_starting_empty"
+                    quarantined = quarantined.as_deref().unwrap_or("FAILED"),
+                    "fleet_registry_unparseable_quarantined_starting_empty"
                 );
                 Self::default()
             }
@@ -153,15 +166,60 @@ impl FleetRegistry {
     /// the parent directory if needed. Blocking disk I/O — call from a
     /// synchronous context, never directly on the reactor.
     pub fn persist(&self, path: &Path) -> std::io::Result<()> {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let body = serde_json::to_vec_pretty(self).map_err(std::io::Error::other)?;
         let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, &body)?;
+        // 0600, like every other file this agent writes that describes who is
+        // paired with whom. It landed 0644 because the mode was never set —
+        // world-readable, and the registry is where per-device relay
+        // credentials are due to live. Setting it now means that arrives on a
+        // file that is already private rather than needing to be remembered
+        // later.
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp)?;
+            f.write_all(&body)?;
+            f.sync_all()?;
+        }
+        // An existing temp file keeps its original mode through `open`, so set
+        // it explicitly rather than trusting the create-time mode.
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
         std::fs::rename(&tmp, path)?;
         Ok(())
     }
+}
+
+/// Move an unparseable registry aside, returning where it went.
+///
+/// Never clobbers an earlier quarantine: repeated corruption is exactly when
+/// the OLDEST copy is the one most likely to still hold the real assignments,
+/// so a suffix is added until a free name is found. Best-effort — a failure
+/// here must not stop the ground station coming up, and the caller reports it.
+fn quarantine(path: &Path) -> Option<String> {
+    for n in 0..100 {
+        let candidate = if n == 0 {
+            path.with_extension("json.corrupt")
+        } else {
+            path.with_extension(format!("json.corrupt.{n}"))
+        };
+        if candidate.exists() {
+            continue;
+        }
+        return match std::fs::rename(path, &candidate) {
+            Ok(()) => Some(candidate.display().to_string()),
+            Err(_) => None,
+        };
+    }
+    None
 }
 
 /// Wall clock as integer unix milliseconds. See [`FleetSlot::paired_at_ms`] for
@@ -176,6 +234,131 @@ fn now_unix_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tmpdir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("ados-fleet-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn the_persisted_registry_is_not_world_readable() {
+        // It landed 0644 because the mode was never set. The registry records
+        // who is paired with whom, and is where per-device relay credentials
+        // are due to live.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmpdir("mode");
+        let path = dir.join("fleet.json");
+        let mut reg = FleetRegistry::default();
+        reg.allocate("drone-a");
+        reg.persist(&path).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the fleet registry must not be world-readable");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rewriting_over_a_stale_temp_file_still_lands_private() {
+        // `open` on an existing file keeps its original mode, so a leftover
+        // world-readable temp from an older build must not survive into the
+        // renamed registry.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmpdir("mode-stale");
+        let path = dir.join("fleet.json");
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, b"stale").unwrap();
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let mut reg = FleetRegistry::default();
+        reg.allocate("drone-a");
+        reg.persist(&path).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_corrupt_registry_is_quarantined_rather_than_overwritten() {
+        // Starting empty on a parse failure is right — a corrupt registry must
+        // not wedge the ground station into refusing every pair — but the next
+        // persist then rewrote the file, so every drone's slot was gone and
+        // those slots were free to reissue to different devices. Two drones on
+        // one slot share a channel_id and thrash each other's FEC decoder,
+        // which is the exact failure this registry exists to prevent.
+        let dir = tmpdir("corrupt");
+        let path = dir.join("fleet.json");
+        std::fs::write(&path, b"{ this is not json").unwrap();
+
+        let reg = FleetRegistry::load(&path);
+        assert!(reg.is_empty(), "a corrupt registry starts empty");
+
+        let quarantined = dir.join("fleet.json.corrupt");
+        assert!(
+            quarantined.exists(),
+            "the unreadable registry must be kept, not left to be overwritten"
+        );
+        assert_eq!(
+            std::fs::read(&quarantined).unwrap(),
+            b"{ this is not json",
+            "the quarantined copy must be the original bytes"
+        );
+        assert!(
+            !path.exists(),
+            "the corrupt file is moved aside, not copied"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn repeated_corruption_never_clobbers_an_earlier_quarantine() {
+        // Repeated corruption is exactly when the OLDEST copy is most likely to
+        // still hold the real assignments.
+        let dir = tmpdir("corrupt-twice");
+        let path = dir.join("fleet.json");
+
+        std::fs::write(&path, b"first corrupt").unwrap();
+        let _ = FleetRegistry::load(&path);
+        std::fs::write(&path, b"second corrupt").unwrap();
+        let _ = FleetRegistry::load(&path);
+
+        assert_eq!(
+            std::fs::read(dir.join("fleet.json.corrupt")).unwrap(),
+            b"first corrupt",
+            "the first quarantine must survive the second"
+        );
+        assert_eq!(
+            std::fs::read(dir.join("fleet.json.corrupt.1")).unwrap(),
+            b"second corrupt"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_valid_registry_is_never_quarantined() {
+        let dir = tmpdir("valid");
+        let path = dir.join("fleet.json");
+        let mut reg = FleetRegistry::default();
+        reg.allocate("drone-a");
+        reg.persist(&path).unwrap();
+
+        let back = FleetRegistry::load(&path);
+        assert_eq!(back.len(), 1);
+        assert!(path.exists(), "a good registry stays where it was");
+        assert!(!dir.join("fleet.json.corrupt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_registry_is_the_pre_pair_state_not_a_corruption() {
+        let dir = tmpdir("missing");
+        let reg = FleetRegistry::load(&dir.join("fleet.json"));
+        assert!(reg.is_empty());
+        assert!(!dir.join("fleet.json.corrupt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn allocation_hands_out_the_lowest_free_slot_from_one() {
