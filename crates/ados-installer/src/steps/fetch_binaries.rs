@@ -232,41 +232,93 @@ fn install_service(
 /// handle it instead of this probe silently swallowing an unrelated fault.
 fn binary_execs_on_this_host(path: &Path) -> bool {
     use std::io::Read;
-    use std::process::{Command, Stdio};
+    use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
 
-    let mut child = match Command::new(path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(_) => return true,
+    /// How long the loader is given to reach a verdict. A rejection happens
+    /// before the program's own code runs, so this only has to cover process
+    /// creation — but it is deliberately generous, because the cost of being
+    /// too tight is not a slow probe, it is a WRONG one: a deadline that
+    /// elapses during an ordinary fork on a loaded machine reads as "runs".
+    const VERDICT_DEADLINE: Duration = Duration::from_secs(2);
+    /// `ETXTBSY` on both Linux and macOS.
+    const ETXTBSY: i32 = 26;
+    const BUSY_RETRIES: u32 = 10;
+    const BUSY_BACKOFF: Duration = Duration::from_millis(20);
+
+    // A binary written moments ago can refuse to exec with ETXTBSY while any
+    // descriptor still holds it open for writing — including one this process
+    // never opened, since a concurrent fork inherits every open descriptor in
+    // the program. That is a timing artefact, not a loader verdict, so retry it
+    // rather than reading it as "runs" (which would skip the very check this
+    // function exists to perform).
+    let mut spawned: Option<Child> = None;
+    for _ in 0..BUSY_RETRIES {
+        match Command::new(path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(c) => {
+                spawned = Some(c);
+                break;
+            }
+            Err(e) if e.raw_os_error() == Some(ETXTBSY) => {
+                std::thread::sleep(BUSY_BACKOFF);
+            }
+            // Any other spawn failure is not what this probes for; leave it to
+            // the caller's retry loop and Hard/BestEffort gate.
+            Err(_) => return true,
+        }
+    }
+    let Some(mut child) = spawned else {
+        return true;
     };
 
-    let deadline = Instant::now() + Duration::from_millis(400);
-    loop {
+    // Drain stderr on its own thread rather than after the process is reaped.
+    // Reading only once `try_wait` reports an exit deadlocks whenever the
+    // rejection message fills the pipe buffer: the child blocks on write, so it
+    // never exits, so nothing ever drains it — and the probe then hits its
+    // deadline and reports the rejected binary as runnable.
+    let stderr_reader = child.stderr.take().map(|mut s| {
+        std::thread::spawn(move || {
+            let mut buf = String::new();
+            // A read error keeps whatever arrived before it. An empty buffer
+            // reads as "no rejection", which is the honest default: absence of
+            // evidence, not evidence of rejection.
+            let _ = s.read_to_string(&mut buf);
+            buf
+        })
+    });
+
+    let deadline = Instant::now() + VERDICT_DEADLINE;
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(status)) => {
-                let mut stderr = String::new();
-                if let Some(mut s) = child.stderr.take() {
-                    let _ = s.read_to_string(&mut stderr);
-                }
-                let linker_rejected = !status.success() && stderr.contains("GLIBC_");
-                return !linker_rejected;
-            }
+            Ok(Some(status)) => break Some(status),
             Ok(None) => {
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    // Still running past the deadline: the loader accepted it.
-                    return true;
+                    break None;
                 }
-                std::thread::sleep(Duration::from_millis(20));
+                std::thread::sleep(Duration::from_millis(10));
             }
             Err(_) => return true,
         }
+    };
+
+    // Either the child exited or we killed it; both close the pipe, so the
+    // reader has finished and this join cannot hang.
+    let stderr = stderr_reader
+        .and_then(|h| h.join().ok())
+        .unwrap_or_default();
+
+    match status {
+        // Exited nonzero carrying a loader complaint: the rejection we probe for.
+        Some(status) => !(!status.success() && stderr.contains("GLIBC_")),
+        // Still alive at the deadline: the loader accepted it.
+        None => true,
     }
 }
 
@@ -523,6 +575,28 @@ mod tests {
     fn write_script(path: &Path, body: &str) {
         std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
         set_executable(path).unwrap();
+    }
+
+    #[test]
+    fn exec_probe_detects_a_rejection_that_fills_the_stderr_pipe() {
+        // A loader complaint big enough to fill the ~64 KiB pipe buffer. Reading
+        // stderr only after the process is reaped deadlocks here: the child
+        // blocks writing, so it never exits, so nothing drains the pipe, so the
+        // probe times out and calls a rejected binary runnable. Draining on a
+        // separate thread is what makes this terminate at all.
+        let dir = tempdir().unwrap();
+        let script = dir.join("fake-chatty-vision");
+        write_script(
+            &script,
+            "printf '%s\\n' \"fake-chatty-vision: /lib/libc.so.6: version GLIBC_2.34 not found\" >&2\n\
+             i=0\n\
+             while [ $i -lt 2000 ]; do printf '%s\\n' \"padding line to fill the pipe buffer\" >&2; i=$((i+1)); done\n\
+             exit 1",
+        );
+        assert!(
+            !binary_execs_on_this_host(&script),
+            "a rejection must be detected even when the message fills the pipe"
+        );
     }
 
     #[test]
