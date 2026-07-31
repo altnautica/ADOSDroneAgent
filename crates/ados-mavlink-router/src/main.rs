@@ -23,6 +23,7 @@ use ados_mavlink_router::aux_uplink;
 use ados_mavlink_router::aux_uplink_consumer::{self, AuxUplinkConsumerCounters};
 use ados_mavlink_router::config::MavlinkConfig;
 use ados_mavlink_router::connection::swarm_setpoint::{self, SwarmSetpointStatus};
+use ados_mavlink_router::connection::ClientOrigin;
 use ados_mavlink_router::connection::FcConnection;
 use ados_mavlink_router::frame_ingest::{self, IngestCounters, INGEST_QUEUE_DEPTH};
 use ados_mavlink_router::param_cache::ParamCache;
@@ -446,7 +447,12 @@ async fn main() {
             loop {
                 tokio::select! {
                     cmd = inbound.recv() => match cmd {
-                        Some(data) => fc.send_client_bytes(&data).await,
+                        // The on-box IPC socket is not reachable off the node,
+                        // so a caller here has already crossed a boundary the
+                        // raw network sockets do not have.
+                        Some(data) => {
+                            fc.send_client_bytes(&data, ClientOrigin::Trusted).await
+                        }
                         None => break,
                     },
                     _ = cancel.notified() => break,

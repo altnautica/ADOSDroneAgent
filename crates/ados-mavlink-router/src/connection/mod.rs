@@ -41,6 +41,7 @@
 
 mod framing;
 mod send_scheduler;
+pub use send_scheduler::ClientOrigin;
 pub mod swarm_setpoint;
 mod transport;
 

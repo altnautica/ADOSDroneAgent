@@ -32,7 +32,7 @@ use tokio_tungstenite::tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL;
 use tokio_tungstenite::tungstenite::http::{HeaderValue, StatusCode};
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::connection::FcConnection;
+use crate::connection::{ClientOrigin, FcConnection};
 
 /// The data-path auth header a paired GCS presents to the direct WebSocket
 /// proxy, matching the HTTP control surface's `X-ADOS-Key`.
@@ -256,6 +256,18 @@ const UDP_MAX_PEERS: usize = 64;
 /// on it: the agent advertises `tcp://<lan-host>:5760` for QGroundControl and
 /// Mission Planner, so a loopback default would silently break a capability an
 /// operator was told they had.
+/// Map an access decision to the provenance the send path records.
+///
+/// Deliberately not a permission: the byte path is unchanged either way. It
+/// exists so the one fallback that radiates a client's bytes to a remote
+/// aircraft can say when the client was anonymous.
+fn origin_of(access: Access) -> ClientOrigin {
+    match access {
+        Access::Accept => ClientOrigin::Trusted,
+        Access::Unauthorized => ClientOrigin::Unauthenticated,
+    }
+}
+
 pub const DEFAULT_PROXY_BIND_ADDR: &str = "0.0.0.0";
 
 /// The address the direct-GCS proxies bind, from `ADOS_MAVLINK_BIND_ADDR`.
@@ -312,7 +324,8 @@ pub async fn run_tcp_proxy(
                             "tcp_proxy_unauthorized"
                         );
                     }
-                    tokio::spawn(handle_tcp_client(fc.clone(), stream));
+                    let origin = origin_of(access);
+                    tokio::spawn(handle_tcp_client(fc.clone(), stream, origin));
                 }
             }
             _ = cancel.notified() => return,
@@ -320,7 +333,11 @@ pub async fn run_tcp_proxy(
     }
 }
 
-async fn handle_tcp_client(fc: Arc<FcConnection>, stream: tokio::net::TcpStream) {
+async fn handle_tcp_client(
+    fc: Arc<FcConnection>,
+    stream: tokio::net::TcpStream,
+    origin: ClientOrigin,
+) {
     let (mut rd, mut wr) = stream.into_split();
     let mut rx = fc.subscribe();
     let mut raw_rx = fc.subscribe_raw();
@@ -354,7 +371,7 @@ async fn handle_tcp_client(fc: Arc<FcConnection>, stream: tokio::net::TcpStream)
     loop {
         match rd.read(&mut buf).await {
             Ok(0) | Err(_) => break,
-            Ok(n) => fc.send_client_bytes(&buf[..n]).await,
+            Ok(n) => fc.send_client_bytes(&buf[..n], origin).await,
         }
     }
     writer.abort();
@@ -448,7 +465,7 @@ pub async fn run_udp_proxy(
                         // drop the least-recently-seen entries.
                         cap_peers(&mut map, UDP_MAX_PEERS);
                     }
-                    fc.send_client_bytes(&buf[..n]).await;
+                    fc.send_client_bytes(&buf[..n], origin_of(access)).await;
                 }
             }
             _ = cancel.notified() => {
@@ -587,7 +604,11 @@ async fn handle_ws_client(
     // Surface the posture decision regardless of admit/reject, so the
     // observe-only stage produces the same audit signal a bench session uses
     // before flipping enforcement on.
+    // Carried into the send path so the relay fallback can record when the
+    // bytes it radiates came from a caller that did not clear the gate.
+    let mut ws_origin = ClientOrigin::Trusted;
     if let Some(d) = decision.lock().unwrap_or_else(|p| p.into_inner()).take() {
+        ws_origin = origin_of(d.access);
         if d.access == Access::Unauthorized {
             tracing::warn!(
                 peer = %peer,
@@ -635,7 +656,7 @@ async fn handle_ws_client(
     // client -> FC (binary frames only; ignore text/ping/pong).
     while let Some(msg) = read.next().await {
         match msg {
-            Ok(Message::Binary(data)) => fc.send_client_bytes(&data).await,
+            Ok(Message::Binary(data)) => fc.send_client_bytes(&data, ws_origin).await,
             Ok(Message::Close(_)) | Err(_) => break,
             _ => {}
         }
