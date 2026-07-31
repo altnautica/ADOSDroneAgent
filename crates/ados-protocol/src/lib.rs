@@ -71,6 +71,7 @@ pub mod offload;
 pub mod offload_link;
 pub mod pairing_posture;
 pub mod plugin;
+pub mod relay_ticket;
 pub mod rest;
 pub mod secret_gen;
 pub mod sidecar;
