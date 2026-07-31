@@ -102,14 +102,18 @@ pub fn beacon_from_state(state: Option<&Value>, slot: u8, seq_ms: u16) -> SwarmB
     if state.get("armed").and_then(Value::as_bool).unwrap_or(false) {
         status |= STATUS_ARMED;
     }
-    // GUIDED is the only mode that accepts the offboard setpoints the autonomy
-    // layer sends, so it is the mode the bus advertises. Compared
-    // case-insensitively because the wire value is the flight controller's own
-    // mode string.
+    // The bus advertises whether this vehicle is in a mode that accepts the
+    // offboard setpoints the autonomy layer sends. Which mode that is depends on
+    // the firmware -- ArduPilot's GUIDED and PX4's OFFBOARD mean the same thing
+    // here -- so matching only the name "guided" made every PX4 neighbour render
+    // as un-commandable to the whole fleet regardless of what it was actually
+    // doing. Upper-cased first because the wire value is the flight
+    // controller's own mode string and the shared predicate matches the decoded
+    // spelling.
     if state
         .get("mode")
         .and_then(Value::as_str)
-        .is_some_and(|m| m.eq_ignore_ascii_case("guided"))
+        .is_some_and(|m| ados_protocol::accepts_offboard_setpoints(&m.to_ascii_uppercase()))
     {
         status |= STATUS_GUIDED;
     }
@@ -339,8 +343,19 @@ mod tests {
         assert!(in_mode("GUIDED"));
         assert!(in_mode("guided"));
         assert!(in_mode("Guided"));
+        // PX4 has no mode called GUIDED. Its equivalent is OFFBOARD, so a PX4
+        // vehicle that was correctly placed in the one mode that accepts our
+        // setpoints used to advertise itself to the whole fleet as
+        // un-commandable, and nothing an operator could do would change that.
+        assert!(in_mode("OFFBOARD"));
+        assert!(in_mode("offboard"));
+        assert!(in_mode("GUIDED_NOGPS"));
         assert!(!in_mode("STABILIZE"));
         assert!(!in_mode("AUTO"));
+        // PX4 ignores offboard setpoints under AUTO, so admitting these would
+        // advertise a vehicle as commandable while its commands went nowhere.
+        assert!(!in_mode("AUTO.LOITER"));
+        assert!(!in_mode("AUTO.MISSION"));
         assert!(!in_mode("LOITER"));
         assert!(!in_mode(""));
         // A non-string mode does not panic and does not claim guided.

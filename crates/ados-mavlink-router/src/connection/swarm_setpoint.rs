@@ -63,9 +63,6 @@ const MAX_SWARM_LINE: usize = 64 * 1024;
 /// after this one, so a missing socket is normal rather than a fault.
 const SWARM_RECONNECT: Duration = Duration::from_secs(2);
 
-/// The flight mode the FC must report before any setpoint is sent.
-const GUIDED: &str = "GUIDED";
-
 /// What the loop wants the state snapshot to say about it. Atomics, so the 10 Hz
 /// snapshot publisher reads it without waiting on the control loop.
 #[derive(Debug, Default)]
@@ -259,9 +256,14 @@ async fn control_loop(
                 ve: s.vy,
                 vd: s.vz,
                 armed: s.armed,
-                // The FC's OWN report, never what this layer asked for. A setpoint
-                // sent outside GUIDED is either ignored or, worse, latched.
-                guided: s.mode == GUIDED,
+                // The FC's OWN report, never what this layer asked for. A
+                // setpoint sent in a mode that does not accept one is either
+                // ignored or, worse, latched. Which mode that is depends on the
+                // firmware, so the name is checked against every commandable
+                // one rather than against ArduPilot's alone -- comparing to
+                // "GUIDED" meant a PX4 vehicle could never be commanded, since
+                // PX4 has no mode by that name.
+                guided: ados_protocol::accepts_offboard_setpoints(&s.mode),
             }
         };
 
