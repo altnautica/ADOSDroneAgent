@@ -472,6 +472,7 @@ mod tests {
                 fec_failed: 25,
                 bitrate_kbps: 2242,
                 has_measurement: true,
+                target_slot: 1,
             },
             at_ms,
         )
@@ -519,6 +520,7 @@ mod tests {
                 fec_failed: 0,
                 bitrate_kbps: 0,
                 has_measurement: false,
+                target_slot: 1,
             },
             10_000,
         );

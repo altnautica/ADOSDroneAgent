@@ -46,10 +46,16 @@
 //! ladder the wrong way on exactly the bad link that truncated it.
 
 /// The framing version this build speaks.
-pub const LINK_FEEDBACK_VERSION: u8 = 1;
+///
+/// v2 added the addressee. The version was bumped rather than the field
+/// appended, deliberately: trailing bytes are ignored by design, so a v1 reader
+/// handed a v2 record would silently drop the addressee and act on a
+/// measurement of somebody else's link. Bumping makes an old drone REJECT the
+/// record and fall back to having no sample, which is the safe direction.
+pub const LINK_FEEDBACK_VERSION: u8 = 2;
 
-/// Encoded size of a v1 record.
-pub const LINK_FEEDBACK_LEN: usize = 20;
+/// Encoded size of a v2 record.
+pub const LINK_FEEDBACK_LEN: usize = 21;
 
 /// Set when the sender had a real decode this interval. Clear means "I am
 /// listening and heard nothing", which is a materially different statement from
@@ -76,6 +82,12 @@ pub struct LinkFeedback {
     pub bitrate_kbps: u32,
     /// Whether the sender actually decoded anything this interval.
     pub has_measurement: bool,
+    /// The fleet slot this measurement describes.
+    ///
+    /// The uplink is one transmission for the whole fleet, so every drone
+    /// receives every record; this is what tells a drone whether the record is
+    /// about its own link. A drone acts only on its own slot.
+    pub target_slot: u8,
 }
 
 /// Why a record could not be decoded.
@@ -110,6 +122,7 @@ impl LinkFeedback {
         out.extend_from_slice(&self.packets_received.to_be_bytes());
         out.extend_from_slice(&self.fec_failed.to_be_bytes());
         out.extend_from_slice(&self.bitrate_kbps.to_be_bytes());
+        out.push(self.target_slot);
         out
     }
 
@@ -133,6 +146,7 @@ impl LinkFeedback {
             packets_received: u32at(8),
             fec_failed: u32at(12),
             bitrate_kbps: u32at(16),
+            target_slot: buf[20],
         })
     }
 }
@@ -180,6 +194,10 @@ pub struct LinkFeedbackSidecar {
     pub fec_failed: u32,
     pub bitrate_kbps: u32,
     pub has_measurement: bool,
+    /// The slot the record was addressed to, carried through so the consumer
+    /// can prove it was the intended recipient rather than assuming it.
+    #[serde(default)]
+    pub target_slot: u8,
 }
 
 impl LinkFeedbackSidecar {
@@ -204,6 +222,7 @@ impl LinkFeedbackSidecar {
             fec_failed: fb.fec_failed,
             bitrate_kbps: fb.bitrate_kbps,
             has_measurement: fb.has_measurement,
+            target_slot: fb.target_slot,
         }
     }
 
@@ -254,6 +273,7 @@ mod tests {
             fec_failed: 25,
             bitrate_kbps: 2242,
             has_measurement: true,
+            target_slot: 1,
         }
     }
 
@@ -273,6 +293,53 @@ mod tests {
     #[test]
     fn encodes_to_the_declared_length() {
         assert_eq!(sample().encode().len(), LINK_FEEDBACK_LEN);
+    }
+
+    #[test]
+    fn the_record_names_the_slot_it_measures() {
+        // The uplink is ONE transmission for the whole fleet, so every drone
+        // receives every record. Without an addressee each one reads it as its
+        // own link — and the ground measures only the primary slot, so every
+        // other drone would act on the primary's loss.
+        let s = LinkFeedback {
+            target_slot: 3,
+            ..sample()
+        };
+        assert_eq!(
+            LinkFeedback::decode(&s.encode())
+                .expect("decode")
+                .target_slot,
+            3
+        );
+    }
+
+    #[test]
+    fn a_reader_that_predates_the_addressee_refuses_the_record() {
+        // Trailing bytes are ignored by design, so appending the addressee
+        // without bumping the version would let an old drone silently drop it
+        // and act on somebody else's measurement. Rejecting is the safe
+        // direction: no sample, and the ladder holds.
+        let encoded = sample().encode();
+        let mut as_v1 = encoded.clone();
+        as_v1[0] = 1;
+        assert_eq!(
+            LinkFeedback::decode(&as_v1),
+            Err(LinkFeedbackError::UnsupportedVersion(1)),
+            "a v1 record must not be accepted by a build that needs an addressee"
+        );
+    }
+
+    #[test]
+    fn the_addressee_survives_into_the_sidecar() {
+        // The consumer gates on it, so it has to cross the process boundary.
+        let s = LinkFeedbackSidecar::stamped(
+            &LinkFeedback {
+                target_slot: 2,
+                ..sample()
+            },
+            1000,
+        );
+        assert_eq!(s.target_slot, 2);
     }
 
     #[test]

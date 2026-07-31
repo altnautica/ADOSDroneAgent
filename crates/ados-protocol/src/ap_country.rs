@@ -88,7 +88,7 @@ pub fn load_from(path: &std::path::Path) -> String {
 
 /// Resolve from the agent's config file.
 pub fn load() -> String {
-    load_from(std::path::Path::new(crate::aux_ports::CONFIG_YAML))
+    load_from(&crate::aux_ports::config_path())
 }
 
 #[cfg(test)]

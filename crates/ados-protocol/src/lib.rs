@@ -55,6 +55,7 @@ pub mod contracts;
 pub mod crypto;
 pub mod dashboard_session;
 pub mod dispatch;
+pub mod fleet_identity;
 pub mod frame;
 pub mod framebus;
 pub mod hwcaps;

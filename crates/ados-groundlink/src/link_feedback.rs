@@ -36,7 +36,7 @@ pub const FEEDBACK_INTERVAL: Duration = Duration::from_secs(1);
 /// measurement would tell the drone its link is perfect at the exact moment the
 /// ground station went deaf, which is the most damaging possible lie here — it
 /// would hold or raise the rate on a link that had just failed.
-pub fn feedback_from(stats: &LinkStats) -> LinkFeedback {
+pub fn feedback_from(stats: &LinkStats, target_slot: u8) -> LinkFeedback {
     let has_measurement = !stats.timestamp.is_empty() && stats.packets_received > 0;
     LinkFeedback {
         loss_percent: if has_measurement {
@@ -50,6 +50,7 @@ pub fn feedback_from(stats: &LinkStats) -> LinkFeedback {
         fec_failed: stats.fec_failed.clamp(0, i64::from(u32::MAX)) as u32,
         bitrate_kbps: stats.bitrate_kbps.clamp(0, i64::from(u32::MAX)) as u32,
         has_measurement,
+        target_slot,
     }
 }
 
@@ -58,7 +59,13 @@ pub fn feedback_from(stats: &LinkStats) -> LinkFeedback {
 /// `aux_tx_port` is the ground station's aux uplink ingress — the same port the
 /// relay-proxy request lane and the GCS uplink already write to, so this adds a
 /// channel to a lane that is already spawned rather than a second transmitter.
-pub async fn run(link: Arc<Mutex<LinkStats>>, aux_tx_port: u16) {
+///
+/// `measured_slot` is the slot these stats actually describe. This station runs
+/// ONE stats reader, on the primary chain, so today that is the primary slot
+/// and every other drone correctly gets no sample. The uplink reaches the whole
+/// fleet in one transmission, so without this the record would read as every
+/// drone's own link and hand the fleet the primary's loss.
+pub async fn run(link: Arc<Mutex<LinkStats>>, aux_tx_port: u16, measured_slot: u8) {
     let sock = match UdpSocket::bind("127.0.0.1:0").await {
         Ok(s) => s,
         Err(e) => {
@@ -72,7 +79,7 @@ pub async fn run(link: Arc<Mutex<LinkStats>>, aux_tx_port: u16) {
     loop {
         tick.tick().await;
         let stats = link.lock().await.clone();
-        let payload = feedback_from(&stats).encode();
+        let payload = feedback_from(&stats, measured_slot).encode();
         let Some(frame) = aux_mux::encode(AuxChannel::LinkFeedback, &payload) else {
             // Structurally impossible for a fixed 20-byte record, but encoding
             // is fallible at the type level and a silent `unwrap` here would
@@ -110,7 +117,7 @@ mod tests {
 
     #[test]
     fn a_real_snapshot_reports_its_loss() {
-        let fb = feedback_from(&measured());
+        let fb = feedback_from(&measured(), 1);
         assert!(fb.has_measurement);
         assert!((fb.loss_percent - 24.29).abs() < 0.001);
         assert_eq!(fb.packets_received, 485);
@@ -123,7 +130,7 @@ mod tests {
         // The regression this guards: LinkStats::default() has loss_percent 0.0
         // and packets_received 0. Shipping that as a measurement would tell the
         // drone "0% loss" at the moment this receiver went deaf.
-        let fb = feedback_from(&LinkStats::default());
+        let fb = feedback_from(&LinkStats::default(), 1);
         assert!(
             !fb.has_measurement,
             "the no-decode sentinel must not claim to be a measurement"
@@ -137,7 +144,7 @@ mod tests {
             packets_received: 0,
             ..LinkStats::default()
         };
-        assert!(!feedback_from(&stats).has_measurement);
+        assert!(!feedback_from(&stats, 1).has_measurement);
     }
 
     #[test]
@@ -149,7 +156,7 @@ mod tests {
             packets_received: 0,
             ..LinkStats::default()
         };
-        let fb = feedback_from(&stats);
+        let fb = feedback_from(&stats, 1);
         assert!(!fb.has_measurement);
         assert_eq!(fb.loss_percent, 0.0);
     }
@@ -163,7 +170,7 @@ mod tests {
             timestamp: "t".to_string(),
             ..LinkStats::default()
         };
-        let fb = feedback_from(&stats);
+        let fb = feedback_from(&stats, 1);
         assert_eq!(fb.packets_received, u32::MAX);
         assert_eq!(fb.fec_failed, u32::MAX);
         assert_eq!(fb.bitrate_kbps, u32::MAX);
@@ -171,7 +178,7 @@ mod tests {
 
     #[test]
     fn the_emitted_frame_round_trips_through_the_aux_mux() {
-        let payload = feedback_from(&measured()).encode();
+        let payload = feedback_from(&measured(), 1).encode();
         let frame = aux_mux::encode(AuxChannel::LinkFeedback, &payload).expect("frame");
         let (channel, inner) = aux_mux::decode(&frame).expect("decode");
         assert_eq!(channel, AuxChannel::LinkFeedback);

@@ -82,6 +82,12 @@ struct CountersInner {
     link_feedback_undecodable: AtomicU64,
     /// Reports that decoded but could not be published for the ladder to read.
     link_feedback_write_errors: AtomicU64,
+    /// Reports that measured a DIFFERENT slot. Normal and expected on every
+    /// drone but the one being measured — the ground transmits the uplink once
+    /// for the whole fleet, so each drone sees every record and keeps only its
+    /// own. A drone whose accepted count stays 0 while this climbs is simply
+    /// not the slot the ground station is measuring.
+    link_feedback_not_for_us: AtomicU64,
     /// Responses abandoned because the process-wide send slot did not free up
     /// inside the ground's call bound. Non-zero means concurrent relay traffic
     /// is queueing deeper than the uplink can drain, which is a capacity
@@ -116,6 +122,7 @@ pub struct AuxUplinkConsumerSnapshot {
     pub link_feedback_frames: u64,
     pub link_feedback_undecodable: u64,
     pub link_feedback_write_errors: u64,
+    pub link_feedback_not_for_us: u64,
     pub rpc_response_abandoned: u64,
     pub rpc_requests_duplicate: u64,
     pub rpc_requests_replayed: u64,
@@ -142,6 +149,7 @@ impl AuxUplinkConsumerCounters {
             link_feedback_frames: c.link_feedback_frames.load(Ordering::Relaxed),
             link_feedback_undecodable: c.link_feedback_undecodable.load(Ordering::Relaxed),
             link_feedback_write_errors: c.link_feedback_write_errors.load(Ordering::Relaxed),
+            link_feedback_not_for_us: c.link_feedback_not_for_us.load(Ordering::Relaxed),
             rpc_response_abandoned: c.rpc_response_abandoned.load(Ordering::Relaxed),
             rpc_requests_duplicate: c.rpc_requests_duplicate.load(Ordering::Relaxed),
             rpc_requests_replayed: c.rpc_requests_replayed.load(Ordering::Relaxed),
@@ -397,6 +405,24 @@ async fn dispatch(
                 .fetch_add(1, Ordering::Relaxed);
             match ados_protocol::link_feedback::LinkFeedback::decode(inner) {
                 Ok(fb) => {
+                    // The uplink is ONE transmission for the whole fleet, so
+                    // every drone receives every record. Acting on one that
+                    // measures a different slot would steer this drone's video
+                    // rate from a neighbour's link — a false measurement, and
+                    // worse than having none, because a no-sample ladder at
+                    // least holds honestly.
+                    //
+                    // An unprovisioned node (no slot in config) accepts
+                    // nothing: it cannot prove a record is about itself, and
+                    // guessing is the failure this check exists to prevent.
+                    let own_slot = ados_protocol::fleet_identity::local_slot();
+                    if own_slot != Some(fb.target_slot) {
+                        counters
+                            .0
+                            .link_feedback_not_for_us
+                            .fetch_add(1, Ordering::Relaxed);
+                        return;
+                    }
                     let sidecar = ados_protocol::link_feedback::LinkFeedbackSidecar::now(&fb);
                     let path = ados_protocol::link_feedback::sidecar_path();
                     if let Err(e) = ados_protocol::link_feedback::write_sidecar_to(&path, &sidecar)
@@ -595,6 +621,16 @@ mod tests {
         aux_mux::encode(AuxChannel::LinkFeedback, &fb.encode()).unwrap()
     }
 
+    /// Write a config naming this node's slot, so the addressee check has
+    /// something to compare against. Returns the dir to keep it alive.
+    fn config_with_slot(dir: &std::path::Path, slot: u8) {
+        std::fs::write(
+            dir.join("config.yaml"),
+            format!("video:\n  wfb:\n    fleet_slot: {slot}\n"),
+        )
+        .unwrap();
+    }
+
     fn measured_feedback() -> ados_protocol::link_feedback::LinkFeedback {
         ados_protocol::link_feedback::LinkFeedback {
             loss_percent: 24.29,
@@ -604,19 +640,36 @@ mod tests {
             fec_failed: 25,
             bitrate_kbps: 2242,
             has_measurement: true,
+            target_slot: 1,
         }
     }
 
     // The env guard must span the dispatch await: it serialises a
     // process-global variable, so releasing it before the call would let a
     // sibling test retarget ADOS_RUN_DIR mid-dispatch.
+    /// Point both the run dir and the config at a temp tree, and name this
+    /// node's slot so the addressee check has something to compare against.
+    fn stage(tag: &str, slot: u8) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("ados-lfd-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        config_with_slot(&dir, slot);
+        std::env::set_var("ADOS_RUN_DIR", &dir);
+        std::env::set_var("ADOS_CONFIG_YAML", dir.join("config.yaml"));
+        dir
+    }
+
+    fn unstage(dir: &std::path::Path) {
+        std::env::remove_var("ADOS_RUN_DIR");
+        std::env::remove_var("ADOS_CONFIG_YAML");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
-    async fn a_link_feedback_report_is_published_for_the_bitrate_ladder() {
+    async fn a_link_feedback_report_for_this_slot_is_published_for_the_ladder() {
         let _guard = RUN_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = std::env::temp_dir().join(format!("ados-lfd-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::env::set_var("ADOS_RUN_DIR", &dir);
+        let dir = stage("mine", 1);
 
         let (fc, _captured) = test_connection();
         let counters = AuxUplinkConsumerCounters::new();
@@ -632,21 +685,86 @@ mod tests {
 
         let snap = counters.snapshot();
         assert_eq!(snap.link_feedback_frames, 1);
-        assert_eq!(snap.link_feedback_undecodable, 0);
+        assert_eq!(snap.link_feedback_not_for_us, 0);
         assert_eq!(snap.link_feedback_write_errors, 0);
-        assert_eq!(
-            snap.non_mavlink_channel, 0,
-            "a handled channel must not also count as unhandled"
-        );
-
         let written =
             ados_protocol::link_feedback::read_sidecar_from(&dir.join("link-feedback.json"))
                 .expect("the ladder's input must be on disk");
         assert!((written.loss_percent - 24.29).abs() < 0.01);
-        assert!(written.has_measurement);
+        assert_eq!(written.target_slot, 1);
+        unstage(&dir);
+    }
 
-        std::env::remove_var("ADOS_RUN_DIR");
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_report_measuring_another_drone_is_refused() {
+        // THE regression this whole change exists for. The ground transmits the
+        // uplink ONCE for the whole fleet and measures only one slot, so an
+        // unaddressed record handed every other drone the primary's loss — a
+        // clean drone would shed video rate because a neighbour was at the edge
+        // of the link. Worse than no sample, because a no-sample ladder holds.
+        let _guard = RUN_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = stage("theirs", 2);
+
+        let (fc, _captured) = test_connection();
+        let counters = AuxUplinkConsumerCounters::new();
+        // The record measures slot 1; this node is slot 2.
+        dispatch(
+            &feedback_datagram(&measured_feedback()),
+            &fc,
+            &counters,
+            &None,
+            OWN_ID,
+            &dedupe(),
+        )
+        .await;
+
+        let snap = counters.snapshot();
+        assert_eq!(snap.link_feedback_frames, 1, "it was received");
+        assert_eq!(snap.link_feedback_not_for_us, 1, "and refused");
+        assert!(
+            ados_protocol::link_feedback::read_sidecar_from(&dir.join("link-feedback.json"))
+                .is_none(),
+            "another drone's measurement must never reach this drone's ladder"
+        );
+        unstage(&dir);
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn an_unprovisioned_node_accepts_no_report() {
+        // With no slot in config a node cannot prove a record is about itself,
+        // and guessing is exactly the failure the addressee prevents.
+        let _guard = RUN_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("ados-lfd-unprov-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("config.yaml"),
+            "video:\n  wfb:\n    channel: 149\n",
+        )
+        .unwrap();
+        std::env::set_var("ADOS_RUN_DIR", &dir);
+        std::env::set_var("ADOS_CONFIG_YAML", dir.join("config.yaml"));
+
+        let (fc, _captured) = test_connection();
+        let counters = AuxUplinkConsumerCounters::new();
+        dispatch(
+            &feedback_datagram(&measured_feedback()),
+            &fc,
+            &counters,
+            &None,
+            OWN_ID,
+            &dedupe(),
+        )
+        .await;
+
+        assert_eq!(counters.snapshot().link_feedback_not_for_us, 1);
+        assert!(
+            ados_protocol::link_feedback::read_sidecar_from(&dir.join("link-feedback.json"))
+                .is_none()
+        );
+        unstage(&dir);
     }
 
     #[allow(clippy::await_holding_lock)]

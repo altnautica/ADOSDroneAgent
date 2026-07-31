@@ -32,6 +32,17 @@ pub const DEFAULT_AUX_RX_PORT: u16 = 5603;
 /// The agent's config file.
 pub const CONFIG_YAML: &str = "/etc/ados/config.yaml";
 
+/// The config path, honouring an `ADOS_CONFIG_YAML` override so a test (and a
+/// sim-bench run) can point every reader at the same temp file rather than the
+/// real `/etc/ados/config.yaml`. Mirrors the `ADOS_RUN_DIR` seam the sidecar
+/// paths already use.
+pub fn config_path() -> std::path::PathBuf {
+    match std::env::var("ADOS_CONFIG_YAML") {
+        Ok(p) if !p.trim().is_empty() => std::path::PathBuf::from(p),
+        _ => std::path::PathBuf::from(CONFIG_YAML),
+    }
+}
+
 /// The resolved pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AuxPorts {
@@ -107,7 +118,7 @@ impl AuxPorts {
 
     /// Resolve from the agent's config file.
     pub fn load() -> Self {
-        Self::load_from(std::path::Path::new(CONFIG_YAML))
+        Self::load_from(&config_path())
     }
 }
 

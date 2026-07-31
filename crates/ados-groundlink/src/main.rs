@@ -867,7 +867,11 @@ async fn receive_loop(
         let feedback_task = {
             let link = link.clone();
             let port = config.aux_tx_port;
-            tokio::spawn(ados_groundlink::link_feedback::run(link, port))
+            tokio::spawn(ados_groundlink::link_feedback::run(
+                link,
+                port,
+                primary_slot,
+            ))
         };
 
         // Stats reader: feeds the counter + LinkStats + the sidecar. Carries the
