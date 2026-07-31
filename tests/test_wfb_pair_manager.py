@@ -44,8 +44,16 @@ def isolated_pm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> PairManager:
     monkeypatch.setattr(
         pm_mod, "_SETUP_COMPLETE_PATH", tmp_path / "setup-complete"
     )
+    # Redirect the whole factory-reset set at the tmp dir. A reset walks
+    # absolute paths, so without this a test running as root would wipe the
+    # machine it runs on.
     monkeypatch.setattr(
-        pm_mod, "_AP_PASSPHRASE_PATH", tmp_path / "ap_passphrase"
+        pm_mod,
+        "_FACTORY_RESET_FILES",
+        (tmp_path / "ap_passphrase", tmp_path / "pairing.json"),
+    )
+    monkeypatch.setattr(
+        pm_mod, "_FACTORY_RESET_DIRS", (tmp_path / "secrets",)
     )
 
     pm_mod._reset_for_tests()

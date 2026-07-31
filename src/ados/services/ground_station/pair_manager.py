@@ -57,6 +57,14 @@ from ados.services.wfb.key_mgr import (
 log = get_logger("ground_station.pair_manager")
 
 _SETUP_COMPLETE_PATH = SETUP_COMPLETE_PATH
+
+# Module-level aliases of the canonical reset set so a test can redirect them at
+# a tmp dir. They are ASSIGNED from `ados.core.paths`, not re-listed, so the
+# shell script and this module still share one source — but a reset that walks
+# hard-coded absolute paths cannot be isolated, and an unisolated factory reset
+# in a test run as root would wipe the machine it runs on.
+_FACTORY_RESET_FILES = FACTORY_RESET_FILES
+_FACTORY_RESET_DIRS = FACTORY_RESET_DIRS
 _CONFIG_PATH = CONFIG_YAML
 
 _WFB_DRONE_UNIT = "ados-wfb.service"
@@ -653,7 +661,7 @@ class PairManager:
         """
         await self.unpair(role)
 
-        for path in FACTORY_RESET_FILES:
+        for path in _FACTORY_RESET_FILES:
             try:
                 if path.is_file():
                     path.unlink()
@@ -664,7 +672,7 @@ class PairManager:
                     error=str(exc),
                 )
 
-        for directory in FACTORY_RESET_DIRS:
+        for directory in _FACTORY_RESET_DIRS:
             try:
                 if directory.is_dir():
                     shutil.rmtree(directory)

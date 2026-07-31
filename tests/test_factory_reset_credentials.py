@@ -140,3 +140,48 @@ class TestClearingTheHotspotPassword:
         pm._clear_configured_hotspot_password()
 
         assert yaml.safe_load(cfg.read_text(encoding="utf-8")) == original
+
+
+class TestTheResetIsIsolatable:
+    """A reset walks absolute paths. If a test cannot redirect them, a suite run
+    as root wipes the machine it runs on — so the injection point is part of the
+    contract, not a convenience."""
+
+    def test_the_module_exposes_redirectable_reset_lists(self):
+        from ados.services.ground_station import pair_manager as pm
+
+        assert hasattr(pm, "_FACTORY_RESET_FILES")
+        assert hasattr(pm, "_FACTORY_RESET_DIRS")
+
+    def test_the_module_lists_are_the_canonical_ones_not_a_second_copy(self):
+        # Aliases, not a re-listing: a private copy is how the three reset
+        # implementations drifted apart in the first place.
+        from ados.core import paths
+        from ados.services.ground_station import pair_manager as pm
+
+        assert pm._FACTORY_RESET_FILES == paths.FACTORY_RESET_FILES
+        assert pm._FACTORY_RESET_DIRS == paths.FACTORY_RESET_DIRS
+
+    def test_reset_touches_only_the_redirected_paths(self, tmp_path, monkeypatch):
+        import asyncio
+
+        from ados.services.ground_station import pair_manager as pm
+
+        doomed = tmp_path / "doomed.json"
+        doomed.write_text("secret", encoding="utf-8")
+        doomed_dir = tmp_path / "doomed-dir"
+        doomed_dir.mkdir()
+        (doomed_dir / "inner").write_text("secret", encoding="utf-8")
+        survivor = tmp_path / "survivor.txt"
+        survivor.write_text("keep me", encoding="utf-8")
+
+        monkeypatch.setattr(pm, "_FACTORY_RESET_FILES", (doomed,))
+        monkeypatch.setattr(pm, "_FACTORY_RESET_DIRS", (doomed_dir,))
+        monkeypatch.setattr(pm, "_clear_configured_hotspot_password", lambda: None)
+
+        mgr = pm.PairManager(key_dir=str(tmp_path))
+        asyncio.run(mgr.factory_reset("gs"))
+
+        assert not doomed.exists()
+        assert not doomed_dir.exists()
+        assert survivor.read_text(encoding="utf-8") == "keep me"
