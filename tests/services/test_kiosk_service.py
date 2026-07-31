@@ -872,10 +872,24 @@ def test_resolve_render_plan_marker_gpu_stale_lib_dir_falls_back(
         assert ks._resolve_render_plan() == (ks._RENDERER_SOFTWARE, None)
 
 
-def test_cage_env_software_uses_pixman_no_ld_path() -> None:
+@pytest.fixture
+def pinned_drm(tmp_path: Any):
+    """Pin /sys/class/drm + /dev/dri for tests that assert on the cage env.
+
+    `_cage_env` derives the compositor's DRM device from a connected-connector
+    scan, so an unpinned test asserts against whatever hardware the runner has
+    — it passed on a developer laptop with no DRM and failed on a CI runner
+    that has one.
+    """
+    sysfs, dev = _drm_dirs(tmp_path, {"card0-HDMI-A-1": "connected"}, ["card0"])
+    with patch.object(ks, "_DRM_SYSFS", sysfs), patch.object(ks, "_DRM_DIR", dev):
+        yield dev
+
+
+def test_cage_env_software_uses_pixman_no_ld_path(pinned_drm: Any) -> None:
     env = ks._cage_env(ks._RENDERER_SOFTWARE, None)
     assert env["WLR_RENDERER"] == "pixman"
-    assert env["WLR_DRM_DEVICES"] == ks._DRM_DEVICE
+    assert env["WLR_DRM_DEVICES"] == str(pinned_drm / "card0")
     assert env["WLR_NO_HARDWARE_CURSORS"] == "1"
     assert "LD_LIBRARY_PATH" not in env
 

@@ -36,3 +36,20 @@ jobs:
 
       - name: Run tests
         run: pytest -v
+
+  # The prebuilt catalog's signing coverage is a checked fact, not an
+  # assumption. It has silently regressed three separate ways: a job whose
+  # runner had no signing tool published unsigned for months, kernel modules
+  # that predate the signing step survive because the manifest merge retains
+  # old rows, and a binary outlived the crate that produced it. None of those
+  # were visible without listing the assets by hand, and signature enforcement
+  # is only worth switching on if the catalog is signed end to end.
+  release-signatures:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Every published artifact carries a signature
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/check-release-signatures.sh
