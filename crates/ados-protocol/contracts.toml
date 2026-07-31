@@ -167,6 +167,15 @@ rust_const = "ados_protocol::node_status::NODE_STATUS_VERSION"
 description = "Compact node status and identity carried on the auxiliary lane's status and identity channels, so a ground station can describe the node it relays."
 
 [[contract]]
+id = "aux.link_feedback"
+version = 1
+wire = "binary"
+transport = "udp"
+status = "active"
+rust_const = "ados_protocol::link_feedback::LINK_FEEDBACK_VERSION"
+description = "Ground-measured video-link quality reported back to the transmitting drone, so its adaptive bitrate ladder steps on a real loss sample instead of the sentinel a transmit-only radio can never leave."
+
+[[contract]]
 id = "rest.openapi"
 version = 0
 wire = "json"

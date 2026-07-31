@@ -76,6 +76,12 @@ pub enum AuxChannel {
     /// Relay-proxy HTTP response, drone → ground over the downlink (radio_id
     /// 2). Carries the same request id the matching `Request` was sent with.
     Response = 5,
+    /// Ground-measured video-link quality, ground → drone over the uplink
+    /// (radio_id 3). A transmitting drone cannot measure its own downlink, so
+    /// the receiver reports what it actually decoded and the drone's adaptive
+    /// bitrate ladder steps on that instead of a permanent sentinel. Payload is
+    /// [`crate::link_feedback::LinkFeedback`].
+    LinkFeedback = 6,
 }
 
 impl AuxChannel {
@@ -88,6 +94,7 @@ impl AuxChannel {
             3 => Some(Self::Identity),
             4 => Some(Self::Request),
             5 => Some(Self::Response),
+            6 => Some(Self::LinkFeedback),
             _ => None,
         }
     }

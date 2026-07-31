@@ -57,6 +57,7 @@ pub mod frame;
 pub mod framebus;
 pub mod hwcaps;
 pub mod ipc;
+pub mod link_feedback;
 pub mod logd;
 #[cfg(feature = "mavlink")]
 pub mod mavlink;
