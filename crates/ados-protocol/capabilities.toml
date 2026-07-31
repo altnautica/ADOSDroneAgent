@@ -45,7 +45,7 @@ description = "Lets the plugin observe the live MAVLink message stream, includin
 category = "flight_control"
 risk = "low"
 risk_reason = "Read-only on the MAVLink stream."
-enforced = false
+enforced = true
 
 [[agent]]
 id = "mavlink.write"
@@ -54,7 +54,7 @@ description = "Lets the plugin inject MAVLink commands to the autopilot, includi
 category = "flight_control"
 risk = "high"
 risk_reason = "Can change flight mode, arm motors, and alter parameters in flight."
-enforced = false
+enforced = true
 
 [[agent]]
 id = "mavlink.component.camera"
@@ -99,7 +99,7 @@ description = "Lets the plugin register as a VIO source that publishes pose esti
 category = "flight_control"
 risk = "high"
 risk_reason = "Pose estimates feed the EKF and influence position control."
-enforced = false
+enforced = true
 
 [[agent]]
 id = "estimator.pose.inject"
@@ -108,7 +108,7 @@ description = "Lets the plugin push pose samples (position, attitude, or both) d
 category = "flight_control"
 risk = "high"
 risk_reason = "Directly biases the EKF; a malicious or buggy plugin can crash the aircraft."
-enforced = false
+enforced = true
 
 [[agent]]
 id = "telemetry.read"
@@ -117,7 +117,7 @@ description = "Lets the plugin read the same telemetry feed the GCS consumes (ba
 category = "data_network"
 risk = "low"
 risk_reason = "Read-only on existing telemetry topics."
-enforced = false
+enforced = true
 
 [[agent]]
 id = "telemetry.extend"
@@ -126,7 +126,7 @@ description = "Lets the plugin add new fields to the telemetry stream that ships
 category = "data_network"
 risk = "low"
 risk_reason = "Adds fields; does not alter existing ones."
-enforced = false
+enforced = true
 
 [[agent]]
 id = "sensor.camera.register"
@@ -135,7 +135,7 @@ description = "Lets the plugin declare a camera device the rest of the agent and
 category = "hardware"
 risk = "medium"
 risk_reason = "Camera streams may be recorded and uploaded; sensor identity matters for safety."
-enforced = false
+enforced = true
 
 [[agent]]
 id = "sensor.depth.register"
@@ -279,7 +279,7 @@ description = "Lets the plugin read the active mission, waypoints, fences, and r
 category = "flight_control"
 risk = "low"
 risk_reason = "Read-only on mission data."
-enforced = false
+enforced = true
 
 [[agent]]
 id = "mission.write"
@@ -288,7 +288,7 @@ description = "Lets the plugin upload new missions, edit waypoints, or change fe
 category = "flight_control"
 risk = "high"
 risk_reason = "Mission changes drive autonomous flight paths."
-enforced = false
+enforced = true
 
 [[agent]]
 id = "network.outbound"
@@ -315,7 +315,7 @@ description = "Lets the plugin save video, telemetry, or analysis outputs into t
 category = "data_network"
 risk = "low"
 risk_reason = "Writes are sandboxed to the recording directory."
-enforced = false
+enforced = true
 
 [[agent]]
 id = "process.spawn"
@@ -324,7 +324,7 @@ description = "Lets the plugin launch helper subprocesses listed in its manifest
 category = "compute_process"
 risk = "high"
 risk_reason = "Subprocesses run outside the plugin host sandbox and with the plugin's privileges."
-enforced = false
+enforced = true
 
 [[agent]]
 id = "vision.frame.read"
@@ -387,7 +387,7 @@ description = "Lets the plugin command the flight controller with guided-mode po
 category = "flight_control"
 risk = "high"
 risk_reason = "Commands vehicle motion in guided mode; a faulty stream can fly the aircraft."
-enforced = false
+enforced = true
 
 [[agent]]
 id = "mavlink.tunnel"
@@ -396,7 +396,7 @@ description = "Lets the plugin exchange application payloads over MAVLink TUNNEL
 category = "flight_control"
 risk = "high"
 risk_reason = "Shares the flight-control link; a misbehaving tunnel can congest MAVLink traffic."
-enforced = false
+enforced = true
 
 [[agent]]
 id = "radio.aux_stream"
@@ -405,7 +405,7 @@ description = "Lets the plugin open a dedicated auxiliary stream on the radio li
 category = "data_network"
 risk = "high"
 risk_reason = "Consumes radio airtime on the shared adapter and owns an application channel between nodes."
-enforced = false
+enforced = true
 
 [[agent]]
 id = "display.oled.page"
@@ -414,7 +414,7 @@ description = "Lets the plugin register a page (its rendered content and touch o
 category = "hardware"
 risk = "low"
 risk_reason = "Draws to the local display only; no effect on flight or the network."
-enforced = false
+enforced = true
 
 [[agent]]
 id = "compute.job.submit"

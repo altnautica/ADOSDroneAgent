@@ -216,8 +216,24 @@ impl DriverRegistry {
         h
     }
 
-    fn unregister(&mut self, handle_id: &str) {
-        self.handles.remove(handle_id);
+    /// Drop `handle_id`, but only when `plugin_id` is the plugin that registered
+    /// it. Returns whether a handle was removed.
+    ///
+    /// The owner check is load-bearing rather than defensive. Handle ids are
+    /// derived from the registering plugin's own id and a counter, so any plugin
+    /// can construct a plausible handle belonging to another one without ever
+    /// having seen it. Removing by id alone therefore let a plugin holding no
+    /// capabilities at all tear down another plugin's sensor driver. The camera
+    /// tracker beside this one has always checked its holder; this did not.
+    fn unregister(&mut self, plugin_id: &str, handle_id: &str) -> bool {
+        let owned = self
+            .handles
+            .get(handle_id)
+            .is_some_and(|h| h.plugin_id == plugin_id);
+        if owned {
+            self.handles.remove(handle_id);
+        }
+        owned
     }
 
     fn release_plugin(&mut self, plugin_id: &str) {
@@ -1779,7 +1795,7 @@ impl HostServices for RealHost {
 
     fn peripheral_unregister_driver(
         &self,
-        _plugin_id: &str,
+        plugin_id: &str,
         args: &Value,
     ) -> Result<HostResult, HostError> {
         let handle_id = arg_str(args, "handle_id").filter(|h| !h.is_empty());
@@ -1788,13 +1804,19 @@ impl HostServices for RealHost {
                 "handle_id must be a non-empty string".to_string(),
             ));
         };
-        self.drivers
+        let unregistered = self
+            .drivers
             .lock()
             .expect("drivers mutex poisoned")
-            .unregister(handle_id);
+            .unregister(plugin_id, handle_id);
+        // A handle that is not this plugin's reports as not unregistered rather
+        // than erroring. The caller learns nothing either way -- an unknown
+        // handle and another plugin's handle are indistinguishable in the
+        // answer -- so a plugin cannot use this to discover what else is
+        // registered on the box.
         Ok(Value::Map(vec![(
             Value::from("unregistered"),
-            Value::Boolean(true),
+            Value::Boolean(unregistered),
         )]))
     }
 
@@ -3204,7 +3226,45 @@ mod tests {
         d.release_plugin("p");
         // After release, the handles are gone; unregister of a stale id is a
         // no-op (does not panic).
-        d.unregister(&h1.handle_id);
+        assert!(!d.unregister("p", &h1.handle_id));
+        let _ = h2;
+    }
+
+    #[test]
+    fn a_plugin_cannot_unregister_another_plugins_driver() {
+        // The handle id is built from the OWNER's plugin id and a small
+        // counter, so any plugin can construct a plausible handle belonging to
+        // another one without ever having been told it. Removing by id alone
+        // therefore let a plugin holding no capabilities at all tear down
+        // another plugin's sensor driver -- and a driver that vanishes looks
+        // from the owner's side like hardware that stopped answering.
+        let mut d = DriverRegistry::default();
+        let victim = d.register("com.example.sensors", "lidar");
+        assert_eq!(victim.handle_id, "lidar-com.example.sensors-1");
+
+        // The attacker guesses the handle correctly and is still refused.
+        assert!(
+            !d.unregister("com.example.attacker", "lidar-com.example.sensors-1"),
+            "a guessed handle belonging to someone else must not be removed"
+        );
+        assert!(
+            d.handles.contains_key(&victim.handle_id),
+            "and the driver is still registered"
+        );
+
+        // The owner can still release its own.
+        assert!(d.unregister("com.example.sensors", &victim.handle_id));
+        assert!(!d.handles.contains_key(&victim.handle_id));
+    }
+
+    #[test]
+    fn an_unknown_handle_and_someone_elses_handle_are_indistinguishable() {
+        // Both answer the same way, so the refusal cannot be used to enumerate
+        // what else is registered on the box.
+        let mut d = DriverRegistry::default();
+        d.register("com.example.sensors", "lidar");
+        assert!(!d.unregister("com.example.attacker", "lidar-com.example.sensors-1"));
+        assert!(!d.unregister("com.example.attacker", "lidar-com.example.nonexistent-9"));
     }
 
     // ---- CameraClaimTracker -----------------------------------------

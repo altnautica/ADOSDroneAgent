@@ -38,7 +38,10 @@ fn spot_check_known_capabilities_and_risk() {
     let write = caps::get_agent_capability("mavlink.write").expect("mavlink.write present");
     assert_eq!(write.category, "flight_control");
     assert_eq!(write.risk, "high");
-    assert!(!write.enforced);
+    // Gated at dispatch: `mavlink.send` will not route without it. This
+    // asserted the opposite for as long as the catalog claimed the opposite,
+    // so it pinned the drift in place rather than catching it.
+    assert!(write.enforced);
 
     let pubcap = caps::get_agent_capability("event.publish").expect("event.publish present");
     assert!(pubcap.enforced);

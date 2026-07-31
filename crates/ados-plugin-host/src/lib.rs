@@ -76,3 +76,92 @@ pub use token_secret::{
     load_or_create_secret, shared_issuer, token_env_path, write_token_env, PLUGIN_TOKEN_SECRET_PATH,
 };
 pub use vision_client::{VisionClient, VisionRpcError};
+
+/// Capabilities gated inside a handler rather than by the generated dispatch
+/// table.
+///
+/// The dispatch table answers "may this plugin call this method at all", which
+/// is the whole gate for most capabilities. A few are finer than a method: the
+/// event bus checks the capability against the topic being published or
+/// subscribed, and a MAVLink send checks the message id against the pose and
+/// visual-odometry capabilities, because the method itself is broader than the
+/// permission. Those checks are real gates and belong in the same picture, so
+/// they are named here rather than being invisible to anything that asks what
+/// is enforced.
+///
+/// Kept in sync by `every_gated_capability_is_declared_enforced` below, which
+/// fails if this list names something no handler actually checks.
+pub const HANDLER_GATED_CAPS: &[&str] = &[
+    "estimator.pose.inject",
+    "event.publish",
+    "event.subscribe",
+    "mavlink.component.vio",
+    "mcp.expose",
+];
+
+#[cfg(test)]
+mod capability_enforcement_guard {
+    use super::HANDLER_GATED_CAPS;
+    use std::collections::BTreeSet;
+
+    /// Every capability the agent actually gates at runtime, from both places a
+    /// gate can live.
+    fn actually_gated() -> BTreeSet<String> {
+        let mut set: BTreeSet<String> = ados_protocol::dispatch::DISPATCH_METHODS
+            .iter()
+            .filter_map(|m| m.required_cap)
+            .map(str::to_string)
+            .collect();
+        set.extend(HANDLER_GATED_CAPS.iter().map(|c| c.to_string()));
+        // Only agent capabilities are described by that catalog.
+        set.retain(|c| ados_protocol::capabilities::get_agent_capability(c).is_some());
+        set
+    }
+
+    #[test]
+    fn every_gated_capability_is_declared_enforced() {
+        // The catalog's `enforced` flag is read by the install-time consent
+        // surface and by anything reasoning about what a plugin can do. It had
+        // drifted to claim fifteen fewer gates than the code performs, which is
+        // metadata that understates the protection actually in place -- the
+        // safe direction, but still a surface saying something untrue about
+        // itself, and one a reader would use to decide what to audit.
+        let under: Vec<String> = actually_gated()
+            .into_iter()
+            .filter(|c| {
+                ados_protocol::capabilities::get_agent_capability(c).is_some_and(|m| !m.enforced)
+            })
+            .collect();
+        assert!(
+            under.is_empty(),
+            "these capabilities are gated at runtime but declared unenforced: {under:?}"
+        );
+    }
+
+    #[test]
+    fn nothing_claims_a_gate_it_does_not_have() {
+        // The dangerous direction. A capability advertised as enforced that no
+        // code checks would let an operator grant it believing something stands
+        // behind it.
+        let gated = actually_gated();
+        let over: Vec<&str> = ados_protocol::capabilities::AGENT_CAPABILITIES
+            .iter()
+            .filter(|m| m.enforced && !gated.contains(m.id))
+            .map(|m| m.id)
+            .collect();
+        assert!(
+            over.is_empty(),
+            "these capabilities claim a runtime gate that does not exist: {over:?}"
+        );
+    }
+
+    #[test]
+    fn every_named_handler_gate_is_a_real_capability() {
+        for cap in HANDLER_GATED_CAPS {
+            assert!(
+                ados_protocol::capabilities::get_agent_capability(cap).is_some(),
+                "{cap} is named as handler-gated but is not a declared capability"
+            );
+        }
+    }
+}

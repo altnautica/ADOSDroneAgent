@@ -97,21 +97,42 @@ def test_catalog_size_matches_spec() -> None:
 
 
 def test_gated_caps_are_marked_enforced() -> None:
-    # The catalog's `enforced` flag reflects the dispatch-level gate today: the
-    # event bus, GPIO output, video-source reconfiguration, and the whole
-    # compute + vision family carry a runtime gate (metadata must be honest —
-    # Rule 44).
+    # Pins the set so a codegen change shows up in review. It is NOT the drift
+    # guard: this list is hand-maintained and cannot see the Rust dispatch
+    # table, so for a long time it happily asserted a set fifteen capabilities
+    # smaller than what the code actually gated -- including mavlink.write,
+    # which is the one that can arm motors. A hand-written list that claims to
+    # describe generated truth will eventually describe the past.
+    #
+    # The real guard derives the set from the dispatch table plus the named
+    # handler gates and fails if the catalog disagrees; it lives beside the code
+    # it reads, in the plugin host's capability_enforcement_guard tests.
     assert ENFORCED_AGENT_CAPABILITIES == frozenset(
         {
-            "event.publish",
-            "event.subscribe",
-            "hardware.gpio_out",
-            "video.source.set",
             "compute.dataset.write",
             "compute.job.read",
             "compute.job.submit",
             "compute.stream.open",
+            "display.oled.page",
+            "estimator.pose.inject",
+            "event.publish",
+            "event.subscribe",
+            "flight.guided_setpoint",
+            "hardware.gpio_out",
+            "mavlink.component.vio",
+            "mavlink.read",
+            "mavlink.tunnel",
+            "mavlink.write",
             "mcp.expose",
+            "mission.read",
+            "mission.write",
+            "process.spawn",
+            "radio.aux_stream",
+            "recording.write",
+            "sensor.camera.register",
+            "telemetry.extend",
+            "telemetry.read",
+            "video.source.set",
             "vision.detection.publish",
             "vision.detection.subscribe",
             "vision.frame.read",
