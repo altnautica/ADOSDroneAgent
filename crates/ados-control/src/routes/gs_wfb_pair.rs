@@ -570,6 +570,35 @@ mod tests {
     }
 
     #[test]
+    fn the_slot_table_never_carries_a_relay_secret() {
+        // The roster IS returned to a caller holding the fleet key. The
+        // per-pair relay secret must not ride along: it is the one thing that
+        // distinguishes a drone's own ground station from anything else that
+        // can reach the air, and handing it to every fleet member would undo
+        // exactly what it is for. `slot_table` picks fields explicitly today —
+        // this fails if anyone replaces it with a whole-struct serialization.
+        let mut registry = FleetRegistry::default();
+        registry.allocate("aaaa");
+        let rendered = serde_json::to_string(&slot_table(&registry)).unwrap();
+
+        let secret = registry
+            .slots()
+            .next()
+            .unwrap()
+            .relay_secret
+            .clone()
+            .expect("allocation issues a secret");
+        assert!(!secret.is_empty());
+        assert!(
+            !rendered.contains(&secret),
+            "the relay secret leaked into the slot table: {rendered}"
+        );
+        assert!(!rendered.contains("relay_secret"));
+        // The fields it SHOULD carry are still there.
+        assert!(rendered.contains("device_id") && rendered.contains("slot"));
+    }
+
+    #[test]
     fn a_foreign_key_is_refused_without_naming_the_fleet() {
         // A caller presenting a DIFFERENT key has just proved it is not part of
         // this fleet. It used to be answered with the peer device id and the

@@ -57,6 +57,20 @@ pub struct FleetSlot {
     /// quietly break. Millisecond resolution is far more than a pair timestamp
     /// needs.
     pub paired_at_ms: u64,
+    /// The per-pair relay secret, hex-encoded, or `None` for a registration
+    /// made before this field existed.
+    ///
+    /// Per PAIR, not per fleet. Every member holds the shared radio keypair —
+    /// that is what makes them a member — so a credential derived from it
+    /// proves only that the caller is on the radio, which being on the radio
+    /// already proved. This is the material that lets a drone tell its own
+    /// ground station from anything else that can reach the air, including
+    /// another drone in the same fleet.
+    ///
+    /// Optional so an existing registry loads unchanged; a registration
+    /// without one is issued a secret the next time it is allocated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_secret: Option<String>,
 }
 
 /// The slot table, keyed by slot so iteration is always in slot order (the
@@ -125,6 +139,7 @@ impl FleetRegistry {
                 slot,
                 device_id: device_id.to_string(),
                 paired_at_ms: now_unix_ms(),
+                relay_secret: generate_relay_secret_opt(),
             },
         );
         Some(slot)
@@ -220,6 +235,19 @@ fn quarantine(path: &Path) -> Option<String> {
         };
     }
     None
+}
+
+/// A fresh per-pair relay secret, hex-encoded.
+///
+/// Fails closed: if the OS cannot give us randomness we return `None` rather
+/// than a predictable value, and the pairing proceeds without a secret. A
+/// missing secret degrades to today's behaviour — the relay presents nothing —
+/// which is honest. A guessable one would look like a credential and not be
+/// one, which is worse than having none.
+fn generate_relay_secret_opt() -> Option<String> {
+    let mut secret = [0u8; ados_protocol::relay_ticket::RELAY_SECRET_LEN];
+    getrandom::getrandom(&mut secret).ok()?;
+    Some(secret.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// Wall clock as integer unix milliseconds. See [`FleetSlot::paired_at_ms`] for
@@ -383,6 +411,90 @@ mod tests {
         let again = reg.allocate("drone-a").unwrap();
         assert_eq!(first, again);
         assert_eq!(reg.len(), 2, "a re-pair must not add a second registration");
+    }
+
+    #[test]
+    fn each_drone_gets_its_own_relay_secret() {
+        // Per PAIR, not per fleet: a shared secret would have the same holder
+        // set as the radio key it is meant to improve on, so one drone could
+        // impersonate the ground station to another.
+        let mut r = FleetRegistry::default();
+        r.allocate("aaaa");
+        r.allocate("bbbb");
+        let a = r
+            .slots()
+            .find(|s| s.device_id == "aaaa")
+            .unwrap()
+            .relay_secret
+            .clone();
+        let b = r
+            .slots()
+            .find(|s| s.device_id == "bbbb")
+            .unwrap()
+            .relay_secret
+            .clone();
+        assert!(a.is_some() && b.is_some());
+        assert_ne!(a, b, "two drones must not share a relay secret");
+    }
+
+    #[test]
+    fn a_relay_secret_is_never_empty_or_short() {
+        // An empty or truncated value would look like a credential on every
+        // surface that reports one, while authenticating nothing.
+        let mut r = FleetRegistry::default();
+        r.allocate("aaaa");
+        let secret = r.slots().next().unwrap().relay_secret.clone().unwrap();
+        assert_eq!(
+            secret.len(),
+            ados_protocol::relay_ticket::RELAY_SECRET_LEN * 2,
+            "hex of {} bytes",
+            ados_protocol::relay_ticket::RELAY_SECRET_LEN
+        );
+        assert!(secret.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn re_pairing_does_not_re_key_a_drone() {
+        // allocate() is idempotent by device id. Issuing a fresh secret on
+        // re-pair would silently invalidate the one the drone already holds,
+        // and it may be airborne.
+        let mut r = FleetRegistry::default();
+        r.allocate("aaaa");
+        let first = r.slots().next().unwrap().relay_secret.clone();
+        r.allocate("aaaa");
+        let second = r.slots().next().unwrap().relay_secret.clone();
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn a_relay_secret_survives_persist_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fleet.json");
+        let mut r = FleetRegistry::default();
+        r.allocate("aaaa");
+        r.persist(&path).unwrap();
+        let loaded = FleetRegistry::load(&path);
+        assert_eq!(
+            loaded.slots().next().unwrap().relay_secret,
+            r.slots().next().unwrap().relay_secret
+        );
+    }
+
+    #[test]
+    fn a_registry_written_before_the_field_existed_still_loads() {
+        // The field is optional so an existing fleet survives the upgrade
+        // rather than the whole registry failing to parse.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fleet.json");
+        std::fs::write(
+            &path,
+            r#"{"1":{"slot":1,"device_id":"aaaa","paired_at_ms":123}}"#,
+        )
+        .unwrap();
+        let loaded = FleetRegistry::load(&path);
+        let slot = loaded.slots().next().unwrap();
+        assert_eq!(slot.device_id, "aaaa");
+        assert_eq!(slot.relay_secret, None);
     }
 
     #[test]

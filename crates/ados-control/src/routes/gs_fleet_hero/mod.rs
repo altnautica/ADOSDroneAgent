@@ -290,6 +290,7 @@ pub(super) mod tests_support {
                 slot: (i + 1) as u8,
                 device_id: (*id).to_string(),
                 paired_at_ms: 0,
+                relay_secret: None,
             })
             .collect()
     }
