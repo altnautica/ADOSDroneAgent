@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::sync::Arc;
 
 use ados_groundlink::FleetSlot;
 use ados_video::profile::VideoProfile;
@@ -117,6 +118,18 @@ pub fn sole_slot_hero(slots: &[FleetSlot]) -> Option<&str> {
     }
 }
 
+/// How many DEMOTIONS a hero fan-out keeps in flight at once.
+///
+/// A fan-out is a burst, not a steady state: it happens when an operator picks a
+/// hero, and the reconcile tick that follows chases only the drones that did not
+/// confirm. Issuing all of a 24-drone fleet at once puts twenty-four
+/// request/response exchanges on one shared radio in the same instant, each of
+/// which may retry, so the burst competes for exactly the airtime it needs to
+/// succeed and manufactures the failures the retry then chases. Draining a few
+/// at a time costs a healthy fleet nothing — a drone that answers releases its
+/// slot immediately — and bounds what a fleet of dead drones can put on the air.
+const MAX_CONCURRENT_DEMOTIONS: usize = 4;
+
 /// Issue every assignment CONCURRENTLY, retrying each failure exactly once.
 ///
 /// Concurrency is the point: a 24-drone fleet demoted serially at the RPC
@@ -126,6 +139,12 @@ pub fn sole_slot_hero(slots: &[FleetSlot]) -> Option<&str> {
 /// a drone stuck on `hero` is an airtime problem, not a safety one, so it never
 /// blocks the new hero's promotion.
 ///
+/// The demotions are drained `MAX_CONCURRENT_DEMOTIONS` at a time so the burst
+/// does not saturate the radio it is travelling over. The promotion is exempt
+/// from that bound and always goes out immediately: a plan carries exactly one
+/// hero, and holding it behind a queue of silent drones is precisely what this
+/// function exists to avoid.
+///
 /// Outcomes come back in slot order regardless of completion order, so the
 /// response body is stable.
 pub async fn apply_plan<F, Fut>(plan: &HeroPlan, call: F) -> Vec<SlotOutcome>
@@ -134,10 +153,21 @@ where
     Fut: Future<Output = Result<(), String>> + Send,
 {
     let mut set = tokio::task::JoinSet::new();
+    let limiter = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_DEMOTIONS));
     for (index, target) in plan.targets.iter().enumerate() {
         let call = call.clone();
         let target = target.clone();
+        let limiter = (target.profile != VideoProfile::Hero).then(|| Arc::clone(&limiter));
         set.spawn(async move {
+            // Held across the retry: a second attempt is part of the same
+            // drone's exchange and belongs inside the same airtime budget.
+            // `acquire` can only fail on a closed semaphore, which nothing
+            // closes; proceeding unpermitted on that impossible branch keeps
+            // the fan-out issuing rather than silently dropping a drone.
+            let _permit = match &limiter {
+                Some(l) => l.acquire().await.ok(),
+                None => None,
+            };
             let mut error = call(target.device_id.clone(), target.profile).await.err();
             if error.is_some() {
                 // One retry. A single dropped aux fragment is the common
@@ -320,5 +350,93 @@ mod tests {
         let attempts = attempts.lock().await;
         assert_eq!(attempts["dead"], 2, "exactly one retry, not a retry storm");
         assert_eq!(attempts["newhero"], 1, "a success is never retried");
+    }
+
+    /// A 24-slot fleet, the size the slot registry issues up to.
+    fn full_fleet() -> Vec<FleetSlot> {
+        let ids: Vec<String> = (1..=24).map(|i| format!("drone-{i:02}")).collect();
+        slots(&ids.iter().map(String::as_str).collect::<Vec<_>>())
+    }
+
+    /// How long each stubbed call parks. Long enough that every call the
+    /// fan-out was willing to issue at once is demonstrably in flight together:
+    /// a task is spawned and first-polled in microseconds, so nothing reaches
+    /// the end of this window before its siblings have started.
+    const PARK: std::time::Duration = std::time::Duration::from_millis(50);
+
+    #[tokio::test]
+    async fn a_full_fleet_fan_out_never_puts_more_than_the_bound_on_the_air() {
+        // Every admitted call parks for the same window, so the peak in-flight
+        // count is what the fan-out was willing to issue at once. Unbounded,
+        // this reads 24.
+        let plan = plan_hero(&full_fleet(), "drone-07").unwrap();
+        let in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let outcomes = {
+            let in_flight = Arc::clone(&in_flight);
+            let peak = Arc::clone(&peak);
+            apply_plan(&plan, move |_id, _p| {
+                let in_flight = Arc::clone(&in_flight);
+                let peak = Arc::clone(&peak);
+                async move {
+                    use std::sync::atomic::Ordering;
+                    let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    tokio::time::sleep(PARK).await;
+                    in_flight.fetch_sub(1, Ordering::SeqCst);
+                    Ok(())
+                }
+            })
+            .await
+        };
+
+        let peak = peak.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            peak,
+            MAX_CONCURRENT_DEMOTIONS + 1,
+            "the burst is bounded at the demotion cap plus the unqueued hero"
+        );
+        // Bounding the burst must not cost a single drone its assignment.
+        assert_eq!(outcomes.len(), 24);
+        assert!(outcomes.iter().all(|o| o.ok));
+        assert_eq!(
+            outcomes.iter().map(|o| o.slot).collect::<Vec<_>>(),
+            (1..=24).collect::<Vec<u8>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_promotion_is_issued_without_waiting_for_a_demotion_slot() {
+        // The hero sits in the LAST slot behind 23 demotions, every one of
+        // which parks. If the promotion took a permit it could not be issued
+        // until a demotion returned; exempt, it goes out inside the first
+        // admitted batch.
+        let plan = plan_hero(&full_fleet(), "drone-24").unwrap();
+        let entered = Arc::new(Mutex::new(Vec::<String>::new()));
+
+        let _ = {
+            let entered = Arc::clone(&entered);
+            apply_plan(&plan, move |id, _p| {
+                let entered = Arc::clone(&entered);
+                async move {
+                    entered.lock().await.push(id);
+                    tokio::time::sleep(PARK).await;
+                    Ok(())
+                }
+            })
+            .await
+        };
+
+        let entered = entered.lock().await;
+        let position = entered
+            .iter()
+            .position(|id| id == "drone-24")
+            .expect("the hero was issued");
+        assert!(
+            position <= MAX_CONCURRENT_DEMOTIONS,
+            "the promotion queued behind demotions: it was call {} of the burst",
+            position + 1
+        );
     }
 }

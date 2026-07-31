@@ -390,10 +390,84 @@ fn finalize_status(mut merged: Map<String, Value>) -> Value {
     Value::Object(merged)
 }
 
+/// How long one `iw reg get` reading is reused.
+///
+/// The regulatory domain changes only when something explicitly sets it — the
+/// radio's own reconciler, or a bind — never on its own, while the GCS radio
+/// panel polls this route about once a second and every poll forked `iw` twice:
+/// once to seed the base block and once to re-assert the domain over the sidecar
+/// payload. Reusing a reading for this window collapses a poll to at most one
+/// fork, and a real domain change still surfaces inside it. The value stays the
+/// freshest thing in the body by a wide margin: the link figures beside it come
+/// off a sidecar the route only calls stale after ten seconds.
+const REG_DOMAIN_TTL: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// One string reading held for a bounded window.
+///
+/// What it serves is always a reading this process genuinely took; the window
+/// bounds only how often the reading is refreshed, so the age of an answer is a
+/// stated number rather than an unknown. Nothing is ever synthesised when the
+/// underlying read fails — that failure has its own value (`"unknown"`) and is
+/// cached like any other, so a wedged `iw` is not retried once per request
+/// either.
+struct TimedCache {
+    inner: std::sync::Mutex<Option<(std::time::Instant, String)>>,
+}
+
+impl TimedCache {
+    const fn new() -> Self {
+        Self {
+            inner: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// The held reading while it is younger than `ttl`, else a fresh one.
+    fn get_or_read(&self, ttl: std::time::Duration, read: impl FnOnce() -> String) -> String {
+        self.get_or_read_at(std::time::Instant::now(), ttl, read)
+    }
+
+    /// The clock-injectable core of [`TimedCache::get_or_read`], so the reuse
+    /// window is a unit under test instead of something a test has to sleep out.
+    fn get_or_read_at(
+        &self,
+        now: std::time::Instant,
+        ttl: std::time::Duration,
+        read: impl FnOnce() -> String,
+    ) -> String {
+        // A poisoned lock means an earlier holder panicked mid-update. Fall
+        // through to a fresh read rather than propagate the panic: this route is
+        // required to answer.
+        if let Ok(held) = self.inner.lock() {
+            if let Some((at, value)) = held.as_ref() {
+                if now.duration_since(*at) < ttl {
+                    return value.clone();
+                }
+            }
+        }
+        // Deliberately outside the lock: the read forks a process, and holding
+        // the mutex across it would queue every concurrent status request behind
+        // one `iw` invocation.
+        let fresh = read();
+        if let Ok(mut held) = self.inner.lock() {
+            *held = Some((now, fresh.clone()));
+        }
+        fresh
+    }
+}
+
+/// The process-wide reading the status route shares across its two call sites
+/// and across concurrent requests.
+static REG_DOMAIN_CACHE: TimedCache = TimedCache::new();
+
+/// The live regulatory domain, re-read at most once per [`REG_DOMAIN_TTL`].
+fn regulatory_domain() -> String {
+    REG_DOMAIN_CACHE.get_or_read(REG_DOMAIN_TTL, read_regulatory_domain)
+}
+
 /// Best-effort `iw reg get` first-line parse, returning the two-letter country
 /// code, `"global"`, or `"unknown"` on any failure. Mirrors the Python
 /// `_read_regulatory_domain`.
-fn regulatory_domain() -> String {
+fn read_regulatory_domain() -> String {
     let output = match Command::new("iw").args(["reg", "get"]).output() {
         Ok(o) => o,
         Err(_) => return "unknown".to_string(),
@@ -1620,6 +1694,59 @@ mod tests {
         let (status, body) = parse_http_response(raw).unwrap();
         assert_eq!(status, 200);
         assert_eq!(body, b"{}");
+    }
+
+    #[test]
+    fn a_regulatory_reading_is_reused_inside_its_window_and_re_read_after_it() {
+        // The radio panel polls this route about once a second and each poll
+        // used to fork `iw` twice. The reading is reused for the window, so a
+        // poll costs at most one fork; past the window it is taken again.
+        let cache = TimedCache::new();
+        let reads = std::cell::Cell::new(0u32);
+        let read = || {
+            reads.set(reads.get() + 1);
+            "US".to_string()
+        };
+
+        let t0 = std::time::Instant::now();
+        assert_eq!(cache.get_or_read_at(t0, REG_DOMAIN_TTL, read), "US");
+        assert_eq!(reads.get(), 1);
+
+        // A second poll one second later, and the two calls a single request
+        // makes, all ride the one reading.
+        let t1 = t0 + std::time::Duration::from_secs(1);
+        assert_eq!(cache.get_or_read_at(t1, REG_DOMAIN_TTL, read), "US");
+        assert_eq!(cache.get_or_read_at(t1, REG_DOMAIN_TTL, read), "US");
+        assert_eq!(reads.get(), 1, "the window was not honoured");
+
+        // Past the window the domain is read again, so a real change reaches
+        // the body rather than being pinned to whatever was true at boot.
+        let t2 = t0 + REG_DOMAIN_TTL;
+        assert_eq!(cache.get_or_read_at(t2, REG_DOMAIN_TTL, read), "US");
+        assert_eq!(reads.get(), 2);
+    }
+
+    #[test]
+    fn a_cached_reading_is_never_a_value_nothing_read() {
+        // The cache must not outlive its usefulness by inventing continuity: a
+        // domain that genuinely changed is served as soon as the window is out,
+        // and a failed read caches as the honest "unknown" rather than holding
+        // the last good answer forever.
+        let cache = TimedCache::new();
+        let t0 = std::time::Instant::now();
+        assert_eq!(
+            cache.get_or_read_at(t0, REG_DOMAIN_TTL, || "US".to_string()),
+            "US"
+        );
+        assert_eq!(
+            cache.get_or_read_at(t0 + REG_DOMAIN_TTL, REG_DOMAIN_TTL, || "IN".to_string()),
+            "IN"
+        );
+        assert_eq!(
+            cache.get_or_read_at(t0 + REG_DOMAIN_TTL * 2, REG_DOMAIN_TTL, || "unknown"
+                .to_string()),
+            "unknown"
+        );
     }
 
     #[test]
