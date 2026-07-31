@@ -38,14 +38,12 @@ use ados_groundlink::wfb_rx::{
     WfbRxManager,
 };
 use ados_groundlink::{
-    fanout, mesh, presence, receiver, relay, FleetRegistry, GsPresenceCache, FLEET_REGISTRY_PATH,
+    fanout, mesh, presence, receiver, relay, FleetRegistry, GsPresenceCache,
+    FLEET_RECONCILE_INTERVAL, FLEET_REGISTRY_PATH,
 };
 
 const CONFIG_YAML: &str = "/etc/ados/config.yaml";
 const RX_KEY: &str = ados_radio::paths::WFB_RX_KEY;
-/// Poll interval while the configured fleet identity is unusable, and the
-/// cadence the receive generation re-reads the fleet registry on.
-const FLEET_RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
 
 /// The run role the service dispatches on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

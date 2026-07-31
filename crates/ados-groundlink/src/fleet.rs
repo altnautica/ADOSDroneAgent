@@ -32,6 +32,13 @@ pub use ados_radio::config::FLEET_MAX_SLOTS;
 /// Canonical on-disk location of the fleet registry.
 pub const FLEET_REGISTRY_PATH: &str = "/var/lib/ados/fleet.json";
 
+/// How often a running service re-reads this registry to pick up a slot issued
+/// after it started. A drone can be paired long after a service is up, because
+/// the pair route deliberately skips re-installing the receive unit when the
+/// fleet key is unchanged, so every consumer of the registry needs the same
+/// cadence rather than its own.
+pub const FLEET_RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// One registered drone: its issued slot, the device it was issued to, and when.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FleetSlot {

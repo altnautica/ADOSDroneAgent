@@ -30,6 +30,8 @@ use ados_radio::hop::{
 
 use crate::acquire::ChannelSetter;
 use crate::watchdog::PresenceCache;
+use crate::wfb_rx;
+use crate::{FleetRegistry, FLEET_RECONCILE_INTERVAL, FLEET_REGISTRY_PATH};
 
 /// Beacon cadence (10 s, matching the air side).
 pub const PRESENCE_CADENCE: Duration = Duration::from_secs(10);
@@ -490,7 +492,9 @@ pub async fn listen_loop(
     );
 
     let mut readers = tokio::task::JoinSet::new();
+    let mut bound: std::collections::BTreeSet<u8> = std::collections::BTreeSet::new();
     for (slot, sock) in socks {
+        bound.insert(slot);
         readers.spawn(listen_on_slot(
             sock,
             slot,
@@ -499,13 +503,70 @@ pub async fn listen_loop(
             own_device_id.clone(),
         ));
     }
-    // A reader only ends on a fault, so the first completion ends the whole
-    // generation; the remaining readers are aborted when the JoinSet drops, and
-    // the supervisor re-binds every slot from scratch.
-    readers.join_next().await;
-    Err(std::io::Error::other(
-        "a presence slot reader ended; re-binding the whole listener",
-    ))
+
+    // Pick up slots issued after this generation started.
+    //
+    // The set above comes from one registry read, and a drone can be paired long
+    // after the listener is running: the pair route deliberately skips
+    // re-installing the receive unit when the fleet key is unchanged, which is
+    // the normal case for the second and every subsequent drone. The receive
+    // plane already reconciles its own processes, so without this the new
+    // drone's control frames are decoded onto a port nobody is bound to. Its
+    // HopAnnounce is never echoed, so its coordinated channel hop never fires;
+    // it never reaches the valid-packet watchdog's presence input, so a healthy
+    // link can be cold-swept; and it never appears in the linked-peers surface,
+    // so a GCS paired to this node never enrols it. All silently.
+    let mut tick = tokio::time::interval(FLEET_RECONCILE_INTERVAL);
+    tick.tick().await; // the first tick completes immediately
+
+    loop {
+        tokio::select! {
+            // A reader only ends on a fault, so the first completion ends the
+            // whole generation; the remaining readers are aborted when the
+            // JoinSet drops, and the supervisor re-binds every slot afresh.
+            _ = readers.join_next() => {
+                return Err(std::io::Error::other(
+                    "a presence slot reader ended; re-binding the whole listener",
+                ));
+            }
+            _ = tick.tick() => {
+                let want = wfb_rx::fleet_slots(&FleetRegistry::load(std::path::Path::new(
+                    FLEET_REGISTRY_PATH,
+                )));
+                let missing: Vec<u8> =
+                    want.into_iter().filter(|s| !bound.contains(s)).collect();
+                for slot in missing {
+                    let port = presence_listen_port(slot);
+                    // A late bind is NOT fatal. The up-front binds are fatal on
+                    // purpose — a port already held means a leaked generation,
+                    // and half a fleet heard is worse than a clean retry. That
+                    // reasoning does not carry here: propagating an EADDRINUSE
+                    // from one newly-paired slot would tear down every healthy
+                    // reader for a slot that was working seconds ago. Retry it
+                    // on the next tick instead and leave the rest alone.
+                    match UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, port)).await {
+                        Ok(sock) => {
+                            bound.insert(slot);
+                            readers.spawn(listen_on_slot(
+                                sock,
+                                slot,
+                                cache.clone(),
+                                follower.clone(),
+                                own_device_id.clone(),
+                            ));
+                            tracing::info!(slot, port, "ground_presence_slot_bound");
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e, slot, port,
+                                "ground_presence_slot_bind_failed; retrying next tick"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// One slot's receive loop. Never returns under normal operation.
