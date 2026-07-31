@@ -184,6 +184,51 @@ fn sign_payload(scope: &str, target: &str, issued_at: i64, expires_at: i64) -> S
     format!("v1|{scope}|{target}|{issued_at}|{expires_at}")
 }
 
+/// Why a secret may or may not be accepted from the relay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcceptDecision {
+    /// No secret held: take this one. Trust-on-first-use.
+    Accept,
+    /// Already holding this exact secret. A no-op, not a conflict — the ground
+    /// station restates it on every reconcile tick.
+    AlreadyHeld,
+    /// Holding a DIFFERENT secret. Refused.
+    RefusedWouldOverwrite,
+    /// The offered value is not a usable secret.
+    RefusedMalformed,
+}
+
+/// Decide whether to accept a relay secret offered over the relay itself.
+///
+/// **This is the security decision in the whole scheme, so it is a pure
+/// function with its own tests rather than a branch inside an HTTP handler.**
+///
+/// The delivery necessarily rides the very channel the credential will later
+/// protect, which today is unauthenticated. If the drone simply took whatever
+/// it was handed, anyone within radio range could overwrite the secret with
+/// their own and then mint tickets the drone accepts — leaving a credential
+/// that looks like protection on every status surface while granting exactly
+/// the access it was built to deny. That is strictly worse than having none.
+///
+/// So: **first write wins.** An unset drone takes the first secret it is
+/// offered; a drone already holding one refuses to replace it over the relay.
+/// The exposure is the pairing moment rather than every request forever, which
+/// is the honest statement of what trust-on-first-use buys.
+///
+/// Replacing a secret deliberately — a re-pair to a different ground station —
+/// goes through unpair, which clears it locally, rather than through a write
+/// that a stranger could also make.
+pub fn decide_accept(held: Option<&str>, offered: &str) -> AcceptDecision {
+    if offered.len() != RELAY_SECRET_LEN * 2 || !offered.chars().all(|c| c.is_ascii_hexdigit()) {
+        return AcceptDecision::RefusedMalformed;
+    }
+    match held {
+        None => AcceptDecision::Accept,
+        Some(existing) if existing.eq_ignore_ascii_case(offered) => AcceptDecision::AlreadyHeld,
+        Some(_) => AcceptDecision::RefusedWouldOverwrite,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,6 +238,66 @@ mod tests {
 
     fn issuer() -> RelayTicketIssuer {
         RelayTicketIssuer::from_secret(SECRET)
+    }
+
+    const HEX32: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn an_unset_drone_takes_the_first_secret_it_is_offered() {
+        // Trust-on-first-use: at pair time there is nothing better available on
+        // a headless aircraft.
+        assert_eq!(decide_accept(None, HEX32), AcceptDecision::Accept);
+    }
+
+    #[test]
+    fn a_drone_already_holding_a_secret_refuses_to_be_re_keyed_over_the_air() {
+        // The delivery rides the channel the credential protects, and that
+        // channel is unauthenticated. Without this, anyone in radio range
+        // overwrites the secret and then mints tickets the drone accepts — a
+        // credential that reads as protection while granting the access it
+        // exists to deny. Deliberate replacement goes through unpair.
+        let other = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        assert_eq!(
+            decide_accept(Some(HEX32), other),
+            AcceptDecision::RefusedWouldOverwrite
+        );
+    }
+
+    #[test]
+    fn restating_the_same_secret_is_a_no_op_not_a_conflict() {
+        // The ground station restates it on every reconcile tick, so the
+        // steady state must not look like an attack.
+        assert_eq!(
+            decide_accept(Some(HEX32), HEX32),
+            AcceptDecision::AlreadyHeld
+        );
+        // Case differences in hex are the same secret.
+        assert_eq!(
+            decide_accept(Some(&HEX32.to_uppercase()), HEX32),
+            AcceptDecision::AlreadyHeld
+        );
+    }
+
+    #[test]
+    fn a_malformed_offer_is_refused_before_anything_is_stored() {
+        // Storing a short or non-hex value would leave the drone holding
+        // something credential-shaped that authenticates nothing, and would
+        // then block the real secret via first-write-wins.
+        for bad in ["", "abc", "zzzz", &"a".repeat(63), &"a".repeat(65)] {
+            assert_eq!(
+                decide_accept(None, bad),
+                AcceptDecision::RefusedMalformed,
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_malformed_offer_cannot_displace_a_held_secret() {
+        assert_eq!(
+            decide_accept(Some(HEX32), "nope"),
+            AcceptDecision::RefusedMalformed
+        );
     }
 
     #[test]
