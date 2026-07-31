@@ -8,7 +8,7 @@
 //! length-prefixed msgpack (v2), the versioned wire the shared reader
 //! auto-detects.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use ados_protocol::frame::{encode_frame, MAVLINK_MAX_FRAME};
@@ -30,6 +30,7 @@ use ados_mavlink_router::param_cache::ParamCache;
 use ados_mavlink_router::proxies::{
     proxy_bind_addr, run_tcp_proxy, run_udp_proxy, run_ws_proxy, ProxyAuth, WsProxyAuth,
 };
+use ados_mavlink_router::relayed::RelayedVehicle;
 use ados_mavlink_router::state::{firmware_family, VehicleState};
 use ados_swarm_control::ModePrecedence;
 
@@ -127,6 +128,12 @@ fn ws_proxy_port(cfg: &MavlinkConfig) -> Option<u16> {
     }
     cfg.websocket_port()
 }
+/// How often the attitude-cadence distribution is shipped to the store.
+///
+/// The window is already a summary by this point, so a faster cadence would add
+/// writes without adding information, and this measurement must not disturb the
+/// thing it is measuring.
+const CADENCE_REPORT_INTERVAL: Duration = Duration::from_secs(10);
 
 #[tokio::main]
 async fn main() {
@@ -224,6 +231,11 @@ async fn main() {
     // Set when the republish seam runs, on the same "absent means not running"
     // reading as the tee counters above.
     let mut frame_ingest_counters: Option<Arc<IngestCounters>> = None;
+    // The decoded reading of the vehicle on the far end of the radio, set on
+    // the same profiles as the seam that feeds it. Kept strictly apart from the
+    // attached-FC `state` above: this node still has no flight controller of
+    // its own, it can now simply see the one it is relaying.
+    let mut relayed_vehicle: Option<Arc<StdMutex<RelayedVehicle>>> = None;
     // Set when the relay-proxy uplink runs, on the same reading as the two
     // above: absent means the lane is not running on this profile, which is not
     // the same signal as a lane that received nothing.
@@ -242,6 +254,58 @@ async fn main() {
         } else {
             tasks.push(tokio::spawn(async move { fc.run(cancel).await }));
         }
+    }
+
+    // Ship the attitude-cadence distribution to the logging store.
+    //
+    // The measurement lives in memory in the read loop, which answers the
+    // question only for whoever is holding the process open at the time. A
+    // decision about closing a control loop over this link needs the tail
+    // across a whole bench run, and needs it to survive the run -- so the
+    // percentiles go where they can be queried afterwards rather than only
+    // observed live.
+    //
+    // Every ten seconds, not every arrival: the samples are already summarised
+    // by then, and emitting per-message would put a few hundred writes a second
+    // onto a store this measurement is not supposed to disturb.
+    {
+        let fc = fc.clone();
+        let cancel = cancel.clone();
+        let metrics = ados_protocol::logd::emitter::IngestEmitter::new("ados-mavlink");
+        tasks.push(tokio::spawn(async move {
+            let mut tick = tokio::time::interval(CADENCE_REPORT_INTERVAL);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {
+                        let s = fc.attitude_cadence().await;
+                        // Nothing to say before the first gap exists. An empty
+                        // window emitting zeros would put a fabricated 0 Hz into
+                        // the series and make a link that has not started look
+                        // like one that stopped.
+                        let (Some(hz), Some(p50), Some(p95), Some(p99)) =
+                            (s.achieved_hz, s.p50, s.p95, s.p99)
+                        else {
+                            continue;
+                        };
+                        use ados_protocol::logd::{Fields, Value};
+                        let mut tags = Fields::new();
+                        tags.insert("message".to_string(), Value::from("attitude"));
+                        let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+                        metrics.emit_metric("fc.attitude.achieved_hz", hz, tags.clone());
+                        metrics.emit_metric("fc.attitude.period_p50_ms", ms(p50), tags.clone());
+                        metrics.emit_metric("fc.attitude.period_p95_ms", ms(p95), tags.clone());
+                        metrics.emit_metric("fc.attitude.period_p99_ms", ms(p99), tags.clone());
+                        metrics.emit_metric(
+                            "fc.attitude.deadline_misses",
+                            s.missed_deadline as f64,
+                            tags,
+                        );
+                    }
+                    _ = cancel.notified() => break,
+                }
+            }
+        }));
     }
 
     // 1 Hz companion heartbeat.
@@ -404,6 +468,8 @@ async fn main() {
                 let inbound = inbound.expect("inbound channel requested");
                 let counters = Arc::new(IngestCounters::default());
                 frame_ingest_counters = Some(counters.clone());
+                let relayed = Arc::new(StdMutex::new(RelayedVehicle::default()));
+                relayed_vehicle = Some(relayed.clone());
                 // Held for the process lifetime: dropping the server closes the
                 // socket and the ground data plane would find nothing to
                 // connect to.
@@ -412,7 +478,7 @@ async fn main() {
                 let cancel = cancel.clone();
                 tasks.push(tokio::spawn(async move {
                     let _server = server;
-                    frame_ingest::run(inbound, fc, counters, cancel).await
+                    frame_ingest::run(inbound, fc, counters, relayed, cancel).await
                 }));
             }
             Err(e) => {
@@ -546,6 +612,7 @@ async fn main() {
         let aux_tee_counters = aux_tee_counters.clone();
         let aux_rpc_counters = aux_rpc_counters.clone();
         let frame_ingest_counters = frame_ingest_counters.clone();
+        let relayed_vehicle = relayed_vehicle.clone();
         let cancel = cancel.clone();
         tasks.push(tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_millis(100));
@@ -584,6 +651,7 @@ async fn main() {
                             &fc, &state, &params, started, mavlink_drops, state_drops,
                             aux_tee_counters.as_ref(), frame_ingest_counters.as_ref(),
                             aux_rpc_counters.as_ref(), swarm_status.as_ref(),
+                            relayed_vehicle.as_ref(),
                         )
                         .await;
                         let wire = { state.lock().await.to_wire_with(&extras) };
@@ -682,6 +750,7 @@ async fn build_extras(
     frame_ingest_counters: Option<&Arc<IngestCounters>>,
     aux_rpc_counters: Option<&AuxUplinkConsumerCounters>,
     swarm: Option<&Arc<SwarmSetpointStatus>>,
+    relayed_vehicle: Option<&Arc<StdMutex<RelayedVehicle>>>,
 ) -> Map<String, Value> {
     // The cached param count and the map's change counter, read under one lock.
     let (cached, param_generation) = {
@@ -816,6 +885,24 @@ async fn build_extras(
             "mavlink_frame_ingest".into(),
             serde_json::to_value(counters.snapshot()).unwrap_or(Value::Null),
         );
+    }
+    // The decoded reading of the relayed vehicle, when this node has ever seen
+    // one. Carries its own provenance and freshness (see `crate::relayed`), and
+    // is nested rather than merged so it can never be mistaken for the
+    // attached-FC fields alongside it. Absent on a node that has never relayed
+    // a vehicle, which is a different signal from one whose vehicle has gone
+    // quiet (that case is present with `fresh: false`).
+    if let Some(relayed) = relayed_vehicle {
+        let snapshot = match relayed.lock() {
+            Ok(r) => r.to_wire(Instant::now()),
+            // Read through a poisoned lock rather than dropping the surface:
+            // a blank reading is exactly the failure this projection exists to
+            // fix, so it must not be reintroduced by a lock error.
+            Err(poisoned) => poisoned.into_inner().to_wire(Instant::now()),
+        };
+        if let Some(value) = snapshot {
+            extras.insert("relayed_vehicle".into(), value);
+        }
     }
     // The relay-proxy uplink's tally: how many HTTP requests crossed the radio,
     // how many were dropped as another node's, and — the pair that says whether
@@ -1005,6 +1092,7 @@ mod extras_key_set_tests {
             Some(&Arc::new(IngestCounters::default())),
             Some(&AuxUplinkConsumerCounters::new()),
             Some(&Arc::new(SwarmSetpointStatus::default())),
+            None,
         )
         .await;
 
@@ -1059,6 +1147,7 @@ mod extras_key_set_tests {
             Some(&Arc::new(IngestCounters::default())),
             Some(&AuxUplinkConsumerCounters::new()),
             None,
+            None,
         )
         .await;
         let empty_len = sized_without_clocks(empty);
@@ -1080,6 +1169,7 @@ mod extras_key_set_tests {
             Some(&Arc::new(TeeCounters::default())),
             Some(&Arc::new(IngestCounters::default())),
             Some(&AuxUplinkConsumerCounters::new()),
+            None,
             None,
         )
         .await;
