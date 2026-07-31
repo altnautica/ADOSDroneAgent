@@ -1198,16 +1198,24 @@ jobs:
             echo "No ADOS_DRIVER_SIGNING_KEY set; publishing SHA256-only (dev posture)."
             exit 0
           fi
-          # This job builds on the older-glibc runner (so the binary runs on the
-          # Bookworm target boards); minisign is not packaged for that runner's
-          # apt, so signing degrades to SHA256-only there rather than failing the
-          # publish. On edge (the default channel) the installer accepts SHA256;
-          # the signed artifacts on the newer-glibc jobs are unaffected.
-          sudo apt-get update || true
-          if ! sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign; then
-            echo "minisign unavailable on this runner; publishing SHA256-only."
-            exit 0
-          fi
+          # This job builds on the older-glibc runner so the binary runs on the
+          # Bookworm target boards. It used to treat a failed minisign install as
+          # a reason to publish SHA256-only and carry on, on the stated premise
+          # that minisign is not packaged for this runner. That premise was never
+          # substantiated, and these were the only two published artifacts in the
+          # whole catalog with no signature — which quietly blocks turning
+          # verification on at all, since a channel that enforces signatures
+          # would hard-fail on exactly these two files.
+          #
+          # minisign lives in universe, so enable it explicitly rather than
+          # assuming the runner's default sources carry it, and let a genuine
+          # failure fail the job. Publishing an unsigned artifact is worse than
+          # not publishing one: the installer degrades to the default vision
+          # build when this release is absent, but it cannot tell that a present
+          # artifact was never signed.
+          sudo add-apt-repository -y universe || true
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
           printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
           minisign -S -s /tmp/sign.key -m rel/ados-vision-onnx-aarch64 -x rel/ados-vision-onnx-aarch64.minisig
           minisign -S -s /tmp/sign.key -m rel/libonnxruntime-aarch64.so -x rel/libonnxruntime-aarch64.so.minisig
