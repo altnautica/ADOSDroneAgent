@@ -35,19 +35,17 @@ const STATE_QUEUE_DEPTH: usize = 32;
 const TCP_PROXY_PORT: u16 = 5760;
 const UDP_PROXY_PORTS: &[u16] = &[14550, 14551];
 /// The ground station's aux-uplink loopback ingress — must equal
-/// `ados-groundlink`'s `wfb_rx::args::AUX_TX_PORT`, the port its
-/// unconditionally-spawned `wfb_tx -p3` reads from. The two crates do not
-/// depend on each other, so this travels as a plain matching literal rather
-/// than a shared const (the existing convention for this port pair — see
-/// `ados-radio`'s `default_aux_tx_port()` / `ados-groundlink`'s
-/// `ATLAS_RX_PORT`, cross-referenced only in comments and tests, never a
-/// shared dependency).
-const AUX_UPLINK_PORT: u16 = 5602;
-/// The drone's own aux-uplink re-emit loopback — must equal `ados-radio`'s
-/// `WfbConfig::aux_rx_port` (default 5603), the port its `wfb_rx -p3`
-/// re-emits decoded uplink datagrams to. Same cross-crate literal-matching
-/// convention as `AUX_UPLINK_PORT` above.
-const AUX_UPLINK_REEMIT_PORT: u16 = 5603;
+/// The auxiliary lane's loopback port pair, resolved from operator config.
+///
+/// These used to be matching literals here, in the control surface and in the
+/// radio service, with comments pointing at each other. That is correct at
+/// exactly one value: the ports are operator-settable, and changing one moved
+/// the radio while the other two kept writing to the old number, so the uplink
+/// carried nothing and nothing reported an error. Resolving from the shared
+/// reader moves all three together.
+fn aux_ports() -> ados_protocol::aux_ports::AuxPorts {
+    ados_protocol::aux_ports::AuxPorts::load()
+}
 
 fn run_dir() -> String {
     std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string())
@@ -358,7 +356,7 @@ async fn main() {
         }
         tasks.push(tokio::spawn(async move {
             aux_uplink_consumer::run(
-                AUX_UPLINK_REEMIT_PORT,
+                aux_ports().rx,
                 uplink_fc,
                 Some(uplink_egress),
                 uplink_device_id,
@@ -436,7 +434,7 @@ async fn main() {
         // whichever drone the ground station's WFB link has bound, closing
         // the ground-to-drone half of the relay (the drone-to-ground half
         // has run since the aux downlink lane was wired up).
-        fc.set_aux_uplink(aux_uplink::spawn(AUX_UPLINK_PORT)).await;
+        fc.set_aux_uplink(aux_uplink::spawn(aux_ports().tx)).await;
     }
 
     // MAVLink socket client commands -> FC.

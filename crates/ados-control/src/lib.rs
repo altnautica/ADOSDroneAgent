@@ -365,11 +365,16 @@ where
     // forwards Response frames to.
     let state = if is_ground_station {
         // The ground station's wfb_rx manager spawns `wfb_tx -p3` whose loopback
-        // ingress is AUX_TX_PORT = 5602 (ados-groundlink::wfb_rx::args). Connect
-        // directly to it rather than going through the `radio-aux.sock` command
-        // socket, which does not exist on the ground station (the radio lifecycle
-        // is managed by the groundlink process, not the ados-radio command socket).
-        match ados_protocol::aux_egress::AuxEgress::connected_to_udp(5602).await {
+        // ingress is the aux transmit port. Connect directly to it rather than
+        // going through the `radio-aux.sock` command socket, which does not
+        // exist on the ground station (the radio lifecycle is managed by the
+        // groundlink process, not the ados-radio command socket).
+        //
+        // Resolved from config rather than hardcoded: the port is
+        // operator-settable, and a literal here silently stopped matching the
+        // radio the moment anyone changed it.
+        let aux_tx = ados_protocol::aux_ports::AuxPorts::load().tx;
+        match ados_protocol::aux_egress::AuxEgress::connected_to_udp(aux_tx).await {
             Ok(aux_egress) => {
                 let proxy = Arc::new(ados_protocol::aux_rpc_proxy::AuxRpcProxy::new(aux_egress));
                 let reader_cancel = Arc::new(tokio::sync::Notify::new());

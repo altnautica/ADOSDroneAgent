@@ -76,11 +76,13 @@ fn default_reg_gate_strict() -> bool {
 fn default_aux_enable() -> bool {
     true
 }
+// Delegated to the shared reader every consumer of the lane resolves through,
+// so the radio and the processes that feed it cannot drift apart on a default.
 fn default_aux_tx_port() -> u16 {
-    5602
+    ados_protocol::aux_ports::DEFAULT_AUX_TX_PORT
 }
 fn default_aux_rx_port() -> u16 {
-    5603
+    ados_protocol::aux_ports::DEFAULT_AUX_RX_PORT
 }
 // The auxiliary channel is a low-rate application pipe between nodes, so it
 // defaults to the lightest valid Reed-Solomon ratio (k=1, n=2) — the same trio
@@ -1102,6 +1104,12 @@ mod tests {
         assert!(c.aux_enable);
         assert_eq!(c.aux_tx_port, 5602);
         assert_eq!(c.aux_rx_port, 5603);
+        // The radio's defaults and the shared reader's must be the same pair:
+        // the router and the control surface resolve through the reader, and a
+        // drift between them takes the uplink down with no error anywhere.
+        let shared = ados_protocol::aux_ports::AuxPorts::default();
+        assert_eq!(c.aux_tx_port, shared.tx);
+        assert_eq!(c.aux_rx_port, shared.rx);
         assert_eq!(c.aux_fec_k, 1);
         assert_eq!(c.aux_fec_n, 2);
         // No explicit aux MCS → the aux pair rides the data-plane rate.

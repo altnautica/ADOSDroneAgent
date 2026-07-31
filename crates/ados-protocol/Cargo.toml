@@ -9,6 +9,9 @@ description = "Canonical implementation of the ADOS Drone Agent IPC wire contrac
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+# Reads the aux port pair out of /etc/ados/config.yaml so every consumer of
+# the lane resolves the same operator-configured value.
+serde_norway = { workspace = true }
 # The shared no-provider rustls crypto-provider install (crypto.rs), so every
 # bare reqwest client builder in the agent installs the RustCrypto provider once
 # (no ring / aws-lc). Already in the workspace via ados-cloud.
