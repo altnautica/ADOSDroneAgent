@@ -58,14 +58,14 @@ class TestRedaction:
         cfg = json.dumps(
             {
                 "security": {"api_key": "k" * 40, "hmac_secret": "s" * 44},
-                "network": {"hotspot": {"password": "5KBZ66T4BR9B", "ssid": "ados-gs"}},
+                "network": {"hotspot": {"password": "EXAMPLEPASS99", "ssid": "ados-gs"}},
                 "video": {"wfb": {"channel": 149, "fleet_slot": 2}},
             }
         )
         out = redact(cfg)
         assert "k" * 40 not in out
         assert "s" * 44 not in out
-        assert "5KBZ66T4BR9B" not in out
+        assert "EXAMPLEPASS99" not in out
         # Structure and non-secrets must remain legible.
         assert "ados-gs" in out
         assert "149" in out
