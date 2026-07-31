@@ -112,6 +112,50 @@ _LOSSY_LINK_PERCENT = 2.0
 _TYPICAL_PACKETS_PER_FRAME = 10
 
 
+# How a loss figure is labelled by who took the measurement. A number whose
+# provenance is invisible is a number an operator cannot act on: "3% loss" means
+# something different when this node's own receiver counted it than when the
+# ground station counted it on the other end of the downlink.
+_MEASURED_BY = {
+    "local": "(measured here)",
+    "peer": "(measured by the receiving station)",
+}
+
+
+def link_loss(data: dict[str, Any]) -> tuple[float | None, str]:
+    """Resolve the link's packet loss and which side measured it.
+
+    A transmit-only drone has no local loss figure and never will: it injects
+    its own downlink and a single radio in monitor mode cannot capture its own
+    frames, so ``packets_received`` is a permanent zero and ``loss_percent`` is
+    the matching sentinel. Gating the loss verdict on that counter made it dead
+    code on the node type that most needs it.
+
+    The measurement does exist — the receiving ground station counts exactly
+    what arrived and sends it back up the link — so prefer whatever the radio
+    resolved as its live sample (``measured_loss_percent`` alongside the
+    ``sample_source`` naming who took it). Fall back to the local counters only
+    when this node really did decode something itself.
+
+    Returns ``(None, "none")`` when nobody measured, which is deliberately
+    distinct from a measured zero.
+    """
+    source = data.get("sample_source")
+    resolved = data.get("measured_loss_percent")
+    if source in _MEASURED_BY and isinstance(resolved, (int, float)):
+        return float(resolved), source
+
+    # Older radio build with no resolved-sample fields: fall back to the local
+    # counters, which are only meaningful once this node has decoded something.
+    local = data.get("loss_percent")
+    decoded = isinstance(data.get("packets_received"), (int, float)) and (
+        data.get("packets_received") or 0
+    ) > 0
+    if decoded and isinstance(local, (int, float)):
+        return float(local), "local"
+    return None, "none"
+
+
 def frame_delivery_percent(
     loss_percent: float, packets_per_frame: int = _TYPICAL_PACKETS_PER_FRAME
 ) -> float:
@@ -195,11 +239,16 @@ def diag_link(as_json: bool) -> None:
     link_diag = data.get("link_diag")
     state = data.get("state", "?")
 
-    loss = data.get("loss_percent")
+    loss, measured_by = link_loss(data)
+    by = _MEASURED_BY.get(measured_by, "")
+    lossy = loss is not None and loss >= _LOSSY_LINK_PERCENT
+    # Whether this node's OWN receiver decoded anything. Distinct from having a
+    # loss figure at all: a drone never decodes its own downlink, so this stays
+    # false on one even while the ground station's measurement of that downlink
+    # is right there in `loss`.
     measured = isinstance(data.get("packets_received"), (int, float)) and (
         data.get("packets_received") or 0
     ) > 0
-    lossy = measured and isinstance(loss, (int, float)) and loss >= _LOSSY_LINK_PERCENT
 
     click.echo(_ansi.marker(theme, "WFB LINK"))
     if lossy:
@@ -208,7 +257,7 @@ def diag_link(as_json: bool) -> None:
         dot = _ansi.dot(theme, "warn")
         click.echo(
             f"  {dot} {theme.bold('LOSSY')}  "
-            f"{theme.dim(f'({loss:.1f}% packet loss, decode={link_diag or state})')}"
+            f"{theme.dim(f'({loss:.1f}% packet loss {by}, decode={link_diag or state})')}"
         )
     elif isinstance(link_diag, str) and link_diag:
         dot = _ansi.dot(theme, _LINK_STATE.get(link_diag, "warn"))
@@ -240,7 +289,7 @@ def diag_link(as_json: bool) -> None:
         ("FEC failed", _num("fec_failed")),
         (
             "Loss",
-            f"{loss:.1f}%" if measured and isinstance(loss, (int, float)) else "— (no decode)",
+            f"{loss:.1f}% {by}" if loss is not None else "— (not measured)",
         ),
         ("Bitrate", f"{data.get('bitrate_mbps')} Mbps" if data.get("bitrate_mbps") else "—"),
     ]
@@ -255,5 +304,16 @@ def diag_link(as_json: bool) -> None:
                 f"  a frame needs every one of its packets, so at ~"
                 f"{_TYPICAL_PACKETS_PER_FRAME} packets/frame this loss delivers "
                 f"roughly {delivered:.0f}% of frames (estimate)."
+            )
+        )
+    elif loss is None and not measured:
+        # Nothing measured this link from either side. Say which measurements
+        # are missing rather than printing a bare dash and leaving the operator
+        # to guess whether the link is clean or unobserved.
+        click.echo("")
+        click.echo(
+            theme.dim(
+                "  no packet-loss measurement: this radio decoded nothing, and no "
+                "receiving station has reported what it decoded from this node."
             )
         )

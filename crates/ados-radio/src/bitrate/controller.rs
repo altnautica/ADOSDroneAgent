@@ -400,6 +400,10 @@ impl BitrateController {
             snap.respawn_applies = applies.respawn;
             snap.tx_cmd_failures = applies.tx_cmd_failed;
             snap.sample_source = sample.source.as_str();
+            // Only a real sample carries a loss figure. Without a sample the
+            // number in `sample` is the local sentinel, which on a drone is
+            // permanently zero and would read as a clean link.
+            snap.sample_loss_percent = has_sample.then_some(loss);
         }
 
         self.reconcile_encoder_ceiling(want_ceiling, observed.as_ref())

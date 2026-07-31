@@ -353,6 +353,19 @@ pub(crate) fn build_stats_value(
         // on a good sample — which is exactly how a permanently top-rung ladder
         // read as healthy.
         "sample_source": bitrate.sample_source,
+        // The loss the `sample_source` measurement actually carries, or null
+        // when there is no usable sample.
+        //
+        // `loss_percent` below is this node's OWN counter, and on a drone that
+        // is permanently zero: it transmits its own downlink and a single radio
+        // in monitor mode cannot capture its own injected frames. So every
+        // delivery verdict keyed on the local counter was structurally dead on
+        // the one node type that most needs it, while the ground station's
+        // measurement of that same downlink arrived, fed the ladder, and was
+        // never surfaced. This is that measurement, published beside the source
+        // that identifies who took it — a loss figure whose provenance is
+        // invisible is one an operator cannot act on.
+        "measured_loss_percent": bitrate.sample_loss_percent,
         // How the live FEC/MCS retunes were applied. `tx_cmd_applies` went over
         // the running transmitter's wfb-ng 24.08 management socket (no video
         // gap); `respawn_applies` fell back to kill-and-respawn (a 1-2 s gap).
@@ -503,6 +516,60 @@ pub(crate) fn read_device_id() -> String {
 mod tests {
     use super::*;
     use crate::reg_gate::STATE_REG_BLOCKED;
+
+    /// Build a stats body over an injected link reading + bitrate snapshot,
+    /// with everything else at its default. Only the loss provenance is under
+    /// test here.
+    fn stats_body(link: &LinkStats, bitrate: &BitrateSnapshot) -> serde_json::Value {
+        build_stats_value(
+            "connected",
+            &ChannelTruth::default(),
+            &RegSnapshot::default(),
+            5,
+            None,
+            link,
+            &WfbConfig::default(),
+            0,
+            &WatchdogCounters::default(),
+            &TxRates::default(),
+            bitrate,
+        )
+    }
+
+    #[test]
+    fn a_transmit_only_node_publishes_the_loss_its_peer_measured() {
+        // A drone injects its own downlink and a single radio in monitor mode
+        // cannot capture what it injects, so its own counters are the permanent
+        // no-measurement sentinel and `loss_percent` reads 0 forever. The
+        // receiving station's measurement of that same downlink already arrives
+        // and already drives the ladder — it just never left the process, so
+        // every delivery surface on a drone had nothing to show.
+        let body = stats_body(
+            &LinkStats::default(),
+            &BitrateSnapshot {
+                sample_source: "peer",
+                sample_loss_percent: Some(24.29),
+                ..BitrateSnapshot::default()
+            },
+        );
+        assert_eq!(body["sample_source"], "peer");
+        assert!((body["measured_loss_percent"].as_f64().unwrap() - 24.29).abs() < 0.001);
+        // The local counter is untouched and still honestly zero, so the two
+        // never get confused for one another.
+        assert_eq!(body["packets_received"], 0);
+    }
+
+    #[test]
+    fn no_usable_sample_publishes_null_not_a_zero() {
+        // Nobody measured. A zero here would render an unobserved link as a
+        // clean one, which is the reading that trains an operator to distrust
+        // the surface.
+        let body = stats_body(&LinkStats::default(), &BitrateSnapshot::default());
+        assert!(
+            body["measured_loss_percent"].is_null(),
+            "an unmeasured link must publish null, not 0"
+        );
+    }
 
     #[test]
     fn reg_posture_default_is_unrestricted() {

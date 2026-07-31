@@ -24,10 +24,11 @@
 //! bytes rather than more — previously the rescue rung tripled FEC on an
 //! already-strained channel while the encoder kept pushing 4000 kbps.
 //!
-//! OFF by default per-rig (`adaptive_bitrate_enabled`). When off, the loop still
-//! ticks at its cadence so the snapshot surface stays populated for the
-//! `/api/video/config` consumers, it never touches the data plane, and it clears
-//! the encoder ceiling (an unarmed ladder must not clamp the encoder).
+//! ON by default (`adaptive_bitrate_enabled` defaults true), flippable at
+//! runtime through the command socket. When off, the loop still ticks at its
+//! cadence so the snapshot surface stays populated for the `/api/video/config`
+//! consumers, it never touches the data plane, and it clears the encoder ceiling
+//! (an unarmed ladder must not clamp the encoder).
 //!
 //! Hysteresis (1 Hz sampling on the bench):
 //! - **Step down** after a sustained bad window: `loss > 5%` OR `rssi < -75` for
@@ -121,6 +122,17 @@ pub struct BitrateSnapshot {
     /// report of what it decoded, or nothing. Without it a rung held for want
     /// of any signal is indistinguishable from one chosen on a good sample.
     pub sample_source: &'static str,
+    /// The packet loss the sample in [`Self::sample_source`] actually carries,
+    /// or `None` when no usable measurement exists.
+    ///
+    /// On a transmit-only drone this is the ONLY loss figure that means
+    /// anything. The node's own counters are the permanent no-measurement
+    /// sentinel — a single radio in monitor mode cannot capture its own
+    /// injected frames — so every surface gated on them showed nothing, and
+    /// the loss the ground station had already measured and sent back stopped
+    /// at the ladder that consumed it. Carried here so a drone can report the
+    /// loss its receiver measured for it.
+    pub sample_loss_percent: Option<f64>,
 }
 
 impl BitrateSnapshot {
@@ -142,6 +154,7 @@ impl BitrateSnapshot {
             // starts at, and the sidecar gates it behind a real decode.
             snr_db: 0.0,
             sample_source: SampleSource::None.as_str(),
+            sample_loss_percent: None,
             mcs_ladder_cap: crate::mcs_ladder::clamp_cap(cfg.adaptive_mcs_max),
             encoder_bitrate_kbps: None,
             tx_cmd_applies: 0,

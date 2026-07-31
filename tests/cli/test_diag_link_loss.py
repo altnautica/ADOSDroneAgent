@@ -82,7 +82,69 @@ def test_a_link_with_no_decode_reports_no_measurement_not_zero_loss(monkeypatch)
     out = _invoke(deaf, monkeypatch)
     assert "DEAF" in out
     assert "LOSSY" not in out, "0% loss on a deaf radio is absence of data, not a clean link"
-    assert "no decode" in out
+    assert "not measured" in out
+    # And name what is missing, so the operator is not left deciding between
+    # "clean link" and "nobody looked" from a bare dash.
+    assert "no packet-loss measurement" in out
+
+
+def _transmit_only_drone() -> dict:
+    """A drone's own reading of its downlink.
+
+    Its radio injects and cannot capture what it injects, so every local counter
+    is the permanent no-measurement sentinel. The ground station receiving that
+    downlink measured a quarter of it missing and reported it back, which is why
+    the radio resolved a peer sample.
+    """
+    return {
+        "link_diag": "healthy",
+        "state": "active",
+        "channel": 149,
+        # Every local counter is the sentinel. This never changes in flight.
+        "packets_received": 0,
+        "packets_all": 0,
+        "packets_lost": 0,
+        "fec_failed": 0,
+        "loss_percent": 0.0,
+        # What the receiving station measured and sent back.
+        "sample_source": "peer",
+        "measured_loss_percent": 24.29,
+    }
+
+
+def test_a_drone_reports_the_loss_its_ground_station_measured(monkeypatch):
+    # The defect: the loss verdict was gated on `packets_received > 0`, which on
+    # a transmit-only drone is permanently zero, so LOSSY and the frame-delivery
+    # explainer were unreachable on the one node type that most needs them —
+    # while the measurement itself sat in the sidecar the ladder already read.
+    out = _invoke(_transmit_only_drone(), monkeypatch)
+    assert "LOSSY" in out
+    assert "24.3% packet loss" in out
+    assert "of frames" in out, "the frame-delivery explainer must reach a drone too"
+
+
+def test_a_loss_figure_says_which_side_measured_it(monkeypatch):
+    # Same number, different meaning: one is this radio's own count, the other
+    # is the far end's count of what actually arrived. An operator cannot act on
+    # a figure whose provenance is invisible.
+    peer = _invoke(_transmit_only_drone(), monkeypatch)
+    assert "measured by the receiving station" in peer
+    assert "measured here" not in peer
+
+    local = _invoke(_healthy_but_lossy(), monkeypatch)
+    assert "measured here" in local
+    assert "measured by the receiving station" not in local
+
+
+def test_a_drone_with_no_peer_report_claims_no_measurement(monkeypatch):
+    # No station has reported, so there is no loss figure. Reporting the local
+    # sentinel as 0% would render an unobserved link as a clean one.
+    silent = _transmit_only_drone()
+    silent.update(sample_source="none", measured_loss_percent=None)
+    out = _invoke(silent, monkeypatch)
+    assert "LOSSY" not in out
+    assert "not measured" in out
+    assert "no receiving station has reported" in out
 
 
 def test_frame_delivery_compounds_across_the_frame():
