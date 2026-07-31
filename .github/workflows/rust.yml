@@ -1189,6 +1189,40 @@ jobs:
           ( cd rel && sha256sum ados-vision-onnx-aarch64 > ados-vision-onnx-aarch64.sha256 )
           ( cd rel && sha256sum libonnxruntime-aarch64.so > libonnxruntime-aarch64.so.sha256 )
 
+      - name: Hand the staged artifacts to the signing job
+        uses: actions/upload-artifact@v4
+        with:
+          name: vision-onnx-rel
+          path: crates/rel/
+          retention-days: 1
+          if-no-files-found: error
+
+  # Signing is split out of the build deliberately. The build must run on the
+  # older-glibc runner so the artifact loads on the Bookworm target boards, but
+  # minisign is genuinely not packaged for that runner's apt — verified: an
+  # explicit `add-apt-repository universe` still yields "Unable to locate package
+  # minisign". Previously the job swallowed that and published unsigned, which
+  # left these two artifacts as the only unsigned files in the catalog and
+  # silently blocked ever enforcing signatures.
+  #
+  # The glibc constraint applies to the BUILD, not to the signature. So the built
+  # artifacts move to the same runner every other publish job already signs on,
+  # and are signed and published there. A signing failure now fails the job
+  # rather than degrading, because an artifact that is present but unsigned is
+  # indistinguishable downstream from one that was verified.
+  publish-vision-onnx-sign:
+    needs: publish-vision-onnx
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write
+    steps:
+      - name: Collect the staged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: vision-onnx-rel
+          path: crates/rel
+
       - name: Sign artifacts (only when the signing key is present)
         env:
           SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
@@ -1198,24 +1232,7 @@ jobs:
             echo "No ADOS_DRIVER_SIGNING_KEY set; publishing SHA256-only (dev posture)."
             exit 0
           fi
-          # This job builds on the older-glibc runner so the binary runs on the
-          # Bookworm target boards. It used to treat a failed minisign install as
-          # a reason to publish SHA256-only and carry on, on the stated premise
-          # that minisign is not packaged for this runner. That premise was never
-          # substantiated, and these were the only two published artifacts in the
-          # whole catalog with no signature — which quietly blocks turning
-          # verification on at all, since a channel that enforces signatures
-          # would hard-fail on exactly these two files.
-          #
-          # minisign lives in universe, so enable it explicitly rather than
-          # assuming the runner's default sources carry it, and let a genuine
-          # failure fail the job. Publishing an unsigned artifact is worse than
-          # not publishing one: the installer degrades to the default vision
-          # build when this release is absent, but it cannot tell that a present
-          # artifact was never signed.
-          sudo add-apt-repository -y universe || true
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
+          sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
           printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
           minisign -S -s /tmp/sign.key -m rel/ados-vision-onnx-aarch64 -x rel/ados-vision-onnx-aarch64.minisig
           minisign -S -s /tmp/sign.key -m rel/libonnxruntime-aarch64.so -x rel/libonnxruntime-aarch64.so.minisig
@@ -1229,10 +1246,6 @@ jobs:
           name: "Prebuilt ados-vision (onnx, rolling)"
           files: crates/rel/*
 
-  # Build the installer as a static arm64 binary and publish it to a rolling
-  # prerelease the bootstrap fetches. Static (musl) so one binary runs on every
-  # supported board regardless of its glibc. Runs only on pushes to main, not
-  # pull requests. Artifact carries a SHA256; a minisign .minisig is signed when ADOS_DRIVER_SIGNING_KEY is set.
   publish-installer:
     needs: build-test
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
