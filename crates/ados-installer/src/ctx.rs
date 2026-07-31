@@ -72,8 +72,24 @@ impl Ctx {
             .or_else(crate::env::read_persisted_profile)
             .map(|p| normalize_profile(&p))
             .unwrap_or_else(|| "drone".to_string());
-        let channel = args.channel.clone().unwrap_or_else(|| "edge".to_string());
+        // Same preservation rule as the profile, and for a sharper reason: an
+        // upgrade with no `--channel` used to fall back to the compiled-in
+        // `edge` default, so a device deliberately installed on `stable`
+        // defected to tip-of-main on its first update and lost signature
+        // enforcement with it, since verification is channel-gated. Nobody
+        // chose that; it is one keystroke from the status screen.
+        let channel = args
+            .channel
+            .clone()
+            .or_else(crate::env::read_persisted_channel)
+            .unwrap_or_else(|| "edge".to_string());
         let install_rtl8812eu = !args.no_rtl_driver;
+        // A pinned channel installs an explicit release, so an upgrade with no
+        // `--version` must reuse the pinned one rather than fail or drift.
+        let mut args = args;
+        if args.version.is_none() {
+            args.version = crate::env::read_persisted_version();
+        }
         Ctx {
             args,
             env,

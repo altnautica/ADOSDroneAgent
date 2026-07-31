@@ -320,6 +320,55 @@ pub fn read_persisted_profile() -> Option<String> {
     parse_profile_conf(&body)
 }
 
+/// Extract an arbitrary `key: value` / `key=value` line from a conf body,
+/// with the same tolerance [`parse_profile_conf`] applies.
+pub fn parse_conf_value(body: &str, key: &str) -> Option<String> {
+    let yaml = format!("{key}:");
+    let kv = format!("{key}=");
+    for line in body.lines() {
+        let stripped = line.trim();
+        if stripped.is_empty() || stripped.starts_with('#') {
+            continue;
+        }
+        let raw = if let Some(rest) = stripped.strip_prefix(&yaml) {
+            rest
+        } else if let Some(rest) = stripped.strip_prefix(&kv) {
+            rest
+        } else {
+            continue;
+        };
+        let v = raw.trim().trim_matches(|c| c == '"' || c == '\'');
+        if !v.is_empty() {
+            return Some(v.to_string());
+        }
+    }
+    None
+}
+
+/// Read the persisted release channel from `/etc/ados/profile.conf`.
+///
+/// The same preservation problem as the profile, with a sharper consequence. An
+/// upgrade invoked with no `--channel` used to fall back to the compiled-in
+/// `edge` default, so a device deliberately installed on `stable` silently
+/// defected to tip-of-main on its first update — and took its signature
+/// enforcement with it, since verification is channel-gated. Updating is one
+/// keystroke from the status screen, so that happened without anyone choosing
+/// it.
+///
+/// `None` on a fresh box or a conf with no channel line, in which case the
+/// caller keeps its own default.
+pub fn read_persisted_channel() -> Option<String> {
+    let body = std::fs::read_to_string(PROFILE_CONF).ok()?;
+    parse_conf_value(&body, "channel")
+}
+
+/// Read the persisted pinned version from `/etc/ados/profile.conf`. Only
+/// meaningful on the `stable` channel, which installs an explicit release.
+pub fn read_persisted_version() -> Option<String> {
+    let body = std::fs::read_to_string(PROFILE_CONF).ok()?;
+    parse_conf_value(&body, "version")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,6 +428,38 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
             .collect();
         assert!(leftovers.is_empty(), "temp files must not survive");
+    }
+
+    #[test]
+    fn a_persisted_channel_survives_an_upgrade_with_no_flag() {
+        // The install identity an upgrade must preserve. Losing the channel is
+        // what silently moved a stable device to tip-of-main and dropped its
+        // signature enforcement, which is channel-gated.
+        let body = "profile: ground_station\nchannel: stable\nversion: 1.2.3\n";
+        assert_eq!(parse_conf_value(body, "channel").as_deref(), Some("stable"));
+        assert_eq!(parse_conf_value(body, "version").as_deref(), Some("1.2.3"));
+        assert_eq!(
+            parse_conf_value(body, "profile").as_deref(),
+            Some("ground_station")
+        );
+
+        // An older conf carries no channel, so the caller keeps its default
+        // rather than inventing one.
+        assert_eq!(parse_conf_value("profile: drone\n", "channel"), None);
+
+        // Same tolerance as the profile line: legacy form, quotes, comments.
+        assert_eq!(
+            parse_conf_value("channel=stable\n", "channel").as_deref(),
+            Some("stable")
+        );
+        assert_eq!(
+            parse_conf_value("channel: \"edge\"\n", "channel").as_deref(),
+            Some("edge")
+        );
+        assert_eq!(parse_conf_value("# channel: stable\n", "channel"), None);
+
+        // A key must not match a longer key that starts with it.
+        assert_eq!(parse_conf_value("channel_extra: x\n", "channel"), None);
     }
 
     #[test]

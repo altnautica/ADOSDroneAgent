@@ -172,9 +172,19 @@ ack_at: null\n"
     }
 }
 
-/// Build the `profile.conf` body (pure): the canonical YAML `profile: <p>` form.
-pub fn profile_conf_body(profile: &str) -> String {
-    format!("profile: {profile}\n")
+/// Build the `profile.conf` body (pure).
+///
+/// Carries the install identity an upgrade must preserve: the profile, the
+/// release channel, and, on a pinned channel, the version. Recording the
+/// channel is what stops a device installed on `stable` defecting to
+/// tip-of-main on its first update and losing signature enforcement with it,
+/// which is channel-gated.
+pub fn profile_conf_body(profile: &str, channel: &str, version: Option<&str>) -> String {
+    let mut body = format!("profile: {profile}\nchannel: {channel}\n");
+    if let Some(v) = version {
+        body.push_str(&format!("version: {v}\n"));
+    }
+    body
 }
 
 /// Build the `pairing.json` body (pure). Mirrors `write_pairing`: the code is
@@ -306,14 +316,16 @@ fn write_default_config(
 
 /// Persist the resolved profile to `/etc/ados/profile.conf` so it survives
 /// reboots and a later `--upgrade`. Idempotent overwrite of the one-line file.
-fn write_profile_conf(profile: &str) {
+fn write_profile_conf(profile: &str, channel: &str, version: Option<&str>) {
     let path = Path::new(PROFILE_CONF);
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Err(e) =
-        crate::env::write_atomic_durable(path, profile_conf_body(profile).as_bytes(), Some(0o644))
-    {
+    if let Err(e) = crate::env::write_atomic_durable(
+        path,
+        profile_conf_body(profile, channel, version).as_bytes(),
+        Some(0o644),
+    ) {
         tracing::warn!(error = %e, "writing profile.conf failed");
     }
 }
@@ -641,7 +653,7 @@ impl Step for ConfigIdentity {
         // 2. Persist the resolved profile + the default config. The server mode
         //    and operating region come from the operator's onboarding choices
         //    (local-first + unrestricted by default).
-        write_profile_conf(&ctx.profile);
+        write_profile_conf(&ctx.profile, &ctx.channel, ctx.args.version.as_deref());
         let server_mode = if ctx.cloud_from_anywhere {
             "cloud"
         } else {
@@ -821,8 +833,8 @@ mod tests {
     #[test]
     fn profile_conf_body_is_yaml_line() {
         assert_eq!(
-            profile_conf_body("ground_station"),
-            "profile: ground_station\n"
+            profile_conf_body("ground_station", "edge", None),
+            "profile: ground_station\nchannel: edge\n"
         );
     }
 
