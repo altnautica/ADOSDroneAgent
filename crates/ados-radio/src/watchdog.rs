@@ -203,6 +203,59 @@ pub async fn tx_health_watchdog<P: LivePid>(
     }
 }
 
+/// Everything the receive-queue watchdog observes about the world outside its
+/// own state machine: the two kernel counters it cross-checks, the monotonic
+/// clock its sustained-window arithmetic runs on, and the wait between polls.
+///
+/// The counters live at fixed `/proc` paths, and the clock and the wait came
+/// straight from the ambient runtime. That left the loop exercisable only on a
+/// board with a real radio attached — nothing could put a deep queue in front of
+/// it, hold the read counter flat, and assert on what it concluded, which is
+/// precisely the judgement the watchdog exists to make. Behind this seam a
+/// scenario is a list of values. [`ProcSignals`] is the production
+/// implementation: the same paths, the same cadence, the same clock.
+pub trait RecvqSignals: Send + Sync {
+    /// Cumulative bytes read by `pid` — the evidence that the data plane is
+    /// actually emptying the socket rather than merely still being alive.
+    /// `None` when the read fails, which must never be mistaken for progress.
+    fn rchar(&self, pid: u32) -> impl std::future::Future<Output = Option<u64>> + Send;
+
+    /// Kernel receive-queue depth in bytes for `port`.
+    fn udp_recvq(&self, port: u16) -> impl std::future::Future<Output = Option<u64>> + Send;
+
+    /// Wait one poll interval. Raced against the cancel notification by the
+    /// caller, so an implementation that never completes simply parks the
+    /// watchdog until it is cancelled.
+    fn wait(&self, interval: Duration) -> impl std::future::Future<Output = ()> + Send;
+
+    /// Read the monotonic clock. Called once per poll; every window in the loop
+    /// is measured against that single reading.
+    fn now(&self) -> Instant;
+}
+
+/// The production [`RecvqSignals`]: the real `/proc` counters, the real tokio
+/// timer, the real monotonic clock.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ProcSignals;
+
+impl RecvqSignals for ProcSignals {
+    async fn rchar(&self, pid: u32) -> Option<u64> {
+        read_rchar(pid).await
+    }
+
+    async fn udp_recvq(&self, port: u16) -> Option<u64> {
+        read_udp_recvq(port).await
+    }
+
+    async fn wait(&self, interval: Duration) {
+        tokio::time::sleep(interval).await;
+    }
+
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+}
+
 /// Watch the UDP 5600 kernel receive queue. Returns when the queue has been
 /// sustained over 256 KiB for 15s **while `wfb_tx` is not draining it**.
 /// Updates the shared counters with the live `tx_video_stalled` flag, the last
@@ -234,16 +287,31 @@ pub async fn video_recvq_watchdog<P: LivePid>(
     counters: CounterHandle,
     cancel: std::sync::Arc<tokio::sync::Notify>,
 ) -> WatchdogFired {
+    video_recvq_watchdog_with(pid_source, ProcSignals, counters, cancel).await
+}
+
+/// [`video_recvq_watchdog`] with its view of the outside world supplied rather
+/// than read from `/proc` and the ambient clock. The public entry point above is
+/// this function with [`ProcSignals`]; tests drive it with a scripted one.
+pub async fn video_recvq_watchdog_with<P: LivePid, S: RecvqSignals>(
+    pid_source: P,
+    signals: S,
+    counters: CounterHandle,
+    cancel: std::sync::Arc<tokio::sync::Notify>,
+) -> WatchdogFired {
     let mut high_since: Option<Instant> = None;
     let mut prev_rchar: u64 = 0;
-    let mut last_backpressure_log = Instant::now() - BACKPRESSURE_LOG_INTERVAL;
+    let mut last_backpressure_log = signals.now() - BACKPRESSURE_LOG_INTERVAL;
 
     loop {
         tokio::select! {
-            _ = tokio::time::sleep(POLL_INTERVAL) => {}
+            _ = signals.wait(POLL_INTERVAL) => {}
             _ = cancel.notified() => return WatchdogFired::Cancelled,
         }
-        let q = read_udp_recvq(5600).await.unwrap_or(0);
+        // One clock reading per poll, so every window below is measured against
+        // the same instant and a slow tick cannot make two of them disagree.
+        let now = signals.now();
+        let q = signals.udp_recvq(5600).await.unwrap_or(0);
 
         // Resolve the live data-tx PID per tick for the same reason
         // `tx_health_watchdog` does: a respawn hands the data plane a new PID,
@@ -255,7 +323,7 @@ pub async fn video_recvq_watchdog<P: LivePid>(
         let live_rchar = if pid == 0 {
             None
         } else {
-            read_rchar(pid).await
+            signals.rchar(pid).await
         };
         let rchar = select_rchar(live_rchar, prev_rchar);
         let draining = rchar > prev_rchar;
@@ -274,8 +342,8 @@ pub async fn video_recvq_watchdog<P: LivePid>(
 
         match tick {
             RecvqTick::Wedged => {
-                let since = high_since.get_or_insert_with(Instant::now);
-                if since.elapsed() >= RECVQ_SUSTAINED_THRESHOLD {
+                let since = *high_since.get_or_insert(now);
+                if now.saturating_duration_since(since) >= RECVQ_SUSTAINED_THRESHOLD {
                     tracing::warn!(
                         queue_bytes = q,
                         pid,
@@ -290,13 +358,14 @@ pub async fn video_recvq_watchdog<P: LivePid>(
                 // interrupt real progress. Reset the wedge timer: a kill must
                 // require a fresh uninterrupted window of genuinely-stuck ticks.
                 high_since = None;
-                if last_backpressure_log.elapsed() >= BACKPRESSURE_LOG_INTERVAL {
+                if now.saturating_duration_since(last_backpressure_log) >= BACKPRESSURE_LOG_INTERVAL
+                {
                     tracing::warn!(
                         queue_bytes = q,
                         pid,
                         "wfb_tx_video_backpressured: draining, offered rate exceeds link capacity"
                     );
-                    last_backpressure_log = Instant::now();
+                    last_backpressure_log = now;
                 }
             }
             RecvqTick::Clear => high_since = None,
@@ -723,6 +792,371 @@ mod tests {
         // on the same cadence the operator already expects.
         assert_eq!(AUX_POLL_INTERVAL.as_secs(), 5);
         assert_eq!(AUX_SILENCE_THRESHOLD.as_secs(), 30);
+    }
+
+    /// One scripted kernel counter. It yields the next value each time the
+    /// watchdog samples it and holds the final value once the script runs out,
+    /// so a scenario only has to spell out the polls that matter.
+    struct Scripted {
+        values: Vec<Option<u64>>,
+        reads: usize,
+    }
+
+    impl Scripted {
+        fn new(values: Vec<Option<u64>>) -> Self {
+            assert!(!values.is_empty(), "a scripted counter needs a first value");
+            Self { values, reads: 0 }
+        }
+
+        fn sample(&mut self) -> Option<u64> {
+            let v = self.values[self.reads.min(self.values.len() - 1)];
+            self.reads += 1;
+            v
+        }
+    }
+
+    fn flat(v: u64) -> Vec<Option<u64>> {
+        vec![Some(v)]
+    }
+
+    fn ramp(start: u64, step: u64, n: usize) -> Vec<Option<u64>> {
+        (0..n).map(|i| Some(start + step * i as u64)).collect()
+    }
+
+    /// A scripted stand-in for `/proc` and the clock, so a scenario can be put in
+    /// front of the receive-queue watchdog and its verdict asserted.
+    ///
+    /// Virtual time advances by exactly one poll interval per poll, which is what
+    /// the real loop sees on an idle board, and the wait returns immediately so a
+    /// 15 s sustained window costs no wall time. Once the scenario's poll budget
+    /// is spent the wait parks forever and fires `spent`: the watchdog then ends
+    /// only by cancellation, which is how a scenario proves that it did *not*
+    /// kill.
+    struct FakeSignals {
+        queue: std::sync::Mutex<Scripted>,
+        rchar: std::sync::Mutex<Scripted>,
+        clock: std::sync::Mutex<Instant>,
+        polls: std::sync::atomic::AtomicUsize,
+        budget: usize,
+        last_port: std::sync::atomic::AtomicU32,
+        spent: std::sync::Arc<tokio::sync::Notify>,
+    }
+
+    impl FakeSignals {
+        fn new(queue: Vec<Option<u64>>, rchar: Vec<Option<u64>>, budget: usize) -> Arc<Self> {
+            Arc::new(Self {
+                queue: std::sync::Mutex::new(Scripted::new(queue)),
+                rchar: std::sync::Mutex::new(Scripted::new(rchar)),
+                // Start the virtual clock an hour in so the loop's initial
+                // `now() - BACKPRESSURE_LOG_INTERVAL` cannot underflow the
+                // monotonic clock on a freshly booted machine.
+                clock: std::sync::Mutex::new(Instant::now() + Duration::from_secs(3600)),
+                polls: std::sync::atomic::AtomicUsize::new(0),
+                budget,
+                last_port: std::sync::atomic::AtomicU32::new(0),
+                spent: std::sync::Arc::new(tokio::sync::Notify::new()),
+            })
+        }
+
+        fn polls(&self) -> usize {
+            self.polls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn rchar_reads(&self) -> usize {
+            self.rchar.lock().unwrap().reads
+        }
+
+        fn last_port(&self) -> u32 {
+            self.last_port.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl RecvqSignals for Arc<FakeSignals> {
+        async fn rchar(&self, _pid: u32) -> Option<u64> {
+            self.rchar.lock().unwrap().sample()
+        }
+
+        async fn udp_recvq(&self, port: u16) -> Option<u64> {
+            self.last_port
+                .store(port as u32, std::sync::atomic::Ordering::SeqCst);
+            self.queue.lock().unwrap().sample()
+        }
+
+        async fn wait(&self, interval: Duration) {
+            let n = self.polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n >= self.budget {
+                self.spent.notify_one();
+                std::future::pending::<()>().await;
+            }
+            *self.clock.lock().unwrap() += interval;
+        }
+
+        fn now(&self) -> Instant {
+            *self.clock.lock().unwrap()
+        }
+    }
+
+    /// A queue depth well past the 256 KiB threshold. The value is the one
+    /// recorded in this module's own backpressure note (~3 MB queued while
+    /// `wfb_tx` was reading steadily), reused here so both cases are exercised at
+    /// the same realistic depth.
+    const DEEP_QUEUE: u64 = 3_127_808;
+
+    /// Run a scenario that is expected NOT to kill: drive it until its poll
+    /// budget is spent, hand the counters to the caller to assert on, then cancel
+    /// and confirm the watchdog left by the cancel arm rather than by a kill.
+    async fn run_until_spent(
+        signals: Arc<FakeSignals>,
+        pid: std::sync::Arc<FakePid>,
+        counters: CounterHandle,
+    ) -> WatchdogFired {
+        let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
+        let spent = signals.spent.clone();
+        let mut handle = tokio::spawn(video_recvq_watchdog_with(
+            pid,
+            signals,
+            counters,
+            cancel.clone(),
+        ));
+        tokio::select! {
+            // The watchdog left before the scenario ran out of polls, which for
+            // these scenarios means it killed. Hand that verdict back so the
+            // caller's assertion fails on the spot, rather than waiting forever
+            // for a poll budget that will now never be spent.
+            verdict = &mut handle => return verdict.expect("watchdog task panicked"),
+            _ = spent.notified() => {}
+        }
+        cancel.notify_one();
+        handle.await.expect("watchdog task panicked")
+    }
+
+    #[tokio::test]
+    async fn a_live_process_reading_nothing_is_killed_after_the_sustained_window() {
+        // The failure this watchdog exists for: `wfb_tx` is alive, the socket is
+        // filling, and it has stopped reading. Process liveness proves nothing —
+        // only the ingress counter does, and it is flat.
+        let signals = FakeSignals::new(flat(DEEP_QUEUE), flat(500), 50);
+        let counters = new_counters();
+        let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
+
+        let fired = video_recvq_watchdog_with(
+            std::sync::Arc::new(FakePid::new(4242)),
+            signals.clone(),
+            counters.clone(),
+            cancel,
+        )
+        .await;
+
+        assert_eq!(fired, WatchdogFired::RecvqBacklog);
+        let c = *counters.lock().await;
+        assert_eq!(c.tx_video_stall_kills, 1, "the kill must be counted once");
+        assert!(c.tx_video_stalled, "a wedge must report as stalled");
+        assert!(!c.tx_video_backpressured);
+        assert_eq!(c.tx_video_recvq_bytes, DEEP_QUEUE);
+        assert_eq!(
+            signals.last_port(),
+            5600,
+            "the video ingress port is watched"
+        );
+
+        // Five polls, and the count is the point: the first poll only seeds the
+        // ingress baseline (`prev_rchar` starts at 0, so any reading looks like
+        // progress), the second is the first poll that can be called wedged, and
+        // the kill lands three polls later — a full uninterrupted 15 s window at
+        // the 5 s cadence. A kill any sooner would mean the window shrank.
+        assert_eq!(signals.polls(), 5);
+    }
+
+    #[tokio::test]
+    async fn a_deep_queue_that_is_being_drained_is_never_killed() {
+        // Same depth as the wedge above, but the process is reading. This is a
+        // saturated link, not a stuck one: killing it drops the link, resets the
+        // bitrate ladder and leaves the encoder still over-feeding, so the queue
+        // refills and the kill repeats forever.
+        let signals = FakeSignals::new(flat(DEEP_QUEUE), ramp(500, 40_000, 40), 30);
+        let counters = new_counters();
+
+        // Thirty polls is 150 s of virtual time, ten times the sustained window.
+        let fired = run_until_spent(
+            signals.clone(),
+            std::sync::Arc::new(FakePid::new(4242)),
+            counters.clone(),
+        )
+        .await;
+
+        assert_eq!(fired, WatchdogFired::Cancelled);
+        let c = *counters.lock().await;
+        assert_eq!(c.tx_video_stall_kills, 0, "backpressure must never kill");
+        assert!(
+            !c.tx_video_stalled,
+            "a busy link reported as stalled trains the operator to ignore the flag"
+        );
+        assert!(c.tx_video_backpressured);
+        assert_eq!(c.tx_video_recvq_bytes, DEEP_QUEUE);
+    }
+
+    #[tokio::test]
+    async fn a_shallow_queue_is_healthy_and_raises_no_flag() {
+        let shallow = RECVQ_BACKLOG_THRESHOLD_BYTES / 4;
+        let signals = FakeSignals::new(flat(shallow), ramp(500, 40_000, 20), 12);
+        let counters = new_counters();
+
+        let fired = run_until_spent(
+            signals,
+            std::sync::Arc::new(FakePid::new(4242)),
+            counters.clone(),
+        )
+        .await;
+
+        assert_eq!(fired, WatchdogFired::Cancelled);
+        let c = *counters.lock().await;
+        assert_eq!(c.tx_video_stall_kills, 0);
+        assert!(!c.tx_video_stalled);
+        assert!(!c.tx_video_backpressured);
+        assert_eq!(
+            c.tx_video_recvq_bytes, shallow,
+            "the depth is reported even when nothing is wrong"
+        );
+    }
+
+    #[tokio::test]
+    async fn one_draining_poll_restarts_the_wedge_window() {
+        // Six wedged polls spread either side of a single draining one: 30 s of
+        // flat ingress in total, but never 15 s uninterrupted. A kill here would
+        // mean the watchdog is accumulating stuck polls instead of requiring a
+        // continuous window, and a process that reads in bursts would be killed
+        // while it was still working.
+        let signals = FakeSignals::new(
+            flat(DEEP_QUEUE),
+            vec![
+                Some(500), // seeds the baseline
+                Some(500), // wedged, window opens here
+                Some(500),
+                Some(500), // 10 s into the window
+                Some(600), // one real read: window resets
+                Some(600), // wedged, a fresh window opens
+                Some(600),
+                Some(600), // 10 s into the fresh window
+            ],
+            8,
+        );
+        let counters = new_counters();
+
+        let fired = run_until_spent(
+            signals,
+            std::sync::Arc::new(FakePid::new(4242)),
+            counters.clone(),
+        )
+        .await;
+
+        assert_eq!(fired, WatchdogFired::Cancelled);
+        assert_eq!(counters.lock().await.tx_video_stall_kills, 0);
+    }
+
+    #[tokio::test]
+    async fn a_data_plane_that_is_not_running_reads_as_not_draining() {
+        // No live PID means no ingress read at all, and the previous value is
+        // carried forward rather than a missing read being taken as progress. A
+        // data plane that is not running is certainly not emptying the socket.
+        let signals = FakeSignals::new(flat(DEEP_QUEUE), ramp(500, 40_000, 40), 50);
+        let counters = new_counters();
+        let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
+
+        let fired = video_recvq_watchdog_with(
+            std::sync::Arc::new(FakePid::new(0)),
+            signals.clone(),
+            counters.clone(),
+            cancel,
+        )
+        .await;
+
+        assert_eq!(fired, WatchdogFired::RecvqBacklog);
+        assert_eq!(counters.lock().await.tx_video_stall_kills, 1);
+        assert_eq!(
+            signals.rchar_reads(),
+            0,
+            "an ingress counter belonging to no live process must never be read"
+        );
+        // Four polls rather than the five of the live-process case: there is no
+        // baseline-seeding poll, because a carried-forward zero never looks like
+        // progress, so the window opens on the very first poll.
+        assert_eq!(signals.polls(), 4);
+    }
+
+    #[tokio::test]
+    async fn a_failed_ingress_read_is_not_progress() {
+        // `/proc/<pid>/io` can fail to read in the window where the process is
+        // being recycled. Treating that as progress would keep a genuinely wedged
+        // transmitter alive indefinitely.
+        let signals = FakeSignals::new(flat(DEEP_QUEUE), vec![Some(500), None], 50);
+        let counters = new_counters();
+        let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
+
+        let fired = video_recvq_watchdog_with(
+            std::sync::Arc::new(FakePid::new(4242)),
+            signals,
+            counters.clone(),
+            cancel,
+        )
+        .await;
+
+        assert_eq!(fired, WatchdogFired::RecvqBacklog);
+        assert_eq!(counters.lock().await.tx_video_stall_kills, 1);
+    }
+
+    #[tokio::test]
+    async fn a_restarted_data_plane_recovers_and_is_not_killed_again() {
+        // The whole point of the kill: the caller respawns the radio group and a
+        // fresh watchdog runs against the new process. The queue drains, the new
+        // PID reads, and the stall flag must clear — while the kill count, which
+        // the sidecar and heartbeat surface as churn, keeps accumulating.
+        let counters = new_counters();
+
+        let wedged = FakeSignals::new(flat(DEEP_QUEUE), flat(500), 50);
+        let fired = video_recvq_watchdog_with(
+            std::sync::Arc::new(FakePid::new(4242)),
+            wedged,
+            counters.clone(),
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+        )
+        .await;
+        assert_eq!(fired, WatchdogFired::RecvqBacklog);
+        assert!(counters.lock().await.tx_video_stalled);
+
+        let recovered = FakeSignals::new(
+            vec![Some(DEEP_QUEUE), Some(64 * 1024), Some(0)],
+            ramp(0, 40_000, 20),
+            10,
+        );
+        let after = run_until_spent(
+            recovered,
+            // A respawn hands the data plane a new PID.
+            std::sync::Arc::new(FakePid::new(9001)),
+            counters.clone(),
+        )
+        .await;
+
+        assert_eq!(after, WatchdogFired::Cancelled);
+        let c = *counters.lock().await;
+        assert!(
+            !c.tx_video_stalled,
+            "the recovered link must clear the flag"
+        );
+        assert!(!c.tx_video_backpressured);
+        assert_eq!(c.tx_video_recvq_bytes, 0);
+        assert_eq!(
+            c.tx_video_stall_kills, 1,
+            "the kill count is cumulative churn, not per-watchdog state"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_production_signals_wait_for_real() {
+        // The seam must not have turned the production poll into a hot spin.
+        let signals = ProcSignals;
+        let before = signals.now();
+        signals.wait(Duration::from_millis(5)).await;
+        assert!(signals.now().saturating_duration_since(before) >= Duration::from_millis(5));
     }
 
     #[tokio::test]
