@@ -200,8 +200,7 @@ fn ensure_device_id() -> anyhow::Result<String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, format!("{id}\n"))?;
-    set_mode(path, 0o644);
+    crate::env::write_atomic_durable(path, format!("{id}\n").as_bytes(), Some(0o644))?;
     tracing::info!(device_id = %id, "device identity generated");
     Ok(id)
 }
@@ -298,11 +297,10 @@ fn write_default_config(
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Err(e) = std::fs::write(path, body) {
+    if let Err(e) = crate::env::write_atomic_durable(path, body.as_bytes(), Some(0o600)) {
         tracing::warn!(error = %e, "writing default config failed");
         return;
     }
-    set_mode(path, 0o600);
     tracing::info!("default config written");
 }
 
@@ -313,7 +311,9 @@ fn write_profile_conf(profile: &str) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Err(e) = std::fs::write(path, profile_conf_body(profile)) {
+    if let Err(e) =
+        crate::env::write_atomic_durable(path, profile_conf_body(profile).as_bytes(), Some(0o644))
+    {
         tracing::warn!(error = %e, "writing profile.conf failed");
     }
 }
@@ -340,7 +340,11 @@ fn set_hostname(name: &str) {
     // hostnamectl is the canonical setter; fall back to /etc/hostname.
     if !exec::run_ok("hostnamectl", &["set-hostname", &slug]) {
         tracing::warn!(slug = %slug, "hostnamectl failed; writing /etc/hostname directly");
-        let _ = std::fs::write("/etc/hostname", format!("{slug}\n"));
+        let _ = crate::env::write_atomic_durable(
+            Path::new("/etc/hostname"),
+            format!("{slug}\n").as_bytes(),
+            Some(0o644),
+        );
     } else {
         tracing::info!(slug = %slug, "hostname set");
     }
@@ -399,11 +403,10 @@ fn write_pairing(code: &str) {
         let _ = std::fs::create_dir_all(parent);
     }
     let body = pairing_json(code, now_epoch());
-    if let Err(e) = std::fs::write(path, body) {
+    if let Err(e) = crate::env::write_atomic_durable(path, body.as_bytes(), Some(0o600)) {
         tracing::warn!(error = %e, "writing pairing.json failed");
         return;
     }
-    set_mode(path, 0o600);
     tracing::info!(code = %code.to_ascii_uppercase(), "pairing code written");
 }
 

@@ -212,6 +212,68 @@ pub fn is_supported_arch() -> bool {
     arch() == "aarch64"
 }
 
+/// Write `contents` to `path` atomically AND durably: a temp sibling, written,
+/// flushed, `fsync`ed, then renamed over the destination.
+///
+/// The `fsync` is the load-bearing part, and the part the other ad-hoc copies of
+/// this helper in the tree omit. Without it the rename can reach the disk before
+/// the data blocks do, so a board losing power mid-write can still come back to
+/// a zero-length file behind a rename that looked like it succeeded. First-run
+/// install is precisely when a board is most likely to lose power — it is often
+/// the first time the operator has it powered at all — and a truncated
+/// `config.yaml` or `pairing.json` is not something a customer can recover from
+/// in the field.
+///
+/// `mode` is applied to the temp file BEFORE the rename, so the file is never
+/// briefly world-readable at its final path.
+pub fn write_atomic_durable(
+    path: &std::path::Path,
+    contents: &[u8],
+    mode: Option<u32>,
+) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "ados".to_string());
+    let tmp = parent.join(format!("{file_name}.{}.tmp", std::process::id()));
+
+    let write = (|| -> std::io::Result<()> {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        if let Some(m) = mode {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            opts.mode(m);
+        }
+        let mut f = opts.open(&tmp)?;
+        f.write_all(contents)?;
+        f.flush()?;
+        f.sync_all()?;
+        Ok(())
+    })();
+    if write.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return write;
+    }
+
+    // Belt and braces: the open mode does not stick under every umask.
+    #[cfg(unix)]
+    if let Some(m) = mode {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(m));
+    }
+
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
 /// Extract the profile name from a `profile.conf` body (pure).
 ///
 /// Accepts BOTH the `profile: <name>` line `config_identity::profile_conf_body`
@@ -283,6 +345,40 @@ mod tests {
             parse_profile_conf("device: abc\nprofile: compute\n").as_deref(),
             Some("compute")
         );
+    }
+
+    #[test]
+    fn write_atomic_durable_lands_content_mode_and_no_residue() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "ados-installer-env-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let path = dir.join("nested").join("config.yaml");
+
+        write_atomic_durable(&path, b"first: value\n", Some(0o600)).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"first: value\n");
+
+        // An overwrite is complete, not appended or partial.
+        write_atomic_durable(&path, b"second\n", Some(0o600)).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"second\n");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "a credential file must not be world-readable");
+        }
+
+        // No temp sibling is left behind for either write.
+        let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp files must not survive");
     }
 
     #[test]
