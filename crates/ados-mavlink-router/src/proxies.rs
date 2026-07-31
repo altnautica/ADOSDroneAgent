@@ -250,15 +250,44 @@ const UDP_MAX_PEERS: usize = 64;
 
 /// TCP MAVLink proxy. Binds `0.0.0.0:<port>` and serves each client a copy of
 /// the FC frame stream while forwarding its bytes to the FC.
-pub async fn run_tcp_proxy(fc: Arc<FcConnection>, port: u16, auth: ProxyAuth, cancel: Arc<Notify>) {
-    let listener = match TcpListener::bind(("0.0.0.0", port)).await {
+/// Bind address for the direct-GCS proxies when nothing overrides it.
+///
+/// `0.0.0.0` is what shipped, and the third-party ground-station path depends
+/// on it: the agent advertises `tcp://<lan-host>:5760` for QGroundControl and
+/// Mission Planner, so a loopback default would silently break a capability an
+/// operator was told they had.
+pub const DEFAULT_PROXY_BIND_ADDR: &str = "0.0.0.0";
+
+/// The address the direct-GCS proxies bind, from `ADOS_MAVLINK_BIND_ADDR`.
+///
+/// Settable because the advertisement above is not right for every deployment.
+/// A unit that never needs a desktop ground station on its LAN can bind
+/// loopback and stop carrying an unauthenticated path to its flight controller
+/// at all — a stronger remedy than inspecting callers on a socket that stays
+/// open, because there is then nothing left to inspect.
+pub fn proxy_bind_addr() -> String {
+    std::env::var("ADOS_MAVLINK_BIND_ADDR")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| DEFAULT_PROXY_BIND_ADDR.to_string())
+}
+
+pub async fn run_tcp_proxy(
+    fc: Arc<FcConnection>,
+    bind_addr: &str,
+    port: u16,
+    auth: ProxyAuth,
+    cancel: Arc<Notify>,
+) {
+    let listener = match TcpListener::bind((bind_addr, port)).await {
         Ok(l) => l,
         Err(e) => {
-            tracing::warn!(port, error = %e, "tcp_proxy_bind_failed");
+            tracing::warn!(bind_addr, port, error = %e, "tcp_proxy_bind_failed");
             return;
         }
     };
-    tracing::info!(port, "tcp_proxy_listening");
+    tracing::info!(bind_addr, port, "tcp_proxy_listening");
     loop {
         tokio::select! {
             accepted = listener.accept() => {
@@ -334,11 +363,17 @@ async fn handle_tcp_client(fc: Arc<FcConnection>, stream: tokio::net::TcpStream)
 /// UDP MAVLink proxy. Binds `0.0.0.0:<port>`, learns each GCS peer from its
 /// inbound datagrams, forwards peer bytes to the FC, and sends FC frames to
 /// every learned peer.
-pub async fn run_udp_proxy(fc: Arc<FcConnection>, port: u16, auth: ProxyAuth, cancel: Arc<Notify>) {
-    let sock = match UdpSocket::bind(("0.0.0.0", port)).await {
+pub async fn run_udp_proxy(
+    fc: Arc<FcConnection>,
+    bind_addr: &str,
+    port: u16,
+    auth: ProxyAuth,
+    cancel: Arc<Notify>,
+) {
+    let sock = match UdpSocket::bind((bind_addr, port)).await {
         Ok(s) => Arc::new(s),
         Err(e) => {
-            tracing::warn!(port, error = %e, "udp_proxy_bind_failed");
+            tracing::warn!(bind_addr, port, error = %e, "udp_proxy_bind_failed");
             return;
         }
     };
@@ -612,6 +647,56 @@ async fn handle_ws_client(
 mod tests {
 
     // --- raw-socket posture (TCP / UDP), which have no handshake ------------
+
+    #[test]
+    fn the_bind_default_keeps_the_advertised_third_party_path_working() {
+        // The agent advertises tcp://<lan-host>:5760 as the QGroundControl /
+        // Mission Planner path, so a loopback DEFAULT would silently break a
+        // capability an operator was told they had. Binding wide is the shipped
+        // behaviour; narrowing it is a deployment choice.
+        assert_eq!(DEFAULT_PROXY_BIND_ADDR, "0.0.0.0");
+    }
+
+    /// Serialises the env mutation below; the house pattern from the uplink
+    /// consumer's tests.
+    static BIND_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn an_operator_can_narrow_the_bind_and_blank_values_do_not_count() {
+        // A unit with no desktop ground station on its LAN can remove the
+        // unauthenticated path entirely rather than inspect callers on a socket
+        // that stays open. A blank override is a mistake, not a request to bind
+        // nowhere, so it falls back rather than failing to bind at all.
+        let _guard = BIND_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let restore = std::env::var("ADOS_MAVLINK_BIND_ADDR").ok();
+
+        std::env::set_var("ADOS_MAVLINK_BIND_ADDR", "127.0.0.1");
+        assert_eq!(proxy_bind_addr(), "127.0.0.1");
+
+        std::env::set_var("ADOS_MAVLINK_BIND_ADDR", "  10.0.0.5  ");
+        assert_eq!(
+            proxy_bind_addr(),
+            "10.0.0.5",
+            "surrounding space is trimmed"
+        );
+
+        for blank in ["", "   "] {
+            std::env::set_var("ADOS_MAVLINK_BIND_ADDR", blank);
+            assert_eq!(
+                proxy_bind_addr(),
+                DEFAULT_PROXY_BIND_ADDR,
+                "a blank override must not bind nowhere"
+            );
+        }
+
+        std::env::remove_var("ADOS_MAVLINK_BIND_ADDR");
+        assert_eq!(proxy_bind_addr(), DEFAULT_PROXY_BIND_ADDR);
+
+        match restore {
+            Some(v) => std::env::set_var("ADOS_MAVLINK_BIND_ADDR", v),
+            None => std::env::remove_var("ADOS_MAVLINK_BIND_ADDR"),
+        }
+    }
 
     #[test]
     fn an_unpaired_node_still_answers_its_own_lifelines() {
