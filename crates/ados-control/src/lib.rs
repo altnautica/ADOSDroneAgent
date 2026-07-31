@@ -377,14 +377,18 @@ where
         match ados_protocol::aux_egress::AuxEgress::connected_to_udp(aux_tx).await {
             Ok(aux_egress) => {
                 let proxy = Arc::new(ados_protocol::aux_rpc_proxy::AuxRpcProxy::new(aux_egress));
+                // The listener spawns its own task, so wrapping the call in
+                // another `tokio::spawn` only moved the cancel handle into a
+                // future that dropped it immediately — nothing could ever
+                // signal a shutdown, and the returned join handle went the same
+                // way. Hold both on the router handle instead, so the shutdown
+                // path this process will eventually grow has something to hold.
                 let reader_cancel = Arc::new(tokio::sync::Notify::new());
-                let proxy_clone = Arc::clone(&proxy);
-                tokio::spawn(async move {
-                    proxy_clone.spawn_response_listener(
-                        ados_protocol::aux_rpc_proxy::DEFAULT_RESPONSE_SOCK,
-                        reader_cancel,
-                    );
-                });
+                let reader_task = proxy.spawn_response_listener(
+                    ados_protocol::aux_rpc_proxy::DEFAULT_RESPONSE_SOCK,
+                    Arc::clone(&reader_cancel),
+                );
+                let listener = crate::state::AuxResponseListener::new(reader_cancel, reader_task);
                 // Fleet attention reconciler: auto-promotes a one-drone fleet to
                 // the full video profile (every drone boots to thumbnail, so the
                 // existing single-drone product would otherwise sit at 320x180)
@@ -393,7 +397,9 @@ where
                 tokio::spawn(crate::routes::gs_fleet_hero::run_hero_reconciler(
                     Arc::clone(&proxy),
                 ));
-                state.with_aux_rpc_proxy(proxy)
+                state
+                    .with_aux_rpc_proxy(proxy)
+                    .with_aux_response_listener(listener)
             }
             Err(e) => {
                 tracing::warn!(error = %e, "aux_egress_connect_failed_relay_proxy_unavailable");

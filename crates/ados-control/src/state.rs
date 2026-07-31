@@ -230,6 +230,33 @@ pub struct AppState {
     /// When `None`, the relay-proxy route returns 503 — the node is not a
     /// ground station or the proxy was not initialised.
     pub aux_rpc_proxy: Option<Arc<ados_protocol::aux_rpc_proxy::AuxRpcProxy>>,
+    /// The aux response listener's cancel handle and task, held so a shutdown
+    /// path has something to signal.
+    pub aux_response_listener: Option<Arc<AuxResponseListener>>,
+}
+
+/// The aux response listener's shutdown handles.
+pub struct AuxResponseListener {
+    pub cancel: Arc<tokio::sync::Notify>,
+    pub task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+impl AuxResponseListener {
+    pub fn new(cancel: Arc<tokio::sync::Notify>, task: tokio::task::JoinHandle<()>) -> Self {
+        Self {
+            cancel,
+            task: std::sync::Mutex::new(Some(task)),
+        }
+    }
+
+    /// Signal the listener to stop and wait for it. Idempotent.
+    pub async fn shutdown(&self) {
+        self.cancel.notify_waiters();
+        let task = self.task.lock().ok().and_then(|mut t| t.take());
+        if let Some(t) = task {
+            let _ = t.await;
+        }
+    }
 }
 
 impl AppState {
@@ -262,6 +289,7 @@ impl AppState {
             started: Instant::now(),
             swarm: SwarmIpcClient::disconnected(),
             aux_rpc_proxy: None,
+            aux_response_listener: None,
         }
     }
 
@@ -274,6 +302,19 @@ impl AppState {
 
     /// Attach a relay-proxy caller and reader. Ground-station-profile nodes
     /// call this at startup; other profiles leave it as `None`.
+    /// Attach the aux response listener so its cancel handle and task outlive
+    /// the block that started them.
+    ///
+    /// The handle used to be created and dropped in the same breath, inside a
+    /// redundant `tokio::spawn` wrapping a call that already spawns, so nothing
+    /// could ever signal the listener to stop. Nothing signals it today either
+    /// — this process has no shutdown path — but the handle is now somewhere a
+    /// shutdown path can reach rather than gone the instant it was made.
+    pub fn with_aux_response_listener(mut self, listener: AuxResponseListener) -> Self {
+        self.aux_response_listener = Some(Arc::new(listener));
+        self
+    }
+
     pub fn with_aux_rpc_proxy(
         mut self,
         proxy: Arc<ados_protocol::aux_rpc_proxy::AuxRpcProxy>,

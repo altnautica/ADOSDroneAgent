@@ -227,6 +227,9 @@ pub struct RpcProxyCounters {
     calls_channel_closed: AtomicU64,
     calls_busy: AtomicU64,
     retransmits: AtomicU64,
+    /// Retransmits that could not leave: a broken egress rather than an
+    /// unanswering far end.
+    retransmit_send_errors: AtomicU64,
     fragments_received: AtomicU64,
     fragments_duplicate: AtomicU64,
     /// Fragments dropped because the drone that sent them is not the one this
@@ -255,6 +258,7 @@ pub struct RpcProxyStats {
     pub calls_channel_closed: u64,
     pub calls_busy: u64,
     pub retransmits: u64,
+    pub retransmit_send_errors: u64,
     pub fragments_received: u64,
     pub fragments_duplicate: u64,
     pub fragments_wrong_sender: u64,
@@ -439,8 +443,28 @@ impl AuxRpcProxy {
                         .map(|p| p.response_started)
                         .unwrap_or(false);
                     if !started {
-                        self.counters.retransmits.fetch_add(1, Ordering::Relaxed);
-                        let _ = self.egress.send(AuxChannel::Request, &payload).await;
+                        // Count what actually went out. The counter used to be
+                        // taken before the send and the send's error dropped,
+                        // so a broken egress — a closed socket, a stopped
+                        // transmitter — read exactly like a healthy radio the
+                        // far end simply was not answering, which is the wrong
+                        // half of the link to go looking at.
+                        match self.egress.send(AuxChannel::Request, &payload).await {
+                            Ok(()) => {
+                                self.counters.retransmits.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Err(e) => {
+                                self.counters
+                                    .retransmit_send_errors
+                                    .fetch_add(1, Ordering::Relaxed);
+                                tracing::warn!(
+                                    request_id = id,
+                                    attempt,
+                                    error = %e,
+                                    "aux_rpc_retransmit_send_failed"
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -583,6 +607,7 @@ impl AuxRpcProxy {
             calls_channel_closed: c.calls_channel_closed.load(Ordering::Relaxed),
             calls_busy: c.calls_busy.load(Ordering::Relaxed),
             retransmits: c.retransmits.load(Ordering::Relaxed),
+            retransmit_send_errors: c.retransmit_send_errors.load(Ordering::Relaxed),
             fragments_received: c.fragments_received.load(Ordering::Relaxed),
             fragments_duplicate: c.fragments_duplicate.load(Ordering::Relaxed),
             fragments_wrong_sender: c.fragments_wrong_sender.load(Ordering::Relaxed),
@@ -1584,6 +1609,43 @@ mod tests {
         assert!(
             proxy.stats().retransmits >= 2,
             "one datagram on a 20-40% loss lane is a coin flip; it must be resent"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_retransmit_that_could_not_be_sent_is_not_counted_as_one_that_was() {
+        // The counter used to be taken before the send and the send's error
+        // dropped, so a broken egress — a closed socket, a stopped transmitter
+        // — read exactly like a healthy radio the far end simply was not
+        // answering. That points a diagnosis at the wrong half of the link.
+        // A UDP socket connected to an unbound loopback port: the first send
+        // leaves, the kernel returns the ICMP port-unreachable on the next one,
+        // which is exactly the shape being tested — a first transmission that
+        // goes out and a retransmit that cannot.
+        let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let dead = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let dead_addr = dead.local_addr().unwrap();
+        drop(dead);
+        sock.connect(dead_addr).await.unwrap();
+        let egress = AuxEgress::connected_for_test(sock);
+        let proxy = AuxRpcProxy::new(egress);
+
+        let r = tokio::time::timeout(
+            RPC_DEFAULT_TIMEOUT + Duration::from_secs(2),
+            proxy.call(&[], RpcMethod::Get, b"/api/pairing/info", &[]),
+        )
+        .await;
+        assert!(r.is_ok(), "the call never terminated");
+
+        let stats = proxy.stats();
+        assert_eq!(
+            stats.retransmits, 0,
+            "a retransmit that never left must not be counted as one that did"
+        );
+        assert!(
+            stats.retransmit_send_errors > 0,
+            "a broken egress must be visible as a send failure, not as silence \
+             from the far end: {stats:?}"
         );
     }
 
