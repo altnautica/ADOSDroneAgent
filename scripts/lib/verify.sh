@@ -56,6 +56,20 @@ ados_verify_minisign() {
     return 1
 }
 
+# Whether a channel tolerates an artifact it cannot signature-verify.
+#
+# ONLY the development channel does. Every other value — including one this
+# build does not recognise — is strict.
+#
+# The inverted form ("strict only when the channel is exactly stable") read the
+# same for the two known channels and silently opened a hole for a third: the
+# kernel-module path passes its own channel name, which matched neither, so it
+# took the lenient branch and warned-and-passed on every unverifiable module.
+# A channel string we do not understand is not a licence to skip a signature.
+ados_channel_is_lenient() {
+    [ "${1:-}" = "edge" ]
+}
+
 ados_verify_artifact() {
     local artifact="$1" pubkey="$2" channel="${3:-edge}" allow_unsigned="${4:-0}"
     local base rc
@@ -74,11 +88,11 @@ ados_verify_artifact() {
 
     # No signing key provisioned yet (CI has not substituted a real key).
     if [ -z "${pubkey}" ]; then
-        if [ "${channel}" = "stable" ]; then
-            error "no signing key available; refusing unsigned ${base} on stable channel"
+        if ! ados_channel_is_lenient "${channel}"; then
+            error "no signing key available; refusing unsigned ${base} on the ${channel} channel"
             return 1
         fi
-        warn "no signing key; ${base} is SHA256-checked only (edge channel)"
+        warn "no signing key; ${base} is SHA256-checked only (${channel} channel)"
         return 0
     fi
 
@@ -90,11 +104,11 @@ ados_verify_artifact() {
             error "tamper check failed for ${base}; refusing to install"
             return 1 ;;
         *)  # 2 (minisign missing) or 3 (no .minisig) — unverifiable, not tampered.
-            if [ "${channel}" = "stable" ]; then
-                error "${base} could not be signature-verified on stable channel"
-                return 1
+            if ados_channel_is_lenient "${channel}"; then
+                warn "${base} signature unverifiable; SHA256-checked only (${channel} channel)"
+                return 0
             fi
-            warn "${base} signature unverifiable; SHA256-checked only (edge channel)"
-            return 0 ;;
+            error "${base} could not be signature-verified on the ${channel} channel"
+            return 1 ;;
     esac
 }

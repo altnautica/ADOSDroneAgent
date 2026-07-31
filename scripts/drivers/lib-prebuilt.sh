@@ -95,7 +95,12 @@ try_prebuilt_install() {
     command -v modprobe >/dev/null 2>&1 || return 1
 
     local base="${ADOS_PREBUILT_BASE_URL}"
-    local allow_unsigned="${ADOS_PREBUILT_ALLOW_UNSIGNED:-1}"
+    # Kernel modules are the highest-value tampering target this installer
+    # fetches, and the published catalog is signed end to end, so the default is
+    # to require a valid signature. A module that cannot be verified is not
+    # installed; the caller falls back to building from source, which is slower
+    # but is the same path a board with no prebuilt coverage already takes.
+    local allow_unsigned="${ADOS_PREBUILT_ALLOW_UNSIGNED:-0}"
     local pubkey; pubkey="$(_pb_pubkey)"
     local tmp; tmp="$(mktemp -d)" || return 1
 
@@ -158,7 +163,11 @@ try_prebuilt_install() {
     ados_fetch "${base}/${file}.minisig" "${tmp}/${file}.minisig" 15 2>/dev/null || true
 
     # 4. verify: SHA256 mandatory, signature per the dev/prod posture.
-    if ! ados_verify_artifact "${tmp}/${file}" "${pubkey}" "prebuilt" "${allow_unsigned}"; then
+    # The channel governs how an UNVERIFIABLE artifact is treated. "prebuilt"
+    # matched neither known channel and so used to take the lenient branch by
+    # accident; it is now strict unless the operator asks for the development
+    # channel explicitly.
+    if ! ados_verify_artifact "${tmp}/${file}" "${pubkey}" "${ADOS_PREBUILT_CHANNEL:-stable}" "${allow_unsigned}"; then
         warn "prebuilt ${file} failed verification; building from source."
         rm -rf "${tmp}"; return 1
     fi

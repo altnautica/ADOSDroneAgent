@@ -45,6 +45,8 @@ jobs:
             scripts/install.sh \
             scripts/lib/net.sh \
             scripts/lib/verify.sh \
+            scripts/drivers/lib-prebuilt.sh \
+            scripts/check-release-signatures.sh \
             scripts/drivers/install-display-overlay.sh \
             scripts/drivers/install-rtl8812eu.sh \
             scripts/test/e2e-install-rig.sh \

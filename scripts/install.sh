@@ -163,17 +163,39 @@ trap 'rm -rf "$tmp" 2>/dev/null || true' EXIT
 # it is verified below; until then the mandatory sha256 is the only gate.
 : "${ADOS_INSTALLER_PUBKEY:=RWQ/CJ1+gk7rjVfGSoy6MOL50e8TmO30KD/J+goaEj+WMI1uzEf92rHN}"
 
+# The bootstrap carries its own verifier.
+#
+# Signature checking below is conditional on minisign being present, and a
+# stock board image does not ship it — so on the path that matters, a fresh
+# install, verification silently did not happen and the only gate was sha256
+# (which a compromised release host controls just as easily as the binary).
+# Install it before the check rather than skipping the check. Best-effort: a
+# box with no package manager or no network still installs, still enforces
+# sha256, and says which posture it is in.
+if ! command -v minisign >/dev/null 2>&1; then
+    if command -v apt-get >/dev/null 2>&1; then
+        echo "Installing minisign to verify the download…" >&2
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq minisign >/dev/null 2>&1 || true
+    fi
+fi
+if command -v minisign >/dev/null 2>&1; then
+    echo "Signature verification: enabled." >&2
+else
+    echo "Signature verification: unavailable (minisign not installed); sha256 only." >&2
+fi
+
 # A line of feedback for the short pre-binary window; the installer renders its
 # own live progress once it execs below.
 echo "Fetching ADOS installer…" >&2
 get "${REL_BASE}/${asset}" "${tmp}/${asset}"
 get "${REL_BASE}/${asset}.sha256" "${tmp}/${asset}.sha256"
-# minisig is opt-in: only fetch when verification can actually run (a pubkey is
-# provided and minisign is installed). On the default path it is an unused
-# download that would surface a misleading 404, so skip it; silence stderr since
-# a missing signature is non-fatal by design.
+# Fetch the signature whenever verification can run. Every artifact in the
+# catalog is signed, so a missing one is now worth reporting rather than
+# passing over in silence.
 if [ -n "${ADOS_INSTALLER_PUBKEY:-}" ] && command -v minisign >/dev/null 2>&1; then
     get "${REL_BASE}/${asset}.minisig" "${tmp}/${asset}.minisig" 2>/dev/null || true
+    [ -s "${tmp}/${asset}.minisig" ] || \
+        echo "WARNING: no signature published for ${asset}; sha256 only." >&2
 fi
 
 # 5. Verify. sha256 is mandatory; abort loudly on mismatch.
