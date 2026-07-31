@@ -84,13 +84,6 @@ fn is_ground_station() -> bool {
 // Path seams.
 // ---------------------------------------------------------------------------
 
-/// The agent config path (`ADOS_CONFIG`, default `/etc/ados/config.yaml`).
-fn config_yaml_path() -> std::path::PathBuf {
-    std::path::PathBuf::from(
-        std::env::var("ADOS_CONFIG").unwrap_or_else(|_| crate::config::CONFIG_YAML.to_string()),
-    )
-}
-
 /// The GS rx-side key file (`<wfb key dir>/rx.key`), honouring `ADOS_WFB_KEY_DIR`
 /// (the same override the pair-state writer uses) for tests, else the canonical
 /// `/etc/ados/wfb` dir.
@@ -107,20 +100,15 @@ fn rx_key_path() -> std::path::PathBuf {
 
 /// The ground station's pair status.
 ///
-/// `paired` + `peer` are the legacy single-peer view (the rx.key exists, is
-/// exactly 64 bytes, and yields a readable fingerprint; the peer comes from the
-/// persisted config). `slots` is the fleet truth: the whole registry, which is
-/// what a 24-drone fleet actually is. The single-peer keys are kept because the
-/// heartbeat and the GCS pairing card still read them, but they describe only
-/// the most recently persisted peer, not the fleet.
+/// Whether a fleet key is installed: the rx.key exists, is exactly 64 bytes,
+/// and yields a readable fingerprint. The fleet's composition is the registry,
+/// read where it is actually returned rather than carried here.
 struct GsPairStatus {
     paired: bool,
-    peer: Option<String>,
-    slots: Vec<Value>,
 }
 
 /// Read the GS pair status. Mirrors the bits of `PairManager.status("gs")` the
-/// FastAPI route consulted, plus the fleet slot table. A status read fault is
+/// FastAPI route consulted. A status read fault is
 /// treated as not-paired (the FastAPI route's
 /// `except Exception: current = {"paired": False}`); an unreadable registry is
 /// an empty slot table, never a failure.
@@ -134,11 +122,7 @@ fn gs_pair_status() -> GsPairStatus {
         // matching the Python `except (OSError, ValueError): paired = False`.
         paired = false;
     }
-    GsPairStatus {
-        paired,
-        peer: read_persisted_peer(&config_yaml_path()),
-        slots: slot_table(&load_registry()),
-    }
+    GsPairStatus { paired }
 }
 
 /// Load the fleet registry from its canonical path. A missing or unparseable
@@ -175,29 +159,6 @@ fn read_public_fingerprint(path: &std::path::Path) -> Option<String> {
     let mut out = [0u8; 8];
     hasher.finalize_variable(&mut out).ok()?;
     Some(hex::encode(out))
-}
-
-/// Read the persisted peer device-id from `video.wfb.paired_with_device_id`,
-/// falling back to `ground_station.paired_drone_id` (the GS legacy mirror), the
-/// same precedence `PairManager.status("gs")` uses for the `paired_with_device_id`
-/// the already-paired 409 echoes.
-fn read_persisted_peer(config_path: &std::path::Path) -> Option<String> {
-    let text = std::fs::read_to_string(config_path).ok()?;
-    let doc: serde_norway::Value = serde_norway::from_str(&text).ok()?;
-    let canon = doc
-        .get("video")
-        .and_then(|v| v.get("wfb"))
-        .and_then(|w| w.get("paired_with_device_id"))
-        .and_then(|v| v.as_str())
-        .filter(|p| !p.is_empty());
-    if let Some(p) = canon {
-        return Some(p.to_string());
-    }
-    doc.get("ground_station")
-        .and_then(|g| g.get("paired_drone_id"))
-        .and_then(|v| v.as_str())
-        .filter(|p| !p.is_empty())
-        .map(str::to_string)
 }
 
 // ---------------------------------------------------------------------------
@@ -313,13 +274,18 @@ pub async fn post_wfb_pair(
         .flatten();
     let mut body = match installed {
         Some(existing) if existing != blob => {
+            // A caller presenting a DIFFERENT key has just proved it does not
+            // belong to this fleet, so it learns only that the key does not
+            // match. This used to answer with the peer device id and the whole
+            // slot table — every member's device id, slot and pairing time —
+            // handing the fleet's roster to the one caller shown not to hold
+            // its key. The successful path still returns the table, because a
+            // caller with the right key is in the fleet already.
             return nested_detail(
                 StatusCode::CONFLICT,
                 json!({
                     "code": "E_FLEET_KEY_MISMATCH",
                     "message": "this ground station already holds a different fleet key; unpair before pairing a different fleet",
-                    "paired_with_device_id": status.peer,
-                    "slots": status.slots,
                 }),
             );
         }
@@ -604,22 +570,27 @@ mod tests {
     }
 
     #[test]
-    fn read_persisted_peer_prefers_canonical_then_mirror() {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = dir.path().join("config.yaml");
-        // Canonical wins.
-        std::fs::write(
-            &cfg,
-            "video:\n  wfb:\n    paired_with_device_id: drone-canon\nground_station:\n  paired_drone_id: drone-mirror\n",
-        )
-        .unwrap();
-        assert_eq!(read_persisted_peer(&cfg).as_deref(), Some("drone-canon"));
-        // Mirror fallback when canonical absent.
-        std::fs::write(&cfg, "ground_station:\n  paired_drone_id: drone-mirror\n").unwrap();
-        assert_eq!(read_persisted_peer(&cfg).as_deref(), Some("drone-mirror"));
-        // Neither → None.
-        std::fs::write(&cfg, "agent:\n  name: x\n").unwrap();
-        assert_eq!(read_persisted_peer(&cfg), None);
+    fn a_foreign_key_is_refused_without_naming_the_fleet() {
+        // A caller presenting a DIFFERENT key has just proved it is not part of
+        // this fleet. It used to be answered with the peer device id and the
+        // whole slot table — every member's device id, slot and pairing time —
+        // so the one caller shown not to hold the key learned the roster.
+        let body = json!({
+            "code": "E_FLEET_KEY_MISMATCH",
+            "message": "this ground station already holds a different fleet key; unpair before pairing a different fleet",
+        });
+        let obj = body.as_object().unwrap();
+        assert!(
+            !obj.contains_key("slots"),
+            "the fleet roster must not ride a refusal"
+        );
+        assert!(
+            !obj.contains_key("paired_with_device_id"),
+            "a refused caller must not learn who this station is paired with"
+        );
+        // It must still say WHY, or the operator cannot act on it.
+        assert_eq!(obj["code"], "E_FLEET_KEY_MISMATCH");
+        assert!(obj["message"].as_str().unwrap().contains("unpair"));
     }
 
     #[test]

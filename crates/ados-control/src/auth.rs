@@ -147,7 +147,11 @@ pub const RELAYED_HEADER: &str = "x-ados-relayed";
 /// - **Credential issuance** — scoped tokens and the dashboard PIN, each of
 ///   which is a second standing credential.
 /// - **Radio pairing** — a caller reaching this over the radio can drop the
-///   node off the very fleet key that let it in.
+///   node off the very fleet key that let it in, or move it onto a different
+///   fleet. The ground-station install route is listed for the same reason: it
+///   is profile-gated, so a relayed call lands on a drone and 404s today, but
+///   the denylist is the layer that must not depend on where a route happens
+///   to be mounted.
 /// - **Plugin install** — arbitrary code, self-granted permissions.
 /// - **Destructive setup** — factory reset, setup reset, cloud re-posture.
 ///
@@ -164,6 +168,7 @@ pub fn relay_forbidden(path: &str) -> bool {
             | "/api/dashboard/pin/clear"
             | "/api/wfb/pair/local-bind"
             | "/api/wfb/pair/unpair"
+            | "/api/v1/ground-station/wfb/pair"
             | "/api/plugins/install"
             | "/api/plugins/install_from_url"
             | "/api/plugins/capability-token"
@@ -327,6 +332,7 @@ mod tests {
         for path in [
             "/api/wfb/pair/unpair",
             "/api/wfb/pair/local-bind",
+            "/api/v1/ground-station/wfb/pair",
             "/api/plugins/install",
             "/api/plugins/install_from_url",
             "/api/v1/setup/reset",
