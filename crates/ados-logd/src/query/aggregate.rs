@@ -8,7 +8,7 @@
 //!
 //! `avg` is derived as `sum/count` so a coarse grain composes from finer ones
 //! (the rollup tables carry `sum`+`count`, never a pre-averaged value).
-//! Percentiles (`p50`/`p95`) need the individual samples and so are only
+//! Percentiles (`p50`/`p95`/`p99`) need the individual samples and so are only
 //! available against the raw table; requesting a percentile at a rollup grain
 //! falls back to a raw scan.
 
@@ -30,6 +30,13 @@ pub enum Agg {
     P50,
     /// 95th percentile (raw only).
     P95,
+    /// 99th percentile (raw only).
+    ///
+    /// Distinct from p95 because a control loop is judged on its tail, not its
+    /// shoulder. At 100 Hz, p95 forgives five late frames a second; whether
+    /// those five are 1 ms or 40 ms late is exactly the question a loop-rate
+    /// measurement is asking, and only a deeper percentile answers it.
+    P99,
     /// The latest sample in the bucket.
     Last,
     /// The sample count in the bucket.
@@ -45,11 +52,12 @@ impl Agg {
             "max" => Ok(Agg::Max),
             "p50" => Ok(Agg::P50),
             "p95" => Ok(Agg::P95),
+            "p99" => Ok(Agg::P99),
             "last" => Ok(Agg::Last),
             "count" => Ok(Agg::Count),
             other => Err(ParamError::new(
                 "bad_agg",
-                format!("unknown agg '{other}', expected avg|min|max|p50|p95|last|count"),
+                format!("unknown agg '{other}', expected avg|min|max|p50|p95|p99|last|count"),
             )),
         }
     }
@@ -57,7 +65,7 @@ impl Agg {
     /// Whether this aggregate can be served from a rollup table. Percentiles
     /// need the individual samples and so cannot.
     fn rollup_capable(self) -> bool {
-        !matches!(self, Agg::P50 | Agg::P95)
+        !matches!(self, Agg::P50 | Agg::P95 | Agg::P99)
     }
 }
 
@@ -273,7 +281,7 @@ fn aggregate_from_rollup(
             Agg::Max => max_max,
             Agg::Last => last_last,
             Agg::Count => sum_count as f64,
-            Agg::P50 | Agg::P95 => sum_sum / sum_count.max(1) as f64,
+            Agg::P50 | Agg::P95 | Agg::P99 => sum_sum / sum_count.max(1) as f64,
         };
         Ok(Bucket {
             bucket_us,
@@ -294,7 +302,7 @@ fn aggregate_from_raw(
     params: &AggregateParams,
 ) -> rusqlite::Result<Vec<Bucket>> {
     let width = grain.width_us();
-    if matches!(params.agg, Agg::P50 | Agg::P95) {
+    if matches!(params.agg, Agg::P50 | Agg::P95 | Agg::P99) {
         return aggregate_percentile_from_raw(conn, metric, width, params);
     }
     let value_expr = match params.agg {
@@ -303,7 +311,7 @@ fn aggregate_from_raw(
         Agg::Max => "MAX(value)",
         Agg::Last => "value", // resolved by the ORDER inside the group below
         Agg::Count => "COUNT(*)",
-        Agg::P50 | Agg::P95 => unreachable!("percentiles handled above"),
+        Agg::P50 | Agg::P95 | Agg::P99 => unreachable!("percentiles handled above"),
     };
     let mut where_clauses = vec!["metric = ?".to_string()];
     let mut binds: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(metric.to_string())];
@@ -363,10 +371,10 @@ fn aggregate_percentile_from_raw(
     width: i64,
     params: &AggregateParams,
 ) -> rusqlite::Result<Vec<Bucket>> {
-    let q = if matches!(params.agg, Agg::P95) {
-        0.95
-    } else {
-        0.50
+    let q = match params.agg {
+        Agg::P99 => 0.99,
+        Agg::P95 => 0.95,
+        _ => 0.50,
     };
     let mut where_clauses = vec!["metric = ?".to_string()];
     let mut binds: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(metric.to_string())];
@@ -449,6 +457,67 @@ mod tests {
 
     fn params(q: &str) -> AggregateParams {
         AggregateParams::parse(&QueryParams::parse(q), 0).unwrap()
+    }
+
+    #[test]
+    fn p99_reaches_deeper_into_the_tail_than_p95() {
+        // The whole reason p99 exists here. A loop-rate measurement is judged on
+        // its tail: at 100 Hz, p95 forgives five late frames every second, and
+        // whether those five are barely late or catastrophically late is the
+        // question being asked. A p99 that merely aliased p95 would answer the
+        // wrong question while looking like it answered the right one.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("logs.db");
+        let conn = db::open(&path).unwrap();
+        conn.execute(
+            "INSERT INTO sessions (started_us, kind) VALUES (0, 'boot')",
+            [],
+        )
+        .unwrap();
+        let s = conn.last_insert_rowid();
+        // A hundred samples in ONE bucket: ninety-five on time, then a tail that
+        // gets progressively worse. Selection is nearest-rank
+        // (`index = ceil(q*n) - 1`), so p95 lands on index 94 and p99 on index
+        // 98 -- one inside the punctual body, one well into the tail. A single
+        // lone outlier would NOT distinguish them: with 99 samples flat and one
+        // extreme, p99 is still the flat value, because 99 percent of the data
+        // genuinely is flat. The tail has to have shape for the deeper
+        // percentile to mean anything.
+        let mut values = vec![1.0f64; 95];
+        values.extend_from_slice(&[10.0, 20.0, 30.0, 40.0, 50.0]);
+        for (i, v) in values.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO metrics (ts_us, session, metric, value) VALUES (?1, ?2, 'loop.period_ms', ?3)",
+                rusqlite::params![(i as i64) * 1_000, s, v],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let ro = db::open_readonly(&path).unwrap();
+        let p95 = aggregate(&ro, &params("metric=loop.period_ms&bucket=1s&agg=p95")).unwrap();
+        let p99 = aggregate(&ro, &params("metric=loop.period_ms&bucket=1s&agg=p99")).unwrap();
+
+        assert_eq!(p95.len(), 1);
+        assert_eq!(p99.len(), 1);
+        assert!(
+            p99[0].value > p95[0].value,
+            "p99 ({}) must see the stall p95 ({}) steps over",
+            p99[0].value,
+            p95[0].value
+        );
+        assert_eq!(p95[0].value, 1.0, "p95 sits inside the punctual body");
+        assert_eq!(
+            p99[0].value, 40.0,
+            "and p99 reports a real sample from the tail, not an interpolation"
+        );
+    }
+
+    #[test]
+    fn p99_is_refused_at_a_rollup_grain_rather_than_silently_approximated() {
+        // A percentile needs the individual samples. Serving one from a rollup
+        // would return a mean wearing a percentile's name.
+        assert!(!Agg::P99.rollup_capable());
     }
 
     #[test]
