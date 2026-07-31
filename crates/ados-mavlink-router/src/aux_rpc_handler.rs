@@ -43,6 +43,10 @@ const HTTP_PORT: u16 = 8080;
 /// (config writes, param loads) while surfacing a wedge to the operator.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Headroom above the response-body ceiling for the HTTP status line and
+/// headers, which are read on the same stream and stripped afterwards.
+const HTTP_HEADER_ALLOWANCE: usize = 8 * 1024;
+
 /// Pause between response fragments.
 ///
 /// Back-to-back 1.2 KB datagrams into `wfb_tx`'s UDP ingress can overrun its
@@ -259,6 +263,30 @@ fn encode_all(sender: &[u8], id: u32, status: u16, symbols: &ResponseSymbols) ->
     out
 }
 
+/// Read a response off `r` up to the ceiling the response encoder already
+/// enforces, rather than to EOF.
+///
+/// `Connection: close` means the server closes after the response, so reading
+/// to EOF terminates — but only when the far end chooses to stop, and the size
+/// check ran after the body was fully buffered. With one task per relay
+/// request, N concurrent calls to a large-response route each held their own
+/// copy on a board with a few hundred megabytes.
+///
+/// The cap carries one byte past the ceiling so an over-ceiling body is still
+/// detected as over-ceiling downstream, rather than being truncated to exactly
+/// the limit and encoded as if it had fit.
+async fn read_response_bounded<R: tokio::io::AsyncRead + Unpin>(
+    r: R,
+) -> Result<Vec<u8>, HttpError> {
+    let cap = ados_protocol::aux_rpc::MAX_RESPONSE_BODY + HTTP_HEADER_ALLOWANCE + 1;
+    let mut buf = Vec::new();
+    r.take(cap as u64)
+        .read_to_end(&mut buf)
+        .await
+        .map_err(|e| HttpError::Read(e.to_string()))?;
+    Ok(buf)
+}
+
 /// A minimal HTTP/1.1 client for localhost. No TLS, no redirects, no
 /// streaming — just a request/response round trip to the drone's own API.
 async fn http_call(
@@ -289,13 +317,7 @@ async fn http_call(
                 .map_err(|e| HttpError::Write(e.to_string()))?;
         }
 
-        // Read the full response. Connection: close means the server closes
-        // after the response, so we read until EOF.
-        let mut response = Vec::new();
-        stream
-            .read_to_end(&mut response)
-            .await
-            .map_err(|e| HttpError::Read(e.to_string()))?;
+        let response = read_response_bounded(&mut stream).await?;
 
         parse_response(&response)
     };
@@ -481,6 +503,54 @@ mod tests {
 
     /// `start_paused` lets the bounded wait expire instantly instead of the
     /// test sitting through the real limit.
+
+    #[tokio::test]
+    async fn a_response_larger_than_the_ceiling_stops_being_read_at_the_ceiling() {
+        // The read used to run to EOF, bounded only by a 5 s timeout against
+        // loopback, and the size check happened after the body was fully
+        // buffered. With one task per relay request, N concurrent calls to a
+        // large-response route each held their own copy.
+        let (mut near, far) = tokio::io::duplex(64 * 1024);
+        let ceiling = ados_protocol::aux_rpc::MAX_RESPONSE_BODY;
+        // Far more than the ceiling, written for as long as anyone reads.
+        tokio::spawn(async move {
+            let chunk = vec![b'x'; 32 * 1024];
+            loop {
+                if near.write_all(&chunk).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        let got = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            read_response_bounded(far),
+        )
+        .await
+        .expect("the read never terminated; it is still bounded only by a timeout")
+        .expect("read failed");
+
+        assert!(
+            got.len() <= ceiling + HTTP_HEADER_ALLOWANCE + 1,
+            "buffered {} bytes for a ceiling of {}",
+            got.len(),
+            ceiling
+        );
+    }
+
+    #[tokio::test]
+    async fn a_response_under_the_ceiling_is_read_whole() {
+        // The bound must not truncate the ordinary case.
+        let (mut near, far) = tokio::io::duplex(64 * 1024);
+        let body = b"HTTP/1.1 200 OK\r\n\r\n{\"ok\":true}".to_vec();
+        let expected = body.clone();
+        tokio::spawn(async move {
+            let _ = near.write_all(&body).await;
+        });
+        let got = read_response_bounded(far).await.expect("read failed");
+        assert_eq!(got, expected);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_response_is_abandoned_rather_than_sent_after_the_caller_gave_up() {
         // The send slot is process-wide and held for a whole burst, so

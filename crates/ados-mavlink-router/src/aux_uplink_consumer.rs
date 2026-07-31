@@ -47,8 +47,26 @@ const BUF_SIZE: usize = 4096;
 /// bound, not a spawn: a write that exceeds it is dropped and counted.
 const FC_WRITE_TIMEOUT: Duration = Duration::from_millis(500);
 
+/// How many relay requests may be in flight at once.
+///
+/// Each accepted request spawns a task that opens a local HTTP call and
+/// buffers its response, so an unbounded spawn let the uplink's datagram rate
+/// set the memory ceiling on a board with a few hundred megabytes. The send
+/// side is already serialised by the response slot, so a bound here costs
+/// nothing in throughput — it only stops the queue forming in heap instead of
+/// in the semaphore.
+///
+/// A request that cannot get a permit is dropped rather than queued: the
+/// ground retransmits, and the dedupe cache answers the retry from what the
+/// first attempt computed.
+const MAX_INFLIGHT_REQUESTS: usize = 8;
+
 /// Receive-buffer size asked of the kernel for the uplink socket.
 const AUX_RECV_BUFFER_BYTES: usize = 4 * 1024 * 1024;
+
+/// In-flight permits for relay requests. Process-wide, like the response slot.
+static REQUEST_SLOTS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT_REQUESTS)));
 
 #[derive(Default)]
 struct CountersInner {
@@ -82,6 +100,10 @@ struct CountersInner {
     link_feedback_undecodable: AtomicU64,
     /// Reports that decoded but could not be published for the ladder to read.
     link_feedback_write_errors: AtomicU64,
+    /// Requests shed because the in-flight ceiling was already reached. The
+    /// ground retransmits and the dedupe cache answers the retry, so this is a
+    /// capacity signal rather than a lost call.
+    rpc_requests_shed: AtomicU64,
     /// Reports that measured a DIFFERENT slot. Normal and expected on every
     /// drone but the one being measured — the ground transmits the uplink once
     /// for the whole fleet, so each drone sees every record and keeps only its
@@ -123,6 +145,7 @@ pub struct AuxUplinkConsumerSnapshot {
     pub link_feedback_undecodable: u64,
     pub link_feedback_write_errors: u64,
     pub link_feedback_not_for_us: u64,
+    pub rpc_requests_shed: u64,
     pub rpc_response_abandoned: u64,
     pub rpc_requests_duplicate: u64,
     pub rpc_requests_replayed: u64,
@@ -150,6 +173,7 @@ impl AuxUplinkConsumerCounters {
             link_feedback_undecodable: c.link_feedback_undecodable.load(Ordering::Relaxed),
             link_feedback_write_errors: c.link_feedback_write_errors.load(Ordering::Relaxed),
             link_feedback_not_for_us: c.link_feedback_not_for_us.load(Ordering::Relaxed),
+            rpc_requests_shed: c.rpc_requests_shed.load(Ordering::Relaxed),
             rpc_response_abandoned: c.rpc_response_abandoned.load(Ordering::Relaxed),
             rpc_requests_duplicate: c.rpc_requests_duplicate.load(Ordering::Relaxed),
             rpc_requests_replayed: c.rpc_requests_replayed.load(Ordering::Relaxed),
@@ -362,6 +386,14 @@ async fn dispatch(
                         warn_target_mismatch_once(request.target, own_device_id);
                         return;
                     }
+                    let Ok(permit) = REQUEST_SLOTS.clone().try_acquire_owned() else {
+                        // Already at the in-flight ceiling. Dropping is safe
+                        // and cheap here: the ground retransmits an unanswered
+                        // request, and the dedupe cache serves the retry from
+                        // the first attempt's work.
+                        counters.0.rpc_requests_shed.fetch_add(1, Ordering::Relaxed);
+                        return;
+                    };
                     if let Some(egress) = egress {
                         let id = request.id;
                         let method = request.method;
@@ -372,6 +404,7 @@ async fn dispatch(
                         let counters = counters.clone();
                         let sender = own_device_id.to_owned();
                         tokio::spawn(async move {
+                            let _permit = permit;
                             let req = ados_protocol::aux_rpc::RpcRequest {
                                 id,
                                 method,
@@ -694,6 +727,50 @@ mod tests {
         assert_eq!(written.target_slot, 1);
         unstage(&dir);
     }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn requests_beyond_the_inflight_ceiling_are_shed_not_queued() {
+        // Each accepted request spawns a task that opens a local HTTP call and
+        // buffers its response, so an unbounded spawn let the uplink's datagram
+        // rate set the memory ceiling on a board with a few hundred megabytes.
+        // Shedding is safe: the ground retransmits, and the dedupe cache
+        // answers the retry from the first attempt's work.
+        let _guard = RUN_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = stage("shed", 1);
+
+        // Hold every permit, as saturated in-flight work would.
+        let mut held = Vec::new();
+        for _ in 0..MAX_INFLIGHT_REQUESTS {
+            held.push(REQUEST_SLOTS.clone().try_acquire_owned().expect("permit"));
+        }
+
+        let (fc, _captured) = test_connection();
+        let counters = AuxUplinkConsumerCounters::new();
+        let payload = ados_protocol::aux_rpc::encode_request(
+            ados_protocol::aux_rpc::RpcMethod::Get,
+            9,
+            OWN_ID.as_bytes(),
+            b"/api/status",
+            &[],
+        )
+        .unwrap();
+        let datagram = aux_mux::encode(AuxChannel::Request, &payload).unwrap();
+        dispatch(&datagram, &fc, &counters, &None, OWN_ID, &dedupe()).await;
+
+        assert_eq!(
+            counters.snapshot().rpc_requests_shed,
+            1,
+            "a request past the ceiling must be shed rather than spawned"
+        );
+        drop(held);
+        unstage(&dir);
+    }
+
+    // Each in-flight request can hold a full response body, so the ceiling is
+    // what turns "bounded by the datagram rate" into a real number. Checked at
+    // compile time so raising it past what the board can hold is a build error.
+    const _: () = assert!(MAX_INFLIGHT_REQUESTS >= 1 && MAX_INFLIGHT_REQUESTS <= 16);
 
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
