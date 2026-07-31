@@ -127,6 +127,42 @@ def test_hdmi_present_true_when_a_connector_is_connected(tmp_path: Any) -> None:
         assert _hdmi_present() is True
 
 
+def test_resolve_drm_device_picks_the_card_that_drives_the_display(tmp_path: Any) -> None:
+    # On a Pi 4 card0 is the render node (v3d, no connectors) and card1 is the
+    # display (vc4). Handing cage a hardcoded card0 there gives it nothing to
+    # modeset, so the appliance path comes up blank on a board where the
+    # windowed path works.
+    sysfs, dev = _drm_dirs(
+        tmp_path,
+        {"card1-HDMI-A-1": "connected", "card1-HDMI-A-2": "disconnected"},
+        ["card0", "card1"],
+    )
+    with patch.object(ks, "_DRM_SYSFS", sysfs), patch.object(ks, "_DRM_DIR", dev):
+        assert ks._resolve_drm_device() == str(dev / "card1")
+
+
+def test_resolve_drm_device_falls_back_when_nothing_is_connected(tmp_path: Any) -> None:
+    sysfs, dev = _drm_dirs(tmp_path, {"card0-HDMI-A-1": "disconnected"}, ["card0"])
+    with patch.object(ks, "_DRM_SYSFS", sysfs), patch.object(ks, "_DRM_DIR", dev):
+        assert ks._resolve_drm_device() == ks._DRM_DEVICE
+
+
+def test_resolve_drm_device_ignores_a_connector_whose_card_node_is_absent(
+    tmp_path: Any,
+) -> None:
+    # A connected connector on a card with no /dev/dri node is not a device we
+    # can hand to a compositor.
+    sysfs, dev = _drm_dirs(tmp_path, {"card9-HDMI-A-1": "connected"}, ["card0"])
+    with patch.object(ks, "_DRM_SYSFS", sysfs), patch.object(ks, "_DRM_DIR", dev):
+        assert ks._resolve_drm_device() == ks._DRM_DEVICE
+
+
+def test_default_cockpit_url_is_the_served_path(tmp_path: Any) -> None:
+    # The static mount serves /cockpit/. Targeting the bare path costs a
+    # redirect on every kiosk boot and puts the appended query at its mercy.
+    assert ks._DEFAULT_URL.endswith("/cockpit/")
+
+
 def test_hdmi_present_true_fallback_when_card_node_exists(tmp_path: Any) -> None:
     # No connector status readable, but a DRM card node exists -> the subsystem
     # is up, so proceed (fallback).
@@ -313,7 +349,9 @@ def test_resolve_target_url_defaults_when_nothing_set(monkeypatch: pytest.Monkey
     monkeypatch.delenv("ADOS_KIOSK_MINIMAL_LAYER", raising=False)
     with patch.object(ks, "_low_ram_board", return_value=False):
         url, minimal = _resolve_target_url(SimpleNamespace())
-    assert url == "http://localhost:8080/cockpit"
+    # Trailing slash: the path the static mount actually serves, so no redirect
+    # stands between the kiosk and the page (and none can drop the query).
+    assert url == "http://localhost:8080/cockpit/"
     assert minimal is False
 
 

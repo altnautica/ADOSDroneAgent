@@ -148,11 +148,19 @@ def create_app(agent: Any) -> FastAPI:
 
     from starlette.responses import RedirectResponse
 
-    async def _cockpit_index_redirect(_request: Any) -> RedirectResponse:
+    async def _cockpit_index_redirect(request: Any) -> RedirectResponse:
         # A bare /cockpit (no trailing slash) does not match the StaticFiles
         # mount below (which serves /cockpit/), so redirect to it. This lets the
         # kiosk and reach links target the clean /cockpit URL.
-        return RedirectResponse(url="/cockpit/")
+        #
+        # The query string must survive the hop. The cockpit reads its access
+        # key off the URL, so dropping it silently broke every /cockpit?key=...
+        # reach link — the operator landed on a page that asked to be paired
+        # again, with nothing to explain why. The kiosk's own render-profile
+        # flag travels the same way.
+        query = getattr(getattr(request, "url", None), "query", "") or ""
+        target = f"/cockpit/?{query}" if query else "/cockpit/"
+        return RedirectResponse(url=target)
 
     app.add_route("/cockpit", _cockpit_index_redirect, include_in_schema=False)
     app.mount(

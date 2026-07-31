@@ -87,3 +87,32 @@
     border-radius: var(--radius);
   }
 }
+
+@layer components {
+  /* Minimal render profile (`?layer=minimal`).
+   *
+   * The chrome floats over full-bleed live video behind a backdrop blur. A
+   * blurred region over a surface that changes every frame makes the
+   * compositor re-read and re-blur its backdrop at the video's frame rate,
+   * which on a small embedded GPU is the most expensive thing the page does.
+   * Minimal drops the effect and keeps the translucency, so every panel stays
+   * legible over the feed.
+   *
+   * This must never remove a datum. Everything readable in full mode is
+   * readable here, only the effect goes. Reduced fidelity, never reduced
+   * truth. */
+  .layer-minimal [class*="backdrop-blur"] {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+
+  /* Animation and shadow are per-frame compositor work for no information. */
+  .layer-minimal *,
+  .layer-minimal *::before,
+  .layer-minimal *::after {
+    transition-duration: 0s !important;
+    animation-duration: 0s !important;
+    animation-iteration-count: 1 !important;
+    box-shadow: none !important;
+  }
+}

@@ -12,6 +12,7 @@
 // with solid chrome. The menu can collapse to give the feed the whole panel.
 
 import { ActionBar, type InputStatus } from "@/components/shell/action-bar";
+import { renderProfile, renderProfileClass } from "@/lib/render-profile";
 import { MenuRail } from "@/components/shell/menu-rail";
 import { QuickMenu } from "@/components/shell/quick-menu";
 import { RebootBanner } from "@/components/shell/reboot-banner";
@@ -50,7 +51,11 @@ export function CockpitShell({ input }: { input: InputStatus }) {
 
   return (
     <TelemetryProvider>
-      <div className="relative h-full w-full overflow-hidden bg-background text-foreground">
+      <div
+        className={`relative h-full w-full overflow-hidden bg-background text-foreground ${renderProfileClass(
+          renderProfile(),
+        )}`}
+      >
         {fullBleed ? body : null}
         <div
           className={
