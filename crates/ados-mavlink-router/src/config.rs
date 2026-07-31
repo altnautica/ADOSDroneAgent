@@ -56,8 +56,22 @@ fn default_endpoint_enabled() -> bool {
 fn default_endpoints() -> Vec<EndpointConfig> {
     vec![EndpointConfig::default()]
 }
+/// Whether an unauthorized WebSocket handshake is REFUSED rather than merely
+/// recorded.
+///
+/// On. It shipped off while the credential was being rolled out, so that an
+/// agent whose clients did not yet present one kept working -- but that meant a
+/// paired node logged an unauthorized connection and then served it anyway, and
+/// the published documentation described an endpoint that authenticates. The
+/// gap between the two was the exposure.
+///
+/// Turning it on does not close the unpaired posture: an unpaired node still
+/// admits any caller, because it has no credential to check against and refusing
+/// would lock an operator out of a node they have not yet claimed. What changes
+/// is that a PAIRED node now requires either the key or a ticket, which every
+/// first-party client already presents.
 fn default_ws_proxy_enforce_auth() -> bool {
-    false
+    true
 }
 fn default_legacy_stream_request() -> bool {
     false
@@ -538,13 +552,25 @@ mod tests {
     }
 
     #[test]
-    fn ws_proxy_enforce_auth_defaults_off() {
+    fn ws_proxy_enforce_auth_defaults_on() {
         let dir = tempfile::tempdir().unwrap();
-        // Missing file, and a config that omits the flag, both default to off so
-        // an un-upgraded config never starts enforcing.
-        assert!(!MavlinkConfig::load_from(&dir.path().join("nope.yaml")).ws_proxy_enforce_auth);
+        // A missing file and a config that omits the flag both enforce, so a
+        // node that was never reconfigured is protected rather than left open
+        // waiting for someone to opt in.
+        assert!(MavlinkConfig::load_from(&dir.path().join("nope.yaml")).ws_proxy_enforce_auth);
         let cfg = dir.path().join("config.yaml");
         write(&cfg, "mavlink:\n  serial_port: /dev/ttyACM0\n");
+        assert!(MavlinkConfig::load_from(&cfg).ws_proxy_enforce_auth);
+    }
+
+    #[test]
+    fn ws_proxy_enforce_auth_can_still_be_turned_off_explicitly() {
+        // An operator with a third-party client that cannot present a
+        // credential needs a way out that is deliberate and recorded in their
+        // config, rather than being the silent default for everyone.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        write(&cfg, "mavlink:\n  ws_proxy_enforce_auth: false\n");
         assert!(!MavlinkConfig::load_from(&cfg).ws_proxy_enforce_auth);
     }
 
