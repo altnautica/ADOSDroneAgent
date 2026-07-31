@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -41,7 +42,12 @@ from typing import Any, Literal
 import yaml
 
 from ados.core.logging import get_logger
-from ados.core.paths import AP_PASSPHRASE_PATH, CONFIG_YAML
+from ados.core.paths import (
+    CONFIG_YAML,
+    FACTORY_RESET_DIRS,
+    FACTORY_RESET_FILES,
+    SETUP_COMPLETE_PATH,
+)
 from ados.services.wfb.key_mgr import (
     WFB_KEY_FILE_BYTES,
     get_key_paths,
@@ -50,8 +56,7 @@ from ados.services.wfb.key_mgr import (
 
 log = get_logger("ground_station.pair_manager")
 
-_SETUP_COMPLETE_PATH = Path("/var/lib/ados/setup-complete")
-_AP_PASSPHRASE_PATH = AP_PASSPHRASE_PATH
+_SETUP_COMPLETE_PATH = SETUP_COMPLETE_PATH
 _CONFIG_PATH = CONFIG_YAML
 
 _WFB_DRONE_UNIT = "ados-wfb.service"
@@ -258,6 +263,23 @@ def update_peer_device_id(role: Role, peer_device_id: str) -> bool:
         gs["paired_drone_id"] = peer_device_id
     _save_config_dict(data)
     return True
+
+
+def _clear_configured_hotspot_password() -> None:
+    """Remove `network.hotspot.password` so a reset really does re-key the AP.
+
+    `ensure_passphrase` prefers a configured password over generating one, so
+    deleting `/etc/ados/ap-passphrase` alone left a configured rig coming back
+    up on exactly the key it had before — which is the opposite of what a
+    factory reset promises, and silently so.
+    """
+    data = _load_config_dict()
+    hotspot = data.get("network", {}).get("hotspot")
+    if not isinstance(hotspot, dict) or "password" not in hotspot:
+        return
+    hotspot.pop("password", None)
+    if _save_config_dict(data):
+        log.info("factory_reset_cleared_configured_hotspot_password")
 
 
 def _persist_pair_state(
@@ -610,16 +632,28 @@ class PairManager:
         return {**current, "auto_pair_enabled": enabled}
 
     async def factory_reset(self, role: Role) -> dict[str, Any]:
-        """Wipe pair keys, setup sentinel, AP passphrase. Re-arm auto-pair.
+        """Destroy every standing credential and return to first-boot posture.
 
-        Forces the rig back to first-boot posture: captive DNS will fire
-        again, hostapd_manager regenerates a fresh passphrase, the
-        operator re-runs the setup webapp flow, and auto-bind is armed
-        for the next boot.
+        This is what an operator runs before handing a unit to somebody else,
+        so the bar is that nothing the previous holder knows still opens the
+        box. That means the API key, the dashboard PIN, the MCP token, the
+        setup/tunnel/server secrets, the AP passphrase and the radio keypair —
+        the full set in :data:`~ados.core.paths.FACTORY_RESET_FILES` and
+        :data:`~ados.core.paths.FACTORY_RESET_DIRS`, which the shell script
+        shares so the two cannot drift apart again.
+
+        The configured hotspot password is cleared too. Without that this reset
+        did not actually change the passphrase: deleting the file only makes
+        the manager fall through to `network.hotspot.password`, so a rig with
+        one configured came back up on the same key it had before.
+
+        What is deliberately left alone: `profile.conf` (what this hardware is,
+        not who owns it — removing it lets a later bare upgrade reprofile the
+        box) and `device-id` (identity, not a credential).
         """
         await self.unpair(role)
 
-        for path in (_SETUP_COMPLETE_PATH, _AP_PASSPHRASE_PATH):
+        for path in FACTORY_RESET_FILES:
             try:
                 if path.is_file():
                     path.unlink()
@@ -629,6 +663,22 @@ class PairManager:
                     path=str(path),
                     error=str(exc),
                 )
+
+        for directory in FACTORY_RESET_DIRS:
+            try:
+                if directory.is_dir():
+                    shutil.rmtree(directory)
+            except OSError as exc:
+                log.warning(
+                    "factory_reset_delete_failed",
+                    path=str(directory),
+                    error=str(exc),
+                )
+
+        # Clear the configured hotspot password, or the "fresh passphrase"
+        # this reset promises is not fresh at all — `ensure_passphrase`
+        # prefers a configured value over generating one.
+        _clear_configured_hotspot_password()
 
         # Re-arm auto-pair so the next boot binds again.
         _persist_pair_state(

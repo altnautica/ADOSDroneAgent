@@ -464,3 +464,60 @@ INSTALL_RESULT = (
     if os.environ.get("ADOS_INSTALL_RESULT")
     else (_ados_home() / "install-result.json" if _IS_MACOS else Path("/var/lib/ados/install-result.json"))
 )
+
+
+# ---------------------------------------------------------------------------
+# Factory reset — the canonical credential set
+# ---------------------------------------------------------------------------
+
+# Standing credentials a factory reset MUST destroy.
+#
+# Factory reset is what an operator runs before handing a unit to somebody
+# else, so anything left behind is access the previous holder keeps. Each of
+# these is a credential in its own right, not a cache of one:
+#
+#   pairing.json        the API key the data plane accepts
+#   dashboard-pin.json  mints dashboard sessions
+#   mcp-token.json      a scoped bearer token the auth edge accepts in place
+#                       of the API key
+#   secrets/            cloudflare tunnel token, setup token, server API key
+#   ap-passphrase       the access point's WPA2 key
+#   wfb/                the radio keypair, which is the fleet's join gate
+#   certs/              TLS material
+#
+# Deliberately NOT reset:
+#
+#   profile.conf   holds `profile`, `channel` and `version` — what this
+#                  hardware IS, not who it belongs to. It is 0644 and carries
+#                  no secret. Removing it strips the profile marker, and a
+#                  later bare upgrade then reprofiles the box, which has
+#                  already cost one rig a full reflash.
+#   device-id      identity rather than a credential. Regenerating it makes
+#                  the same physical unit look like a new one to every record
+#                  that refers to it.
+#
+# Both the shell script and the API path consume this list, and a test asserts
+# they agree: the three implementations diverged in the first place because
+# each carried its own copy.
+
+DASHBOARD_PIN_PATH = ADOS_ETC_DIR / "dashboard-pin.json"
+MCP_TOKEN_PATH = ADOS_ETC_DIR / "mcp-token.json"
+WFB_KEY_DIR = ADOS_ETC_DIR / "wfb"
+CERTS_DIR = ADOS_ETC_DIR / "certs"
+SETUP_COMPLETE_PATH = Path("/var/lib/ados/setup-complete")
+
+#: Files a factory reset unlinks.
+FACTORY_RESET_FILES: tuple[Path, ...] = (
+    PAIRING_JSON,
+    DASHBOARD_PIN_PATH,
+    MCP_TOKEN_PATH,
+    AP_PASSPHRASE_PATH,
+    SETUP_COMPLETE_PATH,
+)
+
+#: Directories a factory reset empties.
+FACTORY_RESET_DIRS: tuple[Path, ...] = (
+    SECRETS_DIR,
+    WFB_KEY_DIR,
+    CERTS_DIR,
+)
