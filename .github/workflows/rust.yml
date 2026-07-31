@@ -1238,13 +1238,27 @@ jobs:
           minisign -S -s /tmp/sign.key -m rel/libonnxruntime-aarch64.so -x rel/libonnxruntime-aarch64.so.minisig
           rm -f /tmp/sign.key
 
+      # Uploaded per-asset rather than through the release action, which
+      # replaces a rolling tag's contents by deleting every existing asset in
+      # parallel and then re-uploading. On a six-asset tag those deletes raced
+      # against each other, one returned 404, and the job aborted midway --
+      # after removing the old assets but before re-uploading them all. That
+      # published the binary with no accompanying .sha256, and a missing
+      # checksum is fatal to the installer rather than merely unverified, so
+      # every board declaring onnx inference would have fallen back to a build
+      # with no real inference behind an advancing version number.
+      #
+      # `--clobber` replaces one named asset at a time, so a failure can no
+      # longer leave the tag holding an artifact whose checksum is absent.
       - name: Publish rolling prerelease
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: prebuilt-vision-onnx
-          prerelease: true
-          name: "Prebuilt ados-vision (onnx, rolling)"
-          files: crates/rel/*
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag=prebuilt-vision-onnx
+          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" \
+            --prerelease --title "Prebuilt ados-vision (onnx, rolling)" --notes ""
+          gh release upload "$tag" rel/* --clobber
 
   publish-installer:
     needs: build-test
