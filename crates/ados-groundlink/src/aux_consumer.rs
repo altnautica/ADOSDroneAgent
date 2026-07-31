@@ -548,6 +548,42 @@ async fn dispatch(
 /// consumer at a stand-in seam. `proxy` is `None` on a rig with no relay-
 /// proxy caller registered — Response datagrams it receives anyway are
 /// counted and dropped rather than silently swallowed.
+/// Receive-buffer size asked of the kernel for an aux consumer socket.
+///
+/// The drone end of this same lane already asks for this; the ground end did
+/// not, so the two ends of one lane disagreed about how much burst they could
+/// absorb. A batched datagram or a response-fragment burst arriving while the
+/// single read loop is mid-dispatch survives only if the kernel holds it, and a
+/// drop there happens below the application: `recv_errors` never sees it, so
+/// the loss is invisible on both sides.
+const AUX_RECV_BUFFER_BYTES: usize = 4 * 1024 * 1024;
+
+/// Ask the kernel for a larger receive buffer, and log what it actually gave.
+///
+/// The kernel clamps the request to `rmem_max` and reports back double what it
+/// kept (its own bookkeeping overhead), so the obtained value is logged rather
+/// than assumed. Failure is non-fatal: the default buffer still works, it just
+/// tolerates a smaller burst.
+fn set_recv_buffer(sock: &UdpSocket) {
+    let opts = socket2::SockRef::from(sock);
+    if let Err(e) = opts.set_recv_buffer_size(AUX_RECV_BUFFER_BYTES) {
+        tracing::warn!(
+            error = %e,
+            requested = AUX_RECV_BUFFER_BYTES,
+            "ground_aux_consumer_rcvbuf_set_failed"
+        );
+        return;
+    }
+    match opts.recv_buffer_size() {
+        Ok(actual) => tracing::info!(
+            requested = AUX_RECV_BUFFER_BYTES,
+            actual,
+            "ground_aux_consumer_rcvbuf"
+        ),
+        Err(e) => tracing::warn!(error = %e, "ground_aux_consumer_rcvbuf_read_failed"),
+    }
+}
+
 pub async fn run_aux_consumer(
     listen_port: u16,
     ingest: Arc<MavlinkIngest>,
@@ -558,6 +594,7 @@ pub async fn run_aux_consumer(
 ) -> std::io::Result<()> {
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, listen_port));
     let sock = UdpSocket::bind(addr).await?;
+    set_recv_buffer(&sock);
     tracing::info!(port = listen_port, "ground_aux_consumer_listening");
 
     let mut gate = SeamGate::default();
@@ -660,6 +697,30 @@ pub async fn supervise_aux_consumer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn the_consumer_asks_for_a_larger_receive_buffer() {
+        // The drone end of this same lane already asked for one and the ground
+        // end did not, so the two ends disagreed about how much burst they
+        // could absorb. A drop from a short buffer happens below the
+        // application: `recv_errors` never sees it, so the loss is invisible on
+        // both sides.
+        let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let before = socket2::SockRef::from(&sock).recv_buffer_size().unwrap();
+        set_recv_buffer(&sock);
+        let after = socket2::SockRef::from(&sock).recv_buffer_size().unwrap();
+        assert!(
+            after >= before,
+            "the request shrank the buffer: {before} -> {after}"
+        );
+    }
+
+    #[test]
+    fn the_two_ends_of_the_lane_ask_for_the_same_buffer() {
+        // Stated as a number rather than a comment, so a change on one side
+        // that forgets the other is visible here.
+        assert_eq!(AUX_RECV_BUFFER_BYTES, 4 * 1024 * 1024);
+    }
     use ados_protocol::frame::HEADER_SIZE;
     use std::path::PathBuf;
     use tokio::io::AsyncReadExt;

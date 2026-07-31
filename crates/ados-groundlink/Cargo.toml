@@ -27,6 +27,9 @@ ados-atlas-transport = { path = "../ados-atlas-transport" }
 
 tokio = { workspace = true }
 serde = { workspace = true }
+# Sets SO_RCVBUF on the aux consumer, mirroring the drone side, which sets it
+# on the same lane's other end. socket2 is pure Rust (libc only, no C build).
+socket2 = { version = "0.5", features = ["all"] }
 serde_json = { workspace = true }
 serde_norway = { workspace = true }
 tracing = { workspace = true }

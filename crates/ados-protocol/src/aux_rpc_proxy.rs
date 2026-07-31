@@ -82,6 +82,19 @@ use tokio::sync::{oneshot, Mutex, Notify};
 /// which hop failed.
 pub const RPC_DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long a write to the proxy's local ingest socket may take.
+///
+/// This is a loopback Unix socket, so a healthy peer completes in microseconds
+/// and anything near this bound means the peer has stopped reading. The caller
+/// awaits it inside the aux consumer's single read loop, so the bound is what
+/// keeps one wedged proxy from stalling a whole drone's inbound traffic.
+const IPC_WRITE_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// How long connecting to that socket may take. A listener that is present
+/// accepts immediately; one that is absent fails immediately. A long wait here
+/// means neither, which is not worth a read loop.
+const IPC_CONNECT_TIMEOUT: Duration = Duration::from_millis(200);
+
 /// Resend schedule for the Request datagram, as gaps between attempts.
 ///
 /// The drone's radio is half-duplex and spends ~60% of its airtime injecting
@@ -761,10 +774,18 @@ impl AuxRpcResponseIngest {
         }
     }
 
-    /// Forward one Response payload as a length-prefixed frame. Best-effort:
-    /// a failed write drops the frame and drops the connection so the next
-    /// call re-connects. Never blocks: the consumer's read loop must not stall
-    /// behind a proxy that is not reading.
+    /// Forward one Response payload as a length-prefixed frame.
+    ///
+    /// Best-effort: a failed or slow write drops the frame and drops the
+    /// connection so the next call re-connects.
+    ///
+    /// Both the connect and the write are BOUNDED, and that is the whole
+    /// point. The caller awaits this inside the aux consumer's single
+    /// `recv_from` loop, so an unbounded write to a proxy that has stopped
+    /// reading its socket stalls that slot's entire read loop — not just RPC,
+    /// but that drone's MAVLink ingest, its status frames and its peer cache.
+    /// The doc used to claim this never blocks while `write_all` on a full
+    /// socket buffer did exactly that.
     pub async fn send(&self, payload: &[u8]) {
         // Length-prefix the payload: 4-byte BE length + body, matching the
         // frame module's framing shared across all the agent's IPC.
@@ -775,19 +796,43 @@ impl AuxRpcResponseIngest {
         let mut guard = self.conn.lock().await;
         match guard.as_mut() {
             Some(stream) => {
-                if stream.write_all(&frame).await.is_err() {
+                let wrote = tokio::time::timeout(IPC_WRITE_TIMEOUT, stream.write_all(&frame)).await;
+                // A timeout and an error are treated alike: drop the
+                // connection so the next call reconnects. A peer that stopped
+                // reading is not going to start because we waited longer, and
+                // the caller's read loop is what pays for the wait.
+                if !matches!(wrote, Ok(Ok(()))) {
+                    if wrote.is_err() {
+                        tracing::warn!(
+                            timeout_ms = IPC_WRITE_TIMEOUT.as_millis() as u64,
+                            "aux_rpc_ingest_write_timed_out"
+                        );
+                    }
                     *guard = None;
                 }
             }
             None => {
-                match UnixStream::connect(&self.sock_path).await {
-                    Ok(mut stream) => {
-                        if stream.write_all(&frame).await.is_ok() {
+                match tokio::time::timeout(
+                    IPC_CONNECT_TIMEOUT,
+                    UnixStream::connect(&self.sock_path),
+                )
+                .await
+                {
+                    Ok(Ok(mut stream)) => {
+                        let wrote =
+                            tokio::time::timeout(IPC_WRITE_TIMEOUT, stream.write_all(&frame)).await;
+                        if matches!(wrote, Ok(Ok(()))) {
                             *guard = Some(stream);
                         }
                     }
-                    Err(_) => {
+                    Ok(Err(_)) => {
                         // No listener yet; the proxy will start eventually.
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            timeout_ms = IPC_CONNECT_TIMEOUT.as_millis() as u64,
+                            "aux_rpc_ingest_connect_timed_out"
+                        );
                     }
                 }
             }
@@ -798,6 +843,68 @@ impl AuxRpcResponseIngest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A peer that accepts a connection and then never reads.
+    ///
+    /// This is the shape that stalls a read loop: the socket buffer fills, the
+    /// write blocks, and every drone behind that consumer goes quiet.
+    async fn deaf_listener(path: &std::path::Path) -> tokio::task::JoinHandle<()> {
+        let listener = tokio::net::UnixListener::bind(path).unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                match listener.accept().await {
+                    // Hold the connection open and never read from it.
+                    Ok((s, _)) => held.push(s),
+                    Err(_) => return,
+                }
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn a_peer_that_stops_reading_cannot_stall_the_caller() {
+        // The caller awaits this inside the aux consumer's single recv loop, so
+        // an unbounded write to a wedged proxy stalls that slot's whole inbound
+        // path — MAVLink ingest, status frames and the peer cache, not just RPC.
+        let dir = std::env::temp_dir().join(format!("ados-ingest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("ingest.sock");
+        let _listener = deaf_listener(&sock).await;
+
+        let ingest = AuxRpcResponseIngest::new(&sock);
+        let big = vec![0u8; 512 * 1024];
+
+        // Write until the buffer fills; every call must return promptly.
+        let started = std::time::Instant::now();
+        for _ in 0..8 {
+            ingest.send(&big).await;
+        }
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "sends took {elapsed:?}; a wedged peer is stalling the caller"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn an_absent_listener_returns_promptly() {
+        let ingest =
+            AuxRpcResponseIngest::new(std::path::Path::new("/nonexistent/ados/ingest.sock"));
+        let started = std::time::Instant::now();
+        ingest.send(b"payload").await;
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn the_ipc_bounds_are_far_below_the_call_bound() {
+        // These guard a read loop, not a call. A bound anywhere near the RPC
+        // timeout would let one wedged proxy silence a drone for seconds.
+        assert!(IPC_WRITE_TIMEOUT < RPC_DEFAULT_TIMEOUT / 10);
+        assert!(IPC_CONNECT_TIMEOUT < RPC_DEFAULT_TIMEOUT / 10);
+    }
     use crate::aux_mux;
     use tokio::net::UdpSocket;
     use tokio::time::Duration;
