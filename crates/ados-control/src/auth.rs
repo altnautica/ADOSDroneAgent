@@ -135,6 +135,57 @@ impl Default for PairingState {
 /// which then enforces the WebSocket auth contract itself (a header key OR a
 /// scoped one-shot ticket). Mirrors the residual handlers, which authenticated
 /// inside the handler for the same reason.
+/// The header the relay stamps on a request that crossed the radio.
+pub const RELAYED_HEADER: &str = "x-ados-relayed";
+
+/// Paths a relayed caller may never reach, regardless of trust posture.
+///
+/// A relayed request arrives in the on-box posture, because the relay has no
+/// credential to present: a fleet shares one radio key by design, and no
+/// per-node API credential is distributed with it. That posture is workable for
+/// the operating surface a linked ground agent is supposed to have — telemetry,
+/// parameters, configuration, services — which is the authority the relay exists
+/// to carry.
+///
+/// It is NOT workable for the paths below, because they do not merely use the
+/// node's authority, they hand it out or give it away:
+///
+/// - **Pairing mutation.** `unpair` clears the node's pairing and mints a fresh
+///   code, and `claim` is public by necessity (a fresh operator holds no key
+///   yet). Reachable together, they convert radio range into a standing API key
+///   that works from anywhere on the network, long after the caller is out of
+///   radio range. That is the one escalation that outlives the lane it came
+///   from, which is what makes it the important one.
+/// - **Credential issuance** — scoped tokens and the dashboard PIN, each of
+///   which is a second standing credential.
+/// - **Radio pairing** — a caller reaching this over the radio can drop the
+///   node off the very fleet key that let it in.
+/// - **Plugin install** — arbitrary code, self-granted permissions.
+/// - **Destructive setup** — factory reset, setup reset, cloud re-posture.
+///
+/// Refused at the edge rather than per-handler so the rule holds for native and
+/// proxied routes alike, and cannot be missed when a route moves between them.
+pub fn relay_forbidden(path: &str) -> bool {
+    matches!(
+        path,
+        "/api/pairing/unpair"
+            | "/api/pairing/accept"
+            | "/api/mcp/tokens"
+            | "/api/mcp/revoke"
+            | "/api/dashboard/pin/set"
+            | "/api/dashboard/pin/clear"
+            | "/api/wfb/pair/local-bind"
+            | "/api/wfb/pair/unpair"
+            | "/api/plugins/install"
+            | "/api/plugins/install_from_url"
+            | "/api/plugins/capability-token"
+            | "/api/v1/setup/reset"
+            | "/api/v1/setup/cloud-choice"
+            | "/api/v1/setup/remote-access/cloudflare"
+            | "/api/v1/ground-station/ui/factory-reset"
+    )
+}
+
 pub fn is_public(path: &str) -> bool {
     matches!(
         path,
@@ -216,6 +267,74 @@ impl RateLimiter {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    /// The escalation this list exists to break: unpair clears the pairing and
+    /// mints a fresh code, and claim is public by necessity, so the two together
+    /// turn radio range into a standing API key that keeps working long after
+    /// the caller is out of range. Refusing unpair is what breaks the chain —
+    /// claim on its own hands out nothing while a pairing is intact.
+    #[test]
+    fn a_relayed_caller_cannot_unpair_and_then_claim() {
+        assert!(
+            relay_forbidden("/api/pairing/unpair"),
+            "unpair over the relay is the escalation root and must be refused"
+        );
+        assert!(
+            is_public("/api/pairing/claim"),
+            "claim stays public — a fresh operator holds no key yet"
+        );
+    }
+
+    #[test]
+    fn credential_issuing_paths_are_refused_over_the_relay() {
+        for path in [
+            "/api/mcp/tokens",
+            "/api/mcp/revoke",
+            "/api/dashboard/pin/set",
+            "/api/dashboard/pin/clear",
+            "/api/plugins/capability-token",
+        ] {
+            assert!(relay_forbidden(path), "{path} hands out a credential");
+        }
+    }
+
+    #[test]
+    fn destructive_and_code_loading_paths_are_refused_over_the_relay() {
+        for path in [
+            "/api/wfb/pair/unpair",
+            "/api/wfb/pair/local-bind",
+            "/api/plugins/install",
+            "/api/plugins/install_from_url",
+            "/api/v1/setup/reset",
+            "/api/v1/setup/cloud-choice",
+            "/api/v1/setup/remote-access/cloudflare",
+            "/api/v1/ground-station/ui/factory-reset",
+        ] {
+            assert!(relay_forbidden(path), "{path} must not cross the relay");
+        }
+    }
+
+    /// The operating surface the relay exists to carry stays reachable. A list
+    /// that quietly grew to cover ordinary operation would break the lane's
+    /// whole purpose, so pin the paths that must keep working.
+    #[test]
+    fn the_ordinary_operating_surface_still_crosses_the_relay() {
+        for path in [
+            "/api/status",
+            "/api/status/full",
+            "/api/telemetry",
+            "/api/config",
+            "/api/params",
+            "/api/services",
+            "/api/logs",
+            "/api/vision/detections/latest",
+        ] {
+            assert!(
+                !relay_forbidden(path),
+                "{path} is ordinary operation and must still cross"
+            );
+        }
+    }
 
     fn write_pairing(dir: &std::path::Path, body: &str) -> PathBuf {
         let path = dir.join("pairing.json");
