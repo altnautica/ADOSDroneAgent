@@ -82,6 +82,12 @@ struct CountersInner {
     link_feedback_undecodable: AtomicU64,
     /// Reports that decoded but could not be published for the ladder to read.
     link_feedback_write_errors: AtomicU64,
+    /// Responses abandoned because the process-wide send slot did not free up
+    /// inside the ground's call bound. Non-zero means concurrent relay traffic
+    /// is queueing deeper than the uplink can drain, which is a capacity
+    /// signal rather than a fault — the ground retransmits and the dedupe
+    /// cache replays the already-computed answer.
+    rpc_response_abandoned: AtomicU64,
     /// Relay-proxy Request frames whose id was already in flight. The ground
     /// retransmits an unanswered Request, so a duplicate that arrives while the
     /// original is still running is dropped — the original answers both.
@@ -110,6 +116,7 @@ pub struct AuxUplinkConsumerSnapshot {
     pub link_feedback_frames: u64,
     pub link_feedback_undecodable: u64,
     pub link_feedback_write_errors: u64,
+    pub rpc_response_abandoned: u64,
     pub rpc_requests_duplicate: u64,
     pub rpc_requests_replayed: u64,
 }
@@ -135,6 +142,7 @@ impl AuxUplinkConsumerCounters {
             link_feedback_frames: c.link_feedback_frames.load(Ordering::Relaxed),
             link_feedback_undecodable: c.link_feedback_undecodable.load(Ordering::Relaxed),
             link_feedback_write_errors: c.link_feedback_write_errors.load(Ordering::Relaxed),
+            rpc_response_abandoned: c.rpc_response_abandoned.load(Ordering::Relaxed),
             rpc_requests_duplicate: c.rpc_requests_duplicate.load(Ordering::Relaxed),
             rpc_requests_replayed: c.rpc_requests_replayed.load(Ordering::Relaxed),
         }
@@ -149,6 +157,13 @@ impl AuxUplinkConsumerCounters {
     pub fn note_rpc_duplicate(&self) {
         self.0
             .rpc_requests_duplicate
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A response abandoned because the send slot never freed up in time.
+    pub fn note_rpc_response_abandoned(&self) {
+        self.0
+            .rpc_response_abandoned
             .fetch_add(1, Ordering::Relaxed);
     }
 

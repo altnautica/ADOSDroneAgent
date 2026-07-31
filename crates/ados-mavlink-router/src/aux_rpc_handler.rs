@@ -59,6 +59,23 @@ const FRAGMENT_PACING: Duration = Duration::from_millis(5);
 /// contiguous, which shortens the ground's reassembly window.
 static RESPONSE_SEND_SLOT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
+/// How long a response may wait for the send slot before it is abandoned.
+///
+/// The slot is process-wide and held for a whole burst — about 145 ms for a
+/// 29 KB answer — so concurrent requests queue linearly behind one another.
+/// That wait used to count against nothing: a response could sit in the queue
+/// past the ground's call bound and then transmit anyway, spending uplink
+/// airtime on an answer whose caller had already given up, while this side
+/// recorded a success.
+///
+/// Bounding the wait makes the drone agree with the ground about what
+/// happened. An abandoned response is not a lost answer: the ground
+/// retransmits the request, and the dedupe cache replays the already-computed
+/// fragments rather than re-running the call.
+///
+/// Set below the ground's 10 s bound with room for the burst itself to finish.
+const SEND_SLOT_WAIT_LIMIT: Duration = Duration::from_secs(6);
+
 /// Handle one RPC request: forward to the local HTTP API and send the
 /// response back over the aux egress, fragmented if it does not fit one frame.
 ///
@@ -126,17 +143,40 @@ pub async fn handle(
         }
     };
 
-    send_fragments(id, egress, &fragments).await;
+    send_fragments(id, egress, &fragments, counters).await;
 }
 
 /// Emit one response's fragments as a single paced burst.
 ///
 /// Holds [`RESPONSE_SEND_SLOT`] for the whole burst, so concurrent responses
 /// queue behind one another instead of interleaving at N x the paced rate.
-async fn send_fragments(id: u32, egress: &AuxEgress, fragments: &[Vec<u8>]) {
+///
+/// The wait for that slot is bounded. Beyond the bound the ground has given up
+/// on this call, and transmitting anyway would spend uplink airtime on an
+/// answer nobody is waiting for while this side logged a success. The ground's
+/// retransmission plus the dedupe cache is what makes abandoning safe.
+async fn send_fragments(
+    id: u32,
+    egress: &AuxEgress,
+    fragments: &[Vec<u8>],
+    counters: &AuxUplinkConsumerCounters,
+) {
     // `acquire` fails only on a closed semaphore and nothing closes a static
     // one; `.ok()` holds the permit for this scope with no panic path.
-    let _slot = RESPONSE_SEND_SLOT.acquire().await.ok();
+    let slot = tokio::time::timeout(SEND_SLOT_WAIT_LIMIT, RESPONSE_SEND_SLOT.acquire()).await;
+    let _slot = match slot {
+        Ok(permit) => permit.ok(),
+        Err(_) => {
+            counters.note_rpc_response_abandoned();
+            tracing::warn!(
+                request_id = id,
+                fragments = fragments.len(),
+                waited_s = SEND_SLOT_WAIT_LIMIT.as_secs(),
+                "aux_rpc_response_abandoned_send_queue_too_deep"
+            );
+            return;
+        }
+    };
     let last = fragments.len().saturating_sub(1);
     for (index, payload) in fragments.iter().enumerate() {
         if let Err(e) = egress.send(AuxChannel::Response, payload).await {
@@ -429,6 +469,50 @@ mod tests {
             }
         }
         None
+    }
+
+    /// `start_paused` lets the bounded wait expire instantly instead of the
+    /// test sitting through the real limit.
+    #[tokio::test(start_paused = true)]
+    async fn a_response_is_abandoned_rather_than_sent_after_the_caller_gave_up() {
+        // The send slot is process-wide and held for a whole burst, so
+        // concurrent responses queue linearly. That wait used to count against
+        // nothing: a response could sit past the ground's call bound and
+        // transmit anyway, spending uplink airtime on an answer nobody was
+        // waiting for while this side recorded a success.
+        let counters = AuxUplinkConsumerCounters::new();
+        let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let target = sock.local_addr().unwrap();
+        sock.connect(target).await.unwrap();
+        let egress = AuxEgress::connected_for_test(sock);
+        let fragments = encode_fragments(OWN_ID, 1, 200, br#"{"ok":true}"#);
+
+        // Hold the slot for longer than a caller would wait.
+        let held = RESPONSE_SEND_SLOT.acquire().await.expect("slot");
+        send_fragments(1, &egress, &fragments, &counters).await;
+        drop(held);
+
+        assert_eq!(
+            counters.snapshot().rpc_response_abandoned,
+            1,
+            "a response that waited past the caller's bound must be abandoned and counted"
+        );
+    }
+
+    #[test]
+    fn the_send_slot_wait_stays_inside_the_grounds_call_bound() {
+        // Waiting longer than the caller does turns a queued response into
+        // wasted airtime: the ground has already timed out and retransmitted.
+        assert!(
+            SEND_SLOT_WAIT_LIMIT < ados_protocol::aux_rpc_proxy::RPC_DEFAULT_TIMEOUT,
+            "the send-slot wait must expire before the ground gives up"
+        );
+        // And it must leave room for the burst itself to finish afterwards.
+        assert!(
+            SEND_SLOT_WAIT_LIMIT + Duration::from_millis(500)
+                < ados_protocol::aux_rpc_proxy::RPC_DEFAULT_TIMEOUT,
+            "the wait must leave the burst time to transmit"
+        );
     }
 
     #[test]
