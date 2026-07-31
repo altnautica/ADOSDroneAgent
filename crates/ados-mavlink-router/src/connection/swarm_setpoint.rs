@@ -377,8 +377,7 @@ mod tests {
         };
         wire.validate()
             .expect("the control layer must not emit an invalid setpoint");
-        // The plan's message, and the one already on
-        // AUX_UPLINK_COMMAND_MESSAGE_IDS: id 86.
+        // The plan's message: SET_POSITION_TARGET_GLOBAL_INT, id 86.
         let msg = wire.build_message(1, 1).expect("builds");
         let bytes = ados_protocol::mavlink::serialize_v2(
             ados_protocol::mavlink::MavHeader {

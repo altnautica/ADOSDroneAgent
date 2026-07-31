@@ -97,20 +97,15 @@ impl FcConnection {
     /// local FC writer exactly like [`Self::send_bytes`]; when none exists
     /// and an aux-uplink sender is installed (this node is relaying a linked
     /// drone rather than driving a local FC), forwards there instead of
-    /// dropping the client's bytes silently — unless a frame carries vehicle
-    /// command authority ([`super::frame_carries_command_authority`]) and
-    /// the relay's command marker is still off, in which case that frame
-    /// alone is refused rather than radiated (see
-    /// [`super::AUX_UPLINK_COMMAND_MESSAGE_IDS`]).
+    /// dropping the client's bytes silently.
     ///
-    /// `data` is not necessarily one frame: a raw TCP/UDP read is not
-    /// frame-aligned, so while the gate is closed the buffer is split into
-    /// whole frames first ([`super::split_client_frames`]) and each is
-    /// classified on its own — checking only the header at the start of
-    /// `data` would let a command frame concatenated after a harmless one
-    /// ride through under the first frame's classification. The open-gate
-    /// path skips the split (nothing left to filter) and forwards `data`
-    /// whole, exactly as before.
+    /// A linked ground agent holds full authority over the node it relays, so
+    /// there is no per-message filter here. The message-id denylist that used to
+    /// sit in this path was removed: it covered only this MAVLink lane and never
+    /// the relay's HTTP lane, where the same caller could already reach the
+    /// vehicle-command routes, so it filtered one door while the other stood
+    /// open. Authority is settled at the relay's authentication boundary
+    /// instead, which is the only place that can actually decide it.
     ///
     /// Deliberately distinct from `send_bytes`, which this router's own
     /// heartbeat/stream-interval/param-sweep housekeeping also calls: those
@@ -123,26 +118,8 @@ impl FcConnection {
             self.send_bytes(data).await;
             return;
         }
-        if !self.relay_command_gated() {
-            if let Some(uplink) = self.aux_uplink.lock().await.as_ref() {
-                uplink.send(data);
-            }
-            return;
-        }
-        let mut refused = false;
-        let uplink = self.aux_uplink.lock().await;
-        for frame in super::split_client_frames(data) {
-            if super::frame_carries_command_authority(frame) {
-                refused = true;
-                continue;
-            }
-            if let Some(u) = uplink.as_ref() {
-                u.send(frame);
-            }
-        }
-        drop(uplink);
-        if refused {
-            tracing::info!(len = data.len(), "aux_uplink_command_gated_refused_frame");
+        if let Some(uplink) = self.aux_uplink.lock().await.as_ref() {
+            uplink.send(data);
         }
     }
 
@@ -625,57 +602,17 @@ mod tests {
         (crate::aux_uplink::spawn(port), listener)
     }
 
+    /// A linked ground agent holds full authority over the node it relays, so
+    /// every frame a connected client sends reaches the uplink. This used to be
+    /// filtered by a message-id denylist that covered only this MAVLink lane
+    /// while the relay's HTTP lane carried the same vehicle commands ungated,
+    /// so it filtered one door and left the other open. Authority now belongs
+    /// to the relay's authentication boundary.
     #[tokio::test]
-    async fn a_command_frame_is_refused_on_a_gated_relay() {
+    async fn a_command_frame_reaches_the_uplink() {
         let conn = test_connection();
         let (sender, listener) = test_uplink().await;
         conn.set_aux_uplink(sender).await;
-        assert!(conn.relay_command_gated(), "default marker is off");
-
-        conn.send_client_bytes(&command_long_bytes()).await;
-
-        let mut buf = [0u8; 256];
-        let outcome =
-            tokio::time::timeout(Duration::from_millis(150), listener.recv_from(&mut buf)).await;
-        assert!(
-            outcome.is_err(),
-            "a command-authority frame must never reach the aux uplink while gated"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_param_frame_crosses_the_gated_relay() {
-        let conn = test_connection();
-        let (sender, listener) = test_uplink().await;
-        conn.set_aux_uplink(sender).await;
-        assert!(conn.relay_command_gated(), "default marker is off");
-
-        let frame = param_request_list_bytes();
-        conn.send_client_bytes(&frame).await;
-
-        let mut buf = [0u8; 256];
-        let (n, _) = tokio::time::timeout(Duration::from_millis(300), listener.recv_from(&mut buf))
-            .await
-            .expect("a param frame must cross the relay even while command-gated")
-            .unwrap();
-        let (_, payload) = ados_protocol::aux_mux::decode(&buf[..n]).unwrap();
-        assert_eq!(payload, frame, "the exact bytes must reach the uplink");
-    }
-
-    #[tokio::test]
-    async fn enabling_the_relay_marker_lets_a_command_frame_through() {
-        let state = std::sync::Arc::new(Mutex::new(VehicleState::default()));
-        let params = std::sync::Arc::new(Mutex::new(ParamCache::new(
-            "/tmp/ados-test-params-relay-armed.json",
-        )));
-        let cfg = MavlinkConfig {
-            relay_command_enabled: true,
-            ..Default::default()
-        };
-        let conn = FcConnection::new(cfg, state, params);
-        let (sender, listener) = test_uplink().await;
-        conn.set_aux_uplink(sender).await;
-        assert!(!conn.relay_command_gated(), "marker is on");
 
         let frame = command_long_bytes();
         conn.send_client_bytes(&frame).await;
@@ -683,51 +620,53 @@ mod tests {
         let mut buf = [0u8; 256];
         let (n, _) = tokio::time::timeout(Duration::from_millis(300), listener.recv_from(&mut buf))
             .await
-            .expect("the command marker on must let the frame through")
+            .expect("a command frame must reach the aux uplink")
+            .unwrap();
+        let (_, payload) = ados_protocol::aux_mux::decode(&buf[..n]).unwrap();
+        assert_eq!(payload, frame, "the exact bytes must reach the uplink");
+    }
+
+    #[tokio::test]
+    async fn a_param_frame_reaches_the_uplink() {
+        let conn = test_connection();
+        let (sender, listener) = test_uplink().await;
+        conn.set_aux_uplink(sender).await;
+
+        let frame = param_request_list_bytes();
+        conn.send_client_bytes(&frame).await;
+
+        let mut buf = [0u8; 256];
+        let (n, _) = tokio::time::timeout(Duration::from_millis(300), listener.recv_from(&mut buf))
+            .await
+            .expect("a param frame must reach the aux uplink")
             .unwrap();
         let (_, payload) = ados_protocol::aux_mux::decode(&buf[..n]).unwrap();
         assert_eq!(payload, frame);
     }
 
+    /// A raw TCP read is not frame-aligned, so one call can carry several
+    /// frames concatenated. Nothing splits them any more, so the buffer must
+    /// cross whole and byte-identical rather than being reassembled or dropped.
     #[tokio::test]
-    async fn a_command_frame_concatenated_after_a_param_frame_is_still_refused() {
-        // The bug this test pins: a raw TCP read is not frame-aligned, so a
-        // client library that pipelines two messages into one write() (or one
-        // TCP segment that happens to land that way) must not smuggle a
-        // command frame through by riding along with a harmless one that
-        // opens the same buffer.
+    async fn a_concatenated_buffer_crosses_whole() {
         let conn = test_connection();
         let (sender, listener) = test_uplink().await;
         conn.set_aux_uplink(sender).await;
-        assert!(conn.relay_command_gated(), "default marker is off");
 
-        let param = param_request_list_bytes();
-        let command = command_long_bytes();
-        let mut concatenated = param.clone();
-        concatenated.extend_from_slice(&command);
+        let mut concatenated = param_request_list_bytes();
+        concatenated.extend_from_slice(&command_long_bytes());
 
         conn.send_client_bytes(&concatenated).await;
 
-        // The param frame must still cross -- proves the fix does not
-        // over-block a buffer just because a later frame in it is refused.
         let mut buf = [0u8; 256];
         let (n, _) = tokio::time::timeout(Duration::from_millis(300), listener.recv_from(&mut buf))
             .await
-            .expect("the leading param frame must still cross the relay")
+            .expect("the concatenated buffer must reach the aux uplink")
             .unwrap();
         let (_, payload) = ados_protocol::aux_mux::decode(&buf[..n]).unwrap();
         assert_eq!(
-            payload, param,
-            "only the param frame, not the command frame"
-        );
-
-        // Nothing else arrives -- the command frame must never have been
-        // queued at all, not merely delayed.
-        let outcome =
-            tokio::time::timeout(Duration::from_millis(150), listener.recv_from(&mut buf)).await;
-        assert!(
-            outcome.is_err(),
-            "the concatenated command frame must never reach the aux uplink"
+            payload, concatenated,
+            "the buffer must cross whole, not be split or filtered"
         );
     }
 }

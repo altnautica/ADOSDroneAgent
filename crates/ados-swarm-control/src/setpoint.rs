@@ -1,7 +1,6 @@
 //! The one command this layer emits: `SET_POSITION_TARGET_GLOBAL_INT`.
 //!
-//! MAVLink message 86, already on the router's
-//! `AUX_UPLINK_COMMAND_MESSAGE_IDS` list, sent only while the FC reports GUIDED.
+//! MAVLink message 86, sent only while the FC reports GUIDED.
 //! This module owns the field set and the `type_mask` semantics as pure data so
 //! the encoding is unit-testable without a flight controller, a serial port or a
 //! MAVLink dialect in scope; the router turns a [`Setpoint`] into the wire

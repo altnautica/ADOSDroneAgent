@@ -167,23 +167,6 @@ pub struct MavlinkConfig {
     /// unaffected. See [`crate::connection`] for the writer gate.
     #[serde(skip)]
     pub crsf_mavlink_command_enabled: bool,
-    /// Whether the aux-uplink relay (radio_id 3, the ground->drone half of
-    /// [`crate::aux_uplink`]) is opted in to carry vehicle command authority
-    /// (`radio.relay.command_enabled`, filled in by the loader). OFF by
-    /// default and not implied merely by the relay lane existing: a fresh
-    /// aux uplink is READ/PARAM-UP / COMMAND-DOWN gated, the same staged
-    /// authority discipline as [`Self::crsf_mavlink_command_enabled`] — a
-    /// param request, mission read, or heartbeat crosses the lane
-    /// immediately, but a message that gives write authority over the
-    /// vehicle (mode change, arm/disarm, manual control, a direct
-    /// attitude/position setpoint) is refused until this marker is
-    /// explicitly set for a bench-validated command lane. Applies only to
-    /// the aux-uplink fallback [`crate::connection::FcConnection::
-    /// send_client_bytes`] uses when no local FC writer exists; a directly
-    /// attached FC's command path is unaffected. See
-    /// [`crate::connection::aux_uplink_command_gated`].
-    #[serde(skip)]
-    pub relay_command_enabled: bool,
     /// The resolved agent profile (`drone` / `ground-station` / other), filled
     /// in by the loader from the top-level `agent:` section with the on-disk
     /// profile marker as the fallback. This router runs on both flight-
@@ -236,7 +219,6 @@ impl Default for MavlinkConfig {
             crsf_mode: "crsf_rc".to_string(),
             crsf_mavlink_transport: "serial".to_string(),
             crsf_mavlink_command_enabled: false,
-            relay_command_enabled: false,
             profile: default_profile(),
         }
     }
@@ -335,8 +317,6 @@ impl MavlinkConfig {
         struct RadioSection {
             #[serde(default)]
             crsf: CrsfSection,
-            #[serde(default)]
-            relay: RelaySection,
         }
         #[derive(Debug, Default, Deserialize)]
         struct CrsfSection {
@@ -354,14 +334,6 @@ impl MavlinkConfig {
             mavlink_transport: Option<String>,
             #[serde(default)]
             mavlink_command_enabled: bool,
-        }
-        // `radio.relay`: the aux-uplink relay's own staged-authority marker,
-        // independent of the CRSF block above (a node can relay a drone over
-        // the aux lane with no RC module involved at all).
-        #[derive(Debug, Default, Deserialize)]
-        struct RelaySection {
-            #[serde(default)]
-            command_enabled: bool,
         }
         let Ok(text) = std::fs::read_to_string(path) else {
             return (MavlinkConfig::default(), None);
@@ -381,7 +353,6 @@ impl MavlinkConfig {
             .trim()
             .to_string();
         cfg.crsf_mavlink_command_enabled = crsf.mavlink_command_enabled;
-        cfg.relay_command_enabled = raw.radio.relay.command_enabled;
         let profile_conf =
             std::env::var("ADOS_PROFILE_CONF").unwrap_or_else(|_| PROFILE_CONF.to_string());
         cfg.profile = resolve_profile(raw.agent.profile.as_deref(), Path::new(&profile_conf));
@@ -636,21 +607,6 @@ mod tests {
                 device: "/dev/ttyUSB0"
             })
         );
-    }
-
-    #[test]
-    fn relay_command_enabled_defaults_off_and_reads_explicit() {
-        let dir = tempfile::tempdir().unwrap();
-        // A bare config, or one with no radio.relay block at all, gates the
-        // aux-uplink relay's command authority closed by default.
-        assert!(!MavlinkConfig::load_from(&dir.path().join("nope.yaml")).relay_command_enabled);
-        let bare = dir.path().join("bare.yaml");
-        write(&bare, "mavlink:\n  serial_port: /dev/ttyACM0\n");
-        assert!(!MavlinkConfig::load_from(&bare).relay_command_enabled);
-        // Explicitly set, independent of the CRSF block.
-        let armed = dir.path().join("armed.yaml");
-        write(&armed, "radio:\n  relay:\n    command_enabled: true\n");
-        assert!(MavlinkConfig::load_from(&armed).relay_command_enabled);
     }
 
     #[test]

@@ -103,66 +103,6 @@ const FRAME_CHANNEL_CAP: usize = 1024;
 /// for this.
 const PARAM_SAVE_DEBOUNCE: Duration = Duration::from_secs(2);
 
-/// MAVLink message ids that give write authority over the vehicle: a mode
-/// change, arm/disarm and every other `COMMAND_LONG`/`COMMAND_INT` vehicle
-/// command, manual control and RC channel override, and a direct
-/// attitude/position setpoint. Deliberately narrower than "every message a
-/// client can send" — a param request, mission read, or heartbeat is not
-/// here, so the aux-uplink relay carries that traffic immediately (proven
-/// live by the parameter download this lane exists to fix) while a message
-/// that makes the vehicle physically do something stays gated until
-/// `radio.relay.command_enabled` is explicitly set. The same staged-authority
-/// split as [`FcConnection::command_down_gated`], drawn per-message instead
-/// of per-source because this lane, unlike the MAVLink-over-ELRS source,
-/// must carry SOME traffic (params/mission) by default for the relay to be
-/// useful at all.
-pub const AUX_UPLINK_COMMAND_MESSAGE_IDS: &[u32] = &[
-    11, // SET_MODE
-    69, // MANUAL_CONTROL
-    70, // RC_CHANNELS_OVERRIDE
-    75, // COMMAND_INT
-    76, // COMMAND_LONG
-    82, // SET_ATTITUDE_TARGET
-    84, // SET_POSITION_TARGET_LOCAL_NED
-    86, // SET_POSITION_TARGET_GLOBAL_INT
-];
-
-/// Whether `frame` is one of [`AUX_UPLINK_COMMAND_MESSAGE_IDS`]. A header this
-/// build cannot read (too short, an unrecognised magic) is never treated as a
-/// command — it cannot be a recognised one either way, and refusing it would
-/// misreport a framing issue as a safety gate.
-pub fn frame_carries_command_authority(frame: &[u8]) -> bool {
-    matches!(
-        crate::aux_tee::mavlink_message_id(frame),
-        Some(id) if AUX_UPLINK_COMMAND_MESSAGE_IDS.contains(&id)
-    )
-}
-
-/// Split a client's raw bytes into whole MAVLink frames before the aux-uplink
-/// command gate inspects them.
-///
-/// A raw TCP read (or a UDP datagram some client libraries pipeline several
-/// messages into) is not frame-aligned: one `send_client_bytes` call can
-/// carry more than one MAVLink frame concatenated back to back. Classifying
-/// only the header at the START of the buffer — as a naive
-/// `frame_carries_command_authority(data)` call would — checks just the
-/// FIRST frame's id and then treats the gate decision as covering the whole
-/// buffer, so a command frame appended after a harmless one in the same read
-/// would ride through ungated. Uses [`ados_protocol::aux_mux::split_frames`],
-/// the same self-delimiting v1/v2 splitter [`crate::aux_tee`]'s batching and
-/// the aux-uplink consumer already rely on; falls back to the buffer as a
-/// single frame when nothing splits (an older client, or a read that landed
-/// on a v1/v2 boundary this parser does not recognise), so ordinary traffic
-/// is never dropped by this step.
-pub fn split_client_frames(data: &[u8]) -> Vec<&[u8]> {
-    let split = ados_protocol::aux_mux::split_frames(data);
-    if split.is_empty() {
-        vec![data]
-    } else {
-        split
-    }
-}
-
 /// The FC serial link plus its shared state. Cheap to wrap in an `Arc`; every
 /// method takes `&self` and uses interior mutability so the run loop and the
 /// periodic sender tasks share one connection.
@@ -493,15 +433,6 @@ impl FcConnection {
     /// the FC.
     pub fn command_down_gated(&self) -> bool {
         self.cfg.crsf_mavlink_source().is_some() && !self.cfg.crsf_mavlink_command_enabled
-    }
-    /// Whether the aux-uplink relay's command authority is currently closed
-    /// (`radio.relay.command_enabled` is false, the default). Mirrors
-    /// [`Self::command_down_gated`]'s status-surface role for the aux relay:
-    /// true means a param/mission/read frame still crosses the lane, but a
-    /// vehicle-command frame ([`frame_carries_command_authority`]) is
-    /// refused at [`Self::send_client_bytes`] rather than radiated.
-    pub fn relay_command_gated(&self) -> bool {
-        !self.cfg.relay_command_enabled
     }
     /// Install the aux-uplink sender a ground station uses in place of a local
     /// FC writer. Called once, from `main.rs`, only when this node is a

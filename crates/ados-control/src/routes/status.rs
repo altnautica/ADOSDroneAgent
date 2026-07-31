@@ -101,10 +101,9 @@ const IPC_ONLY_KEYS: [&str; 12] = [
 /// intervened" at exactly the moment something has.
 ///
 /// Disjoint from [`IPC_ONLY_KEYS`] by construction; a test pins that.
-const AGENT_DIAGNOSTIC_KEYS: [&str; 17] = [
+const AGENT_DIAGNOSTIC_KEYS: [&str; 16] = [
     "aux_mavlink_tee",
     "aux_rpc",
-    "aux_uplink_command_gated",
     "fc_reachable",
     "ipc_mavlink_drops",
     "ipc_state_drops",
