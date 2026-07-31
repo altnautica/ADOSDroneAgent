@@ -75,14 +75,37 @@ impl Ctx {
         // Same preservation rule as the profile, and for a sharper reason: an
         // upgrade with no `--channel` used to fall back to the compiled-in
         // `edge` default, so a device deliberately installed on `stable`
-        // defected to tip-of-main on its first update and lost signature
-        // enforcement with it, since verification is channel-gated. Nobody
-        // chose that; it is one keystroke from the status screen.
+        // defected to tip-of-main on its first update. Nobody chose that; it is
+        // one keystroke from the status screen.
+        //
+        // The default stays `edge`, and NOT because signature verification is
+        // acceptable to leave off. The channel decides two unrelated things: how
+        // strict verification is, and where the agent package comes from. On
+        // `stable` the second meaning is "install this pinned release wheel",
+        // and `venv_agent` fails outright with "stable channel requires
+        // --version" when nothing is pinned. There is no resolve-the-latest-
+        // release path. A fresh box has no persisted version, so making `stable`
+        // the default would abort every flag-less install at the provision step
+        // — the verification posture would be irrelevant because nothing would
+        // finish installing. Publishing a resolvable latest release is what
+        // unblocks that default, and it is a release-process change, not a
+        // resolution change.
+        //
+        // So the verification hole is closed where it actually was, at the
+        // fetch: a signature that does not match the vendored trust anchor is
+        // now refused on every channel, this one included. That also answers the
+        // box already carrying `channel: edge` in its `profile.conf` — and both
+        // rigs do. It gains the check on its next upgrade with no re-pin,
+        // whereas moving the default would have helped only boxes installed
+        // after it moved. What remains channel-gated is the weaker tolerance of
+        // a signature that cannot be OBTAINED, which today is every release,
+        // because CI does not sign yet. `preflight::lenient_channel_note` says
+        // so on every run rather than leaving it silent.
         let channel = args
             .channel
             .clone()
             .or_else(crate::env::read_persisted_channel)
-            .unwrap_or_else(|| "edge".to_string());
+            .unwrap_or_else(|| crate::verify::EDGE_CHANNEL.to_string());
         let install_rtl8812eu = !args.no_rtl_driver;
         // A pinned channel installs an explicit release, so an upgrade with no
         // `--version` must reuse the pinned one rather than fail or drift.
@@ -124,6 +147,27 @@ mod tests {
         assert_eq!(ctx.profile, "drone");
         assert_eq!(ctx.channel, "edge");
         assert!(!ctx.force);
+    }
+
+    #[test]
+    fn the_default_channel_is_one_a_flagless_install_can_actually_finish() {
+        // `stable` is not just a stricter verification posture, it also selects
+        // where the agent package comes from: `venv_agent::install_agent_stable`
+        // bails with "stable channel requires --version" when no version is
+        // pinned, and there is no resolve-the-latest-release path. A flag-less
+        // install on a fresh box has no persisted version, so a `stable` default
+        // would abort every one of them at the provision step.
+        //
+        // This is a standing constraint, not a preference. Anyone moving the
+        // default to `stable` has to give the installer a way to resolve a
+        // version first, and this fails until they do rather than letting the
+        // breakage be discovered on a rig.
+        let ctx = Ctx::from_args(Args::default(), EnvInfo::probe(), Checkpoint::new());
+        assert!(
+            ctx.channel != "stable" || ctx.args.version.is_some(),
+            "a default install on the stable channel needs a version to install; \
+             see venv_agent::install_agent_stable"
+        );
     }
 
     #[test]

@@ -55,20 +55,33 @@ pub fn gate_outcome(gate: Gate, ok: bool) -> Decision {
     }
 }
 
-/// Resolve the channel enum from the ctx's channel string. Anything that is not
-/// exactly `stable` is treated as edge (the default + dev path).
+/// Resolve the channel enum from the ctx's channel string. The lenient branch is
+/// opt-in by exact name; see [`Channel::from_name`].
 fn channel_of(ctx: &Ctx) -> Channel {
-    if ctx.channel == "stable" {
-        Channel::Stable
-    } else {
-        Channel::Edge
-    }
+    Channel::from_name(&ctx.channel)
 }
 
-/// On edge we tolerate unsigned artifacts (CI may not yet sign); on stable a
-/// signature is mandatory, so allow_unsigned is false there.
-fn allow_unsigned_for(channel: Channel) -> bool {
-    matches!(channel, Channel::Edge)
+/// Whether a prebuilt fetch may skip the signature check outright.
+///
+/// Never, on any channel — which is why the channel is not consulted.
+///
+/// `allow_unsigned` short-circuits inside [`verify::verify_artifact`] BEFORE the
+/// pubkey is read, so it does not mean "tolerate a missing signature"; it means
+/// "do not look at signatures at all". Passing it on the default channel meant
+/// the vendored trust anchor below was never consulted on the path almost every
+/// install takes, so a binary carrying a signature that does NOT match it was
+/// installed without complaint. The key has been embedded here since it was
+/// generated, and this flag is the reason none of it ever ran.
+///
+/// Tolerating a signature we cannot OBTAIN is a separate and much weaker
+/// decision, and it already has a home that is still channel-gated:
+/// `verify_minisign` routes a missing `.minisig`, or a host with no `minisign`
+/// binary, through `unverifiable`, which warns on edge and refuses on stable.
+/// That is what keeps today's unsigned releases installable, so turning this off
+/// changes nothing for an install fetching an unsigned asset — and refuses a
+/// tampered one, everywhere, which is the case that mattered.
+fn allow_unsigned_for(_channel: Channel) -> bool {
+    false
 }
 
 /// Fetch + verify one prebuilt binary, then place it atomically at its
@@ -109,9 +122,16 @@ fn install_one(
         net::fetch(&format!("{asset_url}.sha256"), &dl_sha)?;
         let _ = net::fetch(&format!("{asset_url}.minisig"), &dl_sig);
 
-        // Verify the downloaded temp BEFORE it is placed at the live path. Edge
-        // stays SHA256-only (allow_unsigned short-circuits before the key is
-        // used); stable checks the `.minisig` against the vendored trust anchor.
+        // Verify the downloaded temp BEFORE it is placed at the live path. Every
+        // channel checks any `.minisig` that arrived against the vendored trust
+        // anchor; only whether a MISSING one is fatal still varies by channel.
+        //
+        // The best-effort `.minisig` fetch above is what makes that safe to run
+        // on the default channel today: curl is invoked with `-f`, so a 404
+        // leaves no file at all rather than a saved error page, and `net::fetch`
+        // never promotes a failed transfer to the destination. An absent sidecar
+        // therefore reads as "unobtainable" (warn on edge) and not as a
+        // signature that fails to verify.
         verify::verify_artifact(
             &dl_bin,
             Some(ADOS_BINARY_PUBKEY),
@@ -560,6 +580,7 @@ fn tempdir() -> std::io::Result<PathBuf> {
 mod tests {
     use super::*;
     use crate::binaries::PREBUILT;
+    use crate::checkpoint::Checkpoint;
 
     #[test]
     fn each_hard_gate_failing_means_fail_required() {
@@ -599,10 +620,96 @@ mod tests {
     }
 
     #[test]
-    fn channel_and_allow_unsigned_pairing() {
-        // edge tolerates unsigned; stable does not.
-        assert!(allow_unsigned_for(Channel::Edge));
+    fn no_channel_skips_the_signature_check_outright() {
+        // `allow_unsigned` short-circuits inside `verify_artifact` BEFORE the
+        // pubkey is read, so it is not "tolerate a missing signature" — it is
+        // "do not look at signatures at all". Passing it on the default channel
+        // meant the vendored trust anchor was never consulted and a binary
+        // carrying a signature that does not match it was installed anyway.
+        //
+        // Tolerating a signature we cannot obtain is a separate, weaker
+        // decision, and it already has its own home: `verify_minisign` routes a
+        // missing `.minisig` (or a missing minisign binary) through
+        // `unverifiable`, which warns on edge and refuses on stable. That is
+        // what keeps an unsigned release installable today. Skipping the check
+        // outright is never the right answer on any channel.
+        assert!(
+            !allow_unsigned_for(Channel::Edge),
+            "the default channel must still consult the signing key"
+        );
         assert!(!allow_unsigned_for(Channel::Stable));
+    }
+
+    #[test]
+    fn an_unrecognised_channel_is_strict_not_lenient() {
+        // The lenient branch must be opt-in by name, never a fallthrough. The
+        // inverted test ("lenient unless exactly stable") reads the same for the
+        // two channels we ship and silently hands the lenient branch to every
+        // third value — a typo at the prompt, or a channel a newer build knows
+        // and this one does not. A channel string we do not understand is not a
+        // licence to skip a signature.
+        for name in ["stabel", "beta", "", "STABLE", "Edge"] {
+            let mut ctx = Ctx::for_test(Checkpoint::new());
+            ctx.channel = name.to_string();
+            assert_eq!(
+                channel_of(&ctx),
+                Channel::Stable,
+                "unrecognised channel {name:?} must not get the lenient branch"
+            );
+        }
+        // The one channel that IS lenient, by exact name.
+        let mut ctx = Ctx::for_test(Checkpoint::new());
+        ctx.channel = "edge".to_string();
+        assert_eq!(channel_of(&ctx), Channel::Edge);
+    }
+
+    #[test]
+    fn the_shell_and_rust_agree_on_which_channels_are_lenient() {
+        // Two implementations of one policy: `ados_channel_is_lenient` in
+        // `scripts/lib/verify.sh` gates the bootstrap and kernel-module fetches,
+        // `channel_of` gates the prebuilt-binary fetch. They must not drift —
+        // the shell side was already fixed to name its lenient channel
+        // explicitly, and a divergence means one entry point verifies while the
+        // other does not, which is worse than either posture chosen on purpose.
+        let sh = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/lib/verify.sh")
+            .canonicalize()
+            .expect("scripts/lib/verify.sh must exist");
+        let body = std::fs::read_to_string(&sh).unwrap();
+        let lenient_shell = shell_lenient_channels(&body);
+        assert!(
+            !lenient_shell.is_empty(),
+            "could not read the shell lenient set from {}",
+            sh.display()
+        );
+
+        for name in ["edge", "stable", "beta", "stabel", ""] {
+            let mut ctx = Ctx::for_test(Checkpoint::new());
+            ctx.channel = name.to_string();
+            let rust_lenient = channel_of(&ctx) == Channel::Edge;
+            let shell_lenient = lenient_shell.iter().any(|c| c == name);
+            assert_eq!(
+                rust_lenient, shell_lenient,
+                "channel {name:?}: shell lenient={shell_lenient}, rust lenient={rust_lenient}"
+            );
+        }
+    }
+
+    /// Extract the channel names `ados_channel_is_lenient` compares against, by
+    /// reading the literals in its body. Shell parameter expansions (`${1:-}`)
+    /// are not literals and are skipped.
+    fn shell_lenient_channels(script: &str) -> Vec<String> {
+        let after = match script.split_once("ados_channel_is_lenient() {") {
+            Some((_, rest)) => rest,
+            None => return Vec::new(),
+        };
+        let body = after.split_once("\n}").map(|(b, _)| b).unwrap_or(after);
+        body.split('"')
+            .skip(1)
+            .step_by(2)
+            .filter(|s| !s.contains('$'))
+            .map(str::to_string)
+            .collect()
     }
 
     /// Write an executable shell script at `path` with `body` as its content.

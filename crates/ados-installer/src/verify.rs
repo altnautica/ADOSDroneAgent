@@ -5,10 +5,18 @@
 //! channel + `allow_unsigned` flag set the fatality matrix exactly as the bash
 //! `ados_verify_artifact`:
 //!   - SHA256 mismatch                → always fatal.
-//!   - `allow_unsigned == true`       → signature skipped (dev default).
+//!   - `allow_unsigned == true`       → signature skipped entirely.
 //!   - pubkey empty, channel == Edge  → SHA256-only, warn, OK.
 //!   - pubkey empty, channel == Stable→ fatal (refuse unsigned on stable).
 //!   - pubkey present                 → minisign signature mandatory.
+//!
+//! `allow_unsigned` skips the check BEFORE the pubkey is read, so it is not a
+//! tolerance — it is an off switch, and the prebuilt fetch passes it false on
+//! every channel. A signature that is present and does not match the trust
+//! anchor is refused everywhere. What the channel still decides is the weaker
+//! question of whether a signature that cannot be OBTAINED (no `.minisig`
+//! published, or no `minisign` on the host) is fatal: it warns on edge and
+//! refuses on stable.
 
 use std::io::Read;
 use std::path::Path;
@@ -17,14 +25,47 @@ use sha2::{Digest, Sha256};
 
 use crate::exec;
 
-/// Release channel — governs whether a missing signature is fatal.
+/// Release channel — governs whether a signature we cannot OBTAIN is fatal.
+///
+/// It does not govern whether signatures are checked at all: a signature that is
+/// present and does not match the trust anchor is refused on every channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Channel {
-    /// Rolling `main` builds: SHA256-only is acceptable when no key is present.
+    /// Rolling `main` builds: an unobtainable signature warns and passes, on the
+    /// SHA256 alone. Publishing signed releases is what retires this tolerance.
     Edge,
-    /// Pinned releases: a signature is mandatory.
+    /// Everything else: a signature that cannot be obtained is fatal.
     Stable,
 }
+
+impl Channel {
+    /// Resolve a channel NAME to its verification posture.
+    ///
+    /// ONLY the development channel is lenient, by exact name. Every other value
+    /// — including one this build does not recognise — is strict.
+    ///
+    /// The inverted form ("lenient unless the name is exactly `stable`") reads
+    /// the same for the two channels we ship and silently opens a hole for a
+    /// third: a typo at the prompt, or a channel name a newer build knows and
+    /// this one does not, matched neither arm and so took the lenient branch. A
+    /// channel string we do not understand is not a licence to skip a signature.
+    ///
+    /// This mirrors `ados_channel_is_lenient` in `scripts/lib/verify.sh`, which
+    /// gates the bootstrap and kernel-module fetches and was already corrected
+    /// to name its lenient channel explicitly. A test reads that function's
+    /// literals and asserts the two sets still agree, because a drift means one
+    /// entry point verifies while the other does not.
+    pub fn from_name(name: &str) -> Channel {
+        if name == EDGE_CHANNEL {
+            Channel::Edge
+        } else {
+            Channel::Stable
+        }
+    }
+}
+
+/// The one channel name that tolerates a signature it cannot obtain.
+pub const EDGE_CHANNEL: &str = "edge";
 
 /// The outcome of the in-process SHA256 check against the `.sha256` sidecar.
 /// Pure: takes the digest the sidecar declares and the digest we computed.

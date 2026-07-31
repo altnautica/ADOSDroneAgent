@@ -21,6 +21,32 @@ use crate::ctx::Ctx;
 use crate::env::{self, PROFILE_CONF};
 use crate::exec;
 use crate::graph::{Step, StepKind, StepOutcome};
+use crate::verify::Channel;
+
+/// The operator-facing note for a channel that accepts a prebuilt binary whose
+/// signature it could not obtain. `None` when the channel refuses one.
+///
+/// A tampered binary is refused on every channel, so this is not "verification
+/// is off". It is the narrower and still important fact that on this channel a
+/// release which ships no signature at all installs anyway, on its SHA256 alone
+/// — and a SHA256 published beside the artifact it describes proves the transfer
+/// was not corrupted, not that the artifact came from us.
+///
+/// It is said out loud on every run because the channel is STICKY: it is
+/// persisted to `profile.conf` at install time and an upgrade with no
+/// `--channel` deliberately reuses it, so a box provisioned on the development
+/// channel stays there for the rest of its life without anyone revisiting the
+/// choice. A posture nobody is reminded of is a posture nobody reconsiders.
+pub fn lenient_channel_note(channel: &str) -> Option<String> {
+    match Channel::from_name(channel) {
+        Channel::Stable => None,
+        Channel::Edge => Some(format!(
+            "the {channel} channel installs a prebuilt binary whose signature could not be \
+             obtained, on its SHA256 alone; re-run with --channel stable (and --version) to \
+             require a signature"
+        )),
+    }
+}
 
 /// Parse a `profile.conf` body into a normalized profile, accepting both the
 /// YAML form (`profile: X`) and the legacy key=value form (`profile=X`). An
@@ -136,6 +162,9 @@ impl Step for Preflight {
             ctx.channel = c;
         }
         tracing::info!(channel = %ctx.channel, "resolved release channel");
+        if let Some(note) = lenient_channel_note(&ctx.channel) {
+            tracing::warn!(channel = %ctx.channel, "{note}");
+        }
 
         // 5. connectivity note — best-effort, never fatal. `fetch_binaries`
         // is the real network gate; this is just an early operator hint.
@@ -181,6 +210,23 @@ pub fn profile_conf_present() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_lenient_channel_carries_a_note() {
+        // The channel is persisted and reused by every later upgrade, so a box
+        // provisioned on the development channel stays there silently. Saying it
+        // on each run is what keeps that from being invisible.
+        let note = lenient_channel_note("edge").expect("the development channel must say so");
+        assert!(
+            note.contains("SHA256") && note.contains("--channel stable"),
+            "the note must name what is and is not proven, and the way out: {note}"
+        );
+        // A strict channel has nothing to warn about, and an unrecognised name
+        // is strict — so it must not be reassured about a posture it lacks.
+        assert_eq!(lenient_channel_note("stable"), None);
+        assert_eq!(lenient_channel_note("beta"), None);
+        assert_eq!(lenient_channel_note(""), None);
+    }
 
     #[test]
     fn parse_yaml_form() {
