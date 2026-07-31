@@ -15,7 +15,6 @@
     "features.catalog",
     "ground_station.profile",
     "signing.mavlink",
-    "webrtc.signaling.last_error",
-    "can.passthrough"
+    "webrtc.signaling.last_error"
   ]
 }

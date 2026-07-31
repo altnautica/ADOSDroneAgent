@@ -21,12 +21,15 @@ use crate::state::AppState;
 pub const API_VERSION: &str = "1";
 
 /// Capability flags. Add a new flag whenever a new endpoint or behaviour ships
-/// that the GCS may want to gate on. Never rename or remove a flag once shipped
-/// — an older GCS may rely on the absence to take a fallback code path. This
-/// list is the canonical surface contract between the agent and the GCS, kept in
-/// lock-step with the Python `CAPABILITIES` list (order included, since it is
-/// emitted as a JSON array).
-pub const CAPABILITIES: [&str; 15] = [
+/// that the GCS may want to gate on. Never rename or remove a flag that once
+/// worked — an older GCS may rely on the absence to take a fallback code path,
+/// so a retired feature keeps its token (see `scripts.runtime` below). That
+/// protection is for flags with a working past, not for a flag that never had
+/// one: a claim no release ever honoured has nothing depending on it, and
+/// leaving it in the list only steers a client away from the path that does
+/// work. This list is the canonical surface contract between the agent and the
+/// GCS; order matters, since it is emitted as a JSON array.
+pub const CAPABILITIES: [&str; 14] = [
     // /api/status/full consolidated endpoint (fewer round-trips).
     "status.full",
     // /api/version endpoint (this one). Trivially true.
@@ -58,10 +61,12 @@ pub const CAPABILITIES: [&str; 15] = [
     "signing.mavlink",
     // WebRTC SDP signaling broker rejection surfaced via cloud status.
     "webrtc.signaling.last_error",
-    // /api/can/passthrough route presence. Today the route returns 501; the flag
-    // lets the GCS detect whether the surface exists at all so it can fall back
-    // to MAVLink CAN_FORWARD without probing.
-    "can.passthrough",
+    // `can.passthrough` deliberately absent: POST /api/can/passthrough answers a
+    // fixed 501 and has never opened a CAN channel, so claiming it here would
+    // tell a client the bus is reachable through the agent and steer it off the
+    // MAVLink CAN_FORWARD relay, which is the path that actually carries CAN
+    // traffic today. The route stays registered so a probe can tell a planned
+    // surface (501) from a missing one (404); the claim does not.
 ];
 
 /// `GET /api/version` → `{api_version, agent_version, capabilities}`. Stable
@@ -227,6 +232,26 @@ fn which_on_path(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::StatusCode;
+
+    /// A flag in [`CAPABILITIES`] is a claim that the agent can do the thing, so
+    /// it may not outlive the handler that backs it. The CAN passthrough route
+    /// has never opened a CAN channel — it answers a fixed `501` — and a client
+    /// that reads the claim and skips the MAVLink `CAN_FORWARD` path it would
+    /// otherwise take is left with no working route to the bus at all. Assert
+    /// both halves together so whoever lands a real bridge has to flip the
+    /// handler and the advertisement in one change rather than drifting them.
+    #[tokio::test]
+    async fn can_passthrough_is_unadvertised_while_its_route_is_unimplemented() {
+        let unimplemented =
+            crate::routes::can::can_passthrough().await.status() == StatusCode::NOT_IMPLEMENTED;
+        let advertised = CAPABILITIES.contains(&"can.passthrough");
+        assert!(
+            !(unimplemented && advertised),
+            "POST /api/can/passthrough answers 501, so `can.passthrough` must not \
+             appear in the advertised capability list"
+        );
+    }
 
     #[test]
     fn wall_clock_ns_is_after_the_epoch() {
