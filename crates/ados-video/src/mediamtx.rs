@@ -427,10 +427,16 @@ impl MediamtxManager {
     }
 
     /// Spawn `mediamtx <config>` through [`ManagedProcess`] and gate on the
-    /// RTSP listener accepting. Returns `Ok(true)` once the process is up
-    /// (whether or not the RTSP gate passed — the listener may still come up
-    /// after the timeout; a slow start is logged, not fatal). `write_config`
-    /// must have been called first. Idempotent: a still-alive process stays.
+    /// RTSP listener accepting.
+    ///
+    /// `Ok(true)` means the process is up: either the RTSP gate passed, or it
+    /// timed out while the process is still alive, since a slow listener may
+    /// still come up and is logged rather than treated as fatal. `Ok(false)`
+    /// means the process is already gone — the case a rejected config produces,
+    /// and the one that must not be reported as a successful start.
+    ///
+    /// `write_config` must have been called first. Idempotent: a still-alive
+    /// process stays.
     pub async fn start(&mut self) -> std::io::Result<bool> {
         if let Some(p) = self.process.as_mut() {
             if p.is_running() {
@@ -450,6 +456,22 @@ impl MediamtxManager {
 
         let ready = wait_for_tcp_port("127.0.0.1", self.rtsp_port, RTSP_BIND_TIMEOUT).await;
         if !ready {
+            // A listener that is merely slow may still come up, so that stays
+            // non-fatal. A process that has ALREADY EXITED is a different
+            // thing entirely: mediamtx refuses to start at all on an
+            // unrecognised config key, and exits immediately, so this is
+            // exactly the shape a config it does not understand takes. Calling
+            // that "started" left the whole video pipeline dark behind a single
+            // log line, with every downstream surface reporting a healthy
+            // service.
+            if !self.is_running() {
+                tracing::error!(
+                    port = self.rtsp_port,
+                    config = %self.config_path.display(),
+                    "mediamtx_exited_before_rtsp_ready"
+                );
+                return Ok(false);
+            }
             tracing::error!(
                 port = self.rtsp_port,
                 timeout_s = RTSP_BIND_TIMEOUT.as_secs(),
