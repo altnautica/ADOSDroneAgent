@@ -89,6 +89,12 @@ struct CountersInner {
     rpc_requests_not_for_us: AtomicU64,
     /// Relay-proxy Request frames whose body did not decode as an RPC request.
     rpc_undecodable: AtomicU64,
+    /// Relayed requests refused because their per-pair credential did not
+    /// verify. Counted separately from every other refusal so an operator can
+    /// tell a credential problem from a transport one: a lane that is dropping
+    /// frames and a ground station presenting the wrong secret look identical
+    /// from the far end otherwise.
+    rpc_requests_unauthorized: AtomicU64,
     /// Ground-measured link-quality reports received. A drone cannot measure
     /// its own downlink, so this counter is how an operator tells "the ladder
     /// has no sample because the ground is not reporting" apart from "the
@@ -141,6 +147,7 @@ pub struct AuxUplinkConsumerSnapshot {
     pub rpc_requests: u64,
     pub rpc_requests_not_for_us: u64,
     pub rpc_undecodable: u64,
+    pub rpc_requests_unauthorized: u64,
     pub link_feedback_frames: u64,
     pub link_feedback_undecodable: u64,
     pub link_feedback_write_errors: u64,
@@ -169,6 +176,7 @@ impl AuxUplinkConsumerCounters {
             rpc_requests: c.rpc_requests.load(Ordering::Relaxed),
             rpc_requests_not_for_us: c.rpc_requests_not_for_us.load(Ordering::Relaxed),
             rpc_undecodable: c.rpc_undecodable.load(Ordering::Relaxed),
+            rpc_requests_unauthorized: c.rpc_requests_unauthorized.load(Ordering::Relaxed),
             link_feedback_frames: c.link_feedback_frames.load(Ordering::Relaxed),
             link_feedback_undecodable: c.link_feedback_undecodable.load(Ordering::Relaxed),
             link_feedback_write_errors: c.link_feedback_write_errors.load(Ordering::Relaxed),
@@ -186,6 +194,13 @@ impl AuxUplinkConsumerCounters {
     /// is therefore the only place that can tell these two outcomes apart; the
     /// tally lives here so it rides the one uplink snapshot with everything else
     /// about the lane.
+    /// A relayed request refused because its credential did not verify.
+    pub fn note_rpc_unauthorized(&self) {
+        self.0
+            .rpc_requests_unauthorized
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn note_rpc_duplicate(&self) {
         self.0
             .rpc_requests_duplicate

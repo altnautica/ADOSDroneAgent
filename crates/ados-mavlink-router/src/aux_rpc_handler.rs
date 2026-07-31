@@ -34,6 +34,46 @@ use tokio::net::TcpStream;
 use crate::aux_rpc_dedupe::{Admit, RequestDedupe};
 use crate::aux_uplink_consumer::AuxUplinkConsumerCounters;
 
+/// Decide whether a relayed request may proceed to the local HTTP API.
+///
+/// Pure over its inputs so the decision can be tested without a radio, a
+/// secret file or a running server -- this is the boundary the whole relay
+/// credential exists to defend, and a branch buried inside the request handler
+/// would only ever be exercised end to end.
+///
+/// `held` is the secret this drone was given, or `None` when it has none. None
+/// admits everything, unchanged from the behaviour before the credential
+/// existed. That is deliberate: the gate must be able to ship before the
+/// delivery path does, without the lane going dark in between.
+pub fn authorize(
+    held: Option<&str>,
+    ticket: &[u8],
+    own_device_id: &str,
+    now: i64,
+) -> Result<(), ados_protocol::relay_ticket::RelayTicketError> {
+    let Some(secret) = held else {
+        return Ok(());
+    };
+    let issuer = ados_protocol::relay_ticket::RelayTicketIssuer::from_secret(secret.as_bytes());
+    // A ticket that is not valid UTF-8 cannot be one we minted, and reads as a
+    // malformed one rather than being allowed to panic a decode.
+    let presented = std::str::from_utf8(ticket).unwrap_or("");
+    issuer.verify(presented, own_device_id, now)
+}
+
+/// Wall-clock unix seconds, for the relay ticket's expiry check.
+///
+/// Wall clock rather than a monotonic instant because the ticket's expiry was
+/// stamped by the ground station against its own wall clock; a monotonic
+/// reading here would be comparing two unrelated origins.
+fn now_unix_secs() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// The drone's HTTP API is always on localhost.
 const HTTP_HOST: &str = "127.0.0.1";
 const HTTP_PORT: u16 = 8080;
@@ -111,6 +151,42 @@ pub async fn handle(
     // queue wait is past the ground's bound, and the burst transmitted anyway.
     let started = Instant::now();
     let id = request.id;
+
+    // Authorise BEFORE the request reaches loopback.
+    //
+    // Everything downstream treats a relayed call as on-box, because it
+    // genuinely does arrive on 127.0.0.1 -- so by the time `ados-control` sees
+    // it, the decision has already been made. This is the only place the check
+    // can happen while it still means anything.
+    //
+    // Inert until a secret exists. A drone that has never been given one admits
+    // the call exactly as it always has, which is what lets this ship ahead of
+    // the delivery path without taking the relay lane offline in between.
+    let held = ados_protocol::relay_ticket::load_secret_at(std::path::Path::new(
+        ados_protocol::relay_ticket::RELAY_SECRET_PATH,
+    ));
+    if let Err(e) = authorize(
+        held.as_deref(),
+        request.ticket,
+        own_device_id,
+        now_unix_secs(),
+    ) {
+        counters.note_rpc_unauthorized();
+        tracing::warn!(
+            request_id = id,
+            error = %e,
+            "aux_rpc_request_unauthorized"
+        );
+        // Answered rather than dropped: a ground station presenting a bad
+        // credential should see it said so, not sit through a call timeout
+        // that reads identically to a dead radio.
+        let fragments = encode_fragments(own_device_id.as_bytes(), id, 401, &[]);
+        if !fragments.is_empty() {
+            send_fragments(id, egress, &fragments, counters, started).await;
+        }
+        return;
+    }
+
     let fragments = match dedupe.admit(id) {
         Admit::Duplicate => {
             counters.note_rpc_duplicate();
@@ -791,5 +867,82 @@ mod tests {
             2,
             "the all-or-nothing guard must not reject an encodable response"
         );
+    }
+
+    mod relay_authorization {
+        use super::super::authorize;
+        use ados_protocol::relay_ticket::{RelayTicketIssuer, DEFAULT_TTL_SECONDS};
+
+        const SECRET: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        const ME: &str = "77735cd38937";
+        const NOW: i64 = 1_800_000_000;
+
+        fn ticket_for(target: &str) -> String {
+            RelayTicketIssuer::from_secret(SECRET.as_bytes()).mint_at(
+                target,
+                DEFAULT_TTL_SECONDS,
+                NOW,
+            )
+        }
+
+        #[test]
+        fn a_drone_with_no_secret_admits_the_call_exactly_as_before() {
+            // The inert posture. Until a secret is delivered, the relay lane
+            // must behave precisely as it does today.
+            assert!(authorize(None, b"", ME, NOW).is_ok());
+            assert!(authorize(None, b"any old rubbish", ME, NOW).is_ok());
+        }
+
+        #[test]
+        fn a_valid_ticket_is_admitted() {
+            let t = ticket_for(ME);
+            assert!(authorize(Some(SECRET), t.as_bytes(), ME, NOW).is_ok());
+        }
+
+        #[test]
+        fn a_drone_holding_a_secret_refuses_a_call_carrying_none() {
+            // The actual close: once the credential exists, an unaccompanied
+            // relayed request no longer inherits on-box authority.
+            assert!(authorize(Some(SECRET), b"", ME, NOW).is_err());
+        }
+
+        #[test]
+        fn a_ticket_minted_for_another_drone_is_refused() {
+            // Load-bearing because the uplink is a broadcast: every drone in
+            // the fleet hears every ticket, so one addressed elsewhere must not
+            // open this one.
+            let t = ticket_for("some-other-drone");
+            assert!(authorize(Some(SECRET), t.as_bytes(), ME, NOW).is_err());
+        }
+
+        #[test]
+        fn a_ticket_from_a_different_pair_secret_is_refused() {
+            // A second ground station holding the shared fleet radio key still
+            // cannot mint one this drone accepts.
+            let other = "f".repeat(64);
+            let t = RelayTicketIssuer::from_secret(other.as_bytes()).mint_at(
+                ME,
+                DEFAULT_TTL_SECONDS,
+                NOW,
+            );
+            assert!(authorize(Some(SECRET), t.as_bytes(), ME, NOW).is_err());
+        }
+
+        #[test]
+        fn an_expired_ticket_is_refused() {
+            let t = ticket_for(ME);
+            assert!(authorize(
+                Some(SECRET),
+                t.as_bytes(),
+                ME,
+                NOW + DEFAULT_TTL_SECONDS + 1
+            )
+            .is_err());
+        }
+
+        #[test]
+        fn a_ticket_that_is_not_utf8_is_refused_rather_than_panicking() {
+            assert!(authorize(Some(SECRET), &[0xFF, 0xFE, 0xFD], ME, NOW).is_err());
+        }
     }
 }
