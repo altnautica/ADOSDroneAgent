@@ -58,6 +58,18 @@ const SERVICE_SAMPLE_INTERVAL: Duration = Duration::from_secs(15);
 /// is not made to come up faster by asking every second.
 const REFUSED_BACKOFF: Duration = Duration::from_secs(30);
 
+/// How long the producer stands down after the operator's dead-switch refuses
+/// the lane, before testing it again.
+///
+/// The refusal is a deliberate choice, so it must not be retried at the status
+/// cadence. But it is also REVERSIBLE — an operator who re-enables the lane in
+/// config expects it to come back — and honouring it for the life of the
+/// process meant status and identity never returned without a restart, on a
+/// box the operator may only be able to reach through the lane they just
+/// re-enabled. Standing down for a minute is quiet enough to be free and short
+/// enough to self-heal.
+const DISABLED_RECHECK: Duration = Duration::from_secs(60);
+
 /// How often the counters are logged, and only when they have moved.
 const REPORT_INTERVAL: Duration = Duration::from_secs(300);
 
@@ -331,10 +343,11 @@ pub async fn run(config: Arc<CloudConfig>, mut shutdown: watch::Receiver<bool>) 
     let mut last_report = ProducerCounters::default();
     let mut last_report_at = Instant::now();
     let mut seq: u32 = 0;
-    // Set once the operator's dead-switch refuses the lane. The refusal is a
-    // deliberate choice, not a fault, so it is honoured for the life of the
-    // process after one log line instead of being retried every tick.
-    let mut disabled = false;
+    // Set when the operator's dead-switch refuses the lane. The refusal is a
+    // deliberate choice rather than a fault, so it is honoured quietly — but it
+    // is also reversible, so it expires and is retested instead of latching for
+    // the life of the process.
+    let mut disabled_until: Option<Instant> = None;
     let mut backoff_until: Option<Instant> = None;
 
     loop {
@@ -343,10 +356,10 @@ pub async fn run(config: Arc<CloudConfig>, mut shutdown: watch::Receiver<bool>) 
                 if *shutdown.borrow() { break; }
             }
             _ = tick.tick() => {
-                if disabled {
+                let now = Instant::now();
+                if disabled_until.is_some_and(|until| now < until) {
                     continue;
                 }
-                let now = Instant::now();
                 if backoff_until.is_some_and(|until| now < until) {
                     continue;
                 }
@@ -401,7 +414,7 @@ pub async fn run(config: Arc<CloudConfig>, mut shutdown: watch::Receiver<bool>) 
                         match egress.send(AuxChannel::Status, &bytes).await {
                             Ok(()) => counters.status_sent += 1,
                             Err(e) => {
-                                record_send_error(&e, &mut counters, &mut disabled, &mut backoff_until, now);
+                                record_send_error(&e, &mut counters, &mut disabled_until, &mut backoff_until, now);
                             }
                         }
                     }
@@ -413,7 +426,7 @@ pub async fn run(config: Arc<CloudConfig>, mut shutdown: watch::Receiver<bool>) 
 
                 // Identity, on its own slower schedule and only once the lane is
                 // known to work: no point opening it just to say hello.
-                if !disabled
+                if disabled_until.is_none_or(|until| now >= until)
                     && last_identity.is_none_or(|at| now.duration_since(at) >= identity_interval)
                 {
                     if let Some(bytes) = identity.encode() {
@@ -423,7 +436,7 @@ pub async fn run(config: Arc<CloudConfig>, mut shutdown: watch::Receiver<bool>) 
                                 last_identity = Some(now);
                             }
                             Err(e) => {
-                                record_send_error(&e, &mut counters, &mut disabled, &mut backoff_until, now);
+                                record_send_error(&e, &mut counters, &mut disabled_until, &mut backoff_until, now);
                             }
                         }
                     }
@@ -450,19 +463,25 @@ pub async fn run(config: Arc<CloudConfig>, mut shutdown: watch::Receiver<bool>) 
     tracing::info!("aux_status_producer_stopped");
 }
 
-/// Classify a failed send: an operator-disabled lane stops the producer for good
-/// after one line, anything else backs off and is counted.
+/// Classify a failed send: an operator-disabled lane stands the producer down
+/// for a bounded window after one line, anything else backs off and is counted.
 fn record_send_error(
     error: &AuxEgressError,
     counters: &mut ProducerCounters,
-    disabled: &mut bool,
+    disabled_until: &mut Option<Instant>,
     backoff_until: &mut Option<Instant>,
     now: Instant,
 ) {
     match error {
         AuxEgressError::Disabled => {
-            *disabled = true;
-            tracing::info!("aux_status_producer_lane_disabled_by_operator");
+            // Log only on the way in, so a lane left disabled stays quiet, but
+            // stand down for a bounded window rather than for good: the switch
+            // is reversible and the operator may be reaching this box through
+            // the very lane they just re-enabled.
+            if disabled_until.is_none() {
+                tracing::info!("aux_status_producer_lane_disabled_by_operator");
+            }
+            *disabled_until = Some(now + DISABLED_RECHECK);
         }
         AuxEgressError::Refused(e) => {
             counters.refused += 1;
@@ -646,24 +665,25 @@ mod tests {
     }
 
     #[test]
-    fn an_operator_disabled_lane_stops_the_producer_but_a_refusal_backs_off() {
+    fn an_operator_disabled_lane_stands_down_but_a_refusal_backs_off() {
         // A deliberate operator choice and a transient refusal must not be
-        // treated alike: the first is honoured for good, the second retried.
+        // treated alike: the first stands down quietly, the second is counted
+        // and retried sooner.
         let mut counters = ProducerCounters::default();
-        let mut disabled = false;
+        let mut disabled_until = None;
         let mut backoff = None;
         let now = Instant::now();
 
         record_send_error(
             &AuxEgressError::Refused("no radio".into()),
             &mut counters,
-            &mut disabled,
+            &mut disabled_until,
             &mut backoff,
             now,
         );
         assert!(
-            !disabled,
-            "a transient refusal must not disable the producer"
+            disabled_until.is_none(),
+            "a transient refusal must not stand the producer down"
         );
         assert_eq!(counters.refused, 1);
         assert!(backoff.is_some(), "a refusal must back off");
@@ -671,11 +691,73 @@ mod tests {
         record_send_error(
             &AuxEgressError::Disabled,
             &mut counters,
-            &mut disabled,
+            &mut disabled_until,
             &mut backoff,
             now,
         );
-        assert!(disabled, "an operator-disabled lane must stop the producer");
+        assert!(
+            disabled_until.is_some(),
+            "an operator-disabled lane must stand the producer down"
+        );
+    }
+
+    #[test]
+    fn a_disabled_lane_is_retested_rather_than_latched_off_for_the_process() {
+        // The switch is reversible. Latching meant status and identity never
+        // came back after the operator re-enabled the lane — on a box they may
+        // only be able to reach through that same lane.
+        let mut counters = ProducerCounters::default();
+        let mut disabled_until = None;
+        let mut backoff = None;
+        let now = Instant::now();
+
+        record_send_error(
+            &AuxEgressError::Disabled,
+            &mut counters,
+            &mut disabled_until,
+            &mut backoff,
+            now,
+        );
+        let until = disabled_until.expect("stood down");
+        assert!(until > now, "the stand-down must be in the future");
+        assert!(
+            until <= now + DISABLED_RECHECK,
+            "the stand-down must expire, so a re-enabled lane recovers on its own"
+        );
+    }
+
+    #[test]
+    fn a_lane_left_disabled_extends_its_stand_down_without_relatching_the_log() {
+        // Each retest that still finds the lane disabled pushes the window out
+        // again, so a permanently disabled lane costs one attempt a minute
+        // rather than one per status tick.
+        let mut counters = ProducerCounters::default();
+        let mut disabled_until = None;
+        let mut backoff = None;
+        let first = Instant::now();
+
+        record_send_error(
+            &AuxEgressError::Disabled,
+            &mut counters,
+            &mut disabled_until,
+            &mut backoff,
+            first,
+        );
+        let after_first = disabled_until.expect("stood down");
+
+        let later = first + DISABLED_RECHECK;
+        record_send_error(
+            &AuxEgressError::Disabled,
+            &mut counters,
+            &mut disabled_until,
+            &mut backoff,
+            later,
+        );
+        let after_second = disabled_until.expect("still stood down");
+        assert!(
+            after_second > after_first,
+            "a lane still disabled at the retest must stand down again"
+        );
     }
 
     #[test]
