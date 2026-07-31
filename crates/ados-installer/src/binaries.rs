@@ -204,9 +204,18 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
     // station listens so the operator's fleet view is local-first. Best-effort
     // rather than Hard: the unit `ConditionPathExists`-gates on the binary, so a
     // fetch miss leaves single-drone operation entirely intact — the bus adds fleet
-    // awareness and onboard separation input, and neither is on the C2 path. A
-    // missing binary on a node that is part of a real fleet is caught by the health
-    // gate, not by aborting every install.
+    // awareness and onboard separation input, and neither is on the C2 path.
+    //
+    // A fetch miss is NOT caught anywhere, which this comment previously claimed
+    // it was: the health gate checks Hard-gated binaries plus three named
+    // exceptions, and the swarm bus is none of them. That claim mattered,
+    // because for a long time no publish job existed for this release at all, so
+    // every install on both profiles 404'd here and continued degraded in
+    // silence — the unit's ConditionPathExists skipped it, the socket was never
+    // bound, and the swarm control loop suppressed every tick as stale
+    // neighbours. Fleet awareness and onboard separation were simply absent.
+    // If this is ever demoted or the publish job is removed, the absence has to
+    // surface somewhere an operator will see it.
     PrebuiltBinary {
         service: "ados-swarmbus",
         asset: "ados-swarmbus-aarch64",

@@ -325,6 +325,61 @@ jobs:
           name: "Prebuilt ados-radio (rolling)"
           files: crates/rel/*
 
+  # The swarm bus. This job was missing entirely until now: the crate, its
+  # systemd unit and its supervisor registration all shipped, but nothing ever
+  # published the binary, so every install fetched a release that did not exist,
+  # 404'd, and continued degraded because the gate is best-effort. The unit's
+  # ConditionPathExists then skipped it silently and the swarm control loop spun
+  # against a socket that was never bound.
+  publish-swarmbus:
+    needs: build-test
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (musl target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build static ados-swarmbus
+        run: cargo build --release --target aarch64-unknown-linux-musl -p ados-swarmbus
+
+      - name: Stage artifact + checksum
+        run: |
+          set -euo pipefail
+          mkdir -p rel
+          cp target/aarch64-unknown-linux-musl/release/ados-swarmbus rel/ados-swarmbus-aarch64
+          ( cd rel && sha256sum ados-swarmbus-aarch64 > ados-swarmbus-aarch64.sha256 )
+
+      - name: Sign artifact (only when the signing key is present)
+        env:
+          SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SIGNING_KEY}" ]; then
+            echo "No ADOS_DRIVER_SIGNING_KEY set; publishing SHA256-only (dev posture)."
+            exit 0
+          fi
+          sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
+          printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
+          minisign -S -s /tmp/sign.key -m rel/ados-swarmbus-aarch64 -x rel/ados-swarmbus-aarch64.minisig
+          rm -f /tmp/sign.key
+
+      - name: Publish rolling prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: prebuilt-swarmbus
+          prerelease: true
+          name: "Prebuilt ados-swarmbus (rolling)"
+          files: crates/rel/*
+
   publish-gpio:
     needs: build-test
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
