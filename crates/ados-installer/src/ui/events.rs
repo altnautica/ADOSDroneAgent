@@ -110,6 +110,15 @@ pub struct SummaryData {
     pub lan_ips: Vec<String>,
     /// Whether the agent has pairing material on disk.
     pub paired: bool,
+    /// The access point's SSID and passphrase, on a profile that runs one.
+    ///
+    /// Shown because the passphrase is now generated per unit rather than
+    /// being one published default on every box. Nothing in the product
+    /// displayed it before, so a generated value would be undiscoverable and
+    /// the access point unjoinable — this is the first place an operator can
+    /// read it, and it must not be dropped without a replacement.
+    pub ap_ssid: Option<String>,
+    pub ap_passphrase: Option<String>,
     /// Every step that did not succeed.
     pub failed_steps: Vec<String>,
     /// The subset that were Required (hard failures).

@@ -122,9 +122,23 @@ impl HostapdManager {
         &self.passphrase
     }
 
-    /// Resolve the AP passphrase. Precedence: existing `/etc/ados/ap-passphrase`
-    /// → configured `network.hotspot.password` → builtin `"altnautica"`. The
-    /// agent NEVER auto-generates. Mirrors `ensure_passphrase`.
+    /// Resolve the AP passphrase. Precedence: existing
+    /// `/etc/ados/ap-passphrase` → configured `network.hotspot.password` → a
+    /// freshly GENERATED per-unit value.
+    ///
+    /// The last step used to be a single built-in string shared by every unit
+    /// ever shipped. One published default on every access point is not a
+    /// secret; anyone within radio range of any ADOS ground station could join
+    /// the network of any other.
+    ///
+    /// Generating instead is only safe because the value is now displayed —
+    /// on the installer's completion summary, in the on-box status view, and
+    /// through the console. Nothing showed it before, so a generated
+    /// passphrase would have been undiscoverable and the unit unjoinable.
+    /// If that display path is ever removed, this must go back with it.
+    ///
+    /// An explicitly configured passphrase still wins, so a fleet that wants
+    /// one shared credential can still say so.
     pub fn ensure_passphrase(&mut self) -> String {
         if let Ok(existing) = std::fs::read_to_string(&self.passphrase_path) {
             let trimmed = existing.trim();
@@ -135,13 +149,49 @@ impl HostapdManager {
             }
         }
         let configured = self.configured_passphrase.trim();
-        if configured.is_empty() {
-            warn!("ap_passphrase_using_builtin_default");
-            self.passphrase = BUILTIN_PASSPHRASE.to_string();
-        } else {
+        if !configured.is_empty() {
             self.passphrase = configured.to_string();
+            info!("ap_passphrase_from_config");
+            return self.passphrase.clone();
         }
-        info!("ap_passphrase_from_config");
+        match ados_protocol::secret_gen::generate_ap_passphrase() {
+            Ok(fresh) => {
+                self.passphrase = fresh;
+                // Persist immediately. A generated value that is not written
+                // is a DIFFERENT passphrase on every restart: the operator
+                // reads one off the installer card, the service restarts, and
+                // the network they were told to join no longer exists. The
+                // file is also what makes the first branch above win next
+                // time, so without this the value is never stable.
+                if let Some(parent) = self.passphrase_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                match write_with_mode(
+                    &self.passphrase_path,
+                    format!("{}\n", self.passphrase).as_bytes(),
+                    0o600,
+                ) {
+                    Ok(()) => info!(
+                        path = %self.passphrase_path.display(),
+                        "ap_passphrase_generated"
+                    ),
+                    Err(e) => error!(
+                        error = %e,
+                        path = %self.passphrase_path.display(),
+                        "ap_passphrase_generated_but_not_persisted"
+                    ),
+                }
+            }
+            Err(e) => {
+                // Fail-closed on entropy, like every other secret this agent
+                // draws: a predictable passphrase is worse than the shared
+                // default it replaces, because nobody would know to distrust
+                // it. The built-in stands in only when the kernel cannot
+                // provide randomness at all, which is a broken system.
+                warn!(error = %e, "ap_passphrase_generate_failed_using_builtin_default");
+                self.passphrase = BUILTIN_PASSPHRASE.to_string();
+            }
+        }
         self.passphrase.clone()
     }
 
@@ -442,11 +492,68 @@ mod tests {
     }
 
     #[test]
-    fn ensure_passphrase_precedence_file_then_config_then_builtin() {
+    fn a_generated_passphrase_is_stable_across_restarts() {
+        // A generated value that is not written is a DIFFERENT passphrase on
+        // every restart: the operator reads one off the installer card, the
+        // service restarts, and the network they were told to join is gone.
         let dir = tempfile::tempdir().unwrap();
-        // No file, no config → builtin.
+        let mut first = mgr(dir.path(), "dead", Arc::new(ScriptedRunner::new()));
+        let generated = first.ensure_passphrase();
+
+        // Same box, fresh manager — as after a service restart.
+        let mut again = mgr(dir.path(), "dead", Arc::new(ScriptedRunner::new()));
+        assert_eq!(
+            again.ensure_passphrase(),
+            generated,
+            "the generated passphrase must survive a restart"
+        );
+
+        let on_disk = std::fs::read_to_string(dir.path().join("ap-passphrase")).unwrap();
+        assert_eq!(on_disk, format!("{generated}\n"));
+    }
+
+    #[test]
+    fn a_generated_passphrase_is_persisted_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
         let mut m = mgr(dir.path(), "dead", Arc::new(ScriptedRunner::new()));
-        assert_eq!(m.ensure_passphrase(), "altnautica");
+        m.ensure_passphrase();
+        let mode = std::fs::metadata(dir.path().join("ap-passphrase"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "the passphrase file must not be world-readable"
+        );
+    }
+
+    #[test]
+    fn ensure_passphrase_precedence_file_then_config_then_generated() {
+        let dir = tempfile::tempdir().unwrap();
+        // No file, no config → a fresh per-unit value, NOT the shared builtin.
+        // One published default across every shipped unit is not a secret:
+        // anyone in radio range of any ground station could join any other.
+        let mut m = mgr(dir.path(), "dead", Arc::new(ScriptedRunner::new()));
+        let generated = m.ensure_passphrase();
+        assert_ne!(
+            generated, "altnautica",
+            "a fresh unit must not come up on the shared built-in passphrase"
+        );
+        assert!(
+            ados_protocol::secret_gen::is_valid_wpa2_passphrase(&generated),
+            "hostapd refuses the whole config on an illegal passphrase"
+        );
+
+        // And it is per-unit: a second box does not get the same one.
+        let dir2 = tempfile::tempdir().unwrap();
+        let mut other = mgr(dir2.path(), "beef", Arc::new(ScriptedRunner::new()));
+        assert_ne!(
+            other.ensure_passphrase(),
+            generated,
+            "two units must not share a generated passphrase"
+        );
 
         // Configured password wins over builtin (no file present).
         let mut m2 = HostapdManager::with_paths(
@@ -470,8 +577,19 @@ mod tests {
     #[test]
     fn hostapd_conf_is_byte_exact_with_0600_mode() {
         let dir = tempfile::tempdir().unwrap();
-        let mut m = mgr(dir.path(), "58c27faf", Arc::new(ScriptedRunner::new()));
-        m.ensure_passphrase(); // → "altnautica"
+        // Pin the passphrase through config so the golden body stays exact:
+        // an unconfigured unit now generates a fresh one per box.
+        let mut m = HostapdManager::with_paths(
+            "58c27faf",
+            None,
+            6,
+            "altnautica".to_string(),
+            Arc::new(ScriptedRunner::new()),
+            dir.path().join("hostapd-gs.conf"),
+            dir.path().join("dnsmasq-gs.conf"),
+            dir.path().join("ap-passphrase"),
+        );
+        m.ensure_passphrase(); // → the configured "altnautica"
         m.write_config().unwrap();
 
         let expected = "# ADOS Ground Station hostapd config for ADOS-GS-58C2\n\

@@ -20,6 +20,11 @@ pub const PORTABLE_PYTHON_DIR: &str = "/opt/ados/python";
 pub const CONFIG_DIR: &str = "/etc/ados";
 /// Mutable agent state (install-result, checkpoints, peripherals).
 pub const STATE_DIR: &str = "/var/lib/ados";
+
+/// The persisted access-point passphrase. Read by the closing summary so the
+/// operator learns a value that is now generated per unit rather than being
+/// one published default across every box.
+pub const AP_PASSPHRASE_PATH: &str = "/etc/ados/ap-passphrase";
 /// Per-step `<name>.done` markers so an interrupted install resumes.
 pub const CHECKPOINT_DIR: &str = "/var/lib/ados/install-checkpoints";
 /// The machine-readable install outcome the heartbeat + GCS consume.

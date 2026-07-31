@@ -136,6 +136,8 @@ fn summary(status: &str, required: &[&str]) -> SummaryData {
         lan_ips: vec!["192.168.1.42".to_string(), "10.0.0.7".to_string()],
         paired: true,
         failed_steps: required.iter().map(|s| s.to_string()).collect(),
+        ap_ssid: Some("ADOS-GS-9F2C".to_string()),
+        ap_passphrase: Some("KM7QRT4XPN29".to_string()),
         required_failures: required.iter().map(|s| s.to_string()).collect(),
     }
 }

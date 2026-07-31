@@ -130,6 +130,14 @@ pub struct Dashboard {
     pub cloud_configured: bool,
     pub remote_status: String,
     pub hotspot: String,
+    /// The access point's passphrase, read off the box.
+    ///
+    /// Shown because it is now generated per unit rather than being one
+    /// published default on every box: this and the installer's closing card
+    /// are how an operator learns it at all. Empty when the hotspot is off or
+    /// the file is unreadable — never a placeholder, since a wrong passphrase
+    /// is indistinguishable from a broken radio to the person typing it.
+    pub hotspot_passphrase: String,
 
     pub mode: Option<String>,
     pub armed: Option<bool>,
@@ -239,6 +247,21 @@ pub fn reach_rank(url: &str) -> u8 {
 /// True when the URL points at the local loopback (useless over SSH).
 pub fn is_loopback_url(url: &str) -> bool {
     is_loopback_host(&url_host(url))
+}
+
+/// Where the agent persists the access-point passphrase.
+const AP_PASSPHRASE_PATH: &str = "/etc/ados/ap-passphrase";
+
+/// The AP passphrase, or empty when it cannot be read.
+///
+/// Read straight off disk rather than through the status API: this view is the
+/// operator's fallback when the network is the thing that is broken, and the
+/// file is local and 0600. Empty rather than a placeholder — a wrong
+/// passphrase looks exactly like a broken radio to whoever is typing it.
+fn read_ap_passphrase() -> String {
+    std::fs::read_to_string(AP_PASSPHRASE_PATH)
+        .map(|b| b.trim().to_string())
+        .unwrap_or_default()
 }
 
 fn s(v: &Value, key: &str, default: &str) -> String {
@@ -403,6 +426,11 @@ impl Dashboard {
             .unwrap_or(false);
         dash.hotspot = if hotspot_on {
             s(&network, "hotspot_ssid", "")
+        } else {
+            String::new()
+        };
+        dash.hotspot_passphrase = if hotspot_on {
+            read_ap_passphrase()
         } else {
             String::new()
         };

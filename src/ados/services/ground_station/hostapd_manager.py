@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import secrets
 import signal
 import sys
 from pathlib import Path
@@ -51,6 +52,31 @@ log = get_logger("ground_station.hostapd")
 # passphrase by writing this file. New installs rely on
 # ``network.hotspot.password`` from config; the agent never auto-generates.
 _PASSPHRASE_PATH = AP_PASSPHRASE_PATH
+
+# The shared built-in, kept only as the entropy-failure fallback.
+BUILTIN_PASSPHRASE = "altnautica"
+
+# Characters an operator can read off a screen and type without guessing:
+# 0/O and 1/I/L are excluded. Mirrors the Rust `UNAMBIGUOUS_CHARSET`.
+_UNAMBIGUOUS_CHARSET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+
+# WPA2-PSK accepts 8..63 printable ASCII. Twelve from a 31-character alphabet
+# is about 59 bits, and still short enough to read off a small display and type
+# into a phone. Mirrors the Rust `AP_PASSPHRASE_LEN`.
+_AP_PASSPHRASE_LEN = 12
+
+
+def generate_ap_passphrase() -> str:
+    """Draw a fresh per-unit AP passphrase, legal for WPA2-PSK.
+
+    `secrets.choice` is uniform over the sequence and raises rather than
+    degrading if the system has no usable entropy source, which is the
+    fail-closed behaviour every other secret this agent draws uses.
+    """
+    return "".join(
+        secrets.choice(_UNAMBIGUOUS_CHARSET) for _ in range(_AP_PASSPHRASE_LEN)
+    )
+
 _HOSTAPD_CONF_PATH = HOSTAPD_CONF_PATH
 _DNSMASQ_CONF_PATH = DNSMASQ_CONF_PATH
 
@@ -126,13 +152,20 @@ class HostapdManager:
            legacy installs and for operators who explicitly rotated the
            passphrase by writing the file.
         2. The configured ``network.hotspot.password`` passed into the
-           manager constructor. This is the agent's default
-           (``altnautica`` out of the box; operators override in
-           ``/etc/ados/config.yaml``).
+           manager constructor, when an operator has set one in
+           ``/etc/ados/config.yaml``.
+        3. A freshly generated per-unit passphrase.
 
-        The agent never auto-generates a passphrase. A predictable
-        default is more useful than a random one for an OSS agent
-        operators are expected to access at the bench.
+        Step 3 used to be a single built-in string shared by every unit
+        ever shipped. One published default on every access point is not
+        a secret: anyone within radio range of any ADOS ground station
+        could join the network of any other.
+
+        Generating is only safe because the value is now displayed — on
+        the installer's completion card and in the on-box status view.
+        Nothing showed it before, so a generated passphrase would have
+        been undiscoverable and the unit unjoinable. If that display
+        path is removed, this has to go back with it.
         """
         if _PASSPHRASE_PATH.exists():
             try:
@@ -149,11 +182,43 @@ class HostapdManager:
                 )
 
         configured = (self._configured_passphrase or "").strip()
-        if not configured:
-            configured = "altnautica"
-            log.warning("ap_passphrase_using_builtin_default")
-        self._passphrase = configured
-        log.info("ap_passphrase_from_config")
+        if configured:
+            self._passphrase = configured
+            log.info("ap_passphrase_from_config")
+            return self._passphrase
+
+        try:
+            self._passphrase = generate_ap_passphrase()
+            # Persist immediately. A generated value that is not written is a
+            # DIFFERENT passphrase on every restart: the operator reads one off
+            # the installer card, the service restarts, and the network they
+            # were told to join no longer exists. The file is also what makes
+            # the first branch above win next time, so without this the value
+            # is never stable.
+            try:
+                _PASSPHRASE_PATH.parent.mkdir(parents=True, exist_ok=True)
+                _PASSPHRASE_PATH.write_text(
+                    self._passphrase + "\n", encoding="utf-8"
+                )
+                os.chmod(_PASSPHRASE_PATH, 0o600)
+                log.info("ap_passphrase_generated", path=str(_PASSPHRASE_PATH))
+            except OSError as exc:
+                log.error(
+                    "ap_passphrase_generated_but_not_persisted",
+                    path=str(_PASSPHRASE_PATH),
+                    error=str(exc),
+                )
+        except OSError as exc:
+            # Fail-closed on entropy, like every other secret the agent
+            # draws: a predictable passphrase is worse than the shared
+            # default it replaces, because nobody would know to distrust
+            # it. The built-in stands in only when the system cannot
+            # provide randomness at all.
+            log.warning(
+                "ap_passphrase_generate_failed_using_builtin_default",
+                error=str(exc),
+            )
+            self._passphrase = BUILTIN_PASSPHRASE
         return self._passphrase
 
     def _render_hostapd_conf(self) -> str:

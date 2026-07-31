@@ -32,6 +32,23 @@ const NOTE_DOCS: &str = "Docs: docs.altnautica.com";
 const NOTE_DIRECT_IP: &str = "Direct IP is most reliable; it works from the hosted GCS too.";
 const NOTE_MDNS: &str = "The .local (mDNS) name needs a desktop app on the LAN.";
 
+/// The access-point block, when this profile runs one.
+///
+/// The passphrase is generated per unit rather than being one published
+/// default on every box, so this is the first place an operator can read it.
+/// Nothing else in the product showed it before; if this block is removed, the
+/// generation in the AP manager has to go back to a known value with it or the
+/// unit becomes unjoinable.
+fn ap_lines(s: &SummaryData) -> Vec<(String, String)> {
+    match (&s.ap_ssid, &s.ap_passphrase) {
+        (Some(ssid), Some(pass)) => vec![
+            ("network".to_string(), ssid.clone()),
+            ("passphrase".to_string(), pass.clone()),
+        ],
+        _ => Vec::new(),
+    }
+}
+
 /// The reach URLs for the console, most-resolvable first: the `<host>.local`
 /// mDNS name, then one `http://<ip>:8080` per discovered LAN address. A bare
 /// `localhost` is never emitted — it is useless to an operator on another box.
@@ -100,6 +117,16 @@ pub fn plain_lines(s: &SummaryData) -> Vec<String> {
     out.push("Open the console:".to_string());
     for url in console_urls(s) {
         out.push(format!("  {url}"));
+    }
+
+    let ap = ap_lines(s);
+    if !ap.is_empty() {
+        out.push(String::new());
+        out.push("Wi-Fi access point:".to_string());
+        for (label, value) in &ap {
+            out.push(format!("  {label:<11} {value}"));
+        }
+        out.push("  This passphrase is unique to this unit. Write it down.".to_string());
     }
 
     out.push(String::new());
@@ -210,6 +237,18 @@ fn success_card(s: &SummaryData, theme: &Theme, width: usize) -> Vec<String> {
     body.push(section(theme, "Open the console"));
     for url in console_urls(s) {
         body.push(format!("{}  {}", theme.accent(arrow(theme)), url));
+    }
+
+    // The access point's own credentials, on a profile that runs one.
+    let ap = ap_lines(s);
+    if !ap.is_empty() {
+        body.push(String::new());
+        body.push(section(theme, "Wi-Fi access point"));
+        for (label, value) in &ap {
+            let padded = format!("{label:<11}");
+            body.push(format!("  {}  {}", theme.dim(&padded), theme.accent(value)));
+        }
+        body.push(theme.dim("This passphrase is unique to this unit. Write it down."));
     }
 
     // Curated primitive commands: command in accent, description dimmed.
@@ -408,6 +447,8 @@ mod tests {
             lan_ips: vec!["192.168.1.42".to_string()],
             paired: true,
             failed_steps: vec![],
+            ap_ssid: None,
+            ap_passphrase: None,
             required_failures: vec![],
         }
     }
@@ -477,6 +518,49 @@ mod tests {
         assert_eq!(mdns_host("localhost"), None);
         assert_eq!(mdns_host("127.0.0.1"), None);
         assert_eq!(mdns_host("  "), None);
+    }
+
+    /// A generated per-unit passphrase is only safe because it is displayed.
+    /// If this block ever stops rendering, the generation in the AP manager
+    /// has to go back to a known value with it, or the unit is unjoinable.
+    #[test]
+    fn the_access_point_credentials_are_shown_when_there_is_an_access_point() {
+        let mut s = sample("ok");
+        s.ap_ssid = Some("ADOS-GS-9F2C".to_string());
+        s.ap_passphrase = Some("KM7QRT4XPN29".to_string());
+
+        let plain = plain_lines(&s).join("\n");
+        assert!(plain.contains("ADOS-GS-9F2C"), "the network must be named");
+        assert!(
+            plain.contains("KM7QRT4XPN29"),
+            "nothing else in the product shows this value"
+        );
+        assert!(
+            plain.contains("unique to this unit"),
+            "the operator has to know it is not the same on every box"
+        );
+    }
+
+    #[test]
+    fn no_access_point_block_on_a_profile_that_runs_none() {
+        let s = sample("ok");
+        assert!(s.ap_ssid.is_none());
+        let plain = plain_lines(&s).join("\n");
+        assert!(
+            !plain.contains("Wi-Fi access point"),
+            "a drone with no access point must not show an empty credentials block"
+        );
+    }
+
+    #[test]
+    fn a_half_known_access_point_shows_nothing_rather_than_a_blank_field() {
+        // A network name with no passphrase would send the operator to a
+        // network they cannot join, with no hint why.
+        let mut s = sample("ok");
+        s.ap_ssid = Some("ADOS-GS-9F2C".to_string());
+        s.ap_passphrase = None;
+        let plain = plain_lines(&s).join("\n");
+        assert!(!plain.contains("Wi-Fi access point"));
     }
 
     #[test]

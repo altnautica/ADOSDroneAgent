@@ -357,9 +357,53 @@ fn build_summary(status: &str, ctx: &Ctx) -> ui::SummaryData {
         setup_url,
         lan_ips: probe_lan_ips(),
         paired: pairing_present(),
+        ap_ssid: read_ap_ssid(&device_id_for_ap()),
+        ap_passphrase: read_ap_passphrase(),
         failed_steps: ctx.failures.failed.clone(),
         required_failures: ctx.failures.required.clone(),
     }
+}
+
+/// The device id the access-point SSID is derived from.
+fn device_id_for_ap() -> String {
+    read_device_id()
+}
+
+/// The AP's SSID, when this profile runs one.
+///
+/// Derived the same way the AP manager derives it, so the summary names the
+/// network the operator will actually see in a phone's WiFi list.
+fn read_ap_ssid(device_id: &str) -> Option<String> {
+    if !std::path::Path::new(env::AP_PASSPHRASE_PATH).exists() {
+        return None;
+    }
+    Some(format!("ADOS-GS-{}", ap_short_id(device_id)))
+}
+
+/// First four hex characters of the device id, uppercased. Mirrors the AP
+/// manager's own `short_id`.
+fn ap_short_id(device_id: &str) -> String {
+    let hex: String = device_id
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .collect();
+    let padded = if hex.len() >= 4 {
+        hex
+    } else {
+        format!("{hex}0000")
+    };
+    padded[..4].to_uppercase()
+}
+
+/// The AP passphrase the agent persisted, if any.
+///
+/// It is generated per unit rather than being one published default, so this
+/// is the first moment an operator can learn it. Absent on a profile that runs
+/// no access point.
+fn read_ap_passphrase() -> Option<String> {
+    let body = std::fs::read_to_string(env::AP_PASSPHRASE_PATH).ok()?;
+    let trimmed = body.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 /// The box's non-loopback IPv4 addresses, for the success-card reach block.

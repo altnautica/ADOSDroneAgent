@@ -70,6 +70,7 @@ pub mod offload_link;
 pub mod pairing_posture;
 pub mod plugin;
 pub mod rest;
+pub mod secret_gen;
 pub mod sidecar;
 pub mod state;
 pub mod tap;

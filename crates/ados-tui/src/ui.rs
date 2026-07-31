@@ -650,11 +650,20 @@ fn link_panel(frame: &mut Frame, area: Rect, dash: &Dashboard) {
     } else {
         Span::styled(dash.hotspot.clone(), bright())
     };
-    let lines = vec![
+    let mut lines = vec![
         kv("cloud", cloud),
         kv("remote", remote),
         kv("hotspot", hotspot),
     ];
+    // The passphrase is generated per unit, so this view and the installer's
+    // closing card are how an operator learns it. Only rendered when there is
+    // a real value to show.
+    if !dash.hotspot.is_empty() && !dash.hotspot_passphrase.is_empty() {
+        lines.push(kv(
+            "wifi key",
+            Span::styled(dash.hotspot_passphrase.clone(), bright()),
+        ));
+    }
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
