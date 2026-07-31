@@ -24,6 +24,7 @@ use crate::graphics::palette::Palette;
 use crate::graphics::primitives::Canvas;
 
 pub mod about;
+pub mod access_point;
 pub mod calibration;
 pub mod channel_hops;
 pub mod dashboard;
@@ -320,6 +321,18 @@ pub struct NetworkCtx {
     pub mdns_host: Option<String>,
     pub hotspot_ssid: Option<String>,
     pub hotspot_enabled: bool,
+    /// The access point's passphrase, read from its 0600 file ON THE BOX.
+    ///
+    /// Deliberately NOT sourced from the agent's REST API: the display polls
+    /// `127.0.0.1:8080`, but those routes are reachable from the LAN too, so
+    /// putting the passphrase in a response would publish it to anyone who can
+    /// reach the ground station. The panel is a physical surface — you have to
+    /// be standing in front of it — which is the one place showing it is
+    /// appropriate.
+    ///
+    /// `None` when the file is absent or unreadable, which the page renders as
+    /// an honest "unavailable" rather than a blank the operator reads as empty.
+    pub ap_passphrase: Option<String>,
     pub wifi_client: WifiClientCtx,
 }
 

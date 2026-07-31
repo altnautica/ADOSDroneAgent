@@ -568,11 +568,11 @@ fn atomic_write(path: &Path, body: &[u8]) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use crate::pages::{
-        about::AboutDetailPage, channel_hops::ChannelHopsPage, dashboard::DashboardPage,
-        diagnostics::DiagnosticsDetailPage, drone::DroneDetailPage, link_stats::LinkStatsPage,
-        mesh::MeshDetailPage, more::MorePage, pair_drone::PairDroneDetailPage, plugin::PluginPage,
-        radio_link::RadioLinkDetailPage, settings::SettingsPage, uplink::UplinkDetailPage,
-        video::VideoPage,
+        about::AboutDetailPage, access_point::AccessPointDetailPage, channel_hops::ChannelHopsPage,
+        dashboard::DashboardPage, diagnostics::DiagnosticsDetailPage, drone::DroneDetailPage,
+        link_stats::LinkStatsPage, mesh::MeshDetailPage, more::MorePage,
+        pair_drone::PairDroneDetailPage, plugin::PluginPage, radio_link::RadioLinkDetailPage,
+        settings::SettingsPage, uplink::UplinkDetailPage, video::VideoPage,
     };
     use ados_hid::buttons::PressKind;
     use ados_hid::touch::{TouchGesture, TouchMove};
@@ -593,6 +593,9 @@ mod tests {
             Box::new(DroneDetailPage),
             Box::new(MeshDetailPage::new()),
             Box::new(AboutDetailPage),
+            // How to join this ground station's own WiFi. A panel is the only
+            // surface that helps when the box is the thing you cannot reach.
+            Box::new(AccessPointDetailPage),
             Box::new(PairDroneDetailPage),
             Box::new(DiagnosticsDetailPage),
             Box::new(PluginPage::new()),

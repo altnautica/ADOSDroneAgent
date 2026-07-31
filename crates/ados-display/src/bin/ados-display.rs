@@ -536,11 +536,11 @@ async fn run_page_ui(
 #[cfg(target_os = "linux")]
 fn all_pages() -> Vec<Box<dyn ados_display::pages::Page>> {
     use ados_display::pages::{
-        about::AboutDetailPage, channel_hops::ChannelHopsPage, dashboard::DashboardPage,
-        diagnostics::DiagnosticsDetailPage, drone::DroneDetailPage, link_stats::LinkStatsPage,
-        mesh::MeshDetailPage, more::MorePage, pair_drone::PairDroneDetailPage, plugin::PluginPage,
-        radio_link::RadioLinkDetailPage, settings::SettingsPage, uplink::UplinkDetailPage,
-        video::VideoPage, Page,
+        about::AboutDetailPage, access_point::AccessPointDetailPage, channel_hops::ChannelHopsPage,
+        dashboard::DashboardPage, diagnostics::DiagnosticsDetailPage, drone::DroneDetailPage,
+        link_stats::LinkStatsPage, mesh::MeshDetailPage, more::MorePage,
+        pair_drone::PairDroneDetailPage, plugin::PluginPage, radio_link::RadioLinkDetailPage,
+        settings::SettingsPage, uplink::UplinkDetailPage, video::VideoPage, Page,
     };
     let pages: Vec<Box<dyn Page>> = vec![
         Box::new(DashboardPage),
@@ -554,6 +554,9 @@ fn all_pages() -> Vec<Box<dyn ados_display::pages::Page>> {
         Box::new(DroneDetailPage),
         Box::new(MeshDetailPage::new()),
         Box::new(AboutDetailPage),
+        // How to join this ground station's own WiFi. A panel is the only
+        // surface that helps when the box is the thing you cannot reach.
+        Box::new(AccessPointDetailPage),
         Box::new(PairDroneDetailPage),
         Box::new(DiagnosticsDetailPage),
         // The reserved data-driven page a plugin contributes content to. Not a

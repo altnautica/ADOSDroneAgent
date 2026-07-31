@@ -36,6 +36,12 @@ use crate::pages::{
 /// `http://{api_host}:{api_port}` default (`127.0.0.1:8080`).
 pub const DEFAULT_API_BASE: &str = "http://127.0.0.1:8080";
 
+/// Where the network daemon writes the access point's passphrase, 0600.
+/// Mirrors `ados_net::paths::AP_PASSPHRASE_PATH`; duplicated rather than
+/// depended on, because the display crate does not otherwise link the network
+/// daemon and one path constant is a cheaper coupling than a whole crate.
+const AP_PASSPHRASE_PATH: &str = "/etc/ados/ap-passphrase";
+
 /// Pairing-key file. The agent writes the persisted `X-ADOS-Key` here; the LCD
 /// process reads it so its status polls authenticate against a paired agent
 /// instead of getting 401'd (which would leave the panel rendering blanks).
@@ -487,8 +493,28 @@ fn network_ctx(v: Option<&Value>) -> NetworkCtx {
         mdns_host: string_field(v, "mdns_host"),
         hotspot_ssid: string_field(v, "hotspot_ssid"),
         hotspot_enabled: bool_field(v, "hotspot_enabled"),
+        // Read from disk, never from the polled response: those routes answer
+        // the LAN as well as loopback, so a passphrase in a payload is a
+        // passphrase published to anyone who can reach the box.
+        ap_passphrase: read_ap_passphrase(),
         wifi_client,
     }
+}
+
+/// The access point's passphrase, from its 0600 file on this box.
+///
+/// `None` for absent or unreadable — the page says so rather than rendering a
+/// blank, because a blank where a passphrase belongs reads as "there isn't one"
+/// and sends the operator looking for a network that needs no password.
+fn read_ap_passphrase() -> Option<String> {
+    let path =
+        std::env::var("ADOS_AP_PASSPHRASE_PATH").unwrap_or_else(|_| AP_PASSPHRASE_PATH.to_string());
+    let raw = std::fs::read_to_string(path).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_string())
 }
 
 fn uplink_ctx(v: Option<&Value>) -> UplinkCtx {

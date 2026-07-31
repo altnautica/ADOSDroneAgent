@@ -142,6 +142,7 @@ fn connected_context() -> PageContext {
             ],
         },
         network: NetworkCtx {
+            ap_passphrase: Some("EXAMPLEPASS99".into()),
             ap_ssid: Some("ADOS-GS-9F2C".to_string()),
             ap_ip: Some("10.42.0.1".to_string()),
             usb_ip: Some("10.55.0.1".to_string()),
@@ -365,6 +366,7 @@ fn unpaired_context() -> PageContext {
             peers: Vec::new(),
         },
         network: NetworkCtx {
+            ap_passphrase: Some("EXAMPLEPASS99".into()),
             ap_ssid: Some("ADOS-Setup-9F2C".to_string()),
             ap_ip: Some("10.42.0.1".to_string()),
             usb_ip: None,
