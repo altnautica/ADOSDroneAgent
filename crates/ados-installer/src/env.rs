@@ -212,17 +212,36 @@ pub fn is_supported_arch() -> bool {
     arch() == "aarch64"
 }
 
-/// Extract the profile name from a `profile.conf` body (pure). The file is the
-/// single `profile: <name>` line `config_identity::profile_conf_body` writes;
-/// tolerate a quoted value and surrounding whitespace. Returns `None` when the
-/// body carries no non-empty profile line.
+/// Extract the profile name from a `profile.conf` body (pure).
+///
+/// Accepts BOTH the `profile: <name>` line `config_identity::profile_conf_body`
+/// writes and the legacy `profile=<name>` form the older bash installer wrote,
+/// because the runtime parser in `ados-control` accepts both and this one must
+/// not disagree with it. When it did, a device provisioned by the older
+/// installer read its profile correctly at runtime but returned `None` here, so
+/// an `--upgrade` invoked with no `--profile` fell through to the `drone`
+/// default and tore down that device's ground-station units — the failure this
+/// function exists to prevent, still reachable on every box installed before the
+/// Rust installer landed.
+///
+/// Comments and blank lines are skipped and either quote style is tolerated, so
+/// the two parsers agree on the whole file, not just the happy line.
 pub fn parse_profile_conf(body: &str) -> Option<String> {
     for line in body.lines() {
-        if let Some(rest) = line.trim().strip_prefix("profile:") {
-            let v = rest.trim().trim_matches('"');
-            if !v.is_empty() {
-                return Some(v.to_string());
-            }
+        let stripped = line.trim();
+        if stripped.is_empty() || stripped.starts_with('#') {
+            continue;
+        }
+        let raw = if let Some(rest) = stripped.strip_prefix("profile:") {
+            rest
+        } else if let Some(rest) = stripped.strip_prefix("profile=") {
+            rest
+        } else {
+            continue;
+        };
+        let v = raw.trim().trim_matches(|c| c == '"' || c == '\'');
+        if !v.is_empty() {
+            return Some(v.to_string());
         }
     }
     None
@@ -267,8 +286,39 @@ mod tests {
     }
 
     #[test]
+    fn parse_profile_conf_reads_the_legacy_key_value_form() {
+        // The older bash installer wrote `profile=X`. The runtime parser in
+        // `ados-control` accepts it; this one must too. When it did not, a
+        // ground station provisioned by that installer read `None` here, so an
+        // upgrade with no explicit profile fell through to the drone default
+        // and tore its own units down.
+        assert_eq!(
+            parse_profile_conf("profile=ground_station\n").as_deref(),
+            Some("ground_station")
+        );
+        assert_eq!(
+            parse_profile_conf("profile='ground-station'\n").as_deref(),
+            Some("ground-station"),
+            "the legacy form also appeared single-quoted"
+        );
+        assert_eq!(
+            parse_profile_conf("  profile=  workstation  \n").as_deref(),
+            Some("workstation")
+        );
+        // A commented-out line is not a value, in either form.
+        assert_eq!(parse_profile_conf("# profile=drone\n"), None);
+        assert_eq!(parse_profile_conf("# profile: drone\n"), None);
+        // A real value below a comment is still found.
+        assert_eq!(
+            parse_profile_conf("# written by the installer\nprofile=compute\n").as_deref(),
+            Some("compute")
+        );
+    }
+
+    #[test]
     fn parse_profile_conf_none_when_absent_or_empty() {
         assert_eq!(parse_profile_conf(""), None);
+        assert_eq!(parse_profile_conf("profile=\n"), None);
         assert_eq!(parse_profile_conf("profile:\n"), None);
         assert_eq!(parse_profile_conf("profile: \"\"\n"), None);
         assert_eq!(parse_profile_conf("other: value\n"), None);
