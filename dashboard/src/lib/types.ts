@@ -92,6 +92,10 @@ export interface NetworkInfo {
   local_ips?: string[];
   wifi_ssid?: string;
   hotspot_enabled?: boolean;
+  // The name the setup AP actually broadcasts, resolved by the agent from the
+  // configured `network.hotspot.ssid` with the device id substituted in. Absent
+  // on an older agent, in which case the name is unknown, not guessable.
+  hotspot_ssid?: string;
   uplink_kind?: string;
   rssi_dbm?: number | null;
   ip_addresses?: Record<string, string>;

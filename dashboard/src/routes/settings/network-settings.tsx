@@ -11,8 +11,7 @@ import { useStatus } from "@/hooks/use-status";
 import { postApply } from "@/lib/apply-actions";
 import { toast, toastFromError } from "@/lib/toast";
 import { getWifiStatus } from "@/lib/wifi";
-
-const HOTSPOT_NAME_PREFIX = "ADOS-";
+import { resolveHotspotSsid } from "@/lib/hotspot";
 
 export function NetworkSettings() {
   const status = useStatus();
@@ -33,10 +32,10 @@ export function NetworkSettings() {
     }
   }, [status.data]);
 
-  const deviceSuffix = useMemo(() => {
-    const id = status.data?.device_id ?? "";
-    return id ? `${HOTSPOT_NAME_PREFIX}${id}` : `${HOTSPOT_NAME_PREFIX}<device>`;
-  }, [status.data?.device_id]);
+  const hotspotSsid = useMemo(
+    () => resolveHotspotSsid(status.data?.network),
+    [status.data?.network],
+  );
 
   async function commitHotspot(next: boolean) {
     setBusy(true);
@@ -94,10 +93,23 @@ export function NetworkSettings() {
                 <RiskBadge tone="auto" />
               </div>
               <div className="text-xs text-muted-foreground leading-relaxed">
-                Spins up a captive AP named{" "}
-                <span className="font-mono">{deviceSuffix}</span> on
-                wlan0 so a phone or laptop can join the agent over Wi-Fi
-                and finish onboarding without a wired connection.
+                {hotspotSsid.known ? (
+                  <>
+                    Spins up a captive AP named{" "}
+                    <span className="font-mono">{hotspotSsid.ssid}</span>{" "}
+                    on wlan0 so a phone or laptop can join the agent over
+                    Wi-Fi and finish onboarding without a wired
+                    connection.
+                  </>
+                ) : (
+                  <>
+                    Spins up a captive AP on wlan0 so a phone or laptop
+                    can join the agent over Wi-Fi and finish onboarding
+                    without a wired connection. This agent has not
+                    reported the network name, so check the configured
+                    hotspot SSID on the rig before you go looking for it.
+                  </>
+                )}
               </div>
               <div className="text-xs text-warn">
                 Enabling this disconnects any active Wi-Fi client link
@@ -129,10 +141,16 @@ export function NetworkSettings() {
               {wifiStatus.data?.ssid ?? "a Wi-Fi network"}
             </span>
             . Enabling the setup hotspot will drop that link. The rig
-            stays reachable via the{" "}
-            <span className="font-mono">{deviceSuffix}</span> AP or any
-            other uplink (ethernet, USB tether, 4G) until you toggle
-            the hotspot back off.
+            stays reachable via{" "}
+            {hotspotSsid.known ? (
+              <>
+                the <span className="font-mono">{hotspotSsid.ssid}</span> AP
+              </>
+            ) : (
+              "the setup AP"
+            )}{" "}
+            or any other uplink (ethernet, USB tether, 4G) until you
+            toggle the hotspot back off.
           </>
         }
         confirmLabel="Switch to AP"
