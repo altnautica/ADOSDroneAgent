@@ -373,7 +373,41 @@ fn sidecar_path(path: &Path, ext: &str) -> PathBuf {
 /// running service that has the old binary mmap'd keeps its old inode (no
 /// `ETXTBSY`, no `O_TRUNC` on a live executable). Falls back to a copy + chmod
 /// only if the rename fails (e.g. a cross-filesystem dest the caller forced).
+/// The retained previous copy of a placed binary: `<dest>.prev`.
+///
+/// Kept so a bad upgrade has somewhere to go back to. Until this existed the
+/// only documented recovery was reinstalling from a specific git ref, which
+/// needs a working shell, internet and a version the operator knows — none of
+/// which a customer necessarily has once the upgrade that broke the box has
+/// already landed.
+pub fn prev_sibling(dest: &Path) -> PathBuf {
+    let mut s = dest.as_os_str().to_owned();
+    s.push(".prev");
+    PathBuf::from(s)
+}
+
 fn place_binary(src: &Path, dest: &Path) -> anyhow::Result<()> {
+    // Retain the outgoing binary before it is replaced. A hard link keeps the
+    // old inode alive at a second name without a copy, so this costs no disk
+    // and cannot half-finish; a rename would leave the destination briefly
+    // absent, which is worse than the problem it solves. A failure here is not
+    // fatal — losing the rollback copy is better than failing the install — but
+    // it is logged, because a silent failure would present as a rollback that
+    // is simply missing when it is needed most.
+    if dest.exists() {
+        let prev = prev_sibling(dest);
+        let _ = std::fs::remove_file(&prev);
+        if let Err(e) = std::fs::hard_link(dest, &prev) {
+            if let Err(e2) = std::fs::copy(dest, &prev) {
+                tracing::warn!(
+                    link_error = %e,
+                    copy_error = %e2,
+                    dest = %dest.display(),
+                    "could not retain the previous binary; rollback will not cover it"
+                );
+            }
+        }
+    }
     match std::fs::rename(src, dest) {
         Ok(()) => Ok(()),
         Err(_) => {

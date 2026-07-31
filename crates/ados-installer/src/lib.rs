@@ -22,6 +22,7 @@ pub mod journal;
 pub mod macos;
 pub mod net;
 pub mod result;
+pub mod rollback;
 pub mod steps;
 pub mod ui;
 pub mod uninstall;
