@@ -194,11 +194,63 @@ fn quarantine_and_recreate(path: &Path) -> Result<()> {
         path = %path.display(),
         "quarantined broken store; recreating from the embedded schema"
     );
+    prune_quarantines(path);
     // Recreate from the embedded schema. Drop the fresh connection: the writer
     // reopens its own read-write handle, and the verify path only needs the
     // store to exist and be healthy.
     let _ = db::open(path).with_context(|| "recreate store after quarantine")?;
     Ok(())
+}
+
+/// How many quarantined stores to keep beside the live one.
+///
+/// One is enough to post-mortem the corruption that just happened, and the
+/// older ones have already been superseded by it. Keeping every one is an
+/// unbounded disk leak that nothing else reclaims: a field unit accumulated
+/// 1.5 GB of quarantines next to a 934 MB live store, so the dead copies were
+/// the larger half of the logging footprint.
+const QUARANTINE_KEEP: usize = 1;
+
+/// Delete all but the newest [`QUARANTINE_KEEP`] quarantined stores beside
+/// `path`.
+///
+/// Best effort throughout: this runs on the boot path after a corruption has
+/// already been survived, so a directory that cannot be read or a file that
+/// cannot be removed must never stop the daemon coming up. Ordering is by
+/// modification time rather than by the timestamp in the name, because that
+/// suffix is a plain integer whose digit count changes and so does not sort
+/// lexicographically.
+fn prune_quarantines(path: &Path) {
+    let Some(dir) = path.parent() else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut found: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().contains("db.corrupt-"))
+        .filter_map(|e| {
+            let modified = e.metadata().ok()?.modified().ok()?;
+            Some((modified, e.path()))
+        })
+        .collect();
+    if found.len() <= QUARANTINE_KEEP {
+        return;
+    }
+    found.sort_by_key(|(t, _)| *t);
+    let excess = found.len() - QUARANTINE_KEEP;
+    for (_, victim) in found.into_iter().take(excess) {
+        match std::fs::remove_file(&victim) {
+            Ok(()) => tracing::info!(
+                pruned = %victim.display(),
+                "pruned a superseded quarantined store"
+            ),
+            Err(e) => tracing::warn!(
+                error = %e,
+                path = %victim.display(),
+                "could not prune a quarantined store"
+            ),
+        }
+    }
 }
 
 /// Run the daemon to completion: bring everything up, wait for a stop signal,
@@ -588,6 +640,43 @@ mod tests {
         assert_eq!(quarantined.len(), 1, "exactly one quarantine copy expected");
         let saved = std::fs::read(quarantined[0].path()).unwrap();
         assert_eq!(saved, b"this is not a sqlite database, it is garbage bytes");
+    }
+
+    #[test]
+    fn repeated_corruption_does_not_accumulate_quarantines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("logs.db");
+
+        // Corrupt and recover several times over, as a unit that keeps losing
+        // power mid-write would. Each round quarantines the broken store.
+        for round in 0..4u32 {
+            std::fs::write(&path, format!("garbage from round {round}")).unwrap();
+            open_and_verify(&path).expect("a broken store must be recreated");
+            // The timestamped suffix has microsecond resolution; make sure two
+            // rounds cannot land on the same name or share a modified time.
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let quarantined: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains("db.corrupt-"))
+            .collect();
+
+        // Without pruning this grew one dead copy per corruption, forever. On a
+        // field unit that reached 1.5 GB of quarantines beside the live store.
+        assert_eq!(
+            quarantined.len(),
+            QUARANTINE_KEEP,
+            "quarantines must not accumulate across repeated corruption"
+        );
+
+        // The one kept is the most recent, which is the one worth a post-mortem.
+        let kept = std::fs::read(quarantined[0].path()).unwrap();
+        assert_eq!(
+            kept, b"garbage from round 3",
+            "the newest quarantine is the one retained"
+        );
     }
 
     #[test]
