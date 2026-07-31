@@ -264,11 +264,16 @@ async fn main() -> Result<()> {
     // a board with no wlan0 or no configfs logs and continues. The AP manager is
     // shared (behind a Mutex) with the operator command socket below so the AP
     // PUT write drives this same live instance instead of a second hostapd owner.
+    // The operator's `network.hotspot.password`, when they have set one. It was
+    // passed as an empty string, so the "a configured passphrase wins" branch
+    // was unreachable from the path that actually runs: a fleet that set one
+    // shared credential got a different generated value on every box instead.
+    let configured_ap_passphrase = ados_protocol::ap_country::configured_hotspot_password();
     let hostapd = Arc::new(Mutex::new(HostapdManager::new(
         &device_id,
         None,
         6,
-        String::new(),
+        configured_ap_passphrase,
         runner.clone(),
     )));
     hostapd.lock().await.ensure_passphrase();

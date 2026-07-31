@@ -8,6 +8,8 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import { pollIntervalMs, renderProfile } from "@/lib/render-profile";
+
 import { useProfile } from "@/hooks/use-profile";
 import { getDroneStatus, getGsStatus } from "@/lib/api";
 import type { GsStatus } from "@/lib/types";
@@ -22,7 +24,7 @@ export interface TelemetryState {
 /** Poll agent status every `intervalMs` (default 400 ms ≈ 2.5 Hz). The source
  *  follows the agent profile: a drone composes its own status, everything else
  *  reads the ground-station composite. */
-export function useTelemetry(intervalMs = 400): TelemetryState {
+export function useTelemetry(intervalMs = pollIntervalMs(400, renderProfile())): TelemetryState {
   const profile = useProfile();
   const [state, setState] = useState<TelemetryState>({
     status: null,

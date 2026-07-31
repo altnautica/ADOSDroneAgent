@@ -23,7 +23,7 @@
 //! runs in its own spawned task, and a timeout returns a 503 to the ground so
 //! the operator sees the wedge rather than a silent stall.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ados_protocol::aux_egress::AuxEgress;
 use ados_protocol::aux_mux::AuxChannel;
@@ -101,6 +101,11 @@ pub async fn handle(
     counters: &AuxUplinkConsumerCounters,
     own_device_id: &str,
 ) {
+    // The caller's clock starts HERE, not when the fragments are ready. The
+    // bound below used to be measured from the start of the send, so a slow
+    // HTTP call spent the caller's budget for free: a 5 s call plus a 5 s
+    // queue wait is past the ground's bound, and the burst transmitted anyway.
+    let started = Instant::now();
     let id = request.id;
     let fragments = match dedupe.admit(id) {
         Admit::Duplicate => {
@@ -143,7 +148,7 @@ pub async fn handle(
         }
     };
 
-    send_fragments(id, egress, &fragments, counters).await;
+    send_fragments(id, egress, &fragments, counters, started).await;
 }
 
 /// Emit one response's fragments as a single paced burst.
@@ -160,10 +165,13 @@ async fn send_fragments(
     egress: &AuxEgress,
     fragments: &[Vec<u8>],
     counters: &AuxUplinkConsumerCounters,
+    started: Instant,
 ) {
     // `acquire` fails only on a closed semaphore and nothing closes a static
     // one; `.ok()` holds the permit for this scope with no panic path.
-    let slot = tokio::time::timeout(SEND_SLOT_WAIT_LIMIT, RESPONSE_SEND_SLOT.acquire()).await;
+    // Whatever is left of the caller's budget, not a fresh full allowance.
+    let remaining = SEND_SLOT_WAIT_LIMIT.saturating_sub(started.elapsed());
+    let slot = tokio::time::timeout(remaining, RESPONSE_SEND_SLOT.acquire()).await;
     let _slot = match slot {
         Ok(permit) => permit.ok(),
         Err(_) => {
@@ -171,7 +179,7 @@ async fn send_fragments(
             tracing::warn!(
                 request_id = id,
                 fragments = fragments.len(),
-                waited_s = SEND_SLOT_WAIT_LIMIT.as_secs(),
+                elapsed_ms = started.elapsed().as_millis() as u64,
                 "aux_rpc_response_abandoned_send_queue_too_deep"
             );
             return;
@@ -489,7 +497,7 @@ mod tests {
 
         // Hold the slot for longer than a caller would wait.
         let held = RESPONSE_SEND_SLOT.acquire().await.expect("slot");
-        send_fragments(1, &egress, &fragments, &counters).await;
+        send_fragments(1, &egress, &fragments, &counters, Instant::now()).await;
         drop(held);
 
         assert_eq!(

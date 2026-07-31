@@ -34,7 +34,6 @@ const MAVLINK_QUEUE_DEPTH: usize = 256;
 const STATE_QUEUE_DEPTH: usize = 32;
 const TCP_PROXY_PORT: u16 = 5760;
 const UDP_PROXY_PORTS: &[u16] = &[14550, 14551];
-/// The ground station's aux-uplink loopback ingress — must equal
 /// The auxiliary lane's loopback port pair, resolved from operator config.
 ///
 /// These used to be matching literals here, in the control surface and in the

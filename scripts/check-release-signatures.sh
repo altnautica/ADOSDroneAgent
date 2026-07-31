@@ -65,7 +65,10 @@ unsigned=0
 checked=0
 for tag in "${tags[@]}"; do
   assets=()
-  asset_list=$(gh release view "$tag" --json assets -q '.assets[].name' 2>/dev/null | sort)
+  if ! asset_list=$(gh release view "$tag" --json assets -q '.assets[].name' 2>&1 | sort); then
+    echo "ERROR: could not read assets for ${tag}" >&2
+    exit 2
+  fi
   while IFS= read -r a; do
     [ -n "$a" ] && assets+=("$a")
   done <<< "$asset_list"
@@ -89,6 +92,13 @@ for tag in "${tags[@]}"; do
 done
 
 echo "checked ${checked} artifact(s) across ${#tags[@]} tag(s); ${unsigned} unsigned"
+# Checking nothing is not the same as finding nothing wrong. A rate-limited or
+# 5xx API run would otherwise print "0 unsigned" and exit 0 — the silent success
+# this check exists to prevent, reported by the check itself.
+if [ "$checked" -eq 0 ]; then
+    echo "ERROR: inspected 0 artifacts; refusing to report success" >&2
+    exit 2
+fi
 if [ "$unsigned" -gt 0 ]; then
   cat >&2 <<'EOF'
 

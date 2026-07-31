@@ -53,3 +53,17 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash scripts/check-release-signatures.sh
+
+  # Shipped behaviour and the reported version must move together. Twelve
+  # commits once went out with the version unchanged, which makes an updated
+  # box indistinguishable from one that never updated — silently, on every
+  # surface that reports it.
+  version-bumped:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Shipped behaviour carries a version bump
+        run: bash scripts/check-version-bumped.sh origin/${{ github.event.pull_request.base.ref || 'main' }}

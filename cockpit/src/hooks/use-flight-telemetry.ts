@@ -8,6 +8,8 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import { pollIntervalMs, renderProfile } from "@/lib/render-profile";
+
 import { getTelemetry } from "@/lib/api";
 import type { VehicleState } from "@/lib/types";
 
@@ -36,7 +38,7 @@ function isLive(t: VehicleState | null): boolean {
 }
 
 /** Poll `/api/telemetry` every `intervalMs` (default 200 ms ≈ 5 Hz). */
-export function useFlightTelemetry(intervalMs = 200): FlightTelemetryState {
+export function useFlightTelemetry(intervalMs = pollIntervalMs(200, renderProfile())): FlightTelemetryState {
   const [state, setState] = useState<FlightTelemetryState>({
     telemetry: null,
     stale: false,

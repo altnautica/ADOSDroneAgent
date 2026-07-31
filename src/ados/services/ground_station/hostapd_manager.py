@@ -102,6 +102,20 @@ def _resolve_ap_country(config_path: str = "/etc/ados/config.yaml") -> str:
     return _DEFAULT_AP_COUNTRY
 
 
+def read_ap_passphrase() -> str:
+    """The persisted AP passphrase, or empty when there is none.
+
+    Read-only on purpose. `ensure_passphrase` GENERATES when the file is
+    absent, so calling it from a status path made a GET create and persist a
+    secret as a side effect — and, before the create was made exclusive, a
+    different one from the value hostapd had loaded.
+    """
+    try:
+        return _PASSPHRASE_PATH.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
 def generate_ap_passphrase() -> str:
     """Draw a fresh per-unit AP passphrase, legal for WPA2-PSK.
 
@@ -233,11 +247,27 @@ class HostapdManager:
             # is never stable.
             try:
                 _PASSPHRASE_PATH.parent.mkdir(parents=True, exist_ok=True)
-                _PASSPHRASE_PATH.write_text(
-                    self._passphrase + "\n", encoding="utf-8"
+                # Create EXCLUSIVELY at 0600 in one syscall, and adopt the
+                # winner on a collision. Several processes resolve this on a
+                # fresh boot; each used to draw its own value and write the
+                # file, so the value an operator was shown could differ from
+                # the one hostapd loaded. The separate write-then-chmod also
+                # left a world-readable window.
+                fd = os.open(
+                    _PASSPHRASE_PATH,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
                 )
-                os.chmod(_PASSPHRASE_PATH, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(self._passphrase + "\n")
                 log.info("ap_passphrase_generated", path=str(_PASSPHRASE_PATH))
+            except FileExistsError:
+                existing = read_ap_passphrase()
+                if existing:
+                    self._passphrase = existing
+                    log.info("ap_passphrase_adopted_from_concurrent_writer")
+                else:
+                    log.warning("ap_passphrase_race_left_an_unreadable_file")
             except OSError as exc:
                 log.error(
                     "ap_passphrase_generated_but_not_persisted",

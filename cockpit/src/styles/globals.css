@@ -106,13 +106,23 @@
     -webkit-backdrop-filter: none !important;
   }
 
-  /* Animation and shadow are per-frame compositor work for no information. */
+  /* Transitions and shadows are per-frame compositor work carrying no
+   * information, so they go. Animations do NOT go wholesale: a frozen busy
+   * spinner reads as a hung UI and a non-pulsing error dot is a weakened
+   * signal, and both are data. Reduced fidelity, never reduced truth — so the
+   * indicators that mean something keep moving and only decorative motion is
+   * dropped. */
   .layer-minimal *,
   .layer-minimal *::before,
   .layer-minimal *::after {
     transition-duration: 0s !important;
+    box-shadow: none !important;
+  }
+
+  .layer-minimal *:not(.animate-spin):not(.animate-pulse),
+  .layer-minimal *:not(.animate-spin):not(.animate-pulse)::before,
+  .layer-minimal *:not(.animate-spin):not(.animate-pulse)::after {
     animation-duration: 0s !important;
     animation-iteration-count: 1 !important;
-    box-shadow: none !important;
   }
 }

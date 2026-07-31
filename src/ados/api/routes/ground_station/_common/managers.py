@@ -40,9 +40,17 @@ def _hostapd_manager(app: Any) -> Any:
         ssid=ssid_override,
         channel=channel,
     )
-    # Load the persisted passphrase so status() reports a stable SSID + key.
+    # Read the persisted passphrase so status() reports a stable SSID + key.
+    #
+    # Deliberately NOT `ensure_passphrase`: that generates when the file is
+    # absent, which made a status GET create and persist a secret as a side
+    # effect. A read path must not mint credentials.
     try:
-        mgr.ensure_passphrase()
+        from ados.services.ground_station.hostapd_manager import read_ap_passphrase
+
+        existing = read_ap_passphrase()
+        if existing:
+            mgr._passphrase = existing
     except Exception:
         pass
     return mgr

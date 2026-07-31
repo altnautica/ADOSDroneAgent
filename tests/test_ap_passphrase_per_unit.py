@@ -53,6 +53,32 @@ def test_every_charset_position_is_reachable() -> None:
     assert seen == set(_UNAMBIGUOUS_CHARSET)
 
 
+def test_a_status_read_never_creates_a_passphrase(tmp_path, monkeypatch) -> None:
+    """A GET must not mint a credential.
+
+    The status route called `ensure_passphrase`, which generates when the file
+    is absent — so merely reading status created and persisted a secret, and
+    before the create was made exclusive it could be a different one from the
+    value hostapd had loaded.
+    """
+    import ados.services.ground_station.hostapd_manager as hm
+
+    path = tmp_path / "ap-passphrase"
+    monkeypatch.setattr(hm, "_PASSPHRASE_PATH", path)
+
+    assert hm.read_ap_passphrase() == ""
+    assert not path.exists(), "a read must not create the file"
+
+
+def test_a_read_returns_what_is_on_disk(tmp_path, monkeypatch) -> None:
+    import ados.services.ground_station.hostapd_manager as hm
+
+    path = tmp_path / "ap-passphrase"
+    path.write_text("KM7QRT4XPN29\n", encoding="utf-8")
+    monkeypatch.setattr(hm, "_PASSPHRASE_PATH", path)
+    assert hm.read_ap_passphrase() == "KM7QRT4XPN29"
+
+
 def test_the_python_and_rust_halves_agree_on_the_contract() -> None:
     """Both halves resolve this passphrase and must not disagree about it.
 

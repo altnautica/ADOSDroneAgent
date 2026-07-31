@@ -25,6 +25,11 @@ pub const STATE_DIR: &str = "/var/lib/ados";
 /// operator learns a value that is now generated per unit rather than being
 /// one published default across every box.
 pub const AP_PASSPHRASE_PATH: &str = "/etc/ados/ap-passphrase";
+
+/// The rendered access-point config. The summary reads the live SSID out of it
+/// rather than rebuilding one from a prefix, so a renamed AP is named
+/// correctly.
+pub const HOSTAPD_CONF_PATH: &str = "/etc/ados/hostapd-gs.conf";
 /// Per-step `<name>.done` markers so an interrupted install resumes.
 pub const CHECKPOINT_DIR: &str = "/var/lib/ados/install-checkpoints";
 /// The machine-readable install outcome the heartbeat + GCS consume.

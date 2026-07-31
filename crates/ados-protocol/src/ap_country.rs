@@ -86,6 +86,48 @@ pub fn load_from(path: &std::path::Path) -> String {
     }
 }
 
+/// The operator's configured hotspot passphrase, or an empty string.
+///
+/// Empty means "not set", which is what lets the AP manager fall through to
+/// generating a per-unit value. It lives beside the country reader because both
+/// are small reads of the same file by the same caller.
+pub fn configured_hotspot_password() -> String {
+    configured_hotspot_password_from(&crate::aux_ports::config_path())
+}
+
+/// The same, from an explicit path (test seam).
+pub fn configured_hotspot_password_from(path: &std::path::Path) -> String {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return String::new();
+    };
+    configured_hotspot_password_from_yaml(&text)
+}
+
+/// The same, from config text.
+pub fn configured_hotspot_password_from_yaml(text: &str) -> String {
+    #[derive(Debug, Default, serde::Deserialize)]
+    struct Root {
+        #[serde(default)]
+        network: Net,
+    }
+    #[derive(Debug, Default, serde::Deserialize)]
+    struct Net {
+        #[serde(default)]
+        hotspot: Hotspot,
+    }
+    #[derive(Debug, Default, serde::Deserialize)]
+    struct Hotspot {
+        #[serde(default)]
+        password: Option<String>,
+    }
+    let raw: Root = serde_norway::from_str(text).unwrap_or_default();
+    raw.network
+        .hotspot
+        .password
+        .map(|p| p.trim().to_string())
+        .unwrap_or_default()
+}
+
 /// Resolve from the agent's config file.
 pub fn load() -> String {
     load_from(&crate::aux_ports::config_path())

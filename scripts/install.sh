@@ -175,7 +175,18 @@ trap 'rm -rf "$tmp" 2>/dev/null || true' EXIT
 if ! command -v minisign >/dev/null 2>&1; then
     if command -v apt-get >/dev/null 2>&1; then
         echo "Installing minisign to verify the download…" >&2
-        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq minisign >/dev/null 2>&1 || true
+        # `update` first. A freshly flashed image ships an emptied package
+        # index to save space, so the install below fails with "unable to
+        # locate package" on exactly the path this matters most — a fresh
+        # install — and the whole verification step silently does nothing.
+        DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true
+        if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -qq minisign >/dev/null 2>&1; then
+            # Say why, rather than leaving the operator to infer it from the
+            # posture line below.
+            echo "WARNING: could not install minisign from apt." >&2
+        fi
+    else
+        echo "WARNING: no apt-get; cannot install a signature verifier." >&2
     fi
 fi
 if command -v minisign >/dev/null 2>&1; then

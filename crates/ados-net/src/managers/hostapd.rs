@@ -164,30 +164,53 @@ impl HostapdManager {
         }
         match ados_protocol::secret_gen::generate_ap_passphrase() {
             Ok(fresh) => {
-                self.passphrase = fresh;
-                // Persist immediately. A generated value that is not written
-                // is a DIFFERENT passphrase on every restart: the operator
-                // reads one off the installer card, the service restarts, and
-                // the network they were told to join no longer exists. The
-                // file is also what makes the first branch above win next
-                // time, so without this the value is never stable.
+                // Create EXCLUSIVELY, and adopt the winner on a collision.
+                //
+                // Several processes resolve this passphrase on a fresh boot —
+                // the native AP manager, the Python one, and (until it was made
+                // read-only) a status route. Each drew its own value and each
+                // wrote the file, so the value an operator was shown could
+                // differ from the one hostapd actually loaded, and the access
+                // point was unjoinable. Ordering them is fragile; making the
+                // create atomic is not. Whoever wins writes, everyone else
+                // reads the winner, and all of them end up on one passphrase.
                 if let Some(parent) = self.passphrase_path.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
-                match write_with_mode(
+                match create_new_with_mode(
                     &self.passphrase_path,
-                    format!("{}\n", self.passphrase).as_bytes(),
+                    format!("{fresh}\n").as_bytes(),
                     0o600,
                 ) {
-                    Ok(()) => info!(
-                        path = %self.passphrase_path.display(),
-                        "ap_passphrase_generated"
-                    ),
-                    Err(e) => error!(
-                        error = %e,
-                        path = %self.passphrase_path.display(),
-                        "ap_passphrase_generated_but_not_persisted"
-                    ),
+                    Ok(()) => {
+                        self.passphrase = fresh;
+                        info!(
+                            path = %self.passphrase_path.display(),
+                            "ap_passphrase_generated"
+                        );
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                        // Another process got there first. Its value is the one
+                        // on disk and therefore the one every surface displays.
+                        match std::fs::read_to_string(&self.passphrase_path) {
+                            Ok(existing) if !existing.trim().is_empty() => {
+                                self.passphrase = existing.trim().to_string();
+                                info!("ap_passphrase_adopted_from_concurrent_writer");
+                            }
+                            _ => {
+                                self.passphrase = fresh;
+                                warn!("ap_passphrase_race_left_an_unreadable_file");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        self.passphrase = fresh;
+                        error!(
+                            error = %e,
+                            path = %self.passphrase_path.display(),
+                            "ap_passphrase_generated_but_not_persisted"
+                        );
+                    }
                 }
             }
             Err(e) => {
@@ -444,6 +467,23 @@ impl HostapdManager {
     }
 }
 
+/// Create `path` with `body` and `mode`, failing if it already exists.
+///
+/// `O_EXCL` is the point: it makes concurrent first-boot generation safe
+/// without having to order the processes that do it. The caller adopts the
+/// existing file on `AlreadyExists`, so every process converges on one value.
+fn create_new_with_mode(path: &std::path::Path, body: &[u8], mode: u32) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(path)?;
+    f.write_all(body)?;
+    f.sync_all()
+}
+
 /// Write `body` to `path` with an explicit unix mode (owner-controlled secret
 /// files). Truncating, direct write (not atomic-rename — the Python writer also
 /// writes in place + chmods).
@@ -511,6 +551,51 @@ mod tests {
             "IN",
             "an operator who pins a region still gets it"
         );
+    }
+
+    #[test]
+    fn concurrent_first_boot_generation_converges_on_one_value() {
+        // Several processes resolve this on a fresh boot — the native AP
+        // manager, the Python one, and (before it was made read-only) a status
+        // route. Each drew its own value and each wrote the file, so the value
+        // an operator was shown could differ from the one hostapd loaded and
+        // the access point was unjoinable. Ordering them is fragile; an
+        // exclusive create is not.
+        let dir = tempfile::tempdir().unwrap();
+        let mut first = mgr(dir.path(), "dead", Arc::new(ScriptedRunner::new()));
+        let mut second = mgr(dir.path(), "dead", Arc::new(ScriptedRunner::new()));
+        let mut third = mgr(dir.path(), "dead", Arc::new(ScriptedRunner::new()));
+
+        let a = first.ensure_passphrase();
+        let b = second.ensure_passphrase();
+        let c = third.ensure_passphrase();
+
+        assert_eq!(a, b, "a second resolver must adopt the first's value");
+        assert_eq!(b, c, "and so must a third");
+        let on_disk = std::fs::read_to_string(dir.path().join("ap-passphrase")).unwrap();
+        assert_eq!(
+            on_disk.trim(),
+            a,
+            "the displayed value must be the one on disk"
+        );
+    }
+
+    #[test]
+    fn a_configured_passphrase_wins_over_generating() {
+        // The doc promised this and the path that runs made it unreachable: a
+        // fleet setting one shared credential got a random value per box.
+        let dir = tempfile::tempdir().unwrap();
+        let mut m = HostapdManager::with_paths(
+            "dead",
+            None,
+            6,
+            "FleetShared2026".to_string(),
+            Arc::new(ScriptedRunner::new()),
+            dir.path().join("hostapd-gs.conf"),
+            dir.path().join("dnsmasq-gs.conf"),
+            dir.path().join("ap-passphrase"),
+        );
+        assert_eq!(m.ensure_passphrase(), "FleetShared2026");
     }
 
     #[test]
