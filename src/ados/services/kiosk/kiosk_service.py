@@ -989,16 +989,30 @@ def _make_supervisor(
     """Build the supervisor for the current (session, renderer) combination.
 
     Windowed (a live desktop is present) attaches to that session's display
-    server and renders in SOFTWARE: a desktop owns its own GL stack and our
-    scoped GPU userspace does not touch it, so ``--disable-gpu`` is the safe
-    match (a desktop on a board with no GPU userspace is on llvmpipe anyway).
+    server and honours the resolved ``renderer``, exactly as the cage path does.
+
+    This deliberately does NOT force software any more. It used to, on the
+    reasoning that a desktop owns its own GL stack which our scoped GPU
+    userspace does not provision, so a desktop on a GPU-less board is on
+    llvmpipe anyway. That holds for the boards the argument was written for — a
+    Rockchip whose GL comes from our scoped libmali — but not for a board whose
+    distro ships a real GL and video stack of its own. On a Raspberry Pi the
+    desktop runs Mesa v3d with hardware decode on /dev/video10, and forcing
+    ``--disable-gpu`` there threw all of it away: the ground station's HDMI
+    cockpit software-decoded H.264 at ~113% CPU across four Chromium processes
+    on four cores, which presents to the operator as a frozen picture while the
+    stream underneath is perfectly healthy.
+
+    Passing the resolved renderer is safe because the GPU choice is not final:
+    a child that fails to bring up GL is downgraded to software by the
+    supervisor's existing GPU-failure path, so a board that genuinely cannot
+    drive a GPU still ends up rendering rather than crash-looping.
+
     cage (the appliance case) owns the display, with DISPLAY / WAYLAND_DISPLAY
     stripped and the renderer / DRM device / scoped libmali pinned. Raises
     ``FileNotFoundError`` when no Chromium is installed."""
     if session is not None:
-        argv = _build_windowed_chromium_argv(
-            url, session.session_type, _RENDERER_SOFTWARE
-        )
+        argv = _build_windowed_chromium_argv(url, session.session_type, renderer)
         # Run the browser AS the logged-in desktop user (not root): Chromium
         # refuses to run as root without --no-sandbox, and dropping to the user
         # keeps its sandbox and gives it a writable profile (HOME from
