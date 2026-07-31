@@ -1675,3 +1675,50 @@ async fn command_is_gated_by_the_key_when_paired_over_tcp() {
     );
     h.stop().await;
 }
+
+#[tokio::test]
+async fn the_pair_read_serves_the_fleet_roster() {
+    // Which drone holds which slot is the first question a fleet link fault
+    // raises: a duplicate slot puts two transmitters on one address and reads as
+    // unexplained link loss. It was returned ONLY by the pair WRITE, so reading
+    // it meant re-pairing a drone — exactly what an operator diagnosing a live
+    // fleet must not do — or opening the registry file over a shell on a box
+    // that may only be reachable through the link under investigation.
+    //
+    // This drives the ROUTE, not the body-composition helper. A helper that
+    // takes a roster argument does not prove the handler passes it a real one:
+    // the handler could hand it an empty vec and every unit test would still
+    // pass. Only the served body proves the wiring.
+    let dir = tempfile::tempdir().unwrap();
+    let h = start(dir.path(), None).await;
+
+    let (status, body) = unix_get(&h.socket, "/api/wfb/pair", None).await;
+    assert!(status.contains("200"), "status: {status}");
+    let v: Value = serde_json::from_str(&body).unwrap_or_else(|e| panic!("body {body:?}: {e}"));
+
+    let slots = v
+        .get("slots")
+        .unwrap_or_else(|| panic!("the pair read serves no fleet roster: {body}"));
+    assert!(slots.is_array(), "the roster must be an array, got {slots}");
+
+    // Every identity field the read already served is untouched, so a client on
+    // the old shape is unaffected.
+    for k in [
+        "paired",
+        "paired_with_device_id",
+        "paired_at",
+        "fingerprint",
+        "auto_pair_enabled",
+        "role",
+    ] {
+        assert!(v.get(k).is_some(), "the pair read lost {k}: {body}");
+    }
+
+    // A slot carries a per-pair relay secret. Rendering the roster on a SECOND
+    // route is exactly how that would escape, so pin it at the wire.
+    assert!(
+        !body.contains("relay_secret"),
+        "the relay secret reached the pair read: {body}"
+    );
+    h.stop().await;
+}
