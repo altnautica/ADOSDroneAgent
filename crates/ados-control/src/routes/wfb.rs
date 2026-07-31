@@ -15,10 +15,12 @@
 //!   metric aggregate into `{samples, count}`. An unreachable store degrades to the
 //!   native empty history `{"samples": [], "count": 0}`.
 //! - **`GET /api/wfb/pair`** — the pair-state snapshot (paired, peer device-id,
-//!   paired-at, the blake2b-8 key fingerprint, auto-pair flag, role). The
-//!   role-appropriate key file (`tx.key` for a drone, `rx.key` for a ground
-//!   station) is the paired signal; its presence + exact 64-byte size + a readable
-//!   fingerprint are required, and the peer/paired-at/auto-pair come off the config.
+//!   paired-at, the blake2b-8 key fingerprint, auto-pair flag, role) plus the
+//!   fleet slot table. The role-appropriate key file (`tx.key` for a drone,
+//!   `rx.key` for a ground station) is the paired signal; its presence + exact
+//!   64-byte size + a readable fingerprint are required, and the
+//!   peer/paired-at/auto-pair come off the config. The slot table is the fleet
+//!   registry, rendered through the same function the pair write uses.
 //! - **`GET /api/wfb/pair/failover-status`** — the local-bind to cloud-relay
 //!   failover state, from the store's most-recent `wfb.pair.failover` event, else
 //!   the `/run/ados/wfb_failover.json` sidecar, defaulting to `"local"`.
@@ -540,7 +542,12 @@ async fn latest_wfb_history(state: &AppState, seconds: i64) -> Option<Value> {
 /// station) is the paired signal: it must be present, exactly 64 bytes, and yield
 /// a readable blake2b-8 fingerprint. The peer device-id, paired-at, and the
 /// auto-pair flag come off the config (with the legacy `ground_station.*` fallback
-/// on the GS profile). Mirrors the Python `pair_manager.status(role)`.
+/// on the GS profile).
+///
+/// `slots` is the fleet roster: which drone holds which slot, and when it was
+/// issued. It used to be returned only by the pair WRITE, so reading it meant
+/// re-pairing a drone or opening the registry file by hand — neither of which an
+/// operator diagnosing a live fleet link can do.
 pub async fn get_wfb_pair_status(State(state): State<AppState>) -> Json<Value> {
     let paths = &state.pairing_paths;
     let cfg = crate::config::PairingConfig::load_from(&paths.config);
@@ -612,14 +619,53 @@ pub async fn get_wfb_pair_status(State(state): State<AppState>) -> Json<Value> {
         }
     }
 
-    Json(json!({
+    // The fleet roster. A ground station separates its drones by their assigned
+    // slot, so "which drone holds which slot" is the first question a fleet link
+    // fault raises — and it was answerable only by re-pairing a drone (which is
+    // exactly what an operator diagnosing a live fleet must not do) or by
+    // reading the registry file over a shell. It is served here through the same
+    // renderer the pair write uses, so both stay field-for-field identical and
+    // neither can leak a slot's relay secret.
+    //
+    // Empty on a drone, which has no registry: a fleet's slots are issued by the
+    // ground station and only it holds the table.
+    let slots =
+        crate::routes::gs_wfb_pair::slot_table(&crate::routes::gs_wfb_pair::load_registry());
+
+    Json(pair_snapshot(
+        paired,
+        peer,
+        paired_at,
+        fingerprint,
+        auto_pair_enabled,
+        &role,
+        slots,
+    ))
+}
+
+/// Compose the `GET /api/wfb/pair` body.
+///
+/// Split out so the response SHAPE is a unit under test. The fleet roster was
+/// missing from this body for the whole life of the route and nothing failed,
+/// because nothing asserted what the read is supposed to contain.
+fn pair_snapshot(
+    paired: bool,
+    peer: Value,
+    paired_at: Value,
+    fingerprint: Value,
+    auto_pair_enabled: bool,
+    role: &str,
+    slots: Vec<Value>,
+) -> Value {
+    json!({
         "paired": paired,
         "paired_with_device_id": peer,
         "paired_at": paired_at,
         "fingerprint": fingerprint,
         "auto_pair_enabled": auto_pair_enabled,
         "role": role,
-    }))
+        "slots": slots,
+    })
 }
 
 /// The exact 64-byte size a complete WFB-ng key file is. Mirrors
@@ -1351,6 +1397,94 @@ mod tests {
         assert_eq!(out["state"], json!("disabled"));
         assert_eq!(out["channel"], json!(0));
         assert!(out.get("bitrate_mbps").is_none());
+    }
+
+    #[test]
+    fn the_pair_read_serves_the_fleet_slot_table() {
+        // Which drone holds which slot is the first question a fleet link fault
+        // raises, and it was returned ONLY by the pair WRITE — so reading it
+        // meant re-pairing a drone, which is exactly what an operator
+        // diagnosing a live fleet must not do, or opening the registry file
+        // over a shell.
+        use ados_groundlink::FleetRegistry;
+        let mut registry = FleetRegistry::default();
+        registry.allocate("drone-a").unwrap();
+        registry.allocate("drone-b").unwrap();
+        let slots = crate::routes::gs_wfb_pair::slot_table(&registry);
+
+        let body = pair_snapshot(
+            true,
+            json!("drone-a"),
+            Value::Null,
+            json!("0123456789abcdef"),
+            true,
+            "gs",
+            slots,
+        );
+        let table = body["slots"].as_array().expect("the read carries a roster");
+        assert_eq!(table.len(), 2);
+        assert_eq!(table[0]["slot"], 1);
+        assert_eq!(table[0]["device_id"], "drone-a");
+        assert_eq!(table[1]["slot"], 2);
+        assert_eq!(table[1]["device_id"], "drone-b");
+        assert!(table[0]["paired_at_ms"].as_u64().unwrap() > 0);
+
+        // The existing fields are untouched, so a client reading the old shape
+        // is unaffected.
+        assert_eq!(body["paired"], true);
+        assert_eq!(body["role"], "gs");
+        assert_eq!(body["fingerprint"], "0123456789abcdef");
+    }
+
+    #[test]
+    fn the_pair_read_never_serves_a_slots_relay_secret() {
+        // A slot carries a per-pair relay secret. Rendering the roster on a
+        // SECOND route is exactly how that would escape, so the read goes
+        // through the same explicit-field renderer the write does rather than
+        // building its own table.
+        use ados_groundlink::FleetRegistry;
+        let mut registry = FleetRegistry::default();
+        registry.allocate("drone-a").unwrap();
+        let secret = registry
+            .slots()
+            .next()
+            .unwrap()
+            .relay_secret
+            .clone()
+            .expect("allocation issues a secret");
+
+        let body = pair_snapshot(
+            true,
+            json!("drone-a"),
+            Value::Null,
+            Value::Null,
+            true,
+            "gs",
+            crate::routes::gs_wfb_pair::slot_table(&registry),
+        );
+        let rendered = serde_json::to_string(&body).unwrap();
+        assert!(!secret.is_empty());
+        assert!(
+            !rendered.contains(&secret),
+            "the relay secret reached the pair read: {rendered}"
+        );
+        assert!(!rendered.contains("relay_secret"));
+    }
+
+    #[test]
+    fn a_node_holding_no_registry_serves_an_empty_roster_not_a_null() {
+        // A drone holds no registry — slots are issued by the ground station.
+        // An empty array keeps the client on one code path.
+        let body = pair_snapshot(
+            false,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            true,
+            "drone",
+            Vec::new(),
+        );
+        assert_eq!(body["slots"], json!([]));
     }
 
     #[test]

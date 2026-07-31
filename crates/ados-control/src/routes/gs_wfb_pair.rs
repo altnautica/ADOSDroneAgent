@@ -127,12 +127,17 @@ fn gs_pair_status() -> GsPairStatus {
 
 /// Load the fleet registry from its canonical path. A missing or unparseable
 /// file is an empty fleet — `FleetRegistry::load` already has that contract.
-fn load_registry() -> FleetRegistry {
+pub(crate) fn load_registry() -> FleetRegistry {
     FleetRegistry::load(std::path::Path::new(FLEET_REGISTRY_PATH))
 }
 
-/// Render the registry as the `slots` array the route returns, in slot order.
-fn slot_table(registry: &FleetRegistry) -> Vec<Value> {
+/// Render the registry as the `slots` array, in slot order.
+///
+/// The ONE place the roster is rendered, deliberately. It is served by both the
+/// pair write and the pair read, and it picks its fields explicitly so a
+/// `FleetSlot` growing a field — the per-pair relay secret already did — cannot
+/// leak onto the wire through either of them. A test pins that.
+pub(crate) fn slot_table(registry: &FleetRegistry) -> Vec<Value> {
     registry
         .slots()
         .map(|s| {
