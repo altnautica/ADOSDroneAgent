@@ -41,9 +41,10 @@ pub fn lenient_channel_note(channel: &str) -> Option<String> {
     match Channel::from_name(channel) {
         Channel::Stable => None,
         Channel::Edge => Some(format!(
-            "the {channel} channel installs a prebuilt binary whose signature could not be \
-             obtained, on its SHA256 alone; re-run with --channel stable (and --version) to \
-             require a signature"
+            "on the {channel} channel a prebuilt whose signature cannot be obtained still \
+             installs, on its SHA256 alone; a signature that IS present is verified against \
+             the built-in key and a mismatch is refused here as on any channel. Re-run with \
+             --channel stable (and --version) to require a signature to exist"
         )),
     }
 }

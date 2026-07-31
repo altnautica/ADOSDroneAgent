@@ -98,9 +98,12 @@ impl Ctx {
         // rigs do. It gains the check on its next upgrade with no re-pin,
         // whereas moving the default would have helped only boxes installed
         // after it moved. What remains channel-gated is the weaker tolerance of
-        // a signature that cannot be OBTAINED, which today is every release,
-        // because CI does not sign yet. `preflight::lenient_channel_note` says
-        // so on every run rather than leaving it silent.
+        // a signature that cannot be OBTAINED. That tolerance is a fallback for
+        // an artifact published before signing existed, not the normal case:
+        // every current release carries a signature, and the vendored anchor
+        // validates them. `preflight::lenient_channel_note` reports the
+        // tolerance rather than asserting it is in use, because a warning that
+        // fires when nothing is wrong is one an operator learns to ignore.
         let channel = args
             .channel
             .clone()
