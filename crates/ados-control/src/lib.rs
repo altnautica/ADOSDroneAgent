@@ -397,6 +397,16 @@ where
                 tokio::spawn(crate::routes::gs_fleet_hero::run_hero_reconciler(
                     Arc::clone(&proxy),
                 ));
+                // Fleet slot delivery: the ground station allocates a slot at
+                // pair time and, until now, told only the caller. A drone
+                // learned its own fleet address only from a hand-edit or a
+                // cloud push. Reachable even when the drone holds the wrong
+                // slot, because the aux uplink is addressed on the ground
+                // station's link id rather than the drone's. Idle once the
+                // fleet agrees.
+                tokio::spawn(crate::routes::gs_fleet_slot::run_slot_reconciler(
+                    Arc::clone(&proxy),
+                ));
                 state
                     .with_aux_rpc_proxy(proxy)
                     .with_aux_response_listener(listener)
