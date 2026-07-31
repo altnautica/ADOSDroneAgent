@@ -282,10 +282,12 @@ async fn dispatch(
                 // Bounded, not spawned: MAVLink frame order must be preserved,
                 // and the recv loop this runs on is the same one the relay-proxy
                 // Request lane depends on.
-                if tokio::time::timeout(FC_WRITE_TIMEOUT, fc.send_bytes(frame))
-                    .await
-                    .is_err()
-                {
+                // The bound is applied inside the writer lock, not by wrapping
+                // the call here: cancelling the write mid-flight can leave a
+                // partial frame on the wire for the next one to concatenate
+                // onto, which the FC reports as a CRC failure that reads like
+                // line noise. A timeout there re-opens the link instead.
+                if !fc.send_bytes_bounded(frame, FC_WRITE_TIMEOUT).await {
                     counters
                         .0
                         .mavlink_write_timeouts

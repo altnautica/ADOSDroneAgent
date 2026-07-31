@@ -92,6 +92,54 @@ impl FcConnection {
         }
     }
 
+    /// Write raw bytes with a wall bound, treating a timeout as a broken link.
+    ///
+    /// The bound has to be applied here, inside the writer lock, rather than by
+    /// wrapping [`Self::send_bytes`] at the call site. Cancelling that future
+    /// mid-flight is not free: `write_then_flush` may already have put an
+    /// arbitrary prefix of the frame on the wire, and dropping it releases the
+    /// lock with the stream in an unknown state. The next frame is then written
+    /// straight onto that prefix, and the flight controller sees a corrupt frame
+    /// it reports as a CRC failure — indistinguishable from line noise, and
+    /// attributed to the radio rather than to us.
+    ///
+    /// So a timeout drops the writer and asks for a reconnect, exactly as a
+    /// write error already does. Losing one frame and re-opening the link is the
+    /// honest outcome; silently corrupting the following frame is not.
+    ///
+    /// Returns whether the frame was written in full.
+    pub async fn send_bytes_bounded(&self, data: &[u8], budget: Duration) -> bool {
+        let mut guard = self.writer.lock().await;
+        let Some(w) = guard.as_mut() else {
+            return false;
+        };
+        match tokio::time::timeout(budget, write_then_flush(w, data)).await {
+            Ok(Ok(())) => {
+                self.wrote_since_open.store(true, Ordering::Relaxed);
+                true
+            }
+            Ok(Err(e)) => {
+                *guard = None;
+                drop(guard);
+                tracing::warn!(error = %e, "fc_write_failed");
+                self.reconnect.notify_one();
+                false
+            }
+            Err(_) => {
+                // The stream may carry a partial frame. Re-open rather than
+                // write the next frame onto it.
+                *guard = None;
+                drop(guard);
+                tracing::warn!(
+                    budget_ms = budget.as_millis() as u64,
+                    "fc_write_timed_out_reconnecting"
+                );
+                self.reconnect.notify_one();
+                false
+            }
+        }
+    }
+
     /// Write raw bytes toward the flight controller on behalf of a connected
     /// GCS client (the three [`crate::proxies`] transports). Prefers the
     /// local FC writer exactly like [`Self::send_bytes`]; when none exists
