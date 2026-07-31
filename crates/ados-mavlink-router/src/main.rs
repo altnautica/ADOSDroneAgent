@@ -26,7 +26,9 @@ use ados_mavlink_router::connection::swarm_setpoint::{self, SwarmSetpointStatus}
 use ados_mavlink_router::connection::FcConnection;
 use ados_mavlink_router::frame_ingest::{self, IngestCounters, INGEST_QUEUE_DEPTH};
 use ados_mavlink_router::param_cache::ParamCache;
-use ados_mavlink_router::proxies::{run_tcp_proxy, run_udp_proxy, run_ws_proxy, WsProxyAuth};
+use ados_mavlink_router::proxies::{
+    run_tcp_proxy, run_udp_proxy, run_ws_proxy, ProxyAuth, WsProxyAuth,
+};
 use ados_mavlink_router::state::{firmware_family, VehicleState};
 use ados_swarm_control::ModePrecedence;
 
@@ -598,15 +600,21 @@ async fn main() {
         let fc = fc.clone();
         let cancel = cancel.clone();
         let port = tcp_proxy_port();
+        // Same posture object the WebSocket uses. Observe-only here regardless
+        // of the flag for now: this port is advertised to operators as the
+        // QGroundControl / Mission Planner path, so it logs what it would have
+        // refused rather than refusing it.
+        let auth = ProxyAuth::from_config(false);
         tasks.push(tokio::spawn(async move {
-            run_tcp_proxy(fc, port, cancel).await
+            run_tcp_proxy(fc, port, auth, cancel).await
         }));
     }
     for port in udp_proxy_ports() {
         let fc = fc.clone();
         let cancel = cancel.clone();
+        let auth = ProxyAuth::from_config(false);
         tasks.push(tokio::spawn(async move {
-            run_udp_proxy(fc, port, cancel).await
+            run_udp_proxy(fc, port, auth, cancel).await
         }));
     }
     if let Some(ws_port) = ws_proxy_port(&cfg) {

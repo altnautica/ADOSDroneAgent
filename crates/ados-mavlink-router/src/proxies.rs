@@ -65,6 +65,10 @@ const PAIRING_TTL: Duration = Duration::from_secs(2);
 /// the default build does not change the data path. A bench session flips the
 /// config flag to on, after which an unauthorized off-box connection is
 /// rejected at the handshake.
+/// The byte-stream proxies (TCP, UDP) share this gate with the WebSocket, so
+/// the name is an alias rather than a second type: one posture, three edges.
+pub type ProxyAuth = WsProxyAuth;
+
 #[derive(Clone)]
 pub struct WsProxyAuth {
     enforce: bool,
@@ -157,6 +161,37 @@ impl WsProxyAuth {
     /// an off-box credential equivalent to a valid `X-ADOS-Key`. So a browser GCS
     /// (ticket) and a native client (header) both authenticate, and the
     /// `enforce`-on gate is safe to flip for either.
+    /// Classify a raw-socket peer by address alone.
+    ///
+    /// The byte-stream proxies have no header and no handshake, so this is the
+    /// only signal available: `is_on_box` reduces to "is the peer loopback",
+    /// and there is no key or ticket to present.
+    ///
+    /// It also applies [`unpaired_peer_allowed`], which `data_plane_access`
+    /// does not: an UNPAIRED node accepts everything by that rule, and an
+    /// unpaired node reachable from the whole LAN is exactly the state a fresh
+    /// unit ships in. The allowlist keeps the two lifelines a headless node
+    /// actually has — the first-boot AP and the USB gadget network — while
+    /// treating the rest of the LAN as unauthorized.
+    pub fn classify(&self, peer: std::net::IpAddr) -> (bool, Access) {
+        let is_loopback = peer.is_loopback();
+        let mut access = self.decide(is_loopback, false, None);
+        if access == Access::Accept
+            && !is_loopback
+            && !ados_protocol::pairing_posture::unpaired_peer_allowed(&peer)
+            && matches!(self.current(), Pairing::Unpaired)
+        {
+            // Unpaired-accepts-everything, from an address that is neither a
+            // lifeline nor on-box.
+            access = Access::Unauthorized;
+        }
+        let admit = match access {
+            Access::Accept => true,
+            Access::Unauthorized => !self.enforce,
+        };
+        (admit, access)
+    }
+
     fn should_admit(
         &self,
         peer_is_loopback: bool,
@@ -215,7 +250,7 @@ const UDP_MAX_PEERS: usize = 64;
 
 /// TCP MAVLink proxy. Binds `0.0.0.0:<port>` and serves each client a copy of
 /// the FC frame stream while forwarding its bytes to the FC.
-pub async fn run_tcp_proxy(fc: Arc<FcConnection>, port: u16, cancel: Arc<Notify>) {
+pub async fn run_tcp_proxy(fc: Arc<FcConnection>, port: u16, auth: ProxyAuth, cancel: Arc<Notify>) {
     let listener = match TcpListener::bind(("0.0.0.0", port)).await {
         Ok(l) => l,
         Err(e) => {
@@ -227,7 +262,27 @@ pub async fn run_tcp_proxy(fc: Arc<FcConnection>, port: u16, cancel: Arc<Notify>
     loop {
         tokio::select! {
             accepted = listener.accept() => {
-                if let Ok((stream, _addr)) = accepted {
+                if let Ok((stream, addr)) = accepted {
+                    // The peer address was previously discarded here. It is the
+                    // only thing this socket knows about its caller: MAVLink is
+                    // a raw byte stream, so there is no header to carry a
+                    // credential and no handshake to hang one on.
+                    //
+                    // OBSERVE-ONLY. This port is advertised to operators as the
+                    // QGroundControl / Mission Planner path, so refusing an
+                    // unauthorized caller would break third-party GCS
+                    // compatibility at the operator's screen rather than at
+                    // install time. Log what would have been refused, and let
+                    // the field data decide before anything is enforced.
+                    let (_admit, access) = auth.classify(addr.ip());
+                    if access != Access::Accept {
+                        tracing::warn!(
+                            port,
+                            peer = %addr.ip(),
+                            admitted = true,
+                            "tcp_proxy_unauthorized"
+                        );
+                    }
                     tokio::spawn(handle_tcp_client(fc.clone(), stream));
                 }
             }
@@ -279,7 +334,7 @@ async fn handle_tcp_client(fc: Arc<FcConnection>, stream: tokio::net::TcpStream)
 /// UDP MAVLink proxy. Binds `0.0.0.0:<port>`, learns each GCS peer from its
 /// inbound datagrams, forwards peer bytes to the FC, and sends FC frames to
 /// every learned peer.
-pub async fn run_udp_proxy(fc: Arc<FcConnection>, port: u16, cancel: Arc<Notify>) {
+pub async fn run_udp_proxy(fc: Arc<FcConnection>, port: u16, auth: ProxyAuth, cancel: Arc<Notify>) {
     let sock = match UdpSocket::bind(("0.0.0.0", port)).await {
         Ok(s) => Arc::new(s),
         Err(e) => {
@@ -334,6 +389,23 @@ pub async fn run_udp_proxy(fc: Arc<FcConnection>, port: u16, cancel: Arc<Notify>
         tokio::select! {
             recv = sock.recv_from(&mut buf) => {
                 if let Ok((n, addr)) = recv {
+                    // UDP has no handshake, so this is the only point at which
+                    // the sender is ever considered. Note what the insert below
+                    // does: an unrecognised source both injects bytes into the
+                    // flight controller AND enrols itself into the fan-out, so
+                    // the FC's whole telemetry stream is mirrored back to it.
+                    //
+                    // OBSERVE-ONLY, as on TCP: logged, still admitted, so the
+                    // field data decides before a shipped path changes.
+                    let (_admit, access) = auth.classify(addr.ip());
+                    if access != Access::Accept {
+                        tracing::warn!(
+                            port,
+                            peer = %addr.ip(),
+                            admitted = true,
+                            "udp_proxy_unauthorized"
+                        );
+                    }
                     {
                         let mut map = peers.lock().await;
                         map.insert(addr, Instant::now());
@@ -538,6 +610,79 @@ async fn handle_ws_client(
 
 #[cfg(test)]
 mod tests {
+
+    // --- raw-socket posture (TCP / UDP), which have no handshake ------------
+
+    #[test]
+    fn an_unpaired_node_still_answers_its_own_lifelines() {
+        // A headless node's only two operator routes are the first-boot AP and
+        // the USB gadget network, and NEITHER is loopback or link-local. Losing
+        // them would leave a fresh unit with no way in at all.
+        let (_dir, auth) = unpaired_auth(false);
+        for ip in ["127.0.0.1", "192.168.4.20", "192.168.7.2", "169.254.3.4"] {
+            let (admit, access) = auth.classify(ip.parse().unwrap());
+            assert_eq!(access, Access::Accept, "{ip} is a lifeline");
+            assert!(admit);
+        }
+    }
+
+    #[test]
+    fn an_unpaired_node_treats_the_wider_lan_as_unauthorized() {
+        // `data_plane_access` alone says Unpaired => Accept, i.e. an unpaired
+        // node accepts flight-controller bytes from the whole LAN. The
+        // allowlist is what narrows that to the routes an operator actually
+        // has.
+        let (_dir, auth) = unpaired_auth(false);
+        for ip in ["10.0.0.9", "172.16.4.4", "192.168.1.50", "8.8.8.8"] {
+            let (_admit, access) = auth.classify(ip.parse().unwrap());
+            assert_eq!(access, Access::Unauthorized, "{ip} is not a lifeline");
+        }
+    }
+
+    #[test]
+    fn observation_admits_everything_it_flags() {
+        // The whole point of the first stage: this port is advertised as the
+        // third-party GCS path, so refusing a caller would break it at the
+        // operator's screen. Flagging must not change the data path.
+        let (_dir, auth) = unpaired_auth(false);
+        let (admit, access) = auth.classify("10.0.0.9".parse().unwrap());
+        assert_eq!(access, Access::Unauthorized);
+        assert!(admit, "observe-only must still admit");
+    }
+
+    #[test]
+    fn enforcing_refuses_the_same_peer_it_would_have_flagged() {
+        // Proves the second stage is a flag flip rather than new logic, so the
+        // observation gathered now describes exactly what enforcement will do.
+        let (_dir, auth) = unpaired_auth(true);
+        let (admit, access) = auth.classify("10.0.0.9".parse().unwrap());
+        assert_eq!(access, Access::Unauthorized);
+        assert!(!admit);
+        // A lifeline is still admitted under enforcement.
+        assert!(auth.classify("192.168.4.20".parse().unwrap()).0);
+    }
+
+    #[test]
+    fn a_raw_socket_peer_can_present_no_key_and_no_ticket() {
+        // MAVLink is a byte stream: there is no header and no subprotocol, so
+        // address is the only signal. This pins that classify never claims
+        // otherwise — a paired node cannot admit an off-box raw peer.
+        let dir = tempfile::tempdir().unwrap();
+        let pairing = dir.path().join("pairing.json");
+        std::fs::write(&pairing, r#"{"paired":true,"api_key":"secret-key"}"#).unwrap();
+        let auth = ProxyAuth::new(false, pairing);
+        let (_admit, access) = auth.classify("10.0.0.9".parse().unwrap());
+        assert_eq!(
+            access,
+            Access::Unauthorized,
+            "a paired node must not admit an off-box peer that presented nothing"
+        );
+        assert_eq!(
+            auth.classify("127.0.0.1".parse().unwrap()).1,
+            Access::Accept
+        );
+    }
+
     use super::*;
     use std::io::Write;
 
