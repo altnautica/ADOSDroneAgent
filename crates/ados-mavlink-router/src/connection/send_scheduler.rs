@@ -155,18 +155,40 @@ impl FcConnection {
     /// open. Authority is settled at the relay's authentication boundary
     /// instead, which is the only place that can actually decide it.
     ///
+    /// **That rationale holds for the HTTP lane and did not hold here.** The
+    /// raw MAVLink sockets had no authentication boundary at all: they accepted
+    /// the peer address and discarded it. So on a node with no local flight
+    /// controller, bytes from an unauthenticated caller took the fallback below
+    /// and were radiated to a *remote, possibly airborne* aircraft — a longer
+    /// reach than the local case, since it needs no proximity to the vehicle.
+    ///
+    /// `caller` now carries the classification the socket made, so the fallback
+    /// can tell an authorised relay client from an anonymous one. It is
+    /// reported rather than refused for the same reason the socket gates are
+    /// observation-only: this port is advertised as the path for a third-party
+    /// ground station, and a ground station relaying a linked drone is exactly
+    /// the shape that takes this fallback.
+    ///
     /// Deliberately distinct from `send_bytes`, which this router's own
     /// heartbeat/stream-interval/param-sweep housekeeping also calls: those
     /// exist to talk to a directly-attached FC and must stay a silent no-op
     /// with none installed, not start radiating this router's own internal
     /// traffic onto a client's uplink.
-    pub async fn send_client_bytes(&self, data: &[u8]) {
+    pub async fn send_client_bytes(&self, data: &[u8], caller: ClientOrigin) {
         let has_writer = { self.writer.lock().await.is_some() };
         if has_writer {
             self.send_bytes(data).await;
             return;
         }
         if let Some(uplink) = self.aux_uplink.lock().await.as_ref() {
+            if caller == ClientOrigin::Unauthenticated {
+                // The amplifying case: no local vehicle, so these bytes leave
+                // over the radio to one that may be flying.
+                tracing::warn!(
+                    len = data.len(),
+                    "relay_uplink_from_unauthenticated_client"
+                );
+            }
             uplink.send(data);
         }
     }

@@ -36,8 +36,94 @@ pub struct BitrateController {
     /// Starts `None`, which is exactly `ados-video`'s boot state, so the two
     /// agree before the first tick and no spurious apply is issued.
     asserted_ceiling_kbps: Option<u32>,
+    /// Backoff state for failed ceiling publishes. See [`CeilingRetry`].
+    ceiling_retry: CeilingRetry,
     encoder_sock: PathBuf,
     encoder_sidecar: PathBuf,
+}
+
+/// Shortest and longest gap between retries of a failed encoder-ceiling publish.
+const CEILING_RETRY_MIN: Duration = Duration::from_secs(2);
+const CEILING_RETRY_MAX: Duration = Duration::from_secs(60);
+
+/// One warning per this many consecutive failures, after the first.
+///
+/// At the capped retry gap that is roughly one line every half hour: quiet
+/// enough to live with for the life of a process, frequent enough that the
+/// fault is still on the record.
+const CEILING_LOG_EVERY: u32 = 30;
+
+/// When to retry publishing the encoder ceiling after a failed attempt.
+///
+/// Without this the controller retried at the tick rate, which is once a second,
+/// forever. The path that made it permanent is a node with no encoder at all:
+/// nothing publishes an encoder state, so there is no observed ceiling to
+/// reconcile against and the fallback compares against the last SUCCESSFUL
+/// publish — which never happens, because every attempt fails. So the
+/// needs-apply test was true on every tick from boot, and one absent socket
+/// became a warning every second for as long as the node ran.
+///
+/// The answer is not to stop trying. An encoder that starts late, or comes back
+/// after a crash, has to get its ceiling. So the attempt itself backs off
+/// exponentially to a minute, and the log decays with it rather than the fault
+/// going silent: loud on the first failure, then one line per
+/// [`CEILING_LOG_EVERY`] failures carrying the running total, so an operator
+/// reading the log an hour later still learns that this has been failing the
+/// whole time and how many times.
+///
+/// A change of intent — a rung step, or the ladder being disarmed — clears the
+/// backoff. That is new information the encoder has not been told yet, and it
+/// preserves the original contract of one attempt per rung change.
+#[derive(Debug, Default)]
+struct CeilingRetry {
+    /// Consecutive failed attempts since the last success. Not reset by a
+    /// change of intent: it is the count of how long this has been broken.
+    failures: u32,
+    /// Earliest instant the next attempt may run, while backing off.
+    next_attempt: Option<Instant>,
+    /// The ceiling the last attempt tried to publish, so a change of intent can
+    /// be told from a repeat of the same one.
+    attempted: Option<Option<u32>>,
+}
+
+impl CeilingRetry {
+    /// Whether an attempt to publish `want` may run now.
+    fn should_attempt(&self, want: Option<u32>, now: Instant) -> bool {
+        // New intent always gets an immediate attempt.
+        if self.attempted != Some(want) {
+            return true;
+        }
+        self.next_attempt.map(|at| now >= at).unwrap_or(true)
+    }
+
+    /// Record a failed attempt and schedule the next one.
+    fn record_failure(&mut self, want: Option<u32>, now: Instant) {
+        self.failures = self.failures.saturating_add(1);
+        self.attempted = Some(want);
+        // Exponential from CEILING_RETRY_MIN, capped. `saturating_mul` keeps a
+        // long-running failure from overflowing the shift.
+        let factor = 1u32
+            .checked_shl(self.failures.saturating_sub(1))
+            .unwrap_or(u32::MAX);
+        let gap = CEILING_RETRY_MIN
+            .saturating_mul(factor)
+            .min(CEILING_RETRY_MAX);
+        self.next_attempt = Some(now + gap);
+    }
+
+    /// Record a successful attempt, returning how many failures it ended.
+    fn record_success(&mut self, want: Option<u32>) -> u32 {
+        let recovered_from = self.failures;
+        self.failures = 0;
+        self.next_attempt = None;
+        self.attempted = Some(want);
+        recovered_from
+    }
+
+    /// Whether this failure count warrants a warning rather than a debug line.
+    fn should_warn(failures: u32) -> bool {
+        failures == 1 || failures.is_multiple_of(CEILING_LOG_EVERY)
+    }
 }
 
 /// Where this tick's link measurement came from.
@@ -191,6 +277,7 @@ impl BitrateController {
             hysteresis: Hysteresis::new(tier_count, 0),
             mcs: McsLadder::new(mcs_ladder::DEFAULT_LADDER_MAX_MCS, mcs_ladder::MCS_FLOOR),
             asserted_ceiling_kbps: None,
+            ceiling_retry: CeilingRetry::default(),
             encoder_sock: PathBuf::from(VIDEO_ENCODER_SOCK),
             encoder_sidecar: PathBuf::from(VIDEO_PROFILE_SIDECAR),
         }
@@ -422,22 +509,48 @@ impl BitrateController {
         if !ceiling_needs_apply(live, self.asserted_ceiling_kbps, want) {
             return;
         }
+        // On a node with no encoder the check above is true on every tick
+        // forever, because only a SUCCESSFUL publish advances what it compares
+        // against. Backing the attempt off is what stops that from being a
+        // warning every second for the life of the process, without the
+        // controller giving up on an encoder that has not started yet.
+        let now = Instant::now();
+        if !self.ceiling_retry.should_attempt(want, now) {
+            return;
+        }
         match ados_video::profile::set_bitrate_ceiling_at(&self.encoder_sock, want).await {
             Ok(state) => {
                 self.asserted_ceiling_kbps = want;
+                let recovered_from = self.ceiling_retry.record_success(want);
                 tracing::info!(
                     ceiling_kbps = ?want,
                     profile = state.profile.as_str(),
                     encoder_bitrate_kbps = state.bitrate_kbps,
+                    recovered_after_failures = recovered_from,
                     "encoder_ceiling_applied"
                 );
             }
             Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    ceiling_kbps = ?want,
-                    "encoder_ceiling_apply_failed"
-                );
+                self.ceiling_retry.record_failure(want, now);
+                let failures = self.ceiling_retry.failures;
+                // Loud the first time, then one line per CEILING_LOG_EVERY
+                // carrying the running total, so the fault stays on the record
+                // without filling it.
+                if CeilingRetry::should_warn(failures) {
+                    tracing::warn!(
+                        error = %e,
+                        ceiling_kbps = ?want,
+                        consecutive_failures = failures,
+                        "encoder_ceiling_apply_failed"
+                    );
+                } else {
+                    tracing::debug!(
+                        error = %e,
+                        ceiling_kbps = ?want,
+                        consecutive_failures = failures,
+                        "encoder_ceiling_apply_failed"
+                    );
+                }
             }
         }
     }
@@ -626,6 +739,114 @@ mod tests {
         assert!(!ceiling_needs_apply(None, Some(1200), Some(1200)));
         // Intent changed: try once.
         assert!(ceiling_needs_apply(None, Some(1200), Some(2000)));
+    }
+
+    /// The gap the existing "does not retry every tick" test could not cover.
+    ///
+    /// It only exercised `asserted == Some(_)`, i.e. a controller that had
+    /// published successfully at least once. A node with NO encoder never gets
+    /// there: `asserted` stays `None`, so `ceiling_needs_apply(None, None,
+    /// Some(x))` is true on every tick from boot, and the failed publish it
+    /// triggers logged a warning once a second for the life of the process.
+    #[test]
+    fn a_node_that_has_never_published_still_wants_to_apply_every_tick() {
+        // This is the condition the backoff exists to survive; it is correct
+        // (the ceiling really has not been delivered) and it never clears on
+        // its own, which is exactly why the ATTEMPT has to be rate-limited
+        // rather than the check changed.
+        assert!(ceiling_needs_apply(None, None, Some(4000)));
+    }
+
+    #[test]
+    fn a_node_with_no_encoder_does_not_attempt_once_a_second_forever() {
+        // Five minutes of 1 Hz ticks against an encoder that never answers.
+        // Before the backoff this was 300 attempts and 300 warnings.
+        let mut retry = CeilingRetry::default();
+        let t0 = Instant::now();
+        let mut attempts = 0u32;
+        for tick in 0..300u64 {
+            let now = t0 + Duration::from_secs(tick);
+            if retry.should_attempt(Some(4000), now) {
+                attempts += 1;
+                retry.record_failure(Some(4000), now);
+            }
+        }
+        assert!(
+            attempts <= 15,
+            "backed-off retries over five minutes should be a handful, got {attempts}"
+        );
+        // But it must NOT give up: an encoder that starts late still has to be
+        // told the ceiling, so the retries keep coming at the capped rate.
+        assert!(
+            attempts >= 5,
+            "the controller must keep trying, got only {attempts}"
+        );
+    }
+
+    #[test]
+    fn the_failure_is_still_reported_just_not_every_second() {
+        // The signal must survive the rate limit. Loud on the first failure,
+        // then periodically with the running total, never silent.
+        assert!(
+            CeilingRetry::should_warn(1),
+            "the first failure must be loud"
+        );
+        assert!(!CeilingRetry::should_warn(2));
+        assert!(!CeilingRetry::should_warn(29));
+        assert!(
+            CeilingRetry::should_warn(CEILING_LOG_EVERY),
+            "a persistent failure must keep surfacing"
+        );
+        assert!(CeilingRetry::should_warn(CEILING_LOG_EVERY * 4));
+    }
+
+    #[test]
+    fn a_rung_change_is_attempted_at_once_despite_the_backoff() {
+        // The backoff must not delay NEW information. A rung step is something
+        // the encoder has not been told yet, so it goes out immediately.
+        let mut retry = CeilingRetry::default();
+        let t0 = Instant::now();
+        retry.record_failure(Some(4000), t0);
+        assert!(
+            !retry.should_attempt(Some(4000), t0),
+            "the same intent waits for the backoff"
+        );
+        assert!(
+            retry.should_attempt(Some(2000), t0),
+            "a rung change must not wait"
+        );
+        // Disarming the ladder clears the clamp, which is also new intent.
+        assert!(retry.should_attempt(None, t0));
+    }
+
+    #[test]
+    fn a_successful_publish_clears_the_backoff_and_reports_the_outage() {
+        let mut retry = CeilingRetry::default();
+        let t0 = Instant::now();
+        retry.record_failure(Some(4000), t0);
+        retry.record_failure(Some(4000), t0);
+        assert_eq!(
+            retry.record_success(Some(4000)),
+            2,
+            "recovery must say how long it had been failing"
+        );
+        assert!(retry.should_attempt(Some(4000), t0), "backoff is cleared");
+        assert_eq!(retry.failures, 0);
+    }
+
+    #[test]
+    fn the_retry_gap_grows_but_stays_bounded() {
+        // Bounded so a late encoder is picked up within a minute, not hours.
+        let mut retry = CeilingRetry::default();
+        let t0 = Instant::now();
+        for _ in 0..40 {
+            retry.record_failure(Some(4000), t0);
+        }
+        assert!(
+            retry.should_attempt(Some(4000), t0 + CEILING_RETRY_MAX),
+            "the gap must cap, not grow without bound"
+        );
+        assert!(!retry.should_attempt(Some(4000), t0 + Duration::from_secs(1)));
     }
 
     /// Disabling the ladder clears the clamp rather than pinning the encoder at
