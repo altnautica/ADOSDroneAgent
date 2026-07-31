@@ -1216,6 +1216,14 @@ jobs:
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: write
+    env:
+      # Declared as a job variable rather than written inline in the script, so
+      # the installer's release-tag guard can still tie this job to the binary
+      # catalog. That guard reads the tag out of the workflow structurally; a
+      # tag that only ever appears inside a shell line would drop out of it and
+      # reopen the hole it exists to close, which is an install 404ing an asset
+      # and continuing degraded in silence.
+      RELEASE_TAG: prebuilt-vision-onnx
     steps:
       - name: Collect the staged artifacts
         uses: actions/download-artifact@v4
@@ -1255,10 +1263,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tag=prebuilt-vision-onnx
-          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" \
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
             --prerelease --title "Prebuilt ados-vision (onnx, rolling)" --notes ""
-          gh release upload "$tag" rel/* --clobber
+          gh release upload "$RELEASE_TAG" rel/* --clobber
 
   publish-installer:
     needs: build-test

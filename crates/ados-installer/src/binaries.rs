@@ -445,6 +445,26 @@ mod tests {
         let mut found = BTreeMap::new();
         for (job_name, job) in jobs {
             let job_name = job_name.as_str().unwrap_or("<unnamed job>").to_string();
+
+            // A job that publishes with the `gh` CLI rather than the release
+            // action has no `with.tag_name` to read, so it declares the tag as
+            // a `RELEASE_TAG` job variable instead. Recognised here so such a
+            // job is still tied to the catalog; the alternative is matching the
+            // tag inside a shell line, which would tie this guard to the exact
+            // spelling of a script.
+            if let Some(tag) = job.get("env").and_then(|e| e.get("RELEASE_TAG")) {
+                let tag = tag
+                    .as_str()
+                    .unwrap_or_else(|| panic!("job `{job_name}` has a non-string RELEASE_TAG"));
+                assert!(
+                    !tag.contains("${{"),
+                    "job `{job_name}` publishes to a templated tag `{tag}`; this test can \
+                     only tie literal tags to the catalog, so either pin the tag or extend \
+                     this check to resolve it"
+                );
+                found.entry(tag.to_string()).or_insert(job_name.clone());
+            }
+
             let Some(steps) = job.get("steps").and_then(|s| s.as_sequence()) else {
                 continue;
             };

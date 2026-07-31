@@ -34,6 +34,15 @@
 //!   byte 8+T..8+T+N     path bytes (UTF-8, not validated here)
 //!   byte 8+T+N..10+T+N  body_len (u16 BE)
 //!   byte 10+T+N..       body bytes
+//!   [optional, only when a relay ticket is attached]
+//!     next byte         ticket_len (u8)
+//!     following         ticket bytes (UTF-8)
+//!
+//! The ticket is trailing and optional so that a request without one encodes to
+//! byte-identical output to the layout above. A decoder that predates the field
+//! reads a ticketed frame as a length mismatch and refuses it, which is why a
+//! ground station attaches one only to a drone that has confirmed it holds the
+//! per-pair secret — an unconfirmed drone is never sent a frame it cannot read.
 //!
 //! RpcResponseFragment
 //!   byte 0              sender_len (u8, <= MAX_DEVICE_ID)
@@ -152,6 +161,14 @@ pub struct RpcRequest<'a> {
     pub target: &'a [u8],
     pub path: &'a [u8],
     pub body: &'a [u8],
+    /// The relay ticket accompanying this call, or empty when none was sent.
+    ///
+    /// Trailing and optional so that a request carrying no ticket encodes to
+    /// exactly the bytes it always did. That is what lets the credential arrive
+    /// without a flag day: a ground station only ever attaches one to a drone
+    /// that has acknowledged holding the secret, and a drone that has not
+    /// acknowledged is therefore never sent a frame it would fail to decode.
+    pub ticket: &'a [u8],
 }
 
 /// Why a frame could not be decoded. Distinct variants so a caller can count
@@ -192,7 +209,29 @@ pub fn encode_request(
     path: &[u8],
     body: &[u8],
 ) -> Option<Vec<u8>> {
+    encode_request_with_ticket(method, id, target, path, body, &[])
+}
+
+/// Encode a request carrying a relay ticket.
+///
+/// An EMPTY ticket encodes to byte-identical output to [`encode_request`], so
+/// the credential is invisible on the wire until one is actually attached. The
+/// ticket is appended after the body, length-prefixed, which is why a decoder
+/// that predates it reads the extra bytes as a length mismatch and refuses the
+/// frame -- the reason a ground station attaches one only to a drone that has
+/// confirmed it holds the secret.
+pub fn encode_request_with_ticket(
+    method: RpcMethod,
+    id: u32,
+    target: &[u8],
+    path: &[u8],
+    body: &[u8],
+    ticket: &[u8],
+) -> Option<Vec<u8>> {
     if target.len() > MAX_DEVICE_ID {
+        return None;
+    }
+    if ticket.len() > u8::MAX as usize {
         return None;
     }
     if path.len() > u16::MAX as usize {
@@ -201,7 +240,13 @@ pub fn encode_request(
     if body.len() > u16::MAX as usize {
         return None;
     }
-    let total = RPC_REQUEST_OVERHEAD_BASE + target.len() + path.len() + body.len();
+    let ticket_overhead = if ticket.is_empty() {
+        0
+    } else {
+        1 + ticket.len()
+    };
+    let total =
+        RPC_REQUEST_OVERHEAD_BASE + target.len() + path.len() + body.len() + ticket_overhead;
     if total > AUX_MAX_PAYLOAD {
         return None;
     }
@@ -214,6 +259,10 @@ pub fn encode_request(
     out.extend_from_slice(path);
     out.extend_from_slice(&(body.len() as u16).to_be_bytes());
     out.extend_from_slice(body);
+    if !ticket.is_empty() {
+        out.push(ticket.len() as u8);
+        out.extend_from_slice(ticket);
+    }
     Some(out)
 }
 
@@ -247,19 +296,43 @@ pub fn decode_request(payload: &[u8]) -> Result<RpcRequest<'_>, RpcCodecError> {
     let body_len =
         u16::from_be_bytes([payload[body_len_offset], payload[body_len_offset + 1]]) as usize;
     let body_start = body_len_offset + 2;
-    if body_start + body_len != payload.len() {
+    let body_end = body_start + body_len;
+    if body_end > payload.len() {
         return Err(RpcCodecError::LengthMismatch {
-            declared: body_start + body_len,
+            declared: body_end,
             actual: payload.len(),
         });
     }
-    let body = &payload[body_start..body_start + body_len];
+    let body = &payload[body_start..body_end];
+
+    // Anything after the body is the optional relay ticket. Absent is the
+    // ordinary case and stays exact: a payload ending at the body decodes to an
+    // empty ticket, which is how frames from before the credential existed
+    // continue to read correctly. Present, it must account for every remaining
+    // byte -- trailing bytes beyond the declared ticket are still a length
+    // fault, so this stays as strict about garbage as the body check it
+    // replaces.
+    let ticket: &[u8] = if body_end == payload.len() {
+        &[]
+    } else {
+        let ticket_len = payload[body_end] as usize;
+        let ticket_start = body_end + 1;
+        if ticket_start + ticket_len != payload.len() {
+            return Err(RpcCodecError::LengthMismatch {
+                declared: ticket_start + ticket_len,
+                actual: payload.len(),
+            });
+        }
+        &payload[ticket_start..ticket_start + ticket_len]
+    };
+
     Ok(RpcRequest {
         id,
         method,
         target,
         path,
         body,
+        ticket,
     })
 }
 
@@ -400,5 +473,75 @@ mod tests {
         assert_eq!(RPC_REQUEST_OVERHEAD_BASE, 10);
         let enc = encode_request(RpcMethod::Get, 1, &[], &[], &[]).unwrap();
         assert_eq!(enc.len(), RPC_REQUEST_OVERHEAD_BASE);
+    }
+
+    #[test]
+    fn a_ticketless_request_encodes_to_exactly_the_bytes_it_always_did() {
+        // The whole compatibility argument rests on this. If an absent ticket
+        // changed a single byte, every drone running an older build would stop
+        // decoding relayed calls the moment this shipped.
+        let with_helper =
+            encode_request(RpcMethod::Post, 7, b"77735cd38937", b"/api/status", b"{}").unwrap();
+        let explicit_empty = encode_request_with_ticket(
+            RpcMethod::Post,
+            7,
+            b"77735cd38937",
+            b"/api/status",
+            b"{}",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(with_helper, explicit_empty);
+        assert_eq!(
+            with_helper.len(),
+            RPC_REQUEST_OVERHEAD_BASE + 12 + 11 + 2,
+            "no ticket byte is spent when there is no ticket"
+        );
+    }
+
+    #[test]
+    fn a_ticket_survives_the_round_trip() {
+        let ticket = b"v1|relay.http|77735cd38937|100|130|abcdef";
+        let enc = encode_request_with_ticket(
+            RpcMethod::Get,
+            3,
+            b"77735cd38937",
+            b"/api/status",
+            &[],
+            ticket,
+        )
+        .unwrap();
+        let dec = decode_request(&enc).unwrap();
+        assert_eq!(dec.ticket, ticket);
+        assert_eq!(dec.path, b"/api/status");
+        assert_eq!(dec.target, b"77735cd38937");
+    }
+
+    #[test]
+    fn a_request_without_a_ticket_decodes_to_an_empty_one() {
+        let enc = encode_request(RpcMethod::Get, 3, b"abc", b"/api/status", &[]).unwrap();
+        assert!(decode_request(&enc).unwrap().ticket.is_empty());
+    }
+
+    #[test]
+    fn trailing_garbage_beyond_a_declared_ticket_is_still_a_length_fault() {
+        // Relaxing the body check to admit a ticket must not relax it to admit
+        // anything at all.
+        let mut enc =
+            encode_request_with_ticket(RpcMethod::Get, 1, b"abc", b"/api/x", &[], b"tok").unwrap();
+        enc.push(0xFF);
+        assert!(matches!(
+            decode_request(&enc),
+            Err(RpcCodecError::LengthMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn a_ticket_too_long_to_length_prefix_is_refused_rather_than_truncated() {
+        let too_long = vec![b'x'; 256];
+        assert!(
+            encode_request_with_ticket(RpcMethod::Get, 1, b"abc", b"/api/x", &[], &too_long)
+                .is_none()
+        );
     }
 }

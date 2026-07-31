@@ -399,6 +399,7 @@ async fn dispatch(
                         let method = request.method;
                         let path = request.path.to_vec();
                         let body = request.body.to_vec();
+                        let ticket = request.ticket.to_vec();
                         let egress = Arc::clone(egress);
                         let dedupe = Arc::clone(dedupe);
                         let counters = counters.clone();
@@ -411,6 +412,7 @@ async fn dispatch(
                                 target: &[],
                                 path: &path,
                                 body: &body,
+                                ticket: &ticket,
                             };
                             crate::aux_rpc_handler::handle(
                                 &req, &egress, &dedupe, &counters, &sender,
