@@ -10,6 +10,7 @@ use crate::ctx::Ctx;
 use crate::exec;
 use crate::graph::{Step, StepKind, StepOutcome};
 use crate::ui::{activity, ProgressSink};
+use std::time::{Duration, Instant};
 
 /// The cross-profile core apt package set (REQUIRED). Ported verbatim from
 /// `install_system_deps` in 02-deps.sh: Python venv + native-extension build
@@ -143,10 +144,69 @@ fn apt(args: &[&str], sink: &ProgressSink) -> exec::CmdResult {
     })
 }
 
+/// How long to wait for another package manager to release the dpkg lock.
+///
+/// A freshly flashed board runs `unattended-upgrades` on first boot, which
+/// holds this lock for anywhere from seconds to minutes. Failing the moment it
+/// is contended aborts the whole install on a condition that resolves itself,
+/// and the operator's only recourse is to run the one-liner again and hope for
+/// better timing.
+const APT_LOCK_WAIT: Duration = Duration::from_secs(180);
+
+/// How often to retry while the lock is held.
+const APT_LOCK_POLL: Duration = Duration::from_secs(3);
+
+/// Whether this failure is the dpkg lock being held by somebody else, rather
+/// than a real packaging problem.
+///
+/// Matched on the message because apt does not give it a distinct exit code —
+/// every one of these is exit 100, the same as a genuinely broken index.
+fn is_lock_contention(stderr: &str) -> bool {
+    let s = stderr.to_ascii_lowercase();
+    s.contains("could not get lock")
+        || s.contains("unable to acquire the dpkg frontend lock")
+        || s.contains("temporarily unavailable")
+        || (s.contains("is held by process") && s.contains("lock"))
+}
+
+/// Run an apt invocation, waiting out a contended dpkg lock.
+///
+/// Only lock contention is retried. A broken index, an unknown package or a
+/// failing post-install script returns immediately, because those do not get
+/// better by trying again and a silent retry loop would only delay the report.
+fn apt_waiting_for_lock(argv: &[&str], sink: &ProgressSink) -> crate::exec::CmdResult {
+    let deadline = Instant::now() + APT_LOCK_WAIT;
+    let mut announced = false;
+    loop {
+        let res = apt(argv, sink);
+        if res.success() || !res.spawned || !is_lock_contention(&res.stderr) {
+            return res;
+        }
+        if Instant::now() >= deadline {
+            tracing::warn!(
+                waited_s = APT_LOCK_WAIT.as_secs(),
+                "dpkg lock still held; giving up"
+            );
+            return res;
+        }
+        if !announced {
+            // Say what is happening. An install that looks hung for two minutes
+            // with no explanation is indistinguishable from one that has died.
+            sink.activity(
+                "deps",
+                "waiting for another package manager to finish".to_string(),
+            );
+            tracing::info!("dpkg lock held by another process; waiting");
+            announced = true;
+        }
+        std::thread::sleep(APT_LOCK_POLL);
+    }
+}
+
 /// `apt-get update`, surfacing failure. Errors propagate so the caller fails
 /// the step (a stale index breaks every install below).
 fn apt_update(sink: &ProgressSink) -> anyhow::Result<()> {
-    let res = apt(&["update"], sink);
+    let res = apt_waiting_for_lock(&["update"], sink);
     if res.success() {
         Ok(())
     } else if !res.spawned {
@@ -164,7 +224,7 @@ fn apt_install(pkgs: &[&str], required: bool, sink: &ProgressSink) -> anyhow::Re
     }
     let mut argv: Vec<&str> = vec!["install", "-y"];
     argv.extend_from_slice(pkgs);
-    let res = apt(&argv, sink);
+    let res = apt_waiting_for_lock(&argv, sink);
     if res.success() {
         return Ok(());
     }
@@ -486,5 +546,51 @@ mod tests {
         assert!(!parse_py_version_ge_311("3.10"));
         assert!(!parse_py_version_ge_311("2.7"));
         assert!(!parse_py_version_ge_311("garbage"));
+    }
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+
+    #[test]
+    fn the_dpkg_lock_message_is_recognised_as_contention() {
+        // The exact text a freshly flashed board produces while
+        // unattended-upgrades still holds the lock. Getting this wrong aborts
+        // the whole install on a condition that clears itself.
+        assert!(is_lock_contention(
+            "E: Could not get lock /var/lib/dpkg/lock-frontend. It is held by process 2341 (apt-get)"
+        ));
+        assert!(is_lock_contention(
+            "E: Unable to acquire the dpkg frontend lock (/var/lib/dpkg/lock-frontend), is another process using it?"
+        ));
+        assert!(is_lock_contention(
+            "E: Could not get lock /var/lib/apt/lists/lock - open (11: Resource temporarily unavailable)"
+        ));
+    }
+
+    #[test]
+    fn a_real_packaging_failure_is_not_treated_as_contention() {
+        // These do not get better by waiting, and retrying them would only
+        // delay the report by the whole lock timeout.
+        assert!(!is_lock_contention(
+            "E: Unable to locate package ados-nonesuch"
+        ));
+        assert!(!is_lock_contention(
+            "E: The repository 'http://example.invalid stable Release' does not have a Release file."
+        ));
+        assert!(!is_lock_contention(
+            "dpkg: error processing package foo (--configure)"
+        ));
+        assert!(!is_lock_contention(""));
+    }
+
+    #[test]
+    fn the_wait_is_bounded_and_long_enough_to_outlast_first_boot_upgrades() {
+        // Unbounded would hang an install forever behind a stuck package
+        // manager; too short and it does not outlast the thing it waits for.
+        assert!(APT_LOCK_WAIT >= Duration::from_secs(60));
+        assert!(APT_LOCK_WAIT <= Duration::from_secs(600));
+        assert!(APT_LOCK_POLL < APT_LOCK_WAIT);
     }
 }
