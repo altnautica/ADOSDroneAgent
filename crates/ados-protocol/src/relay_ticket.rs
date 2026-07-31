@@ -229,6 +229,77 @@ pub fn decide_accept(held: Option<&str>, offered: &str) -> AcceptDecision {
     }
 }
 
+/// The secret this drone currently holds, or `None` when it holds none.
+///
+/// A missing file and an unreadable one are both "none": the drone then has no
+/// credential to verify against and, per the inert posture, admits the call as
+/// it always did. Failing closed on an unreadable secret would take a working
+/// relay offline over a permissions slip, which is a worse outcome than the
+/// exposure that exists today anyway.
+pub fn load_secret_at(path: &std::path::Path) -> Option<String> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let trimmed = raw.trim().to_string();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
+/// Store a relay secret at `path` with owner-only permissions.
+///
+/// The mode is set explicitly AFTER writing as well as at open time, because
+/// the open-time mode applies only on creation: an existing file left
+/// group-readable by an earlier build would otherwise keep that mode and leave
+/// the material readable to anything on the box. Mirrors the plugin token
+/// secret's write, which is owner-only for the same reason.
+pub fn store_secret_at(path: &std::path::Path, secret: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(meta) = std::fs::metadata(parent) {
+                let mut perms = meta.permissions();
+                perms.set_mode(0o700);
+                let _ = std::fs::set_permissions(parent, perms);
+            }
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(secret.as_bytes())?;
+        f.flush()?;
+        f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, secret.as_bytes())
+    }
+}
+
+/// Apply an offered secret under the [`decide_accept`] rule, storing it only on
+/// [`AcceptDecision::Accept`].
+///
+/// The decision and the write are joined here so no caller can reach the write
+/// without going through the rule -- the whole scheme rests on first-write-wins,
+/// and a handler that stored first and asked afterwards would defeat it.
+pub fn apply_offered_secret(
+    path: &std::path::Path,
+    offered: &str,
+) -> Result<AcceptDecision, std::io::Error> {
+    let decision = decide_accept(load_secret_at(path).as_deref(), offered);
+    if decision == AcceptDecision::Accept {
+        store_secret_at(path, offered)?;
+    }
+    Ok(decision)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,4 +470,87 @@ mod tests {
     // Checked at compile time: a shorter secret would weaken every ticket,
     // and a runtime assertion on a constant is not a test.
     const _: () = assert!(RELAY_SECRET_LEN >= 32);
+
+    #[test]
+    fn applying_an_offer_to_an_unset_drone_stores_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secrets/relay-peer-secret");
+
+        assert_eq!(
+            apply_offered_secret(&path, HEX32).unwrap(),
+            AcceptDecision::Accept
+        );
+        assert_eq!(load_secret_at(&path).as_deref(), Some(HEX32));
+    }
+
+    #[test]
+    fn applying_a_restated_secret_leaves_the_stored_value_alone() {
+        // The ground station restates on every reconcile tick, so the ordinary
+        // steady state must not read as a refusal.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secrets/relay-peer-secret");
+        apply_offered_secret(&path, HEX32).unwrap();
+
+        assert_eq!(
+            apply_offered_secret(&path, HEX32).unwrap(),
+            AcceptDecision::AlreadyHeld
+        );
+    }
+
+    #[test]
+    fn applying_a_stranger_offer_leaves_the_stored_secret_intact() {
+        // The attack the first-write-wins rule exists to stop: anyone in radio
+        // range replacing the credential with their own would leave something
+        // that reads as protection while granting exactly what it denies.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secrets/relay-peer-secret");
+        apply_offered_secret(&path, HEX32).unwrap();
+
+        let attacker = "f".repeat(64);
+        assert_eq!(
+            apply_offered_secret(&path, &attacker).unwrap(),
+            AcceptDecision::RefusedWouldOverwrite
+        );
+        assert_eq!(
+            load_secret_at(&path).as_deref(),
+            Some(HEX32),
+            "the held secret is untouched"
+        );
+    }
+
+    #[test]
+    fn applying_a_malformed_offer_reaches_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secrets/relay-peer-secret");
+
+        assert_eq!(
+            apply_offered_secret(&path, "nonsense").unwrap(),
+            AcceptDecision::RefusedMalformed
+        );
+        assert!(load_secret_at(&path).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stored_secret_is_owner_only_even_over_a_looser_existing_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("relay-peer-secret");
+        // An earlier build could have left this world-readable; the open-time
+        // mode alone would not repair it.
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        store_secret_at(&path, HEX32).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "got {mode:o}");
+    }
+
+    #[test]
+    fn an_absent_secret_reads_as_none_rather_than_an_error() {
+        // Which is what keeps the drone inert until one is delivered.
+        let dir = tempfile::tempdir().unwrap();
+        assert!(load_secret_at(&dir.path().join("nope")).is_none());
+    }
 }
