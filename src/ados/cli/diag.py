@@ -260,8 +260,18 @@ def diag_link(as_json: bool) -> None:
             f"{theme.dim(f'({loss:.1f}% packet loss {by}, decode={link_diag or state})')}"
         )
     elif isinstance(link_diag, str) and link_diag:
+        # Name what each word is answering. The verdict describes what the radio
+        # is DECODING right now; the state is the pairing lifecycle record. They
+        # legitimately disagree -- a link decoding hundreds of packets a second
+        # can sit behind a lifecycle record nothing has refreshed -- but printed
+        # bare, "HEALTHY (state=stale)" reads as a surface contradicting itself,
+        # and a reading an operator has to explain away is one they stop
+        # trusting.
         dot = _ansi.dot(theme, _LINK_STATE.get(link_diag, "warn"))
-        click.echo(f"  {dot} {theme.bold(link_diag.upper())}  {theme.dim(f'(state={state})')}")
+        click.echo(
+            f"  {dot} {theme.bold(link_diag.upper())} {theme.dim('decode')}"
+            f"  {theme.dim(f'· pairing state: {state}')}"
+        )
     else:
         # No verdict field on this reading — report the lifecycle state honestly
         # rather than inventing a verdict.
