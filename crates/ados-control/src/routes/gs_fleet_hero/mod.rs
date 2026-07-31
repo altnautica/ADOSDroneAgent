@@ -35,6 +35,7 @@ pub mod reconcile;
 
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::{Arc, LazyLock};
 use std::task::{Context, Poll};
@@ -139,6 +140,66 @@ impl FleetHeroState {
     }
 }
 
+// ---------------------------------------------------------------------------
+// publishing the selection to the fan-out
+// ---------------------------------------------------------------------------
+
+/// Publish `hero`'s slot so the ground station's video fan-out serves it.
+///
+/// The selection is made here; the fan-out that feeds the mediamtx ingest and
+/// the LCD tap runs in `ados-groundlink`, in another process. Without this hop
+/// that fan-out served whichever slot its generation started on — the LOWEST
+/// registered one — so promoting a hero on any other slot left the operator
+/// watching a different aircraft at 1 fps while the drone they picked streamed
+/// full video to nobody. A run-dir sidecar rather than another IPC channel, so a
+/// restart on either side re-derives its view from disk instead of the two
+/// drifting apart in silence.
+///
+/// Idempotent: a file that already names this slot and device is left alone, so
+/// the reconcile tick can call this every few seconds without rewriting tmpfs
+/// for a settled fleet. Returns `true` when it wrote.
+///
+/// A hero the registry does not know publishes NOTHING and returns `false`.
+/// Leaving the previous value in place is the safe answer: the fan-out validates
+/// what it reads against the same registry, so a selection whose drone has left
+/// is already treated as no selection there.
+pub(super) fn publish_hero_to(path: &Path, slots: &[FleetSlot], hero: &str) -> bool {
+    let Some(slot) = fanout::hero_slot(slots, hero) else {
+        return false;
+    };
+    let already = ados_groundlink::read_hero_from(path)
+        .is_some_and(|h| h.slot == slot && h.device_id == hero);
+    if already {
+        return false;
+    }
+    match ados_groundlink::write_hero_to(path, slot, hero) {
+        Ok(()) => {
+            tracing::info!(device_id = %hero, slot, "fleet_hero_published_for_fanout");
+            true
+        }
+        Err(e) => {
+            // Best-effort by necessity: the promotion already went out over the
+            // radio, so an unwritable run dir must not fail the operator's
+            // selection. Logged loudly because the visible symptom — the wrong
+            // drone on screen — gives no hint of the cause, and the next
+            // reconcile tick retries.
+            tracing::error!(
+                error = %e,
+                path = %path.display(),
+                device_id = %hero,
+                slot,
+                "fleet_hero_publish_failed_fanout_will_serve_the_wrong_drone"
+            );
+            false
+        }
+    }
+}
+
+/// [`publish_hero_to`] at the real sidecar path.
+pub(super) fn publish_hero(slots: &[FleetSlot], hero: &str) -> bool {
+    publish_hero_to(Path::new(&ados_groundlink::hero_path()), slots, hero)
+}
+
 /// The process-wide fleet attention state.
 static FLEET_HERO_STATE: LazyLock<FleetHeroState> = LazyLock::new(FleetHeroState::default);
 
@@ -198,6 +259,10 @@ pub async fn post_fleet_hero(State(state): State<AppState>, body: Option<Json<Va
     fleet_hero_state()
         .record_selection(device_id, &outcomes)
         .await;
+    // Point the fan-out at the new hero only once the profile calls have been
+    // issued: re-pointing first would put the operator on a drone that is still
+    // a 1 fps thumbnail, when what they had a moment ago was a full-rate stream.
+    publish_hero(&slots, device_id);
 
     (
         outcome_status(&outcomes),
@@ -401,6 +466,66 @@ mod tests {
         let st = FleetHeroState::default();
         st.record_selection("b", &outcomes).await;
         assert!(st.outstanding().await.1.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_selection_publishes_the_hero_slot_so_the_fan_out_can_follow_it() {
+        // The operator-facing bug this closes: promoting a hero that is not on
+        // the lowest slot left the ground station forwarding a different drone,
+        // because the fan-out had no way to learn the selection.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fleet-hero.json");
+        let s = slots(&["a", "b", "c"]);
+
+        // The route's sequence: plan, issue, record, publish.
+        let plan = plan_hero(&s, "c").unwrap();
+        let outcomes = apply_plan(&plan, |_id, _p| async { Ok(()) }).await;
+        let st = FleetHeroState::default();
+        st.record_selection("c", &outcomes).await;
+        assert!(publish_hero_to(&path, &s, "c"));
+
+        let published = ados_groundlink::read_hero_from(&path).expect("a selection must publish");
+        assert_eq!(published.slot, 3, "the fan-out must be sent to slot 3");
+        assert_eq!(published.device_id, "c");
+    }
+
+    #[test]
+    fn republishing_a_settled_selection_does_not_rewrite_the_file() {
+        // The reconcile tick calls this every few seconds against a fleet that
+        // usually agrees with itself; a rewrite per tick would be churn for
+        // nothing, and every rewrite is a window a reader can catch.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fleet-hero.json");
+        let s = slots(&["a", "b"]);
+        assert!(publish_hero_to(&path, &s, "b"));
+        assert!(!publish_hero_to(&path, &s, "b"), "no rewrite when settled");
+        // ...but a genuine change does write.
+        assert!(publish_hero_to(&path, &s, "a"));
+        assert_eq!(ados_groundlink::read_hero_from(&path).unwrap().slot, 1);
+    }
+
+    #[test]
+    fn a_hero_the_registry_does_not_know_publishes_nothing() {
+        // Nothing to point the fan-out at. Leaving the previous value alone is
+        // safe: the fan-out validates what it reads against the same registry.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fleet-hero.json");
+        let s = slots(&["a", "b"]);
+        assert!(publish_hero_to(&path, &s, "b"));
+        assert!(!publish_hero_to(&path, &s, "never-paired"));
+        let still = ados_groundlink::read_hero_from(&path).unwrap();
+        assert_eq!(still.device_id, "b");
+    }
+
+    #[test]
+    fn the_hero_slot_lookup_is_exact() {
+        let s = slots(&["a", "b", "c"]);
+        assert_eq!(fanout::hero_slot(&s, "a"), Some(1));
+        assert_eq!(fanout::hero_slot(&s, "c"), Some(3));
+        // Device ids are exact; a near-miss must not publish a slot.
+        assert_eq!(fanout::hero_slot(&s, "A"), None);
+        assert_eq!(fanout::hero_slot(&s, ""), None);
+        assert_eq!(fanout::hero_slot(&[], "a"), None);
     }
 
     #[test]

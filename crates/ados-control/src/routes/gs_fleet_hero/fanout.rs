@@ -91,6 +91,18 @@ pub fn plan_retry(slots: &[FleetSlot], unconfirmed: &BTreeMap<String, VideoProfi
     }
 }
 
+/// The slot `hero` holds, or `None` when it is not registered.
+///
+/// The fan-out addresses drones by SLOT (a slot is the low byte of the wfb-ng
+/// `link_id`, so it is what a video egress port is derived from) while every
+/// operator-facing surface names them by device id. This is the one translation
+/// between the two, and it answers `None` rather than guessing for a hero the
+/// registry does not know — publishing a slot for a drone that is not there
+/// would point the fan-out at a port nothing transmits on.
+pub fn hero_slot(slots: &[FleetSlot], hero: &str) -> Option<u8> {
+    slots.iter().find(|s| s.device_id == hero).map(|s| s.slot)
+}
+
 /// The drone a one-slot fleet must be running as hero.
 ///
 /// A single-drone fleet is the existing product: it has always streamed full

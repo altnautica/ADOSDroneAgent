@@ -26,8 +26,10 @@
 //! socket condition that cannot recover in place.
 
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::net::UdpSocket;
 
@@ -176,32 +178,365 @@ const ERROR_BACKOFF_THRESHOLD: u32 = 8;
 /// receive plane down and respawns it.
 const ERROR_BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
 
-/// The default ground-station fan-out wiring: listen on `slot`'s video egress,
-/// forward to the mediamtx ingest and the LCD tap, all on localhost. `counters`
-/// is the shared handle the stats reader also holds so the sidecar surfaces the
-/// forwarded/drop totals.
+/// How often the fan-out re-reads the published hero selection.
 ///
-/// The two downstream ports are single-stream surfaces (one mediamtx ingest,
-/// one LCD tap), so exactly one slot is fanned out: the primary. Other slots'
-/// video is decoded onto `VIDEO_RX_PORT_BASE + slot` and read there by the
-/// per-drone video ingest, never through this hop.
-pub async fn run_default_fanout(slot: u8, counters: FanoutCounters) -> std::io::Result<()> {
-    let listen: SocketAddr = (
-        std::net::Ipv4Addr::LOCALHOST,
-        crate::wfb_rx::video_rx_port(slot),
-    )
-        .into();
+/// Slow on purpose: the read costs a tmpfs stat in the common case (no
+/// selection published, single-drone fleet) and the operator-visible cost of a
+/// second's delay between clicking a drone and its video arriving is nothing
+/// next to the encoder respawn that switch already waits on.
+pub const HERO_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How long the supervisor waits before rebinding after the inner loop returned
+/// a fatal socket error. Bounded and non-zero: a port that is momentarily
+/// unbindable (the previous generation's socket still closing) clears in well
+/// under this, and a permanently unbindable one must not spin the reactor.
+const REBIND_BACKOFF: Duration = Duration::from_millis(500);
+
+/// Which fleet slot the fan-out should be serving right now.
+///
+/// The published hero selection wins when it is live — the sidecar names a slot
+/// AND the device that holds it, and the fleet registry still agrees. Anything
+/// else falls back to `fallback_slot`, the generation's primary (the lowest
+/// registered slot), which is the whole behaviour before hero selection existed
+/// and remains correct for the single-drone fleet that never publishes one.
+///
+/// Requiring the registry to agree is what makes a stale selection harmless: a
+/// hero that has since unpaired no longer matches its slot, so the fan-out
+/// returns to the primary instead of listening forever on a port that nothing
+/// transmits to.
+pub fn resolve_fanout_slot(fallback_slot: u8, hero_path: &Path, registry_path: &Path) -> u8 {
+    let Some(hero) = crate::fleet_hero::read_hero_from(hero_path) else {
+        return fallback_slot;
+    };
+    let still_registered = crate::fleet::FleetRegistry::load(registry_path)
+        .slots()
+        .any(|s| s.slot == hero.slot && s.device_id == hero.device_id);
+    if still_registered {
+        hero.slot
+    } else {
+        fallback_slot
+    }
+}
+
+/// Run the fan-out, re-pointing it whenever the slot it should serve changes.
+///
+/// The inner [`run_fanout`] loop owns one bound socket, so following a new hero
+/// means binding a different port — and rebinding is the ONLY thing that
+/// happens on a change: while the answer from `resolve` is unchanged the loop is
+/// never touched, so a fleet with a settled hero forwards every datagram without
+/// interruption. `resolve` returning the same slot forever (the absent-sidecar
+/// case) therefore costs one poll per interval and no rebind at all.
+///
+/// Returns only when `resolve` cannot be served at all is not a case: a fatal
+/// socket error backs off and re-resolves rather than ending the fan-out for the
+/// generation, because going permanently dark is a worse answer than retrying a
+/// bind that is very likely transient.
+pub async fn run_repointing_fanout<R, P>(
+    resolve: R,
+    port_for: P,
+    targets: &[SocketAddr],
+    counters: &FanoutCounters,
+    poll: Duration,
+) -> std::io::Result<()>
+where
+    R: Fn() -> u8,
+    P: Fn(u8) -> u16,
+{
+    loop {
+        let slot = resolve();
+        let listen: SocketAddr = (std::net::Ipv4Addr::LOCALHOST, port_for(slot)).into();
+        tokio::select! {
+            res = run_fanout(listen, targets, counters) => {
+                match res {
+                    // `run_fanout` does not return on success; treat it as a
+                    // clean stop rather than inventing a reason to loop.
+                    Ok(()) => return Ok(()),
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            slot,
+                            listen = %listen,
+                            "fanout_socket_failed_rebinding"
+                        );
+                        tokio::time::sleep(REBIND_BACKOFF).await;
+                    }
+                }
+            }
+            next = wait_for_slot_change(&resolve, slot, poll) => {
+                tracing::info!(from = slot, to = next, "fanout_repointed_to_hero_slot");
+            }
+        }
+    }
+}
+
+/// Resolve on a slow tick until the answer differs from `current`, then return
+/// the new slot. Never returns while the selection is unchanged, which is what
+/// leaves the running fan-out undisturbed.
+async fn wait_for_slot_change<R: Fn() -> u8>(resolve: &R, current: u8, poll: Duration) -> u8 {
+    loop {
+        tokio::time::sleep(poll).await;
+        let next = resolve();
+        if next != current {
+            return next;
+        }
+    }
+}
+
+/// The default ground-station fan-out wiring: listen on the hero's video egress,
+/// forward to the mediamtx ingest and the LCD tap, all on localhost.
+/// `fallback_slot` is the generation's primary, served whenever no live hero
+/// selection is published. `counters` is the shared handle the stats reader also
+/// holds so the sidecar surfaces the forwarded/drop totals.
+///
+/// The two downstream ports are single-stream surfaces (one mediamtx ingest, one
+/// LCD tap), so exactly one slot is fanned out at a time: the operator's hero.
+/// Every other registered slot is still fully received and FEC-decoded onto
+/// `VIDEO_RX_PORT_BASE + slot`, but nothing reads those ports — no per-drone
+/// ingest exists yet — so a non-hero drone's video is decoded and discarded.
+/// That is what makes serving the RIGHT slot here the whole of what the operator
+/// sees.
+pub async fn run_default_fanout(
+    fallback_slot: u8,
+    counters: FanoutCounters,
+) -> std::io::Result<()> {
+    let hero_path = PathBuf::from(crate::fleet_hero::hero_path());
+    let registry_path = PathBuf::from(crate::fleet::FLEET_REGISTRY_PATH);
     let targets = [
         (std::net::Ipv4Addr::LOCALHOST, MEDIAMTX_PORT).into(),
         (std::net::Ipv4Addr::LOCALHOST, LCD_PORT).into(),
     ];
-    run_fanout(listen, &targets, &counters).await
+    run_repointing_fanout(
+        || resolve_fanout_slot(fallback_slot, &hero_path, &registry_path),
+        crate::wfb_rx::video_rx_port,
+        &targets,
+        &counters,
+        HERO_POLL_INTERVAL,
+    )
+    .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fleet::FleetRegistry;
     use std::time::Duration;
+
+    /// A registry file holding `ids` on slots 1..=n, and the temp dir that owns
+    /// it. `allocate` issues the lowest free slot first, so `ids[0]` lands on
+    /// slot 1.
+    fn registry_with(dir: &Path, ids: &[&str]) -> PathBuf {
+        let path = dir.join("fleet.json");
+        let mut reg = FleetRegistry::default();
+        for id in ids {
+            reg.allocate(id).expect("a slot must be issuable");
+        }
+        reg.persist(&path).unwrap();
+        path
+    }
+
+    /// Reserve an ephemeral UDP port and give it straight back, so the caller
+    /// knows a free address without holding it.
+    async fn free_port() -> u16 {
+        let s = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let port = s.local_addr().unwrap().port();
+        drop(s);
+        port
+    }
+
+    /// Drive `payload` at `port` on a tight cadence until dropped. UDP gives no
+    /// delivery guarantee and the fan-out's bind races the first send, so every
+    /// test that asserts on delivery resends.
+    async fn drive(port: u16, payload: &'static [u8]) {
+        let sender = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let addr: SocketAddr = (std::net::Ipv4Addr::LOCALHOST, port).into();
+        loop {
+            let _ = sender.send_to(payload, addr).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn the_fan_out_forwards_the_hero_slot_not_the_lowest_registered_one() {
+        // The operator-visible bug: with two drones registered, selecting the
+        // one on slot 2 as hero promoted it to full video while the ground
+        // station kept forwarding slot 1 — a different aircraft, and by then a
+        // 1 fps thumbnail. Both slots transmit here, and the assertion is on
+        // WHICH stream reaches the downstream consumers.
+        let dir = tempfile::tempdir().unwrap();
+        let registry_path = registry_with(dir.path(), &["drone-a", "drone-b"]);
+        let hero_path = dir.path().join("fleet-hero.json");
+        crate::fleet_hero::write_hero_to(&hero_path, 2, "drone-b").unwrap();
+
+        // Stand-ins for the mediamtx ingest and the LCD tap.
+        let consumer = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let lcd = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let targets = [consumer.local_addr().unwrap(), lcd.local_addr().unwrap()];
+
+        // Stand-ins for the two slots' video egress ports.
+        let slot1_port = free_port().await;
+        let slot2_port = free_port().await;
+        let port_for = move |slot: u8| match slot {
+            1 => slot1_port,
+            2 => slot2_port,
+            other => panic!("no test port for slot {other}"),
+        };
+
+        let counters = FanoutCounters::new();
+        let fanout = {
+            let counters = counters.clone();
+            tokio::spawn(async move {
+                let _ = run_repointing_fanout(
+                    || resolve_fanout_slot(1, &hero_path, &registry_path),
+                    port_for,
+                    &targets,
+                    &counters,
+                    Duration::from_millis(25),
+                )
+                .await;
+            })
+        };
+
+        // Both drones are transmitting; only the hero's stream may come through.
+        let read_one = async {
+            let mut buf = [0u8; 64];
+            let n = consumer.recv(&mut buf).await.unwrap();
+            buf[..n].to_vec()
+        };
+        let got = tokio::select! {
+            _ = drive(slot1_port, b"slot-1-stream") => unreachable!("the driver never returns"),
+            _ = drive(slot2_port, b"slot-2-stream") => unreachable!("the driver never returns"),
+            res = tokio::time::timeout(Duration::from_secs(5), read_one) => {
+                res.expect("nothing reached the downstream consumer")
+            }
+        };
+        assert_eq!(
+            got, b"slot-2-stream",
+            "the fan-out forwarded the wrong drone: the hero is on slot 2"
+        );
+
+        fanout.abort();
+    }
+
+    #[tokio::test]
+    async fn the_fan_out_follows_the_hero_when_the_selection_changes() {
+        // A hero change must reach the fan-out, or the first selection an
+        // operator makes on a fleet that auto-promoted its lowest slot would
+        // never take effect.
+        let dir = tempfile::tempdir().unwrap();
+        let registry_path = registry_with(dir.path(), &["drone-a", "drone-b"]);
+        let hero_path = dir.path().join("fleet-hero.json");
+
+        let consumer = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let targets = [consumer.local_addr().unwrap()];
+
+        let slot1_port = free_port().await;
+        let slot2_port = free_port().await;
+        let port_for = move |slot: u8| match slot {
+            1 => slot1_port,
+            2 => slot2_port,
+            other => panic!("no test port for slot {other}"),
+        };
+
+        let watch_path = hero_path.clone();
+        let fanout = tokio::spawn(async move {
+            let _ = run_repointing_fanout(
+                || resolve_fanout_slot(1, &watch_path, &registry_path),
+                port_for,
+                &targets,
+                &FanoutCounters::new(),
+                Duration::from_millis(25),
+            )
+            .await;
+        });
+
+        let exercise = async {
+            let mut buf = [0u8; 64];
+            // No selection published: the fallback (lowest registered slot).
+            loop {
+                let n = consumer.recv(&mut buf).await.unwrap();
+                if &buf[..n] == b"slot-1-stream" {
+                    break;
+                }
+            }
+            // Now select the drone on slot 2, exactly as the hero route does.
+            crate::fleet_hero::write_hero_to(&hero_path, 2, "drone-b").unwrap();
+            // The fan-out must re-point; the slot-1 driver is still running, so
+            // this only passes if it actually rebound.
+            loop {
+                let n = consumer.recv(&mut buf).await.unwrap();
+                if &buf[..n] == b"slot-2-stream" {
+                    break;
+                }
+            }
+        };
+
+        tokio::select! {
+            _ = drive(slot1_port, b"slot-1-stream") => unreachable!("the driver never returns"),
+            _ = drive(slot2_port, b"slot-2-stream") => unreachable!("the driver never returns"),
+            res = tokio::time::timeout(Duration::from_secs(5), exercise) => {
+                res.expect("the fan-out never followed the new hero");
+            }
+        }
+
+        fanout.abort();
+    }
+
+    #[test]
+    fn no_published_selection_serves_the_generation_primary() {
+        // The boot state, and the permanent state of a single-drone fleet that
+        // is never asked to choose. Falling back to the primary is what keeps
+        // the shipped one-drone product streaming.
+        let dir = tempfile::tempdir().unwrap();
+        let registry_path = registry_with(dir.path(), &["drone-a", "drone-b"]);
+        let hero_path = dir.path().join("fleet-hero.json");
+        assert_eq!(resolve_fanout_slot(1, &hero_path, &registry_path), 1);
+
+        // A malformed file is not a licence to point the fan-out somewhere
+        // arbitrary; it reads as no selection.
+        std::fs::write(&hero_path, b"{ truncated").unwrap();
+        assert_eq!(resolve_fanout_slot(1, &hero_path, &registry_path), 1);
+    }
+
+    #[test]
+    fn a_selection_whose_drone_has_left_the_fleet_falls_back() {
+        // Slot numbers are reissued. A selection left behind by a drone that has
+        // unpaired must not keep the fan-out listening on a port nothing
+        // transmits to, nor follow whichever drone inherited the slot.
+        let dir = tempfile::tempdir().unwrap();
+        let registry_path = registry_with(dir.path(), &["drone-a", "drone-b"]);
+        let hero_path = dir.path().join("fleet-hero.json");
+
+        // Registered, on the slot it claims: honoured.
+        crate::fleet_hero::write_hero_to(&hero_path, 2, "drone-b").unwrap();
+        assert_eq!(resolve_fanout_slot(1, &hero_path, &registry_path), 2);
+
+        // Gone from the fleet entirely.
+        crate::fleet_hero::write_hero_to(&hero_path, 2, "drone-departed").unwrap();
+        assert_eq!(resolve_fanout_slot(1, &hero_path, &registry_path), 1);
+
+        // Registered, but on a different slot than the one published.
+        crate::fleet_hero::write_hero_to(&hero_path, 1, "drone-b").unwrap();
+        assert_eq!(resolve_fanout_slot(1, &hero_path, &registry_path), 1);
+    }
+
+    #[test]
+    fn the_rebind_backoff_is_bounded_and_non_zero() {
+        // A port that cannot be bound must not spin the reactor, and one that is
+        // momentarily unbindable must come back quickly.
+        assert!(!REBIND_BACKOFF.is_zero());
+        assert!(REBIND_BACKOFF <= Duration::from_secs(2));
+        assert!(!HERO_POLL_INTERVAL.is_zero());
+    }
 
     #[tokio::test]
     async fn fan_out_delivers_each_datagram_to_both_targets() {

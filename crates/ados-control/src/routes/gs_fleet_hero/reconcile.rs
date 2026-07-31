@@ -98,6 +98,17 @@ async fn reconcile_once(proxy: &Arc<AuxRpcProxy>, hero_state: &FleetHeroState) {
             hero_state.record_retry(&outcomes).await;
         }
     }
+
+    // Publish whoever the hero is now — including one this tick just
+    // auto-promoted, which is the whole of a single-drone fleet's selection and
+    // would otherwise never reach the fan-out. Idempotent, so a settled fleet
+    // costs one tmpfs read every few seconds and no write; that also means a
+    // publish that failed earlier (an unwritable run dir, a full tmpfs) is
+    // retried here instead of leaving the operator on the wrong drone until the
+    // next selection.
+    if let Some(current) = hero_state.hero().await {
+        super::publish_hero(&slots, &current);
+    }
 }
 
 /// The registered slot table, read fresh. Never cached: `ados-groundlink` owns
@@ -181,6 +192,34 @@ mod tests {
             decide_tick(&s, Some("a"), &st.outstanding().await.1),
             TickAction::Idle
         );
+    }
+
+    #[tokio::test]
+    async fn the_tick_republishes_a_selection_whose_first_publish_did_not_land() {
+        // The tick's publish step, exercised as the tick runs it: read the
+        // current hero, publish it. A publish that failed at selection time (an
+        // unwritable run dir, a full tmpfs) would otherwise leave the operator
+        // on the wrong drone until they made another selection.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fleet-hero.json");
+        let s = slots(&["a", "b", "c"]);
+
+        let st = FleetHeroState::default();
+        st.record_selection("c", &[outcome(3, "c", VideoProfile::Hero, true)])
+            .await;
+        // Nothing published: the write failed at selection time.
+        assert!(ados_groundlink::read_hero_from(&path).is_none());
+
+        let hero = st.hero().await.expect("the selection is sticky");
+        assert!(crate::routes::gs_fleet_hero::publish_hero_to(
+            &path, &s, &hero
+        ));
+        assert_eq!(ados_groundlink::read_hero_from(&path).unwrap().slot, 3);
+
+        // And the next tick is a no-op, so a healthy fleet costs no writes.
+        assert!(!crate::routes::gs_fleet_hero::publish_hero_to(
+            &path, &s, &hero
+        ));
     }
 
     #[tokio::test]
