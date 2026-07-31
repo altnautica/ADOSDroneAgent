@@ -118,6 +118,25 @@ jobs:
       - name: Release build (arm64)
         run: cargo build --release --all-features
 
+  # Every publish job below uploads with the `gh` CLI rather than the release
+  # action. That action replaces a rolling tag's contents by deleting all of its
+  # existing assets in parallel and then re-uploading them, and on a multi-asset
+  # tag those deletes raced each other, one returned 404, and the job aborted
+  # after the deletes had gone through but before every re-upload had. The tag
+  # was then left holding a binary with no accompanying .sha256, and a missing
+  # checksum is fatal to the installer rather than merely unverified, so a board
+  # fetching that binary fails and falls back to a degraded build behind an
+  # advancing version number. `--clobber` replaces one named asset at a time, so
+  # a failure can no longer strip a tag of the checksum beside an artifact.
+  #
+  # Each job declares its tag as a RELEASE_TAG job variable rather than inline in
+  # the shell because the installer's release-tag guard reads the tag out of this
+  # file structurally; a tag that only ever appeared inside a shell line would
+  # drop out of that guard and reopen the hole it exists to close, which is an
+  # install 404ing an asset and continuing degraded in silence. GH_REPO is named
+  # explicitly so the upload target never depends on a checkout being present or
+  # on the CLI inferring one from a git remote.
+
   # Build the terminal dashboard as a static arm64 binary and publish it to a
   # rolling prerelease the installer fetches. Static (musl) so one binary runs
   # on every supported board regardless of its glibc. Runs only on pushes to
@@ -128,6 +147,8 @@ jobs:
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: write
+    env:
+      RELEASE_TAG: prebuilt-tui
     steps:
       - uses: actions/checkout@v4
 
@@ -164,12 +185,14 @@ jobs:
           rm -f /tmp/sign.key
 
       - name: Publish rolling prerelease
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: prebuilt-tui
-          prerelease: true
-          name: "Prebuilt ados-tui (rolling)"
-          files: crates/rel/*
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
+            --prerelease --title "Prebuilt ados-tui (rolling)" --notes ""
+          gh release upload "$RELEASE_TAG" rel/* --clobber
 
   # Build the orchestrator as a static arm64 binary and publish it to a rolling
   # prerelease the installer fetches. Static (musl) so one binary runs on every
@@ -181,6 +204,8 @@ jobs:
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: write
+    env:
+      RELEASE_TAG: prebuilt-supervisor
     steps:
       - uses: actions/checkout@v4
 
@@ -217,12 +242,14 @@ jobs:
           rm -f /tmp/sign.key
 
       - name: Publish rolling prerelease
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: prebuilt-supervisor
-          prerelease: true
-          name: "Prebuilt ados-supervisor (rolling)"
-          files: crates/rel/*
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
+            --prerelease --title "Prebuilt ados-supervisor (rolling)" --notes ""
+          gh release upload "$RELEASE_TAG" rel/* --clobber
 
   # Build the MAVLink router as a static arm64 binary and publish it to a rolling
   # prerelease the installer fetches. Static (musl) so one binary runs on every
@@ -233,6 +260,8 @@ jobs:
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: write
+    env:
+      RELEASE_TAG: prebuilt-mavlink-router
     steps:
       - uses: actions/checkout@v4
 
@@ -269,12 +298,14 @@ jobs:
           rm -f /tmp/sign.key
 
       - name: Publish rolling prerelease
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: prebuilt-mavlink-router
-          prerelease: true
-          name: "Prebuilt ados-mavlink-router (rolling)"
-          files: crates/rel/*
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
+            --prerelease --title "Prebuilt ados-mavlink-router (rolling)" --notes ""
+          gh release upload "$RELEASE_TAG" rel/* --clobber
 
   publish-radio:
     needs: build-test
@@ -282,6 +313,8 @@ jobs:
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: write
+    env:
+      RELEASE_TAG: prebuilt-radio
     steps:
       - uses: actions/checkout@v4
 
@@ -318,12 +351,14 @@ jobs:
           rm -f /tmp/sign.key
 
       - name: Publish rolling prerelease
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: prebuilt-radio
-          prerelease: true
-          name: "Prebuilt ados-radio (rolling)"
-          files: crates/rel/*
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
+            --prerelease --title "Prebuilt ados-radio (rolling)" --notes ""
+          gh release upload "$RELEASE_TAG" rel/* --clobber
 
   # The swarm bus. This job was missing entirely until now: the crate, its
   # systemd unit and its supervisor registration all shipped, but nothing ever
@@ -337,6 +372,8 @@ jobs:
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: write
+    env:
+      RELEASE_TAG: prebuilt-swarmbus
     steps:
       - uses: actions/checkout@v4
 
@@ -373,12 +410,14 @@ jobs:
           rm -f /tmp/sign.key
 
       - name: Publish rolling prerelease
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: prebuilt-swarmbus
-          prerelease: true
-          name: "Prebuilt ados-swarmbus (rolling)"
-          files: crates/rel/*
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
+            --prerelease --title "Prebuilt ados-swarmbus (rolling)" --notes ""
+          gh release upload "$RELEASE_TAG" rel/* --clobber
 
   publish-gpio:
     needs: build-test
@@ -386,6 +425,8 @@ jobs:
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: write
+    env:
+      RELEASE_TAG: prebuilt-gpio
     steps:
       - uses: actions/checkout@v4
 
@@ -422,12 +463,14 @@ jobs:
           rm -f /tmp/sign.key
 
       - name: Publish rolling prerelease
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: prebuilt-gpio
-          prerelease: true
-          name: "Prebuilt ados-gpio (rolling)"
-          files: crates/rel/*
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
+            --prerelease --title "Prebuilt ados-gpio (rolling)" --notes ""
+          gh release upload "$RELEASE_TAG" rel/* --clobber
 
   publish-crsf:
     needs: build-test
@@ -435,6 +478,8 @@ jobs:
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: write
+    env:
+      RELEASE_TAG: prebuilt-crsf
     steps:
       - uses: actions/checkout@v4
 
@@ -471,12 +516,14 @@ jobs:
           rm -f /tmp/sign.key
 
       - name: Publish rolling prerelease
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: prebuilt-crsf
-          prerelease: true
-          name: "Prebuilt ados-crsf (rolling)"
-          files: crates/rel/*
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
+            --prerelease --title "Prebuilt ados-crsf (rolling)" --notes ""
+          gh release upload "$RELEASE_TAG" rel/* --clobber
 
   publish-tunnel-config:
     needs: build-test
@@ -484,6 +531,8 @@ jobs:
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: write
+    env:
+      RELEASE_TAG: prebuilt-tunnel-config
     steps:
       - uses: actions/checkout@v4
 
@@ -520,12 +569,14 @@ jobs:
           rm -f /tmp/sign.key
 
       - name: Publish rolling prerelease
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: prebuilt-tunnel-config
-          prerelease: true
-          name: "Prebuilt ados-tunnel-config (rolling)"
-          files: crates/rel/*
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
+            --prerelease --title "Prebuilt ados-tunnel-config (rolling)" --notes ""
+          gh release upload "$RELEASE_TAG" rel/* --clobber
 
   publish-video:
     needs: build-test
@@ -533,6 +584,8 @@ jobs:
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: write
+    env:
+      RELEASE_TAG: prebuilt-video
     steps:
       - uses: actions/checkout@v4
 
@@ -569,12 +622,14 @@ jobs:
           rm -f /tmp/sign.key
 
       - name: Publish rolling prerelease
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: prebuilt-video
-          prerelease: true
-          name: "Prebuilt ados-video (rolling)"
-          files: crates/rel/*
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
+            --prerelease --title "Prebuilt ados-video (rolling)" --notes ""
+          gh release upload "$RELEASE_TAG" rel/* --clobber
 
   publish-plugin-host:
     needs: build-test
@@ -582,6 +637,8 @@ jobs:
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: write
+    env:
+      RELEASE_TAG: prebuilt-plugin-host
     steps:
       - uses: actions/checkout@v4
 
@@ -626,12 +683,14 @@ jobs:
           rm -f /tmp/sign.key
 
       - name: Publish rolling prerelease
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: prebuilt-plugin-host
-          prerelease: true
-          name: "Prebuilt ados-plugin-host (rolling)"
-          files: crates/rel/*
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
+            --prerelease --title "Prebuilt ados-plugin-host (rolling)" --notes ""
+          gh release upload "$RELEASE_TAG" rel/* --clobber
 
   # Build the native HTTP control surface as a static arm64 binary and publish it
   # to a rolling prerelease the installer fetches. Static (musl) so one binary
@@ -644,6 +703,8 @@ jobs:
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: write
+    env:
+      RELEASE_TAG: prebuilt-control
     steps:
       - uses: actions/checkout@v4
 
@@ -683,12 +744,14 @@ jobs:
           rm -f /tmp/sign.key
 
       - name: Publish rolling prerelease
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: prebuilt-control
-          prerelease: true
-          name: "Prebuilt ados-control (rolling)"
-          files: crates/rel/*
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
+            --prerelease --title "Prebuilt ados-control (rolling)" --notes ""
+          gh release upload "$RELEASE_TAG" rel/* --clobber
 
   publish-cloud:
     needs: build-test
@@ -696,6 +759,8 @@ jobs:
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: write
+    env:
+      RELEASE_TAG: prebuilt-cloud
     steps:
       - uses: actions/checkout@v4
 
@@ -737,12 +802,14 @@ jobs:
           rm -f /tmp/sign.key
 
       - name: Publish rolling prerelease
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: prebuilt-cloud
-          prerelease: true
-          name: "Prebuilt ados-cloud (rolling)"
-          files: crates/rel/*
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
+            --prerelease --title "Prebuilt ados-cloud (rolling)" --notes ""
+          gh release upload "$RELEASE_TAG" rel/* --clobber
 
   # Build the compute reconstructor/offload daemon as a static arm64 binary and
   # publish it for the compute profile. (An x86_64/macOS compute host builds from
@@ -753,6 +820,8 @@ jobs:
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: write
+    env:
+      RELEASE_TAG: prebuilt-compute
     steps:
       - uses: actions/checkout@v4
 
@@ -794,12 +863,14 @@ jobs:
           rm -f /tmp/sign.key
 
       - name: Publish rolling prerelease
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: prebuilt-compute
-          prerelease: true
-          name: "Prebuilt ados-compute (rolling)"
-          files: crates/rel/*
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
+            --prerelease --title "Prebuilt ados-compute (rolling)" --notes ""
+          gh release upload "$RELEASE_TAG" rel/* --clobber
 
   publish-atlas:
     needs: build-test
@@ -807,6 +878,8 @@ jobs:
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: write
+    env:
+      RELEASE_TAG: prebuilt-atlas
     steps:
       - uses: actions/checkout@v4
 
@@ -848,12 +921,14 @@ jobs:
           rm -f /tmp/sign.key
 
       - name: Publish rolling prerelease
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: prebuilt-atlas
-          prerelease: true
-          name: "Prebuilt ados-atlas (rolling)"
-          files: crates/rel/*
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
+            --prerelease --title "Prebuilt ados-atlas (rolling)" --notes ""
+          gh release upload "$RELEASE_TAG" rel/* --clobber
 
   # Build the ground-station data-plane as a static arm64 binary and publish it
   # to a rolling prerelease the installer fetches. Static (musl) so one binary
@@ -865,6 +940,8 @@ jobs:
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: write
+    env:
+      RELEASE_TAG: prebuilt-groundlink
     steps:
       - uses: actions/checkout@v4
 
@@ -901,12 +978,14 @@ jobs:
           rm -f /tmp/sign.key
 
       - name: Publish rolling prerelease
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: prebuilt-groundlink
-          prerelease: true
-          name: "Prebuilt ados-groundlink (rolling)"
-          files: crates/rel/*
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
+            --prerelease --title "Prebuilt ados-groundlink (rolling)" --notes ""
+          gh release upload "$RELEASE_TAG" rel/* --clobber
 
   # Build the uplink matrix as a static arm64 binary and publish it to a rolling
   # prerelease the installer fetches. Static (musl) so one binary runs on every
@@ -917,6 +996,8 @@ jobs:
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: write
+    env:
+      RELEASE_TAG: prebuilt-net
     steps:
       - uses: actions/checkout@v4
 
@@ -953,12 +1034,14 @@ jobs:
           rm -f /tmp/sign.key
 
       - name: Publish rolling prerelease
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: prebuilt-net
-          prerelease: true
-          name: "Prebuilt ados-net (rolling)"
-          files: crates/rel/*
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
+            --prerelease --title "Prebuilt ados-net (rolling)" --notes ""
+          gh release upload "$RELEASE_TAG" rel/* --clobber
 
   # Build the human-interface daemons (ados-pic + ados-input) as static arm64
   # binaries and publish them to a rolling prerelease the installer fetches.
@@ -970,6 +1053,8 @@ jobs:
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: write
+    env:
+      RELEASE_TAG: prebuilt-hid
     steps:
       - uses: actions/checkout@v4
 
@@ -1009,12 +1094,14 @@ jobs:
           rm -f /tmp/sign.key
 
       - name: Publish rolling prerelease
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: prebuilt-hid
-          prerelease: true
-          name: "Prebuilt ados-hid (rolling)"
-          files: crates/rel/*
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
+            --prerelease --title "Prebuilt ados-hid (rolling)" --notes ""
+          gh release upload "$RELEASE_TAG" rel/* --clobber
 
   # Build the display daemons (ados-display + ados-display-probe) as static arm64
   # binaries and publish them to a rolling prerelease the installer fetches.
@@ -1026,6 +1113,8 @@ jobs:
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: write
+    env:
+      RELEASE_TAG: prebuilt-display
     steps:
       - uses: actions/checkout@v4
 
@@ -1068,12 +1157,14 @@ jobs:
           rm -f /tmp/sign.key
 
       - name: Publish rolling prerelease
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: prebuilt-display
-          prerelease: true
-          name: "Prebuilt ados-display (rolling)"
-          files: crates/rel/*
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
+            --prerelease --title "Prebuilt ados-display (rolling)" --notes ""
+          gh release upload "$RELEASE_TAG" rel/* --clobber
 
   # Build the vision engine as a static arm64 binary and publish it to a rolling
   # prerelease the installer fetches. Static (musl) so one binary runs on every
@@ -1086,6 +1177,8 @@ jobs:
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: write
+    env:
+      RELEASE_TAG: prebuilt-vision
     steps:
       - uses: actions/checkout@v4
 
@@ -1122,12 +1215,14 @@ jobs:
           rm -f /tmp/sign.key
 
       - name: Publish rolling prerelease
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: prebuilt-vision
-          prerelease: true
-          name: "Prebuilt ados-vision (rolling)"
-          files: crates/rel/*
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
+            --prerelease --title "Prebuilt ados-vision (rolling)" --notes ""
+          gh release upload "$RELEASE_TAG" rel/* --clobber
 
   # Build the vision engine WITH the ONNX Runtime backend (--features onnx) and
   # publish it as a distinct asset the installer fetches for CPU-strong, NPU-less
@@ -1277,6 +1372,8 @@ jobs:
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: write
+    env:
+      RELEASE_TAG: prebuilt-installer
     steps:
       - uses: actions/checkout@v4
 
@@ -1313,12 +1410,14 @@ jobs:
           rm -f /tmp/sign.key
 
       - name: Publish rolling prerelease
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: prebuilt-installer
-          prerelease: true
-          name: "Prebuilt ados-installer (rolling)"
-          files: crates/rel/*
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
+            --prerelease --title "Prebuilt ados-installer (rolling)" --notes ""
+          gh release upload "$RELEASE_TAG" rel/* --clobber
 
   # Build the logging/telemetry daemon as a static arm64 binary and publish it
   # to a rolling prerelease the installer fetches. Unlike the other daemons it
@@ -1330,6 +1429,8 @@ jobs:
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: write
+    env:
+      RELEASE_TAG: prebuilt-logd
     steps:
       - uses: actions/checkout@v4
 
@@ -1371,12 +1472,14 @@ jobs:
           rm -f /tmp/sign.key
 
       - name: Publish rolling prerelease
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: prebuilt-logd
-          prerelease: true
-          name: "Prebuilt ados-logd (rolling)"
-          files: crates/rel/*
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
+            --prerelease --title "Prebuilt ados-logd (rolling)" --notes ""
+          gh release upload "$RELEASE_TAG" rel/* --clobber
 
   # Mirror the upstream mediamtx (the video relay the installer fetches via the
   # prebuilt-binary catalog) into a rolling prerelease, arch-named to match the
@@ -1390,6 +1493,7 @@ jobs:
     permissions:
       contents: write
     env:
+      RELEASE_TAG: prebuilt-mediamtx
       MEDIAMTX_VERSION: v1.17.1
     steps:
       - uses: actions/checkout@v4
@@ -1419,9 +1523,11 @@ jobs:
           rm -f /tmp/sign.key
 
       - name: Publish rolling prerelease
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: prebuilt-mediamtx
-          prerelease: true
-          name: "Prebuilt mediamtx (mirrored)"
-          files: crates/rel/*
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
+            --prerelease --title "Prebuilt mediamtx (mirrored)" --notes ""
+          gh release upload "$RELEASE_TAG" rel/* --clobber
