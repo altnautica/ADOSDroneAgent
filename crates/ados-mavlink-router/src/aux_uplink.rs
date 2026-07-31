@@ -75,6 +75,31 @@ pub fn spawn(target_port: u16) -> AuxUplinkSender {
     AuxUplinkSender { tx }
 }
 
+/// Break a chunk that cannot fit one datagram into pieces that can.
+///
+/// A client's bytes arrive as raw TCP reads of up to several KB, so a mission
+/// or parameter burst can exceed the aux payload ceiling. Such a chunk used to
+/// be handed to the encoder whole, rejected, and dropped with a warning and no
+/// counter — a silent loss of exactly the traffic an operator is most likely to
+/// be watching.
+///
+/// The split is on MAVLink frame boundaries, not arbitrary byte offsets: the
+/// receiver splits an aux payload back into frames by their own headers, so
+/// cutting mid-frame would deliver two fragments that each fail CRC and read as
+/// line noise. A chunk that yields no whole frame is passed through unchanged
+/// and left for the encoder to reject, because guessing at a boundary is worse
+/// than an honest failure.
+fn split_oversize(chunk: &[u8]) -> Vec<&[u8]> {
+    if chunk.len() <= AUX_MAX_PAYLOAD {
+        return vec![chunk];
+    }
+    let frames = aux_mux::split_frames(chunk);
+    if frames.is_empty() {
+        return vec![chunk];
+    }
+    frames
+}
+
 async fn flush(sock: &UdpSocket, target: SocketAddr, batch: &mut Vec<u8>) {
     if batch.is_empty() {
         return;
@@ -100,22 +125,40 @@ async fn run(mut rx: mpsc::Receiver<Vec<u8>>, target_port: u16) {
     };
     let target: SocketAddr = ([127, 0, 0, 1], target_port).into();
     let mut batch: Vec<u8> = Vec::new();
+    // An ABSOLUTE deadline for the batch currently being filled, set when the
+    // first frame lands in it.
+    //
+    // It used to be rebuilt on every loop iteration, which meant every arriving
+    // frame reset the window: a client sending steadily faster than the window
+    // never let it elapse, so nothing went out until the batch happened to
+    // reach the payload ceiling. On a control link that is seconds of added
+    // command latency, and it only clears when the client goes quiet.
+    let mut batch_deadline: Option<tokio::time::Instant> = None;
 
     loop {
-        let deadline = tokio::time::sleep(BATCH_WINDOW);
+        let sleep_until =
+            batch_deadline.unwrap_or_else(|| tokio::time::Instant::now() + BATCH_WINDOW);
+        let deadline = tokio::time::sleep_until(sleep_until);
         tokio::pin!(deadline);
         tokio::select! {
             frame = rx.recv() => match frame {
                 Some(f) => {
-                    if batch.len() + f.len() > AUX_MAX_PAYLOAD {
-                        flush(&sock, target, &mut batch).await;
+                    for piece in split_oversize(&f) {
+                        if batch.len() + piece.len() > AUX_MAX_PAYLOAD {
+                            flush(&sock, target, &mut batch).await;
+                            batch_deadline = None;
+                        }
+                        batch.extend_from_slice(piece);
+                        if batch_deadline.is_none() {
+                            batch_deadline = Some(tokio::time::Instant::now() + BATCH_WINDOW);
+                        }
                     }
-                    batch.extend_from_slice(&f);
                 }
                 None => break,
             },
             _ = &mut deadline => {
                 flush(&sock, target, &mut batch).await;
+                batch_deadline = None;
             }
         }
     }
@@ -128,6 +171,86 @@ async fn run(mut rx: mpsc::Receiver<Vec<u8>>, target_port: u16) {
 mod tests {
     use super::*;
     use tokio::net::UdpSocket as TestSocket;
+
+    /// A MAVLink v2 frame carrying `payload_len` bytes.
+    fn mav2(payload_len: u8, seq: u8) -> Vec<u8> {
+        let mut f = vec![0xFD, payload_len, 0, 0, seq, 1, 1, 0, 0, 0];
+        f.extend(std::iter::repeat_n(0xAB, payload_len as usize));
+        f.extend_from_slice(&[0x00, 0x00]); // checksum
+        f
+    }
+
+    #[test]
+    fn a_chunk_that_fits_is_passed_through_whole() {
+        let c = mav2(10, 1);
+        assert_eq!(split_oversize(&c), vec![c.as_slice()]);
+    }
+
+    #[test]
+    fn an_oversize_chunk_is_split_on_frame_boundaries_rather_than_dropped() {
+        // A mission or parameter burst arrives as one TCP read and used to be
+        // handed to the encoder whole, rejected, and dropped with a warning and
+        // no counter — a silent loss of exactly the traffic an operator is most
+        // likely to be watching at the time.
+        let mut chunk = Vec::new();
+        let mut expected = 0usize;
+        while chunk.len() <= AUX_MAX_PAYLOAD {
+            chunk.extend_from_slice(&mav2(200, expected as u8));
+            expected += 1;
+        }
+        let pieces = split_oversize(&chunk);
+        assert_eq!(pieces.len(), expected, "every frame must survive the split");
+        for p in &pieces {
+            assert!(
+                p.len() <= AUX_MAX_PAYLOAD,
+                "a piece still cannot be encoded"
+            );
+            assert_eq!(p[0], 0xFD, "each piece starts on a frame boundary");
+        }
+    }
+
+    #[test]
+    fn an_unparseable_oversize_chunk_is_passed_through_rather_than_guessed_at() {
+        // Cutting at an arbitrary offset would deliver two halves that each
+        // fail CRC on the far side and read as line noise. An honest encoder
+        // rejection is better than a fabricated boundary.
+        let chunk = vec![0x00u8; AUX_MAX_PAYLOAD + 50];
+        assert_eq!(split_oversize(&chunk).len(), 1);
+    }
+
+    /// `start_paused` drives virtual time, so a steady stream can be simulated
+    /// faster than the batch window without the test sleeping for real.
+    #[tokio::test(start_paused = true)]
+    async fn a_steady_stream_still_flushes_on_the_window() {
+        // The regression: the window was rebuilt on every loop iteration, so
+        // each arriving frame reset it. A client sending faster than the window
+        // never let it elapse and nothing went out until the batch happened to
+        // reach the payload ceiling — seconds of added command latency on a
+        // control link, clearing only when the client went quiet.
+        let listener = TestSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let sender = spawn(port);
+
+        // Send steadily at half the batch window for well over one window.
+        for i in 0..12u8 {
+            sender.send(&mav2(4, i));
+            tokio::time::sleep(BATCH_WINDOW / 2).await;
+        }
+
+        // Something must already have gone out: the window elapsed several
+        // times over, and the batch is nowhere near the payload ceiling.
+        let mut buf = [0u8; 4096];
+        let got = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            listener.recv_from(&mut buf),
+        )
+        .await;
+        assert!(
+            got.is_ok(),
+            "a steady stream never flushed; the batch window is being reset by \
+             every arrival instead of running from the first frame"
+        );
+    }
 
     #[tokio::test]
     async fn a_sent_frame_arrives_framed_on_the_target_port() {
