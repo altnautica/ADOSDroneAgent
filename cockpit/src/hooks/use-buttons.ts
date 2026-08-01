@@ -89,8 +89,17 @@ export function useButtons(): ButtonsState {
     const url = `${proto}//${location.host}/api/v1/ground-station/ws/buttons`;
 
     const scheduleReconnect = () => {
-      if (closed) return;
-      reconnectTimer = setTimeout(connect, reconnectMs);
+      // The `reconnectTimer` guard matters as much as the `closed` one: without
+      // it a churning socket overwrites a pending handle, and the overwritten
+      // timer is unreachable from the cleanup below, so it survives unmount and
+      // fires against a torn-down effect. The sibling reconnect loop in
+      // `lib/vision-detections-ws.ts` has always had this shape; this one did
+      // not.
+      if (closed || reconnectTimer) return;
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        void connect();
+      }, reconnectMs);
       reconnectMs = Math.min(reconnectMs * 2, RECONNECT_MAX_MS);
     };
 
@@ -99,9 +108,21 @@ export function useButtons(): ButtonsState {
       const ticket = await mintWsTicket(BUTTON_SCOPE, controller.signal);
       if (closed) return;
 
-      socket = ticket
-        ? new WebSocket(url, [WS_TICKET_PROTOCOL, ticket])
-        : new WebSocket(url);
+      // The constructor throws synchronously on a subprotocol value that is not
+      // a valid token, so a malformed ticket would otherwise become an
+      // unhandled rejection and kill physical-button input for the session with
+      // no reconnect. Falling back to the unticketed URL keeps the retry ladder
+      // alive; the server still decides whether to accept it.
+      try {
+        socket = ticket
+          ? new WebSocket(url, [WS_TICKET_PROTOCOL, ticket])
+          : new WebSocket(url);
+      } catch {
+        socket = null;
+        setConnected(false);
+        scheduleReconnect();
+        return;
+      }
 
       socket.onopen = () => {
         reconnectMs = RECONNECT_MIN_MS;
