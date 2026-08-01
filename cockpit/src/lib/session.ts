@@ -4,7 +4,10 @@
 // module) is stored here and sent as `X-ADOS-Dashboard-Session`, the native
 // control front's alternative data-plane credential to `X-ADOS-Key`.
 
-const STORAGE_KEY = "ados-cockpit-session";
+// The SAME key the dashboard writes. Same origin, same agent, same credential:
+// storing it separately meant a PIN session minted on the dashboard did nothing
+// for the cockpit, and the cockpit never minted one of its own.
+const STORAGE_KEY = "ados-dashboard-session";
 
 interface StoredSession {
   token: string;
