@@ -170,13 +170,26 @@ function CuratedGroupView({
 }) {
   const group = curatedGroupById(groupId);
   if (!group) return <EmptyNote>Unknown settings group.</EmptyNote>;
-  const rows = group.paths
-    .map((p) => <PathRow key={p} path={p} config={config} onDrill={onDrill} onEdit={onEdit} write={write} />)
-    .filter(Boolean);
-  if (rows.length === 0) {
+  // Presence is decided from the CONFIG, not from the rendered row.
+  //
+  // `PathRow` returns null for a path this profile does not carry, and the
+  // obvious way to count what survived — mapping to rows and filtering — does
+  // not work: `.map` produces React ELEMENTS, and an element is truthy whether
+  // or not it will render to null. So the filter removed nothing, the length
+  // was never zero, and a group whose every field is absent drew a header over
+  // an empty box with no explanation. On a drone that is every group of
+  // ground-station settings, which reads as a screen that failed to load.
+  const present = group.paths.filter((p) => getAtPath(config, p) !== undefined);
+  if (present.length === 0) {
     return <EmptyNote>None of these fields are present on this node.</EmptyNote>;
   }
-  return <div className="flex flex-col gap-[0.3rem]">{rows}</div>;
+  return (
+    <div className="flex flex-col gap-[0.3rem]">
+      {present.map((p) => (
+        <PathRow key={p} path={p} config={config} onDrill={onDrill} onEdit={onEdit} write={write} />
+      ))}
+    </div>
+  );
 }
 
 // ── a raw object drill (the "All settings" tree) ─────────────────────────────
