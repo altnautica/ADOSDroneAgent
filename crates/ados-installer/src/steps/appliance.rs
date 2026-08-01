@@ -65,6 +65,32 @@ fn desktop_churn_units() -> [&'static str; 3] {
     ]
 }
 
+/// The login-manager units to mask on a ground-station appliance so the kiosk
+/// deterministically owns the display via cage. Cage needs the DRM master, and a
+/// running desktop compositor holds it — so as long as a login manager is up the
+/// kiosk resolves onto the windowed in-desktop branch and never scans out.
+/// `display-manager.service` is the alias the distro points at whichever manager
+/// is installed, so both it and lightdm are masked. Pure so it is unit-tested
+/// without systemd.
+fn display_manager_units() -> [&'static str; 2] {
+    ["display-manager.service", "lightdm.service"]
+}
+
+/// Operator escape hatch: a ground station that must remain a normal login box.
+/// When this file exists the installer never masks the login manager, and it
+/// unmasks anything it masked on a previous run — so the rollback survives an
+/// upgrade instead of being undone by the next `ados update`. (This step has no
+/// checkpoint and therefore re-runs on every install; a bare `systemctl unmask`
+/// would be silently re-applied.) Operator-created only; no config schema change.
+///
+/// To restore the desktop on a ground station:
+/// ```text
+/// sudo touch /etc/ados/keep-desktop
+/// sudo systemctl unmask lightdm display-manager.service
+/// sudo systemctl enable --now lightdm
+/// ```
+const KEEP_DESKTOP_MARKER: &str = "/etc/ados/keep-desktop";
+
 /// Render the logind no-idle drop-in body (pure). Ignores the idle timer (both
 /// the action and its zeroed timeout), the power/suspend/hibernate keys, and every
 /// lid-switch variant (on external power, docked, and the base case) so nothing —
@@ -185,9 +211,10 @@ impl Step for Appliance {
         // Optional: a mask/write problem must degrade, never abort the install.
         StepKind::Optional
     }
-    fn run(&self, _ctx: &mut Ctx) -> StepOutcome {
+    fn run(&self, ctx: &mut Ctx) -> StepOutcome {
         keep_awake();
         quiet_desktop_package_daemons();
+        stand_down_display_manager(&ctx.profile);
         StepOutcome::Ok
     }
 }
@@ -251,6 +278,108 @@ fn quiet_desktop_package_daemons() {
         masked,
         "quieted background package-update daemons (desktop present)"
     );
+}
+
+/// The decision behind [`stand_down_display_manager`], kept pure so it is the
+/// unit-tested surface (`exec::run` is not injectable in this crate, matching how
+/// every other step here is tested). True means "mask the login manager".
+fn should_stand_down(profile: &str, marker_present: bool) -> bool {
+    profile == "ground_station" && !marker_present
+}
+
+/// A logind session type that means a compositor is up in that session. Pure.
+fn is_graphical_session_type(session_type: &str) -> bool {
+    matches!(session_type.trim(), "x11" | "wayland" | "mir")
+}
+
+/// Whether the installer may STOP the login manager in place, as opposed to only
+/// masking it for the next boot. Stopping tears down every graphical session on
+/// the box — including the one the installer may itself be running inside, which
+/// on a desktop-imaged ground station would kill the install mid-chain and leave
+/// a half-configured node. So the stop happens only when the INSTALLER'S OWN
+/// session is known and is not graphical (an SSH/TTY install, the normal case).
+/// Unknown reads as "not safe": the mask alone still produces the appliance state
+/// on the next boot, which is the recoverable side of the trade. Pure.
+fn safe_to_stop_display_manager(own_session_type: Option<&str>) -> bool {
+    matches!(own_session_type, Some(t) if !is_graphical_session_type(t))
+}
+
+/// The logind session type of THIS process, or `None` when it cannot be
+/// determined. `XDG_SESSION_TYPE` is deliberately not used: sudo's `env_reset`
+/// strips it, so under the install one-liner it is always absent and would make
+/// the stop unreachable. `/proc/self/sessionid` carries the audit/logind session
+/// id across fork, sudo and setsid, so it survives the way the installer is
+/// actually launched. Best-effort; any failure reads as unknown.
+fn own_session_type() -> Option<String> {
+    let raw = std::fs::read_to_string("/proc/self/sessionid").ok()?;
+    let id = raw.trim();
+    // 4294967295 is the kernel's "no audit session" sentinel.
+    if id.is_empty() || id == "4294967295" {
+        return None;
+    }
+    let shown = exec::run("loginctl", &["show-session", id, "-p", "Type", "--value"]);
+    if !shown.success() {
+        return None;
+    }
+    let t = shown.stdout.trim().to_string();
+    if t.is_empty() {
+        return None;
+    }
+    Some(t)
+}
+
+/// Ground-station appliance only: stand the login manager down so the kiosk's
+/// desktop-session probe finds nothing and takes the cage branch, where cage
+/// holds the DRM master and can scan out. A drone has no desktop; a workstation
+/// or compute node must stay a login box. Fail-soft throughout — this must never
+/// abort an install.
+fn stand_down_display_manager(profile: &str) {
+    if profile != "ground_station" {
+        return;
+    }
+    let marker_present = Path::new(KEEP_DESKTOP_MARKER).exists();
+    if !should_stand_down(profile, marker_present) {
+        // Undo a mask this step applied on a previous run, so the escape hatch
+        // survives every subsequent upgrade rather than being re-masked.
+        for unit in display_manager_units() {
+            let _ = exec::run("systemctl", &["unmask", unit]);
+        }
+        tracing::info!(
+            "{KEEP_DESKTOP_MARKER} present; leaving the login manager enabled \
+             (the kiosk will run windowed inside the desktop)"
+        );
+        return;
+    }
+    let session = own_session_type();
+    let may_stop = safe_to_stop_display_manager(session.as_deref());
+    let mut masked = 0usize;
+    for unit in display_manager_units() {
+        if !unit_present(unit) {
+            continue;
+        }
+        if exec::run_ok("systemctl", &["mask", unit]) {
+            masked += 1;
+        }
+        if may_stop {
+            let _ = exec::run("systemctl", &["stop", unit]);
+        }
+    }
+    tracing::info!(
+        masked,
+        stopped_now = may_stop,
+        session = session.as_deref().unwrap_or("unknown"),
+        "ground station: login manager stood down so the kiosk owns the display via cage. \
+         To restore the desktop: sudo touch /etc/ados/keep-desktop && \
+         sudo systemctl unmask lightdm display-manager.service && \
+         sudo systemctl enable --now lightdm"
+    );
+    if !may_stop {
+        tracing::info!(
+            "the login manager is masked but was left running: this install is not in a \
+             known non-graphical session, and stopping it would tear down the session the \
+             installer is in. It stays down from the next boot."
+        );
+    }
 }
 
 #[cfg(test)]
@@ -335,5 +464,63 @@ mod tests {
             removed.contains(&LOGIND_NO_IDLE_CONF),
             "{LOGIND_NO_IDLE_CONF} is written by install but not removed by uninstall"
         );
+    }
+
+    #[test]
+    fn display_manager_units_cover_the_alias_and_lightdm() {
+        let u = display_manager_units();
+        // The alias is what the distro points at whichever manager is installed;
+        // lightdm is the concrete unit on the ground-station image. Masking only
+        // one of the two leaves a path back to a running compositor.
+        assert!(u.contains(&"display-manager.service"));
+        assert!(u.contains(&"lightdm.service"));
+    }
+
+    #[test]
+    fn stand_down_is_ground_station_only() {
+        // A drone has no desktop and a workstation/compute node must stay a
+        // login box; only the ground-station appliance hands the display to cage.
+        assert!(should_stand_down("ground_station", false));
+        assert!(!should_stand_down("drone", false));
+        assert!(!should_stand_down("workstation", false));
+        assert!(!should_stand_down("compute", false));
+        // The hyphenated CLI spelling is normalized to the underscored profile
+        // before it reaches a step; an un-normalized value must not match.
+        assert!(!should_stand_down("ground-station", false));
+    }
+
+    #[test]
+    fn keep_desktop_marker_suppresses_the_stand_down() {
+        assert!(!should_stand_down("ground_station", true));
+    }
+
+    #[test]
+    fn keep_desktop_marker_path_is_under_etc_ados() {
+        // The escape hatch is documented by this literal path (in the operator
+        // line this step logs and in the changelog); a rename that did not update
+        // both would silently orphan every operator's rollback.
+        assert_eq!(KEEP_DESKTOP_MARKER, "/etc/ados/keep-desktop");
+    }
+
+    #[test]
+    fn graphical_session_types_are_the_compositor_ones() {
+        for t in ["x11", "wayland", "mir"] {
+            assert!(is_graphical_session_type(t), "{t} is a graphical session");
+        }
+        for t in ["tty", "unspecified", ""] {
+            assert!(!is_graphical_session_type(t), "{t} is not graphical");
+        }
+    }
+
+    #[test]
+    fn the_login_manager_is_only_stopped_from_a_non_graphical_session() {
+        // Stopping it from inside a graphical session kills the installer with
+        // the session. An SSH/TTY install is safe; a graphical one is not, and an
+        // unknown session masks only (the mask still applies on the next boot).
+        assert!(safe_to_stop_display_manager(Some("tty")));
+        assert!(safe_to_stop_display_manager(Some("unspecified")));
+        assert!(!safe_to_stop_display_manager(Some("x11")));
+        assert!(!safe_to_stop_display_manager(Some("wayland")));
+        assert!(!safe_to_stop_display_manager(None));
     }
 }

@@ -439,6 +439,7 @@ dependencies = [
  "ados-swarmbus",
  "anyhow",
  "futures-util",
+ "nix 0.29.0",
  "serde",
  "serde_json",
  "serde_norway",

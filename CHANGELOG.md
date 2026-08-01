@@ -4,6 +4,75 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.317] - 2026-08-01
+
+### Added
+
+- **The display-plane probe can now ask the question it was written for.**
+  `scripts/probe-display-planes.sh` only ever ran a `videotestsrc ! waylandsink`
+  client, which hands the compositor `wl_shm` CPU memory. A DRM backend can never
+  scan that out, so its "no plane" answer was a property of the client, not of the
+  compositor — the underlay was never actually tested. The probe gains
+  `--client <testsrc|glsrc|rtsp>` (`testsrc` unchanged, so the first measurement
+  stays reproducible byte for byte; `glsrc` renders through Mesa EGL for real
+  dmabufs with no decoder; `rtsp` hardware-decodes the live H.264 stream through
+  `v4l2h264dec capture-io-mode=dmabuf`), `--under-cage` to run the client in its
+  own `cage` with DRM master, `--renderer <pixman|gles2>`, and `--url`. Two new
+  guards keep a non-answer from reading as a measurement: the `rtsp` client must
+  be seen pulling the stream (mediamtx `bytesSent` advancing with a reader
+  attached, polled up to 15 s) before any plane count is believed, and the
+  effective `WLR_RENDERER` is reported alongside the compositor because a
+  software wlroots renderer is itself a reason promotion could not happen. There
+  is deliberately no software-decode fallback: `videoconvert` emits system memory,
+  a DMABuf caps filter after it cannot negotiate, and the broken pipeline would
+  read as a measured "no" when nothing was measured at all.
+
+- **Ground-station appliances stand the login manager down.** The kiosk needs
+  `cage` to hold the DRM master to scan out, and a running desktop compositor
+  holds it instead — so on a desktop-imaged ground station the kiosk silently
+  resolved onto the windowed in-desktop branch. The installer's `appliance` step
+  now masks `display-manager.service` and `lightdm.service` on the
+  **ground-station profile only**. A drone has no desktop; a workstation or
+  compute node stays a login box. Fail-soft: a mask problem degrades, never aborts
+  the install.
+
+  **Rollback — how to get the desktop back on a ground station:**
+
+  ```
+  sudo touch /etc/ados/keep-desktop
+  sudo systemctl unmask lightdm display-manager.service
+  sudo systemctl enable --now lightdm
+  ```
+
+  The `/etc/ados/keep-desktop` marker is what makes that rollback durable. This
+  step has no checkpoint and therefore re-runs on every upgrade, so a bare
+  `systemctl unmask` would be silently re-applied by the next `ados update`; with
+  the marker present the installer never masks and actively unmasks anything it
+  masked before. The marker is operator-created only — no config schema change.
+  The in-place `systemctl stop` is skipped unless the installer's own logind
+  session is known and non-graphical (the SSH/TTY case), because stopping the
+  login manager from inside a graphical session would tear down the session the
+  installer is running in and leave a half-configured box; when it is skipped the
+  mask still takes effect from the next boot, and the installer says so.
+
+### Fixed
+
+- **The G3 Betaflight gate could not fail.** Its module contract says it requires
+  "a matching body-rate echo", but the code accepted **any inbound byte** as the
+  acknowledgement. Every flight controller streams telemetry continuously, so the
+  gate passed regardless of whether the attitude command was accepted — a
+  guaranteed false pass on a safety gate. It now accumulates inbound bytes,
+  frames them, and requires an `ATTITUDE_TARGET` (id 83) carrying back the
+  commanded `0.5 / -0.2 / 0.1` rad/s within `1e-2` before the 2 s window elapses.
+  The FC tty is put into raw binary mode first, because a CDC-ACM port comes up in
+  canonical mode where `read()` blocks for a newline and `ICRNL` rewrites `0x0D`
+  to `0x0A` inside a binary MAVLink frame. On timeout the assertion reports the
+  inbound byte count, the framed and decoded frame counts and the set of message
+  ids seen, so "the FC is silent", "the port is not MAVLink", and "the FC speaks
+  MAVLink but never echoes the attitude target" are distinguishable rather than
+  one undifferentiated failure. The gate keeps its `#[ignore]` and its
+  fail-closed posture with no `ADOS_G3_FC_PORT`.
+
 ## [0.99.258] - 2026-07-29
 
 ### Fixed
