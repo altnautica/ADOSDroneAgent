@@ -17,6 +17,7 @@ import { useEffect, useState } from "react";
 import {
   Check,
   ChevronLeft,
+  CircleDot,
   Gauge,
   Home,
   PlaneLanding,
@@ -47,6 +48,16 @@ const CORE_ICONS: Record<string, LucideIcon> = {
   land: PlaneLanding,
   rtl: Home,
 };
+
+/** Drawn for a skill with no icon of its own.
+ *
+ *  The map above is keyed by skill id and covers the ids that exist today, so
+ *  the lookup happens to be total. It is a plain index into a partial record
+ *  though, and the component it feeds renders the value as a component — so the
+ *  first skill added without an icon would not render a blank button, it would
+ *  throw during render, and this bar sits on the Feed where a throw takes the
+ *  whole panel. */
+const FALLBACK_SKILL_ICON: LucideIcon = CircleDot;
 
 const CORE_BY_ID: Record<string, Skill> = Object.fromEntries(
   CORE_SKILLS.map((s) => [s.id, s]),
@@ -245,7 +256,7 @@ export function SkillBar() {
               return (
                 <SkillButton
                   key={skill.id}
-                  icon={CORE_ICONS[skill.id]}
+                  icon={CORE_ICONS[skill.id] ?? FALLBACK_SKILL_ICON}
                   label={skill.label}
                   enabled={state.enabled && !busy}
                   reason={state.reason}

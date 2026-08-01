@@ -110,7 +110,14 @@ export function VideoLayer({
       // Reset the shared state so a stale "live" never lingers after the feed
       // unmounts (leaving the Feed screen).
       setVideoStatus("connecting", null, null);
-      void session?.close();
+      // `close()` is async, so `void` discards the PROMISE, not its rejection.
+      // If the browser's WebRTC stack throws while stopping tracks, that became
+      // an unhandled rejection during navigation away from the Feed — invisible
+      // on a panel with no console. Teardown failing is not worth surfacing to
+      // the operator, but it must not escape.
+      session?.close().catch(() => {
+        // Already tearing down; nothing left to recover.
+      });
     };
   }, [whepUrl, reconnectKey, setVideoStatus]);
 

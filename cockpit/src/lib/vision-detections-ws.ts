@@ -191,9 +191,22 @@ export function connectVisionDetections(
     const ticket = await mintWsTicket(VISION_DETECTIONS_SCOPE, controller.signal);
     if (closed) return;
 
-    socket = ticket
-      ? new WebSocket(url, [WS_TICKET_PROTOCOL, ticket])
-      : new WebSocket(url);
+    // The constructor throws SYNCHRONOUSLY when a subprotocol value is not a
+    // valid token, and a throw here escapes before `onclose` is assigned, so
+    // the reconnect ladder below is never reached and detections stay dead for
+    // the rest of the session. Falling back to the unticketed URL keeps the
+    // ladder alive; the server still decides whether to accept it. The physical
+    // button socket carries the same guard.
+    try {
+      socket = ticket
+        ? new WebSocket(url, [WS_TICKET_PROTOCOL, ticket])
+        : new WebSocket(url);
+    } catch {
+      socket = null;
+      onState?.("reconnecting");
+      scheduleReconnect();
+      return;
+    }
 
     socket.onopen = () => {
       reconnectMs = RECONNECT_MIN_MS;
