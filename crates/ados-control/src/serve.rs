@@ -214,26 +214,26 @@ async fn tcp_edge(State(edge): State<EdgeAuth>, mut request: Request, next: Next
     // widens the moment the device is paired and narrows again on unpair with no
     // restart — which a bind-time decision cannot do. See
     // `pairing_posture::unpaired_peer_allowed` for why this is not a bind.
-    if !auth::is_public(&path)
-        && matches!(
-            edge.pairing.current(),
-            ados_protocol::pairing_posture::Pairing::Unpaired
-        )
-    {
-        let peer_ip = request.extensions().get::<PeerAddr>().map(|p| p.0.ip());
-        let allowed =
-            peer_ip.is_some_and(|ip| ados_protocol::pairing_posture::unpaired_peer_allowed(&ip));
-        if !allowed {
-            tracing::warn!(
-                path = %path,
-                peer = ?peer_ip,
-                "unpaired_peer_refused"
-            );
-            return detail(
-                StatusCode::FORBIDDEN,
-                "This device is not paired yet. Pair it first, or reach it over its hotspot or USB connection.",
-            );
-        }
+    // The operator's own UI is allowed through alongside the public routes. It
+    // serves no data — every `/api/*` call it then makes is refused exactly as
+    // before — but withholding the shell left an unpaired node unable to show
+    // the operator its own pairing code, and left a browser that already had an
+    // old copy with no way to fetch a newer one.
+    let peer_ip = request.extensions().get::<PeerAddr>().map(|p| p.0.ip());
+    let unpaired = matches!(
+        edge.pairing.current(),
+        ados_protocol::pairing_posture::Pairing::Unpaired
+    );
+    if auth::refuse_while_unpaired(&path, unpaired, peer_ip) {
+        tracing::warn!(
+            path = %path,
+            peer = ?peer_ip,
+            "unpaired_peer_refused"
+        );
+        return detail(
+            StatusCode::FORBIDDEN,
+            "This device is not paired yet. Pair it first, or reach it over its hotspot or USB connection.",
+        );
     }
 
     // Strip any client-supplied on-box header first (it cannot be trusted), then

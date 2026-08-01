@@ -216,6 +216,57 @@ pub fn is_public(path: &str) -> bool {
     )
 }
 
+/// The operator's browser UIs and the static assets they are built from.
+///
+/// These carry no data of their own — they are the shell that then asks for it
+/// through `/api/*`, and every one of those calls keeps exactly the posture it
+/// had. Refusing the shell as well bought nothing and cost the operator the only
+/// surface that could tell them what was wrong: an unpaired node returned a raw
+/// JSON 403 to a browser navigation, so the page could not load, could not show
+/// the pairing code it already serves publicly on `/api/pairing/info`, and could
+/// not even be reloaded to pick up a newer build. A browser left holding an old
+/// cached bundle had no way back, because the fetch that would replace it was
+/// refused too.
+///
+/// Deliberately an allow-list rather than "anything outside `/api/`". `/whep` is
+/// a live video stream and `/docs` enumerates the route surface; both sit
+/// outside `/api/` and both stay refused while unpaired.
+pub fn is_operator_ui(path: &str) -> bool {
+    // The on-box cockpit and everything under it.
+    if path == "/cockpit" || path.starts_with("/cockpit/") {
+        return true;
+    }
+    // The browser dashboard is mounted at the root, so its entry point is `/`
+    // and its build output sits directly beneath.
+    if path == "/" || path.starts_with("/assets/") {
+        return true;
+    }
+    matches!(
+        path,
+        "/index.html" | "/brand.svg" | "/favicon.ico" | "/manifest.webmanifest"
+    )
+}
+
+/// Whether an unpaired node should refuse this request outright.
+///
+/// Pure, so the decision can be tested. It had no behavioural coverage at all
+/// while it lived inline in the serve loop, which is a poor place for a security
+/// gate to have none: the only way to find out what it refused was to run a node
+/// and ask it.
+///
+/// `peer` is `None` when the peer address could not be determined, which is
+/// treated as not-allowed — an unidentifiable caller is exactly the one this
+/// gate exists for.
+pub fn refuse_while_unpaired(path: &str, unpaired: bool, peer: Option<std::net::IpAddr>) -> bool {
+    if !unpaired {
+        return false;
+    }
+    if is_public(path) || is_operator_ui(path) {
+        return false;
+    }
+    !peer.is_some_and(|ip| ados_protocol::pairing_posture::unpaired_peer_allowed(&ip))
+}
+
 /// A fixed-window token-bucket rate limiter for the TCP edge. Each refill
 /// window grants `capacity` tokens; a request consumes one. When the bucket is
 /// empty within a window the request is rejected with 429. One shared bucket
@@ -444,6 +495,129 @@ mod tests {
             "/v1/openapi.json",
         ] {
             assert!(!is_public(p), "{p} should NOT be public");
+        }
+    }
+
+    #[test]
+    fn the_operator_ui_is_reachable_while_unpaired() {
+        // The shell an operator has to load before they can do anything at all,
+        // including read the pairing code that would let them pair.
+        for p in [
+            "/cockpit",
+            "/cockpit/",
+            "/cockpit/assets/index-abc123.js",
+            "/cockpit/assets/index-abc123.css",
+            "/cockpit/brand.svg",
+            "/",
+            "/index.html",
+            "/assets/index-def456.js",
+            "/brand.svg",
+            "/favicon.ico",
+        ] {
+            assert!(is_operator_ui(p), "{p} is the operator's own UI");
+        }
+    }
+
+    #[test]
+    fn serving_the_ui_does_not_open_the_data_behind_it() {
+        // The whole point: the shell loads, everything it asks for stays shut.
+        // A regression here would hand an unpaired node's telemetry, config and
+        // command surface to any peer on the network.
+        for p in [
+            "/api/status",
+            "/api/telemetry",
+            "/api/config",
+            "/api/command",
+            "/api/services",
+            "/api/v1/ground-station/status",
+            // Live video is not UI. It sits outside `/api/` and must not be
+            // swept in by a "anything that is not an API path" shortcut.
+            "/whep",
+            // Neither is the route-surface documentation.
+            "/docs",
+            "/docs/oauth2-redirect",
+        ] {
+            assert!(!is_operator_ui(p), "{p} must NOT be served while unpaired");
+        }
+    }
+
+    #[test]
+    fn a_cockpit_lookalike_path_is_not_the_cockpit() {
+        // Prefix matching is easy to get wrong in the direction that opens
+        // something: `/cockpit` must not vouch for a sibling that merely starts
+        // with the same letters.
+        for p in [
+            "/cockpitfoo",
+            "/cockpit-admin",
+            "/api/cockpit",
+            "/assetsfoo",
+        ] {
+            assert!(!is_operator_ui(p), "{p} is not the cockpit");
+        }
+    }
+
+    #[test]
+    fn the_unpaired_gate_refuses_data_and_admits_the_shell() {
+        use std::net::IpAddr;
+        // An ordinary LAN peer — the case the founder hit. Not in the allowed
+        // set (loopback, link-local, the AP and USB subnets).
+        let lan: Option<IpAddr> = Some("192.168.1.50".parse().unwrap());
+
+        // The shell loads, so the operator can see the node and its pairing code.
+        for p in [
+            "/cockpit/",
+            "/cockpit/assets/index-abc.js",
+            "/",
+            "/brand.svg",
+        ] {
+            assert!(
+                !refuse_while_unpaired(p, true, lan),
+                "{p} must load so the operator has a surface at all"
+            );
+        }
+        // Everything behind it stays shut.
+        for p in ["/api/status", "/api/config", "/api/command", "/whep"] {
+            assert!(
+                refuse_while_unpaired(p, true, lan),
+                "{p} must stay refused while unpaired"
+            );
+        }
+        // Claiming the device is how it stops being unpaired, so it stays open.
+        assert!(!refuse_while_unpaired("/api/pairing/claim", true, lan));
+        assert!(!refuse_while_unpaired("/api/pairing/info", true, lan));
+    }
+
+    #[test]
+    fn pairing_the_device_opens_everything_the_gate_was_holding() {
+        use std::net::IpAddr;
+        let lan: Option<IpAddr> = Some("192.168.1.50".parse().unwrap());
+        for p in ["/api/status", "/api/command", "/whep", "/cockpit/"] {
+            assert!(
+                !refuse_while_unpaired(p, false, lan),
+                "{p} is not this gate's business once paired"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unidentifiable_peer_is_refused_while_unpaired() {
+        // No peer address means the caller cannot be placed on a trusted link,
+        // which is precisely who this gate exists to stop.
+        assert!(refuse_while_unpaired("/api/status", true, None));
+        // ...but the shell is still served, so a browser is never left with
+        // nothing to read.
+        assert!(!refuse_while_unpaired("/cockpit/", true, None));
+    }
+
+    #[test]
+    fn the_reachable_peers_are_the_ones_a_fresh_device_is_reached_from() {
+        use std::net::IpAddr;
+        for ip in ["127.0.0.1", "192.168.4.10", "192.168.7.2"] {
+            let peer: Option<IpAddr> = Some(ip.parse().unwrap());
+            assert!(
+                !refuse_while_unpaired("/api/status", true, peer),
+                "{ip} is a direct link to the device"
+            );
         }
     }
 
