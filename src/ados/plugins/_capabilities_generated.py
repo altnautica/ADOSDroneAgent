@@ -85,7 +85,6 @@ ENFORCED_AGENT_CAPABILITIES: frozenset[str] = frozenset(
         "vision.detection.subscribe",
         "vision.track.designate",
         "flight.guided_setpoint",
-        "flight.rate_setpoint",
         "mavlink.tunnel",
         "radio.aux_stream",
         "display.oled.page",

@@ -396,7 +396,12 @@ description = "Lets a control lane command the flight controller with body-rate/
 category = "flight_control"
 risk = "critical"
 risk_reason = "Directly commands aircraft body rates and thrust at tick rate; a faulty rate stream can fly the aircraft outside guided-mode limits."
-enforced = true
+# NOT enforced at the plugin-capability dispatch layer yet: the attitude rung's
+# only gate today is its own control-law precedence (armed + own-state freshness +
+# PIC arbiter) in ados-mavlink-router, which is not a plugin-capability gate that
+# `actually_gated()` can see. Marking it enforced would claim a runtime gate the
+# plugin host does not perform (the "dangerous direction" `nothing_claims_a_gate_"
+# test). Flip to enforced = true when a plugin command path reaches the rung.
 
 [[agent]]
 id = "mavlink.tunnel"
