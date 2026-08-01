@@ -102,10 +102,33 @@ jobs:
       - name: Install build toolchain
         run: |
           set -eux
-          DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            build-essential bc kmod patch gnupg curl jq libelf-dev \
-            libssl-dev bison flex \
-            python3 python-is-python3
+          # Retried, because the failure this guards against is not ours to fix.
+          # A mirror mid-sync serves a package whose size disagrees with the
+          # index it just served, apt refuses it, and the whole matrix row goes
+          # red on an infrastructure hiccup that is gone seconds later. The
+          # refusal is correct — a short read is exactly what a partial download
+          # looks like — so the answer is to re-fetch rather than to relax the
+          # check. `--fix-missing` retries only the archives that failed, and the
+          # index is refreshed between attempts because a stale index is the
+          # usual reason a size disagrees in the first place.
+          install_toolchain() {
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --fix-missing \
+              build-essential bc kmod patch gnupg curl jq libelf-dev \
+              libssl-dev bison flex \
+              python3 python-is-python3
+          }
+          for attempt in 1 2 3; do
+            if install_toolchain; then
+              break
+            fi
+            if [ "$attempt" = 3 ]; then
+              echo "::error::Build toolchain failed to install after 3 attempts."
+              exit 1
+            fi
+            echo "toolchain install attempt $attempt failed; refreshing the index and retrying"
+            sleep $((attempt * 15))
+            DEBIAN_FRONTEND=noninteractive apt-get update || true
+          done
           # Some vendor BSP header packages (e.g. Armbian's rk35xx line) run a
           # `make modules_prepare`/`scripts` step in their postinst, which on a
           # 6.1 kernel wants openssl headers (module signing) and the bison/flex
