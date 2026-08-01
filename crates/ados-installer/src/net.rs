@@ -5,25 +5,47 @@
 //! confirmed field failure where a host resolves an asset to IPv6-only with no
 //! usable IPv6 default route and a naive `curl` stalls ~12 s before failing:
 //! force `-4` when no IPv6 default route exists, and retry with `-4` on a
-//! connect timeout. Bounded retries; never hangs (curl `--max-time`).
+//! connect timeout. Bounded retries; never hangs (curl's stall bound — see
+//! [`STALL_WINDOW_SECS`], which bounds a transfer making no progress rather than
+//! one that is merely slow).
 
 use std::path::Path;
 use std::time::Duration;
 
 use crate::exec;
 
+/// How long a transfer may make no meaningful progress before it is abandoned.
+///
+/// # Slow is not stalled
+///
+/// The bound is on a transfer making NO progress, not on how long it takes.
+/// This used to be a flat 180 s overall ceiling, which silently encodes a
+/// minimum throughput: the largest asset here is around 60 MB, so 180 s demands
+/// better than 340 KB/s. A ground station on a marginal wifi link measured
+/// 88 KB/s, where every attempt was killed mid-transfer and the download only
+/// ever completed because the resume below kept clawing it forward — an install
+/// that should take a minute spent the better part of an hour, and looked wedged
+/// the entire time.
+///
+/// `--speed-time` / `--speed-limit` say the thing actually meant: give up when
+/// less than [`STALL_FLOOR_BYTES_PER_SEC`] moves for this long. A stalled
+/// transfer still cannot hang the install, and a slow one is allowed to finish.
+pub const STALL_WINDOW_SECS: &str = "60";
+
+/// Bytes per second below which a transfer counts as stalled rather than slow.
+pub const STALL_FLOOR_BYTES_PER_SEC: &str = "1024";
+
 /// Build the `curl` argument vector for a single fetch attempt.
 ///
 /// Pure (no I/O): silent + fail-on-error + follow-redirects (`-fsSL`), a 10 s
-/// connect timeout, a 180 s overall ceiling so a stalled transfer can never
-/// hang the install, and three bounded retries with a 2 s delay. `--continue-at
-/// -` resumes a partially-downloaded file: on a flaky link a multi-MB asset that
-/// drops mid-transfer continues from the last byte on the next of curl's
-/// `--retry` attempts (GitHub release assets support range requests) instead of
-/// restarting from zero. When `force_ipv4` is set, `-4` is inserted so curl
-/// skips a dead IPv6 default route instead of stalling on it. The destination is
-/// the caller's path verbatim (the atomic temp-then-rename dance is `fetch`'s
-/// job, not this builder's).
+/// connect timeout, a stall bound (see [`STALL_WINDOW_SECS`]), and three bounded
+/// retries with a 2 s delay. `--continue-at -` resumes a partially-downloaded
+/// file: on a flaky link a multi-MB asset that drops mid-transfer continues from
+/// the last byte on the next of curl's `--retry` attempts (GitHub release assets
+/// support range requests) instead of restarting from zero. When `force_ipv4` is
+/// set, `-4` is inserted so curl skips a dead IPv6 default route instead of
+/// stalling on it. The destination is the caller's path verbatim (the atomic
+/// temp-then-rename dance is `fetch`'s job, not this builder's).
 ///
 /// Cache-busting: rolling tags reuse one asset URL across rebuilds, so an
 /// intermediary CDN can hand back a stale binary paired with a stale sha. The
@@ -39,8 +61,10 @@ pub fn curl_args(url: &str, dest: &Path, force_ipv4: bool) -> Vec<String> {
         "Pragma: no-cache".to_string(),
         "--connect-timeout".to_string(),
         "10".to_string(),
-        "--max-time".to_string(),
-        "180".to_string(),
+        "--speed-time".to_string(),
+        STALL_WINDOW_SECS.to_string(),
+        "--speed-limit".to_string(),
+        STALL_FLOOR_BYTES_PER_SEC.to_string(),
         "--retry".to_string(),
         "3".to_string(),
         "--retry-delay".to_string(),
@@ -226,12 +250,19 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn curl_args_has_max_time_and_no_v4_by_default() {
+    fn curl_args_bounds_a_stall_not_a_slow_link_and_no_v4_by_default() {
         let args = curl_args("https://example/x", Path::new("/tmp/x"), false);
-        assert!(args.contains(&"--max-time".to_string()));
-        // The 180 s ceiling value follows --max-time.
-        let pos = args.iter().position(|a| a == "--max-time").unwrap();
-        assert_eq!(args[pos + 1], "180");
+        // A flat overall ceiling is exactly what must NOT be here: it encodes a
+        // minimum throughput, and the largest asset over a marginal link needs
+        // longer than any fixed value that is also short enough to be useful.
+        assert!(
+            !args.contains(&"--max-time".to_string()),
+            "a wall-clock ceiling kills a slow but healthy transfer"
+        );
+        let pos = args.iter().position(|a| a == "--speed-time").unwrap();
+        assert_eq!(args[pos + 1], STALL_WINDOW_SECS);
+        let lpos = args.iter().position(|a| a == "--speed-limit").unwrap();
+        assert_eq!(args[lpos + 1], STALL_FLOOR_BYTES_PER_SEC);
         assert!(!args.contains(&"-4".to_string()));
         // Resume is enabled so a dropped transfer continues from the last byte.
         let cpos = args.iter().position(|a| a == "--continue-at").unwrap();
