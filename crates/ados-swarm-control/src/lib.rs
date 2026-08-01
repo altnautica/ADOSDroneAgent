@@ -89,4 +89,10 @@ pub const NEIGHBOR_STALE: std::time::Duration = std::time::Duration::from_secs(3
 /// confident geometry about where everyone is relative to where we used to be,
 /// and the setpoints keep flowing at the full tick rate. At 10 Hz a three-second
 /// window is thirty ticks of commanding on a dead fix, so this is one second.
-pub const OWN_STATE_STALE: std::time::Duration = std::time::Duration::from_secs(1);
+///
+/// Re-exported, not restated. The transport half gates the OUTGOING beacon on
+/// the same window, because a frozen fix that this loop refuses to fly on is
+/// still a frozen fix every other drone in the fleet dead-reckons forward. Two
+/// copies of the number would let those two halves drift apart without anything
+/// failing.
+pub use ados_swarmbus::OWN_STATE_STALE;

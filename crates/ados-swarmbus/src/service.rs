@@ -31,7 +31,7 @@ use crate::ingest::Ingest;
 use crate::neighbors::NeighborTable;
 use crate::publish::{encode_line, neighbors_payload};
 use crate::schedule::{beacon_delay, random_word, BEACON_PERIOD};
-use crate::vehicle::beacon_from_state;
+use crate::vehicle::{beacon_from_state, OWN_STATE_STALE};
 
 /// Per-client queue depth on the swarm socket. Small on purpose: a consumer that
 /// falls a second behind on position data wants the newest frame, not a backlog.
@@ -44,8 +44,29 @@ const RADIO_RETRY: Duration = Duration::from_secs(5);
 /// so this is deliberately far slower than the publish rate.
 const REGISTRY_REFRESH: Duration = Duration::from_secs(10);
 
+/// The latest vehicle-state snapshot, with the instant it was RECEIVED.
+///
+/// The timestamp is what makes the snapshot's age measurable at all. Without it
+/// the cell holds a value that looks identical whether the flight controller
+/// published it a moment ago or stopped publishing a minute ago, and the beacon
+/// loop reading that cell had no way to ask.
+#[derive(Debug, Clone)]
+struct StateSnapshot {
+    value: Value,
+    received: Instant,
+}
+
 /// Shared latest vehicle-state snapshot.
-type SharedState = Arc<Mutex<Option<Value>>>;
+type SharedState = Arc<Mutex<Option<StateSnapshot>>>;
+
+/// The snapshot body this node may broadcast as its own state, or `None` when
+/// there is none fresh enough to stand for it. Pure, so the window is testable
+/// without a socket or a radio.
+fn beacon_body(snapshot: Option<&StateSnapshot>, now: Instant) -> Option<&Value> {
+    snapshot
+        .filter(|s| now.saturating_duration_since(s.received) < OWN_STATE_STALE)
+        .map(|s| &s.value)
+}
 
 /// Run the service until `cancel` fires.
 pub async fn run(cfg: SwarmBusConfig, cancel: Arc<Notify>) {
@@ -219,11 +240,23 @@ async fn transmit_loop(
         // Fresh jitter every transmission, not once at startup: a fleet powered up
         // together must not stay in lockstep.
         tokio::time::sleep(beacon_delay(random_word())).await;
-        let snapshot = state.lock().clone();
+        // A snapshot older than the window is not broadcast as this node's
+        // state. Every receiving drone dead-reckons the position and velocity in
+        // a beacon FORWARD from the moment it arrives, so a frozen fix does not
+        // read across the fleet as a node gone quiet — it reads as a node still
+        // flying, on a track it left behind. Dropping the body (rather than the
+        // beacon) keeps this node visible on the bus with no position and no
+        // condition bits, which is exactly the reading a receiver needs: present,
+        // not locatable.
+        let held = state.lock().clone();
+        let body = beacon_body(held.as_ref(), Instant::now());
+        if held.is_some() && body.is_none() {
+            tracing::debug!("swarm_beacon_own_state_stale");
+        }
         // Sender uptime, truncated to 16 bits. It wraps every 65.5 s, which is far
         // longer than the staleness window it feeds.
         let seq_ms = started.elapsed().as_millis() as u16;
-        let beacon = beacon_from_state(snapshot.as_ref(), slot, seq_ms);
+        let beacon = beacon_from_state(body, slot, seq_ms);
         match bus.broadcast(&beacon).await {
             Ok(()) => table.lock().record_tx(),
             // A full driver queue is a dropped beacon, not a fault: the next one is
@@ -297,10 +330,22 @@ fn spawn_state_reader(socket_path: String, cancel: Arc<Notify>) -> SharedState {
                     f = read_state_value(&mut reader) => f,
                 };
                 match frame {
-                    Ok(Some(v)) => {
-                        *writer.lock() = Some(v);
+                    Ok(Some(value)) => {
+                        *writer.lock() = Some(StateSnapshot {
+                            value,
+                            received: Instant::now(),
+                        });
                     }
-                    Ok(None) | Err(_) => break,
+                    // The stream ended or failed. Clear the cell rather than
+                    // leaving the last snapshot standing: the reconnect loop
+                    // below may take seconds, and a held value with no producer
+                    // behind it is the frozen-fix case arriving by a different
+                    // route. The age gate would catch it, but the honest state
+                    // while there is no producer is no state.
+                    Ok(None) | Err(_) => {
+                        *writer.lock() = None;
+                        break;
+                    }
                 }
             }
             tokio::select! {
@@ -388,5 +433,103 @@ mod tests {
             REGISTRY_REFRESH > BEACON_PERIOD * 10,
             "pairing is a human-scale event; do not re-read the registry per publish"
         );
+    }
+
+    /// A snapshot whose producer has stopped must not keep being broadcast as
+    /// this node's position. Every receiving drone dead-reckons the beacon
+    /// forward, so a frozen fix radiates as continued motion the aircraft is not
+    /// performing, with the armed and offboard bits still set.
+    #[test]
+    fn a_stale_snapshot_is_not_broadcast_as_this_nodes_state() {
+        use crate::beacon::{STATUS_ARMED, STATUS_GUIDED};
+        use crate::vehicle::beacon_from_state;
+
+        let held = StateSnapshot {
+            value: serde_json::json!({
+                "armed": true,
+                "mode": "GUIDED",
+                "position": {"lat": 12.34, "lon": 56.78, "alt_rel": 40.0},
+                "velocity": {"vx": 8.0, "vy": 0.0, "vz": 0.0},
+            }),
+            received: Instant::now(),
+        };
+
+        // Fresh: the full body goes out, which is the whole point of the bus.
+        let fresh = beacon_from_state(beacon_body(Some(&held), held.received), 3, 0);
+        assert_ne!(fresh.lat, 0);
+        assert_ne!(fresh.vx_cms, 0);
+        assert_eq!(fresh.status & STATUS_ARMED, STATUS_ARMED);
+        assert_eq!(fresh.status & STATUS_GUIDED, STATUS_GUIDED);
+
+        // One window later the producer has gone quiet. The node stays on the
+        // bus, but carries no position, no velocity and no condition bits, so a
+        // receiver reads it as present and not locatable rather than moving.
+        let stale = beacon_from_state(
+            beacon_body(Some(&held), held.received + OWN_STATE_STALE),
+            3,
+            0,
+        );
+        assert_eq!(stale.lat, 0);
+        assert_eq!(stale.lon, 0);
+        assert_eq!(stale.vx_cms, 0);
+        assert_eq!(
+            stale.status, 0,
+            "a dead fix must not radiate armed/offboard"
+        );
+        assert_eq!(stale.slot, 3, "the node is still on the bus");
+    }
+
+    /// The boundary is exclusive on the near side, matching the control loop's
+    /// own reading of the same window.
+    #[test]
+    fn the_freshness_window_is_the_shared_one() {
+        let held = StateSnapshot {
+            value: serde_json::json!({"armed": true}),
+            received: Instant::now(),
+        };
+        let just_inside = held.received + OWN_STATE_STALE - Duration::from_millis(1);
+        assert!(beacon_body(Some(&held), just_inside).is_some());
+        assert!(beacon_body(Some(&held), held.received + OWN_STATE_STALE).is_none());
+        assert!(beacon_body(None, Instant::now()).is_none());
+    }
+
+    /// The state reader used to break out of its read loop leaving the last
+    /// snapshot in the cell, so a flight controller that stopped publishing left
+    /// its final reading standing while the reader reconnected.
+    #[tokio::test]
+    async fn a_closed_state_stream_clears_the_held_snapshot() {
+        use ados_protocol::ipc::IpcBroadcast;
+        use ados_protocol::state::encode_v2;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("state.sock");
+        let (server, _in) = IpcBroadcast::bind(&sock, 32, true, None).await.unwrap();
+        let cancel = Arc::new(Notify::new());
+        let shared = spawn_state_reader(sock.to_string_lossy().into_owned(), cancel.clone());
+
+        server
+            .broadcast(encode_v2(&serde_json::json!({"armed": true})).unwrap())
+            .await;
+        for _ in 0..100 {
+            if shared.lock().is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(shared.lock().is_some(), "the snapshot must be held");
+
+        // The producer goes away.
+        drop(server);
+        for _ in 0..100 {
+            if shared.lock().is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            shared.lock().is_none(),
+            "a snapshot with no producer behind it must not stay held"
+        );
+        cancel.notify_waiters();
     }
 }

@@ -93,6 +93,7 @@ pub use neighbors::{Neighbor, NeighborTable, SwarmCounters, MAX_NEIGHBORS, NEIGH
 pub use precedence::ModePrecedence;
 pub use schedule::{BEACON_HZ, BEACON_JITTER_MS, BEACON_PERIOD};
 pub use service::run;
+pub use vehicle::{beacon_from_state, MIN_USABLE_FIX_TYPE, OWN_STATE_STALE};
 
 /// The airtime figure derived in the module documentation above, as a fraction of
 /// one 20 MHz channel at the full fleet size.
