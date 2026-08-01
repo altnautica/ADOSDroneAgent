@@ -46,5 +46,6 @@ pub mod paths;
 pub mod pic;
 pub mod pic_ipc;
 pub mod pic_sidecar;
+pub mod pic_view;
 pub mod sidecar;
 pub mod touch;

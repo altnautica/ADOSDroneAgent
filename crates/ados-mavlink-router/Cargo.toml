@@ -14,6 +14,11 @@ ados-config = { path = "../ados-config" }
 ados-swarm-control = { path = "../ados-swarm-control" }
 # For the beacon `status` bit layout the autonomy status block encodes into.
 ados-swarmbus = { path = "../ados-swarmbus" }
+# The attitude rung's pure control laws (body-rate/thrust command set).
+ados-rate-control = { path = "../ados-rate-control" }
+# The PIC-verdict authority half the attitude rung's precedence gate consults
+# (ground-profile, so the same verdict propagates over every bearer).
+ados-hid = { path = "../ados-hid" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_norway = { workspace = true }

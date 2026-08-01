@@ -228,6 +228,7 @@ name = "ados-crsf"
 version = "0.1.0"
 dependencies = [
  "ados-config",
+ "ados-hid",
  "ados-protocol",
  "evdev",
  "serde",
@@ -431,7 +432,9 @@ name = "ados-mavlink-router"
 version = "0.1.0"
 dependencies = [
  "ados-config",
+ "ados-hid",
  "ados-protocol",
+ "ados-rate-control",
  "ados-swarm-control",
  "ados-swarmbus",
  "anyhow",
@@ -558,6 +561,13 @@ dependencies = [
  "tracing",
  "tracing-journald",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "ados-rate-control"
+version = "0.1.0"
+dependencies = [
+ "tracing",
 ]
 
 [[package]]

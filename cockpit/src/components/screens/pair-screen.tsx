@@ -22,6 +22,7 @@ import {
   StaleBadge,
   type Tone,
 } from "@/components/ui/data";
+import { SetUpAccess } from "@/components/shell/set-up-access";
 import { useResource } from "@/hooks/use-resource";
 import { apiFetch } from "@/lib/api";
 import { DASH } from "@/lib/format";
@@ -211,6 +212,13 @@ export function PairScreen() {
             ) : null}
           </div>
         ) : null}
+
+        <SectionHeader>Access from a browser</SectionHeader>
+        <p className="mb-[0.2rem] px-[0.15rem] text-[0.7rem] text-muted-foreground">
+          Unlock this node&apos;s data (status, video, command) from a browser on the
+          trusted LAN by setting or entering its dashboard PIN.
+        </p>
+        <SetUpAccess />
       </div>
     </Panel>
   );

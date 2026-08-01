@@ -766,7 +766,7 @@ async fn receive_loop(
         let mut secondaries: std::collections::BTreeMap<u8, SlotReceivers> =
             std::collections::BTreeMap::new();
         for &slot in &slots[1..] {
-            match manager.spawn_slot_receivers(&interface, slot).await {
+            match manager.spawn_slot_receivers(&interface, slot, false).await {
                 Ok(r) => {
                     secondaries.insert(slot, r);
                 }
@@ -943,40 +943,78 @@ async fn receive_loop(
         let reconcile = async {
             let mut tick = tokio::time::interval(FLEET_RECONCILE_INTERVAL);
             tick.tick().await; // the first tick completes immediately
+            let mut hero_tick = tokio::time::interval(Duration::from_secs(1));
+            hero_tick.tick().await;
+            let hero_path = std::path::PathBuf::from(ados_groundlink::fleet_hero::hero_path());
             loop {
-                tick.tick().await;
-                let want: std::collections::BTreeSet<u8> = wfb_rx::fleet_slots(
-                    &FleetRegistry::load(std::path::Path::new(FLEET_REGISTRY_PATH)),
-                )
-                .into_iter()
-                .collect();
-                if !want.contains(&primary_slot) {
-                    tracing::info!(primary_slot, "ground_primary_slot_released");
-                    return;
-                }
-                secondaries.retain(|slot, _| {
-                    let keep = want.contains(slot);
-                    if !keep {
-                        tracing::info!(slot, "ground_slot_rx_despawned");
-                    }
-                    keep
-                });
-                // Collect the missing slots before spawning: the filter borrows
-                // `secondaries` and the insert needs it mutably, so the two
-                // cannot overlap.
-                let missing: Vec<u8> = want
-                    .iter()
-                    .copied()
-                    .filter(|s| *s != primary_slot && !secondaries.contains_key(s))
-                    .collect();
-                for slot in missing {
-                    match manager.spawn_slot_receivers(&interface, slot).await {
-                        Ok(r) => {
-                            secondaries.insert(slot, r);
-                            tracing::info!(slot, "ground_slot_rx_spawned");
+                tokio::select! {
+                    _ = tick.tick() => {
+                        let want: std::collections::BTreeSet<u8> = wfb_rx::fleet_slots(
+                            &FleetRegistry::load(std::path::Path::new(FLEET_REGISTRY_PATH)),
+                        )
+                        .into_iter()
+                        .collect();
+                        if !want.contains(&primary_slot) {
+                            tracing::info!(primary_slot, "ground_primary_slot_released");
+                            return;
                         }
-                        Err(e) => {
-                            tracing::error!(error = %e, slot, "ground_slot_rx_failed_to_start")
+                        secondaries.retain(|slot, _| {
+                            let keep = want.contains(slot);
+                            if !keep {
+                                tracing::info!(slot, "ground_slot_rx_despawned");
+                            }
+                            keep
+                        });
+                        // Collect the missing slots before spawning: the filter
+                        // borrows `secondaries` and the insert needs it mutably.
+                        let missing: Vec<u8> = want
+                            .iter()
+                            .copied()
+                            .filter(|s| *s != primary_slot && !secondaries.contains_key(s))
+                            .collect();
+                        for slot in missing {
+                            match manager.spawn_slot_receivers(&interface, slot, false).await {
+                                Ok(r) => {
+                                    secondaries.insert(slot, r);
+                                    tracing::info!(slot, "ground_slot_rx_spawned");
+                                }
+                                Err(e) => {
+                                    tracing::error!(
+                                        error = %e, slot, "ground_slot_rx_failed_to_start"
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    // Video bring-back, driven off the 1 s hero poll: only the
+                    // hero slot's video egress is read, so a secondary slot
+                    // decodes a full-FEC video stream nobody consumes. Bring the
+                    // video receiver up when the slot BECOMES the hero and drop
+                    // it (killpg) when it is unpromoted. `aux` + `control` were
+                    // spawned unconditionally and stay up either way.
+                    _ = hero_tick.tick() => {
+                        let hero = fanout::resolve_fanout_slot(
+                            primary_slot,
+                            &hero_path,
+                            std::path::Path::new(FLEET_REGISTRY_PATH),
+                        );
+                        for (slot, rx) in secondaries.iter_mut() {
+                            let is_hero = *slot == hero;
+                            if is_hero && !rx.decoding_video() {
+                                match manager.spawn_slot_video(&interface, *slot).await {
+                                    Ok(v) => {
+                                        rx.video = Some(v);
+                                        tracing::info!(slot, "ground_slot_video_brought_up");
+                                    }
+                                    Err(e) => tracing::error!(
+                                        error = %e, slot, "ground_slot_video_failed_to_start"
+                                    ),
+                                }
+                            } else if !is_hero && rx.decoding_video() {
+                                // Dropping the receiver killpg's its group.
+                                rx.video = None;
+                                tracing::info!(slot, "ground_slot_video_unwatched");
+                            }
                         }
                     }
                 }

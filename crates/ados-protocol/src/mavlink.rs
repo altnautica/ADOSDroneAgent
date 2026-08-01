@@ -500,6 +500,180 @@ fn mav_frame_from_u8(frame: u8) -> ardupilotmega::MavFrame {
 }
 
 // ---------------------------------------------------------------------------
+// SET_ATTITUDE_TARGET attitude setpoint builder (message id 82).
+// ---------------------------------------------------------------------------
+
+/// MAVLink message id of `SET_ATTITUDE_TARGET`.
+pub const MSG_ID_SET_ATTITUDE_TARGET: u32 = 82;
+
+/// The `SET_ATTITUDE_TARGET` CRC_EXTRA, the message-definition seed the X.25
+/// checksum folds in last (the value the canonical dialect carries for the
+/// message; not the id). This is a distinct constant for this message — do not
+/// confuse it with the `CRC_EXTRA` of any other id.
+pub const ATTITUDE_TARGET_CRC_EXTRA: u8 = 49;
+
+// ATTITUDE_TARGET_TYPEMASK bits (the values the ardupilotmega dialect carries
+// for the message's `type_mask` bitfield). A set bit ignores that axis, exactly
+// like the position-target mask semantics — an ignored axis serializes its
+// stored value but the autopilot disregards it.
+const ATTMASK_BODY_ROLL_RATE_IGNORE: u8 = 1;
+const ATTMASK_BODY_PITCH_RATE_IGNORE: u8 = 2;
+const ATTMASK_BODY_YAW_RATE_IGNORE: u8 = 4;
+/// `THRUST_BODY_SET`: the (extension) body-frame thrust vector is set. This
+/// lane never commands it; the bit is accepted as known solely so a mask that
+/// carries it is not misread as malformed.
+const ATTMASK_THRUST_BODY_SET: u8 = 32;
+const ATTMASK_THROTTLE_IGNORE: u8 = 64;
+/// `ATTITUDE_IGNORE`: an unset bit here means the quaternion `q` is a commanded
+/// attitude; when set, only the body rates (and possibly thrust) are meaningful.
+const ATTMASK_ATTITUDE_IGNORE: u8 = 128;
+
+/// The full set of `type_mask` bits the attitude-target message defines. A mask
+/// with any bit outside this set is rejected: only the rate/attitude/thrust
+/// bits are meaningful, so an unknown high bit means a malformed request rather
+/// than a new semantic.
+const ATTITUDE_TARGET_TYPEMASK_KNOWN_BITS: u8 =
+    ATTMASK_BODY_ROLL_RATE_IGNORE
+        | ATTMASK_BODY_PITCH_RATE_IGNORE
+        | ATTMASK_BODY_YAW_RATE_IGNORE
+        | ATTMASK_THRUST_BODY_SET
+        | ATTMASK_THROTTLE_IGNORE
+        | ATTMASK_ATTITUDE_IGNORE;
+
+/// How far from unit length a commanded quaternion may be and still pass
+/// validation. `SET_ATTITUDE_TARGET` consumes `q` as a unit quaternion; a
+/// caller that hands it an unnormalized `q` would let the autopilot interpolate
+/// garbage attitude. This is a strict tolerance: a control law that saturates
+/// or accumulates drift is caught here, on this side of the wire.
+const QUAT_NORM_TOLERANCE: f32 = 1e-3;
+
+/// A single `SET_ATTITUDE_TARGET` payload, frame-independent.
+///
+/// This is a transport-agnostic data value, NOT a controller: building one and
+/// sending it is one fire-and-forget MAVLink frame. It owns no flight state,
+/// mode, or schedule — the caller owns the policy around it (the autopilot
+/// accepts these only in its attitude/offboard mode, and a command stream is a
+/// heartbeat the caller must re-send well above the decay rate). The builder
+/// validates that every field the `type_mask` does NOT ignore is finite, that a
+/// commanded attitude is a unit quaternion, and that a commanded thrust is
+/// within the normalized range, so a NaN / out-of-range command can never reach
+/// the wire on an active axis.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AttitudeSetpoint {
+    /// The `type_mask` ignore bits (`ATTITUDE_TARGET_TYPEMASK_*`). A set bit
+    /// ignores that axis. The high bits above the defined field are rejected so
+    /// a malformed mask cannot smuggle unknown semantics to the autopilot.
+    pub type_mask: u8,
+    /// Attitude quaternion `(w, x, y, z)`, MAVLink order; zero rotation is
+    /// `(1, 0, 0, 0)`. Meaningful only while `ATTITUDE_IGNORE` is clear.
+    pub q: [f32; 4],
+    /// Body roll rate, rad/s. Ignored when `BODY_ROLL_RATE_IGNORE` is set.
+    pub body_roll_rate: f32,
+    /// Body pitch rate, rad/s. Ignored when `BODY_PITCH_RATE_IGNORE` is set.
+    pub body_pitch_rate: f32,
+    /// Body yaw rate, rad/s. Ignored when `BODY_YAW_RATE_IGNORE` is set.
+    pub body_yaw_rate: f32,
+    /// Collective thrust, normalized `0..1` (`-1..1` for reverse-thrust
+    /// vehicles). Ignored when `THROTTLE_IGNORE` is set.
+    pub thrust: f32,
+}
+
+impl AttitudeSetpoint {
+    /// Validate the setpoint, returning the first problem found. Mirrors
+    /// [`GuidedSetpoint::validate`] so an out-of-range command is refused at
+    /// construction:
+    /// * the `type_mask` carries no bit outside the defined field, and
+    /// * every numeric field on an axis the mask does NOT ignore is finite, and
+    /// * a commanded attitude is a unit quaternion, and
+    /// * a commanded thrust is within the normalized `-1..=1` range.
+    ///
+    /// An ignored axis is not checked (the autopilot disregards it), so a pure
+    /// body-rate command with a NaN left in the (ignored) quaternion is
+    /// accepted — but a NaN or out-of-range value on an active axis is rejected.
+    pub fn validate(&self) -> Result<(), SetpointError> {
+        if self.type_mask & !ATTITUDE_TARGET_TYPEMASK_KNOWN_BITS != 0 {
+            return Err(SetpointError(format!(
+                "type_mask 0x{:02X} sets a bit outside the defined attitude-target field",
+                self.type_mask
+            )));
+        }
+
+        let active = |bit: u8| self.type_mask & bit == 0;
+        let check_f32 = |v: f32, name: &str| -> Result<(), SetpointError> {
+            if v.is_finite() {
+                Ok(())
+            } else {
+                Err(SetpointError(format!("{name} must be a finite number")))
+            }
+        };
+
+        if active(ATTMASK_ATTITUDE_IGNORE) {
+            for (i, c) in self.q.iter().enumerate() {
+                check_f32(*c, &format!("q[{i}]"))?;
+            }
+            let norm = (self.q[0] * self.q[0]
+                + self.q[1] * self.q[1]
+                + self.q[2] * self.q[2]
+                + self.q[3] * self.q[3])
+            .sqrt();
+            if (norm - 1.0).abs() > QUAT_NORM_TOLERANCE {
+                return Err(SetpointError(format!(
+                    "q must be a unit quaternion (norm {norm})"
+                )));
+            }
+        }
+        if active(ATTMASK_BODY_ROLL_RATE_IGNORE) {
+            check_f32(self.body_roll_rate, "body_roll_rate")?;
+        }
+        if active(ATTMASK_BODY_PITCH_RATE_IGNORE) {
+            check_f32(self.body_pitch_rate, "body_pitch_rate")?;
+        }
+        if active(ATTMASK_BODY_YAW_RATE_IGNORE) {
+            check_f32(self.body_yaw_rate, "body_yaw_rate")?;
+        }
+        if active(ATTMASK_THROTTLE_IGNORE) {
+            check_f32(self.thrust, "thrust")?;
+            if !(-1.0..=1.0).contains(&self.thrust) {
+                return Err(SetpointError(format!(
+                    "thrust {} must be in -1..=1",
+                    self.thrust
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate, then build the typed [`MavMessage`] for this setpoint. The
+    /// `target_system` / `target_component` address the vehicle; `time_boot_ms`
+    /// is fixed at 0 (the autopilot does not require a monotonic stamp on an
+    /// attitude setpoint; ArduPilot ignores it on the inbound path). The actual
+    /// X.25 CRC is folded with [`ATTITUDE_TARGET_CRC_EXTRA`] (49) by the typed
+    /// serializer, identical to what this builder's own encoder would emit.
+    pub fn build_message(
+        &self,
+        target_system: u8,
+        target_component: u8,
+    ) -> Result<MavMessage, SetpointError> {
+        self.validate()?;
+        let type_mask =
+            ardupilotmega::AttitudeTargetTypemask::from_bits_truncate(self.type_mask);
+        Ok(MavMessage::SET_ATTITUDE_TARGET(
+            ardupilotmega::SET_ATTITUDE_TARGET_DATA {
+                time_boot_ms: 0,
+                q: self.q,
+                body_roll_rate: self.body_roll_rate,
+                body_pitch_rate: self.body_pitch_rate,
+                body_yaw_rate: self.body_yaw_rate,
+                thrust: self.thrust,
+                target_system,
+                target_component,
+                type_mask,
+            },
+        ))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // TUNNEL transparent application-payload pipe (message id 385).
 // ---------------------------------------------------------------------------
 
@@ -1120,6 +1294,132 @@ mod tests {
             .unwrap_err()
             .0
             .contains("not valid for this setpoint kind"));
+    }
+
+    // ---- attitude setpoint builder ----------------------------------------
+
+    fn body_rate_command() -> AttitudeSetpoint {
+        // Pure body-rate command: ignore attitude, command rates + thrust.
+        AttitudeSetpoint {
+            type_mask: ATTMASK_ATTITUDE_IGNORE,
+            q: [1.0, 0.0, 0.0, 0.0],
+            body_roll_rate: 0.5,
+            body_pitch_rate: -0.2,
+            body_yaw_rate: 0.1,
+            thrust: 0.6,
+        }
+    }
+
+    #[test]
+    fn attitude_setpoint_builds_and_round_trips() {
+        let sp = body_rate_command();
+        let msg = sp.build_message(1, 1).expect("valid setpoint builds");
+        let header = MavHeader {
+            system_id: 1,
+            component_id: 191,
+            sequence: 0,
+        };
+        let frame = serialize_v2(header, &msg).expect("serialize succeeds");
+        // The 3-byte v2 message id (bytes 7..10) is 82.
+        assert_eq!(frame[7], 82, "message id low byte is 82 (SET_ATTITUDE_TARGET)");
+        assert_eq!(frame[8], 0);
+        assert_eq!(frame[9], 0);
+        let (_h, decoded) = parse_v2(&frame).expect("decode succeeds");
+        match decoded {
+            MavMessage::SET_ATTITUDE_TARGET(d) => {
+                assert_eq!(d.body_roll_rate, 0.5);
+                assert_eq!(d.body_pitch_rate, -0.2);
+                assert_eq!(d.body_yaw_rate, 0.1);
+                assert_eq!(d.thrust, 0.6);
+                assert_eq!(d.target_system, 1);
+                assert_eq!(d.target_component, 1);
+                // The attitude-ignore bit round-tripped.
+                assert!(d
+                    .type_mask
+                    .contains(ardupilotmega::AttitudeTargetTypemask::ATTITUDE_TARGET_TYPEMASK_ATTITUDE_IGNORE));
+            }
+            other => panic!("expected SET_ATTITUDE_TARGET, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attitude_setpoint_commands_a_quaternion_and_round_trips() {
+        // Command a full attitude: clear ATTITUDE_IGNORE, set a unit quaternion.
+        let mut sp = body_rate_command();
+        sp.type_mask &= !ATTMASK_ATTITUDE_IGNORE;
+        sp.q = [0.923_879_5, 0.0, 0.0, 0.382_683_43]; // 45° yaw, unit norm
+        let msg = sp.build_message(1, 1).expect("valid setpoint builds");
+        let header = MavHeader::default();
+        let frame = serialize_v2(header, &msg).expect("serialize succeeds");
+        let (_h, decoded) = parse_v2(&frame).expect("decode succeeds");
+        match decoded {
+            MavMessage::SET_ATTITUDE_TARGET(d) => {
+                assert_eq!(d.q, sp.q);
+                assert!(!d
+                    .type_mask
+                    .contains(ardupilotmega::AttitudeTargetTypemask::ATTITUDE_TARGET_TYPEMASK_ATTITUDE_IGNORE));
+            }
+            other => panic!("expected SET_ATTITUDE_TARGET, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attitude_setpoint_rejects_a_non_unit_quaternion() {
+        let mut sp = body_rate_command();
+        sp.type_mask &= !ATTMASK_ATTITUDE_IGNORE;
+        sp.q = [1.0, 0.0, 0.0, 0.0];
+        sp.q[3] = 0.5; // norm sqrt(1 + 0.25) ≈ 1.118 > tolerance
+        let err = sp.build_message(1, 1).unwrap_err();
+        assert!(err.0.contains("unit quaternion"), "got: {}", err.0);
+    }
+
+    #[test]
+    fn attitude_setpoint_rejects_a_nan_on_an_active_rate_axis() {
+        let mut sp = body_rate_command();
+        sp.body_pitch_rate = f32::NAN;
+        let err = sp.build_message(1, 1).unwrap_err();
+        assert_eq!(err.0, "body_pitch_rate must be a finite number");
+    }
+
+    #[test]
+    fn attitude_setpoint_rejects_thrust_out_of_range() {
+        let mut sp = body_rate_command();
+        sp.thrust = 1.5;
+        let err = sp.build_message(1, 1).unwrap_err();
+        assert!(err.0.contains("must be in -1..=1"), "got: {}", err.0);
+        // A negative value within the reverse-thrust range is accepted.
+        sp.thrust = -0.9;
+        assert!(sp.build_message(1, 1).is_ok());
+    }
+
+    #[test]
+    fn attitude_setpoint_ignores_a_nan_on_an_ignored_axis() {
+        let mut sp = body_rate_command();
+        sp.body_roll_rate = f32::NAN; // ignored (BODY_ROLL_RATE_IGNORE is clear? no)
+        // The active rate axes are roll/pitch/yaw + thrust; directly ignore roll.
+        sp.type_mask |= ATTMASK_BODY_ROLL_RATE_IGNORE;
+        assert!(sp.build_message(1, 1).is_ok(), "ignored-axis NaN is accepted");
+    }
+
+    #[test]
+    fn attitude_setpoint_rejects_an_unknown_type_mask_bit() {
+        let mut sp = body_rate_command();
+        sp.type_mask |= 0x10; // 16 is not a defined attitude-target bit
+        let err = sp.build_message(1, 1).unwrap_err();
+        assert!(
+            err.0.contains("outside the defined attitude-target field"),
+            "got: {}",
+            err.0
+        );
+    }
+
+    #[test]
+    fn opponent_attitude_changes_not_rejected_but_crc_const_is_49() {
+        // Pin the two authoritative constants for the message: id 82, CRC_EXTRA
+        // 49, payload 39 — so a future dialect bump cannot silently drift them.
+        assert_eq!(MSG_ID_SET_ATTITUDE_TARGET, 82);
+        assert_eq!(ATTITUDE_TARGET_CRC_EXTRA, 49);
+        assert_eq!(ardupilotmega::SET_ATTITUDE_TARGET_DATA::ENCODED_LEN, 39);
     }
 
     #[test]

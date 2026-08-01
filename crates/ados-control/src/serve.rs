@@ -224,16 +224,45 @@ async fn tcp_edge(State(edge): State<EdgeAuth>, mut request: Request, next: Next
         edge.pairing.current(),
         ados_protocol::pairing_posture::Pairing::Unpaired
     );
-    if auth::refuse_while_unpaired(&path, unpaired, peer_ip) {
-        tracing::warn!(
-            path = %path,
-            peer = ?peer_ip,
-            "unpaired_peer_refused"
-        );
-        return detail(
-            StatusCode::FORBIDDEN,
-            "This device is not paired yet. Pair it first, or reach it over its hotspot or USB connection.",
-        );
+    match auth::unpaired_decision(&path, unpaired, peer_ip) {
+        auth::UnpairedDecision::Refuse => {
+            tracing::warn!(
+                path = %path,
+                peer = ?peer_ip,
+                "unpaired_peer_refused"
+            );
+            return detail(
+                StatusCode::FORBIDDEN,
+                "This device is not paired yet. Pair it first, or reach it over its hotspot or USB connection.",
+            );
+        }
+        auth::UnpairedDecision::RequirePin => {
+            // A trusted operator-LAN browser to a DATA route on an UNPAIRED node:
+            // it must hold a dashboard PIN session minted via
+            // `/api/dashboard/pin/{set,verify}` (which the edge public-exempts so the
+            // operator's browser can obtain one). No session -> 403 exactly as the
+            // old flat refusal; with a valid session the data loads. The node is
+            // unpaired here, so the session validates under the empty-key issuer
+            // used when the data plane had no pairing key.
+            let session_ok = request
+                .headers()
+                .get(crate::dashboard_pin::DASHBOARD_SESSION_HEADER)
+                .and_then(|v| v.to_str().ok())
+                .map(|tok| edge.dashboard_pin.session_valid_unpaired(tok))
+                .unwrap_or(false);
+            if !session_ok {
+                tracing::warn!(
+                    path = %path,
+                    peer = ?peer_ip,
+                    "unpaired_pin_required"
+                );
+                return detail(
+                    StatusCode::FORBIDDEN,
+                    "This device is not paired yet. Set up access with the dashboard PIN, or pair it first.",
+                );
+            }
+        }
+        auth::UnpairedDecision::Allow => {}
     }
 
     // Strip any client-supplied on-box header first (it cannot be trusted), then
@@ -878,6 +907,108 @@ mod tests {
             edge.mcp_admits(&http::Method::GET, "/api/status", &token_headers(&tampered)),
             McpDecision::Fallthrough
         ));
+    }
+
+    /// Build an UNPAIRED `EdgeAuth`: pairing.json with `paired:false`, a set
+    /// dashboard PIN (so a browser can mint a session), and a session minted the
+    /// way `/api/dashboard/pin/verify` does when the node has no pairing key.
+    fn unpaired_edge(dir: &std::path::Path) -> (EdgeAuth, crate::dashboard_pin::DashboardPin) {
+        let pairing_path = dir.join("pairing.json");
+        std::fs::write(&pairing_path, r#"{"paired": false, "api_key": ""}"#).unwrap();
+        let dashboard_pin = Arc::new(crate::dashboard_pin::DashboardPin::with_path(
+            dir.join("dashboard-pin.json"),
+        ));
+        let edge = EdgeAuth {
+            pairing: Arc::new(PairingState::with_path(pairing_path)),
+            rate: Arc::new(RateLimiter::default_control()),
+            proxied: Arc::new(ProxiedAuth::new(crate::config::SecuritySection::default())),
+            dashboard_pin: dashboard_pin.clone(),
+            mcp_tokens: Arc::new(McpTokenStore::with_path(dir.join("mcp-token.json"))),
+            config_path: dir.join("config.yaml"),
+        };
+        (edge, dashboard_pin.as_ref().clone())
+    }
+
+    fn lan_app(edge: EdgeAuth) -> axum::Router {
+        axum::Router::new()
+            .route("/api/status", axum::routing::get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(edge.clone(), tcp_edge))
+            .with_state(edge)
+    }
+
+    /// The founder's scenario end-to-end: a private-LAN browser reaching a DATA
+    /// route on an UNPAIRED node must hold a dashboard PIN session. Without one it
+    /// is refused (403, exactly the pre-fix outcome); with a valid one it is
+    /// served. This is the new PIN gate, and it fails on the pre-fix behaviour
+    /// (which had no PIN path for a private-LAN peer at all).
+    #[tokio::test]
+    async fn unpaired_private_lan_data_route_requires_a_pin_session() {
+        use tower::util::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let (edge, dashboard_pin) = unpaired_edge(dir.path());
+        dashboard_pin.set_pin("1234", 0.0).unwrap();
+        let sess = dashboard_pin
+            .mint_session("")
+            .expect("a set PIN mints an unpaired session");
+        let app = lan_app(edge);
+        let peer = PeerAddr(SocketAddr::from(([192, 168, 1, 50], 45678)));
+
+        // No session -> 403.
+        let req = Request::builder()
+            .uri("/api/status")
+            .extension(peer)
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // A wrong/tampered session is still refused.
+        let req = Request::builder()
+            .uri("/api/status")
+            .header(crate::dashboard_pin::DASHBOARD_SESSION_HEADER, "v1|1|2|ff")
+            .extension(peer)
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // A valid session -> served.
+        let req = Request::builder()
+            .uri("/api/status")
+            .header(crate::dashboard_pin::DASHBOARD_SESSION_HEADER, &sess.token)
+            .extension(peer)
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// A first-boot lifeline peer keeps unrestricted unpaired data access (no PIN
+    /// required) — the provisioning surface is where the PIN is first created.
+    #[tokio::test]
+    async fn unpaired_lifeline_peer_served_data_without_a_pin() {
+        use tower::util::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let (edge, _set_pin_unused) = unpaired_edge(dir.path());
+        let app = lan_app(edge);
+        for ip in ["192.168.4.37", "192.168.7.2", "127.0.0.1"] {
+            let ip: std::net::IpAddr = ip.parse().unwrap();
+            let req = Request::builder()
+                .uri("/api/status")
+                .extension(PeerAddr(SocketAddr::from((ip, 45678))))
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "{ip} is a lifeline");
+        }
+        // A public-WAN peer stays refused on a data route.
+        let req = Request::builder()
+            .uri("/api/status")
+            .extension(PeerAddr(SocketAddr::from(([8, 8, 8, 8], 45678))))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
     /// A tiny Debug shim so a failing Admit assertion can print the variant.

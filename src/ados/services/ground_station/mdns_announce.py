@@ -196,6 +196,16 @@ async def resolve_receiver(
 
 # Default IP assigned to the AP interface. Matches the value rendered
 # into hostapd + dnsmasq configs by hostapd_manager.
+#
+# REPORT (report-only, do not suppress, do not extend the rule): this
+# `192.168.4.1` is the hotspot AP address served on `wlan0` only. Over mDNS
+# it is advertised alongside the LAN address, but from the LAN/wired side it
+# is unreachable and must NOT be treated as reachable — the same
+# advertise-an-unreachable-address shape the report-only `reachable_addr`
+# rule names in `crates/ados-control/src/routes/reachable_addr.rs`. We keep
+# advertising it on purpose: stations joined to the `ADOS-GS-*` SSID resolve
+# the agent via this address. Report / log it; never filter it out of the
+# advertisement and never extend the rule to hide it.
 _AP_DEFAULT_IP = "192.168.4.1"
 
 

@@ -93,7 +93,7 @@ def test_catalog_size_matches_spec() -> None:
     # plugin's tool/resource/prompt exposure to the MCP surface, and
     # video.source.set lets a camera/pod driver reconfigure the video pipeline's
     # stream sources.
-    assert len(AGENT_CAPABILITIES) == 49
+    assert len(AGENT_CAPABILITIES) == 50
 
 
 def test_gated_caps_are_marked_enforced() -> None:
@@ -118,6 +118,7 @@ def test_gated_caps_are_marked_enforced() -> None:
             "event.publish",
             "event.subscribe",
             "flight.guided_setpoint",
+            "flight.rate_setpoint",
             "hardware.gpio_out",
             "mavlink.component.vio",
             "mavlink.read",

@@ -20,6 +20,19 @@
 //! its own addresses, and which interface the default route leaves by. No probe
 //! is needed, and a probe would be worse — it would answer for the machine
 //! doing the probing rather than for every client.
+//!
+//! ## Report-only note: the ground-station mDNS hotspot address
+//!
+//! The ground-station agent advertises `192.168.4.1` (its `wlan0` hotspot AP
+//! address, see `ground_station/mdns_announce.py` `_AP_DEFAULT_IP`) over mDNS
+//! alongside its reachable LAN address. From the wired/LAN side that hotspot
+//! address is unreachable — it is served only by the AP interface and is not
+//! routable from the LAN — the same advertise-an-unreachable-address shape this
+//! rule detects. REPORT-ONLY: it is logged/annotated here as a known hazard and
+//! must NOT be treated as reachable, but it is deliberately NOT suppressed from
+//! the advertisement (clients on the `ADOS-GS-*` SSID need it) and the rule
+//! below is NOT extended to filter it out. Do not "fix" it by dropping the
+//! address or tightening this rule.
 
 /// One locally-assigned IPv4 address.
 #[derive(Debug, Clone, PartialEq, Eq)]

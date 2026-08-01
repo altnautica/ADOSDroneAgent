@@ -15,6 +15,7 @@
 // they deal with it.
 
 import { useReachStore } from "@/stores/reach-store";
+import { SetUpAccess } from "@/components/shell/set-up-access";
 
 export function ReachNotice() {
   const refusal = useReachStore((s) => s.refusal);
@@ -27,29 +28,39 @@ export function ReachNotice() {
   return (
     <div
       role="status"
-      className="flex shrink-0 flex-wrap items-center justify-center gap-x-[0.75rem] gap-y-[0.25rem] border-b border-amber/40 bg-amber/10 px-[1rem] py-[0.4rem] text-center text-[0.8rem]"
+      className="flex shrink-0 flex-col items-center gap-y-[0.35rem] border-b border-amber/40 bg-amber/10 px-[1rem] py-[0.5rem] text-center text-[0.8rem]"
     >
-      <span className="font-semibold text-amber">
-        {unpaired ? "This node is not paired" : "Not signed in to this node"}
-      </span>
-      <span className="text-muted-foreground">
-        {unpaired
-          ? "It answers its own identity and nothing else, so every reading below is unavailable rather than empty."
-          : "It is paired, and this browser holds no credential for it, so its readings are unavailable rather than empty."}
-      </span>
-      {unpaired && pairingCode ? (
+      <div className="flex w-full flex-wrap items-center justify-center gap-x-[0.75rem] gap-y-[0.25rem]">
+        <span className="font-semibold text-amber">
+          {unpaired ? "This node is not paired" : "Not signed in to this node"}
+        </span>
         <span className="text-muted-foreground">
-          Pair it from Mission Control with code{" "}
-          <span className="font-mono font-semibold text-foreground">
-            {pairingCode}
+          {unpaired
+            ? "It answers its own identity and nothing else, so every reading below is unavailable rather than empty."
+            : "It is paired, and this browser holds no credential for it, so its readings are unavailable rather than empty."}
+        </span>
+        {unpaired && pairingCode ? (
+          <span className="text-muted-foreground">
+            Pair it from Mission Control with code{" "}
+            <span className="font-mono font-semibold text-foreground">
+              {pairingCode}
+            </span>
+            , or reach it over its hotspot or a USB cable.
           </span>
-          , or reach it over its hotspot or a USB cable.
-        </span>
-      ) : null}
-      {!unpaired ? (
-        <span className="text-muted-foreground">
-          Sign in on this node&apos;s dashboard and return here.
-        </span>
+        ) : null}
+        {!unpaired ? (
+          <span className="text-muted-foreground">
+            Sign in on this node&apos;s dashboard and return here.
+          </span>
+        ) : null}
+      </div>
+      {/* The founder's route past an unpaired door: set or enter the dashboard
+          PIN to unlock the DATA surfaces from this trusted-LAN browser, exactly
+          as they chose over blind trusted-network-open. */}
+      {unpaired ? (
+        <div className="flex w-full max-w-[34rem] justify-center">
+          <SetUpAccess />
+        </div>
       ) : null}
     </div>
   );

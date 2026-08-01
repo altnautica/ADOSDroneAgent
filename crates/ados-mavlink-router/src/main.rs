@@ -23,6 +23,7 @@ use ados_mavlink_router::aux_uplink;
 use ados_mavlink_router::aux_uplink_consumer::{self, AuxUplinkConsumerCounters};
 use ados_mavlink_router::config::MavlinkConfig;
 use ados_mavlink_router::connection::swarm_setpoint::{self, SwarmSetpointStatus};
+use ados_mavlink_router::connection::attitude_setpoint::{self, AttitudeSetpointStatus};
 use ados_mavlink_router::connection::ClientOrigin;
 use ados_mavlink_router::connection::FcConnection;
 use ados_mavlink_router::frame_ingest::{self, IngestCounters, INGEST_QUEUE_DEPTH};
@@ -609,6 +610,40 @@ async fn main() {
         Some(status)
     };
 
+    // The attitude rung: body-rate/thrust `SET_ATTITUDE_TARGET` out, a second
+    // way to fly ArduPilot until the G3 gate (a real Betaflight FC) passes.
+    // Gated INERT here: no rate injector producer or config enables it yet, so
+    // it never emits a live attitude command to any airframe (the G3 test is
+    // written failing-first and left #[ignore]d). `AttitudeSetpointStatus` is
+    // the reverse direction: the lane's verdict + counters for the snapshot.
+    let attitude_status: Option<Arc<AttitudeSetpointStatus>> = {
+        let status = Arc::new(AttitudeSetpointStatus::default());
+        let fc = fc.clone();
+        let state = state.clone();
+        let pic_path = format!("{dir}/pic-state.json");
+        let handle = status.clone();
+        let cancel = cancel.clone();
+        // A watch channel carrying the newest live rate command + its attested
+        // identity. No producer is wired yet (that is the G3-gated lane), so
+        // the channel stays empty and the rung suppresses to the human hold.
+        let (rate_tx, rate_rx) =
+            tokio::sync::watch::channel::<Option<(ados_rate_control::AttitudeCommand, String, std::time::Instant)>>(None);
+        let _keep_writer_alive = rate_tx;
+        tasks.push(tokio::spawn(async move {
+            attitude_setpoint::run(
+                fc,
+                state,
+                false, // inert until a producer + config are wired
+                pic_path,
+                rate_rx,
+                handle,
+                cancel,
+            )
+            .await
+        }));
+        Some(status)
+    };
+
     {
         let fc = fc.clone();
         let state = state.clone();
@@ -620,6 +655,7 @@ async fn main() {
         let aux_rpc_counters = aux_rpc_counters.clone();
         let frame_ingest_counters = frame_ingest_counters.clone();
         let relayed_vehicle = relayed_vehicle.clone();
+        let attitude_status = attitude_status.clone();
         let cancel = cancel.clone();
         tasks.push(tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_millis(100));
@@ -658,6 +694,7 @@ async fn main() {
                             &fc, &state, &params, started, mavlink_drops, state_drops,
                             aux_tee_counters.as_ref(), frame_ingest_counters.as_ref(),
                             aux_rpc_counters.as_ref(), swarm_status.as_ref(),
+                            attitude_status.as_ref(),
                             relayed_vehicle.as_ref(),
                         )
                         .await;
@@ -757,6 +794,7 @@ async fn build_extras(
     frame_ingest_counters: Option<&Arc<IngestCounters>>,
     aux_rpc_counters: Option<&AuxUplinkConsumerCounters>,
     swarm: Option<&Arc<SwarmSetpointStatus>>,
+    attitude: Option<&Arc<AttitudeSetpointStatus>>,
     relayed_vehicle: Option<&Arc<StdMutex<RelayedVehicle>>>,
 ) -> Map<String, Value> {
     // The cached param count and the map's change counter, read under one lock.
@@ -942,6 +980,29 @@ async fn build_extras(
     // A real JSON bool, not 0/1: the beacon builder reads a non-bool as false, and
     // for a safety flag that is the wrong direction to fail in.
     extras.insert(ados_swarm_control::EXTRA_EMERGENCY.into(), json!(emergency));
+    // The attitude rung's verdict + counters. Absent (the rung inert / not
+    // yet wired) reads as the honest "no-command" hold — never a fabricated
+    // default that implies a live rate lane.
+    match attitude {
+        Some(s) => {
+            extras.insert("attitude_verdict".into(), json!(s.verdict_wire()));
+            extras.insert(
+                "attitude_setpoints_emitted".into(),
+                json!(s.setpoints_emitted()),
+            );
+            extras.insert(
+                "attitude_ticks_suppressed".into(),
+                json!(s.ticks_suppressed()),
+            );
+            extras.insert(
+                "attitude_freshness_suppressions".into(),
+                json!(s.freshness_suppressions()),
+            );
+        }
+        None => {
+            extras.insert("attitude_verdict".into(), json!("no-command"));
+        }
+    }
     extras
 }
 
@@ -1055,7 +1116,8 @@ mod extras_key_set_tests {
     /// vehicle fields up in place of the withheld local ones. So it appears here
     /// but in neither classification list, which is correct rather than an
     /// omission.
-    const EXPECTED_EXTRAS_KEYS: [&str; 28] = [
+    const EXPECTED_EXTRAS_KEYS: [&str; 29] = [
+        "attitude_verdict",
         "aux_mavlink_tee",
         "aux_rpc",
         "fc_baud",
@@ -1114,6 +1176,7 @@ mod extras_key_set_tests {
             Some(&Arc::new(IngestCounters::default())),
             Some(&AuxUplinkConsumerCounters::new()),
             Some(&Arc::new(SwarmSetpointStatus::default())),
+            None,
             Some(&relayed),
         )
         .await;
@@ -1190,6 +1253,7 @@ mod extras_key_set_tests {
             Some(&Arc::new(IngestCounters::default())),
             None,
             None,
+            None,
             Some(&relayed),
         )
         .await;
@@ -1228,6 +1292,7 @@ mod extras_key_set_tests {
             0,
             None,
             Some(&Arc::new(IngestCounters::default())),
+            None,
             None,
             None,
             Some(&never),
@@ -1279,6 +1344,7 @@ mod extras_key_set_tests {
             Some(&AuxUplinkConsumerCounters::new()),
             None,
             None,
+            None,
         )
         .await;
         let empty_len = sized_without_clocks(empty);
@@ -1300,6 +1366,7 @@ mod extras_key_set_tests {
             Some(&Arc::new(TeeCounters::default())),
             Some(&Arc::new(IngestCounters::default())),
             Some(&AuxUplinkConsumerCounters::new()),
+            None,
             None,
             None,
         )

@@ -137,6 +137,14 @@ pub fn is_on_box(peer_is_loopback: bool, has_forwarding_header: bool) -> bool {
 ///
 /// Returns true for loopback, IPv4/IPv6 link-local, and the two agent-owned
 /// provisioning subnets. Everything else is refused while unpaired.
+///
+/// This is the FIRST-BOOT LIFELINE set, deliberately left unchanged by the
+/// private-LAN operator scope: it is also consulted by the direct MAVLink WebSocket
+/// proxy (an off-`ados-control` surface that re-uses this crate), whose unpaired
+/// posture must stay restricted to the lifelines. A private-LAN browser is instead
+/// trusted for the HTTP operator-UI scope via [`trusted_operator_lan_peer`] and gated
+/// there behind the dashboard PIN — see that predicate for why the two sets are
+/// siblings rather than folded into one.
 pub fn unpaired_peer_allowed(peer: &std::net::IpAddr) -> bool {
     match peer {
         std::net::IpAddr::V4(v4) => {
@@ -156,6 +164,46 @@ pub fn unpaired_peer_allowed(peer: &std::net::IpAddr) -> bool {
                     .to_ipv4_mapped()
                     .is_some_and(|m| unpaired_peer_allowed(&std::net::IpAddr::V4(m)))
         }
+    }
+}
+
+/// True when an IPv4 octet array is in an RFC1918 private range: `10.0.0.0/8`,
+/// `172.16.0.0/12`, or `192.168.0.0/16`. Link-local (`169.254/16`) and loopback
+/// are NOT RFC1918 — the former is handled by the first-boot lifeline set, the
+/// latter is on-box.
+fn is_rfc1918_v4(o: [u8; 4]) -> bool {
+    match o {
+        [10, _, _, _] => true,
+        [172, b, _, _] => (16..=31).contains(&b),
+        [192, 168, _, _] => true,
+        _ => false,
+    }
+}
+
+/// Whether a peer is a trusted operator-LAN peer — it sits on an RFC1918 private
+/// LAN (`10/8`, `172.16/12`, `192.168/16`), i.e. plausibly the operator's own
+/// browser on the local network rather than a random public-WAN host.
+///
+/// These are the peers the founder's PIN-gated cockpit design trusts for the
+/// operator-UI DATA scope while the node is unpaired: they may reach status/video/
+/// command through the HTTP control surface, but (unlike the first-boot lifelines)
+/// only when they present a dashboard PIN session, which the `ados-control` gate
+/// enforces. Public-WAN addresses never match this.
+///
+/// Deliberately a SIBLING of, not folded into, [`unpaired_peer_allowed`]: the
+/// first-boot lifelines keep their unrestricted unpaired access on EVERY surface,
+/// including the direct MAVLink WebSocket proxy that also consults this module. If
+/// the private-LAN set were folded into `unpaired_peer_allowed`, that proxy would
+/// blindly open flight-control bytes to the whole LAN while unpaired — exactly the
+/// blind trusted-network-open the founder rejected — and the PIN gate would be
+/// bypassable off the HTTP surface. So the HTTP gate layers this predicate on top
+/// of the lifeline set and applies the PIN requirement itself.
+pub fn trusted_operator_lan_peer(peer: &std::net::IpAddr) -> bool {
+    match peer {
+        std::net::IpAddr::V4(v4) => is_rfc1918_v4(v4.octets()),
+        std::net::IpAddr::V6(v6) => v6
+            .to_ipv4_mapped()
+            .is_some_and(|m| is_rfc1918_v4(m.octets())),
     }
 }
 
@@ -225,6 +273,58 @@ mod tests {
             assert!(
                 !unpaired_peer_allowed(&addr),
                 "{ip} must not reach a non-public route on an unpaired device"
+            );
+        }
+    }
+
+    /// The founder's ask: a browser on a private trusted LAN is a trusted
+    /// operator-LAN peer for the PIN-gated operator-UI scope. The predicate is
+    /// the RFC1918 signal, kept distinct from the first-boot lifeline set so the
+    /// MAVLink surface stays lifeline-only while the HTTP gate layers the PIN on
+    /// top of this.
+    #[test]
+    fn a_private_lan_peer_is_a_trusted_operator_peer() {
+        for ip in [
+            "192.168.1.10",
+            "192.168.200.50", // the office LAN the founder hit
+            "10.0.0.5",
+            "10.255.255.1",
+            "172.16.4.4",
+            "172.31.255.1",
+            // The provisioning subnets are RFC1918 too, so they are trusted
+            // operator-LAN peers as well (the HTTP gate prioritises their
+            // lifeline status and serves them without a PIN).
+            "192.168.4.37",
+            "192.168.7.42",
+        ] {
+            let addr: IpAddr = ip.parse().unwrap();
+            assert!(
+                trusted_operator_lan_peer(&addr),
+                "{ip} is on a private LAN and must be a trusted operator peer"
+            );
+        }
+        // An IPv4 private address arriving mapped onto v6 is trusted too.
+        let mapped: IpAddr = "::ffff:192.168.1.50".parse().unwrap();
+        assert!(trusted_operator_lan_peer(&mapped));
+    }
+
+    /// Public-WAN hosts and non-RFC1918 addresses must never be trusted as
+    /// operator-LAN peers — the PIN-gated scope must not open to the internet.
+    #[test]
+    fn a_public_wan_peer_is_not_a_trusted_operator_peer() {
+        for ip in [
+            "8.8.8.8",
+            "203.0.113.5",  // documentation range
+            "172.15.255.1", // just below 172.16/12
+            "172.32.0.1",   // just above
+            "169.254.1.1",  // link-local, not RFC1918
+            "127.0.0.1",    // loopback, not RFC1918
+            "2001:db8::1",
+        ] {
+            let addr: IpAddr = ip.parse().unwrap();
+            assert!(
+                !trusted_operator_lan_peer(&addr),
+                "{ip} is not a private-LAN peer and must not be trusted"
             );
         }
     }

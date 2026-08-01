@@ -105,11 +105,29 @@ pub struct PrimaryChain {
 /// The receive trio for one non-primary fleet slot. Additive to the primary
 /// chain: spawned when the slot registers, dropped (killpg) when it releases or
 /// when the generation ends.
+///
+/// `video` is OPTIONAL and spawned apart from `aux`/`control`: only the HERO
+/// slot's video egress is read (every other slot's video port has no consumer),
+/// so a non-hero secondary slot decodes a full-FEC stream nothing reads — pure
+/// waste on the ground adapter. `aux` (the general-purpose application lane) and
+/// `control` (HopAnnounce/Presence) stay UNCONDITIONAL: a linked ground station
+/// must receive whatever a drone sends it on those lanes regardless of whether it
+/// is the hero. Video is brought back when the slot becomes the hero, driven off
+/// the 1 s hero poll — see `main.rs`'s video reconcile.
 pub struct SlotReceivers {
     pub slot: u8,
-    pub video: GsWfbProcess,
+    /// The video receiver (p0), or `None` when this slot is not the hero and its
+    /// video port is therefore unwatched. Dropping a set receiver killpg's it.
+    pub video: Option<GsWfbProcess>,
     pub aux: GsWfbProcess,
     pub control: GsWfbProcess,
+}
+
+impl SlotReceivers {
+    /// Whether this slot currently decodes video.
+    pub fn decoding_video(&self) -> bool {
+        self.video.is_some()
+    }
 }
 
 /// The fleet slots this ground station receives on, ascending.
@@ -466,9 +484,17 @@ impl WfbRxManager {
         })
     }
 
-    /// Spawn the receive trio for one NON-primary fleet slot: video (p0), aux
-    /// (p2) and control (p1), each keyed to that slot's `link_id` and decoding
+    /// Spawn the receive trio for one NON-primary fleet slot: aux (p2) and
+    /// control (p1) unconditionally, plus the video receiver (p0) only when
+    /// `with_video` is true. Each is keyed to that slot's `link_id` and decodes
     /// to that slot's loopback egress ports.
+    ///
+    /// The split is the unwatched-video-slots fix: a non-hero slot's video port
+    /// is never read (only the hero's egress is fanned out), so decoding its
+    /// full-FEC stream is pure adapter waste. `aux` + `control` stay
+    /// unconditional — a linked ground station must hear whatever a drone sends
+    /// on those lanes. Video is brought back via [`Self::spawn_slot_video`] when
+    /// the slot becomes the hero, driven off the 1 s hero poll.
     ///
     /// All instances bind the SAME `iface` as the primary chain. That is legal,
     /// not a workaround: `wfb_rx` opens a promiscuous, non-exclusive pcap handle
@@ -482,16 +508,23 @@ impl WfbRxManager {
         &self,
         iface: &str,
         slot: u8,
+        with_video: bool,
     ) -> std::io::Result<SlotReceivers> {
         let rx_key = rx_key_path();
         let drone = ados_radio::config::link_id(self.config.fleet_id, slot);
-        let video = GsWfbProcess::spawn(
-            "wfb_rx",
-            &data_rx_args(iface, &rx_key, video_rx_port(slot), drone),
-            Stdout::Null,
-            Some(&format!("/run/ados/wfb-gs-video-rx-{slot}.log")),
-        )
-        .await?;
+        let video = if with_video {
+            Some(
+                GsWfbProcess::spawn(
+                    "wfb_rx",
+                    &data_rx_args(iface, &rx_key, video_rx_port(slot), drone),
+                    Stdout::Null,
+                    Some(&format!("/run/ados/wfb-gs-video-rx-{slot}.log")),
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
         let aux = GsWfbProcess::spawn(
             "wfb_rx",
             &gs_atlas_rx_args(iface, &rx_key, aux_rx_port(slot), drone),
@@ -512,6 +545,23 @@ impl WfbRxManager {
             aux,
             control,
         })
+    }
+
+    /// Bring the video receiver (p0) up for a slot, the bring-back half of the
+    /// unwatched-video-slots split. Called when the slot becomes the hero, off the
+    /// 1 s hero poll. The process is created anew because `GsWfbProcess` is not
+    /// `Clone` (it owns a process group); the previous one, if any, was dropped
+    /// (killpg'd) when it was unpromoted.
+    pub async fn spawn_slot_video(&self, iface: &str, slot: u8) -> std::io::Result<GsWfbProcess> {
+        let rx_key = rx_key_path();
+        let drone = ados_radio::config::link_id(self.config.fleet_id, slot);
+        GsWfbProcess::spawn(
+            "wfb_rx",
+            &data_rx_args(iface, &rx_key, video_rx_port(slot), drone),
+            Stdout::Null,
+            Some(&format!("/run/ados/wfb-gs-video-rx-{slot}.log")),
+        )
+        .await
     }
 
     /// Build the chunk-2 watchdog for this receive generation, wired to the

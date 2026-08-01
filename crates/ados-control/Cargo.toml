@@ -130,6 +130,9 @@ sysinfo = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+# The integration tests drive the LAN-edge middleware with `tower::util::ServiceExt::oneshot`;
+# `util` is not a default tower feature, so enable it here for the test build only.
+tower = { workspace = true, features = ["util"] }
 
 # Linux-only edge: systemd readiness/watchdog notify + journald log layer for
 # the daemon, and the nix group-ownership helper for the trusted socket. Confined

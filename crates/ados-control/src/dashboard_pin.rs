@@ -292,6 +292,23 @@ impl DashboardPin {
             .is_ok()
     }
 
+    /// Whether `token` is a valid dashboard session minted while the node is
+    /// UNPAIRED. When unpaired there is no pairing key on file, so the session is
+    /// minted (by [`mint_session`]) under the empty-key issuer; this validates a
+    /// token against that same issuer + the stored salt. This is the credential
+    /// the PIN gate on an unpaired node's data routes requires a trusted-LAN
+    /// browser to hold: the browser mints a session via `/api/dashboard/pin/{set,
+    /// verify}` and presents it as [`DASHBOARD_SESSION_HEADER`]. `false` when no
+    /// PIN is set (no salt to key with).
+    pub fn session_valid_unpaired(&self, token: &str) -> bool {
+        let Some(salt) = self.salt() else {
+            return false;
+        };
+        DashboardSessionIssuer::from_api_key_and_salt("", &salt)
+            .verify(token, now_unix())
+            .is_ok()
+    }
+
     fn persist(&self, doc: &DashboardPinDoc) -> std::io::Result<()> {
         let body =
             serde_json::to_vec_pretty(doc).map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -478,6 +495,37 @@ mod tests {
         let other = Pairing::Paired("different".to_string());
         let fresh = s.mint_session("ados_key").unwrap();
         assert!(!s.session_valid_for(&other, &fresh.token));
+    }
+
+    /// The PIN gate on an unpaired node's data routes: the session is minted under
+    /// the empty-key issuer (there is no pairing key on file) and must validate
+    /// via `session_valid_unpaired`. This is the credential a trusted-LAN browser
+    /// holds before the node is paired.
+    #[test]
+    fn unpaired_session_round_trips_and_revokes_on_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        // No PIN set: nothing can validate, and nothing can be minted.
+        assert!(!s.session_valid_unpaired("v1|1|2|00"));
+        assert!(s.mint_session("").is_none());
+
+        s.set_pin("1234", 0.0).unwrap();
+        let sess = s
+            .mint_session("")
+            .expect("a set PIN mints an unpaired session");
+        assert!(
+            s.session_valid_unpaired(&sess.token),
+            "a fresh unpaired session verifies"
+        );
+        // A reset (new salt) revokes the live session.
+        s.set_pin("5678", 1.0).unwrap();
+        assert!(
+            !s.session_valid_unpaired(&sess.token),
+            "resetting the PIN revokes the prior unpaired session"
+        );
+        // A tampered token never validates.
+        assert!(!s.session_valid_unpaired("v1|1|2|ff"));
+        assert!(!s.session_valid_unpaired("garbage"));
     }
 
     #[cfg(unix)]

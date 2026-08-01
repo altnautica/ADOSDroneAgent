@@ -247,24 +247,64 @@ pub fn is_operator_ui(path: &str) -> bool {
     )
 }
 
-/// Whether an unpaired node should refuse this request outright.
-///
-/// Pure, so the decision can be tested. It had no behavioural coverage at all
-/// while it lived inline in the serve loop, which is a poor place for a security
-/// gate to have none: the only way to find out what it refused was to run a node
-/// and ask it.
+/// The unpaired-node gate's outcome for a request, granular enough to express the
+/// new private-LAN PIN scope: a private-LAN browser is no longer flatly refused on
+/// a DATA route — it is trusted for the operator-UI scope and PIN-gated instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnpairedDecision {
+    /// Serve the request: the node is paired, the route is public or operator UI,
+    /// or the peer is a first-boot lifeline (loopback, link-local, AP/USB subnets).
+    Allow,
+    /// A trusted operator-LAN peer requesting a DATA route on an UNPAIRED node:
+    /// served only when the caller presents a valid dashboard PIN session
+    /// (minted via `/api/dashboard/pin/{set,verify}`), else refused.
+    RequirePin,
+    /// The peer is neither a lifeline nor a trusted operator-LAN peer (a public-WAN
+    /// host, or an unidentifiable peer): refuse with 403, exactly as before.
+    Refuse,
+}
+
+/// The unpaired-node gate: whether a request is served outright, requires a PIN
+/// session, or is refused. Pure, so the decision is testable — it had no
+/// behavioural coverage at all while it lived inline in the serve loop, which is a
+/// poor place for a security gate to have none.
 ///
 /// `peer` is `None` when the peer address could not be determined, which is
-/// treated as not-allowed — an unidentifiable caller is exactly the one this
-/// gate exists for.
-pub fn refuse_while_unpaired(path: &str, unpaired: bool, peer: Option<std::net::IpAddr>) -> bool {
+/// treated as not-allowed — an unidentifiable caller is exactly the one this gate
+/// exists for.
+///
+/// The private-LAN operator scope rests on [`ados_protocol::pairing_posture::
+/// trusted_operator_lan_peer`], layered on top of the (unchanged) first-boot
+/// lifeline set so the direct MAVLink proxy keeps its lifeline-only unpaired
+/// posture and the PIN cannot be bypassed off the HTTP surface. An ordinary private
+/// LAN peer hits `RequirePin` on a DATA route; the caller (serve.rs) checks the
+/// dashboard session and 403s without one.
+pub fn unpaired_decision(
+    path: &str,
+    unpaired: bool,
+    peer: Option<std::net::IpAddr>,
+) -> UnpairedDecision {
     if !unpaired {
-        return false;
+        return UnpairedDecision::Allow;
     }
     if is_public(path) || is_operator_ui(path) {
-        return false;
+        return UnpairedDecision::Allow;
     }
-    !peer.is_some_and(|ip| ados_protocol::pairing_posture::unpaired_peer_allowed(&ip))
+    // A DATA route (status / telemetry / command / video): gate by peer.
+    let Some(peer) = peer else {
+        return UnpairedDecision::Refuse;
+    };
+    use ados_protocol::pairing_posture::{trusted_operator_lan_peer, unpaired_peer_allowed};
+    if unpaired_peer_allowed(&peer) {
+        // First-boot lifeline (loopback, link-local, AP/USB): served without a PIN,
+        // unchanged — these are the surfaces the PIN is first created on.
+        return UnpairedDecision::Allow;
+    }
+    if trusted_operator_lan_peer(&peer) {
+        // A private-LAN browser: the new PIN-gated operator scope.
+        return UnpairedDecision::RequirePin;
+    }
+    UnpairedDecision::Refuse
 }
 
 /// A fixed-window token-bucket rate limiter for the TCP edge. Each refill
@@ -557,10 +597,12 @@ mod tests {
     }
 
     #[test]
-    fn the_unpaired_gate_refuses_data_and_admits_the_shell() {
+    fn the_unpaired_gate_pins_private_lan_data_and_admits_the_shell() {
+        use crate::auth::UnpairedDecision;
         use std::net::IpAddr;
-        // An ordinary LAN peer — the case the founder hit. Not in the allowed
-        // set (loopback, link-local, the AP and USB subnets).
+        // An ordinary LAN peer — the case the founder hit. A private-LAN address:
+        // trusted for the operator-UI scope, so it is no longer flatly refused;
+        // instead its DATA calls now require a PIN session.
         let lan: Option<IpAddr> = Some("192.168.1.50".parse().unwrap());
 
         // The shell loads, so the operator can see the node and its pairing code.
@@ -570,30 +612,57 @@ mod tests {
             "/",
             "/brand.svg",
         ] {
-            assert!(
-                !refuse_while_unpaired(p, true, lan),
+            assert_eq!(
+                unpaired_decision(p, true, lan),
+                UnpairedDecision::Allow,
                 "{p} must load so the operator has a surface at all"
             );
         }
-        // Everything behind it stays shut.
+        // Data routes from a private-LAN browser are PIN-gated, not flatly refused:
+        // the operator's browser can reach the cockpit DATA with a PIN session.
         for p in ["/api/status", "/api/config", "/api/command", "/whep"] {
-            assert!(
-                refuse_while_unpaired(p, true, lan),
-                "{p} must stay refused while unpaired"
+            assert_eq!(
+                unpaired_decision(p, true, lan),
+                UnpairedDecision::RequirePin,
+                "{p} must be PIN-gated for a private-LAN peer while unpaired"
             );
         }
         // Claiming the device is how it stops being unpaired, so it stays open.
-        assert!(!refuse_while_unpaired("/api/pairing/claim", true, lan));
-        assert!(!refuse_while_unpaired("/api/pairing/info", true, lan));
+        assert_eq!(
+            unpaired_decision("/api/pairing/claim", true, lan),
+            UnpairedDecision::Allow
+        );
+        assert_eq!(
+            unpaired_decision("/api/pairing/info", true, lan),
+            UnpairedDecision::Allow
+        );
+    }
+
+    #[test]
+    fn a_public_wan_peer_is_still_refused_data_while_unpaired() {
+        use crate::auth::UnpairedDecision;
+        use std::net::IpAddr;
+        // Public-WAN must stay closed: nothing about the PIN-gated scope loosens
+        // for a non-private-LAN host.
+        for ip in ["8.8.8.8", "203.0.113.5", "2001:db8::1"] {
+            let peer: Option<IpAddr> = Some(ip.parse().unwrap());
+            assert_eq!(
+                unpaired_decision("/api/status", true, peer),
+                UnpairedDecision::Refuse,
+                "{ip} is public WAN and must stay refused"
+            );
+        }
     }
 
     #[test]
     fn pairing_the_device_opens_everything_the_gate_was_holding() {
+        use crate::auth::UnpairedDecision;
         use std::net::IpAddr;
         let lan: Option<IpAddr> = Some("192.168.1.50".parse().unwrap());
         for p in ["/api/status", "/api/command", "/whep", "/cockpit/"] {
-            assert!(
-                !refuse_while_unpaired(p, false, lan),
+            assert_eq!(
+                unpaired_decision(p, false, lan),
+                UnpairedDecision::Allow,
                 "{p} is not this gate's business once paired"
             );
         }
@@ -601,21 +670,32 @@ mod tests {
 
     #[test]
     fn an_unidentifiable_peer_is_refused_while_unpaired() {
+        use crate::auth::UnpairedDecision;
         // No peer address means the caller cannot be placed on a trusted link,
         // which is precisely who this gate exists to stop.
-        assert!(refuse_while_unpaired("/api/status", true, None));
+        assert_eq!(
+            unpaired_decision("/api/status", true, None),
+            UnpairedDecision::Refuse
+        );
         // ...but the shell is still served, so a browser is never left with
         // nothing to read.
-        assert!(!refuse_while_unpaired("/cockpit/", true, None));
+        assert_eq!(
+            unpaired_decision("/cockpit/", true, None),
+            UnpairedDecision::Allow
+        );
     }
 
     #[test]
     fn the_reachable_peers_are_the_ones_a_fresh_device_is_reached_from() {
+        use crate::auth::UnpairedDecision;
         use std::net::IpAddr;
+        // The first-boot lifelines keep unrestricted unpaired data access (no PIN):
+        // these are the surfaces the PIN is first created on.
         for ip in ["127.0.0.1", "192.168.4.10", "192.168.7.2"] {
             let peer: Option<IpAddr> = Some(ip.parse().unwrap());
-            assert!(
-                !refuse_while_unpaired("/api/status", true, peer),
+            assert_eq!(
+                unpaired_decision("/api/status", true, peer),
+                UnpairedDecision::Allow,
                 "{ip} is a direct link to the device"
             );
         }
