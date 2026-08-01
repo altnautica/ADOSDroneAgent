@@ -1,0 +1,86 @@
+name: cockpit-build
+
+# The cockpit is the surface an operator flies from on an attached panel, and
+# until now nothing in CI typechecked it, ran its tests, built it, or checked
+# that the bundle actually served on a node matched its source. Its
+# package.json defined `test` and `typecheck` the whole time; nothing invoked
+# them.
+#
+# The bundle check is the load-bearing one. The agent serves the COMMITTED
+# bundle under src/ados/cockpit/static/, not a build produced at install time,
+# so a change merged to cockpit/src without re-running scripts/build-cockpit.sh
+# ships the OLD screen to every node while the source says otherwise — a class
+# of bug that presents as "the fix did not work" and costs a rig session to
+# find.
+
+on:
+  push:
+    paths:
+      - "cockpit/**"
+      - "src/ados/cockpit/static/**"
+      - "scripts/build-cockpit.sh"
+      - ".github/workflows/cockpit-build.yml"
+  pull_request:
+    paths:
+      - "cockpit/**"
+      - "src/ados/cockpit/static/**"
+      - "scripts/build-cockpit.sh"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: cockpit/package-lock.json
+
+      - name: Install dependencies
+        working-directory: cockpit
+        run: npm ci --no-audit --no-fund
+
+      - name: Type check
+        working-directory: cockpit
+        run: npm run typecheck
+
+      - name: Test
+        working-directory: cockpit
+        run: npm run test
+
+      - name: Build
+        working-directory: cockpit
+        run: npm run build
+
+      - name: Verify dist
+        run: |
+          test -f cockpit/dist/index.html
+          ls -la cockpit/dist
+          du -sh cockpit/dist
+
+      # Rebuild through the real staging script and fail if the committed
+      # bundle differs. Compares CONTENT rather than the asset filenames alone:
+      # Vite hashes its output, so a changed bundle almost always renames, but a
+      # change that happened to keep a name would otherwise slip through.
+      - name: Committed bundle matches source
+        run: |
+          set -euo pipefail
+          scripts/build-cockpit.sh >/dev/null
+          # `git status --porcelain`, not `git diff`: Vite emits content-hashed
+          # asset names, so a rebuilt bundle arrives as an UNTRACKED new file
+          # alongside a deleted old one. `git diff` reports only tracked paths
+          # and would miss a change whose sole evidence is the added file.
+          drift="$(git status --porcelain -- src/ados/cockpit/static)"
+          if [ -n "$drift" ]; then
+            echo "::error::The committed cockpit bundle under src/ados/cockpit/static/ is stale."
+            echo "The agent serves the COMMITTED bundle, so this change would not reach a node."
+            echo "Run scripts/build-cockpit.sh and commit the result in the same change."
+            echo
+            echo "$drift"
+            exit 1
+          fi
+          echo "Committed bundle is in sync with cockpit/src."
