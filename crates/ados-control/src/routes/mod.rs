@@ -55,7 +55,6 @@ pub mod gs_ui_write;
 pub mod gs_wfb_pair;
 pub mod gs_wfb_write;
 pub mod gs_ws;
-pub mod guided;
 pub mod logs_write;
 pub mod mac_adapters;
 pub mod mac_pin;
@@ -700,6 +699,118 @@ mod param_syntax_tests {
         assert!(
             offenders.is_empty(),
             "route path(s) use {{param}} (axum 0.8) syntax; axum 0.7 needs :param: {offenders:?}"
+        );
+    }
+
+    /// Every module under `routes/` must have a caller somewhere in the crate.
+    ///
+    /// A `pub mod` in a lib crate suppresses the dead-code warning, so an
+    /// uncalled module compiles clean and looks reachable to anyone reading the
+    /// directory. One sat here for a while holding an ungated flight-command
+    /// primitive — it built a vehicle-motion frame, documented that it checked
+    /// neither the mode nor anything else, and had no caller at all. Reviewers
+    /// reasonably assume a module under `routes/` is live; this makes that
+    /// assumption true or fails.
+    ///
+    /// Deliberately "has a caller in the crate", NOT "is registered on the
+    /// router". Several modules here are correctly reached by a sibling route or
+    /// a background reconciler rather than by a path of their own, and a
+    /// router-only check flags all of them. The property that actually matters
+    /// is that something calls the code.
+    ///
+    /// Text-matched over the crate's sources, because the alternative is a proc
+    /// macro for a property one grep answers.
+    #[test]
+    fn every_route_module_has_a_caller() {
+        use std::fs;
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let declared: Vec<String> = include_str!("mod.rs")
+            .lines()
+            .map(str::trim_start)
+            .filter_map(|l| l.strip_prefix("pub mod "))
+            .filter_map(|l| l.strip_suffix(';'))
+            .map(str::to_string)
+            .collect();
+        assert!(
+            !declared.is_empty(),
+            "no route modules found; the parse broke"
+        );
+
+        // Every .rs in the crate except the module's own file.
+        let mut sources: Vec<(String, String)> = Vec::new();
+        let mut stack = vec![root];
+        while let Some(dir) = stack.pop() {
+            for entry in fs::read_dir(&dir).expect("crate sources are readable") {
+                let path = entry.expect("readable dir entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let name = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    if let Ok(text) = fs::read_to_string(&path) {
+                        sources.push((name, text));
+                    }
+                }
+            }
+        }
+
+        // Modules that are deliberately built and deliberately not called yet.
+        //
+        // Being uncalled is a legitimate state — a decision can be to ship the
+        // logic and its tests while leaving it unwired — but it is only
+        // legitimate when someone chose it. Naming them here is the difference
+        // between "inert on purpose" and "forgotten", which is otherwise
+        // invisible: both compile clean and both look wired from the directory
+        // listing.
+        //
+        // `reachable_addr` detects a node advertising an address it cannot be
+        // reached on. Held report-only on purpose: the failure it describes is
+        // fixed on the affected machines rather than papered over in the
+        // product, so nothing consumes its verdict.
+        //
+        // `fc_identity` decides what identity an aircraft should carry from its
+        // issued slot. Its write is gated off behind config, but nothing calls
+        // it at all, so the observation half is not running either — worth
+        // stating plainly, because "ships inert with the observation on" is what
+        // it was believed to be doing.
+        const DELIBERATELY_UNCALLED: [&str; 2] = ["reachable_addr", "fc_identity"];
+
+        let unreached: Vec<&String> = declared
+            .iter()
+            .filter(|m| !DELIBERATELY_UNCALLED.contains(&m.as_str()))
+            .filter(|m| {
+                let needle = format!("{m}::");
+                !sources
+                    .iter()
+                    .any(|(name, text)| name != m.as_str() && text.contains(&needle))
+            })
+            .collect();
+        assert!(
+            unreached.is_empty(),
+            "module(s) declared under routes/ with no caller anywhere in the crate — \
+             wire them up, delete them, or record them in DELIBERATELY_UNCALLED \
+             with the reason: {unreached:?}"
+        );
+
+        // And the reverse: a module that gained a caller should leave the list,
+        // so the list cannot quietly become a graveyard.
+        let now_called: Vec<&str> = DELIBERATELY_UNCALLED
+            .iter()
+            .filter(|m| {
+                let needle = format!("{m}::");
+                sources
+                    .iter()
+                    .any(|(name, text)| name != **m && text.contains(&needle))
+            })
+            .copied()
+            .collect();
+        assert!(
+            now_called.is_empty(),
+            "module(s) listed as deliberately uncalled now have callers; \
+             remove them from DELIBERATELY_UNCALLED: {now_called:?}"
         );
     }
 }
