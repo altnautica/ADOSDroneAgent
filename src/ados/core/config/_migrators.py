@@ -15,6 +15,7 @@ from ados.core.paths import GS_UI_JSON
 _SHARE_UPLINK_MIGRATED: bool = False
 _GS_UI_MIGRATED: bool = False
 _API_FROM_SCRIPTING_MIGRATED: bool = False
+_WS_ENFORCE_DEFAULT_MIGRATED: bool = False
 
 _LEGACY_GS_UI_PATH = GS_UI_JSON
 _GS_UI_KEYS = ("oled", "buttons", "screens")
@@ -320,6 +321,80 @@ def _migrate_api_from_scripting(
         )
     finally:
         _API_FROM_SCRIPTING_MIGRATED = True
+
+    return raw
+
+
+def _migrate_ws_proxy_enforce_default(
+    raw: dict[str, Any],
+    yaml_path: Path | None,
+) -> dict[str, Any]:
+    """Drop a persisted ``mavlink.ws_proxy_enforce_auth: false`` so the shipped
+    default applies.
+
+    The MAVLink WebSocket proxy used to log an unauthorized connection and serve
+    it anyway, and that posture was the shipped default. Every node written
+    while it was has the value ``false`` recorded in its own config file, so
+    changing the default in code changes nothing on any of them: an explicit
+    value wins over a default, which is the whole point of an explicit value.
+    Proven on a bench node, where the proxy reported
+    ``enforce_auth=false admitted=true`` while running a build whose default
+    was ``true``.
+
+    So the recorded value is removed rather than rewritten. Removing it lets
+    the node follow the shipped posture now and in future, where writing
+    ``true`` would freeze today's answer into the file and reproduce this same
+    problem the next time the default moves.
+
+    Only a ``false`` is dropped. An operator who deliberately set ``true`` has
+    said something the default cannot say, and a node with a third-party client
+    that cannot present a credential keeps its opt-out: the way to disable
+    enforcement is now to set it after this runs, which no longer looks like
+    the value this migration cleans up, because that one is gone.
+    """
+    global _WS_ENFORCE_DEFAULT_MIGRATED
+    if _WS_ENFORCE_DEFAULT_MIGRATED:
+        return raw
+
+    try:
+        mav = raw.get("mavlink")
+        if not isinstance(mav, dict) or mav.get("ws_proxy_enforce_auth") is not False:
+            return raw
+
+        mav.pop("ws_proxy_enforce_auth", None)
+
+        if yaml_path is not None and yaml_path.exists():
+            try:
+                on_disk = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+                if isinstance(on_disk, dict):
+                    disk_mav = on_disk.get("mavlink")
+                    if (
+                        isinstance(disk_mav, dict)
+                        and disk_mav.get("ws_proxy_enforce_auth") is False
+                    ):
+                        disk_mav.pop("ws_proxy_enforce_auth", None)
+                        body = yaml.safe_dump(
+                            on_disk,
+                            sort_keys=False,
+                            default_flow_style=False,
+                        )
+                        yaml_path.parent.mkdir(parents=True, exist_ok=True)
+                        tmp_path = yaml_path.with_suffix(yaml_path.suffix + ".tmp")
+                        tmp_path.write_text(body, encoding="utf-8")
+                        _os.replace(str(tmp_path), str(yaml_path))
+            except (OSError, yaml.YAMLError):
+                # An unwritable config is not a reason to refuse to start. The
+                # in-memory removal above still takes effect for this process.
+                pass
+
+        import logging as _logging
+
+        _logging.getLogger("ados.core.config").info(
+            "dropped a recorded ws_proxy_enforce_auth=false so the shipped "
+            "WebSocket authentication posture applies"
+        )
+    finally:
+        _WS_ENFORCE_DEFAULT_MIGRATED = True
 
     return raw
 

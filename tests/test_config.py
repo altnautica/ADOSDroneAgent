@@ -527,3 +527,65 @@ def test_camera_thumbnail_is_overridable_per_field():
     thumb = cfg.video.camera.thumbnail
     assert thumb.fps == 2
     assert (thumb.width, thumb.height, thumb.bitrate_kbps) == (320, 180, 50)
+
+
+# ---------------------------------------------------------------------------
+# ws_proxy_enforce_auth: dropping a recorded value so the shipped default wins
+# ---------------------------------------------------------------------------
+
+
+def _ws_migrate(tmp_path, mavlink_block):
+    """Run the migration over a config file and return (in_memory, on_disk)."""
+    import yaml as _yaml
+
+    from ados.core.config import _migrators
+
+    _migrators._WS_ENFORCE_DEFAULT_MIGRATED = False
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(_yaml.safe_dump({"mavlink": mavlink_block, "video": {}}))
+    raw = _yaml.safe_load(cfg.read_text())
+    out = _migrators._migrate_ws_proxy_enforce_default(raw, cfg)
+    return out, _yaml.safe_load(cfg.read_text())
+
+
+def test_a_recorded_enforce_false_is_dropped_from_memory_and_disk(tmp_path):
+    # The whole point: every node written while the old posture shipped has
+    # `false` in its own file, and an explicit value beats a default -- so
+    # changing the default in code reached none of them. Proven on hardware,
+    # where the proxy logged `enforce_auth=false admitted=true` while running a
+    # build whose default was true.
+    mem, disk = _ws_migrate(tmp_path, {"system_id": 1, "ws_proxy_enforce_auth": False})
+    assert "ws_proxy_enforce_auth" not in mem["mavlink"]
+    assert "ws_proxy_enforce_auth" not in disk["mavlink"]
+
+
+def test_an_operator_who_chose_enforcement_is_left_alone(tmp_path):
+    # `true` says something the default cannot say. Removing it would be
+    # rewriting a deliberate choice.
+    mem, disk = _ws_migrate(tmp_path, {"ws_proxy_enforce_auth": True})
+    assert mem["mavlink"]["ws_proxy_enforce_auth"] is True
+    assert disk["mavlink"]["ws_proxy_enforce_auth"] is True
+
+
+def test_the_value_is_removed_rather_than_rewritten_to_true(tmp_path):
+    # Writing `true` would freeze today's answer into the file and reproduce
+    # this exact problem the next time the shipped posture moves.
+    _, disk = _ws_migrate(tmp_path, {"ws_proxy_enforce_auth": False})
+    assert "ws_proxy_enforce_auth" not in disk["mavlink"]
+
+
+def test_neighbouring_mavlink_settings_survive(tmp_path):
+    # The migration rewrites the file, so anything an operator tuned beside it
+    # has to come back untouched.
+    _, disk = _ws_migrate(
+        tmp_path,
+        {"system_id": 42, "baud_rate": 921600, "ws_proxy_enforce_auth": False},
+    )
+    assert disk["mavlink"]["system_id"] == 42
+    assert disk["mavlink"]["baud_rate"] == 921600
+
+
+def test_a_config_without_the_key_is_untouched(tmp_path):
+    mem, disk = _ws_migrate(tmp_path, {"system_id": 1})
+    assert mem["mavlink"] == {"system_id": 1}
+    assert disk["mavlink"] == {"system_id": 1}

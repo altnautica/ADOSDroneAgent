@@ -41,6 +41,7 @@ from ._migrators import (
     _migrate_api_from_scripting,
     _migrate_gs_ui_from_legacy_json,
     _migrate_share_uplink_from_legacy_json,
+    _migrate_ws_proxy_enforce_default,
 )
 from .agent import AgentConfig
 from .api import ApiConfig, RestApiConfig
@@ -209,6 +210,7 @@ def load_config(path: str | Path | None = None) -> ADOSConfig:
     # Relocate the REST-API surface config out of the legacy `scripting`
     # block into the dedicated `api` section. Idempotent, one-shot.
     raw = _migrate_api_from_scripting(raw, picked_path)
+    raw = _migrate_ws_proxy_enforce_default(raw, picked_path)
 
     # Load defaults.yaml from package data
     import importlib.resources
