@@ -15,6 +15,7 @@ import { create } from "zustand";
 
 import { ApiError, apiFetch, getConfig } from "@/lib/api";
 import type { AgentConfig } from "@/lib/types";
+import { useReachStore } from "@/stores/reach-store";
 
 const REBOOT_PATHS_KEY = "ados-cockpit-reboot-paths";
 const REBOOT_SINCE_KEY = "ados-cockpit-reboot-since";
@@ -105,8 +106,12 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   refresh: async () => {
     try {
       const config = await getConfig();
+      useReachStore.getState().report(null, true);
       set({ config, ready: true, stale: false, error: null });
     } catch (err) {
+      useReachStore
+        .getState()
+        .report(err instanceof ApiError ? err.status : null, false);
       set((prev) => ({
         ready: true,
         stale: true,

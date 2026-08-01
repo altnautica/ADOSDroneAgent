@@ -11,13 +11,18 @@
 // floats translucently on top; a framed screen renders in the content region
 // with solid chrome. The menu can collapse to give the feed the whole panel.
 
+import { useEffect } from "react";
+
 import { ActionBar, type InputStatus } from "@/components/shell/action-bar";
 import { renderProfile, renderProfileClass } from "@/lib/render-profile";
 import { MenuRail } from "@/components/shell/menu-rail";
 import { QuickMenu } from "@/components/shell/quick-menu";
+import { ReachNotice } from "@/components/shell/reach-notice";
 import { RebootBanner } from "@/components/shell/reboot-banner";
 import { StatusStrip } from "@/components/shell/status-strip";
 import { TelemetryProvider } from "@/hooks/telemetry-context";
+import { tabScreens } from "@/nav/registry";
+import { useProfile } from "@/hooks/use-profile";
 import { getScreen } from "@/nav/registry";
 import { activeScreenId, useNavStore } from "@/stores/nav-store";
 import type { ScreenContext } from "@/nav/navigator";
@@ -28,6 +33,18 @@ export function CockpitShell({ input }: { input: InputStatus }) {
   const menuCollapsed = useNavStore((s) => s.menuCollapsed);
   const quickMenuOpen = useNavStore((s) => s.quickMenuOpen);
   const dispatch = useNavStore((s) => s.dispatch);
+  const setVisibleTabs = useNavStore((s) => s.setVisibleTabs);
+
+  // Tell the navigator which tabs this node actually shows, so the panel's own
+  // buttons step the same set the operator can see. Declared here rather than
+  // in the rail because the rail can be collapsed, and navigation must not
+  // depend on whether the menu happens to be on screen.
+  const profile = useProfile();
+  const visibleTabIds = tabScreens(profile).map((t) => t.id);
+  const visibleKey = visibleTabIds.join(",");
+  useEffect(() => {
+    setVisibleTabs(visibleKey ? visibleKey.split(",") : []);
+  }, [visibleKey, setVisibleTabs]);
 
   const screen = getScreen(activeScreenId({ activeTabId, detailStack }));
   // A full-bleed screen only paints edge-to-edge when it is the top surface; a
@@ -65,6 +82,7 @@ export function CockpitShell({ input }: { input: InputStatus }) {
           }
         >
           <StatusStrip floating={fullBleed} />
+          <ReachNotice />
           <RebootBanner floating={fullBleed} />
           {menuStrip}
           <ActionBar floating={fullBleed} input={input} />

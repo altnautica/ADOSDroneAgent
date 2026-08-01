@@ -9,6 +9,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ApiError } from "@/lib/api";
+import { useReachStore } from "@/stores/reach-store";
 
 export interface Resource<T> {
   data: T | null;
@@ -54,10 +55,16 @@ export function useResource<T>(
       try {
         const data = await fetcherRef.current(controller.signal);
         if (cancelled) return;
+        // A success clears any standing refusal, so pairing the node while the
+        // panel is open recovers on the next poll rather than on a reload.
+        useReachStore.getState().report(null, true);
         setState({ data, error: null, ready: true, stale: false, status: null });
       } catch (err) {
         if (cancelled || controller.signal.aborted) return;
         const status = err instanceof ApiError ? err.status : null;
+        // Refused is not the same as absent. Reported so the shell can say why
+        // instead of leaving every field dashed with no explanation.
+        useReachStore.getState().report(status, false);
         setState((prev) => ({
           data: prev.data,
           error: err instanceof Error ? err.message : String(err),

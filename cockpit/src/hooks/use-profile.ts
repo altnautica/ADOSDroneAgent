@@ -8,6 +8,7 @@
 import { useEffect, useState } from "react";
 
 import { apiFetch } from "@/lib/api";
+import { useReachStore } from "@/stores/reach-store";
 
 export type AgentProfile = "drone" | "ground_station" | "workstation" | "compute" | "unknown";
 
@@ -16,6 +17,11 @@ let cached: AgentProfile | null = null;
 
 interface PairingInfoLite {
   profile?: string | null;
+  /** Present on every profile; carried here because this probe is the ONE call
+   *  that still succeeds when the node is refusing everything else, so it is
+   *  the only chance to learn the code that would end the refusal. */
+  pairing_code?: string | null;
+  paired?: boolean | null;
 }
 
 /** Normalize the wire profile (which uses the hyphen form `ground-station`) to
@@ -49,6 +55,10 @@ export function useProfile(): AgentProfile | null {
       .then((info) => {
         const p = normalizeProfile(info.profile);
         cached = p;
+        // Stash the code alongside the profile. A node that refuses every other
+        // call still answers this one, so this is where the operator's way out
+        // comes from.
+        useReachStore.getState().setPairingCode(info.pairing_code ?? null);
         if (!cancelled) setProfile(p);
       })
       .catch(() => {
