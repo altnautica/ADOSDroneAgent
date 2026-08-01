@@ -89,6 +89,13 @@ export interface SkillContext {
   fcConnected: boolean;
   /** Whether the vehicle is armed (from the live telemetry snapshot). */
   armed: boolean;
+  /** Whether the readings on screen came over the radio from another node.
+   *  Purely to make the disabled reason accurate: a relayed aircraft is not
+   *  undrivable because the link is dead — it is drivable, just not from here,
+   *  and telling the operator "no flight controller link" while a live horizon
+   *  moves in front of them is precisely the kind of lying surface that trains
+   *  distrust of every other reading. */
+  relayed?: boolean;
 }
 
 /** The resolved drivability of a skill: enabled, or disabled with a plain
@@ -108,7 +115,12 @@ export interface SkillState {
  */
 export function resolveSkillState(skill: Skill, ctx: SkillContext): SkillState {
   if (!ctx.fcConnected) {
-    return { enabled: false, reason: "No flight controller link" };
+    return {
+      enabled: false,
+      reason: ctx.relayed
+        ? "Relayed vehicle — command it from its own node"
+        : "No flight controller link",
+    };
   }
   if (skill.cmd === "arm" && ctx.armed) {
     return { enabled: false, reason: "Already armed" };

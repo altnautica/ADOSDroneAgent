@@ -23,6 +23,33 @@ describe("resolveSkillState", () => {
     }
   });
 
+  it("names the real reason for a relayed vehicle instead of blaming the link", () => {
+    // A relayed aircraft is not undrivable because the link is dead — it is
+    // drivable, just not from this node. Saying "no flight controller link"
+    // while a live horizon moves in front of the operator is the kind of
+    // contradiction that trains distrust of every other reading on screen.
+    for (const s of CORE_SKILLS) {
+      const state = resolveSkillState(s, {
+        fcConnected: false,
+        armed: false,
+        relayed: true,
+      });
+      expect(state.enabled).toBe(false);
+      expect(state.reason).toBe("Relayed vehicle — command it from its own node");
+    }
+  });
+
+  it("still drives skills normally on a directly attached FC", () => {
+    // The relayed flag must not leak into the attached case: `relayed` is only
+    // consulted once the command path is already gated off.
+    const state = resolveSkillState(CORE_SKILLS[0], {
+      fcConnected: true,
+      armed: false,
+      relayed: false,
+    });
+    expect(state.reason).not.toBe("Relayed vehicle — command it from its own node");
+  });
+
   it("disables arm while armed, and disarm while disarmed", () => {
     const armedCtx = { fcConnected: true, armed: true };
     const disarmedCtx = { fcConnected: true, armed: false };

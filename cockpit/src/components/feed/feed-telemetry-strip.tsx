@@ -66,9 +66,18 @@ function batteryValue(
 }
 
 export function FeedTelemetryStrip() {
-  const { telemetry, live, stale } = useFlightTelemetryContext();
+  const { telemetry, live, stale, relayed } = useFlightTelemetryContext();
   const { status } = useTelemetryContext();
   const drone = status?.paired_drone;
+  // Name the aircraft the readings belong to when they came over the radio, so
+  // the operator can tell a relayed vehicle from one attached to this node
+  // (Rule 44 — a reading whose origin is ambiguous is a reading that gets
+  // mistrusted). Falls back to the system id, then to the bare label.
+  const relayedPeer = relayed
+    ? (drone?.device_id ?? (telemetry?.relayed_link?.system_id != null
+        ? `sys ${telemetry.relayed_link.system_id}`
+        : null))
+    : null;
 
   const mode = telemetry?.mode ?? drone?.fc_mode ?? null;
   const armed = telemetry?.armed === true;
@@ -100,6 +109,14 @@ export function FeedTelemetryStrip() {
         value={batteryValue(batt, telemetry?.battery?.voltage, telemetry?.battery?.current)}
         accent={battAccent}
       />
+      {relayed && (
+        <span
+          className="rounded border border-amber/40 px-[0.35rem] py-[0.1rem] font-mono text-[0.5rem] uppercase tracking-wide text-amber"
+          title="Telemetry received over the radio from another node. This node does not fly this aircraft."
+        >
+          {relayedPeer ? `Relayed · ${relayedPeer}` : "Relayed"}
+        </span>
+      )}
     </div>
   );
 }

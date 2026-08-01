@@ -97,12 +97,15 @@ function SkillButton({
 }
 
 export function SkillBar() {
-  const { telemetry, live } = useFlightTelemetryContext();
+  const { telemetry, commandable, relayed } = useFlightTelemetryContext();
 
-  const fcConnected = live;
+  // `commandable`, not `live`: a relayed aircraft has real attitude to draw but
+  // is not flown from this node, so its instruments light up while its command
+  // affordances stay correctly disabled.
+  const fcConnected = commandable;
   const armed = telemetry?.armed === true;
   const autopilot = telemetry?.autopilot ?? null;
-  const ctx: SkillContext = { fcConnected, armed };
+  const ctx: SkillContext = { fcConnected, armed, relayed };
 
   const [page, setPage] = useState<"primary" | "mode">("primary");
   const [pending, setPending] = useState<Skill | null>(null);

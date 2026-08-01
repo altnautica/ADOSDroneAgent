@@ -14,6 +14,8 @@ const FlightTelemetryContext = createContext<FlightTelemetryState>({
   telemetry: null,
   stale: false,
   live: false,
+  commandable: false,
+  relayed: false,
 });
 
 export function FlightTelemetryProvider({ children }: { children: ReactNode }) {

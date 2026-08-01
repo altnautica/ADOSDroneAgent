@@ -173,6 +173,28 @@ export interface VehicleState {
    *  shares the agent's clock, so these gate attitude freshness reliably. */
   last_update?: string;
   last_heartbeat?: string;
+  /** Where the vehicle readings above came from.
+   *
+   *  Absent means a directly attached flight controller — the ordinary drone
+   *  case, and the reason the field is optional rather than always stamped.
+   *  `"relayed"` means this node decoded another aircraft's MAVLink off the
+   *  radio: the readings are real, but the vehicle is not attached here, so
+   *  commands do not go to it from this node. */
+  telemetry_source?: "relayed";
+  /** Provenance for a relayed reading, present whenever `telemetry_source` is
+   *  `"relayed"` — including when the lane has gone stale and the vehicle
+   *  fields above are therefore absent. A known-but-quiet aircraft and no
+   *  aircraft at all are different states, and this is what separates them. */
+  relayed_link?: {
+    /** Whether the agent considers the reading recent enough to act on. When
+     *  false the vehicle blocks above are withheld by the agent. */
+    fresh?: boolean;
+    age_s?: number | null;
+    stale_after_s?: number | null;
+    system_id?: number | null;
+    frames_decoded?: number | null;
+    frames_undecodable?: number | null;
+  } | null;
 }
 
 /** One entry of the `GET /api/video/roster` reconciled camera list. Only the
