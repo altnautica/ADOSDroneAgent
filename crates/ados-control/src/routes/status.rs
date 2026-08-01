@@ -21,6 +21,18 @@
 //!   only the agent's own diagnostics in `AGENT_DIAGNOSTIC_KEYS` are reported.
 //!   A ground station has no flight controller, so that is its steady state.
 //!
+//!   That gate is correct for an ABSENT vehicle and was wrong for a RELAYED one.
+//!   A ground station decoding another node's MAVLink off the radio holds a real
+//!   reading of a real aircraft, and blanking it reported a healthy link as no
+//!   link — the defect behind a dead horizon on the on-box cockpit. So when the
+//!   snapshot carries a fresh `relayed_vehicle` block, its vehicle fields are
+//!   projected in place of the withheld local ones, stamped
+//!   `telemetry_source: "relayed"` with a `relayed_link` provenance summary.
+//!   `fc_connected` and `mavlink_alive` are untouched and stay false: the
+//!   vehicle is visible, not attached. A relayed reading that has gone stale is
+//!   NOT projected — the lane is stamped and the fields stay blank, so a quiet
+//!   aircraft never renders as a flying one.
+//!
 //! With no agent running (an empty snapshot, no store, no board sidecar), both
 //! routes return a valid, GCS-parseable body rather than failing: status reports
 //! `fc_connected:false` with a zero-valued health block and an empty board, and
@@ -468,24 +480,31 @@ fn iso8601_from_unix_secs(secs: i64) -> String {
 
 /// Project a state snapshot into the vehicle-state dict: the runtime-only extras
 /// in [`IPC_ONLY_KEYS`] are stripped, and when the FC link is not alive the
-/// vehicle fields are withheld too, leaving only [`AGENT_DIAGNOSTIC_KEYS`]. An
-/// absent or non-object snapshot projects to `{}`.
+/// vehicle fields are withheld too, leaving only [`AGENT_DIAGNOSTIC_KEYS`] —
+/// unless the node is relaying a vehicle, in which case the relayed reading is
+/// projected in their place with explicit provenance. An absent or non-object
+/// snapshot projects to `{}`.
 ///
 /// Shared with the consolidated `/api/status/full` route, whose `telemetry` block
 /// is the same vehicle-state projection.
 pub(crate) fn project_telemetry(snapshot: Option<Value>) -> Value {
     match snapshot {
-        Some(Value::Object(map)) => {
+        Some(Value::Object(mut map)) => {
             // Honesty gate: when the FC link is explicitly not alive, the
             // vehicle fields are stale or default (0 alt, 0 battery, 360
             // heading, HDOP 655), so they must not surface as live. The agent's
             // own diagnostics are not vehicle readings and stay true either
-            // way, so they survive — on a ground station, which never decodes a
-            // HEARTBEAT, they are the ONLY thing this route can honestly
-            // report. Absence of the flag (an older snapshot) keeps the prior
-            // behavior: staleness cannot be proven, so the fields pass through.
+            // way, so they survive. Absence of the flag (an older snapshot)
+            // keeps the prior behavior: staleness cannot be proven, so the
+            // fields pass through.
             let fc_down = map.get("mavlink_alive").and_then(Value::as_bool) == Some(false);
-            let projected: Map<String, Value> = map
+            // Lifted out before the filter because it is neither a vehicle
+            // reading nor an agent diagnostic: it is the SOURCE of the former
+            // on a node whose vehicle is across a radio. Removing it here also
+            // means the raw nested block never surfaces on this route — only
+            // the projection below, which carries its provenance explicitly.
+            let relayed = map.remove("relayed_vehicle");
+            let mut projected: Map<String, Value> = map
                 .into_iter()
                 .filter(|(k, _)| {
                     if fc_down {
@@ -495,10 +514,64 @@ pub(crate) fn project_telemetry(snapshot: Option<Value>) -> Value {
                     }
                 })
                 .collect();
+
+            // A ground station has no flight controller of its own, so the gate
+            // above correctly blanks the local vehicle fields — but it used to
+            // leave nothing behind, and a node relaying a healthy aircraft
+            // reported no aircraft at all. That is what made the on-box cockpit
+            // render a dead horizon over a working link. When a relayed reading
+            // is present it is projected here instead, and only while fresh:
+            // a lane that has gone quiet must go blank rather than hold its
+            // last attitude, which is the same reason the local gate exists.
+            //
+            // `fc_connected` / `mavlink_alive` are NOT touched. They describe
+            // the LOCAL link and stay false. A relayed vehicle is visible, not
+            // attached, and `telemetry_source` is what tells the two apart.
+            if fc_down {
+                if let Some(block) = relayed.as_ref().and_then(Value::as_object) {
+                    let fresh = block.get("fresh").and_then(Value::as_bool) == Some(true);
+                    if fresh {
+                        if let Some(vehicle) = block.get("vehicle").and_then(Value::as_object) {
+                            for (k, v) in vehicle {
+                                projected.insert(k.clone(), v.clone());
+                            }
+                        }
+                    }
+                    // Stamped whether or not the reading is fresh: a stale lane
+                    // that is KNOWN to exist is a different, more useful signal
+                    // than no lane at all, and the operator should be able to
+                    // tell "the aircraft went quiet" from "there is no
+                    // aircraft".
+                    projected.insert("telemetry_source".into(), json!("relayed"));
+                    projected.insert("relayed_link".into(), relayed_link_summary(block));
+                }
+            }
             Value::Object(projected)
         }
         _ => json!({}),
     }
+}
+
+/// The compact provenance block published alongside a relayed reading.
+///
+/// Deliberately a summary rather than the producer's whole snapshot: consumers
+/// need to know where the reading came from and whether to trust it, not the
+/// internals of the seam that decoded it.
+fn relayed_link_summary(block: &Map<String, Value>) -> Value {
+    let mut out = Map::new();
+    for key in [
+        "fresh",
+        "age_s",
+        "stale_after_s",
+        "system_id",
+        "frames_decoded",
+        "frames_undecodable",
+    ] {
+        if let Some(v) = block.get(key) {
+            out.insert(key.to_string(), v.clone());
+        }
+    }
+    Value::Object(out)
 }
 
 /// Read the FC connection triple + the service uptime out of a snapshot's runtime
@@ -920,8 +993,15 @@ mod tests {
         }
         // The cockpit SPA decides "is the vehicle live" from the presence of
         // `attitude` (cockpit/src/hooks/use-flight-telemetry.ts isLive), so this
-        // key surfacing here would make a dead link render as flying.
+        // key surfacing here would make a dead link render as flying. This
+        // snapshot carries no relayed vehicle, so there is no honest reading to
+        // put in its place — the relayed cases below cover the node that has
+        // one.
         assert!(!obj.contains_key("attitude"));
+        assert!(
+            !obj.contains_key("telemetry_source"),
+            "nothing is being relayed, so no provenance should be claimed"
+        );
         for k in ["transport_open", "mavlink_alive", "fc_link_hint"] {
             assert!(!obj.contains_key(k), "{k} is never part of telemetry");
         }
@@ -947,6 +1027,200 @@ mod tests {
             "the attention profile is an agent-owned RF allocation, true whether or \
              not an FC is attached"
         );
+    }
+
+    /// A ground-station snapshot: no local link, and a relayed vehicle whose
+    /// reading is `fresh`.
+    fn relayed_snapshot(fresh: bool) -> Value {
+        json!({
+            "transport_open": false,
+            "mavlink_alive": false,
+            "fc_connected": false,
+            "fc_reachable": false,
+            "mavlink_frame_ingest": {"frames_published": 395_111},
+            "relayed_vehicle": {
+                "source": "relayed",
+                "fresh": fresh,
+                "age_s": if fresh { 0.08 } else { 47.5 },
+                "stale_after_s": 3.0,
+                "system_id": 1,
+                "frames_decoded": 12_345,
+                "frames_undecodable": 0,
+                "vehicle": {
+                    "armed": false,
+                    "mode": "STABILIZE",
+                    "attitude": {"roll": 0.088, "pitch": -0.037, "yaw": 0.39},
+                    "position": {"lat": 13.02, "lon": 77.65, "alt_rel": -16.34, "heading": 22.4},
+                    "battery": {"voltage": 12.4, "remaining": 29},
+                    "last_update": "2026-07-31T17:11:36+00:00",
+                },
+            },
+        })
+    }
+
+    #[test]
+    fn a_fresh_relayed_vehicle_is_projected_in_place_of_the_withheld_local_fields() {
+        // The headline fix. A ground station relaying a healthy aircraft used
+        // to report no aircraft: the local gate blanked the vehicle fields and
+        // nothing took their place, so the on-box cockpit drew a dead horizon
+        // over a link carrying hundreds of thousands of frames.
+        let tel = project_telemetry(Some(relayed_snapshot(true)));
+        let obj = tel.as_object().unwrap();
+
+        assert_eq!(obj["attitude"]["roll"], json!(0.088));
+        assert_eq!(obj["position"]["alt_rel"], json!(-16.34));
+        assert_eq!(obj["battery"]["remaining"], json!(29));
+        assert_eq!(obj["mode"], json!("STABILIZE"));
+
+        // Provenance is explicit, so no consumer can mistake this for a direct
+        // link.
+        assert_eq!(obj["telemetry_source"], json!("relayed"));
+        assert_eq!(obj["relayed_link"]["fresh"], json!(true));
+        assert_eq!(obj["relayed_link"]["system_id"], json!(1));
+
+        // The raw producer block never surfaces; only the projection does.
+        assert!(!obj.contains_key("relayed_vehicle"));
+
+        // And the agent's own diagnostics still survive the gate.
+        assert_eq!(
+            obj["mavlink_frame_ingest"]["frames_published"],
+            json!(395_111)
+        );
+    }
+
+    #[test]
+    fn a_relayed_vehicle_never_makes_the_node_claim_a_flight_controller() {
+        // The honesty contract this fix must not buy its way out of: the
+        // vehicle is visible, not attached. These keys describe the LOCAL link
+        // and are never part of the telemetry projection at all.
+        let tel = project_telemetry(Some(relayed_snapshot(true)));
+        let obj = tel.as_object().unwrap();
+        for k in ["fc_connected", "mavlink_alive", "transport_open"] {
+            assert!(
+                !obj.contains_key(k),
+                "{k} describes the local link and must never ride telemetry"
+            );
+        }
+        // `/api/status` reads them straight off the snapshot, untouched by this
+        // projection, so a relayed node still reports no FC of its own.
+        let (connected, _, _, _) = fc_from_snapshot(Some(&relayed_snapshot(true)));
+        assert_eq!(connected, json!(false));
+    }
+
+    #[test]
+    fn a_stale_relayed_vehicle_is_named_but_its_readings_are_withheld() {
+        // A lane that has gone quiet must go blank rather than hold its last
+        // attitude — the same reason the local gate exists. The lane is still
+        // NAMED, because "the aircraft went quiet" and "there is no aircraft"
+        // are different things an operator needs to tell apart.
+        let tel = project_telemetry(Some(relayed_snapshot(false)));
+        let obj = tel.as_object().unwrap();
+
+        assert!(
+            !obj.contains_key("attitude"),
+            "a stale relayed reading rendered as live is the exact lie the gate exists to stop"
+        );
+        assert!(!obj.contains_key("position"));
+        assert_eq!(obj["telemetry_source"], json!("relayed"));
+        assert_eq!(obj["relayed_link"]["fresh"], json!(false));
+        assert_eq!(obj["relayed_link"]["age_s"], json!(47.5));
+    }
+
+    #[test]
+    fn an_attached_flight_controller_is_unaffected_by_the_relayed_path() {
+        // A drone with its own FC must be byte-identical to before: no
+        // provenance stamp, no relayed block, vehicle fields straight through.
+        let tel = project_telemetry(Some(json!({
+            "mavlink_alive": true,
+            "fc_connected": true,
+            "armed": true,
+            "attitude": {"roll": 0.1, "pitch": 0.2, "yaw": 0.3},
+        })));
+        let obj = tel.as_object().unwrap();
+
+        assert_eq!(obj["attitude"]["roll"], json!(0.1));
+        assert_eq!(obj["armed"], json!(true));
+        assert!(
+            !obj.contains_key("telemetry_source"),
+            "a direct link stamps nothing, so the drone payload shape is unchanged"
+        );
+        assert!(!obj.contains_key("relayed_link"));
+        assert!(!obj.contains_key("fc_connected"));
+    }
+
+    #[test]
+    fn a_live_local_link_wins_over_a_relayed_one_and_says_nothing_about_it() {
+        // Both at once: this node's own flight controller is alive AND it is
+        // relaying someone else's aircraft. The local reading wins, because the
+        // projection has exactly one set of vehicle keys and the attached
+        // vehicle is the one this node is flying.
+        //
+        // The consequence is deliberate and worth stating: the relay is not
+        // mentioned at all here, so `telemetry_source` stays absent and the
+        // `relayed_link` provenance is dropped. Telemetry answers "what is this
+        // node's vehicle doing"; the relay's own health is reported by the
+        // ingest counters, which do survive. Surfacing a second vehicle's
+        // reading on this route would need a second set of keys, not a stamp on
+        // this one.
+        let tel = project_telemetry(Some(json!({
+            "mavlink_alive": true,
+            "fc_connected": true,
+            "attitude": {"roll": 0.1, "pitch": 0.2, "yaw": 0.3},
+            "mavlink_frame_ingest": {"frames_published": 12},
+            "relayed_vehicle": {
+                "source": "relayed",
+                "fresh": true,
+                "age_s": 0.05,
+                "system_id": 7,
+                "vehicle": {"attitude": {"roll": 9.9, "pitch": 9.9, "yaw": 9.9}},
+            },
+        })));
+        let obj = tel.as_object().unwrap();
+
+        // The local reading, not the relayed one.
+        assert_eq!(obj["attitude"]["roll"], json!(0.1));
+        assert!(!obj.contains_key("telemetry_source"));
+        assert!(!obj.contains_key("relayed_link"));
+        // The raw producer block never leaks either way.
+        assert!(!obj.contains_key("relayed_vehicle"));
+        // The relay's own health still reaches the operator.
+        assert_eq!(obj["mavlink_frame_ingest"]["frames_published"], json!(12));
+    }
+
+    #[test]
+    fn a_snapshot_that_cannot_prove_the_link_is_down_projects_nothing_relayed() {
+        // `mavlink_alive` absent means staleness cannot be PROVEN, so the local
+        // fields pass through unchanged — the pre-existing contract. The relayed
+        // block is still stripped rather than projected, because projecting it
+        // would mean overwriting local readings this snapshot never said were
+        // untrustworthy.
+        //
+        // In practice the router and this crate ship together and a ground
+        // station always emits the flag, so this is the older-snapshot path. It
+        // is pinned so the fallback stays a deliberate choice rather than an
+        // accident of ordering.
+        let tel = project_telemetry(Some(json!({
+            "armed": false,
+            "attitude": {"roll": 0.5, "pitch": 0.0, "yaw": 0.0},
+            "relayed_vehicle": {
+                "source": "relayed",
+                "fresh": true,
+                "vehicle": {"attitude": {"roll": 9.9, "pitch": 9.9, "yaw": 9.9}},
+            },
+        })));
+        let obj = tel.as_object().unwrap();
+
+        assert_eq!(
+            obj["attitude"]["roll"],
+            json!(0.5),
+            "local fields pass through"
+        );
+        assert!(
+            !obj.contains_key("relayed_vehicle"),
+            "the raw block never surfaces"
+        );
+        assert!(!obj.contains_key("telemetry_source"));
+        assert!(!obj.contains_key("relayed_link"));
     }
 
     #[test]
