@@ -23,5 +23,4 @@ pub mod demo;
 pub mod frame_ingest;
 pub mod param_cache;
 pub mod proxies;
-pub mod relayed;
 pub mod state;

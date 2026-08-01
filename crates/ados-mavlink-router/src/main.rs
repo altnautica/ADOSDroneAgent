@@ -8,7 +8,7 @@
 //! length-prefixed msgpack (v2), the versioned wire the shared reader
 //! auto-detects.
 
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ados_protocol::frame::{encode_frame, MAVLINK_MAX_FRAME};
@@ -30,7 +30,6 @@ use ados_mavlink_router::param_cache::ParamCache;
 use ados_mavlink_router::proxies::{
     proxy_bind_addr, run_tcp_proxy, run_udp_proxy, run_ws_proxy, ProxyAuth, WsProxyAuth,
 };
-use ados_mavlink_router::relayed::RelayedVehicle;
 use ados_mavlink_router::state::{firmware_family, VehicleState};
 use ados_swarm_control::ModePrecedence;
 
@@ -231,11 +230,6 @@ async fn main() {
     // Set when the republish seam runs, on the same "absent means not running"
     // reading as the tee counters above.
     let mut frame_ingest_counters: Option<Arc<IngestCounters>> = None;
-    // The decoded reading of the vehicle on the far end of the radio, set on
-    // the same profiles as the seam that feeds it. Kept strictly apart from the
-    // attached-FC `state` above: this node still has no flight controller of
-    // its own, it can now simply see the one it is relaying.
-    let mut relayed_vehicle: Option<Arc<StdMutex<RelayedVehicle>>> = None;
     // Set when the relay-proxy uplink runs, on the same reading as the two
     // above: absent means the lane is not running on this profile, which is not
     // the same signal as a lane that received nothing.
@@ -468,8 +462,6 @@ async fn main() {
                 let inbound = inbound.expect("inbound channel requested");
                 let counters = Arc::new(IngestCounters::default());
                 frame_ingest_counters = Some(counters.clone());
-                let relayed = Arc::new(StdMutex::new(RelayedVehicle::default()));
-                relayed_vehicle = Some(relayed.clone());
                 // Held for the process lifetime: dropping the server closes the
                 // socket and the ground data plane would find nothing to
                 // connect to.
@@ -478,7 +470,7 @@ async fn main() {
                 let cancel = cancel.clone();
                 tasks.push(tokio::spawn(async move {
                     let _server = server;
-                    frame_ingest::run(inbound, fc, counters, relayed, cancel).await
+                    frame_ingest::run(inbound, fc, counters, cancel).await
                 }));
             }
             Err(e) => {
@@ -612,7 +604,6 @@ async fn main() {
         let aux_tee_counters = aux_tee_counters.clone();
         let aux_rpc_counters = aux_rpc_counters.clone();
         let frame_ingest_counters = frame_ingest_counters.clone();
-        let relayed_vehicle = relayed_vehicle.clone();
         let cancel = cancel.clone();
         tasks.push(tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_millis(100));
@@ -651,7 +642,6 @@ async fn main() {
                             &fc, &state, &params, started, mavlink_drops, state_drops,
                             aux_tee_counters.as_ref(), frame_ingest_counters.as_ref(),
                             aux_rpc_counters.as_ref(), swarm_status.as_ref(),
-                            relayed_vehicle.as_ref(),
                         )
                         .await;
                         let wire = { state.lock().await.to_wire_with(&extras) };
@@ -750,7 +740,6 @@ async fn build_extras(
     frame_ingest_counters: Option<&Arc<IngestCounters>>,
     aux_rpc_counters: Option<&AuxUplinkConsumerCounters>,
     swarm: Option<&Arc<SwarmSetpointStatus>>,
-    relayed_vehicle: Option<&Arc<StdMutex<RelayedVehicle>>>,
 ) -> Map<String, Value> {
     // The cached param count and the map's change counter, read under one lock.
     let (cached, param_generation) = {
@@ -885,24 +874,6 @@ async fn build_extras(
             "mavlink_frame_ingest".into(),
             serde_json::to_value(counters.snapshot()).unwrap_or(Value::Null),
         );
-    }
-    // The decoded reading of the relayed vehicle, when this node has ever seen
-    // one. Carries its own provenance and freshness (see `crate::relayed`), and
-    // is nested rather than merged so it can never be mistaken for the
-    // attached-FC fields alongside it. Absent on a node that has never relayed
-    // a vehicle, which is a different signal from one whose vehicle has gone
-    // quiet (that case is present with `fresh: false`).
-    if let Some(relayed) = relayed_vehicle {
-        let snapshot = match relayed.lock() {
-            Ok(r) => r.to_wire(Instant::now()),
-            // Read through a poisoned lock rather than dropping the surface:
-            // a blank reading is exactly the failure this projection exists to
-            // fix, so it must not be reintroduced by a lock error.
-            Err(poisoned) => poisoned.into_inner().to_wire(Instant::now()),
-        };
-        if let Some(value) = snapshot {
-            extras.insert("relayed_vehicle".into(), value);
-        }
     }
     // The relay-proxy uplink's tally: how many HTTP requests crossed the radio,
     // how many were dropped as another node's, and — the pair that says whether
@@ -1092,7 +1063,6 @@ mod extras_key_set_tests {
             Some(&Arc::new(IngestCounters::default())),
             Some(&AuxUplinkConsumerCounters::new()),
             Some(&Arc::new(SwarmSetpointStatus::default())),
-            None,
         )
         .await;
 
@@ -1147,7 +1117,6 @@ mod extras_key_set_tests {
             Some(&Arc::new(IngestCounters::default())),
             Some(&AuxUplinkConsumerCounters::new()),
             None,
-            None,
         )
         .await;
         let empty_len = sized_without_clocks(empty);
@@ -1169,7 +1138,6 @@ mod extras_key_set_tests {
             Some(&Arc::new(TeeCounters::default())),
             Some(&Arc::new(IngestCounters::default())),
             Some(&AuxUplinkConsumerCounters::new()),
-            None,
             None,
         )
         .await;
