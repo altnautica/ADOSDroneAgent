@@ -357,10 +357,6 @@ mod tests {
         Some(Duration::from_millis(10))
     }
 
-    fn rate_live() -> bool {
-        true
-    }
-
     fn no_pic() -> Option<&'static PicView> {
         None
     }
