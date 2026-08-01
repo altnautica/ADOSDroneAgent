@@ -70,6 +70,7 @@ pub mod params_write;
 pub mod plugins_config;
 pub mod plugins_state;
 pub mod plugins_tools;
+pub mod reachable_addr;
 pub mod relay_secret;
 pub mod service_control;
 pub mod services;
