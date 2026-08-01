@@ -51,6 +51,16 @@ interface NavState {
   quickMenuOpen: boolean;
   /** Whether the menu chrome is collapsed to give the feed the whole panel. */
   menuCollapsed: boolean;
+  /** The tabs actually shown for this node's profile, in menu order.
+   *
+   *  Navigation walks THIS, never the full registry order. A drone hides the
+   *  ground-station-only screens, and stepping the unfiltered list meant the
+   *  panel's own next/activate buttons could land on a tab with no menu entry,
+   *  polling routes that do not exist on the profile — a screen the operator
+   *  could see but not have chosen and could not obviously leave. It also made
+   *  the focus ring compare a filtered index against an unfiltered one, so on a
+   *  drone the ring highlighted nothing. */
+  visibleTabs: string[];
 
   /** Apply a screen-raised action (the analog of dispatching a TFT HitAction). */
   dispatch: (action: ScreenAction) => void;
@@ -60,6 +70,9 @@ interface NavState {
   openDetail: (id: string) => void;
   back: () => void;
   setMenuFocus: (index: number) => void;
+  /** Declare which tabs this profile shows. Idempotent; the shell calls it once
+   *  the profile probe resolves. */
+  setVisibleTabs: (ids: string[]) => void;
   toggleMenuCollapsed: () => void;
   closeQuickMenu: () => void;
 }
@@ -70,6 +83,10 @@ export const useNavStore = create<NavState>((set, get) => ({
   menuFocusIndex: tabIndex(loadPersistedTab()),
   quickMenuOpen: false,
   menuCollapsed: false,
+  // Until the profile resolves, every tab is assumed visible — the historical
+  // shape, and the safe direction: a tab that turns out to be hidden is removed
+  // on the next update rather than being unreachable in the meantime.
+  visibleTabs: [...TAB_ORDER],
 
   dispatch: (action) => {
     switch (action.kind) {
@@ -93,19 +110,26 @@ export const useNavStore = create<NavState>((set, get) => ({
     const s = get();
     switch (cmd) {
       case "prev": {
-        const next = (s.menuFocusIndex - 1 + TAB_ORDER.length) % TAB_ORDER.length;
+        const tabs = s.visibleTabs;
+        if (tabs.length === 0) break;
+        const next = (s.menuFocusIndex - 1 + tabs.length) % tabs.length;
         set({ menuFocusIndex: next });
         break;
       }
       case "next": {
-        const next = (s.menuFocusIndex + 1) % TAB_ORDER.length;
+        const tabs = s.visibleTabs;
+        if (tabs.length === 0) break;
+        const next = (s.menuFocusIndex + 1) % tabs.length;
         set({ menuFocusIndex: next });
         break;
       }
       case "activate":
         // In the quick menu, activate the focused tab; on a screen it acts as
         // "open the focused menu entry".
-        s.goTab(TAB_ORDER[s.menuFocusIndex]);
+        {
+          const target = s.visibleTabs[s.menuFocusIndex];
+          if (target) s.goTab(target);
+        }
         break;
       case "back":
         if (s.quickMenuOpen) {
@@ -115,8 +139,13 @@ export const useNavStore = create<NavState>((set, get) => ({
         }
         break;
       case "cycle-tab": {
-        const next = (tabIndex(s.activeTabId) + 1) % TAB_ORDER.length;
-        s.goTab(TAB_ORDER[next]);
+        const tabs = s.visibleTabs;
+        if (tabs.length === 0) break;
+        const here = tabs.indexOf(s.activeTabId);
+        // An active tab that is not in the visible set (a profile change while
+        // it was open) steps to the first visible one rather than nowhere.
+        const next = here < 0 ? 0 : (here + 1) % tabs.length;
+        s.goTab(tabs[next]);
         break;
       }
       case "quick-menu":
@@ -149,9 +178,30 @@ export const useNavStore = create<NavState>((set, get) => ({
   },
 
   setMenuFocus: (index) => {
-    if (index < 0 || index >= TAB_ORDER.length) return;
+    // Bounded by the VISIBLE set, because that is what the index means: the
+    // menu renders the visible tabs, so a caller handing over a rendered
+    // position is speaking in those terms.
+    if (index < 0 || index >= get().visibleTabs.length) return;
     set({ menuFocusIndex: index });
   },
+
+  setVisibleTabs: (ids) =>
+    set((s) => {
+      if (
+        s.visibleTabs.length === ids.length &&
+        s.visibleTabs.every((id, i) => id === ids[i])
+      ) {
+        return s;
+      }
+      // Keep the focus ring on the tab it was on if that tab survived, so a
+      // profile resolving mid-session does not silently move the operator's
+      // selection; otherwise fall back to the active tab, then to the start.
+      const focused = s.visibleTabs[s.menuFocusIndex];
+      const kept = focused ? ids.indexOf(focused) : -1;
+      const onActive = ids.indexOf(s.activeTabId);
+      const menuFocusIndex = kept >= 0 ? kept : onActive >= 0 ? onActive : 0;
+      return { ...s, visibleTabs: ids, menuFocusIndex };
+    }),
 
   toggleMenuCollapsed: () => set((s) => ({ menuCollapsed: !s.menuCollapsed })),
 
