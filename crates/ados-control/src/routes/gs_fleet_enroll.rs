@@ -77,13 +77,36 @@ const DRONE_ROLE: &str = "drone";
 /// slot, so ordering here decides only who gets the lower number when several
 /// arrive together.
 pub fn decide_enrollments(peers: &[(String, String)], registry: &FleetRegistry) -> Vec<String> {
+    let registered: Vec<&str> = registry.slots().map(|s| s.device_id.as_str()).collect();
     peers
         .iter()
         .filter(|(_, role)| role == DRONE_ROLE)
         .map(|(device_id, _)| device_id)
-        .filter(|device_id| registry.slot_of(device_id).is_none())
+        .filter(|device_id| !is_already_registered(device_id, &registered))
         .cloned()
         .collect()
+}
+
+/// Whether `candidate` is an aircraft the registry already holds a slot for.
+///
+/// Not a plain equality check, because the two paths that name an aircraft do
+/// not name it identically. The pair route records the id its CALLER supplied,
+/// while the beacon carries the id the node holds for itself, and the first is
+/// in practice a truncation of the second. Comparing exactly therefore reads
+/// one aircraft as two, and the consequence is not cosmetic: it spends a second
+/// slot out of a table only [`FLEET_MAX_SLOTS`] deep, and the ground station
+/// then stands up a receiver on a slot no aircraft transmits on.
+///
+/// So a candidate matches when either id is a prefix of the other. That is the
+/// exact relationship the two forms have, and it is deliberately narrow --
+/// unrelated ids do not share a prefix, and two genuinely different aircraft
+/// would have to have been issued ids where one begins with the other for this
+/// to be wrong.
+fn is_already_registered(candidate: &str, registered: &[&str]) -> bool {
+    registered.iter().any(|held| {
+        let (a, b) = (held.to_ascii_lowercase(), candidate.to_ascii_lowercase());
+        a.starts_with(&b) || b.starts_with(&a)
+    })
 }
 
 /// Enrol every unregistered audible drone, returning the slots issued.
@@ -185,6 +208,47 @@ mod tests {
         let mut registry = FleetRegistry::default();
         registry.allocate("drone-a");
         assert!(decide_enrollments(&[peer("drone-a", "drone")], &registry).is_empty());
+    }
+
+    #[test]
+    fn a_drone_the_pair_route_already_registered_is_not_enrolled_again() {
+        // Caught on the two-drone bench: the pair route records the id its
+        // caller supplied and the beacon carries the id the node holds for
+        // itself, and the first is a truncation of the second. Compared
+        // exactly, one aircraft read as two and was issued a second slot -- so
+        // a two-drone fleet filled four slots, and the ground station stood up
+        // receivers on two slots nothing was transmitting on.
+        let mut registry = FleetRegistry::default();
+        registry.allocate("40bb1a5a");
+
+        assert!(
+            decide_enrollments(&[peer("40bb1a5a4484", "drone")], &registry).is_empty(),
+            "the longer form of an already-registered id is the same aircraft"
+        );
+    }
+
+    #[test]
+    fn the_shorter_form_of_a_registered_id_is_also_the_same_aircraft() {
+        // The relationship is symmetric: whichever path registered first, the
+        // other must not add a duplicate.
+        let mut registry = FleetRegistry::default();
+        registry.allocate("40bb1a5a4484");
+
+        assert!(decide_enrollments(&[peer("40bb1a5a", "drone")], &registry).is_empty());
+    }
+
+    #[test]
+    fn two_genuinely_different_drones_are_both_enrolled() {
+        // The guard must stay narrow. Unrelated ids share no prefix, and
+        // suppressing a real second aircraft would cost it its address
+        // entirely.
+        let mut registry = FleetRegistry::default();
+        registry.allocate("40bb1a5a");
+
+        assert_eq!(
+            decide_enrollments(&[peer("f6aa0aa41193", "drone")], &registry),
+            vec!["f6aa0aa41193".to_string()]
+        );
     }
 
     #[test]
