@@ -146,7 +146,7 @@ def create_app(agent: Any) -> FastAPI:
             "Run scripts/build-cockpit.sh or reinstall the agent package."
         )
 
-    from starlette.responses import RedirectResponse
+    from starlette.responses import RedirectResponse, Response
 
     async def _cockpit_index_redirect(request: Any) -> RedirectResponse:
         # A bare /cockpit (no trailing slash) does not match the StaticFiles
@@ -162,10 +162,41 @@ def create_app(agent: Any) -> FastAPI:
         target = f"/cockpit/?{query}" if query else "/cockpit/"
         return RedirectResponse(url=target)
 
+    class _RevalidatedStaticFiles(StaticFiles):
+        """StaticFiles that lets a browser cache assets but never the entry.
+
+        The build emits content-hashed asset names, so an asset is safe to keep
+        forever — its name changes when its bytes do. `index.html` is the
+        opposite: its name never changes and it is the only thing that points at
+        the new asset names, so a browser holding a cached copy keeps loading the
+        OLD bundle no matter how many times the operator reloads.
+
+        Starlette sends validators but no `Cache-Control`, which leaves the entry
+        open to heuristic caching. That is how a panel ends up running code the
+        node stopped serving days ago, and it is invisible: the page renders, so
+        nothing looks stale.
+        """
+
+        async def get_response(self, path: str, scope: dict) -> Response:  # type: ignore[override]
+            response = await super().get_response(path, scope)
+            if path.startswith("assets/"):
+                # The name carries a content hash, so these are safe forever.
+                response.headers["cache-control"] = (
+                    "public, max-age=31536000, immutable"
+                )
+            else:
+                # Everything else — the entry, the icon, and the directory form
+                # of the entry, which arrives here as "." rather than a filename
+                # — revalidates. A 304 keeps that cheap, and getting it wrong
+                # means an operator reloading a broken panel is served the same
+                # broken panel.
+                response.headers["cache-control"] = "no-cache"
+            return response
+
     app.add_route("/cockpit", _cockpit_index_redirect, include_in_schema=False)
     app.mount(
         "/cockpit",
-        StaticFiles(directory=str(cockpit_static_dir), html=True),
+        _RevalidatedStaticFiles(directory=str(cockpit_static_dir), html=True),
         name="cockpit_static",
     )
 
@@ -198,7 +229,7 @@ def create_app(agent: Any) -> FastAPI:
         )
 
     from starlette.exceptions import HTTPException as StarletteHTTPException
-    from starlette.responses import FileResponse, Response
+    from starlette.responses import FileResponse
 
     class SpaStaticFiles(StaticFiles):
         """StaticFiles + SPA fallback. Unknown paths return index.html
