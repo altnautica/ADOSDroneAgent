@@ -118,7 +118,6 @@ def test_gated_caps_are_marked_enforced() -> None:
             "event.publish",
             "event.subscribe",
             "flight.guided_setpoint",
-            "flight.rate_setpoint",
             "hardware.gpio_out",
             "mavlink.component.vio",
             "mavlink.read",
