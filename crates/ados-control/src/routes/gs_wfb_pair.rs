@@ -171,16 +171,66 @@ fn read_public_fingerprint(path: &std::path::Path) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 /// The `POST .../wfb/pair` body. Mirrors the FastAPI `PairRequest`: a base64
-/// `blob_b64` (the 64-byte wfb-ng key), an optional `drone_device_id`, and the
-/// legacy `pair_key` kept only so an old client gets a clear 400 instead of a 422.
+/// `blob_b64` (the 64-byte wfb-ng key), an optional `drone_device_id`, an
+/// optional `shared_key_b64`, and the legacy `pair_key` kept only so an old
+/// client gets a clear 400 instead of a 422.
 #[derive(Debug, Default, Deserialize)]
 pub struct PairRequest {
     #[serde(default)]
     pub blob_b64: Option<String>,
     #[serde(default)]
     pub drone_device_id: Option<String>,
+    /// The OTHER half of the generated pair, base64-encoded.
+    ///
+    /// `wfb_keygen` produces two files and the radio bind distributes the
+    /// drone's half to both ends, so after a bind both rigs hold it
+    /// byte-identically. That shared copy is what the presence beacon's HMAC
+    /// key is derived from, and deriving it from anything else was tried once
+    /// and silently dropped every beacon, which is why the resolver carries a
+    /// standing warning against it.
+    ///
+    /// This route only ever received the ground station's own half, so a fleet
+    /// paired through the API had no shared copy at all: the hop supervisor
+    /// found no key, could not parse a beacon, and the ground never began
+    /// receiving. Supplying this closes that. Absent, the route behaves exactly
+    /// as before -- the radio bind remains the path that distributes it.
+    #[serde(default)]
+    pub shared_key_b64: Option<String>,
     #[serde(default)]
     pub pair_key: Option<String>,
+}
+
+/// Where the shared half lives, and the only file the beacon HMAC is derived
+/// from.
+const SHARED_KEY_PATH: &str = "/etc/drone.key";
+
+/// Persist the shared half so the presence beacon can be parsed.
+///
+/// Written only when the caller supplies it and only when it is exactly the
+/// expected size, because a short or truncated key would derive a wrong HMAC
+/// and reproduce the silent beacon-drop this exists to prevent -- and a wrong
+/// key is harder to notice than a missing one, since the resolver at least
+/// warns about missing.
+///
+/// A write failure is reported and not fatal: the pair itself has succeeded by
+/// this point, and refusing it would leave the caller with no radio at all
+/// rather than a radio whose hop supervisor is degraded.
+fn install_shared_key(b64: &str) -> Result<(), String> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64.as_bytes())
+        .map_err(|e| format!("shared key is not valid base64: {e}"))?;
+    if bytes.len() as u64 != WFB_KEY_FILE_BYTES {
+        return Err(format!(
+            "shared key is {} bytes, expected {WFB_KEY_FILE_BYTES}",
+            bytes.len()
+        ));
+    }
+    let path = std::path::Path::new(SHARED_KEY_PATH);
+    let tmp = path.with_extension("key.tmp");
+    std::fs::write(&tmp, &bytes).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// `POST .../wfb/pair` →
@@ -319,6 +369,16 @@ pub async fn post_wfb_pair(
 
     // Issue the slot. Idempotent by device id, so a re-pair returns the slot the
     // drone already holds and never renumbers one that may be airborne.
+    // Persist the shared half before the slot is issued, so a caller that
+    // supplies it gets a ground station whose hop supervisor can actually parse
+    // a beacon rather than one that pairs and then stays deaf.
+    if let Some(shared) = req.shared_key_b64.as_deref() {
+        match install_shared_key(shared) {
+            Ok(()) => tracing::info!("wfb_shared_key_installed"),
+            Err(e) => tracing::warn!(error = %e, "wfb_shared_key_install_failed"),
+        }
+    }
+
     let mut registry = load_registry();
     let Some(slot) = registry.allocate(&device_id) else {
         return nested_detail(
@@ -717,5 +777,31 @@ mod tests {
         let different = vec![4u8; 64];
         assert_eq!(installed, same, "an identical blob must pass the gate");
         assert_ne!(installed, different, "a different blob must be refused");
+    }
+
+    #[test]
+    fn a_shared_key_of_the_wrong_size_is_refused_rather_than_written() {
+        // A truncated key derives a WRONG beacon HMAC, which drops every beacon
+        // silently -- harder to notice than a missing key, because the resolver
+        // at least warns when nothing is there.
+        use base64::Engine as _;
+        let short = base64::engine::general_purpose::STANDARD.encode([0u8; 32]);
+        assert!(install_shared_key(&short).is_err());
+    }
+
+    #[test]
+    fn a_shared_key_that_is_not_base64_is_refused() {
+        assert!(install_shared_key("not base64!!").is_err());
+    }
+
+    #[test]
+    fn the_request_accepts_a_shared_key_and_still_parses_without_one() {
+        // Absent, the route must behave exactly as it did: the radio bind stays
+        // the path that distributes the shared half.
+        let with: PairRequest =
+            serde_json::from_str(r#"{"blob_b64":"x","shared_key_b64":"y"}"#).unwrap();
+        assert_eq!(with.shared_key_b64.as_deref(), Some("y"));
+        let without: PairRequest = serde_json::from_str(r#"{"blob_b64":"x"}"#).unwrap();
+        assert!(without.shared_key_b64.is_none());
     }
 }
