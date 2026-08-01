@@ -23,6 +23,18 @@
 //! has no flight controller of its own. A relayed vehicle is not an attached
 //! one.
 //!
+//! ## What it does now project
+//!
+//! Publishing blind left the relayed vehicle readable by a ground control
+//! station on the transports (which take raw frames) and invisible to every
+//! surface on the node itself (which read decoded vehicle state) — the on-box
+//! cockpit included, which rendered a healthy relayed aircraft as no aircraft.
+//! So alongside the republish, a frame also feeds a [`RelayedVehicle`]: a
+//! decoded reading kept deliberately separate from the attached-FC state, and
+//! stamped with its own provenance. See [`crate::relayed`] for why that
+//! separation is the whole design. The claim above is unchanged — the relayed
+//! projection sets no connected flag and no heartbeat clock.
+//!
 //! ## Bounded by construction
 //!
 //! The socket's inbound queue is fixed at [`INGEST_QUEUE_DEPTH`]. A producer
@@ -42,14 +54,15 @@
 //! drop real traffic from a newer vehicle.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tokio::sync::{mpsc, Notify};
 
 use crate::aux_tee::mavlink_message_id;
 use crate::connection::FcConnection;
+use crate::relayed::RelayedVehicle;
 
 /// Inbound queue depth for the republish socket.
 ///
@@ -132,12 +145,46 @@ fn report(counters: &IngestCounters, last: IngestCountersSnapshot) -> IngestCoun
 ///
 /// Split out from the run loop so the accept-and-publish decision is testable
 /// without a socket.
-pub fn publish(fc: &Arc<FcConnection>, counters: &IngestCounters, frame: Vec<u8>) {
+///
+/// `relayed` is the decoded projection of the vehicle on the other end of the
+/// lane. It is fed from the same frame that is republished, and it is a strictly
+/// additive read: the decode runs first only because the frame is then moved
+/// into the fan-out, and it cannot prevent the republish. [`RelayedVehicle::apply_frame`]
+/// is total — an unreadable header, an id this projection does not read, and a
+/// frame this build's dialect cannot parse are each an early return, never a
+/// panic — and a poisoned lock is recovered rather than propagated. So every
+/// frame reaches a ground control station exactly as it did before.
+pub fn publish(
+    fc: &Arc<FcConnection>,
+    counters: &IngestCounters,
+    relayed: &Mutex<RelayedVehicle>,
+    frame: Vec<u8>,
+) {
     if !is_mavlink_frame(&frame) {
         counters.rejected_malformed.fetch_add(1, Ordering::Relaxed);
         return;
     }
     let len = frame.len() as u64;
+
+    // Decode before the frame is moved into the fan-out. A poisoned lock here
+    // must not take the republish down with it: the transports are the
+    // load-bearing path and the projection is the read-only extra.
+    {
+        let now = Instant::now();
+        let now_iso = crate::connection::transport::now_iso();
+        match relayed.lock() {
+            Ok(mut r) => {
+                r.apply_frame(&frame, &now_iso, now);
+            }
+            Err(poisoned) => {
+                // Recover rather than propagate: dropping the projection for
+                // the process lifetime would silently blank every surface that
+                // reads it, which is the failure this whole path exists to fix.
+                poisoned.into_inner().apply_frame(&frame, &now_iso, now);
+            }
+        }
+    }
+
     let delivered = fc.inject_frame(frame);
     counters.frames_published.fetch_add(1, Ordering::Relaxed);
     counters.bytes_published.fetch_add(len, Ordering::Relaxed);
@@ -157,6 +204,7 @@ pub async fn run(
     mut inbound: mpsc::Receiver<Vec<u8>>,
     fc: Arc<FcConnection>,
     counters: Arc<IngestCounters>,
+    relayed: Arc<Mutex<RelayedVehicle>>,
     cancel: Arc<Notify>,
 ) {
     let mut last_report = IngestCountersSnapshot::default();
@@ -178,7 +226,7 @@ pub async fn run(
                 last_report = report(&counters, last_report);
             }
             received = inbound.recv() => match received {
-                Some(frame) => publish(&fc, &counters, frame),
+                Some(frame) => publish(&fc, &counters, &relayed, frame),
                 None => break,
             },
         }
@@ -209,6 +257,43 @@ mod tests {
         vec![0xFE, 0x1C, 0x05, 0x01, 0x01, 30, 0x00, 0x00]
     }
 
+    /// A fully-formed, parseable HEARTBEAT frame.
+    ///
+    /// Distinct from [`heartbeat`] above, which is a hand-built header with a
+    /// deliberately invalid checksum: that is all the republish path needs (it
+    /// reads the header and never parses), but the relayed projection does
+    /// parse, so exercising it needs a frame that survives a real decode.
+    fn decodable_heartbeat() -> Vec<u8> {
+        use ados_protocol::mavlink::ardupilotmega::{
+            MavAutopilot, MavModeFlag, MavState, MavType, HEARTBEAT_DATA,
+        };
+        use ados_protocol::mavlink::{serialize_v2, MavHeader, MavMessage};
+        let msg = MavMessage::HEARTBEAT(HEARTBEAT_DATA {
+            custom_mode: 0,
+            mavtype: MavType::MAV_TYPE_QUADROTOR,
+            autopilot: MavAutopilot::MAV_AUTOPILOT_ARDUPILOTMEGA,
+            base_mode: MavModeFlag::empty(),
+            system_status: MavState::MAV_STATE_STANDBY,
+            mavlink_version: 3,
+        });
+        serialize_v2(
+            MavHeader {
+                system_id: 1,
+                component_id: 1,
+                sequence: 0,
+            },
+            &msg,
+        )
+        .unwrap()
+    }
+
+    /// The tests' relayed projection. Spelled with the full path because this
+    /// module's test scope also imports tokio's `Mutex` for the FC state, and
+    /// the two are distinct types.
+    fn relayed() -> Arc<std::sync::Mutex<RelayedVehicle>> {
+        Arc::new(std::sync::Mutex::new(RelayedVehicle::default()))
+    }
+
     fn connection() -> Arc<FcConnection> {
         FcConnection::new(
             MavlinkConfig::default(),
@@ -226,7 +311,7 @@ mod tests {
         let mut consumer = fc.subscribe();
         let frame = heartbeat();
 
-        publish(&fc, &counters, frame.clone());
+        publish(&fc, &counters, &relayed(), frame.clone());
 
         assert_eq!(consumer.recv().await.unwrap(), frame);
         let snap = counters.snapshot();
@@ -241,8 +326,8 @@ mod tests {
         let counters = Arc::new(IngestCounters::default());
         let mut consumer = fc.subscribe();
 
-        publish(&fc, &counters, heartbeat());
-        publish(&fc, &counters, v1_attitude());
+        publish(&fc, &counters, &relayed(), heartbeat());
+        publish(&fc, &counters, &relayed(), v1_attitude());
 
         assert_eq!(consumer.recv().await.unwrap(), heartbeat());
         assert_eq!(consumer.recv().await.unwrap(), v1_attitude());
@@ -255,11 +340,11 @@ mod tests {
         let counters = Arc::new(IngestCounters::default());
         let mut consumer = fc.subscribe();
 
-        publish(&fc, &counters, b"not a frame".to_vec());
-        publish(&fc, &counters, Vec::new());
+        publish(&fc, &counters, &relayed(), b"not a frame".to_vec());
+        publish(&fc, &counters, &relayed(), Vec::new());
         // The good frame still gets through, so the reject is per-frame and not
         // a lane that latches shut on one bad input.
-        publish(&fc, &counters, heartbeat());
+        publish(&fc, &counters, &relayed(), heartbeat());
 
         assert_eq!(consumer.recv().await.unwrap(), heartbeat());
         let snap = counters.snapshot();
@@ -274,7 +359,7 @@ mod tests {
         let fc = connection();
         let counters = Arc::new(IngestCounters::default());
 
-        publish(&fc, &counters, heartbeat());
+        publish(&fc, &counters, &relayed(), heartbeat());
 
         let snap = counters.snapshot();
         assert_eq!(snap.frames_published, 1);
@@ -282,14 +367,72 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn publishing_never_claims_a_flight_controller_is_attached() {
-        // The whole point of the seam: relaying someone else's vehicle is not
-        // the same claim as having one attached.
+    async fn a_published_frame_also_becomes_readable_vehicle_state() {
+        // The regression this seam was missing: frames reached every transport
+        // but nothing on the node decoded them, so the on-box cockpit rendered
+        // a healthy relayed aircraft as no aircraft at all.
         let fc = connection();
         let counters = Arc::new(IngestCounters::default());
+        let relayed = relayed();
 
-        publish(&fc, &counters, heartbeat());
+        publish(&fc, &counters, &relayed, decodable_heartbeat());
 
+        let wire = relayed
+            .lock()
+            .unwrap()
+            .to_wire(Instant::now())
+            .expect("a relayed frame produces a readable snapshot");
+        assert_eq!(wire["source"], "relayed");
+        assert_eq!(wire["fresh"], true);
+        assert_eq!(wire["frames_decoded"], 1);
+    }
+
+    #[tokio::test]
+    async fn a_frame_the_projection_does_not_read_is_still_republished() {
+        // The projection is strictly additive. A frame this projection does not
+        // read must still reach a ground control station byte for byte, or
+        // adding the read would have narrowed the relay.
+        //
+        // This is the id-filter path, not the parse-failure path: the id below
+        // is filtered before the parser is ever reached, which is why nothing
+        // is counted as corrupt. The parse-failure path — an id this projection
+        // DOES read whose body will not decode — is covered where the counter
+        // lives, by `relayed::tests::a_corrupt_frame_of_a_read_id_is_counted_as_undecodable`.
+        let fc = connection();
+        let counters = Arc::new(IngestCounters::default());
+        let relayed = relayed();
+        let mut consumer = fc.subscribe();
+        // A readable header carrying a message id no dialect names.
+        let mut unknown = heartbeat();
+        unknown[7] = 0xFE;
+        unknown[8] = 0xFF;
+
+        publish(&fc, &counters, &relayed, unknown.clone());
+
+        assert_eq!(consumer.recv().await.unwrap(), unknown);
+        assert_eq!(counters.snapshot().frames_published, 1);
+        // It fed nothing, and was not miscounted as corruption.
+        assert_eq!(relayed.lock().unwrap().frames_undecodable(), 0);
+        assert!(relayed.lock().unwrap().to_wire(Instant::now()).is_none());
+    }
+
+    #[tokio::test]
+    async fn publishing_never_claims_a_flight_controller_is_attached() {
+        // The whole point of the seam: relaying someone else's vehicle is not
+        // the same claim as having one attached. Asserted with the projection
+        // populated, because that is the case where the two could be confused —
+        // the node now has a full decoded reading of an aircraft and must still
+        // report no flight controller of its own.
+        let fc = connection();
+        let counters = Arc::new(IngestCounters::default());
+        let relayed = relayed();
+
+        publish(&fc, &counters, &relayed, decodable_heartbeat());
+
+        assert!(
+            relayed.lock().unwrap().is_fresh(Instant::now()),
+            "the projection is populated, so this is the confusable case"
+        );
         assert!(!fc.transport_open(), "no transport was opened");
         assert!(!fc.mavlink_alive().await, "no local link came alive");
         assert!(
@@ -306,7 +449,13 @@ mod tests {
         let (tx, rx) = mpsc::channel(8);
         let mut consumer = fc.subscribe();
 
-        let task = tokio::spawn(run(rx, fc.clone(), counters.clone(), cancel.clone()));
+        let task = tokio::spawn(run(
+            rx,
+            fc.clone(),
+            counters.clone(),
+            relayed(),
+            cancel.clone(),
+        ));
         tx.send(heartbeat()).await.unwrap();
         assert_eq!(consumer.recv().await.unwrap(), heartbeat());
 
@@ -324,7 +473,7 @@ mod tests {
         let cancel = Arc::new(Notify::new());
         let (tx, rx) = mpsc::channel::<Vec<u8>>(8);
 
-        let task = tokio::spawn(run(rx, fc, counters, cancel));
+        let task = tokio::spawn(run(rx, fc, counters, relayed(), cancel));
         drop(tx);
 
         tokio::time::timeout(Duration::from_secs(2), task)
