@@ -515,9 +515,13 @@ async fn main() {
                     cmd = inbound.recv() => match cmd {
                         // The on-box IPC socket is not reachable off the node,
                         // so a caller here has already crossed a boundary the
-                        // raw network sockets do not have.
-                        Some(data) => {
-                            fc.send_client_bytes(&data, ClientOrigin::Trusted).await
+                        // raw network sockets do not have — unless the caller
+                        // is forwarding bytes that reached the node some other
+                        // way, which it now says so the reading is its own
+                        // rather than the socket's.
+                        Some(cmd) => {
+                            let origin = ClientOrigin::from_ipc_peer(&cmd.peer);
+                            fc.send_client_bytes(&cmd.payload, origin).await
                         }
                         None => break,
                     },
@@ -564,7 +568,10 @@ async fn main() {
             loop {
                 tokio::select! {
                     cmd = msp_inbound.recv() => match cmd {
-                        Some(data) => fc.send_bytes(&data).await,
+                        Some(cmd) => {
+                            let origin = ClientOrigin::from_ipc_peer(&cmd.peer);
+                            fc.send_client_raw(&cmd.payload, origin).await
+                        }
                         None => break,
                     },
                     _ = cancel.notified() => break,

@@ -227,6 +227,13 @@ impl MavlinkMqttRelay {
                 return Ok(());
             }
         };
+        // Say what this connection is before anything is written on it. Every
+        // command that follows arrived over the broker, so the router must not
+        // read them as produced on the node — which is exactly what it did while
+        // the on-box socket stamped one provenance on all its writers alike. The
+        // declaration is sent before the rx subscription below, so it cannot be
+        // overtaken by the first forwarded command.
+        ipc.declare_off_box_source();
 
         // GCS->FC: subscribe rx and write received payloads to the IPC socket.
         if let Err(e) = transport

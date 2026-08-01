@@ -16,6 +16,17 @@
 //! sends the exact bytes given (the caller frames via [`crate::frame`] or
 //! [`crate::state`]). The inbound reader, used only by the MAVLink socket,
 //! decodes 4-byte big-endian length-prefixed frames.
+//!
+//! ## Who wrote this
+//!
+//! An inbound payload arrives as an [`InboundCommand`], which carries the
+//! writing connection's [`IpcPeer`] alongside the bytes. The owning service
+//! used to receive a bare buffer and had no way to tell one writer from
+//! another, so it recorded a single hardcoded provenance for every one of
+//! them. That reading was wrong for the writer that matters most: a process
+//! that accepts bytes from off the node and forwards them here is not the same
+//! as a process that produced them itself, and a service that cannot see the
+//! difference reports remote traffic as locally originated.
 
 use std::future::Future;
 use std::io;
@@ -31,6 +42,57 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 
 use crate::frame;
+
+/// The control payload a writer sends to declare that the bytes it is about to
+/// forward did not originate on this node.
+///
+/// Sent as an ordinary length-prefixed frame, so no framing changes and no
+/// existing writer is affected. It cannot collide with real traffic on either
+/// socket that carries inbound bytes: a MAVLink frame starts `0xFD` (v2) or
+/// `0xFE` (v1) and an MSP one starts `$`, while this starts with a NUL.
+///
+/// The declaration is one-way and downward. A writer can only ever give up the
+/// benefit of the doubt with it, never claim one, so a writer that does not
+/// send it is treated exactly as it was before and a writer that forges it only
+/// declassifies itself. It is consumed by the reader and never forwarded on.
+pub const IPC_DECLARE_OFF_BOX_SOURCE: &[u8] = b"\x00ados-ipc/source=off-box";
+
+/// Who wrote an inbound payload, as the accepting socket can tell.
+///
+/// The credentials come from the kernel (`SO_PEERCRED` and its equivalents),
+/// so they cannot be forged by the writer. `off_box_source` is the writer's own
+/// declaration (see [`IPC_DECLARE_OFF_BOX_SOURCE`]) and is sticky for the life
+/// of the connection.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IpcPeer {
+    pub uid: Option<u32>,
+    pub gid: Option<u32>,
+    pub pid: Option<i32>,
+    /// The writing process has declared that it is forwarding bytes that
+    /// reached this node from somewhere else.
+    pub off_box_source: bool,
+}
+
+/// One inbound payload plus the identity of the connection that wrote it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboundCommand {
+    pub payload: Vec<u8>,
+    pub peer: IpcPeer,
+}
+
+/// Read the connecting process's credentials. A platform or kernel that will
+/// not answer leaves the fields empty rather than inventing a value.
+fn peer_identity(stream: &UnixStream) -> IpcPeer {
+    match stream.peer_cred() {
+        Ok(cred) => IpcPeer {
+            uid: Some(cred.uid()),
+            gid: Some(cred.gid()),
+            pid: cred.pid(),
+            off_box_source: false,
+        },
+        Err(_) => IpcPeer::default(),
+    }
+}
 
 /// One connected client: its outbound queue plus the writer and reader tasks,
 /// so both can be aborted when the client is pruned or the server is dropped.
@@ -70,13 +132,14 @@ impl IpcBroadcast {
     ///   client (state socket behaviour).
     /// - `inbound`: if `Some`, each client connection is also read as a stream
     ///   of length-prefixed frames whose payloads are forwarded on the channel
+    ///   as [`InboundCommand`]s carrying the writing connection's identity
     ///   (MAVLink command path). The capacity bounds the inbound backlog.
     pub async fn bind(
         path: impl AsRef<Path>,
         queue_depth: usize,
         keep_last: bool,
         inbound: Option<usize>,
-    ) -> io::Result<(Self, Option<mpsc::Receiver<Vec<u8>>>)> {
+    ) -> io::Result<(Self, Option<mpsc::Receiver<InboundCommand>>)> {
         let path = path.as_ref().to_path_buf();
         // The broadcast socket is world-accessible (0o666), matching the Python
         // server; the shared helper owns the create-dir / remove-stale / bind /
@@ -89,7 +152,7 @@ impl IpcBroadcast {
 
         let (inbound_tx, inbound_rx) = match inbound {
             Some(cap) => {
-                let (tx, rx) = mpsc::channel::<Vec<u8>>(cap);
+                let (tx, rx) = mpsc::channel::<InboundCommand>(cap);
                 (Some(tx), Some(rx))
             }
             None => (None, None),
@@ -135,8 +198,9 @@ impl IpcBroadcast {
         keep_last: bool,
         clients: Arc<Mutex<Vec<ClientHandle>>>,
         last: Arc<Mutex<Option<Vec<u8>>>>,
-        inbound_tx: Option<mpsc::Sender<Vec<u8>>>,
+        inbound_tx: Option<mpsc::Sender<InboundCommand>>,
     ) {
+        let peer = peer_identity(&stream);
         let (mut read_half, mut write_half) = stream.into_split();
         let (tx, mut rx) = mpsc::channel::<Vec<u8>>(queue_depth);
 
@@ -167,23 +231,33 @@ impl IpcBroadcast {
         // Python state server which only waits for the client to disconnect.
         let reader = tokio::spawn(async move {
             match inbound_tx {
-                Some(tx) => loop {
-                    let mut header = [0u8; frame::HEADER_SIZE];
-                    if read_half.read_exact(&mut header).await.is_err() {
-                        break;
+                Some(tx) => {
+                    let mut peer = peer;
+                    loop {
+                        let mut header = [0u8; frame::HEADER_SIZE];
+                        if read_half.read_exact(&mut header).await.is_err() {
+                            break;
+                        }
+                        let len = match frame::decode_len(header, frame::MAVLINK_MAX_FRAME, false) {
+                            Ok(n) => n,
+                            Err(_) => break,
+                        };
+                        let mut payload = vec![0u8; len];
+                        if len > 0 && read_half.read_exact(&mut payload).await.is_err() {
+                            break;
+                        }
+                        // The origin declaration is a control frame, not
+                        // traffic: it latches for the rest of the connection
+                        // and is not passed on to the flight controller.
+                        if payload == IPC_DECLARE_OFF_BOX_SOURCE {
+                            peer.off_box_source = true;
+                            continue;
+                        }
+                        if tx.send(InboundCommand { payload, peer }).await.is_err() {
+                            break;
+                        }
                     }
-                    let len = match frame::decode_len(header, frame::MAVLINK_MAX_FRAME, false) {
-                        Ok(n) => n,
-                        Err(_) => break,
-                    };
-                    let mut payload = vec![0u8; len];
-                    if len > 0 && read_half.read_exact(&mut payload).await.is_err() {
-                        break;
-                    }
-                    if tx.send(payload).await.is_err() {
-                        break;
-                    }
-                },
+                }
                 None => {
                     let mut scratch = [0u8; 256];
                     while read_half.read(&mut scratch).await.unwrap_or(0) > 0 {}
@@ -641,8 +715,82 @@ mod tests {
 
         let got = tokio::time::timeout(Duration::from_millis(500), inbound.recv())
             .await
+            .unwrap()
+            .expect("a command");
+        assert_eq!(got.payload, b"command");
+        // The kernel answers for a local peer, so the writing process is
+        // identified rather than assumed.
+        assert!(
+            got.peer.uid.is_some(),
+            "the accepting socket must record who wrote the payload"
+        );
+        assert!(!got.peer.off_box_source);
+    }
+
+    #[tokio::test]
+    async fn a_declared_off_box_source_sticks_and_is_not_forwarded() {
+        let path = temp_sock("offbox");
+        let (_server, inbound) = IpcBroadcast::bind(&path, 256, false, Some(16))
+            .await
             .unwrap();
-        assert_eq!(got.as_deref(), Some(&b"command"[..]));
+        let mut inbound = inbound.expect("inbound channel requested");
+
+        let mut client = connect_with_retry(&path, 10, Duration::from_millis(20))
+            .await
+            .unwrap();
+        for payload in [IPC_DECLARE_OFF_BOX_SOURCE, b"first", b"second"] {
+            let framed = encode_frame(payload, MAVLINK_MAX_FRAME).unwrap();
+            client.write_all(&framed).await.unwrap();
+        }
+        client.flush().await.unwrap();
+
+        // The declaration itself never reaches the consumer, and both payloads
+        // behind it are marked for the whole life of the connection.
+        for expected in [&b"first"[..], &b"second"[..]] {
+            let got = tokio::time::timeout(Duration::from_millis(500), inbound.recv())
+                .await
+                .unwrap()
+                .expect("a command");
+            assert_eq!(got.payload, expected);
+            assert!(
+                got.peer.off_box_source,
+                "a declared forwarder must not read as a local producer"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn one_connection_declaring_does_not_mark_another() {
+        let path = temp_sock("offbox-scope");
+        let (_server, inbound) = IpcBroadcast::bind(&path, 256, false, Some(16))
+            .await
+            .unwrap();
+        let mut inbound = inbound.expect("inbound channel requested");
+
+        let mut declaring = connect_with_retry(&path, 10, Duration::from_millis(20))
+            .await
+            .unwrap();
+        declaring
+            .write_all(&encode_frame(IPC_DECLARE_OFF_BOX_SOURCE, MAVLINK_MAX_FRAME).unwrap())
+            .await
+            .unwrap();
+        declaring.flush().await.unwrap();
+
+        let mut plain = connect_with_retry(&path, 10, Duration::from_millis(20))
+            .await
+            .unwrap();
+        plain
+            .write_all(&encode_frame(b"local", MAVLINK_MAX_FRAME).unwrap())
+            .await
+            .unwrap();
+        plain.flush().await.unwrap();
+
+        let got = tokio::time::timeout(Duration::from_millis(500), inbound.recv())
+            .await
+            .unwrap()
+            .expect("a command");
+        assert_eq!(got.payload, b"local");
+        assert!(!got.peer.off_box_source);
     }
 
     #[tokio::test]

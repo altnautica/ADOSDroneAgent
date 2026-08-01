@@ -99,6 +99,9 @@ impl MspMqttRelay {
                 return Ok(());
             }
         };
+        // See the MAVLink relay: every byte this connection writes reached the
+        // node over the broker, so it declares that before writing any.
+        ipc.declare_off_box_source();
 
         // GCS->FC: subscribe rx and write received payloads to the IPC socket.
         if let Err(e) = transport

@@ -111,6 +111,22 @@ impl MavlinkClient {
         let _ = self.outbound.try_send(frame);
     }
 
+    /// Tell the router that everything this connection writes is being
+    /// forwarded from off the node rather than produced on it.
+    ///
+    /// For a caller that is a bridge — the cloud relay is the one that exists —
+    /// this is the only way the router can tell its traffic apart from a local
+    /// producer's, because the on-box socket's own reasoning ("not reachable off
+    /// the node") describes the socket and not the bytes crossing it. The
+    /// declaration latches for the life of the connection and only ever removes
+    /// benefit of the doubt, so sending it is never the wrong call for a bridge.
+    ///
+    /// Send it before any traffic: the writer task drains its queue in order, so
+    /// a declaration enqueued first is read first.
+    pub fn declare_off_box_source(&self) {
+        self.send_bytes(ados_protocol::ipc::IPC_DECLARE_OFF_BOX_SOURCE);
+    }
+
     /// A fresh receiver for the FC->plugin frame fanout. Each plugin pump holds
     /// its own receiver; a slow pump lags rather than blocking the reader.
     pub fn subscribe(&self) -> broadcast::Receiver<Vec<u8>> {
@@ -186,7 +202,40 @@ mod tests {
         let got = tokio::time::timeout(Duration::from_millis(500), inbound.recv())
             .await
             .unwrap();
-        assert_eq!(got.as_deref(), Some(&b"command-toward-fc"[..]));
+        assert_eq!(
+            got.map(|c| c.payload).as_deref(),
+            Some(&b"command-toward-fc"[..])
+        );
+    }
+
+    /// A bridge declares itself once and every command it forwards afterwards
+    /// carries that reading. Without it the router saw the same thing it sees
+    /// from a local producer, which is how broker traffic came to be recorded
+    /// as on-box.
+    #[tokio::test]
+    async fn a_declared_bridge_marks_every_command_it_forwards() {
+        let path = temp_sock("declare");
+        let (_server, inbound) =
+            IpcBroadcast::bind(&path, MAVLINK_BROADCAST_DEPTH, false, Some(16))
+                .await
+                .unwrap();
+        let mut inbound = inbound.expect("inbound channel requested");
+
+        let client = MavlinkClient::connect(&path).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        client.declare_off_box_source();
+        client.send_bytes(b"forwarded-from-the-broker");
+
+        let got = tokio::time::timeout(Duration::from_millis(500), inbound.recv())
+            .await
+            .unwrap()
+            .expect("a command");
+        assert_eq!(got.payload, b"forwarded-from-the-broker");
+        assert!(
+            got.peer.off_box_source,
+            "a declared bridge's traffic must not read as locally produced"
+        );
     }
 
     #[tokio::test]

@@ -60,6 +60,8 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use tokio::sync::{mpsc, Notify};
 
+use ados_protocol::ipc::InboundCommand;
+
 use crate::aux_tee::mavlink_message_id;
 use crate::connection::FcConnection;
 use crate::relayed::RelayedVehicle;
@@ -201,7 +203,7 @@ pub fn publish(
 /// the whole loop is exercisable over a plain channel with no socket and no
 /// flight controller.
 pub async fn run(
-    mut inbound: mpsc::Receiver<Vec<u8>>,
+    mut inbound: mpsc::Receiver<InboundCommand>,
     fc: Arc<FcConnection>,
     counters: Arc<IngestCounters>,
     relayed: Arc<Mutex<RelayedVehicle>>,
@@ -226,7 +228,11 @@ pub async fn run(
                 last_report = report(&counters, last_report);
             }
             received = inbound.recv() => match received {
-                Some(frame) => publish(&fc, &counters, &relayed, frame),
+                // The ingest socket runs the other way from the command
+                // socket: these are frames a vehicle sent, not commands for
+                // one. They already crossed a radio, so the writer identity the
+                // socket records adds nothing here and only the bytes are read.
+                Some(cmd) => publish(&fc, &counters, &relayed, cmd.payload),
                 None => break,
             },
         }
@@ -285,6 +291,14 @@ mod tests {
             &msg,
         )
         .unwrap()
+    }
+
+    /// Wrap raw bytes as the socket would hand them to the loop.
+    fn ingested(payload: Vec<u8>) -> InboundCommand {
+        InboundCommand {
+            payload,
+            peer: Default::default(),
+        }
     }
 
     /// The tests' relayed projection. Spelled with the full path because this
@@ -456,7 +470,7 @@ mod tests {
             relayed(),
             cancel.clone(),
         ));
-        tx.send(heartbeat()).await.unwrap();
+        tx.send(ingested(heartbeat())).await.unwrap();
         assert_eq!(consumer.recv().await.unwrap(), heartbeat());
 
         cancel.notify_waiters();
@@ -471,7 +485,7 @@ mod tests {
         let fc = connection();
         let counters = Arc::new(IngestCounters::default());
         let cancel = Arc::new(Notify::new());
-        let (tx, rx) = mpsc::channel::<Vec<u8>>(8);
+        let (tx, rx) = mpsc::channel::<InboundCommand>(8);
 
         let task = tokio::spawn(run(rx, fc, counters, relayed(), cancel));
         drop(tx);

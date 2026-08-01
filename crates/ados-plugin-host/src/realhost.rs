@@ -4917,7 +4917,8 @@ gcs:
         let frame = tokio::time::timeout(std::time::Duration::from_millis(500), inbound.recv())
             .await
             .unwrap()
-            .expect("a frame arrives");
+            .expect("a frame arrives")
+            .payload;
         let (_h, decoded) = parse_v2(&frame).expect("decode succeeds");
         match decoded {
             MavMessage::SET_POSITION_TARGET_LOCAL_NED(d) => {
@@ -4974,7 +4975,8 @@ gcs:
         let frame = tokio::time::timeout(std::time::Duration::from_millis(500), inbound.recv())
             .await
             .unwrap()
-            .expect("a frame arrives");
+            .expect("a frame arrives")
+            .payload;
         match parse_v2(&frame).expect("decode succeeds").1 {
             MavMessage::SET_POSITION_TARGET_GLOBAL_INT(d) => {
                 assert_eq!(d.lat_int, 374_224_080);
@@ -5102,7 +5104,8 @@ gcs:
         let frame = tokio::time::timeout(std::time::Duration::from_millis(500), inbound.recv())
             .await
             .unwrap()
-            .expect("a frame arrives");
+            .expect("a frame arrives")
+            .payload;
         let mut id = [0u8; 4];
         id[..3].copy_from_slice(&frame[7..10]);
         assert_eq!(u32::from_le_bytes(id), MSG_ID_TUNNEL);

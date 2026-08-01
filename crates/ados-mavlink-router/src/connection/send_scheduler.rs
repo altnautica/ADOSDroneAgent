@@ -60,19 +60,45 @@ const PARAM_DEADLINE: Duration = Duration::from_secs(30);
 /// Where a client's bytes came from, as far as the socket that accepted them
 /// could tell.
 ///
-/// Only two answers are possible on a raw MAVLink socket, because there is no
+/// On a raw MAVLink socket only two answers are possible, because there is no
 /// header to carry a credential and no handshake to hang one on: either the
-/// peer address cleared the posture check, or it did not. This is not a
-/// permission — it is provenance, recorded so the one path that amplifies a
-/// client's reach can say when it is amplifying an anonymous one.
+/// peer address cleared the posture check, or it did not. The on-box IPC socket
+/// can say one thing more, because a writer there can tell the socket it is
+/// forwarding rather than producing. This is not a permission — it is
+/// provenance, recorded so the one path that amplifies a client's reach can say
+/// what it is amplifying.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientOrigin {
     /// The peer cleared the posture check, or arrived on a trusted local
-    /// transport (an on-box IPC socket, which is not reachable off the node).
+    /// transport (an on-box IPC socket, which is not reachable off the node)
+    /// having claimed nothing to the contrary.
     Trusted,
+    /// An on-box writer that has declared it is forwarding bytes which reached
+    /// this node from elsewhere. Locally delivered, but not locally produced:
+    /// the reach behind these bytes is whatever guards the hop they arrived on,
+    /// which is not the on-box socket's own unreachability.
+    Relayed,
     /// The peer did not clear the posture check. Admitted today, because these
     /// ports are advertised for third-party ground stations, but recorded.
     Unauthenticated,
+}
+
+impl ClientOrigin {
+    /// Classify a payload the on-box IPC socket accepted.
+    ///
+    /// The socket is not reachable off the node, so a writer that says nothing
+    /// is on-box in the sense that matters. A writer that has declared itself a
+    /// forwarder is not, and the difference is the whole reason the identity is
+    /// carried: the previous reading was a hardcoded [`Self::Trusted`] applied
+    /// to every writer alike, which recorded traffic that had crossed a broker
+    /// as if it had been produced on the node.
+    pub fn from_ipc_peer(peer: &ados_protocol::ipc::IpcPeer) -> Self {
+        if peer.off_box_source {
+            Self::Relayed
+        } else {
+            Self::Trusted
+        }
+    }
 }
 
 impl FcConnection {
@@ -187,6 +213,18 @@ impl FcConnection {
     /// ground station, and a ground station relaying a linked drone is exactly
     /// the shape that takes this fallback.
     ///
+    /// **The claim that a boundary exists for every caller was not true of the
+    /// on-box IPC lane either.** That lane was described as trusted because the
+    /// socket cannot be reached off the node, and stamped
+    /// [`ClientOrigin::Trusted`] on every payload without looking. But one of
+    /// its writers is the cloud relay, whose whole job is to take bytes off a
+    /// broker and put them on this socket, so the reach behind those bytes is
+    /// the broker's, not the node's. On a ground station with no local flight
+    /// controller they then took the fallback below and left over the radio.
+    /// The socket now identifies its writers, a forwarder declares itself, and
+    /// the classification says which it was — so this path can no longer report
+    /// broker traffic as locally produced.
+    ///
     /// Deliberately distinct from `send_bytes`, which this router's own
     /// heartbeat/stream-interval/param-sweep housekeeping also calls: those
     /// exist to talk to a directly-attached FC and must stay a silent no-op
@@ -199,13 +237,45 @@ impl FcConnection {
             return;
         }
         if let Some(uplink) = self.aux_uplink.lock().await.as_ref() {
-            if caller == ClientOrigin::Unauthenticated {
-                // The amplifying case: no local vehicle, so these bytes leave
-                // over the radio to one that may be flying.
-                tracing::warn!(len = data.len(), "relay_uplink_from_unauthenticated_client");
+            // The amplifying case: no local vehicle, so these bytes leave over
+            // the radio to one that may be flying. Both non-local readings are
+            // reported, and reported apart, because they are different reaches:
+            // one is a caller on this LAN that presented nothing, the other is a
+            // caller anywhere the broker is reachable from.
+            match caller {
+                ClientOrigin::Unauthenticated => {
+                    tracing::warn!(len = data.len(), "relay_uplink_from_unauthenticated_client");
+                }
+                ClientOrigin::Relayed => {
+                    tracing::warn!(len = data.len(), "relay_uplink_from_off_box_source");
+                }
+                ClientOrigin::Trusted => {}
             }
             uplink.send(data);
         }
+    }
+
+    /// Write raw bytes toward an MSP flight controller on behalf of a client,
+    /// recording where they came from.
+    ///
+    /// Deliberately has no aux-uplink fallback, unlike
+    /// [`Self::send_client_bytes`]. That fallback frames and radiates on the
+    /// aux MAVLink lane, and MSP is a different protocol on a raw byte pipe; a
+    /// ground station with no local flight controller has nothing to do with
+    /// these bytes, so they stop here rather than being put on a lane that
+    /// cannot carry them. What this does add is the classification the MSP path
+    /// never had: it called the plain FC writer directly, so an MSP command that
+    /// arrived over the broker was indistinguishable from one produced on the
+    /// node.
+    pub async fn send_client_raw(&self, data: &[u8], caller: ClientOrigin) {
+        if caller != ClientOrigin::Trusted {
+            tracing::debug!(
+                len = data.len(),
+                origin = ?caller,
+                "msp_command_from_non_local_source"
+            );
+        }
+        self.send_bytes(data).await;
     }
 
     pub(super) async fn send_msg(&self, msg: &MavMessage) -> bool {
@@ -722,10 +792,65 @@ mod tests {
     }
 
     #[test]
-    fn the_two_origins_are_distinguishable() {
-        // If these ever compare equal the recording is silently useless, which
-        // is worse than not recording at all.
+    fn the_origins_are_distinguishable() {
+        // If any two of these compare equal the recording is silently useless,
+        // which is worse than not recording at all.
         assert_ne!(ClientOrigin::Trusted, ClientOrigin::Unauthenticated);
+        assert_ne!(ClientOrigin::Trusted, ClientOrigin::Relayed);
+        assert_ne!(ClientOrigin::Relayed, ClientOrigin::Unauthenticated);
+    }
+
+    /// The on-box socket's provenance was a constant, so a writer forwarding
+    /// broker traffic and a writer producing its own bytes recorded the same
+    /// thing. The first must not read as the second.
+    #[test]
+    fn a_forwarding_writer_is_not_read_as_a_local_producer() {
+        use ados_protocol::ipc::IpcPeer;
+
+        let local = IpcPeer {
+            uid: Some(0),
+            gid: Some(0),
+            pid: Some(1234),
+            off_box_source: false,
+        };
+        assert_eq!(ClientOrigin::from_ipc_peer(&local), ClientOrigin::Trusted);
+
+        let forwarder = IpcPeer {
+            off_box_source: true,
+            ..local
+        };
+        assert_ne!(
+            ClientOrigin::from_ipc_peer(&forwarder),
+            ClientOrigin::Trusted,
+            "bytes that reached the node over a broker must not be recorded as \
+             produced on it"
+        );
+        assert_eq!(
+            ClientOrigin::from_ipc_peer(&forwarder),
+            ClientOrigin::Relayed
+        );
+    }
+
+    /// The raw MSP byte lane called the plain FC writer, so it recorded no
+    /// provenance at all and could not have told a broker-sourced command from
+    /// a local one. It must also never reach the aux uplink: that lane frames
+    /// MAVLink, and MSP bytes put on it are not carried, they are corrupt.
+    #[tokio::test]
+    async fn msp_client_bytes_never_reach_the_aux_uplink() {
+        let conn = test_connection();
+        let (sender, listener) = test_uplink().await;
+        conn.set_aux_uplink(sender).await;
+
+        conn.send_client_raw(b"$M<\x00\x64\x64", ClientOrigin::Relayed)
+            .await;
+
+        let mut buf = [0u8; 256];
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), listener.recv_from(&mut buf))
+                .await
+                .is_err(),
+            "MSP bytes must not be radiated on the MAVLink aux lane"
+        );
     }
 
     #[tokio::test]
