@@ -130,6 +130,14 @@ pub struct OwnState {
     pub armed: bool,
     /// Whether the FC reports GUIDED. No setpoint is emitted otherwise.
     pub guided: bool,
+    /// How long ago the POSITION above was last refreshed by the flight
+    /// controller.
+    ///
+    /// Not the age of the last message of any kind: a heartbeat keeps arriving
+    /// long after a position stops, and that is exactly the case this exists to
+    /// catch. `None` means no position has ever been seen, treated as
+    /// infinitely stale.
+    pub fix_age: Option<Duration>,
 }
 
 impl Default for OwnState {
@@ -144,6 +152,7 @@ impl Default for OwnState {
             vd: 0.0,
             armed: false,
             guided: false,
+            fix_age: None,
         }
     }
 }
@@ -174,6 +183,15 @@ pub enum Suppression {
     NotArmed,
     /// The FC is not in GUIDED.
     NotGuided,
+    /// This drone's OWN position has not been refreshed inside
+    /// [`crate::OWN_STATE_STALE`].
+    ///
+    /// Distinct from [`Suppression::NeighborsStale`], which is about what the
+    /// fleet is saying. This one is about what we know of ourselves, and it is
+    /// the more dangerous of the two: every neighbour's relative position is
+    /// computed in a frame anchored on our own fix, so a frozen own position
+    /// silently corrupts the whole picture rather than emptying it.
+    OwnStateStale,
     /// Nothing is driving and the safety term has nothing to say.
     NothingToDo,
 }
@@ -334,6 +352,24 @@ impl SwarmController {
 
     /// One control tick.
     pub fn tick(&mut self, own: &OwnState, fixes: &[NeighborFix], now: Instant) -> ControlOutcome {
+        // Own-state freshness, BEFORE the frame is built.
+        //
+        // The origin below is anchored on our own fix, and every neighbour is
+        // converted into it, so a frozen own position does not empty the picture
+        // the way a silent fleet does — it produces a confident, wrong one. The
+        // dangerous case is a PARTIAL stall: position stops while heartbeats
+        // continue, so armed and guided stay true, lat/lon freeze, and setpoints
+        // keep flowing at the full tick rate computed against where the aircraft
+        // used to be. That failed open; the neighbour path next to it has always
+        // failed closed.
+        //
+        // Raises the alarm as well as suppressing, matching the not-guided
+        // precedent: the operator should see why the layer stood down.
+        let fix_stale = own.fix_age.is_none_or(|age| age >= crate::OWN_STATE_STALE);
+        if fix_stale {
+            self.hard = None;
+            return self.suppress(Suppression::OwnStateStale, self.emergency);
+        }
         let origin = GeoOrigin::new(own.lat_deg, own.lon_deg, own.alt_rel_m);
         self.scratch.clear();
         for f in fixes {

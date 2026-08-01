@@ -264,6 +264,14 @@ async fn control_loop(
                 // "GUIDED" meant a PX4 vehicle could never be commanded, since
                 // PX4 has no mode by that name.
                 guided: ados_protocol::accepts_offboard_setpoints(&s.mode),
+                // How stale our OWN fix is. Read from the position stamp
+                // specifically, never from `last_update`, which every frame
+                // refreshes: a heartbeat arriving while the position has frozen
+                // is precisely the case the controller has to refuse, and
+                // `last_update` reports it as healthy.
+                fix_age: s
+                    .position_at
+                    .map(|t| std::time::Instant::now().saturating_duration_since(t)),
             }
         };
 

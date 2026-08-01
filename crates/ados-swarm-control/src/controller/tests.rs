@@ -31,6 +31,9 @@ fn own(slot: u8) -> OwnState {
         vd: 0.0,
         armed: true,
         guided: true,
+        // Fresh by default so every existing case still exercises what it was
+        // written for; the staleness cases below set this explicitly.
+        fix_age: Some(std::time::Duration::ZERO),
     }
 }
 
@@ -242,6 +245,69 @@ fn a_vehicle_out_of_guided_gets_nothing_but_still_raises_the_alarm() {
         "a near miss is a near miss whatever mode the FC is in"
     );
     assert_eq!(out.precedence, ModePrecedence::Hold, "nothing is driving");
+}
+
+#[test]
+fn a_frozen_own_position_stops_the_controller_commanding() {
+    // The partial-stall case, and the one that failed open. Position updates
+    // stop while heartbeats continue, so armed and guided stay true and the
+    // fix simply freezes. Every neighbour is measured in a frame anchored on
+    // that fix, so the controller would keep commanding confidently against
+    // where the aircraft used to be.
+    let t = t0();
+    let mut c = controller("flocking", &[1, 2]);
+    let mut o = own(1);
+    o.fix_age = Some(crate::OWN_STATE_STALE);
+    let out = c.tick(&o, &[fix(2, Ned::new(2.0, 0.0, 0.0))], t);
+    assert!(
+        out.setpoint.is_none(),
+        "a stale own fix must not command anything"
+    );
+    assert_eq!(out.suppressed, Some(Suppression::OwnStateStale));
+    assert_eq!(out.precedence, ModePrecedence::Hold);
+}
+
+#[test]
+fn a_position_never_seen_is_treated_as_infinitely_stale() {
+    // Absent is not fresh. A controller that has never had a fix has no frame
+    // to measure anyone in.
+    let t = t0();
+    let mut c = controller("flocking", &[1, 2]);
+    let mut o = own(1);
+    o.fix_age = None;
+    let out = c.tick(&o, &[fix(2, Ned::new(2.0, 0.0, 0.0))], t);
+    assert!(out.setpoint.is_none());
+    assert_eq!(out.suppressed, Some(Suppression::OwnStateStale));
+}
+
+#[test]
+fn own_state_freshness_is_checked_before_the_neighbour_table() {
+    // Ordering matters for the diagnosis, not just the outcome. With BOTH the
+    // own fix stale and the neighbours stale, the reported reason must be the
+    // own fix: it is the one that makes every other reading untrustworthy, and
+    // an operator told "neighbours stale" would go looking at the radio.
+    let t = t0();
+    let mut c = controller("flocking", &[1, 2]);
+    let mut o = own(1);
+    o.fix_age = None;
+    let out = c.tick(&o, &[], t);
+    assert_eq!(out.suppressed, Some(Suppression::OwnStateStale));
+}
+
+#[test]
+fn a_fresh_fix_just_inside_the_window_still_flies() {
+    // The gate must not have become a ban: a fix refreshed inside the window is
+    // exactly the normal case at any real telemetry rate.
+    let t = t0();
+    let mut c = controller("flocking", &[1, 2]);
+    let mut o = own(1);
+    o.fix_age = Some(crate::OWN_STATE_STALE - std::time::Duration::from_millis(1));
+    let out = c.tick(&o, &[fix(2, Ned::new(2.0, 0.0, 0.0))], t);
+    assert_ne!(
+        out.suppressed,
+        Some(Suppression::OwnStateStale),
+        "a fix inside the window is fresh"
+    );
 }
 
 #[test]

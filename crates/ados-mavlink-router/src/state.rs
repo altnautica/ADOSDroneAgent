@@ -235,6 +235,16 @@ pub struct VehicleState {
     // Timestamps (ISO-8601 UTC strings, supplied by the caller)
     pub last_heartbeat: String,
     pub last_update: String,
+    /// When a POSITION was last decoded, monotonic.
+    ///
+    /// Deliberately separate from `last_update`, which is refreshed by EVERY
+    /// frame before the match below and therefore stays fresh while a heartbeat
+    /// arrives and the position does not — the exact partial stall a consumer
+    /// checking freshness needs to catch. `None` until the first position.
+    ///
+    /// Not serialised: an `Instant` has no meaning off this process, and the
+    /// consumer that needs it computes an age in-process.
+    pub position_at: Option<std::time::Instant>,
     // The FC-advertised parameter total. The VALUES are not mirrored here: the
     // persistent [`crate::param_cache::ParamCache`] owns them, and this type's
     // copy was never serialised into `to_wire`, so it was a second 700-entry map
@@ -286,6 +296,9 @@ impl Default for VehicleState {
             rc_rssi: 0,
             last_heartbeat: String::new(),
             last_update: String::new(),
+            // No position has been seen yet, which a consumer must treat as
+            // infinitely stale rather than as "just now".
+            position_at: None,
             param_count: 0,
         }
     }
@@ -327,6 +340,7 @@ impl VehicleState {
                 self.vy = m.vy as f64 / 100.0;
                 self.vz = m.vz as f64 / 100.0;
                 self.heading = m.hdg as f64 / 100.0;
+                self.position_at = Some(std::time::Instant::now());
                 None
             }
             MavMessage::ATTITUDE(m) => {
@@ -623,6 +637,55 @@ mod tests {
         assert!((s.alt_rel - 50.0).abs() < 1e-9);
         assert!((s.vx - 2.5).abs() < 1e-9);
         assert!((s.heading - 180.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_heartbeat_alone_does_not_advance_the_position_stamp() {
+        // The whole reason `position_at` exists rather than reusing
+        // `last_update`. A vehicle whose position stream has stopped while its
+        // heartbeat continues still looks fully alive by `last_update`, which is
+        // refreshed by every frame before the match. Anything gating on
+        // freshness has to see the position specifically or it will fly on a
+        // frozen fix.
+        let mut s = VehicleState::default();
+        assert!(
+            s.position_at.is_none(),
+            "no position seen yet is not 'just now'"
+        );
+
+        s.update_from_message(&heartbeat(MavType::MAV_TYPE_QUADROTOR, 0, true), TS);
+        assert!(
+            s.position_at.is_none(),
+            "a heartbeat is not a position report"
+        );
+        assert!(
+            !s.last_update.is_empty(),
+            "the message stream IS fresh, which is exactly why it cannot be the signal"
+        );
+
+        s.update_from_message(
+            &MavMessage::GLOBAL_POSITION_INT(GLOBAL_POSITION_INT_DATA {
+                time_boot_ms: 0,
+                lat: 129_716_000,
+                lon: 775_946_000,
+                alt: 120_000,
+                relative_alt: 50_000,
+                vx: 0,
+                vy: 0,
+                vz: 0,
+                hdg: 0,
+            }),
+            TS,
+        );
+        let first = s.position_at.expect("a position report stamps it");
+
+        // A later heartbeat must not move it forward.
+        s.update_from_message(&heartbeat(MavType::MAV_TYPE_QUADROTOR, 0, true), TS);
+        assert_eq!(
+            s.position_at,
+            Some(first),
+            "a heartbeat after a position must not refresh the position stamp"
+        );
     }
 
     #[test]

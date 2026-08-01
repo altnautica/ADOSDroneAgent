@@ -219,6 +219,9 @@ impl SimWorld {
                     vd: d.vel.d,
                     armed: d.armed,
                     guided: d.guided,
+                    // The simulated plant refreshes every drone's position each
+                    // tick by construction, so the fix is always current here.
+                    fix_age: Some(std::time::Duration::ZERO),
                 },
                 if d.bus_alive {
                     self.fixes_for(d.slot)
