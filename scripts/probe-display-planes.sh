@@ -49,6 +49,12 @@
 #                            inherit whatever wlroots picks on its own. A pixman
 #                            (software) renderer is a plausible structural reason
 #                            for no promotion, so the effective value is reported.
+#   --baseline <n>           the plane count "during" must beat. REQUIRED with
+#                            --under-cage: there the compositor starts inside the
+#                            measurement window and binds its own plane, so the
+#                            pre-client count is not a valid comparison. Run the
+#                            wl_shm control first (--under-cage --client testsrc)
+#                            and pass its "during" value here.
 #
 # Needs root: the DRM state this reads is root-only, and reading it without
 # privilege returns nothing at all — which is indistinguishable from "no planes
@@ -61,6 +67,7 @@ CLIENT=testsrc
 RTSP_URL="rtsp://127.0.0.1:8554/main"
 UNDER_CAGE=0
 RENDERER=""
+BASELINE=""
 MEDIAMTX_API="http://127.0.0.1:9997"
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -69,7 +76,8 @@ while [ $# -gt 0 ]; do
         --url) RTSP_URL="${2:-}"; shift 2 ;;
         --under-cage) UNDER_CAGE=1; shift ;;
         --renderer) RENDERER="${2:-}"; shift 2 ;;
-        -h|--help) sed -n '2,56p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --baseline) BASELINE="${2:-}"; shift 2 ;;
+        -h|--help) sed -n '2,62p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -88,15 +96,34 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 2
 fi
 
+# Pick the DRM node that actually has planes. Taking the first readable `state`
+# is wrong on a board that exposes both a display node and a render-only node
+# (a Pi 4 has vc4 KMS on one card and the v3d render node on another): the render
+# node's state has no planes at all, so the probe would measure a device that
+# structurally cannot answer the question and report a confident zero.
 STATE=""
 for candidate in /sys/kernel/debug/dri/*/state; do
-    [ -r "$candidate" ] && { STATE="$candidate"; break; }
+    [ -r "$candidate" ] || continue
+    if [ "$(grep -c '^plane\[' "$candidate")" -gt 0 ]; then
+        STATE="$candidate"
+        break
+    fi
+    [ -z "$STATE" ] && STATE="$candidate"   # fall back to something readable
 done
 if [ -z "$STATE" ]; then
     echo "probe: no readable DRM state under /sys/kernel/debug/dri/*/state" >&2
     echo "probe: is debugfs mounted? (mount -t debugfs none /sys/kernel/debug)" >&2
     exit 3
 fi
+
+# The card node matching the DRM state being measured, so `--under-cage` points
+# cage at the SAME device the plane count is read from. Letting cage autodetect
+# can land it on the render-only node, where it either fails outright or drives a
+# device this probe is not watching — either way the number would be meaningless.
+dri_index="${STATE#/sys/kernel/debug/dri/}"
+dri_index="${dri_index%/state}"
+CARD="/dev/dri/card$dri_index"
+[ -e "$CARD" ] || CARD=""
 
 # A plane is "bound" when its state names a CRTC. The alternative reading —
 # counting plane objects — answers a different and useless question: the display
@@ -171,9 +198,14 @@ client_argv() {
         # renders through Mesa EGL on Wayland, so its buffers are dmabufs. This
         # is what answers the promotion question when the V4L2 decoder is absent.
         glsrc)
+            # No `fullscreen` property here: `glimagesink` does not have one
+            # (that is `waylandsink`), and passing it makes gst-launch reject the
+            # pipeline — which reads as "the client never displayed anything"
+            # rather than as an answer. Under cage the single client is fullscreen
+            # anyway, so nothing is lost.
             CLIENT_ARGV=(gst-launch-1.0 -q videotestsrc pattern=smpte is-live=true
                 '!' video/x-raw,width=800,height=480,framerate=30/1
-                '!' glimagesink fullscreen=true)
+                '!' glimagesink)
             CLIENT_BUFFERS="dmabuf (Mesa EGL via glimagesink)"
             ;;
         # The real stream, hardware-decoded straight into dmabufs. On a Pi 4 the
@@ -195,16 +227,36 @@ client_argv() {
 client_argv
 
 # Under cage the client gets its own compositor with DRM master, which is the
-# configuration the kiosk actually runs. WLR_DRM_DEVICES is left to cage's own
-# autodetection on purpose: the kiosk's card-resolution logic is not duplicated
-# here, and the probe runs with the kiosk stopped so there is nothing to match.
+# configuration the kiosk actually runs — so the launch mirrors the kiosk unit's
+# environment rather than hoping cage guesses right.
+#
+#  * XDG_RUNTIME_DIR is MANDATORY: wlroots refuses to create its socket without
+#    one and cage exits immediately with "XDG_RUNTIME_DIR is not set". Under
+#    `sudo` the caller's value is stripped, so the probe supplies the same
+#    `/run/user/0` the `ados-kiosk` unit sets, creating it if it is absent.
+#  * WLR_DRM_DEVICES is pinned to the card whose plane state this probe reads.
+#    Autodetection can pick the render-only node, where cage drives a device the
+#    measurement is not watching — a silent wrong answer rather than an error.
 LAUNCH_ARGV=("${CLIENT_ARGV[@]}")
 LAUNCH_ENV=()
+CAGE_RUNTIME_DIR=""
 if [ "$UNDER_CAGE" -eq 1 ]; then
     if ! command -v cage >/dev/null 2>&1; then
         echo "probe: --under-cage requested but cage is not installed" >&2
         exit 3
     fi
+    CAGE_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    if [ ! -d "$CAGE_RUNTIME_DIR" ]; then
+        mkdir -p "$CAGE_RUNTIME_DIR" 2>/dev/null
+        chmod 700 "$CAGE_RUNTIME_DIR" 2>/dev/null
+    fi
+    if [ ! -d "$CAGE_RUNTIME_DIR" ]; then
+        echo "probe: cannot provide cage an XDG_RUNTIME_DIR ($CAGE_RUNTIME_DIR)" >&2
+        echo "probe: cage exits immediately without one; nothing would be measured" >&2
+        exit 3
+    fi
+    LAUNCH_ENV+=("XDG_RUNTIME_DIR=$CAGE_RUNTIME_DIR")
+    [ -n "$CARD" ] && LAUNCH_ENV+=("WLR_DRM_DEVICES=$CARD")
     if [ -n "$RENDERER" ]; then
         LAUNCH_ENV+=("WLR_RENDERER=$RENDERER")
         # Mirrors the kiosk's own cage environment: a software renderer cannot
@@ -225,6 +277,7 @@ effective_renderer() {
 
 echo "compositor:        $(compositor)"
 echo "client:            $CLIENT"
+echo "drm card:          ${CARD:-<none matched — cage autodetects>}"
 echo "client buffers:    $CLIENT_BUFFERS"
 echo "under cage:        $([ "$UNDER_CAGE" -eq 1 ] && echo yes || echo no)"
 echo "WLR_RENDERER:      $(effective_renderer)"
@@ -241,9 +294,38 @@ if ! command -v gst-launch-1.0 >/dev/null 2>&1; then
     exit 3
 fi
 
-env "${LAUNCH_ENV[@]}" "${LAUNCH_ARGV[@]}" >/tmp/probe-client.log 2>&1 &
+# Own process group, and torn down as a group. Killing only the launcher PID
+# leaves `cage` running and holding DRM master: the probe then blocks forever in
+# `wait`, the operator's kiosk cannot restart, and the box is left with an
+# orphaned compositor on the panel. That is the orphaned-child failure this
+# codebase has a standing rule about, and a measurement script is not exempt.
+env "${LAUNCH_ENV[@]}" setsid "${LAUNCH_ARGV[@]}" >/tmp/probe-client.log 2>&1 &
 client=$!
-trap 'kill "$client" 2>/dev/null' EXIT
+# `setsid` makes the child a session leader, so its process-group id IS its pid.
+# Do NOT read the pgid back with `ps`: setsid() only takes effect after the exec,
+# so a read that wins the race returns THIS script's own group — and killing that
+# group kills the probe, its parent shell and the operator's SSH session.
+client_pgid="$client"
+own_pgid="$(ps -o pgid= -p $$ 2>/dev/null | tr -dc '0-9')"
+if [ -n "$own_pgid" ] && [ "$client_pgid" = "$own_pgid" ]; then
+    echo "probe: refusing to target this script's own process group" >&2
+    client_pgid=""
+fi
+
+stop_client() {
+    if [ -z "${client_pgid:-}" ]; then
+        kill -TERM "$client" 2>/dev/null
+        return 0
+    fi
+    kill -TERM -- "-$client_pgid" 2>/dev/null
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        kill -0 -- "-$client_pgid" 2>/dev/null || return 0
+        sleep 0.5
+    done
+    # cage does not always go on TERM; the group must not survive this script.
+    kill -KILL -- "-$client_pgid" 2>/dev/null
+}
+trap stop_client EXIT
 
 # For the live stream, prove the client actually pulled data before believing
 # any plane count. A probe that never connected measures nothing, and reporting
@@ -306,24 +388,56 @@ during_ids="$(bound_plane_ids)"
 echo "during:            $during_max bound (max over ${SECONDS_TO_PLAY}s)  [$during_ids]"
 echo "  per-second:     $samples"
 
-kill "$client" 2>/dev/null
-wait "$client" 2>/dev/null
+stop_client
 trap - EXIT
 sleep 2
 after_n="$(bound_planes)"; after_ids="$(bound_plane_ids)"
 echo "after:             $after_n bound  [$after_ids]"
 echo
 
-if [ "$during_max" -gt "$before_n" ]; then
-    echo "VERDICT: the compositor DOES promote a fullscreen client to its own plane."
+# Which number "during" has to beat.
+#
+# WITHOUT --under-cage the compositor is already running when `before` is taken,
+# so `before` is the right comparison: any extra plane appeared because of the
+# client.
+#
+# WITH --under-cage it is NOT. `before` is sampled with no compositor at all, and
+# cage then binds its OWN primary (and cursor) plane inside the measurement
+# window — so EVERY arm reads at least +1, including a wl_shm client that a DRM
+# backend physically cannot scan out. Comparing against `before` there would
+# print "DOES promote" for a client holding CPU memory, which is a false pass on
+# the one question this script exists to answer. The honest comparison is against
+# a wl_shm CONTROL run on the same box and renderer: promotion is
+# `during_dmabuf > during_wl_shm`. Pass that control's `during` as --baseline.
+if [ -n "$BASELINE" ]; then
+    compare_to="$BASELINE"
+    compare_label="--baseline $BASELINE (a control run's 'during')"
+elif [ "$UNDER_CAGE" -eq 1 ]; then
+    echo "VERDICT: INDETERMINATE — no baseline to compare against."
     echo "  $before_n -> $during_max -> $after_n"
+    echo "  client: $CLIENT ($CLIENT_BUFFERS)"
+    echo "  Under --under-cage the compositor starts INSIDE the window, so it binds"
+    echo "  its own plane and 'before' is not a valid comparison: every client,"
+    echo "  including a wl_shm one that cannot be scanned out, reads higher."
+    echo "  Run the wl_shm control first and feed its 'during' back in:"
+    echo "    $0 --under-cage --client testsrc            # note the 'during' value"
+    echo "    $0 --under-cage --client $CLIENT --baseline <that value>"
+    exit 2
+else
+    compare_to="$before_n"
+    compare_label="the pre-client count"
+fi
+
+if [ "$during_max" -gt "$compare_to" ]; then
+    echo "VERDICT: the compositor DOES promote a fullscreen client to its own plane."
+    echo "  $before_n -> $during_max -> $after_n, against $compare_label"
     echo "  client: $CLIENT ($CLIENT_BUFFERS)"
     echo "  A video underlay with the cockpit composited above it is available here."
     exit 0
 fi
 
 echo "VERDICT: the compositor does NOT give the client a plane."
-echo "  $before_n -> $during_max -> $after_n, unchanged while a client rendered."
+echo "  $before_n -> $during_max -> $after_n, against $compare_label"
 echo "  client: $CLIENT ($CLIENT_BUFFERS)"
 echo "  It is compositing that surface into the plane it already scans out."
 if [ "$CLIENT" = "testsrc" ]; then

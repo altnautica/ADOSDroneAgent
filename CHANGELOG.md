@@ -4,6 +4,43 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.318] - 2026-08-01
+
+### Fixed
+
+- **`scripts/probe-display-planes.sh` could not actually run its own
+  `--under-cage` path, and its verdict there was wrong.** Five defects, all found
+  by running it on the ground station rather than by reading it:
+  - **cage exited immediately.** wlroots refuses to create its socket without
+    `XDG_RUNTIME_DIR`, and `sudo` strips it, so every under-cage arm died with
+    `XDG_RUNTIME_DIR is not set` and reported "the client never displayed
+    anything". The probe now supplies the same `/run/user/0` the `ados-kiosk`
+    unit sets, creating it when absent.
+  - **it could measure the wrong GPU.** The DRM node was the first readable
+    `state` file, which on a Pi 4 can be the render-only node that exposes no
+    planes at all. It now picks the node that actually has planes, and pins
+    `WLR_DRM_DEVICES` to the matching card so cage drives the device being
+    measured instead of autodetecting a different one.
+  - **the under-cage verdict was a false pass waiting to happen.** With
+    `--under-cage` the compositor starts *inside* the measurement window and
+    binds its own plane, so every arm reads at least +1 — including a `wl_shm`
+    client that a DRM backend physically cannot scan out. Comparing against the
+    pre-client count would have printed "DOES promote" for a client holding CPU
+    memory. The under-cage path now requires `--baseline <n>`, the `during`
+    value from a `wl_shm` control run on the same box and renderer, and reports
+    `INDETERMINATE` rather than guessing when it is missing.
+  - **it orphaned a compositor.** Killing only the launcher PID left `cage`
+    running and holding DRM master; the probe then blocked forever in `wait`,
+    the kiosk could not restart, and the panel was left with a stray compositor.
+    The client is now started with `setsid` and torn down as a process group,
+    with a bounded TERM-then-KILL. The group id is taken from the child pid
+    rather than read back with `ps`, because that read races the `setsid` and
+    can return the probe's own group — killing the probe, its shell and the
+    operator's session.
+  - **the `glsrc` arm never ran.** `glimagesink` has no `fullscreen` property
+    (that is `waylandsink`), so gst-launch rejected the pipeline and the arm
+    reported a client failure instead of a measurement.
+
 ## [0.99.317] - 2026-08-01
 
 ### Added
