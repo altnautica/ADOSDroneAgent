@@ -148,9 +148,17 @@ pub fn fetch_with_progress<F: FnMut(u64, u64)>(
 ) -> anyhow::Result<()> {
     let total = head_content_length(url).unwrap_or(0);
     let tmp = tmp_sibling(dest);
-    // A stale partial from a prior run would make `--continue-at -` resume the
-    // wrong bytes; start clean.
-    let _ = std::fs::remove_file(&tmp);
+    // Do NOT delete a partial left by a prior attempt. `curl` is invoked with
+    // `--continue-at -` (see [`curl_args`]) and resumes from the last byte, so
+    // leaving the partial in place means an installer-level retry (a whole
+    // `fetch_with_progress` that failed and was retried by the caller) claws
+    // the transfer forward instead of restarting from zero — the same resume
+    // that already rides curl's own `--retry` attempts, extended to the outer
+    // retry loop. A stale partial from a different asset/version is caught by
+    // the caller's downstream sha256 verification, so preserving it cannot
+    // silently promote wrong bytes. The stall window still bounds it: a
+    // transfer making no progress is abandoned exactly as before, and a slow
+    // but progressing one is allowed to finish (no flat wall-clock ceiling).
 
     let url_owned = url.to_string();
     let tmp_dl = tmp.clone();
@@ -172,10 +180,9 @@ pub fn fetch_with_progress<F: FnMut(u64, u64)>(
         .unwrap_or_else(|_| Err(anyhow::anyhow!("download thread panicked")));
     match result {
         Ok(()) => finalize(&tmp, dest),
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            Err(e)
-        }
+        // Leave the partial in place so the next installer-level retry resumes
+        // it via `--continue-at -` instead of restarting from zero.
+        Err(e) => Err(e),
     }
 }
 
@@ -289,6 +296,31 @@ mod tests {
     fn tmp_sibling_appends_tmp() {
         let t = tmp_sibling(Path::new("/opt/ados/bin/ados-video"));
         assert_eq!(t.to_str().unwrap(), "/opt/ados/bin/ados-video.tmp");
+    }
+
+    #[test]
+    fn failed_fetch_preserves_partial_for_installer_level_resume() {
+        // The installer retries a whole `fetch_with_progress` (see
+        // `install_one_with_retry`) on failure. A partial left behind must
+        // survive so the next attempt's `--continue-at -` resumes it instead
+        // of restarting from zero. Regression: the old code removed the temp
+        // file both up front and on the error path, defeating cross-attempt
+        // resume on a slow link.
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("artifact");
+        let tmp = tmp_sibling(&dest);
+        // Simulate a partial download clawed forward by earlier attempts.
+        std::fs::write(&tmp, vec![0xabu8; 1234]).unwrap();
+
+        // Port 1 is closed: curl refuses the connection locally and fast, no
+        // network needed, so the fetch fails deterministically.
+        let res = fetch_with_progress("http://127.0.0.1:1/artifact", &dest, |_, _| {});
+        assert!(res.is_err(), "connect-refused fetch should fail");
+
+        // The partial is still present, byte-for-byte, ready to be resumed.
+        assert!(tmp.exists(), "temp partial must survive a failed fetch");
+        assert_eq!(std::fs::metadata(&tmp).unwrap().len(), 1234);
+        assert_eq!(std::fs::read(&tmp).unwrap(), vec![0xabu8; 1234]);
     }
 
     #[test]
