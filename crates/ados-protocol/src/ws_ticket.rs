@@ -40,6 +40,23 @@ pub const MAX_TTL_SECONDS: i64 = 120;
 /// the raw `:8765` MAVLink WS for an off-box paired caller.
 pub const SCOPE_MAVLINK_WS: &str = "gs.mavlink_ws";
 
+/// The RC channel-injection scope for one named client.
+///
+/// Unlike [`SCOPE_MAVLINK_WS`] this is not a fixed string, because the ticket
+/// is attesting an IDENTITY rather than granting a capability: the RC lane's
+/// authority rule asks which client is injecting and compares the answer with
+/// the pilot-in-command holder. Building the client id into the signed scope is
+/// what stops a ticket minted for one client from answering that question as
+/// another.
+///
+/// It lives beside the issuer so the minting surface (the authenticated
+/// ground-station route) and the verifying one (the RC lane daemon) cannot
+/// drift on the spelling; a mismatch there would not fail loudly, it would just
+/// silently stop attesting anyone.
+pub fn crsf_inject_scope(client_id: &str) -> String {
+    format!("crsf.inject:{client_id}")
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum WsTicketError {
     #[error("malformed ws ticket")]
@@ -134,6 +151,28 @@ impl WsTicketIssuer {
         let mut mac = HmacSha256::new_from_slice(&self.key).expect("HMAC accepts any key length");
         mac.update(payload.as_bytes());
         hex::encode(mac.finalize().into_bytes())
+    }
+}
+
+/// Mint a ticket for `scope` against the pairing key stored at `pairing_path`.
+///
+/// The convenience form for a surface that holds a path rather than a key.
+/// `None` on an unpaired node, where there is no key to sign with — callers
+/// treat that as "nothing to attest", not as a failure, because a verifier
+/// keyed off the same file is equally unable to check one and is open in that
+/// state for the same reason.
+pub fn mint_scoped_ticket(
+    pairing_path: &std::path::Path,
+    scope: &str,
+    ttl_seconds: i64,
+) -> Option<String> {
+    match crate::pairing_posture::load_pairing(pairing_path) {
+        crate::pairing_posture::Pairing::Unpaired => None,
+        crate::pairing_posture::Pairing::Paired(api_key) => Some(
+            WsTicketIssuer::from_api_key(&api_key)
+                .mint(scope, ttl_seconds)
+                .token,
+        ),
     }
 }
 

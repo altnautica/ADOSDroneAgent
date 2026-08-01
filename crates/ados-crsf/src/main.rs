@@ -295,6 +295,10 @@ async fn run_service_pass(
     // TX task reads and the latest sidecar body the status verb serves.
     let merge = Arc::new(Mutex::new(SourceMerge::new(cfg.channel_source)));
     let latest_status = Arc::new(Mutex::new(serde_json::Value::Null));
+    // Reads the node pairing key to turn a claimed injector name into an
+    // attested one. Built once and shared: the read behind it is cached, so the
+    // command path does not touch the filesystem per request.
+    let injector_auth = Arc::new(ados_crsf::injector::InjectorAuth::from_env());
 
     // The HID/PIC source: stick + switch intent from the primary gamepad,
     // fed into the merge for the whole service lifetime (the gamepad is
@@ -403,6 +407,7 @@ async fn run_service_pass(
             merge: merge.clone(),
             latest_status: latest_status.clone(),
             oob: oob.clone(),
+            injector_auth: injector_auth.clone(),
         };
         let cmd_cancel = task_cancel.clone();
         let cmd_task = tokio::spawn(async move {

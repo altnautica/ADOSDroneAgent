@@ -7,7 +7,8 @@
 //! ```text
 //! {"op":"status"}
 //!     -> {"ok":true, …the current sidecar body…}
-//! {"op":"set_channels","channels":[992, …16 values…],"ttl_ms":1000,"client_id":"ai-1"}
+//! {"op":"set_channels","channels":[992, …16 values…],"ttl_ms":1000,
+//!  "client_id":"ai-1","client_ticket":"v1|crsf.inject:ai-1|…"}
 //!     -> {"ok":true,"channels":[…],"ttl_ms":1000,"channel_source":"inject","authority":"…"}
 //! {"op":"set_channel","index":4,"value":1811,"ttl_ms":1000,"client_id":"ai-1"}
 //!     -> {"ok":true,"index":4,"value":1811,"ttl_ms":1000,"channel_source":"inject","authority":"…"}
@@ -33,6 +34,18 @@
 //! Channel values are validated against the usable endpoint range 172..=1811
 //! at parse time, before the live merge is ever locked; a failed request
 //! replies `{"ok":false,"error":"E_…"}` and changes nothing.
+//!
+//! ## Who the injector is
+//!
+//! `client_id` is a label. It is logged and echoed and nothing else rests on
+//! it, because a caller writes it into its own request and this socket is
+//! reachable by anything in the agent group. `client_ticket` is what the
+//! hybrid authority rule reads: a signed attestation of that same id, minted
+//! against the node pairing key by the authenticated route an operator or an
+//! autonomous client actually goes through. An injection with no valid ticket
+//! is still accepted and still stored — it simply establishes no identity, so
+//! it cannot match the pilot-in-command holder and cannot take the lane from
+//! a human. Naming the holder is no longer enough to become them.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -46,6 +59,7 @@ use tokio::sync::Mutex;
 use crate::bank::BankError;
 use crate::channels::{CHANNEL_COUNT, CHANNEL_MAX, CHANNEL_MIN};
 use crate::frame::{ADDR_HANDSET, ADDR_TRANSMITTER_MODULE, MAX_PAYLOAD};
+use crate::injector::InjectorAuth;
 use crate::params::ParameterWrite;
 use crate::sources::{clamp_ttl, SourceMerge, DEFAULT_INJECT_TTL};
 use crate::transport::OobQueue;
@@ -67,6 +81,8 @@ pub struct CmdState {
     /// The out-of-band frame lane the TX task drains between RC frames;
     /// parameter writes ride it.
     pub oob: Arc<OobQueue>,
+    /// Turns a claimed injector name into an attested one, or into nothing.
+    pub injector_auth: Arc<InjectorAuth>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -82,6 +98,8 @@ struct Request {
     ttl_ms: Option<u64>,
     #[serde(default)]
     client_id: Option<String>,
+    #[serde(default)]
+    client_ticket: Option<String>,
     #[serde(default)]
     field_index: Option<u8>,
     #[serde(default)]
@@ -116,18 +134,44 @@ enum Command {
     SetChannels {
         channels: [u16; CHANNEL_COUNT],
         ttl: Duration,
-        client_id: Option<String>,
+        claim: InjectorClaim,
     },
     SetChannel {
         index: usize,
         value: u16,
         ttl: Duration,
-        client_id: Option<String>,
+        claim: InjectorClaim,
     },
     ParamWrite {
         field_index: u8,
         data: Vec<u8>,
     },
+}
+
+/// What a request said about who is injecting: the label, and the attestation
+/// that may turn it into an identity. Parsed together and resolved together so
+/// no call site can reach for the label where the identity belongs.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct InjectorClaim {
+    client_id: Option<String>,
+    ticket: Option<String>,
+}
+
+impl InjectorClaim {
+    /// The attested identity, or `None`. A claimed name that fails to verify is
+    /// logged rather than rejected: the injection is still valid input, it just
+    /// does not carry an identity, so it cannot win the lane from a human.
+    fn resolve(&self, auth: &InjectorAuth) -> Option<String> {
+        let verified = auth.verify(self.client_id.as_deref(), self.ticket.as_deref());
+        if verified.is_none() && self.client_id.is_some() {
+            tracing::warn!(
+                claimed = self.client_id.as_deref().unwrap_or_default(),
+                had_ticket = self.ticket.is_some(),
+                "crsf_injector_identity_unattested"
+            );
+        }
+        verified
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -175,7 +219,10 @@ fn parse_command(line: &[u8]) -> Parsed {
             Parsed::Cmd(Command::SetChannels {
                 channels,
                 ttl: requested_ttl(req.ttl_ms),
-                client_id: req.client_id,
+                claim: InjectorClaim {
+                    client_id: req.client_id,
+                    ticket: req.client_ticket,
+                },
             })
         }
         "set_channel" => {
@@ -195,7 +242,10 @@ fn parse_command(line: &[u8]) -> Parsed {
                 index,
                 value,
                 ttl: requested_ttl(req.ttl_ms),
-                client_id: req.client_id,
+                claim: InjectorClaim {
+                    client_id: req.client_id,
+                    ticket: req.client_ticket,
+                },
             })
         }
         "param_write" => {
@@ -242,11 +292,12 @@ async fn apply(cmd: Command, state: &CmdState) -> Value {
         Command::SetChannels {
             channels,
             ttl,
-            client_id,
+            claim,
         } => {
+            let verified = claim.resolve(&state.injector_auth);
             let now = Instant::now();
             let mut merge = state.merge.lock().await;
-            match merge.inject_all(channels, ttl, now, client_id) {
+            match merge.inject_all(channels, ttl, now, verified) {
                 Ok(()) => json!({
                     "ok": true,
                     "channels": channels.to_vec(),
@@ -261,11 +312,12 @@ async fn apply(cmd: Command, state: &CmdState) -> Value {
             index,
             value,
             ttl,
-            client_id,
+            claim,
         } => {
+            let verified = claim.resolve(&state.injector_auth);
             let now = Instant::now();
             let mut merge = state.merge.lock().await;
-            match merge.inject_one(index, value, ttl, now, client_id) {
+            match merge.inject_one(index, value, ttl, now, verified) {
                 Ok(()) => json!({
                     "ok": true,
                     "index": index,
@@ -318,10 +370,19 @@ mod tests {
     use crate::sources::{ChannelSourceMode, MAX_INJECT_TTL, MIN_INJECT_TTL};
 
     fn state() -> CmdState {
+        state_with(ChannelSourceMode::Inject)
+    }
+
+    fn state_with(mode: ChannelSourceMode) -> CmdState {
         CmdState {
-            merge: Arc::new(Mutex::new(SourceMerge::new(ChannelSourceMode::Inject))),
+            merge: Arc::new(Mutex::new(SourceMerge::new(mode))),
             latest_status: Arc::new(Mutex::new(Value::Null)),
             oob: Arc::new(OobQueue::default()),
+            // An unpaired node: no key exists, so a claimed name stands, which
+            // is the posture every native surface takes while unclaimed.
+            injector_auth: Arc::new(InjectorAuth::new(std::path::PathBuf::from(
+                "/nonexistent/pairing.json",
+            ))),
         }
     }
 
@@ -389,7 +450,10 @@ mod tests {
                 index: 4,
                 value: 1811,
                 ttl: Duration::from_millis(700),
-                client_id: Some("ai".to_string()),
+                claim: InjectorClaim {
+                    client_id: Some("ai".to_string()),
+                    ticket: None,
+                },
             })
         );
         // Absent ttl defaults; out-of-window ttl clamps at parse time.
@@ -413,11 +477,11 @@ mod tests {
             Parsed::Cmd(Command::SetChannels {
                 channels,
                 ttl,
-                client_id,
+                claim,
             }) => {
                 assert_eq!(channels, [992u16; 16]);
                 assert_eq!(ttl, DEFAULT_INJECT_TTL);
-                assert_eq!(client_id, None);
+                assert_eq!(claim, InjectorClaim::default());
             }
             other => panic!("unexpected {other:?}"),
         }
@@ -453,11 +517,7 @@ mod tests {
     async fn injection_under_hid_authority_reports_it() {
         // In hid mode the injection is stored but the HID path holds
         // authority; the reply must say so, never imply the values fly.
-        let st = CmdState {
-            merge: Arc::new(Mutex::new(SourceMerge::new(ChannelSourceMode::Hid))),
-            latest_status: Arc::new(Mutex::new(Value::Null)),
-            oob: Arc::new(OobQueue::default()),
-        };
+        let st = state_with(ChannelSourceMode::Hid);
         let resp = dispatch(
             &serde_json::to_vec(&json!({"op":"set_channels","channels":vec![1000u16;16]})).unwrap(),
             &st,
@@ -576,5 +636,64 @@ mod tests {
         let (values, _) = st.merge.lock().await.current(Instant::now());
         assert_eq!(values[2], 992);
         server.abort();
+    }
+
+    /// A paired node: the command socket is group-reachable and the current
+    /// pilot-in-command holder's name is readable from the claim routes, so
+    /// echoing that name back used to hand the transmit lane to the caller.
+    #[tokio::test]
+    async fn naming_the_holder_no_longer_takes_the_lane_from_them() {
+        use crate::sources::PicView;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pairing = dir.path().join("pairing.json");
+        std::fs::write(&pairing, r#"{"paired": true, "api_key": "node-key"}"#).unwrap();
+
+        let st = CmdState {
+            merge: Arc::new(Mutex::new(SourceMerge::new(ChannelSourceMode::Hybrid))),
+            latest_status: Arc::new(Mutex::new(Value::Null)),
+            oob: Arc::new(OobQueue::default()),
+            injector_auth: Arc::new(InjectorAuth::new(pairing.clone())),
+        };
+        // The human holds the claim, and the arbiter is reporting it.
+        st.merge.lock().await.set_pic(Some(PicView {
+            claimed: true,
+            holder: Some("operator-a".to_string()),
+        }));
+
+        // An injector that simply says it is the holder.
+        let resp = dispatch(
+            &serde_json::to_vec(&json!({
+                "op": "set_channels",
+                "channels": vec![1811u16; 16],
+                "client_id": "operator-a",
+            }))
+            .unwrap(),
+            &st,
+        )
+        .await;
+        assert_eq!(resp["ok"], true, "the injection is still accepted");
+        assert_eq!(
+            resp["authority"], "hid",
+            "an unattested claim on the holder's name must not win the lane"
+        );
+
+        // The same injector, now carrying a ticket the node minted for it.
+        let ticket = crate::injector::mint_injector_ticket(&pairing, "operator-a", 60).unwrap();
+        let resp = dispatch(
+            &serde_json::to_vec(&json!({
+                "op": "set_channels",
+                "channels": vec![1811u16; 16],
+                "client_id": "operator-a",
+                "client_ticket": ticket,
+            }))
+            .unwrap(),
+            &st,
+        )
+        .await;
+        assert_eq!(
+            resp["authority"], "inject",
+            "an attested holder is the one case the programmatic lane wins"
+        );
     }
 }

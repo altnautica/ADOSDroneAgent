@@ -162,7 +162,7 @@ pub fn read_pic_view(path: &Path, now: SystemTime) -> Option<PicView> {
 pub fn resolve_authority(
     mode: ChannelSourceMode,
     pic: Option<&PicView>,
-    injector_id: Option<&str>,
+    verified_injector: Option<&str>,
 ) -> Authority {
     match mode {
         ChannelSourceMode::Hid => Authority::Hid,
@@ -177,7 +177,7 @@ pub fn resolve_authority(
             // The PIC arbiter's holder wins: when the holder IS the injector's
             // client, the programmatic lane flies; any other holder is the
             // human input path.
-            Some(view) if view.claimed => match (view.holder.as_deref(), injector_id) {
+            Some(view) if view.claimed => match (view.holder.as_deref(), verified_injector) {
                 (Some(holder), Some(injector)) if holder == injector => Authority::Inject,
                 _ => Authority::Hid,
             },
@@ -189,12 +189,18 @@ pub fn resolve_authority(
     }
 }
 
-/// A live injected channel set with its expiry and the injecting client.
+/// A live injected channel set with its expiry and the ATTESTED identity of the
+/// client that injected it.
+///
+/// Deliberately not named for the `client_id` field on the wire request: that
+/// one is a caller-supplied label kept for logging, and this one is a
+/// credential. Holding both under the same name is how the label came to be
+/// used as the credential.
 #[derive(Debug, Clone)]
 struct Injected {
     bank: ChannelBank,
     fresh_until: Instant,
-    client_id: Option<String>,
+    verified_client: Option<String>,
 }
 
 /// The merged channel state the fixed-cadence transmitter reads each tick.
@@ -239,14 +245,14 @@ impl SourceMerge {
         values: [u16; CHANNEL_COUNT],
         ttl: Duration,
         now: Instant,
-        client_id: Option<String>,
+        verified_client: Option<String>,
     ) -> Result<(), BankError> {
         let mut bank = ChannelBank::default();
         bank.set_all(values)?;
         self.inject = Some(Injected {
             bank,
             fresh_until: now + clamp_ttl(ttl),
-            client_id,
+            verified_client,
         });
         Ok(())
     }
@@ -259,7 +265,7 @@ impl SourceMerge {
         value: u16,
         ttl: Duration,
         now: Instant,
-        client_id: Option<String>,
+        verified_client: Option<String>,
     ) -> Result<(), BankError> {
         let mut bank = match self.live_inject(now) {
             Some(live) => live.bank.clone(),
@@ -269,7 +275,7 @@ impl SourceMerge {
         self.inject = Some(Injected {
             bank,
             fresh_until: now + clamp_ttl(ttl),
-            client_id,
+            verified_client,
         });
         Ok(())
     }
@@ -305,7 +311,9 @@ impl SourceMerge {
 
     /// The source holding authority right now.
     pub fn authority(&self, now: Instant) -> Authority {
-        let injector = self.live_inject(now).and_then(|i| i.client_id.as_deref());
+        let injector = self
+            .live_inject(now)
+            .and_then(|i| i.verified_client.as_deref());
         resolve_authority(self.mode, self.pic.as_ref(), injector)
     }
 

@@ -28,6 +28,7 @@ pub mod cmdsock;
 pub mod config;
 pub mod frame;
 pub mod hid;
+pub mod injector;
 pub mod link;
 pub mod params;
 pub mod paths;

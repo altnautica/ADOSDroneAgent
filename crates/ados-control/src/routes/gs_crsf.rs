@@ -216,6 +216,34 @@ pub struct CrsfChannelsBody {
     pub client_id: Option<String>,
 }
 
+/// How long an injector attestation is good for.
+///
+/// One is minted per request, so this only has to cover the hop from here to
+/// the daemon's socket; it is generous against a slow node rather than sized
+/// for reuse.
+const INJECTOR_TICKET_TTL_SECONDS: i64 = 30;
+
+/// Attest a claimed injector id for the daemon.
+///
+/// This route is the boundary that can actually say something about who is
+/// calling: it sits behind the agent's data-plane auth, so reaching it means
+/// holding the pairing key or being the local operator. The daemon's command
+/// socket is not that boundary — it is group-reachable — so a name arriving
+/// there on its own means nothing, and used to be enough to claim the pilot's
+/// authority by simply repeating the pilot's name back.
+///
+/// Minting here converts "this caller cleared the API gate" into something the
+/// daemon can check without sharing state with this process. On an unpaired
+/// node there is no key and nothing to attest with; the daemon accepts a bare
+/// name in that state, which is the same posture this route itself takes.
+fn attest_injector(state: &AppState, client_id: &str) -> Option<String> {
+    ados_protocol::ws_ticket::mint_scoped_ticket(
+        &state.pairing_paths.pairing_json,
+        &ados_protocol::ws_ticket::crsf_inject_scope(client_id),
+        INJECTOR_TICKET_TTL_SECONDS,
+    )
+}
+
 /// `POST /api/v1/ground-station/crsf/channels` → inject the transmitted
 /// channel set (with its TTL) through the lane daemon.
 pub async fn post_crsf_channels(
@@ -230,6 +258,11 @@ pub async fn post_crsf_channels(
         request["ttl_ms"] = json!(ttl_ms);
     }
     if let Some(client_id) = body.client_id {
+        // The attestation rides alongside the name, never instead of it: the
+        // daemon logs the name and decides authority on the attestation.
+        if let Some(ticket) = attest_injector(&state, &client_id) {
+            request["client_ticket"] = json!(ticket);
+        }
         request["client_id"] = json!(client_id);
     }
     command_response(crsf_cmd(&crsf_cmd_sock(), &request).await)
