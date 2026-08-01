@@ -68,7 +68,18 @@ export async function startWhep(
         clearTimeout(t);
       }
     }
-    pc.getSenders().forEach((s) => s.track?.stop());
+    // Receivers, not senders. The only transceiver here is `recvonly`, so this
+    // connection has no sending tracks at all and `getSenders()` stopped
+    // nothing — every inbound track survived the close. The video layer retries
+    // with backoff, so a feed with no source leaked one `MediaStreamTrack` per
+    // retry cycle for as long as the panel stayed up. Both the receiver tracks
+    // and the tracks handed to the element's stream are stopped, since `ontrack`
+    // copies them across.
+    pc.getReceivers().forEach((r) => r.track?.stop());
+    stream.getTracks().forEach((t) => {
+      t.stop();
+      stream.removeTrack(t);
+    });
     pc.close();
     if (videoEl.srcObject === stream) {
       videoEl.srcObject = null;
