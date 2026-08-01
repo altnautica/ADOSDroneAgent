@@ -1072,7 +1072,7 @@
           "type": "integer"
         },
         "ws_proxy_enforce_auth": {
-          "default": false,
+          "default": true,
           "title": "Ws Proxy Enforce Auth",
           "type": "boolean"
         }
@@ -2447,7 +2447,7 @@
         "serial_port": "",
         "source": "auto",
         "system_id": 1,
-        "ws_proxy_enforce_auth": false
+        "ws_proxy_enforce_auth": true
       }
     },
     "network": {

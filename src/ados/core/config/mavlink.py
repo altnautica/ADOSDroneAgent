@@ -41,10 +41,16 @@ class MavlinkConfig(BaseModel):
     # from a paired agent that presents no valid pairing key (the on-box and
     # unpaired paths stay open). The native router reads this same key from the
     # written config; declaring it here keeps it from being stripped on a config
-    # rewrite and lets it be set through the authenticated config surface. Off by
-    # default: the proxy logs an unauthorized connection but still admits it, so
-    # enabling enforcement is an explicit, deliberate step.
-    ws_proxy_enforce_auth: bool = False
+    # rewrite and lets it be set through the authenticated config surface.
+    #
+    # On, matching the router's own default. This declaration is not advisory:
+    # persisting the config dumps every field, defaults included, so whatever
+    # is written here becomes an explicit value in the node's file and an
+    # explicit value beats the router's default. Declaring the opposite of the
+    # router therefore does not merely disagree on paper -- the next config
+    # write silently pins every node to the losing side, and the migration that
+    # removes the stale recorded value is undone by the write that follows it.
+    ws_proxy_enforce_auth: bool = True
     # Whether the legacy `REQUEST_DATA_STREAM` group requests are sent alongside
     # the modern `SET_MESSAGE_INTERVAL` per-message requests on every stream
     # refresh. OFF by default: measured MAVLink ingest on ArduPilot was 66.5

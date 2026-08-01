@@ -232,16 +232,17 @@ def test_mavlink_endpoints_default():
     assert cfg.mavlink.endpoints[0].port == 8765
 
 
-def test_ws_proxy_enforce_auth_defaults_off_and_round_trips():
-    """The WS-proxy auth-enforcement flag defaults off and survives a round trip
-    through the config model (so it is not stripped and can be set the sanctioned
-    way rather than hand-editing the on-disk config)."""
-    assert ADOSConfig().mavlink.ws_proxy_enforce_auth is False
+def test_ws_proxy_enforce_auth_defaults_on_and_round_trips():
+    """The WS-proxy auth-enforcement flag defaults on, matching the router that
+    reads it, and survives a round trip through the config model (so it is not
+    stripped and an operator who needs it off can say so the sanctioned way
+    rather than hand-editing the on-disk config)."""
+    assert ADOSConfig().mavlink.ws_proxy_enforce_auth is True
     with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
-        yaml.safe_dump({"mavlink": {"ws_proxy_enforce_auth": True}}, f)
+        yaml.safe_dump({"mavlink": {"ws_proxy_enforce_auth": False}}, f)
         path = f.name
     cfg = load_config(path)
-    assert cfg.mavlink.ws_proxy_enforce_auth is True
+    assert cfg.mavlink.ws_proxy_enforce_auth is False
 
 
 def test_security_defaults():
@@ -589,3 +590,28 @@ def test_a_config_without_the_key_is_untouched(tmp_path):
     mem, disk = _ws_migrate(tmp_path, {"system_id": 1})
     assert mem["mavlink"] == {"system_id": 1}
     assert disk["mavlink"] == {"system_id": 1}
+
+
+def test_the_declared_default_matches_the_router_that_reads_it():
+    # The router's own default for this key is on. Persisting the config dumps
+    # every field including defaults, so a Python default of `false` is not a
+    # difference of opinion -- it is written into the node's file as an
+    # explicit value, and an explicit value beats the router's default.
+    from ados.core.config.mavlink import MavlinkConfig
+
+    assert MavlinkConfig().ws_proxy_enforce_auth is True
+
+
+def test_the_migration_is_not_undone_by_the_next_config_write(tmp_path):
+    # The removal migration and the model default have to agree, because the
+    # save path re-serializes the whole model. Dropping the recorded value and
+    # then writing the old default straight back would leave the node exactly
+    # where it started, with the migration reporting success.
+    import yaml as _yaml
+
+    from ados.core.config.mavlink import MavlinkConfig
+
+    mem, _ = _ws_migrate(tmp_path, {"system_id": 1, "ws_proxy_enforce_auth": False})
+    reloaded = MavlinkConfig(**mem["mavlink"])
+    rewritten = _yaml.safe_load(_yaml.safe_dump(reloaded.model_dump()))
+    assert rewritten["ws_proxy_enforce_auth"] is True
