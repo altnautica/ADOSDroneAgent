@@ -21,6 +21,7 @@ pub mod cmdsock;
 pub mod fanout;
 pub mod fleet;
 pub mod fleet_hero;
+pub mod fleet_identity_policy;
 pub mod gs_config;
 pub mod link_feedback;
 pub mod mdns;

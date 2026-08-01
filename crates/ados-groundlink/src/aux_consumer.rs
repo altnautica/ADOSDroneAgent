@@ -486,10 +486,16 @@ async fn dispatch(
                     let colliding = peers.observe_system_id(slot, system_id);
                     if !colliding.is_empty() {
                         counters.bump(&c.system_id_collisions);
+                        // Name what the aircraft SHOULD be carrying alongside
+                        // what it is. A collision report that only says two
+                        // aircraft clash leaves the operator to work out the
+                        // remedy; the slot already determines the answer.
+                        let expected = crate::fleet_identity_policy::system_id_for_slot(slot);
                         tracing::warn!(
                             slot,
                             system_id,
                             also_on = ?colliding,
+                            expected_system_id = ?expected,
                             "ground_aux_system_id_collision"
                         );
                     }
