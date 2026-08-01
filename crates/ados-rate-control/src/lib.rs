@@ -33,6 +33,6 @@
 pub mod command;
 
 pub use command::{
-    AttitudeCommand, AttitudeControlCounters, MAX_BODY_RATE_RAD_S, MAX_THRUST,
-    MIN_THRUST, body_rate_ceiling, rate_command, thrust_range_ok,
+    body_rate_ceiling, rate_command, thrust_range_ok, AttitudeCommand, AttitudeControlCounters,
+    MAX_BODY_RATE_RAD_S, MAX_THRUST, MIN_THRUST,
 };

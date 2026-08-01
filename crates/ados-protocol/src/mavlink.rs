@@ -532,13 +532,12 @@ const ATTMASK_ATTITUDE_IGNORE: u8 = 128;
 /// with any bit outside this set is rejected: only the rate/attitude/thrust
 /// bits are meaningful, so an unknown high bit means a malformed request rather
 /// than a new semantic.
-const ATTITUDE_TARGET_TYPEMASK_KNOWN_BITS: u8 =
-    ATTMASK_BODY_ROLL_RATE_IGNORE
-        | ATTMASK_BODY_PITCH_RATE_IGNORE
-        | ATTMASK_BODY_YAW_RATE_IGNORE
-        | ATTMASK_THRUST_BODY_SET
-        | ATTMASK_THROTTLE_IGNORE
-        | ATTMASK_ATTITUDE_IGNORE;
+const ATTITUDE_TARGET_TYPEMASK_KNOWN_BITS: u8 = ATTMASK_BODY_ROLL_RATE_IGNORE
+    | ATTMASK_BODY_PITCH_RATE_IGNORE
+    | ATTMASK_BODY_YAW_RATE_IGNORE
+    | ATTMASK_THRUST_BODY_SET
+    | ATTMASK_THROTTLE_IGNORE
+    | ATTMASK_ATTITUDE_IGNORE;
 
 /// How far from unit length a commanded quaternion may be and still pass
 /// validation. `SET_ATTITUDE_TARGET` consumes `q` as a unit quaternion; a
@@ -615,7 +614,7 @@ impl AttitudeSetpoint {
                 + self.q[1] * self.q[1]
                 + self.q[2] * self.q[2]
                 + self.q[3] * self.q[3])
-            .sqrt();
+                .sqrt();
             if (norm - 1.0).abs() > QUAT_NORM_TOLERANCE {
                 return Err(SetpointError(format!(
                     "q must be a unit quaternion (norm {norm})"
@@ -655,8 +654,7 @@ impl AttitudeSetpoint {
         target_component: u8,
     ) -> Result<MavMessage, SetpointError> {
         self.validate()?;
-        let type_mask =
-            ardupilotmega::AttitudeTargetTypemask::from_bits_truncate(self.type_mask);
+        let type_mask = ardupilotmega::AttitudeTargetTypemask::from_bits_truncate(self.type_mask);
         Ok(MavMessage::SET_ATTITUDE_TARGET(
             ardupilotmega::SET_ATTITUDE_TARGET_DATA {
                 time_boot_ms: 0,
@@ -1321,7 +1319,10 @@ mod tests {
         };
         let frame = serialize_v2(header, &msg).expect("serialize succeeds");
         // The 3-byte v2 message id (bytes 7..10) is 82.
-        assert_eq!(frame[7], 82, "message id low byte is 82 (SET_ATTITUDE_TARGET)");
+        assert_eq!(
+            frame[7], 82,
+            "message id low byte is 82 (SET_ATTITUDE_TARGET)"
+        );
         assert_eq!(frame[8], 0);
         assert_eq!(frame[9], 0);
         let (_h, decoded) = parse_v2(&frame).expect("decode succeeds");
@@ -1334,9 +1335,9 @@ mod tests {
                 assert_eq!(d.target_system, 1);
                 assert_eq!(d.target_component, 1);
                 // The attitude-ignore bit round-tripped.
-                assert!(d
-                    .type_mask
-                    .contains(ardupilotmega::AttitudeTargetTypemask::ATTITUDE_TARGET_TYPEMASK_ATTITUDE_IGNORE));
+                assert!(d.type_mask.contains(
+                    ardupilotmega::AttitudeTargetTypemask::ATTITUDE_TARGET_TYPEMASK_ATTITUDE_IGNORE
+                ));
             }
             other => panic!("expected SET_ATTITUDE_TARGET, got {other:?}"),
         }
@@ -1355,9 +1356,9 @@ mod tests {
         match decoded {
             MavMessage::SET_ATTITUDE_TARGET(d) => {
                 assert_eq!(d.q, sp.q);
-                assert!(!d
-                    .type_mask
-                    .contains(ardupilotmega::AttitudeTargetTypemask::ATTITUDE_TARGET_TYPEMASK_ATTITUDE_IGNORE));
+                assert!(!d.type_mask.contains(
+                    ardupilotmega::AttitudeTargetTypemask::ATTITUDE_TARGET_TYPEMASK_ATTITUDE_IGNORE
+                ));
             }
             other => panic!("expected SET_ATTITUDE_TARGET, got {other:?}"),
         }
@@ -1396,9 +1397,12 @@ mod tests {
     fn attitude_setpoint_ignores_a_nan_on_an_ignored_axis() {
         let mut sp = body_rate_command();
         sp.body_roll_rate = f32::NAN; // ignored (BODY_ROLL_RATE_IGNORE is clear? no)
-        // The active rate axes are roll/pitch/yaw + thrust; directly ignore roll.
+                                      // The active rate axes are roll/pitch/yaw + thrust; directly ignore roll.
         sp.type_mask |= ATTMASK_BODY_ROLL_RATE_IGNORE;
-        assert!(sp.build_message(1, 1).is_ok(), "ignored-axis NaN is accepted");
+        assert!(
+            sp.build_message(1, 1).is_ok(),
+            "ignored-axis NaN is accepted"
+        );
     }
 
     #[test]

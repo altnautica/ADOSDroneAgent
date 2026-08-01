@@ -38,13 +38,11 @@
 //! FAILING-FIRST and left `#[ignore]`d. Hardware proof is unproven. No live
 //! attitude command is shipped to any airframe.
 
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use ados_hid::pic_view::{
-    self, resolve_authority, Authority, ChannelSourceMode, PicView,
-};
+use ados_hid::pic_view::{self, resolve_authority, Authority, ChannelSourceMode, PicView};
 use ados_protocol::mavlink::{serialize_v2, AttitudeSetpoint, MavHeader};
 use ados_rate_control::AttitudeCommand;
 use tokio::sync::{watch, Mutex, Notify};
@@ -141,11 +139,7 @@ pub fn command_verdict(
     // Request precedence: the PIC arbiter's holder decides. A dead/hung
     // arbiter (pic == None) fails SAFE to the human hold; only a fresh
     // unclaimed report or a claim held BY the rate injector lets the lane fly.
-    match resolve_authority(
-        ChannelSourceMode::Hybrid,
-        pic,
-        verified_rate_injector,
-    ) {
+    match resolve_authority(ChannelSourceMode::Hybrid, pic, verified_rate_injector) {
         Authority::Inject => CommandVerdict::Rate,
         Authority::Hid => CommandVerdict::SuppressHuman,
     }
@@ -195,7 +189,11 @@ impl AttitudeSetpointStatus {
             None => "unknown",
         }
     }
-    pub fn publish(&self, verdict: CommandVerdict, counters: ados_rate_control::AttitudeControlCounters) {
+    pub fn publish(
+        &self,
+        verdict: CommandVerdict,
+        counters: ados_rate_control::AttitudeControlCounters,
+    ) {
         self.verdict.store(verdict as u8, Ordering::Relaxed);
         self.setpoints_emitted
             .store(counters.setpoints_emitted, Ordering::Relaxed);
@@ -266,8 +264,7 @@ async fn control_loop(
             let s = state.lock().await;
             (
                 s.armed,
-                s.position_at
-                    .map(|t| now.saturating_duration_since(t)),
+                s.position_at.map(|t| now.saturating_duration_since(t)),
             )
         };
 

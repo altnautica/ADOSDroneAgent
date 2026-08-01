@@ -42,8 +42,8 @@
 mod framing;
 mod send_scheduler;
 pub use send_scheduler::ClientOrigin;
-pub mod swarm_setpoint;
 pub mod attitude_setpoint;
+pub mod swarm_setpoint;
 pub(crate) mod transport;
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicUsize, Ordering};

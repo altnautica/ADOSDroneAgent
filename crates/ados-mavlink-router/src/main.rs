@@ -22,8 +22,8 @@ use ados_mavlink_router::aux_tee::{self, TeeCounters};
 use ados_mavlink_router::aux_uplink;
 use ados_mavlink_router::aux_uplink_consumer::{self, AuxUplinkConsumerCounters};
 use ados_mavlink_router::config::MavlinkConfig;
-use ados_mavlink_router::connection::swarm_setpoint::{self, SwarmSetpointStatus};
 use ados_mavlink_router::connection::attitude_setpoint::{self, AttitudeSetpointStatus};
+use ados_mavlink_router::connection::swarm_setpoint::{self, SwarmSetpointStatus};
 use ados_mavlink_router::connection::ClientOrigin;
 use ados_mavlink_router::connection::FcConnection;
 use ados_mavlink_router::frame_ingest::{self, IngestCounters, INGEST_QUEUE_DEPTH};
@@ -626,18 +626,18 @@ async fn main() {
         // A watch channel carrying the newest live rate command + its attested
         // identity. No producer is wired yet (that is the G3-gated lane), so
         // the channel stays empty and the rung suppresses to the human hold.
-        let (rate_tx, rate_rx) =
-            tokio::sync::watch::channel::<Option<(ados_rate_control::AttitudeCommand, String, std::time::Instant)>>(None);
+        let (rate_tx, rate_rx) = tokio::sync::watch::channel::<
+            Option<(
+                ados_rate_control::AttitudeCommand,
+                String,
+                std::time::Instant,
+            )>,
+        >(None);
         let _keep_writer_alive = rate_tx;
         tasks.push(tokio::spawn(async move {
             attitude_setpoint::run(
-                fc,
-                state,
-                false, // inert until a producer + config are wired
-                pic_path,
-                rate_rx,
-                handle,
-                cancel,
+                fc, state, false, // inert until a producer + config are wired
+                pic_path, rate_rx, handle, cancel,
             )
             .await
         }));

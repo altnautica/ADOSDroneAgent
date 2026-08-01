@@ -32,7 +32,7 @@ use crate::channels::CHANNEL_COUNT;
 // so the same verdict propagates over every bearer). Re-exported here so this
 // crate's public API is unchanged: these names remain at `crate::sources::*`.
 pub use ados_hid::pic_view::{
-    Authority, ChannelSourceMode, PicView, PIC_STALE_AFTER, read_pic_view, resolve_authority,
+    read_pic_view, resolve_authority, Authority, ChannelSourceMode, PicView, PIC_STALE_AFTER,
 };
 
 /// Default injection time-to-live when a write does not carry one.

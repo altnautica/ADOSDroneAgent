@@ -74,7 +74,13 @@ pub fn body_rate_ceiling(rate: f32) -> f32 {
 /// ceiling saturates; a thrust outside the range saturates to the nearest
 /// bound. A NaN rate saturates to zero (the neutral axis).
 pub fn rate_command(roll: f32, pitch: f32, yaw: f32, thrust: f32) -> AttitudeCommand {
-    let clamp_axis = |r: f32| if r.is_finite() { body_rate_ceiling(r) } else { 0.0 };
+    let clamp_axis = |r: f32| {
+        if r.is_finite() {
+            body_rate_ceiling(r)
+        } else {
+            0.0
+        }
+    };
     AttitudeCommand {
         body_roll_rate: clamp_axis(roll),
         body_pitch_rate: clamp_axis(pitch),

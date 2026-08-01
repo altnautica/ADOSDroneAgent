@@ -62,11 +62,14 @@ fn same_normalized_command_flies_a_real_betaflight_fc() {
     let sp = normalized_command();
     sp.validate().expect("the normalized command must validate");
     let msg = sp.build_message(1, 1).expect("builds");
-    let bytes = serialize_v2(MavHeader {
-        system_id: 1,
-        component_id: 191,
-        sequence: 0,
-    }, &msg)
+    let bytes = serialize_v2(
+        MavHeader {
+            system_id: 1,
+            component_id: 191,
+            sequence: 0,
+        },
+        &msg,
+    )
     .expect("serializes");
 
     // Open the FC port (a Linux character device; real hardware only — no
