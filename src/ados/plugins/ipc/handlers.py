@@ -74,6 +74,63 @@ def _mavlink_msg_id(frame: bytes) -> int | None:
     return None
 
 
+def _mavlink_frame_len(buf: bytes) -> int | None:
+    """Total length of the frame starting at the front of ``buf``.
+
+    Header-only, never the dialect, so a message id this build does not know
+    still yields a correct boundary. A dialect-dependent split would
+    desynchronise a whole batch on the first unknown message.
+
+    v2: 10 header bytes + payload + 2 checksum, plus 13 more when the incompat
+    flag's bit 0 marks the frame signed. v1: 6 header + payload + 2 checksum.
+    """
+    if not buf:
+        return None
+    stx = buf[0]
+    if stx == 0xFD:
+        if len(buf) < 3:
+            return None
+        signed = (buf[2] & 0x01) != 0
+        return 12 + buf[1] + (13 if signed else 0)
+    if stx == 0xFE:
+        if len(buf) < 2:
+            return None
+        return 8 + buf[1]
+    return None
+
+
+def scan_pose_inject(msg_bytes: bytes) -> str:
+    """Classify EVERY frame in an outbound buffer, not just the one at offset 0.
+
+    Returns ``"clear"``, ``"requires_cap"``, or ``"unclassifiable"``.
+
+    ``mavlink.send`` accepts a buffer and the router forwards it verbatim
+    without parsing, so a caller may hand over several concatenated frames.
+    Reading only the first message id let a plugin holding ``mavlink.write`` but
+    not ``estimator.pose.inject`` put one benign frame in front of any number of
+    pose frames: the gate classified the benign id, allowed the send, and every
+    pose reached the flight controller's state estimator.
+
+    A trailing partial frame is ``"unclassifiable"`` rather than ignored. The
+    router forwards the buffer including that remainder, and the flight
+    controller parses a byte stream that neither knows nor cares where our
+    buffers ended — so a pose frame split across two sends would be reassembled
+    on the far side. Refusing is also the honest answer: a buffer that is not
+    whole frames is malformed on its own terms.
+    """
+    at = 0
+    total = len(msg_bytes)
+    found = False
+    while at < total:
+        length = _mavlink_frame_len(msg_bytes[at:])
+        if length is None or length <= 0 or at + length > total:
+            return "unclassifiable"
+        if _mavlink_msg_id(msg_bytes[at : at + length]) in POSE_INJECT_MSG_IDS:
+            found = True
+        at += length
+    return "requires_cap" if found else "clear"
+
+
 # ---------------------------------------------------------------------
 # MAVLink handlers
 # ---------------------------------------------------------------------
@@ -96,10 +153,14 @@ async def handle_mavlink_send(
     if not msg_bytes:
         raise _rpc_error("msg_bytes must be non-empty")
     # Pose-inject gate: rejects ungranted callers regardless of mavlink.write.
-    msg_id = _mavlink_msg_id(msg_bytes)
-    if msg_id in POSE_INJECT_MSG_IDS:
-        if "estimator.pose.inject" not in session.token.granted_caps:
+    # Scans EVERY frame in the buffer, because the router forwards it whole and
+    # a benign leading frame would otherwise speak for the pose frames behind it.
+    if "estimator.pose.inject" not in session.token.granted_caps:
+        verdict = scan_pose_inject(msg_bytes)
+        if verdict == "requires_cap":
             raise CapabilityDenied(session.plugin_id, "estimator.pose.inject")
+        if verdict == "unclassifiable":
+            raise _rpc_error("msg_bytes is not a whole number of MAVLink frames")
     # Component-id reservation check.
     if component_id is not None:
         try:

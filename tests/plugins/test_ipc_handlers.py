@@ -189,6 +189,92 @@ async def test_mavlink_send_pose_inject_allowed_with_cap(short_sock_dir):
         await server.stop_for_plugin(PLUGIN_ID)
 
 
+@pytest.mark.asyncio
+async def test_a_benign_leading_frame_does_not_speak_for_the_pose_frames_behind_it(
+    short_sock_dir,
+):
+    """The bypass: mavlink.send takes a buffer and the router forwards it whole.
+
+    Reading only the message id at offset 0 let a plugin with mavlink.write but
+    not estimator.pose.inject put one HEARTBEAT in front of any number of pose
+    frames, and every one of them reached the flight controller's estimator.
+    """
+    router = _FakeRouter()
+    host = HostServices(mavlink=router)
+    server, client, _ = await _make_harness(
+        short_sock_dir, granted={"mavlink.write"}, host=host
+    )
+    try:
+        batch = _mav_v2_frame(0) + _mav_v2_frame(102) + _mav_v2_frame(331)
+        with pytest.raises(CapabilityDenied) as exc:
+            await client.mavlink_send(batch)
+        assert exc.value.capability == "estimator.pose.inject"
+        assert router.sent == []
+    finally:
+        await client.close()
+        await server.stop_for_plugin(PLUGIN_ID)
+
+
+@pytest.mark.asyncio
+async def test_a_buffer_that_is_not_whole_frames_is_refused(short_sock_dir):
+    """A truncated tail is refused rather than ignored.
+
+    The flight controller parses a byte stream and neither knows nor cares where
+    our buffers ended, so a pose frame split across two sends would be
+    reassembled on the far side. Treating the unparseable remainder as empty
+    would reopen the hole one truncation further along.
+    """
+    router = _FakeRouter()
+    host = HostServices(mavlink=router)
+    server, client, _ = await _make_harness(
+        short_sock_dir, granted={"mavlink.write"}, host=host
+    )
+    try:
+        truncated = _mav_v2_frame(0) + _mav_v2_frame(331)[:6]
+        with pytest.raises(Exception) as exc:
+            await client.mavlink_send(truncated)
+        assert "whole number of MAVLink frames" in str(exc.value)
+        assert router.sent == []
+    finally:
+        await client.close()
+        await server.stop_for_plugin(PLUGIN_ID)
+
+
+@pytest.mark.asyncio
+async def test_a_granted_plugin_may_still_batch_pose_frames(short_sock_dir):
+    """The gate must not have become a ban on batching."""
+    router = _FakeRouter()
+    host = HostServices(mavlink=router)
+    server, client, _ = await _make_harness(
+        short_sock_dir,
+        granted={"mavlink.write", "estimator.pose.inject"},
+        host=host,
+    )
+    try:
+        batch = _mav_v2_frame(0) + _mav_v2_frame(331)
+        result = await client.mavlink_send(batch)
+        assert result.get("sent") is True
+        assert router.sent == [batch]
+    finally:
+        await client.close()
+        await server.stop_for_plugin(PLUGIN_ID)
+
+
+def test_scan_pose_inject_classifies_whole_partial_and_clear_buffers():
+    """The Rust host and this one must agree frame for frame."""
+    from ados.plugins.ipc.handlers import scan_pose_inject
+
+    assert scan_pose_inject(_mav_v2_frame(0)) == "clear"
+    assert scan_pose_inject(_mav_v2_frame(331)) == "requires_cap"
+    # Every id in the set, so adding one to the constant without adding it to
+    # the walk cannot pass unnoticed.
+    for mid in POSE_INJECT_MSG_IDS:
+        assert scan_pose_inject(_mav_v2_frame(mid)) == "requires_cap", mid
+    assert scan_pose_inject(_mav_v2_frame(0) + _mav_v2_frame(102)) == "requires_cap"
+    assert scan_pose_inject(b"\xfd\x09") == "unclassifiable"
+    assert scan_pose_inject(b"not a frame") == "unclassifiable"
+
+
 # ---------------------------------------------------------------------
 # MAVLink component registration
 # ---------------------------------------------------------------------

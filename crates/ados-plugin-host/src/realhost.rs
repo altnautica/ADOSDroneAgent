@@ -742,6 +742,56 @@ fn mavlink_msg_id(frame: &[u8]) -> Option<u32> {
     None
 }
 
+/// What a pose-inject scan of an outbound buffer concluded.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PoseScan {
+    /// No frame in the buffer touches the estimator.
+    Clear,
+    /// At least one frame carries a pose-injection message id.
+    RequiresCap,
+    /// The buffer does not consist purely of whole frames, so it cannot be
+    /// classified. Refused rather than guessed — see [`scan_pose_inject`].
+    Unclassifiable,
+}
+
+/// Classify EVERY frame in an outbound buffer, not just the one at offset 0.
+///
+/// `mavlink.send` accepts a buffer, and the router forwards it verbatim without
+/// parsing — a documented, tested property, since splitting it would corrupt
+/// batched traffic. So a caller may hand over several concatenated frames, and
+/// reading only the first message id let a plugin holding `mavlink.write` but
+/// not `estimator.pose.inject` put one benign frame in front of any number of
+/// pose frames: the gate classified the benign id, allowed the send, and every
+/// pose reached the flight controller's state estimator. The capability's own
+/// description names that as a fly-away risk, and the whole buffer fits
+/// hundreds of pose frames.
+///
+/// The walk is header-only ([`ados_protocol::aux_mux::frame_len`]), so a message
+/// id this build's dialect does not know still yields a correct boundary and
+/// cannot desynchronise the rest of the batch.
+///
+/// A trailing partial frame is [`PoseScan::Unclassifiable`] rather than ignored.
+/// The splitter stops at the first incomplete frame and returns what was whole,
+/// but the router forwards the buffer INCLUDING that remainder — so treating an
+/// unparseable tail as empty would reopen the same hole one truncation further
+/// along. Refusing is also the honest answer: a buffer that is not whole frames
+/// is malformed on its own terms.
+pub(crate) fn scan_pose_inject(msg_bytes: &[u8]) -> PoseScan {
+    let frames = ados_protocol::aux_mux::split_frames(msg_bytes);
+    let consumed: usize = frames.iter().map(|f| f.len()).sum();
+    if consumed != msg_bytes.len() {
+        return PoseScan::Unclassifiable;
+    }
+    if frames
+        .iter()
+        .filter_map(|f| mavlink_msg_id(f))
+        .any(|id| POSE_INJECT_MSG_IDS.contains(&id))
+    {
+        return PoseScan::RequiresCap;
+    }
+    PoseScan::Clear
+}
+
 // ---------------------------------------------------------------------
 // rmpv arg helpers
 // ---------------------------------------------------------------------
@@ -1570,13 +1620,22 @@ impl HostServices for RealHost {
         }
 
         // 2. Pose-inject gate: rejects ungranted callers regardless of the
-        //    dispatch-level mavlink.write.
-        if let Some(id) = mavlink_msg_id(&msg_bytes) {
-            if POSE_INJECT_MSG_IDS.contains(&id) && !granted_caps.contains("estimator.pose.inject")
-            {
-                return Err(HostError::CapabilityDenied(
-                    "estimator.pose.inject".to_string(),
-                ));
+        //    dispatch-level mavlink.write. Scans EVERY frame in the buffer,
+        //    because the router forwards it whole and a benign leading frame
+        //    would otherwise speak for the pose frames behind it.
+        if !granted_caps.contains("estimator.pose.inject") {
+            match scan_pose_inject(&msg_bytes) {
+                PoseScan::Clear => {}
+                PoseScan::RequiresCap => {
+                    return Err(HostError::CapabilityDenied(
+                        "estimator.pose.inject".to_string(),
+                    ));
+                }
+                PoseScan::Unclassifiable => {
+                    return Err(HostError::Rpc(
+                        "msg_bytes is not a whole number of MAVLink frames".to_string(),
+                    ));
+                }
             }
         }
 
@@ -2994,6 +3053,25 @@ fn sorted_formats() -> Vec<&'static str> {
 mod tests {
     use super::*;
 
+    /// A whole, well-formed v1 frame carrying `msgid` and an empty payload.
+    ///
+    /// Eight bytes, because the gate now classifies the WHOLE buffer and a
+    /// buffer that is not a whole number of frames is refused. The six-byte
+    /// stubs these tests used to carry were enough to read a message id out of
+    /// but were not frames, and building real ones here is what lets the gate
+    /// fail closed on a truncated tail — the case an attacker would otherwise
+    /// use to smuggle a pose frame across two sends.
+    fn v1_frame(msgid: u8) -> Vec<u8> {
+        vec![0xFE, 0, 0, 0, 0, msgid, 0, 0]
+    }
+
+    /// A whole, well-formed v2 frame carrying `msgid` and an empty payload.
+    /// Twelve bytes: ten of header, then the two checksum bytes.
+    fn v2_frame(msgid: u32) -> Vec<u8> {
+        let id = msgid.to_le_bytes();
+        vec![0xFD, 0, 0, 0, 0, 0, 0, id[0], id[1], id[2], 0, 0]
+    }
+
     fn caps(items: &[&str]) -> BTreeSet<String> {
         items.iter().map(|s| s.to_string()).collect()
     }
@@ -3371,9 +3449,7 @@ mod tests {
         // A v2 ODOMETRY (331) send without estimator.pose.inject is denied. The
         // gate runs inside the handler, after msg_bytes validation.
         let host = RealHost::new();
-        let mut frame = vec![0xFD, 0, 0, 0, 0, 0, 0];
-        frame.extend_from_slice(&[331u32.to_le_bytes()[0], 331u32.to_le_bytes()[1], 0]);
-        let args = map(&[("msg_bytes", Value::Binary(frame))]);
+        let args = map(&[("msg_bytes", Value::Binary(v2_frame(331)))]);
         assert_eq!(
             err_body(host.mavlink_send("p", &args, &caps(&[]))),
             "capability_denied: estimator.pose.inject"
@@ -3381,10 +3457,102 @@ mod tests {
     }
 
     #[test]
+    fn a_benign_leading_frame_does_not_speak_for_the_pose_frames_behind_it() {
+        // The bypass. `mavlink.send` takes a buffer and the router forwards it
+        // whole without parsing, so a plugin holding mavlink.write but not
+        // estimator.pose.inject could put one HEARTBEAT in front of any number
+        // of ODOMETRY frames: the old gate read the message id at offset 0,
+        // saw the benign one, allowed the send, and every pose frame reached
+        // the flight controller's state estimator.
+        let host = RealHost::new();
+        let mut buf = v2_frame(0); // HEARTBEAT
+        buf.extend_from_slice(&v2_frame(331)); // ODOMETRY
+        buf.extend_from_slice(&v2_frame(331));
+        let args = map(&[("msg_bytes", Value::Binary(buf))]);
+        assert_eq!(
+            err_body(host.mavlink_send("p", &args, &caps(&["mavlink.write"]))),
+            "capability_denied: estimator.pose.inject"
+        );
+    }
+
+    #[test]
+    fn a_pose_frame_anywhere_in_the_buffer_is_caught() {
+        // Not just the second position: the scan covers the whole batch, and a
+        // v1 frame mixed in with v2 ones does not desynchronise it, because the
+        // walk reads only headers.
+        let host = RealHost::new();
+        let mut buf = v2_frame(0);
+        buf.extend_from_slice(&v1_frame(30)); // ATTITUDE, benign
+        buf.extend_from_slice(&v2_frame(0));
+        buf.extend_from_slice(&v2_frame(102)); // VISION_POSITION_ESTIMATE, last
+        let args = map(&[("msg_bytes", Value::Binary(buf))]);
+        assert_eq!(
+            err_body(host.mavlink_send("p", &args, &caps(&["mavlink.write"]))),
+            "capability_denied: estimator.pose.inject"
+        );
+    }
+
+    #[test]
+    fn a_buffer_that_is_not_whole_frames_is_refused_rather_than_guessed() {
+        // The splitter stops at the first incomplete frame and returns what was
+        // whole, but the router forwards the buffer INCLUDING the remainder.
+        // Ignoring the tail would reopen the hole one truncation further along:
+        // a pose frame split across two sends is reassembled by the flight
+        // controller's own parser, which reads a byte stream and neither knows
+        // nor cares where our buffers ended.
+        let host = RealHost::new();
+        let mut buf = v2_frame(0);
+        buf.extend_from_slice(&v2_frame(331)[..6]); // a pose frame, truncated
+        let args = map(&[("msg_bytes", Value::Binary(buf))]);
+        assert_eq!(
+            err_body(host.mavlink_send("p", &args, &caps(&["mavlink.write"]))),
+            "msg_bytes is not a whole number of MAVLink frames"
+        );
+    }
+
+    #[test]
+    fn a_granted_plugin_may_still_batch_pose_frames() {
+        // The gate must not have become a ban. With the capability granted the
+        // same batch passes the check and reaches the router (absent here, so
+        // it degrades to not_available rather than erroring).
+        let host = RealHost::new();
+        let mut buf = v2_frame(0);
+        buf.extend_from_slice(&v2_frame(331));
+        let args = map(&[("msg_bytes", Value::Binary(buf))]);
+        let m = ok_map(host.mavlink_send(
+            "p",
+            &args,
+            &caps(&["mavlink.write", "estimator.pose.inject"]),
+        ));
+        assert_eq!(
+            field(&m, "error").and_then(Value::as_str),
+            Some("not_available")
+        );
+    }
+
+    #[test]
+    fn scan_pose_inject_classifies_whole_partial_and_clear_buffers() {
+        assert_eq!(scan_pose_inject(&v2_frame(0)), PoseScan::Clear);
+        assert_eq!(scan_pose_inject(&v2_frame(331)), PoseScan::RequiresCap);
+        assert_eq!(scan_pose_inject(&v1_frame(30)), PoseScan::Clear);
+        // Every id in the set, so adding one to the constant without adding it
+        // to the walk cannot pass unnoticed.
+        for id in POSE_INJECT_MSG_IDS {
+            assert_eq!(
+                scan_pose_inject(&v2_frame(*id)),
+                PoseScan::RequiresCap,
+                "message id {id} must demand the capability"
+            );
+        }
+        assert_eq!(scan_pose_inject(&[0xFD, 9]), PoseScan::Unclassifiable);
+        assert_eq!(scan_pose_inject(b"not a frame"), PoseScan::Unclassifiable);
+    }
+
+    #[test]
     fn vio_component_gate_demands_vio_cap() {
         let host = RealHost::new();
         let args = map(&[
-            ("msg_bytes", Value::Binary(vec![0xFE, 0, 0, 0, 0, 0])),
+            ("msg_bytes", Value::Binary(v1_frame(0))),
             ("component_id", Value::Integer(197.into())),
         ]);
         assert_eq!(
@@ -3399,7 +3567,7 @@ mod tests {
         // the VIO set still triggers the cap gate instead of being skipped.
         let host = RealHost::new();
         let args = map(&[
-            ("msg_bytes", Value::Binary(vec![0xFE, 0, 0, 0, 0, 0])),
+            ("msg_bytes", Value::Binary(v1_frame(0))),
             ("component_id", Value::from("197")),
         ]);
         assert_eq!(
@@ -3408,7 +3576,7 @@ mod tests {
         );
         // A whitespace-padded numeric string parses too (Python int(" 197 ")).
         let padded = map(&[
-            ("msg_bytes", Value::Binary(vec![0xFE, 0, 0, 0, 0, 0])),
+            ("msg_bytes", Value::Binary(v1_frame(0))),
             ("component_id", Value::from(" 197 ")),
         ]);
         assert_eq!(
@@ -3417,7 +3585,7 @@ mod tests {
         );
         // A non-numeric string is the "component_id not integer" error.
         let nonnum = map(&[
-            ("msg_bytes", Value::Binary(vec![0xFE, 0, 0, 0, 0, 0])),
+            ("msg_bytes", Value::Binary(v1_frame(0))),
             ("component_id", Value::from("abc")),
         ]);
         assert_eq!(
@@ -3509,7 +3677,7 @@ mod tests {
     #[test]
     fn mavlink_send_without_router_returns_not_available() {
         let host = RealHost::new();
-        let args = map(&[("msg_bytes", Value::Binary(vec![0xFE, 0, 0, 0, 0, 0]))]);
+        let args = map(&[("msg_bytes", Value::Binary(v1_frame(0)))]);
         let m = ok_map(host.mavlink_send("p", &args, &caps(&[])));
         assert_eq!(
             field(&m, "error").and_then(Value::as_str),
@@ -3546,7 +3714,7 @@ mod tests {
     fn mavlink_send_unreserved_component_errors() {
         let host = RealHost::new();
         let args = map(&[
-            ("msg_bytes", Value::Binary(vec![0xFE, 0, 0, 0, 0, 0])),
+            ("msg_bytes", Value::Binary(v1_frame(0))),
             ("component_id", Value::Integer(42.into())),
         ]);
         assert_eq!(

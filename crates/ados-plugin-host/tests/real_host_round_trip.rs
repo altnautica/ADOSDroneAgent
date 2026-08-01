@@ -30,6 +30,21 @@ fn caps(items: &[&str]) -> BTreeSet<String> {
     items.iter().map(|s| s.to_string()).collect()
 }
 
+/// A whole, well-formed v1 frame carrying `msgid` and an empty payload.
+///
+/// Eight bytes rather than a six-byte header stub: the pose-inject gate
+/// classifies the whole buffer and refuses one that is not a whole number of
+/// frames, so these fixtures have to be real frames.
+fn v1_frame(msgid: u8) -> Vec<u8> {
+    vec![0xFE, 0, 0, 0, 0, msgid, 0, 0]
+}
+
+/// A whole, well-formed v2 frame carrying `msgid` and an empty payload.
+fn v2_frame(msgid: u32) -> Vec<u8> {
+    let id = msgid.to_le_bytes();
+    vec![0xFD, 0, 0, 0, 0, 0, 0, id[0], id[1], id[2], 0, 0]
+}
+
 fn map(entries: &[(&str, Value)]) -> Value {
     Value::Map(
         entries
@@ -225,7 +240,7 @@ async fn mavlink_send_with_no_router_returns_not_available() {
     let h = harness(RealHost::new(), &[PLUGIN_A]);
     let (mut client, token) = hello(&h, PLUGIN_A, &["mavlink.write"]).await;
 
-    let args = map(&[("msg_bytes", Value::Binary(vec![0xFE, 0, 0, 0, 0, 0]))]);
+    let args = map(&[("msg_bytes", Value::Binary(v1_frame(0)))]);
     send(&mut client, &request("mavlink.send", &token, args)).await;
     let resp = recv(&mut client).await;
     assert_eq!(resp.error, None);
@@ -268,10 +283,29 @@ async fn pose_inject_send_is_denied_without_the_estimator_cap() {
     let h = harness(RealHost::new(), &[PLUGIN_A]);
     let (mut client, token) = hello(&h, PLUGIN_A, &["mavlink.write"]).await;
 
-    // v2 ODOMETRY (331): STX 0xFD, msgid little-endian at bytes 7..10.
-    let mut frame = vec![0xFD, 0, 0, 0, 0, 0, 0];
-    frame.extend_from_slice(&[331u32.to_le_bytes()[0], 331u32.to_le_bytes()[1], 0]);
-    let args = map(&[("msg_bytes", Value::Binary(frame))]);
+    // A whole v2 ODOMETRY (331) frame.
+    let args = map(&[("msg_bytes", Value::Binary(v2_frame(331)))]);
+    send(&mut client, &request("mavlink.send", &token, args)).await;
+    let resp = recv(&mut client).await;
+    assert_eq!(
+        resp.error.as_deref(),
+        Some("capability_denied: estimator.pose.inject")
+    );
+}
+
+#[tokio::test]
+async fn a_batched_send_cannot_smuggle_pose_frames_past_the_gate() {
+    // Proven end to end through the server, because this is the shape a real
+    // plugin would use: one benign frame followed by pose frames in a single
+    // send. The router forwards a buffer whole and never parses it, so reading
+    // only the first message id let every pose frame through to the flight
+    // controller's state estimator on a plugin that held mavlink.write alone.
+    let h = harness(RealHost::new(), &[PLUGIN_A]);
+    let (mut client, token) = hello(&h, PLUGIN_A, &["mavlink.write"]).await;
+
+    let mut buf = v2_frame(0); // HEARTBEAT
+    buf.extend_from_slice(&v2_frame(331)); // ODOMETRY
+    let args = map(&[("msg_bytes", Value::Binary(buf))]);
     send(&mut client, &request("mavlink.send", &token, args)).await;
     let resp = recv(&mut client).await;
     assert_eq!(
