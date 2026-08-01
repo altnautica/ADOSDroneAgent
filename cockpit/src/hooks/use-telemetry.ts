@@ -13,7 +13,7 @@ import { pollIntervalMs, renderProfile } from "@/lib/render-profile";
 import { useProfile } from "@/hooks/use-profile";
 import { ApiError, getDroneStatus, getGsStatus } from "@/lib/api";
 import type { GsStatus } from "@/lib/types";
-import { useReachStore } from "@/stores/reach-store";
+import { pollIntervalFor, useReachStore } from "@/stores/reach-store";
 
 export interface TelemetryState {
   status: GsStatus | null;
@@ -59,7 +59,12 @@ export function useTelemetry(intervalMs = pollIntervalMs(400, renderProfile())):
         }));
       } finally {
         if (!cancelled) {
-          timer.current = setTimeout(tick, intervalMs);
+          // Back off while the agent is refusing — see `pollIntervalFor`.
+          const wait = pollIntervalFor(
+            intervalMs,
+            useReachStore.getState().refusal,
+          );
+          timer.current = setTimeout(tick, wait);
         }
       }
     };

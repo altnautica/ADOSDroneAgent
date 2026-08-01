@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { isRefusal, useReachStore } from "@/stores/reach-store";
+import {
+  REFUSED_POLL_INTERVAL_MS,
+  isRefusal,
+  pollIntervalFor,
+  useReachStore,
+} from "@/stores/reach-store";
 
 function reset() {
   useReachStore.setState({ refusal: "none", pairingCode: null });
@@ -73,5 +78,24 @@ describe("reach store", () => {
     const cleared = useReachStore.getState();
     useReachStore.getState().report(null, true);
     expect(useReachStore.getState()).toBe(cleared);
+  });
+});
+
+describe("polling while refused", () => {
+  it("slows a fast poll down", () => {
+    // Measured on a refusing node: 512 rejected requests in two minutes, each
+    // one also a warning written on the box the panel cannot read.
+    expect(pollIntervalFor(400, "unpaired")).toBe(REFUSED_POLL_INTERVAL_MS);
+    expect(pollIntervalFor(1500, "unauthorized")).toBe(REFUSED_POLL_INTERVAL_MS);
+  });
+
+  it("never speeds a slow poll up", () => {
+    // A screen that deliberately polls slowly keeps its own pace; the backoff
+    // is a floor, not a rate.
+    expect(pollIntervalFor(30_000, "unpaired")).toBe(30_000);
+  });
+
+  it("returns to the normal cadence once the refusal clears", () => {
+    expect(pollIntervalFor(400, "none")).toBe(400);
   });
 });

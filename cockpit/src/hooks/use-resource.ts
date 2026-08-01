@@ -9,7 +9,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ApiError } from "@/lib/api";
-import { useReachStore } from "@/stores/reach-store";
+import { pollIntervalFor, useReachStore } from "@/stores/reach-store";
 
 export interface Resource<T> {
   data: T | null;
@@ -74,7 +74,14 @@ export function useResource<T>(
         }));
       } finally {
         if (!cancelled) {
-          timer = setTimeout(tick, intervalMs);
+          // Back off while the agent is refusing: the answer cannot change
+          // until an operator acts, and every rejected request is also a
+          // warning written on the node.
+          const wait = pollIntervalFor(
+            intervalMs,
+            useReachStore.getState().refusal,
+          );
+          timer = setTimeout(tick, wait);
         }
       }
     };

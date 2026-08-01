@@ -46,6 +46,28 @@ export function isRefusal(status: number | null): boolean {
   return status === 401 || status === 403;
 }
 
+/** How long a poll should wait after a refusal, in ms.
+ *
+ *  A refusal will not resolve on its own — it takes an operator pairing the
+ *  node or signing in — so retrying at the live-telemetry cadence spends real
+ *  effort on an answer that cannot change yet. Measured on a node refusing an
+ *  off-box browser: 512 rejected requests inside two minutes, EACH of which the
+ *  agent records as a warning, so the panel was also filling the log of the box
+ *  it could not read.
+ *
+ *  Long enough to stop being a load, short enough that pairing feels immediate:
+ *  the operator watches the panel while they pair, and five seconds is inside
+ *  the time it takes them to type the code.
+ */
+export const REFUSED_POLL_INTERVAL_MS = 5000;
+
+/** The interval a poll should use next, given its normal cadence and whether
+ *  the agent is currently refusing. Never speeds a poll UP — a screen that
+ *  deliberately polls slowly keeps its own pace. */
+export function pollIntervalFor(normalMs: number, refusal: ReachRefusal): number {
+  return refusal === "none" ? normalMs : Math.max(normalMs, REFUSED_POLL_INTERVAL_MS);
+}
+
 export const useReachStore = create<ReachState>((set) => ({
   refusal: "none",
   pairingCode: null,
