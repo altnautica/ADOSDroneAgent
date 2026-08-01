@@ -21,13 +21,45 @@ export interface VerticalTapeProps {
   step: number;
 }
 
-function visibleTicks(value: number, windowSpan: number, step: number): number[] {
+/** The largest magnitude a tape value is allowed to drive the scale to.
+ *
+ *  Far beyond any real altitude or airspeed, so it never clips a genuine
+ *  reading; its job is only to keep a garbage float out of the tick loop. */
+const MAX_TAPE_VALUE = 1e9;
+
+/** Hard ceiling on generated ticks, as a second independent bound.
+ *
+ *  `windowSpan / step` is a small number for every call site today, so this is
+ *  never reached in practice — it exists so a future caller passing a tiny step
+ *  cannot hang the panel either. */
+const MAX_TICKS = 512;
+
+/** Whether a value can safely drive the tape scale.
+ *
+ *  `Number.isFinite` alone is NOT enough, which is the whole reason this exists:
+ *  a finite-but-enormous float (a corrupt MAVLink field is a plain f32, so up to
+ *  ~3.4e38) makes the tick loop below non-terminating — past ~1e17 the float ULP
+ *  exceeds `step`, so `t += step` stops advancing the accumulator and the loop
+ *  spins forever. It throws nothing, so the error boundary cannot catch it and
+ *  the kiosk simply freezes with no diagnostic. Bounding the input is the fix;
+ *  the tick cap below is the belt to its braces. */
+export function isPlottableTapeValue(value: number | null | undefined): value is number {
+  return value != null && Number.isFinite(value) && Math.abs(value) <= MAX_TAPE_VALUE;
+}
+
+export function visibleTicks(value: number, windowSpan: number, step: number): number[] {
+  // A non-positive step would never advance the accumulator at all. No call
+  // site passes one today; refusing here means none ever can.
+  if (!Number.isFinite(step) || step <= 0) return [];
   const half = windowSpan / 2;
   const lo = Math.ceil((value - half) / step) * step;
   const hi = value + half;
   const ticks: number[] = [];
-  for (let t = lo; t <= hi + 1e-6; t += step) {
-    ticks.push(Math.round(t));
+  // Indexed rather than accumulated: `lo + i * step` is exact at every
+  // iteration and cannot stall the way a repeated `t += step` can.
+  const count = Math.min(Math.floor((hi - lo) / step) + 1, MAX_TICKS);
+  for (let i = 0; i < count; i += 1) {
+    ticks.push(Math.round(lo + i * step));
   }
   return ticks;
 }
@@ -41,7 +73,7 @@ export function VerticalTape({
   step,
 }: VerticalTapeProps) {
   const isLeft = side === "left";
-  const hasValue = value != null && Number.isFinite(value);
+  const hasValue = isPlottableTapeValue(value);
   const ticks = hasValue ? visibleTicks(value, windowSpan, step) : [];
 
   return (
