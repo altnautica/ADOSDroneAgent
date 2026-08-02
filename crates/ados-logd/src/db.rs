@@ -34,6 +34,19 @@ pub const BUSY_TIMEOUT_MS: u32 = 5000;
 /// the SD card.
 pub const WAL_AUTOCHECKPOINT_PAGES: u32 = 1000;
 
+/// `PRAGMA auto_vacuum` value for incremental mode. In this mode a delete puts
+/// its pages on the free list and `PRAGMA incremental_vacuum(N)` reclaims a
+/// bounded number of them on demand — the alternative to a full `VACUUM`, which
+/// rewrites the entire file.
+///
+/// This is load-bearing for flash longevity, not a tuning nicety. With the store
+/// sitting at its size cap, a full `VACUUM` after every eviction rewrites ~900 MB
+/// every time eviction triggers; on an SD card that is the dominant source of
+/// write wear on the whole box. Incremental mode lets the free list absorb the
+/// churn instead: evicted pages are reused by subsequent inserts, so the file
+/// plateaus near the cap and steady-state writes fall to the inserts themselves.
+pub const AUTO_VACUUM_INCREMENTAL: i64 = 2;
+
 /// Per-connection page-cache size for read-only connections, as SQLite's
 /// negative-means-KiB form (`-512` = 512 KiB). Read-only connections are
 /// short-lived and many open concurrently off the blocking pool; SQLite's
@@ -180,6 +193,22 @@ pub fn open(path: impl AsRef<Path>) -> Result<Connection, DbError> {
     let conn = Connection::open(path)?;
     apply_pragmas(&conn)?;
     migrate(&conn)?;
+    // A store created before incremental auto-vacuum existed needs one rewrite
+    // to adopt it. Best-effort: if it cannot convert, retention falls back to
+    // the periodic full vacuum and says so, rather than the open failing.
+    match ensure_incremental_auto_vacuum(&conn) {
+        Ok(true) => tracing::info!(
+            event = "logd.auto_vacuum_converted",
+            "converted the store to incremental auto-vacuum (one-time rewrite)"
+        ),
+        Ok(false) => {}
+        Err(e) => tracing::warn!(
+            event = "logd.auto_vacuum_convert_failed",
+            error = %e,
+            "could not convert the store to incremental auto-vacuum; \
+             retention will keep using the periodic full vacuum"
+        ),
+    }
     Ok(conn)
 }
 
@@ -207,9 +236,44 @@ fn apply_pragmas(conn: &Connection) -> Result<(), DbError> {
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.busy_timeout(std::time::Duration::from_millis(BUSY_TIMEOUT_MS as u64))?;
     conn.pragma_update(None, "wal_autocheckpoint", WAL_AUTOCHECKPOINT_PAGES)?;
+    // Incremental auto-vacuum, so retention can reclaim a bounded number of
+    // pages instead of rewriting the whole file. On a fresh database this takes
+    // effect immediately; converting an existing one needs a `VACUUM`, which
+    // `ensure_incremental_auto_vacuum` does once after migration.
+    conn.pragma_update(None, "auto_vacuum", AUTO_VACUUM_INCREMENTAL)?;
     // Enforce the session foreign keys.
     conn.pragma_update(None, "foreign_keys", "ON")?;
     Ok(())
+}
+
+/// Read `PRAGMA auto_vacuum` (0 = none, 1 = full, 2 = incremental).
+pub fn auto_vacuum_mode(conn: &Connection) -> Result<i64, DbError> {
+    let mode: i64 = conn.query_row("PRAGMA auto_vacuum", [], |row| row.get(0))?;
+    Ok(mode)
+}
+
+/// Convert an existing store to incremental auto-vacuum if it is not already.
+///
+/// SQLite only honours a change to `auto_vacuum` on an empty database or across
+/// a `VACUUM`, so a store created before this mode existed needs one rewrite to
+/// adopt it. That rewrite is paid **once**, and it replaces the per-eviction
+/// full `VACUUM` that used to run every 45 to 100 minutes forever — so the very
+/// first maintenance pass after this migration is already cheaper than the
+/// steady state it replaces.
+///
+/// Returns `true` when a conversion actually ran, so the caller can log it: a
+/// multi-hundred-megabyte rewrite at start is worth a line in the journal rather
+/// than a silent stall that reads like a hang.
+pub fn ensure_incremental_auto_vacuum(conn: &Connection) -> Result<bool, DbError> {
+    if auto_vacuum_mode(conn)? == AUTO_VACUUM_INCREMENTAL {
+        return Ok(false);
+    }
+    conn.pragma_update(None, "auto_vacuum", AUTO_VACUUM_INCREMENTAL)?;
+    conn.execute_batch("VACUUM")?;
+    // Re-read rather than assume: if the conversion did not take (a read-only
+    // filesystem, or a build where the pragma is unavailable), retention must
+    // learn that from the database and not from an assumption here.
+    Ok(auto_vacuum_mode(conn)? == AUTO_VACUUM_INCREMENTAL)
 }
 
 /// Apply pending migrations in order, advancing `PRAGMA user_version` after each.

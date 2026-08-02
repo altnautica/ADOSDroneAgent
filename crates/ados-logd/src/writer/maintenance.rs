@@ -46,9 +46,11 @@ impl Writer {
             do_vacuum,
             &self.stop,
         )?;
-        // A pass that vacuumed for any reason (the cadence, or post-eviction)
-        // resets the vacuum cadence so the next periodic vacuum is a full
-        // interval away.
+        // Only the periodic full vacuum resets the cadence. Eviction reclaims
+        // incrementally and deliberately does not count as one: letting it push
+        // the next full vacuum out would be harmless, but letting it *stand in*
+        // for one is what the old post-eviction rewrite did, and that rewrite on
+        // the eviction cadence was the store's dominant write load.
         if report.vacuumed {
             self.next_vacuum = now + self.config.retention.vacuum_interval;
         }
@@ -72,6 +74,7 @@ impl Writer {
                 rollup_ttl_deleted = report.rollup_ttl_deleted_rows,
                 evicted = report.evicted_rows,
                 vacuumed = report.vacuumed,
+                reclaimed_pages = report.reclaimed_pages,
                 "retention maintenance pass"
             );
         }

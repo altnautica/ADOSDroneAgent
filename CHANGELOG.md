@@ -4,6 +4,39 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.319] - 2026-08-02
+
+### Fixed
+
+- **The logging store rewrote its whole ~900 MB file every 45 to 100 minutes,
+  forever.** `retention.rs` ran a full `VACUUM` after *every* size-cap eviction,
+  not just on its documented weekly cadence. Once the store reaches its 1 GB cap
+  — roughly 5 to 10 hours after install — eviction triggers on that cadence for
+  the life of the box, so the rewrite did too.
+
+  Measured on a ground-station-class board: **1 714 KB/s sustained writes to the
+  card, about 144 GB a day**, on a node doing nothing but running. That is one to
+  two orders of magnitude above what a 24/7 SBC should write, and it is the
+  dominant write load on the whole system. A rewrite of that size is also a
+  minutes-long window in which a power cut tears the store; two abandoned
+  `logs.db.corrupt-*` files, 1.6 GB between them, were sitting next to a live
+  935 MB store on a bench node when this was found.
+
+  Reclaim on the eviction path is now incremental: the store opens in
+  `auto_vacuum=INCREMENTAL`, evicted pages go on SQLite's free list where
+  subsequent inserts reuse them, and a bounded `PRAGMA incremental_vacuum`
+  (16 384 pages, ~64 MiB) returns the surplus. The full `VACUUM` stays, but only
+  on its own long cadence. An existing store converts itself once at open, with
+  a log line, since SQLite only honours the mode change across one rewrite.
+
+  The size cap moves with it, and had to: it now arms on the **logical** used
+  size plus the WAL rather than the raw file size. A store whose freed pages are
+  being reused legitimately sits at its high-water file size, so keeping the old
+  trigger while no longer shrinking the file would have re-fired eviction on
+  every pass and drained the store to empty. A regression test drives three
+  consecutive passes over a store parked at the cap and asserts only the first
+  one evicts.
+
 ## [0.99.318] - 2026-08-01
 
 ### Fixed
