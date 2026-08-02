@@ -18,6 +18,7 @@ import { Button } from "@/components/ui/button";
 import { useCloudPostureNudge } from "@/hooks/use-cloud-posture-nudge";
 import { useHeartbeat } from "@/hooks/use-heartbeat";
 import { useStatus } from "@/hooks/use-status";
+import { refusalDetail } from "@/lib/refusal";
 import { cn } from "@/lib/utils";
 import { modeFromStatus, regionFromStatus } from "@/lib/region";
 import type { SetupStatus } from "@/lib/types";
@@ -37,7 +38,14 @@ export function HomeRoute() {
   const offline =
     heartbeat.isError && !heartbeat.data && status.isError && !status.data;
   if (offline) {
-    return <OfflineHome onRetry={() => {
+    // An agent that ANSWERED and refused is not an agent that is unreachable,
+    // and telling the operator to go check the power and the network about a
+    // board that just replied sends them to look at the wrong thing entirely.
+    // The access gate normally intercepts a refusal before this renders; this
+    // is the backstop for the case where it does not, and it must still say
+    // what actually happened.
+    const refusal = refusalDetail(status.error) ?? refusalDetail(heartbeat.error);
+    return <OfflineHome refusal={refusal} onRetry={() => {
       heartbeat.refetch();
       status.refetch();
     }} />;
@@ -46,7 +54,13 @@ export function HomeRoute() {
   return profile === "ground_station" ? <GroundHome role={role} /> : <DroneHome />;
 }
 
-function OfflineHome({ onRetry }: { onRetry: () => void }) {
+function OfflineHome({
+  refusal,
+  onRetry,
+}: {
+  refusal: string | null;
+  onRetry: () => void;
+}) {
   return (
     <div className="max-w-2xl mx-auto py-12">
       <div className="rounded-lg border border-border bg-muted/20 p-8 flex flex-col items-center text-center space-y-4">
@@ -55,13 +69,20 @@ function OfflineHome({ onRetry }: { onRetry: () => void }) {
         </div>
         <div>
           <h1 className="text-xl font-semibold tracking-tight">
-            Agent unreachable
+            {refusal ? "Access not set up yet" : "Agent unreachable"}
           </h1>
-          <p className="text-sm text-muted-foreground mt-2 max-w-sm">
-            The dashboard couldn't reach the agent's REST API. Check that the
-            board is powered, on the network, and that{" "}
-            <span className="font-mono">ados-supervisor</span> is running.
-          </p>
+          {refusal ? (
+            <p className="text-sm text-muted-foreground mt-2 max-w-sm">
+              The agent answered and declined the request: {refusal} Reload to
+              set up access with its PIN.
+            </p>
+          ) : (
+            <p className="text-sm text-muted-foreground mt-2 max-w-sm">
+              The dashboard couldn't reach the agent's REST API. Check that the
+              board is powered, on the network, and that{" "}
+              <span className="font-mono">ados-supervisor</span> is running.
+            </p>
+          )}
         </div>
         <Button variant="outline" size="sm" onClick={onRetry}>
           <RefreshCw className="h-3.5 w-3.5" />

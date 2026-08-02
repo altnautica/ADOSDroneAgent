@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 
-import { ApiError, apiFetch, setAuthRequiredHandler } from "@/lib/api";
+import { ApiError, apiFetch, isAuthChallenge, setAuthRequiredHandler } from "@/lib/api";
 import { fetchPinStatus, type PinStatus } from "@/lib/pin";
 import { PinSplash } from "./PinSplash";
 
@@ -23,10 +23,12 @@ function GateChecking() {
  * Gates the dashboard behind the PIN splash when a paired agent is reached
  * off-box without a credential.
  *
- * On mount (and whenever `apiFetch` reports a data-plane 401 mid-session) it
- * probes a gated route: a `200` means we are authorized (on-box, or a stored
- * valid session/`?ados_key=`), so the app renders; a `401` means we need the
- * PIN, so it reads the PIN status and shows the branded splash. Any other error
+ * On mount (and whenever `apiFetch` reports a data-plane auth challenge
+ * mid-session) it probes a gated route: a `200` means we are authorized
+ * (on-box, or a stored valid session/`?ados_key=`), so the app renders; a `401`
+ * (paired, no credential) or a `403` (unpaired, PIN required) means we need the
+ * PIN, so it reads the PIN status and shows the branded splash — which already
+ * knows how to offer *setting* a PIN when the node has none yet. Any other error
  * lets the app render and handle it with its own states rather than blocking the
  * whole dashboard.
  */
@@ -40,7 +42,7 @@ export function DashboardAccessGate({ children }: { children: ReactNode }) {
       await apiFetch("/api/status", { skipAuthSignal: true });
       setState("ok");
     } catch (e) {
-      if (e instanceof ApiError && e.status === 401) {
+      if (e instanceof ApiError && isAuthChallenge(e.status)) {
         try {
           setPinStatus(await fetchPinStatus());
         } catch {

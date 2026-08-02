@@ -17,6 +17,29 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Whether a failed response means "you are not authorized yet" rather than
+ * "something is wrong".
+ *
+ * BOTH codes, deliberately. The agent uses them for two different situations
+ * and the UI has to handle both the same way:
+ *
+ * - **401** — the node is PAIRED and we reached it off-box without a
+ *   credential, or with an expired or revoked one.
+ * - **403** — the node is UNPAIRED and we are on its LAN, so it is asking for
+ *   the dashboard PIN before it hands over any data.
+ *
+ * Only 401 used to count. A fresh node is unpaired with no PIN set, which is
+ * the 403 case, so every newly installed agent fell through to the generic
+ * error path and the dashboard told the operator the board was unreachable —
+ * about a board that had just answered, promptly, saying exactly what it
+ * needed. The enrolment screen it should have shown already existed and was
+ * simply never reached.
+ */
+export function isAuthChallenge(status: number): boolean {
+  return status === 401 || status === 403;
+}
+
 interface FetchOptions {
   method?: "GET" | "POST" | "PUT" | "DELETE";
   body?: unknown;
@@ -66,11 +89,12 @@ export async function apiFetch<T = unknown>(
 
   const res = await fetch(path, init);
 
-  // Direct-visit auth: a 401 on a paired agent means the credential is missing,
-  // expired, or revoked. Drop the stale session and hand the UI to the access
+  // Direct-visit auth: the agent is telling us we are not authorized yet —
+  // either a paired node missing a credential (401) or an unpaired node asking
+  // for its PIN (403). Drop any stale session and hand the UI to the access
   // gate (which shows the PIN splash). The gate's own probe passes
-  // `skipAuthSignal` so it resolves its 401 itself without recursing.
-  if (res.status === 401 && !opts.signal?.aborted) {
+  // `skipAuthSignal` so it resolves the challenge itself without recursing.
+  if (isAuthChallenge(res.status) && !opts.signal?.aborted) {
     clearSession();
     if (!opts.skipAuthSignal) authRequiredHandler?.();
   }

@@ -33,6 +33,10 @@ jobs:
         working-directory: dashboard
         run: npm run typecheck
 
+      - name: Unit tests
+        working-directory: dashboard
+        run: npm test
+
       - name: Build
         working-directory: dashboard
         run: npm run build

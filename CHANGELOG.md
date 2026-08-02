@@ -4,6 +4,39 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.323] - 2026-08-02
+
+### Fixed
+
+- **A freshly installed node's dashboard was a dead end, and it blamed the
+  hardware.** Visiting a new agent by IP showed *"Agent unreachable — check that
+  the board is powered, on the network, and that `ados-supervisor` is running"*.
+  Every clause of that was false: the agent answered in milliseconds with
+  `403 This device is not paired yet. Set up access with the dashboard PIN, or
+  pair it first.`
+
+  The access gate only treated **401** as a challenge. That is the *paired*
+  case — reached off-box without a credential. An unpaired node on the operator's
+  own LAN answers **403**, so the gate fell through to "render the app anyway",
+  every panel then failed, and the generic offline card claimed the board was
+  unreachable. The screen that should have appeared — the branded PIN splash,
+  which already knows how to offer *setting* a PIN on a node that has none —
+  existed and worked, and was simply never reached.
+
+  Both codes now count. Verified end-to-end against a real unpaired agent:
+  `403` → challenge → `pin_set: false` → the splash opens in set-a-PIN mode.
+
+- **The offline card no longer blames the board for a board that answered.**
+  "Did not answer" and "answered, and said no" are different faults with
+  different fixes, and reporting the second as the first sends the operator to
+  check a power cable about a node that is running fine. When the failure was a
+  refusal, the card now says so and quotes the agent's own words.
+
+### Added
+
+- Unit tests for the dashboard, which had no test framework at all. Mirrors the
+  cockpit's vitest setup, and CI now runs them.
+
 ## [0.99.322] - 2026-08-02
 
 ### Fixed
