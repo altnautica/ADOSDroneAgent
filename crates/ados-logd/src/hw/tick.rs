@@ -45,14 +45,6 @@ impl Collector {
         let mut metrics: Vec<TelemetryFrame> = Vec::new();
         let mut unavailable = 0u32;
 
-        // soc.compat is constant; carry it on every snapshot for the read edge.
-        if !self.soc.compat.is_empty() {
-            snap.signals.insert(
-                "soc.compat".to_string(),
-                MpVal::from(self.soc.compat.clone()),
-            );
-        }
-
         if now >= self.next_thermal {
             self.next_thermal = now + THERMAL_CADENCE;
             unavailable += self.fold_thermal(ts, &mut snap, &mut metrics);
@@ -88,6 +80,23 @@ impl Collector {
         if now >= self.next_summary {
             self.next_summary = now + SUMMARY_CADENCE;
             self.fold_summary(ts, &mut snap, &mut metrics);
+        }
+
+        // soc.compat is constant, and it rides along on any snapshot that is
+        // already being emitted so the read edge always has it.
+        //
+        // It is folded in HERE, at the end, and only when something else was
+        // read. Inserting it up front made `snapshot.signals` non-empty on every
+        // single tick, which defeated the empty-snapshot guard in `emit` — so
+        // the base tick cadence (100 ms) wrote an `hw` row 10 times a second
+        // forever, ~864 000 rows a day, even on the majority of ticks where no
+        // class was due and there was nothing to report. A constant is not a
+        // reading, and it must not be what makes a tick look like one.
+        if !snap.signals.is_empty() && !self.soc.compat.is_empty() {
+            snap.signals.insert(
+                "soc.compat".to_string(),
+                MpVal::from(self.soc.compat.clone()),
+            );
         }
 
         self.unavailable_classes = unavailable;

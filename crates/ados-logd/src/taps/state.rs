@@ -25,6 +25,7 @@
 //! the state wire model stays frozen.
 
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tokio::io::{AsyncRead, BufReader};
@@ -128,6 +129,66 @@ const METRICS: &[MetricMap] = &[
 struct PrevState {
     armed: Option<bool>,
     mode: Option<String>,
+    /// How often the numeric metrics are sampled out of the snapshot stream.
+    /// `ZERO` means every snapshot is sampled.
+    metric_interval: Duration,
+    /// When the next metric sample is due. `None` until the first snapshot, so
+    /// a freshly connected tap always records one immediately.
+    next_metric_sample: Option<Instant>,
+}
+
+impl PrevState {
+    /// State for a tap sampling metrics at `sample_hz`.
+    fn new(sample_hz: f64) -> Self {
+        Self {
+            metric_interval: sample_interval(sample_hz),
+            ..Self::default()
+        }
+    }
+
+    /// Whether this snapshot's metrics are due, advancing the schedule when they
+    /// are. Transitions never consult this — only the numeric rows are sampled.
+    ///
+    /// The schedule advances from *now* rather than from the previous due time,
+    /// so a tap that reconnects after a gap records one sample and then resumes
+    /// its cadence, instead of firing a burst to "catch up" on samples whose
+    /// data no longer exists.
+    fn metrics_due(&mut self, now: Instant) -> bool {
+        match self.next_metric_sample {
+            Some(due) if now < due => false,
+            _ => {
+                self.next_metric_sample = Some(now + self.metric_interval);
+                true
+            }
+        }
+    }
+}
+
+/// Default metric sample rate for the state stream: one sample per second.
+///
+/// The state hub publishes at roughly 10 Hz and every snapshot carries ~17
+/// numeric fields, so recording all of them was ~170 rows a second — around 15
+/// million rows a day — landing on flash. Nothing consumes that resolution:
+/// the store's own rollups are minute- and hour-grained, so one sample per
+/// second is already 60 per bucket. The raw-frame tap beside this one samples at
+/// the same rate for the same reason.
+///
+/// This is the durable trend store, not the flight recorder of record — the
+/// autopilot's own log and the router's `.tlog` hold the full-rate truth.
+/// Transitions (arm, disarm, mode change) are never sampled: they drive the
+/// flight-session bookkeeping and every one is recorded.
+pub const DEFAULT_SAMPLE_HZ: f64 = 1.0;
+
+/// The sampling period for a rate, clamping a non-positive or non-finite rate to
+/// the default so a misconfiguration cannot silently disable sampling or divide
+/// by zero. A rate of zero would mean "never", which is never what was meant.
+fn sample_interval(sample_hz: f64) -> Duration {
+    let hz = if sample_hz.is_finite() && sample_hz > 0.0 {
+        sample_hz
+    } else {
+        DEFAULT_SAMPLE_HZ
+    };
+    Duration::from_secs_f64(1.0 / hz)
 }
 
 /// Run the state tap until `shutdown` resolves.
@@ -139,11 +200,12 @@ struct PrevState {
 pub async fn run_state_tap(
     socket_path: impl AsRef<Path>,
     tx: mpsc::Sender<IngestFrame>,
+    sample_hz: f64,
     mut shutdown: Shutdown,
 ) {
     let socket_path = socket_path.as_ref();
     let mut backoff = ReconnectBackoff::default();
-    tracing::info!(path = %socket_path.display(), "state tap started");
+    tracing::info!(path = %socket_path.display(), sample_hz, "state tap started");
     loop {
         tokio::select! {
             biased;
@@ -156,7 +218,7 @@ pub async fn run_state_tap(
                     Some(stream) => {
                         backoff.reset();
                         let reader = BufReader::new(stream);
-                        let mut prev = PrevState::default();
+                        let mut prev = PrevState::new(sample_hz);
                         process_stream(reader, &tx, &mut prev, &mut shutdown).await;
                         // The stream ended (EOF or a read error). Loop to
                         // reconnect; the writer side staying open is checked in
@@ -240,7 +302,15 @@ async fn process_stream<R>(
 
 /// Emit every frame derived from one snapshot: arm/disarm and mode-change events
 /// (emitted before the metrics so the writer opens the flight session ahead of
-/// the rows that belong to it), then one telemetry frame per present metric.
+/// the rows that belong to it), then one telemetry frame per present metric —
+/// the metrics only when this snapshot's sample is due.
+///
+/// The asymmetry is deliberate. A transition is a discrete fact that happened
+/// once; dropping one would lose an arm or a mode change and break the flight
+/// session it drives. A metric is a sample of a continuous quantity, and the
+/// next snapshot carries it again. So transitions are never sampled and metrics
+/// always are.
+///
 /// Returns `Err(())` when the writer channel has closed.
 async fn emit_snapshot(
     snapshot: &Value,
@@ -282,7 +352,12 @@ async fn emit_snapshot(
         }
     }
 
-    // Scalar telemetry: one metric per present numeric field.
+    // Scalar telemetry: one metric per present numeric field, on the sample
+    // cadence. Checked after the transitions above so a snapshot that carries
+    // both still records the transition.
+    if !prev.metrics_due(Instant::now()) {
+        return Ok(());
+    }
     for m in METRICS {
         if let Some(value) = lookup_number(snapshot, m.path) {
             let mut frame = TelemetryFrame::new(ts, m.key, value);
@@ -337,6 +412,9 @@ mod tests {
     async fn run_against_bytes(bytes: Vec<u8>) -> Vec<IngestFrame> {
         let (tx, mut rx) = mpsc::channel::<IngestFrame>(256);
         let reader = BufReader::new(Cursor::new(bytes));
+        // `Default` samples every snapshot, so these tests exercise the emit
+        // mapping without the cadence in the way. The sampling itself is proved
+        // separately by `metrics_are_sampled_but_transitions_never_are`.
         let mut prev = PrevState::default();
         let mut shutdown = Shutdown::never();
         process_stream(reader, &tx, &mut prev, &mut shutdown).await;
@@ -539,6 +617,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn metrics_are_sampled_but_transitions_never_are() {
+        // The state hub publishes at ~10 Hz and each snapshot carries ~17
+        // numeric fields. Recording all of them put ~15 million rows a day on
+        // flash for a store whose own rollups are minute-grained. Metrics are
+        // sampled; transitions are not, because a dropped arm or mode change is
+        // a lost fact, not a lost sample.
+        let (tx, mut rx) = mpsc::channel::<IngestFrame>(256);
+        let mut prev = PrevState::new(1.0);
+
+        // First snapshot: armed, in GUIDED, carrying a metric. All three land.
+        let first = json!({"armed": true, "mode": "GUIDED", "battery": {"voltage": 12.4}});
+        emit_snapshot(&first, &mut prev, &tx).await.unwrap();
+
+        // Second snapshot, immediately after: the metric is not due, but the
+        // disarm and the mode change are facts and must still be recorded.
+        let second = json!({"armed": false, "mode": "LAND", "battery": {"voltage": 12.1}});
+        emit_snapshot(&second, &mut prev, &tx).await.unwrap();
+
+        drop(tx);
+        let mut frames = Vec::new();
+        while let Some(f) = rx.recv().await {
+            frames.push(f);
+        }
+
+        let voltages: Vec<f64> = frames
+            .iter()
+            .filter_map(|f| match f {
+                IngestFrame::Telemetry(t) if t.metric == "battery.voltage.v" => Some(t.value),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            voltages,
+            vec![12.4],
+            "only the due sample is recorded, not every snapshot"
+        );
+
+        assert_eq!(
+            events(&frames, "state.arm").len(),
+            2,
+            "both the arm and the disarm are recorded, sampling notwithstanding"
+        );
+        assert_eq!(
+            events(&frames, "mode.change").len(),
+            2,
+            "both mode changes are recorded, sampling notwithstanding"
+        );
+    }
+
+    #[test]
+    fn a_due_sample_advances_the_schedule_and_a_bad_rate_falls_back() {
+        let mut prev = PrevState::new(1.0);
+        let t0 = Instant::now();
+        assert!(prev.metrics_due(t0), "the first sample is always due");
+        assert!(
+            !prev.metrics_due(t0 + Duration::from_millis(500)),
+            "within the interval, not due"
+        );
+        assert!(
+            prev.metrics_due(t0 + Duration::from_millis(1_100)),
+            "past the interval, due again"
+        );
+
+        // A rate of zero would mean "never sample", which is never what was
+        // meant, so it falls back rather than silently disabling the tap.
+        for bad in [0.0, -5.0, f64::NAN] {
+            assert_eq!(
+                sample_interval(bad),
+                Duration::from_secs_f64(1.0 / DEFAULT_SAMPLE_HZ),
+                "a bad rate falls back to the default"
+            );
+        }
+        assert_eq!(sample_interval(2.0), Duration::from_secs_f64(0.5));
+    }
+
+    #[tokio::test]
     async fn lookup_number_walks_dotted_paths_and_coerces_bool() {
         let v = json!({"a": {"b": 3}, "flag": true, "text": "x"});
         assert_eq!(lookup_number(&v, "a.b"), Some(3.0));
@@ -555,7 +709,7 @@ mod tests {
         let path = dir.path().join("state.sock");
         let (tx, _rx) = mpsc::channel::<IngestFrame>(8);
         let (stop, shutdown) = Shutdown::pair();
-        let handle = tokio::spawn(run_state_tap(path, tx, shutdown));
+        let handle = tokio::spawn(run_state_tap(path, tx, DEFAULT_SAMPLE_HZ, shutdown));
         // Let it attempt a connect and enter the backoff wait.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         stop.fire();
@@ -576,7 +730,7 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel::<IngestFrame>(64);
         let (stop, shutdown) = Shutdown::pair();
-        let handle = tokio::spawn(run_state_tap(path.clone(), tx, shutdown));
+        let handle = tokio::spawn(run_state_tap(path.clone(), tx, DEFAULT_SAMPLE_HZ, shutdown));
 
         // First connection: send one snapshot, then close to force a reconnect.
         let (mut a, _addr) = listener.accept().await.unwrap();

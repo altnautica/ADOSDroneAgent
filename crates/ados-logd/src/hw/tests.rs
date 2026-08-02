@@ -279,6 +279,42 @@ fn cadence_gating_skips_a_class_until_its_period_elapses() {
 }
 
 #[test]
+fn a_tick_with_no_class_due_produces_an_empty_snapshot() {
+    // The collector ticks at 100 ms but every signal class is slower than that,
+    // so most ticks have nothing to report. Those ticks must produce a snapshot
+    // with no signals at all, because that is what `emit`'s empty-snapshot guard
+    // keys on to drop the row.
+    //
+    // The regression: `soc.compat` — a constant read once at construction — used
+    // to be inserted at the top of every tick, before any cadence check. That
+    // made every snapshot non-empty, the guard never fired, and a row landed on
+    // flash 10 times a second forever. A constant is not a reading.
+    let dir = rich_fixture();
+    let mut c = Collector::new(dir.path());
+    let t0 = Instant::now();
+
+    // The first tick fires every class, so it is legitimately full — and it
+    // carries the constant, which is the behaviour worth keeping.
+    let first = c.tick(t0);
+    assert!(
+        !first.snapshot.signals.is_empty(),
+        "the first tick reads every class"
+    );
+    assert!(
+        first.snapshot.signals.contains_key("soc.compat"),
+        "a snapshot that is being emitted still carries soc.compat for the read edge"
+    );
+
+    // One base tick later nothing is due: the fastest class is 200 ms.
+    let quiet = c.tick(t0 + BASE_TICK);
+    assert!(
+        quiet.snapshot.signals.is_empty(),
+        "a tick with no class due must carry no signals, got {:?}",
+        signal_keys(&quiet.snapshot)
+    );
+}
+
+#[test]
 fn fold_throttle_writes_flags_and_a_metric() {
     let mut snap = HwSnapshot::new(1);
     let mut metrics = Vec::new();

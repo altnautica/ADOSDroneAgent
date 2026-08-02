@@ -129,6 +129,7 @@ pub fn spawn_all_taps(
     let state_tap = tokio::spawn(state::run_state_tap(
         paths.state_socket.clone(),
         ingest_tx.clone(),
+        state::DEFAULT_SAMPLE_HZ,
         Shutdown {
             rx: shutdownable.subscribe(),
         },

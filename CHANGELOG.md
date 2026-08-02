@@ -4,6 +4,33 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.320] - 2026-08-02
+
+### Fixed
+
+- **The logging store recorded ~15 million telemetry rows a day that nothing
+  reads.** The state tap lifted ~17 numeric fields out of every snapshot on a
+  stream the state hub publishes at roughly 10 Hz, with no rate limit at all —
+  while the raw-frame tap sitting beside it has been sampled at 1 Hz since it
+  was written, for exactly the reason that applies here too. The store's own
+  rollups are minute- and hour-grained, so one sample per second is already 60
+  per bucket and the other nine tenths were landing on flash unread. Metrics are
+  now sampled at 1 Hz (`state::DEFAULT_SAMPLE_HZ`, tunable per tap).
+
+  Transitions are deliberately **not** sampled. An arm, a disarm or a mode
+  change is a discrete fact that drives the flight-session bookkeeping; dropping
+  one loses it for good, unlike a metric the next snapshot carries again.
+
+- **The hardware collector wrote a snapshot row 10 times a second forever, even
+  with nothing to report.** Every signal class is slower than the 100 ms base
+  tick, so most ticks have nothing due, and `emit` has always had an
+  empty-snapshot guard for exactly that. The guard never fired: `soc.compat` — a
+  constant read once at construction — was inserted at the top of every tick,
+  before any cadence check, which made every snapshot look like a reading.
+  ~864 000 rows a day. The constant now folds in at the end of the tick and only
+  when a class actually reported, so it still rides along on the snapshots that
+  are emitted without manufacturing the ones that are not.
+
 ## [0.99.319] - 2026-08-02
 
 ### Fixed
