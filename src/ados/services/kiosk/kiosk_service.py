@@ -51,6 +51,7 @@ import structlog
 
 from ados.core.config import load_config
 from ados.core.logging import configure_logging, get_logger
+from ados.core.paths import ADOS_RUN_DIR
 
 log = get_logger("kiosk.kiosk_service")
 
@@ -142,6 +143,24 @@ _STDERR_TAIL_BYTES = 2048
 # images expose. The installer installs whichever apt package is available; the
 # kiosk resolves the binary at runtime so it does not depend on one fixed name.
 _BROWSER_CANDIDATES = ("chromium-browser", "chromium", "chromium-browser-stable")
+
+# Directory name for the kiosk browser's profile and cache inside a session
+# user's runtime dir (the windowed path). See _chromium_storage_flags.
+_KIOSK_STORAGE_SUBDIR = "ados-kiosk"
+
+# Upper bound on the browser disk cache. It lives in tmpfs, so this is a RAM
+# budget, not a disk one — generous for a single local page, small enough that
+# it can never compete with the video pipeline for memory.
+_DISK_CACHE_BYTES = 64 * 1024 * 1024
+
+# Where the appliance (cage) launch keeps browser storage. The agent's own
+# runtime dir, which is tmpfs and which the agent creates and owns, so it is
+# guaranteed to exist and to be writable by the root-run cage child.
+#
+# Deliberately NOT $XDG_RUNTIME_DIR (/run/user/0): systemd does not create a
+# runtime dir for a system service, so that path can simply be absent, and
+# Chromium given a --user-data-dir whose parent does not exist fails to start.
+_CAGE_STORAGE_DIR = str(ADOS_RUN_DIR / "kiosk")
 
 
 def _hdmi_present() -> bool:
@@ -464,6 +483,39 @@ def _chromium_render_flags(renderer: str) -> list[str]:
     return ["--disable-gpu"]
 
 
+def _chromium_storage_flags(base_dir: str) -> list[str]:
+    """Pin Chromium's profile and cache into the runtime tmpfs, with a bounded
+    cache.
+
+    Left to itself Chromium writes its HTTP cache, code cache, shader cache,
+    Local Storage, cookies and history under ``$HOME``. Under cage the service
+    runs as root, so that is ``/root/.cache/chromium`` and ``/root/.config/
+    chromium`` — on the SD card, unbounded, and rewritten continuously because
+    the page it is showing is a live-updating SPA with a video stream. A ground
+    station runs that page for its whole life.
+
+    None of it is worth persisting. The kiosk shows one page, served from
+    localhost, with no login and no session to carry across a reboot; the cache
+    exists to avoid a network round trip that is not happening anyway. So it all
+    goes to a tmpfs directory and dies with the boot.
+
+    The size cap matters *because* the target is tmpfs: an unbounded cache there
+    would trade SD wear for RAM exhaustion, which on a 4 GB board sharing memory
+    with a video pipeline is not a trade worth making.
+
+    Applying this on the windowed path too has a second, unrelated benefit: the
+    kiosk stops sharing a profile directory with the desktop user's own browser,
+    so launching it can no longer collide with a Chromium the operator already
+    has open.
+    """
+    base = base_dir.rstrip("/")
+    return [
+        f"--user-data-dir={base}/profile",
+        f"--disk-cache-dir={base}/cache",
+        f"--disk-cache-size={_DISK_CACHE_BYTES}",
+    ]
+
+
 def _build_chromium_argv(url: str, renderer: str) -> list[str]:
     """Full argv for `cage -- <chromium> ...`.
 
@@ -488,6 +540,7 @@ def _build_chromium_argv(url: str, renderer: str) -> list[str]:
         "--no-sandbox",
         "--ozone-platform=wayland",
         *_chromium_render_flags(renderer),
+        *_chromium_storage_flags(_CAGE_STORAGE_DIR),
         "--autoplay-policy=no-user-gesture-required",
         url,
     ]
@@ -758,7 +811,7 @@ def _session_env(session: DesktopSession) -> dict[str, str]:
 
 
 def _build_windowed_chromium_argv(
-    url: str, session_type: str, renderer: str
+    url: str, session_type: str, renderer: str, storage_dir: str
 ) -> list[str]:
     """Full argv for a full-screen Chromium kiosk WITHOUT cage, to run inside an
     already-running desktop session. The Ozone platform matches the session so
@@ -778,6 +831,7 @@ def _build_windowed_chromium_argv(
         "--no-first-run",
         f"--ozone-platform={platform}",
         *_chromium_render_flags(renderer),
+        *_chromium_storage_flags(storage_dir),
         "--autoplay-policy=no-user-gesture-required",
         url,
     ]
@@ -1048,7 +1102,16 @@ def _make_supervisor(
     stripped and the renderer / DRM device / scoped libmali pinned. Raises
     ``FileNotFoundError`` when no Chromium is installed."""
     if session is not None:
-        argv = _build_windowed_chromium_argv(url, session.session_type, renderer)
+        argv = _build_windowed_chromium_argv(
+            url,
+            session.session_type,
+            renderer,
+            # Under the session user's own runtime dir. logind creates it for
+            # any active session, so a graphical session always has one, and it
+            # is owned by the user the child is dropped to — which a dir under
+            # the agent's root-owned runtime tree would not be.
+            f"/run/user/{session.uid}/{_KIOSK_STORAGE_SUBDIR}",
+        )
         # Run the browser AS the logged-in desktop user (not root): Chromium
         # refuses to run as root without --no-sandbox, and dropping to the user
         # keeps its sandbox and gives it a writable profile (HOME from
@@ -1058,6 +1121,17 @@ def _make_supervisor(
             env=_session_env(session),
             sweep_orphans=False,
             run_as_uid=session.uid,
+        )
+    # Chromium will not start when the parent of --user-data-dir is absent, and
+    # this one lives in a tmpfs that is empty on every boot, so create it here
+    # rather than assuming. Running as root under cage, this is ours to make.
+    try:
+        os.makedirs(_CAGE_STORAGE_DIR, exist_ok=True)
+    except OSError as exc:  # pragma: no cover - filesystem-dependent
+        log.warning(
+            "kiosk_storage_dir_unavailable",
+            path=_CAGE_STORAGE_DIR,
+            error=str(exc),
         )
     argv = _build_chromium_argv(url, renderer)
     return KioskSupervisor(

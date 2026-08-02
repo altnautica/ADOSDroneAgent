@@ -478,7 +478,7 @@ def test_resolve_browser_binary_raises_naming_every_candidate() -> None:
 def test_windowed_argv_wayland_has_no_cage_and_wayland_platform() -> None:
     with patch.object(ks, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
         argv = ks._build_windowed_chromium_argv(
-            "http://target/cockpit", "wayland", ks._RENDERER_SOFTWARE
+            "http://target/cockpit", "wayland", ks._RENDERER_SOFTWARE, "/run/user/1000"
         )
     assert "cage" not in argv
     assert argv[0] == "/usr/bin/chromium"
@@ -487,10 +487,48 @@ def test_windowed_argv_wayland_has_no_cage_and_wayland_platform() -> None:
     assert argv[-1] == "http://target/cockpit"
 
 
+def test_cage_argv_keeps_browser_storage_off_the_card() -> None:
+    # Under cage the service runs as root, so an unpinned Chromium writes its
+    # HTTP cache, code cache, shader cache, cookies and history under
+    # /root/.cache and /root/.config — on the SD card, unbounded, and rewritten
+    # continuously because the cockpit is a live SPA with a video stream. A
+    # ground station runs that page for its whole life.
+    with patch.object(ks, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
+        argv = _build_chromium_argv("http://target/cockpit", ks._RENDERER_SOFTWARE)
+
+    assert f"--user-data-dir={ks._CAGE_STORAGE_DIR}/profile" in argv
+    assert f"--disk-cache-dir={ks._CAGE_STORAGE_DIR}/cache" in argv
+    # The cache lives in tmpfs, so an unbounded one would trade SD wear for RAM
+    # exhaustion on a board that shares memory with the video pipeline.
+    assert f"--disk-cache-size={ks._DISK_CACHE_BYTES}" in argv
+    # It lands in the agent's own runtime dir, which is tmpfs on a node (the
+    # path differs on a dev host, which is why this asserts the relationship
+    # rather than a literal), and never anywhere under the root account's
+    # persistent cache or config.
+    assert ks._CAGE_STORAGE_DIR == str(ks.ADOS_RUN_DIR / "kiosk")
+    assert "/root/" not in ks._CAGE_STORAGE_DIR
+
+
+def test_windowed_argv_scopes_storage_to_the_session_runtime_dir() -> None:
+    # Same reasoning, plus one of its own: a kiosk that shares a profile
+    # directory with the desktop user's own browser collides with a Chromium
+    # the operator already has open.
+    with patch.object(ks, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
+        argv = ks._build_windowed_chromium_argv(
+            "http://target/cockpit",
+            "wayland",
+            ks._RENDERER_SOFTWARE,
+            f"/run/user/1000/{ks._KIOSK_STORAGE_SUBDIR}",
+        )
+    assert f"--user-data-dir=/run/user/1000/{ks._KIOSK_STORAGE_SUBDIR}/profile" in argv
+    assert f"--disk-cache-dir=/run/user/1000/{ks._KIOSK_STORAGE_SUBDIR}/cache" in argv
+    assert not any(a.startswith("--user-data-dir=/home") for a in argv)
+
+
 def test_windowed_argv_x11_uses_x11_platform() -> None:
     with patch.object(ks, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
         argv = ks._build_windowed_chromium_argv(
-            "http://target/cockpit", "x11", ks._RENDERER_SOFTWARE
+            "http://target/cockpit", "x11", ks._RENDERER_SOFTWARE, "/run/user/1000"
         )
     assert "--ozone-platform=x11" in argv
     assert "cage" not in argv

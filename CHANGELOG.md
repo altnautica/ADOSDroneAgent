@@ -4,6 +4,46 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.321] - 2026-08-02
+
+### Fixed
+
+- **A blocked task rebooted the box, which is how a slow card becomes an
+  unbootable one.** The installer set `kernel.hung_task_panic = 1` alongside
+  `kernel.panic = 10`, on the reasoning that the kernel-default 120 s timeout
+  meant a busy I/O path would never false-trip. That does not survive contact
+  with an SBC writing to an SD card: 120 s in uninterruptible sleep is
+  reachable whenever storage is saturated, and the reboot lands *during* a
+  write. Slow storage then becomes a damaged filesystem, which is slower still,
+  which trips the timeout again.
+
+  `hung_task_panic` is now off, written as an explicit `0` so an upgrade
+  actively reverts a node that already has it on rather than waiting for a
+  reboot to fall back to the default. `panic_on_oops` and the hardware watchdog
+  are unchanged — an oops means the kernel is already untrustworthy and
+  rebooting is right. The 120 s timeout stays, because it is what puts the
+  "blocked for more than 120 seconds" warning and its stack in the journal:
+  the evidence the reboot used to destroy.
+
+- **The kiosk browser wrote an unbounded cache to the card, continuously, for
+  the life of the box.** Nothing pinned Chromium's storage, so under `cage` —
+  where the service runs as root — its HTTP cache, code cache, shader cache,
+  cookies, history and Local Storage went to `/root/.cache/chromium` and
+  `/root/.config/chromium`. The page it shows is a live-updating SPA carrying a
+  video stream, and a ground station shows it permanently.
+
+  Profile and cache now go to a tmpfs directory with a 64 MiB cache cap, and
+  die with the boot. None of it was worth persisting: the kiosk shows one page
+  served from localhost, with no login and no session to carry across a reboot.
+  The cap matters *because* the target is tmpfs — an unbounded cache there
+  would trade SD wear for RAM exhaustion on a board sharing memory with the
+  video pipeline.
+
+  The windowed (in-desktop) path gets the same treatment under the session
+  user's own runtime dir, which fixes a second thing: the kiosk no longer
+  shares a profile directory with the operator's own browser, so launching it
+  can no longer collide with a Chromium they already have open.
+
 ## [0.99.320] - 2026-08-02
 
 ### Fixed
