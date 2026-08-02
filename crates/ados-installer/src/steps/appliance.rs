@@ -42,7 +42,7 @@ const STALE_NOSLEEP_CONF: &str = "/etc/systemd/logind.conf.d/99-ados-nosleep.con
 /// Every systemd sleep path an appliance must never take. Masking all five makes
 /// the box unsuspendable regardless of which target something tries to activate.
 /// Pure so it is unit-tested without systemd.
-fn sleep_targets() -> [&'static str; 5] {
+pub(crate) fn sleep_targets() -> [&'static str; 5] {
     [
         "sleep.target",
         "suspend.target",
@@ -72,7 +72,7 @@ fn desktop_churn_units() -> [&'static str; 3] {
 /// `display-manager.service` is the alias the distro points at whichever manager
 /// is installed, so both it and lightdm are masked. Pure so it is unit-tested
 /// without systemd.
-fn display_manager_units() -> [&'static str; 2] {
+pub(crate) fn display_manager_units() -> [&'static str; 2] {
     ["display-manager.service", "lightdm.service"]
 }
 

@@ -4,6 +4,45 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.322] - 2026-08-02
+
+### Fixed
+
+- **Dead copies of a corrupted logging store were only reclaimed by the next
+  corruption.** Pruning ran as part of quarantining, so a node that corrupted
+  twice under a build predating the prune carried both copies — up to two
+  gigabytes of unreadable file — until it corrupted a *third* time. That is the
+  worst moment to be short of space, and being short of space is a fair way to
+  cause it. A bench node was carrying 1.6 GB of exactly this beside a live
+  935 MB store. Pruning now also runs on a healthy start.
+
+- **Three on-disk outputs had no retention at all**: the per-plugin logs
+  (systemd `StandardOutput=append:`, with no rotation configured anywhere), the
+  audit trail, and operator flight recordings. None is a fast writer, so none
+  was part of the write load — but the failure they lead to is a full root
+  filesystem, which is how a recoverable problem becomes an unbootable card,
+  and nothing else on the box reclaimed them. A `systemd-tmpfiles` drop-in now
+  ages them out (14 days for plugin logs, 90 for the audit trail and
+  recordings). `systemd-tmpfiles` rather than logrotate because it is already
+  used for the plugin runtime directory and needs no extra package.
+
+- **`ados uninstall` left the box a headless appliance.** Masking is a symlink
+  to `/dev/null` in `/etc/systemd/system`; it is not a file under `/opt/ados`
+  and deleting the agent's drop-ins never undid it. Removing the agent left
+  `display-manager.service`, `lightdm.service` and the five sleep targets
+  masked, with nothing on the machine left to explain why. Uninstall now
+  unmasks them, and a test compares the list against the masking sites
+  themselves so a future mask cannot silently become permanent.
+
+### Measured, and deliberately not changed
+
+- **journald is not a meaningful writer here.** It was a suspect, so it was
+  measured rather than tuned on a hunch: 163 entries in a 60 s window on a live
+  node, on the order of tens of megabytes a day against the ~144 GB/day the
+  store was doing before `0.99.319`-`0.99.320`. `Storage=persistent` also earns
+  its place — it is what keeps an oops trace across the reboot. Left alone, and
+  recorded here so it is not "optimised" later on the same hunch.
+
 ## [0.99.321] - 2026-08-02
 
 ### Fixed

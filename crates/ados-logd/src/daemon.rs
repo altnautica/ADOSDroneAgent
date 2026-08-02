@@ -168,6 +168,13 @@ fn open_and_verify(path: &Path) -> Result<()> {
     match db::quick_check(&conn) {
         Ok(()) => {
             tracing::info!(path = %path.display(), "store integrity check passed");
+            // Reclaim dead copies on a healthy start too, not only when a fresh
+            // corruption happens to run the prune. Otherwise a node that
+            // corrupted twice under an older build carries both copies — up to
+            // two gigabytes of unreadable file — until it corrupts a *third*
+            // time, which is exactly the wrong moment to be short of space, and
+            // is a decent way to cause that third corruption.
+            prune_quarantines(path);
             Ok(())
         }
         Err(e) => {
@@ -676,6 +683,46 @@ mod tests {
         assert_eq!(
             kept, b"garbage from round 3",
             "the newest quarantine is the one retained"
+        );
+    }
+
+    #[test]
+    fn a_healthy_start_reclaims_quarantines_left_by_an_older_build() {
+        // Pruning used to run only as part of quarantining, so a node that
+        // corrupted twice under a build that predated it carried both dead
+        // copies — up to two gigabytes of unreadable file — until it corrupted
+        // a *third* time. That is the worst possible moment to be short of
+        // space, and being short of space is a fair way to cause it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("logs.db");
+
+        // A healthy live store, with two stale quarantines beside it.
+        open_and_verify(&path).expect("a fresh store comes up healthy");
+        for (i, name) in ["logs.db.corrupt-100", "logs.db.corrupt-200"]
+            .into_iter()
+            .enumerate()
+        {
+            std::fs::write(dir.path().join(name), format!("dead copy {i}")).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        // Starting again, with nothing wrong, must still reclaim them.
+        open_and_verify(&path).expect("the healthy store still verifies");
+
+        let quarantined: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains("db.corrupt-"))
+            .collect();
+        assert_eq!(
+            quarantined.len(),
+            QUARANTINE_KEEP,
+            "a healthy start must reclaim superseded quarantines, not wait for the next corruption"
+        );
+        assert_eq!(
+            std::fs::read(quarantined[0].path()).unwrap(),
+            b"dead copy 1",
+            "the newest is the one kept for a post-mortem"
         );
     }
 

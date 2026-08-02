@@ -24,6 +24,33 @@ const SYSTEMD_DIR: &str = "/etc/systemd/system";
 /// The login-banner MOTD the install drops.
 const MOTD_FILE: &str = "/etc/update-motd.d/30-ados";
 
+/// Every unit the install masks, so removing the agent gives the box back.
+///
+/// Masking is not a file under `/opt/ados` and is not undone by deleting the
+/// agent's drop-ins: a masked unit is a symlink to `/dev/null` in
+/// `/etc/systemd/system`, and it outlives everything else here. Without this,
+/// uninstalling left the machine a headless appliance that could not sleep and
+/// would not start a desktop — with nothing left on it to explain why.
+///
+/// Kept in step with the two masking sites in `steps/appliance.rs`
+/// (`sleep_targets`, `display_manager_units`); the symmetry test below asserts
+/// this list covers both.
+pub fn masked_units() -> Vec<&'static str> {
+    vec![
+        // The keep-awake masks, applied on every profile.
+        "sleep.target",
+        "suspend.target",
+        "hibernate.target",
+        "hybrid-sleep.target",
+        "suspend-then-hibernate.target",
+        // The ground-station display-manager stand-down. Unmasking one the
+        // install never masked is a harmless no-op, so this does not need to
+        // know which profile the box was.
+        "display-manager.service",
+        "lightdm.service",
+    ]
+}
+
 /// The system dropin files the install lays down OUTSIDE `/opt/ados`. Pure +
 /// listed here (not glob-discovered) exactly as the canonical CLI removal list
 /// in `main.py:570-585`, so the two uninstall surfaces never drift.
@@ -32,6 +59,7 @@ pub fn dropin_files() -> Vec<&'static str> {
         "/etc/tmpfiles.d/ados.conf",
         "/etc/tmpfiles.d/ados-plugins.conf",
         "/etc/tmpfiles.d/99-ados-usb-autosuspend.conf",
+        "/etc/tmpfiles.d/99-ados-log-retention.conf",
         "/etc/sysctl.d/99-ados-video.conf",
         "/etc/sysctl.d/20-ados-resilience.conf",
         "/etc/systemd/journald.conf.d/10-ados-persistent.conf",
@@ -180,6 +208,9 @@ pub fn run_uninstall(purge: bool, sink: &ProgressSink) -> anyhow::Result<()> {
     for dropin in dropin_files() {
         let _ = remove_path(Path::new(dropin));
     }
+    for unit in masked_units() {
+        let _ = exec::run("systemctl", &["unmask", unit]);
+    }
     sink.step_result("stop_units", &StepOutcome::Ok);
 
     // Reload systemd + udev so the removed units/rules are forgotten.
@@ -227,6 +258,32 @@ pub fn run_uninstall(purge: bool, sink: &ProgressSink) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uninstall_unmasks_everything_the_install_masks() {
+        // Masking is a symlink to /dev/null in /etc/systemd/system. It is not a
+        // file under /opt/ados and deleting the agent's drop-ins does not undo
+        // it, so without an explicit unmask the box was left a headless
+        // appliance that could not sleep and would not start a desktop, with
+        // nothing on it left to explain why.
+        //
+        // Compared against the masking sites themselves rather than a second
+        // hand-written list, so adding a mask over there fails here instead of
+        // silently becoming permanent.
+        let unmasked = masked_units();
+        for unit in crate::steps::appliance::sleep_targets() {
+            assert!(
+                unmasked.contains(&unit),
+                "uninstall must unmask {unit}, which the install masks on every profile"
+            );
+        }
+        for unit in crate::steps::appliance::display_manager_units() {
+            assert!(
+                unmasked.contains(&unit),
+                "uninstall must unmask {unit}, which the ground-station install masks"
+            );
+        }
+    }
 
     #[test]
     fn dropin_list_matches_the_canonical_removal_set() {
