@@ -4,6 +4,35 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.324] - 2026-08-02
+
+### Fixed
+
+- **`0.99.319` put a whole-file rewrite in front of daemon readiness, and it was
+  minutes from crash-looping a real node.** Adopting incremental auto-vacuum on
+  a store created before that mode existed needs one `VACUUM`, and that
+  conversion was done inside `db::open`. On a node with a 950 MB store the unit
+  — `Type=notify`, `TimeoutStartSec=5min`, `Restart=on-failure` — sat in
+  `activating` for minutes accumulating a **955 MB WAL**, heading for a
+  start-timeout kill mid-rewrite followed by a restart into the same rewrite.
+  That is a crash loop that tears the store: precisely the failure the
+  incremental work exists to prevent.
+
+  The conversion now rides the **periodic** `VACUUM` instead — the one rewrite
+  that was going to happen anyway — so it costs nothing extra and never blocks
+  startup. Until a legacy store converts, `incremental_vacuum` is a no-op on it
+  and retention honestly reports `reclaimed_pages: 0` rather than pretending.
+
+  Caught by deploying `0.99.323` to a rig and watching it, not by a test. There
+  is a test now, and it fails against the shipped-and-wrong version.
+
+- **A *fresh* store was not getting incremental mode either.** SQLite only
+  honours `auto_vacuum` while the database is still empty, and setting
+  `journal_mode` is itself enough to establish the file header — so applying the
+  pragmas in the written order left every new store in the default mode, making
+  `incremental_vacuum` a permanent no-op on it. `auto_vacuum` is now set first.
+  The ordering is load-bearing, not stylistic.
+
 ## [0.99.323] - 2026-08-02
 
 ### Fixed

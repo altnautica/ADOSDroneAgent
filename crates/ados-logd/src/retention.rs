@@ -264,6 +264,13 @@ pub fn run_maintenance(
         0
     };
     let vacuumed = if do_vacuum && !stopping {
+        // A legacy store adopts incremental auto-vacuum across a VACUUM, and
+        // this is the only VACUUM that runs. Asking for it here means the
+        // conversion rides a rewrite that was going to happen anyway, instead
+        // of being a whole-file rewrite in front of daemon readiness — which,
+        // when it was tried there, put the unit minutes from a start-timeout
+        // kill mid-rewrite on a real node.
+        let _ = crate::db::request_incremental_auto_vacuum(conn);
         conn.execute_batch("VACUUM")?;
         true
     } else {
@@ -1028,6 +1035,64 @@ mod tests {
             remaining,
             "no rows were lost to a re-triggered eviction"
         );
+    }
+
+    #[test]
+    fn opening_a_legacy_store_never_rewrites_it_but_the_periodic_vacuum_converts_it() {
+        // The regression, found on a real node: converting inside `db::open`
+        // put a ~950 MB whole-file rewrite in front of daemon readiness. The
+        // unit is Type=notify with TimeoutStartSec=5min and Restart=on-failure,
+        // so it sat in `activating` growing a 955 MB WAL and was minutes from
+        // being killed mid-rewrite and restarted into the same rewrite — a
+        // crash loop that tears the store, which is the exact failure this whole
+        // change exists to stop.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("logs.db");
+
+        // A store from before incremental mode existed: created with the
+        // default auto_vacuum, then populated.
+        {
+            let legacy = Connection::open(&path).unwrap();
+            legacy.pragma_update(None, "auto_vacuum", 0i64).unwrap();
+            legacy.pragma_update(None, "journal_mode", "WAL").unwrap();
+            legacy
+                .execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, blob TEXT)")
+                .unwrap();
+            let tx = legacy.unchecked_transaction().unwrap();
+            for _ in 0..2_000 {
+                tx.execute("INSERT INTO t (blob) VALUES (?1)", params!["x".repeat(256)])
+                    .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+
+        // Opening it must NOT convert, and must NOT rewrite it.
+        let before = std::fs::metadata(&path).unwrap().len();
+        let conn = db::open(&path).unwrap();
+        assert_eq!(
+            db::auto_vacuum_mode(&conn).unwrap(),
+            0,
+            "opening a legacy store must not convert it — that is a whole-file \
+             rewrite in front of readiness"
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            before,
+            "opening a legacy store must not rewrite it"
+        );
+
+        // The periodic vacuum — the one rewrite that was going to happen
+        // anyway — is where the conversion rides along.
+        let cfg = RetentionConfig::default();
+        let report =
+            run_maintenance(&conn, &cfg, BASE_US, &path, true, &AtomicBool::new(false)).unwrap();
+        assert!(report.vacuumed);
+        assert_eq!(
+            db::auto_vacuum_mode(&conn).unwrap(),
+            db::AUTO_VACUUM_INCREMENTAL,
+            "the periodic vacuum converts the store"
+        );
+        db::integrity_check(&conn).unwrap();
     }
 
     #[test]

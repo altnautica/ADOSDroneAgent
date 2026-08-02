@@ -193,22 +193,6 @@ pub fn open(path: impl AsRef<Path>) -> Result<Connection, DbError> {
     let conn = Connection::open(path)?;
     apply_pragmas(&conn)?;
     migrate(&conn)?;
-    // A store created before incremental auto-vacuum existed needs one rewrite
-    // to adopt it. Best-effort: if it cannot convert, retention falls back to
-    // the periodic full vacuum and says so, rather than the open failing.
-    match ensure_incremental_auto_vacuum(&conn) {
-        Ok(true) => tracing::info!(
-            event = "logd.auto_vacuum_converted",
-            "converted the store to incremental auto-vacuum (one-time rewrite)"
-        ),
-        Ok(false) => {}
-        Err(e) => tracing::warn!(
-            event = "logd.auto_vacuum_convert_failed",
-            error = %e,
-            "could not convert the store to incremental auto-vacuum; \
-             retention will keep using the periodic full vacuum"
-        ),
-    }
     Ok(conn)
 }
 
@@ -229,6 +213,13 @@ pub fn open_readonly(path: impl AsRef<Path>) -> Result<Connection, DbError> {
 /// Apply the connection PRAGMAs tuned for an append-heavy store on flash media:
 /// WAL journaling, `synchronous=NORMAL`, a busy timeout, and WAL autocheckpoint.
 fn apply_pragmas(conn: &Connection) -> Result<(), DbError> {
+    // auto_vacuum FIRST, before anything can write a page. SQLite only honours
+    // this on a database that is still empty (or across a VACUUM), and setting
+    // the journal mode is itself enough to establish the file header — after
+    // which the change is silently ignored. Ordering is load-bearing, not
+    // stylistic: with it after WAL, a *fresh* store came up in the default mode
+    // and `incremental_vacuum` was a permanent no-op on it.
+    conn.pragma_update(None, "auto_vacuum", AUTO_VACUUM_INCREMENTAL)?;
     // WAL: concurrent read-only readers do not block the writer.
     conn.pragma_update(None, "journal_mode", "WAL")?;
     // NORMAL: one fsync per checkpoint rather than per transaction; safe under
@@ -236,11 +227,6 @@ fn apply_pragmas(conn: &Connection) -> Result<(), DbError> {
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.busy_timeout(std::time::Duration::from_millis(BUSY_TIMEOUT_MS as u64))?;
     conn.pragma_update(None, "wal_autocheckpoint", WAL_AUTOCHECKPOINT_PAGES)?;
-    // Incremental auto-vacuum, so retention can reclaim a bounded number of
-    // pages instead of rewriting the whole file. On a fresh database this takes
-    // effect immediately; converting an existing one needs a `VACUUM`, which
-    // `ensure_incremental_auto_vacuum` does once after migration.
-    conn.pragma_update(None, "auto_vacuum", AUTO_VACUUM_INCREMENTAL)?;
     // Enforce the session foreign keys.
     conn.pragma_update(None, "foreign_keys", "ON")?;
     Ok(())
@@ -252,28 +238,33 @@ pub fn auto_vacuum_mode(conn: &Connection) -> Result<i64, DbError> {
     Ok(mode)
 }
 
-/// Convert an existing store to incremental auto-vacuum if it is not already.
+/// Ask SQLite to adopt incremental auto-vacuum at the **next** `VACUUM`.
 ///
 /// SQLite only honours a change to `auto_vacuum` on an empty database or across
-/// a `VACUUM`, so a store created before this mode existed needs one rewrite to
-/// adopt it. That rewrite is paid **once**, and it replaces the per-eviction
-/// full `VACUUM` that used to run every 45 to 100 minutes forever — so the very
-/// first maintenance pass after this migration is already cheaper than the
-/// steady state it replaces.
+/// a `VACUUM`. A fresh store therefore takes it immediately (`apply_pragmas`
+/// runs before any table exists); a store created before this mode existed needs
+/// one whole-file rewrite to adopt it.
 ///
-/// Returns `true` when a conversion actually ran, so the caller can log it: a
-/// multi-hundred-megabyte rewrite at start is worth a line in the journal rather
-/// than a silent stall that reads like a hang.
-pub fn ensure_incremental_auto_vacuum(conn: &Connection) -> Result<bool, DbError> {
-    if auto_vacuum_mode(conn)? == AUTO_VACUUM_INCREMENTAL {
-        return Ok(false);
+/// **That rewrite must never be on the startup path**, which is why this only
+/// sets the pragma and does not vacuum. Retention calls it immediately before
+/// its own periodic `VACUUM`, so the conversion rides a rewrite that was going
+/// to happen anyway and costs nothing extra.
+///
+/// This was learned the hard way. Doing the conversion inside [`open`] put a
+/// ~950 MB rewrite in front of readiness on a real node: the unit is
+/// `Type=notify` with `TimeoutStartSec=5min` and `Restart=on-failure`, so it sat
+/// in `activating` accumulating a 955 MB WAL and was minutes from being killed
+/// mid-rewrite and restarted into the same rewrite — a crash loop that tears the
+/// store, which is precisely the failure the incremental work exists to stop.
+///
+/// Until a store converts, `incremental_vacuum` is a silent no-op on it and the
+/// file simply does not shrink between periodic vacuums. That is honest and
+/// bounded: retention reports `reclaimed_pages: 0` rather than pretending.
+pub fn request_incremental_auto_vacuum(conn: &Connection) -> Result<(), DbError> {
+    if auto_vacuum_mode(conn)? != AUTO_VACUUM_INCREMENTAL {
+        conn.pragma_update(None, "auto_vacuum", AUTO_VACUUM_INCREMENTAL)?;
     }
-    conn.pragma_update(None, "auto_vacuum", AUTO_VACUUM_INCREMENTAL)?;
-    conn.execute_batch("VACUUM")?;
-    // Re-read rather than assume: if the conversion did not take (a read-only
-    // filesystem, or a build where the pragma is unavailable), retention must
-    // learn that from the database and not from an assumption here.
-    Ok(auto_vacuum_mode(conn)? == AUTO_VACUUM_INCREMENTAL)
+    Ok(())
 }
 
 /// Apply pending migrations in order, advancing `PRAGMA user_version` after each.
