@@ -73,10 +73,15 @@ pub fn full_install_chain() -> Vec<Box<dyn Step>> {
         Box::new(appliance::Appliance),
         Box::new(gpu_provision::GpuProvision),
         Box::new(i2c_enable::I2cEnable),
-        Box::new(watchdog::Watchdog),
         Box::new(systemd::Systemd),
         Box::new(start::Start),
         Box::new(health::Health),
+        // LAST, after health. Arming a hard-reset-on-stall BEFORE the step that
+        // starts every service meant a slow startup reset the board mid-install,
+        // and again on every boot after. It is default-off now, but someone will
+        // opt in, and arming it before the step most likely to stall is wrong on
+        // its own merits.
+        Box::new(watchdog::Watchdog),
     ]
 }
 

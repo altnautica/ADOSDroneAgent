@@ -12,10 +12,18 @@
 //! pinned MAC, no cable or manual power-cycle. `RebootWatchdogSec` covers the
 //! second-order case where a reboot/shutdown itself hangs.
 //!
-//! Gated on the watchdog device actually existing (a VM or a board without one
-//! is a clean no-op) and on the `network.watchdog.enabled` config (default-on).
-//! Optional: a write/re-exec problem degrades, never aborts the install. Runs
-//! after `deps` so the apt systemd upgrade (which does its own re-exec) is done.
+//! **DEFAULT OFF** (`network.watchdog.enabled: true` to arm), and the step runs
+//! LAST, after `health`. Both because arming a hard-reset-on-stall before the
+//! step that starts every service turned a slow startup into an unrecoverable
+//! box: the board reset itself mid-install, mid-write, and again on every boot,
+//! each reset degrading the card until it would not boot at all. See
+//! [`watchdog_enabled`] for the reasoning, and why the capability is kept rather
+//! than deleted.
+//!
+//! Also gated on the watchdog device existing (a VM or a board without one is a
+//! clean no-op), EXCEPT the disarm path, which runs regardless so an upgrade
+//! actively reverts a rig that already carries the drop-in. Optional: a
+//! write/re-exec problem degrades, never aborts the install.
 
 use std::path::Path;
 
@@ -96,16 +104,38 @@ struct WatchdogView {
     enabled: Option<bool>,
 }
 
-/// True unless the config explicitly disables the watchdog. Default-on: a fresh
-/// box with no `network.watchdog` block arms it. Pure so it is unit-tested
-/// without the filesystem.
+/// True only when the config explicitly enables the watchdog.
+///
+/// **Default OFF.** It was default-on, and that turned a slow start into an
+/// unrecoverable box. This step arms a timer that HARD-RESETS the SoC — no
+/// shutdown, no log, no trace — if PID 1 is late by more than a few seconds, and
+/// it ran BEFORE the step that starts every service. A ground station whose
+/// startup exceeded the timeout reset itself mid-install, mid-write, then did
+/// the same on the next boot, and each reset landed during a write so the card
+/// degraded and the next boot was slower still. A loop that ends in a card that
+/// will not boot at all.
+///
+/// That is the same failure this tree already removed once, by another
+/// mechanism: `kernel.hung_task_panic` was turned off because "a hung task is
+/// nearly always slow hardware, and the box is still correct — it needs to be
+/// allowed to finish, not shot". The hardware watchdog was doing exactly that by
+/// a different route, and was left armed.
+///
+/// The capability is worth keeping and is why this is a default rather than a
+/// deletion: a genuinely frozen kernel in the field cannot be recovered by any
+/// software, and the SoC watchdog brings the box back with nobody driving out to
+/// it. That is a field property. On a bench, where a human can power-cycle, it
+/// has cost more outages than it has prevented. So it is opt-in:
+/// `network.watchdog.enabled: true`.
+///
+/// Pure so it is unit-tested without the filesystem.
 fn watchdog_enabled(text: &str) -> bool {
     serde_norway::from_str::<RootView>(text)
         .ok()
         .and_then(|r| r.network)
         .and_then(|n| n.watchdog)
         .and_then(|w| w.enabled)
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 /// Render the systemd `system.conf` drop-in that arms the hardware watchdog.
@@ -143,14 +173,35 @@ impl Step for Watchdog {
         StepKind::Optional
     }
     fn run(&self, _ctx: &mut Ctx) -> StepOutcome {
+        // A previously-armed box must be DISARMED even if the device check would
+        // skip, so an upgrade actively reverts a rig that already carries the
+        // drop-in. A default that only affected fresh installs would leave every
+        // existing rig looping, which is the state this change exists to end.
+        let path = Path::new(CONF_PATH);
+        let enabled_now = std::fs::read_to_string(CONFIG_YAML)
+            .map(|t| watchdog_enabled(&t))
+            .unwrap_or(false);
+        if !enabled_now && path.exists() {
+            let _ = std::fs::remove_file(path);
+            let _ = exec::run("systemctl", &["daemon-reexec"]);
+            tracing::info!(
+                path = CONF_PATH,
+                "removed a previously-armed hardware watchdog drop-in"
+            );
+            return StepOutcome::Ok;
+        }
+
         // No watchdog device → nothing to arm (a VM or a board without one).
         if !Path::new(WATCHDOG_DEV).exists() {
             tracing::info!("no hardware watchdog device present; skipping");
             return StepOutcome::Ok;
         }
+        // An unreadable config resolves to OFF, matching the default. Failing
+        // open here would arm a hard-reset timer on exactly the box whose config
+        // could not be read, which is the least likely one to survive it.
         let enabled = std::fs::read_to_string(CONFIG_YAML)
             .map(|t| watchdog_enabled(&t))
-            .unwrap_or(true);
+            .unwrap_or(false);
         let path = Path::new(CONF_PATH);
         if !enabled {
             // Remove a previously-written drop-in + re-exec so the disable takes.
@@ -206,13 +257,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_config_enables_watchdog() {
-        assert!(watchdog_enabled(""));
-        assert!(watchdog_enabled("agent:\n  name: x\n"));
-        // An unrelated network block still defaults the watchdog on.
-        assert!(watchdog_enabled(
+    fn default_config_leaves_the_watchdog_disarmed() {
+        // DEFAULT OFF. This arms a timer that hard-resets the SoC with no
+        // shutdown, no log and no trace when PID 1 is a few seconds late. On a
+        // ground station whose service startup exceeded it, the board reset
+        // itself mid-install and again on every boot after, each reset landing
+        // during a write, until the card would not boot at all.
+        //
+        // The capability is kept because a genuinely frozen kernel in the field
+        // cannot be recovered by software — but it is opt-in now, because a
+        // reset-on-slowness default is the same failure this tree already
+        // removed once as kernel.hung_task_panic.
+        assert!(!watchdog_enabled(""));
+        assert!(!watchdog_enabled("agent:\n  name: x\n"));
+        // An unrelated network block does not arm it either.
+        assert!(!watchdog_enabled(
             "network:\n  regulatory:\n    mode: region\n"
         ));
+        // Nor does an unparseable config: failing open would arm a hard-reset
+        // timer on exactly the box whose config could not be read.
+        assert!(!watchdog_enabled("{{{ not yaml"));
+    }
+
+    #[test]
+    fn the_watchdog_step_runs_after_health() {
+        // Arming a hard-reset-on-stall BEFORE the step that starts every service
+        // is what turned a slow start into an unrecoverable box. Even
+        // default-off, someone will opt in, so the ordering has to be right.
+        let steps = crate::steps::full_install_chain();
+        let pos = |id: &str| steps.iter().position(|s| s.id() == id).unwrap();
+        assert!(
+            pos("start") < pos("watchdog"),
+            "must arm after services start"
+        );
+        assert!(pos("health") < pos("watchdog"), "and after health passes");
     }
 
     #[test]

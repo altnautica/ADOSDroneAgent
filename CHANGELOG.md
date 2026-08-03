@@ -4,6 +4,44 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.351] - 2026-08-03
+
+### Fixed
+
+- **The hardware watchdog is off by default, and now arms last.** It turned a
+  slow startup into a board that would not boot.
+
+  The step arms a timer that HARD-RESETS the SoC — no shutdown, no log, no trace
+  — when PID 1 is late by more than a few seconds. It ran BEFORE the step that
+  starts every service. On a ground station whose service startup exceeded the
+  timeout, the board reset itself mid-install and mid-write, then did the same on
+  the next boot, and the one after. Each reset landed during a write, so the card
+  degraded, so boot got slower, so the reset came sooner. It ends in a card that
+  will not boot at all.
+
+  This is the same failure this tree already removed once by another mechanism.
+  `kernel.hung_task_panic` was turned off because "a hung task is nearly always
+  slow hardware, and the box is still correct — it needs to be allowed to finish,
+  not shot." The hardware watchdog was doing exactly that by a different route,
+  and was left armed.
+
+  Three changes: the default is off (`network.watchdog.enabled: true` opts in);
+  an unreadable config resolves to off rather than open, because failing open
+  arms a hard-reset timer on precisely the box whose config could not be read;
+  and an upgrade now REMOVES an existing drop-in even on a board where the device
+  check would have skipped, so a rig already carrying it is actively reverted
+  rather than left looping.
+
+  The step also moved after `health`. It is default-off now, but someone will opt
+  in, and arming a reset-on-stall before the step most likely to stall is wrong
+  on its own merits.
+
+  The capability is kept rather than deleted, and that is deliberate: a genuinely
+  frozen kernel in the field cannot be recovered by any software, and the SoC
+  watchdog brings the box back with nobody driving out to it. That is a field
+  property. On a bench, where a human can power-cycle, it has cost more outages
+  than it has prevented.
+
 ## [0.99.350] - 2026-08-03
 
 ### Fixed
