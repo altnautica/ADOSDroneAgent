@@ -89,6 +89,18 @@ const SOURCE_COMPONENT_ID: u8 = 191;
 const TARGET_SYSTEM: u8 = 1;
 const TARGET_COMPONENT: u8 = 1;
 
+/// Parameters that change the vehicle's own MAVLink identity.
+///
+/// Writing one of these through this surface is irreversible: [`TARGET_SYSTEM`]
+/// is fixed, so the vehicle stops answering the very route that would restore
+/// it. Matched case-insensitively because operators type parameter names.
+fn is_identity_param(name: &str) -> bool {
+    matches!(
+        name.trim().to_ascii_uppercase().as_str(),
+        "SYSID_THISMAV" | "MAV_SYS_ID"
+    )
+}
+
 /// The width of a MAVLink `param_id` field: a 16-byte, null-padded ASCII name.
 const PARAM_ID_LEN: usize = 16;
 
@@ -154,7 +166,30 @@ pub async fn set_param(
         .into_response();
     }
 
-    // 2. The parameter must be one the agent has already observed. The native
+    // 2. Refuse a write that would put the vehicle beyond this surface's reach.
+    //
+    //    `TARGET_SYSTEM` below is fixed at 1, so changing the vehicle's own
+    //    MAVLink system id makes every subsequent PARAM_SET from this agent
+    //    addressed to a system that no longer exists — including the write that
+    //    would put it back. ArduPilot drops them, and `arm`/`disarm`/`mode`/
+    //    `rtl` stop reaching the aircraft too, because the command path carries
+    //    the same constant. There is no reboot route on this surface either, so
+    //    an operator cannot even cycle out of it.
+    //
+    //    One request, irreversible, and nothing about it looks unusual at the
+    //    time. Refused with the reason named rather than accepted; DEC-275
+    //    records the limitation and what lifting it properly requires.
+    if is_identity_param(&name) {
+        return ParamError {
+            status: StatusCode::CONFLICT,
+            detail: format!(
+                "Refusing to write '{name}': this agent addresses vehicle                  system id 1 only, so changing the vehicle's MAVLink identity                  would make it unreachable by this surface — including the                  write that would undo it, and arm/disarm/mode/rtl. Use a                  direct USB parameter tool if you need a non-default system id."
+            ),
+        }
+        .into_response();
+    }
+
+    // 3. The parameter must be one the agent has already observed. The native
     //    front's only param source is the router's on-disk cache; a name absent
     //    from it is refused with the FastAPI 404 message.
     if !param_known(&state, &name) {
@@ -303,6 +338,58 @@ fn build_set_response(name: &str, value: f64, ack: bool, cached_value: Option<f6
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn identity_params_are_recognised_however_they_are_typed() {
+        // Operators type parameter names, and MAVLink names are conventionally
+        // upper case but arrive however they arrive.
+        for name in [
+            "SYSID_THISMAV",
+            "sysid_thismav",
+            " SysId_ThisMav ",
+            "MAV_SYS_ID",
+        ] {
+            assert!(
+                is_identity_param(name),
+                "{name} changes the vehicle identity"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_params_are_not_caught_by_the_identity_guard() {
+        // The guard must be narrow. Refusing a benign parameter because its
+        // name merely resembles one of these would be its own bug.
+        for name in [
+            "SYSID_MYGCS", // which GCS may command us — NOT our own identity
+            "SYSID_ENFORCE",
+            "NTF_LED_BRIGHT",
+            "ACRO_RP_RATE",
+            "AHRS_EKF_TYPE",
+        ] {
+            assert!(!is_identity_param(name), "{name} must remain writable");
+        }
+    }
+
+    #[tokio::test]
+    async fn writing_the_vehicle_identity_is_refused_rather_than_stranding_it() {
+        // TARGET_SYSTEM is fixed at 1, so a successful write here would make the
+        // aircraft stop answering the very route that would undo it — and
+        // arm/disarm/mode/rtl with it. One request, irreversible, and nothing
+        // about it looks unusual at the time.
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        // Even with the parameter present in the cache (so the 404 guard would
+        // pass), the write is refused.
+        write_cache(dir.path(), &[("SYSID_THISMAV", 1.0)]);
+        let resp = set_param(
+            Path("SYSID_THISMAV".to_string()),
+            State(state),
+            Json(ParamSetRequest { value: 2.0 }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
     use super::*;
     use crate::auth::PairingState;
     use crate::ipc::{LogdQueryClient, MavlinkIpcClient, StateIpcClient};

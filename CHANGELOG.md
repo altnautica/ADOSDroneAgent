@@ -4,6 +4,32 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.331] - 2026-08-03
+
+### Fixed
+
+- **A single parameter write could put an aircraft permanently beyond the
+  agent's reach.** The param and command paths both address vehicle system id
+  `1`, so writing `SYSID_THISMAV` made the flight controller stop answering
+  every subsequent `PARAM_SET` from this agent — **including the write that
+  would undo it** — and stopped `arm`, `disarm`, `mode` and `rtl` reaching it
+  too. There is no reboot route on this surface either, so an operator could not
+  cycle out of it. One request, irreversible, and nothing about it looks unusual
+  at the time.
+
+  Writes to `SYSID_THISMAV` / `MAV_SYS_ID` are now refused with the reason
+  named, pointing at a direct USB parameter tool for the case where a
+  non-default system id is genuinely wanted. The guard is deliberately narrow —
+  `SYSID_MYGCS` (which GCS may command us) and `SYSID_ENFORCE` stay writable,
+  and there is a test for that, because refusing a benign parameter would be its
+  own bug.
+
+  Recorded as DEC-275, including what lifting the limit properly requires:
+  discovering the vehicle's system id from its `HEARTBEAT` and carrying it
+  through both paths with a per-vehicle record. Merely widening the constant
+  would replace an obvious failure with a subtle one, where a command silently
+  reaches the wrong airframe.
+
 ## [0.99.330] - 2026-08-03
 
 ### Fixed
