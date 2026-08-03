@@ -56,7 +56,13 @@ interface WfbStatus {
   session_packets?: number | null;
   fanout_forwarded?: number | null;
   fanout_drops?: number | null;
-  adapter?: string | null;
+  /** The agent sends an OBJECT here (`{chipset, driver, supports_monitor}`),
+   *  not a string. It was typed as a string and rendered directly, which threw
+   *  "objects are not valid as a React child" and took the whole Link screen
+   *  down on visit — a hand-written type that disagreed with the wire, with
+   *  nothing to catch the disagreement. Typed as it actually is, and read
+   *  through [`adapterDetail`]. */
+  adapter?: { chipset?: string | null; driver?: string | null } | string | null;
   adapter_chipset?: string | null;
   chipset?: string | null;
   interface?: string | null;
@@ -84,6 +90,29 @@ interface HistorySample {
 interface WfbHistory {
   samples?: HistorySample[];
   count?: number;
+}
+
+/** A one-line adapter detail, or nothing.
+ *
+ * The agent sends `adapter` as an object; this screen used to hand it straight
+ * to a React child, which threw "objects are not valid as a React child" and
+ * took the whole tab down the moment it was opened. Rendering a string is the
+ * only safe contract here, so anything that is not one is reduced to one or
+ * dropped.
+ *
+ * Empty strings inside the object are treated as absent rather than joined into
+ * a stray separator — on a ground station whose radio has not been probed yet,
+ * every field is `""`, and " · " is not a useful hint.
+ */
+export function adapterDetail(
+  adapter: { chipset?: string | null; driver?: string | null } | string | null | undefined,
+): string | undefined {
+  if (typeof adapter === "string") return adapter.trim() || undefined;
+  if (!adapter || typeof adapter !== "object") return undefined;
+  const parts = [adapter.driver, adapter.chipset]
+    .map((p) => (typeof p === "string" ? p.trim() : ""))
+    .filter((p) => p.length > 0);
+  return parts.length > 0 ? parts.join(" · ") : undefined;
 }
 
 function linkTone(state: string | undefined, active: boolean | undefined): Tone {
@@ -140,6 +169,7 @@ export function LinkScreen() {
   );
 
   const w = wfb.data;
+  const adapterHint = adapterDetail(w?.adapter);
   const tone = linkTone(w?.state, w?.active ?? undefined);
   const diag = linkDiagView(w?.link_diag);
   const chipset = w?.adapter_chipset ?? w?.chipset ?? null;
@@ -235,7 +265,7 @@ export function LinkScreen() {
 
           <SectionHeader>Adapter</SectionHeader>
           <Row label="Interface" value={w?.interface ?? DASH} />
-          <Row label="Chipset" value={chipset ?? DASH} hint={w?.adapter ?? undefined} />
+          <Row label="Chipset" value={chipset ?? DASH} hint={adapterHint} />
           <Row
             label="Injection"
             left={<Dot tone={w?.adapter_injection_ok ? "ok" : w?.adapter_injection_ok === false ? "err" : "muted"} />}

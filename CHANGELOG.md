@@ -4,6 +4,28 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.348] - 2026-08-03
+
+### Fixed
+
+- **The Link tab crashed the moment it was opened.** "Objects are not valid as a
+  React child", with the offending keys named in the error itself:
+  `{chipset, driver, supports_monitor}`.
+
+  The agent sends `adapter` as an object. The screen had it hand-typed as a
+  string and rendered it directly, so the type and the wire disagreed and
+  nothing existed to notice. The whole tab went down, not just that row -- an
+  error thrown during render takes its subtree with it.
+
+  The field is now typed as it actually is and read through a helper that
+  returns a string or nothing, whatever the wire sends. Blank fields (a ground
+  station whose radio has not been probed reports empty strings for all of them)
+  render as absent rather than as a stray separator.
+
+  The same endpoint carries two other object-valued fields, `aux_lane` and
+  `enabled_channels`. Neither is rendered anywhere, so nothing else of this shape
+  is waiting to fire.
+
 ## [0.99.347] - 2026-08-03
 
 ### Fixed
