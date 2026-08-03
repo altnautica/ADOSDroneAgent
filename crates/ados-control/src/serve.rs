@@ -328,13 +328,39 @@ async fn tcp_edge(State(edge): State<EdgeAuth>, mut request: Request, next: Next
         // place the PIN record is read on the native path, and only on a
         // would-be-401 — an on-box or key-bearing request already passed above, so
         // an authenticated dashboard poll does not stat the record every request.
+        // The media plane additionally accepts the session in the QUERY STRING.
+        //
+        // Not a convenience. A plain `<video>` element cannot attach a custom
+        // header to the requests it makes for a playlist or its segments — the
+        // element does the fetching, and there is no hook. So a header-only
+        // credential is unreachable for any element-driven playback, and the
+        // operator gets a black frame with no way to authenticate it.
+        //
+        // Deliberately confined to `/whep` and `/hls`. A credential in a URL
+        // lands in access logs, browser history and `Referer`, which is why it
+        // is not accepted anywhere on `/api/*` — those callers are all code that
+        // can set a header. Same token, same validation, narrower surface.
+        let query_session = crate::proxy_auth::is_media_plane(&path)
+            .then(|| session_token_from_query(request.uri().query()))
+            .flatten();
         let session_ok = request
             .headers()
             .get(crate::dashboard_pin::DASHBOARD_SESSION_HEADER)
             .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+            .or(query_session)
+            .as_deref()
+            // `session_valid`, not `session_valid_for`: the latter returns false
+            // whenever the node is unpaired, because an unpaired node mints its
+            // sessions under a different issuer. This edge used it anyway, which
+            // was survivable only while an unpaired node's data plane was open —
+            // the stricter check was never reached. Gating the media plane in
+            // both states made it reachable, and the result was an operator who
+            // had set a PIN getting telemetry but a black video frame: the same
+            // session accepted by one layer and refused by the next.
             .map(|tok| {
                 edge.dashboard_pin
-                    .session_valid_for(&edge.pairing.current(), tok)
+                    .session_valid(&edge.pairing.current(), tok)
             })
             .unwrap_or(false);
         if !session_ok {
@@ -499,6 +525,23 @@ fn ws_upgrade_ticket_admits(headers: &http::HeaderMap, pairing: &Pairing) -> boo
 }
 
 /// Wall-clock unix milliseconds, matching the MCP token's millisecond expiry.
+/// The query-string parameter carrying a dashboard session on the media plane.
+pub(crate) const MEDIA_SESSION_QUERY_KEY: &str = "ados_session";
+
+/// Pull a dashboard session token out of a query string, if one is there.
+///
+/// Hand-parsed rather than pulled through a URL crate: the input is a raw query
+/// fragment, the only key that matters is one exact name, and an empty value is
+/// treated as absent so `?ados_session=` cannot read as a credential. Percent
+/// decoding is deliberately not done — the token alphabet is URL-safe, so a
+/// value needing decoding is not one we issued.
+pub(crate) fn session_token_from_query(query: Option<&str>) -> Option<String> {
+    query?.split('&').find_map(|pair| {
+        let (k, v) = pair.split_once('=')?;
+        (k == MEDIA_SESSION_QUERY_KEY && !v.is_empty()).then(|| v.to_string())
+    })
+}
+
 fn now_unix_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -1009,6 +1052,65 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    // --- the media-plane session, in the query string ------------------------
+    //
+    // A `<video>` element cannot attach a header to the requests it makes for a
+    // playlist or its segments, so a header-only credential is unreachable for
+    // element-driven playback and the operator gets a black frame with no way to
+    // authenticate it. These pin the narrow shape of the alternative.
+
+    #[test]
+    fn a_session_travels_in_the_query_string() {
+        assert_eq!(
+            session_token_from_query(Some("ados_session=abc123")),
+            Some("abc123".to_string())
+        );
+        assert_eq!(
+            session_token_from_query(Some("foo=1&ados_session=abc123&bar=2")),
+            Some("abc123".to_string()),
+            "the parameter need not be first"
+        );
+    }
+
+    #[test]
+    fn an_empty_session_parameter_is_absent_not_a_credential() {
+        // `?ados_session=` must not read as "a session was presented". An empty
+        // string that reached the validator would be one typo away from a
+        // credential-shaped hole.
+        assert_eq!(session_token_from_query(Some("ados_session=")), None);
+        assert_eq!(session_token_from_query(Some("")), None);
+        assert_eq!(session_token_from_query(None), None);
+    }
+
+    #[test]
+    fn a_similarly_named_parameter_is_not_the_session() {
+        // Exact key match. A prefix or contains check here would accept
+        // `not_ados_session` or `ados_session_id` as the real thing.
+        assert_eq!(session_token_from_query(Some("not_ados_session=x")), None);
+        assert_eq!(session_token_from_query(Some("ados_session_id=x")), None);
+        assert_eq!(session_token_from_query(Some("session=x")), None);
+    }
+
+    #[test]
+    fn only_the_media_plane_may_carry_a_session_in_the_url() {
+        // The whole justification for a URL-borne credential is that the video
+        // element cannot send a header. Every `/api/*` caller is code that can,
+        // so widening this beyond the media plane would put a credential in
+        // access logs and browser history for no reason.
+        for p in ["/whep", "/whep/main", "/hls", "/hls/main/index.m3u8"] {
+            assert!(crate::proxy_auth::is_media_plane(p), "{p} is media");
+        }
+        for p in [
+            "/api/status",
+            "/api/config",
+            "/api/command",
+            "/cockpit/",
+            "/whepinar",
+        ] {
+            assert!(!crate::proxy_auth::is_media_plane(p), "{p} is NOT media");
+        }
     }
 
     /// A tiny Debug shim so a failing Admit assertion can print the variant.

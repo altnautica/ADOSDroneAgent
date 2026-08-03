@@ -10,7 +10,7 @@
 // We attach a video transceiver in recvonly mode so the agent's
 // mediamtx instance knows we are a viewer, not a publisher.
 
-import { mediaAuthHeaders } from "./media-auth";
+import { mediaAuthHeaders, withMediaAuth } from "./media-auth";
 
 export interface WhepSession {
   pc: RTCPeerConnection;
@@ -108,7 +108,12 @@ export async function startWhep(
       return { ok: false, error: "Failed to build SDP offer." };
     }
 
-    const res = await fetch(whepUrl, {
+    // Both forms of the same session, deliberately. The header is the primary —
+    // this is our own fetch and it can set one. The URL copy costs nothing and
+    // survives the cases the header does not: a proxy that strips unknown
+    // headers, and a redirect that drops them. The agent validates whichever
+    // arrives, and accepts the query form on the media plane only.
+    const res = await fetch(withMediaAuth(whepUrl), {
       method: "POST",
       headers: { "Content-Type": "application/sdp", ...mediaAuthHeaders() },
       body: localDesc.sdp,

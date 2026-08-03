@@ -4,6 +4,49 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.347] - 2026-08-03
+
+### Fixed
+
+- **The cockpit showed telemetry and a black video frame from any browser other
+  than the panel's own.** Closing the LAN video hole in 0.99.328 routed the media
+  plane through the auth edge, and the edge refused the operator's dashboard-PIN
+  session for video while accepting it for everything else. On-box requests
+  returned 200 and off-box returned 403, so the ground station's own screen
+  played and a laptop did not -- which is exactly the shape that hides a
+  regression.
+
+  Two session validators exist, because an unpaired node has no pairing key to
+  key its HMAC with and mints sessions under a different issuer. The edge called
+  the paired-only one, which returns false whenever the node is unpaired. A
+  dispatcher that picks the right one per pairing state already existed, and its
+  own comment described this divergence as "harmless only by accident: an
+  unpaired node's data plane was open anyway, so the stricter one was never
+  consulted". Gating the media plane made it consulted. The edge now calls the
+  dispatcher.
+
+  The hole stays closed. A caller with no PIN and no key still gets nothing.
+
+### Added
+
+- **The media plane accepts the session as a query parameter.** A `<video>`
+  element issues its own requests for a playlist and its segments and offers no
+  hook to attach a header, so a header-only credential is unreachable for
+  element-driven playback -- the operator gets a black frame with no way to
+  authenticate it.
+
+  Confined to `/whep` and `/hls`. A credential in a URL lands in access logs,
+  browser history and `Referer`, so it is not accepted anywhere on `/api/*`,
+  where every caller is code that can set a header. An empty value reads as
+  absent rather than as a credential, and the parameter name is matched exactly.
+
+- **The battery warning requires a measured voltage.** A flight controller with
+  no battery monitor reports 0% at 0.0V, and the banner accepted that as an empty
+  pack, so every bench session without a battery raised a red "Battery low - 0%
+  remaining" over the video. A real pack at 0% still has voltage. A critical
+  alarm that fires every session is one an operator learns to dismiss, and it
+  gets dismissed just as fast on the flight where it is true.
+
 ## [0.99.346] - 2026-08-03
 
 ### Added

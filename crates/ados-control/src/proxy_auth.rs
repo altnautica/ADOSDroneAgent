@@ -521,7 +521,11 @@ fn is_exempt(path: &str) -> bool {
 
 /// The live-video paths. Outside `/api/` by URL shape, but a data plane by
 /// nature: whoever can read these can watch what the aircraft sees.
-fn is_media_plane(path: &str) -> bool {
+/// One definition, two callers: the proxy exemption below and the TCP auth edge
+/// in `serve.rs`, which needs the same answer to decide whether a session may
+/// travel in the query string. Two copies of this predicate would drift, and the
+/// drift would silently widen or narrow where a URL-borne credential is accepted.
+pub(crate) fn is_media_plane(path: &str) -> bool {
     path == "/whep" || path.starts_with("/whep/") || path == "/hls" || path.starts_with("/hls/")
 }
 

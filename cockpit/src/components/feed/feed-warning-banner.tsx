@@ -14,6 +14,20 @@ import { linkDiagView } from "@/lib/link-diag";
 import type { GsStatus, VehicleState } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
+/** Whether a pack voltage is a real measurement rather than an absent one.
+ *
+ * MAVLink `SYS_STATUS` reports `voltage_battery = 65535` mV when the flight
+ * controller has no battery monitor, and a board with nothing attached reports
+ * 0. The agent divides the raw field through by 1000, so reverse the exact
+ * conversion to reject the exact sentinel — a genuine 65.5 V pack reads 65500
+ * mV, not 65535, so this never hides a real high-voltage stack. Mirrors the
+ * guard the telemetry strip already applies to the same field. */
+export function batteryIsMeasured(voltage: number | null | undefined): boolean {
+  if (typeof voltage !== "number" || !Number.isFinite(voltage)) return false;
+  const mv = Math.round(voltage * 1000);
+  return mv > 0 && mv !== 65535;
+}
+
 interface Warning {
   tone: Tone;
   icon: LucideIcon;
@@ -38,9 +52,20 @@ function computeWarning(status: GsStatus | null, telemetry: VehicleState | null)
   }
 
   // 3) Low battery — the vehicle's own percentage, else the paired-drone block.
+  //
+  // Only when the reading is CORROBORATED by a plausible pack voltage. A flight
+  // controller with no battery monitor reports 0% at 0.0V, and `remaining >= 0`
+  // accepted that as an empty pack: every bench session without a battery
+  // attached raised a red "Battery low — 0% remaining" over the video. A real
+  // pack at 0% still has voltage; 0.0V means nobody is measuring.
+  //
+  // The cost of getting this wrong is not a cosmetic one. A critical alarm that
+  // fires on every session is an alarm the operator learns to dismiss, and it is
+  // dismissed just as fast on the flight where it is true.
   const remaining = telemetry?.battery?.remaining;
+  const measured = batteryIsMeasured(telemetry?.battery?.voltage);
   const pct =
-    typeof remaining === "number" && remaining >= 0
+    typeof remaining === "number" && remaining >= 0 && measured
       ? remaining
       : (status?.paired_drone?.battery_pct ?? null);
   if (pct != null && pct <= 20) {
