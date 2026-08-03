@@ -9,13 +9,19 @@
 # Operator one-liner (unchanged):
 #   curl -sSL .../scripts/install.sh | sudo bash -s -- --profile drone ...
 #
-# All user flags are passed through verbatim to the Rust installer.
+# All user flags are passed through verbatim to the Rust installer, with one
+# exception: `--ref <commit|branch|tag>` is consumed here. It pins the macOS
+# build-from-source path to an exact revision, and is refused on Linux, where
+# nothing this bootstrap fetches is addressable by commit (see the block guarding
+# it below).
 # =============================================================================
 set -eu
 
 REL_BASE="https://github.com/altnautica/ADOSDroneAgent/releases/download/prebuilt-installer"
 # Source clone location for the macOS build-from-source path (kept for --upgrade).
-GIT_URL="https://github.com/altnautica/ADOSDroneAgent.git"
+# Overridable so the shell suite can point the clone at a local fixture repo;
+# an operator never sets it.
+GIT_URL="${ADOS_GIT_URL:-https://github.com/altnautica/ADOSDroneAgent.git}"
 
 # ── macOS: rootless per-user workstation install ─────────────────────────────
 # There is no prebuilt Mach-O installer asset for a Mac, so the installer runs
@@ -28,6 +34,55 @@ macos_install() {
         echo "ERROR: on macOS run WITHOUT sudo — the ADOS workstation installs as" >&2
         echo "       per-user LaunchAgents under \$HOME/.ados." >&2
         return 2
+    fi
+
+    # Source selectors, read before any work so a malformed pin fails before the
+    # toolchain probes rather than after them:
+    #   --branch <name>  branch to clone on a fresh checkout (default main)
+    #   --ref <rev>      pin to an exact revision — commit SHA, branch, or tag
+    # --ref wins over --branch when both are given (it is the stricter of the
+    # two). It is consumed here and stripped below, because the Rust installer
+    # rejects flags it does not know.
+    branch="main"
+    ref=""
+    saw_ref=0
+    prev=""
+    for a in "$@"; do
+        [ "$prev" = "--branch" ] && branch="$a"
+        [ "$prev" = "--ref" ] && ref="$a"
+        [ "$a" = "--ref" ] && saw_ref=1
+        prev="$a"
+    done
+    if [ "$saw_ref" -eq 1 ]; then
+        # A --ref with no value would otherwise read as "no pin" and install
+        # latest main under the impression it had pinned something.
+        case "$ref" in
+            '' | -*)
+                echo "ERROR: --ref expects a value: a commit SHA, branch, or tag." >&2
+                echo "       Example: --ref 3b4b8dee" >&2
+                return 2
+                ;;
+        esac
+        # Strip `--ref <rev>` from the argv forwarded to the Rust installer,
+        # which errors on an unknown flag. Rotate through the positional
+        # parameters so values containing spaces survive.
+        argc=$#
+        n=0
+        skip=0
+        while [ "$n" -lt "$argc" ]; do
+            a="$1"
+            shift
+            n=$((n + 1))
+            if [ "$skip" -eq 1 ]; then
+                skip=0
+                continue
+            fi
+            if [ "$a" = "--ref" ]; then
+                skip=1
+                continue
+            fi
+            set -- "$@" "$a"
+        done
     fi
 
     # The install builds the service binaries from source; cargo is required.
@@ -46,14 +101,6 @@ macos_install() {
         return 1
     fi
 
-    # Which branch to clone on a fresh checkout (default main).
-    branch="main"
-    prev=""
-    for a in "$@"; do
-        [ "$prev" = "--branch" ] && branch="$a"
-        prev="$a"
-    done
-
     # Resolve the source tree: a local checkout this script sits inside, else a
     # shallow clone under $HOME/.ados/src.
     repo=""
@@ -61,9 +108,82 @@ macos_install() {
     if [ -n "$script_dir" ] && [ -f "$script_dir/../crates/ados-installer/Cargo.toml" ]; then
         repo="$(CDPATH='' cd -- "$script_dir/.." && pwd)"
     fi
+    if [ -n "$repo" ] && [ -n "$ref" ]; then
+        # Running from a checkout the operator controls. Moving its HEAD would
+        # discard whatever they have in it, and building it as-is would ignore
+        # the pin while reporting success — so neither. They pin it themselves.
+        echo "ERROR: --ref cannot be applied to the local checkout at $repo." >&2
+        echo "       That tree is yours; the installer will not move its HEAD." >&2
+        echo "       Check the revision out yourself and re-run without --ref:" >&2
+        echo "         git -C $repo checkout $ref" >&2
+        return 2
+    fi
     if [ -z "$repo" ]; then
         src="$HOME/.ados/src"
-        if [ -d "$src/.git" ]; then
+        if [ -n "$ref" ]; then
+            # An exact-revision pin. `git clone --branch` takes a branch or a
+            # tag but never a commit SHA, so the pinned path is always
+            # fetch + checkout FETCH_HEAD, over a checkout created here if
+            # there is not one already.
+            #
+            # Every step is checked. The unpinned path below tolerates a failed
+            # fetch (`|| true`) and builds whatever is on disk; doing that with
+            # a pin would silently install a different revision than the one
+            # asked for, which is the entire failure this flag exists to stop.
+            if [ -d "$src/.git" ]; then
+                echo "Updating ADOS source at $src (ref $ref) …"
+                git -C "$src" remote set-url origin "$GIT_URL" 2>/dev/null || true
+            else
+                echo "Creating ADOS source checkout at $src (ref $ref) …"
+                mkdir -p "$src"
+                git init -q "$src" \
+                    || { echo "ERROR: git init $src failed" >&2; return 1; }
+                git -C "$src" remote add origin "$GIT_URL" 2>/dev/null \
+                    || git -C "$src" remote set-url origin "$GIT_URL" \
+                    || { echo "ERROR: could not set the origin remote" >&2; return 1; }
+            fi
+            pinned=""
+            if git -C "$src" fetch --depth 1 origin "$ref"; then
+                pinned="FETCH_HEAD"
+            else
+                # A server cannot resolve an ABBREVIATED commit: the fetch asks
+                # for an exact object name, so `3b4b8dee` is refused with the
+                # same "couldn't find remote ref" a typo gets. Treating that as
+                # "does not exist" would reject a perfectly good pin, so deepen
+                # the branch history once and resolve the prefix locally.
+                # Bounded on purpose — a commit not in the last 500 of $branch
+                # is reported, not chased.
+                #
+                # The guard below takes hex refs SHORTER than a full object
+                # name. A 40-char SHA the server already refused is genuinely
+                # absent, so it fails fast rather than paying for a deep fetch
+                # that cannot contain it.
+                case "$ref" in
+                    *[!0-9a-fA-F]* | '') : ;;
+                    ????????????????????????????????????????*) : ;;
+                    *)
+                        echo "'$ref' is an abbreviated commit; deepening $branch to resolve it …"
+                        git -C "$src" fetch --depth 500 origin "$branch" >/dev/null 2>&1 || true
+                        full="$(git -C "$src" rev-parse --verify --quiet "${ref}^{commit}" || true)"
+                        [ -n "$full" ] && pinned="$full"
+                        ;;
+                esac
+            fi
+            if [ -z "$pinned" ]; then
+                echo "ERROR: could not resolve '$ref' in $GIT_URL." >&2
+                echo "       Check that the commit, branch, or tag exists and is pushed." >&2
+                echo "       An abbreviated commit is resolvable only if it is within the" >&2
+                echo "       last 500 commits of '$branch'; otherwise pass the full" >&2
+                echo "       40-character SHA." >&2
+                echo "       Not falling back to main — nothing was installed." >&2
+                return 1
+            fi
+            if ! git -C "$src" checkout -q --force --detach "$pinned"; then
+                echo "ERROR: resolved '$ref' but could not check it out at $src." >&2
+                return 1
+            fi
+            echo "Source pinned to $(git -C "$src" rev-parse HEAD)"
+        elif [ -d "$src/.git" ]; then
             echo "Updating ADOS source at $src (branch $branch) …"
             git -C "$src" fetch --depth 1 origin "$branch" >/dev/null 2>&1 || true
             git -C "$src" checkout "$branch" >/dev/null 2>&1 || true
@@ -97,6 +217,35 @@ if [ "$(uname -s)" = "Darwin" ]; then
     macos_install "$@"
     exit $?
 fi
+
+# 0. --ref is a macOS-only flag, and saying so is the point of this block.
+#
+# The macOS path builds every binary from the tree it checks out, so pinning
+# that tree pins the install. The Linux path cannot make the same promise: this
+# bootstrap fetches only the installer binary, and the installer resolves the
+# service binaries from ROLLING per-service release tags (`prebuilt-supervisor`,
+# `prebuilt-video`, … — see crates/ados-installer/src/binaries.rs) and the wheel
+# from a version tag or a branch clone (crates/ados-installer/src/steps/
+# venv_agent.rs). Neither is addressable by commit, and no release carries both
+# for one revision, so there is nothing here a SHA could select.
+#
+# Accepting the flag and pinning only what happens to be pinnable is worse than
+# refusing it: a deploy would report a pin it does not have, which is how a rig
+# ends up carrying a wheel from one revision and binaries from another. Making
+# this real needs a per-revision release in CI plus an installer that resolves
+# against it — an installer change, not a bootstrap change.
+for a in "$@"; do
+    if [ "$a" = "--ref" ]; then
+        echo "ERROR: --ref is not supported on Linux." >&2
+        echo "       The Linux install fetches prebuilt binaries from rolling" >&2
+        echo "       per-service release tags and the wheel from a version tag," >&2
+        echo "       so no commit can be selected here. Honoring --ref would pin" >&2
+        echo "       nothing while reporting that it had." >&2
+        echo "       To pin the agent package, use: --channel edge --branch <branch-or-tag>" >&2
+        echo "       (that pins the wheel only; the Rust binaries stay rolling)." >&2
+        exit 2
+    fi
+done
 
 # 1. Root requirement (Linux). Every later step writes under /opt, /etc, and
 #    /etc/systemd/system, so a non-root run cannot proceed.
