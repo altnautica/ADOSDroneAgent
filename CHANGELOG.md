@@ -4,6 +4,33 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.335] - 2026-08-03
+
+### Fixed
+
+- **Per-core CPU frequency and utilization were the largest thing on the card.**
+  With the storage diagnostic finally able to answer the question, a live node
+  writing 1 034 KB/s showed where it was going: of 119 stored rows a second, 108
+  were metrics, and 62 of those were sixteen keys — frequency and utilization for
+  each of eight cores — sampled about four times a second and stored every time.
+
+  Nothing reads that series at that resolution. The headline
+  `cpu.utilization_pct` is a separate 1 Hz aggregate, and the per-core detail
+  exists to show load imbalance and pinned cores, both of which are tens of
+  points wide. What was actually being recorded, forever, was the sampler's own
+  jitter.
+
+  These now go through the same change gate the thermal series already uses: a
+  row when the value moves (1 MHz for a clock, which steps between discrete
+  operating points; 5 percentage points for utilization, which wanders several
+  points doing nothing), or when the signal has been quiet for 30 seconds so a
+  flat reading is never mistaken for a dead producer. The live snapshot keeps
+  carrying the current value on every tick — it is one row for the whole box, so
+  freshness there is free — and only the stored series is gated.
+
+  The write rate on hardware after this change is measured, not predicted, in
+  the notes for the following release.
+
 ## [0.99.334] - 2026-08-03
 
 ### Added

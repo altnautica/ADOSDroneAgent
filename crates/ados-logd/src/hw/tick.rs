@@ -37,6 +37,24 @@ use crate::writer::now_us;
 /// matters thermally and far above the sensor's idle jitter.
 const THERMAL_DEADBAND_C: f64 = 0.5;
 
+/// How far a core's clock must move before it is worth a new row, in kHz.
+///
+/// A governor moves between discrete operating points, so a real change is a
+/// step of tens of MHz; anything smaller is the reading landing either side of
+/// one. 1 MHz is far below the smallest real step and above the jitter.
+const CPU_FREQ_DEADBAND_KHZ: f64 = 1_000.0;
+
+/// How far a core's utilization must move before it is worth a new row, in
+/// percentage points.
+///
+/// Per-core utilization is intrinsically noisy — a core sampled four times a
+/// second wanders several points while doing nothing in particular — so without
+/// a threshold this series stores its own jitter forever. Nothing reads per-core
+/// utilization at finer than this: the headline `cpu.utilization_pct` is a
+/// separate 1 Hz aggregate, and the per-core series exists to show imbalance and
+/// pinned cores, both of which are tens of points wide.
+const CPU_UTIL_DEADBAND_PCT: f64 = 5.0;
+
 impl Collector {
     /// Run one collector tick at `now`: read every class whose cadence is due,
     /// fold the readings into one [`HwSnapshot`], and accumulate the per-signal
@@ -59,7 +77,7 @@ impl Collector {
         }
         if now >= self.next_freq_util {
             self.next_freq_util = now + FREQ_UTIL_CADENCE;
-            unavailable += self.fold_freq_util(ts, &mut snap, &mut metrics);
+            unavailable += self.fold_freq_util(ts, now, &mut snap, &mut metrics);
         }
         if now >= self.next_power {
             self.next_power = now + POWER_CADENCE;
@@ -206,6 +224,7 @@ impl Collector {
     fn fold_freq_util(
         &mut self,
         ts: i64,
+        now: Instant,
         snap: &mut HwSnapshot,
         metrics: &mut Vec<TelemetryFrame>,
     ) -> u32 {
@@ -215,14 +234,23 @@ impl Collector {
         for c in &cores {
             if let Some(khz) = c.freq_khz {
                 let key = format!("cpu.freq.{}", c.core);
+                // The snapshot always carries the live value — it is one row for
+                // every signal on the box, so a fresh reading there is free. The
+                // stored per-core SERIES is what costs a row each, so only that
+                // is gated.
                 snap.signals.insert(key.clone(), MpVal::from(khz));
-                push_metric(
-                    metrics,
-                    ts,
-                    &key,
-                    khz as f64,
-                    &[("core", &c.core.to_string())],
-                );
+                if self
+                    .emit_gate
+                    .should_emit(&key, khz as f64, CPU_FREQ_DEADBAND_KHZ, now)
+                {
+                    push_metric(
+                        metrics,
+                        ts,
+                        &key,
+                        khz as f64,
+                        &[("core", &c.core.to_string())],
+                    );
+                }
             }
             if let Some(gov) = &c.governor {
                 snap.signals
@@ -231,7 +259,7 @@ impl Collector {
         }
         // Utilization is a rate: compute it against the previous /proc/stat.
         // The returned aggregate feeds the 1 Hz `cpu.utilization_pct` summary.
-        if let Some(util) = self.fold_utilization(&stat, ts, snap, metrics) {
+        if let Some(util) = self.fold_utilization(&stat, ts, now, snap, metrics) {
             self.last_cpu_util_all = Some(util);
         }
         self.baselines.proc_stat = Some(stat);
@@ -496,38 +524,60 @@ impl Collector {
     /// Returns the aggregate utilization percentage when one was computed, so the
     /// caller can cache it for the 1 Hz summary.
     fn fold_utilization(
-        &self,
+        &mut self,
         stat: &ProcStat,
         ts: i64,
+        now: Instant,
         snap: &mut HwSnapshot,
         metrics: &mut Vec<TelemetryFrame>,
     ) -> Option<f64> {
-        let prev = self.baselines.proc_stat.as_ref()?;
+        // Lift the baseline out before the gate is touched: the gate needs a
+        // mutable borrow of `self` and the baseline is an immutable one, so they
+        // cannot overlap. Both are a handful of integers per core.
+        let (prev_aggregate, prev_cores) = {
+            let prev = self.baselines.proc_stat.as_ref()?;
+            (prev.aggregate, prev.cores.clone())
+        };
         let mut aggregate_pct = None;
         // Aggregate utilization, the quick-glance `cpu.util.all` metric.
-        if let (Some(p), Some(n)) = (prev.aggregate, stat.aggregate) {
+        if let (Some(p), Some(n)) = (prev_aggregate, stat.aggregate) {
             if let Some(pct) = util_pct(p, n) {
                 snap.signals
                     .insert("cpu.util.all".to_string(), MpVal::from(pct));
-                push_metric(metrics, ts, "cpu.util.all", pct as f64, &[]);
+                // The aggregate is returned for the 1 Hz summary whether or not
+                // it is worth storing, so the summary never goes blank because
+                // this series was quiet.
+                if self.emit_gate.should_emit(
+                    "cpu.util.all",
+                    pct as f64,
+                    CPU_UTIL_DEADBAND_PCT,
+                    now,
+                ) {
+                    push_metric(metrics, ts, "cpu.util.all", pct as f64, &[]);
+                }
                 aggregate_pct = Some(pct as f64);
             }
         }
         // Per-core utilization, matched by core index across the two samples.
         for (core, n) in &stat.cores {
-            let Some(p) = prev.cores.iter().find(|(c, _)| c == core).map(|(_, t)| *t) else {
+            let Some(p) = prev_cores.iter().find(|(c, _)| c == core).map(|(_, t)| *t) else {
                 continue;
             };
             if let Some(pct) = util_pct(p, *n) {
                 let key = format!("cpu.util.{core}");
                 snap.signals.insert(key.clone(), MpVal::from(pct));
-                push_metric(
-                    metrics,
-                    ts,
-                    &key,
-                    pct as f64,
-                    &[("core", &core.to_string())],
-                );
+                if self
+                    .emit_gate
+                    .should_emit(&key, pct as f64, CPU_UTIL_DEADBAND_PCT, now)
+                {
+                    push_metric(
+                        metrics,
+                        ts,
+                        &key,
+                        pct as f64,
+                        &[("core", &core.to_string())],
+                    );
+                }
             }
         }
         aggregate_pct

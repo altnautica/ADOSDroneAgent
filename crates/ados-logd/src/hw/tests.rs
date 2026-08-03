@@ -163,6 +163,98 @@ fn utilization_appears_on_the_second_sample() {
 }
 
 #[test]
+fn a_steady_core_stops_storing_its_own_jitter() {
+    // Per-core frequency and utilization were the single largest row source on a
+    // live node: sixteen keys at roughly four samples a second, storing a series
+    // whose consumers read it at a far coarser resolution than it was written.
+    // A core that stays put must stop producing rows, while the live snapshot
+    // keeps carrying its current value.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let stat_path = root.join("proc/stat");
+    fs::create_dir_all(stat_path.parent().unwrap()).unwrap();
+
+    let mut c = Collector::new(root);
+    let mut at = Instant::now();
+    // Steady 50% on one core: every sample adds the same busy/idle split.
+    let mut busy = 100u64;
+    let mut idle = 1000u64;
+    let sample = |c: &mut Collector, at: Instant, busy: u64, idle: u64| {
+        fs::write(
+            &stat_path,
+            format!("cpu  {busy} 0 50 {idle} 0 0 0 0 0 0\ncpu0 {busy} 0 50 {idle} 0 0 0 0 0 0\n"),
+        )
+        .unwrap();
+        c.tick(at)
+    };
+
+    sample(&mut c, at, busy, idle);
+    let mut emitted_after_first = 0usize;
+    let mut last_snapshot_had_util = false;
+    // Several more samples at the class cadence, all at the same utilization.
+    for _ in 0..5 {
+        busy += 100;
+        idle += 100;
+        at += FREQ_UTIL_CADENCE + Duration::from_millis(1);
+        let out = sample(&mut c, at, busy, idle);
+        emitted_after_first += out
+            .metrics
+            .iter()
+            .filter(|m| m.metric == "cpu.util.0")
+            .count();
+        last_snapshot_had_util = out.snapshot.signals.contains_key("cpu.util.0");
+    }
+
+    // The first of those five establishes the baseline; the rest sit inside the
+    // deadband and well inside the heartbeat, so they must store nothing.
+    assert_eq!(
+        emitted_after_first, 1,
+        "a core holding one utilization should store one row, not one per sample"
+    );
+    // ...but the live value is still there for anything reading the snapshot.
+    assert!(
+        last_snapshot_had_util,
+        "gating the stored series must not blank the live snapshot"
+    );
+}
+
+#[test]
+fn a_core_that_actually_moves_still_stores_a_row() {
+    // The gate must not swallow a real change: a core going from idle to pinned
+    // is exactly what the series exists to show.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let stat_path = root.join("proc/stat");
+    fs::create_dir_all(stat_path.parent().unwrap()).unwrap();
+
+    let mut c = Collector::new(root);
+    let mut at = Instant::now();
+    let write = |busy: u64, idle: u64| {
+        fs::write(
+            &stat_path,
+            format!("cpu  {busy} 0 50 {idle} 0 0 0 0 0 0\ncpu0 {busy} 0 50 {idle} 0 0 0 0 0 0\n"),
+        )
+        .unwrap();
+    };
+
+    write(100, 1000);
+    c.tick(at);
+    // ~50% busy.
+    write(200, 1100);
+    at += FREQ_UTIL_CADENCE + Duration::from_millis(1);
+    c.tick(at);
+    // Now pinned: all of the delta is busy time.
+    write(400, 1100);
+    at += FREQ_UTIL_CADENCE + Duration::from_millis(1);
+    let out = c.tick(at);
+
+    assert!(
+        out.metrics.iter().any(|m| m.metric == "cpu.util.0"),
+        "a core jumping to fully busy must store a row"
+    );
+}
+
+#[test]
 fn summary_metrics_emit_at_one_hz_from_cached_class_values() {
     // A fixture with memory + thermal + two distinct /proc/stat samples so
     // the 1 Hz summary can derive cpu.utilization_pct, mem.available_pct and
