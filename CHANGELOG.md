@@ -4,6 +4,28 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.346] - 2026-08-03
+
+### Added
+
+- **Release one drone's fleet slot without dropping the fleet.** The only reset
+  a ground station offered was station-wide: it wipes the radio keys and drops
+  every member. That is the wrong tool for "this airframe is being retired or
+  re-flashed", and with nothing better available a bench removed a drone by
+  editing the registry file by hand -- a runtime patch of the kind that leaves a
+  box in a state no install can reproduce.
+
+  `DELETE /api/v1/ground-station/wfb/pair/:device_id` frees one slot. The
+  registry already had the operation; nothing exposed it.
+
+  It does not touch keys. A fleet shares one radio keypair, so the released
+  drone keeps working until it is re-paired or re-flashed. What is freed is the
+  slot number, so the next drone to pair takes it rather than the station
+  reporting itself full while holding registrations for airframes that no longer
+  exist. Releasing a device that holds no slot reports it absent rather than
+  succeeding, because a typo that reads as a completed release is a typo nobody
+  goes looking for.
+
 ## [0.99.345] - 2026-08-03
 
 ### Fixed

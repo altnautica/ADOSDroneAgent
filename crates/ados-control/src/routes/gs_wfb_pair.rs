@@ -471,6 +471,75 @@ pub async fn delete_wfb_pair(State(_state): State<AppState>) -> Response {
     }
 }
 
+/// `DELETE /api/v1/ground-station/wfb/pair/:device_id` — release ONE drone's
+/// fleet slot.
+///
+/// The station-wide unpair above is the only reset that existed, and it is the
+/// wrong tool for "this one airframe is being retired or re-flashed": it wipes
+/// the radio keys and drops every other member of the fleet with it. The gap
+/// meant a bench removing one drone edited `fleet.json` by hand, which is a
+/// runtime patch of exactly the kind that leaves a box in a state no install can
+/// reproduce.
+///
+/// Releasing a slot does NOT touch keys. The fleet shares one radio keypair, so
+/// the released drone keeps working until it is re-paired or re-flashed; what is
+/// freed is the slot number, so the next drone to pair takes it rather than
+/// running the fleet out of slots.
+pub async fn delete_fleet_slot(
+    State(_state): State<AppState>,
+    axum::extract::Path(device_id): axum::extract::Path<String>,
+) -> Response {
+    if !is_ground_station() {
+        return profile_mismatch();
+    }
+    if device_id.trim().is_empty() {
+        return nested_detail(
+            StatusCode::BAD_REQUEST,
+            json!({
+                "code": "E_DEVICE_ID_REQUIRED",
+                "message": "a device id is required to release a fleet slot",
+            }),
+        );
+    }
+
+    let mut registry = load_registry();
+    let released = registry.release(&device_id);
+    if !released {
+        // Not an error worth a 500: the caller's intent is "this drone should
+        // not hold a slot", and it does not. Report it as already-absent with
+        // the roster, so a retry after a partial failure is safe.
+        return nested_detail(
+            StatusCode::NOT_FOUND,
+            json!({
+                "code": "E_SLOT_NOT_FOUND",
+                "message": format!("{device_id} holds no fleet slot"),
+                "slots": slot_table(&registry),
+            }),
+        );
+    }
+
+    if let Err(e) = registry.persist(std::path::Path::new(FLEET_REGISTRY_PATH)) {
+        // The release exists only in memory. Refuse rather than report a slot
+        // freed that the ground station will re-read as still taken on restart.
+        tracing::error!(error = %e, device_id = %device_id, "fleet_registry_persist_failed");
+        return nested_detail(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json!({
+                "code": "E_FLEET_PERSIST_FAILED",
+                "message": "the slot was released in memory but could not be persisted",
+            }),
+        );
+    }
+
+    tracing::info!(device_id = %device_id, "fleet_slot_released");
+    Json(json!({
+        "released": true,
+        "device_id": device_id,
+        "slots": slot_table(&registry),
+    }))
+    .into_response()
+}
+
 // ---------------------------------------------------------------------------
 // Command-socket reply mapping.
 // ---------------------------------------------------------------------------
@@ -632,6 +701,52 @@ mod tests {
             .map(|m| m.is_file() && m.len() == WFB_KEY_FILE_BYTES)
             .unwrap_or(false);
         assert!(!paired);
+    }
+
+    #[test]
+    fn releasing_one_slot_leaves_the_rest_of_the_fleet_registered() {
+        // The whole point of the per-device release: retiring one airframe must
+        // not disturb the others. The station-wide unpair is the tool that drops
+        // everyone, and reaching for it to remove a single drone is what made a
+        // bench edit the registry file by hand instead.
+        let mut registry = FleetRegistry::default();
+        registry.allocate("drone-a");
+        registry.allocate("drone-b");
+        registry.allocate("drone-c");
+
+        assert!(registry.release("drone-b"));
+
+        let left: Vec<String> = registry.slots().map(|s| s.device_id.clone()).collect();
+        assert_eq!(left, vec!["drone-a".to_string(), "drone-c".to_string()]);
+    }
+
+    #[test]
+    fn a_released_slot_is_reissued_rather_than_running_the_fleet_out() {
+        // Releasing frees the slot NUMBER. Without that, a station that had
+        // cycled through drones would report itself full while holding
+        // registrations for airframes that no longer exist.
+        let mut registry = FleetRegistry::default();
+        let a = registry.allocate("drone-a").unwrap();
+        registry.allocate("drone-b");
+
+        assert!(registry.release("drone-a"));
+        assert_eq!(
+            registry.allocate("drone-d"),
+            Some(a),
+            "the freed slot number should be the next one issued"
+        );
+    }
+
+    #[test]
+    fn releasing_a_device_that_holds_no_slot_reports_absent_rather_than_succeeding() {
+        // The caller's intent is "this drone should not hold a slot". Reporting
+        // success for a device that was never registered would make a typo look
+        // like a completed release, and the operator would stop looking.
+        let mut registry = FleetRegistry::default();
+        registry.allocate("drone-a");
+
+        assert!(!registry.release("never-paired"));
+        assert_eq!(registry.slots().count(), 1, "nothing else may be disturbed");
     }
 
     #[test]

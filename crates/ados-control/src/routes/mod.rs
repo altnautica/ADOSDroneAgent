@@ -545,6 +545,13 @@ pub fn build_router(state: AppState, net_native: bool, hid_native: bool) -> Rout
             "/api/v1/ground-station/wfb/pair",
             post(gs_wfb_pair::post_wfb_pair).delete(gs_wfb_pair::delete_wfb_pair),
         )
+        // Release ONE drone's fleet slot. The station-wide unpair above wipes the
+        // radio keys and drops every member; retiring a single airframe needed a
+        // scalpel, and without one a bench edited the registry file by hand.
+        .route(
+            "/api/v1/ground-station/wfb/pair/:device_id",
+            delete(gs_wfb_pair::delete_fleet_slot),
+        )
         // Ground-station video writes: recording start/stop + the camera-source switch.
         .route(
             "/api/v1/ground-station/recording/start",

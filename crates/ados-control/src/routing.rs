@@ -281,6 +281,8 @@ fn native_routes() -> Vec<NativeRoute> {
         put("/api/v1/ground-station/mesh/config"),
         post("/api/v1/ground-station/wfb/pair"),
         delete("/api/v1/ground-station/wfb/pair"),
+        // Release one drone's fleet slot, without touching the shared radio keys.
+        delete("/api/v1/ground-station/wfb/pair/:device_id"),
         // Ground-station video writes: recording start/stop (ados-video) + the
         // camera-source switch (a MAVLink COMMAND_LONG to the FC socket).
         post("/api/v1/ground-station/recording/start"),
@@ -544,7 +546,7 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            150,
+            151,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);
