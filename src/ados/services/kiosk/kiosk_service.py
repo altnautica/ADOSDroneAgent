@@ -473,13 +473,35 @@ def _resolve_browser_binary() -> str:
 def _chromium_render_flags(renderer: str) -> list[str]:
     """Chromium flags for the chosen renderer.
 
-    GPU: Wayland + EGL + GPU rasterization (hardware accelerated, used only
-    when the GPU userspace is provisioned). Software: ``--disable-gpu`` so
-    Chromium composites on the CPU and never opens the GPU EGL, matching cage's
-    pixman renderer so nothing in the stack touches a GPU that cannot be driven.
+    GPU: let Chromium pick its own GL implementation. **Do not name one.**
+
+    This used to pass ``--use-gl=egl``, and that flag has since been renamed
+    upstream to ``--gl=``. On a current Chromium the old spelling is not
+    rejected loudly — it resolves to "no implementation", so the GPU process
+    exits during initialization, over and over, and the panel stays black while
+    every other health signal reads fine. Measured on a ground station running
+    Chromium 150::
+
+        (no flag)               gpu_process_exits=0
+        --gl=egl-angle          gpu_process_exits=0
+        --use-angle=gl          gpu_process_exits=0
+        --use-gl=egl            gpu_process_exits=4   <- the only failing option
+
+    Several spellings work; passing none of them also works, and is the only
+    option that cannot go stale the same way. Chromium's default on Linux is
+    already the ANGLE/EGL path we were trying to ask for, so naming it bought
+    nothing and cost a black screen.
+
+    ``--enable-gpu-rasterization`` is likewise dropped: it has been the default
+    for years, and carrying a flag whose behaviour is now the default is how the
+    previous one survived long enough to break.
+
+    Software: ``--disable-gpu`` so Chromium composites on the CPU and never
+    opens the GPU EGL, matching cage's pixman renderer so nothing in the stack
+    touches a GPU that cannot be driven.
     """
     if renderer == _RENDERER_GPU:
-        return ["--use-gl=egl", "--enable-gpu-rasterization"]
+        return []
     return ["--disable-gpu"]
 
 

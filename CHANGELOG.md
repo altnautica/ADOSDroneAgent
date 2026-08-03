@@ -4,6 +4,37 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.329] - 2026-08-03
+
+### Fixed
+
+- **The HDMI panel was black on a working ground station, because of a Chromium
+  flag that was renamed upstream.** The kiosk passed `--use-gl=egl` on the GPU
+  path. That spelling has since become `--gl=`, and the old one does not fail
+  loudly — it resolves to "no implementation", so Chromium's GPU process exits
+  during initialization, again and again, while `cage` stays up holding the
+  display. Every health signal read fine: the unit was `active`, zero restarts,
+  the supervisor's child was alive, the journal's last line was
+  `kiosk_child_running`. The screen was simply black.
+
+  Audited on the affected board (Chromium 150), all under `cage`::
+
+      (no flag)               gpu_process_exits=0
+      --gl=egl-angle          gpu_process_exits=0
+      --use-angle=gl          gpu_process_exits=0
+      --use-angle=gles        gpu_process_exits=0
+      --use-gl=egl  (ours)    gpu_process_exits=4   <- the only failing option
+
+  The GPU path now names **no** GL implementation at all. Several spellings
+  work, but only naming none of them cannot go stale the same way, and
+  Chromium's Linux default is already the ANGLE/EGL path the flag was trying to
+  request. `--enable-gpu-rasterization` is dropped for the same reason: it has
+  been the default for years, and carrying flags whose behaviour is now the
+  default is precisely how the broken one survived long enough to matter.
+
+  The software path is unchanged (`--disable-gpu`), so a board that genuinely
+  cannot drive a GPU is unaffected.
+
 ## [0.99.328] - 2026-08-03
 
 ### Security

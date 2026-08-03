@@ -436,16 +436,17 @@ def test_build_chromium_argv_software_disables_gpu() -> None:
     with patch.object(ks, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
         argv = _build_chromium_argv("http://x", ks._RENDERER_SOFTWARE)
     assert "--disable-gpu" in argv
-    assert "--use-gl=egl" not in argv
+    assert not any(a.startswith(("--use-gl", "--gl=", "--use-angle")) for a in argv)
     assert "--enable-gpu-rasterization" not in argv
 
 
-def test_build_chromium_argv_gpu_uses_egl() -> None:
-    """GPU renderer -> EGL + GPU rasterization, and NOT --disable-gpu."""
+def test_build_chromium_argv_gpu_names_no_gl_implementation() -> None:
+    """GPU renderer -> let Chromium choose, and NOT --disable-gpu."""
     with patch.object(ks, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
         argv = _build_chromium_argv("http://x", ks._RENDERER_GPU)
-    assert "--use-gl=egl" in argv
-    assert "--enable-gpu-rasterization" in argv
+    assert not any(a.startswith(("--use-gl", "--gl=", "--use-angle")) for a in argv), (
+        "the GPU path must not hardcode a GL implementation name — that is what broke"
+    )
     assert "--disable-gpu" not in argv
 
 
@@ -557,8 +558,9 @@ def test_windowed_supervisor_honours_the_resolved_gpu_renderer() -> None:
     assert "--disable-gpu" not in argv, (
         "a desktop session must not force software when GPU was resolved"
     )
-    assert "--use-gl=egl" in argv
-    assert "--enable-gpu-rasterization" in argv
+    assert not any(a.startswith(("--use-gl", "--gl=", "--use-angle")) for a in argv), (
+        "the GPU path must not hardcode a GL implementation name — that is what broke"
+    )
 
 
 def test_windowed_supervisor_still_passes_software_when_resolved_software() -> None:
@@ -574,7 +576,7 @@ def test_windowed_supervisor_still_passes_software_when_resolved_software() -> N
             )
     argv = sup._argv
     assert "--disable-gpu" in argv
-    assert "--use-gl=egl" not in argv
+    assert not any(a.startswith(("--use-gl", "--gl=", "--use-angle")) for a in argv)
 
 
 def test_detect_desktop_session_returns_active_wayland_session() -> None:
@@ -957,11 +959,15 @@ def test_cage_env_gpu_without_lib_dir_no_ld_path() -> None:
 
 
 def test_chromium_render_flags() -> None:
+    # Software still explicitly disables the GPU so nothing in the stack opens
+    # an EGL it cannot drive.
     assert ks._chromium_render_flags(ks._RENDERER_SOFTWARE) == ["--disable-gpu"]
-    assert ks._chromium_render_flags(ks._RENDERER_GPU) == [
-        "--use-gl=egl",
-        "--enable-gpu-rasterization",
-    ]
+    # The GPU path names NOTHING. `--use-gl=egl` was renamed upstream to
+    # `--gl=`, and the stale spelling does not fail loudly — it resolves to "no
+    # implementation", so the GPU process exits during init on a loop and the
+    # panel stays black while every health signal reads fine. Measured on
+    # Chromium 150: the old flag was the ONLY option that failed.
+    assert ks._chromium_render_flags(ks._RENDERER_GPU) == []
 
 
 def test_looks_gpu_failure_matches_markers() -> None:
@@ -1004,7 +1010,7 @@ def test_make_supervisor_cage_gpu_strips_display_and_scopes_libmali() -> None:
     with patch.object(ks, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
         sup = ks._make_supervisor("http://x", None, ks._RENDERER_GPU, "/opt/ados/gpu/mali")
     assert sup._argv[0] == "cage"
-    assert "--use-gl=egl" in sup._argv
+    assert not any(a.startswith(("--use-gl", "--gl=", "--use-angle")) for a in sup._argv)
     assert sup._env is not None
     assert sup._env["WLR_RENDERER"] == "gles2"
     assert sup._env["LD_LIBRARY_PATH"].startswith("/opt/ados/gpu/mali")
