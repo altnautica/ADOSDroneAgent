@@ -4,6 +4,84 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.355] - 2026-08-03
+
+### Fixed
+
+- **HLS is remuxed only while something is watching it.** `hlsAlwaysRemux` kept
+  a low-latency muxer segmenting the stream at one second whether or not any
+  HLS client existed.
+
+  Measured on a ground station while an operator's video was freezing: the muxer
+  sat attached to the main path as a third reader with `bytesSent=0` — it had
+  never delivered a single byte to anyone — while the box ran at load 4.94 on
+  four cores and two WebRTC sessions competed with the on-screen browser.
+
+  HLS stays available; the on-box dashboard's video panel uses it, and mediamtx
+  now starts the muxer on the first request instead of holding one open forever.
+  The cost is a slightly slower first HLS frame, paid by whoever asks for it.
+
+## [0.99.354] - 2026-08-03
+
+### Fixed
+
+- **The access point finds its radio by driver, not by name.** Interface names
+  are not stable: measured across three reboots of a ground station, `wlan0` was
+  the onboard Broadcom chip twice and the USB long-range radio once. A hardcoded
+  `wlan0` therefore meant a one-in-three chance of configuring the access point
+  on the aircraft's radio link.
+
+  Resolution reads the same generated adapter tables the radio itself consults,
+  so the two cannot disagree about which adapter is which. Two independent
+  guards, because the cost of being wrong is taking the aircraft's link down:
+  resolution avoids the radio by driver, and the config write refuses outright
+  if the interface it ended up with is the one the radio reports it opened. A
+  box with no onboard WiFi gets no access point rather than stealing the radio.
+
+- `network.hotspot.interface` is now a real setting. A status route already
+  reported it while nothing consumed it, so a value an operator set was shown
+  back to them and then ignored.
+
+## [0.99.353] - 2026-08-03
+
+### Fixed
+
+- **The HDMI cockpit no longer comes up black.** The kiosk unit exported an
+  `XDG_RUNTIME_DIR` that logind only creates for a real login session. A system
+  service never gets one, so on a freshly installed appliance the directory was
+  simply absent and the compositor failed at startup with "Unable to open
+  Wayland socket".
+
+  The compositor process stays alive after that failure, so the unit read
+  `active running` while the screen showed nothing but the framebuffer cursor.
+  It only ever appeared to work on boxes where a desktop session had already
+  created the directory. The kiosk now points at a path the agent creates and
+  owns.
+
+## [0.99.352] - 2026-08-03
+
+### Fixed
+
+- **Every unit generates its own access-point passphrase.** Two paths still put
+  the same passphrase on every unit: the entropy-failure branch substituted a
+  single compiled-in string while its own comment claimed to be failing closed,
+  and — more damagingly — that same string was the shipped configuration
+  default. A configured passphrase takes precedence over a generated one, so
+  per-unit generation was skipped on any box that read the default.
+
+  The default is now empty, which means "generate one". Losing the access point
+  when the random number generator fails is recoverable and visible; a network
+  that presents as protected while sharing one published key across every unit
+  is neither. The generated value is shown on the display page, the on-box
+  console and the installer's completion card.
+
+- **A factory reset erases identity as well as credentials.** The shell script
+  erased the device identity, configuration and logs while the API path
+  preserved them, so the two disagreed about what a factory reset meant. They
+  now share one list: a reset unit comes back indistinguishable from a freshly
+  flashed one. The profile marker is still preserved — it records what the
+  hardware is rather than who holds it.
+
 ## [0.99.351] - 2026-08-03
 
 ### Fixed
