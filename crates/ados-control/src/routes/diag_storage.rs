@@ -17,6 +17,7 @@
 //! card is fine" on exactly the card that is dying.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use axum::{extract::State, Json};
 use serde_json::{json, Value};
@@ -51,9 +52,18 @@ const CRITICAL_KB_S: f64 = 1_000.0;
 const CRITICAL_FS_USED_PCT: f64 = 90.0;
 
 pub async fn get_storage_diagnostics(State(state): State<AppState>) -> Json<Value> {
+    // Take the direct measurement first. It costs one window of wall clock and
+    // it is the reading that does not depend on anything else on the box being
+    // alive, which is the whole point of it.
+    let live = sample_write_window(Path::new(DISKSTATS), LIVE_WINDOW).await;
     let rows = state.logd.hw_rows(WEAR_ROWS).await;
     let store_dir = store_dir();
-    let mut body = build(rows.as_deref(), &store_dir, fs_usage(&store_dir));
+    let mut body = build(
+        rows.as_deref(),
+        &store_dir,
+        fs_usage(&store_dir),
+        live.as_ref().map(|(a, b, w)| (a.as_str(), b.as_str(), *w)),
+    );
     if let Some(obj) = body.as_object_mut() {
         obj.insert(
             "janitor".to_string(),
@@ -63,13 +73,34 @@ pub async fn get_storage_diagnostics(State(state): State<AppState>) -> Json<Valu
     Json(body)
 }
 
-/// Assemble the verdict from the three independent inputs, kept as one pure
+/// Assemble the verdict from the four independent inputs, kept as one pure
 /// function so every branch — including "the store is down" — is testable without
 /// a rig, a socket, or a filesystem.
-pub fn build(rows: Option<&[HwRow]>, store_dir: &Path, fs: Option<(u64, u64)>) -> Value {
-    let write = match rows {
-        Some(rows) => write_rate(rows),
-        None => Measurement::unavailable("the logging store did not answer"),
+///
+/// `live` is a pair of raw `/proc/diskstats` bodies and the seconds between
+/// them. It is passed as text rather than a parsed rate so the parsing is
+/// exercised by the same fixtures that exercise the verdict.
+pub fn build(
+    rows: Option<&[HwRow]>,
+    store_dir: &Path,
+    fs: Option<(u64, u64)>,
+    live: Option<(&str, &str, f64)>,
+) -> Value {
+    // Prefer the reading this process took itself.
+    //
+    // The store used to be the only source, which made the tool that diagnosed
+    // the dying cards depend on the component that is now off by default — it
+    // would have gone blind exactly when it was needed. A direct
+    // `/proc/diskstats` delta needs nothing but the kernel. The store is still
+    // read, because its retained window is hours long where this one is
+    // seconds, and because the sticky throttle bits live only there.
+    let direct = live.and_then(|(a, b, window)| live_write_rate(a, b, window));
+    let write = match (direct, rows) {
+        (Some(m), _) => m,
+        (None, Some(rows)) => write_rate(rows),
+        (None, None) => Measurement::unavailable(
+            "could not read /proc/diskstats, and the logging store did not answer",
+        ),
     };
     let throttle = match rows {
         Some(rows) => throttle_history(rows),
@@ -100,6 +131,10 @@ struct Measurement {
     window_s: Option<f64>,
     device: Option<String>,
     reason: Option<String>,
+    /// Where the number came from. A rate measured over five seconds and one
+    /// averaged over hours answer different questions, and an operator deciding
+    /// whether a change worked needs to know which one is on screen.
+    source: &'static str,
 }
 
 impl Measurement {
@@ -109,6 +144,7 @@ impl Measurement {
             window_s: None,
             device: None,
             reason: Some(reason.to_string()),
+            source: "none",
         }
     }
 
@@ -118,9 +154,102 @@ impl Measurement {
             "gb_per_day": self.kb_s.map(|k| round1(k * 86_400.0 / 1_048_576.0)),
             "window_s": self.window_s.map(round1),
             "device": self.device,
+            "source": self.source,
             "reason": self.reason,
         })
     }
+}
+
+/// The kernel's per-device IO counter file.
+const DISKSTATS: &str = "/proc/diskstats";
+
+/// How long the direct measurement watches the counter.
+///
+/// Long enough that a quiet agent still moves it — at the 60 KB/s the box is
+/// being held to, five seconds is 300 KB, or 600 sectors, which is far above
+/// the granularity of the counter. Short enough that an operator running
+/// `ados diag storage` does not think the command has hung.
+const LIVE_WINDOW: Duration = Duration::from_secs(5);
+
+/// Field index of "sectors written" in a `/proc/diskstats` line, counting from
+/// the device name. The line is `major minor name` then 11 or more counters;
+/// sectors-written is the 7th of those. A kernel ABI position, stable since 2.6.
+const DISKSTATS_WR_SECTORS_FIELD: usize = 6;
+
+/// Read `/proc/diskstats`, wait, read it again. `None` when the file cannot be
+/// read at all — a platform without it says so rather than reporting zero.
+async fn sample_write_window(path: &Path, window: Duration) -> Option<(String, String, f64)> {
+    let first = tokio::fs::read_to_string(path).await.ok()?;
+    tokio::time::sleep(window).await;
+    let second = tokio::fs::read_to_string(path).await.ok()?;
+    Some((first, second, window.as_secs_f64()))
+}
+
+/// Parse `/proc/diskstats` into device → sectors written. Pure.
+///
+/// Lines that are too short to carry the counter are skipped rather than
+/// treated as zero: a truncated or unfamiliar line is missing data, and
+/// pretending it means "no writes" is the failure mode this whole surface
+/// exists to avoid.
+pub fn parse_diskstats(text: &str) -> std::collections::BTreeMap<String, u64> {
+    let mut out = std::collections::BTreeMap::new();
+    for line in text.lines() {
+        let mut fields = line.split_whitespace();
+        // major, minor, then the device name.
+        let (Some(_), Some(_), Some(name)) = (fields.next(), fields.next(), fields.next()) else {
+            continue;
+        };
+        let counters: Vec<&str> = fields.collect();
+        let Some(raw) = counters.get(DISKSTATS_WR_SECTORS_FIELD) else {
+            continue;
+        };
+        let Ok(sectors) = raw.parse::<u64>() else {
+            continue;
+        };
+        out.insert(name.to_string(), sectors);
+    }
+    out
+}
+
+/// The write rate this process measured itself, from two `/proc/diskstats`
+/// bodies taken `window_s` apart. Pure.
+///
+/// Returns `None` — not a zero, and not an "unavailable" measurement — when
+/// there is no usable device in the pair, so the caller falls through to the
+/// store's longer window instead of shadowing it with a failed direct read.
+fn live_write_rate(first: &str, second: &str, window_s: f64) -> Option<Measurement> {
+    if window_s <= 0.0 {
+        return None;
+    }
+    let a = parse_diskstats(first);
+    let b = parse_diskstats(second);
+    if a.is_empty() || b.is_empty() {
+        return None;
+    }
+
+    // The device that moved the most in the window, the same rule the retained
+    // path uses. A counter that went backwards is skipped rather than read as a
+    // huge negative: the only way that happens over five seconds is a device
+    // disappearing and being re-added.
+    let mut best: Option<(String, u64)> = None;
+    for (name, before) in &a {
+        let Some(after) = b.get(name) else { continue };
+        let Some(moved) = after.checked_sub(*before) else {
+            continue;
+        };
+        if best.as_ref().is_none_or(|(_, m)| moved > *m) {
+            best = Some((name.clone(), moved));
+        }
+    }
+    let (device, sectors) = best?;
+    let kb = sectors as f64 * SECTOR_BYTES / 1024.0;
+    Some(Measurement {
+        kb_s: Some(kb / window_s),
+        window_s: Some(window_s),
+        device: Some(device),
+        reason: None,
+        source: "direct",
+    })
 }
 
 /// Sustained write rate as a delta between the oldest and newest snapshot that
@@ -158,6 +287,7 @@ fn write_rate(rows: &[HwRow]) -> Measurement {
             reason: Some(format!(
                 "window too short to be a rate ({window_s:.0}s, need {MIN_WINDOW_S:.0}s)"
             )),
+            source: "store",
         };
     }
     if last.1 < first.1 {
@@ -170,6 +300,7 @@ fn write_rate(rows: &[HwRow]) -> Measurement {
                  rate is not computable across a restart"
                     .to_string(),
             ),
+            source: "store",
         };
     }
 
@@ -179,6 +310,7 @@ fn write_rate(rows: &[HwRow]) -> Measurement {
         window_s: Some(window_s),
         device: Some(device),
         reason: None,
+        source: "store",
     }
 }
 
@@ -573,7 +705,7 @@ mod tests {
 
     #[test]
     fn an_unreachable_store_is_unknown_never_ok() {
-        let out = build(None, Path::new("/nonexistent"), None);
+        let out = build(None, Path::new("/nonexistent"), None, None);
         assert_eq!(out["verdict"], json!("unknown"));
         assert_eq!(out["write"]["kb_per_s"], json!(null));
     }
@@ -582,7 +714,7 @@ mod tests {
     fn the_measured_pre_fix_rate_reads_critical() {
         // 1 714 KB/s, the rate measured on a test node before the retention fix.
         let rows = rows_with_counter(120, 1_714.0 * 1024.0 / 512.0, "mmcblk0");
-        let out = build(Some(&rows), Path::new("/nonexistent"), None);
+        let out = build(Some(&rows), Path::new("/nonexistent"), None, None);
         assert_eq!(out["verdict"], json!("critical"));
         assert!(out["reason"].as_str().unwrap().contains("wore a card out"));
     }
@@ -590,16 +722,148 @@ mod tests {
     #[test]
     fn a_quiet_agent_on_a_healthy_card_reads_ok() {
         let rows = rows_with_counter(120, 2.0, "mmcblk0");
-        let out = build(Some(&rows), Path::new("/nonexistent"), Some((100, 20)));
+        let out = build(
+            Some(&rows),
+            Path::new("/nonexistent"),
+            Some((100, 20)),
+            None,
+        );
         assert_eq!(out["verdict"], json!("ok"));
     }
 
     #[test]
     fn a_full_filesystem_outranks_a_healthy_write_rate() {
         let rows = rows_with_counter(120, 2.0, "mmcblk0");
-        let out = build(Some(&rows), Path::new("/nonexistent"), Some((100, 95)));
+        let out = build(
+            Some(&rows),
+            Path::new("/nonexistent"),
+            Some((100, 95)),
+            None,
+        );
         assert_eq!(out["verdict"], json!("critical"));
         assert!(out["reason"].as_str().unwrap().contains("full"));
+    }
+
+    // --- the direct /proc/diskstats measurement ------------------------------
+
+    /// A `/proc/diskstats` body with `wr_sectors` set for one device. The real
+    /// file's field order, taken from a Pi: three identity fields then the
+    /// counters, with sectors-written seventh.
+    fn diskstats(device: &str, wr_sectors: u64) -> String {
+        format!(
+            " 179       0 {device} 1200 40 90000 900 5000 300 {wr_sectors} 4200 0 3100 5100 0 0 0 0 40 30\n"
+        )
+    }
+
+    #[test]
+    fn the_rate_is_measured_from_the_kernel_without_the_store() {
+        // 12 000 sectors in 5s = 6 000 KiB/5s = 1 228.8 KB/s.
+        let a = diskstats("mmcblk0", 1_000_000);
+        let b = diskstats("mmcblk0", 1_012_000);
+        let m = live_write_rate(&a, &b, 5.0).expect("a moving counter is a rate");
+        assert_eq!(m.kb_s.map(round1), Some(1_200.0));
+        assert_eq!(m.device.as_deref(), Some("mmcblk0"));
+        assert_eq!(m.source, "direct");
+        assert!(m.reason.is_none());
+    }
+
+    #[test]
+    fn the_direct_reading_wins_over_the_stores_older_average() {
+        // The store's retained window says the box is quiet; the kernel says it
+        // is not. The tool must show the reading it just took, and say so —
+        // otherwise a change made a minute ago is invisible behind an hours-long
+        // average.
+        let rows = rows_with_counter(120, 2.0, "mmcblk0");
+        let a = diskstats("mmcblk0", 1_000_000);
+        let b = diskstats("mmcblk0", 1_012_000);
+
+        let out = build(
+            Some(&rows),
+            Path::new("/nonexistent"),
+            None,
+            Some((&a, &b, 5.0)),
+        );
+        assert_eq!(out["write"]["source"], json!("direct"));
+        assert_eq!(out["write"]["kb_per_s"], json!(1_200.0));
+        assert_eq!(out["verdict"], json!("critical"));
+    }
+
+    #[test]
+    fn an_unreadable_diskstats_falls_back_to_the_store_rather_than_reporting_nothing() {
+        let rows = rows_with_counter(120, 2.0, "mmcblk0");
+        let out = build(Some(&rows), Path::new("/nonexistent"), None, None);
+        assert_eq!(out["write"]["source"], json!("store"));
+        assert_eq!(out["write"]["kb_per_s"], json!(1.0));
+    }
+
+    #[test]
+    fn with_neither_source_the_rate_is_absent_and_names_both_failures() {
+        let out = build(None, Path::new("/nonexistent"), None, None);
+        assert_eq!(out["write"]["kb_per_s"], json!(null));
+        assert_eq!(out["write"]["source"], json!("none"));
+        assert_eq!(out["verdict"], json!("unknown"));
+        let why = out["write"]["reason"].as_str().unwrap();
+        assert!(why.contains("diskstats") && why.contains("store"), "{why}");
+    }
+
+    #[test]
+    fn a_device_that_vanished_between_samples_does_not_become_a_negative_rate() {
+        // A counter can only go backwards over five seconds if the device was
+        // re-added. Reading that as a delta would print an enormous rate.
+        let a = diskstats("sda", 5_000_000);
+        let b = diskstats("sda", 12);
+        assert!(live_write_rate(&a, &b, 5.0).is_none());
+    }
+
+    #[test]
+    fn the_busiest_device_wins_the_direct_measurement_too() {
+        let a = format!(
+            "{}{}",
+            diskstats("mmcblk0", 1_000_000),
+            diskstats("sda", 700)
+        );
+        let b = format!(
+            "{}{}",
+            diskstats("mmcblk0", 1_000_050),
+            diskstats("sda", 90_700)
+        );
+        let m = live_write_rate(&a, &b, 5.0).unwrap();
+        assert_eq!(m.device.as_deref(), Some("sda"));
+    }
+
+    #[test]
+    fn diskstats_lines_too_short_to_carry_the_counter_are_skipped_not_zeroed() {
+        // A truncated line is missing data. Treating it as no writes is exactly
+        // the fabricated zero this surface exists to avoid.
+        let text = "  8       0 sda 1 2 3\n 179       0 mmcblk0 1 2 3 4 5 6 7 8 9 10 11\n";
+        let parsed = parse_diskstats(text);
+        assert!(
+            !parsed.contains_key("sda"),
+            "a short line carries no counter"
+        );
+        assert_eq!(parsed.get("mmcblk0").copied(), Some(7));
+    }
+
+    #[test]
+    fn an_empty_or_garbage_diskstats_yields_no_direct_reading() {
+        assert!(parse_diskstats("").is_empty());
+        assert!(live_write_rate("", "", 5.0).is_none());
+        assert!(live_write_rate("not a diskstats file", "either", 5.0).is_none());
+        // A zero-length window cannot be divided by.
+        let a = diskstats("mmcblk0", 1);
+        let b = diskstats("mmcblk0", 2);
+        assert!(live_write_rate(&a, &b, 0.0).is_none());
+    }
+
+    #[test]
+    fn a_genuinely_idle_card_reads_as_zero_not_as_unmeasured() {
+        // The counter really did not move. That is a measurement of zero, which
+        // is a different claim from "could not measure", and both must be
+        // expressible.
+        let a = diskstats("mmcblk0", 1_000_000);
+        let m = live_write_rate(&a, &a, 5.0).expect("an unmoved counter is still a reading");
+        assert_eq!(m.kb_s, Some(0.0));
+        assert_eq!(m.source, "direct");
     }
 
     // --- the janitor's record ------------------------------------------------
@@ -683,7 +947,12 @@ mod tests {
         rows[3]
             .signals
             .insert("throttle.raw".into(), json!(1u64 << 16));
-        let out = build(Some(&rows), Path::new("/nonexistent"), Some((100, 20)));
+        let out = build(
+            Some(&rows),
+            Path::new("/nonexistent"),
+            Some((100, 20)),
+            None,
+        );
         assert_eq!(out["verdict"], json!("wearing"));
         assert!(out["reason"].as_str().unwrap().contains("undervoltage"));
     }

@@ -4,6 +4,36 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.342] - 2026-08-03
+
+### Fixed
+
+- **The storage diagnostic depended on the logging store, which is about to be
+  off by default.** It read the write counter out of the store's hardware
+  snapshots, so the one tool that made the dying-card diagnosis possible would
+  have gone blind at exactly the moment it was needed most — on a node whose
+  store was stopped, torn, or turned off.
+
+  It now takes the reading itself: two `/proc/diskstats` samples five seconds
+  apart, differenced. That needs nothing but the kernel. The store is still
+  read, because its retained window is hours long where this one is seconds and
+  because the sticky throttle bits exist nowhere else, but it is no longer the
+  only source and no longer a prerequisite.
+
+  The direct reading wins when both exist, and the output says which one is on
+  screen. Five seconds of counter and hours of average answer different
+  questions — the first shows whether a change made a minute ago worked, the
+  second whether the box is like that all the time — and an operator acting on
+  one while reading the other draws the wrong conclusion.
+
+  The honesty rules are unchanged and now cover a third case: a counter that
+  went backwards between samples (a device removed and re-added) is skipped
+  rather than becoming an enormous rate, a `/proc/diskstats` line too short to
+  carry the counter is skipped rather than read as zero writes, and a box with
+  neither source available reports an absent rate naming both failures. A
+  genuinely idle card still reads as zero, which is a measurement and a
+  different claim from "could not measure".
+
 ## [0.99.341] - 2026-08-03
 
 ### Changed

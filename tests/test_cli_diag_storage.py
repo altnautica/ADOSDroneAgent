@@ -44,6 +44,40 @@ def _payload(**overrides) -> dict:
     return base
 
 
+def test_the_write_rates_provenance_is_stated_not_left_implicit():
+    # Five seconds of kernel counter and hours of stored history answer
+    # different questions. Reading one as the other is how a change that did
+    # nothing looks like a change that worked.
+    direct = _invoke(
+        _payload(
+            write={
+                "kb_per_s": 48.0,
+                "gb_per_day": 4.0,
+                "window_s": 5.0,
+                "device": "mmcblk0",
+                "source": "direct",
+                "reason": None,
+            }
+        )
+    )
+    assert "kernel" in direct
+    assert "retained history" not in direct
+
+    stored = _invoke(
+        _payload(
+            write={
+                "kb_per_s": 48.0,
+                "gb_per_day": 4.0,
+                "window_s": 3600.0,
+                "device": "mmcblk0",
+                "source": "store",
+                "reason": None,
+            }
+        )
+    )
+    assert "retained history" in stored
+
+
 def test_healthy_box_reports_the_rate_and_the_device():
     out = _invoke(_payload())
     assert "OK" in out

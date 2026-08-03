@@ -135,6 +135,15 @@ _MEASURED_BY = {
 }
 
 
+# Where a write-rate figure came from. The direct reading needs nothing but the
+# kernel, so it is the one that still works with the logging store off; the
+# stored one reaches back much further. Neither is "the" rate on its own.
+_WRITE_SOURCE = {
+    "direct": "sampled from the kernel's own counter just now",
+    "store": "averaged over the logging store's retained history",
+}
+
+
 def link_loss(data: dict[str, Any]) -> tuple[float | None, str]:
     """Resolve the link's packet loss and which side measured it.
 
@@ -387,6 +396,14 @@ def diag_storage(as_json: bool) -> None:
         if isinstance(window, (int, float)):
             detail += f"  ·  {window:.0f}s window"
         click.echo(_ansi.kv(theme, "write rate", detail, label_width=16))
+        # Where the number came from. Five seconds of kernel counter and hours of
+        # stored history answer different questions: the first shows whether a
+        # change made a minute ago worked, the second whether the box is like
+        # this all the time. An operator acting on one while reading the other
+        # draws the wrong conclusion, so the provenance is never left implicit.
+        source = _WRITE_SOURCE.get(write.get("source"))
+        if source:
+            click.echo(_ansi.kv(theme, "", theme.dim(source), label_width=2))
         device = write.get("device")
         if isinstance(device, str) and device:
             click.echo(_ansi.kv(theme, "device", device, label_width=16))
