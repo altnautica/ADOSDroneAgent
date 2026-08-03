@@ -19,6 +19,7 @@ import httpx
 
 from ados.cli import _ansi, api_bases, default_api_base
 from ados.core.paths import PAIRING_JSON
+from ados.core.profile import _read_profile_conf_value
 
 API_BASE = default_api_base()
 PAIRING_STATE_PATH = PAIRING_JSON
@@ -354,13 +355,35 @@ def _latest_main_version() -> str | None:
         return None
 
 
-def _run_upgrade() -> None:
+def _upgrade_profile(override: str | None) -> str | None:
+    """The profile an upgrade should pin, or ``None`` when it cannot be known.
+
+    An upgrade must never be allowed to *change* what a box is. The installer
+    resolves the profile itself when none is passed, and a gap in that
+    resolution has re-profiled a live ground station to ``drone`` and left it
+    in a reboot loop that needed a reflash to recover. The box already knows
+    what it is — ``/etc/ados/profile.conf`` is written by both install.sh and
+    the wizard — so an upgrade states it explicitly rather than relying on a
+    default being right.
+
+    An explicit ``--profile`` wins, for the one legitimate case: deliberately
+    converting a box from one role to another.
+    """
+    if override:
+        return override
+    return _read_profile_conf_value()
+
+
+def _run_upgrade(profile: str | None = None) -> None:
     """Fetch the canonical install.sh (latest main) and run it in upgrade mode.
 
     Linux needs root (the systemd install writes under /opt and /etc), so
     elevate with sudo when not already root; macOS installs per-user (build
     from source), so no sudo. The installer runs inline so its live progress
     stays attached to this terminal.
+
+    ``profile`` is passed through to the installer when known, so an upgrade
+    cannot silently re-profile the box.
     """
     try:
         with httpx.Client(timeout=30.0, follow_redirects=True) as client:
@@ -374,6 +397,8 @@ def _run_upgrade() -> None:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(resp.text)
         argv = ["bash", script, "--upgrade"]
+        if profile:
+            argv += ["--profile", profile]
         if platform.system() == "Linux" and os.geteuid() != 0:
             if shutil.which("sudo") is None:
                 raise click.ClickException(
@@ -449,7 +474,14 @@ def _run_uninstall_via_installer(purge: bool, yes: bool) -> bool:
 @click.option("--check-only", is_flag=True, help="Report the current + latest version, don't install.")
 @click.option("--yes", "-y", is_flag=True, help="Update without an interactive prompt.")
 @click.option("--json", "as_json", is_flag=True, help="Output JSON for scripts.")
-def update(check_only: bool, yes: bool, as_json: bool) -> None:
+@click.option(
+    "--profile",
+    "profile_override",
+    type=click.Choice(["drone", "ground-station", "workstation", "compute"]),
+    default=None,
+    help="Override the profile to install. Defaults to whatever this box already is.",
+)
+def update(check_only: bool, yes: bool, as_json: bool, profile_override: str | None) -> None:
     """Update the agent to the latest and restart it."""
     current = _installed_version()
     latest = _latest_main_version()
@@ -484,8 +516,16 @@ def update(check_only: bool, yes: bool, as_json: bool) -> None:
     if not yes:
         click.confirm("Update the agent to the latest now?", abort=True)
 
+    profile = _upgrade_profile(profile_override)
+    if profile:
+        click.echo(f"Profile:         {profile} (pinned, so the upgrade cannot change it)")
+    else:
+        click.echo(
+            "Profile:         unknown — /etc/ados/profile.conf is missing, so the "
+            "installer will resolve it. Pass --profile to be certain."
+        )
     click.echo("Updating — this rebuilds and restarts the agent…")
-    _run_upgrade()
+    _run_upgrade(profile)
     click.echo("Update complete.")
 
 

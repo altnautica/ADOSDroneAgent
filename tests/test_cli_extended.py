@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import click
@@ -474,3 +475,132 @@ def test_viewer_url_from_whep_handles_trailing_slash() -> None:
 def test_viewer_url_from_whep_none_passthrough() -> None:
     assert cli_main._viewer_url_from_whep(None) is None
     assert cli_main._viewer_url_from_whep("") is None
+
+def test_update_pins_the_boxs_own_profile_so_it_cannot_be_reprofiled() -> None:
+    """An upgrade must never change what a box IS.
+
+    The installer resolves the profile itself when none is passed, and a gap in
+    that resolution re-profiled a live ground station to ``drone`` and left it
+    in a reboot loop that needed a reflash. The box already knows what it is,
+    so the upgrade states it explicitly instead of trusting a default.
+    """
+    with (
+        patch("ados.cli.main._installed_version", return_value="0.10.0"),
+        patch("ados.cli.main._latest_main_version", return_value="0.10.1"),
+        patch("ados.cli.main._read_profile_conf_value", return_value="ground_station"),
+        patch("ados.cli.main._run_upgrade") as upgrade,
+    ):
+        result = runner.invoke(cli, ["update", "--yes"])
+    assert result.exit_code == 0
+    upgrade.assert_called_once_with("ground_station")
+
+
+def test_update_profile_override_wins_for_a_deliberate_conversion() -> None:
+    """The one legitimate reason to change a box's role: an explicit flag."""
+    with (
+        patch("ados.cli.main._installed_version", return_value="0.10.0"),
+        patch("ados.cli.main._latest_main_version", return_value="0.10.1"),
+        patch("ados.cli.main._read_profile_conf_value", return_value="drone"),
+        patch("ados.cli.main._run_upgrade") as upgrade,
+    ):
+        result = runner.invoke(cli, ["update", "--yes", "--profile", "ground-station"])
+    assert result.exit_code == 0
+    upgrade.assert_called_once_with("ground-station")
+
+
+def test_update_says_so_when_the_profile_cannot_be_known() -> None:
+    """No marker on disk: the operator is told, rather than it passing silently."""
+    with (
+        patch("ados.cli.main._installed_version", return_value="0.10.0"),
+        patch("ados.cli.main._latest_main_version", return_value="0.10.1"),
+        patch("ados.cli.main._read_profile_conf_value", return_value=None),
+        patch("ados.cli.main._run_upgrade") as upgrade,
+    ):
+        result = runner.invoke(cli, ["update", "--yes"])
+    assert result.exit_code == 0
+    upgrade.assert_called_once_with(None)
+    assert "unknown" in result.output.lower()
+
+def test_run_upgrade_actually_passes_the_profile_to_the_installer() -> None:
+    """The decision is worthless unless it reaches the installer's argv.
+
+    Deciding the profile and then not passing it is exactly the bug this fixes,
+    so assert on the command that is actually executed, not on the call that
+    computes it.
+    """
+    seen: dict[str, list[str]] = {}
+
+    class _Resp:
+        text = "#!/bin/sh\n"
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class _Client:
+        def __init__(self, *_a, **_kw) -> None:
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a) -> None:
+            return None
+
+        def get(self, _url):
+            return _Resp()
+
+    def _fake_run(argv, **_kw):
+        seen["argv"] = list(argv)
+        return SimpleNamespace(returncode=0)
+
+    with (
+        patch("ados.cli.main.httpx.Client", _Client),
+        patch("ados.cli.main.subprocess.run", _fake_run),
+        patch("ados.cli.main.os.geteuid", return_value=0),
+        patch("ados.cli.main.platform.system", return_value="Linux"),
+    ):
+        cli_main._run_upgrade("ground_station")
+
+    argv = seen["argv"]
+    assert "--upgrade" in argv
+    assert "--profile" in argv, f"the installer was invoked without a profile: {argv}"
+    assert argv[argv.index("--profile") + 1] == "ground_station"
+
+
+def test_run_upgrade_omits_the_flag_when_the_profile_is_unknown() -> None:
+    """No marker on disk: fall back to the installer's own resolution rather
+    than inventing a profile, which would be the same class of bug."""
+    seen: dict[str, list[str]] = {}
+
+    class _Resp:
+        text = "#!/bin/sh\n"
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class _Client:
+        def __init__(self, *_a, **_kw) -> None:
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a) -> None:
+            return None
+
+        def get(self, _url):
+            return _Resp()
+
+    def _fake_run(argv, **_kw):
+        seen["argv"] = list(argv)
+        return SimpleNamespace(returncode=0)
+
+    with (
+        patch("ados.cli.main.httpx.Client", _Client),
+        patch("ados.cli.main.subprocess.run", _fake_run),
+        patch("ados.cli.main.os.geteuid", return_value=0),
+        patch("ados.cli.main.platform.system", return_value="Linux"),
+    ):
+        cli_main._run_upgrade(None)
+
+    assert "--profile" not in seen["argv"]

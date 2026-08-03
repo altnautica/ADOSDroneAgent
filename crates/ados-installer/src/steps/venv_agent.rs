@@ -21,6 +21,8 @@
 
 use std::path::{Path, PathBuf};
 
+use anyhow::Context as _;
+
 use crate::ctx::Ctx;
 use crate::env;
 use crate::exec;
@@ -214,19 +216,38 @@ fn install_agent_edge(ctx: &Ctx) -> anyhow::Result<PathBuf> {
     let repo = clone_dest()?;
     let repo_s = repo.to_string_lossy().into_owned();
 
-    // A reinstall must start from a clean tree so `git clone` does not refuse
-    // a non-empty destination. Idempotent: a missing dir is a no-op.
-    let _ = std::fs::remove_dir_all(&repo);
+    // Clone into a staging sibling and swap it in only once it succeeds, rather
+    // than deleting the live tree first.
+    //
+    // Deleting first meant a failed clone left the node with NO source tree at
+    // all — and that tree carries `scripts/install.sh`, so the box lost its own
+    // ability to retry. On a node with no internet that is unrecoverable, and
+    // even with internet the installer's own advice ("re-run the install
+    // one-liner") is then the only way back. Observed exactly once, on a rig:
+    // the clone failed and `bash /opt/ados/source/scripts/install.sh` was
+    // afterwards "No such file or directory".
+    //
+    // The swap is delete-then-rename rather than a true atomic exchange, which
+    // is the best a cross-platform rename gives us here; the window is a rename
+    // rather than a network clone, so the exposure goes from minutes to
+    // microseconds.
+    let staging = staging_dest(&repo);
+    let staging_s = staging.to_string_lossy().into_owned();
+    let _ = std::fs::remove_dir_all(&staging);
 
-    let clone = git_clone_args(&repo_s, ctx.args.branch.as_deref());
+    let clone = git_clone_args(&staging_s, ctx.args.branch.as_deref());
     let clone_argv: Vec<&str> = clone.iter().map(String::as_str).collect();
     let clone_res = exec::run_streamed("git", &clone_argv, on_git_line(&sink));
     if !clone_res.success() {
+        // Leave the existing tree untouched: a node that could retry before
+        // this attempt must still be able to retry after it.
+        let _ = std::fs::remove_dir_all(&staging);
         if !clone_res.spawned {
             anyhow::bail!("git is not installed");
         }
         anyhow::bail!("git clone failed: {}", clone_res.stderr.trim());
     }
+    promote_staging(&staging, &repo)?;
 
     let pip = pip_install_edge_args(&repo_s);
     let pip_argv: Vec<&str> = pip.iter().map(String::as_str).collect();
@@ -321,6 +342,34 @@ fn wheel_tmp_dir() -> std::io::Result<PathBuf> {
 /// a later `--upgrade` re-clones over it. When `/opt/ados` is not creatable (a
 /// dev host), fall back to a unique temp dir so the edge path still exercises
 /// end to end without root.
+/// Where a fresh clone is staged before it replaces the live tree (pure).
+///
+/// A SIBLING of the live tree, never a child of it: a child would be destroyed
+/// by the very `remove_dir_all` that makes room for the promotion.
+pub fn staging_dest(repo: &Path) -> PathBuf {
+    let name = repo
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "source".to_string());
+    repo.with_file_name(format!("{name}.staging"))
+}
+
+/// Replace the live source tree with a freshly cloned staging tree.
+///
+/// Called only after the clone has succeeded, so the live tree is removed at the
+/// last possible moment and is never absent while a network operation is in
+/// flight. Removing it first is what left a rig with no `scripts/install.sh` and
+/// therefore no way to retry its own install.
+pub fn promote_staging(staging: &Path, repo: &Path) -> anyhow::Result<()> {
+    let _ = std::fs::remove_dir_all(repo);
+    std::fs::rename(staging, repo).with_context(|| {
+        format!(
+            "promote the freshly cloned source tree into {}",
+            repo.display()
+        )
+    })
+}
+
 fn clone_dest() -> std::io::Result<PathBuf> {
     let persisted = PathBuf::from(format!("{}/source", env::INSTALL_DIR));
     if std::fs::create_dir_all(&persisted).is_ok() {
@@ -420,6 +469,69 @@ mod tests {
     fn venv_paths_are_under_the_venv_dir() {
         assert_eq!(venv_python(), "/opt/ados/venv/bin/python");
         assert_eq!(venv_pip(), "/opt/ados/venv/bin/pip");
+    }
+
+    #[test]
+    fn staging_is_a_sibling_of_the_live_tree_never_a_child() {
+        // A child would be destroyed by the very remove_dir_all that makes room
+        // for the promotion, so the clone would be thrown away at the moment it
+        // was needed.
+        let repo = Path::new("/opt/ados/source");
+        let staging = staging_dest(repo);
+        assert_eq!(staging, Path::new("/opt/ados/source.staging"));
+        assert!(
+            !staging.starts_with(repo),
+            "staging must not live inside the tree it replaces"
+        );
+        assert_eq!(staging.parent(), repo.parent());
+    }
+
+    #[test]
+    fn a_failed_clone_leaves_the_existing_source_tree_intact() {
+        // The regression, hit on a rig: the live tree was deleted BEFORE the
+        // clone, so a failed clone left the node with no scripts/install.sh —
+        // no way to retry its own install, and on a node with no internet, no
+        // way back at all. The tree must survive a failure untouched.
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("source");
+        std::fs::create_dir_all(repo.join("scripts")).unwrap();
+        std::fs::write(repo.join("scripts/install.sh"), b"#!/bin/sh\n").unwrap();
+
+        // Simulate the failure path: staging is prepared, the clone fails, the
+        // staging dir is swept, and promote_staging is never reached.
+        let staging = staging_dest(&repo);
+        std::fs::create_dir_all(&staging).unwrap();
+        let _ = std::fs::remove_dir_all(&staging);
+
+        assert!(
+            repo.join("scripts/install.sh").exists(),
+            "a failed clone must leave the node able to retry its own install"
+        );
+        assert!(!staging.exists(), "the staging tree is swept on failure");
+    }
+
+    #[test]
+    fn a_successful_clone_replaces_the_tree_wholesale() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("source");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("stale.txt"), b"old").unwrap();
+
+        let staging = staging_dest(&repo);
+        std::fs::create_dir_all(staging.join("scripts")).unwrap();
+        std::fs::write(staging.join("scripts/install.sh"), b"#!/bin/sh\nnew\n").unwrap();
+
+        promote_staging(&staging, &repo).unwrap();
+
+        assert!(
+            repo.join("scripts/install.sh").exists(),
+            "the new tree is live"
+        );
+        assert!(
+            !repo.join("stale.txt").exists(),
+            "the old tree is gone, not merged"
+        );
+        assert!(!staging.exists(), "staging is consumed by the promotion");
     }
 
     #[test]

@@ -4,6 +4,42 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.325] - 2026-08-03
+
+### Fixed
+
+- **An upgrade could silently change what a box IS, and the documented
+  mitigation did not exist.** `ados update` ran `install.sh --upgrade` with no
+  profile at all, leaving the installer to resolve it. A gap in that resolution
+  has re-profiled a live ground station to `drone` and left it in a reboot loop
+  that needed a reflash to recover — and the standing advice, "always pass
+  `--profile` on `ados update`", was unactionable: the command had no such
+  option (`--check-only`, `-y/--yes`, `--json` only).
+
+  `ados update` now reads `/etc/ados/profile.conf` — which both `install.sh` and
+  the wizard already write — and passes it through explicitly, so an upgrade
+  states what the box is rather than trusting a default to be right. It prints
+  the pinned profile, and says so plainly when no marker exists instead of
+  passing silently. A `--profile` option is added for the one legitimate case:
+  deliberately converting a box from one role to another.
+
+  Tested at the argv level, not just the decision: removing the pass-through
+  fails the test. Asserting only on the computed value would have missed exactly
+  the bug being fixed.
+
+- **A failed install left the box with no installer.** The edge path deleted
+  `/opt/ados/source` *before* cloning, so a clone that failed for any reason
+  left no source tree — and that tree carries `scripts/install.sh`, so the node
+  lost the ability to retry its own install. On a node with no internet that is
+  unrecoverable. Observed on a rig: the clone failed and
+  `bash /opt/ados/source/scripts/install.sh` was afterwards "No such file or
+  directory".
+
+  The clone now lands in a sibling staging directory and is promoted only once
+  it succeeds, so a failure leaves the existing tree exactly as it was. The
+  staging directory is deliberately a sibling, never a child — a child would be
+  destroyed by the very removal that makes room for the promotion.
+
 ## [0.99.324] - 2026-08-02
 
 ### Fixed
