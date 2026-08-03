@@ -4,7 +4,7 @@
 //! injected root, so every signal class is exercised without touching the host,
 //! and the async run loop is verified to emit a snapshot and stop on shutdown.
 
-use super::helpers::{fold_throttle, sanitize};
+use super::helpers::{fold_throttle, sanitize, METRIC_HEARTBEAT};
 use super::*;
 use std::fs;
 use std::path::Path;
@@ -275,6 +275,118 @@ fn cadence_gating_skips_a_class_until_its_period_elapses() {
     assert!(
         out2.snapshot.signals.contains_key("thermal.primary_c"),
         "thermal re-fires after its cadence"
+    );
+}
+
+/// A fixture where a thermal zone and a hwmon chip are the SAME sensor, which
+/// is what a zone backed by a hwmon device looks like in `/sys`.
+fn duplicated_thermal_fixture() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let w = |rel: &str, body: &str| {
+        let p = dir.path().join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    };
+    // One zone named `skin_zone`...
+    w("sys/class/thermal/thermal_zone0/type", "skin_zone\n");
+    w("sys/class/thermal/thermal_zone0/temp", "42000\n");
+    // ...exposed a second time through hwmon under the same chip name.
+    w("sys/class/hwmon/hwmon0/name", "skin_zone\n");
+    w("sys/class/hwmon/hwmon0/temp1_input", "42000\n");
+    // A genuinely separate sensor that is NOT a zone must survive.
+    w("sys/class/hwmon/hwmon1/name", "pmic_die\n");
+    w("sys/class/hwmon/hwmon1/temp1_input", "55000\n");
+    dir
+}
+
+#[test]
+fn one_sensor_exposed_twice_is_recorded_once() {
+    // Measured on a real board: `thermal.skin_zone_c` and
+    // `thermal.hwmon.skin_zone_temp1_c` were the same physical sensor at the
+    // same 200 ms cadence, and roughly half of all thermal rows were duplicates
+    // of the other half.
+    let dir = duplicated_thermal_fixture();
+    let mut c = Collector::new(dir.path());
+    let out = c.tick(Instant::now());
+
+    let keys: Vec<String> = out.metrics.iter().map(|m| m.metric.clone()).collect();
+    assert!(
+        keys.iter().any(|k| k == "thermal.skin_zone_c"),
+        "the zone reading is kept: {keys:?}"
+    );
+    assert!(
+        !keys
+            .iter()
+            .any(|k| k.starts_with("thermal.hwmon.skin_zone")),
+        "the hwmon duplicate of a zone must not be recorded again: {keys:?}"
+    );
+    assert!(
+        keys.iter().any(|k| k.starts_with("thermal.hwmon.pmic_die")),
+        "a hwmon chip that is NOT a zone is still a real sensor: {keys:?}"
+    );
+}
+
+#[test]
+fn a_still_temperature_stops_producing_rows_but_a_transient_lands_at_once() {
+    // The fast cadence exists to catch a throttle transient, so it stays. What
+    // changes is that a sample is only STORED when it means something: sampling
+    // fast and writing every sample to flash are different things, and only the
+    // second costs anything.
+    let dir = duplicated_thermal_fixture();
+    let mut c = Collector::new(dir.path());
+    let t0 = Instant::now();
+
+    let first = c.tick(t0);
+    assert!(
+        first
+            .metrics
+            .iter()
+            .any(|m| m.metric == "thermal.skin_zone_c"),
+        "the first reading is always recorded"
+    );
+
+    // Unchanged temperature, one thermal cadence later: no new row.
+    let quiet = c.tick(t0 + THERMAL_CADENCE + Duration::from_millis(1));
+    assert!(
+        !quiet
+            .metrics
+            .iter()
+            .any(|m| m.metric == "thermal.skin_zone_c"),
+        "a temperature that has not moved does not earn a row"
+    );
+
+    // A real transient: rewrite the sensor and tick again. It lands immediately,
+    // on the very next sample, which is the whole point of the fast cadence.
+    std::fs::write(
+        dir.path().join("sys/class/thermal/thermal_zone0/temp"),
+        "78000\n",
+    )
+    .unwrap();
+    let spike = c.tick(t0 + 2 * THERMAL_CADENCE + Duration::from_millis(2));
+    let row = spike
+        .metrics
+        .iter()
+        .find(|m| m.metric == "thermal.skin_zone_c")
+        .expect("a transient is recorded on the sample that sees it");
+    assert!((row.value - 78.0).abs() < 0.01, "got {}", row.value);
+}
+
+#[test]
+fn a_flat_signal_still_lands_on_the_heartbeat() {
+    // Gating must never make a live producer look dead, and every one-minute
+    // rollup bucket needs at least one sample.
+    let dir = duplicated_thermal_fixture();
+    let mut c = Collector::new(dir.path());
+    let t0 = Instant::now();
+    let _ = c.tick(t0);
+
+    let later = c.tick(t0 + METRIC_HEARTBEAT + Duration::from_secs(1));
+    assert!(
+        later
+            .metrics
+            .iter()
+            .any(|m| m.metric == "thermal.skin_zone_c"),
+        "an unchanged signal is still recorded on the heartbeat"
     );
 }
 

@@ -58,7 +58,7 @@ use tokio::sync::{mpsc, oneshot};
 use ados_protocol::logd::{HwSnapshot, IngestFrame, TelemetryFrame};
 
 use self::cpu::ProcStat;
-use self::helpers::{emit, fold_service_memory, fold_throttle};
+use self::helpers::{emit, fold_service_memory, fold_throttle, EmitGate};
 use self::pss::{resolve_ados_unit_pids, sample_service_pss};
 use self::soc::{detect_soc, SocFamily, SocInfo};
 use self::throttle::read_throttle;
@@ -128,6 +128,9 @@ struct Baselines {
 /// SoC, the per-class next-fire deadlines, the rate baselines, and the count of
 /// signal classes that produced nothing on the last pass.
 pub struct Collector {
+    /// Per-signal change gate for the fast classes. Sampling fast and STORING
+    /// every sample are different things, and only the second costs flash.
+    emit_gate: EmitGate,
     root: PathBuf,
     soc: SocInfo,
     baselines: Baselines,
@@ -164,6 +167,7 @@ impl Collector {
         let soc = detect_soc(&root);
         let now = Instant::now();
         Self {
+            emit_gate: EmitGate::default(),
             root,
             soc,
             baselines: Baselines::default(),

@@ -8,6 +8,7 @@
 //! The file IO done here is synchronous, so the caller runs the whole pass on a
 //! blocking thread.
 
+use std::collections::HashSet;
 use std::time::Instant;
 
 use rmpv::Value as MpVal;
@@ -29,6 +30,13 @@ use super::{
 };
 use crate::writer::now_us;
 
+/// How far a temperature must move before it is worth a new row.
+///
+/// A millidegree sensor never reads exactly the same twice, so "changed" needs a
+/// threshold or the gate never closes. Half a degree is well below anything that
+/// matters thermally and far above the sensor's idle jitter.
+const THERMAL_DEADBAND_C: f64 = 0.5;
+
 impl Collector {
     /// Run one collector tick at `now`: read every class whose cadence is due,
     /// fold the readings into one [`HwSnapshot`], and accumulate the per-signal
@@ -47,7 +55,7 @@ impl Collector {
 
         if now >= self.next_thermal {
             self.next_thermal = now + THERMAL_CADENCE;
-            unavailable += self.fold_thermal(ts, &mut snap, &mut metrics);
+            unavailable += self.fold_thermal(ts, now, &mut snap, &mut metrics);
         }
         if now >= self.next_freq_util {
             self.next_freq_util = now + FREQ_UTIL_CADENCE;
@@ -112,39 +120,66 @@ impl Collector {
     /// Thermal zones + hwmon temperatures. The first zone is the quick-glance
     /// primary. Returns `1` when no thermal source was readable.
     fn fold_thermal(
-        &self,
+        &mut self,
         ts: i64,
+        now: Instant,
         snap: &mut HwSnapshot,
         metrics: &mut Vec<TelemetryFrame>,
     ) -> u32 {
         let zones = read_thermal_zones(&self.root);
         let hwmon = read_hwmon_temps(&self.root);
         let unavailable = u32::from(zones.is_empty() && hwmon.is_empty());
-        // The first zone is the quick-glance primary temperature.
+        let gate = &mut self.emit_gate;
+
+        // Every reading goes into the SNAPSHOT unconditionally — that is the
+        // live view, it costs one blob, and it is what an operator reads. Only
+        // the per-signal metric ROWS are gated, because those are what land on
+        // flash at the sampling cadence.
         if let Some(primary) = zones.first() {
             snap.signals
                 .insert("thermal.primary_c".to_string(), MpVal::from(primary.c));
-            push_metric(metrics, ts, "thermal.primary_c", primary.c as f64, &[]);
+            if gate.should_emit(
+                "thermal.primary_c",
+                primary.c as f64,
+                THERMAL_DEADBAND_C,
+                now,
+            ) {
+                push_metric(metrics, ts, "thermal.primary_c", primary.c as f64, &[]);
+            }
         }
+        let mut zone_keys: HashSet<String> = HashSet::new();
         for z in &zones {
-            let key = format!("thermal.{}_c", sanitize(&z.name));
+            let sanitized = sanitize(&z.name);
+            let key = format!("thermal.{sanitized}_c");
+            zone_keys.insert(sanitized);
             snap.signals.insert(key.clone(), MpVal::from(z.c));
-            push_metric(metrics, ts, &key, z.c as f64, &[("zone", &z.name)]);
+            if gate.should_emit(&key, z.c as f64, THERMAL_DEADBAND_C, now) {
+                push_metric(metrics, ts, &key, z.c as f64, &[("zone", &z.name)]);
+            }
         }
         for t in &hwmon {
-            let key = format!(
-                "thermal.hwmon.{}_{}_c",
-                sanitize(&t.chip),
-                sanitize(&t.label)
-            );
+            // A thermal zone backed by a hwmon device is exposed through BOTH
+            // trees, so recording each records one sensor twice. Measured on a
+            // real board: `thermal.skin_zone_c` and
+            // `thermal.hwmon.skin_zone_temp1_c` were the same sensor at the same
+            // cadence, and roughly half of all thermal rows were duplicates. A
+            // hwmon chip that does NOT correspond to a zone (a separate PMIC
+            // sensor, say) is still recorded — this drops only the overlap.
+            let chip = sanitize(&t.chip);
+            if zone_keys.contains(&chip) {
+                continue;
+            }
+            let key = format!("thermal.hwmon.{}_{}_c", chip, sanitize(&t.label));
             snap.signals.insert(key.clone(), MpVal::from(t.c));
-            push_metric(
-                metrics,
-                ts,
-                &key,
-                t.c as f64,
-                &[("chip", &t.chip), ("label", &t.label)],
-            );
+            if gate.should_emit(&key, t.c as f64, THERMAL_DEADBAND_C, now) {
+                push_metric(
+                    metrics,
+                    ts,
+                    &key,
+                    t.c as f64,
+                    &[("chip", &t.chip), ("label", &t.label)],
+                );
+            }
         }
         unavailable
     }

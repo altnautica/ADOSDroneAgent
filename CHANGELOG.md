@@ -4,6 +4,36 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.327] - 2026-08-03
+
+### Fixed
+
+- **The hardware collector was storing one physical sensor twice, and storing
+  every sample of a temperature that had not moved.** Measured in steady state
+  on a real node: **165 metric rows/sec across 83 keys, and the top sixteen keys
+  were all `thermal.*`** — a board with ~16 thermal zones sampled at 200 ms,
+  landing on flash, for a store whose own rollups are minute-grained.
+
+  Two causes, both fixed:
+
+  - **Duplication.** A thermal zone backed by a hwmon device appears in *both*
+    `/sys/class/thermal` and `/sys/class/hwmon`, and both were recorded —
+    `thermal.skin_zone_c` and `thermal.hwmon.skin_zone_temp1_c` were the same
+    sensor at the same cadence. A hwmon chip that does not correspond to a zone
+    is still recorded; only the overlap is dropped.
+  - **Storing stillness.** The fast cadence is deliberate — a thermal transient
+    is the canary for a throttle — but *sampling* fast and *storing* every sample
+    are different things, and only the second costs flash. A reading is now
+    stored when it actually moved (0.5 °C, above the sensor's idle jitter) or
+    when the signal has been quiet for 30 s. A transient still lands on the very
+    sample that sees it, which is the property the cadence exists for, and the
+    heartbeat keeps a flat signal from reading as a dead producer while
+    guaranteeing every one-minute rollup bucket has a sample.
+
+  The snapshot is untouched: every reading still goes into it unconditionally,
+  because that is the live view and it costs one blob. Only the per-signal rows
+  are gated.
+
 ## [0.99.326] - 2026-08-03
 
 ### Fixed

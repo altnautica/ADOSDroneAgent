@@ -4,6 +4,9 @@
 //! the throttle-flags fold, and the channel emit. These hold no collector state,
 //! so they live apart from the tick and the run loop.
 
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
 use rmpv::Value as MpVal;
 use tokio::sync::mpsc;
 
@@ -18,6 +21,54 @@ pub(super) fn used_mb(mem: &super::memory::MemInfo) -> u64 {
     match (mem.total, mem.available) {
         (Some(t), Some(a)) if t >= a => (t - a) / (1024 * 1024),
         _ => 0,
+    }
+}
+
+/// How long a signal may go unrecorded while it sits still.
+///
+/// A gated signal still lands at least this often, so a flat value is never
+/// mistaken for a dead producer and every one-minute rollup bucket contains at
+/// least one sample. Half the bucket width, so a bucket cannot be missed by
+/// phase alone.
+pub(super) const METRIC_HEARTBEAT: Duration = Duration::from_secs(30);
+
+/// Per-signal record of what was last written, for the change gate.
+#[derive(Debug, Default)]
+pub(super) struct EmitGate {
+    last: HashMap<String, (f64, Instant)>,
+}
+
+impl EmitGate {
+    /// Whether `value` is worth a row, and remember it when it is.
+    ///
+    /// The fast classes are sampled fast on purpose — a thermal transient is the
+    /// canary for a throttle — but sampling fast and *storing* every sample are
+    /// different things, and only the second costs flash. On a real node the
+    /// hardware collector was writing 165 rows/sec of which the top sixteen keys
+    /// were all thermal, on a board whose own rollups are minute-grained.
+    ///
+    /// So: store a sample when it actually moved (beyond `deadband`, since a
+    /// millidegree sensor never reads exactly the same twice), or when the
+    /// signal has been quiet for [`METRIC_HEARTBEAT`]. A transient still lands
+    /// immediately, which is the property the fast cadence exists for.
+    pub(super) fn should_emit(
+        &mut self,
+        key: &str,
+        value: f64,
+        deadband: f64,
+        now: Instant,
+    ) -> bool {
+        match self.last.get(key) {
+            Some(&(prev, at))
+                if (value - prev).abs() < deadband && now.duration_since(at) < METRIC_HEARTBEAT =>
+            {
+                false
+            }
+            _ => {
+                self.last.insert(key.to_string(), (value, now));
+                true
+            }
+        }
     }
 }
 
