@@ -107,7 +107,7 @@ def build_mediamtx_yaml(
         "hls": True,
         "hlsAddress": ":8888",
         "hlsAllowOrigin": "*",
-        "hlsAlwaysRemux": True,
+        "hlsAlwaysRemux": False,
         # MPEG-TS HLS, NOT fmp4 and NOT lowLatency. Variant history
         # on this rig:
         #   lowLatency — HLS.js + LL-HLS CAN-BLOCK-RELOAD requests

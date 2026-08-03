@@ -214,7 +214,7 @@ class MediamtxManager:
             # (8888 by default; see hlsAddress below).
             "hls": True,
             "hlsAddress": ":8888",
-            "hlsAlwaysRemux": True,
+            "hlsAlwaysRemux": False,
             "hlsVariant": "lowLatency",
             "hlsSegmentCount": 7,
             "hlsSegmentDuration": "1s",

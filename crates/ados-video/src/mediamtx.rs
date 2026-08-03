@@ -220,7 +220,19 @@ pub fn mediamtx_config_yaml(params: &ConfigParams) -> String {
             .collect(),
         hls: true,
         hls_address: format!(":{}", params.hls_port),
-        hls_always_remux: true,
+        // Remux HLS only while something is actually watching it.
+        //
+        // With this on, mediamtx keeps a low-latency muxer segmenting the
+        // stream at 1s even when no HLS client exists. Measured on a ground
+        // station: the muxer sat attached as a reader with `bytesSent=0` --
+        // it had never delivered a single byte -- while the box ran at load
+        // 4.94 on four cores and the operator's video froze.
+        //
+        // HLS itself stays available (the on-box dashboard's video panel uses
+        // it); mediamtx starts the muxer on the first request instead. The
+        // cost is a slightly slower first HLS frame, paid only by whoever asks
+        // for it, rather than continuous CPU spent on nobody.
+        hls_always_remux: false,
         hls_variant: "lowLatency".into(),
         hls_segment_count: 7,
         hls_segment_duration: "1s".into(),
@@ -605,7 +617,7 @@ mod tests {
         );
 
         // HLS low-latency, 7 segs x 1s, always remux.
-        assert_eq!(v["hlsAlwaysRemux"], true);
+        assert_eq!(v["hlsAlwaysRemux"], false);
         assert_eq!(v["hlsVariant"], "lowLatency");
         assert_eq!(v["hlsSegmentCount"], 7);
         assert_eq!(v["hlsSegmentDuration"], "1s");
