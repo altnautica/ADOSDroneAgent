@@ -131,6 +131,26 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **The cockpit no longer blurs its chrome over live video by default.** The
+  page draws its chrome over full-bleed video behind a backdrop blur, and a
+  blurred region above a surface that changes every frame makes the compositor
+  re-read and re-blur its backdrop at the video's frame rate. The cockpit's own
+  source already named it the most expensive thing the page does; nobody had
+  switched it off on this board.
+
+  Measured on a ground station with video actually arriving over the radio,
+  which is the first time this was measured under real conditions rather than on
+  an idle page: 292.9% of 400% CPU with the full layer against 137.9% with the
+  reduced one, and board idle rising from 36% to 68%. Same video, same frame
+  rate, 53% less CPU.
+
+  It had been gated on the board having under 3 GiB of RAM, which is the wrong
+  quantity — the blur costs compositor time, not memory. A 3.8 GiB four-core
+  panel sat above that threshold, paid full price for an effect invisible behind
+  a HUD, and was the board the reduced path helps most. Reduced is now the
+  default and an operator who wants the blur asks for it; the RAM heuristic is
+  deleted rather than left as a second unreachable route to the same flag.
+
 - **The durable logging and telemetry store now ships OFF by default. This is a
   deliberate capability regression, not an optimisation.** While it is off the
   node has no durable flight recorder: nothing survives a reboot except the
