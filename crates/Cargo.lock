@@ -360,6 +360,7 @@ dependencies = [
 name = "ados-installer"
 version = "0.1.0"
 dependencies = [
+ "ados-config",
  "ados-macpin",
  "ados-supervisor",
  "anyhow",
@@ -385,6 +386,7 @@ dependencies = [
 name = "ados-logd"
 version = "0.1.0"
 dependencies = [
+ "ados-config",
  "ados-protocol",
  "anyhow",
  "async-stream",

@@ -202,6 +202,29 @@ mod tests {
     }
 
     #[test]
+    fn the_host_read_alone_produces_a_usable_body() {
+        // The store now ships OFF by default, so this is no longer the rare
+        // path a late-starting daemon takes for a few seconds at boot — it is
+        // the ONLY path on most nodes, forever. `derive_system` returns `None`
+        // if any essential signal is missing, and the route then serves the
+        // degraded all-null shape, so a gap here would leave every CPU, memory
+        // and disk reading blank on a normally-configured box.
+        //
+        // Assert against the real host read rather than a fixture: a fixture
+        // would prove the mapping and say nothing about whether the fallback
+        // actually populates the fields the mapping needs.
+        let signals = crate::hw_local::collect_signals();
+        let body = derive_system(&signals)
+            .expect("the direct host read must satisfy the essential signal set");
+        for field in ["memory_total_mb", "cpu_percent", "disk_total_gb"] {
+            assert!(
+                body.get(field).is_some_and(|v| !v.is_null()),
+                "{field} is missing from the store-less body: {body}"
+            );
+        }
+    }
+
+    #[test]
     fn derives_the_full_shape_from_signals() {
         let s = signals(&[
             ("mem.total_bytes", 4.0 * BYTES_PER_GB),

@@ -63,6 +63,7 @@ pub async fn get_storage_diagnostics(State(state): State<AppState>) -> Json<Valu
         &store_dir,
         fs_usage(&store_dir),
         live.as_ref().map(|(a, b, w)| (a.as_str(), b.as_str(), *w)),
+        ados_config::log_store::store_enabled(),
     );
     if let Some(obj) = body.as_object_mut() {
         obj.insert(
@@ -85,6 +86,7 @@ pub fn build(
     store_dir: &Path,
     fs: Option<(u64, u64)>,
     live: Option<(&str, &str, f64)>,
+    store_enabled: bool,
 ) -> Value {
     // Prefer the reading this process took itself.
     //
@@ -102,14 +104,23 @@ pub fn build(
             "could not read /proc/diskstats, and the logging store did not answer",
         ),
     };
-    let throttle = match rows {
-        Some(rows) => throttle_history(rows),
-        None => json!({
+    // The throttle bitfield's sticky bits exist only in the store, so with the
+    // store off they are genuinely unavailable — and the reason is "it is off",
+    // not "it did not answer". Those read very differently to somebody deciding
+    // whether the box is broken.
+    let throttle = match (rows, store_enabled) {
+        (Some(rows), _) => throttle_history(rows),
+        (None, false) => json!({
+            "supported": null,
+            "reason": "the logging store is disabled, and the sticky throttle bits are \
+                       recorded nowhere else",
+        }),
+        (None, true) => json!({
             "supported": null,
             "reason": "the logging store did not answer",
         }),
     };
-    let store = store_facts(store_dir);
+    let store = store_facts(store_dir, store_enabled);
     let filesystem = filesystem_facts(fs);
 
     let (verdict, reason) = verdict(&write, &filesystem, &throttle);
@@ -396,7 +407,7 @@ fn throttle_history(rows: &[HwRow]) -> Value {
 /// A torn store is renamed aside rather than deleted, so a box that has corrupted
 /// twice carries three copies. That is the mechanism that filled the card, and it
 /// is invisible unless something totals it.
-fn store_facts(dir: &Path) -> Value {
+fn store_facts(dir: &Path, enabled: bool) -> Value {
     let live = file_len(&dir.join("logs.db"));
     let wal = file_len(&dir.join("logs.db-wal"));
 
@@ -414,6 +425,7 @@ fn store_facts(dir: &Path) -> Value {
     }
 
     json!({
+        "enabled": enabled,
         "path": dir.to_string_lossy(),
         "live_bytes": live,
         "wal_bytes": wal,
@@ -494,10 +506,25 @@ fn verdict(write: &Measurement, filesystem: &Value, throttle: &Value) -> (&'stat
                     ),
                 );
             }
-            (
-                "ok",
-                format!("writing {kb:.0} KB/s sustained; no throttle events recorded"),
-            )
+            // "No throttle events recorded" is a claim about something that was
+            // looked at. The sticky bits live only in the logging store, so with
+            // the store off nobody looked, and saying it anyway would be exactly
+            // the fabricated clean bill of health this surface exists to refuse.
+            let looked = throttle.get("supported").and_then(Value::as_bool).is_some();
+            if looked {
+                (
+                    "ok",
+                    format!("writing {kb:.0} KB/s sustained; no throttle events recorded"),
+                )
+            } else {
+                (
+                    "ok",
+                    format!(
+                        "writing {kb:.0} KB/s sustained; power and thermal history was not \
+                         checked (it is recorded only by the logging store, which is off)"
+                    ),
+                )
+            }
         }
         None => (
             "unknown",
@@ -705,7 +732,7 @@ mod tests {
 
     #[test]
     fn an_unreachable_store_is_unknown_never_ok() {
-        let out = build(None, Path::new("/nonexistent"), None, None);
+        let out = build(None, Path::new("/nonexistent"), None, None, true);
         assert_eq!(out["verdict"], json!("unknown"));
         assert_eq!(out["write"]["kb_per_s"], json!(null));
     }
@@ -714,7 +741,7 @@ mod tests {
     fn the_measured_pre_fix_rate_reads_critical() {
         // 1 714 KB/s, the rate measured on a test node before the retention fix.
         let rows = rows_with_counter(120, 1_714.0 * 1024.0 / 512.0, "mmcblk0");
-        let out = build(Some(&rows), Path::new("/nonexistent"), None, None);
+        let out = build(Some(&rows), Path::new("/nonexistent"), None, None, true);
         assert_eq!(out["verdict"], json!("critical"));
         assert!(out["reason"].as_str().unwrap().contains("wore a card out"));
     }
@@ -727,6 +754,7 @@ mod tests {
             Path::new("/nonexistent"),
             Some((100, 20)),
             None,
+            true,
         );
         assert_eq!(out["verdict"], json!("ok"));
     }
@@ -739,6 +767,7 @@ mod tests {
             Path::new("/nonexistent"),
             Some((100, 95)),
             None,
+            true,
         );
         assert_eq!(out["verdict"], json!("critical"));
         assert!(out["reason"].as_str().unwrap().contains("full"));
@@ -782,6 +811,7 @@ mod tests {
             Path::new("/nonexistent"),
             None,
             Some((&a, &b, 5.0)),
+            true,
         );
         assert_eq!(out["write"]["source"], json!("direct"));
         assert_eq!(out["write"]["kb_per_s"], json!(1_200.0));
@@ -791,14 +821,14 @@ mod tests {
     #[test]
     fn an_unreadable_diskstats_falls_back_to_the_store_rather_than_reporting_nothing() {
         let rows = rows_with_counter(120, 2.0, "mmcblk0");
-        let out = build(Some(&rows), Path::new("/nonexistent"), None, None);
+        let out = build(Some(&rows), Path::new("/nonexistent"), None, None, true);
         assert_eq!(out["write"]["source"], json!("store"));
         assert_eq!(out["write"]["kb_per_s"], json!(1.0));
     }
 
     #[test]
     fn with_neither_source_the_rate_is_absent_and_names_both_failures() {
-        let out = build(None, Path::new("/nonexistent"), None, None);
+        let out = build(None, Path::new("/nonexistent"), None, None, true);
         assert_eq!(out["write"]["kb_per_s"], json!(null));
         assert_eq!(out["write"]["source"], json!("none"));
         assert_eq!(out["verdict"], json!("unknown"));
@@ -864,6 +894,97 @@ mod tests {
         let m = live_write_rate(&a, &a, 5.0).expect("an unmoved counter is still a reading");
         assert_eq!(m.kb_s, Some(0.0));
         assert_eq!(m.source, "direct");
+    }
+
+    // --- the store being off is a state, not a fault -------------------------
+
+    #[test]
+    fn a_disabled_store_is_not_reported_as_a_broken_one() {
+        // With the store off there are no rows, which used to mean the whole
+        // verdict collapsed to "unknown" — the word an operator reads as
+        // "something here is broken". The rate is measurable without the store,
+        // so the verdict stands on its own and the store simply says it is off.
+        let a = diskstats("mmcblk0", 1_000_000);
+        let b = diskstats("mmcblk0", 1_000_240);
+        let out = build(
+            None,
+            Path::new("/nonexistent"),
+            Some((100, 20)),
+            Some((&a, &b, 5.0)),
+            false,
+        );
+        assert_eq!(out["verdict"], json!("ok"));
+        assert_eq!(out["store"]["enabled"], json!(false));
+        assert_eq!(out["write"]["source"], json!("direct"));
+        // 240 sectors over 5s = 24 KB/s.
+        assert_eq!(out["write"]["kb_per_s"], json!(24.0));
+    }
+
+    #[test]
+    fn a_healthy_verdict_never_claims_a_clean_throttle_history_nobody_read() {
+        // The sticky bits live only in the store. With it off, "no throttle
+        // events recorded" would be a clean bill of health for something that
+        // was never looked at — the exact fabrication this surface refuses.
+        let a = diskstats("mmcblk0", 1_000_000);
+        let b = diskstats("mmcblk0", 1_000_240);
+        let out = build(
+            None,
+            Path::new("/nonexistent"),
+            Some((100, 20)),
+            Some((&a, &b, 5.0)),
+            false,
+        );
+        let reason = out["reason"].as_str().unwrap();
+        assert!(
+            !reason.contains("no throttle events recorded"),
+            "must not claim a history it did not read: {reason}"
+        );
+        assert!(reason.contains("not checked"), "{reason}");
+        // And the throttle block names the store being off as the reason,
+        // rather than the "did not answer" that means a fault.
+        let why = out["throttle"]["reason"].as_str().unwrap();
+        assert!(why.contains("disabled"), "{why}");
+        assert_eq!(out["throttle"]["supported"], json!(null));
+    }
+
+    #[test]
+    fn with_the_store_on_but_silent_the_reason_is_still_a_fault() {
+        // Same absent rows, opposite meaning: somebody asked for the store and
+        // it is not answering. That IS something to look into, and it must not
+        // be softened into "it is off".
+        let a = diskstats("mmcblk0", 1_000_000);
+        let b = diskstats("mmcblk0", 1_000_240);
+        let out = build(
+            None,
+            Path::new("/nonexistent"),
+            Some((100, 20)),
+            Some((&a, &b, 5.0)),
+            true,
+        );
+        assert_eq!(out["store"]["enabled"], json!(true));
+        let why = out["throttle"]["reason"].as_str().unwrap();
+        assert!(why.contains("did not answer"), "{why}");
+    }
+
+    #[test]
+    fn a_store_that_is_on_and_answering_still_reports_a_clean_history() {
+        // The unchanged path: the claim is allowed when it was actually read.
+        let mut rows = rows_with_counter(120, 2.0, "mmcblk0");
+        for row in rows.iter_mut() {
+            row.signals.insert("throttle.raw".into(), json!(0));
+        }
+        let out = build(
+            Some(&rows),
+            Path::new("/nonexistent"),
+            Some((100, 20)),
+            None,
+            true,
+        );
+        assert_eq!(out["verdict"], json!("ok"));
+        assert!(out["reason"]
+            .as_str()
+            .unwrap()
+            .contains("no throttle events recorded"));
     }
 
     // --- the janitor's record ------------------------------------------------
@@ -952,6 +1073,7 @@ mod tests {
             Path::new("/nonexistent"),
             Some((100, 20)),
             None,
+            true,
         );
         assert_eq!(out["verdict"], json!("wearing"));
         assert!(out["reason"].as_str().unwrap().contains("undervoltage"));

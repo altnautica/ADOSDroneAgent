@@ -30,6 +30,61 @@ class LogsTransportError(Exception):
     """A transport-level failure surfaced as a clean CLI error."""
 
 
+def store_is_disabled() -> bool:
+    """True when this box's config has the logging store turned off.
+
+    Read directly rather than through the full config model: this runs on the
+    error path of a CLI command, and pulling in the whole model to answer one
+    boolean would make a failure to load it look like a failure to reach the
+    store.
+    """
+    try:
+        import yaml  # noqa: PLC0415 - deliberately lazy, this is an error path
+
+        from ados.core.paths import ADOS_ETC_DIR  # noqa: PLC0415
+
+        raw = (ADOS_ETC_DIR / "config.yaml").read_text(encoding="utf-8")
+        parsed = yaml.safe_load(raw)
+        if not isinstance(parsed, dict):
+            return True
+        logging_block = parsed.get("logging")
+        if not isinstance(logging_block, dict):
+            return True
+        store = logging_block.get("store")
+        if not isinstance(store, dict):
+            return True
+        return not bool(store.get("enabled", False))
+    except (OSError, ValueError, ImportError):
+        # A config we cannot read means we cannot claim the store was disabled
+        # on purpose. Say nothing rather than assert a reason we do not have.
+        return False
+
+
+def unreachable_message(where: str, on_box: bool) -> str:
+    """Explain a failure to reach the store, distinguishing off from broken.
+
+    The store now ships OFF by default, so "could not connect" is the ordinary
+    case on most nodes, not a fault. Reporting it as one sends an operator
+    debugging a daemon that was never meant to be running, and — worse — an
+    empty result would read as "there are no logs" on a box that has plenty of
+    them in the journal.
+    """
+    if on_box and store_is_disabled():
+        return (
+            "The logging store is turned off on this box, so there is nothing to "
+            "query. This is the default.\n\n"
+            "  Live logs:  journalctl -u ados-supervisor -f   (or any ados-* unit)\n"
+            "  Turn it on: set logging.store.enabled: true in /etc/ados/config.yaml, "
+            "then re-run the installer or `ados update`.\n\n"
+            "While it is off this node keeps no durable flight recorder; the journal "
+            "is the log of record and does not survive a reflash."
+        )
+    return (
+        f"could not reach the logging daemon at {where}. "
+        "Is ados-logd running? On-box, the default is the unix socket."
+    )
+
+
 def _load_pairing_key() -> str | None:
     """Read the agent's pairing key from the local pairing file, if present.
 
@@ -117,8 +172,7 @@ class LogsClient:
             resp = self._client.get(path, params=params)
         except httpx.ConnectError as exc:
             raise LogsTransportError(
-                f"could not reach the logging daemon at {self._where()}. "
-                "Is ados-logd running? On-box, the default is the unix socket."
+                unreachable_message(self._where(), on_box=self._host is None)
             ) from exc
         except httpx.HTTPError as exc:
             raise LogsTransportError(f"request to {self._where()} failed: {exc}") from exc
@@ -135,7 +189,7 @@ class LogsClient:
                 yield from resp.iter_bytes()
         except httpx.ConnectError as exc:
             raise LogsTransportError(
-                f"could not reach the logging daemon at {self._where()}."
+                unreachable_message(self._where(), on_box=self._host is None)
             ) from exc
         except httpx.HTTPError as exc:
             raise LogsTransportError(f"stream from {self._where()} failed: {exc}") from exc
@@ -164,7 +218,7 @@ class LogsClient:
                         continue
         except httpx.ConnectError as exc:
             raise LogsTransportError(
-                f"could not reach the logging daemon at {self._where()}."
+                unreachable_message(self._where(), on_box=self._host is None)
             ) from exc
         except httpx.HTTPError as exc:
             raise LogsTransportError(f"tail from {self._where()} failed: {exc}") from exc

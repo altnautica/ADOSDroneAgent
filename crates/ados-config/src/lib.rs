@@ -19,6 +19,8 @@
 //! a per-service status sidecar so a remote Health surface can show a malformed
 //! config, not just the log.
 
+pub mod log_store;
+
 use std::fmt::Display;
 use std::path::Path;
 

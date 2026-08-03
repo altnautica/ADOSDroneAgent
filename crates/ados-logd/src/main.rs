@@ -47,6 +47,25 @@ fn init_logging() {
 #[tokio::main]
 async fn main() -> Result<()> {
     init_logging();
+
+    // The store is opt-in. It is ~96% of everything this box writes to its card
+    // and the largest single lump of space it occupies, so it does not run
+    // unless somebody asked for it. Exiting BEFORE `run_daemon` is what makes
+    // "off" mean no store file is created, rather than an empty one that grows
+    // the moment anything connects.
+    //
+    // The installer also declines to enable the unit when the key is off; this
+    // second read covers the unit being started by hand or left enabled by an
+    // older install. Exit 0, because declining to run is not a failure and
+    // `Restart=on-failure` must not turn it into a loop.
+    if !ados_logd::gate::store_enabled() {
+        tracing::info!(
+            key = "logging.store.enabled",
+            "logging store is disabled; not starting (journalctl is the log of record)"
+        );
+        return Ok(());
+    }
+
     tracing::info!(
         db = %ados_logd::paths::db_path(),
         ingest = %ados_logd::paths::ingest_socket(),

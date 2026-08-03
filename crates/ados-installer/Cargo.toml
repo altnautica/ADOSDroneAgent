@@ -11,6 +11,10 @@ name = "ados-installer"
 path = "src/main.rs"
 
 [dependencies]
+# The shared config readers. The installer reads exactly one key through them
+# (`logging.store.enabled`), so its decision to enable the store unit and the
+# daemon's decision to run cannot disagree.
+ados-config = { path = "../ados-config" }
 ados-macpin = { path = "../ados-macpin" }
 # Reused for the launchd plist renderer (`render_plist`) + the reverse-DNS
 # label mapper (`unit_to_label`) the macOS workstation install writes into

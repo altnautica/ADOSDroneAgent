@@ -44,6 +44,40 @@ def _payload(**overrides) -> dict:
     return base
 
 
+def test_a_disabled_store_reads_as_off_not_as_an_empty_one():
+    # Off is the default and is not a fault. "0 B live" would describe a store
+    # that exists and happens to be empty, which is a different and much more
+    # alarming claim than one that was never asked to run.
+    out = _invoke(
+        _payload(
+            store={
+                "enabled": False,
+                "live_bytes": 0,
+                "wal_bytes": 0,
+                "quarantined": 0,
+            }
+        )
+    )
+    assert "disabled" in out
+    assert "journal is the record" in out
+    assert "0 B live" not in out
+
+
+def test_an_enabled_store_still_reports_its_footprint():
+    out = _invoke(
+        _payload(
+            store={
+                "enabled": True,
+                "live_bytes": 1048576,
+                "wal_bytes": 4096,
+                "quarantined": 0,
+            }
+        )
+    )
+    assert "1.0 MB live" in out
+    assert "disabled" not in out
+
+
 def test_the_write_rates_provenance_is_stated_not_left_implicit():
     # Five seconds of kernel counter and hours of stored history answer
     # different questions. Reading one as the other is how a change that did

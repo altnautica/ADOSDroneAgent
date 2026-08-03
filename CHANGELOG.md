@@ -4,6 +4,65 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.343] - 2026-08-03
+
+### Changed
+
+- **The durable logging and telemetry store now ships OFF by default. This is a
+  deliberate capability regression, not an optimisation.** While it is off the
+  node has no durable flight recorder: nothing survives a reboot except the
+  journal, and the journal does not survive a reflash. That is the cost, stated
+  plainly, and it is the reason the persistent journal is being kept rather than
+  volatilised.
+
+  What it buys: measured on a drone, the node wrote 904 KB/s with the store
+  running and 49 KB/s with it stopped. The store is roughly 96% of everything
+  reaching the card and the largest single lump of space it occupies. Cards were
+  filling, tearing and being reflashed largely because of it. It is a real
+  feature and it will come back, but it currently costs more than it returns.
+
+  One key controls it: `logging.store.enabled`, default false, in the config
+  schema so it renders in the settings UI. Off means the unit is disabled and
+  masked and the daemon declines to start, so no store file is created — the
+  installer decides from the key, and the daemon reads it again so a unit
+  started by hand or left enabled by an older install still declines. Turning it
+  back on is that one key plus a re-run of the installer, never a reinstall; the
+  binary is placed either way. The legacy pin from `ados rust disable logd` is
+  still honoured as a force-off, so a box an operator turned off by hand is not
+  quietly turned back on by an upgrade.
+
+  The gate defaults to off when the config is absent, malformed, or predates the
+  key — the opposite direction from every other gate in the agent, and on
+  purpose. The others default their feature on because a config a box cannot
+  read must not silently disable a safety net. This one is not a safety net: a
+  typo that turned it on would hand the node back the write volume that has been
+  destroying cards, and losing history is recoverable with one key where a
+  reflash is not.
+
+### Fixed
+
+- **Everything that reads the store now degrades honestly rather than reporting
+  a fault.** With the store off, "could not connect" is the ordinary case on
+  most nodes.
+  - `ados logs` says the store is off, that this is the default, how to reach
+    live logs through `journalctl`, and how to turn it back on. It no longer
+    asks whether `ados-logd` is running, and it never returns an empty result
+    that would read as "this box has no logs".
+  - `ados diag storage` reports the store as disabled rather than as a store
+    that exists and holds zero bytes — a different and much more alarming claim.
+    The verdict no longer collapses to `unknown`, because the write rate is
+    measured directly now.
+  - A healthy verdict no longer says "no throttle events recorded" when the
+    store is off. The sticky power and thermal bits are recorded nowhere else,
+    so with it off nobody looked, and claiming a clean history for something
+    unread is the fabrication this surface exists to refuse. It now says the
+    history was not checked and why.
+  - The resource routes' fallback to a direct host read is now covered by a test
+    that asserts against the real host rather than a fixture. That path used to
+    run for a few seconds at boot; it is now the only path on most nodes,
+    forever, and a gap in it would blank every CPU, memory and disk reading on a
+    normally-configured box.
+
 ## [0.99.342] - 2026-08-03
 
 ### Fixed

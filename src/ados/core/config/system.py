@@ -123,11 +123,34 @@ class PerceptionConfig(BaseModel):
     serving: PerceptionServingConfig = PerceptionServingConfig()
 
 
+class LogStoreConfig(BaseModel):
+    """The durable local logging and telemetry store — the black box.
+
+    **Off by default, deliberately.** Measured on a drone, the node wrote
+    904 KB/s with the store running and 49 KB/s with it stopped: the store is
+    roughly 96% of everything reaching the card, and the largest single lump of
+    space it occupies. Cards were filling and corrupting, and nodes were being
+    reflashed, largely because of it.
+
+    Turning it off is a real capability regression and is not dressed up as
+    anything else: while it is off the node has no durable flight recorder, and
+    ``journalctl`` is the log of record. That is why the persistent journal is
+    kept — with the store gone it is the only thing that survives a reboot.
+
+    Turning it back on is this one key plus a restart, never a reinstall: the
+    binary is installed either way and the installer reconciles the unit to
+    match on the next run.
+    """
+
+    enabled: bool = False
+
+
 class LoggingConfig(BaseModel):
     level: str = "info"
     max_size_mb: int = 50
     keep_count: int = 5
     flight_log_dir: str = str(FLIGHT_LOGS_DIR)
+    store: LogStoreConfig = LogStoreConfig()
 
 
 class PairingConfig(BaseModel):

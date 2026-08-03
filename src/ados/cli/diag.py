@@ -444,9 +444,15 @@ def diag_storage(as_json: bool) -> None:
         click.echo(_ansi.kv(theme, "power/thermal", theme.dim(f"- ({why})"), 16))
 
     store = data.get("store") or {}
-    live = _fmt_bytes(store.get("live_bytes"))
-    wal = _fmt_bytes(store.get("wal_bytes"))
-    click.echo(_ansi.kv(theme, "log store", f"{live} live  ·  {wal} WAL", 16))
+    if store.get("enabled") is False:
+        # Off is the default and is not a fault. Saying "0 B live" here would
+        # read as a store that exists and is empty, which is a different and
+        # more alarming thing than one that was never asked to run.
+        click.echo(_ansi.kv(theme, "log store", "disabled (journal is the record)", 16))
+    else:
+        live = _fmt_bytes(store.get("live_bytes"))
+        wal = _fmt_bytes(store.get("wal_bytes"))
+        click.echo(_ansi.kv(theme, "log store", f"{live} live  ·  {wal} WAL", 16))
     quarantined = store.get("quarantined")
     if isinstance(quarantined, int) and quarantined > 0:
         corpse_bytes = _fmt_bytes(store.get("quarantined_bytes"))

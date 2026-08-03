@@ -24,6 +24,11 @@ pub mod retention;
 pub mod taps;
 pub mod writer;
 
+/// Whether the store runs at all — the `logging.store.enabled` gate, shared with
+/// the installer (which decides whether to enable the unit) and the storage
+/// diagnostic (which must say "off" rather than "broken").
+pub use ados_config::log_store as gate;
+
 /// The shared wire contracts: versioned ingest frames, the read-API envelope,
 /// and the secret-field redaction applied at ingest.
 pub use ados_protocol::logd as wire;

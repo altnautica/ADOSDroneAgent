@@ -958,22 +958,55 @@ fn reconcile_tunnel_marker() {
     }
 }
 
-/// Reconcile the local logging and telemetry store unit against its
-/// fallback marker. The store is on by default (the log-view endpoints read
-/// it), so a fresh box with no marker enables it; the `logd-python-fallback`
-/// marker — written by `ados rust disable logd` — pins it off, so the
-/// installer tears it down instead. Idempotent and runs on every install so a
-/// re-run from a partial state self-heals. The START half is the `start`
-/// step's job (the unit is PartOf the supervisor).
+/// Decide whether the logging and telemetry store unit should be enabled, from
+/// the config body and the legacy pin marker. Pure, so the default and both
+/// override directions are asserted without a filesystem or a systemd.
+///
+/// The store is **off unless asked for**. It is ~96% of everything the box
+/// writes to its card, and the largest single lump of space it occupies, so a
+/// node that nobody configured for it does not run it. `logging.store.enabled`
+/// is the one key; the `logd-python-fallback` marker is honoured as a force-off
+/// so a box already pinned by `ados rust disable logd` stays pinned.
+///
+/// There is no marker that forces it ON. A second way to enable something is a
+/// second thing to check when a node is behaving unexpectedly, and this one has
+/// a measured cost that makes "why is this on?" a question worth being able to
+/// answer from the config alone.
+pub fn logd_unit_wanted(config_body: Option<&str>, pinned_off: bool) -> bool {
+    if pinned_off {
+        return false;
+    }
+    config_body
+        .map(ados_config::log_store::enabled_from)
+        .unwrap_or(false)
+}
+
+/// Reconcile the local logging and telemetry store unit against the config key.
+/// Idempotent and runs on every install so a re-run from a partial state
+/// self-heals. The START half is the `start` step's job (the unit is PartOf the
+/// supervisor).
+///
+/// Turning it back on is one config key plus this reconcile, never a reinstall
+/// from scratch — the binary is still fetched and placed either way.
 fn reconcile_logd_unit() {
     const UNIT: &str = "ados-logd.service";
+    let config_body = std::fs::read_to_string(Path::new(CONFIG_DIR).join("config.yaml")).ok();
     let pinned_off = Path::new(CONFIG_DIR).join("logd-python-fallback").exists();
-    if pinned_off {
+    if logd_unit_wanted(config_body.as_deref(), pinned_off) {
+        // Un-mask first: a box that carried the store while it was off may have
+        // been masked by an earlier reconcile, and `enable` on a masked unit is
+        // a silent no-op that would leave the operator's opt-in inert.
+        let _ = exec::run("systemctl", &["unmask", UNIT]);
+        enable_if_present(UNIT);
+    } else {
         let _ = exec::run("systemctl", &["stop", UNIT]);
         let _ = exec::run("systemctl", &["disable", UNIT]);
+        // Mask as well as disable: `disable` only drops the wants-symlinks, and
+        // this unit is pulled in by the supervisor, so a dependency would start
+        // it again. The daemon's own gate would decline, but the unit would
+        // still churn a start attempt on every boot.
+        let _ = exec::run("systemctl", &["mask", UNIT]);
         let _ = exec::run("systemctl", &["reset-failed", UNIT]);
-    } else {
-        enable_if_present(UNIT);
     }
 }
 
@@ -1992,7 +2025,62 @@ mod tests {
         assert!(body.contains("[Journal]"));
         assert!(body.contains("Storage=persistent"));
         assert!(body.contains("SystemMaxUse=300M"));
-        assert!(body.ends_with('\n'));
+        // journald stays PERSISTENT deliberately. With the logging store off by
+        // default it is the only record that survives a reboot, so the reason a
+        // node died has to still be readable from disk after it does.
+        assert!(body.contains("Storage=persistent"));
+    }
+
+    // --- the logging store is opt-in ----------------------------------------
+
+    #[test]
+    fn a_fresh_node_does_not_enable_the_logging_store() {
+        // No key, no marker: off. This is the case that matters most, because
+        // it is every node that nobody configured.
+        assert!(!logd_unit_wanted(Some("agent:\n  name: x\n"), false));
+        // No config file at all (a box mid-install) is also off.
+        assert!(!logd_unit_wanted(None, false));
+    }
+
+    #[test]
+    fn the_config_key_is_what_turns_the_store_on() {
+        assert!(logd_unit_wanted(
+            Some("logging:\n  store:\n    enabled: true\n"),
+            false
+        ));
+        assert!(!logd_unit_wanted(
+            Some("logging:\n  store:\n    enabled: false\n"),
+            false
+        ));
+    }
+
+    #[test]
+    fn the_legacy_pin_still_forces_it_off_over_the_key() {
+        // A box already pinned by `ados rust disable logd` stays pinned even if
+        // the config asks for the store — the operator turned it off by hand
+        // and an upgrade must not quietly undo that.
+        assert!(!logd_unit_wanted(
+            Some("logging:\n  store:\n    enabled: true\n"),
+            true
+        ));
+    }
+
+    #[test]
+    fn a_config_that_does_not_parse_leaves_the_store_off() {
+        // Deliberately the opposite direction from the other gates in this
+        // installer. A typo must not be able to hand a node back the write
+        // volume that has been destroying cards; losing history is recoverable
+        // with one key, a reflash is not.
+        assert!(!logd_unit_wanted(Some(": : : not yaml"), false));
+        assert!(!logd_unit_wanted(Some("logging: [a, list]"), false));
+    }
+
+    #[test]
+    fn an_unrelated_logging_block_does_not_turn_the_store_on() {
+        assert!(!logd_unit_wanted(
+            Some("logging:\n  level: debug\n  max_size_mb: 50\n"),
+            false
+        ));
     }
 
     #[test]
