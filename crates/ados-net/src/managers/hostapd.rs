@@ -78,7 +78,7 @@ impl HostapdManager {
         configured_passphrase: String,
         runner: Arc<dyn CmdRunner>,
     ) -> Self {
-        Self::with_paths(
+        let mut m = Self::with_paths(
             device_id,
             ssid,
             channel,
@@ -87,7 +87,39 @@ impl HostapdManager {
             PathBuf::from(crate::paths::HOSTAPD_CONF_PATH),
             PathBuf::from(crate::paths::DNSMASQ_CONF_PATH),
             PathBuf::from(crate::paths::AP_PASSPHRASE_PATH),
-        )
+        );
+        m.resolve_interface(&ados_protocol::ap_country::configured_ap_interface());
+        m
+    }
+
+    /// Resolve which radio the access point runs on, replacing the `wlan0`
+    /// guess.
+    ///
+    /// Interface names are not stable: on this bench `wlan0` was the onboard
+    /// chip on two boots out of three and the USB flight radio on the third.
+    /// Binding the AP to a name therefore meant a one-in-three chance of
+    /// configuring hostapd on the aircraft's radio link.
+    ///
+    /// Resolution is by DRIVER, cross-checked against the interface the radio
+    /// says it actually took. A failure here leaves the interface set to the
+    /// `wlan0` fallback and is logged loudly rather than silently accepted; the
+    /// start path refuses separately if that fallback turns out to be the radio.
+    pub fn resolve_interface(&mut self, configured: &str) {
+        let radio = ados_protocol::netif::radio_interface();
+        match ados_protocol::netif::resolve_ap_interface(configured, radio.as_deref()) {
+            Ok(iface) => {
+                if iface != self.interface {
+                    info!(
+                        from = %self.interface, to = %iface, radio = ?radio,
+                        "ap_interface_resolved"
+                    );
+                }
+                self.interface = iface;
+            }
+            Err(e) => {
+                error!(error = %e, radio = ?radio, "ap_interface_unresolved");
+            }
+        }
     }
 
     /// Full constructor (tests).
@@ -293,6 +325,27 @@ impl HostapdManager {
                 std::io::ErrorKind::InvalidData,
                 "refusing to write hostapd.conf without a passphrase",
             ));
+        }
+        // Never emit a conf that points hostapd at the aircraft's radio link.
+        // The resolver should already have avoided it; this is the backstop for
+        // the case where resolution failed and left the `wlan0` fallback in
+        // place on a boot where `wlan0` IS the radio -- which is the exact
+        // one-in-three ordering measured on the bench.
+        if let Some(radio) = ados_protocol::netif::radio_interface() {
+            if radio == self.interface {
+                error!(
+                    interface = %self.interface,
+                    "ap_config_refused_interface_is_the_wfb_radio"
+                );
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "refusing to run the access point on {}: the WFB radio \
+                         is using it",
+                        self.interface
+                    ),
+                ));
+            }
         }
         let hostapd_body = self.render_hostapd_conf();
         let dnsmasq_body = self.render_dnsmasq_conf();

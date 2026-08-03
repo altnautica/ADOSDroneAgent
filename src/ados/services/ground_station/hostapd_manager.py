@@ -129,6 +129,75 @@ _HOSTAPD_CONF_PATH = HOSTAPD_CONF_PATH
 _DNSMASQ_CONF_PATH = DNSMASQ_CONF_PATH
 
 _AP_IFACE = "wlan0"
+
+
+def resolve_ap_interface(
+    configured: str = "",
+    fallback: str = _AP_IFACE,
+    net_root: Path | None = None,
+) -> str:
+    """Return the interface the access point should bind, resolved by DRIVER.
+
+    Interface names are not stable. Measured across three reboots of a ground
+    station, ``wlan0`` was the onboard chip twice and the USB WFB flight radio
+    once -- so binding the AP to a name meant a one-in-three chance of running
+    hostapd on the aircraft's radio link.
+
+    Classification uses the generated deny-set the radio itself consults to make
+    sure it never grabs management WiFi for injection. Read the other way round,
+    that set is exactly "the interface the access point wants".
+
+    Mirrors ``EthernetManager``/``UplinkRouter``, which already resolve their NIC
+    at construction time for this same udev-race reason, and the Rust twin in
+    ``ados_protocol::netif``. Falls back to the previous constant rather than
+    raising: the caller's start path refuses separately if the fallback turns
+    out to be the radio.
+    """
+    from ados.services.wfb._wfb_tables_generated import (
+        WFB_COMPATIBLE_DRIVERS,
+        WFB_DENY_DRIVER_PREFIXES,
+    )
+
+    root = net_root or Path("/sys/class/net")
+
+    def driver_of(iface: str) -> str:
+        try:
+            return (root / iface / "device" / "driver").resolve().name
+        except OSError:
+            return ""
+
+    def is_radio(driver: str) -> bool:
+        return driver.strip().lower() in {d.lower() for d in WFB_COMPATIBLE_DRIVERS}
+
+    def is_onboard(driver: str) -> bool:
+        d = driver.strip().lower()
+        return any(d.startswith(p) for p in WFB_DENY_DRIVER_PREFIXES)
+
+    try:
+        wireless = sorted(
+            p.name
+            for p in root.iterdir()
+            if (p / "phy80211").exists() or (p / "wireless").exists()
+        )
+    except OSError:
+        return configured.strip() or fallback
+
+    configured = configured.strip()
+    if configured:
+        if configured in wireless and is_radio(driver_of(configured)):
+            log.error(
+                "ap_interface_configured_is_the_wfb_radio",
+                interface=configured,
+            )
+            return fallback
+        return configured
+
+    for iface in wireless:
+        if is_onboard(driver_of(iface)):
+            return iface
+
+    log.error("ap_interface_no_onboard_wifi", candidates=wireless)
+    return fallback
 _AP_ADDR = "192.168.4.1"
 _AP_CIDR = f"{_AP_ADDR}/24"
 _DHCP_RANGE = "192.168.4.10,192.168.4.100,12h"
@@ -633,6 +702,9 @@ async def main() -> None:
         ssid=ssid_override,
         channel=hotspot.channel,
         passphrase=hotspot.password,
+        # Resolved here rather than defaulted: the interface names race at boot,
+        # so "wlan0" is right only about two boots in three on this hardware.
+        interface=resolve_ap_interface(hotspot.interface),
     )
     manager.ensure_passphrase()
 

@@ -43,6 +43,14 @@ class HotspotConfig(BaseModel):
     # Set this in config.yaml only to pin a deliberate shared passphrase.
     password: str = ""
     channel: int = 6
+    # Which radio the access point binds. Empty means "resolve it by driver",
+    # which is what the agent does -- interface names are not stable across
+    # boots, so naming one here pins the AP to whatever that name happens to
+    # mean on the next boot. Set it only to override the resolution.
+    #
+    # A REST read route already reported this key while nothing consumed it, so
+    # a value set here used to be echoed back to the operator and then ignored.
+    interface: str = ""
 
 
 class MacPinConfig(BaseModel):

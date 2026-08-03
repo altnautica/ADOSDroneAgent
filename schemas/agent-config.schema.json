@@ -909,6 +909,11 @@
           "title": "Enabled",
           "type": "boolean"
         },
+        "interface": {
+          "default": "",
+          "title": "Interface",
+          "type": "string"
+        },
         "password": {
           "default": "",
           "title": "Password",
@@ -1149,6 +1154,7 @@
           "default": {
             "channel": 6,
             "enabled": false,
+            "interface": "",
             "password": "",
             "ssid": "ADOS-{device_id}"
           }
@@ -2462,6 +2468,7 @@
         "hotspot": {
           "channel": 6,
           "enabled": false,
+          "interface": "",
           "password": "",
           "ssid": "ADOS-{device_id}"
         },

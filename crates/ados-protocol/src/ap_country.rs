@@ -128,6 +128,50 @@ pub fn configured_hotspot_password_from_yaml(text: &str) -> String {
         .unwrap_or_default()
 }
 
+/// The operator's configured AP interface (`network.hotspot.interface`), or an
+/// empty string.
+///
+/// Empty means "not set", which lets the AP manager resolve the interface by
+/// driver instead of by a name that is not stable across boots. A REST read
+/// route already reported this key while nothing consumed it, so a value an
+/// operator set here was previously displayed back to them and then ignored.
+pub fn configured_ap_interface() -> String {
+    configured_ap_interface_from(&crate::aux_ports::config_path())
+}
+
+/// The same, from an explicit path (test seam).
+pub fn configured_ap_interface_from(path: &std::path::Path) -> String {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return String::new();
+    };
+    configured_ap_interface_from_yaml(&text)
+}
+
+/// The same, from config text.
+pub fn configured_ap_interface_from_yaml(text: &str) -> String {
+    #[derive(Debug, Default, serde::Deserialize)]
+    struct Root {
+        #[serde(default)]
+        network: Net,
+    }
+    #[derive(Debug, Default, serde::Deserialize)]
+    struct Net {
+        #[serde(default)]
+        hotspot: Hotspot,
+    }
+    #[derive(Debug, Default, serde::Deserialize)]
+    struct Hotspot {
+        #[serde(default)]
+        interface: Option<String>,
+    }
+    let raw: Root = serde_norway::from_str(text).unwrap_or_default();
+    raw.network
+        .hotspot
+        .interface
+        .map(|p| p.trim().to_string())
+        .unwrap_or_default()
+}
+
 /// Resolve from the agent's config file.
 pub fn load() -> String {
     load_from(&crate::aux_ports::config_path())
