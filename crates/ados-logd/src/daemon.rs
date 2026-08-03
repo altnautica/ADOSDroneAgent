@@ -96,15 +96,19 @@ impl Default for DaemonPaths {
 
 /// systemd readiness ping. No-op off Linux and when not run under a
 /// `Type=notify` unit (`NOTIFY_SOCKET` unset).
+///
+/// Public because the disabled-store path in `main` must send it too: under
+/// `Type=notify`, a process that exits without ever announcing readiness is
+/// recorded as `result 'protocol'` — a failure — however clean its exit code.
 #[cfg(target_os = "linux")]
-fn sd_ready() {
+pub fn sd_ready() {
     if let Err(e) = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]) {
         tracing::debug!(error = %e, "sd_notify READY failed");
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-fn sd_ready() {}
+pub fn sd_ready() {}
 
 /// systemd stopping ping. No-op off Linux / outside a notify unit.
 #[cfg(target_os = "linux")]

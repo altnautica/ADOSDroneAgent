@@ -63,6 +63,19 @@ async fn main() -> Result<()> {
             key = "logging.store.enabled",
             "logging store is disabled; not starting (journalctl is the log of record)"
         );
+        // Announce readiness before exiting. The unit is `Type=notify`, so
+        // systemd waits for this and treats a process that exits without ever
+        // sending it as `result 'protocol'` — a FAILURE — no matter that the
+        // exit code is 0. Both rigs therefore carried a permanently failed
+        // ados-logd after the store was switched off by default, which is worse
+        // than useless: a node that always shows a failed unit teaches its
+        // operator to stop reading failed units, and the next one that matters
+        // is read the same way.
+        //
+        // READY then exit is the correct handshake for "started successfully,
+        // and there is nothing to do" — systemd records a clean start and a
+        // clean stop, and `Restart=on-failure` has no failure to act on.
+        ados_logd::daemon::sd_ready();
         return Ok(());
     }
 

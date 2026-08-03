@@ -4,6 +4,32 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.349] - 2026-08-03
+
+### Fixed
+
+- **A node with the logging store switched off carried a permanently failed
+  unit.** Both rigs showed `ados-logd.service` failed after the store shipped off
+  by default, on every boot, forever.
+
+  The daemon does the right thing: it reads the toggle, logs that it is
+  declining, and exits 0. But the unit is `Type=notify`, so systemd waits for a
+  readiness notification and records a process that exits without ever sending
+  one as `result 'protocol'` — a failure — however clean the exit code. The
+  installer's `mask` could not paper over it either, because the unit file is a
+  real file at the exact path `systemctl mask` needs for its symlink, so masking
+  silently did nothing.
+
+  The disabled path now announces readiness and then exits, which is the correct
+  handshake for "started successfully, and there is nothing to do": systemd
+  records a clean start and a clean stop, and `Restart=on-failure` has no failure
+  to act on.
+
+  Worth stating why this was not cosmetic. A node that always shows a failed unit
+  teaches its operator to stop reading failed units, and the next one that
+  matters gets read the same way. The whole point of switching the store off was
+  to stop the box lying about its own health.
+
 ## [0.99.348] - 2026-08-03
 
 ### Fixed
