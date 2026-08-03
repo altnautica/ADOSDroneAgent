@@ -1,3 +1,4 @@
+import { mediaAuthHeaders } from "./media-auth";
 // Lazy HLS player. iOS / macOS Safari can play HLS natively via the
 // `<video>` element's `src` attribute. Chrome / Firefox / Edge need
 // hls.js as a Media Source Extensions adapter. We dynamic-import
@@ -69,6 +70,15 @@ export async function startHls(
   // to absorb a brief network stutter without re-buffering, then
   // jump forward instead of falling perpetually behind live edge.
   const hls = new HlsCtor({
+    // hls.js fetches the playlist AND every segment itself, so the credential
+    // has to go on its own requests rather than on one call we make. Without
+    // this hook there is no place for it at all, which is why the video paths
+    // could not be gated before now.
+    xhrSetup: (xhr: XMLHttpRequest) => {
+      for (const [k, v] of Object.entries(mediaAuthHeaders())) {
+        xhr.setRequestHeader(k, v);
+      }
+    },
     enableWorker: true,
     lowLatencyMode: false,
     backBufferLength: 30,

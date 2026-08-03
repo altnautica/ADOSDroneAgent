@@ -405,7 +405,7 @@ async fn proxied_auth_then_forward(
         let session_ok = headers
             .x_ados_dashboard_session
             .as_deref()
-            .map(|tok| dashboard_pin.session_valid_for(&pairing, tok))
+            .map(|tok| dashboard_pin.session_valid(&pairing, tok))
             .unwrap_or(false);
         // A browser cannot set `X-ADOS-Key` on a WebSocket handshake, so a
         // proxied WS route (e.g. the vision-detections stream) authenticates via

@@ -255,6 +255,25 @@ impl DashboardPin {
         }
     }
 
+    /// Whether `token` is a valid dashboard session for the node's CURRENT
+    /// pairing state, whichever that is.
+    ///
+    /// The two issuers exist because an unpaired node has no pairing key to key
+    /// the HMAC with, so its sessions are minted under the empty-key issuer.
+    /// Two call sites used to pick one each — the unpaired edge used
+    /// [`Self::session_valid_unpaired`] while the proxied path used
+    /// [`Self::session_valid_for`], which returns `false` when unpaired. That
+    /// disagreement was harmless only by accident: an unpaired node's data plane
+    /// was open anyway, so the stricter one was never consulted. It is no longer
+    /// open — the media plane is now gated in both states — so the two layers
+    /// have to mean the same thing by construction rather than by luck.
+    pub fn session_valid(&self, pairing: &Pairing, token: &str) -> bool {
+        match pairing {
+            Pairing::Paired(_) => self.session_valid_for(pairing, token),
+            Pairing::Unpaired => self.session_valid_unpaired(token),
+        }
+    }
+
     /// Clear the PIN (remove the record). A subsequent visit re-enters the
     /// trust-on-first-use "set a PIN" flow, and the salt rotation revokes every
     /// live session. Absent file is a no-op success.

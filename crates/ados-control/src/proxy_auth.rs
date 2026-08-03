@@ -503,7 +503,26 @@ fn is_exempt(path: &str) -> bool {
     if contains(EXEMPT_PATHS, path) || path.starts_with("/docs") {
         return true;
     }
+    // The media plane is never exempt, even though it sits outside `/api/`.
+    //
+    // The blanket "anything outside /api/ needs no credential" rule was written
+    // for the static SPA, whose client-side routes are not enumerable (the
+    // dashboard is mounted at `/` with a 404 -> index.html fallback, so
+    // `/settings/region` is a legitimate non-API path). But `/whep` and `/hls`
+    // are a live video stream, and the rule handed them to any peer on the LAN
+    // of a PAIRED node with no credential at all — a posture LOOSER than the
+    // same node has while unpaired, where `auth::is_operator_ui` deliberately
+    // refuses them for exactly this reason.
+    if is_media_plane(path) {
+        return false;
+    }
     !path.starts_with("/api/")
+}
+
+/// The live-video paths. Outside `/api/` by URL shape, but a data plane by
+/// nature: whoever can read these can watch what the aircraft sees.
+fn is_media_plane(path: &str) -> bool {
+    path == "/whep" || path.starts_with("/whep/") || path == "/hls" || path.starts_with("/hls/")
 }
 
 /// True when the path is exempt from HMAC verification: the HMAC-exempt set OR
@@ -623,6 +642,40 @@ fn reject(status: StatusCode, field: BodyField, message: &'static str) -> Decisi
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_media_plane_is_never_credential_free() {
+        // A PAIRED node used to serve its live video to any peer on the LAN with
+        // no credential, because the proxy exempted everything outside `/api/`.
+        // That made a paired node LOOSER than the same node while unpaired,
+        // where `auth::is_operator_ui` refuses `/whep` deliberately.
+        for path in ["/whep", "/whep/abc123", "/hls", "/hls/main/index.m3u8"] {
+            assert!(
+                !is_exempt(path),
+                "{path} is a live data plane and must require a credential"
+            );
+        }
+    }
+
+    #[test]
+    fn narrowing_the_media_plane_did_not_close_the_operator_ui() {
+        // The SPA is mounted at `/` with a 404 -> index.html fallback, so its
+        // client-side routes are not enumerable and must stay exempt. Breaking
+        // these would take the whole UI down to fix a video leak.
+        for path in [
+            "/",
+            "/index.html",
+            "/assets/app.js",
+            "/settings/region",
+            "/logs",
+        ] {
+            assert!(
+                is_exempt(path),
+                "{path} is operator UI and must stay served"
+            );
+        }
+        assert!(is_exempt("/docs"), "the docs surface is explicitly exempt");
+    }
+
     use super::*;
 
     fn paired(key: &str) -> Pairing {

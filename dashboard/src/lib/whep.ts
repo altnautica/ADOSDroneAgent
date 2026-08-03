@@ -1,3 +1,4 @@
+import { mediaAuthHeaders } from "./media-auth";
 // Minimal WHEP client — POSTs an SDP offer, applies the SDP answer,
 // returns a session handle the caller can close on unmount.
 //
@@ -60,6 +61,7 @@ export async function startWhep(
       try {
         await fetch(resourceUrl, {
           method: "DELETE",
+          headers: mediaAuthHeaders(),
           signal: deleteAc.signal,
         });
       } catch {
@@ -96,7 +98,7 @@ export async function startWhep(
 
     const res = await fetch(whepUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/sdp" },
+      headers: { "Content-Type": "application/sdp", ...mediaAuthHeaders() },
       body: localDesc.sdp,
       signal,
     });

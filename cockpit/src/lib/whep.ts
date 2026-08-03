@@ -10,6 +10,8 @@
 // We attach a video transceiver in recvonly mode so the agent's
 // mediamtx instance knows we are a viewer, not a publisher.
 
+import { mediaAuthHeaders } from "./media-auth";
+
 export interface WhepSession {
   pc: RTCPeerConnection;
   resourceUrl: string | null;
@@ -60,6 +62,7 @@ export async function startWhep(
       try {
         await fetch(resourceUrl, {
           method: "DELETE",
+          headers: mediaAuthHeaders(),
           signal: deleteAc.signal,
         });
       } catch {
@@ -107,7 +110,7 @@ export async function startWhep(
 
     const res = await fetch(whepUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/sdp" },
+      headers: { "Content-Type": "application/sdp", ...mediaAuthHeaders() },
       body: localDesc.sdp,
       signal,
     });

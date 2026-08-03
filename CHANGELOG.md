@@ -4,6 +4,39 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.328] - 2026-08-03
+
+### Security
+
+- **A paired node served its live video to anyone on the LAN, with no
+  credential.** The proxy exempted every path outside `/api/` from its
+  credential check — a rule written for the static SPA, whose client-side routes
+  genuinely are not enumerable — but `/whep` and `/hls` are a live data plane
+  that happens to sit outside `/api/` by URL shape. The effect was a **paired**
+  node being *looser* than the same node while **unpaired**, where
+  `auth::is_operator_ui` refuses `/whep` deliberately and says why.
+
+  The media plane is now never exempt. The SPA's route space is untouched, so
+  the operator UI still loads on any path — there is a test for each half,
+  because narrowing this carelessly would take the whole UI down to fix a video
+  leak.
+
+  This is shipped **together with its client half**, in this order on purpose:
+  all three video clients (cockpit WHEP, dashboard WHEP, dashboard HLS) now send
+  the same two credentials `apiFetch` already sends. `hls.js` fetches the
+  playlist and every segment itself, so it needed an `xhrSetup` hook rather than
+  a header on one call — the absence of that hook is why the paths could not be
+  gated before now.
+
+### Fixed
+
+- **Two layers disagreed on what a valid unpaired session is.** The unpaired
+  edge validated with the empty-key issuer while the proxied path used the
+  paired-key one, which returns `false` when unpaired. Harmless only by
+  accident — an unpaired node's data plane was open anyway, so the stricter
+  check was never reached. It is no longer open, so both now go through one
+  predicate that dispatches on the actual pairing state.
+
 ## [0.99.327] - 2026-08-03
 
 ### Fixed
