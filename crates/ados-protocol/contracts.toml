@@ -327,6 +327,12 @@ path = "/run/ados/camera-usb-recovery.json"
 description = "Camera USB-recovery reconciler state."
 
 [[sidecar]]
+id = "janitor"
+version = 1
+path = "/run/ados/janitor.json"
+description = "Disk-janitor state: the rung the last pass ran at, the bytes it reclaimed per category, and the free space it left behind."
+
+[[sidecar]]
 id = "pic-state"
 version = 1
 path = "/run/ados/pic-state.json"

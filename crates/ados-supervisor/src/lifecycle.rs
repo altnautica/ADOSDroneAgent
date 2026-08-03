@@ -125,6 +125,14 @@ pub struct Supervisor {
     /// state to /run/ados/camera-usb-recovery.json. Drone-only (gated on a fresh
     /// camera-state); the video pipeline owns pipeline recovery via udev.
     camera_usb_recovery: crate::usb_rehome::camera::CameraUsbRecovery,
+    /// Disk janitor: reclaim, hourly, the things on this box that accumulate
+    /// with nothing else bounding them — the apt cache and index, per-plugin
+    /// logs systemd appends to with no rotation, the audit trail, operator
+    /// recordings, journal history, and quarantined copies of a torn store.
+    /// Three rungs keyed on free space where /var lives; every category has a
+    /// floor and every pass emits what it freed. Mirrors the last pass to
+    /// /run/ados/janitor.json for the storage diagnostic.
+    janitor: crate::janitor::Janitor,
     /// Discrete service-transition events shipped to the logging daemon so an
     /// RCA can query the lifecycle of every managed unit (a death + auto-restart,
     /// a circuit-breaker open, a stop) off-box and across reboots. Best-effort
@@ -174,6 +182,9 @@ impl Supervisor {
             camera_usb_recovery: crate::usb_rehome::camera::CameraUsbRecovery::new(
                 ados_protocol::logd::emitter::EventEmitter::new("ados-supervisor"),
             ),
+            janitor: crate::janitor::Janitor::new(ados_protocol::logd::emitter::EventEmitter::new(
+                "ados-supervisor",
+            )),
         }
     }
 
@@ -617,6 +628,13 @@ impl Supervisor {
         if let Some(plan) = self.camera_usb_recovery.decide().await {
             crate::usb_rehome::camera::execute_camera_recovery(&plan).await;
         }
+
+        // Disk janitor (hourly, not per-tick): reclaim the apt cache, over-long
+        // plugin logs and audit trail, aged recordings, and — once free space is
+        // short — the package index, journal history, and older quarantined
+        // stores. Cheap on the ticks it is not due, and a no-op on the ones it
+        // is when nothing is over its cap.
+        self.janitor.tick().await;
     }
 }
 

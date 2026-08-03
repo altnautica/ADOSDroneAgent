@@ -4,6 +4,61 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.339] - 2026-08-03
+
+### Added
+
+- **An hourly disk janitor, because five separate things on this box grew with
+  nothing anywhere reclaiming them.** The installer fix returns the space apt
+  borrowed once; this is the half that runs forever. It lives inside the
+  supervisor alongside the seven reconcilers already there rather than as a new
+  service, since a new service is one more thing that can fail to start.
+
+  Three rungs, chosen from free space where `/var` lives. Routine, every pass,
+  takes back what is unambiguously waste: the apt archive cache, the part of any
+  plugin log or of the audit trail past its size cap, and recordings past their
+  retention. Under pressure (below 20% free) it also gives up the apt package
+  index, vacuums journal history, tightens recording retention, and prunes
+  quarantined copies of a store that tore. Below 10% free it does all of that
+  and says so loudly, because at that point the box is close to the state that
+  ends in a card which will not boot.
+
+  Two rules hold at every rung, because a janitor that quietly deletes evidence
+  is worse than the full disk it was fitted to prevent. Nothing is reclaimed
+  without being recorded: each pass emits one event carrying the bytes freed per
+  category, so "the janitor ran and found nothing" can be told apart from "the
+  janitor did not run". And every category has a floor: the newest quarantined
+  store survives even the most aggressive pass, since it is the evidence of the
+  most recent corruption; each log keeps its tail; the newest recordings survive
+  however old they are; the journal is never vacuumed below a minimum. The
+  config, the radio keys and the installed runtime are refused outright at the
+  single removal helper, so no category can reach them by mistake.
+
+  A free ratio the box could not measure resolves to Routine, never higher.
+  Being unable to read the filesystem is not evidence that space is short, and
+  the escalated rungs give up things that have value.
+
+  Tunable under `storage.janitor`; on by default, and an unreadable config
+  leaves it on rather than silently disabling a safety net.
+
+### Fixed
+
+- **The retention policy for append-only files could never have worked.** The
+  drop-in that ages out plugin logs, the audit trail and recordings works on
+  file age, and a file being continuously appended to is never old — its
+  timestamps are refreshed by every write. So it correctly aged out recordings,
+  which are closed when the capture ends, and could never age out either of the
+  two files it was mostly written for. The audit trail additionally lives beside
+  the agent's other persistent data rather than under `/var/log`, which is the
+  directory the drop-in names. Both are now bounded by size, which is a property
+  an open file actually has.
+
+  The trim rewrites the file in place rather than renaming it, because systemd
+  opens a plugin log once when the unit starts and holds that descriptor. A
+  rename would leave every later write going to the renamed file, so the
+  rotated log would keep growing under its new name while the new one stayed
+  empty forever.
+
 ## [0.99.338] - 2026-08-03
 
 ### Fixed

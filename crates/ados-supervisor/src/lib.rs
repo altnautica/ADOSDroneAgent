@@ -11,6 +11,7 @@ pub mod bind;
 pub mod config;
 pub mod hardware;
 pub mod hotplug;
+pub mod janitor;
 pub mod lifecycle;
 pub mod mac_pin;
 pub mod mgmt_failover;
