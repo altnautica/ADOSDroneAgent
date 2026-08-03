@@ -4,6 +4,37 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.330] - 2026-08-03
+
+### Fixed
+
+Two faults that let the black panel in `0.99.329` look healthy for as long as it
+did. Neither caused it; both hid it.
+
+- **The child's stderr was only read when the child exited.** A compositor that
+  stays up with a broken browser inside it never exits, so the error was never
+  read and never logged — the journal's last line was `kiosk_child_running` and
+  the GPU-initialization failure was only visible by running the argv by hand.
+  stderr is now streamed to the journal line by line *while* the child runs,
+  bounded at 40 lines so a chatty browser cannot flood a flash-backed journal,
+  and the rolling tail the GPU-downgrade heuristic reads is kept live rather
+  than assembled at death.
+
+- **The supervisor watched the compositor, not the browser.** On the appliance
+  path the supervisor's child is `cage` and the browser is its grandchild, so a
+  dead browser under a live compositor was invisible to `proc.wait()`: unit
+  `active`, zero restarts, child alive, nothing on screen. The browser is now
+  watched directly, and its disappearance is treated as a crash so the existing
+  backoff and GPU-downgrade machinery handles it instead of a black screen
+  reading green.
+
+  The probe errs deliberately toward "still running" on any uncertainty (no
+  `pgrep`, a permission error, an unexpected exit status): a false negative
+  restarts a *working* kiosk, which is worse than missing one failure. It also
+  waits out a start grace period, because the browser is spawned by the
+  compositor and is legitimately absent for a moment after launch, and it is
+  inert on the windowed path where the child already *is* the browser.
+
 ## [0.99.329] - 2026-08-03
 
 ### Fixed

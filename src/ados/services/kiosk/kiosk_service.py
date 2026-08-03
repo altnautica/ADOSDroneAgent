@@ -136,6 +136,16 @@ _MINIMAL_RAM_THRESHOLD_BYTES = 3 * 1024 * 1024 * 1024
 
 _STDERR_TAIL_BYTES = 2048
 
+# How many child stderr lines are forwarded to the journal before the rest are
+# suppressed. A browser is chatty; the point is to make a failure visible, not
+# to relay every frame's noise onto a flash-backed journal.
+_STDERR_LOG_LINE_LIMIT = 40
+
+# The browser is spawned BY the compositor, so it is legitimately absent for a
+# moment after launch. Wait this long before concluding it is missing.
+_BROWSER_START_GRACE_SECONDS = 25.0
+_BROWSER_POLL_SECONDS = 10.0
+
 # Chromium browser binary candidates, in resolution order. The binary name
 # varies by distro: Raspberry Pi OS historically shipped `chromium-browser`;
 # Debian, Armbian, and current Raspberry Pi OS ship `chromium`
@@ -1011,6 +1021,64 @@ class KioskSupervisor:
         except Exception:
             return ""
 
+    async def _stream_stderr(self, proc: Any) -> None:
+        """Forward the child's stderr to the journal line by line, and keep the
+        rolling tail the GPU-downgrade heuristic reads.
+
+        Bounded on purpose: a browser can be extremely chatty, and the point is
+        to make a failure visible, not to relay every frame's worth of noise
+        onto a flash-backed journal.
+        """
+        if proc.stderr is None:
+            return
+        seen = 0
+        recent: list[str] = []
+        try:
+            while True:
+                raw = await proc.stderr.readline()
+                if not raw:
+                    break
+                line = raw.decode("utf-8", errors="replace").rstrip()
+                if not line:
+                    continue
+                recent.append(line)
+                if len(recent) > 40:
+                    recent.pop(0)
+                self.last_stderr_tail = "\n".join(recent)[-_STDERR_TAIL_BYTES:]
+                if seen < _STDERR_LOG_LINE_LIMIT:
+                    log.warning("kiosk_child_stderr", line=line[:400])
+                elif seen == _STDERR_LOG_LINE_LIMIT:
+                    log.warning(
+                        "kiosk_child_stderr_suppressed",
+                        msg=f"further child stderr suppressed after {seen} lines",
+                    )
+                seen += 1
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return
+
+    async def _watch_browser(self, proc: Any) -> None:
+        """Resolve once the BROWSER is gone while the compositor is still up.
+
+        Only meaningful on the cage path, where the supervisor's child is the
+        compositor and the browser is its grandchild. On the windowed path the
+        child IS the browser, so `proc.wait()` already covers it and this never
+        fires.
+
+        The browser is given a grace period to appear: it is spawned by cage, so
+        it is legitimately absent for a moment right after launch.
+        """
+        if not self._sweep_orphans_enabled:
+            return  # windowed path: the child is the browser itself
+        await asyncio.sleep(_BROWSER_START_GRACE_SECONDS)
+        while True:
+            if proc.returncode is not None:
+                return  # the compositor went first; the normal path handles it
+            if not _browser_running():
+                return
+            await asyncio.sleep(_BROWSER_POLL_SECONDS)
+
     async def run(self) -> int:
         """Supervise loop. Returns process exit code or 0 on clean stop."""
         backoff = _BACKOFF_START_SECONDS
@@ -1030,9 +1098,45 @@ class KioskSupervisor:
 
             wait_task = asyncio.create_task(proc.wait(), name="kiosk_child_wait")
             stop_task = asyncio.create_task(self._stop.wait(), name="kiosk_stop_wait")
-            done, pending = await asyncio.wait(
-                {wait_task, stop_task}, return_when=asyncio.FIRST_COMPLETED
+            # Drain the child's stderr WHILE it runs, not only when it exits.
+            #
+            # A compositor that stays up with a broken browser inside it never
+            # exits, so an exit-time read never happens and the error is never
+            # seen. That is exactly how a black panel presented as a healthy
+            # unit: the last journal line was `kiosk_child_running`, and the GPU
+            # initialization error that caused it was only visible by running
+            # the argv by hand.
+            drain_task = asyncio.create_task(
+                self._stream_stderr(proc), name="kiosk_child_stderr"
             )
+            # And watch the BROWSER, not just the compositor we launched. The
+            # supervisor's child is `cage`; the browser is its grandchild, so a
+            # dead browser under a live cage is invisible to `proc.wait()`.
+            browser_task = asyncio.create_task(
+                self._watch_browser(proc), name="kiosk_browser_watch"
+            )
+            done, pending = await asyncio.wait(
+                {wait_task, stop_task, browser_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if browser_task in done and wait_task not in done and stop_task not in done:
+                # The compositor is still alive but has nothing to show. Treat it
+                # as a crash so the existing backoff + GPU-downgrade machinery
+                # handles it, rather than leaving a black screen reading healthy.
+                log.error(
+                    "kiosk_browser_vanished",
+                    msg="the browser exited while the compositor stayed up; restarting",
+                    stderr_tail=self.last_stderr_tail,
+                )
+                for t in pending:
+                    t.cancel()
+                drain_task.cancel()
+                await self._graceful_kill(proc)
+                self._record_crash_and_check()
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, _BACKOFF_MAX_SECONDS)
+                continue
+            drain_task.cancel()
 
             if stop_task in done:
                 for t in pending:
@@ -1082,6 +1186,35 @@ class KioskSupervisor:
             backoff = min(backoff * 2, _BACKOFF_MAX_SECONDS)
 
         return 0
+
+
+def _browser_running() -> bool:
+    """True when any of the known browser binaries has a live process.
+
+    Deliberately a name probe rather than a PID: the browser is the
+    compositor's grandchild and re-execs into several processes, so there is no
+    single stable pid to hold. `pgrep -f` against the resolved binary names is
+    the same mechanism the orphan sweep already uses.
+
+    Errs toward TRUE on any uncertainty (pgrep missing, permission denied): a
+    false "the browser is gone" would restart a working kiosk, which is worse
+    than missing one failure.
+    """
+    for name in _BROWSER_CANDIDATES:
+        try:
+            res = subprocess.run(  # noqa: S603
+                ["pgrep", "-f", name],
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return True
+        if res.returncode == 0 and res.stdout.strip():
+            return True
+        if res.returncode not in (0, 1):
+            return True
+    return False
 
 
 def _looks_gpu_failure(stderr_tail: str) -> bool:

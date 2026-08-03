@@ -1319,3 +1319,81 @@ async def test_amain_downgrades_gpu_to_software_on_cage_crash_loop(
 
 async def _async_noop() -> None:
     return None
+
+# ---------------------------------------------------------------------------
+# The black-screen class of failure: a broken browser inside a healthy cage
+# ---------------------------------------------------------------------------
+
+
+def test_browser_probe_errs_toward_running_when_it_cannot_tell() -> None:
+    """A false 'the browser is gone' restarts a WORKING kiosk, which is worse
+    than missing one failure. Any uncertainty must read as running."""
+    with patch.object(ks.subprocess, "run", side_effect=OSError("no pgrep")):
+        assert ks._browser_running() is True
+
+    # A pgrep that fails for a reason other than "no match" is uncertainty too.
+    with patch.object(
+        ks.subprocess, "run", return_value=SimpleNamespace(returncode=2, stdout=b"")
+    ):
+        assert ks._browser_running() is True
+
+
+def test_browser_probe_reports_gone_only_on_a_clean_no_match() -> None:
+    with patch.object(
+        ks.subprocess, "run", return_value=SimpleNamespace(returncode=1, stdout=b"")
+    ):
+        assert ks._browser_running() is False
+
+    with patch.object(
+        ks.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout=b"4242\n")
+    ):
+        assert ks._browser_running() is True
+
+
+@pytest.mark.asyncio
+async def test_child_stderr_reaches_the_log_while_the_child_is_still_running() -> None:
+    """The regression that made a black screen undiagnosable.
+
+    stderr used to be read only when the child EXITED. A compositor that stays
+    up with a broken browser inside it never exits, so the GPU error that
+    blacked the panel was never logged — the journal's last line was
+    `kiosk_child_running`.
+    """
+
+    class _Stderr:
+        def __init__(self, lines: list[bytes]) -> None:
+            self._lines = list(lines)
+
+        async def readline(self) -> bytes:
+            return self._lines.pop(0) if self._lines else b""
+
+    proc = SimpleNamespace(
+        stderr=_Stderr(
+            [
+                b"ERROR:gl_factory.cc:110] Requested GL implementation not found\n",
+                b"ERROR:viz_main_impl.cc:190] Exiting GPU process due to errors\n",
+            ]
+        ),
+        returncode=None,
+    )
+    sup = KioskSupervisor(["cage", "--", "/usr/bin/chromium"])
+
+    logged: list[str] = []
+    with patch.object(ks.log, "warning", side_effect=lambda *a, **k: logged.append(str(k))):
+        await sup._stream_stderr(proc)
+
+    assert any("Exiting GPU process" in entry for entry in logged), (
+        f"the child's failure must reach the journal while it runs: {logged}"
+    )
+    # And the rolling tail the GPU-downgrade heuristic reads is populated.
+    assert "Exiting GPU process" in sup.last_stderr_tail
+
+
+@pytest.mark.asyncio
+async def test_browser_watch_is_inert_on_the_windowed_path() -> None:
+    """On the in-desktop path the supervisor's child IS the browser, so
+    proc.wait() already covers it and this watch must never fire."""
+    sup = KioskSupervisor(["/usr/bin/chromium"], sweep_orphans=False)
+    proc = SimpleNamespace(returncode=None)
+    # Returns immediately rather than polling forever.
+    await asyncio.wait_for(sup._watch_browser(proc), timeout=2.0)
