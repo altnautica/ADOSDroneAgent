@@ -16,8 +16,16 @@
 //!
 //! - **Re-arm on a paired rig** (`enabled` true AND already paired) is refused:
 //!   the response is the status snapshot with `auto_pair_enabled: false` and an
-//!   added `rearm_blocked: true`, and NOTHING is persisted. The operator must
-//!   `unpair` first.
+//!   added `rearm_blocked: true`, and NOTHING is persisted.
+//! - **...unless `force` is set**, the escape hatch this route adds on top of the
+//!   residual behaviour. The refusal above left an operator with exactly one way
+//!   to re-arm a rig holding a suspect key: `unpair` first, which DELETES the
+//!   key. That is the worst available move if the key turns out to have been
+//!   fine, because it turns "possibly stale" into "definitely gone". A forced
+//!   re-arm instead records a one-shot against the key's own fingerprint in the
+//!   pair-proof record (`ados_protocol::pair_proof`), persists the arm flag, and
+//!   leaves the key exactly where it is; the supervisor's re-arm latch consumes
+//!   the one-shot on its next tick and opens a single bind window.
 //! - **Otherwise** it persists the new arm flag, re-writing the canonical pair
 //!   state (`video.wfb.{paired_with_device_id, paired_at, auto_pair_enabled}`,
 //!   with the legacy `ground_station.*` mirror on the GS profile) from the values
@@ -47,8 +55,11 @@
 //!
 //! Persist path: `{paired, paired_with_device_id, paired_at, fingerprint,
 //! auto_pair_enabled: <requested>, role}`. Re-arm-blocked path: the same keys with
-//! `auto_pair_enabled: false` plus `rearm_blocked: true`. Both carry the exact
-//! field set + casing the pair-status read produces.
+//! `auto_pair_enabled: false` plus `rearm_blocked: true`. Forced path: the persist
+//! field set plus `rearm_blocked: false` and `forced: true`. All three carry the
+//! exact field set + casing the pair-status read produces. `force` is absent by
+//! default, so a client that does not send it sees the residual behaviour
+//! unchanged.
 
 use std::path::{Path, PathBuf};
 
@@ -546,11 +557,20 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
 // PUT /api/wfb/pair/auto-pair — toggle the arm flag.
 // ---------------------------------------------------------------------------
 
-/// The `PUT /api/wfb/pair/auto-pair` request body. Mirrors the residual
-/// `AutoPairToggleRequest`: a single required `enabled` bool.
+/// The `PUT /api/wfb/pair/auto-pair` request body: the required `enabled` bool
+/// plus an optional `force` that overrides the re-arm refusal on a paired rig.
 #[derive(Debug, Deserialize)]
 pub struct AutoPairToggleRequest {
     pub enabled: bool,
+    /// Re-arm a rig that already holds a key, without deleting that key.
+    ///
+    /// The only way to do this used to be `unpair` first, which DELETES the key —
+    /// the worst available move when the key turns out to have been fine, since
+    /// it turns "possibly stale" into "definitely gone". This opens one bind
+    /// window and leaves the key exactly where it is; if the bind fails, the rig
+    /// still has what it had.
+    #[serde(default)]
+    pub force: bool,
 }
 
 /// `PUT /api/wfb/pair/auto-pair` → toggle the auto-bind arm flag.
@@ -560,6 +580,10 @@ pub struct AutoPairToggleRequest {
 /// true`, no persist) or persists the new flag and returns the status with the
 /// requested value. Always a `200`; the body is the pair-status field set with the
 /// resolved arm flag (plus `rearm_blocked` on the refuse path).
+///
+/// With `force`, a re-arm on a paired rig is granted instead of refused: the
+/// one-shot flag is recorded against the key's own fingerprint in the pair-proof
+/// record, and the supervisor's latch consumes it on its next tick.
 pub async fn put_auto_pair(
     State(state): State<AppState>,
     Json(req): Json<AutoPairToggleRequest>,
@@ -569,20 +593,47 @@ pub async fn put_auto_pair(
     put_auto_pair_at(
         &config_yaml_path(),
         &state.pairing_paths.wfb_key_dir,
+        Path::new(ados_protocol::pair_proof::PAIR_PROOF_PATH),
         &role,
         req.enabled,
+        req.force,
     )
 }
 
-/// The auto-pair toggle logic against explicit config + key-dir paths + a resolved
-/// role. The public handler resolves all three from the app state / env; this
-/// takes them directly so a test can point them at temp paths.
-fn put_auto_pair_at(config_path: &Path, key_dir: &Path, role: &str, enabled: bool) -> Response {
+/// Record the one-shot operator force against the key's OWN fingerprint.
+///
+/// Keying it to the fingerprint is what keeps the hatch honest: if the key is
+/// replaced between the request and the supervisor's next tick, the record no
+/// longer matches and the force is discarded with the rest of it, rather than
+/// firing at whatever key happens to be there. The rest of the record — the
+/// proof, the spent episodes — is loaded and preserved, because forcing one
+/// window is not a reason to forget everything else known about the key.
+///
+/// Best-effort, like the config persist beside it: a non-root front cannot write
+/// under `/var/lib`, and the response says what was asked for either way.
+fn record_force_rearm(proof_path: &Path, role: &str, fingerprint: &str) -> bool {
+    let mut proof = ados_protocol::pair_proof::load_for(proof_path, role, fingerprint).proof;
+    proof.force_rearm = true;
+    ados_protocol::pair_proof::write_pair_proof_to(proof_path, &proof).is_ok()
+}
+
+/// The auto-pair toggle logic against explicit config + key-dir + proof-record
+/// paths and a resolved role. The public handler resolves all of them from the
+/// app state / env; this takes them directly so a test can point them at temp
+/// paths.
+fn put_auto_pair_at(
+    config_path: &Path,
+    key_dir: &Path,
+    proof_path: &Path,
+    role: &str,
+    enabled: bool,
+    force: bool,
+) -> Response {
     let status = read_pair_status(config_path, key_dir, role);
 
     // Re-arm on a paired rig is refused: the status snapshot with auto_pair_enabled
     // forced false and rearm_blocked added. NOTHING is persisted.
-    if enabled && status.paired {
+    if enabled && status.paired && !force {
         return Json(json!({
             "paired": status.paired,
             "paired_with_device_id": status.peer,
@@ -590,6 +641,27 @@ fn put_auto_pair_at(config_path: &Path, key_dir: &Path, role: &str, enabled: boo
             "fingerprint": status.fingerprint,
             "auto_pair_enabled": false,
             "rearm_blocked": true,
+            "role": status.role,
+        }))
+        .into_response();
+    }
+
+    // The forced re-arm: record the one-shot, persist the arm flag, and never
+    // touch the key. Only meaningful on a paired rig — a forced request on an
+    // unpaired one is just an ordinary arm, which already works.
+    if enabled && status.paired && force {
+        if let Some(fp) = status.fingerprint.as_str() {
+            record_force_rearm(proof_path, role, fp);
+        }
+        let _ = persist_pair_state(config_path, role, &status.peer, &status.paired_at, enabled);
+        return Json(json!({
+            "paired": status.paired,
+            "paired_with_device_id": status.peer,
+            "paired_at": status.paired_at,
+            "fingerprint": status.fingerprint,
+            "auto_pair_enabled": enabled,
+            "rearm_blocked": false,
+            "forced": true,
             "role": status.role,
         }))
         .into_response();
@@ -660,6 +732,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.yaml");
         let keys = dir.path().join("wfb");
+        let proof = dir.path().join("pair-proof.json");
         std::fs::create_dir_all(&keys).unwrap();
         // A drone with no key file, an existing auto-pair flag + an unrelated key.
         std::fs::write(
@@ -668,7 +741,7 @@ mod tests {
         )
         .unwrap();
 
-        let resp = put_auto_pair_at(&cfg, &keys, "drone", false);
+        let resp = put_auto_pair_at(&cfg, &keys, &proof, "drone", false, false);
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
         let body = body_json(resp).await;
         assert_eq!(
@@ -706,11 +779,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.yaml");
         let keys = dir.path().join("wfb");
+        let proof = dir.path().join("pair-proof.json");
         std::fs::create_dir_all(&keys).unwrap();
         // Unpaired (no key) → enable is allowed and persists true.
         std::fs::write(&cfg, "agent:\n  profile: drone\n").unwrap();
 
-        let resp = put_auto_pair_at(&cfg, &keys, "drone", true);
+        let resp = put_auto_pair_at(&cfg, &keys, &proof, "drone", true, false);
         let body = body_json(resp).await;
         assert_eq!(body["auto_pair_enabled"], json!(true));
         assert!(body.get("rearm_blocked").is_none());
@@ -733,6 +807,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.yaml");
         let keys = dir.path().join("wfb");
+        let proof = dir.path().join("pair-proof.json");
         std::fs::create_dir_all(&keys).unwrap();
         let fp = write_key(&keys, "tx.key");
         // A paired drone (tx.key present) with a peer + a disarmed flag on disk.
@@ -743,7 +818,7 @@ mod tests {
         .unwrap();
         let before = std::fs::read_to_string(&cfg).unwrap();
 
-        let resp = put_auto_pair_at(&cfg, &keys, "drone", true);
+        let resp = put_auto_pair_at(&cfg, &keys, &proof, "drone", true, false);
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
         let body = body_json(resp).await;
         assert_eq!(
@@ -760,6 +835,129 @@ mod tests {
         );
         // The file is unchanged — the refuse path persists nothing.
         assert_eq!(std::fs::read_to_string(&cfg).unwrap(), before);
+        // And nothing was recorded against the key.
+        assert!(!proof.exists());
+    }
+
+    // ── the forced re-arm: granted, one-shot, and the key is never touched ────
+
+    #[tokio::test]
+    async fn a_forced_rearm_on_a_paired_drone_is_granted_and_leaves_the_key_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        let keys = dir.path().join("wfb");
+        let proof = dir.path().join("pair-proof.json");
+        std::fs::create_dir_all(&keys).unwrap();
+        let fp = write_key(&keys, "tx.key");
+        let key_before = std::fs::read(keys.join("tx.key")).unwrap();
+        std::fs::write(
+            &cfg,
+            "agent:\n  profile: drone\nvideo:\n  wfb:\n    paired_with_device_id: peer-xyz\n    auto_pair_enabled: false\n",
+        )
+        .unwrap();
+
+        let resp = put_auto_pair_at(&cfg, &keys, &proof, "drone", true, true);
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body["rearm_blocked"], json!(false));
+        assert_eq!(body["forced"], json!(true));
+        assert_eq!(body["auto_pair_enabled"], json!(true));
+        assert_eq!(body["fingerprint"], json!(fp));
+
+        // The one-shot is recorded against the key's OWN fingerprint, so a key
+        // replaced before the supervisor's next tick discards it rather than
+        // firing at whatever key happens to be there.
+        let stored = ados_protocol::pair_proof::read_pair_proof_from(&proof).unwrap();
+        assert!(stored.force_rearm);
+        assert_eq!(stored.key_fingerprint, fp);
+        assert_eq!(stored.role, "drone");
+
+        // The whole point: the key is still there. Unpairing first would have
+        // deleted it, which is the worst move if the key turns out to be fine.
+        assert_eq!(std::fs::read(keys.join("tx.key")).unwrap(), key_before);
+
+        // And the arm flag is persisted, so the supervisor sees a live request.
+        let parsed: serde_norway::Value =
+            serde_norway::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(
+            parsed
+                .get("video")
+                .and_then(|v| v.get("wfb"))
+                .and_then(|w| w.get("auto_pair_enabled"))
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_forced_rearm_preserves_what_is_already_known_about_the_key() {
+        // Forcing one window is not a reason to forget the key's proof or the
+        // episodes already spent on it.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        let keys = dir.path().join("wfb");
+        let proof = dir.path().join("pair-proof.json");
+        std::fs::create_dir_all(&keys).unwrap();
+        let fp = write_key(&keys, "tx.key");
+        std::fs::write(&cfg, "agent:\n  profile: drone\n").unwrap();
+
+        let mut existing = ados_protocol::pair_proof::PairProof::fresh("drone", &fp);
+        existing.mark_proven(1_700_000_000);
+        existing.record_rearm(1_700_000_100);
+        ados_protocol::pair_proof::write_pair_proof_to(&proof, &existing).unwrap();
+
+        let _ = put_auto_pair_at(&cfg, &keys, &proof, "drone", true, true);
+        let stored = ados_protocol::pair_proof::read_pair_proof_from(&proof).unwrap();
+        assert!(stored.force_rearm);
+        assert_eq!(stored.proven_at, existing.proven_at);
+        assert_eq!(stored.rearm_episodes, existing.rearm_episodes);
+    }
+
+    #[tokio::test]
+    async fn force_on_an_unpaired_rig_is_an_ordinary_arm() {
+        // There is nothing to override and no key to key a one-shot to, so the
+        // request must not manufacture a record.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        let keys = dir.path().join("wfb");
+        let proof = dir.path().join("pair-proof.json");
+        std::fs::create_dir_all(&keys).unwrap();
+        std::fs::write(&cfg, "agent:\n  profile: drone\n").unwrap();
+
+        let body = body_json(put_auto_pair_at(&cfg, &keys, &proof, "drone", true, true)).await;
+        assert_eq!(body["auto_pair_enabled"], json!(true));
+        assert!(body.get("forced").is_none());
+        assert!(body.get("rearm_blocked").is_none());
+        assert!(!proof.exists());
+    }
+
+    #[tokio::test]
+    async fn force_is_ignored_when_disabling() {
+        // `enabled: false` is a disarm; force has nothing to grant.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        let keys = dir.path().join("wfb");
+        let proof = dir.path().join("pair-proof.json");
+        std::fs::create_dir_all(&keys).unwrap();
+        write_key(&keys, "tx.key");
+        std::fs::write(&cfg, "agent:\n  profile: drone\n").unwrap();
+
+        let body = body_json(put_auto_pair_at(&cfg, &keys, &proof, "drone", false, true)).await;
+        assert_eq!(body["auto_pair_enabled"], json!(false));
+        assert!(body.get("forced").is_none());
+        assert!(!proof.exists(), "a disarm must not record a one-shot");
+    }
+
+    #[test]
+    fn the_force_field_defaults_off_so_an_existing_client_is_unchanged() {
+        // The GCS pairing card sends `{"enabled": ...}` and must keep getting the
+        // refusal, not a silent re-bind of a working pair.
+        let req: AutoPairToggleRequest = serde_json::from_str(r#"{"enabled": true}"#).unwrap();
+        assert!(req.enabled);
+        assert!(!req.force);
+        let req: AutoPairToggleRequest =
+            serde_json::from_str(r#"{"enabled": true, "force": true}"#).unwrap();
+        assert!(req.force);
     }
 
     #[tokio::test]
@@ -768,6 +966,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.yaml");
         let keys = dir.path().join("wfb");
+        let proof = dir.path().join("pair-proof.json");
         std::fs::create_dir_all(&keys).unwrap();
         write_key(&keys, "tx.key");
         std::fs::write(
@@ -776,7 +975,7 @@ mod tests {
         )
         .unwrap();
 
-        let resp = put_auto_pair_at(&cfg, &keys, "drone", false);
+        let resp = put_auto_pair_at(&cfg, &keys, &proof, "drone", false, false);
         let body = body_json(resp).await;
         assert_eq!(body["auto_pair_enabled"], json!(false));
         assert!(body.get("rearm_blocked").is_none());
@@ -801,6 +1000,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.yaml");
         let keys = dir.path().join("wfb");
+        let proof = dir.path().join("pair-proof.json");
         std::fs::create_dir_all(&keys).unwrap();
         // A GS with a peer recorded under the canonical spot, unpaired (no rx.key),
         // so the enable persist runs (not blocked).
@@ -810,7 +1010,7 @@ mod tests {
         )
         .unwrap();
 
-        let resp = put_auto_pair_at(&cfg, &keys, "gs", true);
+        let resp = put_auto_pair_at(&cfg, &keys, &proof, "gs", true, false);
         let body = body_json(resp).await;
         assert_eq!(body["auto_pair_enabled"], json!(true));
         assert_eq!(body["role"], json!("gs"));
@@ -877,10 +1077,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.yaml");
         let keys = dir.path().join("wfb");
+        let proof = dir.path().join("pair-proof.json");
         std::fs::create_dir_all(&keys).unwrap();
         // Unpaired, no peer → the persist pops paired_with_device_id / paired_at.
         std::fs::write(&cfg, "agent:\n  profile: drone\n").unwrap();
-        let resp = put_auto_pair_at(&cfg, &keys, "drone", false);
+        let resp = put_auto_pair_at(&cfg, &keys, &proof, "drone", false, false);
         let body = body_json(resp).await;
         assert_eq!(body["paired_with_device_id"], Value::Null);
         let parsed: serde_norway::Value =

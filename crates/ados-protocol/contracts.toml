@@ -272,6 +272,13 @@ path = "/run/ados/wfb_failover.json"
 description = "Local-bind to cloud-relay failover state."
 
 [[sidecar]]
+id = "wfb-pair-proof"
+version = 1
+path = "/var/lib/ados/wfb-pair-proof.json"
+rust_const = "ados_protocol::pair_proof::PAIR_PROOF_SIDECAR_VERSION"
+description = "Per-key WFB pair proof: whether a radio key's fingerprint has ever been confirmed to carry a link, plus the bounded auto-pair re-arm budget. Persistent, so the budget survives a reboot."
+
+[[sidecar]]
 id = "bind-state"
 version = 1
 path = "/run/ados/bind-state.json"

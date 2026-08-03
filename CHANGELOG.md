@@ -4,6 +4,88 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.345] - 2026-08-03
+
+### Fixed
+
+- **A rig holding a radio key from a peer that no longer exists had no way
+  back.** Auto-pair decided "am I paired?" by looking at the shape of the key
+  file — 64 bytes, hashable second half — and disarmed permanently when the
+  answer was yes. A key left behind by a ground station that was since reflashed
+  passes that check perfectly.
+
+  Two rigs sat unlinked for a whole session on exactly that. One held a
+  structurally valid key from a peer that no longer existed and injected into a
+  void, its own radio reporting `rf_unverified`, which means transmitting with
+  zero confirmed reception. The other had been reflashed, had no key at all, and
+  blocked. Neither attempted recovery. Every surface reported health.
+
+  The signal that means "this key does not work" was already being computed, and
+  already being surfaced by `ados diag link`. Nothing consumed it. Now something
+  does: auto-pair may re-arm itself for a key whose fingerprint has never once
+  been confirmed to work, and never for one that has.
+
+  That single rule is what makes this safe. A stale key from a reflashed peer
+  re-arms, because the peer that would have proven its fingerprint is gone. A
+  pair that has worked is latched for life, so an outage of any length — a
+  minute, a week — is structurally incapable of re-opening a bind window on it,
+  which matters far more than the recovery does. Silently re-binding a working
+  pair would be a worse failure than the deadlock being fixed. And a successful
+  re-bind writes a new key whose different fingerprint resets the record, so the
+  new key starts with a clean lifetime rather than inheriting the old one's.
+
+  The two rigs need different evidence and neither transfers. A drone reads
+  `rf_unverified` rather than an absent channel lock, because `rf_unverified`
+  requires the transmitter to be live — so an idle radio, or one that never
+  started, accumulates nothing. A ground station never measures a transmit path
+  at all, so its equivalent is `searching`: key present, receive chain running,
+  nothing decoding. Pointedly not the blocked states, which mean the chain never
+  ran and there is therefore no verdict on the key to act on.
+
+  Bounded so that recovery cannot become a bind storm: a ten-minute confirm hold
+  that restarts in full on any release, five episodes per key ever, and a
+  half-hour cooldown between them. The budget and the cooldown live in
+  `/var/lib/ados/wfb-pair-proof.json` rather than under `/run`, because on tmpfs
+  a reboot would erase both and a rig in a boot loop would reintroduce the storm
+  the budget exists to bound. A stale radio sidecar resets the hold rather than
+  freezing it; a bind already running suspends the trigger, since a bind window
+  is `rf_unverified` by construction and would otherwise feed itself. All of it
+  is tunable under `video.wfb.pair_rearm`, and on by default — the deadlock is
+  silent and permanent, so it must not need enabling.
+
+- **An unpaired ground station published nothing at all.** The pairing gate sits
+  at the very top of the receive loop, ahead of adapter resolution, and returned
+  to the top without writing a sidecar. Not a degraded reading — the absence of
+  one: no state, no interface, no reason. That is why the failure above took a
+  live session to find, with one half of an unlinked pair missing from every
+  surface except the journal.
+
+  It now writes a `blocked_unpaired` sidecar alongside the existing reg-blocked
+  and no-injection ones. Nothing has been examined at that point in the loop, so
+  every hardware verdict is null rather than a confident boolean about an adapter
+  the gate never looked at; the one thing the body asserts is why the plane is
+  deaf. Refreshed every twenty seconds rather than on all twelve polls a minute:
+  the gate still polls at five so a key landing is picked up promptly, but the
+  file only has to stay inside a reader's staleness window, and this is a flash
+  card.
+
+### Added
+
+- **`PUT /api/wfb/pair/auto-pair` takes an optional `force`.** Re-arming a rig
+  that already holds a key was refused outright, which left exactly one route:
+  unpair first, which deletes the key. If the key was in fact fine — a peer
+  merely off, a radio merely down — that turns "possibly stale" into "definitely
+  gone" and makes things strictly worse while trying to diagnose them.
+
+  A forced re-arm records a one-shot against the key's own fingerprint and leaves
+  the key exactly where it is. If the bind that follows fails, the rig still has
+  what it had. Keying it to the fingerprint is what keeps it honest: a key
+  replaced between the request and the supervisor's next tick no longer matches,
+  so the request is discarded rather than firing at whatever key is there now.
+  The field defaults off, so a client that does not send it sees the refusal
+  exactly as before.
+
+
 ## [0.99.344] - 2026-08-03
 
 ### Changed
@@ -104,6 +186,7 @@ the project follows [Semantic Versioning](https://semver.org/).
     forever, and a gap in it would blank every CPU, memory and disk reading on a
     normally-configured box.
 
+||||||| 6823f261
 ## [0.99.342] - 2026-08-03
 
 ### Fixed

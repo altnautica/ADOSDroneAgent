@@ -15,6 +15,14 @@
 //! (the role's key file is absent), run one bind. A successful bind writes the
 //! key file, so the next tick sees the rig as paired and stops attempting; the
 //! key-apply step also flips `auto_pair_enabled` to false in the config.
+//!
+//! "Already paired" is a file-shape check, and a key left behind by a peer that
+//! was since reflashed is a perfectly well-formed key — which is how two rigs
+//! once sat unlinked for a whole session with every surface reporting health.
+//! The [`crate::pair_proof`] latch is the second opinion: it watches the radio's
+//! own verdict and, for a key whose fingerprint has NEVER been confirmed to
+//! work, opens a bind window despite the paired-and-disarmed state. A key that
+//! has ever worked is latched for life and is never re-armed.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -89,6 +97,16 @@ const WFB_FAILOVER_SIDECAR_VERSION: u16 = 1;
 /// Whether auto-pair should attempt a bind this tick. Pure for testing.
 pub fn should_attempt(armed: bool, already_paired: bool) -> bool {
     armed && !already_paired
+}
+
+/// Whether a bind window opens this tick, folding in the re-arm latch.
+///
+/// The latch deliberately overrides BOTH gates: a rig holding a key that has
+/// never worked is paired by the file check and disarmed by the config, and
+/// those are exactly the two states that left it stuck. The latch's own hold,
+/// budget and cooldown are what bound it. Pure for testing.
+pub fn should_attempt_or_rearm(armed: bool, already_paired: bool, rearm: bool) -> bool {
+    should_attempt(armed, already_paired) || rearm
 }
 
 /// Whether the loop should run a bind given the adapter presence. A dongle-less
@@ -253,22 +271,84 @@ fn read_armed() -> bool {
     }
 }
 
-/// True when this role's key file is a real, complete WFB key (the rig is
-/// paired). A bare `Path::exists()` treated a half-written key file (a power
-/// loss mid-bind, a truncated copy) as paired, so the rig skipped its own
-/// auto-bind and never recovered. Reuse the key validator: it succeeds only
-/// when the file is exactly 64 bytes (the libsodium crypto_box size) and its
-/// peer-public half hashes, which is the same completeness check the bind path
-/// applies before it trusts a key.
-fn already_paired(role: BindRole) -> bool {
-    key_is_complete(Path::new(role.key_path()))
+/// The fingerprint of this role's key file, or `None` when there is no complete
+/// key.
+///
+/// This answers BOTH questions the loop asks about the key, from one read.
+/// `Some` means paired: `read_public_fingerprint` succeeds only on a file that
+/// is exactly 64 bytes (the libsodium crypto_box size) with a hashable
+/// peer-public half, so a half-written key (power loss mid-bind, a truncated
+/// copy) reads as unpaired and the rig re-runs its own auto-bind instead of
+/// skipping forever on a torn file. And the value itself is the identity the
+/// re-arm latch keys its proof record on, so the two can never disagree about
+/// which key is on disk.
+fn key_fingerprint(role: BindRole) -> Option<String> {
+    key_fingerprint_at(Path::new(role.key_path()))
 }
 
-/// True when the key file at `path` passes the WFB key validator (64-byte
-/// length + fingerprintable peer-public half). Split out so the completeness
-/// check is unit-testable against a temp file without a real role key path.
-fn key_is_complete(path: &Path) -> bool {
-    crate::bind::keys::read_public_fingerprint(path).is_ok()
+/// [`key_fingerprint`] against an explicit path, so the completeness contract is
+/// unit-testable against a temp file without a real role key path.
+fn key_fingerprint_at(path: &Path) -> Option<String> {
+    crate::bind::keys::read_public_fingerprint(path).ok()
+}
+
+/// Wall-clock seconds, for the latch's reboot-surviving cooldown anchor.
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Step the re-arm latch for this tick and return whether a bind window opens.
+///
+/// Everything the latch needs from the outside world is read here — the config,
+/// the radio's fresh verdict, whether a bind is already running — so the latch
+/// itself touches nothing but its record file and stays testable without a rig.
+/// The event is emitted here too, for the same reason.
+async fn run_latch(
+    latch: &mut crate::pair_proof::PairProofLatch,
+    role: BindRole,
+    fingerprint: Option<String>,
+    orch: &Arc<BindOrchestrator>,
+    events: &EventEmitter,
+) -> bool {
+    use crate::pair_proof::{
+        emit_rearm, read_config_from, read_signals_default, LatchInputs, PairRearmConfig,
+    };
+
+    let cfg = match std::fs::read_to_string(CONFIG_YAML) {
+        Ok(text) => read_config_from(&text),
+        Err(_) => PairRearmConfig::default(),
+    };
+    // Only read the radio when there is something to judge: no key on disk means
+    // ordinary auto-pair already owns the rig.
+    let signals = if cfg.enabled && fingerprint.is_some() {
+        read_signals_default(role, cfg.stats_fresh_ceiling).await
+    } else {
+        None
+    };
+    let max_episodes = cfg.max_episodes;
+    let outcome = latch.step(
+        LatchInputs {
+            fingerprint: fingerprint.clone(),
+            signals,
+            session_active: orch.session_active(),
+            cfg,
+        },
+        std::time::Instant::now(),
+        now_unix(),
+    );
+    if let Some(event) = &outcome.event {
+        let fp = fingerprint.as_deref().unwrap_or("");
+        tracing::warn!(
+            role = role.as_str(),
+            state = event.state(),
+            "auto_pair_rearm_transition"
+        );
+        emit_rearm(events, event, role.as_str(), fp, max_episodes);
+    }
+    outcome.rearm
 }
 
 /// Run the auto-pair loop until `shutdown` flips. Drives the bind in-process via
@@ -322,12 +402,16 @@ async fn run_with_failover(
     // stays alive (so a later recovery can resume the local link) but stops
     // spending local attempts until something re-arms it.
     let mut parked_on_cloud = false;
+    // The per-key proof latch: the only thing that can re-open a bind window on
+    // a rig this loop otherwise considers finished.
+    let mut latch = crate::pair_proof::PairProofLatch::new(role);
     loop {
         if *shutdown.borrow() {
             break;
         }
         let armed = read_armed();
-        let paired = already_paired(role);
+        let fingerprint = key_fingerprint(role);
+        let paired = fingerprint.is_some();
         // A dongle-less boot must not run (and fail) a bind: that would burn the
         // limited local-bind attempts and flip to cloud_relay when the operator
         // has simply not plugged the radio in yet. Skip without counting so the
@@ -336,7 +420,21 @@ async fn run_with_failover(
         if should_attempt(armed, paired) && !adapter_present {
             tracing::info!(role = role.as_str(), "auto_pair_waiting_for_wfb_adapter");
         }
-        if should_attempt(armed, paired) && adapter_present && !parked_on_cloud {
+        // Ask the latch only when a bind could actually run. Stepping it without
+        // an adapter would spend an episode on a window that cannot open.
+        let rearm = if adapter_present {
+            run_latch(&mut latch, role, fingerprint.clone(), &orch, &events).await
+        } else {
+            false
+        };
+        // A re-arm bypasses `parked_on_cloud` deliberately: parking means the
+        // local attempts were spent, and a rig stuck on a key that never worked
+        // is precisely the case where that verdict deserves revisiting. The
+        // latch's own budget and cooldown bound how often it may.
+        if should_attempt_or_rearm(armed, paired, rearm)
+            && adapter_present
+            && (!parked_on_cloud || rearm)
+        {
             // Tear down an in-flight bind if the supervisor shuts down.
             let mut cancel_rx = shutdown.clone();
             let cancel = async move {
@@ -465,18 +563,52 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let good = dir.path().join("drone.key");
         std::fs::write(&good, [7u8; 64]).unwrap();
-        assert!(key_is_complete(&good));
+        assert!(key_fingerprint_at(&good).is_some());
 
         let half = dir.path().join("half.key");
         std::fs::write(&half, [7u8; 32]).unwrap(); // truncated write
-        assert!(!key_is_complete(&half));
+        assert!(key_fingerprint_at(&half).is_none());
 
         let empty = dir.path().join("empty.key");
         std::fs::write(&empty, []).unwrap();
-        assert!(!key_is_complete(&empty));
+        assert!(key_fingerprint_at(&empty).is_none());
 
         // A path that does not exist is not paired.
-        assert!(!key_is_complete(&dir.path().join("missing.key")));
+        assert!(key_fingerprint_at(&dir.path().join("missing.key")).is_none());
+    }
+
+    #[test]
+    fn the_fingerprint_is_stable_and_distinguishes_two_keys() {
+        // The latch's whole contract keys on this value, so a paired rig must
+        // read the same fingerprint on every tick, and a key that was replaced
+        // must read differently.
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.key");
+        let b = dir.path().join("b.key");
+        std::fs::write(&a, [3u8; 64]).unwrap();
+        std::fs::write(&b, [4u8; 64]).unwrap();
+        let fa = key_fingerprint_at(&a).unwrap();
+        assert_eq!(Some(&fa), key_fingerprint_at(&a).as_ref());
+        assert_ne!(Some(fa), key_fingerprint_at(&b));
+    }
+
+    #[test]
+    fn a_rearm_opens_a_window_a_paired_disarmed_rig_would_otherwise_refuse() {
+        // The exact deadlock: the key file is complete so `paired` is true, and
+        // the key-apply step already flipped the arm flag off, so `armed` is
+        // false. Both gates say no, forever. The latch is the only thing that can
+        // say yes — and it must not say yes on its own when they say yes too.
+        assert!(!should_attempt(false, true));
+        assert!(should_attempt_or_rearm(false, true, true));
+        // With no re-arm it stays exactly as before, on every combination.
+        for armed in [false, true] {
+            for paired in [false, true] {
+                assert_eq!(
+                    should_attempt_or_rearm(armed, paired, false),
+                    should_attempt(armed, paired)
+                );
+            }
+        }
     }
 
     #[test]

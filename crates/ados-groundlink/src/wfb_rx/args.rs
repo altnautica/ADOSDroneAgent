@@ -75,6 +75,16 @@ pub const STATE_REG_BLOCKED: &str = "reg_blocked";
 /// loop retries. Distinct from `reg_blocked` (a regulatory-gate refusal) and from
 /// `searching` (a chain is up, hunting for the channel).
 pub const STATE_NO_INJECTION: &str = "no_injection";
+/// No receive key is on disk, so there is nothing to receive and the run loop
+/// blocks before it even looks for an adapter. Without a sidecar for this state a
+/// blocked ground station published NOTHING AT ALL — no interface, no state, no
+/// reason — and its half of an unlinked pair was invisible to every surface
+/// except the journal. That is why a drone holding a key from a reflashed peer
+/// and a ground station holding no key at all could sit facing each other for a
+/// whole session with nothing on screen to say so. Distinct from `reg_blocked`
+/// (the gate refused), `no_injection` (the adapter would not inject) and
+/// `searching` (a chain is up, hunting).
+pub const STATE_BLOCKED_UNPAIRED: &str = "blocked_unpaired";
 
 /// Data-plane RX `wfb_rx` args for the ground profile. `-l 1000` enables the
 /// per-second stats lines on stdout (without it the monitor stays empty and the

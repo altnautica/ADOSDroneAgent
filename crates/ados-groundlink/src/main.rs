@@ -45,6 +45,12 @@ use ados_groundlink::{
 const CONFIG_YAML: &str = "/etc/ados/config.yaml";
 const RX_KEY: &str = ados_radio::paths::WFB_RX_KEY;
 
+/// How often the unpaired-state sidecar is refreshed while the pairing gate
+/// blocks. Comfortably inside every reader's staleness window, and far below the
+/// 5 s poll cadence, so an unpaired ground station stays visible without writing
+/// to the card twelve times a minute.
+const UNPAIRED_SIDECAR_REFRESH: Duration = Duration::from_secs(20);
+
 /// The run role the service dispatches on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Role {
@@ -632,14 +638,37 @@ async fn receive_loop(
     let ingest = ados_protocol::logd::emitter::IngestEmitter::new("ados-groundlink");
 
     let mut backoff = 1.0_f64;
+    // When the unpaired sidecar was last refreshed. The gate polls every 5 s so a
+    // key landing is picked up promptly, but the sidecar only needs to stay
+    // fresh, not be rewritten twelve times a minute on a flash card.
+    let mut unpaired_published: Option<std::time::Instant> = None;
     loop {
         // Pairing gate: without the rx key on disk there is nothing to receive.
         // (The Python side blocks here too; the pairing flow lands the key.)
         if !std::path::Path::new(RX_KEY).exists() {
             tracing::info!(expected = RX_KEY, "ground_wfb_blocked_unpaired");
+            // Say so on the sidecar too. This arm used to `continue` without
+            // writing anything, so a ground station with no key published NOTHING
+            // — and an unlinked pair had one half simply missing from every
+            // surface but the journal.
+            let due = unpaired_published
+                .map(|t| t.elapsed() >= UNPAIRED_SIDECAR_REFRESH)
+                .unwrap_or(true);
+            if due {
+                wfb_rx::write_blocked_unpaired_sidecar(
+                    &config.interface,
+                    config.rendezvous_channel(),
+                    config,
+                    Some(&ingest),
+                );
+                unpaired_published = Some(std::time::Instant::now());
+            }
             tokio::time::sleep(Duration::from_secs(5)).await;
             continue;
         }
+        // Paired again: the next unpaired spell publishes immediately rather than
+        // waiting out a refresh interval left over from the last one.
+        unpaired_published = None;
         // Resolve the receive adapter. Honors an explicit `video.wfb.interface`
         // override; otherwise auto-detects the RTL injection adapter (the
         // management wifi and the operator's control path are excluded and
