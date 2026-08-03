@@ -4,6 +4,23 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.333] - 2026-08-03
+
+### Fixed
+
+- **A subprocess that failed immediately took its error with it.** The stderr
+  drain summarises rate-limited output only when the *next* window opens, so a
+  child that died inside its first window logged its banner and nothing else —
+  everything past the limit was silently lost. That is the worst case to lose:
+  a subprocess failing immediately is failing at startup, which is exactly when
+  its output matters. An encoder fault that had to be reproduced by hand had
+  logged nothing but a banner for this reason.
+
+  The summary is now also flushed when the stream closes. `drain_plain` returns
+  what it did (`logged` / `suppressed`), so the behaviour is assertable without
+  standing up a tracing subscriber — the test drives a child that outruns the
+  rate limit and dies in the same window, and it fails if the flush is removed.
+
 ## [0.99.332] - 2026-08-03
 
 ### Fixed
