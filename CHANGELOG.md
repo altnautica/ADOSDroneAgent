@@ -4,6 +4,24 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.341] - 2026-08-03
+
+### Changed
+
+- **Named the plugin-log size cap where the log is written, not only where it is
+  enforced.** systemd has no directive that bounds an `append:` destination, so
+  the per-plugin logs are capped from outside by the supervisor's janitor. That
+  left the two halves of one rule in two crates with nothing connecting them: a
+  reader of the unit generator would see an append path with no limit and
+  reasonably conclude there was none.
+
+  The unit generator now declares the cap and the log suffix as named constants
+  beside the path it writes, explains that a trim has to rewrite the file in
+  place because systemd holds that descriptor open for the life of the plugin,
+  and carries a test asserting the log still lands in the directory and under
+  the suffix the janitor selects on. Moving either without moving the janitor
+  now fails a test instead of quietly unbounding the logs again.
+
 ## [0.99.340] - 2026-08-03
 
 ### Added

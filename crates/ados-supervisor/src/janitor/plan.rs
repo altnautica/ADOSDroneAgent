@@ -47,8 +47,12 @@ pub const DEFAULT_INTERVAL_S: u64 = 3_600;
 pub const DEFAULT_PRESSURE_FREE_PCT: f64 = 20.0;
 /// Below this fraction of free space the Critical rung engages.
 pub const DEFAULT_CRITICAL_FREE_PCT: f64 = 10.0;
-/// A plugin log larger than this is trimmed. systemd appends to these with no
-/// rotation configured anywhere, so nothing else bounds them.
+/// A plugin log larger than this is trimmed. systemd cannot cap an `append:`
+/// destination and nothing rotates these, so this reconciler is the only thing
+/// bounding them. Kept in step with `PLUGIN_LOG_MAX_BYTES` in the plugin host,
+/// which declares the same figure beside the unit that opens the file; the two
+/// crates do not depend on each other, so each states the number and names the
+/// other.
 pub const DEFAULT_PLUGIN_LOG_MAX_BYTES: u64 = 32 * 1024 * 1024;
 /// How much of a trimmed plugin log survives — the tail, which is the part that
 /// explains what the plugin was doing when it went wrong.

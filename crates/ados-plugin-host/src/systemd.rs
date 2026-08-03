@@ -8,6 +8,22 @@
 //! These are pure string builders. The byte-exact `Slice=`, hardening flags,
 //! `ExecStart`, and resource limits are asserted in tests; nothing here invokes
 //! systemd.
+//!
+//! **Where the log bound comes from.** The unit sends stdout and stderr to
+//! `StandardOutput=append:<log>`, and systemd has no size limit for that
+//! destination — there is no directive that caps it and nothing rotates it, so
+//! for a long time nothing on the box bounded these files at all. The size cap
+//! is enforced from outside, by the supervisor's disk janitor, which trims any
+//! `*.log` under [`PLUGIN_LOG_DIR`] past [`PLUGIN_LOG_MAX_BYTES`] while keeping
+//! its tail.
+//!
+//! It trims in place rather than renaming, and that constraint belongs here as
+//! much as there: systemd opens the append file **once**, when the unit starts,
+//! and holds that descriptor for the life of the plugin. A rotation that renamed
+//! the file would leave every later write going to the renamed inode, so the
+//! rotated log would keep growing under its new name while the fresh one stayed
+//! empty forever. Anything that changes this filename scheme has to keep the
+//! janitor's glob matching, or these go unbounded again.
 
 use std::path::{Path, PathBuf};
 
@@ -24,6 +40,19 @@ pub const PLUGIN_UNIT_DIR: &str = "/etc/systemd/system";
 pub const PLUGIN_UNIT_PREFIX: &str = "ados-plugin-";
 /// Directory plugin logs are appended to.
 pub const PLUGIN_LOG_DIR: &str = "/var/log/ados/plugins";
+/// Suffix every generated plugin log carries. The janitor selects files to trim
+/// by this suffix, so it is part of the contract between the two, not a
+/// cosmetic detail of the filename.
+pub const PLUGIN_LOG_SUFFIX: &str = ".log";
+/// The size a plugin log is allowed to reach before it is trimmed.
+///
+/// Declared here, next to the writer, because this is the only place that knows
+/// these files exist; enforced by the supervisor's disk janitor, because nothing
+/// in a systemd unit can express a cap on an `append:` destination. A plugin
+/// logging a line per second at a hundred bytes takes about four days to reach
+/// it, which leaves the window an operator actually reads while bounding what a
+/// chatty or looping plugin can do to the card.
+pub const PLUGIN_LOG_MAX_BYTES: u64 = 32 * 1024 * 1024;
 
 /// The shared cgroup slice file content.
 pub const PLUGIN_SLICE_CONTENT: &str = "\
@@ -76,8 +105,16 @@ pub fn unit_path_for(plugin_id: &str, unit_dir: Option<&Path>) -> PathBuf {
 }
 
 /// The append-log path for a plugin's stdout/stderr.
+///
+/// Directory and suffix come from the constants rather than being spelled out,
+/// because the janitor that bounds these files finds them by exactly that
+/// directory and suffix. Writing either literally here would let the two drift
+/// apart with nothing failing until a card filled.
 fn log_path_for(plugin_id: &str) -> String {
-    format!("{PLUGIN_LOG_DIR}/{}.log", sanitize_unit_name(plugin_id))
+    format!(
+        "{PLUGIN_LOG_DIR}/{}{PLUGIN_LOG_SUFFIX}",
+        sanitize_unit_name(plugin_id)
+    )
 }
 
 /// Render the per-plugin systemd unit. Returns `None` for plugins that need no
@@ -181,6 +218,27 @@ mod tests {
             "id: com.example.thermal-lepton\nversion: 1.0.0\ncompatibility:\n  ados_version: \">=0.1.0\"\nagent:\n  entrypoint: agent/py/thermal.py\n  resources:\n    max_ram_mb: 128\n    max_cpu_percent: 40\n    max_pids: 16\n",
         )
         .unwrap()
+    }
+
+    #[test]
+    fn the_log_path_stays_where_the_janitor_looks_for_it() {
+        // systemd cannot cap an `append:` file, so the only thing bounding these
+        // is the supervisor's janitor, which finds them by this directory and
+        // this suffix. If either moves without the janitor moving with it, the
+        // logs go unbounded again and nothing else here would notice.
+        let path = log_path_for("com.example.thermal-lepton");
+        assert!(
+            path.starts_with(&format!("{PLUGIN_LOG_DIR}/")),
+            "plugin logs must stay in the directory the janitor sweeps: {path}"
+        );
+        assert!(
+            path.ends_with(PLUGIN_LOG_SUFFIX),
+            "plugin logs must keep the suffix the janitor selects on: {path}"
+        );
+        // The concrete pair, so a change to either constant is a visible diff
+        // rather than a quiet one.
+        assert_eq!(PLUGIN_LOG_DIR, "/var/log/ados/plugins");
+        assert_eq!(PLUGIN_LOG_SUFFIX, ".log");
     }
 
     #[test]
