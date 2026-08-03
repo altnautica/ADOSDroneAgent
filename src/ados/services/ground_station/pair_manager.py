@@ -655,9 +655,15 @@ class PairManager:
         the manager fall through to `network.hotspot.password`, so a rig with
         one configured came back up on the same key it had before.
 
+        Identity goes too: `device-id`, `config.yaml` and `/var/log/ados` are
+        in the canonical set, so a reset unit comes back indistinguishable from
+        a freshly flashed one and reappears in the GCS as a new device. This
+        path used to preserve them while the shell script erased them, which is
+        how the two answers to "what does a factory reset mean" diverged.
+
         What is deliberately left alone: `profile.conf` (what this hardware is,
         not who owns it — removing it lets a later bare upgrade reprofile the
-        box) and `device-id` (identity, not a credential).
+        box, which has already cost one rig a full reflash).
         """
         await self.unpair(role)
 

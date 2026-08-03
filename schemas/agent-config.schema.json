@@ -910,7 +910,7 @@
           "type": "boolean"
         },
         "password": {
-          "default": "altnautica",
+          "default": "",
           "title": "Password",
           "type": "string",
           "x-secret": true
@@ -1149,7 +1149,7 @@
           "default": {
             "channel": 6,
             "enabled": false,
-            "password": "altnautica",
+            "password": "",
             "ssid": "ADOS-{device_id}"
           }
         },
@@ -2462,7 +2462,7 @@
         "hotspot": {
           "channel": 6,
           "enabled": false,
-          "password": "altnautica",
+          "password": "",
           "ssid": "ADOS-{device_id}"
         },
         "mac_pin": {

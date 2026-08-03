@@ -42,7 +42,19 @@ class TestCanonicalSet:
         # upgrade then reprofiles the box — which has already cost a reflash.
         everything = {p.name for p in (*paths.FACTORY_RESET_FILES, *paths.FACTORY_RESET_DIRS)}
         assert "profile.conf" not in everything
-        assert "device-id" not in everything
+
+    def test_identity_and_configuration_are_erased(self):
+        # A factory reset means the unit comes back indistinguishable from a
+        # freshly flashed one, so identity goes with the credentials. The unit
+        # reappears in the GCS as a new device and must be added again; that is
+        # intended, and is the safe default before handing on the hardware.
+        #
+        # The shell script already erased these while the API path preserved
+        # them, so the two disagreed about what a factory reset meant.
+        everything = {p.name for p in (*paths.FACTORY_RESET_FILES, *paths.FACTORY_RESET_DIRS)}
+        assert "device-id" in everything
+        assert "config.yaml" in everything
+        assert "ados" in everything, "/var/log/ados carries the previous holder's history"
 
     def test_the_set_has_no_duplicates(self):
         entries = [*paths.FACTORY_RESET_FILES, *paths.FACTORY_RESET_DIRS]
@@ -60,6 +72,11 @@ class TestShellScriptAgrees:
         for m in re.finditer(r'rm\s+-[rf]*\s+"?([^"\s]+)"?', body):
             target = m.group(1)
             target = target.replace("$CONFIG_DIR", "/etc/ados").rstrip("/")
+            # `rm -rf /var/log/ados/*` empties the directory while keeping it,
+            # so the glob names the contents rather than the directory. Compare
+            # on the directory the canonical list actually names.
+            if target.endswith("/*"):
+                target = target[: -len("/*")]
             found.add(Path(target).name)
         return found
 

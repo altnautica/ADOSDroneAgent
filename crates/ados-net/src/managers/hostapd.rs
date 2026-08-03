@@ -719,7 +719,10 @@ mod tests {
             .find(|l| l.starts_with("wpa_passphrase="))
             .expect("a written conf must set wpa_passphrase");
         let value = line.trim_start_matches("wpa_passphrase=");
-        assert!(!value.is_empty(), "an empty passphrase must never be written");
+        assert!(
+            !value.is_empty(),
+            "an empty passphrase must never be written"
+        );
         assert!(
             ados_protocol::secret_gen::is_valid_wpa2_passphrase(value),
             "written passphrase must satisfy WPA2's 8-63 character rule"

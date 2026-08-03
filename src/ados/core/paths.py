@@ -442,7 +442,8 @@ AUDIT_LOG_PATH = ADOS_VAR_DIR / "audit.jsonl"
 # Plugins (installed third-party bundles, plugin data, plugin configs)
 PLUGINS_INSTALL_DIR = ADOS_VAR_DIR / "plugins"
 PLUGIN_DATA_DIR = ADOS_VAR_DIR / "plugin-data"
-PLUGIN_LOG_DIR = Path("/var/log/ados/plugins")
+ADOS_LOG_DIR = Path("/var/log/ados")
+PLUGIN_LOG_DIR = ADOS_LOG_DIR / "plugins"
 PLUGIN_STATE_PATH = STATE_DIR / "plugin-state.json"
 
 # Camera last-known-good record. Written by the supervisor's camera-recovery
@@ -485,6 +486,17 @@ INSTALL_RESULT = (
 #   wfb/                the radio keypair, which is the fleet's join gate
 #   certs/              TLS material
 #
+# Identity and configuration, also destroyed:
+#
+#   device-id      the unit's identity. A factory reset means the box comes
+#                  back indistinguishable from a freshly flashed one, so the
+#                  identity goes too. It reappears in the GCS as a new device
+#                  and has to be added again — that is the intended reading of
+#                  "factory reset", and the safest default before handing the
+#                  hardware to somebody else.
+#   config.yaml    operator configuration; regenerates from defaults.
+#   /var/log/ados  operational history from the previous holder.
+#
 # Deliberately NOT reset:
 #
 #   profile.conf   holds `profile`, `channel` and `version` — what this
@@ -492,13 +504,11 @@ INSTALL_RESULT = (
 #                  no secret. Removing it strips the profile marker, and a
 #                  later bare upgrade then reprofiles the box, which has
 #                  already cost one rig a full reflash.
-#   device-id      identity rather than a credential. Regenerating it makes
-#                  the same physical unit look like a new one to every record
-#                  that refers to it.
 #
 # Both the shell script and the API path consume this list, and a test asserts
 # they agree: the three implementations diverged in the first place because
-# each carried its own copy.
+# each carried its own copy, and the shell script was already erasing identity
+# while the API path preserved it.
 
 DASHBOARD_PIN_PATH = ADOS_ETC_DIR / "dashboard-pin.json"
 MCP_TOKEN_PATH = ADOS_ETC_DIR / "mcp-token.json"
@@ -506,13 +516,17 @@ WFB_KEY_DIR = ADOS_ETC_DIR / "wfb"
 CERTS_DIR = ADOS_ETC_DIR / "certs"
 SETUP_COMPLETE_PATH = Path("/var/lib/ados/setup-complete")
 
-#: Files a factory reset unlinks.
+#: Files a factory reset unlinks. Credentials first, so an interrupted run has
+#: already destroyed what grants access rather than only what identifies the box.
 FACTORY_RESET_FILES: tuple[Path, ...] = (
     PAIRING_JSON,
     DASHBOARD_PIN_PATH,
     MCP_TOKEN_PATH,
     AP_PASSPHRASE_PATH,
     SETUP_COMPLETE_PATH,
+    # Identity and configuration, after the credentials.
+    DEVICE_ID_PATH,
+    CONFIG_YAML,
 )
 
 #: Directories a factory reset empties.
@@ -520,4 +534,5 @@ FACTORY_RESET_DIRS: tuple[Path, ...] = (
     SECRETS_DIR,
     WFB_KEY_DIR,
     CERTS_DIR,
+    ADOS_LOG_DIR,
 )
