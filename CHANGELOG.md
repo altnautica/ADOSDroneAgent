@@ -4,6 +4,29 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.350] - 2026-08-03
+
+### Fixed
+
+- **One aircraft could occupy two fleet slots.** A device id is
+  `uuid4().hex[:12]`, and an 8-character form of the same id is derived from it
+  for naming. The slot registry compared ids as exact strings, so the two forms
+  of one drone were two drones: it took a second slot, and the hero fan-out
+  promoted and demoted the same airframe in a single call.
+
+  Slot lookup now recognises the short form as the aircraft it was derived from.
+  The rule is deliberately narrow — the exact 8-from-12 hex derivation, both
+  sides hex, nothing else. A general "one starts with the other" rule was written
+  first and was wrong: it merged `drone-1` into `drone-11`, which an existing
+  fleet-full test caught on the first run. Identifiers that merely share a
+  leading substring are not the same aircraft, and a rule loose enough to merge
+  them would eventually bind a command to the wrong airframe — worse than the
+  duplicate slot it fixes.
+
+  An ambiguous short form, where two registered ids share it, resolves to nothing
+  rather than to whichever was found first. An empty id matches nothing; absent
+  is not a wildcard.
+
 ## [0.99.349] - 2026-08-03
 
 ### Fixed

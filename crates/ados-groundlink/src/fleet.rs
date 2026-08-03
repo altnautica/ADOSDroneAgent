@@ -82,6 +82,32 @@ pub struct FleetRegistry {
     by_slot: BTreeMap<u8, FleetSlot>,
 }
 
+/// Whether two device ids name the same aircraft.
+///
+/// True only when one is a strict prefix of the other. That is exactly how the
+/// short form is produced — a device id is `uuid4().hex[:12]` and the
+/// 8-character form is that truncated again for naming — so a prefix match
+/// reproduces the derivation rather than guessing at a resemblance.
+///
+/// Deliberately narrow: it matches ONLY the exact 8-from-12 hex derivation, not
+/// any prefix of anything. A loose "one starts with the other" rule looked
+/// equivalent and was not — it merged `drone-1` into `drone-11`, which an
+/// existing test caught immediately. Identifiers that merely share a leading
+/// substring are not the same aircraft, and a rule broad enough to merge them
+/// would eventually bind a command to the wrong airframe. That is a worse
+/// failure than the duplicate slot this fixes.
+pub fn id_refers_to_same_device(a: &str, b: &str) -> bool {
+    const FULL: usize = 12;
+    const SHORT: usize = 8;
+    let (a, b) = (a.trim(), b.trim());
+    let (long, short) = if a.len() > b.len() { (a, b) } else { (b, a) };
+    long.len() == FULL
+        && short.len() == SHORT
+        && long.chars().all(|c| c.is_ascii_hexdigit())
+        && short.chars().all(|c| c.is_ascii_hexdigit())
+        && long.starts_with(short)
+}
+
 impl FleetRegistry {
     /// Read the registry from `path`. A missing file is an empty fleet (the
     /// pre-first-pair state).
@@ -155,11 +181,38 @@ impl FleetRegistry {
     }
 
     /// The slot `device_id` holds, if it is registered.
+    ///
+    /// Matches the SHORT form of an id against its full form, because they are
+    /// the same aircraft. A device id is `uuid4().hex[:12]` (`identity.py`), and
+    /// the 8-character form seen on some surfaces is that same id truncated
+    /// again for naming (`config/root.py`). Exact string equality therefore gave
+    /// `f6aa0aa4` and `f6aa0aa41193` two different slots for one airframe, and
+    /// the hero fan-out promoted and demoted the same aircraft in a single call.
+    ///
+    /// Only a genuine prefix relationship counts, and only in the direction the
+    /// truncation actually goes — never a partial overlap, never an equal-length
+    /// near-miss. An ambiguous prefix (two registered ids sharing it) resolves to
+    /// NOTHING rather than to a guess: with 8 hex characters a collision inside
+    /// a fleet is vanishingly unlikely, but silently binding a command to the
+    /// wrong airframe is not a risk worth taking for a convenience.
     pub fn slot_of(&self, device_id: &str) -> Option<u8> {
-        self.by_slot
+        let needle = device_id.trim();
+        if needle.is_empty() {
+            return None;
+        }
+        if let Some(s) = self.by_slot.values().find(|s| s.device_id == needle) {
+            return Some(s.slot);
+        }
+        let mut matches = self
+            .by_slot
             .values()
-            .find(|s| s.device_id == device_id)
-            .map(|s| s.slot)
+            .filter(|s| id_refers_to_same_device(&s.device_id, needle));
+        let first = matches.next()?;
+        // A second match means the prefix does not identify one aircraft.
+        if matches.next().is_some() {
+            return None;
+        }
+        Some(first.slot)
     }
 
     /// Every registered slot, in ascending slot order.
@@ -527,6 +580,63 @@ mod tests {
         reg.allocate("drone-a").unwrap();
         assert!(!reg.release("drone-nobody"));
         assert_eq!(reg.len(), 1);
+    }
+
+    #[test]
+    fn the_short_and_long_form_of_one_id_are_one_aircraft() {
+        // A device id is uuid4().hex[:12]; the 8-character form seen on some
+        // surfaces is that same id truncated again for naming. Exact string
+        // equality gave one airframe two slots, and the hero fan-out then
+        // promoted and demoted it in a single call.
+        let mut r = FleetRegistry::default();
+        let slot = r.allocate("f6aa0aa41193").unwrap();
+        assert_eq!(r.slot_of("f6aa0aa4"), Some(slot));
+        assert_eq!(
+            r.allocate("f6aa0aa4"),
+            Some(slot),
+            "re-allocating under the short form must not issue a second slot"
+        );
+        assert_eq!(r.slots().count(), 1, "still one aircraft");
+    }
+
+    #[test]
+    fn only_the_exact_eight_from_twelve_derivation_counts() {
+        // Narrow on purpose. A loose "one starts with the other" rule merged
+        // drone-1 into drone-11 and broke a fleet-full test on the first run.
+        assert!(id_refers_to_same_device("f6aa0aa41193", "f6aa0aa4"));
+        assert!(!id_refers_to_same_device("drone-11", "drone-1"));
+        assert!(!id_refers_to_same_device("f6aa0aa41193", "f6aa0a"));
+        assert!(!id_refers_to_same_device("f6aa0aa4119312", "f6aa0aa4"));
+        // Non-hex of the right lengths is not a device id.
+        assert!(!id_refers_to_same_device("zzzzzzzzzzzz", "zzzzzzzz"));
+    }
+
+    #[test]
+    fn two_different_aircraft_are_never_merged() {
+        // Binding a command to the wrong airframe is worse than the bug.
+        assert!(!id_refers_to_same_device("f6aa0aa41193", "f6aa0aa41194"));
+        assert!(!id_refers_to_same_device("aaaaaaaa", "bbbbbbbb"));
+        assert!(!id_refers_to_same_device("f6aa0aa41193", "6aa0aa41"));
+    }
+
+    #[test]
+    fn an_ambiguous_prefix_resolves_to_nothing_rather_than_a_guess() {
+        // Two registered ids sharing the queried prefix means it identifies no
+        // single aircraft. Returning either would be a coin flip.
+        let mut r = FleetRegistry::default();
+        r.allocate("abcd1234aaaa");
+        r.allocate("abcd1234bbbb");
+        assert_eq!(r.slot_of("abcd1234"), None);
+    }
+
+    #[test]
+    fn an_empty_id_matches_nothing() {
+        // An absent id is not a wildcard.
+        let mut r = FleetRegistry::default();
+        r.allocate("f6aa0aa41193");
+        assert_eq!(r.slot_of(""), None);
+        assert_eq!(r.slot_of("   "), None);
+        assert!(!id_refers_to_same_device("", "f6aa0aa41193"));
     }
 
     #[test]
