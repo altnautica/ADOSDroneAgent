@@ -4,7 +4,34 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
-## [0.99.333] - 2026-08-03
+## [0.99.334] - 2026-08-03
+
+### Added
+
+- **`ados diag storage` — read back the wear the box was already recording.**
+  Four SD cards were replaced in eight days without anyone being able to say how
+  much the node was writing. The measurement existed the whole time: the hardware
+  collector puts the disk write counter and the throttle bitfield into the
+  durable store on every tick, and that store survives the reboot that destroys
+  everything in RAM. Nothing read it back.
+
+  A new `GET /api/diag/storage` does, and the CLI renders it. Three things it is
+  careful about:
+
+  - The write counter is reported as a **delta across the retained window**, not
+    as a reading. A cumulative counter's instantaneous value says nothing about
+    rate. If the counter went backwards the node rebooted mid-window, and the
+    answer is "not computable across a restart" rather than a negative number.
+  - The throttle bitfield is reported by its **sticky "has occurred" bits**.
+    Undervoltage is transient, so a single poll almost always misses it — which
+    is why the one reading ever taken proved nothing.
+  - Every field can come back absent **with a stated reason**, and a store that
+    did not answer reads `unknown`, never `ok`. A fabricated zero here would look
+    like a clean bill of health on exactly the card that is dying.
+
+  It also totals the store's own footprint, including quarantined copies of a
+  torn store — those are renamed aside rather than deleted, so a node that has
+  corrupted twice carries three, which is the mechanism that filled the card.
 
 ### Fixed
 
@@ -64,7 +91,7 @@ the project follows [Semantic Versioning](https://semver.org/).
   and there is a test for that, because refusing a benign parameter would be its
   own bug.
 
-  Recorded as DEC-275, including what lifting the limit properly requires:
+  Lifting the limit properly requires
   discovering the vehicle's system id from its `HEARTBEAT` and carrying it
   through both paths with a per-vehicle record. Merely widening the constant
   would replace an obvious failure with a subtle one, where a command silently
@@ -779,7 +806,7 @@ Fleet release: one ground station, one RTL8812EU per node, up to 24 drones on on
 - The plugin host validates a config write against the plugin's declared
   parameter schema (`gcs.contributes.parameters[key].schema`, read from the
   installed manifest) before persisting it -- JSON Schema Draft-07 via the
-  jsonschema crate, the agent half of the shared validator (DEC-217), so the
+  jsonschema crate, the agent half of the shared validator, so the
   agent never trusts the GCS form. A missing/uncompilable schema or a
   non-JSON value allows the write (graceful degradation); only a value a valid
   schema rejects is refused.

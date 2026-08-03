@@ -86,6 +86,26 @@ impl LogdQueryClient {
         merge_hw_signals(&parsed)
     }
 
+    /// Read recent hardware snapshots with their timestamps, newest first.
+    ///
+    /// [`latest_hw_signals`](Self::latest_hw_signals) collapses history into one
+    /// map, which answers "what is the value now" and cannot answer "how fast is
+    /// this counter moving". Wear diagnosis needs the second question, so this
+    /// returns the rows intact and leaves the delta arithmetic to the caller.
+    ///
+    /// Returns `None` when the store is unreachable or the response does not
+    /// parse, so the caller reports "cannot measure" rather than inventing a rate
+    /// from a half-read page.
+    pub async fn hw_rows(&self, limit: u32) -> Option<Vec<HwRow>> {
+        let path = format!("/v1/query?kind=hw&limit={limit}");
+        let (status, body) = self.uds_get(&path).await.ok()?;
+        if status >= 400 {
+            return None;
+        }
+        let parsed: Value = serde_json::from_slice(&body).ok()?;
+        parse_hw_rows(&parsed)
+    }
+
     /// A minimal HTTP/1.1 `GET` over the query Unix socket. Returns the status code
     /// and the response body bytes. `Connection: close` lets the body be read to
     /// EOF; a chunked body is de-chunked. Bounded by [`MAX_READ_BYTES`] so a
@@ -112,6 +132,44 @@ impl LogdQueryClient {
         }
         parse_http_response(&raw)
     }
+}
+
+/// One hardware snapshot as stored: when it was taken, and what it carried.
+///
+/// The store's own row shape (`ts_us`, `signals`) surfaced intact, because a
+/// snapshot's value is only half of what wear diagnosis needs — the other half is
+/// when it was taken.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HwRow {
+    /// Sample time, microseconds since the epoch, as the store recorded it.
+    pub ts_us: i64,
+    /// The signal map for this tick. Sparse: each signal class fires on its own
+    /// cadence, so a given key is absent from most rows.
+    pub signals: Map<String, Value>,
+}
+
+impl HwRow {
+    /// This row's value for `key`, if present and numeric.
+    pub fn num(&self, key: &str) -> Option<f64> {
+        self.signals.get(key).and_then(Value::as_f64)
+    }
+}
+
+/// Parse the `data` rows of a `/v1/query?kind=hw` response into timestamped rows,
+/// dropping any row missing a usable timestamp or signal map. Returns `None` when
+/// the envelope itself is unusable, so "malformed response" stays distinguishable
+/// from "store is up and has no rows yet".
+fn parse_hw_rows(body: &Value) -> Option<Vec<HwRow>> {
+    let rows = body.get("data")?.as_array()?;
+    let parsed = rows
+        .iter()
+        .filter_map(|row| {
+            let ts_us = row.get("ts_us").and_then(Value::as_i64)?;
+            let signals = row.get("signals").and_then(Value::as_object)?.clone();
+            Some(HwRow { ts_us, signals })
+        })
+        .collect();
+    Some(parsed)
 }
 
 /// Merge the `data` rows of a `/v1/query?kind=hw` response into one signal map,

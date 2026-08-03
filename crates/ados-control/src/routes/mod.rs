@@ -26,6 +26,7 @@ pub mod command;
 pub mod compute_status;
 pub mod config_schema;
 pub mod dashboard_pin;
+pub mod diag_storage;
 pub mod diagnostics;
 pub mod fc_identity;
 pub mod fleet;
@@ -342,6 +343,14 @@ pub fn build_router(state: AppState, net_native: bool, hid_native: bool) -> Rout
         // counters (mediamtx bytesReceived, wfb_rx decode, fan-out, WHEP) twice
         // and attributes a stall to the exact hop that stopped, profile-aware.
         .route("/api/diag/video", get(diagnostics::get_video_diagnostics))
+        // Storage-wear verdict: the write counter as a delta across the retained
+        // window, the throttle bitfield's sticky bits, and the store's own
+        // footprint including quarantined corpses. Reads what the collector was
+        // already recording; four cards were reflashed before anything did.
+        .route(
+            "/api/diag/storage",
+            get(diag_storage::get_storage_diagnostics),
+        )
         // Video reads: glass-to-glass latency, the air-side pipeline snapshot, and
         // the encoder/radio config (the snapshot/record/switch writes + the
         // camera-enumeration route stay proxied).
