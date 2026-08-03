@@ -130,10 +130,6 @@ _BACKOFF_MAX_SECONDS = 30.0
 # Graceful shutdown allowance for the cage child.
 _SHUTDOWN_GRACE_SECONDS = 10.0
 
-# Minimal-layer auto-trigger threshold. Boards under 3 GiB default to the
-# reduced render path so Chromium stays within its memory envelope.
-_MINIMAL_RAM_THRESHOLD_BYTES = 3 * 1024 * 1024 * 1024
-
 _STDERR_TAIL_BYTES = 2048
 
 # How many child stderr lines are forwarded to the journal before the rest are
@@ -332,18 +328,6 @@ def _get_kiosk_config(config: Any) -> tuple[str | None, bool | None]:
     return url, minimal
 
 
-def _low_ram_board() -> bool:
-    try:
-        import psutil
-    except Exception:
-        return False
-    try:
-        total = psutil.virtual_memory().total
-    except Exception:
-        return False
-    return total < _MINIMAL_RAM_THRESHOLD_BYTES
-
-
 def _resolve_target_url(config: Any) -> tuple[str, bool]:
     """Config -> env -> default. Returns (url_with_query, minimal_flag).
 
@@ -355,11 +339,23 @@ def _resolve_target_url(config: Any) -> tuple[str, bool]:
 
     url = cfg_url or os.environ.get(_ENV_URL_KEY) or _DEFAULT_URL
 
-    minimal = False
-    if cfg_minimal is True:
-        minimal = True
-    elif _low_ram_board():
-        minimal = True
+    # Minimal by default on the panel. The reduced layer drops the backdrop
+    # blur the cockpit draws over live video, and a blurred region above a
+    # surface that changes every frame forces the compositor to re-read and
+    # re-blur its backdrop at the video's frame rate.
+    #
+    # Measured on a 4-core panel with video actually arriving over the radio:
+    # the full layer costs 292.9% of 400% and leaves 36% of the board idle;
+    # the reduced layer costs 137.9% and leaves 68% idle. Same video, same
+    # frame rate, 53% less CPU.
+    #
+    # This used to be gated on the board having under 3 GiB of RAM, which is
+    # the wrong quantity: the blur costs compositor time, not memory. A 3.8 GiB
+    # four-core panel — comfortably over that threshold — was therefore paying
+    # full price for an effect nobody can see behind a HUD, and was the board
+    # the reduced path would have helped most. An operator who wants the full
+    # layer asks for it.
+    minimal = cfg_minimal is not False
 
     env_minimal = os.environ.get(_ENV_MINIMAL_KEY)
     if env_minimal is not None:

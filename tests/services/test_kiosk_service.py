@@ -14,7 +14,7 @@ import asyncio
 import os
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -24,7 +24,6 @@ from ados.services.kiosk.kiosk_service import (
     _build_chromium_argv,
     _get_kiosk_config,
     _hdmi_present,
-    _low_ram_board,
     _resolve_target_url,
 )
 
@@ -303,43 +302,6 @@ def test_get_kiosk_config_returns_configured_values() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Low-RAM threshold (board with <3 GiB total RAM auto-trips minimal layer)
-# ---------------------------------------------------------------------------
-
-
-def test_low_ram_board_true_when_under_threshold() -> None:
-    """A 2 GiB board falls under the 3 GiB threshold."""
-    fake_psutil = MagicMock()
-    fake_psutil.virtual_memory.return_value = MagicMock(total=2 * 1024 * 1024 * 1024)
-    with patch.dict("sys.modules", {"psutil": fake_psutil}):
-        assert _low_ram_board() is True
-
-
-def test_low_ram_board_false_when_at_or_above_threshold() -> None:
-    """A 4 GiB board is comfortably above the threshold."""
-    fake_psutil = MagicMock()
-    fake_psutil.virtual_memory.return_value = MagicMock(total=4 * 1024 * 1024 * 1024)
-    with patch.dict("sys.modules", {"psutil": fake_psutil}):
-        assert _low_ram_board() is False
-
-
-def test_low_ram_board_threshold_boundary() -> None:
-    """At exactly 3 GiB the helper returns False (strict less-than)."""
-    fake_psutil = MagicMock()
-    fake_psutil.virtual_memory.return_value = MagicMock(total=3 * 1024 * 1024 * 1024)
-    with patch.dict("sys.modules", {"psutil": fake_psutil}):
-        assert _low_ram_board() is False
-
-
-def test_low_ram_board_psutil_failure_returns_false() -> None:
-    """psutil.virtual_memory() exceptions degrade safely to ``False``."""
-    fake_psutil = MagicMock()
-    fake_psutil.virtual_memory.side_effect = RuntimeError("no /proc on this box")
-    with patch.dict("sys.modules", {"psutil": fake_psutil}):
-        assert _low_ram_board() is False
-
-
-# ---------------------------------------------------------------------------
 # URL resolution
 # ---------------------------------------------------------------------------
 
@@ -347,21 +309,23 @@ def test_low_ram_board_psutil_failure_returns_false() -> None:
 def test_resolve_target_url_defaults_when_nothing_set(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("ADOS_KIOSK_URL", raising=False)
     monkeypatch.delenv("ADOS_KIOSK_MINIMAL_LAYER", raising=False)
-    with patch.object(ks, "_low_ram_board", return_value=False):
-        url, minimal = _resolve_target_url(SimpleNamespace())
+    url, minimal = _resolve_target_url(SimpleNamespace())
     # Trailing slash: the path the static mount actually serves, so no redirect
     # stands between the kiosk and the page (and none can drop the query).
-    assert url == "http://localhost:8080/cockpit/"
-    assert minimal is False
+    #
+    # Minimal is the DEFAULT on the panel. The backdrop blur it drops costs 53%
+    # of the browser's CPU on a four-core board, measured with video actually
+    # arriving over the radio, and nothing can see it behind a HUD.
+    assert url == "http://localhost:8080/cockpit/?layer=minimal"
+    assert minimal is True
 
 
 def test_resolve_target_url_env_override_used(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ADOS_KIOSK_URL", "http://env-host/hud")
     monkeypatch.delenv("ADOS_KIOSK_MINIMAL_LAYER", raising=False)
-    with patch.object(ks, "_low_ram_board", return_value=False):
-        url, minimal = _resolve_target_url(SimpleNamespace())
-    assert url == "http://env-host/hud"
-    assert minimal is False
+    url, minimal = _resolve_target_url(SimpleNamespace())
+    assert url == "http://env-host/hud?layer=minimal"
+    assert minimal is True
 
 
 def test_resolve_target_url_config_beats_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -369,20 +333,25 @@ def test_resolve_target_url_config_beats_env(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("ADOS_KIOSK_URL", "http://env-host/hud")
     monkeypatch.delenv("ADOS_KIOSK_MINIMAL_LAYER", raising=False)
     cfg = _config_with_kiosk(url="http://cfg-host/hud")
-    with patch.object(ks, "_low_ram_board", return_value=False):
-        url, _ = _resolve_target_url(cfg)
-    assert url == "http://cfg-host/hud"
+    url, _ = _resolve_target_url(cfg)
+    assert url == "http://cfg-host/hud?layer=minimal"
 
 
-def test_resolve_target_url_low_ram_appends_minimal_layer(
+def test_resolve_target_url_config_can_opt_back_into_the_full_layer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """An explicit ``minimal_layer: false`` is the only way back to the blur.
+
+    Absent config means minimal; only an operator asking for the full layer
+    gets it, because on every board measured so far the blur costs about half
+    the browser's CPU and buys nothing visible behind the HUD.
+    """
     monkeypatch.delenv("ADOS_KIOSK_URL", raising=False)
     monkeypatch.delenv("ADOS_KIOSK_MINIMAL_LAYER", raising=False)
-    with patch.object(ks, "_low_ram_board", return_value=True):
-        url, minimal = _resolve_target_url(SimpleNamespace())
-    assert minimal is True
-    assert url.endswith("?layer=minimal")
+    cfg = _config_with_kiosk(url="http://host/hud", minimal=False)
+    url, minimal = _resolve_target_url(cfg)
+    assert minimal is False
+    assert "layer=minimal" not in url
 
 
 def test_resolve_target_url_config_minimal_flag_appends_query(
@@ -391,8 +360,7 @@ def test_resolve_target_url_config_minimal_flag_appends_query(
     monkeypatch.delenv("ADOS_KIOSK_URL", raising=False)
     monkeypatch.delenv("ADOS_KIOSK_MINIMAL_LAYER", raising=False)
     cfg = _config_with_kiosk(url="http://host/hud?theme=dark", minimal=True)
-    with patch.object(ks, "_low_ram_board", return_value=False):
-        url, minimal = _resolve_target_url(cfg)
+    url, minimal = _resolve_target_url(cfg)
     assert minimal is True
     # Existing query separator preserved.
     assert url == "http://host/hud?theme=dark&layer=minimal"
@@ -401,11 +369,10 @@ def test_resolve_target_url_config_minimal_flag_appends_query(
 def test_resolve_target_url_env_can_force_full_layer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``ADOS_KIOSK_MINIMAL_LAYER=0`` overrides a low-RAM detection."""
+    """``ADOS_KIOSK_MINIMAL_LAYER=0`` overrides the minimal default."""
     monkeypatch.setenv("ADOS_KIOSK_MINIMAL_LAYER", "0")
     monkeypatch.delenv("ADOS_KIOSK_URL", raising=False)
-    with patch.object(ks, "_low_ram_board", return_value=True):
-        url, minimal = _resolve_target_url(SimpleNamespace())
+    url, minimal = _resolve_target_url(SimpleNamespace())
     assert minimal is False
     assert "layer=minimal" not in url
 
