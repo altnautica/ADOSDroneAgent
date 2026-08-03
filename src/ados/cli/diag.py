@@ -378,6 +378,12 @@ def diag_storage(as_json: bool) -> None:
     verdict = str(data.get("verdict", "unknown"))
     state = _WEAR_STATE.get(verdict, "warn")
 
+    # Footprint first. Space is what actually breaks these nodes — the card
+    # fills, a rewrite cannot get its scratch, a write tears, and the box will
+    # not boot. Write rate is wear, which is real but slower and more
+    # forgiving, so it is reported below rather than above.
+    _render_footprint(theme, data.get("janitor") or {})
+
     click.echo(_ansi.marker(theme, "STORAGE WEAR"))
     click.echo(f"  {_ansi.dot(theme, state)} {theme.bold(verdict.upper())}")
     reason = data.get("reason")
@@ -482,6 +488,12 @@ def diag_storage(as_json: bool) -> None:
 # a silently dropped row would be a category quietly deleting things with
 # nothing on screen to say so.
 _JANITOR_CATEGORIES = {
+    # Reclaim categories (what a pass freed) and footprint categories (what is
+    # occupied) overlap but are not identical: apt is one budget category and
+    # two reclaim ones, and the live store occupies space no pass may reclaim.
+    # Both sets are listed so neither renderer silently drops a row.
+    "log_store": "logging store",
+    "apt": "apt cache and index",
     "apt_archives": "downloaded packages",
     "apt_lists": "package index",
     "plugin_logs": "plugin logs",
@@ -505,6 +517,67 @@ def _category_rows(block: Any) -> list[tuple[str, int]]:
         if key not in _JANITOR_CATEGORIES and isinstance(value, int) and value > 0:
             rows.append((key, value))
     return rows
+
+
+def _render_footprint(theme: Any, janitor: dict[str, Any]) -> None:
+    """How much of the card the agent occupies, against the budget it is held to.
+
+    This leads the report because space is what breaks these nodes. A card fills,
+    a rewrite cannot get the scratch it needs, a write tears, the filesystem
+    corrupts, and the box will not boot — that sequence is what caused four
+    reflashes in eight days, not wear. The write rate below is the wear signal:
+    real, but slower and far more forgiving.
+
+    Every figure comes from the janitor's last pass. When it has not run, this
+    says so and prints nothing rather than a total of zero, which would claim the
+    agent occupies nothing at all.
+    """
+    total = janitor.get("footprint_bytes")
+    budget = janitor.get("budget_bytes")
+    click.echo(_ansi.marker(theme, "FOOTPRINT"))
+    if not isinstance(total, int) or not isinstance(budget, int) or budget <= 0:
+        why = janitor.get("reason") or "the janitor has not measured it yet"
+        click.echo(_ansi.kv(theme, "total", theme.dim(f"- ({why})"), label_width=16))
+        click.echo("")
+        return
+
+    pct = total * 100.0 / budget
+    state = "fail" if total >= budget else ("warn" if pct >= 85.0 else "ok")
+    click.echo(
+        f"  {_ansi.dot(theme, state)} "
+        f"{theme.bold(_fmt_bytes(total))} of {_fmt_bytes(budget)}  ({pct:.0f}%)"
+    )
+
+    caps = janitor.get("caps") if isinstance(janitor.get("caps"), dict) else {}
+    over = janitor.get("over_cap") if isinstance(janitor.get("over_cap"), dict) else {}
+    footprint = janitor.get("footprint") if isinstance(janitor.get("footprint"), dict) else {}
+    for key, label in _JANITOR_CATEGORIES.items():
+        used = footprint.get(key)
+        if not isinstance(used, int) or used <= 0:
+            continue
+        cap = caps.get(key)
+        detail = _fmt_bytes(used)
+        if isinstance(cap, int) and cap > 0:
+            detail += f" / {_fmt_bytes(cap)}"
+        if isinstance(over.get(key), int) and over[key] > 0:
+            # A category a floor is holding above its cap. Named rather than
+            # hidden: the janitor declined to fix it and somebody may need to.
+            detail = theme.fail(f"{detail}  over by {_fmt_bytes(over[key])}")
+        click.echo(_ansi.kv(theme, "", theme.dim(f"{label}: {detail}"), label_width=4))
+
+    installed = janitor.get("installed_bytes")
+    if isinstance(installed, int) and installed > 0:
+        # Stated as excluded rather than left for the reader to infer from the
+        # arithmetic not adding up.
+        click.echo(
+            _ansi.kv(
+                theme,
+                "",
+                theme.dim(f"installed agent: {_fmt_bytes(installed)} (not counted)"),
+                label_width=4,
+            )
+        )
+    click.echo("")
 
 
 def _render_janitor(theme: Any, janitor: dict[str, Any]) -> None:

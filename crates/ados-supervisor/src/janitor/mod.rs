@@ -14,9 +14,24 @@
 //! already live here and an eighth service is eight more things that can fail to
 //! start.
 //!
-//! Three rungs, keyed on free space where `/var` lives, described in
-//! [`plan`]. Routine reclaims what is unambiguously waste. Pressure and Critical
+//! **Space is the trigger, not throughput.** Write rate is wear: it shortens a
+//! card's life over months. Occupied space is what actually breaks these nodes,
+//! and it breaks them in days — the card fills, a store rewrite cannot get the
+//! scratch it needs, a write tears, the filesystem corrupts and the box will not
+//! boot. So the primary signal is the agent's own footprint against a budget
+//! (default 5 GB, per-category caps in [`budget`]), with free-space percentage
+//! kept only as the secondary net for a card shared with something else.
+//!
+//! Percentage alone would have caught none of it: a 128 GB card at 3% used can
+//! carry a runaway store, and no percentage threshold fires until the day there
+//! is nothing left to trim gracefully.
+//!
+//! Three rungs, described in [`plan`], from whichever of those two signals is
+//! harsher. Routine reclaims what is unambiguously waste. Pressure and Critical
 //! also give up things that have some value, in ascending order of how much.
+//! Per-category caps are enforced at every rung, so a category over its share is
+//! trimmed even on a box with room to spare — recordings must not quietly take
+//! the store's allowance on a node that happens not to be logging.
 //!
 //! Two rules hold at every rung, because a janitor that quietly deletes evidence
 //! is worse than the full disk it was fitted to prevent:
@@ -36,6 +51,7 @@
 //! current size, so a second pass immediately after a first finds everything
 //! under its cap and reclaims nothing.
 
+pub mod budget;
 pub mod plan;
 pub mod reclaim;
 
@@ -91,6 +107,20 @@ impl Reclaimed {
         ]
         .iter()
         .fold(0u64, |a, b| a.saturating_add(*b))
+    }
+
+    /// Fold another pass's totals in. Saturating, so a pathological figure can
+    /// never wrap the accounting the event is built from.
+    pub fn add(&mut self, other: &Reclaimed) {
+        self.apt_archives = self.apt_archives.saturating_add(other.apt_archives);
+        self.apt_lists = self.apt_lists.saturating_add(other.apt_lists);
+        self.plugin_logs = self.plugin_logs.saturating_add(other.plugin_logs);
+        self.audit_log = self.audit_log.saturating_add(other.audit_log);
+        self.recordings = self.recordings.saturating_add(other.recordings);
+        self.journal = self.journal.saturating_add(other.journal);
+        self.quarantined_stores = self
+            .quarantined_stores
+            .saturating_add(other.quarantined_stores);
     }
 
     /// The per-category pairs, for the event detail and the sidecar. One place
@@ -152,6 +182,27 @@ pub fn read_config_from(text: &str) -> JanitorConfig {
         journal_floor_mb: Option<u64>,
         #[serde(default)]
         quarantine_keep_newest: Option<usize>,
+        #[serde(default)]
+        budget_mb: Option<u64>,
+        #[serde(default)]
+        caps: Option<RawCaps>,
+    }
+    #[derive(serde::Deserialize)]
+    struct RawCaps {
+        #[serde(default)]
+        log_store_mb: Option<u64>,
+        #[serde(default)]
+        quarantined_stores_mb: Option<u64>,
+        #[serde(default)]
+        recordings_mb: Option<u64>,
+        #[serde(default)]
+        plugin_logs_mb: Option<u64>,
+        #[serde(default)]
+        audit_log_mb: Option<u64>,
+        #[serde(default)]
+        journal_mb: Option<u64>,
+        #[serde(default)]
+        apt_mb: Option<u64>,
     }
     fn default_true() -> bool {
         true
@@ -204,6 +255,28 @@ pub fn read_config_from(text: &str) -> JanitorConfig {
             .map(|m| m.saturating_mul(MB))
             .unwrap_or(d.journal_floor_bytes),
         quarantine_keep_newest: j.quarantine_keep_newest.unwrap_or(d.quarantine_keep_newest),
+        budget_bytes: j
+            .budget_mb
+            .map(|m| m.saturating_mul(MB))
+            .unwrap_or(d.budget_bytes),
+        caps: match j.caps {
+            None => d.caps,
+            Some(c) => budget::Caps {
+                log_store: c.log_store_mb.map(|m| m * MB).unwrap_or(d.caps.log_store),
+                quarantined_stores: c
+                    .quarantined_stores_mb
+                    .map(|m| m * MB)
+                    .unwrap_or(d.caps.quarantined_stores),
+                recordings: c.recordings_mb.map(|m| m * MB).unwrap_or(d.caps.recordings),
+                plugin_logs: c
+                    .plugin_logs_mb
+                    .map(|m| m * MB)
+                    .unwrap_or(d.caps.plugin_logs),
+                audit_log: c.audit_log_mb.map(|m| m * MB).unwrap_or(d.caps.audit_log),
+                journal: c.journal_mb.map(|m| m * MB).unwrap_or(d.caps.journal),
+                apt: c.apt_mb.map(|m| m * MB).unwrap_or(d.caps.apt),
+            },
+        },
     }
 }
 
@@ -225,6 +298,9 @@ pub struct Roots {
     pub recordings: PathBuf,
     pub journal: PathBuf,
     pub logd_store: PathBuf,
+    /// The installed product. Measured so the footprint report is honest about
+    /// what the agent costs on a card, and never touched.
+    pub installed: PathBuf,
 }
 
 impl Default for Roots {
@@ -240,15 +316,124 @@ impl Default for Roots {
             recordings: reclaim::path_from_env("ADOS_RECORDINGS_DIR", "/var/ados/recordings"),
             journal: PathBuf::from("/var/log/journal"),
             logd_store: reclaim::path_from_env("ADOS_LOGD_DIR", "/var/ados/logd"),
+            installed: PathBuf::from("/opt/ados"),
         }
     }
+}
+
+/// What the agent is occupying right now, per category, plus the installed
+/// product measured separately.
+///
+/// The live store's own footprint is its database and WAL, not the whole
+/// directory: the quarantined corpses live beside them and are their own
+/// category, because "the store is large" and "a store tore once and its corpse
+/// is still here" call for completely different responses.
+pub fn measure_footprint(roots: &Roots) -> budget::Footprint {
+    let quarantined = reclaim::quarantine_bytes(&roots.logd_store);
+    let store_dir_total = reclaim::tree_bytes(&roots.logd_store);
+    budget::Footprint {
+        log_store: store_dir_total.saturating_sub(quarantined),
+        quarantined_stores: quarantined,
+        recordings: reclaim::tree_bytes(&roots.recordings),
+        plugin_logs: reclaim::tree_bytes(&roots.plugin_logs),
+        audit_log: std::fs::metadata(&roots.audit_log)
+            .map(|m| m.len())
+            .unwrap_or(0),
+        journal: reclaim::tree_bytes(&roots.journal),
+        apt: reclaim::apt_archive_bytes(&roots.apt_archives)
+            .saturating_add(reclaim::dir_bytes(&roots.apt_lists)),
+        installed: reclaim::tree_bytes(&roots.installed),
+    }
+}
+
+/// Enforce the per-category caps, oldest-first within each category.
+///
+/// This runs regardless of the rung and regardless of the total, which is the
+/// whole point of having caps as well as a budget: a category over its share is
+/// trimmed even on a box with plenty of room, so recordings cannot quietly
+/// occupy the store's allowance on a node that happens not to be logging.
+///
+/// The append-only categories (plugin logs, the audit trail) are trimmed to
+/// their per-file keep floor rather than deleted, because there is only ever one
+/// file per plugin and deleting it would take the live log out from under a
+/// writer that has it open.
+async fn enforce_caps(
+    roots: &Roots,
+    cfg: &JanitorConfig,
+    footprint: &budget::Footprint,
+) -> Reclaimed {
+    use budget::Category;
+    let mut out = Reclaimed::default();
+    for (category, _over) in budget::over_cap_categories(footprint, &cfg.caps) {
+        let cap = cfg.caps.get(category);
+        match category {
+            Category::Recordings => {
+                out.recordings =
+                    out.recordings
+                        .saturating_add(reclaim::reclaim_to_cap_oldest_first(
+                            &roots.recordings,
+                            |n| n.ends_with(".mp4") || n.ends_with(".mkv") || n.ends_with(".ts"),
+                            cap,
+                            cfg.recording_keep_newest.max(1),
+                        ));
+            }
+            Category::QuarantinedStores => {
+                out.quarantined_stores =
+                    out.quarantined_stores
+                        .saturating_add(reclaim::reclaim_to_cap_oldest_first(
+                            &roots.logd_store,
+                            |n| n.starts_with("logs.db.corrupt-"),
+                            cap,
+                            // The floor that outranks the cap. A single corpse
+                            // larger than the whole quarantine share is the case
+                            // that actually happens, and it stays.
+                            cfg.quarantine_keep_newest.max(1),
+                        ));
+            }
+            Category::Apt => {
+                out.apt_archives = out
+                    .apt_archives
+                    .saturating_add(reclaim::reclaim_apt_archives(&roots.apt_archives));
+                out.apt_lists = out
+                    .apt_lists
+                    .saturating_add(reclaim::reclaim_apt_lists(&roots.apt_lists));
+            }
+            Category::Journal => {
+                let target = cap.max(cfg.journal_floor_bytes);
+                out.journal = out
+                    .journal
+                    .saturating_add(reclaim::vacuum_journal(&roots.journal, target).await);
+            }
+            Category::PluginLogs => {
+                out.plugin_logs = out.plugin_logs.saturating_add(reclaim::trim_plugin_logs(
+                    &roots.plugin_logs,
+                    cfg.plugin_log_keep_bytes,
+                    cfg.plugin_log_keep_bytes,
+                ));
+            }
+            Category::AuditLog => {
+                out.audit_log = out.audit_log.saturating_add(reclaim::trim_append_only(
+                    &roots.audit_log,
+                    cfg.audit_keep_bytes,
+                    cfg.audit_keep_bytes,
+                ));
+            }
+            // The store bounds itself: its own retention evicts to a low-water
+            // mark, and the janitor deleting rows out from under the single
+            // writer would corrupt exactly the file this whole effort is trying
+            // to keep intact. Over-cap here is reported, not acted on.
+            Category::LogStore => {}
+        }
+    }
+    out
 }
 
 /// Run one pass over `roots` under `cfg`, returning what it freed and the rung
 /// it ran at. Separated from the reconciler so a test drives a whole sweep
 /// against a temporary tree with no timer, no config file and no clock.
 pub async fn sweep(roots: &Roots, cfg: &JanitorConfig, free_pct: Option<f64>) -> (Rung, Reclaimed) {
-    let rung = cfg.rung_for(free_pct);
+    let footprint = measure_footprint(roots);
+    let rung = cfg.rung_for(free_pct, &footprint);
     let p = cfg.plan(rung);
 
     // Unambiguous waste, every rung.
@@ -281,18 +466,23 @@ pub async fn sweep(roots: &Roots, cfg: &JanitorConfig, free_pct: Option<f64>) ->
         0
     };
 
-    (
-        rung,
-        Reclaimed {
-            apt_archives,
-            apt_lists,
-            plugin_logs,
-            audit_log,
-            recordings,
-            journal,
-            quarantined_stores,
-        },
-    )
+    let mut freed = Reclaimed {
+        apt_archives,
+        apt_lists,
+        plugin_logs,
+        audit_log,
+        recordings,
+        journal,
+        quarantined_stores,
+    };
+
+    // Then the caps. Re-measure first: the sweep above has already taken things
+    // off the disk, and enforcing a cap against a stale figure would delete more
+    // than the cap actually calls for.
+    let after_sweep = measure_footprint(roots);
+    freed.add(&enforce_caps(roots, cfg, &after_sweep).await);
+
+    (rung, freed)
 }
 
 /// What a full sweep at the **Pressure** rung would free right now, measured
@@ -392,8 +582,9 @@ impl Janitor {
             // Measured AFTER the sweep, so the sidecar answers "what is left to
             // give" rather than "what was there before this pass took some".
             let left = reclaimable(&roots, &cfg);
-            self.emit(rung, &freed, before, after);
-            write_sidecar(rung, &freed, &left, after);
+            let footprint = measure_footprint(&roots);
+            self.emit(rung, &freed, &footprint, &cfg, before, after);
+            write_sidecar(rung, &freed, &left, &footprint, &cfg, after);
         }
     }
 
@@ -401,7 +592,15 @@ impl Janitor {
     /// janitor ran and there was nothing to do" and "the janitor did not run"
     /// are different facts and only one of them is fine.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    fn emit(&self, rung: Rung, freed: &Reclaimed, before: Option<f64>, after: Option<f64>) {
+    fn emit(
+        &self,
+        rung: Rung,
+        freed: &Reclaimed,
+        footprint: &budget::Footprint,
+        cfg: &JanitorConfig,
+        before: Option<f64>,
+        after: Option<f64>,
+    ) {
         let mut detail = Fields::new();
         detail.insert("rung".to_string(), Value::from(rung.as_str()));
         detail.insert(
@@ -410,6 +609,28 @@ impl Janitor {
         );
         for (name, bytes) in freed.pairs() {
             detail.insert(name.to_string(), Value::from(bytes as i64));
+        }
+        // The footprint the pass left behind, against the budget it is held to.
+        // Space is what breaks these nodes, so the event carries the figure the
+        // decision was made on rather than only what came off the disk.
+        detail.insert(
+            "footprint_bytes".to_string(),
+            Value::from(footprint.budgeted_total() as i64),
+        );
+        detail.insert(
+            "budget_bytes".to_string(),
+            Value::from(cfg.budget_bytes as i64),
+        );
+        // Categories still over their share after the pass — the ones a floor
+        // held above the cap. Named rather than left implicit, because "the
+        // janitor ran and this is still over" is the state an operator has to
+        // act on themselves.
+        let over: Vec<String> = budget::over_cap_categories(footprint, &cfg.caps)
+            .into_iter()
+            .map(|(c, bytes)| format!("{}:{}", c.as_str(), bytes))
+            .collect();
+        if !over.is_empty() {
+            detail.insert("over_cap".to_string(), Value::from(over.join(",")));
         }
         // Absent free space stays absent rather than becoming a zero, which
         // would read as "the disk is full" on a box that merely could not
@@ -437,6 +658,8 @@ fn write_sidecar(
     rung: Rung,
     freed: &Reclaimed,
     reclaimable_now: &Reclaimed,
+    footprint: &budget::Footprint,
+    cfg: &JanitorConfig,
     free_pct: Option<f64>,
 ) {
     #[derive(serde::Serialize)]
@@ -449,6 +672,15 @@ fn write_sidecar(
         /// pass. The storage diagnostic reads this to answer "what is left".
         reclaimable_bytes: u64,
         reclaimable: &'a Reclaimed,
+        /// What the agent occupies now, per category, against the budget it is
+        /// held to. The headline the storage diagnostic leads with.
+        footprint_bytes: u64,
+        footprint: &'a budget::Footprint,
+        budget_bytes: u64,
+        caps: std::collections::BTreeMap<&'static str, u64>,
+        over_cap: std::collections::BTreeMap<&'static str, u64>,
+        /// The installed product, reported and EXCLUDED from the budget.
+        installed_bytes: u64,
         free_pct: Option<f64>,
         ran_at_unix: i64,
         updated_at_unix: i64,
@@ -461,6 +693,18 @@ fn write_sidecar(
         reclaimed: freed,
         reclaimable_bytes: reclaimable_now.total(),
         reclaimable: reclaimable_now,
+        footprint_bytes: footprint.budgeted_total(),
+        footprint,
+        budget_bytes: cfg.budget_bytes,
+        caps: budget::Category::ALL
+            .iter()
+            .map(|c| (c.as_str(), cfg.caps.get(*c)))
+            .collect(),
+        over_cap: budget::over_cap_categories(footprint, &cfg.caps)
+            .into_iter()
+            .map(|(c, bytes)| (c.as_str(), bytes))
+            .collect(),
+        installed_bytes: footprint.installed,
         free_pct,
         ran_at_unix: now,
         updated_at_unix: now,
@@ -575,6 +819,7 @@ mod tests {
             recordings,
             journal: base.join("no-journal-here"),
             logd_store: store,
+            installed: base.join("no-opt-ados-here"),
         }
     }
 
@@ -728,6 +973,161 @@ mod tests {
             0,
             "a swept box must not keep advertising space it cannot free"
         );
+    }
+
+    // --- the footprint budget ------------------------------------------------
+
+    #[tokio::test]
+    async fn a_category_over_its_cap_is_trimmed_on_a_box_with_plenty_of_room() {
+        // The reason caps exist alongside a total budget: recordings must not
+        // take the store's share just because the store is idle. Free space is
+        // fine, the total is far under budget, and this still trims.
+        let tmp = tempfile::tempdir().unwrap();
+        let roots = populate(tmp.path());
+        let cfg = JanitorConfig {
+            // Keep the age-based sweep inert so this test isolates the cap.
+            recording_retention: Duration::from_secs(86_400 * 3650),
+            recording_pressure_retention: Duration::from_secs(86_400 * 3650),
+            recording_keep_newest: 1,
+            caps: budget::Caps {
+                recordings: 2_500,
+                ..budget::Caps::default()
+            },
+            ..JanitorConfig::default()
+        };
+
+        // Four 1 000-byte recordings against a 2 500-byte cap.
+        let (rung, freed) = sweep(&roots, &cfg, Some(90.0)).await;
+        assert_eq!(rung, Rung::Routine, "plenty of free space, tiny footprint");
+        assert_eq!(
+            freed.recordings, 2_000,
+            "trimmed down to the cap, oldest first"
+        );
+        assert_eq!(
+            measure_footprint(&roots).recordings,
+            2_000,
+            "left at or under the cap"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_cap_never_takes_the_newest_even_when_it_alone_exceeds_it() {
+        // The floor outranks the cap. This is not hypothetical: a single 1 GB
+        // quarantined store against a 400 MB quarantine share is what the drone
+        // was actually holding.
+        let tmp = tempfile::tempdir().unwrap();
+        let roots = populate(tmp.path());
+        let cfg = JanitorConfig {
+            caps: budget::Caps {
+                // Far below the size of even one corpse in the fixture.
+                quarantined_stores: 100,
+                ..budget::Caps::default()
+            },
+            ..JanitorConfig::default()
+        };
+
+        let (_, freed) = sweep(&roots, &cfg, Some(90.0)).await;
+        assert_eq!(freed.quarantined_stores, 4_000, "two of the three corpses");
+        assert!(
+            roots.logd_store.join("logs.db.corrupt-2").exists(),
+            "the newest quarantined store survives its own cap"
+        );
+        // And the residue is visible rather than silently accepted.
+        let after = measure_footprint(&roots);
+        assert!(
+            budget::over_cap(&after, &cfg.caps, budget::Category::QuarantinedStores) > 0,
+            "a category a floor holds above its cap must still read as over"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_footprint_over_budget_escalates_the_rung_on_a_mostly_empty_card() {
+        // The failure a percentage trigger cannot see: a big card barely used,
+        // and an agent whose own footprint has run away. Free space says 97%,
+        // and the pass still escalates.
+        let tmp = tempfile::tempdir().unwrap();
+        let roots = populate(tmp.path());
+        let cfg = JanitorConfig {
+            budget_bytes: 1_000,
+            ..JanitorConfig::default()
+        };
+        let footprint = measure_footprint(&roots);
+        assert!(footprint.budgeted_total() > 1_000);
+        assert_eq!(cfg.rung_for(Some(97.0), &footprint), Rung::Critical);
+    }
+
+    #[tokio::test]
+    async fn the_installed_product_is_measured_and_never_touched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut roots = populate(tmp.path());
+        let installed = tmp.path().join("opt-ados");
+        fs::create_dir_all(installed.join("venv/bin")).unwrap();
+        fs::write(installed.join("venv/bin/python"), vec![0u8; 9_000]).unwrap();
+        roots.installed = installed.clone();
+
+        let before = measure_footprint(&roots);
+        assert_eq!(before.installed, 9_000, "reported");
+        assert!(
+            !before.pairs().iter().any(|(n, _)| *n == "installed"),
+            "and excluded from the budgeted categories"
+        );
+
+        let cfg = JanitorConfig {
+            budget_bytes: 1,
+            caps: budget::Caps {
+                recordings: 0,
+                quarantined_stores: 0,
+                ..budget::Caps::default()
+            },
+            ..JanitorConfig::default()
+        };
+        // The most aggressive pass this config can produce.
+        let (rung, _) = sweep(&roots, &cfg, Some(0.5)).await;
+        assert_eq!(rung, Rung::Critical);
+        assert_eq!(
+            measure_footprint(&roots).installed,
+            9_000,
+            "the installed product is never reclaimed, at any rung"
+        );
+    }
+
+    #[tokio::test]
+    async fn cap_enforcement_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let roots = populate(tmp.path());
+        let cfg = JanitorConfig {
+            recording_retention: Duration::from_secs(86_400 * 3650),
+            recording_pressure_retention: Duration::from_secs(86_400 * 3650),
+            recording_keep_newest: 1,
+            caps: budget::Caps {
+                recordings: 2_500,
+                quarantined_stores: 2_500,
+                ..budget::Caps::default()
+            },
+            ..JanitorConfig::default()
+        };
+        let (_, first) = sweep(&roots, &cfg, Some(90.0)).await;
+        assert!(first.total() > 0);
+        let (_, second) = sweep(&roots, &cfg, Some(90.0)).await;
+        assert_eq!(
+            second.total(),
+            0,
+            "a settled box reclaims nothing: {second:?}"
+        );
+    }
+
+    #[test]
+    fn the_budget_and_caps_are_configurable() {
+        let cfg = read_config_from(
+            "storage:\n  janitor:\n    budget_mb: 2048\n    caps:\n      recordings_mb: 512\n      journal_mb: 64\n",
+        );
+        assert_eq!(cfg.budget_bytes, 2048 * 1024 * 1024);
+        assert_eq!(cfg.caps.recordings, 512 * 1024 * 1024);
+        assert_eq!(cfg.caps.journal, 64 * 1024 * 1024);
+        // Unspecified caps keep their defaults rather than collapsing to zero,
+        // which would make one configured cap silently delete everything else.
+        assert_eq!(cfg.caps.apt, budget::DEFAULT_CAP_APT);
+        assert_eq!(cfg.caps.log_store, budget::DEFAULT_CAP_LOG_STORE);
     }
 
     #[tokio::test]

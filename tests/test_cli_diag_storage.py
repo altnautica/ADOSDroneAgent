@@ -44,6 +44,106 @@ def _payload(**overrides) -> dict:
     return base
 
 
+# --- the footprint budget --------------------------------------------------
+#
+# Space is what actually breaks these nodes: the card fills, a rewrite cannot get
+# its scratch, a write tears, the filesystem corrupts and the box will not boot.
+# So footprint leads the report and write rate follows it.
+
+
+def _janitor_with_footprint(**overrides) -> dict:
+    base = {
+        "ran": True,
+        "rung": "routine",
+        "age_s": 60,
+        "reclaimed_bytes": 0,
+        "reclaimed": {},
+        "reclaimable_bytes": 0,
+        "reclaimable": {},
+        "footprint_bytes": 1694498816,
+        "footprint": {
+            "quarantined_stores": 1073741824,
+            "journal": 322961408,
+            "apt": 195035136,
+        },
+        "budget_bytes": 5368709120,
+        "caps": {"quarantined_stores": 419430400, "journal": 419430400},
+        "over_cap": {"quarantined_stores": 654311424},
+        "installed_bytes": 634388480,
+        "reason": None,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_footprint_leads_the_report_and_write_rate_follows_it():
+    out = _invoke(_payload(janitor=_janitor_with_footprint()))
+    assert "FOOTPRINT" in out
+    assert "STORAGE WEAR" in out
+    assert out.index("FOOTPRINT") < out.index("STORAGE WEAR"), (
+        "space is what fills a card and corrupts it; wear is the slower signal"
+    )
+
+
+def test_the_total_is_shown_against_its_budget_with_a_percentage():
+    out = _invoke(_payload(janitor=_janitor_with_footprint()))
+    assert "1.6 GB of 5.0 GB" in out
+    assert "(32%)" in out
+
+
+def test_a_category_over_its_cap_is_named_with_the_excess():
+    # A single quarantined store larger than the whole quarantine share is the
+    # case that actually happened. The janitor's floor holds it, so the operator
+    # has to know it is there rather than find it on the next reflash.
+    out = _invoke(_payload(janitor=_janitor_with_footprint()))
+    assert "quarantined stores" in out
+    assert "over by" in out
+    assert "624.0 MB" in out
+
+
+def test_each_category_is_shown_against_its_own_cap():
+    out = _invoke(_payload(janitor=_janitor_with_footprint()))
+    # journal: 308 MB used of a 400 MB share.
+    assert "308.0 MB / 400.0 MB" in out
+
+
+def test_the_installed_agent_is_reported_and_marked_uncounted():
+    # Reported so a card can be sized honestly; excluded so a release shipping a
+    # bigger model does not silently eat the allowance for recordings.
+    out = _invoke(_payload(janitor=_janitor_with_footprint()))
+    assert "installed agent" in out
+    assert "605.0 MB" in out
+    assert "not counted" in out
+
+
+def test_an_unmeasured_footprint_says_so_rather_than_claiming_zero():
+    # A total of zero would say the agent occupies nothing at all, on a box
+    # where nobody has looked.
+    out = _invoke(
+        _payload(
+            janitor={
+                "ran": False,
+                "reason": "the janitor has not completed a pass since this box booted",
+            }
+        )
+    )
+    assert "FOOTPRINT" in out
+    assert "has not completed a pass" in out
+    assert "0 B of" not in out
+
+
+def test_a_footprint_over_budget_reads_as_a_failure_not_a_warning():
+    out = _invoke(
+        _payload(
+            janitor=_janitor_with_footprint(
+                footprint_bytes=5500000000,
+                budget_bytes=5368709120,
+            )
+        )
+    )
+    assert "(102%)" in out
+
+
 def test_a_disabled_store_reads_as_off_not_as_an_empty_one():
     # Off is the default and is not a fault. "0 B live" would describe a store
     # that exists and happens to be empty, which is a different and much more

@@ -323,7 +323,7 @@ SIDECAR_CATALOG: dict[str, dict[str, object]] = {
         "wire": "json",
         "transport": "/run/ados/janitor.json",
         "status": "sidecar",
-        "description": "Disk-janitor state: the rung the last pass ran at, the bytes it reclaimed per category, and the free space it left behind.",
+        "description": "Disk-janitor state: the agent's footprint per category against its budget, the rung the last pass ran at, the bytes it reclaimed per category, what is still reclaimable, and the free space it left behind.",
     },
     "pic-state": {
         "version": 1,

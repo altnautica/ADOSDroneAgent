@@ -571,17 +571,32 @@ pub fn janitor_facts(sidecar: &Path, now_unix: i64) -> Value {
     };
 
     let ran_at = v.get("ran_at_unix").and_then(Value::as_i64);
+    let get = |k: &str| v.get(k).cloned().unwrap_or(Value::Null);
     json!({
         "ran": true,
-        "rung": v.get("rung").cloned().unwrap_or(Value::Null),
+        "rung": get("rung"),
         "ran_at_unix": ran_at,
         // Absent when the pass carried no timestamp; never a zero, which would
         // read as "just now".
         "age_s": ran_at.map(|t| (now_unix - t).max(0)),
-        "reclaimed_bytes": v.get("reclaimed_bytes").cloned().unwrap_or(Value::Null),
-        "reclaimed": v.get("reclaimed").cloned().unwrap_or(Value::Null),
-        "reclaimable_bytes": v.get("reclaimable_bytes").cloned().unwrap_or(Value::Null),
-        "reclaimable": v.get("reclaimable").cloned().unwrap_or(Value::Null),
+        "reclaimed_bytes": get("reclaimed_bytes"),
+        "reclaimed": get("reclaimed"),
+        "reclaimable_bytes": get("reclaimable_bytes"),
+        "reclaimable": get("reclaimable"),
+        // The headline. Space is what breaks these nodes: the card fills, a
+        // rewrite tears, the filesystem corrupts and the box will not boot.
+        // Write rate is wear, which is slower and more forgiving, so it is
+        // reported below this rather than above it.
+        "footprint_bytes": get("footprint_bytes"),
+        "footprint": get("footprint"),
+        "budget_bytes": get("budget_bytes"),
+        "caps": get("caps"),
+        "over_cap": get("over_cap"),
+        // `/opt/ados`: reported so the figure an operator sizes a card against
+        // is complete, excluded from the budget because it is the installed
+        // product rather than accumulation — a release shipping a bigger model
+        // must not silently eat the allowance for recordings.
+        "installed_bytes": get("installed_bytes"),
         "reason": Value::Null,
     })
 }
@@ -1046,6 +1061,69 @@ mod tests {
         // Forty minutes ago — the reader can see the figures are not live.
         assert_eq!(out["age_s"], json!(2_400));
         assert_eq!(out["reason"], json!(null));
+    }
+
+    #[test]
+    fn the_footprint_and_its_budget_are_carried_through() {
+        // Space, not throughput, is the headline: it is what fills a card and
+        // corrupts it. The route must pass the budget arithmetic through
+        // untouched so the renderer can lead with it.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("janitor.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&json!({
+                "version": 1,
+                "rung": "routine",
+                "reclaimed_bytes": 0,
+                "reclaimed": {},
+                "reclaimable_bytes": 0,
+                "reclaimable": {},
+                "footprint_bytes": 1_694_498_816u64,
+                "footprint": {
+                    "quarantined_stores": 1_073_741_824u64,
+                    "journal": 322_961_408u64,
+                    "apt": 195_035_136u64,
+                },
+                "budget_bytes": 5_368_709_120u64,
+                "caps": { "quarantined_stores": 419_430_400u64 },
+                "over_cap": { "quarantined_stores": 654_311_424u64 },
+                "installed_bytes": 634_388_480u64,
+                "ran_at_unix": 1_700_000_000i64,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let out = janitor_facts(&path, 1_700_000_060);
+        assert_eq!(out["footprint_bytes"], json!(1_694_498_816u64));
+        assert_eq!(out["budget_bytes"], json!(5_368_709_120u64));
+        assert_eq!(
+            out["footprint"]["quarantined_stores"],
+            json!(1_073_741_824u64)
+        );
+        assert_eq!(out["caps"]["quarantined_stores"], json!(419_430_400u64));
+        // The residue a floor held above its cap is surfaced, not swallowed.
+        assert_eq!(out["over_cap"]["quarantined_stores"], json!(654_311_424u64));
+        // And the installed product travels separately from the budgeted total.
+        assert_eq!(out["installed_bytes"], json!(634_388_480u64));
+        assert!(
+            out["footprint_bytes"].as_u64().unwrap() < out["budget_bytes"].as_u64().unwrap(),
+            "this box is inside its budget while one category is well over its cap"
+        );
+    }
+
+    #[test]
+    fn an_older_record_without_the_budget_fields_reports_them_absent_not_zero() {
+        // A node that has not yet run a janitor carrying the budget must not
+        // read as "occupying nothing", which would say the card is empty.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("janitor.json");
+        std::fs::write(&path, br#"{"rung":"routine","reclaimed_bytes":0}"#).unwrap();
+        let out = janitor_facts(&path, 1_700_000_000);
+        assert_eq!(out["footprint_bytes"], json!(null));
+        assert_eq!(out["budget_bytes"], json!(null));
+        assert_eq!(out["installed_bytes"], json!(null));
     }
 
     #[test]

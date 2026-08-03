@@ -77,6 +77,97 @@ pub fn dir_bytes(dir: &Path) -> u64 {
     total
 }
 
+/// How deep a footprint measurement walks. `/var/ados` and `/opt/ados` are a
+/// handful of levels; a bound stops a symlinked or pathological tree turning a
+/// size report into an unbounded walk on an SD card.
+const TREE_MAX_DEPTH: usize = 8;
+
+/// Total bytes of the regular files under `dir`, walking subdirectories to a
+/// bounded depth. Symlinks are not followed, so a link into `/` cannot make the
+/// agent's footprint read as the whole filesystem.
+pub fn tree_bytes(dir: &Path) -> u64 {
+    tree_bytes_depth(dir, 0)
+}
+
+fn tree_bytes_depth(dir: &Path, depth: usize) -> u64 {
+    if depth > TREE_MAX_DEPTH {
+        return 0;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut total = 0u64;
+    for entry in entries.flatten() {
+        // `symlink_metadata` does not follow the link, so a symlinked directory
+        // contributes its own (tiny) size rather than whatever it points at.
+        let Ok(meta) = entry.metadata() else { continue };
+        let Ok(link_meta) = entry.path().symlink_metadata() else {
+            continue;
+        };
+        if link_meta.file_type().is_symlink() {
+            continue;
+        }
+        if meta.is_file() {
+            total = total.saturating_add(meta.len());
+        } else if meta.is_dir() {
+            total = total.saturating_add(tree_bytes_depth(&entry.path(), depth + 1));
+        }
+    }
+    total
+}
+
+/// Reclaim oldest-first from a directory until it is at or under `cap`, never
+/// taking the newest `keep_newest` whatever happens. Returns the bytes freed.
+///
+/// Oldest-first because within one category the oldest item is the least likely
+/// to be wanted, and because it makes the outcome predictable: an operator can
+/// say which recording will go next without reading this code.
+///
+/// A category can end up still over its cap — that is what the floor is for, and
+/// a single quarantined store larger than the whole quarantine cap is the case
+/// that actually happens on these boxes. The caller reports the residue rather
+/// than looping.
+pub fn reclaim_to_cap_oldest_first(
+    dir: &Path,
+    select: impl Fn(&str) -> bool,
+    cap: u64,
+    keep_newest: usize,
+) -> u64 {
+    let mut entries = entries_with_mtime(dir, &select);
+    let sizes: std::collections::BTreeMap<String, u64> = entries
+        .iter()
+        .filter_map(|(name, _)| {
+            std::fs::metadata(dir.join(name))
+                .ok()
+                .map(|m| (name.clone(), m.len()))
+        })
+        .collect();
+    let mut total: u64 = sizes.values().fold(0u64, |a, b| a.saturating_add(*b));
+    if total <= cap {
+        return 0;
+    }
+
+    // Oldest first; a tie falls back to the name so the order is deterministic.
+    entries.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    let protected = super::plan::newest_names(&entries, keep_newest);
+
+    let mut freed = 0u64;
+    for (name, _) in &entries {
+        if total <= cap {
+            break;
+        }
+        if protected.contains(name) {
+            continue;
+        }
+        let gone = remove_file_guarded(&dir.join(name));
+        if gone > 0 {
+            total = total.saturating_sub(gone);
+            freed = freed.saturating_add(gone);
+        }
+    }
+    freed
+}
+
 /// `(name, mtime_unix)` for every entry directly under `dir` whose name matches
 /// `keep`. An unreadable mtime sorts as epoch, which makes it a reclaim
 /// candidate before anything datable — the safe direction for a file the
@@ -169,6 +260,16 @@ pub fn recording_reclaimable_bytes(dir: &Path, cutoff_unix: i64, keep_newest: us
     super::plan::older_than_keeping_newest(&entries, cutoff_unix, keep_newest)
         .iter()
         .filter_map(|name| std::fs::metadata(dir.join(name)).ok().map(|m| m.len()))
+        .fold(0u64, |a, b| a.saturating_add(b))
+}
+
+/// Total bytes of every quarantined store, including the newest. The footprint
+/// figure, as distinct from the reclaimable one — the corpse that can never be
+/// taken still occupies the card and an operator sizing one needs to see it.
+pub fn quarantine_bytes(dir: &Path) -> u64 {
+    entries_with_mtime(dir, |name| name.starts_with("logs.db.corrupt-"))
+        .iter()
+        .filter_map(|(name, _)| std::fs::metadata(dir.join(name)).ok().map(|m| m.len()))
         .fold(0u64, |a, b| a.saturating_add(b))
 }
 

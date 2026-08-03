@@ -4,6 +4,47 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.344] - 2026-08-03
+
+### Changed
+
+- **The janitor is now bounded by how much space the agent occupies, not by how
+  full the card happens to be.** Free-space percentage was the wrong signal and
+  would have caught none of the failures this work exists to prevent: a 128 GB
+  card at 3% used can carry a store growing by a gigabyte a day, and no
+  percentage threshold fires until the day there is nothing left to trim
+  gracefully. Occupied space is what breaks these nodes — the card fills, a
+  rewrite cannot get its scratch, a write tears, the filesystem corrupts and the
+  box will not boot. That sequence caused the reflashes; wear did not.
+
+  There is now a total footprint budget, 5 GB by default, split into per-category
+  caps that sum to it: the logging store, quarantined copies of a torn store,
+  recordings, plugin logs, the audit trail, the journal, and apt. Each cap is
+  enforced at every rung, so a category over its share is trimmed even on a box
+  with room to spare — recordings cannot quietly take the store's allowance on a
+  node that happens not to be logging. Within a category, oldest goes first.
+  Free-space percentage is kept as the secondary net for a card the agent shares
+  with something else, and the harsher of the two signals picks the rung.
+
+  `/opt/ados` — the venv, the runtime, the models and the binaries, 605 MB on a
+  drone — is measured and reported but never reclaimed, and deliberately sits
+  **outside** the budget. It is the installed product rather than accumulation:
+  it does not grow while the box runs, deleting any of it breaks the agent
+  rather than freeing space, and counting it inside would mean a release
+  shipping a bigger model silently ate the allowance for recordings.
+
+  The floors are unchanged and still outrank the caps. A single quarantined
+  store larger than the entire quarantine share is not a hypothetical — it is
+  what the drone was holding — so it survives, and the residue is reported as a
+  category the janitor declined to fix rather than quietly accepted.
+
+- **`ados diag storage` now leads with the footprint.** Total against budget,
+  then each category against its own cap with any excess named, then the
+  installed agent marked as not counted. The write rate is still reported,
+  because wear is still real, but it follows rather than leads. A box whose
+  janitor has not measured yet says so instead of printing a total of zero,
+  which would claim the agent occupies nothing at all.
+
 ## [0.99.343] - 2026-08-03
 
 ### Changed

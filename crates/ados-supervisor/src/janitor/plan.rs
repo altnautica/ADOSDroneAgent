@@ -16,7 +16,7 @@ use std::time::Duration;
 
 /// How hard the janitor is allowed to push, chosen from free space on the
 /// filesystem holding `/var`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Rung {
     /// The steady state: reclaim what is unambiguously waste.
     Routine,
@@ -93,6 +93,10 @@ pub struct JanitorConfig {
     pub journal_pressure_bytes: u64,
     pub journal_floor_bytes: u64,
     pub quarantine_keep_newest: usize,
+    /// Total the agent may occupy on the card. The PRIMARY trigger.
+    pub budget_bytes: u64,
+    /// Per-category shares of that budget.
+    pub caps: super::budget::Caps,
 }
 
 impl Default for JanitorConfig {
@@ -114,24 +118,41 @@ impl Default for JanitorConfig {
             journal_pressure_bytes: DEFAULT_JOURNAL_PRESSURE_BYTES,
             journal_floor_bytes: DEFAULT_JOURNAL_FLOOR_BYTES,
             quarantine_keep_newest: DEFAULT_QUARANTINE_KEEP_NEWEST,
+            budget_bytes: super::budget::DEFAULT_BUDGET_BYTES,
+            caps: super::budget::Caps::default(),
         }
     }
 }
 
 impl JanitorConfig {
-    /// Which rung a measured free-space fraction selects.
+    /// Which rung this pass runs at, from the footprint against the budget and
+    /// free space on the card. The harsher of the two wins.
     ///
-    /// An **unmeasured** free ratio resolves to `Routine`, never higher. The
+    /// **Footprint is the primary signal.** Free-space percentage would not have
+    /// caught any of the failures this exists to prevent: a 128 GB card at 3%
+    /// used can carry a runaway store, and no percentage threshold fires until
+    /// the day there is nothing left to trim gracefully. The budget fires when
+    /// the agent starts taking more than its share, which is while something can
+    /// still be done. Percentage is kept as the secondary net for a card the
+    /// agent shares with something else that is filling it.
+    ///
+    /// An **unmeasured** free ratio contributes `Routine`, never higher. The
     /// escalated rungs give up real evidence, and "I could not read the
-    /// filesystem" is not grounds for that — it is the same discipline the
-    /// storage diagnostic follows when it refuses to render an absent number as
-    /// a zero.
-    pub fn rung_for(&self, free_pct: Option<f64>) -> Rung {
-        match free_pct {
+    /// filesystem" is not grounds for that. A footprint is always measurable, so
+    /// it has no such case.
+    pub fn rung_for(&self, free_pct: Option<f64>, footprint: &super::budget::Footprint) -> Rung {
+        let by_free = match free_pct {
             Some(pct) if pct < self.critical_free_pct => Rung::Critical,
             Some(pct) if pct < self.pressure_free_pct => Rung::Pressure,
             _ => Rung::Routine,
-        }
+        };
+        let by_budget =
+            match super::budget::budget_state(footprint.budgeted_total(), self.budget_bytes) {
+                super::budget::BudgetState::Over => Rung::Critical,
+                super::budget::BudgetState::Near => Rung::Pressure,
+                super::budget::BudgetState::Within => Rung::Routine,
+            };
+        by_free.max(by_budget)
     }
 
     /// Build the plan for a rung.
@@ -197,6 +218,21 @@ pub fn beyond_newest(entries: &[(String, i64)], keep: usize) -> Vec<String> {
         .collect()
 }
 
+/// The `keep` newest names, which no rule may reclaim. Pure.
+///
+/// Floored at 1: this is the function every floor is built on, so a caller that
+/// passes zero must not be able to empty the set.
+pub fn newest_names(entries: &[(String, i64)], keep: usize) -> std::collections::BTreeSet<String> {
+    let keep = keep.max(1);
+    let mut sorted: Vec<&(String, i64)> = entries.iter().collect();
+    sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    sorted
+        .into_iter()
+        .take(keep)
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
 /// Given `(name, mtime_unix)` pairs, the names older than `cutoff_unix` — but
 /// never the `keep_newest` newest, whatever their age. Pure.
 pub fn older_than_keeping_newest(
@@ -204,16 +240,7 @@ pub fn older_than_keeping_newest(
     cutoff_unix: i64,
     keep_newest: usize,
 ) -> Vec<String> {
-    let protected: std::collections::BTreeSet<String> = {
-        let keep = keep_newest.max(1);
-        let mut sorted: Vec<&(String, i64)> = entries.iter().collect();
-        sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-        sorted
-            .into_iter()
-            .take(keep)
-            .map(|(name, _)| name.clone())
-            .collect()
-    };
+    let protected = newest_names(entries, keep_newest);
     let mut out: Vec<String> = entries
         .iter()
         .filter(|(name, mtime)| *mtime < cutoff_unix && !protected.contains(name))
@@ -245,19 +272,26 @@ mod tests {
     #[test]
     fn free_space_selects_the_rung() {
         let cfg = JanitorConfig::default();
-        assert_eq!(cfg.rung_for(Some(50.0)), Rung::Routine);
-        assert_eq!(cfg.rung_for(Some(20.0)), Rung::Routine);
-        assert_eq!(cfg.rung_for(Some(19.9)), Rung::Pressure);
-        assert_eq!(cfg.rung_for(Some(10.0)), Rung::Pressure);
-        assert_eq!(cfg.rung_for(Some(9.9)), Rung::Critical);
-        assert_eq!(cfg.rung_for(Some(0.0)), Rung::Critical);
+        // An empty footprint contributes Routine, so this isolates the
+        // free-space half of the decision.
+        let empty = super::super::budget::Footprint::default();
+        assert_eq!(cfg.rung_for(Some(50.0), &empty), Rung::Routine);
+        assert_eq!(cfg.rung_for(Some(20.0), &empty), Rung::Routine);
+        assert_eq!(cfg.rung_for(Some(19.9), &empty), Rung::Pressure);
+        assert_eq!(cfg.rung_for(Some(10.0), &empty), Rung::Pressure);
+        assert_eq!(cfg.rung_for(Some(9.9), &empty), Rung::Critical);
+        assert_eq!(cfg.rung_for(Some(0.0), &empty), Rung::Critical);
     }
 
     #[test]
     fn an_unmeasured_filesystem_never_escalates() {
         // Refusing to read free space is not evidence that space is short, and
         // the escalated rungs give up real evidence.
-        assert_eq!(JanitorConfig::default().rung_for(None), Rung::Routine);
+        let empty = super::super::budget::Footprint::default();
+        assert_eq!(
+            JanitorConfig::default().rung_for(None, &empty),
+            Rung::Routine
+        );
     }
 
     #[test]
