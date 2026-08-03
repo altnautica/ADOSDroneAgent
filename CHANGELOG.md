@@ -4,6 +4,29 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.332] - 2026-08-03
+
+### Fixed
+
+- **`ground_station.display.type` did nothing.** The field was documented in
+  three places as selecting which surface owns the panel, and was read by
+  nothing at all — setting it to `none` still started the HDMI kiosk. It is now
+  honoured: `lcd` and `none` both mean "this service does not own the screen",
+  and the kiosk stands down cleanly before it touches the display, saying which
+  selection stood it down. Read defensively, because this service has to start
+  against a config written by an older or newer agent: a missing or unusable
+  block means "no opinion", never a crash.
+
+### Removed
+
+- **`ground_station.display.detected_type`**, which was always `null`. It was
+  documented as "populated by the heartbeat enrichment helper after probing what
+  the OS actually exposes" — but no such helper was ever written, nothing ever
+  assigned it, and the heartbeat field it was meant to feed is hardcoded `None`
+  in two places. A read-only field that is permanently null while three
+  docstrings describe it as live is a lying surface. What the agent actually
+  detected belongs in runtime status, not in the config file an operator edits.
+
 ## [0.99.331] - 2026-08-03
 
 ### Fixed

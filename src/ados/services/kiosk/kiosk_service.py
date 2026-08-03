@@ -295,6 +295,22 @@ def hdmi_present() -> bool:
     return _hdmi_present()
 
 
+def _display_selection(config: Any) -> str:
+    """The operator's `ground_station.display.type`, or ``auto`` when unset.
+
+    Read defensively: this service must start on a config shaped by an older or
+    newer agent, and a missing block means "no opinion", not a crash.
+    """
+    try:
+        value = config.ground_station.display.type
+    except AttributeError:
+        return "auto"
+    if not isinstance(value, str):
+        return "auto"
+    selection = value.strip().lower()
+    return selection if selection in ("auto", "hdmi", "lcd", "none") else "auto"
+
+
 def _get_kiosk_config(config: Any) -> tuple[str | None, bool | None]:
     """Return (target_url, minimal_layer) from config, if present.
 
@@ -1301,6 +1317,22 @@ async def _amain() -> int:
     configure_logging(config.logging.level)
     slog = structlog.get_logger()
     slog.info("kiosk_service_starting")
+
+    # The operator's display selection, honoured before anything touches the
+    # panel. `lcd` and `none` both mean "this service does not own the screen",
+    # and until now setting either did nothing at all — the value was written,
+    # read by no one, and the kiosk started regardless.
+    display = _display_selection(config)
+    if display in ("lcd", "none"):
+        slog.info(
+            "kiosk_disabled_by_display_config",
+            selection=display,
+            msg=(
+                "the panel is assigned elsewhere by ground_station.display.type; "
+                "HDMI kiosk skipped cleanly"
+            ),
+        )
+        return 0
 
     if not await _wait_for_display():
         slog.info(

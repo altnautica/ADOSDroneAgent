@@ -738,26 +738,8 @@
       "type": "object"
     },
     "DisplayConfig": {
-      "description": "Effective local-display primary path for the ground-station profile.\n\n``type`` is the operator-set selection. ``auto`` lets the agent pick\nthe strongest local renderer at runtime (HDMI > SPI LCD > none).\nExplicit values short-circuit detection: ``hdmi`` keeps the OLED /\nSPI LCD services from grabbing the panel on boards where the\noperator wants the Chromium kiosk to own the screen, ``lcd`` keeps\nthe kiosk off boards that boot with both an HDMI sink and an SPI\nLCD wired, ``none`` disables all local-display services entirely\n(headless deployment).\n\n``detected_type`` is runtime-only \u2014 it is populated by the heartbeat\nenrichment helper after probing what the OS actually exposes and is\nsurfaced to Mission Control as a read-only field. Operators should\nnot write to it via the config API.",
+      "description": "Effective local-display primary path for the ground-station profile.\n\n``type`` is the operator-set selection. ``auto`` lets the agent pick\nthe strongest local renderer at runtime (HDMI > SPI LCD > none).\nExplicit values short-circuit detection: ``hdmi`` keeps the OLED /\nSPI LCD services from grabbing the panel on boards where the\noperator wants the Chromium kiosk to own the screen, ``lcd`` keeps\nthe kiosk off boards that boot with both an HDMI sink and an SPI\nLCD wired, ``none`` disables all local-display services entirely\n(headless deployment).\n\nThere is deliberately no ``detected_type`` field. One existed, documented\nas \"populated by the heartbeat enrichment helper\" \u2014 but no such helper was\never written, nothing assigned it, and it read ``null`` on every node\nforever while three places described it as live. A read-only field that is\nalways null is a lying surface; what the agent actually detected belongs in\nruntime status, not in the config file the operator edits.",
       "properties": {
-        "detected_type": {
-          "anyOf": [
-            {
-              "enum": [
-                "auto",
-                "hdmi",
-                "lcd",
-                "none"
-              ],
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Detected Type"
-        },
         "type": {
           "default": "auto",
           "enum": [
@@ -2384,7 +2366,6 @@
       "default": {
         "cloud_uplink": "auto",
         "display": {
-          "detected_type": null,
           "type": "auto"
         },
         "kiosk": {

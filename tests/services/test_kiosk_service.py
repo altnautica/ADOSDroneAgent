@@ -1397,3 +1397,50 @@ async def test_browser_watch_is_inert_on_the_windowed_path() -> None:
     proc = SimpleNamespace(returncode=None)
     # Returns immediately rather than polling forever.
     await asyncio.wait_for(sup._watch_browser(proc), timeout=2.0)
+
+# ---------------------------------------------------------------------------
+# ground_station.display.type — it used to be read by nothing
+# ---------------------------------------------------------------------------
+
+
+def _config_with_display(value: object) -> SimpleNamespace:
+    return SimpleNamespace(
+        logging=SimpleNamespace(level="info"),
+        ground_station=SimpleNamespace(display=SimpleNamespace(type=value)),
+    )
+
+
+def test_display_selection_reads_the_operator_choice() -> None:
+    for raw, expected in [
+        ("hdmi", "hdmi"),
+        ("LCD", "lcd"),
+        (" none ", "none"),
+        ("auto", "auto"),
+    ]:
+        assert ks._display_selection(_config_with_display(raw)) == expected
+
+
+def test_display_selection_falls_back_to_auto_on_anything_unusable() -> None:
+    # This service has to start against a config written by an older or newer
+    # agent. A missing or nonsense block means "no opinion", never a crash.
+    assert ks._display_selection(SimpleNamespace(logging=SimpleNamespace(level="info"))) == "auto"
+    assert ks._display_selection(_config_with_display(None)) == "auto"
+    assert ks._display_selection(_config_with_display("banana")) == "auto"
+
+
+@pytest.mark.asyncio
+async def test_kiosk_stands_down_when_the_panel_is_assigned_elsewhere() -> None:
+    """`lcd` and `none` both mean this service does not own the screen.
+
+    Setting either used to do nothing at all: the value was written, read by
+    nobody, and the kiosk started regardless.
+    """
+    for selection in ("lcd", "none"):
+        with (
+            patch.object(ks, "load_config", return_value=_config_with_display(selection)),
+            patch.object(ks, "configure_logging"),
+            patch.object(ks, "_wait_for_display") as waited,
+        ):
+            rc = await ks._amain()
+        assert rc == 0, f"{selection} must exit cleanly, not fail"
+        waited.assert_not_called(), f"{selection} must not even probe the display"

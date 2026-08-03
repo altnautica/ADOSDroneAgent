@@ -92,14 +92,15 @@ class DisplayConfig(BaseModel):
     LCD wired, ``none`` disables all local-display services entirely
     (headless deployment).
 
-    ``detected_type`` is runtime-only — it is populated by the heartbeat
-    enrichment helper after probing what the OS actually exposes and is
-    surfaced to Mission Control as a read-only field. Operators should
-    not write to it via the config API.
+    There is deliberately no ``detected_type`` field. One existed, documented
+    as "populated by the heartbeat enrichment helper" — but no such helper was
+    ever written, nothing assigned it, and it read ``null`` on every node
+    forever while three places described it as live. A read-only field that is
+    always null is a lying surface; what the agent actually detected belongs in
+    runtime status, not in the config file the operator edits.
     """
 
     type: DisplayType = "auto"
-    detected_type: DisplayType | None = None
 
 
 class MeshConfig(BaseModel):
