@@ -97,6 +97,33 @@ impl LayerStats {
 /// running tokio runtime — the background shipper is spawned at construction —
 /// and add it to the subscriber registry alongside the existing journald/fmt
 /// layer. It is generic over the subscriber `S` so it composes with any stack.
+/// Start the background shipper wherever this process can run one.
+///
+/// Inside a tokio runtime it is a plain task. Outside one it gets a dedicated
+/// thread with its own current-thread runtime: one thread parked on a channel,
+/// which is what the task would have been anyway. If even the thread cannot be
+/// spawned the frames simply queue and drop, and the drop is already counted in
+/// [`LayerStats`] — the process keeps running and journald still has the logs.
+fn spawn_shipper(rx: mpsc::Receiver<LogFrame>, path: std::path::PathBuf) {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(shipper_task(rx, path));
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("logd-shipper".to_string())
+        .spawn(move || {
+            // If the runtime cannot be built there is nothing to fall back to,
+            // and nowhere useful to report it from inside logging init. Frames
+            // drop, counted, and journald still carries them.
+            if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                rt.block_on(shipper_task(rx, path));
+            }
+        });
+}
+
 pub struct LogdLayer<S> {
     source: String,
     tx: mpsc::Sender<LogFrame>,
@@ -106,19 +133,29 @@ pub struct LogdLayer<S> {
 
 impl<S> LogdLayer<S> {
     /// Build a layer for the default ingest socket, tagging every frame with
-    /// `source` (the binary name). Spawns the background shipper on the current
-    /// tokio runtime; must be called from within a runtime context.
+    /// `source` (the binary name). Safe to call from any binary, async or not.
     pub fn new(source: impl Into<String>) -> Self {
         Self::with_socket(source, DEFAULT_INGEST_SOCK)
     }
 
     /// Build a layer that ships to an explicit socket path (used by tests).
-    /// Spawns the background shipper on the current tokio runtime.
+    ///
+    /// The shipper runs on the ambient tokio runtime when there is one. When
+    /// there is not — a synchronous binary, of which this repo has several — it
+    /// gets its own single-threaded runtime on a dedicated thread instead of
+    /// panicking.
+    ///
+    /// This used to be "must be called from within a runtime context", which is
+    /// a contract a logging layer cannot reasonably impose: logging is
+    /// initialised first, before anything has decided whether the process is
+    /// async, and the failure is a panic inside the tracing setup rather than a
+    /// missing log line. It crash-looped a shipped display service on every
+    /// start, so the service never ran at all.
     pub fn with_socket(source: impl Into<String>, socket: impl AsRef<Path>) -> Self {
         let (tx, rx) = mpsc::channel::<LogFrame>(CHANNEL_CAPACITY);
         let stats = Arc::new(LayerStats::default());
         let path = socket.as_ref().to_path_buf();
-        tokio::spawn(shipper_task(rx, path));
+        spawn_shipper(rx, path);
         Self {
             source: source.into(),
             tx,
@@ -386,6 +423,25 @@ mod tests {
 
     use crate::frame::{decode_len, HEADER_SIZE};
     use crate::logd::{IngestFrame, Level, LOGD_MAX_FRAME};
+
+    /// A synchronous binary must be able to install this layer.
+    ///
+    /// This is deliberately NOT a `#[tokio::test]`: the whole point is that
+    /// there is no ambient runtime. Constructing the layer used to panic here,
+    /// inside tracing setup, which crash-looped a shipped display service on
+    /// every start so the service never ran at all.
+    #[test]
+    fn constructing_the_layer_outside_a_runtime_does_not_panic() {
+        assert!(
+            tokio::runtime::Handle::try_current().is_err(),
+            "this test is only meaningful without an ambient runtime"
+        );
+        let layer: LogdLayer<tracing_subscriber::Registry> =
+            LogdLayer::with_socket("sync-binary", tmp_sock());
+        // The layer is usable: its counters exist and start clean.
+        assert_eq!(layer.stats().enqueued(), 0);
+        assert_eq!(layer.stats().dropped(), 0);
+    }
 
     fn tmp_sock() -> PathBuf {
         let mut p = std::env::temp_dir();

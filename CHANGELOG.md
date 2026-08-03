@@ -4,7 +4,28 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
-## [0.99.335] - 2026-08-03
+## [0.99.336] - 2026-08-03
+
+### Fixed
+
+- **The I2C status OLED crash-looped on every ground station, always.** The
+  service panicked inside its own logging setup — "there is no reactor running"
+  — five times in a row and then gave up, so the display never painted anything.
+  Found by looking at what a rig actually reported after an upgrade rather than
+  by anyone using the OLED.
+
+  The logging layer spawned its background shipper with `tokio::spawn`, which
+  requires an ambient async runtime, and documented that as a caller
+  requirement. Every other binary happens to have an async `main`; this one is
+  synchronous, because driving an I2C panel does not need a runtime. So the
+  panic landed in the one binary where the requirement was not met, and it
+  landed during tracing init — before any log line could say so.
+
+  A logging layer cannot reasonably impose that contract: logging is set up
+  first, before the process has decided what shape it is. The layer now runs its
+  shipper on the ambient runtime when there is one and on its own thread when
+  there is not, so it works from any binary. The regression test is deliberately
+  not an async test, because the whole point is the absence of a runtime.
 
 ### Fixed
 
