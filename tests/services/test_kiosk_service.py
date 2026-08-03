@@ -893,6 +893,24 @@ def pinned_drm(tmp_path: Any):
         yield dev
 
 
+def test_cage_env_overrides_the_units_nonexistent_runtime_dir(pinned_drm: Any) -> None:
+    """cage must not inherit XDG_RUNTIME_DIR=/run/user/0 from the unit.
+
+    logind creates a per-user runtime dir only for a real login SESSION, and a
+    system service does not get one -- so on a freshly installed appliance that
+    path is absent and cage dies with "Unable to open Wayland socket: Invalid
+    argument". The cage process stays alive, so the unit still reads active
+    while the HDMI output is black. It only ever appeared to work on boxes
+    where a desktop session had already created the directory.
+    """
+    for renderer in (ks._RENDERER_SOFTWARE, ks._RENDERER_GPU):
+        env = ks._cage_env(renderer, None)
+        assert env["XDG_RUNTIME_DIR"] != "/run/user/0"
+        assert env["XDG_RUNTIME_DIR"] == ks._CAGE_RUNTIME_DIR
+        # The agent creates and owns this one, so it is guaranteed to exist.
+        assert env["XDG_RUNTIME_DIR"].startswith(str(ks.ADOS_RUN_DIR))
+
+
 def test_cage_env_software_uses_pixman_no_ld_path(pinned_drm: Any) -> None:
     env = ks._cage_env(ks._RENDERER_SOFTWARE, None)
     assert env["WLR_RENDERER"] == "pixman"

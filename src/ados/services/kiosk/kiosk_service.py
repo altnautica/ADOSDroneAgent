@@ -168,6 +168,20 @@ _DISK_CACHE_BYTES = 64 * 1024 * 1024
 # Chromium given a --user-data-dir whose parent does not exist fails to start.
 _CAGE_STORAGE_DIR = str(ADOS_RUN_DIR / "kiosk")
 
+# XDG_RUNTIME_DIR for the cage launch, for exactly the same reason.
+#
+# The unit exports `/run/user/0`, but logind creates a per-user runtime dir only
+# for a real login SESSION. A system service does not get one, so on an
+# appliance box that path is simply absent and cage dies at startup with
+# "Unable to open Wayland socket: Invalid argument" — while the cage process
+# stays alive, so the unit still reads active and the screen is black.
+#
+# It appeared to work only on boxes where a desktop session had already created
+# the directory; a freshly installed appliance has no session and no directory.
+# Point it at a tmpfs path the agent creates and owns, mode 0700 as the spec
+# requires, so it exists before cage needs it.
+_CAGE_RUNTIME_DIR = str(ADOS_RUN_DIR / "kiosk" / "runtime")
+
 
 def _hdmi_present() -> bool:
     """True when a DRM display is available.
@@ -455,6 +469,9 @@ def _cage_env(renderer: str, mali_lib_dir: str | None) -> dict[str, str]:
     env = {
         "WLR_RENDERER": wlr,
         "WLR_DRM_DEVICES": _resolve_drm_device(),
+        # Overrides the unit's /run/user/0, which does not exist for a system
+        # service. Without this cage cannot bind its Wayland socket at all.
+        "XDG_RUNTIME_DIR": _CAGE_RUNTIME_DIR,
     }
     if renderer == _RENDERER_GPU and mali_lib_dir:
         # Scope libmali to this process tree only (cage + Chromium), so the GPU
@@ -1298,6 +1315,18 @@ def _make_supervisor(
         log.warning(
             "kiosk_storage_dir_unavailable",
             path=_CAGE_STORAGE_DIR,
+            error=str(exc),
+        )
+    # cage refuses to bind its Wayland socket if XDG_RUNTIME_DIR is absent, and
+    # the unit's /run/user/0 does not exist for a system service. 0700 because
+    # the XDG spec requires it and libwayland complains otherwise.
+    try:
+        os.makedirs(_CAGE_RUNTIME_DIR, mode=0o700, exist_ok=True)
+        os.chmod(_CAGE_RUNTIME_DIR, 0o700)
+    except OSError as exc:  # pragma: no cover - filesystem-dependent
+        log.warning(
+            "kiosk_runtime_dir_unavailable",
+            path=_CAGE_RUNTIME_DIR,
             error=str(exc),
         )
     argv = _build_chromium_argv(url, renderer)
