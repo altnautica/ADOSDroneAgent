@@ -28,6 +28,7 @@ use crate::graph::Step;
 
 pub mod aic8800_tune;
 pub mod appliance;
+pub mod apt_reclaim;
 pub mod config_identity;
 pub mod deps;
 pub mod dkms;
@@ -56,6 +57,9 @@ pub fn full_install_chain() -> Vec<Box<dyn Step>> {
         Box::new(preflight::Preflight),
         Box::new(purge_residue::PurgeResidue),
         Box::new(deps::Deps),
+        // Right after the packages land, before the venv / fetched binaries /
+        // DKMS build ask for space: the downloaded .debs have no further use.
+        Box::new(apt_reclaim::AptReclaim),
         Box::new(venv_agent::VenvAgent),
         Box::new(npu_provision::NpuProvision),
         Box::new(wfb_ng::WfbNg),
@@ -85,11 +89,16 @@ mod tests {
     fn full_chain_orders_cleanly() {
         let steps = full_install_chain();
         let order = topo_order(&steps).expect("the install chain must be a valid DAG");
-        assert_eq!(order.len(), 20);
+        assert_eq!(order.len(), 21);
 
         let pos = |id: &str| order.iter().position(|x| x == id).unwrap();
         // Spot-check the load-bearing edges.
         assert!(pos("preflight") < pos("deps"));
+        // The apt reclaim runs after the packages are installed and before the
+        // space-hungry steps that follow, so the freed disk is available to them.
+        assert!(pos("deps") < pos("apt_reclaim"));
+        assert!(pos("apt_reclaim") < pos("venv_agent"));
+        assert!(pos("apt_reclaim") < pos("fetch_binaries"));
         // The headless Wi-Fi join runs after config (hostname is set before the
         // box appears on the joined network).
         assert!(pos("config_identity") < pos("wifi_join"));

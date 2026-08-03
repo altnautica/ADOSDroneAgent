@@ -4,6 +4,31 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.338] - 2026-08-03
+
+### Fixed
+
+- **The largest thing on a freshly flashed ground station was downloaded
+  package files nobody would ever open again.** Measured on a rig two days
+  after a flash: 349 MB across the apt archive cache and the package index,
+  ahead of the logging store, the journal and everything else on the card.
+  `apt-get install` copies every `.deb` it fetches into
+  `/var/cache/apt/archives` and leaves it there permanently; nothing in the
+  installer, the agent, or the base image had ever run `apt-get clean`.
+
+  The installer now reclaims both, immediately after the packages are
+  installed rather than at the end, so the space is back before the virtual
+  environment, the fetched binaries and the driver build ask for it. The
+  archive cache is pure waste and goes unconditionally. The package index is
+  not waste, so its removal is a deliberate trade: the next apt invocation has
+  to run `apt-get update` first, which every apt path the agent owns already
+  does, and which apt itself tells a human to do. One command against a third
+  of a gigabyte on a card that had been filling until it corrupted.
+
+  The step cannot fail an install. A reclaim that does not work is a reason to
+  try harder later; a full disk is the condition it exists to relieve, so
+  aborting on it would be backwards.
+
 ## [0.99.337] - 2026-08-03
 
 ### Fixed
