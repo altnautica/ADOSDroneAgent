@@ -8,7 +8,7 @@
 use ados_radio::config::WfbConfig;
 use ados_radio::link_quality::LinkStats;
 
-use super::args::{STATE_NO_INJECTION, STATE_REG_BLOCKED};
+use super::args::{STATE_BLOCKED_UNPAIRED, STATE_NO_INJECTION, STATE_REG_BLOCKED};
 
 /// The regulatory picture the receive sidecar surfaces, symmetric with the
 /// drone side. `domain` is the LIVE global country (`None` when unreadable);
@@ -205,6 +205,71 @@ pub fn write_no_injection_sidecar(
         &GsRegSnapshot::default(),
         cfg,
         STATE_NO_INJECTION,
+        crate::acquire::AcquireState::Searching.as_str(),
+        false, // not channel-locked
+        0.0,   // no valid decodes
+        0,     // no reacquire kills
+        0,     // no zombie kills
+        None,  // no silence window (the chain is not running)
+        0.0,   // no inbound video
+    );
+    let _ = crate::sidecars::write_json_atomic(
+        std::path::Path::new(crate::paths::WFB_STATS_JSON),
+        &v,
+        0o644,
+    );
+    if let Some(em) = ingest {
+        em.emit_event(
+            "link.wfb_status",
+            ados_protocol::logd::Level::Info,
+            json_object_to_fields(&v),
+        );
+    }
+}
+
+/// Write a `blocked_unpaired` ground sidecar so a ground station with no receive
+/// key self-reports instead of going completely silent.
+///
+/// The pairing gate sits at the very top of the run loop, ahead of adapter
+/// resolution, and used to `continue` without writing anything — so a ground
+/// station in this state published NO sidecar at all. That is not a degraded
+/// reading, it is the absence of one, and it hid an entire half of a live
+/// failure: a drone transmitting into a void on a key from a peer that had been
+/// reflashed, facing a ground station that had no key and said nothing. The
+/// journal knew. Nothing else did.
+///
+/// Nothing has been examined at this point, so every verdict is the honest
+/// unknown: no adapter record (hence null chipset, null injection verdict, null
+/// USB facts), no regulatory picture, no link quality. The one thing this write
+/// asserts is WHY the plane is deaf, which is the whole point.
+///
+/// When an `IngestEmitter` is passed the same body ships to the logging store as
+/// a `link.wfb_status` event, symmetric with the reg-blocked and no-injection
+/// writers, so the durable read source never lags the file.
+pub fn write_blocked_unpaired_sidecar(
+    interface: &str,
+    channel: u8,
+    cfg: &WfbConfig,
+    ingest: Option<&ados_protocol::logd::emitter::IngestEmitter>,
+) {
+    let snap = LinkStats::default();
+    // No chain, no adapter, no live channel: report the rendezvous home.
+    let channels = GsChannelTruth {
+        actual: channel,
+        rendezvous: channel,
+        operating: channel,
+    };
+    let v = build_gs_stats(
+        &snap,
+        interface,
+        // Default = nothing resolved: null chipset, and therefore null injection
+        // and null USB verdicts rather than confident booleans about hardware
+        // this arm never looked at.
+        &GsAdapterInfo::default(),
+        channels,
+        &GsRegSnapshot::default(),
+        cfg,
+        STATE_BLOCKED_UNPAIRED,
         crate::acquire::AcquireState::Searching.as_str(),
         false, // not channel-locked
         0.0,   // no valid decodes
@@ -1043,6 +1108,79 @@ mod tests {
     fn no_injection_state_string_is_bland_and_stable() {
         // The sidecar surfaces this verbatim; keep it stable and tag-free.
         assert_eq!(STATE_NO_INJECTION, "no_injection");
+    }
+
+    #[test]
+    fn blocked_unpaired_state_string_is_bland_and_stable() {
+        // Consumed by name: the re-arm latch treats this state as "the receive
+        // chain never ran, so there is no verdict on the key" and must not
+        // confuse it with `searching`, which IS a verdict.
+        assert_eq!(STATE_BLOCKED_UNPAIRED, "blocked_unpaired");
+        assert_ne!(STATE_BLOCKED_UNPAIRED, STATE_SEARCHING);
+        assert_ne!(STATE_BLOCKED_UNPAIRED, STATE_REG_BLOCKED);
+        assert_ne!(STATE_BLOCKED_UNPAIRED, STATE_NO_INJECTION);
+    }
+
+    #[test]
+    fn blocked_unpaired_sidecar_names_the_cause_and_claims_nothing_it_did_not_examine() {
+        // The gate sits ahead of adapter resolution, so nothing has been looked
+        // at: every hardware verdict must be null, not a confident boolean. The
+        // one thing the body asserts is WHY the plane is deaf.
+        let v = build_gs_stats(
+            &LinkStats::default(),
+            "",
+            &GsAdapterInfo::default(),
+            GsChannelTruth {
+                actual: 149,
+                rendezvous: 149,
+                operating: 149,
+            },
+            &GsRegSnapshot::default(),
+            &WfbConfig::default(),
+            STATE_BLOCKED_UNPAIRED,
+            crate::acquire::AcquireState::Searching.as_str(),
+            false,
+            0.0,
+            0,
+            0,
+            None,
+            0.0,
+        );
+        assert_eq!(v["state"], "blocked_unpaired");
+        assert_eq!(v["link_state"], "blocked_unpaired");
+        assert_eq!(v["profile"], "ground_station");
+        // Nothing was examined, so nothing is claimed.
+        assert!(v["adapter_chipset"].is_null());
+        assert!(v["adapter_injection_ok"].is_null());
+        assert!(v["adapter_usb_speed_mbps"].is_null());
+        assert!(v["adapter_usb_degraded"].is_null());
+        assert!(v["rssi_dbm"].is_null());
+        // And the receive plane never measures a transmit path, on any state.
+        assert!(v["rf_unverified"].is_null());
+        assert_eq!(v["channel_locked"], false);
+        assert_eq!(v["packets_received"], 0);
+    }
+
+    #[tokio::test]
+    async fn blocked_unpaired_sidecar_emits_the_status_event_when_given_an_emitter() {
+        // Same contract as the other two degraded-state writers: the body ships
+        // to the store alongside the file, so a store-first read never lags.
+        let dir = tempfile::tempdir().unwrap();
+        let emitter = ados_protocol::logd::emitter::IngestEmitter::with_socket(
+            "ados-groundlink",
+            dir.path().join("ingest.sock"),
+        );
+        let stats = emitter.stats();
+        write_blocked_unpaired_sidecar("", 149, &WfbConfig::default(), Some(&emitter));
+        assert_eq!(stats.enqueued(), 1);
+
+        let none_emitter = ados_protocol::logd::emitter::IngestEmitter::with_socket(
+            "ados-groundlink",
+            dir.path().join("ingest2.sock"),
+        );
+        let none_stats = none_emitter.stats();
+        write_blocked_unpaired_sidecar("", 149, &WfbConfig::default(), None);
+        assert_eq!(none_stats.enqueued(), 0);
     }
 
     #[test]

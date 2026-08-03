@@ -70,14 +70,14 @@ pub mod stats;
 pub use args::{
     aux_rx_port, control_rx_port, data_rx_args, gs_atlas_rx_args, gs_aux_tx_args,
     gs_rx_control_args, gs_tx_control_args, video_rx_port, AUX_TX_PORT, DEFAULT_REG_DOMAIN,
-    RX_HEALTH_POLL_INTERVAL_S, STATE_ACTIVE, STATE_NO_INJECTION, STATE_REG_BLOCKED,
-    STATE_SEARCHING, TX_CONTROL_PORT,
+    RX_HEALTH_POLL_INTERVAL_S, STATE_ACTIVE, STATE_BLOCKED_UNPAIRED, STATE_NO_INJECTION,
+    STATE_REG_BLOCKED, STATE_SEARCHING, TX_CONTROL_PORT,
 };
 pub use loops::{stats_reader_loop, zombie_watchdog};
 pub use seams::{DataRxHandle, IwChannelSetter, SharedValidCounter, SystemClock};
 pub use stats::{
-    build_gs_stats, write_no_injection_sidecar, write_reg_blocked_sidecar, GsAdapterInfo,
-    GsChannelTruth, GsRegSnapshot,
+    build_gs_stats, write_blocked_unpaired_sidecar, write_no_injection_sidecar,
+    write_reg_blocked_sidecar, GsAdapterInfo, GsChannelTruth, GsRegSnapshot,
 };
 
 // Re-exported so the run loop can build the shared receive-health seam through
