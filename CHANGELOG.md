@@ -4,6 +4,26 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.326] - 2026-08-03
+
+### Fixed
+
+- **The periodic `VACUUM` was a scheduled opportunity to create an unrecoverable
+  start.** A `VACUUM` runs as a single transaction, so `wal_autocheckpoint`
+  cannot fire inside it and the entire rewrite lands in the WAL. On a ~1 GB
+  store that produced a **955 MB WAL** on a real node, and the next start had to
+  recover it — inside a `TimeoutStartSec` whose expiry would restart the daemon
+  straight back into the same recovery. It came up with seconds to spare; a
+  larger store would not have.
+
+  Now that reclaim is incremental, the full `VACUUM` has almost no job left, so
+  it runs only when warranted: a store that has not adopted incremental mode yet
+  and needs the one-time conversion rewrite, or a file whose free list has grown
+  past a quarter of it (incremental reclaim genuinely falling behind). A healthy
+  incremental store never rewrites itself, which removes the last whole-file
+  rewrite from the steady state — and with it the only thing that was producing
+  gigabyte WALs.
+
 ## [0.99.325] - 2026-08-03
 
 ### Fixed
