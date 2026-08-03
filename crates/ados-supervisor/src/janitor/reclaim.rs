@@ -126,6 +126,62 @@ pub fn reclaim_apt_archives(dir: &Path) -> u64 {
     freed
 }
 
+/// The bytes the apt archive cache is holding, without removing them. Same
+/// selection as [`reclaim_apt_archives`], so the reported figure is what a pass
+/// would actually take.
+pub fn apt_archive_bytes(dir: &Path) -> u64 {
+    let mut total = 0u64;
+    for sub in [dir.to_path_buf(), dir.join("partial")] {
+        let Ok(entries) = std::fs::read_dir(&sub) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if name.ends_with(".deb") || name.ends_with(".ddeb") || name.ends_with(".deb.partial") {
+                total = total.saturating_add(entry.metadata().map(|m| m.len()).unwrap_or(0));
+            }
+        }
+    }
+    total
+}
+
+/// How much a trim of the plugin logs would free — the part of each log past its
+/// cap, never the tail that is its floor.
+pub fn plugin_log_trimmable(dir: &Path, max_bytes: u64, keep_bytes: u64) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|e| e.file_name().to_str().is_some_and(|n| n.ends_with(".log")))
+        .filter_map(|e| e.metadata().ok().map(|m| m.len()))
+        .filter_map(|len| super::plan::trim_from(len, max_bytes, keep_bytes))
+        .fold(0u64, |a, b| a.saturating_add(b))
+}
+
+/// How much reclaiming recordings would free at `cutoff_unix`, with
+/// `keep_newest` protected.
+pub fn recording_reclaimable_bytes(dir: &Path, cutoff_unix: i64, keep_newest: usize) -> u64 {
+    let entries = entries_with_mtime(dir, |name| {
+        name.ends_with(".mp4") || name.ends_with(".mkv") || name.ends_with(".ts")
+    });
+    super::plan::older_than_keeping_newest(&entries, cutoff_unix, keep_newest)
+        .iter()
+        .filter_map(|name| std::fs::metadata(dir.join(name)).ok().map(|m| m.len()))
+        .fold(0u64, |a, b| a.saturating_add(b))
+}
+
+/// How much pruning quarantined stores would free, with the newest `keep`
+/// protected.
+pub fn quarantine_reclaimable_bytes(dir: &Path, keep: usize) -> u64 {
+    let entries = entries_with_mtime(dir, |name| name.starts_with("logs.db.corrupt-"));
+    super::plan::beyond_newest(&entries, keep)
+        .iter()
+        .filter_map(|name| std::fs::metadata(dir.join(name)).ok().map(|m| m.len()))
+        .fold(0u64, |a, b| a.saturating_add(b))
+}
+
 /// Entries under `/var/lib/apt/lists` that must survive. Mirrors the installer's
 /// one-shot reclaim; kept here rather than shared because the two run in
 /// different binaries and neither should depend on the other.

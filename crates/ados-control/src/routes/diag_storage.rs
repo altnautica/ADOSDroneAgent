@@ -53,7 +53,14 @@ const CRITICAL_FS_USED_PCT: f64 = 90.0;
 pub async fn get_storage_diagnostics(State(state): State<AppState>) -> Json<Value> {
     let rows = state.logd.hw_rows(WEAR_ROWS).await;
     let store_dir = store_dir();
-    Json(build(rows.as_deref(), &store_dir, fs_usage(&store_dir)))
+    let mut body = build(rows.as_deref(), &store_dir, fs_usage(&store_dir));
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert(
+            "janitor".to_string(),
+            janitor_facts(&janitor_sidecar_path(), now_unix()),
+        );
+    }
+    Json(body)
 }
 
 /// Assemble the verdict from the three independent inputs, kept as one pure
@@ -370,6 +377,72 @@ fn verdict(write: &Measurement, filesystem: &Value, throttle: &Value) -> (&'stat
     }
 }
 
+/// What the disk janitor did on its last pass, and what is left for it to take.
+///
+/// The wear figures above say how fast the card is being written; this says what
+/// is *sitting* on it and which of that can still be given back. The two
+/// together are the whole picture: a box can be writing gently and still fill
+/// up, which is exactly what happened — the ground station whose card filled was
+/// not writing quickly, it was holding 349 MB of downloaded packages that
+/// nothing ever removed.
+///
+/// The janitor mirrors its pass to a sidecar; this reads it. When the sidecar is
+/// absent the answer is "the janitor has not completed a pass", stated as such —
+/// never a set of zeroes, which would read as "there is nothing to reclaim" on a
+/// box where nobody has looked. The pass age travels with the figures so a stale
+/// sidecar (the janitor is hourly) is visible rather than passed off as current.
+pub fn janitor_facts(sidecar: &Path, now_unix: i64) -> Value {
+    let Ok(text) = std::fs::read_to_string(sidecar) else {
+        return json!({
+            "ran": false,
+            "rung": null,
+            "reclaimed_bytes": null,
+            "reclaimable_bytes": null,
+            "reason": "the janitor has not completed a pass since this box booted",
+        });
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&text) else {
+        return json!({
+            "ran": false,
+            "rung": null,
+            "reclaimed_bytes": null,
+            "reclaimable_bytes": null,
+            "reason": "the janitor's record could not be read",
+        });
+    };
+
+    let ran_at = v.get("ran_at_unix").and_then(Value::as_i64);
+    json!({
+        "ran": true,
+        "rung": v.get("rung").cloned().unwrap_or(Value::Null),
+        "ran_at_unix": ran_at,
+        // Absent when the pass carried no timestamp; never a zero, which would
+        // read as "just now".
+        "age_s": ran_at.map(|t| (now_unix - t).max(0)),
+        "reclaimed_bytes": v.get("reclaimed_bytes").cloned().unwrap_or(Value::Null),
+        "reclaimed": v.get("reclaimed").cloned().unwrap_or(Value::Null),
+        "reclaimable_bytes": v.get("reclaimable_bytes").cloned().unwrap_or(Value::Null),
+        "reclaimable": v.get("reclaimable").cloned().unwrap_or(Value::Null),
+        "reason": Value::Null,
+    })
+}
+
+/// Where the janitor mirrors its last pass, honouring the run-dir override the
+/// sibling daemons read so a rootless install resolves to its own run directory.
+fn janitor_sidecar_path() -> PathBuf {
+    match std::env::var_os("ADOS_RUN_DIR") {
+        Some(dir) => PathBuf::from(dir).join("janitor.json"),
+        None => PathBuf::from("/run/ados/janitor.json"),
+    }
+}
+
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// Where the store lives, honouring the same override the daemon resolves with so
 /// a test and a moved data root both land on the real directory.
 fn store_dir() -> PathBuf {
@@ -527,6 +600,81 @@ mod tests {
         let out = build(Some(&rows), Path::new("/nonexistent"), Some((100, 95)));
         assert_eq!(out["verdict"], json!("critical"));
         assert!(out["reason"].as_str().unwrap().contains("full"));
+    }
+
+    // --- the janitor's record ------------------------------------------------
+
+    #[test]
+    fn no_janitor_pass_reads_as_unknown_never_as_nothing_to_reclaim() {
+        let out = janitor_facts(Path::new("/no/such/janitor.json"), 1_000);
+        assert_eq!(out["ran"], json!(false));
+        // The distinction that matters: a box nobody has swept must not report
+        // zero reclaimable, which would read as "there is nothing to give".
+        assert_eq!(out["reclaimable_bytes"], json!(null));
+        assert_eq!(out["reclaimed_bytes"], json!(null));
+        assert!(out["reason"]
+            .as_str()
+            .unwrap()
+            .contains("has not completed"));
+    }
+
+    #[test]
+    fn a_corrupt_record_says_so_rather_than_inventing_figures() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("janitor.json");
+        std::fs::write(&path, b"{ truncated").unwrap();
+        let out = janitor_facts(&path, 1_000);
+        assert_eq!(out["ran"], json!(false));
+        assert_eq!(out["reclaimable_bytes"], json!(null));
+        assert!(out["reason"]
+            .as_str()
+            .unwrap()
+            .contains("could not be read"));
+    }
+
+    #[test]
+    fn the_last_pass_is_reported_with_its_age_so_staleness_is_visible() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("janitor.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&json!({
+                "version": 1,
+                "rung": "pressure",
+                "reclaimed_bytes": 366_002_176u64,
+                "reclaimed": { "apt_archives": 195_035_136u64, "apt_lists": 170_967_040u64 },
+                "reclaimable_bytes": 1_048_576u64,
+                "reclaimable": { "quarantined_stores": 1_048_576u64 },
+                "free_pct": 18.5,
+                "ran_at_unix": 1_700_000_000i64,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let out = janitor_facts(&path, 1_700_002_400);
+        assert_eq!(out["ran"], json!(true));
+        assert_eq!(out["rung"], json!("pressure"));
+        assert_eq!(out["reclaimed_bytes"], json!(366_002_176u64));
+        assert_eq!(out["reclaimable_bytes"], json!(1_048_576u64));
+        assert_eq!(out["reclaimed"]["apt_archives"], json!(195_035_136u64));
+        // Forty minutes ago — the reader can see the figures are not live.
+        assert_eq!(out["age_s"], json!(2_400));
+        assert_eq!(out["reason"], json!(null));
+    }
+
+    #[test]
+    fn a_record_without_a_timestamp_has_no_age_rather_than_a_zero_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("janitor.json");
+        std::fs::write(&path, br#"{"rung":"routine","reclaimed_bytes":0}"#).unwrap();
+        let out = janitor_facts(&path, 1_700_000_000);
+        assert_eq!(out["ran"], json!(true));
+        assert_eq!(
+            out["age_s"],
+            json!(null),
+            "an unknown age is not 'just now'"
+        );
     }
 
     #[test]

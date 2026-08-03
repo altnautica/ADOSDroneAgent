@@ -450,3 +450,83 @@ def diag_storage(as_json: bool) -> None:
     else:
         why = fs.get("reason") or "not measured"
         click.echo(_ansi.kv(theme, "filesystem", theme.dim(f"- ({why})"), 16))
+
+    _render_janitor(theme, data.get("janitor") or {})
+
+
+# How each reclaim category is named on screen, in sweep order. A category the
+# agent reports but this map does not know is still shown, under its raw key —
+# a silently dropped row would be a category quietly deleting things with
+# nothing on screen to say so.
+_JANITOR_CATEGORIES = {
+    "apt_archives": "downloaded packages",
+    "apt_lists": "package index",
+    "plugin_logs": "plugin logs",
+    "audit_log": "audit trail",
+    "recordings": "recordings",
+    "journal": "journal",
+    "quarantined_stores": "quarantined stores",
+}
+
+
+def _category_rows(block: Any) -> list[tuple[str, int]]:
+    """Non-zero per-category byte figures from a janitor block, in sweep order."""
+    if not isinstance(block, dict):
+        return []
+    rows: list[tuple[str, int]] = []
+    for key, label in _JANITOR_CATEGORIES.items():
+        value = block.get(key)
+        if isinstance(value, int) and value > 0:
+            rows.append((label, value))
+    for key, value in block.items():
+        if key not in _JANITOR_CATEGORIES and isinstance(value, int) and value > 0:
+            rows.append((key, value))
+    return rows
+
+
+def _render_janitor(theme: Any, janitor: dict[str, Any]) -> None:
+    """The disk janitor's last pass, and what is left for it to reclaim.
+
+    A box can be writing gently and still fill up — the card that filled was not
+    writing quickly, it was holding downloaded packages nothing removed. So the
+    wear figures above are only half the answer and this is the other half.
+
+    Absent numbers stay absent. A box whose janitor has never run must not print
+    zeroes, because "nothing to reclaim" and "nobody has looked" are different
+    answers and only one of them means the card is fine.
+    """
+    if not janitor:
+        return
+    click.echo("")
+    click.echo(_ansi.marker(theme, "RECLAIM"))
+
+    if janitor.get("ran") is not True:
+        why = janitor.get("reason") or "the janitor has not run"
+        click.echo(_ansi.kv(theme, "last pass", theme.dim(f"- ({why})"), 16))
+        return
+
+    rung = janitor.get("rung")
+    age = janitor.get("age_s")
+    when = f"{int(age) // 60} min ago" if isinstance(age, int) else "at an unknown time"
+    detail = f"{rung} · {when}" if isinstance(rung, str) and rung else when
+    click.echo(_ansi.kv(theme, "last pass", detail, 16))
+
+    freed = janitor.get("reclaimed_bytes")
+    if isinstance(freed, int):
+        click.echo(_ansi.kv(theme, "freed", _fmt_bytes(freed), 16))
+        for label, value in _category_rows(janitor.get("reclaimed")):
+            click.echo(
+                _ansi.kv(theme, "", theme.dim(f"{label}: {_fmt_bytes(value)}"), label_width=4)
+            )
+    else:
+        click.echo(_ansi.kv(theme, "freed", theme.dim("- (not reported)"), 16))
+
+    left = janitor.get("reclaimable_bytes")
+    if isinstance(left, int):
+        click.echo(_ansi.kv(theme, "still to give", _fmt_bytes(left), 16))
+        for label, value in _category_rows(janitor.get("reclaimable")):
+            click.echo(
+                _ansi.kv(theme, "", theme.dim(f"{label}: {_fmt_bytes(value)}"), label_width=4)
+            )
+    else:
+        click.echo(_ansi.kv(theme, "still to give", theme.dim("- (not reported)"), 16))

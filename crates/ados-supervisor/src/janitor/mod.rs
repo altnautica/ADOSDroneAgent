@@ -295,6 +295,56 @@ pub async fn sweep(roots: &Roots, cfg: &JanitorConfig, free_pct: Option<f64>) ->
     )
 }
 
+/// What a full sweep at the **Pressure** rung would free right now, measured
+/// without removing anything.
+///
+/// This is the number an operator wants when they ask "why is the card full and
+/// what is left to give". Reporting the raw footprint of each directory instead
+/// would overstate it badly: most of a plugin log is not reclaimable, because
+/// its tail is a floor, and most recordings are not reclaimable, because the
+/// newest ones survive at any age.
+///
+/// Pressure, not Critical, because the two reclaim the same categories —
+/// Critical differs only in being loud — so a Pressure figure is the honest
+/// ceiling rather than a larger number that no rung would actually reach.
+pub fn reclaimable(roots: &Roots, cfg: &JanitorConfig) -> Reclaimed {
+    let p = cfg.plan(Rung::Pressure);
+
+    let apt_archives = reclaim::apt_archive_bytes(&roots.apt_archives);
+    let apt_lists = reclaim::dir_bytes(&roots.apt_lists);
+    let plugin_logs = reclaim::plugin_log_trimmable(
+        &roots.plugin_logs,
+        cfg.plugin_log_max_bytes,
+        cfg.plugin_log_keep_bytes,
+    );
+    let audit_log = std::fs::metadata(&roots.audit_log)
+        .map(|m| m.len())
+        .ok()
+        .and_then(|len| plan::trim_from(len, cfg.audit_max_bytes, cfg.audit_keep_bytes))
+        .unwrap_or(0);
+
+    let cutoff = now_unix().saturating_sub(p.recording_cutoff.as_secs() as i64);
+    let recordings =
+        reclaim::recording_reclaimable_bytes(&roots.recordings, cutoff, p.recording_keep_newest);
+
+    let journal = p
+        .journal_target_bytes
+        .map(|target| reclaim::dir_bytes(&roots.journal).saturating_sub(target))
+        .unwrap_or(0);
+    let quarantined_stores =
+        reclaim::quarantine_reclaimable_bytes(&roots.logd_store, p.keep_quarantines);
+
+    Reclaimed {
+        apt_archives,
+        apt_lists,
+        plugin_logs,
+        audit_log,
+        recordings,
+        journal,
+        quarantined_stores,
+    }
+}
+
 /// The hourly disk janitor. Owns only its own cadence; the supervisor drives it
 /// from the monitor pass like the other reconcilers.
 ///
@@ -339,8 +389,11 @@ impl Janitor {
             let (rung, freed) = sweep(&roots, &cfg, before).await;
             let after = reclaim::free_pct(std::path::Path::new(PRESSURE_PATH));
 
+            // Measured AFTER the sweep, so the sidecar answers "what is left to
+            // give" rather than "what was there before this pass took some".
+            let left = reclaimable(&roots, &cfg);
             self.emit(rung, &freed, before, after);
-            write_sidecar(rung, &freed, after);
+            write_sidecar(rung, &freed, &left, after);
         }
     }
 
@@ -380,13 +433,22 @@ impl Janitor {
 
 /// Mirror the last pass so the storage diagnostic can report it.
 #[cfg(target_os = "linux")]
-fn write_sidecar(rung: Rung, freed: &Reclaimed, free_pct: Option<f64>) {
+fn write_sidecar(
+    rung: Rung,
+    freed: &Reclaimed,
+    reclaimable_now: &Reclaimed,
+    free_pct: Option<f64>,
+) {
     #[derive(serde::Serialize)]
     struct Snap<'a> {
         version: u16,
         rung: &'a str,
         reclaimed_bytes: u64,
         reclaimed: &'a Reclaimed,
+        /// What a Pressure-rung sweep would still free, measured after this
+        /// pass. The storage diagnostic reads this to answer "what is left".
+        reclaimable_bytes: u64,
+        reclaimable: &'a Reclaimed,
         free_pct: Option<f64>,
         ran_at_unix: i64,
         updated_at_unix: i64,
@@ -397,6 +459,8 @@ fn write_sidecar(rung: Rung, freed: &Reclaimed, free_pct: Option<f64>) {
         rung: rung.as_str(),
         reclaimed_bytes: freed.total(),
         reclaimed: freed,
+        reclaimable_bytes: reclaimable_now.total(),
+        reclaimable: reclaimable_now,
         free_pct,
         ran_at_unix: now,
         updated_at_unix: now,
@@ -623,6 +687,46 @@ mod tests {
             0,
             "a janitor that keeps finding work on an unchanged disk is deleting \
              something it should not: {second:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn what_is_left_to_give_is_measured_not_the_raw_footprint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let roots = populate(tmp.path());
+        let cfg = tight_config();
+
+        let before = reclaimable(&roots, &cfg);
+        // Everything the fixture holds is visible as something a pressure sweep
+        // could take.
+        assert_eq!(before.apt_archives, 4_000);
+        assert_eq!(
+            before.apt_lists, 5_000,
+            "the index is reclaimable under pressure"
+        );
+        assert_eq!(before.quarantined_stores, 4_000, "two of three corpses");
+        assert!(before.plugin_logs > 0);
+        assert!(before.audit_log > 0);
+
+        // A log's reclaimable figure is what a trim would free, never its whole
+        // size — the tail is a floor and reporting it as reclaimable would
+        // promise space the janitor will not take.
+        let log_len = fs::metadata(roots.plugin_logs.join("com-example-a.log"))
+            .unwrap()
+            .len();
+        assert!(
+            before.plugin_logs < log_len,
+            "reported {} for a {log_len}-byte log; the tail must not be counted",
+            before.plugin_logs
+        );
+
+        // After a full pass there is nothing left to give.
+        let (_, freed) = sweep(&roots, &cfg, Some(1.0)).await;
+        assert!(freed.total() > 0);
+        assert_eq!(
+            reclaimable(&roots, &cfg).total(),
+            0,
+            "a swept box must not keep advertising space it cannot free"
         );
     }
 

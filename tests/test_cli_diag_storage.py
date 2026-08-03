@@ -125,3 +125,104 @@ def test_a_critical_verdict_carries_its_reason():
     assert "CRITICAL" in out
     assert "wore a card out" in out
     assert "1714.0 KB/s" in out
+
+
+# --- the disk janitor's record --------------------------------------------
+#
+# The card that filled was not writing quickly. It was holding 349 MB of
+# downloaded packages that nothing ever removed, so the write rate above is only
+# half the picture and these rows are the other half.
+
+
+def test_a_box_whose_janitor_never_ran_says_so_and_prints_no_figures():
+    out = _invoke(
+        _payload(
+            janitor={
+                "ran": False,
+                "rung": None,
+                "reclaimed_bytes": None,
+                "reclaimable_bytes": None,
+                "reason": "the janitor has not completed a pass since this box booted",
+            }
+        )
+    )
+    assert "RECLAIM" in out
+    assert "has not completed a pass" in out
+    # The distinction that matters: nobody has looked is not the same answer as
+    # there being nothing left to reclaim, and a zero here would say the latter.
+    assert "0 B" not in out
+
+
+def test_the_last_pass_names_its_rung_and_breaks_the_bytes_down_by_category():
+    out = _invoke(
+        _payload(
+            janitor={
+                "ran": True,
+                "rung": "pressure",
+                "ran_at_unix": 1700000000,
+                "age_s": 2400,
+                "reclaimed_bytes": 366002176,
+                "reclaimed": {
+                    "apt_archives": 195035136,
+                    "apt_lists": 170967040,
+                    "plugin_logs": 0,
+                },
+                "reclaimable_bytes": 1073741824,
+                "reclaimable": {"quarantined_stores": 1073741824},
+                "reason": None,
+            }
+        )
+    )
+    assert "pressure" in out
+    assert "40 min ago" in out
+    assert "349.0 MB" in out
+    assert "downloaded packages" in out
+    assert "package index" in out
+    assert "quarantined stores" in out
+    assert "1.0 GB" in out
+    # A category that reclaimed nothing is not listed; a row of zeroes tells an
+    # operator nothing and buries the two categories that matter.
+    assert "plugin logs" not in out
+
+
+def test_an_unknown_pass_age_is_not_rendered_as_just_now():
+    out = _invoke(
+        _payload(
+            janitor={
+                "ran": True,
+                "rung": "routine",
+                "age_s": None,
+                "reclaimed_bytes": 0,
+                "reclaimed": {},
+                "reclaimable_bytes": None,
+                "reclaimable": None,
+                "reason": None,
+            }
+        )
+    )
+    assert "at an unknown time" in out
+    assert "0 min ago" not in out
+    # The reclaimable figure genuinely was not reported; say so rather than
+    # implying the box has nothing left to give.
+    assert "not reported" in out
+
+
+def test_an_agent_that_reports_an_unknown_category_still_shows_it():
+    # A category this renderer has no label for is still something the janitor
+    # deleted. Dropping the row would leave bytes disappearing with nothing on
+    # screen to account for them.
+    out = _invoke(
+        _payload(
+            janitor={
+                "ran": True,
+                "rung": "routine",
+                "age_s": 60,
+                "reclaimed_bytes": 4096,
+                "reclaimed": {"some_future_category": 4096},
+                "reclaimable_bytes": 0,
+                "reclaimable": {},
+                "reason": None,
+            }
+        )
+    )
+    assert "some_future_category" in out

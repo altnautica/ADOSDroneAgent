@@ -4,6 +4,29 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.340] - 2026-08-03
+
+### Added
+
+- **`ados diag storage` now says what is sitting on the card, not only how fast
+  it is being written.** The wear figures answer one half of why a card fills;
+  the ground station whose card filled was not writing quickly at all, it was
+  holding 349 MB of downloaded packages nothing ever removed. That half was
+  invisible.
+
+  A new section reports the janitor's last pass — which rung it ran at, how long
+  ago, and the bytes it freed broken down by category — followed by what a full
+  pass would still be able to free, again per category. The second figure is
+  what a reclaim would actually take, not the raw size of each directory: most
+  of a log is not reclaimable because its tail is kept, and most recordings are
+  not reclaimable because the newest survive at any age, so reporting footprints
+  would promise space that does not exist.
+
+  A box whose janitor has not run reports that, rather than a column of zeroes.
+  "There is nothing left to reclaim" and "nobody has looked" are different
+  answers and only one of them means the card is fine. The pass age travels with
+  the figures so hour-old numbers are visibly hour-old.
+
 ## [0.99.339] - 2026-08-03
 
 ### Added
