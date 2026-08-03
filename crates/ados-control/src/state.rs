@@ -378,11 +378,92 @@ impl AppState {
             .and_then(serde_json::Value::as_i64)
             .unwrap_or(0)
     }
+
+    /// Whether the connected FC speaks MSP (Betaflight / iNav) rather than
+    /// MAVLink, read from the same snapshot the status route already surfaces.
+    ///
+    /// This matters because [`Self::autopilot`] cannot tell the difference. An
+    /// MSP flight controller never sends a HEARTBEAT, so `autopilot` reads its
+    /// absent-field default of `0` — indistinguishable from an ArduPilot board
+    /// that simply has not been identified yet. Without this check the command
+    /// route builds a `COMMAND_LONG` and writes MAVLink bytes into a Betaflight
+    /// serial port: not refused, not dropped, just written as garbage the FC
+    /// silently discards while the operator is told the command was sent.
+    ///
+    /// Two independent signals, either of which is sufficient: the link hint
+    /// the MAVLink service sets when it sees MSP framing on the port, and the
+    /// firmware family read from the USB descriptor.
+    pub fn fc_speaks_msp(&self) -> bool {
+        snapshot_says_msp(self.state.snapshot().as_ref())
+    }
+}
+
+/// The pure half of [`AppState::fc_speaks_msp`], over a state snapshot.
+///
+/// Two independent signals, either sufficient: the link hint the MAVLink
+/// service sets when it sees MSP framing on the port, and the firmware family
+/// read from the USB descriptor. An absent snapshot or absent fields read as
+/// "not known to be MSP" — the route's `fc_connected` gate has already refused
+/// when there is no snapshot at all, so this must not invent a second refusal
+/// for a healthy MAVLink board whose optional fields are simply missing.
+pub(crate) fn snapshot_says_msp(snapshot: Option<&serde_json::Value>) -> bool {
+    let Some(map) = snapshot.and_then(serde_json::Value::as_object) else {
+        return false;
+    };
+    let hint_says_msp = map
+        .get("fc_link_hint")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|h| h == "msp_detected");
+    let variant_says_msp = map
+        .get("fc_variant")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|v| {
+            let v = v.to_ascii_lowercase();
+            v == "betaflight" || v == "inav"
+        });
+    hint_says_msp || variant_says_msp
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_msp_flight_controller_is_recognised_from_either_signal() {
+        use serde_json::json;
+        // The link hint the MAVLink service sets when it sees MSP framing.
+        let hint = json!({"fc_connected": true, "fc_link_hint": "msp_detected"});
+        assert!(snapshot_says_msp(Some(&hint)));
+
+        // Or the firmware family off the USB descriptor, case-insensitively.
+        for v in ["betaflight", "iNav", "INAV"] {
+            let variant = json!({"fc_connected": true, "fc_variant": v});
+            assert!(snapshot_says_msp(Some(&variant)), "{v} should read as MSP");
+        }
+    }
+
+    #[test]
+    fn a_mavlink_board_is_not_mistaken_for_msp() {
+        use serde_json::json;
+        // The case that makes the guard necessary: an MSP board never sends a
+        // HEARTBEAT, so `autopilot` reads its absent-field default of 0 —
+        // identical to an unidentified ArduPilot board. `autopilot` alone
+        // cannot tell them apart, which is why these fields are consulted.
+        let ardupilot = json!({"fc_connected": true, "autopilot": 3, "fc_variant": "ardupilot"});
+        assert!(!snapshot_says_msp(Some(&ardupilot)));
+
+        let px4 = json!({"fc_connected": true, "autopilot": 12});
+        assert!(!snapshot_says_msp(Some(&px4)));
+
+        // A healthy board whose optional fields are simply absent must NOT be
+        // refused; the connected gate owns the no-snapshot case.
+        assert!(!snapshot_says_msp(Some(&json!({"fc_connected": true}))));
+        assert!(!snapshot_says_msp(None));
+
+        // A non-MSP hint is not a match.
+        let silent = json!({"fc_connected": true, "fc_link_hint": "no_heartbeat"});
+        assert!(!snapshot_says_msp(Some(&silent)));
+    }
 
     #[test]
     fn version_reads_the_install_result_version() {

@@ -354,6 +354,22 @@ pub async fn execute_command(
         return detail(StatusCode::SERVICE_UNAVAILABLE, "FC not connected");
     }
 
+    // An MSP flight controller cannot be commanded from this route.
+    //
+    // Everything below builds a MAVLink COMMAND_LONG. A Betaflight or iNav
+    // board never heartbeats, so `autopilot()` falls through to its `0` default
+    // and is treated as ArduPilot — the frame is then written to the serial
+    // port and silently discarded by an FC that does not speak MAVLink, while
+    // the operator is told the command was sent. Refuse by name instead: the
+    // agent already knows the FC is MSP and the status route already says so.
+    if state.fc_speaks_msp() {
+        return detail(
+            StatusCode::NOT_IMPLEMENTED,
+            "this flight controller speaks MSP (Betaflight/iNav); MAVLink \
+             commands do not apply to it",
+        );
+    }
+
     let cmd = req.cmd.to_lowercase();
     let autopilot = state.autopilot();
 
