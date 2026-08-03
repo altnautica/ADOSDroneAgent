@@ -12,10 +12,7 @@ display.
 
 from __future__ import annotations
 
-from ados.services.ground_station.hostapd_manager import (
-    BUILTIN_PASSPHRASE,
-    generate_ap_passphrase,
-)
+from ados.services.ground_station.hostapd_manager import generate_ap_passphrase
 
 
 def test_a_generated_passphrase_is_legal_for_wpa2() -> None:
@@ -26,8 +23,19 @@ def test_a_generated_passphrase_is_legal_for_wpa2() -> None:
     assert all(c.isprintable() and c.isascii() for c in p)
 
 
-def test_it_is_not_the_shared_builtin() -> None:
-    assert generate_ap_passphrase() != BUILTIN_PASSPHRASE
+def test_the_shared_builtin_passphrase_no_longer_exists() -> None:
+    # There used to be a single passphrase compiled into every unit, reached
+    # both as the entropy-failure fallback and -- more damagingly -- as the
+    # shipped config default, which took precedence over generation and so gave
+    # every ground station the same key. Neither path may come back.
+    import ados.services.ground_station.hostapd_manager as hm
+    from ados.core.config import HotspotConfig
+
+    assert not hasattr(hm, "BUILTIN_PASSPHRASE")
+    assert generate_ap_passphrase() != "altnautica"
+    assert HotspotConfig().password == "", (
+        "a non-empty configured default silently disables per-unit generation"
+    )
 
 
 def test_successive_draws_differ() -> None:

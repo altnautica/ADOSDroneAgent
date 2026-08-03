@@ -28,11 +28,20 @@ class HotspotConfig(BaseModel):
     # setting network.hotspot.enabled=true in /etc/ados/config.yaml.
     enabled: bool = False
     ssid: str = "ADOS-{device_id}"
-    # Default WPA2 passphrase used when the agent brings up its access
-    # point. Predictable so operators can connect from a phone at the
-    # bench without reading a generated value off disk. Override in
-    # config.yaml for any deployment that needs a unique passphrase.
-    password: str = "altnautica"
+    # WPA2 passphrase for the agent's access point. Empty by default, which
+    # makes the agent generate a per-unit passphrase on first use and store it
+    # 0600 at /etc/ados/ap-passphrase.
+    #
+    # This used to default to a single predictable string so an operator could
+    # connect from a phone without reading a generated value off disk. That
+    # convenience is no longer needed -- the generated value is shown on the
+    # OLED access-point page, in the on-box console, and on the installer's
+    # completion card -- and a configured value takes precedence over the
+    # generated one, so a non-empty default silently disabled per-unit
+    # generation and gave every unit ever shipped the same key.
+    #
+    # Set this in config.yaml only to pin a deliberate shared passphrase.
+    password: str = ""
     channel: int = 6
 
 

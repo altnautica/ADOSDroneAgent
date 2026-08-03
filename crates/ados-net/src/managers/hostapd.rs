@@ -23,7 +23,6 @@ const AP_CIDR: &str = "192.168.4.1/24";
 const DHCP_RANGE: &str = "192.168.4.10,192.168.4.100,12h";
 const HOSTAPD_UNIT: &str = "ados-hostapd.service";
 const DNSMASQ_UNIT: &str = "ados-dnsmasq-gs.service";
-const BUILTIN_PASSPHRASE: &str = "altnautica";
 
 const CMD_TIMEOUT: Duration = Duration::from_secs(10);
 const SHORT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -214,13 +213,19 @@ impl HostapdManager {
                 }
             }
             Err(e) => {
-                // Fail-closed on entropy, like every other secret this agent
-                // draws: a predictable passphrase is worse than the shared
-                // default it replaces, because nobody would know to distrust
-                // it. The built-in stands in only when the kernel cannot
-                // provide randomness at all, which is a broken system.
-                warn!(error = %e, "ap_passphrase_generate_failed_using_builtin_default");
-                self.passphrase = BUILTIN_PASSPHRASE.to_string();
+                // Actually fail closed. This branch used to substitute a single
+                // passphrase compiled into every unit, which the comment above
+                // it described as failing closed while doing the opposite.
+                //
+                // One published string shared by every ground station ever
+                // shipped is worse than having no access point: the network
+                // presents as protected, so nobody knows to distrust it.
+                //
+                // An empty passphrase stops `write_config` from emitting a
+                // hostapd.conf, so the AP simply does not come up. A missing AP
+                // is recoverable and visible; a fleet-wide known key is neither.
+                self.passphrase.clear();
+                error!(error = %e, "ap_passphrase_generate_failed_refusing_to_start_ap");
             }
         }
         self.passphrase.clone()
@@ -277,6 +282,17 @@ impl HostapdManager {
     pub fn write_config(&mut self) -> std::io::Result<()> {
         if self.passphrase.is_empty() {
             self.ensure_passphrase();
+        }
+        // Still empty means the RNG failed and there is no passphrase to use.
+        // Refuse here rather than emitting a conf: WPA requires 8-63 characters,
+        // so an empty one either yields an open network or a start-time failure
+        // from hostapd that reads as an unrelated fault.
+        if self.passphrase.is_empty() {
+            error!("ap_config_refused_no_passphrase");
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "refusing to write hostapd.conf without a passphrase",
+            ));
         }
         let hostapd_body = self.render_hostapd_conf();
         let dnsmasq_body = self.render_dnsmasq_conf();
@@ -679,6 +695,35 @@ mod tests {
         std::fs::write(dir.path().join("ap-passphrase"), "from-file\n").unwrap();
         let mut m3 = mgr(dir.path(), "dead", Arc::new(ScriptedRunner::new()));
         assert_eq!(m3.ensure_passphrase(), "from-file");
+    }
+
+    #[test]
+    fn a_written_conf_always_carries_a_wpa2_legal_passphrase() {
+        // The invariant behind the fail-closed guard in `write_config`: no
+        // hostapd.conf is ever emitted with an empty or illegal passphrase,
+        // which would either open the network or make hostapd fail at start
+        // for reasons that read as an unrelated fault.
+        //
+        // Honest limit: this exercises the success path. The RNG-failure branch
+        // that leaves the passphrase empty is not reachable from a test without
+        // injecting a `getrandom` failure, so the guard itself is defence in
+        // depth rather than something proven here.
+        let dir = tempfile::tempdir().unwrap();
+        let mut m = mgr(dir.path(), "c0ffee", Arc::new(ScriptedRunner::new()));
+        m.country_code = "US".to_string();
+        m.write_config().unwrap();
+
+        let body = std::fs::read_to_string(dir.path().join("hostapd-gs.conf")).unwrap();
+        let line = body
+            .lines()
+            .find(|l| l.starts_with("wpa_passphrase="))
+            .expect("a written conf must set wpa_passphrase");
+        let value = line.trim_start_matches("wpa_passphrase=");
+        assert!(!value.is_empty(), "an empty passphrase must never be written");
+        assert!(
+            ados_protocol::secret_gen::is_valid_wpa2_passphrase(value),
+            "written passphrase must satisfy WPA2's 8-63 character rule"
+        );
     }
 
     #[test]

@@ -357,15 +357,20 @@ def test_apply_cloud_choice_validates_port_range() -> None:
 # --- AP defaults --------------------------------------------------------------
 
 
-def test_hotspot_default_password_is_altnautica() -> None:
-    """The agent's out-of-the-box AP passphrase is a known default so an
-    operator can connect from a phone at the bench without reading a
-    generated value off disk. Operators who need a unique passphrase set
-    `network.hotspot.password` in /etc/ados/config.yaml.
+def test_hotspot_password_defaults_to_empty_so_each_unit_generates_its_own() -> None:
+    """Out of the box the agent has no configured AP passphrase, so it draws a
+    per-unit one on first use and stores it 0600 at /etc/ados/ap-passphrase.
+
+    This previously defaulted to a single known string for bench convenience.
+    Because a configured passphrase takes precedence over a generated one, that
+    default silently disabled per-unit generation and gave every unit ever
+    shipped the same key. The generated value is shown on the OLED
+    access-point page, in the on-box console and on the installer's completion
+    card, so nothing is lost by removing it.
     """
     from ados.core.config import HotspotConfig
 
-    assert HotspotConfig().password == "altnautica"
+    assert HotspotConfig().password == ""
 
 
 # --- setup state (gate) ------------------------------------------------------

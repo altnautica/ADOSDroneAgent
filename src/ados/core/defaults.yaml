@@ -26,7 +26,12 @@ network:
     # src/ados/core/config/network.py also reads false; keep both
     # in sync.
     enabled: false
-    password: "altnautica"
+    # Empty means "generate a per-unit passphrase on first use" (stored 0600 at
+    # /etc/ados/ap-passphrase, shown on the OLED, the on-box console and the
+    # installer's completion card). A configured value takes precedence over
+    # the generated one, so naming a passphrase here gives every unit the same
+    # key. Set it only to pin a deliberate shared passphrase.
+    password: ""
   mac_pin:
     # Auto-pin a stable MAC on an onboard adapter with no efuse MAC (it would
     # otherwise randomize each boot and churn the DHCP lease / IP). On by

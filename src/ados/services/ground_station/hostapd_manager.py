@@ -53,8 +53,6 @@ log = get_logger("ground_station.hostapd")
 # ``network.hotspot.password`` from config; the agent never auto-generates.
 _PASSPHRASE_PATH = AP_PASSPHRASE_PATH
 
-# The shared built-in, kept only as the entropy-failure fallback.
-BUILTIN_PASSPHRASE = "altnautica"
 
 # Characters an operator can read off a screen and type without guessing:
 # 0/O and 1/I/L are excluded. Mirrors the Rust `UNAMBIGUOUS_CHARSET`.
@@ -275,16 +273,19 @@ class HostapdManager:
                     error=str(exc),
                 )
         except OSError as exc:
-            # Fail-closed on entropy, like every other secret the agent
-            # draws: a predictable passphrase is worse than the shared
-            # default it replaces, because nobody would know to distrust
-            # it. The built-in stands in only when the system cannot
-            # provide randomness at all.
-            log.warning(
-                "ap_passphrase_generate_failed_using_builtin_default",
+            # Actually fail closed. This used to substitute a single passphrase
+            # compiled into every unit, while the comment above it claimed to be
+            # failing closed.
+            #
+            # One published string shared by every ground station ever shipped
+            # is worse than having no access point: the network presents as
+            # protected, so nobody knows to distrust it. An empty passphrase
+            # stops the config write, so the AP simply does not come up.
+            log.error(
+                "ap_passphrase_generate_failed_refusing_to_start_ap",
                 error=str(exc),
             )
-            self._passphrase = BUILTIN_PASSPHRASE
+            self._passphrase = ""
         return self._passphrase
 
     def _render_hostapd_conf(self) -> str:
@@ -339,6 +340,14 @@ class HostapdManager:
         """
         if not self._passphrase:
             self.ensure_passphrase()
+
+        # Still empty means the RNG failed and there is no passphrase to use.
+        # Refuse here rather than emitting a conf: WPA requires 8-63 characters,
+        # so an empty one either yields an open network or a start-time failure
+        # from hostapd that reads as an unrelated fault.
+        if not self._passphrase:
+            log.error("ap_config_refused_no_passphrase")
+            raise OSError("refusing to write hostapd.conf without a passphrase")
 
         _HOSTAPD_CONF_PATH.parent.mkdir(parents=True, exist_ok=True)
 
