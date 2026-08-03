@@ -172,10 +172,16 @@ fn gs_a_missing_sidecar_degrades_to_unknown_at_the_first_read_never_panics() {
 
 #[test]
 fn drone_every_hop_flows_while_camera_bytes_and_tx_advance() {
-    // mediamtx `main` ingest ADVANCES (camera → encoder → mediamtx alive) and the
-    // wfb TX injection rate is positive (the tap → wfb_tx leg alive).
+    // mediamtx `main` ingest ADVANCES (camera → encoder → mediamtx alive), the wfb
+    // TX injection rate is positive (the tap → wfb_tx leg alive), AND a receiver
+    // has decoded the transmission (`channel_locked`). All three are needed: an
+    // advancing TX counter alone proves the transmitter works, never that anything
+    // received it.
     let dir = tempfile::tempdir().unwrap();
-    write_wfb_sidecar(dir.path(), json!({ "tx_bytes_per_s": 4_000 }));
+    write_wfb_sidecar(
+        dir.path(),
+        json!({ "tx_bytes_per_s": 4_000, "channel_locked": true }),
+    );
     let s0 = VideoSample::from_run_dir(dir.path(), Some(1_000), true);
     let s1 = VideoSample::from_run_dir(dir.path(), Some(2_000), true);
 

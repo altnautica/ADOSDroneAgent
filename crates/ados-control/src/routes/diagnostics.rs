@@ -538,6 +538,12 @@ impl VideoSample {
         self.wfb.as_ref()?.get(key).and_then(Value::as_f64)
     }
 
+    /// A boolean field from the wfb sidecar. `None` when absent or non-boolean,
+    /// so "the radio never said" stays distinct from "the radio said false".
+    fn wfb_bool(&self, key: &str) -> Option<bool> {
+        self.wfb.as_ref()?.get(key).and_then(Value::as_bool)
+    }
+
     /// A string field from the wfb sidecar.
     fn wfb_str(&self, key: &str) -> Option<String> {
         self.wfb
@@ -608,14 +614,53 @@ fn drone_hops(s0: &VideoSample, s1: &VideoSample) -> Vec<HopFinding> {
     let tx_bps = s1
         .wfb_num("tx_bytes_per_s")
         .or_else(|| s0.wfb_num("tx_bytes_per_s"));
+    // Reception is read, never assumed. This detail line used to be a hardcoded
+    // sentence claiming reception WAS confirmed, attached whenever any byte was
+    // injected — so a drone transmitting into a void reported "all hops flowing"
+    // while its own link diagnostic, on the same box in the same session, said
+    // the link was unverified. An advancing TX counter is not proof that anything
+    // received the bytes; only the received side can prove that.
+    let rx_proof = reception_proof(s1, s0);
     let radio = match tx_bps {
         Some(bps) => HopFinding {
             name: "mediamtx_to_radio_tx",
             label: "Tap → wfb_tx (radio injection)",
-            method: "wfb-stats tx_bytes_per_s (TX injection rate)",
-            metric: format!("{} B/s injected", bps.max(0.0) as i64),
-            flowing: Some(bps > 0.0),
-            detail: Some("RF reception is confirmed on the receiver's link_diag".to_string()),
+            method: "wfb-stats tx_bytes_per_s + reception proof (channel_locked / rf_unverified)",
+            metric: match rx_proof {
+                ReceptionProof::Confirmed => {
+                    format!("{} B/s injected, reception confirmed", bps.max(0.0) as i64)
+                }
+                ReceptionProof::Unconfirmed => format!(
+                    "{} B/s injected, reception UNCONFIRMED",
+                    bps.max(0.0) as i64
+                ),
+                ReceptionProof::Unknown => format!("{} B/s injected", bps.max(0.0) as i64),
+            },
+            // A dead TX leg is stalled whatever the receiver says — nothing is
+            // being transmitted, so reception is not the question. Injecting with
+            // no CONFIRMED reception is not a flowing hop either: `None` resolves
+            // to `unknown`, which stops the chain and names this hop as where
+            // video dies, the honest reading when the bytes may be going nowhere.
+            flowing: match (bps > 0.0, rx_proof) {
+                (false, _) => Some(false),
+                (true, ReceptionProof::Confirmed) => Some(true),
+                (true, _) => None,
+            },
+            detail: Some(
+                match rx_proof {
+                    ReceptionProof::Confirmed => {
+                        "a receiver decoded this transmission (peer-reported reception)"
+                    }
+                    ReceptionProof::Unconfirmed => {
+                        "transmitting, but nothing has confirmed receiving it — check the \
+                         receiver is powered, on this channel, and holding the matching key"
+                    }
+                    ReceptionProof::Unknown => {
+                        "the radio did not report a reception verdict, so delivery is unproven"
+                    }
+                }
+                .to_string(),
+            ),
         },
         None => hop_unknown(
             "mediamtx_to_radio_tx",
@@ -625,6 +670,40 @@ fn drone_hops(s0: &VideoSample, s1: &VideoSample) -> Vec<HopFinding> {
         ),
     };
     vec![cam, radio]
+}
+
+/// Whether anything has confirmed receiving what this node transmits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReceptionProof {
+    /// A receiver decoded this node's transmission.
+    Confirmed,
+    /// The radio is transmitting and nothing has confirmed reception.
+    Unconfirmed,
+    /// The radio reported no verdict either way.
+    Unknown,
+}
+
+/// Read the received-side verdict the radio already computes, newest sample
+/// first.
+///
+/// `channel_locked` is set from the radio's own `rx_proven`, and `rf_unverified`
+/// is its explicit "transmitting with zero confirmed reception" state. Both are
+/// derived from decoded peer traffic — frames that passed error correction AND
+/// decryption — which is why they can prove delivery when a TX byte counter
+/// cannot.
+fn reception_proof(s1: &VideoSample, s0: &VideoSample) -> ReceptionProof {
+    let locked = s1
+        .wfb_bool("channel_locked")
+        .or_else(|| s0.wfb_bool("channel_locked"));
+    let unverified = s1
+        .wfb_bool("rf_unverified")
+        .or_else(|| s0.wfb_bool("rf_unverified"));
+    match (locked, unverified) {
+        (Some(true), _) => ReceptionProof::Confirmed,
+        (_, Some(true)) => ReceptionProof::Unconfirmed,
+        (Some(false), Some(false)) => ReceptionProof::Unconfirmed,
+        _ => ReceptionProof::Unknown,
+    }
 }
 
 /// The ground-station (video-sink) hop findings.
@@ -1116,13 +1195,64 @@ Local:
     }
 
     #[test]
-    fn drone_all_hops_flow_when_mediamtx_advances_and_tx_injects() {
-        // Camera → mediamtx bytesReceived climbing, and the wfb TX bitrate > 0.
-        let s0 = sample(Some(1000), true, &[("tx_bytes_per_s", json!(4000))]);
-        let s1 = sample(Some(2000), true, &[("tx_bytes_per_s", json!(4000))]);
+    fn drone_all_hops_flow_when_mediamtx_advances_and_a_receiver_confirms() {
+        // Camera → mediamtx bytesReceived climbing, wfb TX injecting, AND the
+        // radio reporting a receiver decoded it. All three are required before
+        // this reads as flowing.
+        let wfb = [
+            ("tx_bytes_per_s", json!(4000)),
+            ("channel_locked", json!(true)),
+        ];
+        let s0 = sample(Some(1000), true, &wfb);
+        let s1 = sample(Some(2000), true, &wfb);
         let (hops, dies) = resolve_hops(drone_hops(&s0, &s1));
         assert_eq!(verdicts(&hops), vec!["flowing", "flowing"]);
         assert_eq!(dies, Value::Null);
+    }
+
+    #[test]
+    fn drone_injecting_into_a_void_never_reads_as_all_hops_flowing() {
+        // THE REGRESSION THIS EXISTS FOR. The transmitter is healthy and the
+        // camera is healthy, but nothing is receiving: the radio says so with
+        // rf_unverified. This once rendered "all hops flowing" with a hardcoded
+        // sentence claiming reception was confirmed, on a rig whose peer had been
+        // reflashed and held no key at all.
+        let wfb = [
+            ("tx_bytes_per_s", json!(296173)),
+            ("rf_unverified", json!(true)),
+            ("channel_locked", json!(false)),
+        ];
+        let s0 = sample(Some(1000), true, &wfb);
+        let s1 = sample(Some(2000), true, &wfb);
+        let (hops, dies) = resolve_hops(drone_hops(&s0, &s1));
+
+        assert_eq!(verdicts(&hops), vec!["flowing", "unknown"]);
+        assert_eq!(dies, json!("mediamtx_to_radio_tx"));
+        // The bytes are still reported — the transmitter IS working — but the
+        // claim about the far end is the opposite of what it used to be.
+        let detail = hops[1]["detail"].as_str().unwrap();
+        assert!(
+            detail.contains("nothing has confirmed receiving it"),
+            "got {detail}"
+        );
+        assert!(hops[1]["metric"].as_str().unwrap().contains("UNCONFIRMED"));
+    }
+
+    #[test]
+    fn drone_with_no_reception_verdict_says_delivery_is_unproven() {
+        // An older radio build, or a sidecar written before the proof fields
+        // existed: absent is not the same as false, and neither is a licence to
+        // claim delivery.
+        let wfb = [("tx_bytes_per_s", json!(4000))];
+        let s0 = sample(Some(1000), true, &wfb);
+        let s1 = sample(Some(2000), true, &wfb);
+        let (hops, dies) = resolve_hops(drone_hops(&s0, &s1));
+        assert_eq!(verdicts(&hops), vec!["flowing", "unknown"]);
+        assert_eq!(dies, json!("mediamtx_to_radio_tx"));
+        assert!(hops[1]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("did not report a reception verdict"));
     }
 
     #[test]

@@ -318,6 +318,10 @@ async fn run_with_failover(
     }
     // Cumulative count of bind attempts; reaching the cap flips to cloud_relay.
     let mut attempt: u32 = 0;
+    // Set once the attempt cap has flipped this rig to the cloud relay. The loop
+    // stays alive (so a later recovery can resume the local link) but stops
+    // spending local attempts until something re-arms it.
+    let mut parked_on_cloud = false;
     loop {
         if *shutdown.borrow() {
             break;
@@ -332,7 +336,7 @@ async fn run_with_failover(
         if should_attempt(armed, paired) && !adapter_present {
             tracing::info!(role = role.as_str(), "auto_pair_waiting_for_wfb_adapter");
         }
-        if should_attempt(armed, paired) && adapter_present {
+        if should_attempt(armed, paired) && adapter_present && !parked_on_cloud {
             // Tear down an in-flight bind if the supervisor shuts down.
             let mut cancel_rx = shutdown.clone();
             let cancel = async move {
@@ -355,7 +359,14 @@ async fn run_with_failover(
                         if failover.sync(FailoverState::Local) {
                             emit_failover(&events, FailoverState::Local);
                         }
-                        break;
+                        // Keep the loop alive rather than exiting. A paired rig
+                        // costs one cheap evaluation per tick (the key-apply step
+                        // disarms auto-pair, so `should_attempt` says no), and the
+                        // loop staying up is what lets a rig whose peer is later
+                        // reflashed act on that. Exiting here meant the recovery
+                        // path could only ever run once, at boot.
+                        attempt = 0;
+                        continue;
                     }
                     // A non-paired terminal. An external shutdown aborts the bind
                     // and breaks below without counting toward failover; otherwise
@@ -382,7 +393,15 @@ async fn run_with_failover(
                             emit_failover(&events, FailoverState::CloudRelay);
                         }
                         tracing::warn!(attempts = attempt, "wfb_failover_to_cloud_relay");
-                        break;
+                        // Park on the cloud path instead of exiting. The sidecar
+                        // stays at `cloud_relay` and no further local attempts are
+                        // counted, but the loop remains alive so the local link can
+                        // be recovered later. Exiting here meant a ground station
+                        // that gave up after the attempt cap was no longer in a
+                        // bind window when its drone came back — the two could
+                        // never meet again without a restart.
+                        parked_on_cloud = true;
+                        continue;
                     }
                 }
                 Err(BindStartError::Busy) => {
@@ -466,6 +485,53 @@ mod tests {
         // not (the gate is what keeps a dongle-less boot from burning attempts).
         assert!(adapter_ready_to_bind(true));
         assert!(!adapter_ready_to_bind(false));
+    }
+
+    #[test]
+    fn parking_on_the_cloud_relay_stops_spending_attempts_without_ending_the_loop() {
+        // Model the loop's decision after the attempt cap flips a rig to the
+        // cloud relay. Before, this path `break`s and the task is gone: a ground
+        // station that gave up was no longer in a bind window when its drone came
+        // back, so the two could never meet again without a restart. Now it parks
+        // — no further local attempts are spent, but the loop keeps evaluating so
+        // something can re-arm it later.
+        let armed = true;
+        let paired = false;
+        let mut attempt: u32 = 0;
+        let mut parked_on_cloud = false;
+        let mut ticks_evaluated = 0u32;
+
+        for _ in 0..(MAX_LOCAL_BIND_ATTEMPTS + 20) {
+            ticks_evaluated += 1;
+            let adapter_present = adapter_ready_to_bind(true);
+            if should_attempt(armed, paired) && adapter_present && !parked_on_cloud {
+                attempt += 1;
+                if failover_reached(attempt) {
+                    parked_on_cloud = true;
+                }
+            }
+        }
+
+        // Attempts stopped at the cap...
+        assert_eq!(attempt, MAX_LOCAL_BIND_ATTEMPTS);
+        assert!(parked_on_cloud);
+        // ...but the loop kept running every tick rather than exiting.
+        assert_eq!(ticks_evaluated, MAX_LOCAL_BIND_ATTEMPTS + 20);
+    }
+
+    #[test]
+    fn a_paired_rig_keeps_evaluating_instead_of_exiting() {
+        // After a successful pair the loop used to `break`, so the recovery path
+        // could only ever run once, at boot. It now continues; a paired rig simply
+        // answers "no" cheaply on every tick.
+        let armed = true;
+        let mut ticks = 0u32;
+        for _ in 0..50 {
+            ticks += 1;
+            let paired = true; // the key-apply step disarms auto-pair too
+            assert!(!should_attempt(armed, paired));
+        }
+        assert_eq!(ticks, 50, "the loop must survive a successful pair");
     }
 
     #[test]

@@ -4,7 +4,40 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
-## [0.99.336] - 2026-08-03
+## [0.99.337] - 2026-08-03
+
+### Fixed
+
+- **A drone transmitting into a void reported "all hops flowing".** The video
+  diagnostic attached a fixed sentence — "RF reception is confirmed on the
+  receiver's link_diag" — to the radio-injection hop whenever any byte was being
+  injected. It never asked the receiver anything. It also counted that hop as
+  flowing, so the summary line agreed.
+
+  Found on hardware: a drone injecting 296 KB/s at a ground station that had been
+  reflashed, held no radio key at all, and was decoding nothing. The tool said
+  the link was healthy. The same agent's link diagnostic, on the same box in the
+  same session, correctly said the link was unverified — so the tool disagreed
+  with itself, and the optimistic half is the one printed first.
+
+  The hop now reads the reception verdict the radio already computes and reports
+  what it found: reception confirmed, reception UNCONFIRMED, or no verdict
+  available. Injecting without confirmed reception is not a flowing hop — it
+  resolves as unknown, which names that hop as where video dies. The byte count
+  is still shown, because the transmitter genuinely is working; what changed is
+  the claim about the far end. An advancing transmit counter proves a
+  transmitter, never a receiver.
+
+- **Auto-pair could stop trying and never resume.** The loop exited permanently
+  in two places: after a successful pair, and after the attempt cap flipped a rig
+  to the cloud relay. Both meant the recovery path could only ever run once, at
+  boot.
+
+  The second one is the more damaging: a ground station that gave up after the
+  cap was no longer in a bind window when its drone returned, so the two could
+  not meet again without a restart. The loop now stays alive in both cases — a
+  paired rig answers "no" cheaply on each tick, and a cloud-parked rig stops
+  spending local attempts without ending the loop.
 
 ### Fixed
 
