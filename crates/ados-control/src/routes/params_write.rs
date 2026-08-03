@@ -177,8 +177,11 @@ pub async fn set_param(
     //    an operator cannot even cycle out of it.
     //
     //    One request, irreversible, and nothing about it looks unusual at the
-    //    time. Refused with the reason named rather than accepted; DEC-275
-    //    records the limitation and what lifting it properly requires.
+    //    time. Refused with the reason named rather than accepted. Lifting the
+    //    limit properly means discovering the vehicle's system id from its
+    //    HEARTBEAT and carrying it through both paths per vehicle; merely
+    //    widening the constant would replace an obvious failure with a subtle
+    //    one, where a command silently reaches the wrong airframe.
     if is_identity_param(&name) {
         return ParamError {
             status: StatusCode::CONFLICT,

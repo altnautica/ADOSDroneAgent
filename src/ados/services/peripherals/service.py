@@ -1,6 +1,6 @@
 """Systemd service wrapper for the Peripheral Manager.
 
-Wave 3 behavior: load the registry on startup, honor SIGHUP to reload,
+Loads the registry on startup, honors SIGHUP to reload,
 and sit idle until shutdown. The registry is consumed in-process by
 the REST API, but the supervised service is still useful because it
 gives operators a clean ``systemctl reload ados-peripherals`` path for
