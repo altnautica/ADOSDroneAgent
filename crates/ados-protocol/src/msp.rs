@@ -372,7 +372,8 @@ mod tests {
         assert_eq!(bipolar_to_pwm(2.0), 2000); // clamp high
         assert_eq!(bipolar_to_pwm(-2.0), 1000); // clamp low
         assert_eq!(bipolar_to_pwm(0.5), 1750);
-        // Throttle: idle at 0, NOT centre — the live-bug guard from DEC-273.
+        // Throttle: idle at 0, NOT centre. A throttle scaled to mid-stick would
+        // arm a motor at half power the instant the channel opened.
         assert_eq!(throttle_to_pwm(0.0), 1000);
         assert_eq!(throttle_to_pwm(1.0), 2000);
         assert_eq!(throttle_to_pwm(0.5), 1500);
