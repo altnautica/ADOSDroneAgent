@@ -110,20 +110,28 @@ async fn main() -> Result<()> {
     // own socket so the HDMI cockpit relay can subscribe without touching the PIC
     // arbiter seam. Shares the one button bus, so short/long/cancel + the config
     // mapping stay single-source in the reader/classifier below.
+    // Front-panel buttons: skip-clean when the board has no GPIO chip. The live
+    // mapping handle is shared with the SIGHUP task so a remap is seen by the
+    // next release.
+    let mapping = Arc::new(RwLock::new(load_button_mapping()));
+
     {
+        // The injection classifier shares the same mapping handle as the GPIO
+        // reader, so a synthetic press resolves the same action a real one would
+        // and a SIGHUP remap reaches both. It stays inert unless the operator
+        // sets ADOS_BUTTONS_ALLOW_INJECT=1 (the op checks the env itself).
+        let inject = Arc::new(std::sync::Mutex::new(
+            ados_hid::buttons::PressClassifier::with_mapping(mapping.clone()),
+        ));
         let button_bus = button_bus.clone();
         tokio::spawn(async move {
             let path = Path::new(BUTTONS_SOCK);
-            if let Err(e) = buttons_ipc::serve(button_bus, path).await {
+            if let Err(e) = buttons_ipc::serve_with_inject(button_bus, Some(inject), path).await {
                 tracing::error!(error = %e, "button event socket exited");
             }
         });
     }
 
-    // Front-panel buttons: skip-clean when the board has no GPIO chip. The live
-    // mapping handle is shared with the SIGHUP task so a remap is seen by the
-    // next release.
-    let mapping = Arc::new(RwLock::new(load_button_mapping()));
     spawn_button_reader(mapping.clone(), button_bus.clone());
 
     sd_ready();

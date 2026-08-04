@@ -31,7 +31,10 @@ use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
-use crate::eventbus::ButtonEventBus;
+use std::sync::{Arc, Mutex};
+
+use crate::buttons::{Edge, PressClassifier};
+use crate::eventbus::{ButtonBusEvent, ButtonEventBus};
 
 /// Button-event fanout socket path (sibling to pic.sock / mavlink.sock).
 pub const BUTTONS_SOCK: &str = "/run/ados/buttons.sock";
@@ -39,10 +42,32 @@ pub const BUTTONS_SOCK: &str = "/run/ados/buttons.sock";
 /// Cap on a single request line so a malformed client can't grow the buffer.
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
 
-/// Only the `op` field is read: this socket serves exactly one op.
+/// Env flag that turns the `inject` op on. Default off: injection lets a caller
+/// synthesize presses, which on a production node would be a way to drive the
+/// UI (and any button-subscribing plugin) remotely. It is a sim / bench affordance
+/// — the virtual ground panel uses it so a clicked button travels the same path a
+/// real GPIO press would — so it stays behind an explicit opt-in.
+pub const INJECT_ENABLE_ENV: &str = "ADOS_BUTTONS_ALLOW_INJECT";
+
+/// `op` selects the request; `subscribe` reads no more, `inject` reads the rest.
 #[derive(Debug, Deserialize)]
 struct Request {
     op: String,
+}
+
+/// The `inject` op body: one synthetic edge for the shared classifier.
+#[derive(Debug, Deserialize)]
+struct InjectRequest {
+    /// BCM pin of the button being driven.
+    pin: u32,
+    /// `"press"` (falling) or `"release"` (rising).
+    edge: String,
+    /// Monotonic-millisecond timestamp of the edge. The classifier measures
+    /// short vs long from the press→release delta, so the caller must supply a
+    /// real clock here — a press and release at the same ts would always read
+    /// short.
+    #[serde(default)]
+    ts_ms: u64,
 }
 
 /// Bind the button fanout socket and stream events to each subscriber until the
@@ -55,6 +80,24 @@ struct Request {
 /// `subscribe_buttons` op reads — so the classifier stays the single source of
 /// truth for short / long / cancel and the config mapping.
 pub async fn serve(buttons: ButtonEventBus, sock_path: &Path) -> std::io::Result<()> {
+    serve_with_inject(buttons, None, sock_path).await
+}
+
+/// [`serve`] plus an optional injection classifier.
+///
+/// When `inject` is `Some`, the `inject` op is served (subject to the
+/// [`INJECT_ENABLE_ENV`] gate): a synthetic edge is fed to that classifier and
+/// any press it classifies is published to the bus, so an injected press is
+/// byte-identical downstream to a real one. `inject` shares the SAME
+/// [`PressClassifier`] type the GPIO reader uses — it is a second instance, not a
+/// second implementation, so short/long/cancel and the action mapping cannot
+/// drift. On a node with no GPIO (a VM) the reader is skipped entirely, so this
+/// is then the only classifier and there is no second instance at all.
+pub async fn serve_with_inject(
+    buttons: ButtonEventBus,
+    inject: Option<Arc<Mutex<PressClassifier>>>,
+    sock_path: &Path,
+) -> std::io::Result<()> {
     let listener = bind_command_socket(sock_path, 0o660)?;
     tracing::info!(path = %sock_path.display(), "button event socket listening");
 
@@ -62,8 +105,9 @@ pub async fn serve(buttons: ButtonEventBus, sock_path: &Path) -> std::io::Result
         match listener.accept().await {
             Ok((stream, _addr)) => {
                 let buttons = buttons.clone();
+                let inject = inject.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_conn(stream, buttons).await {
+                    if let Err(e) = handle_conn(stream, buttons, inject).await {
                         tracing::debug!(error = %e, "button conn error");
                     }
                 });
@@ -80,7 +124,11 @@ pub async fn serve(buttons: ButtonEventBus, sock_path: &Path) -> std::io::Result
 /// Read one newline-terminated request and, when it is the `subscribe` op, stream
 /// button events until the client disconnects. Any other op closes with a single
 /// error line, matching the pic.sock unknown-op posture.
-async fn handle_conn(mut stream: UnixStream, buttons: ButtonEventBus) -> std::io::Result<()> {
+async fn handle_conn(
+    mut stream: UnixStream,
+    buttons: ButtonEventBus,
+    inject: Option<Arc<Mutex<PressClassifier>>>,
+) -> std::io::Result<()> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 1024];
     loop {
@@ -100,6 +148,7 @@ async fn handle_conn(mut stream: UnixStream, buttons: ButtonEventBus) -> std::io
 
     match op_of(line).as_deref() {
         Some("subscribe") => stream_button_events(stream, buttons).await,
+        Some("inject") => handle_inject(stream, line, buttons, inject).await,
         other => {
             let mut body = serde_json::to_vec(&json!({
                 "ok": false,
@@ -111,6 +160,71 @@ async fn handle_conn(mut stream: UnixStream, buttons: ButtonEventBus) -> std::io
             stream.flush().await?;
             Ok(())
         }
+    }
+}
+
+/// Serve one `inject` request: feed the edge to the shared classifier and
+/// publish any resulting press. Refuses when injection is disabled (the default)
+/// or unwired, so a production node cannot be driven through this op.
+async fn handle_inject(
+    mut stream: UnixStream,
+    line: &[u8],
+    buttons: ButtonEventBus,
+    inject: Option<Arc<Mutex<PressClassifier>>>,
+) -> std::io::Result<()> {
+    let reply = classify_injected(line, &buttons, inject.as_deref());
+    let mut body = serde_json::to_vec(&reply).unwrap_or_default();
+    body.push(b'\n');
+    stream.write_all(&body).await?;
+    stream.flush().await?;
+    Ok(())
+}
+
+/// The pure core of an inject: parse, gate, feed the classifier, publish. Split
+/// out with no I/O so the gate and the classify→publish path are unit-tested
+/// against the real classifier rather than through a socket.
+fn classify_injected(
+    line: &[u8],
+    buttons: &ButtonEventBus,
+    inject: Option<&Mutex<PressClassifier>>,
+) -> serde_json::Value {
+    if std::env::var(INJECT_ENABLE_ENV).ok().as_deref() != Some("1") {
+        return json!({"ok": false, "error": "E_INJECT_DISABLED"});
+    }
+    let Some(classifier) = inject else {
+        return json!({"ok": false, "error": "E_INJECT_UNAVAILABLE"});
+    };
+    let req: InjectRequest = match serde_json::from_slice(line) {
+        Ok(r) => r,
+        Err(e) => return json!({"ok": false, "error": format!("E_BAD_REQUEST: {e}")}),
+    };
+    let edge = match req.edge.as_str() {
+        "press" => Edge::Falling,
+        "release" => Edge::Rising,
+        other => return json!({"ok": false, "error": format!("E_BAD_EDGE: {other}")}),
+    };
+
+    // The classifier emits a press only on the release edge; a press edge returns
+    // None and is acknowledged without a published event.
+    let event = {
+        // Recover a poisoned lock rather than propagating the panic: a prior
+        // panic while classifying one injected edge must not take the whole
+        // inject path down, and on_edge holds no invariant a poisoned state
+        // corrupts (a stale press timestamp at worst yields one mis-timed press).
+        let mut guard = classifier.lock().unwrap_or_else(|e| e.into_inner());
+        guard.on_edge(req.pin, edge, req.ts_ms)
+    };
+    match event {
+        Some(ev) => {
+            buttons.publish(ButtonBusEvent {
+                button: ev.pin,
+                kind: ev.kind.as_str(),
+                action: ev.action.clone(),
+                timestamp_ms: ev.timestamp_ms,
+            });
+            json!({"ok": true, "published": true, "kind": ev.kind.as_str()})
+        }
+        None => json!({"ok": true, "published": false}),
     }
 }
 
@@ -166,6 +280,107 @@ mod tests {
     #[test]
     fn button_sock_default_is_the_literal_run_dir_path() {
         assert_eq!(BUTTONS_SOCK, "/run/ados/buttons.sock");
+    }
+
+    /// Serializes the inject tests: they toggle the process-global
+    /// [`INJECT_ENABLE_ENV`], and Rust runs tests on several threads in one
+    /// process, so one test's env would otherwise leak into another's gate.
+    static INJECT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn line(s: &str) -> Vec<u8> {
+        s.as_bytes().to_vec()
+    }
+
+    fn short_mapping() -> Arc<Mutex<PressClassifier>> {
+        use std::collections::HashMap;
+        use std::sync::RwLock;
+        // Pin 5 maps to label B1 (see buttons::pin_to_label); the classifier's
+        // mapping key is "<label>_<kind>".
+        let mut m = HashMap::new();
+        m.insert("B1_short".to_string(), "commit".to_string());
+        Arc::new(Mutex::new(PressClassifier::with_mapping(Arc::new(
+            RwLock::new(m),
+        ))))
+    }
+
+    #[test]
+    fn a_press_then_release_publishes_a_classified_event() {
+        let _guard = INJECT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(INJECT_ENABLE_ENV, "1");
+        let bus = ButtonEventBus::new();
+        let mut rx = bus.subscribe();
+        let classifier = short_mapping();
+
+        // Press at t=1000: no event yet (the classifier emits on release).
+        let r1 = classify_injected(
+            &line(r#"{"op":"inject","pin":5,"edge":"press","ts_ms":1000}"#),
+            &bus,
+            Some(&classifier),
+        );
+        assert_eq!(r1["ok"], serde_json::json!(true));
+        assert_eq!(r1["published"], serde_json::json!(false));
+
+        // Release at t=1200: a short press, published to the bus with the
+        // mapped action — proof the real classifier ran, not a re-implementation.
+        let r2 = classify_injected(
+            &line(r#"{"op":"inject","pin":5,"edge":"release","ts_ms":1200}"#),
+            &bus,
+            Some(&classifier),
+        );
+        assert_eq!(r2["ok"], serde_json::json!(true));
+        assert_eq!(r2["published"], serde_json::json!(true));
+        assert_eq!(r2["kind"], serde_json::json!("short"));
+
+        let ev = rx.try_recv().expect("a press was published");
+        assert_eq!(ev.button, 5);
+        assert_eq!(ev.kind, "short");
+        assert_eq!(ev.action.as_deref(), Some("commit"));
+        std::env::remove_var(INJECT_ENABLE_ENV);
+    }
+
+    #[test]
+    fn injection_is_refused_when_the_env_gate_is_off() {
+        let _guard = INJECT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var(INJECT_ENABLE_ENV);
+        let bus = ButtonEventBus::new();
+        let classifier = short_mapping();
+        let r = classify_injected(
+            &line(r#"{"op":"inject","pin":5,"edge":"press","ts_ms":1}"#),
+            &bus,
+            Some(&classifier),
+        );
+        assert_eq!(r["ok"], serde_json::json!(false));
+        assert_eq!(r["error"], serde_json::json!("E_INJECT_DISABLED"));
+    }
+
+    #[test]
+    fn injection_is_refused_when_no_classifier_is_wired() {
+        let _guard = INJECT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(INJECT_ENABLE_ENV, "1");
+        let bus = ButtonEventBus::new();
+        let r = classify_injected(
+            &line(r#"{"op":"inject","pin":5,"edge":"press","ts_ms":1}"#),
+            &bus,
+            None,
+        );
+        assert_eq!(r["error"], serde_json::json!("E_INJECT_UNAVAILABLE"));
+        std::env::remove_var(INJECT_ENABLE_ENV);
+    }
+
+    #[test]
+    fn a_malformed_edge_is_rejected_not_guessed() {
+        let _guard = INJECT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(INJECT_ENABLE_ENV, "1");
+        let bus = ButtonEventBus::new();
+        let classifier = short_mapping();
+        let r = classify_injected(
+            &line(r#"{"op":"inject","pin":5,"edge":"sideways","ts_ms":1}"#),
+            &bus,
+            Some(&classifier),
+        );
+        assert_eq!(r["ok"], serde_json::json!(false));
+        assert!(r["error"].as_str().unwrap().starts_with("E_BAD_EDGE"));
+        std::env::remove_var(INJECT_ENABLE_ENV);
     }
 
     #[tokio::test]
