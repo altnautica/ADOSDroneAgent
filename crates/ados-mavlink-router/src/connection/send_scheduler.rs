@@ -230,7 +230,26 @@ impl FcConnection {
     /// exist to talk to a directly-attached FC and must stay a silent no-op
     /// with none installed, not start radiating this router's own internal
     /// traffic onto a client's uplink.
-    pub async fn send_client_bytes(&self, data: &[u8], caller: ClientOrigin) {
+    pub async fn send_client_bytes(
+        &self,
+        data: &[u8],
+        caller: ClientOrigin,
+        injector: Option<&ados_protocol::ipc::InjectorClaim>,
+    ) {
+        // PIC-arbiter gate. A writer that declared itself an autonomous injector
+        // is refused whenever a human holds manual control (or the arbiter is not
+        // reporting — fail closed). An undeclared writer (injector = None) is the
+        // operator/human path and is NEVER gated. Inert until a producer is armed.
+        if let Some(claim) = injector {
+            if super::injector_gate::injector_refused_default(claim) {
+                tracing::warn!(
+                    injector = %claim.client_id,
+                    len = data.len(),
+                    "injector_command_refused_operator_holds_pic"
+                );
+                return;
+            }
+        }
         let has_writer = { self.writer.lock().await.is_some() };
         if has_writer {
             self.send_bytes(data).await;
@@ -267,7 +286,24 @@ impl FcConnection {
     /// never had: it called the plain FC writer directly, so an MSP command that
     /// arrived over the broker was indistinguishable from one produced on the
     /// node.
-    pub async fn send_client_raw(&self, data: &[u8], caller: ClientOrigin) {
+    pub async fn send_client_raw(
+        &self,
+        data: &[u8],
+        caller: ClientOrigin,
+        injector: Option<&ados_protocol::ipc::InjectorClaim>,
+    ) {
+        // Same PIC-arbiter gate as send_client_bytes; MSP is a second way to
+        // command an airframe, so it is gated identically.
+        if let Some(claim) = injector {
+            if super::injector_gate::injector_refused_default(claim) {
+                tracing::warn!(
+                    injector = %claim.client_id,
+                    len = data.len(),
+                    "injector_msp_refused_operator_holds_pic"
+                );
+                return;
+            }
+        }
         if caller != ClientOrigin::Trusted {
             tracing::debug!(
                 len = data.len(),
@@ -779,7 +815,7 @@ mod tests {
         conn.set_aux_uplink(sender).await;
 
         let frame = command_long_bytes();
-        conn.send_client_bytes(&frame, ClientOrigin::Unauthenticated)
+        conn.send_client_bytes(&frame, ClientOrigin::Unauthenticated, None)
             .await;
 
         let mut buf = [0u8; 256];
@@ -812,11 +848,13 @@ mod tests {
             gid: Some(0),
             pid: Some(1234),
             off_box_source: false,
+            injector: None,
         };
         assert_eq!(ClientOrigin::from_ipc_peer(&local), ClientOrigin::Trusted);
 
         let forwarder = IpcPeer {
             off_box_source: true,
+            injector: None,
             ..local
         };
         assert_ne!(
@@ -841,7 +879,7 @@ mod tests {
         let (sender, listener) = test_uplink().await;
         conn.set_aux_uplink(sender).await;
 
-        conn.send_client_raw(b"$M<\x00\x64\x64", ClientOrigin::Relayed)
+        conn.send_client_raw(b"$M<\x00\x64\x64", ClientOrigin::Relayed, None)
             .await;
 
         let mut buf = [0u8; 256];
@@ -860,7 +898,8 @@ mod tests {
         conn.set_aux_uplink(sender).await;
 
         let frame = command_long_bytes();
-        conn.send_client_bytes(&frame, ClientOrigin::Trusted).await;
+        conn.send_client_bytes(&frame, ClientOrigin::Trusted, None)
+            .await;
 
         let mut buf = [0u8; 256];
         let (n, _) = tokio::time::timeout(Duration::from_millis(300), listener.recv_from(&mut buf))
@@ -878,7 +917,8 @@ mod tests {
         conn.set_aux_uplink(sender).await;
 
         let frame = param_request_list_bytes();
-        conn.send_client_bytes(&frame, ClientOrigin::Trusted).await;
+        conn.send_client_bytes(&frame, ClientOrigin::Trusted, None)
+            .await;
 
         let mut buf = [0u8; 256];
         let (n, _) = tokio::time::timeout(Duration::from_millis(300), listener.recv_from(&mut buf))
@@ -901,7 +941,7 @@ mod tests {
         let mut concatenated = param_request_list_bytes();
         concatenated.extend_from_slice(&command_long_bytes());
 
-        conn.send_client_bytes(&concatenated, ClientOrigin::Trusted)
+        conn.send_client_bytes(&concatenated, ClientOrigin::Trusted, None)
             .await;
 
         let mut buf = [0u8; 256];

@@ -522,7 +522,7 @@ async fn main() {
                         // rather than the socket's.
                         Some(cmd) => {
                             let origin = ClientOrigin::from_ipc_peer(&cmd.peer);
-                            fc.send_client_bytes(&cmd.payload, origin).await
+                            fc.send_client_bytes(&cmd.payload, origin, cmd.peer.injector.as_ref()).await
                         }
                         None => break,
                     },
@@ -571,7 +571,7 @@ async fn main() {
                     cmd = msp_inbound.recv() => match cmd {
                         Some(cmd) => {
                             let origin = ClientOrigin::from_ipc_peer(&cmd.peer);
-                            fc.send_client_raw(&cmd.payload, origin).await
+                            fc.send_client_raw(&cmd.payload, origin, cmd.peer.injector.as_ref()).await
                         }
                         None => break,
                     },

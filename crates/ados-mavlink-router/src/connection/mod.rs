@@ -40,6 +40,7 @@
 //! [`FcConnection`] state and the connect/read reconnect FSM.
 
 mod framing;
+pub mod injector_gate;
 mod send_scheduler;
 pub use send_scheduler::ClientOrigin;
 pub mod attitude_setpoint;

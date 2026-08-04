@@ -60,13 +60,59 @@ use crate::frame;
 /// declassifies itself. It is consumed by the reader and never forwarded on.
 pub const IPC_DECLARE_OFF_BOX_SOURCE: &[u8] = b"\x00ados-ipc/source=off-box";
 
+/// Control-frame prefix a writer uses to declare that it is an AUTONOMOUS
+/// INJECTOR: a producer of commands generated on the node rather than by a
+/// human operator (the plugin host driving guided setpoints, the MSP relay).
+/// The rest of the payload is the writer's `client_id`, optionally followed by
+/// `;ticket=<ticket>` — the attestation the FC-write path verifies against the
+/// pairing key so a spoofed `client_id` cannot claim the injector lane.
+///
+/// Like [`IPC_DECLARE_OFF_BOX_SOURCE`] this is one-way and downward: declaring
+/// injector can only ever SUBJECT the writer to the PIC arbiter (an operator
+/// holding the manual-control claim refuses it), never grant it authority. A
+/// writer that does not declare is treated as the operator/human path and is
+/// NEVER gated — the load-bearing invariant. Sticky for the connection, never
+/// forwarded to the flight controller.
+pub const IPC_DECLARE_INJECTOR_PREFIX: &[u8] = b"\x00ados-ipc/injector=";
+
+/// A writer's declared autonomous-injector identity (see
+/// [`IPC_DECLARE_INJECTOR_PREFIX`]). Carried raw to the FC-write path, which
+/// verifies `ticket` against the pairing key before treating `client_id` as the
+/// attested injector; a `None` ticket is an unverified claim that can never win
+/// the lane away from a human holder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InjectorClaim {
+    pub client_id: String,
+    pub ticket: Option<String>,
+}
+
+/// Parse an [`IPC_DECLARE_INJECTOR_PREFIX`] control frame into an
+/// [`InjectorClaim`]. `None` when the payload is not an injector declaration or
+/// carries an empty client id (a declaration with no identity is not a claim).
+pub fn parse_injector_declaration(payload: &[u8]) -> Option<InjectorClaim> {
+    let body = payload.strip_prefix(IPC_DECLARE_INJECTOR_PREFIX)?;
+    let text = std::str::from_utf8(body).ok()?;
+    let (client_id, ticket) = match text.split_once(";ticket=") {
+        Some((id, tkt)) => (id, (!tkt.is_empty()).then(|| tkt.to_string())),
+        None => (text, None),
+    };
+    if client_id.is_empty() {
+        return None;
+    }
+    Some(InjectorClaim {
+        client_id: client_id.to_string(),
+        ticket,
+    })
+}
+
 /// Who wrote an inbound payload, as the accepting socket can tell.
 ///
 /// The credentials come from the kernel (`SO_PEERCRED` and its equivalents),
-/// so they cannot be forged by the writer. `off_box_source` is the writer's own
-/// declaration (see [`IPC_DECLARE_OFF_BOX_SOURCE`]) and is sticky for the life
-/// of the connection.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// so they cannot be forged by the writer. `off_box_source` and `injector` are
+/// the writer's own declarations (see [`IPC_DECLARE_OFF_BOX_SOURCE`] /
+/// [`IPC_DECLARE_INJECTOR_PREFIX`]) and are sticky for the life of the
+/// connection. Not `Copy`: the injector claim carries owned strings.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IpcPeer {
     pub uid: Option<u32>,
     pub gid: Option<u32>,
@@ -74,6 +120,10 @@ pub struct IpcPeer {
     /// The writing process has declared that it is forwarding bytes that
     /// reached this node from somewhere else.
     pub off_box_source: bool,
+    /// The writing process has declared itself an autonomous injector, so its
+    /// commands are subject to the PIC arbiter. `None` = an operator/human
+    /// writer, never gated.
+    pub injector: Option<InjectorClaim>,
 }
 
 /// One inbound payload plus the identity of the connection that wrote it.
@@ -92,6 +142,7 @@ fn peer_identity(stream: &UnixStream) -> IpcPeer {
             gid: Some(cred.gid()),
             pid: cred.pid(),
             off_box_source: false,
+            injector: None,
         },
         Err(_) => IpcPeer::default(),
     }
@@ -264,7 +315,20 @@ impl IpcBroadcast {
                             peer.off_box_source = true;
                             continue;
                         }
-                        if tx.send(InboundCommand { payload, peer }).await.is_err() {
+                        if let Some(claim) = parse_injector_declaration(&payload) {
+                            // Sticky, one-way: a writer subjects itself to the PIC
+                            // arbiter. Never forwarded to the FC.
+                            peer.injector = Some(claim);
+                            continue;
+                        }
+                        if tx
+                            .send(InboundCommand {
+                                payload,
+                                peer: peer.clone(),
+                            })
+                            .await
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -802,6 +866,70 @@ mod tests {
                 got.peer.off_box_source,
                 "a declared forwarder must not read as a local producer"
             );
+        }
+    }
+
+    #[test]
+    fn parse_injector_declaration_reads_id_and_optional_ticket() {
+        // id only
+        let mut d = IPC_DECLARE_INJECTOR_PREFIX.to_vec();
+        d.extend_from_slice(b"ai-mission");
+        assert_eq!(
+            parse_injector_declaration(&d),
+            Some(InjectorClaim {
+                client_id: "ai-mission".into(),
+                ticket: None
+            })
+        );
+        // id + ticket
+        let mut d2 = IPC_DECLARE_INJECTOR_PREFIX.to_vec();
+        d2.extend_from_slice(b"ai-mission;ticket=abc.def");
+        assert_eq!(
+            parse_injector_declaration(&d2),
+            Some(InjectorClaim {
+                client_id: "ai-mission".into(),
+                ticket: Some("abc.def".into())
+            })
+        );
+        // an empty client id is not a claim
+        let mut empty = IPC_DECLARE_INJECTOR_PREFIX.to_vec();
+        empty.extend_from_slice(b";ticket=abc");
+        assert_eq!(parse_injector_declaration(&empty), None);
+        // an unrelated payload is not an injector declaration
+        assert_eq!(parse_injector_declaration(b"command"), None);
+        assert_eq!(parse_injector_declaration(IPC_DECLARE_OFF_BOX_SOURCE), None);
+    }
+
+    #[tokio::test]
+    async fn a_declared_injector_sticks_and_is_not_forwarded() {
+        let path = temp_sock("injector");
+        let (_server, inbound) = IpcBroadcast::bind(&path, 256, false, Some(16))
+            .await
+            .unwrap();
+        let mut inbound = inbound.expect("inbound channel requested");
+
+        let mut client = connect_with_retry(&path, 10, Duration::from_millis(20))
+            .await
+            .unwrap();
+        let mut decl = IPC_DECLARE_INJECTOR_PREFIX.to_vec();
+        decl.extend_from_slice(b"ai-mission;ticket=tkt");
+        for payload in [decl.as_slice(), b"first", b"second"] {
+            let framed = encode_frame(payload, MAVLINK_MAX_FRAME).unwrap();
+            client.write_all(&framed).await.unwrap();
+        }
+        client.flush().await.unwrap();
+
+        // The declaration never reaches the FC, and both payloads behind it carry
+        // the sticky injector claim.
+        for expected in [&b"first"[..], &b"second"[..]] {
+            let got = tokio::time::timeout(Duration::from_millis(500), inbound.recv())
+                .await
+                .unwrap()
+                .expect("a command");
+            assert_eq!(got.payload, expected);
+            let claim = got.peer.injector.expect("a declared injector claim");
+            assert_eq!(claim.client_id, "ai-mission");
+            assert_eq!(claim.ticket.as_deref(), Some("tkt"));
         }
     }
 

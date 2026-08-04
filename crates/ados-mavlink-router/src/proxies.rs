@@ -371,7 +371,7 @@ async fn handle_tcp_client(
     loop {
         match rd.read(&mut buf).await {
             Ok(0) | Err(_) => break,
-            Ok(n) => fc.send_client_bytes(&buf[..n], origin).await,
+            Ok(n) => fc.send_client_bytes(&buf[..n], origin, None).await,
         }
     }
     writer.abort();
@@ -465,7 +465,7 @@ pub async fn run_udp_proxy(
                         // drop the least-recently-seen entries.
                         cap_peers(&mut map, UDP_MAX_PEERS);
                     }
-                    fc.send_client_bytes(&buf[..n], origin_of(access)).await;
+                    fc.send_client_bytes(&buf[..n], origin_of(access), None).await;
                 }
             }
             _ = cancel.notified() => {
@@ -656,7 +656,7 @@ async fn handle_ws_client(
     // client -> FC (binary frames only; ignore text/ping/pong).
     while let Some(msg) = read.next().await {
         match msg {
-            Ok(Message::Binary(data)) => fc.send_client_bytes(&data, ws_origin).await,
+            Ok(Message::Binary(data)) => fc.send_client_bytes(&data, ws_origin, None).await,
             Ok(Message::Close(_)) | Err(_) => break,
             _ => {}
         }
