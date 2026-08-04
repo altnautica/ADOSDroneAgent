@@ -26,7 +26,7 @@ NEW_AGENT_CAPS = (
 # single source of truth (generated from capabilities.toml); this test guards
 # that the count does not change unnoticed, while the internal-consistency check
 # below proves the catalog and its metadata table agree.
-EXPECTED_AGENT_CAPABILITY_COUNT = 50
+EXPECTED_AGENT_CAPABILITY_COUNT = 49
 
 # The compute + vision capability family: gated at the dispatch level today, so
 # the catalog must mark them enforced (the metadata that drives the install
@@ -122,7 +122,6 @@ def test_existing_baseline_capabilities_preserved() -> None:
         "hardware.usb",
         "hardware.usb.uvc",
         "hardware.camera.csi",
-        "hardware.audio",
         "vehicle.command",
         "mission.read",
         "mission.write",
@@ -130,7 +129,7 @@ def test_existing_baseline_capabilities_preserved() -> None:
         "filesystem.host",
         "recording.write",
     }
-    assert len(baseline_catalog) == 29
+    assert len(baseline_catalog) == 28
     assert baseline_catalog.issubset(AGENT_CAPABILITIES)
 
 

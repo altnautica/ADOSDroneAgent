@@ -35,7 +35,6 @@ AGENT_CAPABILITIES: frozenset[str] = frozenset(
         "hardware.usb.uvc",
         "hardware.camera.csi",
         "video.source.set",
-        "hardware.audio",
         "vehicle.command",
         "mission.read",
         "mission.write",
@@ -279,13 +278,6 @@ CAPABILITY_CATALOG: dict[str, dict[str, str]] = {
         "category": "data_network",
         "risk": "medium",
         "risk_reason": "Reconfigures which video sources the vehicle serves and restarts the video pipeline; a wrong source list can black out the operator's video.",
-    },
-    "hardware.audio": {
-        "label": "Access audio capture and playback devices",
-        "description": "Lets the plugin record from microphones or play to speakers connected to the host. Required by audio alert and voice plugins.",
-        "category": "hardware",
-        "risk": "medium",
-        "risk_reason": "Audio capture may pick up private conversations near the aircraft.",
     },
     "vehicle.command": {
         "label": "Issue high-level vehicle commands",

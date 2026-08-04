@@ -17,7 +17,7 @@
 # Edit here, then run codegen. Do not edit the generated files by hand.
 
 # ===========================================================================
-# AGENT capabilities (50)
+# AGENT capabilities (49)
 # ===========================================================================
 
 [[agent]]
@@ -255,15 +255,6 @@ risk_reason = "Reconfigures which video sources the vehicle serves and restarts 
 enforced = true
 
 [[agent]]
-id = "hardware.audio"
-label = "Access audio capture and playback devices"
-description = "Lets the plugin record from microphones or play to speakers connected to the host. Required by audio alert and voice plugins."
-category = "hardware"
-risk = "medium"
-risk_reason = "Audio capture may pick up private conversations near the aircraft."
-enforced = false
-
-[[agent]]
 id = "vehicle.command"
 label = "Issue high-level vehicle commands"
 description = "Lets the plugin send high-level vehicle commands (arm, takeoff, RTL, land, mode change) through the agent's command pipeline rather than raw MAVLink."
@@ -389,6 +380,11 @@ risk = "high"
 risk_reason = "Commands vehicle motion in guided mode; a faulty stream can fly the aircraft."
 enforced = true
 
+# RESERVED, not dead: this capability is the plugin-facing half of the rate/stick
+# control-output work. The ados-rate-control crate exists (pure, tested) and is
+# inert by construction; the method + sender land when that work reaches a live
+# FC command path. Kept declared so the manifest vocabulary and the grant surface
+# stay stable across its arrival, rather than churning the capability in and out.
 [[agent]]
 id = "flight.rate_setpoint"
 label = "Emit attitude/rate setpoints"
