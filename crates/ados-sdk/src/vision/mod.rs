@@ -49,6 +49,9 @@ pub struct Frame {
 /// dropped silently and the callback does not fire for it.
 pub type FrameCallback = Arc<dyn Fn(Frame) + Send + Sync>;
 
+/// Callback for a decoded detection batch.
+pub type DetectionCallback = Arc<dyn Fn(DetectionBatch) + Send + Sync>;
+
 /// `ctx.vision` — the vision engine facade.
 ///
 /// Cloning shares the one underlying IPC client. The ring resolver caches each
@@ -202,6 +205,60 @@ impl VisionClient {
         let frame = pose::frame_for(&odometry.to_odometry())
             .map_err(|e| ClientError::Rpc(format!("vision odometry encode failed: {e}")))?;
         self.ipc.mavlink_send(&frame, Some(VIO_COMPONENT_ID)).await
+    }
+
+    /// Receive the engine's detection batches.
+    ///
+    /// `camera_id` of `None` receives every camera. The engine fans all cameras
+    /// onto one stream, so a `Some(id)` filter is applied here rather than
+    /// narrowed at the engine — matching the frame subscription and the Python
+    /// client.
+    ///
+    /// A batch that will not decode is dropped rather than surfaced: the wire
+    /// carries a version and an older producer round-trips, so an undecodable
+    /// batch means a genuinely broken frame, not a version skew the caller could
+    /// act on.
+    pub async fn subscribe_detections(
+        &self,
+        camera_id: Option<&str>,
+        callback: DetectionCallback,
+    ) -> Result<(), ClientError> {
+        let filter = camera_id.map(str::to_string);
+        let on_deliver = move |args: Value| {
+            let Some(Value::Binary(blob)) = map_get(&args, "batch") else {
+                return;
+            };
+            let Ok(batch) = DetectionBatch::from_msgpack(&blob) else {
+                return;
+            };
+            if let Some(want) = &filter {
+                if &batch.camera_id != want {
+                    return;
+                }
+            }
+            callback(batch);
+        };
+        self.ipc
+            .register_detection_callback(camera_id, Arc::new(on_deliver));
+        self.ipc.vision_subscribe_detections(camera_id).await?;
+        Ok(())
+    }
+
+    /// Lock the tracker onto a specific detection, overriding its auto-lock.
+    ///
+    /// This is the operator-designation path: the engine presents a lock state
+    /// only for a track a caller designated, so this is what makes a lock mean
+    /// "the target that was chosen" rather than "whatever scored highest".
+    pub async fn designate_track(
+        &self,
+        camera_id: &str,
+        detection: &Detection,
+    ) -> Result<Value, ClientError> {
+        let blob = rmp_serde::to_vec_named(detection)
+            .map_err(|e| ClientError::Rpc(format!("detection encode failed: {e}")))?;
+        self.ipc
+            .vision_designate_track(camera_id, Value::Binary(blob))
+            .await
     }
 }
 

@@ -760,7 +760,17 @@ ados-mavlink-router.service loaded active running ADOS MAVLink router
         });
 
         // Serve `wire` bytes on a fresh socket and return the folded enrichment.
-        let fold_over_wire = |tag: &str, wire: Vec<u8>| -> Map<String, Value> {
+        //
+        // Retried, deliberately. `read_state_snapshot` gives the socket a 200 ms
+        // read timeout, which is the right production bound but is a real wall
+        // clock: under a full `cargo test --workspace` the writer thread is not
+        // always scheduled inside it, the read times out, and every FC field
+        // comes back absent. The assertion here is about which fields get lifted
+        // off which wire version, not about latency, so a scheduling miss must
+        // not be reported as a parsing failure. An earlier attempt at this blamed
+        // the shared `ADOS_STATE_SOCK` env var — that race is real and is still
+        // serialized above, but it was not what made this test red.
+        let fold_over_wire_once = |tag: &str, wire: Vec<u8>| -> Map<String, Value> {
             let dir = std::env::temp_dir();
             let sock = dir.join(format!(
                 "ados-enrich-state-{}-{}.sock",
@@ -785,6 +795,20 @@ ados-mavlink-router.service loaded active running ADOS MAVLink router
             std::env::remove_var("ADOS_STATE_SOCK");
             let _ = handle.join();
             obj
+        };
+
+        // Up to five attempts; in practice the first succeeds. Five consecutive
+        // misses is not scheduler noise, it is a real regression.
+        let fold_over_wire = |tag: &str, wire: Vec<u8>| -> Map<String, Value> {
+            let mut last = Map::new();
+            for attempt in 0..5 {
+                last = fold_over_wire_once(tag, wire.clone());
+                if last.contains_key("fcConnected") {
+                    return last;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20 * (attempt + 1)));
+            }
+            last
         };
 
         let assert_fc = |obj: &Map<String, Value>| {
