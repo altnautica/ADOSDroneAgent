@@ -57,6 +57,32 @@ from ados.plugins.rpc import (
 
 log = get_logger("plugins.ipc_server")
 
+
+def _grant_ados_group(sock_path: Path) -> None:
+    """Give the per-plugin socket to the ``ados`` group.
+
+    The mode above is ``0o660``, but this server runs as root while a plugin runs
+    as ``ados``, and a mode alone grants the group nothing until the group owns
+    the file — so without this the socket is effectively root-only and the plugin
+    it was created for cannot connect to it.
+
+    Best-effort: the installer creates the group, and on a host where it is absent
+    (a dev box, or a test running as the same user) this is a quiet no-op so
+    bring-up stays automatic. Mirrors ``bind_command_socket`` on the native side.
+    """
+    import grp
+    import shutil
+
+    try:
+        grp.getgrnam("ados")
+    except KeyError:
+        log.debug("ados_group_absent", socket=str(sock_path))
+        return
+    try:
+        shutil.chown(sock_path, group="ados")
+    except OSError as exc:  # not owner, read-only fs — never fatal
+        log.debug("plugin_socket_chgrp_failed", socket=str(sock_path), error=str(exc))
+
 SOCKET_DIR = Path("/run/ados/plugins")
 
 
@@ -168,6 +194,7 @@ class PluginIpcServer:
             path=str(sock_path),
         )
         os.chmod(sock_path, 0o660)
+        _grant_ados_group(sock_path)
         self._servers[plugin_id] = server
         log.info(
             "plugin_ipc_server_started",

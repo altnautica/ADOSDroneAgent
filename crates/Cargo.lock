@@ -524,6 +524,7 @@ dependencies = [
  "hex",
  "hmac",
  "mavlink",
+ "nix 0.29.0",
  "raptorq",
  "rmp-serde",
  "rmpv",

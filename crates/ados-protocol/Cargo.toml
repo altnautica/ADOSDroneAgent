@@ -9,6 +9,11 @@ description = "Canonical implementation of the ADOS Drone Agent IPC wire contrac
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+# Group ownership for the shared command sockets. Binding a socket 0o660 grants
+# nobody but root until the group actually owns the file, so the chgrp and the
+# mode have to live together in `bind_command_socket` rather than being left to
+# each caller to remember.
+nix = { workspace = true }
 # Reads the aux port pair out of /etc/ados/config.yaml so every consumer of
 # the lane resolves the same operator-configured value.
 serde_norway = { workspace = true }

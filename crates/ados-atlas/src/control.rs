@@ -85,13 +85,14 @@ pub async fn serve_control(
     socket_path: &str,
     tx: mpsc::Sender<AtlasControlCmd>,
 ) -> io::Result<JoinHandle<()>> {
-    // The shared helper owns the create-dir / remove-stale / bind / chmod hygiene
-    // (mode 0o666, world-accessible, matching the atlas bus). The accept loop and
-    // per-connection handler stay bespoke below: this socket's reply is
-    // conditional — a command that arrives after the capture loop has gone closes
-    // with NO response — which the uniform-response `serve_rpc` helper cannot
-    // express, so only the bind hygiene is shared here.
-    let listener = bind_command_socket(socket_path, 0o666)?;
+    // The shared helper owns the create-dir / remove-stale / bind / chmod / chgrp
+    // hygiene (mode 0o660, group `ados` — the trusted local plane, matching every
+    // other command socket). The accept loop and per-connection handler stay
+    // bespoke below: this socket's reply is conditional — a command that arrives
+    // after the capture loop has gone closes with NO response — which the
+    // uniform-response `serve_rpc` helper cannot express, so only the bind
+    // hygiene is shared here.
+    let listener = bind_command_socket(socket_path, 0o660)?;
     tracing::info!(path = %socket_path, "atlas_control_listening");
 
     let handle = tokio::spawn(async move {

@@ -2,8 +2,11 @@
 //!
 //! Mirrors the semantics of `ADOSDroneAgent/src/ados/core/ipc.py`:
 //!
-//! - The owning service binds a Unix socket (perms `0o666`, stale socket
-//!   removed first) and broadcasts byte buffers to every connected client.
+//! - The owning service binds a Unix socket (perms `0o660`, group `ados`,
+//!   stale socket removed first) and broadcasts byte buffers to every connected
+//!   client. The trusted local plane is root plus that group and nothing wider:
+//!   two of these sockets forward inbound bytes straight to the flight
+//!   controller.
 //! - Each client has a bounded outbound queue. A client whose queue fills is
 //!   dropped rather than allowed to grow unbounded (slow-client policy).
 //! - The state socket additionally replays the last buffer to a client the
@@ -141,10 +144,18 @@ impl IpcBroadcast {
         inbound: Option<usize>,
     ) -> io::Result<(Self, Option<mpsc::Receiver<InboundCommand>>)> {
         let path = path.as_ref().to_path_buf();
-        // The broadcast socket is world-accessible (0o666), matching the Python
-        // server; the shared helper owns the create-dir / remove-stale / bind /
-        // chmod hygiene.
-        let listener = bind_command_socket(&path, 0o666)?;
+        // Owner+group rw (0o660, group `ados`), matching every other command
+        // socket in the tree; the shared helper owns the create-dir /
+        // remove-stale / bind / chmod / chgrp hygiene.
+        //
+        // This was 0o666 to match the Python server. That is world-writable, and
+        // two of these sockets — the MAVLink and MSP lanes — accept inbound bytes
+        // that are written straight through to the flight controller, so any
+        // local process could arm an aircraft. The trusted-local plane is
+        // root plus the `ados` group; nothing legitimate needs more, because
+        // every service runs as root and plugins reach the flight controller
+        // through the plugin host rather than by opening these sockets.
+        let listener = bind_command_socket(&path, 0o660)?;
 
         let clients: Arc<Mutex<Vec<ClientHandle>>> = Arc::new(Mutex::new(Vec::new()));
         let last: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
@@ -371,8 +382,43 @@ pub fn bind_command_socket(path: impl AsRef<Path>, mode: u32) -> io::Result<Unix
     let _ = std::fs::remove_file(path);
     let listener = UnixListener::bind(path)?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
+    set_ados_group(path);
     Ok(listener)
 }
+
+/// Give a freshly-bound socket to the `ados` group.
+///
+/// This belongs next to the mode, not in each caller, because the two are one
+/// decision: every service here runs as root, so a `0o660` socket grants
+/// *nobody but root* until the group owns the file. A caller that sets the mode
+/// and forgets the chgrp has not written a group-readable socket, it has
+/// written a root-only one — and the failure is silent, because root can still
+/// reach it, so it only shows up as a non-root client that mysteriously cannot
+/// connect.
+///
+/// Best-effort by design: the installer creates the group, and on a dev host
+/// where it is absent this is a quiet no-op so bring-up stays automatic
+/// (Rule 26). Linux-only; a stub elsewhere. Mirrors the `ados-control` and
+/// `ados-gpio` helpers this generalizes.
+#[cfg(target_os = "linux")]
+fn set_ados_group(path: &Path) {
+    match nix::unistd::Group::from_name("ados") {
+        Ok(Some(g)) => {
+            if let Err(err) = nix::unistd::chown(path, None, Some(g.gid)) {
+                tracing::debug!(
+                    error = %err,
+                    path = %path.display(),
+                    "chgrp command socket to ados failed"
+                );
+            }
+        }
+        Ok(None) => tracing::debug!("ados group not present; leaving socket group as-is"),
+        Err(err) => tracing::debug!(error = %err, "resolving ados group failed"),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn set_ados_group(_path: &Path) {}
 
 /// Serve a one-shot request/response command socket.
 ///
@@ -835,9 +881,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_broadcast_socket_is_never_world_accessible() {
+        // Regression guard. These sockets were bound 0o666 to match an older
+        // Python server, and two of them — the MAVLink and MSP lanes — forward
+        // inbound bytes straight to the flight controller, so world-write meant
+        // any local process could arm an aircraft. The trusted local plane is
+        // root plus the `ados` group and nothing wider.
+        let path = temp_sock("bcast-perm");
+        let (server, _inbound) = IpcBroadcast::bind(&path, 8, false, None).await.unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o007,
+            0,
+            "broadcast socket must carry no world bits, got {:o}",
+            mode & 0o777
+        );
+        assert_eq!(mode & 0o777, 0o660, "expected owner+group rw only");
+
+        drop(server);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
     async fn serve_rpc_round_trips_a_request_and_closes_over_cap() {
         let path = temp_sock("rpc");
-        let listener = bind_command_socket(&path, 0o666).unwrap();
+        let listener = bind_command_socket(&path, 0o660).unwrap();
         // Echo handler: prefix the request so the test sees the request bytes
         // (trailing newline stripped) reached the dispatch closure.
         let server = tokio::spawn(serve_rpc(listener, 16, |req: Vec<u8>| async move {
