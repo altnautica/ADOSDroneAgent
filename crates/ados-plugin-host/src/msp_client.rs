@@ -94,6 +94,18 @@ impl MspClient {
         let _ = self.outbound.try_send(frame);
     }
 
+    /// Declare this MSP connection an AUTONOMOUS INJECTOR. MSP is a second way to
+    /// command an airframe (`set_raw_rc` overrides the sticks), so it is gated by
+    /// the same PIC arbiter as the MAVLink lane: an operator holding manual
+    /// control refuses these commands. One-way and downward — an undeclared
+    /// connection stays the never-gated path. Sent only when injector arbitration
+    /// is armed. See [`crate::mavlink_client::MavlinkClient::declare_injector`].
+    pub fn declare_injector(&self, client_id: &str, ticket: Option<&str>) {
+        self.send_bytes(&ados_protocol::ipc::encode_injector_declaration(
+            client_id, ticket,
+        ));
+    }
+
     /// A fresh receiver for the FC->host byte fanout. Each `msp.subscribe` pump
     /// holds its own receiver; a slow pump lags rather than blocking the reader.
     pub fn subscribe(&self) -> broadcast::Receiver<Vec<u8>> {
@@ -134,6 +146,24 @@ mod tests {
         let mut inbound = inbound.expect("inbound requested");
         let client = MspClient::connect(&sock).await.unwrap();
         tokio::time::sleep(Duration::from_millis(30)).await;
+
+        // A declared injector's MSP command carries the claim the router's PIC
+        // gate reads, so an operator can refuse it. Arming is exactly this.
+        client.declare_injector("plugin-host", Some("a-ticket"));
+        let sticks = ados_protocol::msp::set_raw_rc(&[1500, 1500], true).unwrap();
+        client.send_bytes(&sticks);
+        let armed = tokio::time::timeout(Duration::from_secs(1), inbound.recv())
+            .await
+            .expect("no inbound")
+            .expect("channel closed");
+        assert_eq!(
+            armed.peer.injector,
+            Some(ados_protocol::ipc::InjectorClaim {
+                client_id: "plugin-host".into(),
+                ticket: Some("a-ticket".into()),
+            }),
+            "a declared MSP injector's traffic must carry the PIC claim"
+        );
 
         // Host->FC: send an MSP frame; the router receives the raw bytes.
         let frame = ados_protocol::msp::set_raw_rc(&[1500, 1500], true).unwrap();

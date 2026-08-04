@@ -127,6 +127,26 @@ impl MavlinkClient {
         self.send_bytes(ados_protocol::ipc::IPC_DECLARE_OFF_BOX_SOURCE);
     }
 
+    /// Declare this connection an AUTONOMOUS INJECTOR, subjecting everything it
+    /// writes toward the FC to the PIC arbiter: an operator holding the
+    /// manual-control claim refuses these commands, and a not-reporting arbiter
+    /// fails closed. One-way and downward like [`Self::declare_off_box_source`] —
+    /// it can only ever remove authority, never grant it, so an UNDECLARED
+    /// connection stays the never-gated operator path (the load-bearing
+    /// invariant). Sent only when injector arbitration is armed; the host is inert
+    /// by default.
+    ///
+    /// `ticket` attests `client_id` against the pairing key (mint it with
+    /// `ados_protocol::ws_ticket::mint_scoped_ticket` + `crsf_inject_scope`);
+    /// `None` on an unpaired node, where the router's verifier accepts the
+    /// asserted id, matching every other native surface while unclaimed. Send it
+    /// before any traffic — the writer drains its queue in order.
+    pub fn declare_injector(&self, client_id: &str, ticket: Option<&str>) {
+        self.send_bytes(&ados_protocol::ipc::encode_injector_declaration(
+            client_id, ticket,
+        ));
+    }
+
     /// A fresh receiver for the FC->plugin frame fanout. Each plugin pump holds
     /// its own receiver; a slow pump lags rather than blocking the reader.
     pub fn subscribe(&self) -> broadcast::Receiver<Vec<u8>> {
@@ -235,6 +255,39 @@ mod tests {
         assert!(
             got.peer.off_box_source,
             "a declared bridge's traffic must not read as locally produced"
+        );
+    }
+
+    /// A declared injector's every command carries the claim the router's PIC
+    /// gate consumes. Arming is exactly this: without the declaration the router
+    /// sees an operator/human writer and never gates it.
+    #[tokio::test]
+    async fn a_declared_injector_marks_every_command_with_its_claim() {
+        let path = temp_sock("declare-injector");
+        let (_server, inbound) =
+            IpcBroadcast::bind(&path, MAVLINK_BROADCAST_DEPTH, false, Some(16))
+                .await
+                .unwrap();
+        let mut inbound = inbound.expect("inbound channel requested");
+
+        let client = MavlinkClient::connect(&path).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        client.declare_injector("plugin-host", Some("a-ticket"));
+        client.send_bytes(b"guided-setpoint");
+
+        let got = tokio::time::timeout(Duration::from_millis(500), inbound.recv())
+            .await
+            .unwrap()
+            .expect("a command");
+        assert_eq!(got.payload, b"guided-setpoint");
+        assert_eq!(
+            got.peer.injector,
+            Some(ados_protocol::ipc::InjectorClaim {
+                client_id: "plugin-host".into(),
+                ticket: Some("a-ticket".into()),
+            }),
+            "a declared injector's traffic must carry the claim the PIC gate reads"
         );
     }
 

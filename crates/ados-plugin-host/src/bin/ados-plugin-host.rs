@@ -154,6 +154,64 @@ impl<H: ados_plugin_host::HostServices> WiredDaemon<H> {
     }
 }
 
+/// The autonomous-injector identity the plugin host declares when injector
+/// arbitration is armed. A PIC arbiter designates this id (or leaves PIC
+/// unclaimed) to let the host's guided/MSP commands fly; any other holder
+/// refuses them.
+const INJECTOR_CLIENT_ID: &str = "plugin-host";
+
+/// TTL for the host's injector attestation. The declaration is sent once per
+/// connection and the router verifies it once (the claim is sticky), so this
+/// only has to cover the window from arming to first command; a reconnect
+/// re-mints. Generous so a slow bench setup never expires it mid-arm.
+const INJECTOR_TICKET_TTL_SECS: i64 = 3600;
+
+/// The agent config path, `ADOS_CONFIG`-overridable like every other surface.
+fn config_yaml_path() -> PathBuf {
+    PathBuf::from(std::env::var("ADOS_CONFIG").unwrap_or_else(|_| "/etc/ados/config.yaml".to_string()))
+}
+
+/// The pairing file, respecting the same `ADOS_PAIRING_JSON` override the router
+/// and the CRSF injector read.
+fn pairing_json_path() -> PathBuf {
+    PathBuf::from(
+        std::env::var("ADOS_PAIRING_JSON").unwrap_or_else(|_| "/etc/ados/pairing.json".to_string()),
+    )
+}
+
+/// Whether `mavlink.injector_arbitration` is set in the agent config.
+///
+/// DEFAULT FALSE: with it off the host declares no injector, so every command it
+/// writes is the never-gated operator path and the router's PIC gate stays
+/// inert. On (opt-in on a deployment with a PIC arbiter), the host subjects its
+/// autonomous guided/MSP commands to the operator's manual-control claim. A
+/// missing/unreadable config reads as off.
+fn injector_arbitration_armed() -> bool {
+    match std::fs::read_to_string(config_yaml_path()) {
+        Ok(t) => parse_injector_arbitration(&t),
+        Err(_) => false,
+    }
+}
+
+/// Pure parse of the `mavlink.injector_arbitration` flag from config YAML.
+/// Unknown/absent → false; unparseable → false. Separated so the default-off
+/// behaviour is unit-testable without touching process env.
+fn parse_injector_arbitration(yaml: &str) -> bool {
+    #[derive(serde::Deserialize, Default)]
+    struct Cfg {
+        #[serde(default)]
+        mavlink: MavlinkFlags,
+    }
+    #[derive(serde::Deserialize, Default)]
+    struct MavlinkFlags {
+        #[serde(default)]
+        injector_arbitration: bool,
+    }
+    serde_norway::from_str::<Cfg>(yaml)
+        .map(|c| c.mavlink.injector_arbitration)
+        .unwrap_or(false)
+}
+
 /// Build the real host from a discovered supervisor: the five facades plus the
 /// MAVLink client (best-effort), the runtime lookup (install dir + spawn
 /// allowlist from each plugin's manifest), and the agent-id lookup.
@@ -164,12 +222,37 @@ impl<H: ados_plugin_host::HostServices> WiredDaemon<H> {
 async fn build_host(install_dir: PathBuf, run_dir: PathBuf) -> Arc<RealHost> {
     let mut host = RealHost::new();
 
+    // Injector arbitration (default off). When armed, the MAVLink + MSP lanes
+    // declare themselves autonomous injectors so the router's PIC gate subjects
+    // their commands to an operator's manual-control claim. The ticket attests
+    // the id against the pairing key; `None` on an unpaired node (the verifier
+    // accepts the asserted id there). Minted once and reused on both lanes.
+    let armed = injector_arbitration_armed();
+    let injector_ticket: Option<String> = if armed {
+        let t = ados_protocol::ws_ticket::mint_scoped_ticket(
+            &pairing_json_path(),
+            &ados_protocol::ws_ticket::crsf_inject_scope(INJECTOR_CLIENT_ID),
+            INJECTOR_TICKET_TTL_SECS,
+        );
+        tracing::info!(
+            paired = t.is_some(),
+            "injector arbitration armed (mavlink.injector_arbitration)"
+        );
+        t
+    } else {
+        None
+    };
+
     // (a) MAVLink client: best-effort connect to the router's socket. A connect
     //     failure is logged and the slot stays None.
     let mavlink_sock = run_dir.join("mavlink.sock");
     match MavlinkClient::connect(&mavlink_sock).await {
         Ok(client) => {
             tracing::info!(path = %mavlink_sock.display(), "mavlink client connected");
+            // Declare BEFORE any traffic, so every command carries the claim.
+            if armed {
+                client.declare_injector(INJECTOR_CLIENT_ID, injector_ticket.as_deref());
+            }
             host = host.with_mavlink(Arc::new(client));
         }
         Err(e) => {
@@ -189,6 +272,9 @@ async fn build_host(install_dir: PathBuf, run_dir: PathBuf) -> Arc<RealHost> {
     match MspClient::connect(&msp_sock).await {
         Ok(client) => {
             tracing::info!(path = %msp_sock.display(), "msp client connected");
+            if armed {
+                client.declare_injector(INJECTOR_CLIENT_ID, injector_ticket.as_deref());
+            }
             host = host.with_msp(Arc::new(client));
         }
         Err(e) => {
@@ -742,5 +828,28 @@ mod tests {
                 "{runtime}: env token must verify against the shared persisted secret"
             );
         }
+    }
+
+    /// Injector arbitration is OFF unless the flag is explicitly set true. The
+    /// default-off path is the load-bearing invariant: with no flag, no config,
+    /// or a config that omits it, the host declares no injector and the gate
+    /// stays inert. Proven-to-bite: only `injector_arbitration: true` flips it.
+    #[test]
+    fn injector_arbitration_defaults_off_and_arms_only_when_set() {
+        // Explicit true → armed.
+        assert!(parse_injector_arbitration(
+            "mavlink:\n  injector_arbitration: true\n"
+        ));
+        // Explicit false, absent key, absent section, empty doc → off.
+        assert!(!parse_injector_arbitration(
+            "mavlink:\n  injector_arbitration: false\n"
+        ));
+        assert!(!parse_injector_arbitration(
+            "mavlink:\n  legacy_stream_request: true\n"
+        ));
+        assert!(!parse_injector_arbitration("radio:\n  region: US\n"));
+        assert!(!parse_injector_arbitration(""));
+        // Garbage YAML → off (never accidentally arms).
+        assert!(!parse_injector_arbitration("::: not yaml :::"));
     }
 }

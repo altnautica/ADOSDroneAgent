@@ -86,6 +86,21 @@ pub struct InjectorClaim {
     pub ticket: Option<String>,
 }
 
+/// Build the [`IPC_DECLARE_INJECTOR_PREFIX`] control frame a writer sends to
+/// declare itself an autonomous injector. The inverse of
+/// [`parse_injector_declaration`], kept beside it so a producer's declaration
+/// and the router's parse cannot drift on the wire format. `ticket` is the
+/// pairing-key attestation for `client_id`; omit it on an unpaired node.
+pub fn encode_injector_declaration(client_id: &str, ticket: Option<&str>) -> Vec<u8> {
+    let mut out = IPC_DECLARE_INJECTOR_PREFIX.to_vec();
+    out.extend_from_slice(client_id.as_bytes());
+    if let Some(t) = ticket {
+        out.extend_from_slice(b";ticket=");
+        out.extend_from_slice(t.as_bytes());
+    }
+    out
+}
+
 /// Parse an [`IPC_DECLARE_INJECTOR_PREFIX`] control frame into an
 /// [`InjectorClaim`]. `None` when the payload is not an injector declaration or
 /// carries an empty client id (a declaration with no identity is not a claim).
@@ -865,6 +880,23 @@ mod tests {
             assert!(
                 got.peer.off_box_source,
                 "a declared forwarder must not read as a local producer"
+            );
+        }
+    }
+
+    #[test]
+    fn encode_injector_declaration_round_trips_through_the_parser() {
+        // The producer's encoder and the router's parser must agree byte-for-byte,
+        // with and without a ticket — a drift here silently un-arms the gate.
+        for (id, ticket) in [("ai-mission", Some("abc.def")), ("autopilot-1", None)] {
+            let frame = encode_injector_declaration(id, ticket);
+            assert!(frame.starts_with(IPC_DECLARE_INJECTOR_PREFIX));
+            assert_eq!(
+                parse_injector_declaration(&frame),
+                Some(InjectorClaim {
+                    client_id: id.into(),
+                    ticket: ticket.map(str::to_string),
+                })
             );
         }
     }
