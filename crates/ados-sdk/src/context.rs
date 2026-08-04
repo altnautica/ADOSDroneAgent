@@ -71,6 +71,21 @@ impl MavlinkClient {
     }
 }
 
+/// Pack normalized sticks into AETR PWM channels `[roll, pitch, throttle, yaw]`,
+/// applying the codec's bipolar (centre 1500) and throttle (idle 1000) scaling.
+/// Separated from [`MspClient::send_sticks`] so the scaling is unit-testable
+/// without an IPC transport — the whole point of the fix is that the scaling is
+/// actually applied.
+fn sticks_to_channels(roll: f32, pitch: f32, yaw: f32, throttle: f32) -> [u16; 4] {
+    use ados_protocol::msp::{bipolar_to_pwm, throttle_to_pwm};
+    [
+        bipolar_to_pwm(roll),
+        bipolar_to_pwm(pitch),
+        throttle_to_pwm(throttle),
+        bipolar_to_pwm(yaw),
+    ]
+}
+
 /// `ctx.msp` — read and write raw MSP to a Betaflight / iNav / KISS FC through
 /// the host's MSP byte plane. The sibling of [`MavlinkClient`] for an FC that
 /// speaks MSP; the codec that builds/parses the bytes is
@@ -95,6 +110,29 @@ impl MspClient {
         let frame = ados_protocol::msp::set_raw_rc(channels, true)
             .ok_or_else(|| ClientError::Rpc("too many RC channels for the frame".to_string()))?;
         self.ipc.msp_send(&frame).await
+    }
+
+    /// Send an `MSP_SET_RAW_RC` from NORMALIZED stick inputs, applying the codec's
+    /// stick scaling. `roll`/`pitch`/`yaw` are bipolar `-1.0..=1.0` (centre `0` →
+    /// `1500` µs); `throttle` is `0.0..=1.0` (idle `0` → `1000` µs, NOT centre).
+    /// Channels are packed AETR `[roll, pitch, throttle, yaw]`, the codebase
+    /// convention (the `ados-crsf` bank + the GCS mapping).
+    ///
+    /// This is the safe way to fly an MSP FC from a control loop: [`send_raw_rc`]
+    /// takes RAW PWM and applies NO scaling, so handing it normalized sticks
+    /// sends near-centre garbage (and a `0.0` throttle would sit at `0`, not
+    /// idle). Prefer this whenever the loop produces normalized commands.
+    ///
+    /// [`send_raw_rc`]: Self::send_raw_rc
+    pub async fn send_sticks(
+        &self,
+        roll: f32,
+        pitch: f32,
+        yaw: f32,
+        throttle: f32,
+    ) -> Result<Value, ClientError> {
+        self.send_raw_rc(&sticks_to_channels(roll, pitch, yaw, throttle))
+            .await
     }
 
     /// Subscribe to the raw FC->host MSP byte stream. The callback fires for each
@@ -544,5 +582,22 @@ mod tests {
         assert_eq!(ctx.plugin_id, "com.example.demo");
         assert_eq!(ctx.agent_id, "agent-1");
         assert_eq!(ctx.plugin_version, "1.0.0");
+    }
+
+    /// `send_sticks` must apply the codec scaling and AETR order. The bug it
+    /// fixes is a control loop handing `send_raw_rc` normalized sticks, where a
+    /// centre stick (`0.0`) would land at PWM `0` — off the bottom of the range —
+    /// instead of `1500`. This asserts the scaling is actually applied.
+    #[test]
+    fn send_sticks_scales_and_orders_aetr() {
+        // Centre sticks + idle throttle: NOT zeros. AETR = [roll, pitch, thr, yaw].
+        assert_eq!(sticks_to_channels(0.0, 0.0, 0.0, 0.0), [1500, 1500, 1000, 1500]);
+        // Full deflection each axis + full throttle, exercising the ordering.
+        assert_eq!(
+            sticks_to_channels(1.0, -1.0, 1.0, 1.0),
+            [2000, 1000, 2000, 2000]
+        );
+        // Out-of-range clamps rather than wrapping.
+        assert_eq!(sticks_to_channels(5.0, -5.0, 0.0, 2.0), [2000, 1000, 2000, 1500]);
     }
 }
