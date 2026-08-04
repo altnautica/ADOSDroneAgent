@@ -183,15 +183,16 @@ async def _run(
         ipc_client = _NullIpcClient(plugin_id)
 
     static_config = _read_static_config(plugin_id, agent_id)
+    data_dir, config_dir, temp_dir = _prepare_plugin_dirs(plugin_id, agent_id)
     ctx = PluginContext(
         plugin_id=plugin_id,
         plugin_version=manifest.version,
         config=static_config,
         ipc=ipc_client,  # type: ignore[arg-type]
         agent_id=agent_id,
-        data_dir=_data_dir_for(plugin_id, agent_id),
-        config_dir=PLUGIN_DATA_DIR / plugin_id / "config",
-        temp_dir=PLUGIN_RUN_DIR / plugin_id,
+        data_dir=data_dir,
+        config_dir=config_dir,
+        temp_dir=temp_dir,
     )
 
     # Buffer the vendor-binary subprocesses the plugin spawned so we
@@ -280,6 +281,30 @@ def _data_dir_for(plugin_id: str, agent_id: str) -> Path:
     if agent_id:
         return base / "drones" / agent_id
     return base
+
+
+def _prepare_plugin_dirs(plugin_id: str, agent_id: str) -> tuple[Path, Path, Path]:
+    """Resolve and create the three dirs the plugin context hands the plugin.
+
+    ``data_dir`` prefers ``ADOS_PLUGIN_DATA_DIR`` — the path the host already
+    computed and delivered in the env file — so there is one source of truth.
+    ``_data_dir_for`` and the Rust host's ``plugin_data_dir`` derive the identical
+    path today, but two hand-synced derivations invite drift; when the env is
+    present it wins, and ``_data_dir_for`` is the fallback for a direct (no-host)
+    launch. Nothing upstream makes the per-drone leaf, so a plugin's first write
+    hits ``FileNotFoundError`` without this. A create failure is logged (surfaced
+    as the plugin's own write error later), never a runner crash.
+    """
+    env_data_dir = os.environ.get("ADOS_PLUGIN_DATA_DIR")
+    data_dir = Path(env_data_dir) if env_data_dir else _data_dir_for(plugin_id, agent_id)
+    config_dir = PLUGIN_DATA_DIR / plugin_id / "config"
+    temp_dir = PLUGIN_RUN_DIR / plugin_id
+    for d in (data_dir, config_dir, temp_dir):
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            log.warning("plugin_dir_create_failed", dir=str(d), error=str(exc))
+    return data_dir, config_dir, temp_dir
 
 
 def _read_static_config(plugin_id: str, agent_id: str) -> dict:
