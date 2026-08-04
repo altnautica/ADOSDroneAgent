@@ -22,7 +22,7 @@
 //! valid injector ticket is.
 
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use ados_hid::pic_view::{read_pic_view, resolve_authority, Authority, ChannelSourceMode, PicView};
 use ados_protocol::ipc::InjectorClaim;
@@ -62,15 +62,6 @@ pub fn injector_refused_decision(pic: Option<&PicView>, verified_injector: Optio
     resolve_authority(ChannelSourceMode::Hybrid, pic, verified_injector) == Authority::Hid
 }
 
-/// The live gate: read the pairing + PIC state off disk and decide. Reads the
-/// PIC view FRESH each call (it is the live authority; a cached "unclaimed"
-/// could outlive the operator's grab), staleness-gated by the sidecar's mtime.
-pub fn injector_refused(pairing_path: &Path, pic_state_path: &Path, claim: &InjectorClaim) -> bool {
-    let verified = verify_injector(pairing_path, claim);
-    let pic = read_pic_view(pic_state_path, SystemTime::now());
-    injector_refused_decision(pic.as_ref(), verified.as_deref())
-}
-
 /// The pairing file, respecting the same `ADOS_PAIRING_JSON` override every
 /// other surface reads.
 fn default_pairing_path() -> PathBuf {
@@ -79,16 +70,96 @@ fn default_pairing_path() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("/etc/ados/pairing.json"))
 }
 
-/// [`injector_refused`] against the canonical on-box paths (the PIC sidecar in
-/// the run dir, the pairing file). This is what the FC-write path calls; it runs
-/// only when a command actually carries an injector claim, which nothing does
-/// until a producer is armed, so it is inert by default.
-pub fn injector_refused_default(claim: &InjectorClaim) -> bool {
-    injector_refused(
-        &default_pairing_path(),
-        &ados_hid::paths::pic_state_json(),
-        claim,
-    )
+/// How long a PIC read is reused before the sidecar is re-read on the hot path.
+/// Mirrors the attitude rung's once-per-tick model (its `RATE_PERIOD` is 50 ms):
+/// a fresh operator grab is honored within this window, and the per-command
+/// blocking read stays off the async router loop.
+const PIC_CACHE_TTL: Duration = Duration::from_millis(50);
+
+/// The hot-path injector gate: the same decision as [`injector_refused`], but
+/// with the two blocking costs cached off the async router loop.
+///
+/// [`injector_refused`] read `pairing.json` (+ an HMAC verify) AND the PIC
+/// sidecar on EVERY command. At an armed 50–100 Hz `set_raw_rc` cadence that is
+/// two blocking `std::fs` reads plus a crypto verify per frame, on the executor
+/// thread that also drives every other socket. This caches both:
+///
+/// * the **verify** is reused while the claim is byte-identical — the injector
+///   ticket is minted once per connection, so a claim that verified once stays
+///   verified; the HMAC + pairing read run once per distinct claim, not per
+///   command.
+/// * the **PIC read** is reused within [`PIC_CACHE_TTL`], exactly as the
+///   attitude rung reads it once per tick. `None` (absent/stale/malformed) still
+///   fails closed to the human hold.
+///
+/// Held behind a `std::sync::Mutex` on the connection and used synchronously, so
+/// the lock never spans an `.await`.
+pub struct InjectorGateCache {
+    pairing_path: PathBuf,
+    pic_state_path: PathBuf,
+    /// The last claim verified and its attested id (the injector ticket is
+    /// per-connection, so this is sticky for the life of the lane).
+    verify_cache: Option<(InjectorClaim, Option<String>)>,
+    /// The last PIC read and the instant it was taken.
+    pic_cache: Option<(Instant, Option<PicView>)>,
+}
+
+impl Default for InjectorGateCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl InjectorGateCache {
+    /// Resolve the on-box paths once (respecting `ADOS_PAIRING_JSON`), so the hot
+    /// path never re-resolves them.
+    pub fn new() -> Self {
+        Self {
+            pairing_path: default_pairing_path(),
+            pic_state_path: ados_hid::paths::pic_state_json(),
+            verify_cache: None,
+            pic_cache: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_paths(pairing_path: PathBuf, pic_state_path: PathBuf) -> Self {
+        Self {
+            pairing_path,
+            pic_state_path,
+            verify_cache: None,
+            pic_cache: None,
+        }
+    }
+
+    /// Is this declared injector's command REFUSED right now? Caches the verify
+    /// per sticky claim and the PIC read on a short TTL; the verdict itself is the
+    /// same pure [`injector_refused_decision`] the matrix tests cover.
+    pub fn refused(&mut self, claim: &InjectorClaim) -> bool {
+        self.refused_at(claim, Instant::now(), SystemTime::now())
+    }
+
+    /// [`Self::refused`] with the clocks injected, so the cache behaviour is
+    /// unit-testable without sleeping.
+    fn refused_at(&mut self, claim: &InjectorClaim, now: Instant, wall: SystemTime) -> bool {
+        let verified = match &self.verify_cache {
+            Some((cached, id)) if cached == claim => id.clone(),
+            _ => {
+                let id = verify_injector(&self.pairing_path, claim);
+                self.verify_cache = Some((claim.clone(), id.clone()));
+                id
+            }
+        };
+        let pic = match &self.pic_cache {
+            Some((taken, p)) if now.duration_since(*taken) < PIC_CACHE_TTL => p.clone(),
+            _ => {
+                let p = read_pic_view(&self.pic_state_path, wall);
+                self.pic_cache = Some((now, p.clone()));
+                p
+            }
+        };
+        injector_refused_decision(pic.as_ref(), verified.as_deref())
+    }
 }
 
 #[cfg(test)]
@@ -192,5 +263,94 @@ mod tests {
             verify_injector(&pairing, &claim("other", Some(&ticket))),
             None
         );
+    }
+
+    // ── the hot-path cache ───────────────────────────────────────────────────
+
+    fn unpaired_cache() -> (tempfile::TempDir, InjectorGateCache) {
+        let dir = tempfile::tempdir().unwrap();
+        // No pairing file → Unpaired → the asserted id is accepted with no ticket,
+        // so the verdict turns purely on the PIC sidecar (which is what we vary).
+        let cache = InjectorGateCache::with_paths(
+            dir.path().join("pairing.json"),
+            dir.path().join("pic-state.json"),
+        );
+        (dir, cache)
+    }
+
+    /// Write the PIC sidecar in the real schema `read_pic_view` parses
+    /// (`state`/`claimed_by`, NOT `claimed`/`holder`).
+    fn write_pic(dir: &Path, holder: Option<&str>) {
+        let body = match holder {
+            Some(h) => format!(r#"{{"state": "claimed", "claimed_by": "{h}"}}"#),
+            None => r#"{"state": "unclaimed"}"#.to_string(),
+        };
+        std::fs::write(dir.join("pic-state.json"), body).unwrap();
+    }
+
+    /// The PIC read is cached within the TTL, then refreshed — so a fresh grab is
+    /// honored on the next tick, not the next command, and the blocking read is
+    /// off the per-command path. Proven-to-bite: flip the sidecar to a human
+    /// holder mid-window and the verdict must NOT change until the TTL elapses,
+    /// then MUST flip to refused.
+    #[test]
+    fn pic_read_is_cached_within_the_ttl_then_refreshes() {
+        let (dir, mut cache) = unpaired_cache();
+        let c = claim("ai-mission", None);
+
+        // t0: no one holds PIC → the injector is allowed (not refused). A fresh
+        // `wall` per call keeps the just-written sidecar inside the staleness gate,
+        // while the fake `Instant`s drive the cache TTL independently.
+        write_pic(dir.path(), None);
+        let t0 = Instant::now();
+        assert!(
+            !cache.refused_at(&c, t0, SystemTime::now()),
+            "unclaimed PIC allows the injector"
+        );
+
+        // The operator grabs control, but only 10 ms (< TTL) has passed: the
+        // cached "unclaimed" still stands. This is the deliberate, bounded window.
+        write_pic(dir.path(), Some("hdmi-kiosk"));
+        assert!(
+            !cache.refused_at(&c, t0 + Duration::from_millis(10), SystemTime::now()),
+            "within the TTL the cached PIC read stands (bounded staleness)"
+        );
+
+        // Past the TTL: the sidecar is re-read and the human hold now refuses
+        // (holder 'hdmi-kiosk' != the injector's verified id 'ai-mission').
+        assert!(
+            cache.refused_at(
+                &c,
+                t0 + PIC_CACHE_TTL + Duration::from_millis(1),
+                SystemTime::now()
+            ),
+            "past the TTL the fresh read sees the operator's grab and refuses"
+        );
+    }
+
+    /// The verify (pairing read + HMAC on a paired node) is reused while the claim
+    /// is byte-identical, and re-run when the claim changes — the sticky-claim
+    /// optimisation. Proven-to-bite by asserting the verdict tracks a changed
+    /// claim: a paired node with no ticket must be refused (unverified → can't win
+    /// the lane), while the unpaired-accepted id turns on the PIC alone.
+    #[test]
+    fn verify_is_resolved_per_distinct_claim() {
+        let dir = tempfile::tempdir().unwrap();
+        let pairing = dir.path().join("pairing.json");
+        std::fs::write(&pairing, r#"{"paired": true, "api_key": "k-secret"}"#).unwrap();
+        write_pic(dir.path(), Some("ai-mission")); // the robot itself holds PIC
+        let mut cache =
+            InjectorGateCache::with_paths(pairing, dir.path().join("pic-state.json"));
+
+        let now = Instant::now();
+        // A claim with no ticket on a PAIRED node cannot verify → unverified →
+        // refused even though the holder matches the asserted id.
+        assert!(
+            cache.refused_at(&claim("ai-mission", None), now, SystemTime::now()),
+            "an unverified claim can never win the lane away from the hold"
+        );
+        // A DIFFERENT claim re-runs the verify (still no ticket → still refused),
+        // proving the cache keys on the claim rather than latching the first id.
+        assert!(cache.refused_at(&claim("other", None), now, SystemTime::now()));
     }
 }

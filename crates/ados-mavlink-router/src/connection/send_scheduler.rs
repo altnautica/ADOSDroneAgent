@@ -241,7 +241,7 @@ impl FcConnection {
         // reporting — fail closed). An undeclared writer (injector = None) is the
         // operator/human path and is NEVER gated. Inert until a producer is armed.
         if let Some(claim) = injector {
-            if super::injector_gate::injector_refused_default(claim) {
+            if self.injector_gate.lock().unwrap().refused(claim) {
                 tracing::warn!(
                     injector = %claim.client_id,
                     len = data.len(),
@@ -295,7 +295,7 @@ impl FcConnection {
         // Same PIC-arbiter gate as send_client_bytes; MSP is a second way to
         // command an airframe, so it is gated identically.
         if let Some(claim) = injector {
-            if super::injector_gate::injector_refused_default(claim) {
+            if self.injector_gate.lock().unwrap().refused(claim) {
                 tracing::warn!(
                     injector = %claim.client_id,
                     len = data.len(),

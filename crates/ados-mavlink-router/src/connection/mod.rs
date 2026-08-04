@@ -211,6 +211,11 @@ pub struct FcConnection {
     /// [`Self::send_bytes`] for how this becomes the fallback destination for
     /// a client's outbound MAVLink.
     aux_uplink: Mutex<Option<crate::aux_uplink::AuxUplinkSender>>,
+    /// Hot-path cache for the PIC-arbiter injector gate. A `std::sync::Mutex`
+    /// (not the async one) held only for the synchronous verdict, so the blocking
+    /// pairing/PIC reads + HMAC verify are cached off the router loop and the
+    /// lock never spans an `.await`. Inert until a producer arms the gate.
+    injector_gate: std::sync::Mutex<injector_gate::InjectorGateCache>,
 }
 
 impl FcConnection {
@@ -252,6 +257,7 @@ impl FcConnection {
             param_sweep_started: Mutex::new(None),
             param_last_cached_count: AtomicUsize::new(0),
             aux_uplink: Mutex::new(None),
+            injector_gate: std::sync::Mutex::new(injector_gate::InjectorGateCache::new()),
         })
     }
 
