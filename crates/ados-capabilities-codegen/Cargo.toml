@@ -9,3 +9,5 @@ description = "Generates the ADOS capability catalog (Python, Rust, TypeScript) 
 [dependencies]
 serde = { workspace = true }
 toml = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
