@@ -31,6 +31,7 @@ pub mod client;
 pub mod context;
 pub mod drivers;
 pub mod lifecycle;
+pub mod msp;
 pub mod testing;
 pub mod vision;
 
