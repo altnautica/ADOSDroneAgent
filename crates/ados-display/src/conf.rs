@@ -62,9 +62,66 @@ pub fn rotation_from_blob(blob: &BTreeMap<String, String>) -> i32 {
     }
 }
 
+/// The physical panel geometry from the config, DISTINCT from the native
+/// authoring canvas (`pages::PANEL_W`/`PANEL_H`, always 480x320). `None` for
+/// `width`/`height` means "probe the device / use the native size"; a
+/// `controller` string is an optional hint the installer may record. The render
+/// loop scale-fits the native canvas onto the probed panel size, so this is a
+/// hint/override, not a hard requirement.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PhysicalGeometry {
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub controller: Option<String>,
+}
+
+/// Read the panel geometry from `path`.
+pub fn read_physical_geometry(path: &Path) -> PhysicalGeometry {
+    physical_geometry_from_blob(&parse(path))
+}
+
+/// Resolve the panel geometry from an already-parsed blob (the testable core).
+/// A non-numeric or zero dimension is ignored (`None`), so a malformed value
+/// falls back to the probed/native size rather than a broken geometry.
+pub fn physical_geometry_from_blob(blob: &BTreeMap<String, String>) -> PhysicalGeometry {
+    let dim = |key: &str| -> Option<u32> {
+        blob.get(key)
+            .and_then(|raw| raw.parse::<u32>().ok())
+            .filter(|&v| v > 0)
+    };
+    PhysicalGeometry {
+        width: dim("panel_width"),
+        height: dim("panel_height"),
+        controller: blob
+            .get("panel_controller")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn physical_geometry_parses_and_ignores_malformed() {
+        let blob =
+            parse_str("panel_width=800\npanel_height=480\npanel_controller=ili9488\nrotation=90\n");
+        let g = physical_geometry_from_blob(&blob);
+        assert_eq!(g.width, Some(800));
+        assert_eq!(g.height, Some(480));
+        assert_eq!(g.controller.as_deref(), Some("ili9488"));
+
+        // Absent keys -> None (fall back to probed/native size).
+        assert_eq!(
+            physical_geometry_from_blob(&parse_str("")),
+            PhysicalGeometry::default()
+        );
+        // A zero or non-numeric dimension is ignored, not a broken 0-size panel.
+        let bad = physical_geometry_from_blob(&parse_str("panel_width=0\npanel_height=abc\n"));
+        assert_eq!(bad.width, None);
+        assert_eq!(bad.height, None);
+    }
 
     #[test]
     fn parses_key_value_pairs_and_skips_comments_blanks() {

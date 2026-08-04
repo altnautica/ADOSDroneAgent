@@ -96,13 +96,8 @@ async fn run_linux(
     rotation: i32,
     conf_blob: &std::collections::BTreeMap<String, String>,
 ) -> Result<()> {
-    use std::time::Duration;
-
-    use tokio::signal::unix::{signal, SignalKind};
-
     use ados_display::fb_geometry::{self, FbMatch};
     use ados_display::fb_writer::{FbWriter, MmapSink};
-    use ados_display::sidecar::{LcdLatency, LCD_LATENCY_PATH, LCD_PAGE_REQUEST_PATH};
 
     let sys_root = Path::new(fb_geometry::SYS_GRAPHICS_DIR);
     let Some(FbMatch {
@@ -128,78 +123,38 @@ async fn run_linux(
         "framebuffer probed"
     );
 
-    let sink = MmapSink::open(&dev_path.to_string_lossy(), frame_bytes)?;
-    let writer = FbWriter::spawn(sink);
+    // The virtual sink (a file, for a VM/CI/dev box with no framebuffer) takes
+    // precedence when ADOS_DISPLAY_VIRTUAL_FB is set; otherwise the real
+    // /dev/fbN mmap. FbWriter::spawn is generic over the sink, so both yield the
+    // same writer.
+    let writer = match ados_display::fb_writer::VirtualSink::from_env() {
+        Some(vs) => {
+            tracing::info!("ados-display: virtual framebuffer sink (ADOS_DISPLAY_VIRTUAL_FB)");
+            FbWriter::spawn(vs)
+        }
+        None => FbWriter::spawn(MmapSink::open(&dev_path.to_string_lossy(), frame_bytes)?),
+    };
 
     sd_ready();
 
-    // The native in-process page UI is the only render mode. When the panel can
-    // host the 480x320 page system, drive the page render loop.
-    let page_geom_ok = geometry.xres >= ados_display::pages::PANEL_W
-        && geometry.yres >= ados_display::pages::PANEL_H;
-    if page_geom_ok {
-        tracing::info!(
-            width = geometry.xres,
-            height = geometry.yres,
-            bpp = geometry.bits_per_pixel,
-            "native page UI mode engaged"
-        );
-        return run_page_ui(writer, geometry.bits_per_pixel, rotation, conf_blob).await;
-    }
-
-    // A bound SPI-LCD too small for the 480x320 page system is an unsupported
-    // panel: there is nothing to render, but the framebuffer is still owned, so
-    // keep the writer alive and run the latency mirror + page-request drain so
-    // the diagnostics surface stays honest rather than reporting a dead service.
-    tracing::warn!(
+    // The native in-process page UI drives ANY panel: the 480x320 page canvas is
+    // scaled-to-fit (letterboxed) onto the probed geometry, so a smaller or
+    // larger panel renders the full UI rather than nothing.
+    tracing::info!(
         width = geometry.xres,
         height = geometry.yres,
-        "bound panel cannot host the 480x320 page system; idling the write path"
+        bpp = geometry.bits_per_pixel,
+        "native page UI mode engaged (scale-to-fit)"
     );
-    let mut tick = tokio::time::interval(Duration::from_secs(1));
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-    let mut sigterm = signal(SignalKind::terminate())?;
-    let mut sigint = signal(SignalKind::interrupt())?;
-    // Absorb SIGHUP so a UI-config reload signal does not terminate the idle
-    // write path (there is no page system to reload, but the unit must survive).
-    let mut sighup = signal(SignalKind::hangup())?;
-
-    loop {
-        tokio::select! {
-            _ = tick.tick() => {
-                // Mirror writer stats to lcd-latency.json for the diag surface.
-                let lat: LcdLatency = writer.stats().into();
-                if let Err(e) = lat.write_to(Path::new(LCD_LATENCY_PATH)) {
-                    tracing::debug!(error = %e, "lcd-latency write failed");
-                }
-                // Drain (and discard) a remote page switch so a stale request
-                // can never accumulate while no page system is running.
-                if let Some(page) = ados_display::sidecar::take_page_request(
-                    Path::new(LCD_PAGE_REQUEST_PATH),
-                ) {
-                    tracing::info!(page = %page, "lcd page request dropped (no page system)");
-                }
-                sd_watchdog();
-            }
-            _ = sighup.recv() => {
-                tracing::debug!("received SIGHUP (idle write path; nothing to reload)");
-            }
-            _ = sigterm.recv() => {
-                tracing::info!("received SIGTERM");
-                break;
-            }
-            _ = sigint.recv() => {
-                tracing::info!("received SIGINT");
-                break;
-            }
-        }
-    }
-
-    // cleanup() joins the writer thread BEFORE the mmap sink is dropped.
-    drop(writer);
-    tracing::info!("ados-display stopped");
-    Ok(())
+    run_page_ui(
+        writer,
+        geometry.bits_per_pixel,
+        rotation,
+        conf_blob,
+        geometry.xres,
+        geometry.yres,
+    )
+    .await
 }
 
 /// Drive the native in-process page UI: build the navigator + state source,
@@ -214,11 +169,14 @@ async fn run_linux(
 /// paint does not waste a core. `lcd-latency.json` is mirrored at 1 Hz, and a
 /// remote `POST /api/v1/display/page` request is drained each render tick.
 #[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
 async fn run_page_ui(
     mut writer: ados_display::fb_writer::FbWriter,
     bpp: u32,
     rotation: i32,
     conf_blob: &std::collections::BTreeMap<String, String>,
+    xres: u32,
+    yres: u32,
 ) -> Result<()> {
     use std::time::{Duration, Instant};
 
@@ -233,7 +191,7 @@ async fn run_page_ui(
     use ados_display::navigator::{Dispatch, PageNavigator};
     use ados_display::pages::calibration::render_calibration;
     use ados_display::pages::PageContext;
-    use ados_display::render_loop::pack_frame;
+    use ados_display::render_loop::pack_frame_fitted;
     use ados_display::sidecar::{
         write_snapshot_png, LcdLatency, LCD_LATENCY_PATH, LCD_SNAPSHOT_PATH,
     };
@@ -275,9 +233,12 @@ async fn run_page_ui(
 
     // Pack + present a finished canvas through the off-thread writer. The blit
     // is off-thread, so this returns immediately.
-    fn present_frame(writer: &FbWriter, bpp: u32, canvas: &Canvas) {
+    fn present_frame(writer: &FbWriter, bpp: u32, canvas: &Canvas, xres: u32, yres: u32) {
+        // The native canvas's RGB is the dedup key (it uniquely identifies the
+        // frame; the letterbox is a pure function of it), while the WRITTEN bytes
+        // are the canvas scaled-to-fit the probed panel.
         let raw = canvas.as_rgb888();
-        if let Some(packed) = pack_frame(canvas, bpp) {
+        if let Some((packed, _xf)) = pack_frame_fitted(canvas, bpp, xres, yres) {
             writer.present(Frame::new(packed, raw));
         } else {
             tracing::warn!(bpp, "unsupported panel bit depth; frame dropped");
@@ -436,7 +397,7 @@ async fn run_page_ui(
                         last_snapshot = Some(now);
                     }
 
-                    present_frame(&writer, bpp, &canvas);
+                    present_frame(&writer, bpp, &canvas, xres, yres);
                     last_render = Some(now);
                 }
 
@@ -488,7 +449,7 @@ async fn run_page_ui(
                         // Repaint immediately: the next target, or the resumed
                         // UI when the fit just landed.
                         let canvas = build_canvas(&calibration, &navigator, &ctx, &palette);
-                        present_frame(&writer, bpp, &canvas);
+                        present_frame(&writer, bpp, &canvas, xres, yres);
                         last_render = Some(now);
                     } else {
                         // Normal UI: route the gesture through the navigator
@@ -505,7 +466,7 @@ async fn run_page_ui(
                             ctx = source.build_context();
                             last_state_poll = now;
                             let canvas = build_canvas(&calibration, &navigator, &ctx, &palette);
-                            present_frame(&writer, bpp, &canvas);
+                            present_frame(&writer, bpp, &canvas, xres, yres);
                             last_render = Some(now);
                         }
                         // A page-defined custom key (slider drag, list row) or an
@@ -537,7 +498,7 @@ async fn run_page_ui(
                             ctx = source.build_context();
                             last_state_poll = now;
                             let canvas = build_canvas(&calibration, &navigator, &ctx, &palette);
-                            present_frame(&writer, bpp, &canvas);
+                            present_frame(&writer, bpp, &canvas, xres, yres);
                             last_render = Some(now);
                         }
                     }

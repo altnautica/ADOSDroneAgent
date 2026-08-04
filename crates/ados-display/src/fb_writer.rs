@@ -99,6 +99,37 @@ pub trait FrameSink: Send {
     fn write_frame(&mut self, buf: &[u8]) -> std::io::Result<()>;
 }
 
+/// A portable [`FrameSink`] that writes each packed frame to a file, overwriting
+/// so the file always holds the CURRENT panel contents. Selected by the
+/// `ADOS_DISPLAY_VIRTUAL_FB` env var, it makes the display render path runnable
+/// and inspectable off real hardware — in a VM, in CI, or on a dev box with no
+/// framebuffer — where `MmapSink` (Linux `/dev/fbN`) is unavailable. The bytes
+/// are exactly what the real sink would blit, so a reader decodes them with the
+/// panel's geometry + bpp.
+pub struct VirtualSink {
+    path: std::path::PathBuf,
+}
+
+impl VirtualSink {
+    pub fn open(path: impl Into<std::path::PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
+    /// The sink from `ADOS_DISPLAY_VIRTUAL_FB`, or `None` when unset (the real
+    /// framebuffer path is used instead).
+    pub fn from_env() -> Option<Self> {
+        std::env::var_os("ADOS_DISPLAY_VIRTUAL_FB").map(Self::open)
+    }
+}
+
+impl FrameSink for VirtualSink {
+    fn write_frame(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        // Full overwrite so a reader always sees one complete frame, never a
+        // torn mix of two.
+        std::fs::write(&self.path, buf)
+    }
+}
+
 /// Observability snapshot, mirroring `FrameBufferRenderer.stats()`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WriterStats {
@@ -372,6 +403,29 @@ impl FrameSink for MmapSink {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn virtual_sink_writes_the_latest_frame_to_its_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fb.bin");
+        let mut sink = VirtualSink::open(&path);
+        sink.write_frame(&[1, 2, 3, 4]).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), vec![1, 2, 3, 4]);
+        // Overwrite: the file always holds exactly the current frame, never a
+        // torn mix.
+        sink.write_frame(&[9, 9]).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), vec![9, 9]);
+    }
+
+    #[test]
+    fn virtual_sink_from_env_is_none_when_unset() {
+        // Absent env -> no virtual sink (the real framebuffer path is used).
+        // (Set-case is covered by the explicit `open` round-trip above; reading
+        // the process env in a test is racy, so it is asserted only for absence
+        // under a name that is not set.)
+        std::env::remove_var("ADOS_DISPLAY_VIRTUAL_FB");
+        assert!(VirtualSink::from_env().is_none());
+    }
 
     /// A Vec-backed fake sink that records every write. Optionally fails after a
     /// configured number of writes to exercise the stop-on-error path.
