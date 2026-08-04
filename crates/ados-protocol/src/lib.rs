@@ -67,6 +67,7 @@ pub mod logd;
 pub mod mavlink;
 pub mod mavlink_ingest;
 pub mod mcp_token;
+pub mod msp;
 pub mod netif;
 pub mod node_status;
 pub mod offload;
