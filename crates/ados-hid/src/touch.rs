@@ -259,7 +259,10 @@ pub fn direction_for(dx: i32, dy: i32) -> Direction {
 /// exists, else the rotation-aware identity. Mirrors the Python
 /// `_initial_affine`.
 pub fn initial_affine(calib_path: &std::path::Path, rotation: i32, lcd_size: (i32, i32)) -> Affine {
-    crate::affine::load(calib_path)
+    // load_for, not load: a calibration captured on a different panel geometry or
+    // rotation must be rejected so this falls back to the identity (and the
+    // wizard re-prompts) rather than mis-mapping every touch.
+    crate::affine::load_for(calib_path, lcd_size, rotation)
         .unwrap_or_else(|| crate::affine::identity_for(rotation, lcd_size))
 }
 

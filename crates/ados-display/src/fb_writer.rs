@@ -124,9 +124,18 @@ impl VirtualSink {
 
 impl FrameSink for VirtualSink {
     fn write_frame(&mut self, buf: &[u8]) -> std::io::Result<()> {
-        // Full overwrite so a reader always sees one complete frame, never a
-        // torn mix of two.
-        std::fs::write(&self.path, buf)
+        // Atomic replace: write a sibling temp file, then rename it over the
+        // target. A concurrent reader then sees either the previous complete
+        // frame or the new one, NEVER a torn mix. `std::fs::write` truncates the
+        // target and then writes, so a reader can catch it part-filled — the
+        // comment here used to claim atomicity the plain write does not provide.
+        // The temp sibling shares the target's directory, so the rename stays on
+        // one filesystem (a cross-fs rename is not atomic).
+        let mut tmp = self.path.clone().into_os_string();
+        tmp.push(".tmp");
+        let tmp = std::path::PathBuf::from(tmp);
+        std::fs::write(&tmp, buf)?;
+        std::fs::rename(&tmp, &self.path)
     }
 }
 
@@ -411,10 +420,56 @@ mod tests {
         let mut sink = VirtualSink::open(&path);
         sink.write_frame(&[1, 2, 3, 4]).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), vec![1, 2, 3, 4]);
-        // Overwrite: the file always holds exactly the current frame, never a
-        // torn mix.
+        // Overwrite: the file always holds exactly the current frame.
         sink.write_frame(&[9, 9]).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), vec![9, 9]);
+        // No temp sibling is left behind.
+        let mut tmp = path.clone().into_os_string();
+        tmp.push(".tmp");
+        assert!(!std::path::Path::new(&tmp).exists(), "the temp sibling is renamed away");
+    }
+
+    /// A reader hammering the file while the sink writes alternating-size frames
+    /// must only ever see a COMPLETE frame — one of the two full lengths, never a
+    /// partial. With the plain truncate-then-write this races and a reader can
+    /// catch a short file; the temp-file + rename makes every observed state a
+    /// whole frame. (Proven-to-bite: revert to `std::fs::write` and this fails.)
+    #[test]
+    fn concurrent_reader_never_sees_a_torn_frame() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fb.bin");
+        // Two distinct lengths so a torn read has a length that is neither.
+        let small = vec![0xAAu8; 64];
+        let large = vec![0xBBu8; 4096];
+        // Seed so the reader always finds a file.
+        VirtualSink::open(&path).write_frame(&small).unwrap();
+
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let reader = {
+            let (path, stop) = (path.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let (mut small_seen, mut large_seen) = (false, false);
+                while !stop.load(Ordering::Relaxed) {
+                    if let Ok(bytes) = std::fs::read(&path) {
+                        match bytes.len() {
+                            64 => small_seen = true,
+                            4096 => large_seen = true,
+                            other => panic!("torn read: length {other} is neither full frame"),
+                        }
+                    }
+                }
+                (small_seen, large_seen)
+            })
+        };
+
+        let mut sink = VirtualSink::open(&path);
+        for i in 0..400 {
+            sink.write_frame(if i % 2 == 0 { &large } else { &small }).unwrap();
+        }
+        stop.store(true, Ordering::Relaxed);
+        let (small_seen, large_seen) = reader.join().unwrap();
+        assert!(small_seen && large_seen, "the reader observed both complete frames");
     }
 
     #[test]

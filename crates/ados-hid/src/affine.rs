@@ -361,25 +361,59 @@ impl Default for SaveParams {
     }
 }
 
-/// Read the persisted affine from `path`.
+/// Read and validate the on-disk blob: present, parseable, the current file
+/// version, and marked `calibrated`. `None` (fall back to identity) otherwise.
+fn read_valid_blob(path: &Path) -> Option<CalibBlob> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let blob: CalibBlob = serde_json::from_str(&text).ok()?;
+    if blob.version != CALIB_FILE_VERSION || !blob.calibrated {
+        return None;
+    }
+    Some(blob)
+}
+
+/// The 2x3 affine from a validated blob, or `None` when the matrix is absent or
+/// the wrong length.
+fn blob_affine(blob: &CalibBlob) -> Option<Affine> {
+    let matrix = blob.matrix.as_ref()?;
+    if matrix.len() != 6 {
+        return None;
+    }
+    Affine::from_list(matrix)
+}
+
+/// Read the persisted affine from `path`, WITHOUT checking the panel geometry.
 ///
 /// Returns `None` when the file is missing, malformed, marked
 /// `calibrated=false` (a skip marker), or the version field does not match this
 /// build. The caller falls back to [`identity_for`] in any of those cases.
+/// Prefer [`load_for`] on the render path — a calibration is only valid for the
+/// panel + rotation it was captured on.
 pub fn load(path: &Path) -> Option<Affine> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let blob: CalibBlob = serde_json::from_str(&text).ok()?;
-    if blob.version != CALIB_FILE_VERSION {
+    blob_affine(&read_valid_blob(path)?)
+}
+
+/// Read the persisted affine only if it was captured on THIS panel geometry and
+/// rotation.
+///
+/// A calibration matrix is fit against one panel's raw ADC range mapped to one
+/// LCD size at one rotation. Swap the panel (a different `lcd_size`) or change
+/// the display rotation and the stored matrix mis-maps every touch by tens of
+/// pixels — silently, because [`load`] never looked. This gate rejects a
+/// calibration whose saved `lcd_size` or `rotation_applied_at_save` does not
+/// match what the reader is running now, so the caller falls back to the
+/// rotation-aware identity and the wizard re-prompts rather than the operator
+/// fighting a mis-aligned screen. A blob that predates geometry tagging (no
+/// `lcd_size`) is also rejected — its geometry cannot be proven.
+pub fn load_for(path: &Path, expected_lcd: (i32, i32), expected_rotation: i32) -> Option<Affine> {
+    let blob = read_valid_blob(path)?;
+    if blob.lcd_size != Some([expected_lcd.0, expected_lcd.1]) {
         return None;
     }
-    if !blob.calibrated {
+    if blob.rotation_applied_at_save != Some(expected_rotation.rem_euclid(360)) {
         return None;
     }
-    let matrix = blob.matrix?;
-    if matrix.len() != 6 {
-        return None;
-    }
-    Affine::from_list(&matrix)
+    blob_affine(&blob)
 }
 
 /// Persist the affine atomically to `path`.
@@ -676,6 +710,61 @@ mod tests {
             .filter_map(|e| e.ok())
             .any(|e| e.file_name().to_string_lossy().ends_with(".tmp"));
         assert!(!stray, "stray .tmp file left behind");
+    }
+
+    /// `load_for` accepts a calibration only for the panel geometry + rotation it
+    /// was captured on. A swapped panel (different `lcd_size`) or a changed
+    /// rotation must fall back to the identity (None) rather than mis-map every
+    /// touch — the defect `load` had (it never looked at the stored geometry).
+    #[test]
+    fn load_for_rejects_a_mismatched_panel_or_rotation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("touch.calib");
+        let m = Affine {
+            a: 0.1,
+            b: 0.0,
+            c: -3.0,
+            d: 0.0,
+            e: 0.1,
+            f: 4.0,
+        };
+        // Captured on a 480x320 panel at rotation 90.
+        let params = SaveParams {
+            rotation: 90,
+            lcd_size: (480, 320),
+            ..SaveParams::default()
+        };
+        save(&m, &path, &params).unwrap();
+
+        // Same geometry + rotation: accepted.
+        assert_eq!(load_for(&path, (480, 320), 90), Some(m));
+        // A swapped panel (different LCD size): rejected → fall back + re-prompt.
+        assert!(load_for(&path, (320, 240), 90).is_none());
+        // A changed rotation: the matrix no longer maps → rejected.
+        assert!(load_for(&path, (480, 320), 0).is_none());
+        // The geometry-blind load still accepts it (documented weaker contract).
+        assert_eq!(load(&path), Some(m));
+    }
+
+    /// A blob with no `lcd_size` (pre-geometry-tagging) cannot prove its geometry,
+    /// so `load_for` rejects it even though the plain `load` accepts it.
+    #[test]
+    fn load_for_rejects_a_blob_without_geometry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("touch.calib");
+        // Hand-write a valid-but-untagged blob (no lcd_size / rotation fields).
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"version":{CALIB_FILE_VERSION},"calibrated":true,"matrix":[0.1,0.0,-3.0,0.0,0.1,4.0],"saved_at":0}}"#
+            ),
+        )
+        .unwrap();
+        assert!(load(&path).is_some(), "the geometry-blind load still accepts it");
+        assert!(
+            load_for(&path, (480, 320), 0).is_none(),
+            "an untagged blob's geometry cannot be proven, so load_for rejects it"
+        );
     }
 
     #[test]

@@ -28,8 +28,13 @@ pub fn pack_frame(canvas: &Canvas, bpp: u32) -> Option<Vec<u8>> {
 
 /// How the native canvas was placed onto a differently-sized panel: the uniform
 /// scale factor and the top-left offset of the scaled image within the panel.
-/// Kept so the touch layer can invert it (a tap in panel pixels maps back to the
-/// native logical space).
+///
+/// This is RENDER-side placement geometry — [`scale_letterbox`] uses it to blit
+/// the scaled canvas, and it is returned so the placement can be asserted in
+/// tests. It is NOT how touch is mapped: the touch layer maps raw ADC counts to
+/// LCD pixels through the [`crate::touch_input`] affine calibration, fit against
+/// the panel's real geometry independently of this letterbox, so there is no
+/// panel-to-canvas inverse of this transform anywhere on the touch path.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LetterboxTransform {
     pub scale: f32,

@@ -160,7 +160,11 @@ pub fn load_transform(
     x_range: AxisRange,
     y_range: AxisRange,
 ) -> TouchTransform {
-    match affine::load(calib_path) {
+    // load_for, not load: reject a calibration captured on a different panel
+    // geometry or rotation so it falls back to the rotation-aware identity (and
+    // the wizard re-prompts) rather than mis-mapping every touch on a swapped
+    // panel.
+    match affine::load_for(calib_path, (LCD_W, LCD_H), rotation) {
         Some(a) => TouchTransform::calibrated(a),
         None => TouchTransform::fallback(rotation, x_range, y_range),
     }
