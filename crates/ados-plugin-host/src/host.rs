@@ -131,6 +131,16 @@ pub trait HostServices: Send + Sync + 'static {
     ) -> Result<HostResult, HostError> {
         Ok(not_implemented("mavlink.send"))
     }
+
+    /// Write raw MSP bytes (already framed by the plugin's codec) to a
+    /// Betaflight / iNav / KISS FC over `/run/ados/msp.sock`. The MSP byte plane
+    /// is opaque to the host — unlike `mavlink_send` there is no EKF-pose scan or
+    /// component gate, because MSP carries no such frames; the whole gate is the
+    /// dispatch-level `msp.write` capability. `args` carries `msg_bytes`. The
+    /// default returns `not_implemented` so [`NoopHost`] stays inert.
+    fn msp_send(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
+        Ok(not_implemented("msp.send"))
+    }
     /// Send one application payload over a MAVLink TUNNEL frame tagged with a
     /// private `payload_type`. A real host validates the request (a private
     /// payload_type strictly above the registered range, a payload within the
@@ -293,6 +303,20 @@ pub trait HostServices: Send + Sync + 'static {
         &self,
         _plugin_id: &str,
         _msg_name: &str,
+    ) -> Option<tokio::sync::broadcast::Receiver<Vec<u8>>> {
+        None
+    }
+
+    /// A receiver for the MSP byte fanout, when this host has a wired MSP client.
+    /// The server obtains one per `msp.subscribe` and pushes each FC->host chunk
+    /// to the plugin as an `msp.deliver` event. Unlike MAVLink there is no
+    /// msg-name filter — MSP has no per-message topic, so a subscriber receives
+    /// the whole raw stream and its own codec parses it. The default returns
+    /// `None`, keeping [`NoopHost`] unaffected (a node with no MSP FC stays quiet
+    /// rather than erroring).
+    fn msp_subscribe_stream(
+        &self,
+        _plugin_id: &str,
     ) -> Option<tokio::sync::broadcast::Receiver<Vec<u8>>> {
         None
     }

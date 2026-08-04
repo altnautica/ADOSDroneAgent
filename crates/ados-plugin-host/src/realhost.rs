@@ -40,6 +40,7 @@ use ados_protocol::pairing_posture::{load_pairing, Pairing};
 
 use crate::host::{not_implemented, HostError, HostResult, HostServices};
 use crate::mavlink_client::MavlinkClient;
+use crate::msp_client::MspClient;
 use crate::vision_client::VisionClient;
 
 // ---------------------------------------------------------------------
@@ -1157,6 +1158,11 @@ pub struct RealHost {
     cameras: Mutex<CameraClaimTracker>,
     config: Mutex<ConfigStore>,
     mavlink: Option<Arc<MavlinkClient>>,
+    /// The MSP byte-plane client (Betaflight / iNav / KISS FC). `None` until the
+    /// supervisor wires a connection to `/run/ados/msp.sock`; `msp_send` /
+    /// `msp_subscribe_stream` return the not-available posture while unwired,
+    /// exactly like the MAVLink slot.
+    msp: Option<Arc<MspClient>>,
     vision: Option<Arc<VisionClient>>,
     /// The paired compute node's offload client. `None` until the supervisor
     /// wires a discovered/paired node; the `compute_*` methods return
@@ -1245,6 +1251,7 @@ impl RealHost {
             cameras: Mutex::new(CameraClaimTracker::default()),
             config: Mutex::new(ConfigStore::default()),
             mavlink: None,
+            msp: None,
             vision: None,
             compute: None,
             plugin_runtime_lookup: None,
@@ -1315,6 +1322,14 @@ impl RealHost {
     /// Wire the MAVLink client (builder style).
     pub fn with_mavlink(mut self, mavlink: Arc<MavlinkClient>) -> Self {
         self.mavlink = Some(mavlink);
+        self
+    }
+
+    /// Wire the MSP byte-plane client (builder style). When wired, `msp.send`
+    /// forwards raw bytes to the FC and `msp_subscribe_stream` hands out the
+    /// FC->host fanout; when unwired both return the not-available posture.
+    pub fn with_msp(mut self, msp: Arc<MspClient>) -> Self {
+        self.msp = Some(msp);
         self
     }
 
@@ -1548,6 +1563,8 @@ const ALL_DISPATCH_METHODS: &[crate::dispatch::Method] = {
         RecordingStop,
         MavlinkSubscribe,
         MavlinkSend,
+        MspSubscribe,
+        MspSend,
         MavlinkTunnelSend,
         MavlinkRegisterComponent,
         PeripheralRegisterDriver,
@@ -1694,6 +1711,39 @@ impl HostServices for RealHost {
             Some(client) => {
                 // Best-effort send; failures are swallowed by send_bytes, so the
                 // success shape stands, matching the Python slice.
+                client.send_bytes(&msg_bytes);
+                Ok(Value::Map(vec![
+                    (Value::from("sent"), Value::Boolean(true)),
+                    (
+                        Value::from("len"),
+                        Value::Integer((msg_bytes.len() as i64).into()),
+                    ),
+                ]))
+            }
+        }
+    }
+
+    fn msp_send(&self, _plugin_id: &str, args: &Value) -> Result<HostResult, HostError> {
+        // The MSP byte plane is opaque: validate that msg_bytes are bytes and
+        // non-empty, then forward raw. No pose-inject scan or component gate (MSP
+        // carries no such frames); the dispatch-level msp.write cap is the whole
+        // gate. Best-effort send, matching mavlink.send.
+        let msg_value = arg_owned(args, "msg_bytes");
+        let msg_bytes = match &msg_value {
+            Value::Array(_) | Value::Binary(_) => {
+                coerce_msg_bytes(&msg_value).map_err(HostError::Rpc)?
+            }
+            _ => return Err(HostError::Rpc("msg_bytes must be bytes".to_string())),
+        };
+        if msg_bytes.is_empty() {
+            return Err(HostError::Rpc("msg_bytes must be non-empty".to_string()));
+        }
+        match self.msp.as_ref() {
+            None => Ok(Value::Map(vec![
+                (Value::from("error"), Value::from("not_available")),
+                (Value::from("method"), Value::from("msp.send")),
+            ])),
+            Some(client) => {
                 client.send_bytes(&msg_bytes);
                 Ok(Value::Map(vec![
                     (Value::from("sent"), Value::Boolean(true)),
@@ -2446,6 +2496,13 @@ impl HostServices for RealHost {
         _msg_name: &str,
     ) -> Option<broadcast::Receiver<Vec<u8>>> {
         self.mavlink.as_ref().map(|c| c.subscribe())
+    }
+
+    fn msp_subscribe_stream(&self, _plugin_id: &str) -> Option<broadcast::Receiver<Vec<u8>>> {
+        // The router fans every FC->host MSP chunk out on one broadcast; there is
+        // no per-message filter (MSP has no topic). When the MSP socket is not up
+        // the slot is None and no stream arms, matching the MAVLink posture.
+        self.msp.as_ref().map(|c| c.subscribe())
     }
 
     fn vision_subscribe_stream(

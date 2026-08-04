@@ -17,7 +17,7 @@
 # Edit here, then run codegen. Do not edit the generated files by hand.
 
 # ===========================================================================
-# AGENT capabilities (50)
+# AGENT capabilities (52)
 # ===========================================================================
 
 [[agent]]
@@ -54,6 +54,24 @@ description = "Lets the plugin inject MAVLink commands to the autopilot, includi
 category = "flight_control"
 risk = "high"
 risk_reason = "Can change flight mode, arm motors, and alter parameters in flight."
+enforced = true
+
+[[agent]]
+id = "msp.read"
+label = "Read MSP messages from the flight controller"
+description = "Lets the plugin observe the raw MSP byte stream from a Betaflight / iNav / KISS flight controller, so it can decode telemetry, sensor, and status replies. Read-only on the MSP stream; the sibling of mavlink.read for an FC that speaks MSP instead of MAVLink."
+category = "flight_control"
+risk = "low"
+risk_reason = "Read-only on the MSP stream."
+enforced = true
+
+[[agent]]
+id = "msp.write"
+label = "Send MSP commands to the flight controller"
+description = "Lets the plugin write raw MSP commands to a Betaflight / iNav / KISS flight controller, including MSP_SET_RAW_RC (the RC channel values that fly the aircraft in a rate mode). An untrusted plugin with this capability can command the aircraft, exactly like mavlink.write on a MAVLink FC."
+category = "flight_control"
+risk = "high"
+risk_reason = "Can drive the RC channels and arm the aircraft on an MSP flight controller."
 enforced = true
 
 [[agent]]
@@ -645,7 +663,7 @@ risk = "medium"
 risk_reason = "Publishes a callable interface to an AI client; effect is bounded by the plugin's other capabilities and the token scope."
 
 # ===========================================================================
-# Plugin RPC dispatch table (45): wire method -> dispatch-level required cap.
+# Plugin RPC dispatch table (47): wire method -> dispatch-level required cap.
 #
 # The single source of truth for the gate the plugin IPC server applies BEFORE
 # routing a request. Codegen emits this into both the Rust host
@@ -718,6 +736,18 @@ required_cap = "mavlink.read"
 [[method]]
 id = "mavlink.send"
 required_cap = "mavlink.write"
+
+# ---- msp (the byte plane for a Betaflight / iNav / KISS FC) ----
+# msp.subscribe arms a per-connection push of raw FC->host MSP bytes (the server
+# short-circuits it, like mavlink.subscribe); msp.send writes raw MSP bytes to
+# the FC. The codec that builds/parses those bytes lives at the plugin edge.
+[[method]]
+id = "msp.subscribe"
+required_cap = "msp.read"
+
+[[method]]
+id = "msp.send"
+required_cap = "msp.write"
 
 # Send one application payload over a MAVLink TUNNEL frame tagged with a private
 # payload_type, a transparent opaque pipe separate from the full MAVLink write

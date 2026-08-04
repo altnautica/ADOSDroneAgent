@@ -268,6 +268,14 @@ impl<H: HostServices> Connection<H> {
         let mut button_subscribed = false;
         let (btn_tx, mut btn_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
 
+        // MSP byte-plane subscription. One `msp.subscribe` per connection arms a
+        // forwarder off the host's MSP client broadcast into this merged channel,
+        // so the select loop writes `msp.deliver` envelopes with no competing
+        // writers. Same shape as the button pump; there is no per-message filter
+        // (MSP has no topic), so a subscriber receives every FC->host chunk.
+        let mut msp_subscribed = false;
+        let (msp_tx, mut msp_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
+
         // MCP tool invocation: register an outbound-request sender so the control
         // socket can reach THIS live connection (the host->plugin request flow),
         // and track pending replies here so the read branch can resolve them. On
@@ -327,6 +335,8 @@ impl<H: HostServices> Connection<H> {
                             &det_tx,
                             &mut button_subscribed,
                             &btn_tx,
+                            &mut msp_subscribed,
+                            &msp_tx,
                             &mut forwarders,
                         )
                         .await
@@ -425,6 +435,17 @@ impl<H: HostServices> Connection<H> {
                         }
                     }
                 }
+                bytes = msp_rx.recv() => {
+                    // None means the MSP forwarder dropped its sender; keep serving.
+                    if let Some(bytes) = bytes {
+                        if let Err(e) = self
+                            .deliver_msp(&mut write_half, &token, &bytes)
+                            .await
+                        {
+                            break Err(e);
+                        }
+                    }
+                }
                 delivery = det_rx.recv() => {
                     // None means every detection forwarder dropped its sender;
                     // keep serving requests rather than tearing down.
@@ -477,6 +498,8 @@ impl<H: HostServices> Connection<H> {
         det_tx: &tokio::sync::mpsc::Sender<DetectionDelivery>,
         button_subscribed: &mut bool,
         btn_tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
+        msp_subscribed: &mut bool,
+        msp_tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
         forwarders: &mut Vec<JoinHandle<()>>,
     ) -> Result<(), ServerError> {
         let req_id = env.request_id.clone();
@@ -502,6 +525,8 @@ impl<H: HostServices> Connection<H> {
                     det_tx,
                     button_subscribed,
                     btn_tx,
+                    msp_subscribed,
+                    msp_tx,
                     forwarders,
                 )
                 .await
@@ -527,6 +552,8 @@ impl<H: HostServices> Connection<H> {
         det_tx: &tokio::sync::mpsc::Sender<DetectionDelivery>,
         button_subscribed: &mut bool,
         btn_tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
+        msp_subscribed: &mut bool,
+        msp_tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
         forwarders: &mut Vec<JoinHandle<()>>,
     ) -> Result<(), ServerError> {
         match method {
@@ -722,6 +749,41 @@ impl<H: HostServices> Connection<H> {
                                 // Lagged: this subscriber fell behind and the
                                 // oldest presses were dropped. Keep going — a
                                 // missed press is better than a dead stream.
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                    continue
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                            }
+                        }
+                    }));
+                }
+                let result = Value::Map(vec![(Value::from("subscribed"), Value::Boolean(true))]);
+                send_response(write_half, &env.request_id, result).await
+            }
+            // msp.subscribe arms the per-connection raw-MSP push stream, exactly
+            // like button.subscribe. One subscribe per connection; the forwarder
+            // pushes every FC->host chunk into the merged channel, so the select
+            // loop writes `msp.deliver` envelopes. There is no per-message filter
+            // (MSP has no topic), so the plugin's own codec parses the stream.
+            Method::MspSubscribe => {
+                if *msp_subscribed {
+                    let result = Value::Map(vec![(
+                        Value::from("already_subscribed"),
+                        Value::Boolean(true),
+                    )]);
+                    return send_response(write_half, &env.request_id, result).await;
+                }
+                *msp_subscribed = true;
+                if let Some(mut rx) = self.host.msp_subscribe_stream(&self.plugin_id) {
+                    let tx = msp_tx.clone();
+                    forwarders.push(tokio::spawn(async move {
+                        loop {
+                            match rx.recv().await {
+                                Ok(bytes) => {
+                                    if tx.send(bytes).await.is_err() {
+                                        break;
+                                    }
+                                }
                                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                                     continue
                                 }
@@ -935,6 +997,33 @@ impl<H: HostServices> Connection<H> {
                 (Value::from("timestamp_ms"), Value::Integer(ts.into())),
             ]),
             request_id: format!("btn-{ts}"),
+            token: token.to_token_string(),
+            error: None,
+        };
+        write_frame(write_half, &env).await
+    }
+
+    /// Push raw FC->host MSP bytes to the plugin as an `msp.deliver` event: kind
+    /// `event`, method `msp.deliver`, capability `msp.read`, args `{bytes,
+    /// timestamp_ms}`, request_id `msp-<ms>`. The `bytes` are the raw MSP chunk
+    /// the router forwarded; the plugin's codec parses them (the host never does).
+    async fn deliver_msp<W: AsyncWriteExt + Unpin>(
+        &self,
+        write_half: &mut W,
+        token: &CapabilityToken,
+        bytes: &[u8],
+    ) -> Result<(), ServerError> {
+        let ts = now_ms();
+        let env = Envelope {
+            version: PROTOCOL_VERSION,
+            kind: "event".to_string(),
+            method: "msp.deliver".to_string(),
+            capability: "msp.read".to_string(),
+            args: Value::Map(vec![
+                (Value::from("bytes"), Value::Binary(bytes.to_vec())),
+                (Value::from("timestamp_ms"), Value::Integer(ts.into())),
+            ]),
+            request_id: format!("msp-{ts}"),
             token: token.to_token_string(),
             error: None,
         };

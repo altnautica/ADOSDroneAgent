@@ -101,6 +101,12 @@ class PluginIpcClient:
         self._button_callbacks: list[
             Callable[[dict], Awaitable[None] | None]
         ] = []
+        # MSP deliveries arrive as ``msp.deliver`` events carrying no ``topic``
+        # (MSP has no per-message topic), routed by method name to these
+        # callbacks. Each carries ``{bytes, timestamp_ms}``.
+        self._msp_callbacks: list[
+            Callable[[dict], Awaitable[None] | None]
+        ] = []
         self._reader_task: asyncio.Task | None = None
         self._next_id = 0
         # MCP tool handlers the plugin registers (the SDK @tool decorator fills
@@ -205,6 +211,34 @@ class PluginIpcClient:
             "mavlink.subscribe",
             capability="mavlink.read",
             args={"msg_name": msg_name},
+        )
+
+    # ---- MSP (Betaflight / iNav / KISS byte plane) --------------------
+
+    async def msp_send(self, msg_bytes: bytes) -> dict:
+        """Write already-framed MSP bytes (built with ``ados_protocol::msp`` /
+        the plugin's own codec) to the FC. Gated on ``msp.write``."""
+        return (
+            await self._send_request(
+                "msp.send",
+                capability="msp.write",
+                args={"msg_bytes": bytes(msg_bytes)},
+            )
+        ).args
+
+    async def msp_subscribe(
+        self,
+        callback: Callable[[dict], Awaitable[None] | None],
+    ) -> None:
+        """Subscribe to the raw FC->host MSP byte stream. Deliveries arrive as
+        ``msp.deliver`` events carrying ``{bytes, timestamp_ms}``; MSP has no
+        per-message topic, so the callback sees every chunk. Gated on
+        ``msp.read``."""
+        self._msp_callbacks.append(callback)
+        await self._send_request(
+            "msp.subscribe",
+            capability="msp.read",
+            args={},
         )
 
     # ---- Vision -------------------------------------------------------
@@ -480,6 +514,8 @@ class PluginIpcClient:
                         await self._dispatch_detection(env)
                     elif env.method == "button.deliver":
                         await self._dispatch_button(env)
+                    elif env.method == "msp.deliver":
+                        await self._dispatch_msp(env)
                     else:
                         await self._dispatch_event(env)
                 elif env.type == "request" and env.method == _TOOL_INVOKE_METHOD:
@@ -584,6 +620,17 @@ class PluginIpcClient:
             except Exception:  # noqa: BLE001 - one bad callback must not stop the stream
                 log.exception("button_callback_failed")
 
+    async def _dispatch_msp(self, env: Envelope) -> None:
+        # The whole args map ({bytes, timestamp_ms}) goes to the callback; the
+        # plugin's codec parses the raw MSP bytes.
+        for cb in list(self._msp_callbacks):
+            try:
+                result = cb(env.args)
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception:  # noqa: BLE001 - one bad callback must not stop the stream
+                log.exception("msp_callback_failed")
+
     async def _dispatch_detection(self, env: Envelope) -> None:
         payload = {
             "batch": env.args.get("batch"),
@@ -675,6 +722,8 @@ class _NullIpcClient:
     async def event_subscribe(self, *_a, **_k) -> None: return self._unavail("event_subscribe")
     async def mavlink_send(self, *_a, **_k) -> dict: return self._unavail("mavlink_send")
     async def mavlink_subscribe(self, *_a, **_k) -> None: return self._unavail("mavlink_subscribe")
+    async def msp_send(self, *_a, **_k) -> dict: return self._unavail("msp_send")
+    async def msp_subscribe(self, *_a, **_k) -> None: return self._unavail("msp_subscribe")
     async def vision_subscribe_detections(self, *_a, **_k) -> None: return self._unavail("vision_subscribe_detections")
     async def vision_read_model(self, *_a, **_k) -> list: return self._unavail("vision_read_model")
     async def mavlink_register_component(self, *_a, **_k) -> dict: return self._unavail("mavlink_register_component")

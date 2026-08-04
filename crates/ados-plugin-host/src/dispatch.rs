@@ -47,6 +47,8 @@ pub enum Method {
     // MAVLink.
     MavlinkSubscribe,
     MavlinkSend,
+    MspSubscribe,
+    MspSend,
     // Send one application payload over a MAVLink TUNNEL frame (a private
     // payload_type), a transparent opaque pipe on the existing link.
     MavlinkTunnelSend,
@@ -146,6 +148,8 @@ impl Method {
             "recording.stop" => Self::RecordingStop,
             "mavlink.subscribe" => Self::MavlinkSubscribe,
             "mavlink.send" => Self::MavlinkSend,
+            "msp.subscribe" => Self::MspSubscribe,
+            "msp.send" => Self::MspSend,
             "mavlink.tunnel.send" => Self::MavlinkTunnelSend,
             "mavlink.register_component" => Self::MavlinkRegisterComponent,
             "peripheral.register_driver" => Self::PeripheralRegisterDriver,
@@ -190,6 +194,8 @@ impl Method {
             Self::RecordingStop => "recording.stop",
             Self::MavlinkSubscribe => "mavlink.subscribe",
             Self::MavlinkSend => "mavlink.send",
+            Self::MspSubscribe => "msp.subscribe",
+            Self::MspSend => "msp.send",
             Self::MavlinkTunnelSend => "mavlink.tunnel.send",
             Self::MavlinkRegisterComponent => "mavlink.register_component",
             Self::PeripheralRegisterDriver => "peripheral.register_driver",
@@ -481,6 +487,8 @@ mod tests {
         Method::RecordingStop,
         Method::MavlinkSubscribe,
         Method::MavlinkSend,
+        Method::MspSubscribe,
+        Method::MspSend,
         Method::MavlinkTunnelSend,
         Method::MavlinkRegisterComponent,
         Method::PeripheralRegisterDriver,

@@ -321,6 +321,9 @@ pub async fn route_host_method<H: HostServices + ?Sized>(
         Method::RecordingStop => host.recording_stop(plugin_id, args),
         Method::MavlinkSubscribe => host.mavlink_subscribe(plugin_id, args),
         Method::MavlinkSend => host.mavlink_send(plugin_id, args, granted_caps),
+        // msp.send forwards raw MSP bytes to the FC; the dispatch-level msp.write
+        // cap is the whole gate, so no granted_caps inline check.
+        Method::MspSend => host.msp_send(plugin_id, args),
         Method::MavlinkTunnelSend => host.mavlink_tunnel_send(plugin_id, args),
         Method::MavlinkRegisterComponent => {
             host.mavlink_register_component(plugin_id, args, granted_caps)
@@ -374,6 +377,7 @@ pub async fn route_host_method<H: HostServices + ?Sized>(
         | Method::Ping
         | Method::VisionSubscribeFrames
         | Method::VisionSubscribeDetections
+        | Method::MspSubscribe
         | Method::ButtonSubscribe => Ok(crate::host::not_implemented("event")),
     }
 }

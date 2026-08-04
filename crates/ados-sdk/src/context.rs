@@ -71,6 +71,40 @@ impl MavlinkClient {
     }
 }
 
+/// `ctx.msp` — read and write raw MSP to a Betaflight / iNav / KISS FC through
+/// the host's MSP byte plane. The sibling of [`MavlinkClient`] for an FC that
+/// speaks MSP; the codec that builds/parses the bytes is
+/// [`ados_protocol::msp`](ados_protocol::msp).
+#[derive(Clone)]
+pub struct MspClient {
+    ipc: Arc<PluginIpcClient>,
+}
+
+impl MspClient {
+    /// Send already-framed MSP bytes (build them with `ados_protocol::msp`).
+    /// Gated on `msp.write`.
+    pub async fn send(&self, msg_bytes: &[u8]) -> Result<Value, ClientError> {
+        self.ipc.msp_send(msg_bytes).await
+    }
+
+    /// Convenience: send an `MSP_SET_RAW_RC` with the given PWM channel values
+    /// (v2 framing). Builds the frame with the codec and sends it. Returns an
+    /// error if a v1 encode were requested with too many channels (v2 never
+    /// overflows). This is the command that flies the FC in a rate mode.
+    pub async fn send_raw_rc(&self, channels: &[u16]) -> Result<Value, ClientError> {
+        let frame = ados_protocol::msp::set_raw_rc(channels, true)
+            .ok_or_else(|| ClientError::Rpc("too many RC channels for the frame".to_string()))?;
+        self.ipc.msp_send(&frame).await
+    }
+
+    /// Subscribe to the raw FC->host MSP byte stream. The callback fires for each
+    /// delivered chunk with the `{bytes, timestamp_ms}` map; the plugin's own
+    /// codec parses `bytes`. Gated on `msp.read`.
+    pub async fn subscribe(&self, callback: EventCallback) -> Result<(), ClientError> {
+        self.ipc.msp_subscribe(callback).await
+    }
+}
+
 /// `ctx.telemetry` — extend the heartbeat schema.
 #[derive(Clone)]
 pub struct TelemetryClient {
@@ -409,6 +443,8 @@ pub struct PluginContext {
     pub data_dir: Option<std::path::PathBuf>,
     pub events: EventsClient,
     pub mavlink: MavlinkClient,
+    /// `ctx.msp` — raw MSP read/write for a Betaflight / iNav / KISS FC.
+    pub msp: MspClient,
     pub telemetry: TelemetryClient,
     pub peripheral_manager: PeripheralClient,
     /// Alias for `peripheral_manager` (Python `ctx.peripherals`).
@@ -452,6 +488,7 @@ impl PluginContext {
             data_dir: data_dir.map(std::path::PathBuf::from),
             events: EventsClient { ipc: ipc.clone() },
             mavlink: MavlinkClient { ipc: ipc.clone() },
+            msp: MspClient { ipc: ipc.clone() },
             telemetry: TelemetryClient { ipc: ipc.clone() },
             peripherals: peripheral_manager.clone(),
             peripheral_manager,

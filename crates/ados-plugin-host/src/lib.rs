@@ -49,6 +49,7 @@ pub mod host;
 pub mod invoke;
 pub mod manifest;
 pub mod mavlink_client;
+pub mod msp_client;
 pub mod realhost;
 pub mod server;
 pub mod signing;

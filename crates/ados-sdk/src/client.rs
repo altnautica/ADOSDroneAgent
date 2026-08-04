@@ -95,6 +95,9 @@ pub struct PluginIpcClient {
     /// Front-panel button callbacks. Keyed on the wildcard only: a press has no
     /// subject to filter on, so every subscriber sees every press.
     button_callbacks: CallbackMap,
+    /// MSP byte-plane callbacks. Keyed on the wildcard only: MSP has no per-
+    /// message topic, so every subscriber sees every FC->host chunk.
+    msp_callbacks: CallbackMap,
     reader_task: Mutex<Option<JoinHandle<()>>>,
     next_id: AtomicU64,
     request_timeout: Duration,
@@ -123,6 +126,7 @@ impl PluginIpcClient {
             vision_callbacks: Arc::new(Mutex::new(HashMap::new())),
             detection_callbacks: Arc::new(Mutex::new(HashMap::new())),
             button_callbacks: Arc::new(Mutex::new(HashMap::new())),
+            msp_callbacks: Arc::new(Mutex::new(HashMap::new())),
             reader_task: Mutex::new(None),
             next_id: AtomicU64::new(0),
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
@@ -257,6 +261,28 @@ impl PluginIpcClient {
         register_callback(&self.mavlink_callbacks, msg_name, callback);
         let args = Value::Map(vec![(Value::from("msg_name"), Value::from(msg_name))]);
         self.send_request("mavlink.subscribe", "mavlink.read", args)
+            .await?;
+        Ok(())
+    }
+
+    /// Write raw MSP bytes (already framed by `ados_protocol::msp`) to the FC.
+    /// Gated on `msp.write`. The reply is `{sent, len}` or a `not_available`
+    /// map when no MSP FC is wired.
+    pub async fn msp_send(&self, msg_bytes: &[u8]) -> Result<Value, ClientError> {
+        let args = Value::Map(vec![(
+            Value::from("msg_bytes"),
+            Value::Binary(msg_bytes.to_vec()),
+        )]);
+        Ok(self.send_request("msp.send", "msp.write", args).await?.args)
+    }
+
+    /// Subscribe to the raw FC->host MSP byte stream and register a callback.
+    /// Deliveries arrive as `msp.deliver` events carrying `{bytes, timestamp_ms}`;
+    /// MSP has no per-message topic, so the callback sees every chunk and its own
+    /// codec parses it. Gated on `msp.read`. Mirrors the button subscribe shape.
+    pub async fn msp_subscribe(&self, callback: EventCallback) -> Result<(), ClientError> {
+        register_callback(&self.msp_callbacks, VISION_ANY_CAMERA, callback);
+        self.send_request("msp.subscribe", "msp.read", Value::Map(vec![]))
             .await?;
         Ok(())
     }
@@ -835,6 +861,7 @@ impl PluginIpcClient {
         let vision_callbacks = self.vision_callbacks.clone();
         let detection_callbacks = self.detection_callbacks.clone();
         let button_callbacks = self.button_callbacks.clone();
+        let msp_callbacks = self.msp_callbacks.clone();
         let plugin_id = self.plugin_id.clone();
         tokio::spawn(async move {
             let mut reader = read_half;
@@ -853,6 +880,8 @@ impl PluginIpcClient {
                                 dispatch_detection(&detection_callbacks, &env);
                             } else if env.method == ados_protocol::buttons::DELIVER {
                                 dispatch_button(&button_callbacks, &env);
+                            } else if env.method == "msp.deliver" {
+                                dispatch_button(&msp_callbacks, &env);
                             } else {
                                 dispatch_event(&event_callbacks, &env);
                             }

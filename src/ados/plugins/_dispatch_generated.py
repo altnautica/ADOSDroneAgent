@@ -25,6 +25,8 @@ REQUIRED_CAP: dict[str, str | None] = {
     "recording.stop": "recording.write",
     "mavlink.subscribe": "mavlink.read",
     "mavlink.send": "mavlink.write",
+    "msp.subscribe": "msp.read",
+    "msp.send": "msp.write",
     "mavlink.tunnel.send": "mavlink.tunnel",
     "mavlink.register_component": None,
     "peripheral.register_driver": None,

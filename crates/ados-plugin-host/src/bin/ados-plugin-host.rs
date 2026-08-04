@@ -27,6 +27,7 @@ use tokio::task::JoinHandle;
 
 use ados_plugin_host::manifest::PluginManifest;
 use ados_plugin_host::mavlink_client::MavlinkClient;
+use ados_plugin_host::msp_client::MspClient;
 use ados_plugin_host::realhost::RealHost;
 use ados_plugin_host::server::DEFAULT_SOCKET_DIR;
 use ados_plugin_host::state::PluginStatus;
@@ -176,6 +177,25 @@ async fn build_host(install_dir: PathBuf, run_dir: PathBuf) -> Arc<RealHost> {
                 path = %mavlink_sock.display(),
                 error = %e,
                 "mavlink router socket unavailable; mavlink.send will report not_available"
+            );
+        }
+    }
+
+    // (a2) MSP client: best-effort connect to the router's MSP byte-plane socket
+    //      so msp.send forwards to a Betaflight/iNav FC and msp.subscribe arms.
+    //      A connect failure (no MSP FC on this node) leaves the slot None and
+    //      the MSP methods report not_available, matching the MAVLink posture.
+    let msp_sock = run_dir.join("msp.sock");
+    match MspClient::connect(&msp_sock).await {
+        Ok(client) => {
+            tracing::info!(path = %msp_sock.display(), "msp client connected");
+            host = host.with_msp(Arc::new(client));
+        }
+        Err(e) => {
+            tracing::warn!(
+                path = %msp_sock.display(),
+                error = %e,
+                "msp router socket unavailable; msp.send will report not_available"
             );
         }
     }
