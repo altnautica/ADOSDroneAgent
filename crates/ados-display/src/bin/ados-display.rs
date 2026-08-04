@@ -320,6 +320,14 @@ async fn run_page_ui(
         });
     }
 
+    // Front-panel buttons. `ados-hid` already classifies and publishes them; this
+    // is the transport that lets a press reach the navigator, which has always
+    // known what to do with one. A node whose `ados-pic` is absent or down simply
+    // never yields an event — the reader retries quietly and the UI is unaffected.
+    let mut button_rx = ados_display::button_source::spawn_button_reader(std::path::PathBuf::from(
+        ados_display::button_source::BUTTONS_SOCK,
+    ));
+
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
     // SIGHUP is the in-place config-reload signal. The agent's REST handlers
@@ -503,6 +511,35 @@ async fn run_page_ui(
                         // A page-defined custom key (slider drag, list row) or an
                         // inert tap has no navigator-owned surface change; the
                         // interaction boost already quickened the next render.
+                    }
+                }
+            }
+            maybe_button = button_rx.recv() => {
+                // A decoded front-panel press. `None` means the reader task is
+                // gone; keep looping so the rest of the UI survives, exactly as
+                // the touch arm does.
+                if let Some(event) = maybe_button {
+                    let now = Instant::now();
+                    last_interaction = Some(now);
+
+                    // While the calibration wizard is engaged the panel has no
+                    // usable coordinate frame and the wizard is deliberately
+                    // un-skippable, so a button must not navigate out of it.
+                    if calibration.is_none() {
+                        let dispatch = navigator.on_button(&event);
+                        if matches!(
+                            dispatch,
+                            Dispatch::RouteChanged(_) | Dispatch::ModalChanged(_)
+                        ) {
+                            // Same handling as a touch: the active surface moved,
+                            // so pull fresh state for the new page and repaint now
+                            // rather than waiting out the old page's period.
+                            ctx = source.build_context();
+                            last_state_poll = now;
+                            let canvas = build_canvas(&calibration, &navigator, &ctx, &palette);
+                            present_frame(&writer, bpp, &canvas);
+                            last_render = Some(now);
+                        }
                     }
                 }
             }
