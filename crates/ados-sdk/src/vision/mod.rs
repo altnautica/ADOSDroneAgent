@@ -52,6 +52,50 @@ pub type FrameCallback = Arc<dyn Fn(Frame) + Send + Sync>;
 /// Callback for a decoded detection batch.
 pub type DetectionCallback = Arc<dyn Fn(DetectionBatch) + Send + Sync>;
 
+/// One declared model's delivery resolution, mirroring the agent resolver's
+/// `ModelResolution`. `state` is `resolved` | `needs_model` | `verify_failed`;
+/// when resolved, `runtime` and `path` name the cached model and how to run it,
+/// and a plugin loads its detector from `path`. Otherwise `reason` explains why.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelResolution {
+    pub state: String,
+    pub model_id: String,
+    pub runtime: Option<String>,
+    pub path: Option<String>,
+    pub reason: Option<String>,
+}
+
+fn mpv_get<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
+    v.as_map()?
+        .iter()
+        .find(|(k, _)| k.as_str() == Some(key))
+        .map(|(_, val)| val)
+}
+
+fn parse_model_resolutions(reply: &Value) -> Vec<ModelResolution> {
+    let Some(models) = mpv_get(reply, "models").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    models
+        .iter()
+        .filter_map(|m| {
+            Some(ModelResolution {
+                state: mpv_get(m, "state")?.as_str()?.to_string(),
+                model_id: mpv_get(m, "model_id")?.as_str()?.to_string(),
+                runtime: mpv_get(m, "runtime")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                path: mpv_get(m, "path")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                reason: mpv_get(m, "reason")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            })
+        })
+        .collect()
+}
+
 /// `ctx.vision` — the vision engine facade.
 ///
 /// Cloning shares the one underlying IPC client. The ring resolver caches each
@@ -128,6 +172,17 @@ impl VisionClient {
             .to_msgpack()
             .map_err(|e| ClientError::Rpc(format!("model metadata encode failed: {e}")))?;
         self.ipc.vision_register_model(&blob).await
+    }
+
+    /// Read this plugin's resolved model-delivery status: one
+    /// [`ModelResolution`] per declared model, keyed by `model_id`. This is the
+    /// model-delivery last mile — a plugin loads its detector from the resolved
+    /// `path`. Sends [`methods::READ_MODEL`] (gated on `vision.model.read`); an
+    /// unresolved plugin returns an empty list rather than erroring, so a caller
+    /// can poll until its model resolves.
+    pub async fn resolved_model(&self) -> Result<Vec<ModelResolution>, ClientError> {
+        let reply = self.ipc.vision_read_model().await?;
+        Ok(parse_model_resolutions(&reply))
     }
 
     /// Run a registered model against one frame on the shared backend and

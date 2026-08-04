@@ -1203,6 +1203,12 @@ pub struct RealHost {
     /// Reusing the sidecar keeps the tier decision one source of truth (Rule 44),
     /// not a second copy of `ados_offload::pick_tier`.
     offload_link_path: PathBuf,
+    /// The plugin-state file `vision.read_model` reads a plugin's resolved
+    /// `model_status` from (the canonical `/var/ados/state/plugin-state.json`,
+    /// written by the Python resolver; a builder overrides it in tests). Read
+    /// per call so a fresh resolution (e.g. an operator sideload flipping
+    /// `needs_model`→`resolved`) is picked up without a restart.
+    state_path: PathBuf,
 }
 
 /// Canonical sidecar the reserved data-driven display page reads. Kept in sync
@@ -1252,7 +1258,15 @@ impl RealHost {
             offload_session_seq: AtomicU64::new(0),
             pairing_path: PathBuf::from(DEFAULT_PAIRING_PATH),
             offload_link_path: PathBuf::from(OFFLOAD_LINK_SIDECAR),
+            state_path: PathBuf::from(crate::state::PLUGIN_STATE_PATH),
         }
+    }
+
+    /// Override the plugin-state path `vision.read_model` reads (builder style,
+    /// tests). Production uses the canonical `/var/ados/state/plugin-state.json`.
+    pub fn with_state_path(mut self, path: PathBuf) -> Self {
+        self.state_path = path;
+        self
     }
 
     /// Override the `pairing.json` path (builder style, tests). Production uses
@@ -1553,6 +1567,7 @@ const ALL_DISPATCH_METHODS: &[crate::dispatch::Method] = {
         RadioAuxStreamClose,
         VisionSubscribeFrames,
         VisionRegisterModel,
+        VisionReadModel,
         VisionInfer,
         VisionPublishDetection,
         VisionSubscribeDetections,
@@ -2492,6 +2507,24 @@ impl HostServices for RealHost {
             .register_model(args)
             .await
             .map_err(|e| HostError::Rpc(e.0))
+    }
+
+    async fn vision_read_model(
+        &self,
+        plugin_id: &str,
+        _args: &Value,
+    ) -> Result<HostResult, HostError> {
+        // The model-delivery last mile: return the CALLING plugin's resolved
+        // model status off the install record, so it can find where its
+        // delivered model was cached. Read per call so an operator sideload that
+        // flips `needs_model`→`resolved` is picked up without a restart. Unlike
+        // the other vision methods this touches no engine — a missing state file
+        // or an unresolved plugin yields `{models: []}`, never an error.
+        let installs = crate::state::load_state(Some(&self.state_path));
+        let models = crate::state::find_install(&installs, plugin_id)
+            .and_then(|i| i.model_status.clone())
+            .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
+        Ok(json_to_mpv(&serde_json::json!({ "models": models })))
     }
 
     async fn vision_infer(&self, _plugin_id: &str, args: &Value) -> Result<HostResult, HostError> {
@@ -4258,6 +4291,77 @@ gcs:
         .unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "persisted plugin config must be 0600");
+    }
+
+    #[tokio::test]
+    async fn vision_read_model_returns_the_plugins_resolved_status() {
+        use crate::state::{save_state, PluginInstall, PluginSource, PluginStatus};
+        // A plugin-state file carrying one plugin's resolved model_status.
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("plugin-state.json");
+        let install = PluginInstall {
+            plugin_id: "com.example.p".into(),
+            version: "1.0.0".into(),
+            source: PluginSource::Registry,
+            source_uri: None,
+            signer_id: None,
+            manifest_hash: "h".into(),
+            status: PluginStatus::Running,
+            installed_at: 0,
+            enabled_at: None,
+            failure_reason: None,
+            permissions: Default::default(),
+            auto_update: true,
+            pinned_version: None,
+            last_update_check_at: None,
+            last_update_attempt: None,
+            model_status: Some(serde_json::json!([
+                {"state": "resolved", "model_id": "uav", "runtime": "onnx",
+                 "path": "/var/ados/models/uav.onnx", "reason": null}
+            ])),
+            service_status: None,
+        };
+        save_state(&[install], Some(&state_path)).unwrap();
+
+        let host = RealHost::new().with_state_path(state_path.clone());
+        let res = host
+            .vision_read_model("com.example.p", &Value::Map(vec![]))
+            .await
+            .unwrap();
+        let m = match res {
+            Value::Map(m) => m,
+            other => panic!("{other:?}"),
+        };
+        let models = field(&m, "models")
+            .and_then(Value::as_array)
+            .expect("models array");
+        assert_eq!(models.len(), 1);
+        let m0 = match &models[0] {
+            Value::Map(m) => m,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(field(m0, "model_id").and_then(Value::as_str), Some("uav"));
+        assert_eq!(
+            field(m0, "path").and_then(Value::as_str),
+            Some("/var/ados/models/uav.onnx"),
+            "the resolved model path must reach the plugin — the whole point of A7"
+        );
+        assert_eq!(field(m0, "state").and_then(Value::as_str), Some("resolved"));
+
+        // An unknown plugin (or a plugin whose models are unresolved) yields an
+        // empty list, never an error — a caller can poll until it resolves.
+        let empty = host
+            .vision_read_model("com.example.other", &Value::Map(vec![]))
+            .await
+            .unwrap();
+        let em = match empty {
+            Value::Map(m) => m,
+            other => panic!("{other:?}"),
+        };
+        assert!(field(&em, "models")
+            .and_then(Value::as_array)
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]

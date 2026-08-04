@@ -48,6 +48,7 @@ pub const DISPATCH_METHODS: &[DispatchMethod] = &[
     DispatchMethod { method: "process.spawn", required_cap: Some("process.spawn"), inline: false },
     DispatchMethod { method: "vision.subscribe_frames", required_cap: Some("vision.frame.read"), inline: false },
     DispatchMethod { method: "vision.register_model", required_cap: Some("vision.model.register"), inline: false },
+    DispatchMethod { method: "vision.read_model", required_cap: Some("vision.model.read"), inline: false },
     DispatchMethod { method: "vision.infer", required_cap: Some("vision.model.register"), inline: false },
     DispatchMethod { method: "vision.publish_detection", required_cap: Some("vision.detection.publish"), inline: false },
     DispatchMethod { method: "vision.subscribe_detections", required_cap: Some("vision.detection.subscribe"), inline: false },

@@ -483,6 +483,21 @@ impl PluginIpcClient {
             .args)
     }
 
+    /// Read this plugin's resolved model-delivery status. Sends
+    /// [`framebus::methods::READ_MODEL`] (gated on `vision.model.read`); the host
+    /// returns `{models: [ {state, model_id, runtime, path, reason}, ... ]}` off
+    /// this plugin's install record. No args.
+    pub async fn vision_read_model(&self) -> Result<Value, ClientError> {
+        Ok(self
+            .send_request(
+                ados_protocol::framebus::methods::READ_MODEL,
+                "vision.model.read",
+                Value::Map(vec![]),
+            )
+            .await?
+            .args)
+    }
+
     /// Arm the host's front-panel button push stream for this connection.
     pub async fn button_subscribe(&self) -> Result<Value, ClientError> {
         Ok(self

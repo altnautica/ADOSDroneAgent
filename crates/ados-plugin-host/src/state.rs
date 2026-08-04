@@ -88,6 +88,18 @@ pub struct PluginInstall {
     pub last_update_check_at: Option<i64>,
     #[serde(default)]
     pub last_update_attempt: Option<serde_json::Value>,
+    /// The plugin's resolved model-delivery status, one entry per declared model
+    /// (`{state, model_id, runtime, path, reason}`). Written by the Python
+    /// resolver on install/configure; the Rust host reads it to serve
+    /// `vision.read_model`. Kept as opaque JSON so the Rust side neither owns the
+    /// shape nor strips it on a round-trip save (before this field existed serde
+    /// silently dropped it, so a Rust save wiped the Python-written status).
+    #[serde(default)]
+    pub model_status: Option<serde_json::Value>,
+    /// The plugin's per-service runtime status, opaque here for the same
+    /// round-trip-preservation reason as `model_status`.
+    #[serde(default)]
+    pub service_status: Option<serde_json::Value>,
 }
 
 fn default_true() -> bool {
@@ -351,6 +363,8 @@ mod tests {
             pinned_version: None,
             last_update_check_at: None,
             last_update_attempt: None,
+            model_status: None,
+            service_status: None,
         }
     }
 

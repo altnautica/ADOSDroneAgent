@@ -362,6 +362,8 @@ impl PluginSupervisor {
             pinned_version: None,
             last_update_check_at: None,
             last_update_attempt: None,
+            model_status: None,
+            service_status: None,
         };
         self.installs = upsert_install(std::mem::take(&mut self.installs), install);
         save_state(&self.installs, Some(&self.paths.state_path))?;
@@ -1195,6 +1197,8 @@ mod tests {
             pinned_version: None,
             last_update_check_at: None,
             last_update_attempt: None,
+            model_status: None,
+            service_status: None,
         };
         grant_permission(&mut inst, "hardware.spi");
         grant_permission(&mut inst, "vehicle.command"); // not declared

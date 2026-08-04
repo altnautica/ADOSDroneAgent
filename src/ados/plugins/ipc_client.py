@@ -222,6 +222,22 @@ class PluginIpcClient:
         """
         self._detection_callbacks.append(callback)
 
+    async def vision_read_model(self) -> list[dict]:
+        """Read this plugin's resolved model-delivery status.
+
+        Returns one dict per declared model — ``{state, model_id, runtime, path,
+        reason}`` (the resolver's ``ModelResolution.to_dict()``), keyed by
+        ``model_id`` — so the plugin can find where its delivered model was
+        cached (``path`` when ``state == "resolved"``). An unresolved plugin
+        returns an empty list rather than raising, so a caller can poll.
+        """
+        resp = await self._send_request(
+            "vision.read_model",
+            capability="vision.model.read",
+            args={},
+        )
+        return (resp.args or {}).get("models", [])
+
     def register_button_callback(
         self,
         callback: Callable[[dict], Awaitable[None] | None],
@@ -660,6 +676,7 @@ class _NullIpcClient:
     async def mavlink_send(self, *_a, **_k) -> dict: return self._unavail("mavlink_send")
     async def mavlink_subscribe(self, *_a, **_k) -> None: return self._unavail("mavlink_subscribe")
     async def vision_subscribe_detections(self, *_a, **_k) -> None: return self._unavail("vision_subscribe_detections")
+    async def vision_read_model(self, *_a, **_k) -> list: return self._unavail("vision_read_model")
     async def mavlink_register_component(self, *_a, **_k) -> dict: return self._unavail("mavlink_register_component")
     async def telemetry_extend(self, *_a, **_k) -> dict: return self._unavail("telemetry_extend")
     async def peripheral_register_driver(self, *_a, **_k) -> dict: return self._unavail("peripheral_register_driver")

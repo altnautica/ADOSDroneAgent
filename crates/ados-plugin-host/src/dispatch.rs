@@ -81,6 +81,7 @@ pub enum Method {
     // the host proxies these to it over its socket.
     VisionSubscribeFrames,
     VisionRegisterModel,
+    VisionReadModel,
     VisionInfer,
     VisionPublishDetection,
     VisionSubscribeDetections,
@@ -114,6 +115,9 @@ impl Method {
         }
         if name == vision_methods::REGISTER_MODEL {
             return Some(Self::VisionRegisterModel);
+        }
+        if name == vision_methods::READ_MODEL {
+            return Some(Self::VisionReadModel);
         }
         if name == vision_methods::INFER {
             return Some(Self::VisionInfer);
@@ -205,6 +209,7 @@ impl Method {
             Self::RadioAuxStreamClose => "radio.aux_stream.close",
             Self::VisionSubscribeFrames => vision_methods::SUBSCRIBE_FRAMES,
             Self::VisionRegisterModel => vision_methods::REGISTER_MODEL,
+            Self::VisionReadModel => vision_methods::READ_MODEL,
             Self::VisionInfer => vision_methods::INFER,
             Self::VisionPublishDetection => vision_methods::PUBLISH_DETECTION,
             Self::VisionSubscribeDetections => vision_methods::SUBSCRIBE_DETECTIONS,
@@ -495,6 +500,7 @@ mod tests {
         Method::RadioAuxStreamClose,
         Method::VisionSubscribeFrames,
         Method::VisionRegisterModel,
+        Method::VisionReadModel,
         Method::VisionInfer,
         Method::VisionPublishDetection,
         Method::VisionSubscribeDetections,

@@ -363,6 +363,20 @@ pub trait HostServices: Send + Sync + 'static {
         std::future::ready(Ok(not_implemented("vision.register_model")))
     }
 
+    /// Read the CALLING plugin's own resolved model-delivery status
+    /// (`{models: [...]}`). Unlike the other vision methods this does NOT proxy
+    /// to the engine — the resolution lives on the plugin install record, which
+    /// the host reads by `plugin_id`. The default is empty so a host without
+    /// install-state access degrades to "no resolved models" rather than an
+    /// error.
+    fn vision_read_model(
+        &self,
+        _plugin_id: &str,
+        _args: &Value,
+    ) -> impl std::future::Future<Output = Result<HostResult, HostError>> + Send {
+        std::future::ready(Ok(not_implemented("vision.read_model")))
+    }
+
     /// Run a registered model against one frame on the engine's shared backend
     /// and return the detections. Proxied to the engine over the vision socket.
     fn vision_infer(

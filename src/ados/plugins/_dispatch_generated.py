@@ -38,6 +38,7 @@ REQUIRED_CAP: dict[str, str | None] = {
     "process.spawn": "process.spawn",
     "vision.subscribe_frames": "vision.frame.read",
     "vision.register_model": "vision.model.register",
+    "vision.read_model": "vision.model.read",
     "vision.infer": "vision.model.register",
     "vision.publish_detection": "vision.detection.publish",
     "vision.subscribe_detections": "vision.detection.subscribe",

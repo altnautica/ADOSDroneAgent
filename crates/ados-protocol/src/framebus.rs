@@ -451,6 +451,14 @@ pub mod methods {
     /// a msgpack-encoded `Vec<ModelInfo>` in a binary field.
     pub const LIST_MODELS: &str = "vision.list_models";
 
+    /// Read the CALLING plugin's own resolved model-delivery status. No args; the
+    /// reply is `{models: [ {state, model_id, runtime, path, reason}, ... ]}` —
+    /// the `model_status` the host resolved from the plugin's declared model
+    /// refs, so the plugin can find where its delivered model was cached. This is
+    /// the model-delivery last mile: unlike `LIST_MODELS` (engine registry) this
+    /// is per-plugin resolution keyed by `model_id`.
+    pub const READ_MODEL: &str = "vision.read_model";
+
     /// Event method the host uses to push a frame descriptor to a subscriber
     /// (mirrors `mavlink.deliver`).
     pub const DELIVER_FRAME: &str = "vision.deliver";

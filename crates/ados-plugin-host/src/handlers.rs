@@ -346,6 +346,9 @@ pub async fn route_host_method<H: HostServices + ?Sized>(
         // reply. (vision.subscribe_frames is handled in the server, where it
         // arms the frame-descriptor push stream, never reaching here.)
         Method::VisionRegisterModel => host.vision_register_model(plugin_id, args).await,
+        // Reads the plugin's own resolved model status off the install record —
+        // the one vision method that does not proxy to the engine.
+        Method::VisionReadModel => host.vision_read_model(plugin_id, args).await,
         Method::VisionInfer => host.vision_infer(plugin_id, args).await,
         Method::VisionPublishDetection => host.vision_publish_detection(plugin_id, args).await,
         Method::VisionDesignateTrack => host.vision_designate_track(plugin_id, args).await,
