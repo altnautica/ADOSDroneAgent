@@ -190,6 +190,7 @@ async fn subscribe_frames_resolves_a_real_ring_to_a_frame() {
         ipc.clone(),
         "1.0.0",
         "agent-1",
+        None,
         std::collections::BTreeMap::new(),
     );
 

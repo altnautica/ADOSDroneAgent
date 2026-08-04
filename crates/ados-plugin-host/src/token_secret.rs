@@ -41,6 +41,26 @@ const SECRET_LEN: usize = 32;
 pub const ENV_SOCKET: &str = "ADOS_PLUGIN_SOCKET";
 /// The env-var the runner reads for its capability token.
 pub const ENV_TOKEN: &str = "ADOS_PLUGIN_TOKEN";
+/// The env-var the runner reads for the paired device id. Empty on an unpaired
+/// node; the runner then treats the plugin as node-scoped rather than per-drone.
+pub const ENV_AGENT_ID: &str = "ADOS_PLUGIN_AGENT_ID";
+/// The env-var the runner reads for the plugin's per-drone data directory.
+pub const ENV_DATA_DIR: &str = "ADOS_PLUGIN_DATA_DIR";
+/// Base of the persistent plugin data tree. Mirrors the Python `PLUGIN_DATA_DIR`
+/// (`/var/ados/plugin-data`), and the per-plugin unit already lists it under
+/// `ReadWritePaths`.
+pub const PLUGIN_DATA_DIR: &str = "/var/ados/plugin-data";
+
+/// The plugin's data directory, matching the Python `_data_dir_for`: node-scoped
+/// at `<base>/<id>`, or per-drone at `<base>/<id>/drones/<agent_id>` when paired.
+pub fn plugin_data_dir(plugin_id: &str, agent_id: &str) -> PathBuf {
+    let base = Path::new(PLUGIN_DATA_DIR).join(plugin_id);
+    if agent_id.is_empty() {
+        base
+    } else {
+        base.join("drones").join(agent_id)
+    }
+}
 
 /// The absolute env-file path a plugin's unit references via `EnvironmentFile=`.
 /// One file per plugin so a unit restart rewrites only that plugin's token.
@@ -101,6 +121,7 @@ pub fn write_token_env(
     plugin_id: &str,
     granted_caps: &BTreeSet<String>,
     socket_path: &Path,
+    agent_id: &str,
     env_dir: Option<&Path>,
 ) -> std::io::Result<CapabilityToken> {
     let token = issuer.mint(plugin_id, granted_caps, TOKEN_TTL_SECONDS);
@@ -108,10 +129,20 @@ pub fn write_token_env(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    // The agent id and data dir ride here rather than on the unit's ExecStart:
+    // the unit is rendered once, but the paired device id is a runtime fact, and
+    // this file is already rewritten per start. Without them `ctx.agent_id` was
+    // empty and `ctx.data_dir` unavailable for every plugin — so a plugin that
+    // wanted its own storage had to hard-code a path and hope.
+    let data_dir = plugin_data_dir(plugin_id, agent_id);
     let body = format!(
-        "{ENV_TOKEN}={token}\n{ENV_SOCKET}={socket}\n",
+        "{ENV_TOKEN}={token}\n\
+         {ENV_SOCKET}={socket}\n\
+         {ENV_AGENT_ID}={agent_id}\n\
+         {ENV_DATA_DIR}={data_dir}\n",
         token = token.to_token_string(),
         socket = socket_path.display(),
+        data_dir = data_dir.display(),
     );
     write_owner_only(&path, body.as_bytes())?;
     Ok(token)
@@ -223,6 +254,7 @@ mod tests {
             "com.example.demo",
             &caps(&["mavlink.read"]),
             &sock,
+            "drone-abc",
             Some(&env_dir),
         )
         .unwrap();
@@ -232,6 +264,14 @@ mod tests {
         // The env file carries the two keys the runner reads.
         assert!(body.contains(&format!("{ENV_TOKEN}={}", token.to_token_string())));
         assert!(body.contains(&format!("{ENV_SOCKET}={}", sock.display())));
+        // The agent id and the derived per-drone data dir reach the runner: this
+        // is what makes ctx.agent_id non-empty and ctx.data_dir usable. Without
+        // it a plugin has no place of its own to write.
+        assert!(body.contains(&format!("{ENV_AGENT_ID}=drone-abc")));
+        assert!(body.contains(&format!(
+            "{ENV_DATA_DIR}={}",
+            plugin_data_dir("com.example.demo", "drone-abc").display()
+        )));
     }
 
     #[cfg(unix)]
@@ -248,6 +288,7 @@ mod tests {
             "com.example.x",
             &BTreeSet::new(),
             &sock,
+            "",
             Some(&env_dir),
         )
         .unwrap();
@@ -301,6 +342,7 @@ mod tests {
             "com.example.x",
             &BTreeSet::new(),
             &sock,
+            "",
             Some(&env_dir),
         )
         .unwrap();

@@ -56,7 +56,7 @@ async fn connect(h: &Harness, granted: &[&str]) -> (Arc<PluginIpcClient>, Plugin
         .to_token_string();
     let ipc = Arc::new(PluginIpcClient::new(PLUGIN_ID, token, &h.path));
     ipc.connect().await.expect("connect + handshake");
-    let ctx = PluginContext::new(ipc.clone(), "1.0.0", "agent-1", BTreeMap::new());
+    let ctx = PluginContext::new(ipc.clone(), "1.0.0", "agent-1", None, BTreeMap::new());
     (ipc, ctx)
 }
 

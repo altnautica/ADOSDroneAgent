@@ -323,6 +323,9 @@ async fn wire(
         }
     };
 
+    // The paired device id scopes each plugin's per-drone data dir, written into
+    // the runner's env file below. Empty on an unpaired node (node scope).
+    let device_id = read_device_id();
     let mut served: Vec<(String, JoinHandle<()>)> = Vec::new();
     for install in supervisor.installs() {
         // Serve the enabled / running subprocess plugins. A built-in / inprocess
@@ -358,6 +361,7 @@ async fn wire(
                     &install.plugin_id,
                     &caps,
                     &path,
+                    &device_id,
                     Some(&socket_dir),
                 ) {
                     tracing::warn!(
@@ -693,6 +697,7 @@ mod tests {
                 plugin_id,
                 &caps(&["mavlink.read"]),
                 &sock,
+                "test-drone",
                 Some(&socket_dir),
             )
             .expect("write env");

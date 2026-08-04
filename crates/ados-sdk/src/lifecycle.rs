@@ -96,6 +96,10 @@ pub struct RunnerArgs {
     pub socket_path: Option<String>,
     pub token: Option<String>,
     pub agent_id: String,
+    /// The plugin's per-drone data directory, from `ADOS_PLUGIN_DATA_DIR`. The
+    /// host sets this on the unit; a plugin reads it through `ctx.data_dir`
+    /// rather than re-deriving a path it might get wrong.
+    pub data_dir: Option<String>,
 }
 
 impl RunnerArgs {
@@ -157,6 +161,7 @@ impl RunnerArgs {
             agent_id: agent_id
                 .or_else(|| env("ADOS_PLUGIN_AGENT_ID"))
                 .unwrap_or_default(),
+            data_dir: env("ADOS_PLUGIN_DATA_DIR"),
         })
     }
 }
@@ -214,6 +219,7 @@ where
         ipc.clone(),
         plugin_version,
         args.agent_id,
+        args.data_dir,
         static_config.clone(),
     );
 
@@ -362,6 +368,7 @@ mod tests {
             socket_path: None,
             token: None,
             agent_id: String::new(),
+            data_dir: None,
         };
         let err = run_plugin_with::<DummyPlugin, _>(
             args,

@@ -495,6 +495,149 @@ impl PluginIpcClient {
             .args)
     }
 
+    /// Drive a host GPIO output line high or low.
+    pub async fn gpio_output_set(
+        &self,
+        chip: i64,
+        pin: i64,
+        high: bool,
+    ) -> Result<Value, ClientError> {
+        let args = Value::Map(vec![
+            (Value::from("chip"), Value::Integer(chip.into())),
+            (Value::from("pin"), Value::Integer(pin.into())),
+            (
+                Value::from("level"),
+                Value::from(if high { "high" } else { "low" }),
+            ),
+        ]);
+        Ok(self
+            .send_request("gpio.output.set", "hardware.gpio_out", args)
+            .await?
+            .args)
+    }
+
+    /// Play a bounded beep pattern on a host GPIO line.
+    ///
+    /// The gpio service is the single owner of the safe bounds and clamps the
+    /// pattern itself, so this sends the requested values verbatim rather than
+    /// pre-clamping them to a second, drifting opinion of what is safe.
+    pub async fn gpio_buzzer_beep(
+        &self,
+        chip: i64,
+        pin: i64,
+        on_ms: i64,
+        cycles: i64,
+        off_ms: Option<i64>,
+        freq_hz: Option<i64>,
+    ) -> Result<Value, ClientError> {
+        let mut entries = vec![
+            (Value::from("chip"), Value::Integer(chip.into())),
+            (Value::from("pin"), Value::Integer(pin.into())),
+            (Value::from("on_ms"), Value::Integer(on_ms.into())),
+            (Value::from("cycles"), Value::Integer(cycles.into())),
+        ];
+        if let Some(v) = off_ms {
+            entries.push((Value::from("off_ms"), Value::Integer(v.into())));
+        }
+        if let Some(v) = freq_hz {
+            entries.push((Value::from("freq_hz"), Value::Integer(v.into())));
+        }
+        Ok(self
+            .send_request("gpio.buzzer.beep", "hardware.gpio_out", Value::Map(entries))
+            .await?
+            .args)
+    }
+
+    /// Set the content of the host's reserved data-driven display page.
+    ///
+    /// `rows` are `(label, value)` pairs and `zones` are
+    /// `(x, y, w, h, key, label)` touch rectangles in page-local content
+    /// coordinates. The host writes the page sidecar the display service renders.
+    pub async fn display_page_set(
+        &self,
+        title: &str,
+        rows: &[(String, String)],
+        zones: &[(i64, i64, i64, i64, String, String)],
+    ) -> Result<Value, ClientError> {
+        let rows_v: Vec<Value> = rows
+            .iter()
+            .map(|(label, value)| {
+                Value::Map(vec![
+                    (Value::from("label"), Value::from(label.as_str())),
+                    (Value::from("value"), Value::from(value.as_str())),
+                ])
+            })
+            .collect();
+        let zones_v: Vec<Value> = zones
+            .iter()
+            .map(|(x, y, w, h, key, label)| {
+                Value::Map(vec![
+                    (Value::from("x"), Value::Integer((*x).into())),
+                    (Value::from("y"), Value::Integer((*y).into())),
+                    (Value::from("w"), Value::Integer((*w).into())),
+                    (Value::from("h"), Value::Integer((*h).into())),
+                    (Value::from("key"), Value::from(key.as_str())),
+                    (Value::from("label"), Value::from(label.as_str())),
+                ])
+            })
+            .collect();
+        let args = Value::Map(vec![
+            (Value::from("title"), Value::from(title)),
+            (Value::from("rows"), Value::Array(rows_v)),
+            (Value::from("zones"), Value::Array(zones_v)),
+        ]);
+        Ok(self
+            .send_request("display.page.set", "display.oled.page", args)
+            .await?
+            .args)
+    }
+
+    /// Open the additive auxiliary application stream on the radio link.
+    pub async fn radio_aux_stream_open(&self) -> Result<Value, ClientError> {
+        Ok(self
+            .send_request(
+                "radio.aux_stream.open",
+                "radio.aux_stream",
+                Value::Map(vec![]),
+            )
+            .await?
+            .args)
+    }
+
+    /// Close the auxiliary application stream.
+    pub async fn radio_aux_stream_close(&self) -> Result<Value, ClientError> {
+        Ok(self
+            .send_request(
+                "radio.aux_stream.close",
+                "radio.aux_stream",
+                Value::Map(vec![]),
+            )
+            .await?
+            .args)
+    }
+
+    /// Send one application payload over a MAVLink TUNNEL frame.
+    ///
+    /// `payload_type` must be a private type (> 32767); the host validates it
+    /// before anything is sent.
+    pub async fn mavlink_tunnel_send(
+        &self,
+        payload_type: u16,
+        payload: &[u8],
+    ) -> Result<Value, ClientError> {
+        let args = Value::Map(vec![
+            (
+                Value::from("payload_type"),
+                Value::Integer(payload_type.into()),
+            ),
+            (Value::from("payload"), Value::Binary(payload.to_vec())),
+        ]);
+        Ok(self
+            .send_request("mavlink.tunnel.send", "mavlink.tunnel", args)
+            .await?
+            .args)
+    }
+
     /// Send one guided-mode setpoint through the scoped sender.
     ///
     /// `args` is the setpoint map the host validates (`kind`, `coordinate_frame`,
