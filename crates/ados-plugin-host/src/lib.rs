@@ -40,6 +40,7 @@
 //! - [`errors`] — the lifecycle error hierarchy.
 
 pub mod archive;
+pub mod button_client;
 pub mod control;
 pub mod dispatch;
 pub mod errors;

@@ -113,6 +113,7 @@ def test_gated_caps_are_marked_enforced() -> None:
             "compute.job.read",
             "compute.job.submit",
             "compute.stream.open",
+            "button.subscribe",
             "display.oled.page",
             "estimator.pose.inject",
             "event.publish",

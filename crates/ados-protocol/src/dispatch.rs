@@ -53,6 +53,7 @@ pub const DISPATCH_METHODS: &[DispatchMethod] = &[
     DispatchMethod { method: "vision.subscribe_detections", required_cap: Some("vision.detection.subscribe"), inline: false },
     DispatchMethod { method: "vision.designate_track", required_cap: Some("vision.track.designate"), inline: false },
     DispatchMethod { method: "display.page.set", required_cap: Some("display.oled.page"), inline: false },
+    DispatchMethod { method: "button.subscribe", required_cap: Some("button.subscribe"), inline: false },
     DispatchMethod { method: "gpio.output.set", required_cap: Some("hardware.gpio_out"), inline: false },
     DispatchMethod { method: "gpio.buzzer.beep", required_cap: Some("hardware.gpio_out"), inline: false },
     DispatchMethod { method: "flight.guided_setpoint.send", required_cap: Some("flight.guided_setpoint"), inline: false },

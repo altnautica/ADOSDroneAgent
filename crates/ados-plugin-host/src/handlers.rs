@@ -362,15 +362,16 @@ pub async fn route_host_method<H: HostServices + ?Sized>(
         Method::ComputeStreamClose => host.compute_stream_close(plugin_id, args).await,
         Method::ComputeStreamHealth => host.compute_stream_health(plugin_id, args).await,
         // The event surface, ping, and the streaming subscribe methods never
-        // reach here; the server short-circuits both `vision.subscribe_frames`
-        // and `vision.subscribe_detections`, arming the per-connection push
-        // streams before they could route to the facade. Reaching this arm is a
-        // programming error guarded by a stable response.
+        // reach here; the server short-circuits `vision.subscribe_frames`,
+        // `vision.subscribe_detections` and `button.subscribe`, arming the
+        // per-connection push streams before they could route to the facade.
+        // Reaching this arm is a programming error guarded by a stable response.
         Method::EventPublish
         | Method::EventSubscribe
         | Method::Ping
         | Method::VisionSubscribeFrames
-        | Method::VisionSubscribeDetections => Ok(crate::host::not_implemented("event")),
+        | Method::VisionSubscribeDetections
+        | Method::ButtonSubscribe => Ok(crate::host::not_implemented("event")),
     }
 }
 

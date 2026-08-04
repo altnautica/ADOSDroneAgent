@@ -49,6 +49,7 @@ pub mod aux_mux;
 pub mod aux_ports;
 pub mod aux_rpc;
 pub mod aux_rpc_proxy;
+pub mod buttons;
 pub mod capabilities;
 pub mod compute;
 pub mod contracts;

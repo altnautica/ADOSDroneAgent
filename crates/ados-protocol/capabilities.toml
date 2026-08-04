@@ -378,7 +378,7 @@ description = "Lets the plugin receive press events (short, long, chord) from th
 category = "hardware"
 risk = "medium"
 risk_reason = "Button events drive plugin actions; an input source should be reviewed like any other."
-enforced = false
+enforced = true
 
 [[agent]]
 id = "flight.guided_setpoint"
@@ -804,6 +804,16 @@ required_cap = "vision.track.designate"
 [[method]]
 id = "display.page.set"
 required_cap = "display.oled.page"
+
+# ---- front-panel buttons ----
+# Subscribe to the host's front-panel button presses. Arms a per-connection push
+# stream (like the vision subscriptions): the host reads the already-decoded
+# events off the button fanout socket and pushes each one to the plugin as a
+# `button.deliver` event. Read-only — a subscriber observes presses and neither
+# remaps them nor consumes them from the other consumers on that bus.
+[[method]]
+id = "button.subscribe"
+required_cap = "button.subscribe"
 
 # ---- gpio output (status buzzer / LED) ----
 # Drive a host GPIO output line, and play a bounded buzzer/LED beep pattern. The

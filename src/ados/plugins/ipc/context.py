@@ -246,6 +246,41 @@ class _VideoClient:
         return await self._ipc.video_source_set(cameras)
 
 
+class _ButtonClient:
+    """``ctx.buttons`` facade.
+
+    A node plugin that drives an on-device workflow from the front panel — a
+    field operator with no screen and no GCS — needs the presses, not the pins.
+    The host owns the bus and the short/long decode; this only arms the push
+    stream and hands each press to the callback, so a plugin never re-implements
+    debounce or the action mapping and so cannot drift from what the panel's own
+    UI thinks a press means.
+
+    Read-only and non-exclusive: several consumers watch the same bus, so
+    subscribing observes presses without consuming or remapping them.
+    """
+
+    def __init__(self, ipc: Any) -> None:
+        self._ipc = ipc
+
+    async def subscribe(
+        self, callback: Callable[[dict], Awaitable[None] | None]
+    ) -> dict:
+        """Receive every front-panel press.
+
+        The callback gets ``{pin, kind, action, timestamp_ms}``. ``kind`` is
+        ``"short"`` or ``"long"``; ``action`` is the host's configured action name
+        for that button, or ``None`` when it is unmapped — an unmapped button is
+        still delivered, so a plugin can bind one the operator has not assigned.
+
+        A board with no front panel simply never fires the callback. That is the
+        resting state, not an error, so this does not raise on a node without
+        buttons.
+        """
+        self._ipc.register_button_callback(callback)
+        return await self._ipc.button_subscribe()
+
+
 class _FlightClient:
     """``ctx.flight`` facade.
 
@@ -467,6 +502,9 @@ class PluginContext:
         # through a scoped sender (the host gates the flight-command cap and
         # forwards to the MAVLink router) rather than raw MAVLink writes.
         self.flight = _FlightClient(ipc)
+        # Front-panel buttons: the on-device input surface, for a plugin whose
+        # operator has no screen. Read-only push stream.
+        self.buttons = _ButtonClient(ipc)
         # Vision engine facade: frame subscription (shared-memory ring),
         # model registration, inference, detection publishing, and
         # visual-odometry pose injection. The host gates the vision caps.

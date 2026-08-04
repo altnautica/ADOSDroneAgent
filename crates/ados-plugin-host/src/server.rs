@@ -261,6 +261,13 @@ impl<H: HostServices> Connection<H> {
         let mut detection_subs: Vec<String> = Vec::new();
         let (det_tx, mut det_rx) = tokio::sync::mpsc::channel::<DetectionDelivery>(256);
 
+        // Front-panel button subscription. One `button.subscribe` per connection
+        // arms a forwarder off the host's shared bus receiver into this merged
+        // channel, so the select loop writes `button.deliver` envelopes with no
+        // competing writers. Same shape as the two vision pumps.
+        let mut button_subscribed = false;
+        let (btn_tx, mut btn_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+
         // MCP tool invocation: register an outbound-request sender so the control
         // socket can reach THIS live connection (the host->plugin request flow),
         // and track pending replies here so the read branch can resolve them. On
@@ -318,6 +325,8 @@ impl<H: HostServices> Connection<H> {
                             &vis_tx,
                             &mut detection_subs,
                             &det_tx,
+                            &mut button_subscribed,
+                            &btn_tx,
                             &mut forwarders,
                         )
                         .await
@@ -404,6 +413,18 @@ impl<H: HostServices> Connection<H> {
                         }
                     }
                 }
+                press = btn_rx.recv() => {
+                    // None means the forwarder dropped its sender; keep serving
+                    // requests rather than tearing the session down.
+                    if let Some(press) = press {
+                        if let Err(e) = self
+                            .deliver_button_press(&mut write_half, &token, &press)
+                            .await
+                        {
+                            break Err(e);
+                        }
+                    }
+                }
                 delivery = det_rx.recv() => {
                     // None means every detection forwarder dropped its sender;
                     // keep serving requests rather than tearing down.
@@ -454,6 +475,8 @@ impl<H: HostServices> Connection<H> {
         vis_tx: &tokio::sync::mpsc::Sender<VisionDelivery>,
         detection_subs: &mut Vec<String>,
         det_tx: &tokio::sync::mpsc::Sender<DetectionDelivery>,
+        button_subscribed: &mut bool,
+        btn_tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
         forwarders: &mut Vec<JoinHandle<()>>,
     ) -> Result<(), ServerError> {
         let req_id = env.request_id.clone();
@@ -477,6 +500,8 @@ impl<H: HostServices> Connection<H> {
                     vis_tx,
                     detection_subs,
                     det_tx,
+                    button_subscribed,
+                    btn_tx,
                     forwarders,
                 )
                 .await
@@ -500,6 +525,8 @@ impl<H: HostServices> Connection<H> {
         vis_tx: &tokio::sync::mpsc::Sender<VisionDelivery>,
         detection_subs: &mut Vec<String>,
         det_tx: &tokio::sync::mpsc::Sender<DetectionDelivery>,
+        button_subscribed: &mut bool,
+        btn_tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
         forwarders: &mut Vec<JoinHandle<()>>,
     ) -> Result<(), ServerError> {
         match method {
@@ -668,6 +695,44 @@ impl<H: HostServices> Connection<H> {
                 ]);
                 send_response(write_half, &env.request_id, result).await
             }
+            // button.subscribe arms the per-connection front-panel press stream.
+            // The host owns one connection to the bus and hands out receivers, so
+            // arming here is just attaching a forwarder. A second subscribe on the
+            // same connection is idempotent rather than an error: re-arming would
+            // duplicate every press to that plugin.
+            Method::ButtonSubscribe => {
+                if *button_subscribed {
+                    let result = Value::Map(vec![(
+                        Value::from("already_subscribed"),
+                        Value::Boolean(true),
+                    )]);
+                    return send_response(write_half, &env.request_id, result).await;
+                }
+                *button_subscribed = true;
+                if let Some(mut rx) = self.host.button_subscribe_stream(&self.plugin_id) {
+                    let tx = btn_tx.clone();
+                    forwarders.push(tokio::spawn(async move {
+                        loop {
+                            match rx.recv().await {
+                                Ok(press) => {
+                                    if tx.send(press).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                // Lagged: this subscriber fell behind and the
+                                // oldest presses were dropped. Keep going — a
+                                // missed press is better than a dead stream.
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                    continue
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                            }
+                        }
+                    }));
+                }
+                let result = Value::Map(vec![(Value::from("subscribed"), Value::Boolean(true))]);
+                send_response(write_half, &env.request_id, result).await
+            }
             // vision.subscribe_detections arms the per-connection detection-batch
             // push stream, exactly like vision.subscribe_frames arms the frame
             // pump. On the first subscribe to a camera we obtain a batch receiver
@@ -814,6 +879,62 @@ impl<H: HostServices> Connection<H> {
                 (Value::from("timestamp_ms"), Value::Integer(ts.into())),
             ]),
             request_id: format!("vis-{ts}"),
+            token: token.to_token_string(),
+            error: None,
+        };
+        write_frame(write_half, &env).await
+    }
+
+    /// Push one front-panel press to the plugin as a `button.deliver` event.
+    ///
+    /// The press rides under `press` as the JSON-encoded
+    /// `ados_protocol::buttons::ButtonPress` the host re-encoded off the bus.
+    /// Unlike the vision deliveries this carries no binary blob, so it goes as a
+    /// decoded map: a press is four small scalars and making the SDKs decode a
+    /// nested byte string would buy nothing.
+    async fn deliver_button_press<W: AsyncWriteExt + Unpin>(
+        &self,
+        write_half: &mut W,
+        token: &CapabilityToken,
+        press: &[u8],
+    ) -> Result<(), ServerError> {
+        let ts = now_ms();
+        let decoded: ados_protocol::buttons::ButtonPress = match serde_json::from_slice(press) {
+            Ok(v) => v,
+            // The host re-encoded this itself, so a failure here is a host bug,
+            // not bad input. Drop the press rather than kill the session.
+            Err(e) => {
+                tracing::debug!(error = %e, "button press re-encode was unreadable");
+                return Ok(());
+            }
+        };
+        let mut fields = vec![
+            (Value::from("pin"), Value::Integer(decoded.pin.into())),
+            (Value::from("kind"), Value::from(decoded.kind.as_str())),
+            (
+                Value::from("timestamp_ms"),
+                Value::Integer(decoded.timestamp_ms.into()),
+            ),
+        ];
+        // An unmapped button carries no action; send the key as nil rather than
+        // omitting it so a decoder never has to distinguish absent from unmapped.
+        fields.push((
+            Value::from("action"),
+            match decoded.action.as_deref() {
+                Some(a) => Value::from(a),
+                None => Value::Nil,
+            },
+        ));
+        let env = Envelope {
+            version: PROTOCOL_VERSION,
+            kind: "event".to_string(),
+            method: ados_protocol::buttons::DELIVER.to_string(),
+            capability: ados_protocol::buttons::SUBSCRIBE.to_string(),
+            args: Value::Map(vec![
+                (Value::from("press"), Value::Map(fields)),
+                (Value::from("timestamp_ms"), Value::Integer(ts.into())),
+            ]),
+            request_id: format!("btn-{ts}"),
             token: token.to_token_string(),
             error: None,
         };

@@ -332,6 +332,24 @@ pub trait HostServices: Send + Sync + 'static {
         None
     }
 
+    /// A stream of front-panel button presses, when the host has a reachable
+    /// button bus. The server obtains one per `button.subscribe` and pushes each
+    /// press to the plugin as a `button.deliver` event, mirroring the vision
+    /// pumps. The bytes are a JSON-encoded
+    /// [`ados_protocol::buttons::ButtonPress`].
+    ///
+    /// The default returns `None`, so [`NoopHost`] and any node without a button
+    /// bus simply yield no presses. That is the honest resting state for a
+    /// board with no front panel: the subscription succeeds and stays quiet,
+    /// rather than failing and making a plugin treat "no buttons here" as an
+    /// error it has to handle.
+    fn button_subscribe_stream(
+        &self,
+        _plugin_id: &str,
+    ) -> Option<tokio::sync::broadcast::Receiver<Vec<u8>>> {
+        None
+    }
+
     /// Register an inference model with the vision engine. The host proxies the
     /// request to `/run/ados/vision.sock` and returns the engine's response.
     /// Async because the proxy awaits the engine's reply on the socket, unlike

@@ -1145,6 +1145,11 @@ fn pairing_key(path: &std::path::Path) -> Option<String> {
 /// The real host: the five in-memory facades, the optional MAVLink client, and
 /// the two runtime lookups. Mirrors the `HostServices` dataclass and
 /// `default_host_services()` (every external slot starts `None`).
+/// The process-wide button-bus reader, started on first `button.subscribe`.
+/// The bus is one socket, so one connection serves every subscriber.
+static BUTTON_CLIENT: std::sync::OnceLock<crate::button_client::ButtonClient> =
+    std::sync::OnceLock::new();
+
 pub struct RealHost {
     components: Mutex<ComponentRegistrar>,
     telemetry: Mutex<TelemetryExtender>,
@@ -1552,6 +1557,7 @@ const ALL_DISPATCH_METHODS: &[crate::dispatch::Method] = {
         VisionPublishDetection,
         VisionSubscribeDetections,
         VisionDesignateTrack,
+        ButtonSubscribe,
         ComputeDatasetWrite,
         ComputeJobSubmit,
         ComputeJobRead,
@@ -2449,6 +2455,27 @@ impl HostServices for RealHost {
         // non-matching camera). When the engine socket is not up the slot is None
         // and no stream arms, matching the frame-stream posture.
         self.vision.as_ref().map(|c| c.subscribe_detections())
+    }
+
+    fn button_subscribe_stream(&self, _plugin_id: &str) -> Option<broadcast::Receiver<Vec<u8>>> {
+        // One connection to the bus for the whole host process, shared by every
+        // subscriber — the bus is a single socket and N plugins do not need N
+        // connections to it. Started on first use rather than at construction so
+        // a node whose plugins never ask for buttons never opens it.
+        //
+        // Always `Some`: an absent or down bus is a normal resting state (a
+        // drone has no front panel), so the subscription succeeds and stays
+        // quiet while the reader retries underneath. Returning `None` would make
+        // every plugin treat "no buttons on this board" as an error to handle.
+        Some(
+            BUTTON_CLIENT
+                .get_or_init(|| {
+                    crate::button_client::ButtonClient::spawn(std::path::PathBuf::from(
+                        crate::button_client::BUTTONS_SOCK,
+                    ))
+                })
+                .subscribe(),
+        )
     }
 
     async fn vision_register_model(

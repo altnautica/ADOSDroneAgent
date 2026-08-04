@@ -22,6 +22,7 @@
 
 use std::collections::BTreeSet;
 
+use ados_protocol::buttons::SUBSCRIBE as BUTTON_SUBSCRIBE;
 use ados_protocol::dispatch::required_cap_for;
 use ados_protocol::framebus::methods as vision_methods;
 
@@ -84,6 +85,10 @@ pub enum Method {
     VisionPublishDetection,
     VisionSubscribeDetections,
     VisionDesignateTrack,
+    /// Arm the per-connection front-panel button push stream. Like the vision
+    /// subscriptions this never reaches the facade: the server short-circuits it
+    /// and pushes `button.deliver` events.
+    ButtonSubscribe,
     // Compute offload: the host routes these to its paired compute connection.
     ComputeDatasetWrite,
     ComputeJobSubmit,
@@ -121,6 +126,9 @@ impl Method {
         }
         if name == vision_methods::DESIGNATE_TRACK {
             return Some(Self::VisionDesignateTrack);
+        }
+        if name == BUTTON_SUBSCRIBE {
+            return Some(Self::ButtonSubscribe);
         }
         Some(match name {
             "event.publish" => Self::EventPublish,
@@ -201,6 +209,7 @@ impl Method {
             Self::VisionPublishDetection => vision_methods::PUBLISH_DETECTION,
             Self::VisionSubscribeDetections => vision_methods::SUBSCRIBE_DETECTIONS,
             Self::VisionDesignateTrack => vision_methods::DESIGNATE_TRACK,
+            Self::ButtonSubscribe => BUTTON_SUBSCRIBE,
             Self::ComputeDatasetWrite => "compute.dataset.write",
             Self::ComputeJobSubmit => "compute.job.submit",
             Self::ComputeJobRead => "compute.job.read",
@@ -490,6 +499,7 @@ mod tests {
         Method::VisionPublishDetection,
         Method::VisionSubscribeDetections,
         Method::VisionDesignateTrack,
+        Method::ButtonSubscribe,
         Method::ComputeDatasetWrite,
         Method::ComputeJobSubmit,
         Method::ComputeJobRead,

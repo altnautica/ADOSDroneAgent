@@ -43,6 +43,7 @@ REQUIRED_CAP: dict[str, str | None] = {
     "vision.subscribe_detections": "vision.detection.subscribe",
     "vision.designate_track": "vision.track.designate",
     "display.page.set": "display.oled.page",
+    "button.subscribe": "button.subscribe",
     "gpio.output.set": "hardware.gpio_out",
     "gpio.buzzer.beep": "hardware.gpio_out",
     "flight.guided_setpoint.send": "flight.guided_setpoint",

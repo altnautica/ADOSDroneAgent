@@ -98,6 +98,9 @@ class PluginIpcClient:
         self._detection_callbacks: list[
             Callable[[dict], Awaitable[None] | None]
         ] = []
+        self._button_callbacks: list[
+            Callable[[dict], Awaitable[None] | None]
+        ] = []
         self._reader_task: asyncio.Task | None = None
         self._next_id = 0
         # MCP tool handlers the plugin registers (the SDK @tool decorator fills
@@ -218,6 +221,28 @@ class PluginIpcClient:
         timestamp_ms}``.
         """
         self._detection_callbacks.append(callback)
+
+    def register_button_callback(
+        self,
+        callback: Callable[[dict], Awaitable[None] | None],
+    ) -> None:
+        """Register a callback for ``button.deliver`` events.
+
+        Like the detection stream, the event carries no ``topic`` and is routed
+        by method name, so it needs its own callback list rather than riding the
+        generic topic dispatch. The callback receives the press directly:
+        ``{pin, kind, action, timestamp_ms}``, where ``action`` is ``None`` for an
+        unmapped button.
+        """
+        self._button_callbacks.append(callback)
+
+    async def button_subscribe(self) -> dict:
+        """Arm the host's front-panel button push stream for this connection."""
+        return await self._send_request(
+            "button.subscribe",
+            capability="button.subscribe",
+            args={},
+        )
 
     # ---- Telemetry ----------------------------------------------------
 
@@ -437,6 +462,8 @@ class PluginIpcClient:
                         await self._dispatch_mavlink(env)
                     elif env.method == "vision.deliver_detection":
                         await self._dispatch_detection(env)
+                    elif env.method == "button.deliver":
+                        await self._dispatch_button(env)
                     else:
                         await self._dispatch_event(env)
                 elif env.type == "request" and env.method == _TOOL_INVOKE_METHOD:
@@ -528,6 +555,18 @@ class PluginIpcClient:
                             topic=topic,
                             error=str(exc),
                         )
+
+    async def _dispatch_button(self, env: Envelope) -> None:
+        # The press rides as a decoded map, not a byte blob: it is four small
+        # scalars, so the callback gets it directly with no second decode step.
+        press = env.args.get("press") or {}
+        for cb in list(self._button_callbacks):
+            try:
+                result = cb(press)
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception:  # noqa: BLE001 - one bad callback must not stop the stream
+                log.exception("button_callback_failed")
 
     async def _dispatch_detection(self, env: Envelope) -> None:
         payload = {

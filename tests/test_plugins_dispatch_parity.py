@@ -66,6 +66,7 @@ EXPECTED: dict[str, str | None] = {
     "vision.publish_detection": "vision.detection.publish",
     "vision.subscribe_detections": "vision.detection.subscribe",
     "vision.designate_track": "vision.track.designate",
+    "button.subscribe": "button.subscribe",
     "display.page.set": "display.oled.page",
     "gpio.output.set": "hardware.gpio_out",
     "gpio.buzzer.beep": "hardware.gpio_out",
