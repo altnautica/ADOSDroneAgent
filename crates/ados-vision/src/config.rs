@@ -199,7 +199,7 @@ pub struct VisionConfig {
     /// Slots per camera ring (latest-wins recycling depth).
     #[serde(default = "default_slot_count")]
     pub slot_count: u32,
-    /// Backend preference: "auto" (pick by SoC) | "mock" | "onnx" | "rknn".
+    /// Backend preference: "auto" (pick by SoC) | "mock" | "onnx" | "rknn" | "hailo".
     #[serde(default = "default_backend")]
     pub backend: String,
     /// Run the engine-side single-object tracker between inference and publish so
@@ -374,6 +374,11 @@ impl VisionConfig {
     /// The accelerator sidecar socket path the RKNN backend talks to.
     pub fn rknn_socket_path(&self) -> String {
         format!("{}/vision-rknn.sock", self.socket_dir.trim_end_matches('/'))
+    }
+
+    /// The accelerator sidecar socket path the Hailo backend talks to (Pi + AI HAT).
+    pub fn hailo_socket_path(&self) -> String {
+        format!("{}/vision-hailo.sock", self.socket_dir.trim_end_matches('/'))
     }
 
     /// The default tap socket path for a camera id.

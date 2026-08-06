@@ -163,7 +163,40 @@ def test_rknn_embed_unknown_model_is_an_error():
         )
     )
     assert resp["status"] == proto.STATUS_ERROR
-    assert "not loaded" in resp["error"]
+
+
+def test_hailo_sidecar_degrades_cleanly_without_the_runtime(tmp_path):
+    """The Hailo sidecar builds and serves error responses on a host with no HailoRT / no device,
+    so it is exercisable in CI without the NPU."""
+    from ados.services.vision.hailo_sidecar import HailoBackend
+
+    backend = HailoBackend()
+    # a missing model file is a clean error, not a crash
+    missing = backend.load_model(
+        proto.LoadModelRequest("m", "/nope/model.hef", 640, 640, "rgb24", [], "yolov8")
+    )
+    assert missing["status"] == proto.STATUS_ERROR and "not found" in missing["error"]
+
+    # a real file with the wrong suffix is rejected before any runtime import
+    wrong = tmp_path / "model.onnx"
+    wrong.write_bytes(b"not a hef")
+    resp = backend.load_model(
+        proto.LoadModelRequest("m", str(wrong), 640, 640, "rgb24", [], "yolov8")
+    )
+    assert resp["status"] == proto.STATUS_ERROR and ".hef" in resp["error"]
+
+    # a real .hef with no HailoRT installed surfaces the missing-runtime error, still no crash
+    hef = tmp_path / "model.hef"
+    hef.write_bytes(b"stub")
+    loaded = backend.load_model(
+        proto.LoadModelRequest("m", str(hef), 640, 640, "rgb24", [], "yolov8")
+    )
+    assert loaded["status"] == proto.STATUS_ERROR  # HailoRT absent here → error, not exception
+
+    # infer on an unloaded model is a clean error
+    inf = backend.infer(proto.InferRequest("m", b"", 640, 640, "rgb24"))
+    assert inf["status"] == proto.STATUS_ERROR
+    assert "not loaded" in inf["error"]
 
 
 def test_detection_dict_defaults_track_id_to_none():

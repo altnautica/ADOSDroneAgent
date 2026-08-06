@@ -123,6 +123,7 @@ async fn main() {
         &BackendPrefs {
             preference: &config.backend,
             rknn_socket_path: config.rknn_socket_path(),
+            hailo_socket_path: config.hailo_socket_path(),
         },
     );
     tracing::info!(soc = %soc, backend = backend.name(), "vision backend selected");

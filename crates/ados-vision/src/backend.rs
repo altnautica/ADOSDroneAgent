@@ -8,11 +8,12 @@
 //!   fallback when a real backend cannot load a model.
 //! - `OnnxBackend` — an ONNX Runtime backend, compiled in only under the `onnx`
 //!   cargo feature so the default build stays free of the heavy native runtime.
-//! - [`RknnSidecarBackend`] — an IPC client that forwards load + infer requests
+//! - [`SidecarBackend`] — an IPC client that forwards load + infer requests
 //!   to the Python accelerator sidecar over `/run/ados/vision-rknn.sock` using
 //!   the same 4-byte big-endian length-prefixed msgpack framing as the other
-//!   agent sockets. The NPU vendor runtime (RKNN, TensorRT) is reached only
-//!   through that sidecar, never linked here.
+//!   agent sockets. The NPU vendor runtime (RKNN, TensorRT, or HailoRT on a
+//!   Pi AI HAT) is reached only through that sidecar, never linked here — one
+//!   sidecar client, the accelerator differs by socket + name.
 
 use ados_protocol::framebus::{
     BoundingBox, Detection, DetectionHead, FrameFormat, LockState, ModelMetadata,
@@ -58,7 +59,7 @@ pub trait LoadedModel: Send + Sync {
 pub trait VisionBackend: Send + Sync {
     /// Load `meta` into a runnable model.
     fn load(&self, meta: &ModelMetadata) -> Result<Box<dyn LoadedModel>>;
-    /// Short backend name for logs and the registry (`mock`, `onnx`, `rknn`).
+    /// Short backend name for logs and the registry (`mock`, `onnx`, `rknn`, `hailo`).
     fn name(&self) -> &str;
     /// Whether this backend actually runs inference. The mock backend returns
     /// no detections, so a vision engine wired to it produces a silently-empty
@@ -272,14 +273,20 @@ pub use onnx_backend::OnnxBackend;
 /// cannot reach the sidecar returns an error, which the engine treats as a
 /// degraded model (it falls back to the mock model for that registration) so a
 /// missing sidecar never crashes the engine.
-pub struct RknnSidecarBackend {
+pub struct SidecarBackend {
     socket_path: String,
+    name: String,
 }
 
-impl RknnSidecarBackend {
-    pub fn new(socket_path: impl Into<String>) -> Self {
+impl SidecarBackend {
+    /// `name` is the accelerator the sidecar owns behind this socket — "rknn"
+    /// (Rockchip/Jetson) or "hailo" (a Hailo-8 on a Pi AI HAT). The wire
+    /// protocol is identical; only the socket and the reported name differ,
+    /// because the vendor runtime lives in the Python sidecar, not here.
+    pub fn new(socket_path: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             socket_path: socket_path.into(),
+            name: name.into(),
         }
     }
 
@@ -288,7 +295,7 @@ impl RknnSidecarBackend {
     }
 }
 
-struct RknnModel {
+struct SidecarModel {
     socket_path: String,
     model_id: String,
     model_path: String,
@@ -305,13 +312,13 @@ struct RknnModel {
     loaded: Mutex<bool>,
 }
 
-impl VisionBackend for RknnSidecarBackend {
+impl VisionBackend for SidecarBackend {
     fn load(&self, meta: &ModelMetadata) -> Result<Box<dyn LoadedModel>> {
         // Capture the load parameters; the sidecar handshake is deferred to the
         // first infer so the registry can record the model even when the sidecar
         // is not up yet (a missing model_path degrades to an unreachable sidecar
         // at infer time, which the engine treats as a degraded model).
-        Ok(Box::new(RknnModel {
+        Ok(Box::new(SidecarModel {
             socket_path: self.socket_path.clone(),
             model_id: meta.id.clone(),
             model_path: meta.model_path.clone().unwrap_or_default(),
@@ -324,11 +331,11 @@ impl VisionBackend for RknnSidecarBackend {
         }))
     }
     fn name(&self) -> &str {
-        "rknn"
+        &self.name
     }
 }
 
-impl RknnModel {
+impl SidecarModel {
     /// Send `load_model` to the sidecar once. Idempotent: a no-op after the
     /// first success until [`mark_unloaded`] resets it.
     fn ensure_loaded(&self) -> Result<()> {
@@ -356,7 +363,7 @@ impl RknnModel {
     }
 }
 
-impl LoadedModel for RknnModel {
+impl LoadedModel for SidecarModel {
     fn infer(
         &self,
         frame: &[u8],
@@ -637,10 +644,12 @@ fn decode_detections(resp: &rmpv::Value) -> Result<Vec<Detection>> {
 
 /// The minimal config view the picker needs (avoids a config dependency cycle).
 pub struct BackendPrefs<'a> {
-    /// Operator preference: "auto" | "mock" | "onnx" | "rknn".
+    /// Operator preference: "auto" | "mock" | "onnx" | "rknn" | "hailo".
     pub preference: &'a str,
-    /// The accelerator sidecar socket path (for the rknn backend).
+    /// The accelerator sidecar socket path for the rknn backend.
     pub rknn_socket_path: String,
+    /// The accelerator sidecar socket path for the hailo backend (Pi + AI HAT).
+    pub hailo_socket_path: String,
 }
 
 /// Whether the build carries the ONNX CPU backend.
@@ -673,7 +682,10 @@ pub fn select_backend(board_soc: &str, prefs: &BackendPrefs) -> Box<dyn VisionBa
         other => other,
     };
     let backend: Box<dyn VisionBackend> = match want {
-        "rknn" => Box::new(RknnSidecarBackend::new(prefs.rknn_socket_path.clone())),
+        "rknn" => Box::new(SidecarBackend::new(prefs.rknn_socket_path.clone(), "rknn")),
+        // The Pi 5 + AI HAT (Hailo-8) is selected explicitly, not by "auto": the HAT is a PCIe device,
+        // not the SoC, so the SoC string (bcm2712) does not reveal it. The Python sidecar owns HailoRT.
+        "hailo" => Box::new(SidecarBackend::new(prefs.hailo_socket_path.clone(), "hailo")),
         "onnx" => {
             #[cfg(feature = "onnx")]
             {
@@ -737,7 +749,7 @@ mod tests {
 
     #[test]
     fn rknn_backend_records_socket_and_errors_without_sidecar() {
-        let b = RknnSidecarBackend::new("/nonexistent/ados-vision-rknn.sock");
+        let b = SidecarBackend::new("/nonexistent/ados-vision-rknn.sock", "rknn");
         assert_eq!(b.name(), "rknn");
         assert_eq!(b.socket_path(), "/nonexistent/ados-vision-rknn.sock");
         let m = b.load(&meta()).unwrap();
@@ -803,7 +815,7 @@ mod tests {
             }
         });
 
-        let backend = RknnSidecarBackend::new(sock.to_str().unwrap());
+        let backend = SidecarBackend::new(sock.to_str().unwrap(), "rknn");
         let mut m = meta();
         m.model_path = Some("/tmp/uav.rknn".into());
         let model = backend.load(&m).unwrap();
@@ -828,6 +840,7 @@ mod tests {
         let prefs = BackendPrefs {
             preference: "auto",
             rknn_socket_path: "/run/ados/vision-rknn.sock".into(),
+            hailo_socket_path: "/run/ados/vision-hailo.sock".into(),
         };
         assert_eq!(select_backend("rk3576", &prefs).name(), "rknn");
         assert_eq!(select_backend("RK3588S2", &prefs).name(), "rknn");
@@ -855,7 +868,7 @@ mod tests {
         // The status surface keys on this to tell the operator no real inference
         // runs; the real backends report capable.
         assert!(!MockBackend.is_inference_capable());
-        assert!(RknnSidecarBackend::new("/x").is_inference_capable());
+        assert!(SidecarBackend::new("/x", "rknn").is_inference_capable());
     }
 
     #[test]
@@ -863,6 +876,7 @@ mod tests {
         let prefs = BackendPrefs {
             preference: "mock",
             rknn_socket_path: "/run/ados/vision-rknn.sock".into(),
+            hailo_socket_path: "/run/ados/vision-hailo.sock".into(),
         };
         assert_eq!(select_backend("rk3576", &prefs).name(), "mock");
 
@@ -870,6 +884,7 @@ mod tests {
         let prefs_onnx = BackendPrefs {
             preference: "onnx",
             rknn_socket_path: "/run/ados/vision-rknn.sock".into(),
+            hailo_socket_path: "/run/ados/vision-hailo.sock".into(),
         };
         let name = select_backend("x86", &prefs_onnx).name().to_string();
         #[cfg(feature = "onnx")]
