@@ -371,28 +371,6 @@ REGISTRY: list[RouteCase] = [
             "samples",
         ),
     ),
-    # Air-side pipeline stats snapshot. The counters / gauges / monotonic floats all
-    # move every read, so they are masked; the field set (camera_source /
-    # encoder_name / pipeline_state + the counters + the three live-only floats) is
-    # the contract. A 204 (pipeline not in use) compares as an empty body on both.
-    RouteCase(
-        name="video-air-pipeline",
-        method="GET",
-        path="/api/v1/video/air-pipeline",
-        extra_volatile=(
-            "sei_injected_count",
-            "udp_bytes_out",
-            "restart_count",
-            "tx_silent_kicks",
-            "bus_errors",
-            "updated_at_ms",
-            "encoder_fps",
-            "encoded_kbps",
-            "started_at",
-            "last_state_change_at",
-            "last_buffer_at",
-        ),
-    ),
     # Video encoder + radio config snapshot. The dynamic adaptive / hopping / link
     # blocks carry live link readings + hop history that move between reads, so those
     # are masked; the static radio + encoder blocks (channel/band/mcs/fec/codec/…)

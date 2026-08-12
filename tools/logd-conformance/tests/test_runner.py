@@ -51,16 +51,6 @@ _FULL_METRICS = [
     {"metric": "link.bitrate_kbps", "value": 5700.0},
     {"metric": "video.encoder_bitrate_kbps", "value": 4000.0},
     {"metric": "video.framerate_hz", "value": 30.0},
-    {"metric": "video.air.encoder_fps", "value": 30.0},
-    {"metric": "video.air.encoded_kbps", "value": 6000.0},
-    {"metric": "video.air.sei_injected_count", "value": 12.0},
-    {"metric": "video.air.udp_bytes_out", "value": 4096.0},
-    {"metric": "video.air.restart_count", "value": 1.0},
-    {"metric": "video.air.tx_silent_kicks", "value": 0.0},
-    {"metric": "video.air.bus_errors", "value": 0.0},
-    {"metric": "video.air.updated_at_ms", "value": 1717000000000.0},
-    {"metric": "video.air.encoder_hw_accel", "value": 1.0},
-    {"metric": "video.air.cloud_branch_open", "value": 0.0},
     {"metric": "video.latency.glass_ms", "value": 42.5},
     {"metric": "video.latency.ewma_ms", "value": 40.1},
     {"metric": "video.latency.samples", "value": 7.0},
@@ -108,20 +98,6 @@ _SERVICE_EVENT = {
         "from_state": "stopped",
         "to_state": "running",
         "reason": "start_ok",
-    },
-}
-
-_AIR_STATE_EVENT = {
-    "id": 2,
-    "ts_us": 2,
-    "kind": "video.air_state",
-    "source": "sidecar-tap",
-    "severity": "info",
-    "detail": {
-        "name": "air-pipeline.json",
-        "camera_source": "v4l2src",
-        "encoder_name": "v4l2h264enc",
-        "pipeline_state": "playing",
     },
 }
 
@@ -361,7 +337,6 @@ _NET_MODEM_USAGE_EVENT = {
 
 _FULL_EVENTS = [
     _SERVICE_EVENT,
-    _AIR_STATE_EVENT,
     _WFB_STATUS_DRONE_EVENT,
     _WFB_STATUS_GS_EVENT,
     _WFB_FAILOVER_EVENT,

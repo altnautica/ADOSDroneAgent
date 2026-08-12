@@ -57,8 +57,7 @@ struct ScalarMap {
 /// The string-carrying snapshot a sidecar can emit as an event.
 ///
 /// The scalar path samples only numbers, so a sidecar whose route returns string
-/// fields (e.g. the air pipeline's `pipeline_state` / `encoder_name`, or the SEI
-/// tap's `source`) needs a second carrier. This describes that carrier: an event
+/// fields (the SEI tap's `source`, today the only one) needs a second carrier. This describes that carrier: an event
 /// of `kind` whose detail map carries the named string `fields` verbatim. The
 /// event fires on every fresh poll where the keyed string field is present and
 /// changed since the last emission, so the latest event always reflects the
@@ -115,65 +114,6 @@ const SPECS: &[SidecarSpec] = &[
             },
         ],
         string_event: None,
-    },
-    // The air-side pipeline snapshot (`AirPipelineStats.to_dict()` + a wall-clock
-    // `updated_at_ms`). The numeric fields are sampled into a `video.air.*` metric
-    // series; the three string fields (`camera_source`, `encoder_name`,
-    // `pipeline_state`) ride a `video.air_state` event so they round-trip back to
-    // the air-pipeline route. The monotonic-clock floats (`started_at`,
-    // `last_state_change_at`, `last_buffer_at`) carry no cross-process meaning and
-    // are not sampled; the route serves those live.
-    SidecarSpec {
-        name: "air-pipeline.json",
-        staleness: DEFAULT_STALENESS,
-        source: "video",
-        scalars: &[
-            ScalarMap {
-                path: "encoder_fps",
-                key: "video.air.encoder_fps",
-            },
-            ScalarMap {
-                path: "encoded_kbps",
-                key: "video.air.encoded_kbps",
-            },
-            ScalarMap {
-                path: "sei_injected_count",
-                key: "video.air.sei_injected_count",
-            },
-            ScalarMap {
-                path: "udp_bytes_out",
-                key: "video.air.udp_bytes_out",
-            },
-            ScalarMap {
-                path: "restart_count",
-                key: "video.air.restart_count",
-            },
-            ScalarMap {
-                path: "tx_silent_kicks",
-                key: "video.air.tx_silent_kicks",
-            },
-            ScalarMap {
-                path: "bus_errors",
-                key: "video.air.bus_errors",
-            },
-            ScalarMap {
-                path: "updated_at_ms",
-                key: "video.air.updated_at_ms",
-            },
-            ScalarMap {
-                path: "encoder_hw_accel",
-                key: "video.air.encoder_hw_accel",
-            },
-            ScalarMap {
-                path: "cloud_branch_open",
-                key: "video.air.cloud_branch_open",
-            },
-        ],
-        string_event: Some(StringEventSpec {
-            kind: "video.air_state",
-            fields: &["camera_source", "encoder_name", "pipeline_state"],
-            transition_on: "pipeline_state",
-        }),
     },
     // The SEI glass-to-glass latency snapshot written by the drone-side tap when
     // SEI latency is enabled. The numeric fields ride a `video.latency.*` series;
@@ -616,28 +556,6 @@ mod tests {
         now_us_systemtime() + Duration::from_secs(3600).as_micros() as i64
     }
 
-    /// A full air-pipeline snapshot body matching `AirPipelineStats.to_dict()`
-    /// plus the publisher's `updated_at_ms`. The string fields drive the
-    /// `video.air_state` event; the numerics drive the `video.air.*` series.
-    const AIR_PIPELINE_BODY: &str = r#"{
-        "camera_source": "v4l2src",
-        "encoder_name": "v4l2h264enc",
-        "encoder_hw_accel": true,
-        "pipeline_state": "playing",
-        "started_at": 1234.5,
-        "last_state_change_at": 1240.0,
-        "encoder_fps": 30.0,
-        "encoded_kbps": 6000.0,
-        "sei_injected_count": 12,
-        "udp_bytes_out": 4096,
-        "last_buffer_at": 1245.0,
-        "restart_count": 1,
-        "tx_silent_kicks": 0,
-        "bus_errors": 0,
-        "cloud_branch_open": false,
-        "updated_at_ms": 1717000000000
-    }"#;
-
     #[test]
     fn fresh_sidecars_sample_their_scalars_with_the_source_tag() {
         let dir = tempfile::tempdir().unwrap();
@@ -648,7 +566,6 @@ mod tests {
             r#"{"rssi": -44, "snr": 21, "fec_loss": 0.02, "bitrate_mbps": 8.5}"#,
             Duration::ZERO,
         );
-        write_with_age(root, "air-pipeline.json", AIR_PIPELINE_BODY, Duration::ZERO);
         let mut state = TailerState::default();
         // A present `now` keeps the just-written files fresh.
         let frames = poll_once(root, &mut state, now_us_systemtime());
@@ -675,92 +592,67 @@ mod tests {
     }
 
     #[test]
-    fn air_pipeline_samples_every_numeric_field_and_coerces_bools() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        write_with_age(root, "air-pipeline.json", AIR_PIPELINE_BODY, Duration::ZERO);
-        let mut state = TailerState::default();
-        let frames = poll_once(root, &mut state, now_us_systemtime());
-
-        // Every numeric / bool field of the snapshot becomes a `video.air.*`
-        // metric (bools coerced to 0/1 by `lookup_number`).
-        assert_eq!(
-            metric(&frames, "video.air.encoder_fps").map(|m| m.value),
-            Some(30.0)
-        );
-        assert_eq!(
-            metric(&frames, "video.air.encoded_kbps").map(|m| m.value),
-            Some(6000.0)
-        );
-        assert_eq!(
-            metric(&frames, "video.air.sei_injected_count").map(|m| m.value),
-            Some(12.0)
-        );
-        assert_eq!(
-            metric(&frames, "video.air.udp_bytes_out").map(|m| m.value),
-            Some(4096.0)
-        );
-        assert_eq!(
-            metric(&frames, "video.air.restart_count").map(|m| m.value),
-            Some(1.0)
-        );
-        assert_eq!(
-            metric(&frames, "video.air.updated_at_ms").map(|m| m.value),
-            Some(1_717_000_000_000.0)
-        );
-        assert_eq!(
-            metric(&frames, "video.air.encoder_hw_accel").map(|m| m.value),
-            Some(1.0)
-        );
-        assert_eq!(
-            metric(&frames, "video.air.cloud_branch_open").map(|m| m.value),
-            Some(0.0)
-        );
-        // The string fields are not sampled as metrics.
-        assert!(metric(&frames, "video.air.pipeline_state").is_none());
+    fn lookup_number_coerces_bools_and_rejects_non_numbers() {
+        // Bools sample as 0/1 so a spec can declare a boolean field as a scalar.
+        // No surviving spec declares one, which is why this asserts the rule on
+        // the helper rather than through a fixture: it has to stay true for the
+        // next spec that does.
+        let json: Value = serde_json::from_str(
+            r#"{"yes": true, "no": false, "num": 30.5, "text": "x", "nul": null,
+                "nested": {"deep": 7}}"#,
+        )
+        .unwrap();
+        assert_eq!(lookup_number(&json, "yes"), Some(1.0));
+        assert_eq!(lookup_number(&json, "no"), Some(0.0));
+        assert_eq!(lookup_number(&json, "num"), Some(30.5));
+        assert_eq!(lookup_number(&json, "nested.deep"), Some(7.0));
+        // A string, a null, and an absent path are all "no value", never zero.
+        assert_eq!(lookup_number(&json, "text"), None);
+        assert_eq!(lookup_number(&json, "nul"), None);
+        assert_eq!(lookup_number(&json, "absent"), None);
     }
 
     #[test]
-    fn air_state_event_carries_the_strings_and_fires_once_per_transition() {
+    fn string_event_carries_its_fields_and_fires_once_per_transition() {
+        // `lcd-latency.json` is the only spec left that carries a string event, so
+        // this is the sole coverage of the transition machine: fire on first sight,
+        // stay quiet while the value holds, fire again when it changes.
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        write_with_age(root, "air-pipeline.json", AIR_PIPELINE_BODY, Duration::ZERO);
+        let body = |source: &str| {
+            format!(
+                r#"{{"latency_ms": 42.5, "latency_ewma_ms": 40.1, "samples": 7, "source": "{source}"}}"#
+            )
+        };
+        write_with_age(root, "lcd-latency.json", &body("sei"), Duration::ZERO);
         let mut state = TailerState::default();
 
-        // First fresh poll fires the state event with all three strings.
+        // First fresh poll fires the state event carrying the field.
         let first = poll_once(root, &mut state, now_us_systemtime());
-        let evts = events(&first, "video.air_state");
+        let evts = events(&first, "video.latency_source");
         assert_eq!(evts.len(), 1);
-        let d = &evts[0].detail;
         assert_eq!(
-            d.get("pipeline_state").and_then(|v| v.as_str()),
-            Some("playing")
-        );
-        assert_eq!(
-            d.get("encoder_name").and_then(|v| v.as_str()),
-            Some("v4l2h264enc")
-        );
-        assert_eq!(
-            d.get("camera_source").and_then(|v| v.as_str()),
-            Some("v4l2src")
+            evts[0].detail.get("source").and_then(|v| v.as_str()),
+            Some("sei")
         );
 
         // A second poll of the same snapshot does NOT re-fire (steady state).
         let second = poll_once(root, &mut state, now_us_systemtime());
-        assert!(events(&second, "video.air_state").is_empty());
+        assert!(events(&second, "video.latency_source").is_empty());
 
-        // The state changes -> a new event fires.
-        let changed = AIR_PIPELINE_BODY.replace("\"playing\"", "\"paused\"");
-        write_with_age(root, "air-pipeline.json", &changed, Duration::ZERO);
+        // The value changes -> a new event fires.
+        write_with_age(
+            root,
+            "lcd-latency.json",
+            &body("unavailable"),
+            Duration::ZERO,
+        );
         let third = poll_once(root, &mut state, now_us_systemtime());
-        let evts3 = events(&third, "video.air_state");
+        let evts3 = events(&third, "video.latency_source");
         assert_eq!(evts3.len(), 1);
         assert_eq!(
-            evts3[0]
-                .detail
-                .get("pipeline_state")
-                .and_then(|v| v.as_str()),
-            Some("paused")
+            evts3[0].detail.get("source").and_then(|v| v.as_str()),
+            Some("unavailable")
         );
     }
 
@@ -769,13 +661,16 @@ mod tests {
         // The keep-alive path is driven by `now_us` vs the last emit time, which
         // is unit-testable directly without the mtime-vs-now tension `poll_once`
         // has (the staleness check is mtime-driven, the keep-alive is now-driven).
-        // The air-pipeline spec carries the `video.air_state` string event.
+        // `lcd-latency.json` is the spec carrying the `video.latency_source` event.
         let spec = SPECS
             .iter()
-            .find(|s| s.name == "air-pipeline.json")
-            .expect("the air-pipeline sidecar spec is present");
+            .find(|s| s.name == "lcd-latency.json")
+            .expect("the lcd-latency sidecar spec is present");
         let evt = spec.string_event.as_ref().unwrap();
-        let json: Value = serde_json::from_str(AIR_PIPELINE_BODY).unwrap();
+        let json: Value = serde_json::from_str(
+            r#"{"latency_ms": 42.5, "latency_ewma_ms": 40.1, "samples": 7, "source": "sei"}"#,
+        )
+        .unwrap();
         let base = 1_000_000_000_i64;
         let keepalive_us = STRING_EVENT_KEEPALIVE.as_micros() as i64;
 
@@ -786,12 +681,12 @@ mod tests {
             spec,
             evt,
             base + keepalive_us - 1,
-            Some("playing"),
+            Some("sei"),
             Some(base),
             &mut out,
         );
         assert!(within.is_none(), "no re-emit inside the keep-alive window");
-        assert!(events(&out, "video.air_state").is_empty());
+        assert!(events(&out, "video.latency_source").is_empty());
 
         // Same transition value, last emitted >= keep-alive ago -> re-emit, and
         // the returned timestamp is the new `now_us` so the next window restarts.
@@ -801,26 +696,23 @@ mod tests {
             spec,
             evt,
             base + keepalive_us,
-            Some("playing"),
+            Some("sei"),
             Some(base),
             &mut out,
         );
-        assert_eq!(due, Some(("playing".to_string(), base + keepalive_us)));
-        let evts = events(&out, "video.air_state");
+        assert_eq!(due, Some(("sei".to_string(), base + keepalive_us)));
+        let evts = events(&out, "video.latency_source");
         assert_eq!(evts.len(), 1, "the steady snapshot re-emits on keep-alive");
         assert_eq!(
-            evts[0]
-                .detail
-                .get("pipeline_state")
-                .and_then(|v| v.as_str()),
-            Some("playing")
+            evts[0].detail.get("source").and_then(|v| v.as_str()),
+            Some("sei")
         );
 
         // A never-emitted snapshot (no prior timestamp) always emits first time.
         let mut out = Vec::new();
         let first = emit_string_event(&json, spec, evt, base, None, None, &mut out);
-        assert_eq!(first, Some(("playing".to_string(), base)));
-        assert_eq!(events(&out, "video.air_state").len(), 1);
+        assert_eq!(first, Some(("sei".to_string(), base)));
+        assert_eq!(events(&out, "video.latency_source").len(), 1);
     }
 
     #[test]

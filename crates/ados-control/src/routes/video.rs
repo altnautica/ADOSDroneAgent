@@ -1,7 +1,6 @@
-//! Video pipeline read routes: latency, the air-side pipeline snapshot, and the
-//! encoder/radio config snapshot.
+//! Video pipeline read routes: latency and the encoder/radio config snapshot.
 //!
-//! Three read-only routes the GCS Video Link panel + the LCD page poll:
+//! Two read-only routes the GCS Video Link panel + the LCD page poll:
 //!
 //! - **`GET /api/video/latency`** — the most-recent SEI-probe glass-to-glass
 //!   latency. Reads the durable store first (the store's sidecar tailer samples the
@@ -9,12 +8,6 @@
 //!   series + a `video.latency_source` event), falling back to a live read of
 //!   `lcd-latency.json` when the store is unreachable or the probe has produced
 //!   nothing. Degrades to `{"latency_ms": null, "source": "unavailable"}`.
-//! - **`GET /api/v1/video/air-pipeline`** — the air-side encoder pipeline's live
-//!   stats snapshot. Store-first (`video.air.*` metrics + the `video.air_state`
-//!   event), with the three monotonic-clock floats the store cannot carry
-//!   (`started_at` / `last_state_change_at` / `last_buffer_at`) merged from the live
-//!   `air-pipeline.json` when present. Falls back wholesale to the live file read,
-//!   preserving the `204` (not in use) and `503` (read error) contract.
 //! - **`GET /api/video/config`** — the composite encoder + radio config snapshot.
 //!   The static radio/encoder blocks come from `/etc/ados/config.yaml`; the dynamic
 //!   `adaptive` / `hopping` / `link` blocks come from the controller sidecar files
@@ -32,8 +25,6 @@
 use std::path::{Path, PathBuf};
 
 use axum::extract::State;
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -55,12 +46,6 @@ fn run_dir() -> PathBuf {
 /// `LCD_LATENCY_STATS_PATH` (with the `/run/ados/lcd-latency.json` fallback).
 fn lcd_latency_path() -> PathBuf {
     run_dir().join("lcd-latency.json")
-}
-
-/// The air-side pipeline stats file (`/run/ados/air-pipeline.json`), written by
-/// the encoder pipeline at 1 Hz. Mirrors `AIR_PIPELINE_STATS_PATH`.
-fn air_pipeline_path() -> PathBuf {
-    run_dir().join("air-pipeline.json")
 }
 
 /// The bitrate-controller snapshot file (`/run/ados/bitrate-controller.json`),
@@ -192,183 +177,6 @@ fn project_latency_live(path: &Path) -> Value {
         "samples": map.get("samples").cloned().unwrap_or(Value::Null),
         "source": source,
     })
-}
-
-// ===========================================================================
-// GET /api/v1/video/air-pipeline
-// ===========================================================================
-
-/// The integer `video.air.*` metric → route-key map. Mirrors `_AIR_INT_METRICS`.
-const AIR_INT_METRICS: [(&str, &str); 6] = [
-    ("video.air.sei_injected_count", "sei_injected_count"),
-    ("video.air.udp_bytes_out", "udp_bytes_out"),
-    ("video.air.restart_count", "restart_count"),
-    ("video.air.tx_silent_kicks", "tx_silent_kicks"),
-    ("video.air.bus_errors", "bus_errors"),
-    ("video.air.updated_at_ms", "updated_at_ms"),
-];
-
-/// The float `video.air.*` metric → (route key, decimal places). Mirrors
-/// `_AIR_FLOAT_METRICS`.
-const AIR_FLOAT_METRICS: [(&str, &str, i32); 2] = [
-    ("video.air.encoder_fps", "encoder_fps", 2),
-    ("video.air.encoded_kbps", "encoded_kbps", 1),
-];
-
-/// The boolean `video.air.*` metric → route-key map. The store carries them as
-/// `0.0`/`1.0`; the route casts via `value >= 0.5`. Mirrors `_AIR_BOOL_METRICS`.
-const AIR_BOOL_METRICS: [(&str, &str); 2] = [
-    ("video.air.encoder_hw_accel", "encoder_hw_accel"),
-    ("video.air.cloud_branch_open", "cloud_branch_open"),
-];
-
-/// The three monotonic-clock floats the store cannot carry. The route fills them
-/// from the live file when present, else they stay `null`. Mirrors
-/// `_AIR_LIVE_ONLY_FLOATS`.
-const AIR_LIVE_ONLY_FLOATS: [&str; 3] = ["started_at", "last_state_change_at", "last_buffer_at"];
-
-/// `GET /api/v1/video/air-pipeline` → the air-side pipeline's live stats snapshot.
-///
-/// Reads the store first; the three monotonic-clock floats the store cannot carry
-/// are filled from the live `air-pipeline.json` blob when it is present. Falls back
-/// wholesale to the live file read when the store is unreachable or the air
-/// pipeline is not running, preserving the `204` (not in use) and `503` (read
-/// error) contract. Mirrors the Python `get_air_pipeline_status`.
-pub async fn get_air_pipeline_status(State(state): State<AppState>) -> Response {
-    if let Some(mut derived) = latest_air_pipeline(&state).await {
-        // The store carries every field but the three monotonic floats; merge those
-        // from the live file when it is present so the snapshot is whole. A live
-        // read/parse error must not sink the otherwise-fresh store snapshot: the
-        // three floats stay null, which is strictly better than a 503.
-        if let Some(live) = read_air_pipeline_live_object() {
-            if let Some(out) = derived.as_object_mut() {
-                for key in AIR_LIVE_ONLY_FLOATS {
-                    if let Some(v) = live.get(key) {
-                        if !v.is_null() {
-                            out.insert(key.to_string(), v.clone());
-                        }
-                    }
-                }
-            }
-        }
-        return Json(derived).into_response();
-    }
-    read_air_pipeline_live_response()
-}
-
-/// Reconstruct the `air-pipeline.json` route body from the store.
-///
-/// Maps each `video.air.*` metric back to its `AirPipelineStats.to_dict()` key
-/// (re-casting integer counters, float gauges, and the two bool flags) and pulls
-/// the three strings from the latest `video.air_state` event. The three
-/// monotonic-clock floats are set to `null` (the store does not carry them).
-/// Returns `None` when neither the metric series nor the state event is in the
-/// window (the air pipeline is not running). Mirrors the Python
-/// `latest_air_pipeline`.
-async fn latest_air_pipeline(state: &AppState) -> Option<Value> {
-    let mut names: Vec<&str> = Vec::new();
-    for (m, _) in AIR_INT_METRICS {
-        names.push(m);
-    }
-    for (m, _, _) in AIR_FLOAT_METRICS {
-        names.push(m);
-    }
-    for (m, _) in AIR_BOOL_METRICS {
-        names.push(m);
-    }
-    let metrics = latest_metrics(state, &names).await;
-    let air = latest_event_detail(state, "video.air_state").await;
-    if metrics.is_none() && air.is_none() {
-        return None;
-    }
-
-    let mut out = Map::new();
-    // Strings from the state event (empty defaults match the dataclass).
-    let air_obj = air.as_ref();
-    out.insert(
-        "camera_source".to_string(),
-        json!(event_str(air_obj, "camera_source", "")),
-    );
-    out.insert(
-        "encoder_name".to_string(),
-        json!(event_str(air_obj, "encoder_name", "")),
-    );
-    out.insert(
-        "pipeline_state".to_string(),
-        json!(event_str(air_obj, "pipeline_state", "idle")),
-    );
-
-    for (name, key) in AIR_INT_METRICS {
-        let value = metric_value(metrics.as_ref(), name);
-        out.insert(key.to_string(), json!(value.map(|v| v as i64).unwrap_or(0)));
-    }
-    for (name, key, ndigits) in AIR_FLOAT_METRICS {
-        let value = metric_value(metrics.as_ref(), name);
-        out.insert(
-            key.to_string(),
-            json!(value.map(|v| round_half_even(v, ndigits)).unwrap_or(0.0)),
-        );
-    }
-    for (name, key) in AIR_BOOL_METRICS {
-        let value = metric_value(metrics.as_ref(), name);
-        out.insert(
-            key.to_string(),
-            json!(value.map(|v| v >= 0.5).unwrap_or(false)),
-        );
-    }
-
-    // The monotonic-clock floats carry no cross-process meaning; the route fills
-    // them from the live file when it can, else they stay null.
-    for key in AIR_LIVE_ONLY_FLOATS {
-        out.insert(key.to_string(), Value::Null);
-    }
-    Some(Value::Object(out))
-}
-
-/// The live air-pipeline read producing an axum `Response`, resolving the
-/// runtime-dir-relative `air-pipeline.json` path. The projection lives in
-/// [`project_air_pipeline_live`] (path-injectable for tests).
-fn read_air_pipeline_live_response() -> Response {
-    project_air_pipeline_live(&air_pipeline_path())
-}
-
-/// Project an air-pipeline state file into an axum `Response`: the parsed dict as a
-/// 200, a 204 when the file is absent or not a dict (the legacy stream owns the
-/// pipeline), and a `{"detail"}` 503 on a read/parse error. This is the unchanged
-/// file-backed fallback the store-first path falls through to. Mirrors the Python
-/// `_read_air_pipeline_live_blob`.
-fn project_air_pipeline_live(path: &Path) -> Response {
-    if !path.exists() {
-        return StatusCode::NO_CONTENT.into_response();
-    }
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(_) => {
-            return crate::routes::detail(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "air pipeline stats unavailable",
-            );
-        }
-    };
-    match serde_json::from_str::<Value>(&text) {
-        Ok(Value::Object(map)) => Json(Value::Object(map)).into_response(),
-        // A well-formed-but-non-object body → 204 (the `if not isinstance(blob,
-        // dict): return Response(204)` branch).
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
-        Err(_) => crate::routes::detail(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "air pipeline stats unavailable",
-        ),
-    }
-}
-
-/// The live air-pipeline blob read returning just the object (for the float-merge
-/// on the store-first path). Returns `None` when the file is absent / unparseable /
-/// non-object — the store-first merge only wants the live floats and never sinks on
-/// a read error here. Mirrors the merge branch's `_read_air_pipeline_live_blob`
-/// call wrapped in `try: ... except: live = None`.
-fn read_air_pipeline_live_object() -> Option<Map<String, Value>> {
-    read_state_file(&air_pipeline_path())
 }
 
 // ===========================================================================
@@ -754,9 +562,9 @@ impl VideoConfig {
 /// page, newest-wins. Returns `None` when the store is unreachable OR when none of
 /// the named metrics is in the window; a name not seen is simply absent from a
 /// non-empty map. Mirrors the Python `latest_metrics`, whose `return out or None`
-/// collapses an empty result to `None` — the air-pipeline route relies on that
-/// `None` to fall through to the live read's 204 (no data) contract rather than
-/// synthesizing a default snapshot from an empty store window.
+/// collapses an empty result to `None` — the latency route relies on that `None`
+/// to fall through to its live file read rather than reporting a snapshot of nulls
+/// as a real measurement.
 async fn latest_metrics(state: &AppState, names: &[&str]) -> Option<Map<String, Value>> {
     let rows = logd_query_rows(state, "metrics", 200, None).await?;
     let mut out: Map<String, Value> = Map::new();
@@ -778,9 +586,8 @@ async fn latest_metrics(state: &AppState, names: &[&str]) -> Option<Map<String, 
 
 /// Collapse an empty metric map to `None`, mirroring the Python helper's final
 /// `return out or None`. A non-empty map passes through as `Some(map)`. The
-/// air-pipeline route depends on the `None` so it falls through to the live read's
-/// 204 (no data) contract instead of synthesizing a default snapshot from a store
-/// window that held no air metrics.
+/// latency route depends on the `None` so it falls through to its live file read
+/// instead of reporting a snapshot of nulls as a real measurement.
 fn collapse_empty_metrics(out: Map<String, Value>) -> Option<Map<String, Value>> {
     if out.is_empty() {
         None
@@ -825,18 +632,6 @@ async fn latest_event_detail(state: &AppState, kind: &str) -> Option<Map<String,
 async fn latest_event_field(state: &AppState, kind: &str, field: &str) -> Option<Value> {
     let detail = latest_event_detail(state, kind).await?;
     detail.get(field).cloned()
-}
-
-/// A string field off an event-detail object, with a default. Mirrors the Python
-/// `(air or {}).get(key) or default`: a missing key, a null, or an empty string all
-/// fall back to the default.
-fn event_str(detail: Option<&Map<String, Value>>, key: &str, default: &str) -> String {
-    detail
-        .and_then(|d| d.get(key))
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(default)
-        .to_string()
 }
 
 /// Page the store's `/v1/query` for one row kind, returning the `data` array, or
@@ -984,28 +779,6 @@ fn percent_encode(s: &str) -> String {
         }
     }
     out
-}
-
-/// Round to `ndigits` decimal places with round-half-to-even (banker's rounding),
-/// matching the Python built-in `round(value, ndigits)` the air-pipeline float
-/// gauges use. The store carries these as floats, so the two ends agree on the same
-/// rounded value.
-fn round_half_even(value: f64, ndigits: i32) -> f64 {
-    let factor = 10f64.powi(ndigits);
-    let scaled = value * factor;
-    let floor = scaled.floor();
-    let diff = scaled - floor;
-    let rounded = if (diff - 0.5).abs() < f64::EPSILON {
-        // Exactly halfway: round to the nearest even integer.
-        if (floor as i64) % 2 == 0 {
-            floor
-        } else {
-            floor + 1.0
-        }
-    } else {
-        scaled.round()
-    };
-    rounded / factor
 }
 
 #[cfg(test)]
@@ -1341,52 +1114,21 @@ mod tests {
         assert_eq!(fresh["channel"], json!(165));
     }
 
-    // ----- /api/v1/video/air-pipeline -----
-
-    #[test]
-    fn air_pipeline_live_of_an_absent_file_is_204() {
-        let dir = tempfile::tempdir().unwrap();
-        let resp = project_air_pipeline_live(&dir.path().join("air-pipeline.json"));
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-    }
-
-    #[test]
-    fn air_pipeline_live_of_a_present_object_is_200() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("air-pipeline.json");
-        std::fs::write(
-            &path,
-            r#"{"pipeline_state": "running", "encoder_fps": 30.0}"#,
-        )
-        .unwrap();
-        let resp = project_air_pipeline_live(&path);
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
-
-    #[test]
-    fn air_pipeline_live_of_a_non_object_body_is_204() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("air-pipeline.json");
-        std::fs::write(&path, "42").unwrap();
-        let resp = project_air_pipeline_live(&path);
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-    }
-
     #[test]
     fn empty_metrics_window_collapses_to_none() {
         // The Python `latest_metrics` ends with `return out or None`, so a reachable
         // store whose window held none of the named metrics reads as `None` (no
-        // data), NOT an empty snapshot. The air-pipeline route relies on that `None`:
-        // with `metrics is None and air is None` it falls through to the live read,
-        // which is a 204 when air-pipeline.json is absent. An empty map collapsing to
-        // `Some({})` instead would let the route synthesize a default snapshot and
-        // wrongly answer 200.
+        // data), NOT an empty snapshot. The latency route relies on that `None`: it
+        // falls through to the live file read, which reports `source: "unavailable"`
+        // when the SEI probe has produced nothing. An empty map collapsing to
+        // `Some({})` instead would let the route synthesize a snapshot of nulls and
+        // report it as a real measurement.
         assert_eq!(collapse_empty_metrics(Map::new()), None);
 
         // A non-empty map passes through unchanged so the route still builds a
-        // snapshot when the store does carry air metrics.
+        // snapshot when the store does carry the metrics.
         let mut m = Map::new();
-        m.insert("video.air.encoder_fps".to_string(), json!(30.0));
+        m.insert("video.latency.glass_ms".to_string(), json!(30.0));
         let collapsed = collapse_empty_metrics(m.clone());
         assert_eq!(collapsed, Some(m));
     }
@@ -1407,35 +1149,10 @@ mod tests {
     }
 
     #[test]
-    fn event_str_falls_back_on_missing_null_and_empty() {
-        let mut d = Map::new();
-        d.insert("present".to_string(), json!("camX"));
-        d.insert("empty".to_string(), json!(""));
-        d.insert("nul".to_string(), Value::Null);
-        assert_eq!(event_str(Some(&d), "present", "def"), "camX");
-        assert_eq!(event_str(Some(&d), "empty", "def"), "def");
-        assert_eq!(event_str(Some(&d), "nul", "def"), "def");
-        assert_eq!(event_str(Some(&d), "absent", "def"), "def");
-        assert_eq!(event_str(None, "present", "idle"), "idle");
-    }
-
-    #[test]
-    fn round_half_even_matches_python_round() {
-        // Python round(value, ndigits) is round-half-to-even.
-        assert_eq!(round_half_even(30.0, 2), 30.0);
-        assert_eq!(round_half_even(29.456, 1), 29.5);
-        assert_eq!(round_half_even(29.444, 1), 29.4);
-        // Halfway cases round to even: 0.5->0, 1.5->2, 2.5->2.
-        assert_eq!(round_half_even(0.5, 0), 0.0);
-        assert_eq!(round_half_even(1.5, 0), 2.0);
-        assert_eq!(round_half_even(2.5, 0), 2.0);
-    }
-
-    #[test]
     fn percent_encode_escapes_reserved_chars() {
         assert_eq!(
-            percent_encode("video.air.encoder_fps"),
-            "video.air.encoder_fps"
+            percent_encode("video.latency.glass_ms"),
+            "video.latency.glass_ms"
         );
         assert_eq!(percent_encode("metrics"), "metrics");
         assert_eq!(percent_encode("a b"), "a%20b");

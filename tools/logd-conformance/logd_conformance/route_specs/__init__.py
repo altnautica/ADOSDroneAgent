@@ -18,7 +18,7 @@ from . import baseline, gs, link, mesh, network, video  # one line per domain
 _REGISTRY: list[Callable[[], list[RouteSpec]]] = [
     baseline.routes,  # logs + hw-summary + hw-snapshot + service-events
     link.routes,  # link-metrics + wfb status/history/failover
-    video.routes,  # video-metrics + pipeline/air-pipeline/latency
+    video.routes,  # video-metrics + latency
     mesh.routes,  # mesh state/neighbors/routes/gateways
     gs.routes,  # ground-station status + relay/receiver
     network.routes,  # uplink-active + modem-usage

@@ -351,14 +351,10 @@ pub fn build_router(state: AppState, net_native: bool, hid_native: bool) -> Rout
             "/api/diag/storage",
             get(diag_storage::get_storage_diagnostics),
         )
-        // Video reads: glass-to-glass latency, the air-side pipeline snapshot, and
-        // the encoder/radio config (the snapshot/record/switch writes + the
-        // camera-enumeration route stay proxied).
+        // Video reads: glass-to-glass latency and the encoder/radio config (the
+        // snapshot/record/switch writes + the camera-enumeration route stay
+        // proxied).
         .route("/api/video/latency", get(video::get_video_latency))
-        .route(
-            "/api/v1/video/air-pipeline",
-            get(video::get_air_pipeline_status),
-        )
         .route("/api/video/config", get(video::get_video_config))
         // Camera roster: the reconciled per-node camera list (declared legs +
         // discovered devices + live stream state) the Cameras management surface

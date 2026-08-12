@@ -17,8 +17,6 @@ def test_initial_set_has_the_expected_routes():
         "wfb-history",
         "wfb-failover",
         "video-metrics",
-        "air-pipeline-metrics",
-        "air-pipeline-state",
         "video-latency",
         "mesh-state",
         "gs-relay-state",
@@ -65,19 +63,6 @@ def test_wfb_failover_route_filters_on_kind():
     assert all(f.locator == Locator.DETAIL_KEY for f in route.fields)
 
 
-def test_air_pipeline_state_route_filters_on_kind():
-    route = route_by_name("air-pipeline-state")
-    assert route is not None
-    assert route.kind == "events"
-    assert route.row_match == {"kind": "video.air_state"}
-    assert {f.field for f in route.fields} == {
-        "pipeline_state",
-        "encoder_name",
-        "camera_source",
-    }
-    assert all(f.locator == Locator.DETAIL_KEY for f in route.fields)
-
-
 def test_hw_snapshot_route_uses_the_signal_locator():
     route = route_by_name("hw-snapshot")
     assert route is not None
@@ -105,7 +90,6 @@ def test_metric_routes_use_the_metric_locator():
         "link-metrics",
         "video-metrics",
         "hw-summary",
-        "air-pipeline-metrics",
         "video-latency",
     ):
         route = route_by_name(name)

@@ -2,8 +2,8 @@
 //!
 //! This module owns the cold-start sequence (`start_stream`) and every leaf
 //! spawn/teardown the orchestrator drives — the wfb radio tap, the decoupled
-//! vision tap, the headless SEI tap, the cloud-relay push, and the reaping of
-//! the deferred GStreamer air-pipeline slot. Each spawn carries the
+//! vision tap, the headless SEI tap, and the cloud-relay push. Each spawn
+//! carries the
 //! setsid/killpg process-group ownership (via [`crate::process::ManagedProcess`])
 //! so a dropped future can never orphan a child onto a mediamtx publisher slot.
 //!
@@ -770,19 +770,9 @@ impl VideoOrchestrator {
         }
     }
 
-    /// Tear down the deferred GStreamer air-pipeline subprocess if one was ever
-    /// spawned. On the legacy bash path this slot is always empty; the teardown
-    /// is here so a future gated GST step inherits correct reaping for free.
-    pub(crate) async fn stop_gst_air(&mut self) {
-        if let Some(mut gst) = self.gst_air.take() {
-            gst.terminate(Duration::from_secs(5)).await;
-        }
-    }
-
     /// Roll back a partial start: tear down anything spawned after
     /// mediamtx.start(), then mark Error. Mirrors `_teardown_after_partial_start`.
     async fn teardown_after_partial_start(&mut self) {
-        self.stop_gst_air().await;
         self.stop_wfb_tee().await;
         self.stop_vision_tap().await;
         if let Some(mut tap) = self.sei_tap.take() {

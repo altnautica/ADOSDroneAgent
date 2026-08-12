@@ -16,8 +16,6 @@ land at ``/api/video/cameras`` as before.
 * ``encoder_config.py`` — :data:`router` carrying ``GET
   /video/config``, ``POST /video/config`` and the controller-snapshot
   fallbacks.
-* ``latency.py`` — :data:`router` carrying ``GET /video/latency`` and
-  ``GET /v1/video/air-pipeline``.
 * ``_common.py`` — shared constants (mediamtx ports, record lock),
   Pydantic models, pipeline accessor, recording-block + mediamtx
   probe helpers.
@@ -35,7 +33,6 @@ from fastapi import APIRouter
 
 from . import camera_probe as _camera_mod
 from . import encoder_config as _encoder_mod
-from . import latency as _latency_mod
 from . import recording as _record_mod
 from . import snapshot as _snapshot_mod
 from . import stream_status as _status_mod
@@ -70,7 +67,6 @@ router.include_router(_snapshot_mod.router)
 router.include_router(_record_mod.router)
 router.include_router(_camera_mod.router)
 router.include_router(_encoder_mod.router)
-router.include_router(_latency_mod.router)
 
 
 __all__ = [

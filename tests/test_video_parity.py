@@ -69,12 +69,6 @@ async def test_video_latency_source_defaults_to_sei_without_the_event(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_latest_air_pipeline_none_without_producer(monkeypatch):
-    _patch_store(monkeypatch, metric_rows=[], event_rows=[])
-    assert await video_source.latest_air_pipeline() is None
-
-
-@pytest.mark.asyncio
 async def test_latest_video_latency_none_without_samples(monkeypatch):
     _patch_store(monkeypatch, metric_rows=[], event_rows=[])
     assert await video_source.latest_video_latency() is None

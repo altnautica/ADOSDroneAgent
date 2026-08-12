@@ -109,12 +109,6 @@ pub struct VideoOrchestrator {
     /// headers them (Contract F), and serves the connecting vision engine.
     /// Bound to the same lifetime as `vision_tap`; aborted on stop/restart.
     pub(crate) vision_tap_reframer: Option<tokio::task::JoinHandle<()>>,
-    /// Supervised-subprocess slot held for a future GStreamer air branch. It
-    /// is never populated on the current bash path, so the teardown paths reap
-    /// it for free if that branch is ever wired; there is no operator toggle
-    /// that selects it.
-    pub(crate) gst_air: Option<ManagedProcess>,
-
     pub(crate) wfb_tee_progress: ProgressTracker,
     /// Output-progress clock for the decoupled vision tap (Rule 37: liveness
     /// alone is never proof of work; the tap can hold the sink open while
@@ -230,7 +224,6 @@ impl VideoOrchestrator {
             sei_tap: None,
             vision_tap: None,
             vision_tap_reframer: None,
-            gst_air: None,
             wfb_tee_progress: ProgressTracker::new(),
             vision_tap_progress: ProgressTracker::new(),
             last_cameras: DiscoveryResult::empty(),
@@ -472,7 +465,6 @@ impl VideoOrchestrator {
     /// sei_tap → cloud_push → encoder → mediamtx. Mirrors `stop_stream`.
     pub async fn stop_stream(&mut self) {
         tracing::info!("stop_stream_begin");
-        self.stop_gst_air().await;
         self.stop_wfb_tee().await;
         self.stop_vision_tap().await;
         self.stop_secondary_encoders().await;
@@ -736,10 +728,9 @@ impl VideoOrchestrator {
             }
         }
 
-        // Final teardown: gst air → wfb tee → vision tap → cloud push →
-        // encoder → mediamtx. The ManagedProcess Drop killpg is the backstop;
+        // Final teardown: wfb tee → vision tap → cloud push → encoder →
+        // mediamtx. The ManagedProcess Drop killpg is the backstop;
         // this is the graceful ordered path.
-        self.stop_gst_air().await;
         self.stop_wfb_tee().await;
         self.stop_vision_tap().await;
         self.stop_cloud_push().await;
