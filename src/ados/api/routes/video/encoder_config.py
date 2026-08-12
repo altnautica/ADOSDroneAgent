@@ -48,13 +48,38 @@ def _read_state_file(path: str) -> dict[str, Any] | None:
         return None
 
 
-def _bitrate_controller_snapshot(app: Any) -> dict[str, Any] | None:
-    """Read the BitrateController snapshot.
+# The `adaptive` block's live fields, read out of wfb-stats.json. The radio
+# writes all of these on every tick. `available` is seeded from config
+# separately and is not in this list. Mirrored by ADAPTIVE_KEYS in the native
+# route, which the conformance harness compares against byte for byte.
+_ADAPTIVE_KEYS = (
+    "adaptive_bitrate_enabled",
+    "recommended_bitrate_kbps",
+    "encoder_bitrate_kbps",
+    "recommended_tier_idx",
+    "link_preset",
+    "mcs_index",
+    "mcs_ladder_cap",
+    "fec_k",
+    "fec_n",
+)
 
-    First tries the in-process accessor (single-process mode,
-    bench dev). Falls back to the state file the controller
-    persists at /run/ados/bitrate-controller.json (production
-    multi-process). Returns None when neither path yields data.
+
+def _bitrate_controller_snapshot(app: Any) -> dict[str, Any] | None:
+    """The live adaptive-controller state, from ``wfb-stats.json``.
+
+    Sourced from the wfb stats sidecar, which the radio rewrites on every tick.
+    This used to read ``/run/ados/bitrate-controller.json`` -- a file with no
+    writer, because its only producer was a ``BitrateController`` that is never
+    instantiated anywhere. The merge could therefore never fire, and the
+    ``adaptive`` block was permanently just ``{"available": <config flag>}``
+    while the real controller state sat unread in the sidecar next to it.
+
+    The in-process accessor is tried first for the single-process bench path,
+    where an app object may still carry a live controller.
+
+    Returns None when the sidecar is absent or carries none of these keys, so
+    the caller keeps its config-seeded stub.
     """
     getter = getattr(app, "bitrate_controller", None)
     if callable(getter):
@@ -66,9 +91,13 @@ def _bitrate_controller_snapshot(app: Any) -> dict[str, Any] | None:
                     return snap_fn()
                 except Exception:  # noqa: BLE001
                     pass
-    from ados.core.paths import BITRATE_CONTROLLER_JSON
+    from ados.core.paths import WFB_STATS_JSON
 
-    return _read_state_file(str(BITRATE_CONTROLLER_JSON))
+    blob = _read_state_file(str(WFB_STATS_JSON))
+    if not blob:
+        return None
+    live = {k: blob[k] for k in _ADAPTIVE_KEYS if k in blob}
+    return live or None
 
 
 # Beyond this age the wfb-stats snapshot can no longer describe the link

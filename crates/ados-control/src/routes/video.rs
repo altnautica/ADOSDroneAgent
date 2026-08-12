@@ -10,10 +10,10 @@
 //!   nothing. Degrades to `{"latency_ms": null, "source": "unavailable"}`.
 //! - **`GET /api/video/config`** — the composite encoder + radio config snapshot.
 //!   The static radio/encoder blocks come from `/etc/ados/config.yaml`; the dynamic
-//!   `adaptive` / `hopping` / `link` blocks come from the controller sidecar files
-//!   the wfb-side controllers persist under the runtime dir
-//!   (`bitrate-controller.json` / `hop-supervisor.json` / `wfb-stats.json`),
-//!   defaulting to the config-seeded stub when a sidecar is absent.
+//!   `adaptive` / `hopping` / `link` blocks come from the sidecars the wfb-side
+//!   services persist under the runtime dir (`wfb-stats.json` for both `adaptive`
+//!   and `link`, `hop-supervisor.json` for `hopping`), defaulting to the
+//!   config-seeded stub when a sidecar is absent.
 //!
 //! Every read is fault-tolerant: an absent store / sidecar / config degrades to the
 //! same empty/default shape the FastAPI route returns when its own source is
@@ -48,11 +48,45 @@ fn lcd_latency_path() -> PathBuf {
     run_dir().join("lcd-latency.json")
 }
 
-/// The bitrate-controller snapshot file (`/run/ados/bitrate-controller.json`),
-/// persisted by the closed-loop controller. Mirrors `BITRATE_CONTROLLER_JSON`.
-fn bitrate_controller_path() -> PathBuf {
-    run_dir().join("bitrate-controller.json")
+/// Compose the config route's `adaptive` block: `available` from config, with the
+/// live controller state merged over it from the wfb stats sidecar.
+///
+/// The live half is sourced from `wfb-stats.json`, which the radio rewrites on
+/// every tick. It used to be read from `bitrate-controller.json` -- a file with
+/// NO writer, because its only producer was a Python `BitrateController` that is
+/// never instantiated anywhere. The merge could therefore never fire and this
+/// block was permanently `{available}` alone. The on-box dashboard reads
+/// `adaptive.adaptive_bitrate_enabled` and rendered blank forever as a result,
+/// which looked like a stale key name and was really a reader pointed at a dead
+/// file: the live sidecar publishes that exact key, alongside the rest of the
+/// controller's state.
+fn build_adaptive_block(available: bool, stats: Option<&Map<String, Value>>) -> Map<String, Value> {
+    let mut adaptive = Map::new();
+    adaptive.insert("available".to_string(), json!(available));
+    if let Some(snap) = stats {
+        for key in ADAPTIVE_KEYS {
+            if let Some(v) = snap.get(*key) {
+                adaptive.insert((*key).to_string(), v.clone());
+            }
+        }
+    }
+    adaptive
 }
+
+/// The `adaptive` block's live fields, read out of `wfb-stats.json`. The radio
+/// writes all of these on every tick; `available` is seeded from config
+/// separately and is not in this list.
+const ADAPTIVE_KEYS: &[&str] = &[
+    "adaptive_bitrate_enabled",
+    "recommended_bitrate_kbps",
+    "encoder_bitrate_kbps",
+    "recommended_tier_idx",
+    "link_preset",
+    "mcs_index",
+    "mcs_ladder_cap",
+    "fec_k",
+    "fec_n",
+];
 
 /// The hop-supervisor snapshot file (`/run/ados/hop-supervisor.json`), persisted
 /// by the frequency hopper. Mirrors `HOP_SUPERVISOR_JSON`.
@@ -214,15 +248,10 @@ pub async fn get_video_config() -> Json<Value> {
         "codec": camera.codec,
     });
 
-    // adaptive: `{available}` from config, with the bitrate-controller snapshot
-    // merged over it when the sidecar is present.
-    let mut adaptive = Map::new();
-    adaptive.insert("available".to_string(), json!(wfb.adaptive_bitrate_enabled));
-    if let Some(snap) = read_state_file(&bitrate_controller_path()) {
-        for (k, v) in snap {
-            adaptive.insert(k, v);
-        }
-    }
+    let adaptive = build_adaptive_block(
+        wfb.adaptive_bitrate_enabled,
+        read_state_file(&wfb_stats_path()).as_ref(),
+    );
 
     // hopping: the supervisor snapshot, or a config-seeded stub when absent.
     let hopping = match read_state_file(&hop_supervisor_path()) {
@@ -828,6 +857,61 @@ mod tests {
     }
 
     // ----- /api/video/config -----
+
+    #[test]
+    fn adaptive_block_carries_the_live_controller_state_from_wfb_stats() {
+        // The dashboard reads `adaptive.adaptive_bitrate_enabled`. That key is
+        // published by the radio into wfb-stats.json on every tick -- the reader
+        // used to look for it in bitrate-controller.json, which has no writer at
+        // all, so the row was blank forever and the key looked stale when the
+        // real fault was the file.
+        //
+        // Scope, stated because it is not obvious: this covers the PROJECTION,
+        // not which file the caller reads. Two other things cover that -- the
+        // dead path's helper is deleted, so re-pointing at it takes a
+        // hand-written join rather than an existing affordance, and the
+        // api-conformance `video-config` case diffs this route against its Python
+        // twin, so a one-sided repoint shows up there (on a live agent).
+        let mut stats = Map::new();
+        stats.insert("adaptive_bitrate_enabled".into(), json!(true));
+        stats.insert("recommended_bitrate_kbps".into(), json!(3000));
+        stats.insert("encoder_bitrate_kbps".into(), json!(2800));
+        stats.insert("recommended_tier_idx".into(), json!(1));
+        stats.insert("link_preset".into(), json!("conservative"));
+        stats.insert("mcs_index".into(), json!(2));
+        stats.insert("fec_k".into(), json!(8));
+        stats.insert("fec_n".into(), json!(14));
+        // A key the block does not carry must not leak through the filter.
+        stats.insert("rssi".into(), json!(-48));
+
+        let block = build_adaptive_block(true, Some(&stats));
+        assert_eq!(block.get("available"), Some(&json!(true)));
+        assert_eq!(block.get("adaptive_bitrate_enabled"), Some(&json!(true)));
+        assert_eq!(block.get("recommended_bitrate_kbps"), Some(&json!(3000)));
+        assert_eq!(block.get("encoder_bitrate_kbps"), Some(&json!(2800)));
+        assert_eq!(block.get("recommended_tier_idx"), Some(&json!(1)));
+        assert_eq!(block.get("link_preset"), Some(&json!("conservative")));
+        assert_eq!(block.get("fec_k"), Some(&json!(8)));
+        assert!(
+            block.get("rssi").is_none(),
+            "the block must carry only its own keys, not the whole sidecar"
+        );
+    }
+
+    #[test]
+    fn adaptive_block_without_a_sidecar_is_the_config_stub() {
+        // An absent or unparseable sidecar degrades to `available` alone rather
+        // than erroring or fabricating a controller state.
+        let block = build_adaptive_block(false, None);
+        assert_eq!(block.get("available"), Some(&json!(false)));
+        assert_eq!(block.len(), 1, "expected only `available`, got {block:?}");
+
+        // A present sidecar carrying none of the adaptive keys is the same case.
+        let mut unrelated = Map::new();
+        unrelated.insert("rssi".into(), json!(-48));
+        let block = build_adaptive_block(true, Some(&unrelated));
+        assert_eq!(block.len(), 1, "expected only `available`, got {block:?}");
+    }
 
     #[test]
     fn config_of_an_empty_yaml_is_the_pydantic_default_shape() {

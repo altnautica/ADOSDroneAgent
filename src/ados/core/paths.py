@@ -207,7 +207,6 @@ USB_REHOME_JSON = ADOS_RUN_DIR / "usb-rehome.json"
 # reconciler: the recovery state + attempt count + topology for an expected
 # camera that failed to enumerate (a cold-boot port-enable failure).
 CAMERA_USB_RECOVERY_JSON = ADOS_RUN_DIR / "camera-usb-recovery.json"
-BITRATE_CONTROLLER_JSON = ADOS_RUN_DIR / "bitrate-controller.json"
 
 # Perception offload-link state, written by the offload reconciler: whether a
 # workstation node is paired + reachable and the drone is offloading to it. Read
