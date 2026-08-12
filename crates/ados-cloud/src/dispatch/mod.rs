@@ -4,8 +4,9 @@
 //! Each handler returns `(status, result, data)`: `status` is `completed` or
 //! `failed`, `result` is the small ACK doc, `data` is the optional larger
 //! payload. Plugin lifecycle commands route to the frozen `PluginSupervisor`
-//! through [`plugin_commands`] (idempotent). Ports `execute_command` from
-//! `src/ados/services/cloud/command_dispatcher.py`.
+//! through [`plugin_commands`] (idempotent). Originally ported from the Python
+//! dispatcher's `execute_command`, which has since been deleted; this is the
+//! implementation.
 
 pub mod download;
 pub mod install;

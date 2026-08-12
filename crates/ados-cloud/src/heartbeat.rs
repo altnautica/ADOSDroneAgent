@@ -2,21 +2,23 @@
 //!
 //! The cloud relay POSTs a status payload to `{convex}/agent/status` on a 5 s
 //! cadence; Mission Control reads it to populate the per-drone view. This module
-//! reproduces that payload's WIRE SHAPE byte-identically with the Python emit in
-//! `src/ados/services/cloud/heartbeat_loop.py` (the source of truth) so the
-//! relay can move to Rust without the receiver noticing.
+//! is that payload's wire shape. It was frozen byte-identically against the
+//! Python emitter so the relay could move to Rust without the receiver
+//! noticing; that emitter has since been deleted, so what the shape is now
+//! answerable to is the RECEIVER -- the Convex `pushStatus` validator and the
+//! golden fixture in `tests/heartbeat_golden.rs`. A field that stops matching
+//! the validator is rejected for the whole payload, and the node goes dark
+//! every tick, so the three rules below are load-bearing rather than stylistic.
 //!
 //! Three wire rules are load-bearing and are encoded in the types here:
 //!
 //! 1. **Casing.** Every root key is camelCase EXCEPT the `radio` sub-block,
-//!    whose keys are snake_case (the captured wire contract carries snake_case
-//!    keys verbatim). The root struct carries `#[serde(rename_all =
+//!    whose keys are snake_case, as the golden fixture pins them. The root struct carries `#[serde(rename_all =
 //!    "camelCase")]`; [`RadioBlock`] uses its own field names (already
 //!    snake_case) with no rename.
 //! 2. **Null-stripping.** The receiver's schema is `v.optional(T)`, which
-//!    accepts "field absent OR T" but rejects an explicit JSON `null`. The
-//!    Python loop strips every top-level `None`-valued key before the POST
-//!    (`payload = {k: v for k, v in payload.items() if v is not None}`). Every
+//!    accepts "field absent OR T" but rejects an explicit JSON `null`, so every
+//!    absent top-level key must be omitted rather than sent as `null`. Every
 //!    optional field here is `Option<T>` with
 //!    `#[serde(skip_serializing_if = "Option::is_none")]`, so a `None` is
 //!    omitted, never serialized as `null`.
@@ -26,10 +28,10 @@
 //! The `radio` block is always emitted (an `absent` block
 //! when no radio status is available), so it is a plain field, not an option.
 //! Inside the block every value is itself optional and null-strips — but Convex
-//! validates the nested object's own optionals, so the block is sent whole (the
-//! Python loop does not strip nested `None`s). [`RadioBlock`] therefore serializes
-//! its `None` fields as JSON `null` deliberately, matching the Python nested
-//! dict which keeps the `None` values.
+//! validates the nested object's own optionals, so the block is sent whole and
+//! nested `None`s are NOT stripped. [`RadioBlock`] therefore serializes its
+//! `None` fields as JSON `null` deliberately -- the opposite of the top-level
+//! rule, and load-bearing in the same way.
 
 use serde::{Deserialize, Serialize};
 

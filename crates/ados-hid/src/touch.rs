@@ -4,9 +4,10 @@
 //
 //! Touch input: raw evdev samples -> rotated/calibrated -> classified gesture.
 //!
-//! Ports `src/ados/services/ui/touch/bridge.py`: the per-stroke state machine
-//! (`open_stroke` / `record_move` / `close_stroke`), the move filter, and the
-//! tap / long_press / swipe / drag classifier. The chunk-1 [`crate::affine`]
+//! Originally ported from the Python touch bridge, which has since been deleted.
+//! Covers the per-stroke state machine (`open_stroke` / `record_move` /
+//! `close_stroke`), the move filter, and the tap / long_press / swipe / drag
+//! classifier. The chunk-1 [`crate::affine`]
 //! transform maps each raw `(x, y)` ADC sample to LCD pixels before the FSM
 //! sees it.
 //!

@@ -927,7 +927,9 @@ fn bool_or_null(map: &Map<String, Value>, key: &str) -> Value {
 /// `wfb_status` is the `/api/wfb` body (or `None` when no view is available). The
 /// GCS keys off the presence of the block, not the values; an absent view yields
 /// the full "absent" skeleton (every metric `null`, paired/injection `false`).
-/// Matches the captured wire contract field-for-field.
+/// The field set is pinned by the heartbeat golden fixture
+/// (`ados-cloud/tests/heartbeat_golden.rs`), which asserts the same block
+/// snake_case and field-for-field.
 fn build_radio_block(wfb_status: Option<&Map<String, Value>>) -> Value {
     let Some(status) = wfb_status else {
         return radio_absent_block();
@@ -1019,7 +1021,7 @@ fn build_radio_block(wfb_status: Option<&Map<String, Value>>) -> Value {
 /// Every metric is `null` and `paired` is `false`; the adapter / PHY verdicts are
 /// `null` too — with no radio view there is nothing to have measured them, and a
 /// `false` would claim a healthy USB link / unmuted PHY that was never examined.
-/// Matches the captured wire contract's `absent` branch exactly.
+/// Pinned by the golden fixture's `RadioBlock::absent()` case.
 fn radio_absent_block() -> Value {
     json!({
         "state": "absent",

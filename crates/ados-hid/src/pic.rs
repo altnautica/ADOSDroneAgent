@@ -15,8 +15,8 @@
 //! claimed(A) --on_pic_disconnected()---> unclaimed
 //! ```
 //!
-//! Ports `src/ados/services/ground_station/pic_arbiter.py`: the five claim
-//! cases with their exact outcome shapes (the REST layer maps `needs_confirm` /
+//! Originally ported from the Python PIC arbiter, which has since been
+//! deleted. Covers the five claim cases with their exact outcome shapes (the REST layer maps `needs_confirm` /
 //! `status` to HTTP 409 / 403 / 410), the confirm-token TTL, the heartbeat
 //! session watchdog auto-release, gamepad auto-claim, and the monotonic claim
 //! counter. Time comes from an injectable [`Clock`] so the TTL and watchdog are

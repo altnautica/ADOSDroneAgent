@@ -1,8 +1,9 @@
 //! WebRTC SDP signaling relay over MQTT.
 //!
 //! A pure SDP-string rendezvous (no `webrtc` crate — the media flows
-//! peer-to-peer after the handshake, this only relays signaling text). Ports
-//! `src/ados/services/cloud/webrtc_signaling.py`:
+//! peer-to-peer after the handshake, this only relays signaling text).
+//! Originally ported from the Python signaling relay, which has since been
+//! deleted:
 //! * subscribe `ados/{id}/webrtc/offer` (q1)
 //! * on each offer, POST the SDP to the local mediamtx WHEP endpoint
 //!   (`http://localhost:8889/main/whep`, PLAINTEXT localhost — no TLS)

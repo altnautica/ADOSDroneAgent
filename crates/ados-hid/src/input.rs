@@ -1,7 +1,7 @@
 //! Input-device lifecycle for the ground-station profile.
 //!
-//! Ports `src/ados/services/ground_station/input_manager.py`: USB gamepad
-//! enumeration via evdev, the 1 Hz hotplug poll of `/dev/input`, the
+//! Originally ported from the Python input manager, which has since been
+//! deleted. Covers USB gamepad enumeration via evdev, the 1 Hz hotplug poll of `/dev/input`, the
 //! gamepad-detection predicate, stable device-id formatting, and primary-device
 //! persistence to `/etc/ados/ground-station-input.json` (reusing the chunk-1
 //! [`crate::sidecar::GroundStationInput`] helper).

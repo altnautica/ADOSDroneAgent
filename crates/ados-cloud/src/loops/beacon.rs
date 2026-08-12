@@ -3,8 +3,8 @@
 //! When UNPAIRED and only when `pairing.beacon_enabled` is true, POST the
 //! pairing code to `{convex}/pairing/register` every `beacon_interval` seconds.
 //! The default deployment ships with the beacon OFF — the agent stays LAN-only
-//! and waits for a local `POST /api/pairing/claim`. Ports
-//! `src/ados/services/cloud/beacon_loop.py`.
+//! and waits for a local `POST /api/pairing/claim`. Originally ported from the
+//! Python beacon loop, which has since been deleted.
 
 use std::time::Duration;
 

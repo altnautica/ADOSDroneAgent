@@ -54,13 +54,15 @@
 //!
 //! ## Service reload signal
 //!
-//! After persisting, the FastAPI handlers SIGHUP the live display service so it
-//! reloads its config without a restart (`signal_oled_reload` →
-//! `ados-oled.service`, `signal_buttons_reload` → `ados-pic.service`). The
-//! front does the same via `systemctl kill -s HUP <unit>`, best-effort: a failure
-//! (the unit inactive, systemd unavailable on a dev tree) is swallowed, matching
-//! the FastAPI helper that degrades silently. The reload is fire-and-forget and
-//! never affects the response.
+//! After persisting, the front SIGHUPs the live display service so it reloads its
+//! config without a restart (`ados-oled.service` for the display config,
+//! `ados-pic.service` for the buttons) via `systemctl kill -s HUP <unit>`.
+//!
+//! Best-effort as to the RESPONSE -- the write is already durable, so a reload
+//! that does not land costs a restart, not the setting -- but not silent: a
+//! refused or unsendable signal is logged with the unit, because otherwise the
+//! write returns 200 while the running config is unchanged and nothing explains
+//! why. See [`signal_reload`].
 //!
 //! ## The profile gate
 //!

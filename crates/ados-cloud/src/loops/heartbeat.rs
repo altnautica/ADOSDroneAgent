@@ -1,8 +1,8 @@
 //! Cloud status heartbeat loop.
 //!
 //! Every 5 s, when paired, POST the frozen [`HeartbeatPayload`] to
-//! `{convex}/agent/status` with `X-ADOS-Key` auth. Ports
-//! `src/ados/services/cloud/heartbeat_loop.py`.
+//! `{convex}/agent/status` with `X-ADOS-Key` auth. Originally ported from the
+//! Python heartbeat loop, which has since been deleted.
 //!
 //! ## Native enrichment
 //!
