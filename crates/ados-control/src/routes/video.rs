@@ -60,6 +60,9 @@ fn lcd_latency_path() -> PathBuf {
 /// which looked like a stale key name and was really a reader pointed at a dead
 /// file: the live sidecar publishes that exact key, alongside the rest of the
 /// controller's state.
+///
+/// `stats` is `None` for BOTH an absent sidecar and a stale one — see
+/// [`read_stats_if_fresh`].
 fn build_adaptive_block(available: bool, stats: Option<&Map<String, Value>>) -> Map<String, Value> {
     let mut adaptive = Map::new();
     adaptive.insert("available".to_string(), json!(available));
@@ -71,6 +74,23 @@ fn build_adaptive_block(available: bool, stats: Option<&Map<String, Value>>) -> 
         }
     }
     adaptive
+}
+
+/// Read the wfb stats sidecar only while it is fresh enough to describe the radio
+/// NOW, applying the same [`LINK_STALE_AFTER_S`] ceiling the `link` block uses on
+/// this same file.
+///
+/// Absent and stale both return `None`. A stale snapshot's controller state
+/// describes a radio that may be dead: a frozen `adaptive_bitrate_enabled: true`
+/// beside a frozen recommended rung reads as a live adapting link, which is the
+/// healthy-looking dead link Rule 44 forbids — the same reasoning the `link`
+/// block already documents for its own counters.
+fn read_stats_if_fresh(path: &Path) -> Option<Map<String, Value>> {
+    if stats_age_seconds(path).is_some_and(|age| age <= LINK_STALE_AFTER_S) {
+        read_state_file(path)
+    } else {
+        None
+    }
 }
 
 /// The `adaptive` block's live fields, read out of `wfb-stats.json`. The radio
@@ -248,9 +268,15 @@ pub async fn get_video_config() -> Json<Value> {
         "codec": camera.codec,
     });
 
+    // Gated on the same freshness ceiling the `link` block below applies to this
+    // same file. A stale snapshot's controller state describes a radio that may
+    // be dead now: a frozen `adaptive_bitrate_enabled: true` beside a frozen
+    // recommended rung reads as a live adapting link, which is the
+    // healthy-looking dead link Rule 44 forbids. Absent and stale both degrade to
+    // the config stub rather than to a last-known value.
     let adaptive = build_adaptive_block(
         wfb.adaptive_bitrate_enabled,
-        read_state_file(&wfb_stats_path()).as_ref(),
+        read_stats_if_fresh(&wfb_stats_path()).as_ref(),
     );
 
     // hopping: the supervisor snapshot, or a config-seeded stub when absent.
@@ -896,6 +922,46 @@ mod tests {
             block.get("rssi").is_none(),
             "the block must carry only its own keys, not the whole sidecar"
         );
+    }
+
+    #[test]
+    fn a_stale_stats_sidecar_is_not_read_into_the_adaptive_block() {
+        // The `link` block twelve lines below reads this same file behind a
+        // freshness ceiling, for the reason its own docs give: a stale snapshot
+        // describes a radio that may be dead now. The adaptive half shipped
+        // without that gate, so a dead radio left a frozen
+        // `adaptive_bitrate_enabled: true` next to a frozen recommended rung --
+        // a live-looking adapting link with nothing behind it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wfb-stats.json");
+        std::fs::write(
+            &path,
+            r#"{"adaptive_bitrate_enabled": true, "recommended_bitrate_kbps": 3000}"#,
+        )
+        .unwrap();
+
+        // Fresh: the state is read.
+        let fresh = read_stats_if_fresh(&path).expect("a just-written file is fresh");
+        assert_eq!(fresh.get("adaptive_bitrate_enabled"), Some(&json!(true)));
+
+        // Older than the ceiling: nothing is read, so the block falls to the stub.
+        let stale = std::time::SystemTime::now()
+            - std::time::Duration::from_secs_f64(LINK_STALE_AFTER_S + 5.0);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(stale)
+            .unwrap();
+        assert!(
+            read_stats_if_fresh(&path).is_none(),
+            "a snapshot past the staleness ceiling must not be merged"
+        );
+        let block = build_adaptive_block(true, read_stats_if_fresh(&path).as_ref());
+        assert_eq!(block.len(), 1, "expected only `available`, got {block:?}");
+
+        // An absent file is the same case, not an error.
+        assert!(read_stats_if_fresh(&dir.path().join("nope.json")).is_none());
     }
 
     #[test]

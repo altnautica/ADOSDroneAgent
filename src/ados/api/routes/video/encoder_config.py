@@ -93,6 +93,14 @@ def _bitrate_controller_snapshot(app: Any) -> dict[str, Any] | None:
                     pass
     from ados.core.paths import WFB_STATS_JSON
 
+    # Gated on the same freshness ceiling the `link` block applies to this same
+    # file. A stale snapshot's controller state describes a radio that may be
+    # dead now: a frozen ``adaptive_bitrate_enabled: True`` beside a frozen
+    # recommended rung reads as a live adapting link. Absent and stale both
+    # degrade to the config stub rather than to a last-known value.
+    age_s = _stats_age_seconds(str(WFB_STATS_JSON))
+    if age_s is None or age_s > _LINK_STALE_AFTER_S:
+        return None
     blob = _read_state_file(str(WFB_STATS_JSON))
     if not blob:
         return None
