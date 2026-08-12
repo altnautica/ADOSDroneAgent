@@ -1952,20 +1952,152 @@ mod tests {
         // [Install] section so the supervisor pulls it up.
         let unit = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../data/systemd/ados-plugin-host.service");
-        if let Ok(body) = std::fs::read_to_string(&unit) {
-            assert!(
-                body.contains("ExecStart=/opt/ados/bin/ados-plugin-host"),
-                "{body}"
-            );
-            assert!(
-                body.contains("ConditionPathExists=/opt/ados/bin/ados-plugin-host"),
-                "{body}"
-            );
-            assert!(body.contains("WantedBy=ados-supervisor.service"), "{body}");
-            // Neither retired marker may appear: the unit selects nothing now.
-            assert!(!body.contains("plugin-host-rust-enabled"), "{body}");
-            assert!(!body.contains("plugin-host-python-fallback"), "{body}");
+        // Read unconditionally. Swallowing a read failure here means a unit that
+        // moved or was deleted passes this test in silence, which is the state
+        // it exists to prevent.
+        let body = std::fs::read_to_string(&unit)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", unit.display()));
+        assert!(
+            body.contains("ExecStart=/opt/ados/bin/ados-plugin-host"),
+            "{body}"
+        );
+        // Placement is checked by `every_unit_directive_sits_in_a_section_that_reads_it`;
+        // a bare `contains` here would pass with the directive in [Service],
+        // where systemd ignores it.
+        assert!(
+            body.contains("ConditionPathExists=/opt/ados/bin/ados-plugin-host"),
+            "{body}"
+        );
+        assert!(body.contains("WantedBy=ados-supervisor.service"), "{body}");
+        // Neither retired marker may appear: the unit selects nothing now.
+        assert!(!body.contains("plugin-host-rust-enabled"), "{body}");
+        assert!(!body.contains("plugin-host-python-fallback"), "{body}");
+    }
+
+    /// Every shipped unit's directives must sit in a section that reads them.
+    ///
+    /// systemd does not reject a misplaced directive; it logs "Unknown key name
+    /// … ignoring" at load and carries on. So a `ConditionPathExists` written
+    /// under `[Service]` is not a guard at all, and the unit behaves as though
+    /// it were never written — which is indistinguishable, from every surface,
+    /// from a unit that simply has no condition.
+    ///
+    /// This is a denylist of the directives that are section-specific AND
+    /// silently ignored when misplaced, rather than an allowlist of every valid
+    /// key: an allowlist would reject a legitimately new directive and would
+    /// need updating on every systemd release, whereas this only has to know
+    /// about keys whose misplacement is undetectable at runtime.
+    #[test]
+    fn every_unit_directive_sits_in_a_section_that_reads_it() {
+        // (directive, the only section that reads it)
+        const UNIT_ONLY: &[&str] = &[
+            "After",
+            "Before",
+            "Requires",
+            "Requisite",
+            "Wants",
+            "BindsTo",
+            "PartOf",
+            "Conflicts",
+            "Description",
+            "Documentation",
+            "DefaultDependencies",
+            "StartLimitBurst",
+            "StartLimitInterval",
+            "StartLimitIntervalSec",
+            "OnFailure",
+            "RefuseManualStart",
+            "RefuseManualStop",
+        ];
+        const INSTALL_ONLY: &[&str] =
+            &["WantedBy", "RequiredBy", "Also", "Alias", "DefaultInstance"];
+        const SERVICE_ONLY: &[&str] = &[
+            "ExecStart",
+            "ExecStartPre",
+            "ExecStartPost",
+            "ExecStop",
+            "ExecStopPost",
+            "ExecReload",
+            "Restart",
+            "RestartSec",
+            "Type",
+            "RemainAfterExit",
+            "WatchdogSec",
+            "TimeoutStartSec",
+            "TimeoutStopSec",
+            "User",
+            "Group",
+            "EnvironmentFile",
+        ];
+
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/systemd");
+        let entries = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));
+
+        let mut checked = 0usize;
+        let mut problems: Vec<String> = Vec::new();
+
+        for entry in entries {
+            let path = entry.expect("dir entry").path();
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if !matches!(
+                ext,
+                "service" | "socket" | "timer" | "slice" | "target" | "mount"
+            ) {
+                continue;
+            }
+            let body = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+            checked += 1;
+
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+            let mut section = String::new();
+            for line in body.lines() {
+                let line = line.trim();
+                if line.starts_with('[') && line.ends_with(']') {
+                    section = line.to_string();
+                    continue;
+                }
+                if line.starts_with('#') || line.starts_with(';') || !line.contains('=') {
+                    continue;
+                }
+                let key = line.split('=').next().unwrap_or("").trim();
+                // `Condition*`/`Assert*` are families, matched by prefix; the
+                // rest are exact names.
+                let unit_only = key.starts_with("Condition")
+                    || key.starts_with("Assert")
+                    || UNIT_ONLY.contains(&key);
+                let expected = if unit_only {
+                    Some("[Unit]")
+                } else if INSTALL_ONLY.contains(&key) {
+                    Some("[Install]")
+                } else if SERVICE_ONLY.contains(&key) {
+                    Some("[Service]")
+                } else {
+                    None
+                };
+                if let Some(want) = expected {
+                    if section != want {
+                        problems.push(format!(
+                            "  {name}: {key}= is in {section} but only {want} reads it"
+                        ));
+                    }
+                }
+            }
         }
+
+        // A directory that matched nothing would make this pass vacuously.
+        assert!(
+            checked >= 40,
+            "only parsed {checked} unit files under {}; the scan is broken",
+            dir.display()
+        );
+        assert!(
+            problems.is_empty(),
+            "systemd ignores a misplaced directive silently, so these are no-ops \
+             that read as configured:\n{}",
+            problems.join("\n")
+        );
     }
 
     #[test]

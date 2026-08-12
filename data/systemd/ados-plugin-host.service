@@ -4,6 +4,11 @@ After=ados-mavlink.service
 PartOf=ados-supervisor.service
 StartLimitInterval=60s
 StartLimitBurst=5
+# Keeps a box whose binary has not landed yet inactive rather than
+# restart-looping: with Restart=on-failure below, a missing ExecStart target
+# would exit 203/EXEC and latch failed after the burst limit. Condition*
+# directives are only honoured in [Unit]; systemd ignores them anywhere else.
+ConditionPathExists=/opt/ados/bin/ados-plugin-host
 
 [Service]
 # Join the shared accounting slice so MemoryCurrent/CPUUsage are
@@ -14,9 +19,7 @@ Type=simple
 # packaged host server to fall back to, so the ExecStart is the binary itself
 # rather than a shell that chose between them. A routine install enables this
 # unit and the supervisor pulls it up (see [Install] below) with zero manual
-# steps. ConditionPathExists keeps a box whose binary has not landed yet
-# inactive rather than restart-looping.
-ConditionPathExists=/opt/ados/bin/ados-plugin-host
+# steps.
 ExecStart=/opt/ados/bin/ados-plugin-host
 Restart=on-failure
 RestartSec=3
