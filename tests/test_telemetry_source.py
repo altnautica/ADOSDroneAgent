@@ -1,7 +1,11 @@
-"""Unit tests for the logd-sourced telemetry derivation (pure mapping)."""
+"""Unit tests for the shared logd read client and its telemetry derivation."""
 
 from __future__ import annotations
 
+import httpx
+import pytest
+
+from ados.api import telemetry_source
 from ados.api.telemetry_source import derive_resources
 
 _MB = 1024 * 1024
@@ -78,3 +82,63 @@ def test_booleans_are_not_treated_as_measurements():
     # A boolean-valued signal must not satisfy an essential numeric field.
     s = _signals(**{"cpu.util.all": True})
     assert derive_resources(s) is None
+
+
+# ---------------------------------------------------------------------------
+# The shared upstream client.
+#
+# This coverage used to sit in a per-domain source's test, which is where it
+# happened to be needed rather than where it belongs. Those domain modules were
+# store-read reconstructors for routes that have since migrated to the native
+# front; when the last of them was deleted, the only test driving this seam went
+# with it. It lives here now, next to the client itself, so it survives the next
+# domain module being retired.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _reset_shared_client():
+    """Each test starts from no cached client and leaves none behind."""
+    telemetry_source._client = None
+    yield
+    telemetry_source._client = None
+
+
+def test_get_client_is_cached_across_calls() -> None:
+    """One connection to the store, not one per read.
+
+    The module docstring's contract is "one connection, one timeout policy, one
+    gap-tolerance contract". A client built per call would still work and would
+    silently open a socket per request.
+    """
+    first = telemetry_source._get_client()
+    second = telemetry_source._get_client()
+    assert first is second
+
+
+def test_get_client_talks_over_the_logd_unix_socket() -> None:
+    """The transport is the on-box UDS, not a TCP host.
+
+    The store is reachable over a unix socket precisely so a read works when the
+    network is down; a client built against a TCP base URL would appear healthy
+    in tests and fail on a box with no route to itself.
+    """
+    client = telemetry_source._get_client()
+    assert isinstance(client, httpx.AsyncClient)
+    transport = client._transport
+    assert isinstance(transport, httpx.AsyncHTTPTransport), transport
+    # The uds path is held on the underlying connection pool.
+    pool = transport._pool
+    assert getattr(pool, "_uds", None) == str(telemetry_source.LOGD_QUERY_SOCK), (
+        f"expected the logd query socket, got {getattr(pool, '_uds', None)!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_aclose_drops_the_cached_client() -> None:
+    """Shutdown must release it, and the next read must rebuild rather than
+    reuse a closed client."""
+    first = telemetry_source._get_client()
+    await telemetry_source.aclose()
+    assert telemetry_source._client is None
+    assert telemetry_source._get_client() is not first
