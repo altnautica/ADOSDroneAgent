@@ -30,10 +30,14 @@ ROUTE_CASES = (
 )
 PY_ROUTES_DIR = REPO_ROOT / "src" / "ados" / "api" / "routes"
 
-# Below this, assume the parse broke rather than that the table shrank. The
-# routing tests pin the exact count; this only has to catch "matched nothing".
-MIN_NATIVE_ROUTES = 100
-MIN_CASES = 40
+# Floors for "the parse broke", set just under the real counts rather than well
+# under them. At 100-vs-151 a third of the native table could vanish silently and
+# still clear the bar, which is the same shape of hole this file exists to close.
+# A legitimate shrink below these is rare enough to be worth an explicit edit;
+# growth needs no change. The routing tests pin the exact native count.
+MIN_NATIVE_ROUTES = 145
+MIN_CASES = 60
+MIN_PYTHON_ROUTES = 90
 
 
 def _native_routes() -> set[tuple[str, str]]:
@@ -54,20 +58,48 @@ def _native_routes() -> set[tuple[str, str]]:
     }
 
 
+def _router_prefix(text: str) -> str:
+    """The `prefix=` a module's own `APIRouter(...)` declares, or ``""``."""
+    match = re.search(r'APIRouter\([^)]*prefix="([^"]+)"', text)
+    return match.group(1) if match else ""
+
+
 def _python_routes() -> set[tuple[str, str]]:
     """The (METHOD, path) pairs the residual FastAPI app mounts.
 
-    Each router is included under `/api`; a router may add its own prefix, which
-    is why several live paths carry `/api/v1/...`. The WHEP router is mounted at
-    the root, so its paths are recorded both with and without the `/api` stem.
+    Every router is included under `/api`. Two things then add to the path, and
+    reading a file in isolation sees only one of them:
+
+    * the module's own `APIRouter(prefix=...)`, and
+    * the prefix declared by the `__init__.py` of the package it lives in,
+      which composes its sub-modules with `include_router`.
+
+    Missing the second is not cosmetic. `routes/setup/__init__.py` declares
+    `prefix="/v1/setup"` and includes six sub-modules that each declare a bare
+    `APIRouter()`, so ignoring it records nineteen routes at `/api/status`,
+    `/api/apply`, `/api/reset` and so on — generic paths that then certify a
+    conformance case against a route that does not exist there, while a case
+    naming the real `/api/v1/setup/...` path reads as served by nobody.
+
+    Verified against the tree: `routes/setup/` is the only package declaring a
+    prefix on its `__init__.py` (`ground_station/` and `video/` declare none and
+    their sub-modules carry their own), and no `include_router` call anywhere
+    adds a prefix of its own. So one level of package prefix is the whole rule.
     """
     routes: set[tuple[str, str]] = set()
+    package_prefix: dict[Path, str] = {}
+
+    for init in PY_ROUTES_DIR.rglob("__init__.py"):
+        package_prefix[init.parent] = _router_prefix(init.read_text())
+
     for path in PY_ROUTES_DIR.rglob("*.py"):
         text = path.read_text()
-        prefix_match = re.search(r'APIRouter\(\s*prefix="([^"]+)"', text)
-        prefix = prefix_match.group(1) if prefix_match else ""
+        # A package's own __init__ must not inherit its prefix twice.
+        owner = package_prefix.get(path.parent, "") if path.name != "__init__.py" else ""
+        prefix = owner + _router_prefix(text)
         for m in re.finditer(r'@router\.(get|post|put|delete|patch)\("([^"]*)"', text):
             routes.add((m.group(1).upper(), "/api" + prefix + m.group(2)))
+
     routes |= {(m, p.replace("/api", "", 1)) for m, p in routes if "/whep" in p}
     return routes
 
@@ -123,7 +155,12 @@ def test_every_conformance_case_names_a_served_route() -> None:
     assert len(cases) >= MIN_CASES, (
         f"parsed only {len(cases)} conformance cases; the parse is broken"
     )
-    assert python, "parsed no residual Python routes; the parse is broken"
+    # A truthiness check here would pass on a single bogus entry. The Python
+    # table currently contributes no matches at all (every case is served
+    # natively), so nothing else exercises it.
+    assert len(python) >= MIN_PYTHON_ROUTES, (
+        f"parsed only {len(python)} residual Python routes; the parse is broken"
+    )
 
     orphans = [
         (name, method, path)
