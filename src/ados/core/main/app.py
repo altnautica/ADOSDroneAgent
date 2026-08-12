@@ -1,16 +1,16 @@
 """AgentApp — top-level orchestrator that owns every long-running service.
 
 The class itself is intentionally thin. Where a piece of logic could
-live as a free function taking the app, it does:
-
-* Service spawn order lives in ``service_registry.register_services``.
-* Heartbeat payload composition lives in
-  ``heartbeat_payload.build_heartbeat_payload``.
-* Cloud-relay loops live in ``cloud_loops``.
+live as a free function taking the app, it does: service spawn order
+lives in ``service_registry.register_services``.
 
 The instance methods that remain here are the ones that own private
 mutable state (task list, health monitor, service tracker, pairing
 manager) or expose the asyncio shutdown event.
+
+Cloud relay is not among them. The status heartbeat, the pairing beacon
+and the command poll are served by the native ``ados-cloud`` service,
+which is the only cloud transport; this process spawns nothing for them.
 """
 
 from __future__ import annotations
@@ -26,12 +26,6 @@ from ados.core.health import HealthMonitor
 from ados.core.logging import get_logger
 from ados.core.service_tracker import ServiceState, ServiceTracker
 
-from .cloud_loops import (
-    cloud_beacon_loop,
-    cloud_command_poll_loop,
-    cloud_heartbeat_loop,
-)
-from .heartbeat_payload import build_heartbeat_payload
 from .service_registry import register_services
 
 log = get_logger("main")
@@ -111,9 +105,6 @@ class AgentApp:
         task = asyncio.create_task(_wrapper(), name=name)
         self._tasks.append(task)
 
-    def _single_process_cloud_enabled(self) -> bool:
-        """Return whether the fallback single-process runtime owns cloud loops."""
-        return bool(getattr(self.config.pairing, "single_process_cloud_enabled", False))
 
     async def _health_loop(self) -> None:
         """Periodically check system health."""
@@ -122,52 +113,6 @@ class AgentApp:
             self.health.sd_notify_watchdog()
             await asyncio.sleep(5)
 
-    async def _cloud_beacon_loop(self) -> None:
-        """Forwards to :func:`cloud_loops.cloud_beacon_loop`."""
-        await cloud_beacon_loop(self)
-
-    async def _cloud_heartbeat_loop(self) -> None:
-        """Forwards to :func:`cloud_loops.cloud_heartbeat_loop`."""
-        await cloud_heartbeat_loop(self)
-
-    async def _cloud_command_poll_loop(self) -> None:
-        """Forwards to :func:`cloud_loops.cloud_command_poll_loop`."""
-        await cloud_command_poll_loop(self)
-
-    def _first_mavlink_tcp_port_for_heartbeat(self) -> int | None:
-        """Return the MAVLink TCP listener port the agent serves on.
-
-        Mirrors :func:`ados.setup.service._first_mavlink_tcp_port`.
-        Walks ``config.mavlink.endpoints`` first so an explicit
-        override wins, then falls back to ``DEFAULT_MAVLINK_TCP_PORT``
-        (the hardcoded port the native router binds its TCP proxy on).
-        Returns None only when the operator explicitly disabled the TCP
-        entry in config.
-        """
-        from ados.setup.service import DEFAULT_MAVLINK_TCP_PORT
-
-        found_disabled = False
-        for endpoint in getattr(self.config.mavlink, "endpoints", []):
-            etype = str(getattr(endpoint, "type", "") or "")
-            if etype in ("tcp", "tcp_server"):
-                if getattr(endpoint, "enabled", False):
-                    return int(getattr(endpoint, "port", DEFAULT_MAVLINK_TCP_PORT))
-                found_disabled = True
-        if found_disabled:
-            return None
-        return DEFAULT_MAVLINK_TCP_PORT
-
-    def _first_mavlink_ws_port_for_heartbeat(self) -> int | None:
-        """Return the first enabled MAVLink WebSocket port, or None."""
-        for endpoint in getattr(self.config.mavlink, "endpoints", []):
-            etype = str(getattr(endpoint, "type", "") or "")
-            if etype == "websocket" and getattr(endpoint, "enabled", False):
-                return int(getattr(endpoint, "port", 8765))
-        return None
-
-    def _build_heartbeat_payload(self) -> dict:
-        """Forwards to :func:`heartbeat_payload.build_heartbeat_payload`."""
-        return build_heartbeat_payload(self)
 
     async def _stop(self) -> None:
         """Gracefully stop all services."""

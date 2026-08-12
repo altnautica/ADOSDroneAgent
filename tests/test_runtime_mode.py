@@ -297,10 +297,3 @@ def test_is_service_native_unknown_is_false(roots: tuple[Path, Path]) -> None:
     assert not is_service_native("nope", bin_dir=bin_dir, etc_dir=etc_dir)
 
 
-def test_runtime_mode_enrichment_shape() -> None:
-    """The cloud-heartbeat sibling enricher returns the runtimeMode key."""
-    from ados.services.cloud.heartbeat import build_runtime_mode_enrichment
-
-    out = build_runtime_mode_enrichment(object())
-    assert set(out) == {"runtimeMode"}
-    assert out["runtimeMode"] in ("native", "hybrid", "packaged")

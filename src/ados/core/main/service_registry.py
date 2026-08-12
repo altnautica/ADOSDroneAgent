@@ -209,20 +209,9 @@ async def register_services(app: AgentApp) -> None:  # noqa: C901
             role=role,
         )
 
-    if app._single_process_cloud_enabled():
-        # Cloud pairing beacon (when unpaired, POST code to Convex)
-        app._start_service("pairing-beacon", app._cloud_beacon_loop())
-
-        # Cloud heartbeat (when paired, POST status to Convex)
-        app._start_service("pairing-heartbeat", app._cloud_heartbeat_loop())
-
-        # Cloud command polling (when paired, poll Convex for commands)
-        app._start_service("cloud-command-poll", app._cloud_command_poll_loop())
-    else:
-        log.info(
-            "single_process_cloud_disabled",
-            reason="cloud runs through managed service runtime",
-        )
+    # No cloud services are spawned here. The pairing beacon, the status
+    # heartbeat and the command poll are served by the native ados-cloud
+    # service, which is the only cloud transport.
 
 
 __all__ = ["register_services"]

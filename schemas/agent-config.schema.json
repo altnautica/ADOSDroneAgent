@@ -1223,11 +1223,6 @@
           "title": "Heartbeat Interval",
           "type": "integer"
         },
-        "single_process_cloud_enabled": {
-          "default": false,
-          "title": "Single Process Cloud Enabled",
-          "type": "boolean"
-        },
         "state_path": {
           "default": "/etc/ados/pairing.json",
           "title": "State Path",
@@ -2503,7 +2498,6 @@
         "code_ttl": 900,
         "convex_url": "",
         "heartbeat_interval": 60,
-        "single_process_cloud_enabled": false,
         "state_path": "/etc/ados/pairing.json"
       }
     },

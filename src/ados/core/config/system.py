@@ -158,7 +158,6 @@ class PairingConfig(BaseModel):
     convex_url: str = ""  # Convex HTTP endpoint for cloud pairing
     beacon_interval: int = 30  # seconds
     heartbeat_interval: int = 60  # seconds
-    single_process_cloud_enabled: bool = False
     code_ttl: int = 900  # 15 minutes
     # Cloud pair beacon publishes the unpaired agent's short-lived
     # pair code to ``convex_url`` so a GCS reached from any network
