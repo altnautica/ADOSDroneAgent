@@ -111,10 +111,9 @@ pub async fn get_video_latency(State(state): State<AppState>) -> Json<Value> {
 
 /// The `video.latency.*` metric → route-key map. Each store metric maps back to the
 /// JSON key the route returns. Mirrors the Python `_LATENCY_METRICS`.
-const LATENCY_METRICS: [(&str, &str); 4] = [
+const LATENCY_METRICS: [(&str, &str); 3] = [
     ("video.latency.glass_ms", "latency_ms"),
     ("video.latency.ewma_ms", "ewma_ms"),
-    ("video.latency.pipeline_ms", "pipeline_latency_ms"),
     ("video.latency.samples", "samples"),
 ];
 
@@ -134,7 +133,6 @@ async fn latest_video_latency(state: &AppState) -> Option<Value> {
     if glass.is_none() && samples.is_none() {
         return None;
     }
-    let pipeline = metric_value(metrics.as_ref(), "video.latency.pipeline_ms");
     let ewma = metric_value(metrics.as_ref(), "video.latency.ewma_ms");
     let source = latest_event_field(state, "video.latency_source", "source")
         .await
@@ -143,7 +141,6 @@ async fn latest_video_latency(state: &AppState) -> Option<Value> {
     Some(json!({
         "latency_ms": glass.map(Value::from).unwrap_or(Value::Null),
         "ewma_ms": ewma.map(Value::from).unwrap_or(Value::Null),
-        "pipeline_latency_ms": pipeline.map(Value::from).unwrap_or(Value::Null),
         "samples": samples.map(|s| json!(s as i64)).unwrap_or(Value::Null),
         "source": source,
     }))
@@ -192,7 +189,6 @@ fn project_latency_live(path: &Path) -> Value {
     json!({
         "latency_ms": map.get("latency_ms").cloned().unwrap_or(Value::Null),
         "ewma_ms": ewma,
-        "pipeline_latency_ms": map.get("pipeline_latency_ms").cloned().unwrap_or(Value::Null),
         "samples": map.get("samples").cloned().unwrap_or(Value::Null),
         "source": source,
     })
@@ -1032,7 +1028,7 @@ mod tests {
         std::fs::write(
             &path,
             r#"{"latency_ms": 82.5, "latency_ewma_ms": 80.0, "ewma_ms": 999,
-                "pipeline_latency_ms": 12.0, "samples": 30}"#,
+                "samples": 30}"#,
         )
         .unwrap();
         let out = project_latency_live(&path);
@@ -1041,7 +1037,6 @@ mod tests {
         let want = json!({
             "latency_ms": 82.5,
             "ewma_ms": 80.0,
-            "pipeline_latency_ms": 12.0,
             "samples": 30,
             "source": "sei",
         });

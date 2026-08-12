@@ -117,7 +117,6 @@ def _video_latency_metrics_route() -> RouteSpec:
     names = [
         "video.latency.glass_ms",
         "video.latency.ewma_ms",
-        "video.latency.pipeline_ms",
         "video.latency.samples",
     ]
     return RouteSpec(

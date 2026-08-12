@@ -358,10 +358,9 @@ REGISTRY: list[RouteCase] = [
         )
         + _TELEMETRY_VOLATILE,
     ),
-    # Video glass-to-glass latency. The latency / ewma / pipeline readings and the
-    # sample count move every read (the SEI probe keeps sampling), so they are
-    # masked; the {latency_ms, ewma_ms, pipeline_latency_ms, samples, source} shape
-    # is the contract.
+    # Video glass-to-glass latency. The latency / ewma readings and the sample
+    # count move every read (the SEI probe keeps sampling), so they are masked;
+    # the {latency_ms, ewma_ms, samples, source} shape is the contract.
     RouteCase(
         name="video-latency",
         method="GET",
@@ -369,7 +368,6 @@ REGISTRY: list[RouteCase] = [
         extra_volatile=(
             "latency_ms",
             "ewma_ms",
-            "pipeline_latency_ms",
             "samples",
         ),
     ),

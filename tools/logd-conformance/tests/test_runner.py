@@ -63,7 +63,6 @@ _FULL_METRICS = [
     {"metric": "video.air.cloud_branch_open", "value": 0.0},
     {"metric": "video.latency.glass_ms", "value": 42.5},
     {"metric": "video.latency.ewma_ms", "value": 40.1},
-    {"metric": "video.latency.pipeline_ms", "value": 0.0},
     {"metric": "video.latency.samples", "value": 7.0},
     {"metric": "cpu.utilization_pct", "value": 12.0},
     {"metric": "mem.available_pct", "value": 75.0},

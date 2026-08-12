@@ -240,7 +240,6 @@ class HeadlessSeiTap:
                 if self._latency_ewma_ms is not None
                 else None
             ),
-            "pipeline_latency_ms": None,
             "samples": samples_since_last,
             "source": "sei",
         }

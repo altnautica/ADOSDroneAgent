@@ -47,7 +47,6 @@ interface VideoConfigResponse {
 interface VideoLatencyResponse {
   latency_ms?: number | null;
   ewma_ms?: number | null;
-  pipeline_latency_ms?: number | null;
   samples?: number;
   source?: string;
 }

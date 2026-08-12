@@ -58,7 +58,6 @@ _AIR_LIVE_ONLY_FLOATS = ("started_at", "last_state_change_at", "last_buffer_at")
 _LATENCY_METRICS = {
     "video.latency.glass_ms": "latency_ms",
     "video.latency.ewma_ms": "ewma_ms",
-    "video.latency.pipeline_ms": "pipeline_latency_ms",
     "video.latency.samples": "samples",
 }
 
@@ -154,13 +153,11 @@ async def latest_video_latency() -> dict[str, Any] | None:
     samples = _metric_value(metrics, "video.latency.samples")
     if glass is None and samples is None:
         return None
-    pipeline = _metric_value(metrics, "video.latency.pipeline_ms")
     ewma = _metric_value(metrics, "video.latency.ewma_ms")
     src_event = await _latest_event("video.latency_source")
     return {
         "latency_ms": glass,
         "ewma_ms": ewma,
-        "pipeline_latency_ms": pipeline,
         "samples": int(samples) if samples is not None else None,
         "source": src_event.get("source", "sei") if src_event else "sei",
     }

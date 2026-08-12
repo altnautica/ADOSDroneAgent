@@ -195,10 +195,6 @@ const SPECS: &[SidecarSpec] = &[
                 key: "video.latency.ewma_ms",
             },
             ScalarMap {
-                path: "pipeline_latency_ms",
-                key: "video.latency.pipeline_ms",
-            },
-            ScalarMap {
                 path: "samples",
                 key: "video.latency.samples",
             },
@@ -834,7 +830,7 @@ mod tests {
         write_with_age(
             root,
             "lcd-latency.json",
-            r#"{"latency_ms": 42.5, "latency_ewma_ms": 40.1, "pipeline_latency_ms": null, "samples": 7, "source": "sei"}"#,
+            r#"{"latency_ms": 42.5, "latency_ewma_ms": null, "samples": 7, "source": "sei"}"#,
             Duration::ZERO,
         );
         let mut state = TailerState::default();
@@ -845,15 +841,13 @@ mod tests {
             Some(42.5)
         );
         assert_eq!(
-            metric(&frames, "video.latency.ewma_ms").map(|m| m.value),
-            Some(40.1)
-        );
-        assert_eq!(
             metric(&frames, "video.latency.samples").map(|m| m.value),
             Some(7.0)
         );
-        // pipeline_latency_ms is null -> no metric (a null is not a number).
-        assert!(metric(&frames, "video.latency.pipeline_ms").is_none());
+        // A null reads as absent, not as zero: the EWMA is null here, so no
+        // metric is recorded for it at all. This is the generic rule for every
+        // scalar in every spec, and this is the only place it is asserted.
+        assert!(metric(&frames, "video.latency.ewma_ms").is_none());
         // The source rides the latency-source event.
         let evts = events(&frames, "video.latency_source");
         assert_eq!(evts.len(), 1);

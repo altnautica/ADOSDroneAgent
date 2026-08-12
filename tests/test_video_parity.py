@@ -18,8 +18,6 @@ from ados.api.sources import video as video_source
 
 
 def _latency_metric_rows() -> list[dict[str, Any]]:
-    # No video.latency.pipeline_ms row -> derived pipeline_latency_ms is None,
-    # matching the live blob's null.
     return [
         {"metric": "video.latency.glass_ms", "value": 42.5},
         {"metric": "video.latency.ewma_ms", "value": 40.1},
