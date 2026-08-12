@@ -149,12 +149,22 @@ def test_gs_needs_groundlink_and_hid(roots: tuple[Path, Path]) -> None:
     )
 
 
-def test_display_opt_out_native_by_default_fallback_marker_forces_hybrid(
+def test_display_native_only_ignores_a_stray_fallback_marker(
     roots: tuple[Path, Path],
 ) -> None:
-    """Display is cut over: native once its binaries are present, with no
-    marker. The ``display-python-fallback`` marker pins the packaged path,
-    which drops the aggregate to hybrid."""
+    """Display is native-only: native once its binaries are present, and a
+    stray ``display-python-fallback`` marker is ignored.
+
+    There is no packaged render path to fall back to — the units exec their
+    native binary unconditionally and gate on ``display.enabled`` /
+    ``display.probation`` / the i2c device, never on this marker. While the
+    entry still carried the flag, a marker left on a rig flipped the whole
+    node's badge to ``hybrid`` while changing nothing about what was running:
+    a surface reporting a state that was not true.
+
+    The marker is now pruned on upgrade, so this covers the window before that
+    prune runs, and it is what goes red if the flag is ever reintroduced.
+    """
     bin_dir, etc_dir = roots
     for b in _CORE:
         _make_bin(bin_dir, b)
@@ -162,12 +172,10 @@ def test_display_opt_out_native_by_default_fallback_marker_forces_hybrid(
               "ados-display", "ados-display-probe"):
         _make_bin(bin_dir, b)
 
-    # Default: no fallback marker → display native → drone native.
     assert compute_runtime_mode("drone", bin_dir=bin_dir, etc_dir=etc_dir) == "native"
 
-    # Pin the packaged fallback → display non-native → hybrid.
     _touch_flag(etc_dir, "display-python-fallback")
-    assert compute_runtime_mode("drone", bin_dir=bin_dir, etc_dir=etc_dir) == "hybrid"
+    assert compute_runtime_mode("drone", bin_dir=bin_dir, etc_dir=etc_dir) == "native"
 
 
 def test_plugin_host_native_only_ignores_stray_markers(

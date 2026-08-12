@@ -130,6 +130,7 @@ const RETIRED_CUTOVER_FLAGS: &[&str] = &[
     "groundlink-python-fallback",
     "net-rust-enabled",
     "net-python-fallback",
+    "display-python-fallback",
 ];
 
 /// The other-profile teardown list, keyed by the profile being installed
@@ -1912,9 +1913,17 @@ mod tests {
         // still carrying it has no plugin host at all (the old ExecStart resolved
         // to /bin/true), so the prune is what recovers it.
         assert!(RETIRED_CUTOVER_FLAGS.contains(&"plugin-host-python-fallback"));
+        // Display went native-only when the packaged render tree was deleted. All
+        // three display units exec their native binary unconditionally and gate on
+        // display.enabled / display.probation / the i2c device -- none of them
+        // reads this marker, so it selects nothing and is pruned. This assertion
+        // was inverted until then, which was correct while a packaged UI existed.
+        assert!(RETIRED_CUTOVER_FLAGS.contains(&"display-python-fallback"));
         // A marker a live service still gates on must never be in the retired set,
-        // or the installer would erase the operator's pinned choice.
-        assert!(!RETIRED_CUTOVER_FLAGS.contains(&"display-python-fallback"));
+        // or the installer would erase the operator's pinned choice. `logd` is the
+        // live case: the installer itself reads that marker as a force-off at
+        // start.rs and in the enable path below.
+        assert!(!RETIRED_CUTOVER_FLAGS.contains(&"logd-python-fallback"));
     }
 
     #[test]

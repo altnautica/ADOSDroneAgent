@@ -34,39 +34,6 @@ def test_service_map_is_well_formed():
         assert svc.swap_units or svc.extra_units, name
 
 
-def test_display_is_opt_out_native_by_default(tmp_path, monkeypatch):
-    """The display service is already cut over: with the binaries present
-    and no fallback marker it reports the native (rust) branch, and
-    `disable` writes the fallback marker rather than removing a flag."""
-    monkeypatch.setattr(rust_mod, "ADOS_ETC_DIR", tmp_path)
-    monkeypatch.setattr(rust_mod.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(
-        rust_mod, "_binaries_present", lambda svc: svc is _SERVICES["display"]
-    )
-    monkeypatch.setattr(rust_mod, "_unit_active", lambda unit: True)
-    calls: list[tuple[str, ...]] = []
-    monkeypatch.setattr(rust_mod, "_systemctl", lambda *a, **k: calls.append(a) or 0)
-
-    svc = _SERVICES["display"]
-    marker = tmp_path / svc.flag
-
-    # Default: binaries present, marker absent → native.
-    assert rust_mod._mode(svc) == "rust"
-
-    # disable → writes the fallback marker and restarts the swap units.
-    result = CliRunner().invoke(rust_group, ["disable", "display"])
-    assert result.exit_code == 0, result.output
-    assert marker.exists()
-    assert rust_mod._mode(svc) == "python"
-    assert ("restart", "ados-oled") in calls
-
-    # enable → removes the fallback marker and returns to native.
-    result = CliRunner().invoke(rust_group, ["enable", "display"])
-    assert result.exit_code == 0, result.output
-    assert not marker.exists()
-    assert rust_mod._mode(svc) == "rust"
-
-
 def test_native_only_services_are_absent_from_the_toggle_registry():
     """A service with no packaged implementation left must not be listed here.
 
@@ -74,9 +41,11 @@ def test_native_only_services_are_absent_from_the_toggle_registry():
     fallback an operator can switch to. Once the packaged side is deleted there
     is nothing to switch to, and offering the toggle would write a marker that
     selects nothing -- on the plugin host that previously meant an ExecStart of
-    /bin/true, i.e. no host running at all.
+    /bin/true, i.e. no host running at all. On display it meant something quieter
+    and longer-lived: the marker changed nothing about what ran, but flipped the
+    whole node's runtime badge to "hybrid" for as long as it sat there.
     """
-    for name in ("net", "hid", "plugin-host"):
+    for name in ("net", "hid", "plugin-host", "display"):
         assert name not in _SERVICES, (
             f"{name} has no packaged fallback left; listing it offers a toggle "
             "that would pin a box to an implementation that no longer exists"

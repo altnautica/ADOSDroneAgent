@@ -153,7 +153,14 @@ _FLAG_GATED: dict[str, _FlagGated] = {
         profiles=("drone",),
     ),
     "display": _FlagGated(
-        flag="display-python-fallback",
+        # Native-only: the packaged render tree was deleted when the LCD/OLED UI
+        # was ported, so there is no Python fallback to toggle. All three display
+        # units exec their native binary unconditionally, and their
+        # ConditionPathExists gates name display.enabled / display.probation /
+        # the i2c device -- never a fallback marker. Left flag-carrying, the
+        # marker selected nothing while still flipping this node's runtime badge
+        # to "hybrid".
+        flag=None,
         binaries=("ados-display", "ados-display-probe"),
         profiles=("drone", "ground-station"),
         opt_out=True,

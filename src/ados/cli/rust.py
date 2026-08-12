@@ -94,16 +94,12 @@ _SERVICES: dict[str, _Service] = {
     # and button service were all deleted, so ados-pic + ados-input always run
     # on a ground station and own the front-panel GPIO in-process. Not listed
     # here because there is no packaged fallback to switch to.
-    "display": _Service(
-        flag="display-python-fallback",
-        binaries=(
-            "/opt/ados/bin/ados-display",
-            "/opt/ados/bin/ados-display-probe",
-        ),
-        swap_units=("ados-oled", "ados-display-probe"),
-        note="native display (default); the fallback marker pins the packaged UI",
-        opt_out=True,
-    ),
+    # display is native-only (no toggle): the packaged render tree was deleted
+    # when the LCD/OLED UI was ported, so ados-display + ados-display-probe
+    # always own the panel. Listing it here offered a switch to a path that no
+    # longer exists -- the command wrote the marker, restarted the units,
+    # reported success, changed nothing, and then made the runtime badge read
+    # "hybrid". Not listed because there is no packaged fallback to switch to.
     "logd": _Service(
         flag="logd-python-fallback",
         binaries=("/opt/ados/bin/ados-logd",),
