@@ -1,7 +1,7 @@
 """Tests for the air-side H.264 SEI injector.
 
 Encoder-side counterpart of the ground-side parser at
-``ados.services.video.local_tap.parse_sei_latency_ns``. The round-trip
+``ados.services.video.sei_parser.parse_sei_latency_ns``. The round-trip
 test is the load-bearing assertion: feed
 ``build_sei_nal(N)`` output through the parser and verify ``N`` comes
 out the other side. Confirms encoder/decoder byte-level agreement.

@@ -55,7 +55,7 @@ def _iter_nal_units(stream: bytes) -> Iterator[tuple[int, bytes]]:
         while i + 2 < n:
             if stream[i] == 0 and stream[i + 1] == 0:
                 if stream[i + 2] == 1:
-                    positions.append(i + 3)
+                    positions.append((i + 3, i))
                     i += 3
                     continue
                 if (
@@ -63,16 +63,24 @@ def _iter_nal_units(stream: bytes) -> Iterator[tuple[int, bytes]]:
                     and stream[i + 2] == 0
                     and stream[i + 3] == 1
                 ):
-                    positions.append(i + 4)
+                    positions.append((i + 4, i))
                     i += 4
                     continue
             i += 1
-        for idx, start in enumerate(positions):
-            end = (
-                positions[idx + 1] - 4
-                if idx + 1 < len(positions)
-                else n
-            )
+        for idx, (start, _sc) in enumerate(positions):
+            # The previous NAL ends where the NEXT START CODE BEGINS, which is
+            # why both offsets are tracked. Deriving the end from the payload
+            # start alone (`next_start - 4`) assumes the 4-byte start code and
+            # truncates by one byte whenever the next one is the 3-byte form,
+            # which h264parse emits depending on upstream caps.
+            end = positions[idx + 1][1] if idx + 1 < len(positions) else n
+            # Trim Annex-B trailing_zero_8bits padding. Safe only because `end`
+            # is exact: an rbsp always ends on a non-zero byte (it carries
+            # rbsp_stop_one_bit, 0x80 for our markers), so a zero here is
+            # padding. With `end` one byte low this loop ate a real trailing
+            # 0x00 instead, failing the SEI's own length check and discarding
+            # the marker -- losing the latency sample for any ns value whose low
+            # byte is 0x00, about one timestamp in 250, silently.
             while end > start and stream[end - 1] == 0:
                 end -= 1
             if end <= start:
