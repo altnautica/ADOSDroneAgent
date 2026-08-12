@@ -4,6 +4,60 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.358] - 2026-08-12
+
+### Removed
+
+- **Three superseded Python subsystems, about 8,600 lines.** Each had been
+  replaced by a native service some time ago and stayed on disk, shipping in
+  every wheel and read by anyone tracing the code.
+
+  The packaged plugin host: nothing constructed it, and the native host had
+  owned the per-plugin sockets since the default flipped. Its fallback marker
+  goes with it, because a marker selecting a deleted implementation is worse
+  than none — the unit resolved its `ExecStart` to `/bin/true` when the marker
+  was present, so a box pinned to the packaged path had no plugin host at all.
+  The marker is now pruned on upgrade, which is what recovers such a box.
+
+  The single-process cloud runtime: the pairing beacon, status heartbeat and
+  command poll sat behind a config flag defaulting false that nothing set. The
+  native cloud service has served all three throughout, so this was a second
+  implementation that only ran if someone opted in by hand.
+
+  The packaged button service: the native arbiter has read the front-panel GPIO
+  in-process since the PIC cutover, and the installer stopped and disabled the
+  packaged unit on every run.
+
+### Fixed
+
+- **A button-mapping change from the GCS took effect only after a restart.**
+  Both reload paths signalled `ados-buttons.service`, which the installer always
+  tore down, while the daemon that actually owns the mapping and rebuilds it on
+  SIGHUP was never signalled at all. The write returned success and the running
+  mapping stayed as it was.
+
+  Found while deleting that unit, by tracing who signalled it. The reload now
+  goes to the arbiter, and a refused signal is logged rather than swallowed, so
+  a save that lands on disk without reaching the running process leaves
+  something to explain why.
+
+- **A malformed `config.yaml` read as an unconfigured feature.** Four route
+  modules each carried their own reader that collapsed a parse failure into the
+  same empty object they return for an absent file. They now share the loader
+  that keeps the missing case quiet and logs the parser error — naming the
+  offending field — when the file is present but unreadable.
+
+- **The headless profile answered 404 for features it simply does not carry.**
+  The permanent-Python prefix table listed features by name rather than by mount
+  point, so three live ones never matched and a request for them read as "no
+  such path" instead of "this build does not carry that feature".
+
+- **A failed TX-power save reported success silently.** The atomic write
+  collapsed every I/O fault into a bool that the caller discarded, so a setting
+  that reverted on the next restart had nothing in the log. The radio still
+  accepts the value, so the response is unchanged; what changes is that the
+  durability failure is now attributable.
+
 ## [0.99.355] - 2026-08-03
 
 ### Fixed
