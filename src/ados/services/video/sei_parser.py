@@ -5,7 +5,7 @@ GStreamer, no third-party libs) so any agent service can import it.
 Mirror of the on-the-wire format produced by
 :mod:`ados.services.video.sei_injector`.
 
-Extracted from ``local_tap.py`` so headless services that need the
+Extracted from the LCD-side tap that used to own it, so headless services that need the
 parser (e.g. the drone-side :class:`HeadlessSeiTap`) don't have to
 pay the cost of loading PIL just to walk bytes.
 """

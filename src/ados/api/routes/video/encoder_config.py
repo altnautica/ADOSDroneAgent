@@ -51,7 +51,9 @@ def _read_state_file(path: str) -> dict[str, Any] | None:
 # The `adaptive` block's live fields, read out of wfb-stats.json. The radio
 # writes all of these on every tick. `available` is seeded from config
 # separately and is not in this list. Mirrored by ADAPTIVE_KEYS in the native
-# route, which the conformance harness compares against byte for byte.
+# route; tests/test_adaptive_keys_agree_across_transports.py compares the two
+# constants, because the api-conformance harness diffs live RESPONSES on a rig
+# and would not catch a key added to one side in a pull request.
 _ADAPTIVE_KEYS = (
     "adaptive_bitrate_enabled",
     "recommended_bitrate_kbps",

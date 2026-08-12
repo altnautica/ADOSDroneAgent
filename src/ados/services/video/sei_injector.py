@@ -9,7 +9,7 @@ wfb-tee bash pipeline:
         | python -m ados.services.video.sei_injector
         | ffmpeg-output (stdin -> RTP UDP 5600)
 
-The receiver (LocalVideoTap.parse_sei_latency_ns) reads the same UUID
+The receiver (`sei_parser.parse_sei_latency_ns`) reads the same UUID
 and computes ``time.time_ns() - air_ns`` to surface latency on the
 LCD Video tab. Both ends rely on chrony / systemd-timesyncd to keep
 wall clocks aligned within a few ms on the LAN.
@@ -26,9 +26,9 @@ import sys
 import time
 from typing import BinaryIO
 
-# Mirror of LocalVideoTap.ADOS_LATENCY_SEI_UUID. Kept as a literal here
-# so an air-side rig can import this module without pulling in PIL /
-# gstreamer (which local_tap depends on).
+# Mirror of the parser's ADOS_LATENCY_SEI_UUID. Kept as a literal here so an
+# air-side rig can import this module without pulling the parser's dependencies
+# in; the two constants are asserted equal in tests/test_sei_parser.py.
 ADOS_LATENCY_SEI_UUID = bytes.fromhex("ad05140e9c2c4f6e8a31f0e5b7d4c8a2")
 assert len(ADOS_LATENCY_SEI_UUID) == 16
 

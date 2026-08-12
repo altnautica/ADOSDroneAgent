@@ -4,7 +4,7 @@
 Two consumers want to read it:
 
 1. The mediamtx-gs ffmpeg ingest sidecar — for the browser WHEP stream.
-2. ``LocalVideoTap`` (the LCD video pipeline) — for the on-device LCD.
+2. the LCD video pipeline — for the on-device LCD.
 
 Only one process can bind a UDP port at a time, and SO_REUSEPORT
 load-balances rather than duplicating, so we run a tiny fan-out: read

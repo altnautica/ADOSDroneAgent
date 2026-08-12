@@ -927,9 +927,12 @@ fn bool_or_null(map: &Map<String, Value>, key: &str) -> Value {
 /// `wfb_status` is the `/api/wfb` body (or `None` when no view is available). The
 /// GCS keys off the presence of the block, not the values; an absent view yields
 /// the full "absent" skeleton (every metric `null`, paired/injection `false`).
-/// The field set is pinned by the heartbeat golden fixture
-/// (`ados-cloud/tests/heartbeat_golden.rs`), which asserts the same block
-/// snake_case and field-for-field.
+/// NOTHING pins this whole field set. The tests below cover the verdict fields
+/// that must stay null rather than fabricate a measurement, and the heartbeat
+/// golden fixture asserts a populated `RadioBlock` — but only a subset, so a
+/// field added or dropped here is not caught by either. Said plainly because an
+/// earlier version of this comment claimed the fixture pinned it field-for-field,
+/// which is the kind of citation that stops a reader checking.
 fn build_radio_block(wfb_status: Option<&Map<String, Value>>) -> Value {
     let Some(status) = wfb_status else {
         return radio_absent_block();
@@ -1021,7 +1024,8 @@ fn build_radio_block(wfb_status: Option<&Map<String, Value>>) -> Value {
 /// Every metric is `null` and `paired` is `false`; the adapter / PHY verdicts are
 /// `null` too — with no radio view there is nothing to have measured them, and a
 /// `false` would claim a healthy USB link / unmuted PHY that was never examined.
-/// Pinned by the golden fixture's `RadioBlock::absent()` case.
+/// The absent branch, covered by the verdict tests below rather than pinned
+/// wholesale — see the note on [`build_radio_block`].
 fn radio_absent_block() -> Value {
     json!({
         "state": "absent",

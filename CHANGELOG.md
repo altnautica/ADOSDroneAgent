@@ -61,9 +61,9 @@ the project follows [Semantic Versioning](https://semver.org/).
   owned the live path since the video service cut over; this module's only
   remaining reader was a hand-run script that replayed it into the byte-parity
   fixtures the Rust tests assert against. Those fixtures are committed and
-  exercised by 29 tests, so the reference had already been captured and the
-  module was a second implementation kept only to reproduce numbers that are
-  written down. The script goes with it, and the fixture file now says plainly
+  exercised by 18 of that module's 29 tests, so the reference had already been
+  captured and the module was a second implementation kept only to reproduce
+  numbers that are written down. The script goes with it, and the fixture file now says plainly
   that it is the reference and a new case is written by hand.
 
 - **The `use_gst_air_pipeline` toggle.** It selected between two air-side
@@ -71,7 +71,26 @@ the project follows [Semantic Versioning](https://semver.org/).
   an SoC detect and a file read on every config load in every Python service, and
   it was still offered to operators in the settings schema.
 
+- **`ados rust enable/disable display`.** The verb wrote a marker, restarted the
+  display units and reported success while changing nothing: there is no packaged
+  render path left to switch to, and all three units exec their native binary
+  unconditionally. What the marker did do was flip the node's whole runtime badge
+  to `hybrid` for as long as it sat on disk. The marker is now pruned on upgrade,
+  which is what clears one already sitting on a rig.
+
 ### Fixed
+
+- **The adaptive block of `GET /api/video/config` was always empty.** It merged
+  from a sidecar with no writer, so it served `{available}` alone on every node
+  while the live controller state — the chosen rung, the applied bitrate, the MCS
+  and FEC pair — sat unread in `wfb-stats.json` next to it. Downstream, the
+  on-device dashboard's adaptive row had been blank since the rename that
+  supposedly caused it, which it did not.
+
+  It reads the live sidecar now, behind the same freshness ceiling the `link`
+  block applies to that same file: a snapshot too old to describe the radio now
+  degrades to the stub rather than freezing a last-known rung beside a `link`
+  block whose counters have already gone null.
 
 - **Glass-to-glass latency samples were being dropped, more on some encoders than
   others.** The Annex-B parser computed each NAL's end by assuming the four-byte

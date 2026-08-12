@@ -150,7 +150,7 @@ pub struct EncoderParams {
 
 impl EncoderParams {
     /// Build params from the resolved encoder kind and the camera config
-    /// block (the same fields the Python pipeline copies into EncoderConfig).
+    /// block.
     pub fn from_camera_config(kind: EncoderKind, cfg: &CameraConfig) -> Self {
         Self {
             kind,
@@ -851,12 +851,12 @@ pub fn augment_encoder_with_raw_tap(
 }
 
 /// Remove the last occurrence of `flag` and its following value from `args`,
-/// scanning right-to-left. Mirrors the Python reverse-scan + double-pop.
+/// scanning right-to-left.
 fn strip_flag_with_value(args: &mut Vec<String>, flag: &str) {
     if args.len() < 2 {
         return;
     }
-    // Match the Python loop: i runs from len-1 down to 1; act when args[i]==flag
+    // i runs from len-1 down to 1; act when args[i]==flag
     // and a value follows (i+1 < len). Take the highest such i (right-most).
     for i in (1..args.len()).rev() {
         if args[i] == flag && i + 1 < args.len() {

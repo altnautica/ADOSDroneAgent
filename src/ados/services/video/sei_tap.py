@@ -7,7 +7,7 @@ for the ADOS latency SEI marker, and persists rolling EWMA stats to
 ``/run/ados/lcd-latency.json`` at 1 Hz.
 
 This decouples the `/api/video/latency` endpoint from the LCD-bound
-`LocalVideoTap` inside the OLED service. On a drone profile with no
+LCD-side tap that used to live inside the OLED service. On a drone profile with no
 local LCD attached (e.g. groundnode after the 2026-05-08 swap), the
 OLED tap never runs and the latency file never gets written, so the
 GCS popover AIR row stayed blank even with SEI on. This tap fills the
@@ -33,7 +33,7 @@ from ados.services.video.sei_parser import parse_sei_latency_ns
 
 log = get_logger("video.sei_tap")
 
-# EWMA smoothing factor — same as LocalVideoTap to keep the JSON
+# EWMA smoothing factor — unchanged from the LCD-side tap so the JSON
 # file's `ewma_ms` field semantically consistent across both writers.
 _EWMA_ALPHA = 0.25
 # Read chunk size for the ffmpeg stdout pipe. 64 KiB keeps the SEI
