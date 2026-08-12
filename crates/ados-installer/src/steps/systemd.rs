@@ -78,7 +78,6 @@ const GROUND_STATION_ENABLE_UNITS: &[&str] = &[
     "ados-usb-gadget.service",
     "ados-oled.service",
     "ados-oled-i2c.service",
-    "ados-buttons.service",
     "ados-hostapd.service",
     "ados-dnsmasq-gs.service",
     "ados-setup-captive.service",
@@ -100,7 +99,15 @@ const GROUND_STATION_ENABLE_UNITS: &[&str] = &[
 /// the source set" sweep: the runtime-written plugin slice (`ados-plugins.slice`)
 /// and the per-plugin subprocess units legitimately live outside `data/systemd`
 /// and must never be pruned.
-const RETIRED_UNITS: &[&str] = &["ados-scripting.service", "ados-cloud-relay.service"];
+const RETIRED_UNITS: &[&str] = &[
+    "ados-scripting.service",
+    "ados-cloud-relay.service",
+    // The native ados-pic reads the front-panel buttons in-process and the
+    // packaged button service was deleted, so this unit selects nothing. It
+    // is pruned rather than merely disabled: left on disk its ExecStart names
+    // a module that no longer exists.
+    "ados-buttons.service",
+];
 
 /// Cutover marker files retired by a default sense flip or a fallback deletion.
 /// The net uplink matrix, the mesh relay/receiver and the plugin host are all
@@ -143,7 +150,6 @@ fn other_profile_units(profile: &str) -> &'static [&'static str] {
             "ados-usb-gadget-setup.service",
             "ados-oled.service",
             "ados-oled-i2c.service",
-            "ados-buttons.service",
             "ados-hostapd.service",
             "ados-dnsmasq-gs.service",
             "ados-setup-captive.service",
@@ -802,8 +808,6 @@ fn reconcile_rust_cutover_units() {
         "ados-wifi-client.service",
         "ados-usb-gadget.service",
         "ados-modem.service",
-        // hid: the native ados-pic reads the GPIO buttons in-process.
-        "ados-buttons.service",
     ];
 
     for unit in always_subsumed {

@@ -2,11 +2,10 @@
 //!
 //! Reads the four ground-station front-panel buttons on GPIO 5, 6, 13, and 19
 //! (BCM) over the character-device GPIO interface and classifies each press as
-//! short / long / cancel on the RELEASE edge. Ports
-//! `src/ados/services/ui/button_service.py`: the pin list, the thresholds, the
-//! pin->label table, the default mapping, the SIGHUP-rebuilt action mapping
-//! merged over the defaults, and the skip-clean posture when no GPIO chip
-//! exists.
+//! short / long / cancel on the RELEASE edge. This is the only implementation:
+//! it carries the pin list, the thresholds, the pin->label table, the default
+//! mapping, the SIGHUP-rebuilt action mapping merged over the defaults, and the
+//! skip-clean posture when no GPIO chip exists.
 //!
 //! The classification ([`PressClassifier`]) is pure and host-portable: it takes
 //! synthetic `(pin, edge, ts_ms)` events, so the debounce guard, the short/long

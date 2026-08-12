@@ -90,9 +90,9 @@ _SERVICES: dict[str, _Service] = {
     # deleted, so the native binary always owns the per-plugin sockets and
     # there is no fallback to switch to. Intentionally absent from this
     # toggle registry.
-    # hid is native-only (no toggle): the packaged PIC arbiter + input manager
-    # were deleted, so ados-pic + ados-input always run on a ground station and
-    # absorb ados-buttons unconditionally (the installer masks it). Not listed
+    # hid is native-only (no toggle): the packaged PIC arbiter, input manager
+    # and button service were all deleted, so ados-pic + ados-input always run
+    # on a ground station and own the front-panel GPIO in-process. Not listed
     # here because there is no packaged fallback to switch to.
     "display": _Service(
         flag="display-python-fallback",

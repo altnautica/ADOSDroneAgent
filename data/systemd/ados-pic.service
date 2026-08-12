@@ -18,8 +18,8 @@ User=root
 Environment=ADOS_CONFIG=/etc/ados/config.yaml
 EnvironmentFile=-/etc/ados/env
 # Native-only: the packaged Python arbiter was deleted, so the daemon runs its
-# binary directly. It also reads the front-panel GPIO buttons in-process, so the
-# installer masks the packaged ados-buttons unit on a ground station.
+# binary directly. It also reads the front-panel GPIO buttons in-process; there
+# is no separate button unit any more.
 ExecStart=/opt/ados/bin/ados-pic
 Restart=on-failure
 RestartSec=5

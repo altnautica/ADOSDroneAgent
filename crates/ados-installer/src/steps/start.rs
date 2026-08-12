@@ -24,7 +24,6 @@ const GROUND_STATION_START_UNITS: &[&str] = &[
     "ados-mediamtx-gs.service",
     "ados-usb-gadget.service",
     "ados-oled.service",
-    "ados-buttons.service",
     "ados-hostapd.service",
     "ados-dnsmasq-gs.service",
     "ados-setup-captive.service",

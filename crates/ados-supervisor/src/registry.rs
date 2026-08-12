@@ -222,7 +222,6 @@ pub const SERVICE_REGISTRY: &[ServiceDef] = &[
     // Optional I2C status OLED, coexists with the HDMI cockpit (self-skips
     // cleanly when no panel answers on the bus).
     def("ados-oled-i2c", Hardware, Some("ground_station"), None),
-    def("ados-buttons", Hardware, Some("ground_station"), None),
     def("ados-hostapd", Hardware, Some("ground_station"), None),
     def("ados-dnsmasq-gs", Hardware, Some("ground_station"), None),
     def("ados-setup-captive", OnDemand, Some("ground_station"), None),
@@ -333,7 +332,7 @@ mod tests {
     #[test]
     fn registry_has_expected_shape() {
         let specs = build_specs();
-        assert_eq!(specs.len(), 36, "service count drifted from the catalog");
+        assert_eq!(specs.len(), 35, "service count drifted from the catalog");
         // Core tier members. ados-mavlink/api/cloud/health are the cross-profile
         // always-on core (the single cloud unit serves the gateway + heartbeat on
         // both profiles, spawning the ground-station bridge when the role resolves

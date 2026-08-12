@@ -56,7 +56,7 @@
 //!
 //! After persisting, the FastAPI handlers SIGHUP the live display service so it
 //! reloads its config without a restart (`signal_oled_reload` →
-//! `ados-oled.service`, `signal_buttons_reload` → `ados-buttons.service`). The
+//! `ados-oled.service`, `signal_buttons_reload` → `ados-pic.service`). The
 //! front does the same via `systemctl kill -s HUP <unit>`, best-effort: a failure
 //! (the unit inactive, systemd unavailable on a dev tree) is swallowed, matching
 //! the FastAPI helper that degrades silently. The reload is fire-and-forget and
@@ -614,9 +614,15 @@ fn signal_oled_reload() {
     signal_reload("ados-oled.service");
 }
 
-/// SIGHUP the button service (the Python `signal_buttons_reload`).
+/// SIGHUP the daemon that owns the button mapping so a write takes effect.
+///
+/// This is `ados-pic`, not a separate button unit. The native arbiter reads the
+/// front-panel GPIO in-process and rebuilds its mapping on SIGHUP; the packaged
+/// button service it replaced is gone. Signalling that old unit meant the write
+/// reported success while the mapping stayed as it was until the daemon next
+/// restarted.
 fn signal_buttons_reload() {
-    signal_reload("ados-buttons.service");
+    signal_reload("ados-pic.service");
 }
 
 // ---------------------------------------------------------------------------
@@ -909,6 +915,36 @@ mod tests {
             .await
             .unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[test]
+    fn ui_reloads_name_units_that_are_actually_installed() {
+        // A reload signalled at a unit the installer does not ship is a silent
+        // no-op: the write returns 200 and the running daemon keeps its old
+        // mapping until it next restarts. This previously pointed at
+        // `ados-buttons.service`, which the installer always tore down, while
+        // the daemon that owns the mapping (`ados-pic`) was never signalled.
+        //
+        // Reading the source keeps the assertion honest without a systemd stub:
+        // the check is which unit name the call sites carry.
+        let src = include_str!("gs_ui_write.rs");
+        for unit in ["ados-pic.service", "ados-oled.service"] {
+            assert!(
+                src.contains(&format!("signal_reload(\"{unit}\")")),
+                "expected a reload signalled at {unit}"
+            );
+            let shipped = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../data/systemd")
+                .join(unit);
+            assert!(
+                shipped.exists(),
+                "{unit} is signalled for a UI reload but is not a shipped unit"
+            );
+        }
+        assert!(
+            !src.contains("signal_reload(\"ados-buttons.service\")"),
+            "ados-buttons.service is no longer shipped; signalling it is a no-op"
+        );
     }
 
     // ── profile-mismatch + error envelopes ────────────────────────────────────

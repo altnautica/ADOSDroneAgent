@@ -69,7 +69,6 @@ use serde_json::{json, Value};
 const ALLOWED_UNITS: &[&str] = &[
     "ados-api",
     "ados-atlas",
-    "ados-buttons",
     "ados-cloud",
     "ados-discovery",
     "ados-ethernet",

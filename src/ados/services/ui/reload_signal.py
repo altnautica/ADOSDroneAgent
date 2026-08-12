@@ -1,7 +1,8 @@
 """SIGHUP signaling helper for ground-station UI services.
 
-The ground-station OLED and button services run as their own systemd units
-(`ados-oled.service`, `ados-buttons.service`). When the GCS or captive
+The ground-station OLED runs as its own systemd unit (`ados-oled.service`);
+the button mapping is owned by the native arbiter (`ados-pic.service`), which
+reads the front-panel GPIO in-process. When the GCS or captive
 portal pushes a UI config update via REST (`PUT /ui/oled`, `PUT /ui/buttons`,
 `PUT /ui/screens`), the REST handler must tell each service to reload its
 mapping from `ADOSConfig.ground_station.ui` without restarting the unit.
@@ -82,5 +83,11 @@ def signal_oled_reload() -> bool:
 
 
 def signal_buttons_reload() -> bool:
-    """SIGHUP the button service so it reloads the action mapping."""
-    return signal_sighup("ados-buttons.service")
+    """SIGHUP the daemon that owns the button mapping so a write takes effect.
+
+    That is ``ados-pic``: the native arbiter reads the front-panel GPIO
+    in-process and rebuilds its mapping on SIGHUP. The packaged button service
+    it replaced is gone, so signalling that unit left the mapping unchanged
+    until the daemon next restarted.
+    """
+    return signal_sighup("ados-pic.service")
