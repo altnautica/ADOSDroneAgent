@@ -137,7 +137,7 @@ fn current_python_executable() -> String {
         .unwrap_or_else(|| "/opt/ados/venv/bin/python3".to_string())
 }
 
-/// Encoder invocation parameters. Mirrors the Python `EncoderConfig`.
+/// Encoder invocation parameters.
 #[derive(Debug, Clone)]
 pub struct EncoderParams {
     pub kind: EncoderKind,
@@ -206,8 +206,6 @@ impl std::error::Error for EncoderError {}
 /// Returns the program plus its arguments. For the bash-pipeline cases (rpicam
 /// → RTSP, and the SEI-wrapped variants) the returned vector is
 /// `["bash", "-c", "<pipeline>"]`, exactly as the predecessor composes it.
-///
-/// Mirrors `build_encoder_command(config, source, output, camera)`.
 pub fn build_encoder_command(
     params: &EncoderParams,
     source: &str,
@@ -333,7 +331,7 @@ fn join_shell(args: &[String]) -> String {
 
 /// Minimal POSIX single-quote escape for arguments inside `bash -c`. Quotes
 /// when the argument is empty or contains any shell-significant character;
-/// otherwise returns it verbatim. Mirrors `_shell_quote`.
+/// otherwise returns it verbatim.
 fn shell_quote(arg: &str) -> String {
     const SPECIAL: &[char] = &[
         ' ', '\'', '"', '$', '&', ';', '|', '<', '>', '(', ')', '*', '?', '{', '}', '\\', '`',
@@ -349,8 +347,7 @@ fn shell_quote(arg: &str) -> String {
 /// Choose the V4L2 input format from camera capabilities.
 ///
 /// Priority: mjpeg (compressed, high fps) > yuyv (raw). Returns `None` when
-/// capabilities are unknown (let ffmpeg auto-detect). Mirrors
-/// `_select_input_format`.
+/// capabilities are unknown (let ffmpeg auto-detect).
 fn select_input_format(camera: Option<&CameraInfo>) -> Option<&'static str> {
     let camera = camera?;
     let caps: Vec<String> = camera
@@ -667,8 +664,6 @@ fn gst_quote(s: &str) -> String {
 ///   publish-stdin, rebuilding the publisher for the original URI;
 /// - GStreamer / unknown: returned unchanged (the wfb-tee injector stays the
 ///   sole SEI source).
-///
-/// Mirrors `wrap_with_sei_inject`.
 pub fn wrap_with_sei_inject(cmd: &[String], output_uri: &str, env: &EncoderEnv) -> Vec<String> {
     let inject_cmd = format!(
         "{} -m ados.services.video.sei_injector",
@@ -876,8 +871,7 @@ fn strip_flag_with_value(args: &mut Vec<String>, flag: &str) {
 ///
 /// CSI → rpicam-vid (fallback ffmpeg). USB/IP → ffmpeg (the Rockchip
 /// `mpph264enc` VPU path is disabled because it emits corrupt frames; fallback
-/// gstreamer). Mirrors `detect_encoder_for_camera`. The binary-presence flags
-/// are taken as inputs to keep this pure.
+/// gstreamer). The binary-presence flags are taken as inputs to keep this pure.
 pub fn detect_encoder_for_camera(
     camera_type: CameraType,
     has_rpicam: bool,

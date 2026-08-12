@@ -143,8 +143,7 @@ fn read_latency_live() -> Value {
 /// Reads `lcd-latency.json` when present, projecting the latency fields, and
 /// returns `{latency_ms: None, source: "unavailable"}` when the file is absent,
 /// `{..., source: "read_failed"}` on a read/parse error, and `{..., source:
-/// "unexpected_shape"}` for a well-formed-but-non-object body. Mirrors the Python
-/// `_read_latency_live`.
+/// "unexpected_shape"}` for a well-formed-but-non-object body.
 fn project_latency_live(path: &Path) -> Value {
     if !path.is_file() {
         return json!({"latency_ms": null, "source": "unavailable"});
