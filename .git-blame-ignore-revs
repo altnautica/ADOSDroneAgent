@@ -1,0 +1,18 @@
+# Commits that moved or reformatted code without changing behaviour.
+#
+# `git blame` follows the last commit to touch a line, so a formatting sweep or
+# a file split re-points every line in it at that sweep. The tests in this repo
+# encode specific past failures -- a bind precheck, a watchdog liveness window, a
+# regulatory reconciler -- and knowing which change introduced a line is how the
+# reasoning behind it is recovered. Losing that to a whitespace commit is a real
+# cost, so those commits are listed here instead.
+#
+# Enable it once per clone:
+#
+#     git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# Only add a commit that provably changed no behaviour. If in doubt, leave it
+# out: a wrongly-listed commit hides the change that actually caused a bug.
+
+# crates: apply cargo fmt (formatter output only, 8 files across 7 crates)
+e8e2d7bb3778112cb6c887509ee617f377892409
