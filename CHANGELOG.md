@@ -8,7 +8,7 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ### Removed
 
-- **Three superseded Python subsystems, about 8,600 lines.** Each had been
+- **Four superseded Python subsystems, about 7,600 lines.** Each had been
   replaced by a native service some time ago and stayed on disk, shipping in
   every wheel and read by anyone tracing the code.
 
@@ -31,12 +31,51 @@ the project follows [Semantic Versioning](https://semver.org/).
   The packaged video pipeline: the in-process GStreamer pipeline, the local tap
   and the recorder. The native video service has run the encode path alone since
   its unit gained a binary-presence condition, and the only thing still naming
-  the packaged pipeline was a branch that no systemd unit could reach. The parts
-  the native service genuinely uses stay — it shells out to the SEI injector and
-  tap by module name, and the config layer reads the auto-fallback resolver on
-  every load.
+  the packaged pipeline was a branch that no systemd unit could reach. What the
+  native service genuinely uses stays: it shells out to the SEI injector and the
+  headless tap by module name.
+
+- **The air-side pipeline read chain, which had no writer.** Nothing wrote
+  `/run/ados/air-pipeline.json` once the in-process GStreamer pipeline went, but
+  the entire read side outlived it: a route on both transports, a ten-metric
+  series and a state event in the logging store, a store-to-route reconstructor,
+  two conformance specs, and a merge block in `GET /api/video` that no surviving
+  pipeline could trigger. The route answered 204 forever and the series had
+  nothing to sample.
+
+  Removed with it: a router module that declared no routes at all, so its mount
+  was a no-op; two helpers left with no non-test caller; and a subprocess slot in
+  the native video service that is initialised to empty and never filled, whose
+  teardown could only ever do nothing.
+
+- **The pipeline-buffer latency reading, which could only ever be empty.** It came
+  from a GStreamer latency query on a pipeline object inside the Python tap. The
+  drone-side tap now reads the local RTSP feed through ffmpeg, and a subprocess
+  cannot be asked for its internal pipeline latency, so the surviving writer had
+  been hardcoding the field to null while the route, the metric series and the
+  GCS popover row all still carried it. The number is not reproducible under the
+  current architecture, so it is gone rather than replaced by a different
+  measurement wearing the old label.
+
+- **The `use_gst_air_pipeline` toggle.** It selected between two air-side
+  pipelines, one of which no longer exists. Nothing read it, yet its default ran
+  an SoC detect and a file read on every config load in every Python service, and
+  it was still offered to operators in the settings schema.
 
 ### Fixed
+
+- **Glass-to-glass latency samples were being dropped, more on some encoders than
+  others.** The Annex-B parser computed each NAL's end by assuming the four-byte
+  start code. Behind the three-byte form — which `h264parse` emits depending on
+  upstream caps — that lands one byte early, and the trailing-zero trim then
+  removes a real payload byte. The SEI arrives short, fails its own length check,
+  and the marker vanishes.
+
+  A fix for exactly this had been made once and was lost when two same-named
+  parsers were consolidated onto the copy that never received it. Measured across
+  60,000 timestamps: 236 samples lost against 1. The loss is value-dependent, so
+  it reads as intermittent, and on an encoder that always emits the three-byte
+  form it is every frame.
 
 - **A button-mapping change from the GCS took effect only after a restart.**
   Both reload paths signalled `ados-buttons.service`, which the installer always
