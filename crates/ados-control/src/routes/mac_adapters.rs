@@ -4,7 +4,8 @@
 //! The agent tracks each adapter's stable-MAC verdict (stable / pinned / a learner
 //! candidate / deferred) in an on-disk state file the installer step + the
 //! supervisor reconciler write. This route exposes that state to the GCS Network
-//! panel, the same shape the cloud heartbeat's `macStability` block carries.
+//! panel over the LAN, and is the only producer of it: the cloud heartbeat
+//! carries no `macStability` block, so a cloud-only node shows nothing here.
 //!
 //! - **`GET /api/v1/network/mac/adapters`** — read the per-adapter verdicts. Returns
 //!   `{"version": N, "adapters": [...]}`; an empty list on a board with no tracked

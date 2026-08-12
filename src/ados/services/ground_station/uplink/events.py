@@ -2,7 +2,7 @@
 
 `UplinkEvent` is the canonical record for routing, health, and data-cap
 state changes. `UplinkEventBus` mirrors `ButtonEventBus` from
-`ados.services.ui.events` and `PicEventBus` from `pic_arbiter`: bounded
+the sibling ground-station buses and `PicEventBus` from `pic_arbiter`: bounded
 per-subscriber queues, drop-on-full, structural fanout.
 """
 

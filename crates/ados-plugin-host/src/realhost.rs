@@ -1,11 +1,11 @@
 //! The real [`HostServices`] implementation.
 //!
-//! Ports `src/ados/plugins/ipc/host_services.py` (the five in-memory facades:
-//! component registrar, telemetry extender, driver registry, camera claim
-//! tracker, config store) plus the twelve real handler bodies in
-//! `src/ados/plugins/ipc/handlers.py`. Behaviour is reproduced exactly: the
-//! same argument validation, the same inline capability gates, the same error
-//! strings, and the same success-map shapes.
+//! Carries the five in-memory facades (component registrar, telemetry
+//! extender, driver registry, camera claim tracker, config store) and the
+//! twelve real handler bodies. The argument validation, the inline capability
+//! gates, the error strings and the success-map shapes are all part of the
+//! wire contract a plugin is written against, so none of them may drift
+//! without a matching SDK change.
 //!
 //! Raise-vs-return mapping (read carefully — it is load-bearing):
 //! * A Python `raise _RpcError(m)` becomes `Err(HostError::Rpc(m))`.

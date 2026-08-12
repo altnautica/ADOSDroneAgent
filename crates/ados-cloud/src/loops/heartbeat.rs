@@ -386,7 +386,7 @@ fn read_config_error_sidecars() -> Vec<ConfigErrorEntry> {
     read_config_error_sidecars_from(&config_status_dir())
 }
 
-/// Heartbeat cadence. Mirrors the Python loop's 5 s base sleep.
+/// Heartbeat cadence: a 5 s base sleep, as the receiver expects.
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 
 /// The deterministic, native inputs the loop always has without any probing:
@@ -453,7 +453,7 @@ pub fn build_payload(
 
     // Null-strip the top level: Convex `v.optional(T)` accepts absent-or-T, not
     // an explicit null. The nested `radio` object keeps its own nulls (matching
-    // the Python loop, which strips only top-level keys).
+    // the contract, which strips only top-level keys).
     obj.retain(|_, v| !v.is_null());
     serde_json::Value::Object(obj)
 }
@@ -538,7 +538,7 @@ fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
         perception_offload_target,
         // Unmeasured by the native loop: omitted (None) so the wire says
         // "unknown" rather than asserting a 0 / false / "stopped" reading the
-        // loop never took (operating rule 37). The Python enrichment producer
+        // loop never took (operating rule 37). The enrichment loop
         // folds the real values over these absences each tick.
         cpu_percent: None,
         memory_percent: None,

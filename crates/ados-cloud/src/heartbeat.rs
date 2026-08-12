@@ -9,7 +9,7 @@
 //! Three wire rules are load-bearing and are encoded in the types here:
 //!
 //! 1. **Casing.** Every root key is camelCase EXCEPT the `radio` sub-block,
-//!    whose keys are snake_case (the Python `build_radio_block` emits snake_case
+//!    whose keys are snake_case (the captured wire contract carries snake_case
 //!    keys verbatim). The root struct carries `#[serde(rename_all =
 //!    "camelCase")]`; [`RadioBlock`] uses its own field names (already
 //!    snake_case) with no rename.
@@ -23,7 +23,7 @@
 //! 3. **Required-on-wire.** `deviceId`, `version`, and `uptimeSeconds` are
 //!    always present, so they are plain (non-`Option`) fields.
 //!
-//! The `radio` block is always emitted by the Python loop (an `absent` block
+//! The `radio` block is always emitted (an `absent` block
 //! when no radio status is available), so it is a plain field, not an option.
 //! Inside the block every value is itself optional and null-strips — but Convex
 //! validates the nested object's own optionals, so the block is sent whole (the
@@ -151,7 +151,7 @@ pub struct RadioBlock {
     pub phy_muted: Option<bool>,
     /// Radio-data-plane churn + transmit-rate observability, forwarded so a
     /// cloud-reached node surfaces a thrashing or zombie transmitter. These three
-    /// are SIDECAR-ONLY: the Python `build_radio_block` OMITS them from the absent
+    /// are SIDECAR-ONLY: the wire contract OMITS them from the absent
     /// block (they only mean anything with a live radio view), so they carry
     /// `skip_serializing_if` to mirror that exactly — omitted (not `null`) on
     /// `absent()`, present (value or null) once a live view populates them. A `None`
@@ -299,7 +299,7 @@ impl CrsfBlock {
 /// Field set + order mirrors the Python cloud loop's `payload` dict. Order does
 /// not affect the receiver (it validates by key), but it is kept aligned with the
 /// Python source for readability. Required-on-wire fields are plain; everything
-/// the Python loop may strip is `Option<T>` + `skip_serializing_if`.
+/// the strip step may remove is `Option<T>` + `skip_serializing_if`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HeartbeatPayload {
@@ -307,7 +307,7 @@ pub struct HeartbeatPayload {
     pub device_id: String,
     pub version: String,
     // profile/role are optional: a drone-profile heartbeat carries role=None,
-    // which the Python loop strips. profile is always set in practice but kept
+    // which the strip step removes. profile is always set in practice but kept
     // optional to honor the strip rule for any future None.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
@@ -333,7 +333,7 @@ pub struct HeartbeatPayload {
     pub perception_offload_target: Option<String>,
 
     // --- health ---
-    // CPU/memory/disk are measured by the Python enrichment producer, not the
+    // CPU/memory/disk are measured by the enrichment loop, not the
     // native loop. Optional + skip so a heartbeat with no fresh enrichment OMITS
     // them (honest "unknown") instead of asserting 0.0 as a live reading
     // (operating rule 37). The producer folds the real values over the base.
@@ -416,7 +416,7 @@ pub struct HeartbeatPayload {
     pub remote_access: RemoteAccess,
 
     // --- optional auxiliary blocks ---
-    // This one root key is snake_case on the wire (the Python loop sets the
+    // This one root key is snake_case on the wire (the contract sets the
     // literal key `last_plugin_update_check_at`), unlike every other camelCase
     // root key — so it carries an explicit rename that overrides the container
     // `rename_all = "camelCase"`.
@@ -618,7 +618,7 @@ pub struct CanBus {
 impl HeartbeatPayload {
     /// Serialize to a `serde_json::Value`. The relay POSTs the JSON body; the
     /// `skip_serializing_if` rules have already stripped the `None` keys, so the
-    /// value carries exactly the keys the Python loop would after its strip step.
+    /// value carries exactly the keys the contract requires after its strip step.
     pub fn to_value(&self) -> serde_json::Value {
         serde_json::to_value(self).expect("heartbeat payload serializes")
     }

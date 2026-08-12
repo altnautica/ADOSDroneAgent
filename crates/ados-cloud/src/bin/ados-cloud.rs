@@ -270,7 +270,7 @@ async fn main() -> Result<()> {
 
 /// The HAL board sidecar the API process persists once per boot. Read here so the
 /// native base carries the real board identity (name/tier/soc/arch) instead of
-/// "unknown", even before the Python enrichment producer's first write.
+/// "unknown", even before the enrichment loop's first write.
 const BOARD_SIDECAR: &str = "/run/ados/board.json";
 
 /// The schema version this build reads for the board sidecar. Must match the

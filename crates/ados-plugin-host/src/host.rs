@@ -1,8 +1,7 @@
 //! Host-service facade the dispatcher routes through.
 //!
 //! The dispatcher does not talk to the agent's real services directly. It
-//! talks to this small facade. Mirrors the Python `HostServices` dataclass in
-//! `src/ados/plugins/ipc/host_services.py`: one orchestration object between
+//! talks to this small facade: one orchestration object between
 //! the IPC handler and the real modules (MAVLink router, peripheral registry,
 //! telemetry pump, driver registries, config store) so the host code is
 //! testable without booting the full agent.
@@ -29,8 +28,8 @@ pub type HostResult = Value;
 
 /// A soft host-method failure that becomes the response envelope `error` field.
 ///
-/// Mirrors the three exception types the Python dispatch loop converts to the
-/// wire `error` string (`src/ados/plugins/ipc_server.py`): `_RpcError` (the
+/// The three failure kinds the dispatch loop converts to the wire `error`
+/// string, which the SDK parses back: a plain RPC error (the
 /// message verbatim), `CapabilityDenied` (`capability_denied: <cap>`, the
 /// inline pose-inject / VIO-component / driver-kind / component-kind gates),
 /// and `AllowlistViolation` (`allowlist_violation: <basename>`). [`body`](Self::body)
@@ -292,7 +291,7 @@ pub trait HostServices: Send + Sync + 'static {
     /// A receiver for the MAVLink frame fanout, when this host has a wired
     /// MAVLink client. The server obtains one per `mavlink.subscribe` and pushes
     /// each frame to the plugin as a `mavlink.deliver` envelope. Mirrors the
-    /// pump-subscription seam in `src/ados/plugins/ipc/mavlink_pump.py`, where
+    /// pump-subscription seam, where
     /// the host's MAVLink router exposes a per-subscriber frame queue.
     ///
     /// The default returns `None`, which keeps [`NoopHost`] unaffected (no push

@@ -876,7 +876,7 @@
       "type": "object"
     },
     "GroundStationUiConfig": {
-      "description": "OLED + buttons + screens UI config for the ground-station profile.\n\nPulled out of the legacy `/etc/ados/ground-station-ui.json` side-file\ninto the Pydantic model so it round-trips through save cycles and is\nconsumed live by the display service and button_service. The legacy file is\nmigrated once at load time and preserved on disk for rollback.\n\nField shapes are intentionally loose (`dict`) because the OLED, button\nmapping, and screen order schemas are still evolving. The REST handlers\nand services know the keys they care about.",
+      "description": "OLED + buttons + screens UI config for the ground-station profile.\n\nPulled out of the legacy `/etc/ados/ground-station-ui.json` side-file\ninto the Pydantic model so it round-trips through save cycles and is\nconsumed live by the display service and the native input arbiter. The legacy file is\nmigrated once at load time and preserved on disk for rollback.\n\nField shapes are intentionally loose (`dict`) because the OLED, button\nmapping, and screen order schemas are still evolving. The REST handlers\nand services know the keys they care about.",
       "properties": {
         "buttons": {
           "additionalProperties": true,

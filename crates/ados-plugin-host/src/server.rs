@@ -1,6 +1,6 @@
 //! Per-plugin Unix-socket RPC server.
 //!
-//! Ports `src/ados/plugins/ipc_server.py`. One server instance binds one
+//! One server instance binds one
 //! socket per plugin at `<socket_dir>/<plugin_id>.sock`, accepts the plugin
 //! runner's connection, runs the `hello` handshake, then loops on request
 //! envelopes: re-check token expiry, gate the method on its required
@@ -27,7 +27,8 @@ use crate::handlers::{self, Event, EventBus, PublishOutcome};
 use crate::host::HostServices;
 use crate::invoke::{InvokeRegistry, InvokeRequest};
 
-/// Default per-plugin socket directory. Mirrors `SOCKET_DIR` in Python.
+/// Default per-plugin socket directory. Part of the plugin wire contract: the
+/// runtime resolves the same path, so changing it breaks every installed plugin.
 pub const DEFAULT_SOCKET_DIR: &str = "/run/ados/plugins";
 
 /// Errors raised while running one plugin's socket server.
@@ -887,7 +888,7 @@ impl<H: HostServices> Connection<H> {
     }
 
     /// Push a subscribed MAVLink frame to the plugin as a `mavlink.deliver`
-    /// envelope. Mirrors the envelope shape in `mavlink_pump._pump_loop`:
+    /// envelope. The shape is fixed by the SDK's frame subscriber:
     /// kind `event`, method `mavlink.deliver`, capability `mavlink.read`, args
     /// `{msg_name, frame: bytes, timestamp_ms}`, request_id `mav-<ms>`.
     async fn deliver_mavlink<W: AsyncWriteExt + Unpin>(

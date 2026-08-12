@@ -487,7 +487,7 @@ pub fn parse_systemctl_units(out: &str) -> Vec<Value> {
 }
 
 /// Round a float to two decimals so the wire carries `12.34`, not the full f64
-/// expansion (matches the Python loop's `round(x, 2)` discipline).
+/// expansion (the contract carries values rounded to two places).
 fn round2(x: f64) -> f64 {
     (x * 100.0).round() / 100.0
 }

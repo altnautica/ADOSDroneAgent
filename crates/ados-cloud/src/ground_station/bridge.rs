@@ -491,7 +491,7 @@ impl CloudRelayBridge {
 
         let mut poll = tokio::time::interval(Duration::from_secs(2));
         let mut heartbeat = tokio::time::interval(STATUS_HEARTBEAT_INTERVAL);
-        // Skip the immediate heartbeat tick (the Python loop sleeps first).
+        // Skip the immediate heartbeat tick (the contract sleeps first).
         heartbeat.tick().await;
 
         loop {
@@ -717,7 +717,7 @@ async fn teardown_relay(
 }
 
 /// Fold a raw vehicle-state JSON snapshot into the heartbeat telemetry block.
-/// Picks the small set of fields the Python loop forwarded; unknown shapes pass
+/// Picks the small set of fields the contract forwards; unknown shapes pass
 /// through as the raw object so a schema change does not drop data.
 fn fold_telemetry(state: serde_json::Value) -> serde_json::Value {
     let obj = match state.as_object() {

@@ -1,7 +1,7 @@
 //! Handler routing and the in-process event bus.
 //!
-//! Ports the handler surface of `src/ados/plugins/ipc_server.py` plus
-//! `src/ados/plugins/events.py`. Splits cleanly into two groups:
+//! The handler surface and the event bus, in one place. Splits cleanly into
+//! two groups:
 //!
 //! * Fully-wired, host-independent handlers: `event.publish`,
 //!   `event.subscribe`, and `ping`. The event bus is an in-process fanout

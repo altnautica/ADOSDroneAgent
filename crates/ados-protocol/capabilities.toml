@@ -665,11 +665,11 @@ risk_reason = "Publishes a callable interface to an AI client; effect is bounded
 # ===========================================================================
 # Plugin RPC dispatch table (47): wire method -> dispatch-level required cap.
 #
-# The single source of truth for the gate the plugin IPC server applies BEFORE
-# routing a request. Codegen emits this into both the Rust host
+# The single source of truth for the gate the native host applies BEFORE routing
+# a request. Codegen emits this into both the Rust host
 # (crates/ados-protocol/src/dispatch.rs, consumed by ados-plugin-host) and the
-# Python host (src/ados/plugins/_dispatch_generated.py, consumed by
-# ipc/dispatch.py) so the two copies cannot drift.
+# plugin runtime (src/ados/plugins/_dispatch_generated.py, read by
+# plugins/ipc_client.py) so the two halves of the wire contract cannot drift.
 #
 # required_cap absent  -> the method is ungated at the dispatch level (the event
 #                         surface and ping are open; per-topic checks run inline

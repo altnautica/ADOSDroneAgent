@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use crate::dispatch::CommandResult;
 
-/// Poll cadence. Mirrors the Python loop's 5 s sleep.
+/// Poll cadence: a 5 s sleep, as the receiver expects.
 pub const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Build the ACK payload for a dispatched command. Mirrors the Python

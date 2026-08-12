@@ -1,8 +1,7 @@
 //! Client to the MAVLink IPC socket the router serves.
 //!
-//! Ports the slice of the MAVLink router the plugin host needs: the
-//! `MAVLinkRouter` Protocol in `src/ados/plugins/ipc/host_services.py`
-//! (`send_bytes` + `subscribe` + `unsubscribe`) bound to the router's
+//! The slice of the MAVLink router the plugin host needs
+//! (`send_bytes` + `subscribe` + `unsubscribe`), bound to the router's
 //! `/run/ados/mavlink.sock`. The socket is bidirectional and length-prefixed
 //! (4-byte big-endian length + raw frame): a frame written toward the socket is
 //! a command toward the flight controller, and FC frames fan out on the same
@@ -39,9 +38,9 @@ pub const MAVLINK_BROADCAST_DEPTH: usize = 256;
 /// queue or a write error is swallowed, matching the Python slice whose
 /// `send_bytes` does not surface a failure to the plugin handler.
 ///
-/// Frames are forwarded raw, with no per-message-name byte filtering (the Python
-/// pump forwards every queued frame to every active subscriber), matching
-/// `src/ados/plugins/ipc/mavlink_pump.py`.
+/// Frames are forwarded raw, with no per-message-name byte filtering: every
+/// queued frame reaches every active subscriber, and filtering is the
+/// subscriber's job.
 pub struct MavlinkClient {
     /// Plugin->FC command queue; the writer task drains it.
     outbound: mpsc::Sender<Vec<u8>>,

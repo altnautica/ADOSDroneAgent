@@ -1,6 +1,6 @@
 """Mesh and pairing event buses for the ground-station profile.
 
-Mirrors the `ButtonEventBus` pattern in `ados.services.ui.events` but scoped
+Follows the bounded-queue event-bus pattern used across the agent, scoped
 to distributed receive concerns: role transitions, batman-adv neighbor
 churn, gateway election changes, and field pairing lifecycle.
 

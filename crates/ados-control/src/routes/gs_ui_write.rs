@@ -586,30 +586,50 @@ fn write_atomic_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
-// SIGHUP the live display service (best-effort, matches the Python reload helper).
+// SIGHUP the live UI services so a config write takes effect without a restart.
 // ---------------------------------------------------------------------------
 
 /// SIGHUP the named systemd unit so it reloads its UI config without a restart.
-/// Best-effort: a failure (the unit inactive, systemd unavailable on a dev tree /
-/// non-Linux host) is swallowed, matching the FastAPI `signal_sighup` helper which
-/// degrades silently. `systemctl kill -s HUP <unit>` is the unit-targeted
-/// equivalent of the Python's MainPID-resolve + `os.kill(pid, SIGHUP)`.
+///
+/// Best-effort by design: the config write has already succeeded and is durable,
+/// so a reload that does not land costs the operator a restart, not the setting.
+/// The failure is LOGGED rather than swallowed, because the cases where it fails
+/// are exactly the ones worth knowing about -- the unit inactive on a box whose
+/// binaries never landed, or systemd absent -- and without a line here the write
+/// returns 200 while the running config is unchanged, with nothing to explain
+/// why. `systemctl kill -s HUP <unit>` targets the unit rather than resolving a
+/// MainPID, so it needs no knowledge of the process tree.
 #[cfg(target_os = "linux")]
 fn signal_reload(unit: &str) {
-    let _ = std::process::Command::new("systemctl")
+    match std::process::Command::new("systemctl")
         .args(["kill", "-s", "HUP", unit])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status();
+        .status()
+    {
+        Ok(status) if status.success() => {}
+        Ok(status) => tracing::warn!(
+            unit,
+            code = status.code(),
+            "UI config saved but the reload signal was refused; \
+             the running config is unchanged until the unit restarts"
+        ),
+        Err(e) => tracing::warn!(
+            unit,
+            error = %e,
+            "UI config saved but the reload signal could not be sent; \
+             the running config is unchanged until the unit restarts"
+        ),
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
 fn signal_reload(_unit: &str) {
-    // No systemd on the dev host; the reload is a no-op, matching the Python
-    // helper's silent degrade when the unit/PID cannot be resolved.
+    // No systemd on a dev host, so there is no unit to signal and nothing to
+    // report: the write still lands and the panel reads it on next start.
 }
 
-/// SIGHUP the OLED display service (the Python `signal_oled_reload`).
+/// SIGHUP the OLED display service so it reloads its config.
 fn signal_oled_reload() {
     signal_reload("ados-oled.service");
 }

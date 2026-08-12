@@ -1,12 +1,11 @@
 //! Method dispatch table and the capability gate.
 //!
-//! Mirrors the gate from the Python server's dispatch loop
-//! (`src/ados/plugins/ipc_server.py`): re-check token expiry, look up the
+//! The gate every request passes through: re-check token expiry, look up the
 //! method, then refuse an ungranted caller before the handler runs.
 //!
 //! The `method -> required_cap` mapping is NOT carried here. It is the
 //! generated [`ados_protocol::dispatch::DISPATCH_METHODS`] const, the single
-//! source of truth shared with the Python host (whose generated copy is
+//! source of truth shared with the plugin runtime (whose generated copy is
 //! `src/ados/plugins/_dispatch_generated.py`). The enum below is the typed
 //! handler handle the host routes on; [`Method::required_cap`] resolves through
 //! the generated table by wire name so the two can never drift, and a test in
