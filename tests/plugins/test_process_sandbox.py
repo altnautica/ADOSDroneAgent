@@ -74,6 +74,57 @@ def test_resolve_binary_rejects_shell_meta(tmp_path: Path) -> None:
     )
 
 
+def test_resolve_binary_rejects_a_symlink_escaping_the_vendor_root(
+    tmp_path: Path,
+) -> None:
+    """A safe-looking basename must not reach outside the tree via a symlink.
+
+    This is the guard the other two rejection tests cannot reach. Both of those
+    are stopped by the basename filter, which fires on the NAME before any path
+    is resolved -- so the resolved-path escape check underneath it had no
+    coverage at all, and could have been deleted with the suite still green.
+
+    A symlink is the case that gets past the name: `helper` is a perfectly legal
+    basename, the file sits inside `vendor/`, and only resolving it reveals that
+    it points at a payload outside the plugin tree. That is precisely why
+    `resolve_binary` resolves before it compares.
+    """
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    payload = outside / "payload"
+    payload.write_text("#!/bin/sh\necho pwned\n")
+    payload.chmod(payload.stat().st_mode | stat.S_IXUSR)
+
+    vendor = tmp_path / "plugin" / "vendor"
+    vendor.mkdir(parents=True)
+    (vendor / "helper").symlink_to(payload)
+
+    with pytest.raises(SpawnError) as excinfo:
+        resolve_binary(tmp_path / "plugin", "helper")
+    assert "escapes vendor root" in str(excinfo.value), (
+        "the symlink must be rejected for escaping the tree, not for any other "
+        f"reason: {excinfo.value!s}"
+    )
+
+
+def test_resolve_binary_allows_a_symlink_that_stays_inside(tmp_path: Path) -> None:
+    """The escape check must not reject every symlink, only escaping ones.
+
+    Without this, the test above passes just as well against a guard that
+    refuses symlinks outright -- which would be a different, stricter rule than
+    the one the code documents, and would break a plugin that ships a versioned
+    binary behind a stable name.
+    """
+    vendor = tmp_path / "plugin" / "vendor"
+    vendor.mkdir(parents=True)
+    real = vendor / "helper-1.2.0"
+    real.write_text("#!/bin/sh\necho ok\n")
+    real.chmod(real.stat().st_mode | stat.S_IXUSR)
+    (vendor / "helper").symlink_to(real)
+
+    assert resolve_binary(tmp_path / "plugin", "helper") == real.resolve()
+
+
 def test_sandbox_spawn_denies_off_allowlist(tmp_path: Path) -> None:
     """A binary present on disk but absent from the manifest allowlist is refused."""
     _make_fake_vendor_binary(tmp_path, "ok-bin")
@@ -105,18 +156,32 @@ def test_plugin_context_exposes_the_v11_facades() -> None:
     """The `ctx` surface a plugin author writes against must keep its shape.
 
     Every facade is assigned in ``__init__`` rather than declared on the class,
-    so this reads the constructor's attribute names instead of using ``hasattr``
-    on the type — ``hasattr`` is ``False`` for all thirteen and would make the
-    check either fail outright or, if papered over, assert nothing.
+    so this reads the constructor's assignments instead of using ``hasattr`` on
+    the type — ``hasattr`` is ``False`` for all thirteen and would make the check
+    either fail outright or, if papered over, assert nothing.
 
     That is what happened to the version of this test that used to live beside
     the packaged host's tests: its assertion ended in ``or True`` and its own
     comment conceded "the import is the test". Restoring it verbatim would have
     restored a test that cannot fail.
+
+    Read via ``dis`` filtered to ``STORE_ATTR`` rather than ``co_names``, which
+    is every name the code object touches — reads included. ``co_names`` carries
+    a concrete false pass here: ``self.peripherals = self.peripheral_manager``
+    means deleting the ``peripheral_manager`` assignment leaves the name in the
+    pool through the surviving ``LOAD_ATTR``, so the facade could disappear with
+    this test still green. It also carries fourteen imported class names that are
+    not attributes at all. ``STORE_ATTR`` is exactly "was assigned".
     """
+    import dis
+
     from ados.plugins.runner import PluginContext
 
-    assigned = set(PluginContext.__init__.__code__.co_names)
+    assigned = {
+        instruction.argval
+        for instruction in dis.get_instructions(PluginContext.__init__.__code__)
+        if instruction.opname == "STORE_ATTR"
+    }
     missing = [
         attr
         for attr in (

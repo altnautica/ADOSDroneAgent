@@ -30,14 +30,22 @@ ROUTE_CASES = (
 )
 PY_ROUTES_DIR = REPO_ROOT / "src" / "ados" / "api" / "routes"
 
-# Floors for "the parse broke", set just under the real counts rather than well
-# under them. At 100-vs-151 a third of the native table could vanish silently and
-# still clear the bar, which is the same shape of hole this file exists to close.
-# A legitimate shrink below these is rare enough to be worth an explicit edit;
-# growth needs no change. The routing tests pin the exact native count.
-MIN_NATIVE_ROUTES = 145
-MIN_CASES = 60
-MIN_PYTHON_ROUTES = 90
+# Floors for "the parse broke". A broken parse returns zero or near-zero, so these
+# only have to sit clearly above that -- they are not a route-count contract.
+#
+# The previous values were set just under the real counts on the theory that a
+# tight floor also catches silent shrinkage. It does not, and it made the file
+# hostile: with cases at 63 against a floor of 60, this test's own remedy
+# ("delete the case with the route") failed on its fourth use, reporting "the
+# parse is broken" about a parse that was working perfectly. A guard whose advice
+# breaks it is worse than no guard, because the next reader deletes it.
+#
+# Silent shrinkage is covered where it can be covered exactly: routing.rs pins the
+# native route count to an exact number, and the orphan check below is the real
+# work of this file. So these are deliberately loose.
+MIN_NATIVE_ROUTES = 75
+MIN_CASES = 30
+MIN_PYTHON_ROUTES = 45
 
 
 def _native_routes() -> set[tuple[str, str]]:
@@ -149,17 +157,26 @@ def test_every_conformance_case_names_a_served_route() -> None:
     # Guard the guard: a broken parse must fail here, not quietly pass every
     # case because the tables it compares against came back empty.
     assert len(native) >= MIN_NATIVE_ROUTES, (
-        f"parsed only {len(native)} native routes from {ROUTING_RS.name}; "
-        "the parse is broken, so this check would pass vacuously"
+        f"parsed only {len(native)} native routes from {ROUTING_RS.name}, which is "
+        f"below the {MIN_NATIVE_ROUTES} floor. Either the regex stopped matching "
+        "the table -- in which case this check would pass vacuously -- or the "
+        "native surface genuinely shrank that far, in which case lower the floor "
+        "deliberately"
     )
     assert len(cases) >= MIN_CASES, (
-        f"parsed only {len(cases)} conformance cases; the parse is broken"
+        f"parsed only {len(cases)} conformance cases, below the {MIN_CASES} floor. "
+        "Either the RouteCase regex stopped matching, or the registry genuinely "
+        "shrank that far -- if the latter, lower the floor deliberately"
     )
     # A truthiness check here would pass on a single bogus entry. The Python
     # table currently contributes no matches at all (every case is served
     # natively), so nothing else exercises it.
     assert len(python) >= MIN_PYTHON_ROUTES, (
-        f"parsed only {len(python)} residual Python routes; the parse is broken"
+        f"parsed only {len(python)} residual Python routes, below the "
+        f"{MIN_PYTHON_ROUTES} floor. Either the @router regex or the package-prefix "
+        "resolution broke, or the residual surface genuinely shrank that far -- the "
+        "migration is meant to drive this number to zero, so on the day it does, "
+        "this floor and the Python table go together"
     )
 
     orphans = [

@@ -2011,7 +2011,15 @@ mod tests {
         ];
         const INSTALL_ONLY: &[&str] =
             &["WantedBy", "RequiredBy", "Also", "Alias", "DefaultInstance"];
-        const SERVICE_ONLY: &[&str] = &[
+        // Directives read by the unit's OWN type section -- `[Service]` in a
+        // .service, `[Socket]` in a .socket, `[Mount]` in a .mount. Deliberately
+        // not called "service-only": most of these are exec-context settings that
+        // .socket and .mount read too (`User`, `Group`, `EnvironmentFile`,
+        // `ExecStartPre`/`Post`, the timeouts), and `Type=` means the filesystem
+        // type in a .mount. Asserting `[Service]` for all of them would make the
+        // first non-service unit added fail with a message stating the opposite of
+        // the truth, so the expected section is derived from the file extension.
+        const TYPE_SECTION_ONLY: &[&str] = &[
             "ExecStart",
             "ExecStartPre",
             "ExecStartPost",
@@ -2029,6 +2037,19 @@ mod tests {
             "Group",
             "EnvironmentFile",
         ];
+
+        /// The section a unit file's own type directives belong in.
+        fn type_section(ext: &str) -> Option<&'static str> {
+            match ext {
+                "service" => Some("[Service]"),
+                "socket" => Some("[Socket]"),
+                "timer" => Some("[Timer]"),
+                "mount" => Some("[Mount]"),
+                "slice" => Some("[Slice]"),
+                // A .target has no type section; its directives are all [Unit].
+                _ => None,
+            }
+        }
 
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/systemd");
         let entries = std::fs::read_dir(&dir)
@@ -2071,8 +2092,8 @@ mod tests {
                     Some("[Unit]")
                 } else if INSTALL_ONLY.contains(&key) {
                     Some("[Install]")
-                } else if SERVICE_ONLY.contains(&key) {
-                    Some("[Service]")
+                } else if TYPE_SECTION_ONLY.contains(&key) {
+                    type_section(ext)
                 } else {
                     None
                 };
@@ -2086,10 +2107,15 @@ mod tests {
             }
         }
 
-        // A directory that matched nothing would make this pass vacuously.
+        // A directory that matched nothing would make this pass vacuously. The
+        // floor is a broken-scan tripwire, not a unit-count contract: units do get
+        // retired, so a legitimate shrink below this is a deliberate edit here,
+        // and the message has to say so rather than accusing the scan.
         assert!(
             checked >= 40,
-            "only parsed {checked} unit files under {}; the scan is broken",
+            "parsed only {checked} unit files under {}. Either the scan is broken, \
+             or units were legitimately removed -- if the latter, lower this floor \
+             deliberately rather than deleting the check",
             dir.display()
         );
         assert!(

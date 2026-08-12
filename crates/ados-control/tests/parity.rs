@@ -75,7 +75,77 @@ async fn start_with_state(
 /// Bring the server up with explicit state + MAVLink socket paths so a command
 /// test can point the MAVLink socket at a live mock server (or an absent path for
 /// the no-socket 503 case).
+/// Bring the server up, retrying on a lost port race.
+///
+/// The port is chosen by binding an ephemeral one and releasing it for the
+/// server to rebind, which leaves a window where a concurrently-starting test
+/// can take it. That window is real: under a full-workspace `cargo test` this
+/// harness intermittently handed a test a port the server never got, and
+/// because the readiness wait below only watched the UNIX socket, the test then
+/// ran against a port nobody was listening on and failed as though the route
+/// were broken. Retrying with a fresh port turns a confusing intermittent
+/// failure into a slower start.
 async fn start_full(
+    dir: &Path,
+    pairing_body: Option<&str>,
+    state_socket: PathBuf,
+    mavlink_socket: PathBuf,
+) -> Harness {
+    for attempt in 0..4 {
+        let h = start_full_once(
+            dir,
+            pairing_body,
+            state_socket.clone(),
+            mavlink_socket.clone(),
+        )
+        .await;
+        if tcp_ready(h.port).await {
+            return h;
+        }
+        // Our server is not on the port we were handed. Tear this one down and
+        // take a different port rather than running the test against dead air.
+        let port = h.port;
+        h.stop().await;
+        eprintln!(
+            "parity harness: port {port} never came up, retry {}",
+            attempt + 1
+        );
+    }
+    panic!("parity harness: the control server never bound a TCP port in 4 attempts");
+}
+
+/// Is OUR server answering on `port` within a short deadline?
+///
+/// Deliberately not a bare `TcpStream::connect`. A connect succeeds against any
+/// listener, including whichever one won the port race, so it answers "something
+/// is bound" when the question is "is the server bound". Measured: holding the
+/// port with a listener that never accepts, the connect-only form reported ready
+/// and the retry below never fired. Requiring a well-formed HTTP status line
+/// makes the probe specific to a server that is actually serving.
+async fn tcp_ready(port: u16) -> bool {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(mut stream) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+            let req = "GET /api/status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+            if stream.write_all(req.as_bytes()).await.is_ok() {
+                let mut buf = Vec::new();
+                // A listener that never accepts leaves this pending until the
+                // timeout; one that accepts without speaking HTTP returns
+                // something that is not a status line.
+                let read =
+                    tokio::time::timeout(Duration::from_millis(500), stream.read_to_end(&mut buf))
+                        .await;
+                if read.is_ok() && buf.starts_with(b"HTTP/1.1 ") {
+                    return true;
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    false
+}
+
+async fn start_full_once(
     dir: &Path,
     pairing_body: Option<&str>,
     state_socket: PathBuf,
@@ -87,7 +157,7 @@ async fn start_full(
         std::fs::write(&pairing_path, body).unwrap();
     }
     // Ask the OS for an ephemeral free port, then release it for the server to
-    // rebind (a tiny race window that is fine for a test).
+    // rebind. The caller re-checks that the server actually got it.
     let probe = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let port = probe.local_addr().unwrap().port();
     drop(probe);
