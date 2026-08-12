@@ -83,7 +83,7 @@ def _install_with_perms(plugin_id: str, **grants: bool) -> PluginInstall:
 
 
 def test_catalog_size_matches_spec() -> None:
-    # 49 agent capabilities in the catalog. Beyond the earlier substrate set
+    # 52 agent capabilities in the catalog. Beyond the earlier substrate set
     # (button.subscribe, flight.guided_setpoint, mavlink.tunnel,
     # radio.aux_stream, display.oled.page) and the GPIO output + vision
     # designate/subscribe caps (hardware.gpio_out, vision.detection.subscribe,
@@ -92,8 +92,10 @@ def test_catalog_size_matches_spec() -> None:
     # compute-offload + streaming-perception methods, mcp.expose gates the
     # plugin's tool/resource/prompt exposure to the MCP surface, and
     # video.source.set lets a camera/pod driver reconfigure the video pipeline's
-    # stream sources.
-    assert len(AGENT_CAPABILITIES) == 49
+    # stream sources. msp.read/msp.write gate the MSP lane the way mavlink.read/
+    # mavlink.write gate MAVLink, and vision.model.read lets a plugin read the
+    # model catalog without being able to register into it.
+    assert len(AGENT_CAPABILITIES) == 52
 
 
 def test_gated_caps_are_marked_enforced() -> None:
@@ -127,6 +129,8 @@ def test_gated_caps_are_marked_enforced() -> None:
             "mcp.expose",
             "mission.read",
             "mission.write",
+            "msp.read",
+            "msp.write",
             "process.spawn",
             "radio.aux_stream",
             "recording.write",
@@ -137,6 +141,7 @@ def test_gated_caps_are_marked_enforced() -> None:
             "vision.detection.publish",
             "vision.detection.subscribe",
             "vision.frame.read",
+            "vision.model.read",
             "vision.model.register",
             "vision.track.designate",
         }
