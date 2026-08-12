@@ -11,10 +11,16 @@ covers both layouts on synthetic tensors with known boxes.
 
 from __future__ import annotations
 
-import numpy as np
 import pytest
 
-from ados.services.vision.rknn_sidecar import decode_yolo_detections
+# numpy lives in the `vision` extra, deliberately kept out of the base and drone
+# installs so the on-device footprint stays small. Imported through
+# `importorskip` so a checkout without that extra SKIPS this module rather than
+# raising during collection -- a bare `import numpy` here aborts the ENTIRE
+# pytest run, which is how a full-suite green report silently excluded this file.
+np = pytest.importorskip("numpy", reason="requires the `vision` extra (numpy)")
+
+from ados.services.vision.rknn_sidecar import decode_yolo_detections  # noqa: E402
 
 LABELS = ["drone", "person"]
 
