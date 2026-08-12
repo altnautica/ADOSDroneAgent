@@ -154,14 +154,13 @@ async def register_services(app: AgentApp) -> None:  # noqa: C901
         )
         app._start_service("mqtt-gateway", mqtt.run(app._shutdown))
 
-    # Start Video Pipeline
+    # Video. Only the demo pipeline runs in-process: on a real node the native
+    # video service owns the encode path, exactly as the radio block below
+    # describes for the transmit chain. There is no packaged pipeline to fall
+    # back to any more.
     if app.demo:
         from ados.services.video.demo import DemoVideoPipeline
         app._video_pipeline = DemoVideoPipeline()
-        app._start_service("video-pipeline", app._video_pipeline.run())
-    else:
-        from ados.services.video.pipeline import VideoPipeline
-        app._video_pipeline = VideoPipeline(app.config.video)
         app._start_service("video-pipeline", app._video_pipeline.run())
 
     # WFB-ng radio link.

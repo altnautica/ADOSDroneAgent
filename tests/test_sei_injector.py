@@ -12,15 +12,15 @@ from __future__ import annotations
 import io
 import struct
 
-from ados.services.video.local_tap import (
-    ADOS_LATENCY_SEI_UUID,
-    parse_sei_latency_ns,
-)
 from ados.services.video.sei_injector import (
     _emulation_prevent,
     build_sei_nal,
     inject_stream,
     is_vcl_nal_type,
+)
+from ados.services.video.sei_parser import (
+    ADOS_LATENCY_SEI_UUID,
+    parse_sei_latency_ns,
 )
 
 
@@ -51,7 +51,7 @@ def test_emulation_prevent_handles_consecutive_triggers() -> None:
     out = _emulation_prevent(src)
     # Verify we can de-escape it back to the original via the
     # receiver-side stripper (round-trip property).
-    from ados.services.video.local_tap import _remove_emulation_prevention
+    from ados.services.video.sei_parser import _remove_emulation_prevention
 
     assert _remove_emulation_prevention(out) == src
 

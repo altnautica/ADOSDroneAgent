@@ -28,6 +28,14 @@ the project follows [Semantic Versioning](https://semver.org/).
   in-process since the PIC cutover, and the installer stopped and disabled the
   packaged unit on every run.
 
+  The packaged video pipeline: the in-process GStreamer pipeline, the local tap
+  and the recorder. The native video service has run the encode path alone since
+  its unit gained a binary-presence condition, and the only thing still naming
+  the packaged pipeline was a branch that no systemd unit could reach. The parts
+  the native service genuinely uses stay — it shells out to the SEI injector and
+  tap by module name, and the config layer reads the auto-fallback resolver on
+  every load.
+
 ### Fixed
 
 - **A button-mapping change from the GCS took effect only after a restart.**

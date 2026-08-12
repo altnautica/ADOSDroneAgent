@@ -1,37 +1,16 @@
-"""Air-side GStreamer pipeline package — re-exports the public surface.
+"""Air-side video helpers.
 
-The original ``air_pipeline.py`` module was split into:
+The in-process GStreamer pipeline that used to live here is gone: the native
+video service owns the encode path on every profile. What remains is the
+auto-fallback watcher, which resolves the per-board default for
+``video.use_gst_air_pipeline``.
 
-* ``pipeline.py`` — :class:`AirPipeline`, the in-process GStreamer
-  pipeline + restart watchdogs.
-* ``pipeline_builder.py`` — pure functions that compose the pipeline
-  launch string and pick the camera source / encoder element.
-* ``stats.py`` — :class:`AirPipelineStats` snapshot container.
-* ``errors.py`` — :class:`AirPipelineUnavailable`.
-
-Existing callers (``from ados.services.video.air_pipeline import
-AirPipeline, AirPipelineUnavailable``) keep working unchanged.
+Deliberately imports nothing at package level. ``auto_fallback`` is read from a
+pydantic default factory, so it runs on every config load in every Python
+service; an eager re-export here would make that path carry whatever else the
+package happened to name.
 """
 
 from __future__ import annotations
 
-from .errors import AirPipelineUnavailable
-from .pipeline import AirPipeline
-from .pipeline_builder import (
-    _gst_element_available,  # noqa: F401  re-exported for test patches
-    _read_tx_bytes,  # noqa: F401  re-exported for test patches
-    _resolve_wfb_iface,  # noqa: F401  re-exported for test patches
-    build_air_pipeline_string,
-    choose_camera_source,
-    choose_encoder,
-)
-from .stats import AirPipelineStats
-
-__all__ = [
-    "AirPipeline",
-    "AirPipelineStats",
-    "AirPipelineUnavailable",
-    "build_air_pipeline_string",
-    "choose_camera_source",
-    "choose_encoder",
-]
+__all__: list[str] = []
