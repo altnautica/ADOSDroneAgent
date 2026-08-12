@@ -1982,10 +1982,6 @@
             "tick_interval_s": 5
           }
         },
-        "use_gst_air_pipeline": {
-          "title": "Use Gst Air Pipeline",
-          "type": "boolean"
-        },
         "wfb": {
           "$ref": "#/$defs/WfbConfig",
           "default": {
@@ -2683,7 +2679,6 @@
           "max_attempts": 3,
           "tick_interval_s": 5
         },
-        "use_gst_air_pipeline": false,
         "wfb": {
           "adaptive_bitrate_enabled": true,
           "adaptive_mcs_max": 3,

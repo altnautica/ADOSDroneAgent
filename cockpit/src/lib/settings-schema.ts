@@ -388,8 +388,7 @@ export const CURATED_GROUPS: CuratedGroup[] = [
       "video.recording.max_duration_minutes",
       "video.lcd_fps_cap",
       "video.prefer_hw_encoder",
-      "video.use_gst_air_pipeline",
-    ],
+      ],
   },
   {
     id: "system",
