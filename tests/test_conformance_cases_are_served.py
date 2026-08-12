@@ -12,8 +12,10 @@ static -- it reads the two route tables rather than issuing requests -- so it
 runs in CI and cannot introduce a false failure on a rig.
 
 The Rust table is parsed from source. A parse that silently matched nothing
-would make this whole check vacuous, so the parse result is itself asserted
-against the count the routing tests pin.
+would make this whole check vacuous, so the parse result is asserted against a
+floor. That floor is a broken-parse tripwire and deliberately NOT the exact count
+routing.rs pins -- see the note on the constants below for why a tight floor made
+this file hostile to its own advice.
 """
 
 from __future__ import annotations

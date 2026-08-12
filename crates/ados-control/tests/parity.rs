@@ -102,16 +102,29 @@ async fn start_full(
         if tcp_ready(h.port).await {
             return h;
         }
-        // Our server is not on the port we were handed. Tear this one down and
-        // take a different port rather than running the test against dead air.
+        // Our server did not answer on the port we were handed. Tear this one
+        // down and take a different port rather than running the test against
+        // dead air.
         let port = h.port;
         h.stop().await;
         eprintln!(
-            "parity harness: port {port} never came up, retry {}",
+            "parity harness: no HTTP answer on port {port}, retry {}",
             attempt + 1
         );
     }
-    panic!("parity harness: the control server never bound a TCP port in 4 attempts");
+    // Three distinct conditions reach here and this cannot tell them apart: the
+    // port was taken by a concurrent test, the server never bound it, or the
+    // server bound it and the probe request did not come back as HTTP. The last
+    // one matters -- there is no CatchPanicLayer in ados-control, so a panic in
+    // the probed handler aborts the connection with no status line and reads
+    // exactly like a lost port race. Naming only the race would send a reader
+    // hunting a flake for a real handler regression.
+    panic!(
+        "parity harness: no HTTP answer on any of 4 ports. Either every port was \
+         taken by a concurrent test, or the server failed to bind, or it bound and \
+         the probe request did not return a status line -- a panic in the probed \
+         handler looks like this, since nothing catches it."
+    );
 }
 
 /// Is OUR server answering on `port` within a short deadline?

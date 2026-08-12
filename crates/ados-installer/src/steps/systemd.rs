@@ -2020,44 +2020,98 @@ mod tests {
         ];
         const INSTALL_ONLY: &[&str] =
             &["WantedBy", "RequiredBy", "Also", "Alias", "DefaultInstance"];
-        // Directives read by the unit's OWN type section -- `[Service]` in a
-        // .service, `[Socket]` in a .socket, `[Mount]` in a .mount. Deliberately
-        // not called "service-only": most of these are exec-context settings that
-        // .socket and .mount read too (`User`, `Group`, `EnvironmentFile`,
-        // `ExecStartPre`/`Post`, the timeouts), and `Type=` means the filesystem
-        // type in a .mount. Asserting `[Service]` for all of them would make the
-        // first non-service unit added fail with a message stating the opposite of
-        // the truth, so the expected section is derived from the file extension.
-        const TYPE_SECTION_ONLY: &[&str] = &[
+
+        // Directives read ONLY by `[Service]`, in any unit type. A `.socket` has
+        // no `ExecStart=`; a `.timer` has no `Restart=`.
+        const SERVICE_ONLY: &[&str] = &[
             "ExecStart",
-            "ExecStartPre",
-            "ExecStartPost",
             "ExecStop",
-            "ExecStopPost",
             "ExecReload",
             "Restart",
             "RestartSec",
-            "Type",
             "RemainAfterExit",
             "WatchdogSec",
+        ];
+
+        // Exec-context directives, read by `[Service]`, `[Socket]`, `[Mount]` and
+        // `[Swap]` -- but by none of `[Unit]`, `[Install]`, `[Timer]`, `[Slice]`
+        // or a `.target`. `Type=` rides here because it is valid in both
+        // `[Service]` and `[Mount]` (where it names the filesystem type).
+        const EXEC_CONTEXT: &[&str] = &[
+            "ExecStartPre",
+            "ExecStartPost",
+            "ExecStopPost",
             "TimeoutStartSec",
             "TimeoutStopSec",
+            "Type",
             "User",
             "Group",
             "EnvironmentFile",
         ];
 
-        /// The section a unit file's own type directives belong in.
-        fn type_section(ext: &str) -> Option<&'static str> {
-            match ext {
-                "service" => Some("[Service]"),
-                "socket" => Some("[Socket]"),
-                "timer" => Some("[Timer]"),
-                "mount" => Some("[Mount]"),
-                "slice" => Some("[Slice]"),
-                // A .target has no type section; its directives are all [Unit].
-                _ => None,
+        /// The sections that actually read `key`, or `None` when the key is not
+        /// one whose misplacement systemd swallows.
+        ///
+        /// Modelled per-directive rather than per-unit-type. Mapping a unit type
+        /// to "its own section" reads plausibly and is wrong in both directions:
+        /// a `[Timer]`, `[Slice]` or `.target` reads NONE of these, so an
+        /// `ExecStart=` copied into one is ignored by systemd and would have gone
+        /// unflagged, and `[Socket]` reads the exec-context keys but not
+        /// `ExecStart=`/`Restart=`. Both are the same silent-pass this test exists
+        /// to close, moved one unit type over.
+        fn sections_reading(key: &str) -> Option<&'static [&'static str]> {
+            if key.starts_with("Condition") || key.starts_with("Assert") {
+                return Some(&["[Unit]"]);
             }
+            if UNIT_ONLY.contains(&key) {
+                return Some(&["[Unit]"]);
+            }
+            if INSTALL_ONLY.contains(&key) {
+                return Some(&["[Install]"]);
+            }
+            if SERVICE_ONLY.contains(&key) {
+                return Some(&["[Service]"]);
+            }
+            if EXEC_CONTEXT.contains(&key) {
+                return Some(&["[Service]", "[Socket]", "[Mount]", "[Swap]"]);
+            }
+            None
+        }
+
+        /// Flag every directive in `body` sitting in a section that does not read
+        /// it. Pure over the text so the corpus scan and the synthetic-unit test
+        /// below run the same code -- the shipped corpus is 44 `.service` files
+        /// and one `.slice`, so without this seam the socket / timer / target
+        /// paths would have no committed coverage at all.
+        fn misplaced_directives(name: &str, body: &str) -> Vec<String> {
+            let mut out = Vec::new();
+            let mut section = String::new();
+            for line in body.lines() {
+                let line = line.trim();
+                if line.starts_with('[') && line.ends_with(']') {
+                    section = line.to_string();
+                    continue;
+                }
+                if line.starts_with('#') || line.starts_with(';') || !line.contains('=') {
+                    continue;
+                }
+                let key = line.split('=').next().unwrap_or("").trim();
+                let Some(allowed) = sections_reading(key) else {
+                    continue;
+                };
+                if !allowed.contains(&section.as_str()) {
+                    let want = allowed.join(" or ");
+                    let where_ = if section.is_empty() {
+                        "before any section header".to_string()
+                    } else {
+                        section.clone()
+                    };
+                    out.push(format!(
+                        "  {name}: {key}= is in {where_} but only {want} reads it"
+                    ));
+                }
+            }
+            out
         }
 
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/systemd");
@@ -2081,39 +2135,57 @@ mod tests {
             checked += 1;
 
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
-            let mut section = String::new();
-            for line in body.lines() {
-                let line = line.trim();
-                if line.starts_with('[') && line.ends_with(']') {
-                    section = line.to_string();
-                    continue;
-                }
-                if line.starts_with('#') || line.starts_with(';') || !line.contains('=') {
-                    continue;
-                }
-                let key = line.split('=').next().unwrap_or("").trim();
-                // `Condition*`/`Assert*` are families, matched by prefix; the
-                // rest are exact names.
-                let unit_only = key.starts_with("Condition")
-                    || key.starts_with("Assert")
-                    || UNIT_ONLY.contains(&key);
-                let expected = if unit_only {
-                    Some("[Unit]")
-                } else if INSTALL_ONLY.contains(&key) {
-                    Some("[Install]")
-                } else if TYPE_SECTION_ONLY.contains(&key) {
-                    type_section(ext)
-                } else {
-                    None
-                };
-                if let Some(want) = expected {
-                    if section != want {
-                        problems.push(format!(
-                            "  {name}: {key}= is in {section} but only {want} reads it"
-                        ));
-                    }
-                }
-            }
+            problems.extend(misplaced_directives(name, &body));
+        }
+
+        // The corpus is all .service today, so exercise the other unit types on
+        // synthetic bodies. Without these the socket / timer / target arms have
+        // no committed coverage and the by-hand proof that motivated this shape
+        // lives only in a commit message.
+        let cases: &[(&str, &str, bool)] = &[
+            // A .socket reads the exec-context keys: not a misplacement.
+            (
+                "ok.socket",
+                "[Unit]\nConditionPathExists=/x\n\n[Socket]\nListenStream=/run/x.sock\n\
+                 User=ados\nGroup=ados\nExecStartPost=/bin/true\nTimeoutStartSec=30\n\
+                 \n[Install]\nWantedBy=sockets.target\n",
+                false,
+            ),
+            // ...but it does NOT read ExecStart=/Restart=; systemd ignores both.
+            (
+                "bad.socket",
+                "[Unit]\nDescription=x\n\n[Socket]\nListenStream=/run/x.sock\n\
+                 ExecStart=/bin/true\nRestart=always\n",
+                true,
+            ),
+            // A .target reads none of them, so a copied service template is dead.
+            (
+                "bad.target",
+                "[Unit]\nDescription=x\n\n[Install]\nExecStart=/bin/true\nUser=ados\n",
+                true,
+            ),
+            // A [Timer] reads none of them either.
+            (
+                "bad.timer",
+                "[Unit]\nDescription=x\n\n[Timer]\nOnCalendar=daily\nExecStart=/bin/true\n",
+                true,
+            ),
+            // The original shipped defect: a [Unit] condition written under
+            // [Service] is not a guard at all.
+            (
+                "bad.service",
+                "[Unit]\nDescription=x\n\n[Service]\n\
+                 ConditionPathExists=/opt/ados/bin/x\nExecStart=/opt/ados/bin/x\n",
+                true,
+            ),
+        ];
+        for (name, body, want_flagged) in cases {
+            let got = misplaced_directives(name, body);
+            assert_eq!(
+                !got.is_empty(),
+                *want_flagged,
+                "{name}: expected flagged={want_flagged}, got {got:?}"
+            );
         }
 
         // A directory that matched nothing would make this pass vacuously. The

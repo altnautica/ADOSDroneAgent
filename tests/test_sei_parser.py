@@ -17,8 +17,13 @@ import struct
 
 import pytest
 
-from ados.services.video.sei_injector import ADOS_LATENCY_SEI_UUID, build_sei_nal
+from ados.services.video.sei_injector import (
+    ADOS_LATENCY_SEI_UUID,
+    _emulation_prevent,
+    build_sei_nal,
+)
 from ados.services.video.sei_parser import (
+    _iter_nal_units,
     _remove_emulation_prevention,
     parse_sei_latency_ns,
 )
@@ -59,17 +64,37 @@ def test_three_byte_start_code_round_trips_every_low_byte() -> None:
         )
 
 
-def test_trailing_zero_padding_is_still_trimmed() -> None:
+def test_trailing_zero_padding_is_trimmed_off_the_nal_extent() -> None:
     """The fix must not cost the padding trim it sits next to.
 
     Annex-B allows `trailing_zero_8bits` between the end of an rbsp and the next
     start code. Those are padding and must come off; the payload's own trailing
     bytes must not. An rbsp always ends on a non-zero byte, which is what makes
     the distinction safe once the end offset is exact.
+
+    Asserted on the NAL EXTENT, not on the parsed timestamp, because the
+    timestamp cannot see this. The SEI walk stops at the declared payload size
+    and breaks out on leftover bytes, so untrimmed padding inside the yielded
+    payload changes nothing about the value returned. The earlier version of
+    this test asserted only `parse_sei_latency_ns(padded) == ns`, and it passed
+    with the trim loop deleted outright -- a test named for a mechanism it could
+    not observe. What the trim actually controls is where the NAL ends, so that
+    is what this reads.
     """
     ns = _REALISTIC_NS_BASE | 0xAB
     padded = build_sei_nal(ns) + b"\x00\x00" + THREE_BYTE + bytes([0x65, 0x88])
+
+    # The value still round-trips, but that is not what is under test here.
     assert parse_sei_latency_ns(padded) == ns
+
+    sei = [payload for nal_type, payload in _iter_nal_units(padded) if nal_type == 6]
+    assert len(sei) == 1, "expected exactly one SEI NAL in the fixture"
+    assert sei[0][-1] == 0x80, (
+        "the SEI payload must end on its rbsp_stop_one_bit, not on Annex-B "
+        f"padding -- got {sei[0][-1]:#04x}, so the trailing zeros were kept"
+    )
+    # And the padding is not merely at the end: it is absent entirely.
+    assert not sei[0].endswith(b"\x00"), "trailing_zero_8bits survived the trim"
 
 
 def test_returns_none_without_a_marker() -> None:
@@ -95,19 +120,66 @@ def test_finds_the_marker_after_a_non_matching_nal() -> None:
     assert parse_sei_latency_ns(stream) == ns
 
 
-def test_uuid_is_exactly_sixteen_bytes() -> None:
-    """Pins the wire contract: the GCS mirrors this constant to find the NAL."""
+def test_the_two_uuid_constants_are_the_same_bytes() -> None:
+    """Pins the wire contract across the injector/parser pair.
+
+    Asserting only `len(...) == 16` cannot fail: both modules carry a
+    module-level `assert len(ADOS_LATENCY_SEI_UUID) == 16`, so a changed length
+    raises during collection and the test never runs. What is genuinely
+    unguarded is the two constants DIVERGING — they are separate literals in
+    separate files, and the injector's own comment says it keeps its copy so an
+    air-side rig can import it without pulling the parser's dependencies. Two
+    literals that must match is the same shape as the two same-named parsers
+    that cost this project 236 dropped samples.
+    """
+    from ados.services.video import sei_parser as parser_mod
+
+    assert parser_mod.ADOS_LATENCY_SEI_UUID == ADOS_LATENCY_SEI_UUID, (
+        "the injector stamps a different UUID than the parser searches for, so "
+        "no marker this agent writes would ever be found"
+    )
     assert len(ADOS_LATENCY_SEI_UUID) == 16
+
+
+def _rbsp_for(ns: int) -> bytes:
+    """The unescaped SEI rbsp the injector builds for `ns`."""
+    payload = ADOS_LATENCY_SEI_UUID + struct.pack(">Q", ns)
+    return bytes([0x05, len(payload)]) + payload + b"\x80"
+
+
+# Timestamps whose bytes contain a `00 00 0x` run, so escaping actually fires.
+# Measured: the previous version of this test used five values off a realistic
+# clock base, and EVERY one produced zero escape bytes — the UUID has no 00 00
+# run and that base's penultimate byte is 0xE2 — so it exercised the stripper
+# only on data with nothing to strip. It also compared just the first two bytes
+# (the literal `05 18` header), which holds with the stripper replaced by the
+# identity function. Both halves were untested by the test named for them.
+#
+# `0x0000010000000001` is deliberately excluded: it also drives the injector into
+# emitting a literal `00 00 01`, the separate defect recorded as the xfail below.
+# Keeping it out means this test measures the escaper/stripper inverse and not
+# that bug.
+_ESCAPING_NS = (
+    0x1234_0000_0100_0000,
+    0x18C6_0000_0200_00AB,
+    0x0000_0000_0000_0003,
+    0x18C6_7F00_0003_0080,
+    0x18C6_7F5B_0000_0100,
+)
 
 
 def test_emulation_prevention_round_trips() -> None:
     """The stripper must be the exact inverse of the escaper for our payloads."""
-    for low in (0x00, 0x01, 0x02, 0x03, 0xFF):
-        ns = _REALISTIC_NS_BASE | low
-        nal = build_sei_nal(ns)
-        # Everything after the 4-byte start code and the 1-byte NAL header.
-        escaped = nal[5:]
-        assert _remove_emulation_prevention(escaped)[:2] == bytes([0x05, 0x18])
+    for ns in _ESCAPING_NS:
+        raw = _rbsp_for(ns)
+        escaped = _emulation_prevent(raw)
+        assert len(escaped) > len(raw), (
+            f"{ns:#018x} inserted no escape bytes, so this case proves nothing "
+            "about emulation prevention"
+        )
+        assert _remove_emulation_prevention(escaped) == raw, (
+            f"stripping is not the inverse of escaping for {ns:#018x}"
+        )
 
 
 @pytest.mark.xfail(

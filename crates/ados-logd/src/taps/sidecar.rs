@@ -722,30 +722,62 @@ mod tests {
         write_with_age(
             root,
             "lcd-latency.json",
-            r#"{"latency_ms": 42.5, "latency_ewma_ms": null, "samples": 7, "source": "sei"}"#,
+            r#"{"latency_ms": 42.5, "latency_ewma_ms": 40.1, "samples": 7, "source": "sei"}"#,
             Duration::ZERO,
         );
         let mut state = TailerState::default();
         let frames = poll_once(root, &mut state, now_us_systemtime());
 
+        // Every scalar this spec declares must actually produce its metric. A
+        // negative assertion alone cannot show that: deleting a ScalarMap makes
+        // "no metric was recorded" pass MORE readily, so each mapping needs a
+        // positive gate of its own.
         assert_eq!(
             metric(&frames, "video.latency.glass_ms").map(|m| m.value),
             Some(42.5)
         );
         assert_eq!(
+            metric(&frames, "video.latency.ewma_ms").map(|m| m.value),
+            Some(40.1)
+        );
+        assert_eq!(
             metric(&frames, "video.latency.samples").map(|m| m.value),
             Some(7.0)
         );
-        // A null reads as absent, not as zero: the EWMA is null here, so no
-        // metric is recorded for it at all. This is the generic rule for every
-        // scalar in every spec, and this is the only place it is asserted.
-        assert!(metric(&frames, "video.latency.ewma_ms").is_none());
         // The source rides the latency-source event.
         let evts = events(&frames, "video.latency_source");
         assert_eq!(evts.len(), 1);
         assert_eq!(
             evts[0].detail.get("source").and_then(|v| v.as_str()),
             Some("sei")
+        );
+    }
+
+    #[test]
+    fn a_null_scalar_reads_as_absent_not_as_zero() {
+        // The generic rule for every scalar in every spec, asserted here on the
+        // EWMA because it is the one nullable field a live producer actually
+        // leaves null. Kept SEPARATE from the positive test above: folding the
+        // two together (a null fixture plus an is_none assertion) is what let the
+        // EWMA mapping lose its only positive gate — with the mapping deleted,
+        // the is_none check passes and the whole module stays green.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_with_age(
+            root,
+            "lcd-latency.json",
+            r#"{"latency_ms": 42.5, "latency_ewma_ms": null, "samples": 7, "source": "sei"}"#,
+            Duration::ZERO,
+        );
+        let mut state = TailerState::default();
+        let frames = poll_once(root, &mut state, now_us_systemtime());
+
+        assert!(metric(&frames, "video.latency.ewma_ms").is_none());
+        // Its siblings still record, so this is the null being skipped rather
+        // than the whole snapshot failing to sample.
+        assert_eq!(
+            metric(&frames, "video.latency.glass_ms").map(|m| m.value),
+            Some(42.5)
         );
     }
 
