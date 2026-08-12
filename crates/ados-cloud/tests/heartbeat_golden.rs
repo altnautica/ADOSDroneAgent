@@ -1,13 +1,19 @@
 //! Golden-JSON byte-parity test for the cloud status heartbeat wire model.
 //!
-//! The fixtures under `tests/fixtures/` were captured from the Python emit
-//! (`src/ados/services/cloud/heartbeat_loop.py` assembly + the real pure
-//! `build_radio_block`, with the loop's top-level `None`-strip applied). This
-//! builds the same logical input in Rust and asserts the Rust serialization
-//! equals the fixture as a `serde_json::Value` — comparing as values so key
-//! ORDER does not matter (the receiver validates by key, not order). The parity
-//! that matters is FIELD SET + CASING + NULL-STRIPPING, not the psutil-derived
-//! numbers.
+//! The fixtures under `tests/fixtures/` are FROZEN. They were captured once
+//! from the Python emit that owned this wire model before the native relay took
+//! it over, with that loop's top-level `None`-strip applied. Nothing
+//! regenerates them, and the module they were captured from no longer exists,
+//! so they are a record of an agreed wire shape rather than a live mirror of
+//! another implementation. Treat a diff here as "the wire model changed", never
+//! as "the fixtures are stale" — the receiver is the party that has to agree,
+//! and it is not in this repository.
+//!
+//! This builds the same logical input in Rust and asserts the Rust
+//! serialization equals the fixture as a `serde_json::Value` — comparing as
+//! values so key ORDER does not matter (the receiver validates by key, not
+//! order). The parity that matters is FIELD SET + CASING + NULL-STRIPPING, not
+//! the psutil-derived numbers.
 
 use ados_cloud::heartbeat::{
     CanBus, CrsfBlock, HeartbeatPayload, Peripheral, RadioBlock, RemoteAccess,
