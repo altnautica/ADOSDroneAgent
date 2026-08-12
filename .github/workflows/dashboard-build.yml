@@ -1,14 +1,24 @@
 name: dashboard-build
 
+# The agent serves the COMMITTED bundle under src/ados/dashboard/static/, not a
+# build produced at install time. A change merged to dashboard/src without
+# re-running scripts/build-dashboard.sh therefore ships the OLD screen to every
+# node while the source says otherwise — a bug that presents as "the fix did not
+# work" and costs a rig session to find. The cockpit workflow has guarded this
+# since it was written; the dashboard, which is the surface the rule was written
+# for, did not.
+
 on:
   push:
     paths:
       - "dashboard/**"
+      - "src/ados/dashboard/static/**"
       - "scripts/build-dashboard.sh"
       - ".github/workflows/dashboard-build.yml"
   pull_request:
     paths:
       - "dashboard/**"
+      - "src/ados/dashboard/static/**"
       - "scripts/build-dashboard.sh"
 
 jobs:
@@ -47,3 +57,26 @@ jobs:
           test -d dashboard/dist/assets || true
           ls -la dashboard/dist
           du -sh dashboard/dist
+
+      # Rebuild through the real staging script and fail if the committed bundle
+      # differs. Compares CONTENT rather than the asset filenames alone: Vite
+      # hashes its output, so a changed bundle almost always renames, but a
+      # change that happened to keep a name would otherwise slip through.
+      - name: Committed bundle matches source
+        run: |
+          set -euo pipefail
+          scripts/build-dashboard.sh >/dev/null
+          # `git status --porcelain`, not `git diff`: Vite emits content-hashed
+          # asset names, so a rebuilt bundle arrives as an UNTRACKED new file
+          # alongside a deleted old one. `git diff` reports only tracked paths
+          # and would miss a change whose sole evidence is the added file.
+          drift="$(git status --porcelain -- src/ados/dashboard/static)"
+          if [ -n "$drift" ]; then
+            echo "::error::The committed dashboard bundle under src/ados/dashboard/static/ is stale."
+            echo "The agent serves the COMMITTED bundle, so this change would not reach a node."
+            echo "Run scripts/build-dashboard.sh and commit the result in the same change."
+            echo
+            echo "$drift"
+            exit 1
+          fi
+          echo "Committed bundle is in sync with dashboard/src."
