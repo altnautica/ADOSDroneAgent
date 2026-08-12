@@ -310,18 +310,27 @@ fn native_routes() -> Vec<NativeRoute> {
 
 /// The path prefixes the agent keeps in Python by design — the ecosystem-bound
 /// features (vision/AI, the plugin runtime, the setup facade, peripherals,
-/// the WebRTC playback endpoint, the LCD/OLED display surface, calibration). A
-/// request under one of these is a known feature that has not migrated, NOT an
-/// unknown path: when the residual upstream is gone (the zero-Python headless
-/// profile), the proxy answers `501` for these rather than `404`.
-pub const PERMANENT_PYTHON_PREFIXES: [&str; 7] = [
+/// the WebRTC playback endpoint, the LCD/OLED display surface). A request under
+/// one of these is a known feature that has not migrated, NOT an unknown path:
+/// when the residual upstream is gone (the zero-Python headless profile), the
+/// proxy answers `501` for these rather than `404`.
+///
+/// These are the paths as MOUNTED, not as the feature is named. The FastAPI app
+/// includes each router under `/api` and several routers carry their own `/v1`
+/// prefix, so the served path is `/api/v1/setup`, not `/api/setup`. Both the
+/// unversioned and `/v1` forms of peripherals and plugins are live and are
+/// listed separately. Touch-panel calibration needs no entry of its own: those
+/// routes hang off the display and setup routers (`/api/v1/display/calibrate/*`,
+/// `/api/v1/setup/display/calibrate/*`) and are already covered.
+pub const PERMANENT_PYTHON_PREFIXES: [&str; 8] = [
     "/api/vision",
     "/api/plugins",
-    "/api/setup",
+    "/api/v1/plugins",
+    "/api/v1/setup",
     "/api/peripherals",
+    "/api/v1/peripherals",
     "/whep",
-    "/api/display",
-    "/api/calibrate",
+    "/api/v1/display",
 ];
 
 /// How the front handles a `(method, path)`: native, a known permanent-Python
@@ -532,7 +541,53 @@ mod tests {
         assert!(is_permanent_python_path("/api/vision/detections"));
         // A path that only shares the prefix as a substring does NOT match.
         assert!(!is_permanent_python_path("/api/visionary"));
-        assert!(!is_permanent_python_path("/api/setupwizard"));
+        assert!(!is_permanent_python_path("/api/v1/setupwizard"));
+    }
+
+    #[test]
+    fn permanent_prefixes_are_the_paths_python_actually_serves() {
+        // Each entry below is a route the FastAPI app really mounts. The app
+        // includes every router under `/api` (api/server.py) and several routers
+        // declare their own `/v1` prefix, so the served path carries both
+        // segments. A prefix written as the feature is NAMED rather than as it is
+        // MOUNTED matches nothing, and the headless profile then answers 404 —
+        // "no such path" — for a feature that exists and is simply absent from
+        // this build. 501 is the truthful answer.
+        for path in [
+            // routes/setup/__init__.py: APIRouter(prefix="/v1/setup")
+            "/api/v1/setup/state",
+            "/api/v1/setup/cloud",
+            // routes/display.py: APIRouter(prefix="/v1/display")
+            "/api/v1/display/page",
+            // ...and calibration hangs off display + setup, so it needs no entry.
+            "/api/v1/display/calibrate/start",
+            "/api/v1/setup/display/calibrate/start",
+            // routes/peripherals_v1.py: APIRouter(prefix="/v1/peripherals")
+            "/api/v1/peripherals",
+            // routes/peripherals.py: unprefixed, mounted under /api
+            "/api/peripherals/scan",
+            // routes/plugins.py: unprefixed, but one route is declared /v1/...
+            "/api/plugins/install",
+            "/api/v1/plugins/catalog",
+            // routes/vision_models.py + vision_detections.py: unprefixed
+            "/api/vision/models",
+            "/api/vision/detections/latest",
+            // routes/whep.py: mounted at the root, no /api
+            "/whep",
+            "/whep/abc123",
+        ] {
+            assert!(
+                is_permanent_python_path(path),
+                "{path} is served by residual Python but is not covered by \
+                 PERMANENT_PYTHON_PREFIXES, so a headless node answers 404 \
+                 instead of 501"
+            );
+            assert_eq!(
+                classify(&Method::GET, path),
+                RouteMode::Proxied { permanent: true },
+                "{path} should classify as permanently proxied"
+            );
+        }
     }
 
     #[test]
