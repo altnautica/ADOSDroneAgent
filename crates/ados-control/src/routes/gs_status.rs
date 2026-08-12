@@ -282,7 +282,7 @@ fn pair_identity(state: &AppState) -> (Value, Value) {
 /// absent value reads as `null`. Mirrors the Python `pair_manager.status("gs")`
 /// peer resolution.
 fn config_gs_peer(config_path: &Path) -> Value {
-    let raw = load_config_value(config_path);
+    let raw = crate::config::load_config_object(config_path);
     let peer = raw
         .get("video")
         .filter(|v| v.is_object())
@@ -306,7 +306,7 @@ fn config_gs_peer(config_path: &Path) -> Value {
 /// `"direct"` when the section / field is absent or non-string. Mirrors the Python
 /// `getattr(app.config.ground_station, "role", "direct")`.
 fn ground_station_config_role(config_path: &Path) -> String {
-    load_config_value(config_path)
+    crate::config::load_config_object(config_path)
         .get("ground_station")
         .filter(|v| v.is_object())
         .and_then(|g| g.get("role"))
@@ -566,7 +566,7 @@ const AP_GATEWAY_IP: &str = "192.168.4.1";
 /// AP unit is down, `ap_ip` is null (the manager's status reports the gateway only
 /// while up), while `ap_ssid` still resolves off config.
 fn network_view(state: &AppState) -> Value {
-    let cfg = load_config_value(&state.pairing_paths.config);
+    let cfg = crate::config::load_config_object(&state.pairing_paths.config);
     let running = hostapd_running();
     network_view_compose(&ap_ssid_from_config(&cfg), running)
 }
@@ -1094,20 +1094,6 @@ fn read_public_fingerprint(path: &Path) -> Option<String> {
     let mut out = [0u8; 8];
     hasher.finalize_variable(&mut out).ok()?;
     Some(hex::encode(out))
-}
-
-/// Load `/etc/ados/config.yaml` as a raw JSON value (objects/arrays/scalars
-/// preserved), tolerating absence / a parse error / a non-object root with an empty
-/// object. Mirrors the Python `_load_config_dict`.
-fn load_config_value(path: &Path) -> Value {
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(_) => return json!({}),
-    };
-    match serde_norway::from_str::<Value>(&text) {
-        Ok(v) if v.is_object() => v,
-        _ => json!({}),
-    }
 }
 
 /// A numeric signal value, or `None` if absent / non-numeric. A JSON `bool` is not

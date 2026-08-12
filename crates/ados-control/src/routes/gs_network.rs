@@ -165,7 +165,7 @@ pub async fn get_ground_station_network(State(state): State<AppState>) -> Respon
     if !is_ground_station() {
         return profile_mismatch();
     }
-    let cfg = load_config_value();
+    let cfg = crate::config::load_config_object_default();
     let active_uplink = latest_uplink_active(&state).await.unwrap_or(Value::Null);
     let body = json!({
         "ap": ap_view(&cfg),
@@ -962,28 +962,6 @@ fn de_chunk(body: &[u8]) -> Vec<u8> {
 // ---------------------------------------------------------------------------
 // Config + file helpers.
 // ---------------------------------------------------------------------------
-
-/// Load `/etc/ados/config.yaml` (or the `ADOS_CONFIG` override) as a raw JSON
-/// value, tolerating absence / a parse error / a non-object root with an empty
-/// object. Used for the `ap` (hotspot) and `share_uplink` legs.
-fn load_config_value() -> Value {
-    let path =
-        std::env::var("ADOS_CONFIG").unwrap_or_else(|_| crate::config::CONFIG_YAML.to_string());
-    load_yaml_object(Path::new(&path))
-}
-
-/// Read a YAML file into a JSON object value, or `{}` on absence / parse error /
-/// non-object root.
-fn load_yaml_object(path: &Path) -> Value {
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(_) => return json!({}),
-    };
-    match serde_norway::from_str::<Value>(&text) {
-        Ok(v) if v.is_object() => v,
-        _ => json!({}),
-    }
-}
 
 /// Read a JSON file into its object map, or `None` on absence / parse error /
 /// non-object root. Used for the priority / modem / wifi-client side-files.

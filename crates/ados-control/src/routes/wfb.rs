@@ -655,7 +655,7 @@ pub async fn get_wfb_pair_status(State(state): State<AppState>) -> Json<Value> {
     // PyYAML's loader (so the Python read demotes it to null via `isinstance(str)`),
     // while this YAML parser flattens it back to a string, so the timestamp-shaped
     // string is demoted to null here too to keep the two reads byte-identical.
-    let raw = load_config_value(&paths.config);
+    let raw = crate::config::load_config_object(&paths.config);
     let wfb_section = raw
         .get("video")
         .filter(|v| v.is_object())
@@ -776,20 +776,6 @@ fn current_role(config_profile: &str) -> (String, String) {
     let (profile, _role) = crate::profile::current_profile_and_role(config_profile);
     let bind_role = if profile == "drone" { "drone" } else { "gs" };
     (profile, bind_role.to_string())
-}
-
-/// Load `/etc/ados/config.yaml` as a raw JSON value (objects/arrays/scalars
-/// preserved), tolerating absence / a parse error / a non-object root with an
-/// empty object. Mirrors the Python `_load_config_dict` for the pair-status read.
-fn load_config_value(path: &Path) -> Value {
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(_) => return json!({}),
-    };
-    match serde_norway::from_str::<Value>(&text) {
-        Ok(v) if v.is_object() => v,
-        _ => json!({}),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1569,7 +1555,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg_path = dir.path().join("config.yaml");
         std::fs::write(&cfg_path, "agent:\n  profile: drone\n").unwrap();
-        let raw = load_config_value(&cfg_path);
+        let raw = crate::config::load_config_object(&cfg_path);
         // Drive the pieces the handler composes, without the AppState wiring.
         let (_profile, role) = current_role("drone");
         assert_eq!(role, "drone");

@@ -229,6 +229,36 @@ impl ControlSecurityConfig {
     }
 }
 
+/// Read the agent config as an untyped object for the routes that project a
+/// handful of raw fields rather than deserializing a typed slice.
+///
+/// Always an object: a missing file, an unreadable one, a parse failure, and a
+/// YAML document that is not a mapping all yield `{}`, so callers can index
+/// straight into it. What changes versus reading it inline is that a
+/// PRESENT-but-malformed file now logs the parser error (which names the
+/// offending field) instead of being indistinguishable from an absent one — the
+/// case where a typo in the config reads on the status surface as "this feature
+/// is simply not configured".
+///
+/// Deliberately the quiet-sidecar helper, not `write_config_status`: these are
+/// per-request readers, and publishing a service-level status sidecar on every
+/// request is a startup concern, matching the note on the pairing reader above.
+pub fn load_config_object(path: &Path) -> serde_json::Value {
+    let value: serde_json::Value = ados_config::load_yaml_or_default(path, "control");
+    if value.is_object() {
+        value
+    } else {
+        serde_json::json!({})
+    }
+}
+
+/// [`load_config_object`] against the configured config path, honoring the
+/// `ADOS_CONFIG` override the systemd unit sets.
+pub fn load_config_object_default() -> serde_json::Value {
+    let path = std::env::var("ADOS_CONFIG").unwrap_or_else(|_| CONFIG_YAML.to_string());
+    load_config_object(Path::new(&path))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,6 +274,50 @@ mod tests {
         let mut f = std::fs::File::create(&p).unwrap();
         f.write_all(body.as_bytes()).unwrap();
         p
+    }
+
+    #[test]
+    fn load_config_object_is_always_an_object() {
+        // The routes index straight into the result, so every failure mode has
+        // to land on `{}` rather than null/scalar. These four cases are the
+        // contract the per-route readers had before they shared one loader; the
+        // only intended change is that the malformed case now logs the parser
+        // error instead of being silently identical to the absent one.
+
+        // Absent — the normal fresh-node case.
+        assert_eq!(
+            load_config_object(Path::new("/nonexistent/ados/config.yaml")),
+            serde_json::json!({})
+        );
+
+        // Present but malformed. Asserted to be a genuine parse failure first:
+        // if this text merely parsed to a non-mapping it would still land on
+        // `{}` and the case would pass without ever exercising the loud path.
+        let malformed = "agent: {device_id: [unclosed\n  bad";
+        assert!(
+            serde_norway::from_str::<serde_json::Value>(malformed).is_err(),
+            "fixture must be a parse error, otherwise this case proves nothing"
+        );
+        let bad = temp_yaml("obj-malformed", malformed);
+        assert_eq!(load_config_object(&bad), serde_json::json!({}));
+
+        // Parses cleanly, but the root is not a mapping — a distinct path from
+        // the one above, and the reason the object coercion exists at all.
+        let scalar_text = "just-a-string\n";
+        let parsed = serde_norway::from_str::<serde_json::Value>(scalar_text)
+            .expect("fixture must parse, to separate this case from the malformed one");
+        assert!(!parsed.is_object());
+        let scalar = temp_yaml("obj-scalar", scalar_text);
+        assert_eq!(load_config_object(&scalar), serde_json::json!({}));
+
+        // The happy path still projects the mapping through untouched.
+        let good = temp_yaml(
+            "obj-good",
+            "agent:\n  name: test-drone\nvideo:\n  mode: disabled\n",
+        );
+        let v = load_config_object(&good);
+        assert_eq!(v["agent"]["name"], "test-drone");
+        assert_eq!(v["video"]["mode"], "disabled");
     }
 
     #[test]

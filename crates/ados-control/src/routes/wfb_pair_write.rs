@@ -175,7 +175,7 @@ fn read_pair_status(config_path: &Path, key_dir: &Path, role: &str) -> PairStatu
     // Peer / paired-at / auto-pair off the raw config dict, mirroring the residual
     // `_load_config_dict()` read (a present-but-non-string peer/paired-at reads as
     // null, an absent auto-pair flag defaults to true).
-    let raw = load_config_value(config_path);
+    let raw = crate::config::load_config_object(config_path);
     let wfb_section = raw
         .get("video")
         .filter(|v| v.is_object())
@@ -239,20 +239,6 @@ fn read_public_fingerprint(path: &Path) -> Option<String> {
     let mut out = [0u8; 8];
     hasher.finalize_variable(&mut out).ok()?;
     Some(hex::encode(out))
-}
-
-/// Load `/etc/ados/config.yaml` as a raw JSON value (objects/arrays/scalars
-/// preserved), tolerating absence / a parse error / a non-object root with an
-/// empty object. Mirrors the residual `_load_config_dict` read.
-fn load_config_value(path: &Path) -> Value {
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(_) => return json!({}),
-    };
-    match serde_norway::from_str::<Value>(&text) {
-        Ok(v) if v.is_object() => v,
-        _ => json!({}),
-    }
 }
 
 /// The `paired_at` field value the status read reports, mirroring the residual
