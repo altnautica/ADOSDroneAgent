@@ -927,9 +927,15 @@ mod tests {
     use super::*;
     use serde_json::Value;
 
-    /// Fixtures captured verbatim from the Python `build_encoder_command` +
-    /// `wrap_with_sei_inject` by `tests/capture_encoder_fixtures.py`. See the
-    /// module test for how each case maps onto the Rust builder.
+    /// The frozen argv vectors this builder must reproduce byte for byte.
+    ///
+    /// Originally captured from the Python encoder that this module replaced, by
+    /// a script that mocked every runtime probe (the Rockchip `/proc` read, the
+    /// ffmpeg and gst-inspect probes, `sys.executable`) so each vector was
+    /// deterministic on any host. Both the Python builder and that script are
+    /// deleted: this file IS the reference now, and a new case is written here
+    /// by hand rather than captured. See the module test for how each case maps
+    /// onto the Rust builder.
     const FIXTURES: &str = include_str!("../tests/encoder_fixtures.json");
 
     /// The pinned interpreter path the capture script used for `sys.executable`.

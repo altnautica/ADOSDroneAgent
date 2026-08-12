@@ -57,6 +57,15 @@ the project follows [Semantic Versioning](https://semver.org/).
   current architecture, so it is gone rather than replaced by a different
   measurement wearing the old label.
 
+- **The Python encoder command builder, 814 lines.** The native encoder has
+  owned the live path since the video service cut over; this module's only
+  remaining reader was a hand-run script that replayed it into the byte-parity
+  fixtures the Rust tests assert against. Those fixtures are committed and
+  exercised by 29 tests, so the reference had already been captured and the
+  module was a second implementation kept only to reproduce numbers that are
+  written down. The script goes with it, and the fixture file now says plainly
+  that it is the reference and a new case is written by hand.
+
 - **The `use_gst_air_pipeline` toggle.** It selected between two air-side
   pipelines, one of which no longer exists. Nothing read it, yet its default ran
   an SoC detect and a file read on every config load in every Python service, and
