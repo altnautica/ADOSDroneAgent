@@ -86,14 +86,13 @@ impl Step for Start {
             );
         }
 
-        // The native plugin host owns the per-plugin sockets by default and is
-        // PartOf the supervisor, so the restart above stopped it; bring it back
-        // unless the fallback marker pins the packaged path. A fresh box must
-        // come up with the native host serving the plugin sockets and zero
-        // manual steps. Cross-profile (both profiles fetch the binary).
-        if !Path::new(CONFIG_DIR)
-            .join("plugin-host-python-fallback")
-            .exists()
+        // The native plugin host owns the per-plugin sockets and is PartOf the
+        // supervisor, so the restart above stopped it; bring it back. There is no
+        // longer a packaged host to pin instead, so this is unconditional; the
+        // unit's ConditionPathExists keeps a box whose binary has not landed yet
+        // inactive rather than restart-looping. A fresh box must come up with the
+        // native host serving the plugin sockets and zero manual steps.
+        // Cross-profile (both profiles fetch the binary).
         {
             let _ = exec::run(
                 "systemctl",

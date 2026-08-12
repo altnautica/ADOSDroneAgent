@@ -129,15 +129,12 @@ _FLAG_GATED: dict[str, _FlagGated] = {
         profiles=("ground-station",),
     ),
     "plugin-host": _FlagGated(
-        # Cut over: native is the default. The host runs its native binary
-        # whenever the binary is present; the plugin-host-python-fallback
-        # marker pins the packaged host server instead. The two are mutually
-        # exclusive (both bind /run/ados/plugins/<id>.sock), so exactly one
-        # owns the per-plugin sockets at a time.
-        flag="plugin-host-python-fallback",
+        # Native-only (like net, radio and groundlink): the packaged host
+        # server was deleted, so there is no Python fallback to pin. The
+        # native binary owns the per-plugin sockets whenever it is present.
+        flag=None,
         binaries=("ados-plugin-host",),
         profiles=("drone", "ground-station"),
-        opt_out=True,
     ),
     "hid": _FlagGated(
         # Native-only: the packaged PIC arbiter + input manager were deleted, so

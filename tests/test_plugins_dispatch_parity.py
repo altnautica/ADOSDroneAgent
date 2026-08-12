@@ -21,15 +21,11 @@ These tests pin the Python side of that contract:
 
 from __future__ import annotations
 
-import pytest
-
 from ados.plugins._dispatch_generated import (
     INLINE_GATED,
     KNOWN_METHODS,
     REQUIRED_CAP,
 )
-from ados.plugins.ipc.dispatch import build_dispatch_table
-from ados.plugins.ipc_server import PluginIpcServer
 
 # The canonical method -> required-cap mapping. Locked here so a drift in the
 # generated table (or an accidental hand-edit) is a test failure. The Rust
@@ -105,38 +101,6 @@ def test_inline_gated_set_is_the_payload_gated_methods() -> None:
     )
     for method in INLINE_GATED:
         assert REQUIRED_CAP[method] is None
-
-
-def test_build_dispatch_table_sources_cap_from_generated_table() -> None:
-    table = build_dispatch_table(PluginIpcServer)
-    # Every method the Python host can route takes its required cap from the
-    # generated table, never a literal.
-    for method, (_handler, requires) in table.items():
-        assert method in REQUIRED_CAP, f"{method} not in the generated table"
-        assert requires == REQUIRED_CAP[method], (
-            f"{method} cap {requires!r} disagrees with the generated "
-            f"table {REQUIRED_CAP[method]!r}"
-        )
-
-
-def test_dispatch_table_refuses_a_handler_missing_from_generated_table() -> None:
-    # A handler registered for a method the generated table does not know would
-    # run with no gate. The builder refuses to construct the table.
-    class _Server(PluginIpcServer):
-        pass
-
-    import ados.plugins.ipc.dispatch as dispatch_mod
-
-    original = dispatch_mod.REQUIRED_CAP
-    try:
-        # Drop a known method so its handler row has no generated cap.
-        dispatch_mod.REQUIRED_CAP = {
-            k: v for k, v in original.items() if k != "ping"
-        }
-        with pytest.raises(RuntimeError, match="not in the generated"):
-            build_dispatch_table(_Server)
-    finally:
-        dispatch_mod.REQUIRED_CAP = original
 
 
 def test_vision_methods_are_gated_in_the_generated_table() -> None:

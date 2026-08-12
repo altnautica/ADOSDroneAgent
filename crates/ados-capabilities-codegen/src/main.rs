@@ -333,10 +333,10 @@ fn emit_python_dispatch(methods: &[MethodRow]) -> String {
     out.push_str("\"\"\"Generated plugin RPC dispatch gate (data only).\n\n");
     out.push_str(
         "The source of truth is the ``[[method]]`` section of\n\
-         crates/ados-protocol/capabilities.toml. ``ipc/dispatch.py`` imports\n\
-         ``REQUIRED_CAP`` and looks the required cap up from it instead of\n\
-         carrying its own copy, so the Rust host and the Python host cannot\n\
-         drift — and so a method can never be routed without its gate.\n\"\"\"\n\n",
+         crates/ados-protocol/capabilities.toml. The native host owns dispatch;\n\
+         the plugin runtime (``plugins/ipc_client.py``) reads ``REQUIRED_CAP``\n\
+         from here rather than carrying its own copy, so the two halves of the\n\
+         wire contract cannot drift.\n\"\"\"\n\n",
     );
     out.push_str("from __future__ import annotations\n\n");
 

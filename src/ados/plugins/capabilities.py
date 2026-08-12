@@ -5,11 +5,11 @@ declare. Manifest validation accepts strings here as opaque
 permission identifiers; per-capability enforcement gates land
 incrementally as the surfaces they protect ship.
 
-Today ``event.publish`` and ``event.subscribe`` are enforced (see
-:mod:`ados.plugins.events`). The rest are recorded in plugin state
-and surfaced in the install dialog risk badge, but no runtime gate
-rejects an action because of them yet. Treat the un-enforced caps
-as advisory until the relevant subsystem ships its check.
+Enforcement lives with the native host, which gates every wire method
+against the required cap in the generated dispatch table before the
+handler runs. The caps with no gated method behind them yet are
+recorded in plugin state and surfaced at install time; treat those as
+advisory until the relevant subsystem ships its check.
 
 Each capability ID also has a :class:`CapabilityMeta` entry in
 :data:`CAPABILITY_CATALOG`. The catalog supplies human-readable

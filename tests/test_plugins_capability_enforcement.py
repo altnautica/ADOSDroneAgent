@@ -1,21 +1,17 @@
-"""Capability runtime enforcement tests.
+"""Capability catalog + grant-helper tests.
 
-Two layers covered:
+Covers ``ados.plugins.capabilities`` against supervisor state
+(``get_granted_caps``, ``has_capability``, ``require_capability``) and pins the
+generated catalog so a codegen change surfaces in review.
 
-1. ``ados.plugins.capabilities`` helpers against supervisor state
-   (``get_granted_caps``, ``has_capability``, ``require_capability``).
-2. The IPC server's per-method capability gate. The dispatcher rejects
-   ungranted callers with ``capability_denied: <cap>`` before the
-   handler is reached. Granted callers reach the stub handler and get
-   the not_implemented response.
+The per-method dispatch gate is NOT covered here any more. That gate lives in
+the native host, and the tests that exercised it drove the packaged Python host
+server, which no longer exists. The equivalent coverage is the host's own
+capability-enforcement guard, which derives the gated set from the dispatch
+table rather than restating it.
 """
 
 from __future__ import annotations
-
-import shutil
-import tempfile
-from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -28,18 +24,9 @@ from ados.plugins.capabilities import (
     require_capability,
 )
 from ados.plugins.errors import CapabilityDenied
-from ados.plugins.events import EventBus
-from ados.plugins.ipc_client import PluginIpcClient
-from ados.plugins.ipc_server import PluginIpcServer
-from ados.plugins.rpc import Envelope, TokenIssuer
 from ados.plugins.state import PermissionGrant, PluginInstall
 
 PLUGIN_ID = "com.example.gated"
-
-
-# ---------------------------------------------------------------------
-# Helpers and fixtures
-# ---------------------------------------------------------------------
 
 
 class _StubSupervisor:
@@ -75,11 +62,6 @@ def _install_with_perms(plugin_id: str, **grants: bool) -> PluginInstall:
             for pid, g in grants.items()
         },
     )
-
-
-# ---------------------------------------------------------------------
-# Catalog
-# ---------------------------------------------------------------------
 
 
 def test_catalog_size_matches_spec() -> None:
@@ -190,127 +172,3 @@ def test_require_capability_raises_on_missing() -> None:
         require_capability(sup, PLUGIN_ID, "vehicle.command")
     assert excinfo.value.plugin_id == PLUGIN_ID
     assert excinfo.value.capability == "vehicle.command"
-
-
-def test_require_capability_silent_when_granted() -> None:
-    sup = _StubSupervisor(
-        [_install_with_perms(PLUGIN_ID, **{"recording.write": True})]
-    )
-    require_capability(sup, PLUGIN_ID, "recording.write")  # no raise
-
-
-# ---------------------------------------------------------------------
-# IPC dispatch gate
-# ---------------------------------------------------------------------
-
-
-@pytest.fixture
-def short_sock_dir():
-    base = Path(tempfile.mkdtemp(prefix="adpcap", dir="/tmp"))
-    try:
-        yield base
-    finally:
-        shutil.rmtree(base, ignore_errors=True)
-
-
-async def _connected_client(
-    short_sock_dir: Path, granted: set[str]
-) -> tuple[PluginIpcServer, PluginIpcClient]:
-    bus = EventBus()
-    issuer = TokenIssuer()
-    server = PluginIpcServer(
-        bus=bus, token_issuer=issuer, socket_dir=short_sock_dir
-    )
-    sock = await server.start_for_plugin(PLUGIN_ID)
-    token = issuer.mint(plugin_id=PLUGIN_ID, granted_caps=granted)
-    client = PluginIpcClient(
-        plugin_id=PLUGIN_ID, token=token.to_string(), socket_path=sock
-    )
-    await client.connect()
-    return server, client
-
-
-async def _call_method(
-    client: PluginIpcClient, method: str, args: dict[str, Any]
-) -> Envelope:
-    """Send a request via the client's correlation-aware path.
-
-    Uses the private ``_send_request`` so the response is matched by
-    request_id through the client's reader loop, avoiding double-read
-    contention with the high-level ``ping`` / ``event_*`` methods.
-    """
-    return await client._send_request(method, capability=method, args=args)
-
-
-@pytest.mark.asyncio
-async def test_gated_method_denied_without_capability(
-    short_sock_dir: Path,
-) -> None:
-    server, client = await _connected_client(short_sock_dir, granted=set())
-    try:
-        with pytest.raises(CapabilityDenied) as excinfo:
-            await _call_method(client, "telemetry.subscribe", {})
-        assert excinfo.value.capability == "telemetry.read"
-    finally:
-        await client.close()
-        await server.stop_for_plugin(PLUGIN_ID)
-
-
-@pytest.mark.asyncio
-async def test_gated_method_reaches_handler_when_granted(
-    short_sock_dir: Path,
-) -> None:
-    server, client = await _connected_client(
-        short_sock_dir, granted={"telemetry.read"}
-    )
-    try:
-        resp = await _call_method(client, "telemetry.subscribe", {})
-        # Stub returns not_implemented in args; no error envelope.
-        assert resp.error is None
-        assert resp.args.get("error") == "not_implemented"
-        assert resp.args.get("method") == "telemetry.subscribe"
-    finally:
-        await client.close()
-        await server.stop_for_plugin(PLUGIN_ID)
-
-
-@pytest.mark.asyncio
-async def test_each_gated_method_rejects_with_correct_cap(
-    short_sock_dir: Path,
-) -> None:
-    cases = [
-        ("telemetry.subscribe", "telemetry.read"),
-        ("telemetry.extend", "telemetry.extend"),
-        ("mission.read", "mission.read"),
-        ("mission.write", "mission.write"),
-        ("recording.start", "recording.write"),
-        ("recording.stop", "recording.write"),
-        ("mavlink.subscribe", "mavlink.read"),
-        ("mavlink.send", "mavlink.write"),
-    ]
-    server, client = await _connected_client(short_sock_dir, granted=set())
-    try:
-        for method, expected_cap in cases:
-            with pytest.raises(CapabilityDenied) as excinfo:
-                await _call_method(client, method, {})
-            assert excinfo.value.capability == expected_cap, (
-                f"{method} should cite {expected_cap}, "
-                f"got {excinfo.value.capability}"
-            )
-    finally:
-        await client.close()
-        await server.stop_for_plugin(PLUGIN_ID)
-
-
-@pytest.mark.asyncio
-async def test_ungated_method_runs_without_check(
-    short_sock_dir: Path,
-) -> None:
-    """ping has no requires; should work even with empty caps."""
-    server, client = await _connected_client(short_sock_dir, granted=set())
-    try:
-        resp = await client.ping()
-        assert resp["pong"] is True
-    finally:
-        await client.close()
-        await server.stop_for_plugin(PLUGIN_ID)

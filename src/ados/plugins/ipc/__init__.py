@@ -1,19 +1,15 @@
 """Plugin IPC submodules.
 
-Splits the plugin IPC server's handlers out of the main server file
-into per-surface modules so each handler family lives near the host
-service it routes into. The server module keeps the connection /
-handshake / dispatch loop; this package keeps the handler bodies.
+The host half of the plugin RPC surface is native: ``ados-plugin-host`` owns
+the connection, handshake and dispatch loop, and binds the per-plugin sockets.
+What remains here is the plugin-side half, which stays Python because the
+plugin runtime does.
 
 Public surfaces:
 
-* :mod:`ados.plugins.ipc.host_services` — facades the handlers route
-  through (MAVLink router, component registrar, telemetry extender,
-  driver registry, config kv store). The facades hide the concrete
-  host modules and let tests inject fakes.
-* :mod:`ados.plugins.ipc.handlers` — the handler functions themselves.
-* :mod:`ados.plugins.ipc.process_handler` — the spawn handler is
-  isolated because it carries the most threat surface.
+* :mod:`ados.plugins.ipc.context` — the ``ctx`` object a plugin is handed,
+  wrapping the client's request/response calls in the namespaced API a plugin
+  author writes against.
 """
 
 from __future__ import annotations

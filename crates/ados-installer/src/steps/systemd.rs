@@ -103,19 +103,23 @@ const GROUND_STATION_ENABLE_UNITS: &[&str] = &[
 const RETIRED_UNITS: &[&str] = &["ados-scripting.service", "ados-cloud-relay.service"];
 
 /// Cutover marker files retired by a default sense flip or a fallback deletion.
-/// The plugin host moved from an opt-IN marker (`plugin-host-rust-enabled`,
-/// native only when present) to an opt-OUT marker (`plugin-host-python-fallback`,
-/// native by default), so the old opt-in marker carries no meaning. The net
-/// uplink matrix and the mesh relay/receiver are now native-only — their packaged
-/// Python entrypoints were deleted — so BOTH their old opt-in marker
-/// (`net-rust-enabled`) and their fallback markers (`net-python-fallback`,
-/// `groundlink-python-fallback`) are retired outright; they no longer select
-/// anything. The installer deletes these on every run (`prune_legacy_cutover_flags`).
-/// This list must never name an active marker (e.g. an in-use fallback marker like
-/// `plugin-host-python-fallback`), or the installer would erase an operator's pinned
-/// choice on each upgrade.
+/// The net uplink matrix, the mesh relay/receiver and the plugin host are all
+/// native-only now — their packaged Python entrypoints were deleted — so both
+/// their old opt-IN markers (`plugin-host-rust-enabled`, `net-rust-enabled`) and
+/// their fallback markers (`net-python-fallback`, `groundlink-python-fallback`,
+/// `plugin-host-python-fallback`) are retired outright; none of them select
+/// anything any more. The installer deletes these on every run
+/// (`prune_legacy_cutover_flags`).
+///
+/// This list must only ever name a marker whose alternative no longer exists.
+/// Naming a marker that still selects between two live paths would erase an
+/// operator's pinned choice on each upgrade. Retiring one is therefore part of
+/// deleting the path it selected, never a step on its own — a box pinned to a
+/// deleted fallback is a box with nothing running, and the prune is what
+/// recovers it.
 const RETIRED_CUTOVER_FLAGS: &[&str] = &[
     "plugin-host-rust-enabled",
+    "plugin-host-python-fallback",
     "groundlink-python-fallback",
     "net-rust-enabled",
     "net-python-fallback",
@@ -1899,9 +1903,13 @@ mod tests {
         // its old opt-in marker and its fallback marker are meaningless and pruned.
         assert!(RETIRED_CUTOVER_FLAGS.contains(&"net-rust-enabled"));
         assert!(RETIRED_CUTOVER_FLAGS.contains(&"net-python-fallback"));
-        // An active fallback marker (a service still gated on it) must never be in
-        // the retired set, or the installer would erase the operator's pinned choice.
-        assert!(!RETIRED_CUTOVER_FLAGS.contains(&"plugin-host-python-fallback"));
+        // The plugin host is native-only now too: the packaged host server was
+        // deleted, so its fallback marker selects nothing and is pruned. A box
+        // still carrying it has no plugin host at all (the old ExecStart resolved
+        // to /bin/true), so the prune is what recovers it.
+        assert!(RETIRED_CUTOVER_FLAGS.contains(&"plugin-host-python-fallback"));
+        // A marker a live service still gates on must never be in the retired set,
+        // or the installer would erase the operator's pinned choice.
         assert!(!RETIRED_CUTOVER_FLAGS.contains(&"display-python-fallback"));
     }
 
@@ -1934,18 +1942,25 @@ mod tests {
     }
 
     #[test]
-    fn plugin_host_unit_self_gates_to_the_fallback_marker() {
-        // The shipped unit must run the native binary by default and resolve to
-        // /bin/true only when the fallback marker pins the packaged path, and it
-        // must carry an [Install] section so the supervisor pulls it up.
+    fn plugin_host_unit_runs_the_native_binary_directly() {
+        // The shipped unit must exec the native binary with no marker branch --
+        // there is no packaged host to select any more -- and must carry an
+        // [Install] section so the supervisor pulls it up.
         let unit = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../data/systemd/ados-plugin-host.service");
         if let Ok(body) = std::fs::read_to_string(&unit) {
-            assert!(body.contains("plugin-host-python-fallback"), "{body}");
-            assert!(body.contains("/opt/ados/bin/ados-plugin-host"), "{body}");
+            assert!(
+                body.contains("ExecStart=/opt/ados/bin/ados-plugin-host"),
+                "{body}"
+            );
+            assert!(
+                body.contains("ConditionPathExists=/opt/ados/bin/ados-plugin-host"),
+                "{body}"
+            );
             assert!(body.contains("WantedBy=ados-supervisor.service"), "{body}");
-            // The retired opt-in marker must no longer appear in the unit.
+            // Neither retired marker may appear: the unit selects nothing now.
             assert!(!body.contains("plugin-host-rust-enabled"), "{body}");
+            assert!(!body.contains("plugin-host-python-fallback"), "{body}");
         }
     }
 

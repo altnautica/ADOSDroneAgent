@@ -170,46 +170,27 @@ def test_display_opt_out_native_by_default_fallback_marker_forces_hybrid(
     assert compute_runtime_mode("drone", bin_dir=bin_dir, etc_dir=etc_dir) == "hybrid"
 
 
-def test_plugin_host_opt_out_native_by_default_fallback_marker_forces_hybrid(
+def test_plugin_host_native_only_ignores_stray_markers(
     roots: tuple[Path, Path],
 ) -> None:
-    """The plugin host is cut over: native once its binary is present, with no
-    marker. The ``plugin-host-python-fallback`` marker pins the packaged host
-    server, which drops the aggregate to hybrid."""
+    """The plugin host is native-only: native once its binary is present, and
+    either stray marker is ignored (there is no packaged host server to fall
+    back to), so the aggregate stays native."""
     bin_dir, etc_dir = roots
     for b in _CORE:
         _make_bin(bin_dir, b)
     for b in ("ados-radio", "ados-net", "ados-plugin-host",
               "ados-display", "ados-display-probe"):
         _make_bin(bin_dir, b)
-    # radio + net are native-only; display + plugin-host are opt-out (native by
-    # default). None needs a marker.
 
-    # Default: no fallback marker → plugin host native → drone native.
+    # Native once its binary is present → drone native.
     assert compute_runtime_mode("drone", bin_dir=bin_dir, etc_dir=etc_dir) == "native"
 
-    # Pin the packaged fallback → plugin host non-native → hybrid.
-    _touch_flag(etc_dir, "plugin-host-python-fallback")
-    assert compute_runtime_mode("drone", bin_dir=bin_dir, etc_dir=etc_dir) == "hybrid"
-
-
-def test_plugin_host_opt_out_ignores_legacy_opt_in_marker(
-    roots: tuple[Path, Path],
-) -> None:
-    """The retired opt-in marker no longer selects the plugin host. With the
-    binary present and no fallback marker the host is native; a stray legacy
-    ``plugin-host-rust-enabled`` marker is ignored and does not change that."""
-    bin_dir, etc_dir = roots
-    bin_dir.mkdir(parents=True, exist_ok=True)
-    etc_dir.mkdir(parents=True, exist_ok=True)
-    _make_bin(bin_dir, "ados-plugin-host")
-    assert is_service_native("plugin-host", bin_dir=bin_dir, etc_dir=etc_dir)
-    # A stray legacy opt-in marker is ignored — the host stays native.
+    # Neither the retired opt-in marker nor the retired fallback marker selects
+    # anything now; a box still carrying one must not read as hybrid.
     _touch_flag(etc_dir, "plugin-host-rust-enabled")
-    assert is_service_native("plugin-host", bin_dir=bin_dir, etc_dir=etc_dir)
-    # The fallback marker pins the packaged path → not native.
     _touch_flag(etc_dir, "plugin-host-python-fallback")
-    assert not is_service_native("plugin-host", bin_dir=bin_dir, etc_dir=etc_dir)
+    assert compute_runtime_mode("drone", bin_dir=bin_dir, etc_dir=etc_dir) == "native"
 
 
 def test_radio_native_only_ignores_fallback_marker(

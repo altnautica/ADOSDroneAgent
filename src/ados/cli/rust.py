@@ -86,18 +86,10 @@ _SERVICES: dict[str, _Service] = {
     # net is native-only (like radio + groundlink): the native ados-net daemon
     # always runs and the packaged Python entrypoints were deleted, so there is
     # no flag to toggle — it is intentionally absent from this toggle registry.
-    "plugin-host": _Service(
-        # Cut over: native is the default. The unit's ExecStart runs the
-        # native binary unless the fallback marker pins the packaged host
-        # server (served by the supervisor). `enable` removes the marker,
-        # `disable` writes it. The two share the per-plugin sockets, so
-        # exactly one is the active owner.
-        flag="plugin-host-python-fallback",
-        binaries=("/opt/ados/bin/ados-plugin-host",),
-        swap_units=("ados-plugin-host",),
-        note="native plugin host (default); the fallback marker pins the packaged path",
-        opt_out=True,
-    ),
+    # plugin-host is native-only (like net): the packaged host server was
+    # deleted, so the native binary always owns the per-plugin sockets and
+    # there is no fallback to switch to. Intentionally absent from this
+    # toggle registry.
     # hid is native-only (no toggle): the packaged PIC arbiter + input manager
     # were deleted, so ados-pic + ados-input always run on a ground station and
     # absorb ados-buttons unconditionally (the installer masks it). Not listed

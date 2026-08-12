@@ -2,10 +2,10 @@
 """Generated plugin RPC dispatch gate (data only).
 
 The source of truth is the ``[[method]]`` section of
-crates/ados-protocol/capabilities.toml. ``ipc/dispatch.py`` imports
-``REQUIRED_CAP`` and looks the required cap up from it instead of
-carrying its own copy, so the Rust host and the Python host cannot
-drift — and so a method can never be routed without its gate.
+crates/ados-protocol/capabilities.toml. The native host owns dispatch;
+the plugin runtime (``plugins/ipc_client.py``) reads ``REQUIRED_CAP``
+from here rather than carrying its own copy, so the two halves of the
+wire contract cannot drift.
 """
 
 from __future__ import annotations
