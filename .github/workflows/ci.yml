@@ -36,39 +36,22 @@ jobs:
 
       - name: Demo boots
         # `ados demo` is the supported no-hardware path and nothing else in CI
-        # boots it. Cheap enough to run on every matrix leg, and the failure it
-        # catches -- a module the demo path imports going away -- is one the unit
-        # tests only partially cover, since the one test that touches the demo
-        # command drives the CLI with the app mocked out and so cannot see a
-        # process that starts and then fails to serve.
+        # boots it. The failure it catches -- a module the demo path imports
+        # going away -- is one the unit tests only partially cover, since the
+        # single test touching the demo command drives the CLI with the app
+        # mocked out and so cannot see a process that starts and then fails to
+        # serve.
+        #
+        # Once, not once per matrix leg: nothing on the demo path is
+        # version-sensitive (the tree carries no PEP 695 syntax and the floor is
+        # 3.11), so three boots would cost three times as much to learn the same
+        # thing. macOS is verified locally rather than on a runner -- see the
+        # note in scripts/smoke-demo.sh.
+        if: matrix.python-version == '3.11'
         run: bash scripts/smoke-demo.sh
 
       - name: Run tests
         run: pytest -v
-
-  # macOS is a first-class target for `ados demo` specifically: it is the
-  # no-hardware path a developer runs on a laptop, with no SBC and no sudo. The
-  # Linux leg above cannot speak for it -- board detection, the runtime dir and
-  # the mDNS stack all take different branches here -- so the one command that
-  # is supposed to work on a Mac is checked on a Mac. Only the demo boot runs
-  # here; the unit suite stays on Linux where the optional extras install.
-  demo-macos:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-
-      - name: Install
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
-
-      - name: Demo boots
-        run: bash scripts/smoke-demo.sh
 
   # The prebuilt catalog's signing coverage is a checked fact, not an
   # assumption. It has silently regressed three separate ways: a job whose

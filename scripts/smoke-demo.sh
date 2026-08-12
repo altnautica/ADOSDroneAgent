@@ -21,7 +21,15 @@
 #   3. No service reported a failure and no traceback was printed. A service
 #      that dies still leaves HTTP serving, so a status code alone would miss it.
 #   4. The REST API answers with a real config document, not merely a 200.
-#   5. SIGTERM shuts it down cleanly and promptly.
+#   5. No service dies in the settle window after startup (see SETTLE_SECONDS).
+#   6. SIGTERM shuts it down cleanly and promptly.
+#
+# macOS is NOT covered by a CI leg, deliberately: a macOS runner is billed at a
+# multiple of a Linux one, and this is a cheap check to run by hand. Run it on
+# the Mac (or the Linux VM) before shipping anything that touches the demo path.
+# The two platforms differ in ways this script cannot paper over -- board
+# detection, the runtime-dir base, and the mDNS stack all branch -- so a green
+# Linux leg is not evidence about macOS.
 #
 # Usage:  scripts/smoke-demo.sh [port]
 # Exits 0 on success; on failure prints the captured log and exits non-zero.
@@ -34,14 +42,25 @@ WORK="$(mktemp -d)"
 LOG="${WORK}/demo.log"
 PID=""
 
-# Keep the demo off the real runtime dir and off any real pairing state.
+# Keep the demo off every real path base. There are three independent ones and
+# overriding only the run dir leaves the Linux run reaching /etc/ados and
+# /var/ados, where it passes only because the two startup writes there happen to
+# swallow PermissionError. That is luck, not isolation, and it also made the
+# Linux and macOS runs exercise different trees -- on macOS all three already
+# fall back under HOME.
 export ADOS_RUN_DIR="${WORK}/run"
+export ADOS_ETC_DIR="${WORK}/etc"
+export ADOS_VAR_DIR="${WORK}/var"
 export HOME="${WORK}/home"
-mkdir -p "$ADOS_RUN_DIR" "$HOME"
+mkdir -p "$ADOS_RUN_DIR" "$ADOS_ETC_DIR" "$ADOS_VAR_DIR" "$HOME"
 
 cleanup() {
     if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
-        kill -9 "$PID" 2>/dev/null || true
+        # The group, not just the parent: `ados demo` spawns the MAVLink router
+        # as a child when one is installed, and killing only the parent leaves it
+        # running. Harmless on a CI runner where no router exists; on a dev
+        # machine it orphans a live process on every failed run.
+        kill -9 -- "-$PID" 2>/dev/null || kill -9 "$PID" 2>/dev/null || true
     fi
     rm -rf "$WORK"
 }
@@ -56,9 +75,18 @@ fail() {
 }
 
 command -v ados >/dev/null 2>&1 || fail "the 'ados' CLI is not on PATH; install the package first"
+# Guarded so a missing tool reports itself. Without this the readiness loop
+# just times out and blames the agent for not answering.
+command -v curl >/dev/null 2>&1 || fail "curl is required by this script but is not on PATH"
+command -v python3 >/dev/null 2>&1 || fail "python3 is required by this script but is not on PATH"
 
 echo "smoke-demo: starting 'ados demo --port ${PORT}'"
 cd "$REPO_ROOT" || fail "could not enter the repo root ${REPO_ROOT}"
+# Job control on, so the background job becomes its own process-group leader and
+# cleanup can kill the group. Without this `&` leaves the child in the script's
+# own group, `kill -- -$PID` has no group to name, and the "kill the group" in
+# cleanup would quietly fall back to killing only the parent.
+set -m
 ados demo --port "$PORT" >"$LOG" 2>&1 &
 PID=$!
 
@@ -77,7 +105,7 @@ for _ in $(seq 1 40); do
     fi
     sleep 1
 done
-[ -n "$ready" ] || fail "the REST API never answered on port ${PORT} within 40s"
+[ -n "$ready" ] || fail "the REST API never answered on port ${PORT} (40 attempts, up to ~2 min against a hung server)"
 
 # 2. Service registration finished. Without this, a process that bound the port
 #    and then stalled would still pass.
@@ -123,7 +151,29 @@ if missing:
     raise SystemExit(f"config document is missing {missing}")
 PY
 
-# 5. Clean, prompt shutdown on SIGTERM -- the signal systemd and CI both send.
+# 5. Watch a little longer for a service that dies AFTER registration finished.
+#    Step 3 runs the instant `agent_started` appears, and the failures a deletion
+#    causes often surface when a loop first touches the missing thing rather than
+#    at import -- so the interesting death is usually a second or two later, not
+#    at startup.
+#
+#    The window is bounded and stated rather than implied: SETTLE_SECONDS after
+#    registration. A boot check cannot speak for a service that dies minutes in;
+#    that is what the runtime service tracker is for. Measured: without the
+#    dwell, a canary raising 6s after startup passed this script cleanly, because
+#    everything from readiness to SIGTERM completes in about three seconds.
+SETTLE_SECONDS=8
+for _ in $(seq 1 "$SETTLE_SECONDS"); do
+    if grep -qE "service_failed|Traceback \(most recent call last\)" "$LOG"; then
+        fail "a service failed after startup completed (see the log below)"
+    fi
+    if ! kill -0 "$PID" 2>/dev/null; then
+        fail "the demo process exited on its own after startup completed"
+    fi
+    sleep 1
+done
+
+# 6. Clean, prompt shutdown on SIGTERM -- the signal systemd and CI both send.
 kill -TERM "$PID" 2>/dev/null || fail "could not signal the demo process"
 stopped=""
 for _ in $(seq 1 20); do
