@@ -381,7 +381,18 @@ async fn set_wfb_tx_power_at(socket: &Path, config_path: &Path, requested: i64) 
     //    driver's effective value, then return the success body. A persist failure
     //    does not change the response, matching the FastAPI route (which ignores
     //    the `_persist_tx_power` boolean result).
-    let _ = persist_tx_power(config_path, requested);
+    if let Err(e) = persist_tx_power(config_path, requested) {
+        // The radio accepted the value, so the response still reports success:
+        // what failed is only durability. Naming it here is the difference
+        // between "the setting reverted after a reboot" being diagnosable and
+        // being a mystery.
+        tracing::error!(
+            path = %config_path.display(),
+            requested_dbm = requested,
+            error = %e,
+            "tx power applied to the radio but not persisted; it will revert on restart"
+        );
+    }
 
     (
         StatusCode::OK,
@@ -463,10 +474,15 @@ fn norway_to_i64(v: &serde_norway::Value) -> Option<i64> {
 /// config at `path` so the operator's tuning survives a service restart,
 /// preserving every other config key. Reads the full config as a YAML value,
 /// navigates/creates `video.wfb`, sets the field, and writes via a tmp sibling +
-/// rename. Returns `true` on success, `false` on any read/parse/write fault (the
-/// route ignores the result, matching the FastAPI `_persist_tx_power` boolean it
-/// never inspects). Mirrors the Python `_persist_wfb_fields({"tx_power_dbm": ...})`.
-fn persist_tx_power(path: &Path, dbm: i64) -> bool {
+/// rename.
+///
+/// `Err` carries why the persist failed. The HTTP response is deliberately
+/// unchanged by a failure here (the radio already accepted the value; the write
+/// only decides whether it survives a restart), but the reason must not vanish:
+/// without it a config the service cannot write looks identical to a successful
+/// save, and the setting silently reverts on the next reboot with nothing in the
+/// log to explain it. The caller logs the message.
+fn persist_tx_power(path: &Path, dbm: i64) -> Result<(), String> {
     use serde_norway::Value as Yaml;
 
     // Load the existing config (an absent / non-mapping file starts from an empty
@@ -484,7 +500,7 @@ fn persist_tx_power(path: &Path, dbm: i64) -> bool {
     {
         let root = match data.as_mapping_mut() {
             Some(m) => m,
-            None => return false,
+            None => return Err("config root is not a mapping".to_string()),
         };
         let video = root
             .entry(Yaml::String("video".to_string()))
@@ -494,7 +510,7 @@ fn persist_tx_power(path: &Path, dbm: i64) -> bool {
         }
         let video_map = match video.as_mapping_mut() {
             Some(m) => m,
-            None => return false,
+            None => return Err("video section is not a mapping".to_string()),
         };
         let wfb = video_map
             .entry(Yaml::String("wfb".to_string()))
@@ -504,7 +520,7 @@ fn persist_tx_power(path: &Path, dbm: i64) -> bool {
         }
         let wfb_map = match wfb.as_mapping_mut() {
             Some(m) => m,
-            None => return false,
+            None => return Err("video.wfb section is not a mapping".to_string()),
         };
         wfb_map.insert(
             Yaml::String("tx_power_dbm".to_string()),
@@ -514,19 +530,18 @@ fn persist_tx_power(path: &Path, dbm: i64) -> bool {
 
     let body = match serde_norway::to_string(&data) {
         Ok(b) => b,
-        Err(_) => return false,
+        Err(e) => return Err(format!("serializing the merged config failed: {e}")),
     };
-    write_atomic(path, body.as_bytes())
+    write_atomic(path, body.as_bytes()).map_err(|e| format!("writing {}: {e}", path.display()))
 }
 
 /// Write `bytes` to `path` atomically: ensure the parent dir, write a `.tmp`
 /// sibling, then rename over the target. Mirrors the Python tmp-write +
-/// `os.replace` idiom. Returns `false` on any I/O fault.
-fn write_atomic(path: &Path, bytes: &[u8]) -> bool {
+/// `os.replace` idiom. The io error is propagated rather than collapsed into a
+/// bool so a caller can say which step failed and why.
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
-        if std::fs::create_dir_all(parent).is_err() {
-            return false;
-        }
+        std::fs::create_dir_all(parent)?;
     }
     let tmp = {
         let mut ext = path
@@ -536,10 +551,8 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> bool {
         ext.push(".tmp");
         path.with_extension(ext)
     };
-    if std::fs::write(&tmp, bytes).is_err() {
-        return false;
-    }
-    std::fs::rename(&tmp, path).is_ok()
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path)
 }
 
 #[cfg(test)]
@@ -851,7 +864,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.yaml");
         std::fs::write(&cfg, "agent:\n  name: my-drone\n").unwrap();
-        assert!(persist_tx_power(&cfg, 7));
+        persist_tx_power(&cfg, 7).expect("persist should succeed");
 
         let parsed: serde_norway::Value =
             serde_norway::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
@@ -871,7 +884,7 @@ mod tests {
     fn persist_creates_the_file_when_absent() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.yaml");
-        assert!(persist_tx_power(&cfg, 9));
+        persist_tx_power(&cfg, 9).expect("persist should succeed");
         let parsed: serde_norway::Value =
             serde_norway::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
         assert_eq!(
@@ -881,6 +894,55 @@ mod tests {
                 .and_then(|w| w.get("tx_power_dbm"))
                 .and_then(norway_to_i64),
             Some(9)
+        );
+    }
+
+    #[test]
+    fn persist_failure_names_the_path_and_the_cause() {
+        // An unwritable config directory is the realistic version of this: the
+        // radio accepts the new power, the save fails, and the setting reverts
+        // on the next restart. Previously every one of these collapsed to a bare
+        // `false` at the call site, so nothing anywhere said which step failed
+        // or why. The message is what makes that diagnosable.
+        let dir = tempfile::tempdir().unwrap();
+        let readonly = dir.path().join("locked");
+        std::fs::create_dir(&readonly).unwrap();
+        let cfg = readonly.join("config.yaml");
+        std::fs::write(&cfg, "agent:\n  name: my-drone\n").unwrap();
+
+        let mut perms = std::fs::metadata(&readonly).unwrap().permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o500); // r-x: the temp sibling cannot be created
+        }
+        std::fs::set_permissions(&readonly, perms.clone()).unwrap();
+
+        // Confirm the mode actually denies a write for THIS user before relying
+        // on it. Root ignores the mode, so without this the assertion below
+        // would fail for a reason unrelated to the code under test.
+        let enforced = std::fs::write(readonly.join(".probe"), b"x").is_err();
+
+        let err = persist_tx_power(&cfg, 11);
+
+        // Restore before asserting so a failed assert cannot leave an
+        // undeletable temp dir behind.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut restore = perms;
+            restore.set_mode(0o700);
+            std::fs::set_permissions(&readonly, restore).unwrap();
+        }
+
+        if !enforced {
+            return; // running as a user the mode does not bind (e.g. root)
+        }
+
+        let msg = err.expect_err("a read-only config dir must not report success");
+        assert!(
+            msg.contains("config.yaml"),
+            "the message must name the path it failed to write, got: {msg}"
         );
     }
 
