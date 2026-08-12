@@ -339,8 +339,7 @@ mod tests {
         let pairing = dir.path().join("pairing.json");
         std::fs::write(&pairing, r#"{"paired": true, "api_key": "k-secret"}"#).unwrap();
         write_pic(dir.path(), Some("ai-mission")); // the robot itself holds PIC
-        let mut cache =
-            InjectorGateCache::with_paths(pairing, dir.path().join("pic-state.json"));
+        let mut cache = InjectorGateCache::with_paths(pairing, dir.path().join("pic-state.json"));
 
         let now = Instant::now();
         // A claim with no ticket on a PAIRED node cannot verify → unverified →

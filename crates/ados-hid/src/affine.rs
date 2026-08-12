@@ -760,7 +760,10 @@ mod tests {
             ),
         )
         .unwrap();
-        assert!(load(&path).is_some(), "the geometry-blind load still accepts it");
+        assert!(
+            load(&path).is_some(),
+            "the geometry-blind load still accepts it"
+        );
         assert!(
             load_for(&path, (480, 320), 0).is_none(),
             "an untagged blob's geometry cannot be proven, so load_for rejects it"

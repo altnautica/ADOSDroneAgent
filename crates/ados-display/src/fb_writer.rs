@@ -426,7 +426,10 @@ mod tests {
         // No temp sibling is left behind.
         let mut tmp = path.clone().into_os_string();
         tmp.push(".tmp");
-        assert!(!std::path::Path::new(&tmp).exists(), "the temp sibling is renamed away");
+        assert!(
+            !std::path::Path::new(&tmp).exists(),
+            "the temp sibling is renamed away"
+        );
     }
 
     /// A reader hammering the file while the sink writes alternating-size frames
@@ -465,11 +468,15 @@ mod tests {
 
         let mut sink = VirtualSink::open(&path);
         for i in 0..400 {
-            sink.write_frame(if i % 2 == 0 { &large } else { &small }).unwrap();
+            sink.write_frame(if i % 2 == 0 { &large } else { &small })
+                .unwrap();
         }
         stop.store(true, Ordering::Relaxed);
         let (small_seen, large_seen) = reader.join().unwrap();
-        assert!(small_seen && large_seen, "the reader observed both complete frames");
+        assert!(
+            small_seen && large_seen,
+            "the reader observed both complete frames"
+        );
     }
 
     #[test]

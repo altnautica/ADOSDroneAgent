@@ -103,7 +103,11 @@ mod tests {
         assert!(r.push(&f[..mid]).is_empty(), "no frame from the first half");
         assert_eq!(r.pending(), mid);
         let got = r.push(&f[mid..]);
-        assert_eq!(got.len(), 1, "the reassembled frame appears on the second half");
+        assert_eq!(
+            got.len(),
+            1,
+            "the reassembled frame appears on the second half"
+        );
         assert_eq!(got[0].cmd, 200); // MSP_SET_RAW_RC
     }
 
@@ -148,6 +152,9 @@ mod tests {
         for _ in 0..1000 {
             assert!(r.push(&[0u8; 256]).is_empty());
         }
-        assert!(r.pending() <= 256, "a preamble-less stream is drained, not hoarded");
+        assert!(
+            r.pending() <= 256,
+            "a preamble-less stream is drained, not hoarded"
+        );
     }
 }

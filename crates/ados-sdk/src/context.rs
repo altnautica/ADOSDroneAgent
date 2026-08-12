@@ -591,13 +591,19 @@ mod tests {
     #[test]
     fn send_sticks_scales_and_orders_aetr() {
         // Centre sticks + idle throttle: NOT zeros. AETR = [roll, pitch, thr, yaw].
-        assert_eq!(sticks_to_channels(0.0, 0.0, 0.0, 0.0), [1500, 1500, 1000, 1500]);
+        assert_eq!(
+            sticks_to_channels(0.0, 0.0, 0.0, 0.0),
+            [1500, 1500, 1000, 1500]
+        );
         // Full deflection each axis + full throttle, exercising the ordering.
         assert_eq!(
             sticks_to_channels(1.0, -1.0, 1.0, 1.0),
             [2000, 1000, 2000, 2000]
         );
         // Out-of-range clamps rather than wrapping.
-        assert_eq!(sticks_to_channels(5.0, -5.0, 0.0, 2.0), [2000, 1000, 2000, 1500]);
+        assert_eq!(
+            sticks_to_channels(5.0, -5.0, 0.0, 2.0),
+            [2000, 1000, 2000, 1500]
+        );
     }
 }

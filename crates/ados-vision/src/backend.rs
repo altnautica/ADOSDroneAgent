@@ -685,7 +685,10 @@ pub fn select_backend(board_soc: &str, prefs: &BackendPrefs) -> Box<dyn VisionBa
         "rknn" => Box::new(SidecarBackend::new(prefs.rknn_socket_path.clone(), "rknn")),
         // The Pi 5 + AI HAT (Hailo-8) is selected explicitly, not by "auto": the HAT is a PCIe device,
         // not the SoC, so the SoC string (bcm2712) does not reveal it. The Python sidecar owns HailoRT.
-        "hailo" => Box::new(SidecarBackend::new(prefs.hailo_socket_path.clone(), "hailo")),
+        "hailo" => Box::new(SidecarBackend::new(
+            prefs.hailo_socket_path.clone(),
+            "hailo",
+        )),
         "onnx" => {
             #[cfg(feature = "onnx")]
             {

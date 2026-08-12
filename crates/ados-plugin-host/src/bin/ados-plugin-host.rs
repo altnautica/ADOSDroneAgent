@@ -168,7 +168,9 @@ const INJECTOR_TICKET_TTL_SECS: i64 = 3600;
 
 /// The agent config path, `ADOS_CONFIG`-overridable like every other surface.
 fn config_yaml_path() -> PathBuf {
-    PathBuf::from(std::env::var("ADOS_CONFIG").unwrap_or_else(|_| "/etc/ados/config.yaml".to_string()))
+    PathBuf::from(
+        std::env::var("ADOS_CONFIG").unwrap_or_else(|_| "/etc/ados/config.yaml".to_string()),
+    )
 }
 
 /// The pairing file, respecting the same `ADOS_PAIRING_JSON` override the router

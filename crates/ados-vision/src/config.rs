@@ -378,7 +378,10 @@ impl VisionConfig {
 
     /// The accelerator sidecar socket path the Hailo backend talks to (Pi + AI HAT).
     pub fn hailo_socket_path(&self) -> String {
-        format!("{}/vision-hailo.sock", self.socket_dir.trim_end_matches('/'))
+        format!(
+            "{}/vision-hailo.sock",
+            self.socket_dir.trim_end_matches('/')
+        )
     }
 
     /// The default tap socket path for a camera id.
