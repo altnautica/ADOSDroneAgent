@@ -19,7 +19,6 @@ use super::{relay_username, topic_webrtc_answer, topic_webrtc_offer};
 
 /// The local mediamtx WHEP endpoint the offer is posted to. Plaintext loopback:
 /// mediamtx is started by the video service and listens on the SBC's loopback.
-/// Mirrors `_LOCAL_WHEP_URL`.
 pub const LOCAL_WHEP_URL: &str = "http://localhost:8889/main/whep";
 
 /// The result of posting an SDP offer to the local WHEP endpoint.
@@ -41,9 +40,8 @@ pub trait WhepPoster {
 }
 
 /// What to publish on the answer topic for a given offer outcome. The browser
-/// distinguishes an SDP answer (always starts with `v=0`) from a JSON error
-/// (starts with `{`) by a single-character check, so an error is published as a
-/// JSON doc. Mirrors `_handle_offer` + `_publish_error`.
+/// distinguishes an SDP answer (always starts with `v=0`) from a JSON error (starts
+/// with `{`) by a single-character check, so an error is published as a JSON doc.
 pub enum AnswerPayload {
     /// The SDP answer text to publish verbatim.
     Sdp(String),
@@ -69,9 +67,7 @@ impl AnswerPayload {
     }
 }
 
-/// Decide what to publish for an offer outcome. Mirrors `_handle_offer`: a 2xx
-/// yields the SDP answer; a non-2xx yields `{"error":"whep_failed","status":N}`;
-/// a POST exception yields `{"error":"whep_exception","status":0}`.
+/// Decide what to publish for an offer outcome.
 pub fn build_answer(result: WhepResult) -> AnswerPayload {
     match result {
         WhepResult::Answer(sdp) => AnswerPayload::Sdp(sdp),

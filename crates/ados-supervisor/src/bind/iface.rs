@@ -15,9 +15,8 @@ use std::time::Duration;
 use tokio::process::Command;
 use tokio::time::{sleep, Instant};
 
-/// Poll `ip -4 addr show dev <iface>` every [`super::TUNNEL_POLL_INTERVAL`]
-/// until it exits 0 (the tunnel iface exists with an inet addr) or `timeout`
-/// elapses. Mirrors `_wait_for_iface`.
+/// Poll `ip -4 addr show dev <iface>` every [`super::TUNNEL_POLL_INTERVAL`] until it
+/// exits 0 (the tunnel iface exists with an inet addr) or `timeout` elapses.
 pub async fn wait_for_iface(iface: &str, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {

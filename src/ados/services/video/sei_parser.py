@@ -110,8 +110,17 @@ def _iter_nal_units(stream: bytes) -> Iterator[tuple[int, bytes]]:
 def _remove_emulation_prevention(ebsp: bytes) -> bytes:
     """Strip H.264 emulation-prevention escape bytes from an EBSP.
 
-    Inverse of ``sei_injector._emulation_prevent``. Idempotent on
+    Exact inverse of ``sei_injector._emulation_prevent``. Idempotent on
     streams that have no escape bytes (a no-op).
+
+    Per H.264 §7.3.1 the decoder discards the ``0x03`` of a ``00 00 03``
+    triple and then resumes scanning at the byte that followed it. This
+    used to consume that byte unconditionally, which desynchronised the
+    pair whenever an escape was immediately followed by another
+    zero-run — the shape a conforming encoder emits for four or more
+    consecutive zero bytes (``00 00 03 00 00 03 …``). Escaping and
+    stripping are only exact inverses with the standard resume, and the
+    inverse is what the injector's fix depends on.
     """
     out = bytearray()
     i = 0
@@ -126,9 +135,6 @@ def _remove_emulation_prevention(ebsp: bytes) -> bytes:
             out.append(0)
             out.append(0)
             i += 3
-            if i < n:
-                out.append(ebsp[i])
-                i += 1
         else:
             out.append(ebsp[i])
             i += 1

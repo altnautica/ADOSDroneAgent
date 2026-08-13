@@ -239,6 +239,78 @@ fn read_crsf_sidecar() -> Option<CrsfBlock> {
     )
 }
 
+/// The WFB link-stats sidecar the radio writes ~1 Hz. The LAN status routes read
+/// the same file; this is the cloud transport's copy of that read.
+const WFB_STATS_SIDECAR: &str = "/run/ados/wfb-stats.json";
+
+/// A stats sidecar not re-written within this window is treated as absent, the
+/// same ceiling the LAN route applies (`WFB_STALE_AGE_S`). A frozen snapshot
+/// renders a dead link as if it were live (operating rule 44), and the body
+/// carries no write time, so the gate keys on the file mtime.
+const WFB_STATS_STALE: Duration = Duration::from_secs(10);
+
+/// The radio block for the heartbeat, derived from the WFB stats sidecar at
+/// `path` and mtime-staleness-gated against `now`.
+///
+/// This closes the gap where the cloud heartbeat hardcoded `RadioBlock::absent()`
+/// forever: the data was on disk and the LAN routes read it fine, so a
+/// cloud-relayed node rendered the absent skeleton in the GCS link card while its
+/// LAN-paired twin showed a live link.
+///
+/// The derivation is `ados_protocol::wfb_status`'s — the SAME one both LAN routes
+/// call — and the block is produced by deserializing its output rather than by a
+/// second hand-written projection. A parallel derivation of the same 40 fields is
+/// exactly the fork class that cost this codebase a shipped regression.
+///
+/// `None` when the file is absent, unreadable, stale, or does not deserialize
+/// into the block; the caller then emits the honest absent skeleton. Never a
+/// partially-populated block.
+fn read_radio_sidecar_from(
+    path: &std::path::Path,
+    now: std::time::SystemTime,
+) -> Option<RadioBlock> {
+    let fresh = std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .map(|mtime| {
+            now.duration_since(mtime)
+                .map(|age| age <= WFB_STATS_STALE)
+                .unwrap_or(true)
+        })
+        .unwrap_or(false);
+    if !fresh {
+        return None;
+    }
+
+    let config_path =
+        std::env::var("ADOS_CONFIG").unwrap_or_else(|_| crate::config::CONFIG_YAML.to_string());
+    let cfg = ados_protocol::wfb_status::WfbStatusConfig::load(std::path::Path::new(&config_path));
+    let status = ados_protocol::wfb_status::build_status_from_stats_file_at(&cfg, path);
+    let status_map = status.as_object()?;
+    let block = ados_protocol::wfb_status::build_radio_block(Some(status_map));
+
+    match serde_json::from_value::<RadioBlock>(block) {
+        Ok(b) => Some(b),
+        Err(e) => {
+            // A type the block declares differently (a float where the struct
+            // says i64) must not ship half a reading. Say so loudly once per
+            // tick and fall back to the absent skeleton.
+            tracing::warn!(
+                error = %e,
+                path = %path.display(),
+                "wfb_stats_sidecar_did_not_match_the_radio_block_shape"
+            );
+            None
+        }
+    }
+}
+
+fn read_radio_sidecar() -> Option<RadioBlock> {
+    read_radio_sidecar_from(
+        std::path::Path::new(WFB_STATS_SIDECAR),
+        std::time::SystemTime::now(),
+    )
+}
+
 /// Local epoch ms for the staleness gate.
 fn now_epoch_ms() -> i64 {
     std::time::SystemTime::now()
@@ -583,9 +655,20 @@ fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
         },
         last_plugin_update_check_at: None,
         peripherals: None,
-        radio: RadioBlock::absent(),
+        // The live block when the radio's stats sidecar is fresh, else the honest
+        // absent skeleton. This was hardcoded absent, so a cloud-relayed node
+        // rendered an empty link card forever while the same data sat on disk and
+        // the LAN routes read it fine.
+        radio: read_radio_sidecar().unwrap_or_else(RadioBlock::absent),
         crsf,
         wfb_adapter_chipset: None,
+        // The per-adapter stable-MAC verdicts, from the same projection the LAN
+        // status body uses. Six GCS readers and three cards waited on this key
+        // and no transport ever produced it.
+        mac_stability: ados_macpin::engine::adapters_camel_from(std::path::Path::new(
+            &std::env::var("ADOS_MAC_PINS_STATE")
+                .unwrap_or_else(|_| ados_macpin::engine::STATE_PATH.to_string()),
+        )),
         // No radio view in the native base ⇒ no injection verdict: the key is
         // omitted (never a fabricated false) until the radio enrichment folds
         // a real scan outcome over the base.
@@ -601,11 +684,6 @@ fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
         video_local_decoder_type: None,
         video_local_decoder_fps: None,
         video_recording: None,
-        video_pipeline_flavor: None,
-        video_encoder_name: None,
-        video_encoder_hw_accel: None,
-        video_camera_source: None,
-        video_pipeline_state: None,
         video_streams,
         linked_peers,
         display_type: None,

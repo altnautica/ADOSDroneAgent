@@ -252,27 +252,6 @@ def _get_video_wfb_section(data: dict[str, Any]) -> dict[str, Any]:
     return _get_section(video, "wfb")
 
 
-def update_peer_device_id(role: Role, peer_device_id: str) -> bool:
-    """Set peer_device_id on the persisted pair state without disturbing
-    other fields (paired_at, auto_pair_enabled, key path references).
-
-    Used by the presence-beacon path to back-fill the peer identifier
-    after a pair where the bind tunnel did not carry it. Idempotent:
-    returns False if the value is already correct, True if the config
-    was rewritten so callers can decide whether to log.
-    """
-    data = _load_config_dict()
-    wfb = _get_video_wfb_section(data)
-    if wfb.get("paired_with_device_id") == peer_device_id:
-        return False
-    wfb["paired_with_device_id"] = peer_device_id
-    if role == "gs":
-        gs = _get_section(data, "ground_station")
-        gs["paired_drone_id"] = peer_device_id
-    _save_config_dict(data)
-    return True
-
-
 def _clear_configured_hotspot_password() -> None:
     """Remove `network.hotspot.password` so a reset really does re-key the AP.
 
@@ -327,6 +306,24 @@ def _persist_pair_state(
             gs["paired_at"] = paired_at
 
     _save_config_dict(data)
+
+    # The audit trail: a pair transition is what admits a peer to the fleet (or
+    # removes it), and the radio keypair it rides on is the fleet's join gate. An
+    # operator asking later "when did this ground station adopt that drone" has
+    # only this record and the config's own `paired_at` to work from.
+    from ados.core import audit
+
+    audit.record(
+        audit.PAIRING_STATE_CHANGED,
+        audit.ACTOR_OPERATOR,
+        {
+            "role": role,
+            "peer_device_id": peer_device_id,
+            "paired": peer_device_id is not None,
+            "paired_at": paired_at,
+            "auto_pair_enabled": auto_pair_enabled,
+        },
+    )
 
 
 def _systemctl(action: str, unit: str) -> bool:

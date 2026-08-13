@@ -219,9 +219,8 @@ impl Supervisor {
         }
     }
 
-    /// Record a failure (which may open the breaker) and emit the resulting
-    /// transition. Mirrors the prior inline `record_failure` + conditional
-    /// `Failed` assignment, plus the event. Returns whether the breaker opened.
+    /// Record a failure (which may open the breaker) and emit the resulting transition.
+    /// Returns whether the breaker opened.
     fn record_failure_and_emit(&mut self, i: usize, now: Instant, reason: &str) -> bool {
         let from = self.services[i].state;
         let opened = self.services[i].record_failure(now);

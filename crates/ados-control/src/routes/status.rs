@@ -240,6 +240,12 @@ pub async fn get_status(State(state): State<AppState>) -> Json<Value> {
         for (key, value) in crate::routes::status_full::read_camera_status() {
             obj.insert(key, value);
         }
+        // The reconciler verdicts ride the same seam: `managementLink`,
+        // `mgmtLinkMode`, `usbRehomeState`, `wifiPowersave`. Both status routes
+        // fold them so a GCS on either endpoint sees the same reading.
+        for (key, value) in crate::routes::status_full::read_reconciler_status() {
+            obj.insert(key, value);
+        }
     }
 
     Json(body)

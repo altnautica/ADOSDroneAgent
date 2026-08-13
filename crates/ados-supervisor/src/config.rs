@@ -234,13 +234,11 @@ impl AgentConfig {
         }
     }
 
-    /// The active ground-station role read fresh from the on-disk sentinel.
-    /// Falls back to `direct` when the sentinel is missing/unreadable/unknown.
-    /// This is the source of truth for role gating: an operator role switch
-    /// flips the sentinel and stops/starts units WITHOUT restarting this
-    /// process, so a cached boot-time role would leave self-healing acting on
-    /// the wrong unit set. Mirrors the Python `start_service` live-sentinel
-    /// read.
+    /// The active ground-station role read fresh from the on-disk sentinel. Falls back
+    /// to `direct` when the sentinel is missing/unreadable/unknown. This is the source
+    /// of truth for role gating: an operator role switch flips the sentinel and
+    /// stops/starts units WITHOUT restarting this process, so a cached boot-time role
+    /// would leave self-healing acting on the wrong unit set.
     pub fn live_role(&self) -> String {
         read_current_role(&self.mesh_role_path)
     }

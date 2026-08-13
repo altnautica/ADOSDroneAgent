@@ -188,10 +188,8 @@ fn parse_kind(s: &str) -> Option<ModelKind> {
     }
 }
 
-/// Resolve a capability from a model set: the first inference-capable model of
-/// `kind` whose classes cover `class` (any of that kind when `class` is
-/// `None`). Mirrors the engine's `resolve_capability`; the model set the engine
-/// returns is id-sorted, so the first match is deterministic.
+/// Resolve a capability from a model set: the first inference-capable model of `kind`
+/// whose classes cover `class` (any of that kind when `class` is `None`).
 fn resolve_capability<'a>(
     models: &'a [ModelInfo],
     kind: ModelKind,

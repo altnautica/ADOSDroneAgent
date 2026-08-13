@@ -11,17 +11,17 @@
 use std::collections::BTreeSet;
 
 /// Standard 5 GHz WFB channels: (channel number, centre freq MHz). 20 MHz BW.
-pub const STANDARD_CHANNELS: &[(u8, u32)] = &[
-    (36, 5180),
-    (40, 5200),
-    (44, 5220),
-    (48, 5240),
-    (149, 5745),
-    (153, 5765),
-    (157, 5785),
-    (161, 5805),
-    (165, 5825),
-];
+///
+/// Projected from `ados_protocol::wfb_status::STANDARD_CHANNELS`, the one table.
+/// Three copies of these nine pairs used to ship, and the narrowest of them
+/// omitted 40 and 44 — so a link on either rendered a null frequency on one
+/// surface while its neighbour reported the right one.
+pub fn standard_channels() -> Vec<(u8, u32)> {
+    ados_protocol::wfb_status::STANDARD_CHANNELS
+        .iter()
+        .map(|c| (c.channel_number as u8, c.frequency_mhz as u32))
+        .collect()
+}
 
 const BANDWIDTH_MHZ: u32 = 20;
 
@@ -33,7 +33,7 @@ fn band_channels(band: &str) -> Vec<u8> {
     } else if b.contains("u-nii-3") || b.contains("unii-3") {
         vec![149, 153, 157, 161, 165]
     } else {
-        STANDARD_CHANNELS.iter().map(|(c, _)| *c).collect()
+        standard_channels().iter().map(|(c, _)| *c).collect()
     }
 }
 
@@ -70,7 +70,7 @@ pub fn parse_scan_results(output: &str) -> Vec<(u32, i32)> {
 /// Count detected APs falling within 20 MHz of each standard channel, returning
 /// `(channel, ap_count)` sorted ascending by congestion (least busy first).
 pub fn rank_channels(detected: &[(u32, i32)]) -> Vec<(u8, u32)> {
-    let mut ranked: Vec<(u8, u32)> = STANDARD_CHANNELS
+    let mut ranked: Vec<(u8, u32)> = standard_channels()
         .iter()
         .map(|&(ch, freq)| {
             let count = detected
@@ -88,7 +88,7 @@ pub fn rank_channels(detected: &[(u32, i32)]) -> Vec<(u8, u32)> {
 /// monitor mode rejects the scan, `iw` missing, timeout) returns every channel
 /// at zero interference — the caller decides what to do with a flat ranking.
 pub async fn scan_channels(iface: &str) -> Vec<(u8, u32)> {
-    let zero: Vec<(u8, u32)> = STANDARD_CHANNELS.iter().map(|&(c, _)| (c, 0)).collect();
+    let zero: Vec<(u8, u32)> = standard_channels().iter().map(|&(c, _)| (c, 0)).collect();
     let out = tokio::process::Command::new("iw")
         .args([iface, "scan"])
         .output()

@@ -21,10 +21,9 @@
 
 use std::path::Path;
 
-/// Proxy / tunnel relay headers. Their presence means the request was forwarded
-/// by a reverse proxy or tunnel (e.g. a Cloudflare Tunnel terminating on
-/// 127.0.0.1) rather than originating on this host, so it must NOT qualify for
-/// on-box loopback trust. Mirrors the Python middleware's `_FORWARDED_HEADERS`.
+/// Proxy / tunnel relay headers. Their presence means the request was forwarded by a
+/// reverse proxy or tunnel (e.g. a Cloudflare Tunnel terminating on 127.0.0.1) rather
+/// than originating on this host, so it must NOT qualify for on-box loopback trust.
 pub const FORWARDED_HEADERS: [&str; 4] = [
     "x-forwarded-for",
     "x-real-ip",

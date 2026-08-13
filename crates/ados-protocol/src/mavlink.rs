@@ -692,8 +692,7 @@ pub const TUNNEL_MAX_PAYLOAD: usize = 128;
 /// is a u16, so the usable application range is `32768..=65535`.
 pub const TUNNEL_RESERVED_PAYLOAD_TYPE_MAX: u16 = 32767;
 
-/// A TUNNEL build/parse failure with a stable, human-readable message (not
-/// localized). Mirrors [`SetpointError`] in shape.
+/// A TUNNEL build/parse failure with a stable, human-readable message (not localized).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TunnelError(pub String);
 

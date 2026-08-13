@@ -98,9 +98,8 @@ fn first_ados_unit(line: &str) -> Option<String> {
 
 /// Parse the `Pss:` line out of a `/proc/<pid>/smaps_rollup` body (KiB).
 ///
-/// Pure + testable. Returns 0 when the rollup has no `Pss:` line (older kernels)
-/// or it does not parse. Mirrors the Python `pss_kib_from_rollup`: the first
-/// `Pss:` line, second whitespace token, base-10 unsigned.
+/// Pure + testable. Returns 0 when the rollup has no `Pss:` line (older kernels) or it
+/// does not parse.
 pub fn pss_kib_from_rollup(text: &str) -> u64 {
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("Pss:") {

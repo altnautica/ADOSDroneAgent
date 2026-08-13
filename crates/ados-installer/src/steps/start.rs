@@ -31,9 +31,7 @@ const GROUND_STATION_START_UNITS: &[&str] = &[
     "ados-input.service",
     "ados-pic.service",
     "ados-uplink-router.service",
-    "ados-modem.service",
     "ados-wifi-client.service",
-    "ados-ethernet.service",
 ];
 
 /// Start the top-level supervisor unit (+ the GS unit set on a ground station).

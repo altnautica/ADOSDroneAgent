@@ -326,10 +326,7 @@ enum AckOutcome {
     NoAck,
 }
 
-/// The `POST /api/command` request body. Mirrors the FastAPI `CommandRequest`: a
-/// `cmd` string and an `args` list of numbers or strings (takeoff reads `args[0]`
-/// as the altitude, mode reads `args[0]` as the mode name). `args` defaults to an
-/// empty list when omitted.
+/// The `POST /api/command` request body. `args` defaults to an empty list when omitted.
 #[derive(Debug, Deserialize)]
 pub struct CommandRequest {
     pub cmd: String,

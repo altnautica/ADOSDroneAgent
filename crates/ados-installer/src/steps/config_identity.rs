@@ -55,15 +55,12 @@ pub fn slugify_hostname(name: &str) -> String {
     cut
 }
 
-/// Build the default `config.yaml` body (pure). Mirrors `generate_default_config`
-/// in 09-config.sh: agent identity + the mavlink / logging / server / scripting /
-/// pairing / discovery / video blocks, plus the network operating-region block.
-/// `short_id` is the first 8 hex of the device id, `agent_name` is `--name` or
-/// `ados-<short_id>`, `fc_port` is the auto-detected FC serial port (empty when
-/// none found), `server_mode` is `local` (local-first) or `cloud` (reach from
-/// anywhere), and `region` pins an operating region (`None` = unrestricted).
-/// `ack_at` is the ISO-8601 stamp recorded when a region is pinned (unused for
-/// the unrestricted default).
+/// Build the default `config.yaml` body (pure). `short_id` is the first 8 hex of the
+/// device id, `agent_name` is `--name` or `ados-<short_id>`, `fc_port` is the
+/// auto-detected FC serial port (empty when none found), `server_mode` is `local`
+/// (local-first) or `cloud` (reach from anywhere), and `region` pins an operating
+/// region (`None` = unrestricted). `ack_at` is the ISO-8601 stamp recorded when a
+/// region is pinned (unused for the unrestricted default).
 pub fn default_config_yaml(
     short_id: &str,
     agent_name: &str,
@@ -187,8 +184,7 @@ pub fn profile_conf_body(profile: &str, channel: &str, version: Option<&str>) ->
     body
 }
 
-/// Build the `pairing.json` body (pure). Mirrors `write_pairing`: the code is
-/// uppercased and stamped with the creation epoch.
+/// Build the `pairing.json` body (pure).
 pub fn pairing_json(code: &str, created_at: u64) -> String {
     let upper = code.to_ascii_uppercase();
     format!("{{\n  \"pairing_code\": \"{upper}\",\n  \"code_created_at\": {created_at}\n}}\n")

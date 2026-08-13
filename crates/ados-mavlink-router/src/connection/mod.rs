@@ -1,12 +1,5 @@
 //! Flight-controller serial link.
 //!
-//! Mirrors the Python `FCConnection` (services/mavlink/connection.py): discover
-//! and baud-probe the FC serial device, hold the link with reconnect-on-drop
-//! backoff, parse the inbound MAVLink v2 byte stream into frames, fan every raw
-//! frame out to consumers (the MAVLink socket + the GCS proxies), feed the
-//! parsed message into the shared [`VehicleState`], and own the send paths
-//! toward the FC (client commands, the 1 Hz companion heartbeat, the adaptive
-//! stream-interval requests, and the parameter sweep).
 //!
 //! Transport scope: serial is the default and the production path on the dev
 //! rigs. A configured port starting with `tcp:` or `udp:` opens a TCP or UDP

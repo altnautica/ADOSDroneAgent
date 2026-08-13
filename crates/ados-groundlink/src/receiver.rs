@@ -132,9 +132,9 @@ impl ReceiverState {
     }
 }
 
-/// Build the `wfb_rx -a` aggregator args. With `accept_local_nic` the local
-/// monitor adapter is appended so its fragments are aggregated too; without it
-/// the receiver trusts only relay forwards. Mirrors `_launch_wfb_rx_aggregate`.
+/// Build the `wfb_rx -a` aggregator args. With `accept_local_nic` the local monitor
+/// adapter is appended so its fragments are aggregated too; without it the receiver
+/// trusts only relay forwards.
 pub fn aggregate_args(
     drone_iface: &str,
     listen_port: u16,
@@ -216,9 +216,8 @@ fn upsert_relays(state: &mut ReceiverState, macs: &[String], now_ms: i64) -> Vec
     newly
 }
 
-/// Remove relays silent past `RELAY_GRACE_MS`, returning the aged-out MACs so
-/// the caller emits `relay_disconnected`. Mirrors the Python `_watch_relay_churn`
-/// stale-removal half.
+/// Remove relays silent past `RELAY_GRACE_MS`, returning the aged-out MACs so the
+/// caller emits `relay_disconnected`.
 fn age_out_relays(state: &mut ReceiverState, now_ms: i64) -> Vec<String> {
     let mut removed = Vec::new();
     state.relays.retain(|r| {
@@ -231,8 +230,8 @@ fn age_out_relays(state: &mut ReceiverState, now_ms: i64) -> Vec<String> {
     removed
 }
 
-/// Tail the aggregator's stderr, folding combined counters into shared state.
-/// Mirrors the Python `_tail_stats`. Returns when the stderr pipe closes.
+/// Tail the aggregator's stderr, folding combined counters into shared state. Returns
+/// when the stderr pipe closes.
 async fn tail_aggregator_stats(
     stderr: tokio::process::ChildStderr,
     state: Arc<Mutex<ReceiverState>>,

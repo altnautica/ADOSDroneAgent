@@ -329,10 +329,8 @@ impl CloudRelayBridge {
 
     // ── Pure decision logic (testable) ──────────────────────────────────
 
-    /// Decide the MQTT action for a new uplink snapshot, updating the bridge's
-    /// tracked uplink + reachability. Mirrors `_on_uplink_changed`: any uplink
-    /// change tears MQTT down; a live + reachable uplink then reconnects, else
-    /// the bridge idles.
+    /// Decide the MQTT action for a new uplink snapshot, updating the bridge's tracked
+    /// uplink + reachability.
     pub fn reconcile_uplink(&mut self, snap: Option<&UplinkSnapshot>) -> MqttAction {
         let (new_uplink, reachable) = match snap {
             Some(s) if !s.active_uplink.is_empty() => {
@@ -373,8 +371,8 @@ impl CloudRelayBridge {
         MqttAction::Noop
     }
 
-    /// Apply a data-cap level, returning `true` when the relay must be torn down
-    /// (the 100 % heartbeat-only case). Mirrors `_on_data_cap_threshold`.
+    /// Apply a data-cap level, returning `true` when the relay must be torn down (the
+    /// 100 % heartbeat-only case).
     pub fn apply_data_cap(&mut self, state: ThrottleState) -> bool {
         let previous = self.throttle;
         self.throttle = state;
@@ -690,8 +688,7 @@ impl CloudRelayBridge {
     }
 }
 
-/// Tear the relay task down: signal its shutdown, await with a timeout, abort on
-/// stall. Mirrors `_teardown_relay`.
+/// Tear the relay task down: signal its shutdown, await with a timeout, abort on stall.
 async fn teardown_relay(
     relay_task: &mut Option<tokio::task::JoinHandle<()>>,
     relay_shutdown: &mut Option<watch::Sender<bool>>,

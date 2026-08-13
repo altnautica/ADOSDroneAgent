@@ -68,6 +68,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use ados_protocol::wfb_status::{
+    build_radio_block, build_status_from_stats_file_at, derive_wfb_status, get_or_null,
+    json_truthy, WfbStatusConfig,
+};
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::Json;
@@ -196,6 +200,25 @@ pub async fn get_full_status(State(state): State<AppState>, headers: HeaderMap) 
     // Camera presence + USB-recovery, folded in only when the sidecars are fresh.
     for (k, v) in read_camera_status() {
         payload.insert(k, v);
+    }
+
+    // Reconciler verdicts — management-link guardian, reach-back failover, USB
+    // rehome, WiFi power-save — folded in only when each sidecar is fresh. Every
+    // one of these had a GCS reader and a card and no producer on either
+    // transport, so all four rendered permanently empty.
+    for (k, v) in read_reconciler_status() {
+        payload.insert(k, v);
+    }
+
+    // Per-adapter stable-MAC verdicts. No transport emitted a `macStability`
+    // block, and nothing in the GCS fetches the LAN route that serves the same
+    // verdicts, so the adapter-stability card, the MAC-pin settings section and
+    // the radio-network health panel all read an absent key forever. Omitted
+    // (never an empty list) on a node that has pinned nothing.
+    if let Some(mac_stability) =
+        ados_macpin::engine::adapters_camel_from(&crate::routes::mac_adapters::state_file_path())
+    {
+        payload.insert("macStability".to_string(), mac_stability);
     }
 
     // Linked WFB peers + the freshest-peer scalars, folded in only when this node
@@ -390,7 +413,7 @@ fn build_services_list() -> Value {
 /// Enumerate `ados-*.service` units via `systemctl list-units`, returning the
 /// per-unit objects (without `memory_mb`, which the caller attaches).
 ///
-/// Mirrors the Python `_systemd_services_fallback`: `systemctl list-units
+/// : `systemctl list-units
 /// --type=service --all --no-pager --no-legend ados-*.service`, then for each row
 /// `parts = line.split(None, 4)` (at most five whitespace-split tokens), the unit
 /// is `parts[0]` with leading status glyphs (`●`/`*`) stripped, the sub-state is
@@ -534,10 +557,10 @@ fn unit_for_service(name: &str) -> Option<String> {
 }
 
 /// Sum PSS (MiB, one decimal) per `ados-*.service` unit across all running PIDs,
-/// reading `/proc/<pid>/cgroup` for the owning unit and `/proc/<pid>/smaps_rollup`
-/// for the PSS. Best-effort: an unreadable entry / a PID that exits mid-scan / no
-/// permission contributes nothing. On a non-Linux host there is no `/proc`, so the
-/// map is empty and every unit lands at `0.0`. Mirrors `_scan_pss_by_unit`.
+/// reading `/proc/<pid>/cgroup` for the owning unit and `/proc/<pid>/smaps_rollup` for
+/// the PSS. Best-effort: an unreadable entry / a PID that exits mid-scan / no
+/// permission contributes nothing. On a non-Linux host there is no `/proc`, so the map
+/// is empty and every unit lands at `0.0`.
 fn scan_pss_by_unit() -> std::collections::BTreeMap<String, f64> {
     let mut totals_kib: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
 
@@ -607,7 +630,7 @@ fn unit_from_cgroup(text: &str) -> Option<String> {
 }
 
 /// Parse the `Pss:` line out of a `/proc/<pid>/smaps_rollup` body (KiB), `0` when
-/// absent or unparseable. Mirrors `pss_kib_from_rollup`.
+/// absent or unparseable.
 fn pss_kib_from_rollup(text: &str) -> u64 {
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("Pss:") {
@@ -644,58 +667,11 @@ async fn wfb_status_view(state: &AppState) -> Option<Map<String, Value>> {
         }
     }
 
-    match build_status_from_stats_file(&cfg) {
+    match build_status_from_stats_file_at(&cfg, &run_dir().join("wfb-stats.json")) {
         Value::Object(map) if !map.is_empty() => Some(map),
         _ => None,
     }
 }
-
-/// The `video.wfb` config slice the WFB status base block seeds from. Each field
-/// is optional so an absent section reads the same default the loaded Python
-/// config would (`channel` → `0`, the rest → `null`). Mirrors the wave-1
-/// `/api/wfb` config seam.
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-struct WfbStatusConfig {
-    channel: i64,
-    tx_power_dbm: Value,
-    tx_power_max_dbm: Value,
-    topology: Value,
-    mcs_index: Value,
-}
-
-impl WfbStatusConfig {
-    /// Load the `video.wfb` slice from the config path, defaulting every field when
-    /// the file/section is absent or unparseable.
-    fn load(config_path: &Path) -> Self {
-        let text = match std::fs::read_to_string(config_path) {
-            Ok(t) => t,
-            Err(_) => return WfbStatusConfig::default(),
-        };
-        let root: Value = match serde_norway::from_str(&text) {
-            Ok(v) => v,
-            Err(_) => return WfbStatusConfig::default(),
-        };
-        let wfb = root
-            .get("video")
-            .filter(|v| v.is_object())
-            .and_then(|v| v.get("wfb"))
-            .filter(|v| v.is_object());
-        let Some(wfb) = wfb else {
-            return WfbStatusConfig::default();
-        };
-        WfbStatusConfig {
-            channel: wfb.get("channel").and_then(json_to_i64).unwrap_or(0),
-            tx_power_dbm: wfb.get("tx_power_dbm").cloned().unwrap_or(Value::Null),
-            tx_power_max_dbm: wfb.get("tx_power_max_dbm").cloned().unwrap_or(Value::Null),
-            topology: wfb.get("topology").cloned().unwrap_or(Value::Null),
-            mcs_index: wfb.get("mcs_index").cloned().unwrap_or(Value::Null),
-        }
-    }
-}
-
-/// Beyond this age (microseconds) a stored status event is treated as stale,
-/// mirroring the sidecar path's `mtime > 10 s` flip.
-const WFB_STALE_AGE_US: i64 = 10_000_000;
 
 /// The most-recent full wfb-status snapshot + its emit timestamp, or `None` when
 /// the store is unreachable / holds no such event / the detail is empty. Mirrors
@@ -715,404 +691,13 @@ async fn latest_wfb_status(state: &AppState) -> Option<(Map<String, Value>, i64)
     Some((detail.clone(), ts_us))
 }
 
-/// Map a stored status body back to the `/api/wfb` shape: the config-seeded base,
-/// the body merged over it, an event-age staleness flip, then the shared finalize
-/// legs. Mirrors the wave-1 `derive_wfb_status`.
-fn derive_wfb_status(detail: &Map<String, Value>, ts_us: i64, cfg: &WfbStatusConfig) -> Value {
-    let mut merged = wfb_base_block(cfg);
-    for (k, v) in detail {
-        merged.insert(k.clone(), v.clone());
-    }
-    let now_us = now_unix_micros();
-    if ts_us > 0 && now_us - ts_us > WFB_STALE_AGE_US {
-        merged.insert("state".to_string(), json!("stale"));
-    }
-    finalize_wfb_status(merged)
-}
-
-/// Compose a `/api/wfb` body from the `wfb-stats.json` sidecar: merge the file
-/// payload over the config-seeded base, flip `state` to `"stale"` when the file is
-/// older than 10 s, re-assert the live regulatory domain, and finalize. An absent
-/// / unparseable file degrades to the bare base block; a well-formed non-object
-/// body returns the bare base. Mirrors the wave-1 `build_status_from_stats_file`.
-fn build_status_from_stats_file(cfg: &WfbStatusConfig) -> Value {
-    let base = wfb_base_block(cfg);
-    let path = run_dir().join("wfb-stats.json");
-
-    let age_s = match std::fs::metadata(&path).and_then(|m| m.modified()) {
-        Ok(mtime) => mtime.elapsed().map(|d| d.as_secs_f64()).unwrap_or(0.0),
-        Err(_) => return Value::Object(base),
-    };
-
-    let payload = match std::fs::read_to_string(&path) {
-        Ok(text) => match serde_json::from_str::<Value>(&text) {
-            Ok(Value::Object(map)) => map,
-            Ok(_) => return Value::Object(base),
-            Err(_) => return Value::Object(base),
-        },
-        Err(_) => return Value::Object(base),
-    };
-
-    // Best-effort schema-drift signal (never reject): warn when the sidecar was
-    // written by an agent with a different schema version, then read anyway. The
-    // writer const lives in the radio crate, so compare against the shared registry.
-    let got = payload.get("version").and_then(Value::as_u64).unwrap_or(0) as u16;
-    if let Some(ours) = ados_protocol::contracts::sidecar_version("wfb-stats") {
-        ados_protocol::sidecar::check_sidecar_version("wfb-stats", got, ours);
-    }
-
-    let mut merged = base;
-    for (k, v) in payload {
-        merged.insert(k, v);
-    }
-    if age_s > 10.0 {
-        merged.insert("state".to_string(), json!("stale"));
-    }
-    merged.insert("regulatory_domain".to_string(), json!(regulatory_domain()));
-    finalize_wfb_status(merged)
-}
-
-/// The config-seeded zero-default WFB status block both read paths merge over.
-/// `regulatory_domain` is the LIVE `iw reg get` value. Mirrors the wave-1
-/// `base_block`.
-fn wfb_base_block(cfg: &WfbStatusConfig) -> Map<String, Value> {
-    let mut block = Map::new();
-    block.insert("state".to_string(), json!("disabled"));
-    block.insert("interface".to_string(), json!(""));
-    block.insert("channel".to_string(), json!(cfg.channel));
-    block.insert("frequency_mhz".to_string(), json!(0));
-    block.insert("bandwidth_mhz".to_string(), json!(0));
-    block.insert(
-        "adapter".to_string(),
-        json!({"driver": "", "chipset": "", "supports_monitor": false}),
-    );
-    block.insert("adapter_chipset".to_string(), Value::Null);
-    // Null, not false: this base is what `build_radio_block` receives when no
-    // sidecar / stored status exists — i.e. no adapter scan ever produced a
-    // verdict. A false here would be a real boolean `bool_or_null` forwards
-    // verbatim, resurrecting the fabricated measured no-injection claim the
-    // radio block's null contract exists to prevent. A real sidecar always
-    // carries the key, so a genuine verdict overwrites this on merge.
-    block.insert("adapter_injection_ok".to_string(), Value::Null);
-    block.insert("rssi_dbm".to_string(), json!(-100.0));
-    block.insert("noise_dbm".to_string(), json!(-95.0));
-    block.insert("snr_db".to_string(), json!(0.0));
-    block.insert("packets_received".to_string(), json!(0));
-    block.insert("packets_lost".to_string(), json!(0));
-    block.insert("loss_percent".to_string(), json!(0.0));
-    block.insert("fec_recovered".to_string(), json!(0));
-    block.insert("fec_failed".to_string(), json!(0));
-    block.insert("bitrate_kbps".to_string(), json!(0));
-    block.insert("rx_silent_seconds".to_string(), Value::Null);
-    block.insert("restart_count".to_string(), json!(0));
-    block.insert("samples".to_string(), json!(0));
-    block.insert("tx_power_dbm".to_string(), cfg.tx_power_dbm.clone());
-    block.insert("tx_power_max_dbm".to_string(), cfg.tx_power_max_dbm.clone());
-    block.insert("topology".to_string(), cfg.topology.clone());
-    block.insert("mcs_index".to_string(), cfg.mcs_index.clone());
-    block.insert("regulatory_domain".to_string(), json!(regulatory_domain()));
-    block
-}
-
-/// Re-derive `frequency_mhz` / `bandwidth_mhz` from the channel and add the
-/// `bitrate_mbps` shim, on top of a base+payload merge. Mirrors the wave-1
-/// `finalize_status`.
-fn finalize_wfb_status(mut merged: Map<String, Value>) -> Value {
-    let channel = merged.get("channel").and_then(json_to_i64).unwrap_or(0);
-    if let Some((freq, bw)) = wfb_channel_freq_bw(channel) {
-        merged.insert("frequency_mhz".to_string(), json!(freq));
-        merged.insert("bandwidth_mhz".to_string(), json!(bw));
-    }
-    let bitrate_mbps = match merged.get("bitrate_kbps").and_then(Value::as_f64) {
-        Some(bk) if bk > 0.0 => round3(bk / 1000.0),
-        _ => 0.0,
-    };
-    merged.insert("bitrate_mbps".to_string(), json!(bitrate_mbps));
-    Value::Object(merged)
-}
-
-/// The standard 5 GHz WFB-ng channel → (frequency_mhz, bandwidth_mhz) lookup, each
-/// 20 MHz wide. Mirrors the wave-1 `STANDARD_CHANNELS` set; an unknown channel
-/// yields `None` so the merged frequency/bandwidth survive unchanged.
-fn wfb_channel_freq_bw(channel: i64) -> Option<(i64, i64)> {
-    let freq = match channel {
-        36 => 5180,
-        40 => 5200,
-        44 => 5220,
-        48 => 5240,
-        149 => 5745,
-        153 => 5765,
-        157 => 5785,
-        161 => 5805,
-        165 => 5825,
-        _ => return None,
-    };
-    Some((freq, 20))
-}
-
-/// Best-effort `iw reg get` first-line parse → the two-letter country code,
-/// `"global"`, or `"unknown"`. Mirrors the wave-1 `regulatory_domain`.
-fn regulatory_domain() -> String {
-    let output = match Command::new("iw").args(["reg", "get"]).output() {
-        Ok(o) => o,
-        Err(_) => return "unknown".to_string(),
-    };
-    if !output.status.success() {
-        return "unknown".to_string();
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines() {
-        let stripped = line.trim();
-        if let Some(rest) = stripped.strip_prefix("country ") {
-            let code = rest.split(':').next().unwrap_or("").trim();
-            if code.is_empty() {
-                return "unknown".to_string();
-            }
-            return code.to_string();
-        }
-        if stripped.starts_with("global") {
-            return "global".to_string();
-        }
-    }
-    "unknown".to_string()
-}
-
 // ---------------------------------------------------------------------------
 // Radio block: the forward-compatible heartbeat radio block + camelCase remap.
 // ---------------------------------------------------------------------------
 
-/// The RSSI sentinel the link-quality monitor seeds before the first real sample.
-/// Treated as "no reading yet" so the radio block reports `null` for it. Mirrors
-/// the Python `if rssi == -100.0: rssi = None`.
-const RSSI_SENTINEL: f64 = -100.0;
-
-/// The `rf_unverified` verdict forwarded from the radio sidecar, or `null` when
-/// it cannot be sourced honestly.
-///
-/// The radio service owns this boolean (an advancing transmit counter with no
-/// confirmed reception inside the proof grace window); every other surface only
-/// forwards it, so a consumer never has to re-derive it from a heuristic.
-///
-/// It reads `null` — never a confident `false` — when the key is absent (a
-/// receive-side view, or a sidecar written before the field existed) or when the
-/// snapshot went stale, because a reading older than the staleness ceiling
-/// cannot say whether the radio is unverified NOW, and a stale `false` is
-/// exactly the healthy-looking dead link this field exists to expose.
-fn rf_unverified_field(status: &Map<String, Value>) -> Value {
-    if status.get("state").and_then(Value::as_str) == Some("stale") {
-        return Value::Null;
-    }
-    bool_or_null(status, "rf_unverified")
-}
-
-/// Forward a boolean verdict from the status view verbatim, or `null` when the
-/// view carries no boolean reading for it.
-///
-/// The absence of a verdict must never collapse to a confident `false`: the
-/// GCS resolves these fields three-state (degraded / ok / unknown), so a
-/// fabricated `false` for `adapter_usb_degraded` renders a green "USB link OK"
-/// for an adapter nothing ever enumerated, a fabricated `false` for
-/// `adapter_injection_ok` renders a red no-injection claim a pre-scan rig
-/// never measured, and a fabricated `false` for `phy_muted` asserts a healthy
-/// TX PHY on a view (the receive side) that has no TX PHY to read.
-fn bool_or_null(map: &Map<String, Value>, key: &str) -> Value {
-    match map.get(key) {
-        Some(Value::Bool(b)) => Value::Bool(*b),
-        _ => Value::Null,
-    }
-}
-
-/// Shape the forward-compatible `radio` heartbeat block from a WFB status view.
-///
-/// `wfb_status` is the `/api/wfb` body (or `None` when no view is available). The
-/// GCS keys off the presence of the block, not the values; an absent view yields
-/// the full "absent" skeleton (every metric `null`, paired/injection `false`).
-/// NOTHING pins this whole field set. The tests below cover the verdict fields
-/// that must stay null rather than fabricate a measurement, and the heartbeat
-/// golden fixture asserts a populated `RadioBlock` — but only a subset, so a
-/// field added or dropped here is not caught by either. Said plainly because an
-/// earlier version of this comment claimed the fixture pinned it field-for-field,
-/// which is the kind of citation that stops a reader checking.
-fn build_radio_block(wfb_status: Option<&Map<String, Value>>) -> Value {
-    let Some(status) = wfb_status else {
-        return radio_absent_block();
-    };
-
-    let iface = status.get("interface").and_then(non_empty_string);
-    let driver = iface
-        .as_deref()
-        .and_then(detect_radio_driver_name)
-        .map(Value::from)
-        .unwrap_or(Value::Null);
-    let iface_value = iface.clone().map(Value::from).unwrap_or(Value::Null);
-
-    let channel = status
-        .get("channel")
-        .filter(|v| !is_falsey(v))
-        .cloned()
-        .unwrap_or(Value::Null);
-    let freq_mhz = channel
-        .as_i64()
-        .and_then(channel_to_freq)
-        .map(Value::from)
-        .unwrap_or(Value::Null);
-
-    let rssi = match status.get("rssi_dbm").and_then(Value::as_f64) {
-        Some(v) if v == RSSI_SENTINEL => Value::Null,
-        _ => status.get("rssi_dbm").cloned().unwrap_or(Value::Null),
-    };
-    let bitrate = status
-        .get("bitrate_kbps")
-        .filter(|v| !is_falsey(v))
-        .cloned()
-        .unwrap_or(Value::Null);
-
-    json!({
-        "state": status.get("state").cloned().unwrap_or(Value::Null),
-        "iface": iface_value,
-        "driver": driver,
-        "channel": channel,
-        "freq_mhz": freq_mhz,
-        "bandwidth_mhz": 20,
-        "tx_power_dbm": get_or_null(status, "tx_power_dbm"),
-        "tx_power_max_dbm": get_or_null(status, "tx_power_max_dbm"),
-        "topology": get_or_null(status, "topology"),
-        "rssi_dbm": rssi,
-        "snr_db": get_or_null(status, "snr_db"),
-        "noise_dbm": get_or_null(status, "noise_dbm"),
-        "bitrate_kbps": bitrate,
-        "fec_recovered": get_or_null(status, "fec_recovered"),
-        "fec_lost": get_or_null(status, "fec_failed"),
-        "packets_lost": get_or_null(status, "packets_lost"),
-        "loss_percent": get_or_null(status, "loss_percent"),
-        "mcs_index": get_or_null(status, "mcs_index"),
-        "rx_silent_seconds": get_or_null(status, "rx_silent_seconds"),
-        "paired": json_truthy(status.get("paired").unwrap_or(&Value::Null)),
-        "paired_with_device_id": get_or_null(status, "paired_with_device_id"),
-        "paired_at": get_or_null(status, "paired_at"),
-        "public_key_fingerprint": get_or_null(status, "public_key_fingerprint"),
-        "auto_pair_enabled": get_or_null(status, "auto_pair_enabled"),
-        "tx_video_stalled": get_or_null(status, "tx_video_stalled"),
-        "tx_video_stall_kills": get_or_null(status, "tx_video_stall_kills"),
-        "tx_video_recvq_bytes": get_or_null(status, "tx_video_recvq_bytes"),
-        "acquire_state": get_or_null(status, "acquire_state"),
-        "channel_locked": get_or_null(status, "channel_locked"),
-        // The two halves of the received-side proof: `channel_locked` is true
-        // once a verified return signal was heard, `rf_unverified` is true when
-        // the transmit counter advances while none has been. Forwarded from the
-        // radio's own verdict so a consumer reads the authoritative value
-        // instead of re-deriving it.
-        "rf_unverified": rf_unverified_field(status),
-        "reacquire_kills": get_or_null(status, "reacquire_kills"),
-        "valid_rx_packets_per_s": get_or_null(status, "valid_rx_packets_per_s"),
-        "adapter_chipset": get_or_null(status, "adapter_chipset"),
-        // Adapter + PHY verdicts forward verbatim as booleans, or `null` when
-        // the view has no reading — never a fabricated false, which the GCS's
-        // three-state resolvers would render as a measured green/red claim
-        // about hardware this view never examined.
-        "adapter_injection_ok": bool_or_null(status, "adapter_injection_ok"),
-        "adapter_usb_speed_mbps": get_or_null(status, "adapter_usb_speed_mbps"),
-        "adapter_usb_degraded": bool_or_null(status, "adapter_usb_degraded"),
-        "phy_muted": bool_or_null(status, "phy_muted"),
-        "tx_zombie_kills": get_or_null(status, "tx_zombie_kills"),
-        "tx_bytes_per_s": get_or_null(status, "tx_bytes_per_s"),
-        "restart_count": get_or_null(status, "restart_count"),
-    })
-}
-
-/// The "no radio" skeleton the heartbeat carries when there is no WFB status view.
-/// Every metric is `null` and `paired` is `false`; the adapter / PHY verdicts are
-/// `null` too — with no radio view there is nothing to have measured them, and a
-/// `false` would claim a healthy USB link / unmuted PHY that was never examined.
-/// The absent branch, covered by the verdict tests below rather than pinned
-/// wholesale — see the note on [`build_radio_block`].
-fn radio_absent_block() -> Value {
-    json!({
-        "state": "absent",
-        "iface": null,
-        "driver": null,
-        "channel": null,
-        "freq_mhz": null,
-        "bandwidth_mhz": null,
-        "tx_power_dbm": null,
-        "tx_power_max_dbm": null,
-        "topology": null,
-        "rssi_dbm": null,
-        "snr_db": null,
-        "noise_dbm": null,
-        "bitrate_kbps": null,
-        "fec_recovered": null,
-        "fec_lost": null,
-        "packets_lost": null,
-        "loss_percent": null,
-        "mcs_index": null,
-        "rx_silent_seconds": null,
-        "paired": false,
-        "paired_with_device_id": null,
-        "paired_at": null,
-        "public_key_fingerprint": null,
-        "auto_pair_enabled": null,
-        "tx_video_stalled": null,
-        "tx_video_stall_kills": null,
-        "tx_video_recvq_bytes": null,
-        "acquire_state": null,
-        "channel_locked": null,
-        // Null, not false: with no radio view there is no verdict to report, and
-        // a false here would claim a transmit path was proven.
-        "rf_unverified": null,
-        "reacquire_kills": null,
-        "valid_rx_packets_per_s": null,
-        "adapter_chipset": null,
-        "adapter_injection_ok": null,
-        "adapter_usb_speed_mbps": null,
-        "adapter_usb_degraded": null,
-        "phy_muted": null,
-    })
-}
-
-/// The radio block's channel → centre-frequency lookup (a strict subset of the
-/// WFB channel set: the Python `_CHANNEL_TO_FREQ_MHZ` map). An unknown channel
-/// yields `None` so the GCS draws a blank cell. NOTE the `40`/`44` channels in the
-/// status channel set are deliberately absent here, matching the Python map.
-fn channel_to_freq(channel: i64) -> Option<i64> {
-    match channel {
-        36 => Some(5180),
-        48 => Some(5240),
-        149 => Some(5745),
-        153 => Some(5765),
-        157 => Some(5785),
-        161 => Some(5805),
-        165 => Some(5825),
-        _ => None,
-    }
-}
-
-/// Best-effort kernel driver name for the WFB monitor interface, read from
-/// `/sys/class/net/<iface>/device/uevent`'s `DRIVER=` line. `None` for an empty
-/// iface or an unreadable file. Mirrors `_detect_radio_driver_name`.
-fn detect_radio_driver_name(interface: &str) -> Option<String> {
-    if interface.is_empty() {
-        return None;
-    }
-    let path = Path::new("/sys/class/net")
-        .join(interface)
-        .join("device")
-        .join("uevent");
-    let text = std::fs::read_to_string(path).ok()?;
-    for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("DRIVER=") {
-            let name = rest.trim();
-            if !name.is_empty() {
-                return Some(name.to_string());
-            }
-        }
-    }
-    None
-}
-
 /// Convert the snake_case radio block to the camelCase shape the GCS reads (the
-/// LAN-direct poll has no heartbeat remapper, so the conversion happens here).
-/// Each `a_b_c` key becomes `aBC`. `None` stays `None`. Mirrors `_radio_to_camel`.
+/// LAN-direct poll has no heartbeat remapper, so the conversion happens here). Each
+/// `a_b_c` key becomes `aBC`. `None` stays `None`.
 fn radio_to_camel(block: Value) -> Value {
     let Value::Object(map) = block else {
         return Value::Null;
@@ -1606,9 +1191,9 @@ const CAMERA_RECOVERY_FRESH_S: f64 = 60.0;
 /// the payload only when the sidecars are fresh + valid (absent otherwise).
 ///
 /// Reads `/run/ados/camera-state.json` (the `cameraState` enum) and
-/// `/run/ados/camera-usb-recovery.json` (the recovery block), staleness-gated on
-/// each sidecar's `updated_at_unix`. Mirrors `_read_camera_status`. Shared with
-/// the `/api/status` route, which folds the same camera keys into its body.
+/// `/run/ados/camera-usb-recovery.json` (the recovery block), staleness-gated on each
+/// sidecar's `updated_at_unix`. Shared with the `/api/status` route, which folds the
+/// same camera keys into its body.
 pub(crate) fn read_camera_status() -> Vec<(String, Value)> {
     read_camera_status_in(&run_dir(), now_unix_secs())
 }
@@ -1677,6 +1262,189 @@ fn read_camera_status_in(run_dir: &Path, now: f64) -> Vec<(String, Value)> {
         }
     }
     out
+}
+
+/// The freshness window (seconds) for the management-link guardian sidecar. The
+/// guardian ticks every few seconds inside its fast-initial window and steadies
+/// after; 90 s tolerates the steady cadence without ever rendering a stopped
+/// supervisor's last verdict as live.
+const MGMT_LINK_FRESH_S: f64 = 90.0;
+
+/// The freshness window (seconds) for the reach-back-mode sidecar. Same
+/// reasoning as [`MGMT_LINK_FRESH_S`]; both are written by the same tick.
+const MGMT_FAILOVER_FRESH_S: f64 = 90.0;
+
+/// The freshness window (seconds) for the USB-rehome sidecar. It is written on a
+/// state change rather than a tick, so the window is the generous one: an idle
+/// verdict that has not changed in minutes is still the truth.
+const USB_REHOME_FRESH_S: f64 = 600.0;
+
+/// Reconciler state for the LOCAL status surface: the management-link guardian,
+/// the reach-back-mode failover, the USB-rehome self-heal, and the WiFi
+/// power-save reconciler.
+///
+/// All four write a `/run/ados` sidecar every tick and, until this reader
+/// existed, **nothing read any of them** — while the GCS carried a normalizer
+/// clamp and a card for each one, permanently empty. Same defect as the camera
+/// block above, four surfaces over. The keys are the camelCase ones
+/// `agent-capabilities/normalizer.ts` already validates, so the GCS needs only to
+/// fold them into its status-extras pick list.
+///
+/// Every block is omitted (not defaulted) when its sidecar is absent, stale, or
+/// malformed: a stopped supervisor must read as "no reading", never as a healthy
+/// verdict frozen at the moment it died (operating rule 44).
+pub(crate) fn read_reconciler_status() -> Vec<(String, Value)> {
+    read_reconciler_status_in(&run_dir(), now_unix_secs())
+}
+
+/// The path-injectable core of [`read_reconciler_status`]. Pure (no env reads), so
+/// a test drives it with a tempdir without racing the process-global
+/// `ADOS_RUN_DIR`.
+fn read_reconciler_status_in(run_dir: &Path, now: f64) -> Vec<(String, Value)> {
+    let mut out: Vec<(String, Value)> = Vec::new();
+
+    // --- Management-link guardian → `managementLink` ---------------------------
+    if let Some(ml) = read_versioned_sidecar(&run_dir.join("mgmt-link.json"), "mgmt-link") {
+        if sidecar_fresh(&ml, now, MGMT_LINK_FRESH_S) {
+            // The GCS clamp accepts the block only on a known state, so an
+            // unrecognised verdict is dropped here rather than shipped.
+            if let Some(state) = ml.get("state").and_then(Value::as_str) {
+                if matches!(state, "healthy" | "degraded" | "down") {
+                    out.push((
+                        "managementLink".to_string(),
+                        json!({
+                            "state": state,
+                            "iface": get_or_null(&ml, "iface"),
+                            "transport": get_or_null(&ml, "transport"),
+                            "backend": get_or_null(&ml, "backend"),
+                            "carrier": json_truthy_default_false(&ml, "carrier"),
+                            "hasLease": json_truthy_default_false(&ml, "has_lease"),
+                            "gatewayReachable": json_truthy_default_false(&ml, "gateway_reachable"),
+                            "repairing": json_truthy_default_false(&ml, "repairing"),
+                            "lastRung": get_or_null(&ml, "last_rung"),
+                            "lastRepairAt": get_or_null(&ml, "last_repair_at_unix"),
+                            "repairsInWindow": ml.get("repairs_in_window").cloned().unwrap_or(json!(0)),
+                        }),
+                    ));
+                }
+            }
+        }
+    }
+
+    // --- Reach-back mode → `mgmtLinkMode` + the two failover scalars -----------
+    if let Some(mf) = read_versioned_sidecar(&run_dir.join("mgmt-failover.json"), "mgmt-failover") {
+        if sidecar_fresh(&mf, now, MGMT_FAILOVER_FRESH_S) {
+            if let Some(mode) = mf.get("mgmt_link_mode").and_then(Value::as_str) {
+                if matches!(mode, "primary" | "wifi_heartbeat" | "none") {
+                    out.push(("mgmtLinkMode".to_string(), json!(mode)));
+                    out.push((
+                        "mgmtFailoverIface".to_string(),
+                        get_or_null(&mf, "mgmt_failover_iface"),
+                    ));
+                    out.push((
+                        "mgmtFailoverReason".to_string(),
+                        get_or_null(&mf, "mgmt_failover_reason"),
+                    ));
+                }
+            }
+        }
+    }
+
+    // --- USB rehome → `usbRehomeState` + the attempt scalars -------------------
+    if let Some(ur) = read_versioned_sidecar(&run_dir.join("usb-rehome.json"), "usb-rehome") {
+        if sidecar_fresh(&ur, now, USB_REHOME_FRESH_S) {
+            if let Some(state) = ur.get("usb_rehome_state").and_then(Value::as_str) {
+                if matches!(state, "idle" | "rehoming" | "exhausted" | "guard_blocked") {
+                    out.push(("usbRehomeState".to_string(), json!(state)));
+                    out.push((
+                        "usbRehomeAttempts".to_string(),
+                        ur.get("usb_rehome_attempts").cloned().unwrap_or(json!(0)),
+                    ));
+                    out.push((
+                        "usbRehomeMaxAttempts".to_string(),
+                        ur.get("usb_rehome_max_attempts")
+                            .cloned()
+                            .unwrap_or(json!(0)),
+                    ));
+                    out.push((
+                        "usbRehomeLastResult".to_string(),
+                        get_or_null(&ur, "usb_rehome_last_result"),
+                    ));
+                }
+            }
+        }
+    }
+
+    // --- WiFi power-save → `wifiPowersave.interfaces[]` ------------------------
+    //
+    // The only shape change of the four: the sidecar keys its per-interface
+    // snapshots by interface NAME (a JSON object), while the GCS clamp requires
+    // `interfaces` to be an ARRAY and each entry to carry its own `iface`. It also
+    // carries no `updated_at_unix`, so freshness is the file's mtime — the same
+    // gate the CRSF block applies for the same reason.
+    let ps_path = run_dir.join("wifi-powersave.json");
+    if sidecar_mtime_fresh(&ps_path, WIFI_POWERSAVE_FRESH) {
+        if let Some(ps) = read_versioned_sidecar(&ps_path, "wifi-powersave") {
+            if let Some(ifaces) = ps.get("interfaces").and_then(Value::as_object) {
+                let rows: Vec<Value> = ifaces
+                    .iter()
+                    .filter_map(|(name, snap)| {
+                        let s = snap.as_object()?;
+                        Some(json!({
+                            "iface": name,
+                            "powersaveOn": json_truthy_default_false(s, "powersave_on"),
+                            "reasserts": s.get("reasserts").cloned().unwrap_or(json!(0)),
+                            "lastReassert": get_or_null(s, "last_reassert"),
+                            "signalDbm": get_or_null(s, "signal_dbm"),
+                            "linkState": s
+                                .get("link_state")
+                                .cloned()
+                                .unwrap_or_else(|| json!("unknown")),
+                        }))
+                    })
+                    .collect();
+                // A node with no managed WiFi interface omits the block rather than
+                // shipping an empty list, so the card stays hidden.
+                if !rows.is_empty() {
+                    out.push(("wifiPowersave".to_string(), json!({"interfaces": rows})));
+                }
+            }
+        }
+    }
+
+    out
+}
+
+/// The freshness window for the WiFi power-save sidecar, gated on file mtime
+/// because the writer stamps no in-body time.
+const WIFI_POWERSAVE_FRESH: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Read a sidecar object and emit the best-effort schema-drift warning against the
+/// shared contract registry. Never rejects on a version mismatch — a stale sidecar
+/// from an older agent still reads.
+fn read_versioned_sidecar(path: &Path, contract_id: &str) -> Option<Map<String, Value>> {
+    let obj = read_sidecar_object(path)?;
+    let got = obj.get("version").and_then(Value::as_u64).unwrap_or(0) as u16;
+    if let Some(ours) = ados_protocol::contracts::sidecar_version(contract_id) {
+        ados_protocol::sidecar::check_sidecar_version(contract_id, got, ours);
+    }
+    Some(obj)
+}
+
+/// True when `path`'s mtime is within `max_age` of now. For a sidecar that carries
+/// no in-body timestamp; a file from the future counts as fresh (a clock step must
+/// not blank a live reading).
+fn sidecar_mtime_fresh(path: &Path, max_age: std::time::Duration) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    let Ok(mtime) = meta.modified() else {
+        return false;
+    };
+    match std::time::SystemTime::now().duration_since(mtime) {
+        Ok(age) => age <= max_age,
+        Err(_) => true,
+    }
 }
 
 /// Read + parse a sidecar file into an object, or `None` on any gap (absent /
@@ -1894,7 +1662,7 @@ fn read_linked_peers_in(path: &Path, now: f64) -> Vec<(String, Value)> {
 
 /// Query the store for the newest `events` rows of one `event_kind`, returning the
 /// `data` array or `None`. Reuses the app-state logd client's socket so a test
-/// redirects it. Mirrors the wave-1 `logd_query_events`.
+/// redirects it.
 async fn logd_query_events(state: &AppState, event_kind: &str, limit: i64) -> Option<Vec<Value>> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -1993,67 +1761,10 @@ pub(crate) fn run_dir() -> PathBuf {
     PathBuf::from(std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string()))
 }
 
-/// Look up `key` and return its value, or JSON `null` when absent — the Python
-/// `dict.get(key)` (which returns `None`, serialized as `null`).
-fn get_or_null(map: &Map<String, Value>, key: &str) -> Value {
-    map.get(key).cloned().unwrap_or(Value::Null)
-}
-
 /// `bool(map.get(key, False))` — Python truthiness over the value, defaulting to
 /// `false` when the key is absent.
 fn json_truthy_default_false(map: &Map<String, Value>, key: &str) -> bool {
     map.get(key).map(json_truthy).unwrap_or(false)
-}
-
-/// A non-empty owned string for a JSON string value, or `None` for a non-string /
-/// empty string — the Python `x or None` over a possibly-empty interface name.
-fn non_empty_string(v: &Value) -> Option<String> {
-    match v {
-        Value::String(s) if !s.is_empty() => Some(s.clone()),
-        _ => None,
-    }
-}
-
-/// Python `bool(x)` over a JSON value: `null`/`false`/`0`/`0.0`/`""`/`[]`/`{}` are
-/// falsey, everything else truthy.
-fn json_truthy(v: &Value) -> bool {
-    match v {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Number(n) => n.as_f64().map(|f| f != 0.0).unwrap_or(true),
-        Value::String(s) => !s.is_empty(),
-        Value::Array(a) => !a.is_empty(),
-        Value::Object(o) => !o.is_empty(),
-    }
-}
-
-/// The Python `x or None` falsiness used for `channel` / `bitrate_kbps` (a `0` /
-/// `0.0` / `null` reads as no value → `null`).
-fn is_falsey(v: &Value) -> bool {
-    !json_truthy(v)
-}
-
-/// Coerce a JSON number to `i64`, accepting an integer or a float. `None` for a
-/// non-number.
-fn json_to_i64(v: &Value) -> Option<i64> {
-    match v {
-        Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f as i64)),
-        _ => None,
-    }
-}
-
-/// Round to three decimal places, matching the Python `round(x, 3)`.
-fn round3(v: f64) -> f64 {
-    (v * 1000.0).round() / 1000.0
-}
-
-/// The current wall-clock time in microseconds since the Unix epoch.
-fn now_unix_micros() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_micros() as i64)
-        .unwrap_or(0)
 }
 
 /// The current wall-clock time in seconds (float) since the Unix epoch, matching
@@ -2069,6 +1780,9 @@ pub(crate) fn now_unix_secs() -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Test-only: the base block is the shared module's, exercised here because
+    // this is where the radio block's null-verdict contract is pinned.
+    use ados_protocol::wfb_status::wfb_base_block;
 
     fn signals(pairs: &[(&str, Value)]) -> Map<String, Value> {
         pairs
@@ -2513,15 +2227,6 @@ mod tests {
         assert!(obj.contains_key("validRxPacketsPerS"));
     }
 
-    #[test]
-    fn channel_to_freq_omits_the_status_only_channels() {
-        // 40 + 44 exist in the WFB status channel set but NOT the radio-block map.
-        assert_eq!(channel_to_freq(40), None);
-        assert_eq!(channel_to_freq(44), None);
-        assert_eq!(channel_to_freq(149), Some(5745));
-        assert_eq!(channel_to_freq(165), Some(5825));
-    }
-
     // -------- video gate --------
 
     #[test]
@@ -2653,6 +2358,161 @@ mod tests {
         assert_eq!(obj["peer_count"], json!(2));
         assert_eq!(obj["selected_gateway"], json!("a"));
         assert_eq!(obj["partition"], json!(false));
+    }
+
+    // -------- reconciler verdicts --------
+
+    /// Helper: collect the reconciler keys from a tempdir at `now`.
+    fn reconciler_map(dir: &Path, now: f64) -> Map<String, Value> {
+        read_reconciler_status_in(dir, now).into_iter().collect()
+    }
+
+    #[test]
+    fn a_fresh_management_link_sidecar_becomes_the_camelcase_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = 1_700_000_000.0;
+        std::fs::write(
+            dir.path().join("mgmt-link.json"),
+            format!(
+                r#"{{"version":1,"state":"degraded","iface":"eth0","transport":"ethernet","backend":"networkd","carrier":true,"has_lease":true,"gateway_reachable":false,"repairing":true,"last_rung":"renew_dhcp","last_repair_at_unix":1699999990,"repairs_in_window":2,"updated_at_unix":{now}}}"#
+            ),
+        )
+        .unwrap();
+        let map = reconciler_map(dir.path(), now);
+        let ml = map.get("managementLink").unwrap();
+        assert_eq!(ml["state"], json!("degraded"));
+        assert_eq!(ml["iface"], json!("eth0"));
+        assert_eq!(ml["gatewayReachable"], json!(false));
+        assert_eq!(ml["hasLease"], json!(true));
+        assert_eq!(ml["repairing"], json!(true));
+        assert_eq!(ml["lastRung"], json!("renew_dhcp"));
+        assert_eq!(ml["repairsInWindow"], json!(2));
+    }
+
+    #[test]
+    fn a_stale_or_absent_or_unknown_management_link_is_omitted() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = 1_700_000_000.0;
+        // Absent.
+        assert!(!reconciler_map(dir.path(), now).contains_key("managementLink"));
+        // Stale: a stopped supervisor must not render its last verdict as live.
+        let stale = now - MGMT_LINK_FRESH_S - 1.0;
+        std::fs::write(
+            dir.path().join("mgmt-link.json"),
+            format!(r#"{{"version":1,"state":"healthy","updated_at_unix":{stale}}}"#),
+        )
+        .unwrap();
+        assert!(!reconciler_map(dir.path(), now).contains_key("managementLink"));
+        // Fresh but an unrecognised verdict the GCS clamp would drop anyway.
+        std::fs::write(
+            dir.path().join("mgmt-link.json"),
+            format!(r#"{{"version":1,"state":"weird","updated_at_unix":{now}}}"#),
+        )
+        .unwrap();
+        assert!(!reconciler_map(dir.path(), now).contains_key("managementLink"));
+    }
+
+    #[test]
+    fn a_fresh_failover_sidecar_becomes_the_mode_and_its_two_scalars() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = 1_700_000_000.0;
+        std::fs::write(
+            dir.path().join("mgmt-failover.json"),
+            format!(
+                r#"{{"version":1,"mgmt_link_mode":"wifi_heartbeat","mgmt_failover_iface":"wlan0","mgmt_failover_reason":"primary_carrier_down","updated_at_unix":{now}}}"#
+            ),
+        )
+        .unwrap();
+        let map = reconciler_map(dir.path(), now);
+        assert_eq!(map.get("mgmtLinkMode"), Some(&json!("wifi_heartbeat")));
+        assert_eq!(map.get("mgmtFailoverIface"), Some(&json!("wlan0")));
+        assert_eq!(
+            map.get("mgmtFailoverReason"),
+            Some(&json!("primary_carrier_down"))
+        );
+
+        // The primary mode carries nulls for both scalars, not omissions: the
+        // operator needs "on the wired primary, no failover" to read distinctly
+        // from "this agent does not report reach-back at all".
+        std::fs::write(
+            dir.path().join("mgmt-failover.json"),
+            format!(
+                r#"{{"version":1,"mgmt_link_mode":"primary","mgmt_failover_iface":null,"mgmt_failover_reason":null,"updated_at_unix":{now}}}"#
+            ),
+        )
+        .unwrap();
+        let map = reconciler_map(dir.path(), now);
+        assert_eq!(map.get("mgmtLinkMode"), Some(&json!("primary")));
+        assert_eq!(map.get("mgmtFailoverIface"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn a_fresh_usb_rehome_sidecar_becomes_the_state_and_attempt_scalars() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = 1_700_000_000.0;
+        std::fs::write(
+            dir.path().join("usb-rehome.json"),
+            format!(
+                r#"{{"version":1,"usb_rehome_state":"rehoming","usb_rehome_attempts":2,"usb_rehome_max_attempts":3,"usb_rehome_last_result":"retry","updated_at_unix":{now}}}"#
+            ),
+        )
+        .unwrap();
+        let map = reconciler_map(dir.path(), now);
+        assert_eq!(map.get("usbRehomeState"), Some(&json!("rehoming")));
+        assert_eq!(map.get("usbRehomeAttempts"), Some(&json!(2)));
+        assert_eq!(map.get("usbRehomeMaxAttempts"), Some(&json!(3)));
+        assert_eq!(map.get("usbRehomeLastResult"), Some(&json!("retry")));
+
+        let stale = now - USB_REHOME_FRESH_S - 1.0;
+        std::fs::write(
+            dir.path().join("usb-rehome.json"),
+            format!(r#"{{"version":1,"usb_rehome_state":"rehoming","updated_at_unix":{stale}}}"#),
+        )
+        .unwrap();
+        assert!(!reconciler_map(dir.path(), now).contains_key("usbRehomeState"));
+    }
+
+    #[test]
+    fn the_powersave_interface_map_becomes_the_array_the_gcs_clamp_requires() {
+        // The one shape change of the four: the sidecar keys its snapshots by
+        // interface name, the GCS requires `interfaces` to be an array whose
+        // entries carry their own `iface`. A map shipped verbatim would fail the
+        // clamp and render nothing.
+        let dir = tempfile::tempdir().unwrap();
+        let now = 1_700_000_000.0;
+        std::fs::write(
+            dir.path().join("wifi-powersave.json"),
+            r#"{"version":1,"interfaces":{"wlan0":{"powersave_on":false,"reasserts":3,"last_reassert":"2026-08-13T04:00:00+00:00","signal_dbm":-52,"link_state":"connected"}}}"#,
+        )
+        .unwrap();
+        let map = reconciler_map(dir.path(), now);
+        let ps = map.get("wifiPowersave").unwrap();
+        let rows = ps["interfaces"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["iface"], json!("wlan0"));
+        assert_eq!(rows[0]["powersaveOn"], json!(false));
+        assert_eq!(rows[0]["reasserts"], json!(3));
+        assert_eq!(rows[0]["signalDbm"], json!(-52));
+        assert_eq!(rows[0]["linkState"], json!("connected"));
+    }
+
+    #[test]
+    fn a_powersave_sidecar_with_no_interfaces_is_omitted() {
+        // A profile with no managed WiFi interface must hide the card, not render
+        // an empty one.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("wifi-powersave.json"),
+            r#"{"version":1,"interfaces":{}}"#,
+        )
+        .unwrap();
+        assert!(!reconciler_map(dir.path(), 1_700_000_000.0).contains_key("wifiPowersave"));
+    }
+
+    #[test]
+    fn an_absent_run_dir_folds_no_reconciler_keys_at_all() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(read_reconciler_status_in(dir.path(), 1_700_000_000.0).is_empty());
     }
 
     // -------- camera --------
@@ -3033,5 +2893,54 @@ mod tests {
         assert_eq!(obj["profile"], json!("drone"));
         assert_eq!(obj["role"], Value::Null);
         assert_eq!(obj["runtimeMode"], json!("packaged"));
+    }
+
+    // -------- macStability --------
+
+    /// The per-adapter verdicts must reach the status body from the state file.
+    ///
+    /// Six GCS readers and three cards consumed `macStability` while no transport
+    /// produced it, so the whole feature rendered nothing. The projection is
+    /// `ados-macpin`'s (the crate that owns the file), shared with the cloud
+    /// heartbeat, so this pins the shape both transports carry.
+    #[test]
+    fn the_mac_pin_verdicts_project_to_the_block_the_gcs_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("mac-pins.state");
+        std::fs::write(
+            &state,
+            r#"{"version":1,"adapters":[
+                {"name":"wlan1","vidpid":"0bda:a81a","usb_path":"1-1.2","state":"pinned",
+                 "applied_live":true,"pinned_mac":"00:11:22:33:44:55","source":"learner"},
+                {"name":"wlan2","vidpid":"0bda:8812","usb_path":"1-1.3","state":"stable",
+                 "applied_live":false,"pinned_mac":null}
+            ]}"#,
+        )
+        .unwrap();
+
+        let block = ados_macpin::engine::adapters_camel_from(&state).expect("a pinned node");
+        let adapters = block["adapters"].as_array().unwrap();
+        assert_eq!(adapters.len(), 2);
+        assert_eq!(adapters[0]["usbPath"], json!("1-1.2"));
+        assert_eq!(adapters[0]["pinnedMac"], json!("00:11:22:33:44:55"));
+        assert_eq!(adapters[0]["appliedLive"], json!(true));
+        assert_eq!(adapters[1]["appliedLive"], json!(false));
+        // A null source value omits the key rather than rendering it null.
+        assert!(
+            !adapters[1].as_object().unwrap().contains_key("pinnedMac"),
+            "a null pinned_mac must omit the key, not claim an empty pin"
+        );
+    }
+
+    #[test]
+    fn a_node_that_pinned_nothing_omits_the_mac_stability_block() {
+        let dir = tempfile::tempdir().unwrap();
+        // Absent state file.
+        assert!(ados_macpin::engine::adapters_camel_from(&dir.path().join("nope.state")).is_none());
+        // Present but empty: the card must stay hidden rather than claim the node
+        // looked and found no adapter.
+        let empty = dir.path().join("empty.state");
+        std::fs::write(&empty, r#"{"version":1,"adapters":[]}"#).unwrap();
+        assert!(ados_macpin::engine::adapters_camel_from(&empty).is_none());
     }
 }

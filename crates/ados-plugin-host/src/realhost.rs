@@ -63,7 +63,7 @@ pub const POSE_INJECT_MSG_IDS: &[u32] = &[
 /// `VIO_COMPONENT_IDS`.
 pub const VIO_COMPONENT_IDS: &[i64] = &[197, 198];
 
-/// Driver kind -> required capability. Mirrors `_DRIVER_KIND_TO_CAP`.
+/// Driver kind -> required capability.
 fn driver_kind_to_cap(kind: &str) -> Option<&'static str> {
     Some(match kind {
         "camera" => "sensor.camera.register",
@@ -78,14 +78,14 @@ fn driver_kind_to_cap(kind: &str) -> Option<&'static str> {
     })
 }
 
-/// Supported camera frame formats. Mirrors `_SUPPORTED_CAMERA_FORMATS`.
+/// Supported camera frame formats.
 const SUPPORTED_CAMERA_FORMATS: &[&str] = &["nv12", "rgb888", "yuv420p"];
 
 // ---------------------------------------------------------------------
 // Component registrar
 // ---------------------------------------------------------------------
 
-/// One component-id reservation. Mirrors `ComponentRegistration`.
+/// One component-id reservation.
 #[derive(Debug, Clone)]
 struct ComponentRegistration {
     plugin_id: String,
@@ -151,7 +151,7 @@ impl ComponentRegistrar {
 // ---------------------------------------------------------------------
 
 /// Stores per-plugin telemetry channel payloads. Channel keys are namespaced
-/// `<plugin_id>/<channel>`. Mirrors `TelemetryExtender`.
+/// `<plugin_id>/<channel>`.
 #[derive(Default)]
 struct TelemetryExtender {
     channels: BTreeMap<String, Value>,
@@ -187,16 +187,14 @@ impl TelemetryExtender {
 // Driver registry
 // ---------------------------------------------------------------------
 
-/// One driver registration handle. Mirrors `DriverHandle`.
+/// One driver registration handle.
 #[derive(Debug, Clone)]
 struct DriverHandle {
     plugin_id: String,
     handle_id: String,
 }
 
-/// Generic driver registry for every driver kind. Mirrors `DriverRegistry`
-/// (the installer/uninstaller callables are not wired in this in-memory host;
-/// the production agent hands the driver to the owning manager out of band).
+/// Generic driver registry for every driver kind.
 #[derive(Default)]
 struct DriverRegistry {
     handles: BTreeMap<String, DriverHandle>,
@@ -246,7 +244,7 @@ impl DriverRegistry {
 // Camera claim tracker
 // ---------------------------------------------------------------------
 
-/// One camera claim. Mirrors `CameraClaim`.
+/// One camera claim.
 #[derive(Debug, Clone)]
 struct CameraClaim {
     plugin_id: String,
@@ -254,8 +252,7 @@ struct CameraClaim {
     exclusive: bool,
 }
 
-/// The latest captured frame for a claimed path. Mirrors `CameraFrame`; only a
-/// test harness populates it in this in-memory host.
+/// The latest captured frame for a claimed path.
 #[derive(Debug, Clone)]
 pub struct CameraFrame {
     pub frame_id: i64,
@@ -266,8 +263,8 @@ pub struct CameraFrame {
     pub ts_ns: i64,
 }
 
-/// Records per-plugin exclusive holds on a `/dev/videoN` path plus the cached
-/// latest frame. Mirrors `CameraClaimTracker`.
+/// Records per-plugin exclusive holds on a `/dev/videoN` path plus the cached latest
+/// frame.
 #[derive(Default)]
 struct CameraClaimTracker {
     claims: BTreeMap<String, CameraClaim>,
@@ -726,8 +723,8 @@ fn gpio_socket_roundtrip(
 // MAVLink frame classification
 // ---------------------------------------------------------------------
 
-/// Best-effort MAVLink message id from a raw frame. Returns `None` when the
-/// frame is too short to classify. Mirrors `_mavlink_msg_id`.
+/// Best-effort MAVLink message id from a raw frame. Returns `None` when the frame is
+/// too short to classify.
 fn mavlink_msg_id(frame: &[u8]) -> Option<u32> {
     let stx = *frame.first()?;
     if stx == 0xFD && frame.len() >= 10 {
@@ -1143,11 +1140,10 @@ fn pairing_key(path: &std::path::Path) -> Option<String> {
     }
 }
 
-/// The real host: the five in-memory facades, the optional MAVLink client, and
-/// the two runtime lookups. Mirrors the `HostServices` dataclass and
-/// `default_host_services()` (every external slot starts `None`).
-/// The process-wide button-bus reader, started on first `button.subscribe`.
-/// The bus is one socket, so one connection serves every subscriber.
+/// The real host: the five in-memory facades, the optional MAVLink client, and the two
+/// runtime lookups. The process-wide button-bus reader, started on first
+/// `button.subscribe`. The bus is one socket, so one connection serves every
+/// subscriber.
 static BUTTON_CLIENT: std::sync::OnceLock<crate::button_client::ButtonClient> =
     std::sync::OnceLock::new();
 
@@ -1638,7 +1634,7 @@ impl HostServices for RealHost {
         args: &Value,
         granted_caps: &BTreeSet<String>,
     ) -> Result<HostResult, HostError> {
-        // Mirrors `handle_mavlink_send` in source order: argument validation,
+        // Order of operations: argument validation,
         // then the pose-inject capability gate, then the component-id VIO gate +
         // reservation check, then the router-None / send. The inline gates run
         // INSIDE the handler, after validation, so a malformed request fails
@@ -1844,7 +1840,7 @@ impl HostServices for RealHost {
         args: &Value,
         granted_caps: &BTreeSet<String>,
     ) -> Result<HostResult, HostError> {
-        // Mirrors `handle_mavlink_register_component` in source order: validate
+        // Order of operations: validate
         // kind, coerce component_id, then the `mavlink.component.<kind>` cap gate,
         // then the VIO-kind reservation rule, then register.
         let kind = arg_str(args, "kind").filter(|k| !k.is_empty());
@@ -1887,7 +1883,7 @@ impl HostServices for RealHost {
         args: &Value,
         granted_caps: &BTreeSet<String>,
     ) -> Result<HostResult, HostError> {
-        // Mirrors `handle_peripheral_register_driver` in source order: validate
+        // Order of operations: validate
         // kind, validate driver_ref, resolve the kind's required cap (unknown
         // kind is an _RpcError), then the cap gate, then register.
         let kind = arg_str(args, "kind").filter(|k| !k.is_empty());

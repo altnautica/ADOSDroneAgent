@@ -569,6 +569,26 @@ def apply_regulatory(
         except Exception:
             pass
 
+    if changed:
+        # The audit trail: a regulatory posture is a decision that outlives the
+        # request, and the operator + timestamp recorded above are exactly what
+        # an after-the-fact "who set this region" question needs.
+        from ados.core import audit
+
+        audit.record(
+            audit.REGULATORY_POSTURE_APPLIED,
+            audit.ACTOR_OPERATOR,
+            {
+                "mode": target_mode,
+                "region": target_region,
+                "previous_mode": previous_mode,
+                "previous_region": previous_region,
+                "ack_operator": reg.ack_operator,
+                "ack_at": reg.ack_at,
+                "restart_required": True,
+            },
+        )
+
     data: dict[str, object] = {
         "changed": changed,
         "mode": target_mode,

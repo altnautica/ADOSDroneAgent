@@ -82,10 +82,16 @@ fn profile_mismatch() -> Response {
 /// The one recorder for the life of the front process. The start and stop are
 /// separate HTTP requests, so the ffmpeg child must outlive a single request;
 /// the front holds the recorder here (behind an `Arc` so each handler shares the
-/// same instance + `Mutex`-guarded inner state). Mirrors the Python
-/// `get_recorder()` module-level singleton. Built lazily at the first start/stop
-/// so a drone-profile front (which never records) never constructs one.
-fn recorder() -> Arc<GroundStationRecorder> {
+/// same instance + `Mutex`-guarded inner state). Built lazily at the first
+/// start/stop/status read so a drone-profile front (which never records) never
+/// constructs one.
+///
+/// `pub(crate)` because the ground-station status route reports the recorder's
+/// live state and must read THIS instance: it previously hardcoded `false` on the
+/// stated grounds that the front had no in-process recorder, which this module
+/// contradicts, and an operator recording through the cockpit saw the status
+/// surface deny it (rule 6).
+pub(crate) fn recorder() -> Arc<GroundStationRecorder> {
     static RECORDER: OnceLock<Arc<GroundStationRecorder>> = OnceLock::new();
     RECORDER
         .get_or_init(|| Arc::new(GroundStationRecorder::default_recorder()))

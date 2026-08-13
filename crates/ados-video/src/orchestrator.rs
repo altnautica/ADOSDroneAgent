@@ -482,10 +482,10 @@ impl VideoOrchestrator {
         tracing::info!("pipeline_stopped");
     }
 
-    /// One health probe: encoder PID alive + mediamtx alive + the startup-grace
-    /// / path-ready / inbound-stall ladder. Mirrors `_check_health`. Returns
-    /// the overall health verdict; side-effects (latching first-packet,
-    /// recording bytes/s) are applied here against the pure decision helpers.
+    /// One health probe: encoder PID alive + mediamtx alive + the startup-grace /
+    /// path-ready / inbound-stall ladder. Returns the overall health verdict;
+    /// side-effects (latching first-packet, recording bytes/s) are applied here against
+    /// the pure decision helpers.
     pub async fn check_health(&mut self) -> bool {
         // Encoder liveness.
         let Some(enc) = self.encoder.as_mut() else {
@@ -534,10 +534,10 @@ impl VideoOrchestrator {
         self.check_inbound_flow_healthy().await
     }
 
-    /// Inbound-byte stall watchdog. Reads mediamtx's per-path `bytesReceived`,
-    /// applies the pure [`inbound_decision`], and records the bytes/s. Falls
-    /// back to healthy on an unreadable counter (a transient API hiccup must
-    /// never force a needless restart). Mirrors `_check_inbound_flow_healthy`.
+    /// Inbound-byte stall watchdog. Reads mediamtx's per-path `bytesReceived`, applies
+    /// the pure [`inbound_decision`], and records the bytes/s. Falls back to healthy on
+    /// an unreadable counter (a transient API hiccup must never force a needless
+    /// restart).
     async fn check_inbound_flow_healthy(&mut self) -> bool {
         let Some(current) = self.mediamtx.inbound_bytes(MAIN_PATH).await else {
             return true;
@@ -578,14 +578,13 @@ impl VideoOrchestrator {
     /// Is the cloud push still alive? `true` when healthy or — for the absent
     /// slot — only when cloud relay is NOT configured to be running here.
     ///
-    /// The None branch is the same shape as the wfb-tee None-branch: a full
-    /// pipeline restart (`stop_stream` → `start_stream`) clears `cloud_push`
-    /// and `start_stream` does NOT re-arm it, so reporting healthy for None
-    /// would leave a configured cloud push dead for the rest of the process
-    /// lifetime. Report unhealthy for the absent slot WHILE cloud is enabled
-    /// AND the pipeline is Running so the run-loop ladder re-arms it; when
-    /// cloud is disabled, or the pipeline is not running, the absent slot is
-    /// correct and healthy. Mirrors `_check_cloud_push_health`.
+    /// The None branch is the same shape as the wfb-tee None-branch: a full pipeline
+    /// restart (`stop_stream` → `start_stream`) clears `cloud_push` and `start_stream`
+    /// does NOT re-arm it, so reporting healthy for None would leave a configured cloud
+    /// push dead for the rest of the process lifetime. Report unhealthy for the absent
+    /// slot WHILE cloud is enabled AND the pipeline is Running so the run-loop ladder
+    /// re-arms it; when cloud is disabled, or the pipeline is not running, the absent
+    /// slot is correct and healthy.
     fn check_cloud_push_health(&mut self) -> bool {
         match self.cloud_push.as_mut() {
             None => !(self.config.cloud_enabled() && self.state == PipelineState::Running),
@@ -601,8 +600,7 @@ impl VideoOrchestrator {
         }
     }
 
-    /// Is the wfb tap alive AND producing? `true` when healthy or never
-    /// started. Mirrors `_check_wfb_tee_health` (Rule 37: liveness ≠ work).
+    /// Is the wfb tap alive AND producing? `true` when healthy or never started.
     async fn check_wfb_tee_health(&mut self) -> bool {
         let Some(p) = self.wfb_tee.as_mut() else {
             // No tee yet: the first spawn is deferred until the RTSP source is
@@ -1062,8 +1060,8 @@ impl VideoOrchestrator {
         }
     }
 
-    /// Re-arm the consecutive-healthy timer on a failed probe so the window has
-    /// to start over before the counter can clear. Mirrors `_note_unhealthy_tick`.
+    /// Re-arm the consecutive-healthy timer on a failed probe so the window has to
+    /// start over before the counter can clear.
     fn note_unhealthy_tick(&mut self) {
         self.last_healthy_at = None;
     }
@@ -1097,7 +1095,6 @@ pub(crate) fn apply_settings_to(cfg: &mut CameraConfig, s: EncoderSettings) {
 
 /// Sleep up to `dur`, waking early on shutdown or (when `wake_on_camera`) on a
 /// camera-plugged SIGUSR1. A zero / negative duration returns immediately.
-/// Mirrors `_sleep_or_wake_on_camera` fused with shutdown awareness.
 async fn interruptible_sleep(
     dur: Duration,
     shutdown: &Shutdown,

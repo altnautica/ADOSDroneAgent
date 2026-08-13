@@ -14,12 +14,9 @@ barrel:
   YAML-backed) and the in-memory mirror helper.
 * ``system_snapshot.py`` — CPU / RAM / temp / uptime / agent version.
 * ``managers.py`` — lazy-import singletons for the live service
-  managers (hostapd, pair, ethernet, wifi-client, modem, uplink
-  router, input, PIC arbiter).
+  managers (hostapd, pair).
 * ``views.py`` — view aggregators that compose the live status JSON
-  (link, network, AP, wifi-client, ethernet, modem, router state).
-* ``share_uplink.py`` — read / persist / apply for the share-uplink
-  toggle.
+  (radio link, AP-only network block, WFB, AP-guard diagnostics).
 * ``models.py`` — Pydantic request models.
 * ``validators.py`` — IPv4 helpers, AP-subnet gate, JSON / YAML
   file readers, stock confirm token.
@@ -39,28 +36,17 @@ from ._paths import (
     _DEFAULT_SCREENS,
     _MESH_STATE_JSON,
     _UI_CONFIG_PATH,
-    _UPLINK_PRIORITY_PATH,
     _WFB_RECEIVER_JSON,
     _WFB_RELAY_JSON,
 )
-from .managers import (
-    _ethernet_mgr,
-    _hostapd_manager,
-    _modem_mgr,
-    _pair_manager,
-    _uplink_router,
-    _wifi_client_manager,
-)
+from .managers import _pair_manager
 from .models import (
-    ApUpdate,
     BluetoothPairRequest,
     BluetoothScanRequest,
     ButtonsUpdate,
-    EthernetConfigUpdate,
     GamepadPrimaryUpdate,
     MeshConfigUpdate,
     MeshGatewayPreferenceUpdate,
-    ModemConfigUpdate,
     OledUpdate,
     PairAcceptRequest,
     PairApproveRequest,
@@ -73,17 +59,10 @@ from .models import (
     PicReleaseRequest,
     RoleChangeRequest,
     ScreensUpdate,
-    ShareUplinkUpdate,
-    UplinkPriorityUpdate,
     WfbUpdate,
     WifiJoinRequest,
 )
 from .profile import _require_ground_profile, _save_config
-from .share_uplink import (
-    _apply_share_uplink,
-    _load_share_uplink_flag,
-    _persist_share_uplink_flag,
-)
 from .system_snapshot import _agent_version, _system_snapshot
 from .ui_config import (
     _load_display_config,
@@ -101,16 +80,7 @@ from .validators import (
     _validate_ipv4,
     _validate_ipv4_cidr,
 )
-from .views import (
-    _ap_view,
-    _ethernet_view,
-    _link_view,
-    _modem_view,
-    _network_view,
-    _read_wfb_view,
-    _router_state_view,
-    _wifi_client_view,
-)
+from .views import _read_wfb_view
 
 __all__ = [
     # paths + defaults
@@ -119,7 +89,6 @@ __all__ = [
     "_DEFAULT_BUTTONS",
     "_DEFAULT_SCREENS",
     "_DEFAULT_DISPLAY",
-    "_UPLINK_PRIORITY_PATH",
     "_MESH_STATE_JSON",
     "_WFB_RELAY_JSON",
     "_WFB_RECEIVER_JSON",
@@ -136,25 +105,9 @@ __all__ = [
     "_agent_version",
     "_system_snapshot",
     # managers
-    "_hostapd_manager",
     "_pair_manager",
-    "_ethernet_mgr",
-    "_wifi_client_manager",
-    "_modem_mgr",
-    "_uplink_router",
     # views
-    "_link_view",
-    "_network_view",
     "_read_wfb_view",
-    "_ap_view",
-    "_wifi_client_view",
-    "_ethernet_view",
-    "_modem_view",
-    "_router_state_view",
-    # share uplink
-    "_load_share_uplink_flag",
-    "_persist_share_uplink_flag",
-    "_apply_share_uplink",
     # validators
     "_IPV4_RE",
     "_stock_confirm_token",
@@ -165,7 +118,6 @@ __all__ = [
     "_read_yaml_or_empty",
     # models
     "WfbUpdate",
-    "ApUpdate",
     "PairRequest",
     "OledUpdate",
     "ButtonsUpdate",
@@ -178,9 +130,6 @@ __all__ = [
     "PicConfirmTokenRequest",
     "PicHeartbeatRequest",
     "WifiJoinRequest",
-    "ModemConfigUpdate",
-    "UplinkPriorityUpdate",
-    "ShareUplinkUpdate",
     "RoleChangeRequest",
     "MeshConfigUpdate",
     "MeshGatewayPreferenceUpdate",
@@ -188,5 +137,4 @@ __all__ = [
     "PairApproveRequest",
     "PairRevokeRequest",
     "PairJoinRequest",
-    "EthernetConfigUpdate",
 ]

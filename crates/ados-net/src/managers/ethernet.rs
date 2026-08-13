@@ -337,7 +337,7 @@ impl EthernetManager {
         })
     }
 
-    /// Reset the primary connection to DHCP via nmcli. Mirrors `configure_dhcp`.
+    /// Reset the primary connection to DHCP via nmcli.
     pub async fn configure_dhcp(&self) -> Value {
         let name = match self.discover_primary_connection().await {
             Some(n) => n,

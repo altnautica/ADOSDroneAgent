@@ -39,6 +39,14 @@ pub const FAILOVER_KIND: &str = "link.mgmt_failover";
 #[cfg(target_os = "linux")]
 const SIDECAR_PATH: &str = "/run/ados/mgmt-failover.json";
 
+/// Schema version of the `mgmt-failover.json` sidecar. Bump on an incompatible
+/// field-set change; a reader compares it best-effort via
+/// `ados_protocol::sidecar::check_sidecar_version`. Kept in step with the
+/// registry in `contracts.toml`. Gated to the platforms that build the writer
+/// (Linux) or the version test.
+#[cfg(any(target_os = "linux", test))]
+const MGMT_FAILOVER_SIDECAR_VERSION: u16 = 1;
+
 /// Default sustained-down window before failing over to the WiFi heartbeat.
 /// Longer than a transient cable blip so a momentary drop never demotes.
 const DEFAULT_DOWN_DEBOUNCE_S: u64 = 20;
@@ -405,6 +413,7 @@ impl MgmtFailover {
     fn write_sidecar(&self) {
         #[derive(serde::Serialize)]
         struct Snap<'a> {
+            version: u16,
             mgmt_link_mode: &'a str,
             mgmt_failover_iface: Option<&'a str>,
             mgmt_failover_reason: Option<&'a str>,
@@ -416,6 +425,7 @@ impl MgmtFailover {
             MgmtLinkMode::NoReachback => Some("no_wifi_reachback"),
         };
         let snap = Snap {
+            version: MGMT_FAILOVER_SIDECAR_VERSION,
             mgmt_link_mode: self.mode.as_str(),
             mgmt_failover_iface: self.failover_iface.as_deref(),
             mgmt_failover_reason: reason,
@@ -497,6 +507,18 @@ fn write_json_atomic<T: serde::Serialize>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mgmt_failover_sidecar_version_matches_registry() {
+        // The per-file const and the sidecar registry are the two sources of
+        // truth for this sidecar's schema version; a drift is caught here. The
+        // reader (`ados-control`'s status route) gates its drift warning on the
+        // registry, so an unregistered sidecar would warn on every read.
+        assert_eq!(
+            MGMT_FAILOVER_SIDECAR_VERSION,
+            ados_protocol::contracts::sidecar_version("mgmt-failover").unwrap()
+        );
+    }
 
     fn machine() -> MgmtFailover {
         MgmtFailover::new(EventEmitter::with_socket(

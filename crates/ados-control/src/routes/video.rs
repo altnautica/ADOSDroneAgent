@@ -149,7 +149,7 @@ pub async fn get_video_latency(State(state): State<AppState>) -> Json<Value> {
 }
 
 /// The `video.latency.*` metric → route-key map. Each store metric maps back to the
-/// JSON key the route returns. Mirrors the Python `_LATENCY_METRICS`.
+/// JSON key the route returns.
 const LATENCY_METRICS: [(&str, &str); 3] = [
     ("video.latency.glass_ms", "latency_ms"),
     ("video.latency.ewma_ms", "ewma_ms"),
@@ -650,9 +650,8 @@ fn collapse_empty_metrics(out: Map<String, Value>) -> Option<Map<String, Value>>
     }
 }
 
-/// The newest numeric value for `name` from a merged metric map, or `None` if the
-/// name is absent / non-numeric / a bool. Mirrors the Python `_metric_value` (which
-/// excludes bools and casts to float).
+/// The newest numeric value for `name` from a merged metric map, or `None` if the name
+/// is absent / non-numeric / a bool.
 fn metric_value(metrics: Option<&Map<String, Value>>, name: &str) -> Option<f64> {
     let value = metrics?.get(name)?;
     match value {
@@ -664,9 +663,6 @@ fn metric_value(metrics: Option<&Map<String, Value>>, name: &str) -> Option<f64>
 }
 
 /// The `detail` object of the newest events row whose `kind` matches, or `None`.
-/// Mirrors the Python `_latest_event`: filter the events table to the kind
-/// server-side (`event_kind`), re-check the kind client-side, and return the
-/// `detail` (an empty object when the detail is absent / non-object).
 async fn latest_event_detail(state: &AppState, kind: &str) -> Option<Map<String, Value>> {
     let rows = logd_query_rows(state, "events", 50, Some(kind)).await?;
     for row in rows {

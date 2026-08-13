@@ -25,7 +25,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ados_radio::channel::STANDARD_CHANNELS;
+use ados_radio::channel::standard_channels;
 
 /// Per-channel dwell while sweeping. Long enough for the transmitter's next FEC
 /// block + the receiver's decode to land (the radio retune blackout is
@@ -121,12 +121,12 @@ pub fn candidate_channels(band: &str, enabled: Option<&BTreeSet<u8>>) -> Vec<u8>
         "u-nii-1" => vec![36, 40, 44, 48],
         "u-nii-3" => vec![149, 153, 157, 161, 165],
         // "all" and every unknown key use the full standard set.
-        _ => STANDARD_CHANNELS.iter().map(|&(c, _)| c).collect(),
+        _ => standard_channels().iter().map(|&(c, _)| c).collect(),
     };
     let mut ordered = band_numbers;
     // Append any remaining standard channels so a peer that hopped out of band
     // is still found, just later in the sweep.
-    for &(ch, _) in STANDARD_CHANNELS {
+    for &(ch, _) in standard_channels().iter() {
         if !ordered.contains(&ch) {
             ordered.push(ch);
         }

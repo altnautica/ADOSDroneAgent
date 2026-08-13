@@ -254,8 +254,7 @@ pub fn prepare_publish(
 }
 
 /// Validate an `event.subscribe` request, applying the inline per-topic check
-/// (`is_subscribe_allowed`). Returns the topic pattern to subscribe to, or a
-/// refusal. Mirrors `_handle_event_subscribe` up to the bus call.
+/// (`is_subscribe_allowed`). Returns the topic pattern to subscribe to, or a refusal.
 pub fn prepare_subscribe(
     plugin_id: &str,
     args: &Value,
@@ -270,8 +269,8 @@ pub fn prepare_subscribe(
     Ok(pattern.to_string())
 }
 
-/// Build the `event.deliver` envelope `args` the server pushes to a subscriber
-/// when a matching event fans out. Mirrors the args map in `_pump_subscription`.
+/// Build the `event.deliver` envelope `args` the server pushes to a subscriber when a
+/// matching event fans out.
 pub fn event_deliver_args(event: &Event) -> Value {
     Value::Map(vec![
         (Value::from("topic"), Value::from(event.topic.as_str())),

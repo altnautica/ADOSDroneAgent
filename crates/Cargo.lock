@@ -91,6 +91,7 @@ dependencies = [
  "ados-atlas-transport",
  "ados-compute",
  "ados-config",
+ "ados-macpin",
  "ados-offload",
  "ados-plugin-host",
  "ados-protocol",

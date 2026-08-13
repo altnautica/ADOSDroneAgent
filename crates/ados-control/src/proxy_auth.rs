@@ -41,7 +41,7 @@ type HmacSha256 = Hmac<Sha256>;
 /// env-override convention the sibling paths use.
 pub const DEFAULT_SETUP_TOKEN_PATH: &str = "/etc/ados/secrets/setup-token";
 
-/// Routes that never require authentication. Mirrors the former `EXEMPT_PATHS`.
+/// Routes that never require authentication.
 const EXEMPT_PATHS: &[&str] = &[
     "/",
     "/docs",
@@ -484,7 +484,7 @@ impl ProxiedAuth {
     }
 
     /// Read + trim the setup token from disk, returning `None` on an absent /
-    /// unreadable / empty file. Mirrors `_load_setup_token`.
+    /// unreadable / empty file.
     fn load_setup_token(&self) -> Option<String> {
         let text = std::fs::read_to_string(&self.setup_token_path).ok()?;
         let trimmed = text.trim();
@@ -536,7 +536,7 @@ fn is_hmac_exempt(path: &str) -> bool {
     contains(HMAC_EXEMPT_ROUTES, path) || path.starts_with("/api/pairing/")
 }
 
-/// The mutating methods the HMAC gate verifies. Mirrors `VERIFIED_METHODS`.
+/// The mutating methods the HMAC gate verifies.
 fn is_verified_method(method: &Method) -> bool {
     matches!(
         *method,
@@ -564,10 +564,8 @@ fn is_same_origin(headers: &RequestHeaders) -> bool {
     !request_host.is_empty() && host == request_host
 }
 
-/// The host part of the Origin (or Referer) header. Mirrors `_origin_host`
-/// (`urlparse(origin).hostname`): the host between `scheme://` and the next
-/// `/`, `:`, `?`, or `#`. Returns `None` when neither header is present or the
-/// value has no host.
+/// The host part of the Origin (or Referer) header. Returns `None` when neither header
+/// is present or the value has no host.
 fn origin_host(headers: &RequestHeaders) -> Option<String> {
     let raw = headers.origin.as_deref().or(headers.referer.as_deref())?;
     parse_hostname(raw)

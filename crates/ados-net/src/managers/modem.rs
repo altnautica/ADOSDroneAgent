@@ -350,12 +350,11 @@ impl ModemManager {
         }
     }
 
-    /// Bring up the cellular data session. D-Bus first; on failure the manager
-    /// advances its failure counter and (past threshold) flips to fallback,
-    /// where the AT work belongs to the Python service. Returns a status dict.
-    /// `apn = "auto"` resolves via the supplied IMSI (sysfs has none, so the
-    /// daemon passes a resolved APN; "auto" with no IMSI falls back to
-    /// `internet`). Mirrors `bring_up`.
+    /// Bring up the cellular data session. D-Bus first; on failure the manager advances
+    /// its failure counter and (past threshold) flips to fallback, where the AT work
+    /// belongs to the Python service. Returns a status dict. `apn = "auto"` resolves
+    /// via the supplied IMSI (sysfs has none, so the daemon passes a resolved APN;
+    /// "auto" with no IMSI falls back to `internet`).
     pub async fn bring_up(&self, apn: &str, imsi: Option<&str>) -> Value {
         let mut st = self.state.lock().await;
         let resolved = if apn == "auto" {
@@ -420,8 +419,8 @@ impl ModemManager {
         }
     }
 
-    /// Tear the data session down (best-effort D-Bus, then a raw link-down via
-    /// the iface operstate is left to the daemon). Mirrors `bring_down`.
+    /// Tear the data session down (best-effort D-Bus, then a raw link-down via the
+    /// iface operstate is left to the daemon).
     pub async fn bring_down(&self) -> Value {
         let mut st = self.state.lock().await;
         let mut ok = false;
@@ -624,13 +623,9 @@ impl ModemManager {
         self.dbus.imsi().await.unwrap_or_default()
     }
 
-    /// The active cellular iface: wwan0 (MBIM/QMI) preferred, else usb0
-    /// (RNDIS/AT) ONLY when the USB-gadget tether is not provisioned, else
-    /// wwan0. Mirrors `_current_iface` and applies the same `usb0`-is-the-tether
-    /// carve-out the data-cap source uses: when the gadget owns `usb0`, the
-    /// modem must not claim it, or a modem-less board with a provisioned tether
-    /// would report the cellular slot up + routable. Falling back to `wwan0` (an
-    /// absent iface on that board) keeps `is_up`/`iface_up` false.
+    /// The active cellular iface: wwan0 (MBIM/QMI) preferred, else usb0 (RNDIS/AT) ONLY
+    /// when the USB-gadget tether is not provisioned, else wwan0. Falling back to
+    /// `wwan0` (an absent iface on that board) keeps `is_up`/`iface_up` false.
     fn current_iface(&self) -> String {
         if self.net_dir.join(WWAN_IFACE).exists() {
             return WWAN_IFACE.to_string();

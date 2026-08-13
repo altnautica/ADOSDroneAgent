@@ -69,9 +69,7 @@ const UNIVERSAL_UNITS: &[&str] = &[
     "ados-tunnel-config.service",
 ];
 
-/// Ground-station units enable-linked here (the START half is the `start`
-/// step's job). Mirrors `enable_ground_station_units`'s enable list, minus the
-/// env-gated USB-gadget composer which the bash gates on ADOS_ENABLE_USB_GADGET.
+/// Ground-station units enable-linked here (the START half is the `start` step's job).
 const GROUND_STATION_ENABLE_UNITS: &[&str] = &[
     "ados-wfb-rx.service",
     "ados-mediamtx-gs.service",
@@ -85,9 +83,7 @@ const GROUND_STATION_ENABLE_UNITS: &[&str] = &[
     "ados-input.service",
     "ados-pic.service",
     "ados-uplink-router.service",
-    "ados-modem.service",
     "ados-wifi-client.service",
-    "ados-ethernet.service",
 ];
 
 /// Units the agent shipped in a prior release but has since deleted. The
@@ -107,6 +103,24 @@ const RETIRED_UNITS: &[&str] = &[
     // is pruned rather than merely disabled: left on disk its ExecStart names
     // a module that no longer exists.
     "ados-buttons.service",
+    // The packaged ethernet + modem managers were deleted: the native ados-net
+    // daemon owns both uplinks, and every ground-station network write is now a
+    // native route. Their ExecStart named `python -m
+    // ados.services.ground_station.{ethernet,modem}_manager`, so left on disk
+    // they point at nothing. They were already stopped + disabled on every
+    // install; pruning is what stops an upgraded box carrying a unit whose code
+    // is gone.
+    "ados-ethernet.service",
+    "ados-modem.service",
+];
+
+/// Udev rules retired with the units they triggered. Same reasoning as
+/// [`RETIRED_UNITS`]: a rule left on an upgraded box fires `systemctl start` for
+/// a unit that no longer exists, so a modem hot-plug logs a failure forever.
+/// Pruned on every install (`prune_retired_udev_rules`).
+const RETIRED_UDEV_RULES: &[&str] = &[
+    // Started ados-modem.service on a SIMCom / Qualcomm 4G modem appearing.
+    "99-ados-modem.rules",
 ];
 
 /// Cutover marker files retired by a default sense flip or a fallback deletion.
@@ -158,9 +172,7 @@ fn other_profile_units(profile: &str) -> &'static [&'static str] {
             "ados-input.service",
             "ados-pic.service",
             "ados-uplink-router.service",
-            "ados-modem.service",
             "ados-wifi-client.service",
-            "ados-ethernet.service",
             "ados-batman.service",
             "ados-mesh-pairing.service",
         ],
@@ -679,11 +691,8 @@ fn write_env_file() {
     set_mode(&path, 0o600);
 }
 
-/// Install the plugin runtime tmpfiles drop-in so `/run/ados/plugins` (the
-/// per-plugin socket dir) is recreated on every boot, not just at install
-/// time. Mirrors `install_plugin_tmpfiles`: prefer the packaged snippet under
-/// the source tree, else write the inline default; then run
-/// `systemd-tmpfiles --create` so the dir exists for the supervisor + plugins.
+/// Install the plugin runtime tmpfiles drop-in so `/run/ados/plugins` (the per-plugin
+/// socket dir) is recreated on every boot, not just at install time.
 fn install_plugin_tmpfiles(source: Option<&Path>) {
     const DEST: &str = "/etc/tmpfiles.d/ados-plugins.conf";
     let inline = "# ADOS plugin runtime sockets and runtime state\n\
@@ -781,6 +790,22 @@ fn prune_retired_units() {
     }
 }
 
+/// Prune udev rules retired in a prior release, then reload so the removal takes
+/// effect in the same install. Idempotent — a rule already gone is a no-op.
+fn prune_retired_udev_rules() {
+    let mut removed = false;
+    for rule in RETIRED_UDEV_RULES {
+        let path = Path::new(UDEV_RULES_DIR).join(rule);
+        if std::fs::remove_file(&path).is_ok() {
+            tracing::info!(rule, "pruned retired udev rule");
+            removed = true;
+        }
+    }
+    if removed {
+        let _ = exec::run("udevadm", &["control", "--reload"]);
+    }
+}
+
 /// Tear down (stop + disable) units belonging to the other profile.
 fn disable_other_profile_units(profile: &str) {
     for unit in other_profile_units(profile) {
@@ -804,12 +829,10 @@ fn mask_conflicting_standalone_services() {
 /// ethernet/wifi-client/usb-gadget/modem and the front-panel buttons in-process
 /// — their packaged units are ALWAYS torn down.
 fn reconcile_rust_cutover_units() {
-    let always_subsumed = [
-        "ados-ethernet.service",
-        "ados-wifi-client.service",
-        "ados-usb-gadget.service",
-        "ados-modem.service",
-    ];
+    // ados-ethernet + ados-modem moved to RETIRED_UNITS (their Python
+    // entrypoints were deleted), so the prune removes them outright rather than
+    // leaving a disabled unit on disk.
+    let always_subsumed = ["ados-wifi-client.service", "ados-usb-gadget.service"];
 
     for unit in always_subsumed {
         let _ = exec::run("systemctl", &["stop", unit]);
@@ -1620,6 +1643,11 @@ impl Step for Systemd {
         let udev_src = source.join("data/udev");
         let udev_count = deploy_udev_rules(&udev_src);
         tracing::info!(count = udev_count, "deployed udev rules");
+        // 2a. Prune udev rules retired with the units they triggered, AFTER the
+        //     deploy (which copies whatever the source dir holds) so a rule the
+        //     source no longer ships cannot survive an upgrade and keep firing
+        //     `systemctl start` at a unit that is gone.
+        prune_retired_udev_rules();
 
         // 2b. Cross-profile kernel/power/observability hardening. Drone-relevant
         //     (video sysctl keeps the receive chain from dropping bursts; power

@@ -27,8 +27,14 @@ from tests.api_runtime_utils import build_api_runtime
 # ---------------------------------------------------------------------------
 
 
-class _FakeRecorder:
-    """Tiny stand-in for the air-side VideoRecorder."""
+class _StubRecorderStatus:
+    """Source of the ``recorder`` status sub-dict the routes read.
+
+    Not a recorder: it holds no process and records nothing. It exists to
+    fill the runtime's ``video_pipeline`` slot with something whose
+    ``get_status()`` carries a ``recorder`` block, which is the whole of
+    what the recording-state routes consume.
+    """
 
     def __init__(self) -> None:
         self.recording = False
@@ -61,10 +67,16 @@ class _FakeRecorder:
         self.started_at = None
 
 
-class _FakeAirPipeline:
-    """Pipeline shaped enough for the recording-block helper."""
+class _StubVideoPipeline:
+    """Fills the runtime's ``video_pipeline`` slot.
 
-    def __init__(self, recorder: _FakeRecorder) -> None:
+    The live sibling in that slot is
+    ``ados.services.video.demo.DemoVideoPipeline``; the duck-typed contract
+    the routes rely on is ``get_status() -> dict`` carrying a ``recorder``
+    sub-dict.
+    """
+
+    def __init__(self, recorder: _StubRecorderStatus) -> None:
         self.recorder = recorder
         self.camera_manager = MagicMock()
         self.camera_manager.cameras = []
@@ -87,24 +99,24 @@ class _FakeAirPipeline:
 
 
 @pytest.fixture
-def air_recorder() -> _FakeRecorder:
-    return _FakeRecorder()
+def stub_recorder() -> _StubRecorderStatus:
+    return _StubRecorderStatus()
 
 
 @pytest.fixture
-def air_pipeline(air_recorder: _FakeRecorder) -> _FakeAirPipeline:
-    return _FakeAirPipeline(air_recorder)
+def stub_pipeline(stub_recorder: _StubRecorderStatus) -> _StubVideoPipeline:
+    return _StubVideoPipeline(stub_recorder)
 
 
 @pytest.fixture
-def air_client(air_pipeline: _FakeAirPipeline) -> TestClient:
-    runtime = build_api_runtime(video_pipeline=air_pipeline)
+def video_client(stub_pipeline: _StubVideoPipeline) -> TestClient:
+    runtime = build_api_runtime(video_pipeline=stub_pipeline)
     return TestClient(create_app(runtime))
 
 
-def test_get_video_includes_recording_fields_when_idle(air_client: TestClient) -> None:
+def test_get_video_includes_recording_fields_when_idle(video_client: TestClient) -> None:
     """``GET /api/video`` always reports the recording block."""
-    resp = air_client.get("/api/video")
+    resp = video_client.get("/api/video")
     assert resp.status_code == 200
     body = resp.json()
     assert body["recording"] is False
@@ -113,12 +125,12 @@ def test_get_video_includes_recording_fields_when_idle(air_client: TestClient) -
 
 
 def test_get_video_includes_recording_fields_when_active(
-    air_client: TestClient, air_recorder: _FakeRecorder
+    video_client: TestClient, stub_recorder: _StubRecorderStatus
 ) -> None:
-    air_recorder.set_active(
+    stub_recorder.set_active(
         "recording_20260507_143000.mp4", "2026-05-07T14:30:00+00:00"
     )
-    resp = air_client.get("/api/video")
+    resp = video_client.get("/api/video")
     assert resp.status_code == 200
     body = resp.json()
     assert body["recording"] is True

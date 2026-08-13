@@ -328,11 +328,11 @@ fn read_json_object_or_empty(path: &Path) -> Map<String, Value> {
 
 /// The most-recent full mesh-state body from the durable store, or `None`.
 ///
-/// Queries the store for the newest `mesh.state` event the relay/receiver poll
-/// loop shipped and returns its non-empty `detail` map (the same body written to
-/// `mesh-state.json`). `None` when the store is unreachable, holds no such event,
-/// or the `detail` is absent / non-object / empty, so the caller falls back to the
-/// sidecar file. Mirrors the Python `latest_mesh_snapshot`.
+/// Queries the store for the newest `mesh.state` event the relay/receiver poll loop
+/// shipped and returns its non-empty `detail` map (the same body written to
+/// `mesh-state.json`). `None` when the store is unreachable, holds no such event, or
+/// the `detail` is absent / non-object / empty, so the caller falls back to the sidecar
+/// file.
 async fn latest_mesh_snapshot(state: &AppState) -> Option<Map<String, Value>> {
     let rows = logd_query_events(state, "mesh.state", 1).await?;
     let row = rows.first()?.as_object()?;
@@ -344,15 +344,13 @@ async fn latest_mesh_snapshot(state: &AppState) -> Option<Map<String, Value>> {
 }
 
 /// Project the `/mesh/neighbors` shape from a snapshot body: `{"neighbors": ...}`,
-/// defaulting to the empty list. Mirrors the Python `slice_neighbors` /
-/// `{"neighbors": snap.get("neighbors", [])}`.
+/// defaulting to the empty list.
 fn slice_neighbors(detail: &Map<String, Value>) -> Value {
     json!({ "neighbors": detail.get("neighbors").cloned().unwrap_or_else(|| json!([])) })
 }
 
-/// Project the `/mesh/routes` shape: `{"routes": <neighbors>}`. Routes are aliased
-/// to neighbors on the live path today. Mirrors the Python `slice_routes` /
-/// `{"routes": snap.get("neighbors", [])}`.
+/// Project the `/mesh/routes` shape: `{"routes": <neighbors>}`. Routes are aliased to
+/// neighbors on the live path today.
 fn slice_routes(detail: &Map<String, Value>) -> Value {
     json!({ "routes": detail.get("neighbors").cloned().unwrap_or_else(|| json!([])) })
 }
@@ -402,10 +400,9 @@ pub async fn get_role() -> Response {
 
 /// `GET /api/v1/ground-station/mesh` → the batman-adv state snapshot.
 ///
-/// 404 with `E_PROFILE_MISMATCH` off a ground station, 404 with `E_NOT_IN_MESH` on
-/// a `direct` node. Otherwise the store's most-recent `mesh.state` body, falling
-/// back to the `mesh-state.json` sidecar (the empty object when neither is
-/// available). Mirrors the Python `get_mesh_health`.
+/// 404 with `E_PROFILE_MISMATCH` off a ground station, 404 with `E_NOT_IN_MESH` on a
+/// `direct` node. Otherwise the store's most-recent `mesh.state` body, falling back to
+/// the `mesh-state.json` sidecar (the empty object when neither is available).
 pub async fn get_mesh_health(State(state): State<AppState>) -> Response {
     use axum::response::IntoResponse;
     if !is_ground_station() {
@@ -424,8 +421,8 @@ pub async fn get_mesh_health(State(state): State<AppState>) -> Response {
 // GET /api/v1/ground-station/mesh/neighbors
 // ---------------------------------------------------------------------------
 
-/// `GET /api/v1/ground-station/mesh/neighbors` → the `{neighbors}` slice. Same
-/// gates as `/mesh`. Mirrors the Python `get_mesh_neighbors`.
+/// `GET /api/v1/ground-station/mesh/neighbors` → the `{neighbors}` slice. Same gates as
+/// `/mesh`.
 pub async fn get_mesh_neighbors(State(state): State<AppState>) -> Response {
     use axum::response::IntoResponse;
     if !is_ground_station() {
@@ -446,7 +443,7 @@ pub async fn get_mesh_neighbors(State(state): State<AppState>) -> Response {
 // ---------------------------------------------------------------------------
 
 /// `GET /api/v1/ground-station/mesh/routes` → the `{routes}` slice (aliased to
-/// neighbors). Same gates as `/mesh`. Mirrors the Python `get_mesh_routes`.
+/// neighbors). Same gates as `/mesh`.
 pub async fn get_mesh_routes(State(state): State<AppState>) -> Response {
     use axum::response::IntoResponse;
     if !is_ground_station() {
@@ -466,8 +463,8 @@ pub async fn get_mesh_routes(State(state): State<AppState>) -> Response {
 // GET /api/v1/ground-station/mesh/gateways
 // ---------------------------------------------------------------------------
 
-/// `GET /api/v1/ground-station/mesh/gateways` → the `{gateways, selected}` slice.
-/// Same gates as `/mesh`. Mirrors the Python `get_mesh_gateways`.
+/// `GET /api/v1/ground-station/mesh/gateways` → the `{gateways, selected}` slice. Same
+/// gates as `/mesh`.
 pub async fn get_mesh_gateways(State(state): State<AppState>) -> Response {
     use axum::response::IntoResponse;
     if !is_ground_station() {
@@ -487,11 +484,10 @@ pub async fn get_mesh_gateways(State(state): State<AppState>) -> Response {
 // GET /api/v1/ground-station/mesh/config
 // ---------------------------------------------------------------------------
 
-/// `GET /api/v1/ground-station/mesh/config` → the configured mesh transport
-/// fields. 404 with `E_PROFILE_MISMATCH` off a ground station, otherwise always
-/// 200 with `{mesh_id, carrier, channel, bat_iface, interface_override}` off the
-/// agent config (with the config-model defaults when the section is absent).
-/// Mirrors the Python `get_mesh_config`.
+/// `GET /api/v1/ground-station/mesh/config` → the configured mesh transport fields. 404
+/// with `E_PROFILE_MISMATCH` off a ground station, otherwise always 200 with `{mesh_id,
+/// carrier, channel, bat_iface, interface_override}` off the agent config (with the
+/// config-model defaults when the section is absent).
 pub async fn get_mesh_config() -> Response {
     use axum::response::IntoResponse;
     if !is_ground_station() {

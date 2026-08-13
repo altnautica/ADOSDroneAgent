@@ -4,24 +4,33 @@
 //! The agent tracks each adapter's stable-MAC verdict (stable / pinned / a learner
 //! candidate / deferred) in an on-disk state file the installer step + the
 //! supervisor reconciler write. This route exposes that state to the GCS Network
-//! panel over the LAN, and is the only producer of it: the cloud heartbeat
-//! carries no `macStability` block, so a cloud-only node shows nothing here.
+//! panel over the LAN.
 //!
 //! - **`GET /api/v1/network/mac/adapters`** — read the per-adapter verdicts. Returns
 //!   `{"version": N, "adapters": [...]}`; an empty list on a board with no tracked
 //!   adapters. Each adapter is the camelCase projection of one state-file entry.
 //!
+//! ## The projection lives in `ados-macpin`, not here
+//!
+//! Three surfaces need it: this route, `/api/status/full`'s `macStability` block,
+//! and the cloud heartbeat's. It therefore lives in the crate that owns the state
+//! file (`ados_macpin::engine::adapters_camel_from` /
+//! [`ados_macpin::engine::state_json_to_camel`]) and this route projects through
+//! it. Until those two producers existed the GCS's six readers of `macStability`
+//! — the adapter-stability card, the MAC-pin settings section, the radio-network
+//! health panel — had no producer on either transport and rendered nothing, while
+//! this route sat here unfetched.
+//!
 //! ## Why this ports cleanly to the native front
 //!
-//! It is a pure read with no side effect: the FastAPI handler reads the on-disk
-//! state file (the same `mac-pins.state` the sibling MAC-pin write route reads for
-//! its learner-candidate fallback) and maps each entry to camelCase — it never
-//! enumerates live adapters, runs a command, or mutates anything. The native front
-//! reuses the identical state-file seam (`ados-macpin`'s `STATE_PATH`, overridable
-//! via `ADOS_MAC_PINS_STATE` for tests, exactly as `mac_pin.rs` resolves it) and
-//! reproduces the camelCase projection byte-for-byte, with no daemon round-trip.
+//! It is a pure read with no side effect: read the on-disk state file (the same
+//! `mac-pins.state` the sibling MAC-pin write route reads for its
+//! learner-candidate fallback) and map each entry to camelCase — it never
+//! enumerates live adapters, runs a command, or mutates anything. The state-file
+//! seam is `ados-macpin`'s `STATE_PATH`, overridable via `ADOS_MAC_PINS_STATE` for
+//! tests, exactly as `mac_pin.rs` resolves it.
 //!
-//! ## The camelCase projection (matched to the FastAPI mapper)
+//! ## The camelCase projection
 //!
 //! Each state-file adapter dict is reduced to:
 //! - Always present: `name`, `vidpid`, `usbPath`, `state` (each carried through
@@ -29,9 +38,8 @@
 //!   bool, the source `applied_live` coerced to a boolean with a `false` default).
 //! - Present only when the source value is non-null: `source`, `pinnedMac`
 //!   (`pinned_mac`), `lastSeenMac` (`last_seen_mac`), `linkFile` (`link_file`),
-//!   `deferredReason` (`deferred_reason`). A `null` source value omits the key,
-//!   matching the Python `a.get(src) is not None` guard (a present-but-falsy value
-//!   like an empty string is still emitted).
+//!   `deferredReason` (`deferred_reason`). A `null` source value omits the key (a
+//!   present-but-falsy value like an empty string is still emitted).
 //!
 //! A non-dict entry in the source list is skipped (the Python `if isinstance(a,
 //! dict)` filter). An absent / malformed state file reads as no document, so the
@@ -41,84 +49,16 @@
 use std::path::{Path, PathBuf};
 
 use axum::Json;
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 
-use ados_macpin::engine::STATE_PATH;
+use ados_macpin::engine::{read_state, state_json_to_camel, STATE_PATH};
 
 /// The on-disk state file with the per-adapter verdicts (`/etc/ados/mac-pins.state`),
 /// the same file the installer step + supervisor reconciler write and the heartbeat
 /// reads. Overridable via `ADOS_MAC_PINS_STATE` for tests, resolved identically to
 /// the sibling MAC-pin write route so both read one source of truth.
-fn state_file_path() -> PathBuf {
+pub(crate) fn state_file_path() -> PathBuf {
     PathBuf::from(std::env::var("ADOS_MAC_PINS_STATE").unwrap_or_else(|_| STATE_PATH.to_string()))
-}
-
-/// Read + parse the state file into a JSON document, or `None` when the file is
-/// absent or malformed. Mirrors the Python `read_mac_pins_state`, which returns
-/// `None` on `OSError` / `ValueError`.
-fn read_state(state_path: &Path) -> Option<Value> {
-    let text = std::fs::read_to_string(state_path).ok()?;
-    serde_json::from_str(&text).ok()
-}
-
-/// Project one state-file adapter object to the camelCase shape the GCS expects,
-/// byte-identically to the Python `_mac_adapter_to_camel`.
-fn adapter_to_camel(a: &Map<String, Value>) -> Value {
-    let mut out = Map::new();
-    // Always present (carried through verbatim — an absent source key renders
-    // JSON null, matching the Python `a.get(...)`).
-    out.insert(
-        "name".to_string(),
-        a.get("name").cloned().unwrap_or(Value::Null),
-    );
-    out.insert(
-        "vidpid".to_string(),
-        a.get("vidpid").cloned().unwrap_or(Value::Null),
-    );
-    out.insert(
-        "usbPath".to_string(),
-        a.get("usb_path").cloned().unwrap_or(Value::Null),
-    );
-    out.insert(
-        "state".to_string(),
-        a.get("state").cloned().unwrap_or(Value::Null),
-    );
-    // `applied_live` coerced to a bool with a false default (the Python
-    // `bool(a.get("applied_live", False))`).
-    let applied_live = a.get("applied_live").map(value_is_truthy).unwrap_or(false);
-    out.insert("appliedLive".to_string(), Value::Bool(applied_live));
-
-    // Present only when the source value is non-null (the Python
-    // `if a.get(src) is not None`).
-    for (src, dst) in [
-        ("source", "source"),
-        ("pinned_mac", "pinnedMac"),
-        ("last_seen_mac", "lastSeenMac"),
-        ("link_file", "linkFile"),
-        ("deferred_reason", "deferredReason"),
-    ] {
-        if let Some(v) = a.get(src) {
-            if !v.is_null() {
-                out.insert(dst.to_string(), v.clone());
-            }
-        }
-    }
-    Value::Object(out)
-}
-
-/// Python truthiness for the `bool(a.get("applied_live", False))` coercion: a JSON
-/// bool is itself; `null` is false; a number is false iff zero; a string/array/
-/// object is false iff empty. Matches what `bool(...)` would yield for the value
-/// FastAPI deserialized from the JSON state file.
-fn value_is_truthy(v: &Value) -> bool {
-    match v {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Number(n) => n.as_f64().map(|f| f != 0.0).unwrap_or(true),
-        Value::String(s) => !s.is_empty(),
-        Value::Array(a) => !a.is_empty(),
-        Value::Object(o) => !o.is_empty(),
-    }
 }
 
 /// `GET /api/v1/network/mac/adapters` → the per-adapter stable-MAC verdicts.
@@ -144,17 +84,7 @@ fn get_mac_adapters_at(state_path: &Path) -> Json<Value> {
         .and_then(|d| d.get("version"))
         .cloned()
         .unwrap_or(Value::from(1));
-    let adapters: Vec<Value> = raw
-        .as_ref()
-        .and_then(|d| d.get("adapters"))
-        .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(Value::as_object)
-                .map(adapter_to_camel)
-                .collect()
-        })
-        .unwrap_or_default();
+    let adapters: Vec<Value> = state_json_to_camel(raw.as_ref());
     Json(json!({ "version": version, "adapters": adapters }))
 }
 

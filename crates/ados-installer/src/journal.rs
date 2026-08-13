@@ -1,9 +1,6 @@
 //! Logging init: journald on Linux, fmt fallback elsewhere, `RUST_LOG`-driven.
 //!
-//! Mirrors the supervisor's `init_logging`: when running under systemd on
-//! Linux the logs go to the journal; on a dev host (or when journald is
-//! unavailable) they fall back to a formatted stderr layer. `RUST_LOG` selects
-//! the filter (default `info`).
+//! `RUST_LOG` selects the filter (default `info`).
 
 /// Initialize the global tracing subscriber. Idempotent via `try_init`.
 pub fn init_logging() {

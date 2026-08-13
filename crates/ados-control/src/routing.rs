@@ -7,9 +7,13 @@
 //! proxied set and join the native set here.
 //!
 //! [`is_native`] is the single source of truth the auth edge ([`crate::serve`])
-//! and the proxy fallback ([`crate::proxy`]) both consult: a native route keeps
-//! the front's auth posture, a non-native route is forwarded with the front's
-//! auth skipped (the residual surface applies its own). The proxied-prefix table
+//! consults. A native route takes the front's own auth lane — rate limiter,
+//! pairing gate, MCP-scope admission. A non-native route is authenticated on the
+//! proxied lane instead ([`crate::serve`]'s `proxied_auth_then_forward`: API key,
+//! HMAC, dashboard session, WS ticket) and then forwarded, so it never sees the
+//! native lane's rate limiter or scope admission. Classifying a served route
+//! non-native by accident therefore drops it off those three protections.
+//! The proxied-prefix table
 //! is documentation/diagnostics only — it records which prefixes are known
 //! features that simply have not migrated, so a graceful-degradation reply can
 //! distinguish "this feature is absent on this profile" (a permanent-Python
@@ -29,9 +33,11 @@ pub enum RouteMode {
     Proxied { permanent: bool },
 }
 
-/// One native route: an exact `(method, path)` the front serves itself. The
-/// current native routes carry no path params, so an exact path match is
-/// sufficient; a future param route would need a matcher, not a literal.
+/// One native route: a `(method, path)` template the front serves itself. A
+/// template segment written `{name}` matches any single segment and `{*name}`
+/// swallows the tail; see [`segments_match`]. Axum's `:name` form is NOT
+/// understood here — a colon segment is compared literally and the route silently
+/// falls off the native lane.
 struct NativeRoute {
     method: Method,
     path: &'static str,
@@ -272,6 +278,11 @@ fn native_routes() -> Vec<NativeRoute> {
         put("/api/v1/ground-station/network/ethernet"),
         put("/api/v1/ground-station/network/modem"),
         put("/api/v1/ground-station/network/share_uplink"),
+        // The ground station's Wi-Fi client join/leave, forwarded to the same
+        // command socket. The last two ground-station network writes to leave the
+        // residual Python surface.
+        put("/api/v1/ground-station/network/client/join"),
+        delete("/api/v1/ground-station/network/client"),
         put("/api/v1/network/client/configured/{name}/autoconnect"),
         // Ground-station mesh + WFB-pair writes (role + mesh/config PUTs share their
         // read paths) forwarded to the ados-groundlink command socket.
@@ -281,7 +292,7 @@ fn native_routes() -> Vec<NativeRoute> {
         post("/api/v1/ground-station/wfb/pair"),
         delete("/api/v1/ground-station/wfb/pair"),
         // Release one drone's fleet slot, without touching the shared radio keys.
-        delete("/api/v1/ground-station/wfb/pair/:device_id"),
+        delete("/api/v1/ground-station/wfb/pair/{device_id}"),
         // Ground-station video writes: recording start/stop (ados-video) + the
         // camera-source switch (a MAVLink COMMAND_LONG to the FC socket).
         post("/api/v1/ground-station/recording/start"),
@@ -428,6 +439,50 @@ mod tests {
             );
             assert_eq!(classify(&r.method, r.path), RouteMode::Native);
         }
+    }
+
+    /// No table entry may use axum's `:param` form. `segments_match` treats only
+    /// `{name}` as a wildcard, so a colon segment is compared literally: the route
+    /// is still served by axum (0.7 is where `:param` is correct) but classified
+    /// non-native, which silently drops it off the native auth lane — rate
+    /// limiter, pairing gate, MCP-scope admission.
+    ///
+    /// `every_native_route_is_native` above cannot catch this: a literal template
+    /// matches itself, so the malformed entry passes there. That is why the
+    /// colon form survived in this table until it was found by hand.
+    #[test]
+    fn no_native_template_uses_axum_colon_param_syntax() {
+        let offenders: Vec<&str> = native_routes()
+            .iter()
+            .filter(|r| r.path.split('/').any(|s| s.starts_with(':')))
+            .map(|r| r.path)
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "these templates use axum's `:param` form, which this table's matcher \
+             reads as a literal segment, so the route is served but not classified \
+             native: {offenders:?}"
+        );
+    }
+
+    /// The fleet-slot release is a param route: a concrete device id must classify
+    /// native so the DELETE takes the native auth lane like its siblings.
+    #[test]
+    fn the_fleet_slot_release_is_native_for_a_concrete_device_id() {
+        assert!(is_native(
+            &Method::DELETE,
+            "/api/v1/ground-station/wfb/pair/abc123"
+        ));
+        // The bare collection DELETE is a separate, also-native route.
+        assert!(is_native(
+            &Method::DELETE,
+            "/api/v1/ground-station/wfb/pair"
+        ));
+        // Two segments below the template is not a match.
+        assert!(!is_native(
+            &Method::DELETE,
+            "/api/v1/ground-station/wfb/pair/abc123/extra"
+        ));
     }
 
     #[test]
@@ -600,7 +655,7 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            150,
+            152,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);
@@ -704,6 +759,14 @@ mod tests {
             Method::PUT,
             "/api/v1/ground-station/network/share_uplink"
         ));
+        // The ground station's own Wi-Fi client join/leave (its uplink onto an
+        // existing network), distinct from the drone-side `/api/v1/network/client`
+        // pair above.
+        assert!(has(
+            Method::PUT,
+            "/api/v1/ground-station/network/client/join"
+        ));
+        assert!(has(Method::DELETE, "/api/v1/ground-station/network/client"));
         assert!(has(
             Method::PUT,
             "/api/v1/network/client/configured/{name}/autoconnect"

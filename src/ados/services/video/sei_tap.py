@@ -168,9 +168,12 @@ class HeadlessSeiTap:
                 ns = parse_sei_latency_ns(bytes(buf))
                 if ns is None:
                     continue
-                # Compute latency against our wall clock. SEI carries
-                # `time.time_ns()` at encode time; both sides rely on
-                # chrony/systemd-timesyncd to stay within a few ms.
+                # Compute latency against our wall clock. The SEI carries
+                # `time.time_ns()` stamped by the injector, which
+                # `encoder.wrap_with_sei_inject` splices AFTER the encoder,
+                # so this is stamp-to-readback: muxing, publish and
+                # drone-side buffering, not capture or encode. Both sides
+                # rely on chrony/systemd-timesyncd to stay within a few ms.
                 delta_ns = time.time_ns() - ns
                 if delta_ns <= 0 or delta_ns > 60_000_000_000:
                     # Sample is bogus (clock skew, stale buffer); skip.

@@ -71,9 +71,6 @@ fn default_pairing_path() -> PathBuf {
 }
 
 /// How long a PIC read is reused before the sidecar is re-read on the hot path.
-/// Mirrors the attitude rung's once-per-tick model (its `RATE_PERIOD` is 50 ms):
-/// a fresh operator grab is honored within this window, and the per-command
-/// blocking read stays off the async router loop.
 const PIC_CACHE_TTL: Duration = Duration::from_millis(50);
 
 /// The hot-path injector gate: the same decision as [`injector_refused`], but

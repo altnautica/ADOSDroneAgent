@@ -394,6 +394,21 @@ def write_granted_permissions_yaml(
         os.chmod(grant_path, 0o640)
     except OSError as exc:
         log.warning("granted_perms_chmod_failed", path=str(grant_path), error=str(exc))
+    # The audit trail: granting a capability to a plugin is a standing decision,
+    # and the grant file itself is per-plugin — the trail is where an operator
+    # sees the sequence across every plugin on the box.
+    from ados.core import audit
+
+    audit.record(
+        audit.PLUGIN_PERMISSIONS_GRANTED,
+        audit.ACTOR_OPERATOR,
+        {
+            "plugin_id": plugin_id,
+            "operator_id": operator_id,
+            "agent_id": agent_id,
+            "granted": sorted(set(granted)),
+        },
+    )
     return grant_path
 
 

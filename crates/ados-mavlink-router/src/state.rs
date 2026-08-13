@@ -1,11 +1,13 @@
 //! Vehicle-state aggregator: turns the MAVLink message stream into the unified
 //! JSON snapshot published on the state socket.
 //!
-//! Mirrors the Python `VehicleState` (services/mavlink/state.py): the same
-//! fields, the same message-to-field scaling, and the same `to_dict` wire
-//! shape. The runtime extras the service merges onto the snapshot
-//! (`fc_connected`, `param_priming`, `param_generation`, ...) are added by the
-//! caller via [`VehicleState::to_wire_with`]; this type owns only the
+//! This is the authority for the snapshot shape: the field set, the
+//! message-to-field scaling, and the `to_dict` wire form. The Python side keeps
+//! only a passive view of it (`services/mavlink/ipc_state.py`'s
+//! `IpcVehicleState`, fed from the state socket); the in-process producer it
+//! used to mirror is gone. The runtime extras the service merges onto the
+//! snapshot (`fc_connected`, `param_priming`, `param_generation`, ...) are added
+//! by the caller via [`VehicleState::to_wire_with`]; this type owns only the
 //! vehicle-derived fields so it stays I/O-free and unit-testable.
 
 use ados_protocol::mavlink::ardupilotmega::MavMessage;

@@ -16,46 +16,6 @@ from __future__ import annotations
 from typing import Any
 
 
-def _hostapd_manager(app: Any) -> Any:
-    """Construct a HostapdManager keyed off the running agent config."""
-    from ados.services.ground_station.hostapd_manager import HostapdManager
-
-    device_id = getattr(app.config.agent, "device_id", "unknown")
-    hotspot = getattr(app.config.network, "hotspot", None)
-
-    ssid_override: str | None = None
-    if hotspot is not None:
-        configured = getattr(hotspot, "ssid", "") or ""
-        if (
-            configured
-            and "{device_id}" not in configured
-            and configured.startswith("ADOS-GS-")
-        ):
-            ssid_override = configured
-
-    channel = int(getattr(hotspot, "channel", 6)) if hotspot is not None else 6
-
-    mgr = HostapdManager(
-        device_id=device_id,
-        ssid=ssid_override,
-        channel=channel,
-    )
-    # Read the persisted passphrase so status() reports a stable SSID + key.
-    #
-    # Deliberately NOT `ensure_passphrase`: that generates when the file is
-    # absent, which made a status GET create and persist a secret as a side
-    # effect. A read path must not mint credentials.
-    try:
-        from ados.services.ground_station.hostapd_manager import read_ap_passphrase
-
-        existing = read_ap_passphrase()
-        if existing:
-            mgr._passphrase = existing
-    except Exception:
-        pass
-    return mgr
-
-
 def _pair_manager() -> Any:
     """Return the process-wide PairManager. Lazy import so route module loads without it."""
     from ados.services.ground_station.pair_manager import get_pair_manager
@@ -63,39 +23,6 @@ def _pair_manager() -> Any:
     return get_pair_manager()
 
 
-def _ethernet_mgr() -> Any:
-    from ados.services.ground_station.ethernet_manager import (
-        get_ethernet_manager,
-    )
-
-    return get_ethernet_manager()
-
-
-def _wifi_client_manager() -> Any:
-    from ados.services.ground_station.wifi_client_manager import (
-        get_wifi_client_manager,
-    )
-
-    return get_wifi_client_manager()
-
-
-def _modem_mgr() -> Any:
-    from ados.services.ground_station.modem_manager import get_modem_manager
-
-    return get_modem_manager()
-
-
-def _uplink_router() -> Any:
-    from ados.services.ground_station.uplink import get_uplink_router
-
-    return get_uplink_router()
-
-
 __all__ = [
-    "_hostapd_manager",
     "_pair_manager",
-    "_ethernet_mgr",
-    "_wifi_client_manager",
-    "_modem_mgr",
-    "_uplink_router",
 ]

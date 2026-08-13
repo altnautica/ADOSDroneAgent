@@ -267,13 +267,12 @@ pub(crate) async fn run_hop_supervisor(
                         let peer_id = p.device_id.clone();
                         lst_state.lock().await.on_peer_beacon(p);
                         write_peer_presence_json(&lst_state).await;
-                        // On a NEW peer device-id, signal the back-fill so the
-                        // persisted pair state learns the peer over the radio
-                        // (the bind tunnel does not always carry it). The signal
-                        // is a small additive sidecar a Python REST consumer
-                        // reads to call update_peer_device_id — Rust does not
-                        // round-trip config.yaml itself, which would risk
-                        // clobbering unrelated keys.
+                        // On a NEW peer device-id, latch it so the persisted pair
+                        // state learns the peer over the radio (the bind tunnel
+                        // does not always carry it). The latch is a small additive
+                        // sidecar the front's peer-backfill reconciler reads and
+                        // persists — Rust does not round-trip config.yaml from
+                        // here, because the front already owns every write to it.
                         if last_backfilled.as_deref() != Some(peer_id.as_str()) {
                             write_peer_backfill_json(&peer_id);
                             last_backfilled = Some(peer_id);
@@ -589,13 +588,14 @@ pub(crate) fn is_self_beacon(own_device_id: &str, beacon_device_id: &str) -> boo
     beacon_device_id == truncated
 }
 
-/// Signal a freshly-learned peer device-id for back-fill into the persisted pair
-/// state. Writes `peer-backfill.json` = `{"peer_device_id": <id>}` atomically;
-/// the REST seam reads it and calls `update_peer_device_id("drone", id)`, which
-/// owns the config.yaml round-trip so the radio service never clobbers unrelated
-/// config keys (the persisted-pair write stays on the API side that already owns
-/// config persistence). The bind tunnel does not always carry the peer id, so
-/// the presence beacon is the canonical source.
+/// Latch a freshly-learned peer device-id for back-fill into the persisted pair
+/// state. Writes `peer-backfill.json` = `{"peer_device_id": <id>}` atomically.
+///
+/// The reader is `ados-control`'s `routes::peer_backfill` reconciler, which owns
+/// the config.yaml round-trip so the radio service never clobbers unrelated
+/// config keys (every other write to that file goes through the front too). The
+/// bind tunnel does not always carry the peer id, so the presence beacon is the
+/// canonical source.
 fn write_peer_backfill_json(peer_device_id: &str) {
     let v = json!({ "peer_device_id": peer_device_id });
     let _ = write_sidecar(&run_path("peer-backfill.json"), &v);

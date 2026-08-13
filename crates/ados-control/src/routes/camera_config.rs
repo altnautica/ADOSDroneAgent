@@ -284,10 +284,8 @@ enum VideoCmd {
     Unavailable,
 }
 
-/// Send one newline-terminated JSON request to the video command socket and read
-/// one newline-terminated JSON reply. Mirrors the `gs_network_write` round-trip;
-/// the read is bounded so a runaway reply cannot exhaust memory. `sock` is
-/// injectable so a test points it at a stub.
+/// Send one newline-terminated JSON request to the video command socket and read one
+/// newline-terminated JSON reply. `sock` is injectable so a test points it at a stub.
 async fn video_cmd(request: &Value, sock: &Path) -> VideoCmd {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 

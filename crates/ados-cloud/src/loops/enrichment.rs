@@ -64,8 +64,11 @@ pub struct CpuSample {
 /// is omitted and the sample is seeded for the next tick.
 ///
 /// Every key is best-effort and omitted on a failed source read — see the module
-/// doc. The radio block is intentionally NOT built here: the heartbeat keeps its
-/// honest `RadioBlock::absent()` (radio enrichment is a separate producer).
+/// doc. The radio block is not built here: it is derived in the heartbeat loop
+/// itself (`loops::heartbeat::read_radio_sidecar`) from the WFB stats sidecar,
+/// through the same `ados_protocol::wfb_status` derivation the LAN routes use.
+/// This comment used to name "a separate producer" that did not exist, which is
+/// why the block shipped absent on every cloud tick.
 pub fn build_native_enrichment(prev_cpu: &mut Option<CpuSample>) -> Value {
     build_native_enrichment_with(prev_cpu, true)
 }

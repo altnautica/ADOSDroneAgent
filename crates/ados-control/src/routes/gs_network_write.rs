@@ -142,12 +142,19 @@ enum NetCmd {
 /// the sibling [`crate::routes::network_write`] round-trip + strip-ok. The read is
 /// bounded so a runaway reply cannot exhaust memory.
 async fn net_cmd(request: &Value) -> NetCmd {
+    net_cmd_at(&cmd_sock(), request).await
+}
+
+/// The path-injectable core of [`net_cmd`]. Threaded so a test drives a handler
+/// against a temp socket without mutating the process-global `ADOS_RUN_DIR`, the
+/// same convention [`crate::routes::network_write::wifi_cmd`] already follows.
+async fn net_cmd_at(sock: &std::path::Path, request: &Value) -> NetCmd {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     /// A manager reply is a few hundred bytes; bound the read to guard a runaway.
     const MAX_REPLY_BYTES: usize = 64 * 1024;
 
-    let mut stream = match tokio::net::UnixStream::connect(cmd_sock()).await {
+    let mut stream = match tokio::net::UnixStream::connect(sock).await {
         Ok(s) => s,
         Err(_) => return NetCmd::Unavailable,
     };
@@ -304,11 +311,7 @@ pub async fn put_network_priority(
     Json(json!({ "priority": strings })).into_response()
 }
 
-/// Validate the requested priority list, returning the list of strings on
-/// success. Mirrors the Python `validate_priority`: a non-empty list whose every
-/// member is a string is accepted; an empty list or any non-string member raises
-/// the `ValueError("priority must be a non-empty list of strings")` the FastAPI
-/// route surfaces in the 400 body.
+/// Validate the requested priority list, returning the list of strings on success.
 fn validate_priority(priority: &[Value]) -> Result<Vec<String>, String> {
     const INVALID: &str = "priority must be a non-empty list of strings";
     if priority.is_empty() {
@@ -344,9 +347,7 @@ fn save_priority(path: &Path, priority: &[String]) -> Result<(), String> {
 // PUT /api/v1/ground-station/network/ap — apply AP config + start/stop.
 // ---------------------------------------------------------------------------
 
-/// The `PUT .../network/ap` request body. Mirrors the FastAPI `ApUpdate`: four
-/// optional fields, each applied only when present; `enabled` is the start/stop
-/// hint.
+/// The `PUT .../network/ap` request body.
 #[derive(Debug, Default, Deserialize)]
 pub struct ApUpdate {
     #[serde(default)]
@@ -672,10 +673,8 @@ pub async fn put_network_share_uplink(
     .into_response()
 }
 
-/// Merge `ground_station.share_uplink` into the agent config, preserving every
-/// other key. Mirrors the Python `_persist_share_uplink_flag` (which writes
-/// `ground_station.share_uplink` to `/etc/ados/config.yaml`). Returns the error
-/// string on any I/O / serialize fault so the route can surface
+/// Merge `ground_station.share_uplink` into the agent config, preserving every other
+/// key. Returns the error string on any I/O / serialize fault so the route can surface
 /// `E_UI_SAVE_FAILED`, mirroring the Python `OSError` path.
 fn persist_share_uplink(config_path: &Path, enabled: bool) -> Result<(), String> {
     use serde_norway::Value as Yaml;
@@ -738,6 +737,135 @@ fn write_yaml_atomic(path: &Path, data: &serde_norway::Value) -> Result<(), Stri
     };
     std::fs::write(&tmp, body.as_bytes()).map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// PUT  /api/v1/ground-station/network/client/join
+// DELETE /api/v1/ground-station/network/client
+// ---------------------------------------------------------------------------
+//
+// The last two ground-station network writes that had no native counterpart.
+// Their Python twins forwarded to this same `wifi-cmd.sock` with an in-process
+// manager fallback; the fallback is what kept the packaged island alive, so
+// porting them is what lets the island go.
+//
+// The ops and their replies are the daemon's (`ados-net`'s `cmdsock`):
+//   {"op":"wifi_join","ssid":…,"passphrase":…,"force":…}
+//       -> {"ok":true,"joined":…,"ip":…,"gateway":…,"error":null}
+//   {"op":"wifi_leave"} -> {"ok":true,"left":true,"previous_ssid":"Net"}
+//
+// One deliberate posture difference from the Python twin, matching every sibling
+// in this module: Pydantic rejected an empty `ssid` with a 422 before the handler
+// ran, and the native front has no such pre-validation, so the guard below is the
+// front's own.
+
+/// The `PUT .../network/client/join` request body: a required `ssid`, an optional
+/// `passphrase`, and an optional `force` flag (defaulting false).
+#[derive(Debug, Deserialize)]
+pub struct GsWifiJoinRequest {
+    pub ssid: String,
+    #[serde(default)]
+    pub passphrase: Option<String>,
+    #[serde(default)]
+    pub force: Option<bool>,
+}
+
+/// `PUT /api/v1/ground-station/network/client/join` →
+/// `{"joined", "ip", "gateway", "error"}`.
+///
+/// A reply with `joined:false` and the AP-busy error code is the `409`
+/// (`E_WLAN0_BUSY_AP_ACTIVE` + `needs_force:true`) — the ground station's AP and
+/// its client mode contend for `wlan0`, so stealing it has to be deliberate. An
+/// unreachable socket → 503; an `ok:false` reply → `E_WIFI_JOIN_FAILED` 500.
+pub async fn put_gs_network_client_join(Json(req): Json<GsWifiJoinRequest>) -> Response {
+    if !is_ground_station() {
+        return profile_mismatch();
+    }
+    put_gs_network_client_join_at(&cmd_sock(), req).await
+}
+
+/// The path-injectable core of [`put_gs_network_client_join`], for tests.
+async fn put_gs_network_client_join_at(sock: &Path, req: GsWifiJoinRequest) -> Response {
+    if req.ssid.trim().is_empty() {
+        return error_body(
+            StatusCode::BAD_REQUEST,
+            "E_WIFI_JOIN_FAILED",
+            "ssid is required",
+        );
+    }
+
+    let request = json!({
+        "op": "wifi_join",
+        "ssid": req.ssid,
+        "passphrase": req.passphrase,
+        "force": req.force.unwrap_or(false),
+    });
+    let reply = match net_cmd_at(sock, &request).await {
+        NetCmd::Reply(r) => r,
+        NetCmd::Error(msg) => {
+            return error_body(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "E_WIFI_JOIN_FAILED",
+                &msg,
+            );
+        }
+        NetCmd::Unavailable => return socket_unavailable("E_WIFI_JOIN_FAILED"),
+    };
+
+    let joined = reply
+        .get("joined")
+        .map(|v| v.as_bool().unwrap_or(false))
+        .unwrap_or(false);
+    if !joined && reply.get("error").and_then(Value::as_str) == Some("wlan0_busy_ap_active") {
+        let hint = reply
+            .get("hint")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("AP is active; retry with force=true to steal wlan0");
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "detail": {
+                    "error": {"code": "E_WLAN0_BUSY_AP_ACTIVE", "message": hint},
+                },
+                "needs_force": true,
+            })),
+        )
+            .into_response();
+    }
+
+    Json(json!({
+        "joined": joined,
+        "ip": reply.get("ip").cloned().unwrap_or(Value::Null),
+        "gateway": reply.get("gateway").cloned().unwrap_or(Value::Null),
+        "error": reply.get("error").cloned().unwrap_or(Value::Null),
+    }))
+    .into_response()
+}
+
+/// `DELETE /api/v1/ground-station/network/client` → `{"left", "previous_ssid"}`.
+///
+/// Forwards a `wifi_leave` op and returns the reply verbatim (the transport `ok`
+/// already stripped). An unreachable socket → 503; an `ok:false` reply →
+/// `E_WIFI_LEAVE_FAILED` 500.
+pub async fn delete_gs_network_client() -> Response {
+    if !is_ground_station() {
+        return profile_mismatch();
+    }
+    delete_gs_network_client_at(&cmd_sock()).await
+}
+
+/// The path-injectable core of [`delete_gs_network_client`], for tests.
+async fn delete_gs_network_client_at(sock: &Path) -> Response {
+    match net_cmd_at(sock, &json!({"op": "wifi_leave"})).await {
+        NetCmd::Reply(r) => Json(Value::Object(r)).into_response(),
+        NetCmd::Error(msg) => error_body(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "E_WIFI_LEAVE_FAILED",
+            &msg,
+        ),
+        NetCmd::Unavailable => socket_unavailable("E_WIFI_LEAVE_FAILED"),
+    }
 }
 
 #[cfg(test)]
@@ -1086,5 +1214,125 @@ mod tests {
             .cap_gb
             .or_else(|| mb_only.cap_mb.map(|mb| mb as f64 / 1024.0));
         assert_eq!(cap2, Some(2.0));
+    }
+
+    // ── the ported Wi-Fi client join / leave ────────────────────────────────
+
+    /// Serve one canned newline-JSON reply on a temp AF_UNIX socket, the same
+    /// shape `ados-net`'s command socket speaks.
+    async fn canned_socket(dir: &std::path::Path, reply: &str) -> std::path::PathBuf {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let path = dir.join("wifi-cmd.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let body = format!("{reply}\n");
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let _ = stream.write_all(body.as_bytes()).await;
+                let _ = stream.flush().await;
+            }
+        });
+        path
+    }
+
+    fn join(ssid: &str, force: Option<bool>) -> GsWifiJoinRequest {
+        GsWifiJoinRequest {
+            ssid: ssid.to_string(),
+            passphrase: Some("hunter2".to_string()),
+            force,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_successful_join_returns_the_four_field_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = canned_socket(
+            dir.path(),
+            r#"{"ok":true,"joined":true,"ip":"192.168.1.50","gateway":"192.168.1.1","error":null}"#,
+        )
+        .await;
+        let resp = put_gs_network_client_join_at(&sock, join("BenchNet", None)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            body_json(resp).await,
+            json!({"joined": true, "ip": "192.168.1.50", "gateway": "192.168.1.1", "error": null})
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ap_busy_refusal_is_the_409_that_asks_for_force() {
+        // The ground station's AP and its client mode contend for wlan0, so
+        // stealing it has to be a deliberate second request rather than a silent
+        // takeover that drops every operator already on the AP.
+        let dir = tempfile::tempdir().unwrap();
+        let sock = canned_socket(
+            dir.path(),
+            r#"{"ok":true,"joined":false,"error":"wlan0_busy_ap_active"}"#,
+        )
+        .await;
+        let resp = put_gs_network_client_join_at(&sock, join("BenchNet", None)).await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body = body_json(resp).await;
+        assert_eq!(
+            body["detail"]["error"]["code"],
+            json!("E_WLAN0_BUSY_AP_ACTIVE")
+        );
+        assert_eq!(body["needs_force"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn a_daemon_failure_is_the_join_failed_500() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = canned_socket(dir.path(), r#"{"ok":false,"error":"no such network"}"#).await;
+        let resp = put_gs_network_client_join_at(&sock, join("BenchNet", Some(true))).await;
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            body_json(resp).await["detail"]["error"]["code"],
+            json!("E_WIFI_JOIN_FAILED")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_absent_socket_is_the_503_no_link_posture() {
+        // The front must not race the daemon by driving the interface itself, so
+        // an unreachable socket is "no link", never a fabricated success.
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("absent.sock");
+        let resp = put_gs_network_client_join_at(&missing, join("BenchNet", None)).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let resp = delete_gs_network_client_at(&missing).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            body_json(resp).await["detail"]["error"]["code"],
+            json!("E_WIFI_LEAVE_FAILED")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_ssid_is_rejected_before_the_socket_round_trip() {
+        // Pydantic rejected this with a 422 before the Python handler ran; the
+        // native front has no pre-validation, so the guard is the handler's.
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("never-connected.sock");
+        let resp = put_gs_network_client_join_at(&missing, join("   ", None)).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn a_leave_returns_the_daemon_reply_with_the_transport_flag_stripped() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = canned_socket(
+            dir.path(),
+            r#"{"ok":true,"left":true,"previous_ssid":"BenchNet"}"#,
+        )
+        .await;
+        let resp = delete_gs_network_client_at(&sock).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            body_json(resp).await,
+            json!({"left": true, "previous_ssid": "BenchNet"})
+        );
     }
 }

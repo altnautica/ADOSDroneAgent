@@ -229,9 +229,9 @@ fn unit_for_service(name: &str) -> Option<String> {
     short_name_to_unit(name).map(str::to_string)
 }
 
-/// Map an in-process service short name onto the systemd unit that owns its
-/// cgroup on a stock multi-process install. Names absent here have no dedicated
-/// unit and resolve to `None`. Mirrors the Python `_SHORT_NAME_TO_UNIT` table.
+/// Map an in-process service short name onto the systemd unit that owns its cgroup on a
+/// stock multi-process install. Names absent here have no dedicated unit and resolve to
+/// `None`.
 fn short_name_to_unit(name: &str) -> Option<&'static str> {
     match name {
         "fc-connection" => Some("ados-mavlink.service"),
@@ -250,14 +250,13 @@ fn short_name_to_unit(name: &str) -> Option<&'static str> {
 /// Sum PSS (MiB, one decimal) per `ados-*.service` unit across all running PIDs.
 ///
 /// For each numeric `/proc/<pid>` entry it reads the owning unit from
-/// `/proc/<pid>/cgroup` and the process's PSS from `/proc/<pid>/smaps_rollup`,
-/// summing PSS per unit. PSS divides shared pages (one libpython mapped by
-/// several services) fairly across the mappers, so the per-unit totals add up
-/// sensibly and a multi-process unit is summed across its children. Best-effort
-/// and never raises: an unreadable entry, a PID that exits mid-scan, or no read
-/// permission skips that process and contributes nothing. On a non-Linux host
-/// there is no `/proc`, so the scan yields an empty map and every unit lands at
-/// `0.0`. Mirrors the Python `_scan_pss_by_unit`.
+/// `/proc/<pid>/cgroup` and the process's PSS from `/proc/<pid>/smaps_rollup`, summing
+/// PSS per unit. PSS divides shared pages (one libpython mapped by several services)
+/// fairly across the mappers, so the per-unit totals add up sensibly and a
+/// multi-process unit is summed across its children. Best-effort and never raises: an
+/// unreadable entry, a PID that exits mid-scan, or no read permission skips that
+/// process and contributes nothing. On a non-Linux host there is no `/proc`, so the
+/// scan yields an empty map and every unit lands at `0.0`.
 fn scan_pss_by_unit() -> BTreeMap<String, f64> {
     let mut totals_kib: BTreeMap<String, u64> = BTreeMap::new();
 
@@ -338,10 +337,8 @@ fn unit_from_cgroup(text: &str) -> Option<String> {
 
 /// Parse the `Pss:` line out of a `/proc/<pid>/smaps_rollup` body (KiB).
 ///
-/// Returns `0` when the rollup has no `Pss:` line (older kernels) or it does not
-/// parse to a number. Mirrors the Python `pss_kib_from_rollup`: the first
-/// `Pss:`-prefixed line, second whitespace token, parsed as a non-negative
-/// integer.
+/// Returns `0` when the rollup has no `Pss:` line (older kernels) or it does not parse
+/// to a number.
 fn pss_kib_from_rollup(text: &str) -> u64 {
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("Pss:") {

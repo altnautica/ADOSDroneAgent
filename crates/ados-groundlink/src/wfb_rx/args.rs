@@ -63,10 +63,8 @@ pub const RX_HEALTH_POLL_INTERVAL_S: f64 = 5.0;
 /// state. "active" once the data RX is up; "searching" while it is not.
 pub const STATE_ACTIVE: &str = "active";
 pub const STATE_SEARCHING: &str = "searching";
-/// The receive plane refuses to bring up monitor mode / spawn the receive chain
-/// until the wanted regulatory domain verifies and the rendezvous channel is
-/// permitted. Mirrors the drone-side `reg_blocked` state so the panel shows the
-/// regulatory conflict on either rig in one glance.
+/// The receive plane refuses to bring up monitor mode / spawn the receive chain until
+/// the wanted regulatory domain verifies and the rendezvous channel is permitted.
 pub const STATE_REG_BLOCKED: &str = "reg_blocked";
 /// A receive adapter was selected but injection setup did not establish (the
 /// usual cause is a slow-USB link that cannot carry usable RF). No receive chain

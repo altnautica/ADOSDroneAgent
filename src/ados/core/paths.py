@@ -83,6 +83,18 @@ def _var_base() -> Path:
     return _ados_home() / "var" if _IS_MACOS else Path("/var/ados")
 
 
+def _lib_base() -> Path:
+    """Install-orchestration dir: ``ADOS_LIB_DIR`` override, else ``~/.ados`` on
+    macOS (where ``installer/macos.rs`` records the install result beside
+    ``config.yaml``), else the Linux FHS ``/var/lib/ados`` (Linux default
+    unchanged, and the same literal ``ados-installer``'s ``env.rs`` STATE_DIR
+    carries)."""
+    override = os.environ.get("ADOS_LIB_DIR")
+    if override:
+        return Path(override)
+    return _ados_home() if _IS_MACOS else Path("/var/lib/ados")
+
+
 # ---------------------------------------------------------------------------
 # Runtime directory: /run/ados/
 # Sockets, pid files, ephemeral state. Wiped on reboot by tmpfs.
@@ -106,12 +118,6 @@ WFB_CMD_SOCK = ADOS_RUN_DIR / "wfb-cmd.sock"
 # native daemon owns the uplink, so they never drive `nmcli` on `wlan0`
 # in-process and race the daemon's WiFi manager for the radio.
 WIFI_CMD_SOCK = ADOS_RUN_DIR / "wifi-cmd.sock"
-
-# PIC arbiter control socket served by the native ``ados-pic`` daemon. The
-# `/pic/events` WebSocket relays the daemon's `subscribe` event stream from here
-# (the native arbiter owns the pilot-in-command state; there is no in-process
-# Python arbiter anymore).
-PIC_SOCK = ADOS_RUN_DIR / "pic.sock"
 
 # Ingest socket for the local logging and telemetry store. The store's
 # writer process binds this; every producer (the native services and this
@@ -139,8 +145,6 @@ LOGD_QUERY_SOCK = ADOS_RUN_DIR / "logd-query.sock"
 LOGD_PUSH_REQUEST_PATH = ADOS_RUN_DIR / "logd-push-request.json"
 LOGD_PUSH_RESULT_PATH = ADOS_RUN_DIR / "logd-push-result.json"
 
-# Live JSON state snapshots
-HEALTH_JSON = ADOS_RUN_DIR / "health.json"
 # The detected HAL board dict, persisted once at status time so a separate
 # on-box reader (the native control surface) can serve the full board block
 # without an in-process HAL-detect port of its own.
@@ -148,12 +152,6 @@ BOARD_JSON = ADOS_RUN_DIR / "board.json"
 MESH_STATE_JSON = ADOS_RUN_DIR / "mesh-state.json"
 WFB_RELAY_JSON = ADOS_RUN_DIR / "wfb-relay.json"
 WFB_RECEIVER_JSON = ADOS_RUN_DIR / "wfb-receiver.json"
-# Cross-process mesh-event journal. When the relay/receiver loops run in their
-# own process (the native data-plane binary), they cannot reach the in-process
-# asyncio mesh event bus, so they append newline-delimited JSON events here.
-# The mesh-event tailer follows this file and republishes each line onto the
-# in-process bus so the REST WebSocket + OLED light up unchanged.
-MESH_EVENTS_JSONL = ADOS_RUN_DIR / "mesh-events.jsonl"
 # Cross-process field-pairing event journal. The in-process pairing bus lives in
 # the API process; the native control surface that serves the mesh event stream
 # is a separate process and cannot reach that bus, so the pairing manager mirrors
@@ -178,43 +176,6 @@ WFB_STATS_JSON = ADOS_RUN_DIR / "wfb-stats.json"
 # accessors are cross-process-blind. Written by their owners every
 # ~5 s (atomic tmpfile+rename).
 HOP_SUPERVISOR_JSON = ADOS_RUN_DIR / "hop-supervisor.json"
-PEER_PRESENCE_JSON = ADOS_RUN_DIR / "peer-presence.json"
-# The LIST of WFB peers this ground station currently relays, written ~5 s by
-# the receive-side presence listener (a ground station can relay more than one
-# drone, so this is the list; peer-presence.json is the drone's single-peer
-# source). Read by the heartbeat to surface linkedPeers[].
-LINKED_PEERS_JSON = ADOS_RUN_DIR / "linked-peers.json"
-CAMERA_STATE_JSON = ADOS_RUN_DIR / "camera-state.json"
-# CRSF / ExpressLRS RC-lane state snapshot, written ~1 Hz by the ados-crsf
-# service while it runs (and on a slow keep-alive cadence while idling), read
-# staleness-gated by the heartbeat producer + the native lane-status route. An
-# orphaned file from a dead service must never be served as a live reading.
-CRSF_STATS_JSON = ADOS_RUN_DIR / "crsf-stats.json"
-# Management-link health, written by the supervisor's management-link guardian
-# each tick: the operator's management link state + repair-ladder progress.
-MGMT_LINK_JSON = ADOS_RUN_DIR / "mgmt-link.json"
-# Management-link reach-back mode, written by the supervisor's heartbeat-failover
-# reconciler: primary / wifi_heartbeat / none when the wired primary is down.
-MGMT_FAILOVER_JSON = ADOS_RUN_DIR / "mgmt-failover.json"
-# WiFi power-save runtime reconciler state, written by the supervisor each tick:
-# per-station-interface power-save on/off, re-assert counts, and link signal, so
-# the heartbeat can prove the onboard link is not being idle-dropped by the driver.
-WIFI_POWERSAVE_JSON = ADOS_RUN_DIR / "wifi-powersave.json"
-# USB-rehome self-heal state, written by the supervisor's USB-rehome reconciler:
-# the recovery state + attempt count for a slow-port, not-radiating WFB adapter.
-USB_REHOME_JSON = ADOS_RUN_DIR / "usb-rehome.json"
-# Camera USB-recovery state, written by the supervisor's camera-recovery
-# reconciler: the recovery state + attempt count + topology for an expected
-# camera that failed to enumerate (a cold-boot port-enable failure).
-CAMERA_USB_RECOVERY_JSON = ADOS_RUN_DIR / "camera-usb-recovery.json"
-
-# Perception offload-link state, written by the offload reconciler: whether a
-# workstation node is paired + reachable and the drone is offloading to it. Read
-# staleness-gated by the perception-tier decision so an NPU-less drone with a
-# reachable workstation reports (and runs) tier "offload". Shape is the
-# ados-protocol offload-link sidecar (camelCase: paired / bearerAcceptable /
-# target / generatedAtMs).
-OFFLOAD_LINK_JSON = ADOS_RUN_DIR / "offload-link.json"
 
 # Local-bind to cloud-relay failover state. Written by the always-on
 # auto-pair supervisor (a separate process from the API) when a fresh
@@ -225,26 +186,6 @@ WFB_FAILOVER_STATE_JSON = ADOS_RUN_DIR / "wfb_failover.json"
 
 # Sentinel files
 UPLINK_ACTIVE_FLAG = ADOS_RUN_DIR / "uplink-active"
-AP_WAS_ENABLED_FLAG = ADOS_RUN_DIR / "ap-was-enabled"
-
-# Radio-module-source breadcrumb. Written by the install pipeline to
-# record whether the WFB kernel module came from a prebuilt package or
-# a DKMS build. Lives on tmpfs so it disappears on reboot; the heartbeat
-# treats it as a fast hint and prefers the live modinfo path as the
-# authoritative source. Values: "prebuilt" or "dkms".
-WFB_MODULE_SOURCE = ADOS_RUN_DIR / "wfb-module-source"
-
-# Last-locked WFB channel hint. Written by the ground-side receiver when
-# a channel acquisition sweep locks onto the transmitter, so a restart
-# can try that channel first instead of sweeping from scratch. This is a
-# runtime HINT only: it lives on tmpfs (gone on reboot) and is NEVER the
-# rendezvous home. The home channel is the operator's immutable
-# ``video.wfb.channel`` in config.yaml; the agent must never auto-write
-# that field. On a cold start with no established link the receiver homes
-# on the configured channel and may consult this hint as a fast first
-# guess, but always falls back to home. Single integer channel number as
-# text; atomic tmp+replace write; missing/corrupt tolerated.
-WFB_LOCKED_CHANNEL_HINT = ADOS_RUN_DIR / "wfb-locked-channel"
 
 # USB gadget composer runtime artifacts
 DNSMASQ_USB0_CONF = ADOS_RUN_DIR / "dnsmasq-usb0.conf"
@@ -260,13 +201,6 @@ LCD_STATE_PATH = ADOS_RUN_DIR / "lcd-state.json"
 # navigator watcher. Atomic-write JSON; the watcher unlinks after
 # applying so the same request is not reapplied on every tick.
 LCD_PAGE_REQUEST_PATH = ADOS_RUN_DIR / "lcd-page-request.json"
-
-# Local-video-tap stats published by the OLED service's video page on
-# every tick. Consumed by the cloud heartbeat so the GCS Display
-# sub-view can show whether the LCD is currently decoding video and
-# at what FPS, without making the cloud subprocess reach into the
-# OLED service's private state directly.
-LCD_VIDEO_TAP_PATH = ADOS_RUN_DIR / "lcd-video-tap.json"
 
 # PNG of the most recently rendered panel frame. The native display
 # writer (``ados-display``) writes it after each render at ~1 Hz, so the
@@ -298,12 +232,6 @@ PAIRING_JSON = (
 PROFILE_CONF = ADOS_ETC_DIR / "profile.conf"
 BOARD_OVERRIDE_PATH = ADOS_ETC_DIR / "board_override"
 DISPLAY_CONF_PATH = ADOS_ETC_DIR / "display.conf"
-# Persistent marker written ONLY when a display has been provisioned or a
-# physically-present panel was recognized. Services that drive a display
-# (the on-board UI service, framebuffer-console detach) gate on this file
-# so they skip cleanly on a board with no panel instead of running and
-# failing. Removed on the no-display path.
-DISPLAY_ENABLED_PATH = ADOS_ETC_DIR / "display.enabled"
 # Marker mirroring `radio.crsf.enabled`: present ⇔ the CRSF RC lane is opted
 # in. The ados-crsf systemd unit gates on it (ConditionPathExists) so a node
 # that never enables the lane skips the unit cleanly. Reconciled by the config
@@ -322,13 +250,6 @@ TUNNEL_ENABLED_PATH = ADOS_ETC_DIR / "tunnel-enabled"
 # itself gate the DHCP/DNS unit. Reconciled by the config persist path and by
 # the installer, never hand-managed.
 HOTSPOT_ENABLED_PATH = ADOS_ETC_DIR / "hotspot-enabled"
-# Probation marker for the apply-verify-auto-revert path. Written when a
-# boot-critical SPI-LCD overlay is applied blind on a board that declares
-# the panel but where it is not yet bound. Records the boot-config snapshot
-# path so the boot-time probe can self-heal: confirm the panel after the
-# overlay-applying reboot, or restore the snapshot when it never bound.
-DISPLAY_PROBATION_PATH = ADOS_ETC_DIR / "display.probation"
-ENV_FILE = ADOS_ETC_DIR / "env"
 FIREWALL_RULES_PATH = ADOS_ETC_DIR / "firewall.rules"
 AP_PASSPHRASE_PATH = ADOS_ETC_DIR / "ap-passphrase"
 
@@ -350,9 +271,6 @@ HDMI_TOUCH_UDEV_RULE_PATH = Path("/etc/udev/rules.d/99-ados-hdmi-touch.rules")
 # be created with owner-only permissions and must never be returned by APIs.
 SECRETS_DIR = ADOS_ETC_DIR / "secrets"
 CLOUDFLARE_TUNNEL_TOKEN_PATH = SECRETS_DIR / "cloudflare-tunnel-token"
-# Same-origin setup token, used when security.setup_token_required=True.
-# 0600 owner-only. CLI surfaces it in the status page.
-SETUP_TOKEN_PATH = SECRETS_DIR / "setup-token"
 # Self-hosted backend API key set during cloud-choice. 0600 owner-only.
 SERVER_API_KEY_PATH = SECRETS_DIR / "server-api-key"
 
@@ -362,9 +280,6 @@ DNSMASQ_CONF_PATH = ADOS_ETC_DIR / "dnsmasq-gs.conf"
 
 # Ground-station side-files (legacy + active migrations)
 GS_UI_JSON = ADOS_ETC_DIR / "ground-station-ui.json"
-GS_UPLINK_JSON = ADOS_ETC_DIR / "ground-station-uplink.json"
-GS_INPUT_JSON = ADOS_ETC_DIR / "ground-station-input.json"
-GS_MODEM_JSON = ADOS_ETC_DIR / "ground-station-modem.json"
 GS_WIFI_CLIENT_JSON = ADOS_ETC_DIR / "ground-station-wifi-client.json"
 
 # Peripherals
@@ -396,7 +311,6 @@ MESH_REVOCATIONS_JSON = MESH_DIR / "revocations.json"
 # WFB-ng key material
 WFB_KEY_DIR = ADOS_ETC_DIR / "wfb"
 WFB_RX_KEY_PATH = WFB_KEY_DIR / "rx.key"
-WFB_RX_KEY_PUB_PATH = WFB_KEY_DIR / "rx.key.pub"
 
 # ---------------------------------------------------------------------------
 # Data directory: /var/ados/
@@ -411,12 +325,6 @@ RECORDINGS_DIR = ADOS_VAR_DIR / "recordings"
 # Flight logs
 FLIGHT_LOGS_DIR = ADOS_VAR_DIR / "logs/flights"
 
-# OTA
-DOWNLOADS_DIR = ADOS_VAR_DIR / "downloads"
-OTA_STATE_PATH = ADOS_VAR_DIR / "ota-state.json"
-SLOT_A_PATH = ADOS_VAR_DIR / "slot-a"
-SLOT_B_PATH = ADOS_VAR_DIR / "slot-b"
-
 # Persistent state files (setup wizard, hardware snapshot, etc.)
 STATE_DIR = ADOS_VAR_DIR / "state"
 SETUP_STATE_DIR = ADOS_VAR_DIR / "setup"
@@ -427,21 +335,12 @@ SETUP_STATE_PATH = SETUP_STATE_DIR / "state.json"
 # cached runner. Owned by the agent; readable by the GCS.
 HARDWARE_STATE_PATH = SETUP_STATE_DIR / "hardware-state.json"
 
-# Audit log
-AUDIT_LOG_PATH = ADOS_VAR_DIR / "audit.jsonl"
-
 # Plugins (installed third-party bundles, plugin data, plugin configs)
 PLUGINS_INSTALL_DIR = ADOS_VAR_DIR / "plugins"
 PLUGIN_DATA_DIR = ADOS_VAR_DIR / "plugin-data"
 ADOS_LOG_DIR = Path("/var/log/ados")
 PLUGIN_LOG_DIR = ADOS_LOG_DIR / "plugins"
 PLUGIN_STATE_PATH = STATE_DIR / "plugin-state.json"
-
-# Camera last-known-good record. Written by the supervisor's camera-recovery
-# reconciler whenever a camera enumerates healthy; persists the bind id + hub +
-# port so the absent (cold-boot) case can target the right port and `auto`
-# camera-expectation arms across reboots.
-CAMERA_LAST_GOOD_JSON = ADOS_VAR_DIR / "camera-last-good.json"
 
 # Install-result record. Written atomically by the install pipeline with the
 # outcome of the last install/upgrade (status, version, profile, board, kernel
@@ -451,10 +350,28 @@ CAMERA_LAST_GOOD_JSON = ADOS_VAR_DIR / "camera-last-good.json"
 # ``ADOS_INSTALL_RESULT`` (the variable the workstation daemons + Linux env file
 # carry); default is the Linux FHS path, or ``~/.ados/install-result.json`` on
 # macOS (where the installer records it).
+# The operator audit trail: an append-only, newline-delimited record of the
+# decisions that persist (a regulatory posture, a plugin capability grant, a pair
+# transition, a sandbox rule enforced). Written by `ados.core.audit`; budgeted,
+# trimmed and rendered by the supervisor's disk janitor + `ados diag`, which
+# constrain only that it is append-only and newline-delimited.
+AUDIT_LOG = ADOS_VAR_DIR / "audit.jsonl"
+
 INSTALL_RESULT = (
     Path(os.environ["ADOS_INSTALL_RESULT"])
     if os.environ.get("ADOS_INSTALL_RESULT")
-    else (_ados_home() / "install-result.json" if _IS_MACOS else Path("/var/lib/ados/install-result.json"))
+    else _lib_base() / "install-result.json"
+)
+
+# Per-step ``<name>.done`` markers the install pipeline drops so an interrupted
+# run can resume. `ados install --status` reads them to show done vs missing.
+# Aligned with ``crates/ados-installer/src/env.rs``'s ``CHECKPOINT_DIR``; the
+# Rust side keeps the Linux literal because the installer only ever runs on a
+# target, while this constant also has to resolve on a macOS workstation.
+INSTALL_CHECKPOINT_DIR = (
+    Path(os.environ["ADOS_INSTALL_CHECKPOINT_DIR"])
+    if os.environ.get("ADOS_INSTALL_CHECKPOINT_DIR")
+    else _lib_base() / "install-checkpoints"
 )
 
 
@@ -505,7 +422,7 @@ DASHBOARD_PIN_PATH = ADOS_ETC_DIR / "dashboard-pin.json"
 MCP_TOKEN_PATH = ADOS_ETC_DIR / "mcp-token.json"
 WFB_KEY_DIR = ADOS_ETC_DIR / "wfb"
 CERTS_DIR = ADOS_ETC_DIR / "certs"
-SETUP_COMPLETE_PATH = Path("/var/lib/ados/setup-complete")
+SETUP_COMPLETE_PATH = _lib_base() / "setup-complete"
 
 #: Files a factory reset unlinks. Credentials first, so an interrupted run has
 #: already destroyed what grants access rather than only what identifies the box.

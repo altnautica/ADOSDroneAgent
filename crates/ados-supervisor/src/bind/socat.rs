@@ -32,8 +32,8 @@ fn gs_client_retry() -> u64 {
     KEY_TRANSFER_TIMEOUT.as_secs() + GS_CLIENT_RETRY_MARGIN_S
 }
 
-/// Drone-side socat: listen on the tunnel rendezvous and hand the connection to
-/// the upstream server wrapper. Mirrors `_run_drone_server`'s command exactly.
+/// Drone-side socat: listen on the tunnel rendezvous and hand the connection to the
+/// upstream server wrapper.
 pub fn drone_server_args() -> Vec<String> {
     vec![
         "-d".into(),

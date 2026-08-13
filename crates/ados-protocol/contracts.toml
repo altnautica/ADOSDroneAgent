@@ -260,6 +260,18 @@ path = "/run/ados/mgmt-link.json"
 description = "Management-link guardian state."
 
 [[sidecar]]
+id = "mgmt-failover"
+version = 1
+path = "/run/ados/mgmt-failover.json"
+description = "Management-link reach-back mode: primary, wifi_heartbeat, or none, with the failover interface and reason."
+
+[[sidecar]]
+id = "usb-rehome"
+version = 1
+path = "/run/ados/usb-rehome.json"
+description = "USB-rehome self-heal state for a WFB adapter on a slow USB port: the recovery state, attempt count, and last outcome."
+
+[[sidecar]]
 id = "wifi-powersave"
 version = 1
 path = "/run/ados/wifi-powersave.json"

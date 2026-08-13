@@ -1,7 +1,7 @@
 """Path constants and default-config blobs shared across helper modules.
 
 Holding these in one tiny module avoids circular imports between the
-helpers (``ui_config``, ``views``, ``share_uplink``) that all need
+helpers (``ui_config``, ``views``) that all need
 the same set of paths and defaults.
 """
 
@@ -11,7 +11,6 @@ from typing import Any
 
 from ados.core.paths import (
     GS_UI_JSON,
-    GS_UPLINK_JSON,
     MESH_STATE_JSON,
     WFB_RECEIVER_JSON,
     WFB_RELAY_JSON,
@@ -52,7 +51,6 @@ _DEFAULT_DISPLAY: dict[str, Any] = {
     "kiosk_target_url": None,
 }
 
-_UPLINK_PRIORITY_PATH = GS_UPLINK_JSON
 _MESH_STATE_JSON = MESH_STATE_JSON
 _WFB_RELAY_JSON = WFB_RELAY_JSON
 _WFB_RECEIVER_JSON = WFB_RECEIVER_JSON
@@ -64,7 +62,6 @@ __all__ = [
     "_DEFAULT_BUTTONS",
     "_DEFAULT_SCREENS",
     "_DEFAULT_DISPLAY",
-    "_UPLINK_PRIORITY_PATH",
     "_MESH_STATE_JSON",
     "_WFB_RELAY_JSON",
     "_WFB_RECEIVER_JSON",

@@ -33,9 +33,7 @@ pub struct BeaconInputs {
     pub code_expires_at: Option<i64>,
 }
 
-/// Build the `/pairing/register` POST body. Mirrors the Python `beacon_body`:
-/// camelCase keys, `mdnsHost` empty, `pairingCodeExpiresAt` included only when
-/// the code has an expiry.
+/// Build the `/pairing/register` POST body.
 pub fn build_beacon_body(inputs: &BeaconInputs) -> serde_json::Value {
     let mut body = serde_json::Map::new();
     body.insert("deviceId".to_string(), serde_json::json!(inputs.device_id));

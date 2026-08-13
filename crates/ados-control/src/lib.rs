@@ -428,6 +428,17 @@ where
         state
     };
 
+    // Peer device-id back-fill: the radio's hop supervisor latches the peer id it
+    // learns from a verified presence beacon into `peer-backfill.json`, and until
+    // now nothing read it — so an auto-bound rig's `paired_drone.device_id` was
+    // null on every status read, across reboots. Runs on BOTH profiles: a drone
+    // learns its ground station's id the same way, and the canonical key is
+    // profile-agnostic. Idle once the config agrees.
+    tokio::spawn(crate::routes::peer_backfill::run_peer_backfill_reconciler(
+        paths.config_path.clone(),
+        is_ground_station,
+    ));
+
     // The proxied-route auth decision: the ported Python auth + HMAC middlewares
     // the front runs on every forwarded (non-native) route, so the front is the
     // single authenticator for the whole surface. The `security:` slice (read

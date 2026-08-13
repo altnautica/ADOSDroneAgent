@@ -33,8 +33,7 @@ const RECEIVER_LOST_GRACE_MS: i64 = 15_000;
 /// Poll cadence for re-resolving the receiver and republishing state. Mirrors
 /// the Python `_POLL_INTERVAL_S = 2.0`.
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
-/// mDNS resolve timeout per poll. Mirrors the Python `_resolve_receiver`
-/// `timeout=3.0`.
+/// mDNS resolve timeout per poll.
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(3);
 /// Forwarder graceful-shutdown grace before SIGKILL. Mirrors the Python
 /// `wait_for(proc.wait(), timeout=3.0)` between terminate and kill.
@@ -121,8 +120,8 @@ impl RelayState {
     }
 }
 
-/// Build the `wfb_rx -f` FEC-forward args for the drone-facing adapter. Uses the
-/// rx key (decrypts the drone uplink). Mirrors `_launch_wfb_rx_forward`.
+/// Build the `wfb_rx -f` FEC-forward args for the drone-facing adapter. Uses the rx key
+/// (decrypts the drone uplink).
 pub fn forward_args(
     drone_iface: &str,
     receiver_ip: &str,
@@ -187,9 +186,8 @@ fn receiver_is_stale(last_seen_ms: i64, was_up: bool, now_ms: i64) -> bool {
     last_seen_ms > 0 && was_up && (now_ms - last_seen_ms) > RECEIVER_LOST_GRACE_MS
 }
 
-/// Tail a forwarder's stderr, folding each `PKT` line into the shared state's
-/// fragment counters. Mirrors the Python `_tail_stats`. Returns when the stderr
-/// pipe closes (the forwarder exited).
+/// Tail a forwarder's stderr, folding each `PKT` line into the shared state's fragment
+/// counters. Returns when the stderr pipe closes (the forwarder exited).
 async fn tail_forwarder_stats(stderr: tokio::process::ChildStderr, state: Arc<Mutex<RelayState>>) {
     use tokio::io::{AsyncBufReadExt, BufReader};
     let mut lines = BufReader::new(stderr).lines();

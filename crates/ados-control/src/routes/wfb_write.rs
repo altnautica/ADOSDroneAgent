@@ -67,72 +67,15 @@ use crate::routes::detail;
 // Standard WFB-ng channels (frequency lookup + the invalid-channel guard).
 // ---------------------------------------------------------------------------
 
-/// A WFB-ng channel: the channel number + its 5 GHz centre frequency. Mirrors the
-/// Python `WfbChannel` fields the channel route reads.
-#[derive(Clone, Copy)]
-struct WfbChannel {
-    channel_number: i64,
-    frequency_mhz: i64,
-}
-
-/// The standard 5 GHz channels usable with WFB-ng on the RTL8812 family: the
-/// U-NII-1 sub-band (36/40/44/48) and the U-NII-3 sub-band (149/153/157/161/165).
-/// Mirrors the Python `STANDARD_CHANNELS` list exactly; the order is the order the
-/// invalid-channel error lists the valid set in.
-const STANDARD_CHANNELS: [WfbChannel; 9] = [
-    WfbChannel {
-        channel_number: 36,
-        frequency_mhz: 5180,
-    },
-    WfbChannel {
-        channel_number: 40,
-        frequency_mhz: 5200,
-    },
-    WfbChannel {
-        channel_number: 44,
-        frequency_mhz: 5220,
-    },
-    WfbChannel {
-        channel_number: 48,
-        frequency_mhz: 5240,
-    },
-    WfbChannel {
-        channel_number: 149,
-        frequency_mhz: 5745,
-    },
-    WfbChannel {
-        channel_number: 153,
-        frequency_mhz: 5765,
-    },
-    WfbChannel {
-        channel_number: 157,
-        frequency_mhz: 5785,
-    },
-    WfbChannel {
-        channel_number: 161,
-        frequency_mhz: 5805,
-    },
-    WfbChannel {
-        channel_number: 165,
-        frequency_mhz: 5825,
-    },
-];
-
-/// Look up a channel by number, or `None` for an unknown number. Mirrors the
-/// Python `get_channel`.
-fn get_channel(channel_number: i64) -> Option<WfbChannel> {
-    STANDARD_CHANNELS
-        .iter()
-        .find(|c| c.channel_number == channel_number)
-        .copied()
-}
-
-/// The valid-channel list rendered as the FastAPI error message uses it: a
-/// Python-list repr `[36, 40, ..., 165]`. The numbers are joined with `, ` inside
-/// square brackets, byte-identical to `str([c.channel_number for c in
-/// STANDARD_CHANNELS])`.
+/// The valid-channel list rendered as the error message uses it: a list repr
+/// `[36, 40, ..., 165]`, the numbers joined with `, ` inside square brackets.
+///
+/// Reads `ados_protocol::wfb_status::STANDARD_CHANNELS`, the one table. This
+/// module carried a private copy of the same nine pairs; a third copy in the
+/// radio block omitted 40 and 44 and rendered a null frequency for a link on
+/// either, which is what a duplicated table buys.
 fn valid_channels_repr() -> String {
-    let inner = STANDARD_CHANNELS
+    let inner = ados_protocol::wfb_status::STANDARD_CHANNELS
         .iter()
         .map(|c| c.channel_number.to_string())
         .collect::<Vec<_>>()
@@ -228,7 +171,7 @@ pub async fn set_wfb_channel(Json(req): Json<ChannelRequest>) -> Response {
 async fn set_wfb_channel_at(socket: &Path, channel: i64) -> Response {
     // 1. The channel must be a standard WFB channel. An unknown channel is the
     //    FastAPI 400 with the valid-channel list rendered as a Python-list repr.
-    let ch = match get_channel(channel) {
+    let ch = match ados_protocol::wfb_status::get_channel(channel) {
         Some(ch) => ch,
         None => {
             return detail(
@@ -558,6 +501,9 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The channel table is the shared one now; this route's guard is still
+    // what these pin, so the import comes in rather than the table coming back.
+    use ados_protocol::wfb_status::get_channel;
 
     // ── channel lookup + the invalid-channel guard ────────────────────────────
 

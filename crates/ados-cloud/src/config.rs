@@ -15,9 +15,8 @@ use serde::Deserialize;
 /// systemd unit sets (same convention as the other crates).
 pub const CONFIG_YAML: &str = "/etc/ados/config.yaml";
 
-/// The cloud-relay endpoint under `server.cloud.url`, plus the MQTT broker
-/// host/port the relays dial. Mirrors the Python `CloudConfig` fields the relay
-/// reads.
+/// The cloud-relay endpoint under `server.cloud.url`, plus the MQTT broker host/port
+/// the relays dial.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CloudSection {
     #[serde(default)]
@@ -421,12 +420,12 @@ pub fn atlas_compute_addr(config: &CloudConfig) -> Option<String> {
         .map(str::to_string)
 }
 
-/// The pinned workstation address (`host:port`) the perception offload targets
-/// when set, so the reconciler skips mDNS and offloads straight to it (a
-/// segmented / bridged network, or an operator who pinned a specific box). The
+/// The pinned workstation address (`host:port`) the perception offload targets when
+/// set, so the reconciler skips mDNS and offloads straight to it (a segmented / bridged
+/// network, or an operator who pinned a specific box). The
 /// `ADOS_PERCEPTION_OFFLOAD_ADDR` env var wins, else the
 /// `perception.offload.compute_node_addr` field. Whitespace / empty ⇒ unset
-/// (auto-discover). Mirrors [`atlas_compute_addr`].
+/// (auto-discover).
 pub fn perception_offload_addr(config: &CloudConfig) -> Option<String> {
     if let Ok(v) = std::env::var("ADOS_PERCEPTION_OFFLOAD_ADDR") {
         let t = v.trim();

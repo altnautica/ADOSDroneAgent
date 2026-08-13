@@ -23,8 +23,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 const MAX_REPLY_BYTES: usize = 64 * 1024;
 
 /// The data-plane command socket (`/run/ados/groundlink-cmd.sock`), honouring
-/// `ADOS_RUN_DIR` (the same override the sibling sockets + sidecars resolve
-/// under). Mirrors the `GROUNDLINK_CMD_SOCK` constant the service binds.
+/// `ADOS_RUN_DIR` (the same override the sibling sockets + sidecars resolve under).
 fn groundlink_cmd_sock() -> PathBuf {
     PathBuf::from(std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string()))
         .join("groundlink-cmd.sock")

@@ -169,7 +169,7 @@ fn signature_policy(
 }
 
 /// Verify the minisign signature of `artifact` against `<artifact>.minisig`
-/// using the provided pubkey. Mirrors bash `ados_verify_minisign` return codes,
+/// using the provided pubkey. return codes,
 /// collapsed into the install's fatality model:
 ///   - verified              → Ok(())
 ///   - signature INVALID     → fatal everywhere (tamper)

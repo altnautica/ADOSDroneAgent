@@ -220,6 +220,20 @@ def spawn(
             basename=basename,
             allowlist_size=len(allow),
         )
+        # The audit trail: the sandbox refusing a spawn is the agent enforcing a
+        # standing rule against a plugin that tried to step outside it, which is
+        # exactly the kind of thing an operator reconstructs after the fact.
+        from ados.core import audit
+
+        audit.record(
+            audit.PLUGIN_SANDBOX_VIOLATION,
+            audit.ACTOR_SERVICE,
+            {
+                "plugin_id": plugin_id,
+                "basename": basename,
+                "allowlist_size": len(allow),
+            },
+        )
         raise AllowlistViolation(plugin_id=plugin_id, basename=basename)
 
     binary_path = resolve_binary(install_dir, basename)

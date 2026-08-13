@@ -235,11 +235,9 @@ fn ap_view(cfg: &Value) -> Value {
     view
 }
 
-/// Merge the setup-AP guard's live decision (`standing_down` + reason + phy
-/// count + client-uplink flag) into the AP view so an operator can see WHY the
-/// AP is up or down (Rule 44). Mirrors the Python `_ap_guard_diagnostics`: an
-/// absent / unreadable sidecar defaults to `standing_down=false` with a
-/// `standdown_reason` of `"unknown"`, never failing the view.
+/// Merge the setup-AP guard's live decision (`standing_down` + reason + phy count +
+/// client-uplink flag) into the AP view so an operator can see WHY the AP is up or down
+/// (Rule 44).
 fn merge_ap_guard_diagnostics(view: &mut Value) {
     let Some(obj) = view.as_object_mut() else {
         return;
@@ -284,10 +282,9 @@ fn read_ap_guard_sidecar() -> (bool, String, Value, Value) {
 }
 
 /// Compose the `_ap_view` body from already-probed pieces: the resolved SSID, the
-/// channel, the AP interface, the live running flag, and the associated station
-/// MACs. Split out so the shape + the running-vs-not-running gating are unit
-/// tested without the `systemctl` / `iw` IO. Mirrors the Python `_ap_view` live
-/// branch field-for-field, gating the gateway + clients on `running`.
+/// channel, the AP interface, the live running flag, and the associated station MACs.
+/// Split out so the shape + the running-vs-not-running gating are unit tested without
+/// the `systemctl` / `iw` IO.
 fn ap_view_compose(
     ssid: &str,
     channel: i64,
@@ -372,10 +369,9 @@ fn parse_station_dump(text: &str) -> Vec<String> {
     macs
 }
 
-/// Resolve the AP SSID the way the live hostapd manager does: honor a configured
-/// SSID only when it is non-empty, has no `{device_id}` placeholder, and already
-/// starts with `ADOS-GS-`; otherwise build `ADOS-GS-<short_id>` from the device
-/// id. Mirrors `_hostapd_manager`'s `ssid_override` gate + `_build_ssid`.
+/// Resolve the AP SSID the way the live hostapd manager does: honor a configured SSID
+/// only when it is non-empty, has no `{device_id}` placeholder, and already starts with
+/// `ADOS-GS-`; otherwise build `ADOS-GS-<short_id>` from the device id.
 fn resolve_ap_ssid(configured: &str, device_id: &str) -> String {
     if !configured.is_empty()
         && !configured.contains("{device_id}")
@@ -443,14 +439,12 @@ fn ethernet_view_default() -> Value {
 
 /// The modem leg of the aggregate view (also the `GET .../network/modem` body).
 ///
-/// The front has no live modem-status seam, so the connectivity legs are the
-/// no-modem defaults the live `ModemManager.status()` returns when no modem is
-/// connected: `iface:"wwan0"`, `signal_quality:-1`, `technology:"unknown"`,
-/// `operator:""`, `connected:false`. The `enabled` / `apn` / cap come off the
-/// modem config file, and the cumulative-usage legs (`data_used_mb`, `cap_mb`,
-/// `percent`) are overlaid from the store's most-recent `net.modem_usage` event
-/// when present. Mirrors `_modem_view` over a box whose `status()` reports no
-/// modem + the store overlay.
+/// The front has no live modem-status seam, so the connectivity legs are the no-modem
+/// defaults the live `ModemManager.status()` returns when no modem is connected:
+/// `iface:"wwan0"`, `signal_quality:-1`, `technology:"unknown"`, `operator:""`,
+/// `connected:false`. The `enabled` / `apn` / cap come off the modem config file, and
+/// the cumulative-usage legs (`data_used_mb`, `cap_mb`, `percent`) are overlaid from
+/// the store's most-recent `net.modem_usage` event when present.
 ///
 /// Shared with the `PUT .../network/modem` write route, which returns the same
 /// `_modem_view()` body after persisting the config sidecar (exactly as the
@@ -625,8 +619,6 @@ pub(crate) fn nmcli_connections(fields: &[&str], active: bool) -> Vec<Vec<String
 
 /// Parse `nmcli -t` (terse) multi-line output into rows, skipping blank lines and
 /// keeping only rows with at least `fields` columns (each truncated to `fields`).
-/// Mirrors the Python `_parse_nmcli_terse_fields` per line + the manager's
-/// per-line column guard.
 fn parse_nmcli_terse(text: &str, fields: usize) -> Vec<Vec<String>> {
     let mut rows = Vec::new();
     for line in text.lines() {
@@ -709,9 +701,8 @@ pub async fn get_network_priority() -> Response {
     Json(json!({"priority": priority_list()})).into_response()
 }
 
-/// The uplink priority list from `ground-station-uplink.json`, or the default
-/// chain when the file is absent / unparseable / carries an empty or non-string
-/// list. Mirrors the Python `load_priority` + `UplinkRouter.get_priority`.
+/// The uplink priority list from `ground-station-uplink.json`, or the default chain
+/// when the file is absent / unparseable / carries an empty or non-string list.
 fn priority_list() -> Value {
     let default = || Value::Array(DEFAULT_PRIORITY.iter().map(|s| json!(s)).collect());
     let Some(obj) = load_json_object(&gs_uplink_json()) else {
@@ -828,18 +819,18 @@ async fn wifi_cmd_roundtrip(request: &str) -> Option<Value> {
 // Store seams: net.uplink_active + net.modem_usage events.
 // ---------------------------------------------------------------------------
 
-/// The store's most-recent `active_uplink` value (the daemon's selected uplink),
-/// or `None` when the store is unreachable / has no such event / the body omits
-/// the field. A present body with a null `active_uplink` (the daemon emitting
-/// "no viable uplink") yields `Some(Value::Null)`, so a store-first reader learns
-/// "no uplink" without a separate probe. Mirrors `latest_uplink_active`.
+/// The store's most-recent `active_uplink` value (the daemon's selected uplink), or
+/// `None` when the store is unreachable / has no such event / the body omits the field.
+/// A present body with a null `active_uplink` (the daemon emitting "no viable uplink")
+/// yields `Some(Value::Null)`, so a store-first reader learns "no uplink" without a
+/// separate probe.
 async fn latest_uplink_active(state: &AppState) -> Option<Value> {
     let detail = latest_event_detail(state, "net.uplink_active").await?;
     detail.get("active_uplink").cloned()
 }
 
-/// The store's most-recent modem cumulative-usage block, or `None` when the
-/// store is unreachable / holds no such event. Mirrors `latest_modem_usage`.
+/// The store's most-recent modem cumulative-usage block, or `None` when the store is
+/// unreachable / holds no such event.
 async fn latest_modem_usage(state: &AppState) -> Option<Map<String, Value>> {
     latest_event_detail(state, "net.modem_usage").await
 }

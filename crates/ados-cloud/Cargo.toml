@@ -29,6 +29,10 @@ ados-atlas-transport = { path = "../ados-atlas-transport" }
 # (`ados_compute::mdns::resolve_compute`) to build the direct-LAN bearer. A
 # one-way edge: ados-compute never depends on ados-cloud.
 ados-compute = { path = "../ados-compute" }
+# The per-adapter stable-MAC verdicts the heartbeat's `macStability` block
+# carries. The projection lives in the crate that owns the state file so the
+# LAN status body and this heartbeat ship one shape, not two.
+ados-macpin = { path = "../ados-macpin" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # YAML config reader (/etc/ados/config.yaml), the same reader the other crates

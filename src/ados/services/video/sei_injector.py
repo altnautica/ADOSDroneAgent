@@ -53,25 +53,35 @@ def _emulation_prevent(rbsp: bytes) -> bytes:
     pattern with `00 00 03 <XX>`. Without this, a SEI payload that
     happens to contain `00 00 01` would be mis-parsed as the start
     of the next NAL.
+
+    Single forward pass over the OUTPUT's trailing-zero run, with no
+    lookahead. The lookahead form this replaced had two defects that
+    together emitted a literal `00 00 01` into the NAL — a false start
+    code for any decoder, not just this parser: a guard bounded by
+    `i + 2 < n` never examined a forbidden triple ending at the final
+    byte, and resuming `i += 3` past the escaped byte left a zero it
+    had just written able to open a run that was never re-examined.
+
+    Counting emitted zeros instead escapes at exactly the positions
+    §7.3.1's decoder expects. `sei_parser._remove_emulation_prevention`
+    was corrected in the same change to resume at the byte after a
+    discarded `0x03` rather than consuming it, which is what makes the
+    two exact inverses; escaping this way against the old consuming
+    stripper would round-trip wrong on `00 00 03 00 00 03 …`.
+    There is deliberately NO trailing-zero rule: the stripper's own
+    `i + 2 < n` guard cannot remove a trailing `0x03`, and adding one
+    here would break the inverse property. It is safe to omit because
+    `build_sei_nal` always terminates the RBSP with `0x80` (see the
+    `rbsp_trailing` byte below), so the payload never ends in zeros.
     """
     out = bytearray()
-    i = 0
-    n = len(rbsp)
-    while i < n:
-        if (
-            i + 2 < n
-            and rbsp[i] == 0
-            and rbsp[i + 1] == 0
-            and rbsp[i + 2] in (0, 1, 2, 3)
-        ):
-            out.append(0)
-            out.append(0)
-            out.append(3)
-            out.append(rbsp[i + 2])
-            i += 3
-        else:
-            out.append(rbsp[i])
-            i += 1
+    zeros = 0  # consecutive 0x00 bytes already emitted
+    for b in rbsp:
+        if zeros >= 2 and b <= 0x03:
+            out.append(0x03)
+            zeros = 0
+        out.append(b)
+        zeros = zeros + 1 if b == 0x00 else 0
     return bytes(out)
 
 

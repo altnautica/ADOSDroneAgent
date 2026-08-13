@@ -363,8 +363,8 @@ impl VideoOrchestrator {
         true
     }
 
-    /// Spawn the wfb radio tap (idempotent). Best-effort: a failure leaves the
-    /// rest of the pipeline up. Mirrors `start_wfb_tee`.
+    /// Spawn the wfb radio tap (idempotent). Best-effort: a failure leaves the rest of
+    /// the pipeline up.
     pub async fn start_wfb_tee(&mut self) {
         if self.state != PipelineState::Running {
             tracing::warn!("wfb_tee_skipped: pipeline not running");
@@ -394,7 +394,7 @@ impl VideoOrchestrator {
         tracing::info!(sei_latency = self.sei_latency_on(), "wfb_tee_started");
     }
 
-    /// Stop the wfb radio tap. Mirrors `stop_wfb_tee`.
+    /// Stop the wfb radio tap.
     pub async fn stop_wfb_tee(&mut self) {
         if let Some(mut p) = self.wfb_tee.take() {
             p.terminate(Duration::from_secs(5)).await;
@@ -403,10 +403,8 @@ impl VideoOrchestrator {
         kill_orphans(&orphan_pattern()).await;
     }
 
-    /// Spawn the decoupled vision frame tap (idempotent). Best-effort and
-    /// strictly additive: a failure leaves the encode + radio path fully up.
-    /// Mirrors [`start_wfb_tee`](Self::start_wfb_tee) — same setsid/killpg
-    /// ownership, same orphan sweep, same output-progress watchdog.
+    /// Spawn the decoupled vision frame tap (idempotent). Best-effort and strictly
+    /// additive: a failure leaves the encode + radio path fully up.
     pub async fn start_vision_tap(&mut self) {
         if !self.vision_enabled() || self.config.vision.raw_tap {
             return;
@@ -709,8 +707,8 @@ impl VideoOrchestrator {
         tracing::info!("headless_sei_tap_started");
     }
 
-    /// Start the cloud-relay push (an ffmpeg that copies local RTSP to the
-    /// cloud relay). Mirrors `start_cloud_push`. Returns `true` on spawn.
+    /// Start the cloud-relay push (an ffmpeg that copies local RTSP to the cloud
+    /// relay). Returns `true` on spawn.
     pub async fn start_cloud_push(&mut self) -> bool {
         let Some(cloud_url) = self
             .config
@@ -762,7 +760,7 @@ impl VideoOrchestrator {
         true
     }
 
-    /// Stop the cloud push. Mirrors `stop_cloud_push`.
+    /// Stop the cloud push.
     pub async fn stop_cloud_push(&mut self) {
         if let Some(mut p) = self.cloud_push.take() {
             p.terminate(Duration::from_secs(5)).await;
@@ -770,8 +768,8 @@ impl VideoOrchestrator {
         }
     }
 
-    /// Roll back a partial start: tear down anything spawned after
-    /// mediamtx.start(), then mark Error. Mirrors `_teardown_after_partial_start`.
+    /// Roll back a partial start: tear down anything spawned after mediamtx.start(),
+    /// then mark Error.
     async fn teardown_after_partial_start(&mut self) {
         self.stop_wfb_tee().await;
         self.stop_vision_tap().await;

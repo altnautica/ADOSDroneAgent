@@ -4,6 +4,148 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.359] - 2026-08-13
+
+### Security
+
+- **The cloud status query had no ownership check on the hosted deployment.**
+  Knowing a device id was enough for any authenticated caller to read that node's
+  entire status row — its addresses, its pairing state, its whole telemetry
+  summary. The self-hosted Convex tree has always required ownership; the hosted
+  one did not, and the exposure gate could not tell the difference because both
+  sides are a plain `query`. Both trees now call the same ownership check.
+
+### Added
+
+- **The cloud heartbeat carries the radio block.** It was hardcoded absent, so a
+  cloud-relayed node rendered an empty link card in the GCS forever while
+  `/run/ados/wfb-stats.json` held the data on disk and the LAN routes read it
+  fine.
+
+  The reason it stayed absent is worth stating: the WFB status derivation existed
+  in **three** copies — `/api/wfb` and `/api/status/full` each carried a private
+  one, and the channel-to-frequency table a further two — so giving the cloud
+  transport a block meant writing a fourth. It now lives once, in
+  `ados-protocol::wfb_status`, with both LAN routes and the cloud loop calling it.
+  The cloud side reads the sidecar through the same
+  `read_<thing>_sidecar_from(path, now)` pattern its neighbours use, under the
+  same staleness gate, and `RadioBlock::absent()` remains for the genuinely-absent
+  case. A round-trip identity test pins the seam: the derivation's output must
+  deserialize into `RadioBlock` and re-serialize to exactly the same JSON, so a
+  field added on one side only fails rather than vanishing off the wire.
+
+  `macStability` is carried the same way.
+
+- **The operator audit trail has a writer.** `/var/ados/audit.jsonl` was budgeted
+  by the disk janitor, trimmed on a rung, counted toward the agent's footprint and
+  rendered by `ados diag` — a category an operator can see, that nothing produced.
+  It now records four kinds of decision that persist beyond the process that made
+  it: a regulatory posture written to config, a capability granted to a plugin, a
+  sandbox rule enforced against a plugin that stepped outside it, and a
+  credential-bearing pair transition. One newline-terminated JSON object per line,
+  `{ts, kind, actor, detail}`. This is not a log — structured logs go to the
+  logging store, which has retention and a query API. A write failure never fails
+  the action being recorded.
+
+- **Two ground-station network routes are native.**
+  `PUT /api/v1/ground-station/network/client/join` and
+  `DELETE /api/v1/ground-station/network/client` now reach the command socket
+  directly instead of through the packaged forwarder. Pinned native route count
+  150 → 152.
+
+- **The device id of a newly-learned peer reaches the ground-station status
+  route.** Two writers fired on every peer while the reconciler that consumed them
+  had no callers, so the id never reached `config.yaml` and the route returned
+  null across restarts.
+
+- **Gates.** Six, each demonstrated by planting the failure it exists to catch:
+  the WFB derivation and the channel table must each have exactly one definition;
+  a `Mirrors <symbol>` doc citation must name a symbol that still exists; every
+  path constant must have a reader somewhere; the audit record shape and its
+  never-raises posture; `ados install --status` must resolve the path its own
+  platform installs to; and the radio-block round trip above.
+
+### Fixed
+
+- **The SEI injector emitted a false start code.** Its emulation-prevention pass
+  used a three-byte lookahead that could not see a forbidden pattern ending at the
+  final byte, and resumed past the byte it had just escaped — between them they
+  put a literal `00 00 01` into the NAL, which any decoder reads as the start of a
+  new unit, not just this one's parser.
+
+  The fix had to include the stripper. Per H.264 §7.3.1 a decoder discards the
+  `0x03` of a `00 00 03` triple and resumes at the byte that followed it; ours
+  consumed that byte unconditionally. While that held, "the escaper and the
+  stripper are exact inverses" and "the escaper emits no false start code" could
+  not both be true, so an earlier attempt confined to the escaper traded one bug
+  for a worse one. Both halves are correct now, and the round trip is asserted
+  across a swept input space rather than a handful of cases.
+
+- **The ground-station status route reported recording inactive while a capture
+  was running.** It hardcoded `false`, citing a sibling recorder process — but the
+  recorder is held in-process by the recording route itself, behind a `OnceLock`,
+  because start and stop arrive as separate requests. The route now reads it.
+
+- **A native route used a path-parameter form the front's own matcher cannot
+  read.** `:device_id` instead of `{device_id}`. Axum served it, but the route
+  table classified it non-native, which moves the request off the native
+  authentication lane — its rate limiter, pairing gate and scope admission — onto
+  the proxied one. A test now rejects any colon segment in the table, because the
+  malformed form was silent.
+
+- **`ados install --status` read a path that cannot exist on macOS.** The command
+  carried its own hardcoded literal instead of the platform-aware resolution, then
+  printed that impossible path in its "nothing recorded" message.
+
+- **`usb-rehome` and `mgmt-failover` are registered in the contracts registry.**
+  Both sidecars were written and read without an entry, so nothing pinned their
+  version or shape across the language boundary.
+
+### Removed
+
+- **The packaged ground-station network island: 27 files, 5,346 lines.** The modem
+  manager, the ethernet manager, the AT-command layer, the uplink router and its
+  data cap, failover, health, adapters and events, the share-uplink firewall, the
+  modem and network routers, their systemd units and udev rule, and the tests that
+  covered only them.
+
+  The two routes in that tree with no native counterpart were ported first, in
+  this same release, so there is no version in which they are missing.
+  `wifi_client_manager.py` and `usb_gadget.py` stay: both are live.
+
+- **Thirty-one path constants with no reader**, each left behind by a migration
+  that moved its last reader into a native service. The registry is the source of
+  truth for a path that crosses the language boundary; a constant that only names
+  a real file is not evidence anything uses it.
+
+- **Five encoder-identity fields in the cloud heartbeat.** `videoPipelineFlavor`,
+  `videoEncoderName`, `videoEncoderHwAccel`, `videoCameraSource` and
+  `videoPipelineState` were declared, defaulted to null, emitted as null and
+  asserted null in the frozen fixture. No assignment of a real value existed
+  anywhere; their only possible producer was the packaged air pipeline, already
+  removed. Gone from the agent, from both Convex trees and from the GCS row that
+  carried them to no reader.
+
+- **`ados rust enable front` and `ados rust disable front`.** The toggle promised
+  that disabling it returns the LAN port to the packaged surface. That stopped
+  being true when the last packaged ground-station network writes went native
+  above: the packaged surface no longer serves the routes an operator would be
+  falling back to. The `front-rust-enabled` marker stays — it is the installer's
+  unit-reconcile mechanism and the control surface's port selector, not a choice.
+  The two systemd drop-ins the toggle wrote go with it, in the same change, so the
+  flag and the code behind it never disagree. `ados rust status` still reports the
+  front's mode as a reading.
+
+### Changed
+
+- **132 `Mirrors <symbol>` doc citations named symbols that no longer exist.**
+  Each was written to document an equivalence a migration wave was maintaining,
+  then outlived the predecessor it pointed at. The comment asserts that a second
+  implementation exists which your edit must stay identical to, so a reader either
+  hunts a file that is not there or treats the native code as a copy rather than
+  the authority. The surviving citations point at the permanently-Python layers,
+  and the new gate is shrink-only.
+
 ## [0.99.358] - 2026-08-12
 
 ### Removed

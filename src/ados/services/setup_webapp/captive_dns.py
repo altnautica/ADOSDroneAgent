@@ -48,10 +48,14 @@ from pathlib import Path
 from typing import Any
 
 from ados.core.logging import configure_logging, get_logger
+from ados.core.paths import SETUP_COMPLETE_PATH
 
 log = get_logger("setup_webapp.captive_dns")
 
-SETUP_COMPLETE_SENTINEL = Path("/var/lib/ados/setup-complete")
+# Assigned from `ados.core.paths`, not re-listed: `pair_manager` writes this
+# sentinel and the systemd unit's ConditionPathExists names the same file, so a
+# second literal here would be a third copy of one path to drift.
+SETUP_COMPLETE_SENTINEL = SETUP_COMPLETE_PATH
 AP_GATEWAY_IP = "192.168.4.1"
 
 # Hostnames that get mapped to AP_GATEWAY_IP.

@@ -801,9 +801,6 @@ async fn read_one_frame(stream: &mut UnixStream) -> std::io::Result<Vec<u8>> {
 /// Writer side: CONNECTS to the Response IPC socket and writes each Response
 /// payload as a length-prefixed frame. Used by the aux consumer's process to
 /// forward Response datagrams to the proxy's process.
-///
-/// Mirrors `MavlinkIngest` exactly: lazy connect, bounded retry, best-effort
-/// write (a full pipe drops rather than blocks the consumer's read loop).
 #[derive(Clone)]
 pub struct AuxRpcResponseIngest {
     sock_path: PathBuf,

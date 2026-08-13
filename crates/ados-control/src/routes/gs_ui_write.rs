@@ -141,11 +141,8 @@ fn error_message(status: StatusCode, code: &str, message: impl Into<String>) -> 
 /// out-of-range request.
 const PYDANTIC_VERSION: &str = "2.11";
 
-/// Build the FastAPI 422 validation-error body for one numeric bound violation on
-/// a request-body field. Mirrors the FastAPI `RequestValidationError` shape:
-/// `{"detail": [{"type", "loc": ["body", <field>], "msg", "input", "ctx", "url"}]}`,
-/// with `ctx` carrying the single bound key (`ge` / `le`) and `url` the
-/// version-pinned Pydantic docs link.
+/// Build the FastAPI 422 validation-error body for one numeric bound violation on a
+/// request-body field.
 fn validation_error_422(
     field: &str,
     error_type: &str,

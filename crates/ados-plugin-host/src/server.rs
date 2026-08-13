@@ -96,9 +96,8 @@ impl<H: HostServices> PluginIpcServer<H> {
         self.socket_dir.join(format!("{plugin_id}.sock"))
     }
 
-    /// Bind the per-plugin socket and spawn the accept loop. Returns the bound
-    /// path and a handle to the accept task. Mirrors `start_for_plugin`:
-    /// create the dir, unlink any stale socket, bind, then set mode 0o660.
+    /// Bind the per-plugin socket and spawn the accept loop. Returns the bound path and
+    /// a handle to the accept task.
     pub fn serve_plugin(&self, plugin_id: &str) -> Result<(PathBuf, JoinHandle<()>), ServerError> {
         let path = self.socket_path(plugin_id);
         // The shared helper owns the create-dir / remove-stale / bind / chmod
@@ -627,7 +626,7 @@ impl<H: HostServices> Connection<H> {
             // frame receiver from the host's MAVLink client (if wired) and spawn
             // a forwarder that tags each frame with the msg_name into the merged
             // delivery channel, so the select loop pushes `mavlink.deliver`
-            // envelopes. Mirrors `handle_mavlink_subscribe` + `spawn_mavlink_pump`.
+            // envelopes.
             Method::MavlinkSubscribe => {
                 let Some(name) = mavlink_subscribe_msg_name(&env.args) else {
                     return send_error(
@@ -867,7 +866,6 @@ impl<H: HostServices> Connection<H> {
     }
 
     /// Push a matched event to the plugin as an `event.deliver` envelope.
-    /// Mirrors `_pump_subscription`.
     async fn deliver_event<W: AsyncWriteExt + Unpin>(
         &self,
         write_half: &mut W,

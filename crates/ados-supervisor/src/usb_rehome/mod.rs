@@ -54,6 +54,15 @@ const REHOME_REENUM_STEP: Duration = Duration::from_millis(200);
 
 #[cfg(target_os = "linux")]
 const SIDECAR_PATH: &str = "/run/ados/usb-rehome.json";
+
+/// Schema version of the `usb-rehome.json` sidecar. Bump on an incompatible
+/// field-set change; a reader compares it best-effort via
+/// `ados_protocol::sidecar::check_sidecar_version`. Kept in step with the
+/// registry in `contracts.toml`. Gated to the platforms that build the writer
+/// (Linux) or the version test.
+#[cfg(any(target_os = "linux", test))]
+const USB_REHOME_SIDECAR_VERSION: u16 = 1;
+
 #[cfg(target_os = "linux")]
 const WFB_STATS_PATH: &str = "/run/ados/wfb-stats.json";
 /// Max age of `wfb-stats.json` before its signals are treated as stale. The
@@ -402,6 +411,7 @@ impl UsbRehome {
     fn write_sidecar(&self, attempts: u32, max_attempts: u32) {
         #[derive(serde::Serialize)]
         struct Snap<'a> {
+            version: u16,
             usb_rehome_state: &'a str,
             usb_rehome_attempts: u32,
             usb_rehome_max_attempts: u32,
@@ -416,6 +426,7 @@ impl UsbRehome {
             _ => "idle",
         };
         let snap = Snap {
+            version: USB_REHOME_SIDECAR_VERSION,
             usb_rehome_state: state,
             usb_rehome_attempts: attempts,
             usb_rehome_max_attempts: max_attempts,
@@ -566,6 +577,18 @@ fn write_json_atomic<T: serde::Serialize>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usb_rehome_sidecar_version_matches_registry() {
+        // The per-file const and the sidecar registry are the two sources of
+        // truth for this sidecar's schema version; a drift is caught here. The
+        // reader (`ados-control`'s status route) gates its drift warning on the
+        // registry, so an unregistered sidecar would warn on every read.
+        assert_eq!(
+            USB_REHOME_SIDECAR_VERSION,
+            ados_protocol::contracts::sidecar_version("usb-rehome").unwrap()
+        );
+    }
 
     #[test]
     fn absent_section_is_enabled_with_defaults() {

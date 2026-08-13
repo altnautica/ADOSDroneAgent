@@ -116,7 +116,7 @@ enum Parsed {
 /// be a known channel before the request is ever forwarded; the supervisor then
 /// re-asserts in-band/regulatory membership against the live enabled set.
 fn is_known_channel(channel: u8) -> bool {
-    crate::channel::STANDARD_CHANNELS
+    crate::channel::standard_channels()
         .iter()
         .any(|(c, _)| *c == channel)
 }
@@ -292,9 +292,9 @@ mod tests {
     #[test]
     fn hop_accepts_each_known_wfb_channel() {
         // Every standard channel parses to a routed Hop carrying it verbatim.
-        for (channel, _freq) in crate::channel::STANDARD_CHANNELS {
+        for (channel, _freq) in crate::channel::standard_channels() {
             let line = format!(r#"{{"op":"hop","channel":{channel}}}"#);
-            assert_eq!(cmd(line.as_bytes()), Command::Hop { channel: *channel });
+            assert_eq!(cmd(line.as_bytes()), Command::Hop { channel });
         }
     }
 

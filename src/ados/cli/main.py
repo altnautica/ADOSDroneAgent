@@ -18,7 +18,7 @@ import click
 import httpx
 
 from ados.cli import _ansi, api_bases, default_api_base
-from ados.core.paths import PAIRING_JSON
+from ados.core.paths import INSTALL_CHECKPOINT_DIR, INSTALL_RESULT, PAIRING_JSON
 from ados.core.profile import _read_profile_conf_value
 
 API_BASE = default_api_base()
@@ -529,14 +529,15 @@ def update(check_only: bool, yes: bool, as_json: bool, profile_override: str | N
     click.echo("Update complete.")
 
 
-# Install orchestration contract paths. The installer writes a machine
-# readable result file and per-step checkpoint markers under /var/lib/ados;
-# these constants must stay aligned with the installer's result + checkpoint
-# paths (crates/ados-installer/src/{result,checkpoint}.rs).
-INSTALL_RESULT_PATH = Path("/var/lib/ados/install-result.json")
-INSTALL_CHECKPOINT_DIR = Path("/var/lib/ados/install-checkpoints")
-# The REQUIRED steps the full-agent install records a checkpoint for, in
-# install order. Used by `ados install --status` to show done vs missing.
+# Install orchestration contract paths come from `ados.core.paths`, which
+# resolves them per platform: the Linux FHS `/var/lib/ados` (the same literal
+# `crates/ados-installer/src/env.rs` STATE_DIR carries, since the installer only
+# ever runs on a target) or `~/.ados` on a macOS workstation. Hardcoding the
+# Linux paths here made `ados install --status` report a path that cannot exist
+# on macOS, and read nothing on a box where the installer had recorded a result.
+# The checkpoint step list stays here because it is a CLI display contract, not a
+# path: the REQUIRED steps the full-agent install records a checkpoint for, in
+# install order, used by `ados install --status` to show done vs missing.
 INSTALL_CHECKPOINT_STEPS = (
     "deps",
     "venv",
@@ -551,8 +552,8 @@ INSTALLER_PERSISTED_PATH = Path("/opt/ados/source/scripts/install.sh")
 
 def _read_install_result() -> dict[str, Any] | None:
     try:
-        if INSTALL_RESULT_PATH.exists():
-            data = json.loads(INSTALL_RESULT_PATH.read_text(encoding="utf-8"))
+        if INSTALL_RESULT.exists():
+            data = json.loads(INSTALL_RESULT.read_text(encoding="utf-8"))
             return data if isinstance(data, dict) else None
     except (OSError, ValueError, json.JSONDecodeError):
         return None
@@ -622,7 +623,7 @@ def _install_status(*, as_json: bool) -> None:
         return
 
     if result is None:
-        click.echo(f"No install result recorded at {INSTALL_RESULT_PATH}.")
+        click.echo(f"No install result recorded at {INSTALL_RESULT}.")
         click.echo("The installer has not finished a run on this box yet.")
     else:
         status = str(result.get("status", "unknown"))

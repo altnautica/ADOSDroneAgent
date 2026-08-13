@@ -91,7 +91,13 @@ pub struct Peripheral {
 /// (only top-level keys are stripped), so these `Option`s serialize as JSON
 /// `null` when absent — that is intentional parity. The block is always present
 /// in the payload (an all-`absent` block when no radio status is available).
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// `Deserialize` + a container `default` so the block can be built by
+/// deserializing `ados_protocol::wfb_status::build_radio_block`'s output — the one
+/// derivation, shared with the LAN routes, rather than a second one written here.
+/// The container default is what lets the three `skip_serializing_if` fields and
+/// the non-`Option` `paired` come back from the 37-key absent form.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RadioBlock {
     pub state: Option<String>,
     pub iface: Option<String>,
@@ -445,6 +451,16 @@ pub struct HeartbeatPayload {
     pub wfb_adapter_chipset: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wfb_adapter_injection_ok: Option<bool>,
+    /// Per-adapter stable-MAC verdicts, `{adapters: [...]}` from
+    /// `/etc/ados/mac-pins.state`. Omitted on a node that has pinned nothing —
+    /// the GCS clamp hides its card unless `adapters` is an array, and an empty
+    /// one would claim the node looked and found no adapter.
+    ///
+    /// Already camelCase at the source, so the Convex relay's snake→camel remap
+    /// must NOT be applied to it. Carried as a `Value` because the block is a
+    /// pass-through the GCS validates, not a shape this crate owns.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mac_stability: Option<serde_json::Value>,
 
     // --- LCD / display enrichment (all optional, omitted when absent) ---
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -469,16 +485,6 @@ pub struct HeartbeatPayload {
     pub video_local_decoder_fps: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub video_recording: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub video_pipeline_flavor: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub video_encoder_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub video_encoder_hw_accel: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub video_camera_source: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub video_pipeline_state: Option<String>,
     /// Per-leg video streams (id/role/codec) a multi-stream node serves, folded
     /// from the /run/ados/video-streams.json sidecar. Absent on a single-stream
     /// node so the heartbeat stays byte-identical. The GCS resolves each leg's
@@ -836,6 +842,7 @@ mod tests {
             radio: RadioBlock::absent(),
             crsf: None,
             wfb_adapter_chipset: None,
+            mac_stability: None,
             wfb_adapter_injection_ok: None,
             lcd_active_page: None,
             ui_theme: None,
@@ -848,11 +855,6 @@ mod tests {
             video_local_decoder_type: None,
             video_local_decoder_fps: None,
             video_recording: None,
-            video_pipeline_flavor: None,
-            video_encoder_name: None,
-            video_encoder_hw_accel: None,
-            video_camera_source: None,
-            video_pipeline_state: None,
             video_streams: None,
             linked_peers: None,
             display_type: None,

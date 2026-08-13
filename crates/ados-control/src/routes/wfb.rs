@@ -32,8 +32,10 @@
 //! the residual surface.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
+use ados_protocol::wfb_status::{
+    build_status_from_stats_file_at, derive_wfb_status, WfbStatusConfig,
+};
 use axum::extract::{Query, State};
 use axum::Json;
 use serde::Deserialize;
@@ -42,133 +44,21 @@ use serde_json::{json, Map, Value};
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
-// Standard WFB-ng channels (frequency + bandwidth lookup).
-// ---------------------------------------------------------------------------
-
-/// A WFB-ng channel: the channel number, its 5 GHz centre frequency, and the
-/// bandwidth. Mirrors the Python `WfbChannel` (default bandwidth 20 MHz).
-#[derive(Clone, Copy)]
-struct WfbChannel {
-    channel_number: i64,
-    frequency_mhz: i64,
-    bandwidth_mhz: i64,
-}
-
-/// The standard 5 GHz channels usable with WFB-ng on the RTL8812 family: the
-/// U-NII-1 sub-band (36/40/44/48) and the U-NII-3 sub-band (149/153/157/161/165).
-/// Mirrors the Python `STANDARD_CHANNELS` list exactly (each 20 MHz wide).
-const STANDARD_CHANNELS: [WfbChannel; 9] = [
-    WfbChannel {
-        channel_number: 36,
-        frequency_mhz: 5180,
-        bandwidth_mhz: 20,
-    },
-    WfbChannel {
-        channel_number: 40,
-        frequency_mhz: 5200,
-        bandwidth_mhz: 20,
-    },
-    WfbChannel {
-        channel_number: 44,
-        frequency_mhz: 5220,
-        bandwidth_mhz: 20,
-    },
-    WfbChannel {
-        channel_number: 48,
-        frequency_mhz: 5240,
-        bandwidth_mhz: 20,
-    },
-    WfbChannel {
-        channel_number: 149,
-        frequency_mhz: 5745,
-        bandwidth_mhz: 20,
-    },
-    WfbChannel {
-        channel_number: 153,
-        frequency_mhz: 5765,
-        bandwidth_mhz: 20,
-    },
-    WfbChannel {
-        channel_number: 157,
-        frequency_mhz: 5785,
-        bandwidth_mhz: 20,
-    },
-    WfbChannel {
-        channel_number: 161,
-        frequency_mhz: 5805,
-        bandwidth_mhz: 20,
-    },
-    WfbChannel {
-        channel_number: 165,
-        frequency_mhz: 5825,
-        bandwidth_mhz: 20,
-    },
-];
-
-/// Look up a channel by number, or `None` for an unknown number. Mirrors the
-/// Python `get_channel`.
-fn get_channel(channel_number: i64) -> Option<WfbChannel> {
-    STANDARD_CHANNELS
-        .iter()
-        .find(|c| c.channel_number == channel_number)
-        .copied()
-}
-
-// ---------------------------------------------------------------------------
 // Config seam: the `video.wfb` slice the status base block reads.
 // ---------------------------------------------------------------------------
-
-/// The `video.wfb` fields the status base block seeds its zero-default block with.
-/// Each is optional so an absent section reads the same value the loaded Python
-/// config would for an unset field (the base block treats a missing field as the
-/// Python default: `channel` defaults to `0`, the rest to JSON `null`).
-#[derive(Debug, Clone, Default, Deserialize)]
-struct WfbConfigSection {
-    #[serde(default)]
-    channel: Option<i64>,
-    #[serde(default)]
-    tx_power_dbm: Option<Value>,
-    #[serde(default)]
-    tx_power_max_dbm: Option<Value>,
-    #[serde(default)]
-    topology: Option<Value>,
-    #[serde(default)]
-    mcs_index: Option<Value>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-struct VideoSection {
-    #[serde(default)]
-    wfb: WfbConfigSection,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-struct StatusConfig {
-    #[serde(default)]
-    video: VideoSection,
-}
-
-impl StatusConfig {
-    /// Load the `video.wfb` slice from the config path (`ADOS_CONFIG`, default
-    /// `/etc/ados/config.yaml`). A missing or unparseable file yields the
-    /// all-defaults slice, so the status route still answers a usable body.
-    fn load() -> Self {
-        let path =
-            std::env::var("ADOS_CONFIG").unwrap_or_else(|_| crate::config::CONFIG_YAML.to_string());
-        Self::load_from(Path::new(&path))
-    }
-
-    fn load_from(path: &Path) -> Self {
-        match std::fs::read_to_string(path) {
-            Ok(text) => serde_norway::from_str(&text).unwrap_or_default(),
-            Err(_) => StatusConfig::default(),
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Runtime-dir seam: the sidecar files the radio writes.
 // ---------------------------------------------------------------------------
+
+/// The config path the status base block seeds from (`ADOS_CONFIG`, default
+/// `/etc/ados/config.yaml`). The shared loader takes a path because the cloud
+/// relay resolves the same config differently.
+fn status_config_path() -> PathBuf {
+    PathBuf::from(
+        std::env::var("ADOS_CONFIG").unwrap_or_else(|_| crate::config::CONFIG_YAML.to_string()),
+    )
+}
 
 /// The runtime dir (`ADOS_RUN_DIR`, default `/run/ados`), the same override the
 /// sibling sockets + sentinels resolve under.
@@ -201,7 +91,7 @@ fn wfb_failover_path() -> PathBuf {
 /// it, the live `regulatory_domain` re-asserted, the frequency/bandwidth
 /// re-derived from the channel, and the `bitrate_mbps` shim. Guaranteed 200.
 pub async fn get_wfb_status(State(state): State<AppState>) -> Json<Value> {
-    let cfg = StatusConfig::load();
+    let cfg = WfbStatusConfig::load(&status_config_path());
 
     // Store-first: the radio ships the full status body to the durable store each
     // heartbeat as a `link.wfb_status` event. The base regulatory domain (one live
@@ -213,16 +103,15 @@ pub async fn get_wfb_status(State(state): State<AppState>) -> Json<Value> {
 
     // Sidecar fallback: read `wfb-stats.json`, merge over the base, flip to
     // `"stale"` when the file mtime is older than 10 s.
-    Json(build_status_from_stats_file(&cfg))
+    Json(build_status_from_stats_file_at(&cfg, &wfb_stats_path()))
 }
 
 /// The most-recent full wfb-status snapshot + its emit timestamp, or `None`.
 ///
-/// Queries the store for the newest `link.wfb_status` event and returns its
-/// `detail` body (the full sidecar shape the radio shipped) plus the row's
-/// `ts_us` (used for the staleness check). `None` when the store is unreachable,
-/// holds no such event, or the `detail` is absent/non-object, so the caller falls
-/// back to the sidecar file. Mirrors the Python `latest_wfb_status`.
+/// Queries the store for the newest `link.wfb_status` event and returns its `detail`
+/// body (the full sidecar shape the radio shipped) plus the row's `ts_us` (used for the
+/// staleness check). `None` when the store is unreachable, holds no such event, or the
+/// `detail` is absent/non-object, so the caller falls back to the sidecar file.
 async fn latest_wfb_status(state: &AppState) -> Option<(Map<String, Value>, i64)> {
     let rows = logd_query_events(state, "link.wfb_status", 1).await?;
     let row = rows.first()?.as_object()?;
@@ -236,261 +125,6 @@ async fn latest_wfb_status(state: &AppState) -> Option<(Map<String, Value>, i64)
         .map(|v| v as i64)
         .unwrap_or(0);
     Some((detail.clone(), ts_us))
-}
-
-/// Map a stored status body back to the exact `/api/wfb` shape: the config-seeded
-/// base, the body merged over it, an event-age staleness flip, then the shared
-/// finalize legs (frequency/bandwidth + `bitrate_mbps`). Mirrors the Python
-/// `derive_wfb_status`.
-fn derive_wfb_status(detail: &Map<String, Value>, ts_us: i64, cfg: &StatusConfig) -> Value {
-    let mut merged = base_block(cfg);
-    // The base `regulatory_domain` (the live `iw reg get`) stays put: the stored
-    // body carries `reg_domain` (a different key), so this merge never overwrites it.
-    for (k, v) in detail {
-        merged.insert(k.clone(), v.clone());
-    }
-    // Event-age staleness, mirroring the file-mtime flip on the sidecar path.
-    let now_us = now_unix_micros();
-    if ts_us > 0 && now_us - ts_us > STALE_AGE_US {
-        merged.insert("state".to_string(), json!("stale"));
-    }
-    finalize_status(merged)
-}
-
-/// Beyond this age (microseconds) a stored status event is treated as stale,
-/// mirroring the sidecar path's `mtime > 10 s` flip. Mirrors `_STALE_AGE_US`.
-const STALE_AGE_US: i64 = 10_000_000;
-
-/// Compose a `/api/wfb` body from the `wfb-stats.json` sidecar.
-///
-/// Merges the file payload over the config-seeded base, flips `state` to
-/// `"stale"` when the file is older than 10 s, re-asserts the live regulatory
-/// domain, and finalizes. An absent / unparseable / non-object file degrades to
-/// the bare base block. Mirrors the Python `_build_status_from_stats_file`.
-fn build_status_from_stats_file(cfg: &StatusConfig) -> Value {
-    build_status_from_stats_file_at(cfg, &wfb_stats_path())
-}
-
-/// The path-injectable core of [`build_status_from_stats_file`]: compose the body
-/// from an explicit stats-file path. Threaded so a test drives the absent-file
-/// degrade against a tempdir without mutating the process-global `ADOS_RUN_DIR`.
-fn build_status_from_stats_file_at(cfg: &StatusConfig, path: &std::path::Path) -> Value {
-    let base = base_block(cfg);
-
-    // The mtime drives the staleness flip; compute the file age in seconds.
-    let age_s = match std::fs::metadata(path).and_then(|m| m.modified()) {
-        Ok(mtime) => mtime.elapsed().map(|d| d.as_secs_f64()).unwrap_or(0.0),
-        Err(_) => return finalize_base(base),
-    };
-
-    let payload = match std::fs::read_to_string(path) {
-        Ok(text) => match serde_json::from_str::<Value>(&text) {
-            Ok(Value::Object(map)) => map,
-            // A well-formed-but-non-object body returns the bare base, matching the
-            // Python `if not isinstance(payload, dict): return base`.
-            Ok(_) => return Value::Object(base),
-            Err(_) => return finalize_base(base),
-        },
-        Err(_) => return finalize_base(base),
-    };
-
-    // Best-effort schema-drift signal (never reject): warn when the sidecar was
-    // written by an agent with a different schema version, then read anyway. The
-    // writer const lives in the radio crate, so compare against the shared registry.
-    let got = payload.get("version").and_then(Value::as_u64).unwrap_or(0) as u16;
-    if let Some(ours) = ados_protocol::contracts::sidecar_version("wfb-stats") {
-        ados_protocol::sidecar::check_sidecar_version("wfb-stats", got, ours);
-    }
-
-    let mut merged = base;
-    for (k, v) in payload {
-        merged.insert(k, v);
-    }
-    if age_s > 10.0 {
-        merged.insert("state".to_string(), json!("stale"));
-    }
-    // Re-assert the live regulatory domain over the payload (the file's body must
-    // not overwrite it). The base already set it from one `iw reg get`.
-    let reg = regulatory_domain();
-    merged.insert("regulatory_domain".to_string(), json!(reg));
-    finalize_status(merged)
-}
-
-/// The non-object / read-error degrade path: the Python returns the bare base
-/// block (no finalize) only on a non-object payload; a missing file / read error
-/// also returns the bare base. Both land here returning the base unchanged, which
-/// is the FastAPI `except: return base` behavior.
-fn finalize_base(base: Map<String, Value>) -> Value {
-    Value::Object(base)
-}
-
-/// The config-seeded zero-default status block both read paths merge the actual
-/// values over. `regulatory_domain` is the LIVE `iw reg get` value. Mirrors the
-/// Python `_base_block`.
-fn base_block(cfg: &StatusConfig) -> Map<String, Value> {
-    let wfb = &cfg.video.wfb;
-    let channel = wfb.channel.unwrap_or(0);
-    let tx_power = wfb.tx_power_dbm.clone().unwrap_or(Value::Null);
-    let tx_power_max = wfb.tx_power_max_dbm.clone().unwrap_or(Value::Null);
-    let topology = wfb.topology.clone().unwrap_or(Value::Null);
-    let mcs = wfb.mcs_index.clone().unwrap_or(Value::Null);
-
-    let mut block = Map::new();
-    block.insert("state".to_string(), json!("disabled"));
-    block.insert("interface".to_string(), json!(""));
-    block.insert("channel".to_string(), json!(channel));
-    block.insert("frequency_mhz".to_string(), json!(0));
-    block.insert("bandwidth_mhz".to_string(), json!(0));
-    block.insert(
-        "adapter".to_string(),
-        json!({"driver": "", "chipset": "", "supports_monitor": false}),
-    );
-    block.insert("adapter_chipset".to_string(), Value::Null);
-    // Null, not false: the base is what a caller sees when the radio service
-    // never wrote a sidecar, i.e. no adapter scan has produced a verdict. A
-    // false here is a fabricated measured-scan outcome that three-state
-    // consumers (CLI, GCS) would render as a red "no injection radio" claim
-    // for hardware nothing ever examined. A real sidecar always carries the
-    // key, so a genuine scan result (true OR false) overwrites this on merge.
-    block.insert("adapter_injection_ok".to_string(), Value::Null);
-    block.insert("rssi_dbm".to_string(), json!(-100.0));
-    block.insert("noise_dbm".to_string(), json!(-95.0));
-    block.insert("snr_db".to_string(), json!(0.0));
-    block.insert("packets_received".to_string(), json!(0));
-    block.insert("packets_lost".to_string(), json!(0));
-    block.insert("loss_percent".to_string(), json!(0.0));
-    block.insert("fec_recovered".to_string(), json!(0));
-    block.insert("fec_failed".to_string(), json!(0));
-    block.insert("bitrate_kbps".to_string(), json!(0));
-    block.insert("rx_silent_seconds".to_string(), Value::Null);
-    block.insert("restart_count".to_string(), json!(0));
-    block.insert("samples".to_string(), json!(0));
-    block.insert("tx_power_dbm".to_string(), tx_power);
-    block.insert("tx_power_max_dbm".to_string(), tx_power_max);
-    block.insert("topology".to_string(), topology);
-    block.insert("mcs_index".to_string(), mcs);
-    block.insert("regulatory_domain".to_string(), json!(regulatory_domain()));
-    block
-}
-
-/// Apply the route-computed legs on top of a base+payload merge: re-derive
-/// `frequency_mhz` / `bandwidth_mhz` from the channel number and add the
-/// `bitrate_mbps` forward-compat shim. Mirrors the Python `_finalize_status`.
-fn finalize_status(mut merged: Map<String, Value>) -> Value {
-    let channel = merged.get("channel").and_then(json_to_i64).unwrap_or(0);
-    if let Some(ch) = get_channel(channel) {
-        merged.insert("frequency_mhz".to_string(), json!(ch.frequency_mhz));
-        merged.insert("bandwidth_mhz".to_string(), json!(ch.bandwidth_mhz));
-    }
-    let bitrate_mbps = match merged.get("bitrate_kbps").and_then(Value::as_f64) {
-        Some(bk) if bk > 0.0 => round3(bk / 1000.0),
-        _ => 0.0,
-    };
-    merged.insert("bitrate_mbps".to_string(), json!(bitrate_mbps));
-    Value::Object(merged)
-}
-
-/// How long one `iw reg get` reading is reused.
-///
-/// The regulatory domain changes only when something explicitly sets it — the
-/// radio's own reconciler, or a bind — never on its own, while the GCS radio
-/// panel polls this route about once a second and every poll forked `iw` twice:
-/// once to seed the base block and once to re-assert the domain over the sidecar
-/// payload. Reusing a reading for this window collapses a poll to at most one
-/// fork, and a real domain change still surfaces inside it. The value stays the
-/// freshest thing in the body by a wide margin: the link figures beside it come
-/// off a sidecar the route only calls stale after ten seconds.
-const REG_DOMAIN_TTL: std::time::Duration = std::time::Duration::from_secs(3);
-
-/// One string reading held for a bounded window.
-///
-/// What it serves is always a reading this process genuinely took; the window
-/// bounds only how often the reading is refreshed, so the age of an answer is a
-/// stated number rather than an unknown. Nothing is ever synthesised when the
-/// underlying read fails — that failure has its own value (`"unknown"`) and is
-/// cached like any other, so a wedged `iw` is not retried once per request
-/// either.
-struct TimedCache {
-    inner: std::sync::Mutex<Option<(std::time::Instant, String)>>,
-}
-
-impl TimedCache {
-    const fn new() -> Self {
-        Self {
-            inner: std::sync::Mutex::new(None),
-        }
-    }
-
-    /// The held reading while it is younger than `ttl`, else a fresh one.
-    fn get_or_read(&self, ttl: std::time::Duration, read: impl FnOnce() -> String) -> String {
-        self.get_or_read_at(std::time::Instant::now(), ttl, read)
-    }
-
-    /// The clock-injectable core of [`TimedCache::get_or_read`], so the reuse
-    /// window is a unit under test instead of something a test has to sleep out.
-    fn get_or_read_at(
-        &self,
-        now: std::time::Instant,
-        ttl: std::time::Duration,
-        read: impl FnOnce() -> String,
-    ) -> String {
-        // A poisoned lock means an earlier holder panicked mid-update. Fall
-        // through to a fresh read rather than propagate the panic: this route is
-        // required to answer.
-        if let Ok(held) = self.inner.lock() {
-            if let Some((at, value)) = held.as_ref() {
-                if now.duration_since(*at) < ttl {
-                    return value.clone();
-                }
-            }
-        }
-        // Deliberately outside the lock: the read forks a process, and holding
-        // the mutex across it would queue every concurrent status request behind
-        // one `iw` invocation.
-        let fresh = read();
-        if let Ok(mut held) = self.inner.lock() {
-            *held = Some((now, fresh.clone()));
-        }
-        fresh
-    }
-}
-
-/// The process-wide reading the status route shares across its two call sites
-/// and across concurrent requests.
-static REG_DOMAIN_CACHE: TimedCache = TimedCache::new();
-
-/// The live regulatory domain, re-read at most once per [`REG_DOMAIN_TTL`].
-fn regulatory_domain() -> String {
-    REG_DOMAIN_CACHE.get_or_read(REG_DOMAIN_TTL, read_regulatory_domain)
-}
-
-/// Best-effort `iw reg get` first-line parse, returning the two-letter country
-/// code, `"global"`, or `"unknown"` on any failure. Mirrors the Python
-/// `_read_regulatory_domain`.
-fn read_regulatory_domain() -> String {
-    let output = match Command::new("iw").args(["reg", "get"]).output() {
-        Ok(o) => o,
-        Err(_) => return "unknown".to_string(),
-    };
-    if !output.status.success() {
-        return "unknown".to_string();
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines() {
-        let stripped = line.trim();
-        if let Some(rest) = stripped.strip_prefix("country ") {
-            // Format: "country US: DFS-FCC" — keep the two-letter code.
-            let code = rest.split(':').next().unwrap_or("").trim();
-            if code.is_empty() {
-                return "unknown".to_string();
-            }
-            return code.to_string();
-        }
-        if stripped.starts_with("global") {
-            return "global".to_string();
-        }
-    }
-    "unknown".to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -511,12 +145,11 @@ fn default_history_seconds() -> i64 {
 
 /// `GET /api/wfb/history?seconds=N` → the link-quality history.
 ///
-/// On this native front the radio's per-heartbeat link samples flow to the store
-/// as `link.*` metrics, so the history is read from the store's aggregate and
-/// reshaped into `{samples: [{timestamp, rssi_dbm, snr_db, loss_percent,
-/// bitrate_kbps}], count}`. An unreachable store degrades to the native empty
-/// history `{"samples": [], "count": 0}`. Mirrors the Python `get_wfb_history`
-/// native branch.
+/// On this native front the radio's per-heartbeat link samples flow to the store as
+/// `link.*` metrics, so the history is read from the store's aggregate and reshaped
+/// into `{samples: [{timestamp, rssi_dbm, snr_db, loss_percent, bitrate_kbps}],
+/// count}`. An unreachable store degrades to the native empty history `{"samples": [],
+/// "count": 0}`.
 pub async fn get_wfb_history(
     State(state): State<AppState>,
     Query(q): Query<HistoryQuery>,
@@ -528,9 +161,8 @@ pub async fn get_wfb_history(
     Json(json!({"samples": [], "count": 0}))
 }
 
-/// The aggregate metrics that compose a history sample, paired with their
-/// sample-row key. `agg=last` per bucket picks the reading at that instant.
-/// Mirrors the Python `_HIST_KEY`.
+/// The aggregate metrics that compose a history sample, paired with their sample-row
+/// key. `agg=last` per bucket picks the reading at that instant.
 const HIST_KEYS: [(&str, &str); 4] = [
     ("link.rssi_dbm", "rssi_dbm"),
     ("link.snr_db", "snr_db"),
@@ -540,10 +172,10 @@ const HIST_KEYS: [(&str, &str); 4] = [
 
 /// Reshape the store's `link.*` metric aggregate into the route's sample list.
 ///
-/// Aggregates the four metrics into time buckets via `/v1/aggregate` and groups
-/// them by bucket instant into `{samples, count}`. `None` when the store is
-/// unreachable / the response does not parse / has no usable buckets, so the route
-/// falls back to the native empty history. Mirrors the Python `latest_wfb_history`.
+/// Aggregates the four metrics into time buckets via `/v1/aggregate` and groups them by
+/// bucket instant into `{samples, count}`. `None` when the store is unreachable / the
+/// response does not parse / has no usable buckets, so the route falls back to the
+/// native empty history.
 async fn latest_wfb_history(state: &AppState, seconds: i64) -> Option<Value> {
     let seconds = seconds.clamp(1, 300);
     let mut params: Vec<(&str, String)> = vec![
@@ -782,8 +414,8 @@ fn current_role(config_profile: &str) -> (String, String) {
 // GET /api/wfb/pair/failover-status — local-bind to cloud-relay failover state.
 // ---------------------------------------------------------------------------
 
-/// The failover states the route validates against. `failed` is tolerated but
-/// never produced. Mirrors `_FAILOVER_STATES`.
+/// The failover states the route validates against. `failed` is tolerated but never
+/// produced.
 const FAILOVER_STATES: [&str; 3] = ["local", "cloud_relay", "failed"];
 
 /// `GET /api/wfb/pair/failover-status` → `{"failover_state": <state>}`.
@@ -994,16 +626,6 @@ fn percent_encode(s: &str) -> String {
     out
 }
 
-/// Coerce a JSON number value to `i64`, accepting an integer or a float (the
-/// channel field may arrive as either). `None` for a non-number. Mirrors the
-/// Python `int(merged.get("channel") or 0)` over a numeric value.
-fn json_to_i64(v: &Value) -> Option<i64> {
-    match v {
-        Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f as i64)),
-        _ => None,
-    }
-}
-
 /// Python `bool(x)` truthiness over a JSON value, for the `auto_pair_enabled`
 /// coercion: `null`/`false`/`0`/`0.0`/`""`/`[]`/`{}` are falsey, everything else
 /// truthy. Mirrors `bool(wfb_section.get("auto_pair_enabled", True))`.
@@ -1016,12 +638,6 @@ fn json_truthy(v: &Value) -> bool {
         Value::Array(a) => !a.is_empty(),
         Value::Object(o) => !o.is_empty(),
     }
-}
-
-/// Round to three decimal places, matching the Python `round(x, 3)` the
-/// `bitrate_mbps` shim uses.
-fn round3(v: f64) -> f64 {
-    (v * 1000.0).round() / 1000.0
 }
 
 /// The `paired_at` field value the route reports, mirroring the Python pair-status
@@ -1159,16 +775,6 @@ fn is_yaml_timestamp(s: &str) -> bool {
     i == s.len()
 }
 
-/// The current wall-clock time in microseconds since the Unix epoch, for the
-/// event-age staleness check (mirrors the Python `time.time() * 1_000_000`).
-fn now_unix_micros() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_micros() as i64)
-        .unwrap_or(0)
-}
-
 /// Render a microsecond-epoch timestamp as an ISO-8601 UTC string ending in `Z`,
 /// matching the Python `_iso_from_us` (`datetime.fromtimestamp(...).isoformat()`
 /// with `+00:00` replaced by `Z`). Microsecond precision is preserved when the
@@ -1211,20 +817,24 @@ fn iso8601_from_unix_secs(secs: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The derivation these tests pin lives in the shared module now; the pins
+    // stay here because this route is one of its two callers and its served
+    // body is what they defend.
+    use ados_protocol::wfb_status::{finalize_wfb_status, now_unix_micros, wfb_base_block};
 
     /// The exact base block the Python `_base_block` builds for an all-default
     /// config (no `video.wfb` fields, regulatory domain forced to a known value).
     /// Re-asserting the live `regulatory_domain` is stubbed out by overwriting it
     /// after the build, so the test does not depend on `iw` being present.
-    fn base_block_fixed_reg(cfg: &StatusConfig, reg: &str) -> Map<String, Value> {
-        let mut b = base_block(cfg);
+    fn base_block_fixed_reg(cfg: &WfbStatusConfig, reg: &str) -> Map<String, Value> {
+        let mut b = wfb_base_block(cfg);
         b.insert("regulatory_domain".to_string(), json!(reg));
         b
     }
 
     #[test]
     fn base_block_is_the_zero_default_for_an_empty_config() {
-        let cfg = StatusConfig::default();
+        let cfg = WfbStatusConfig::default();
         let b = base_block_fixed_reg(&cfg, "unknown");
         // The exact 27-field zero-default block the FastAPI `_base_block` returns.
         let want = json!({
@@ -1261,16 +871,12 @@ mod tests {
 
     #[test]
     fn base_block_seeds_the_config_wfb_fields() {
-        let cfg = StatusConfig {
-            video: VideoSection {
-                wfb: WfbConfigSection {
-                    channel: Some(149),
-                    tx_power_dbm: Some(json!(10)),
-                    tx_power_max_dbm: Some(json!(15)),
-                    topology: Some(json!("one-to-one")),
-                    mcs_index: Some(json!(2)),
-                },
-            },
+        let cfg = WfbStatusConfig {
+            channel: 149,
+            tx_power_dbm: json!(10),
+            tx_power_max_dbm: json!(15),
+            topology: json!("one-to-one"),
+            mcs_index: json!(2),
         };
         let b = base_block_fixed_reg(&cfg, "US");
         assert_eq!(b["channel"], json!(149));
@@ -1288,7 +894,7 @@ mod tests {
         let mut merged = Map::new();
         merged.insert("channel".to_string(), json!(149));
         merged.insert("bitrate_kbps".to_string(), json!(5000));
-        let out = finalize_status(merged);
+        let out = finalize_wfb_status(merged);
         assert_eq!(out["frequency_mhz"], json!(5745));
         assert_eq!(out["bandwidth_mhz"], json!(20));
         assert_eq!(out["bitrate_mbps"], json!(5.0));
@@ -1302,7 +908,7 @@ mod tests {
         merged.insert("channel".to_string(), json!(7)); // not a standard WFB channel
         merged.insert("frequency_mhz".to_string(), json!(2442));
         merged.insert("bandwidth_mhz".to_string(), json!(40));
-        let out = finalize_status(merged);
+        let out = finalize_wfb_status(merged);
         assert_eq!(out["frequency_mhz"], json!(2442));
         assert_eq!(out["bandwidth_mhz"], json!(40));
         assert_eq!(out["bitrate_mbps"], json!(0.0));
@@ -1312,7 +918,7 @@ mod tests {
     fn derive_merges_body_over_base_and_keeps_live_reg_domain() {
         // The stored body carries link values + a `reg_domain` key (NOT
         // `regulatory_domain`), so the base's live `regulatory_domain` survives.
-        let cfg = StatusConfig::default();
+        let cfg = WfbStatusConfig::default();
         let mut detail = Map::new();
         detail.insert("state".to_string(), json!("active"));
         detail.insert("channel".to_string(), json!(149));
@@ -1335,7 +941,7 @@ mod tests {
 
     #[test]
     fn derive_flips_state_to_stale_for_an_old_event() {
-        let cfg = StatusConfig::default();
+        let cfg = WfbStatusConfig::default();
         let mut detail = Map::new();
         detail.insert("state".to_string(), json!("active"));
         detail.insert("channel".to_string(), json!(36));
@@ -1450,7 +1056,7 @@ mod tests {
         // the test never mutates the process-global `ADOS_RUN_DIR`.
         let dir = tempfile::tempdir().unwrap();
         let stats = dir.path().join("wfb-stats.json");
-        let cfg = StatusConfig::default();
+        let cfg = WfbStatusConfig::default();
         let out = build_status_from_stats_file_at(&cfg, &stats);
         // The bare base carries the 27 keys with no `bitrate_mbps` shim (the
         // FastAPI absent-file path skips finalize).
@@ -1680,59 +1286,6 @@ mod tests {
         let (status, body) = parse_http_response(raw).unwrap();
         assert_eq!(status, 200);
         assert_eq!(body, b"{}");
-    }
-
-    #[test]
-    fn a_regulatory_reading_is_reused_inside_its_window_and_re_read_after_it() {
-        // The radio panel polls this route about once a second and each poll
-        // used to fork `iw` twice. The reading is reused for the window, so a
-        // poll costs at most one fork; past the window it is taken again.
-        let cache = TimedCache::new();
-        let reads = std::cell::Cell::new(0u32);
-        let read = || {
-            reads.set(reads.get() + 1);
-            "US".to_string()
-        };
-
-        let t0 = std::time::Instant::now();
-        assert_eq!(cache.get_or_read_at(t0, REG_DOMAIN_TTL, read), "US");
-        assert_eq!(reads.get(), 1);
-
-        // A second poll one second later, and the two calls a single request
-        // makes, all ride the one reading.
-        let t1 = t0 + std::time::Duration::from_secs(1);
-        assert_eq!(cache.get_or_read_at(t1, REG_DOMAIN_TTL, read), "US");
-        assert_eq!(cache.get_or_read_at(t1, REG_DOMAIN_TTL, read), "US");
-        assert_eq!(reads.get(), 1, "the window was not honoured");
-
-        // Past the window the domain is read again, so a real change reaches
-        // the body rather than being pinned to whatever was true at boot.
-        let t2 = t0 + REG_DOMAIN_TTL;
-        assert_eq!(cache.get_or_read_at(t2, REG_DOMAIN_TTL, read), "US");
-        assert_eq!(reads.get(), 2);
-    }
-
-    #[test]
-    fn a_cached_reading_is_never_a_value_nothing_read() {
-        // The cache must not outlive its usefulness by inventing continuity: a
-        // domain that genuinely changed is served as soon as the window is out,
-        // and a failed read caches as the honest "unknown" rather than holding
-        // the last good answer forever.
-        let cache = TimedCache::new();
-        let t0 = std::time::Instant::now();
-        assert_eq!(
-            cache.get_or_read_at(t0, REG_DOMAIN_TTL, || "US".to_string()),
-            "US"
-        );
-        assert_eq!(
-            cache.get_or_read_at(t0 + REG_DOMAIN_TTL, REG_DOMAIN_TTL, || "IN".to_string()),
-            "IN"
-        );
-        assert_eq!(
-            cache.get_or_read_at(t0 + REG_DOMAIN_TTL * 2, REG_DOMAIN_TTL, || "unknown"
-                .to_string()),
-            "unknown"
-        );
     }
 
     #[test]

@@ -715,6 +715,31 @@ REGISTRY: list[RouteCase] = [
         require_sandbox=True,
         extra_volatile=("previous_ssid",),
     ),
+    # The ground station's own Wi-Fi client join, distinct from the drone-side
+    # route above: it takes the GS profile gate first, and its AP-busy refusal is
+    # the 409 that asks for `force` (the AP and client mode contend for wlan0).
+    # Sandboxed for the same reason as its sibling: it drops and re-forms a link.
+    RouteCase(
+        name="gs-network-client-join",
+        method="PUT",
+        path="/api/v1/ground-station/network/client/join",
+        body=b'{"ssid": "BenchNet", "passphrase": "benchpass", "force": false}',
+        content_type="application/json",
+        paired_headers={"authorization": PAIRED_AUTH_PLACEHOLDER},
+        require_sandbox=True,
+        extra_volatile=("ip", "gateway"),
+    ),
+    # Drop the ground station's Wi-Fi-client uplink. Same side effect as the
+    # drone-side leave; the previous SSID depends on the live link, so it is
+    # masked and the {left} shape is the contract.
+    RouteCase(
+        name="gs-network-client-leave",
+        method="DELETE",
+        path="/api/v1/ground-station/network/client",
+        paired_headers={"authorization": PAIRED_AUTH_PLACEHOLDER},
+        require_sandbox=True,
+        extra_volatile=("previous_ssid",),
+    ),
     # Change the WFB-ng channel. A side effect (it forwards a coordinated hop to
     # the radio command socket), so sandboxed and skipped by default; the bench
     # opts in against a live radio. The body is the {"channel": N} the route

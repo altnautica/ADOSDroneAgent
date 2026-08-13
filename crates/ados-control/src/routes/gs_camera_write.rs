@@ -296,11 +296,8 @@ fn build_set_camera_source_frame(camera_index: u32) -> Vec<u8> {
     )
 }
 
-/// Resolve a ground-side `camera_id` string to a 1-based MAVLink source index.
-/// Mirrors the FastAPI `_resolve_camera_index`: the id must match
-/// `[A-Za-z0-9_-]{1,32}` and parse to a positive integer (today only numeric ids
-/// are supported; a future named-source map plugs in here). Returns `None` when
-/// the id is malformed or not a positive integer.
+/// Resolve a ground-side `camera_id` string to a 1-based MAVLink source index. Returns
+/// `None` when the id is malformed or not a positive integer.
 fn resolve_camera_index(camera_id: &str) -> Option<u32> {
     // The FastAPI regex: 1..=32 chars of [A-Za-z0-9_-]. An id that fails this is
     // unresolvable (None), the same as a non-numeric or out-of-range id.

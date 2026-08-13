@@ -1,10 +1,8 @@
 //! Bind state machine + session record.
 //!
-//! Mirrors the `BindState` StrEnum + `BindSession` dataclass in
-//! `bind_orchestrator.py`. The wall-clock fields (`started_at`/`finished_at`)
-//! are ISO-8601 second-precision UTC; the phase clocks (`phase_entered_at`,
-//! `last_frame_at`) are monotonic seconds-since-process-start floats, exactly
-//! as Python stores `time.monotonic()`.
+//! The wall-clock fields (`started_at`/`finished_at`) are ISO-8601 second-precision
+//! UTC; the phase clocks (`phase_entered_at`, `last_frame_at`) are monotonic
+//! seconds-since-process-start floats, exactly as Python stores `time.monotonic()`.
 
 use std::sync::OnceLock;
 use std::time::Instant;

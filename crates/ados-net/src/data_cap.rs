@@ -136,7 +136,7 @@ impl UsageSource for SysfsUsageSource {
     }
 }
 
-/// Persisted cumulative-usage window. Mirrors `_UsageState`.
+/// Persisted cumulative-usage window.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UsageState {
     pub window_started_at: f64,
@@ -241,8 +241,7 @@ impl DataCapTracker {
         info!(cap_gb = gb, "uplink.datacap_set");
     }
 
-    /// Classify the current usage. Mirrors `_classify`: cap<=0 → ok; >=100
-    /// blocked_100; >=95 throttle_95; >=80 warn_80; else ok.
+    /// Classify the current usage.
     pub fn classify(&self) -> DataCapState {
         classify(self.cap_bytes, self.state.cumulative_bytes)
     }

@@ -296,15 +296,14 @@ fn show_value(unit: &str, prop: &str) -> String {
 }
 
 /// The unit's `MainPID` as an integer, or `0` when the property is empty or not a
-/// number. Mirrors the FastAPI `_main_pid` (`int(_show(...) or "0")` with a
-/// `ValueError` → `0` guard).
+/// number.
 fn main_pid(unit: &str) -> i64 {
     let raw = show_value(unit, "MainPID");
     raw.parse::<i64>().unwrap_or(0)
 }
 
-/// The unit's `ActiveEnterTimestamp` string (the systemd-formatted last-active
-/// time), empty on any read error. Mirrors the FastAPI `_active_enter_ts`.
+/// The unit's `ActiveEnterTimestamp` string (the systemd-formatted last-active time),
+/// empty on any read error.
 fn active_enter_ts(unit: &str) -> String {
     show_value(unit, "ActiveEnterTimestamp")
 }

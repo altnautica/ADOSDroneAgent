@@ -185,15 +185,14 @@ def _read_regulatory_domain() -> str:
 
 
 def _base_block(wfb_cfg: object) -> dict:
-    """The config-seeded zero-default block both the live sidecar read and the
-    durable store read merge the actual values over.
+    """The config-seeded zero-default block the live sidecar read merges the
+    actual values over.
 
-    Shared between ``_build_status_from_stats_file`` (the live fallback) and the
-    store-derived path (``ados.api.sources.wfb.derive_wfb_status``) so the two
-    read paths start from a byte-identical base and any divergence can only come
-    from the payload, never from a drifted default. ``regulatory_domain`` is the
-    LIVE ``iw reg get`` value, re-asserted by both paths so the file/store body
-    can never overwrite it.
+    Kept as the single seed for ``_build_status_from_stats_file`` so the served
+    body can only differ from the config by what the sidecar payload actually
+    carries, never by a drifted default. ``regulatory_domain`` is the LIVE
+    ``iw reg get`` value, re-asserted after the merge so the file body can never
+    overwrite it.
     """
     cfg_channel = getattr(wfb_cfg, "channel", 0) if wfb_cfg is not None else 0
     cfg_tx_power = getattr(wfb_cfg, "tx_power_dbm", None) if wfb_cfg is not None else None

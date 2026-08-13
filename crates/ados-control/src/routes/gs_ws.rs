@@ -263,10 +263,9 @@ async fn uplink_loop(mut socket: WebSocket, state: AppState, _auth: WsAuth) {
     }
 }
 
-/// Shape a stored `net.uplink_active` body into the uplink WS frame, preferring
-/// the live `net.modem_usage` `state` for `data_cap_state` and falling back to the
-/// uplink event's own `data_cap_state`. Mirrors the Python `_uplink_ws_payload`
-/// byte-for-byte (same keys, same order, same default coercions).
+/// Shape a stored `net.uplink_active` body into the uplink WS frame, preferring the
+/// live `net.modem_usage` `state` for `data_cap_state` and falling back to the uplink
+/// event's own `data_cap_state`.
 fn uplink_ws_payload(uplink: &Map<String, Value>, usage: Option<&Map<String, Value>>) -> Value {
     // `data_cap_state = usage.get("state")` then fall back when it is None — the
     // Python checks `is None` specifically (a JSON null), not general falsiness.
@@ -598,11 +597,10 @@ async fn mesh_loop(mut socket: WebSocket, state: AppState, _auth: WsAuth) {
     }
 }
 
-/// A follower over an append-only newline-JSON journal: seek to end on first
-/// open (skip the backlog so a long-lived journal never replays stale events
-/// into a freshly connected client), tolerate a missing file (retried on the
-/// next call), and re-open on truncation/recreation (the tmpfs wipe on a service
-/// restart). Mirrors the Python `tail_mesh_events` loop.
+/// A follower over an append-only newline-JSON journal: seek to end on first open (skip
+/// the backlog so a long-lived journal never replays stale events into a freshly
+/// connected client), tolerate a missing file (retried on the next call), and re-open
+/// on truncation/recreation (the tmpfs wipe on a service restart).
 struct JournalTail {
     path: std::path::PathBuf,
     reader: Option<BufReader<tokio::fs::File>>,

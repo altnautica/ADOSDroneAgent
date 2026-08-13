@@ -28,10 +28,12 @@
 //!
 //! Every read is fault-tolerant: an absent store / sidecar / key file degrades to
 //! the same empty/default shape the FastAPI route returns when its own source is
-//! unavailable, never a 500. The native front runs the radio + recorder in sibling
-//! processes (no in-process manager to call), so the live legs read the durable
-//! store and the on-disk sidecars the sibling services write — exactly the seams
-//! the FastAPI handlers fall back to.
+//! unavailable, never a 500. The native front runs the radio in sibling processes
+//! (no in-process manager to call), so the live radio legs read the durable store
+//! and the on-disk sidecars the sibling services write — exactly the seams the
+//! FastAPI handlers fall back to. The RECORDER is the exception: it is held
+//! in-process by [`crate::routes::gs_recording`] (start and stop arrive as
+//! separate requests), so the recording legs read that singleton directly.
 
 use std::path::{Path, PathBuf};
 
@@ -41,6 +43,8 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
+
+use ados_video::recorder::GroundStationRecorder;
 
 use crate::state::AppState;
 
@@ -203,12 +207,15 @@ pub async fn get_status(State(state): State<AppState>) -> Response {
         json!({})
     };
 
-    // Recorder state. The native front has no in-process recorder (recording runs
-    // in a sibling service), so this degrades to inactive — the exact shape the
-    // FastAPI route returns when `_recorder()` raises (`recording_active = False;
-    // recording_filename = None`).
-    let recording_active = false;
-    let recording_filename = Value::Null;
+    // Recorder state, read off the process-wide recorder this same binary owns
+    // (`gs_recording::recorder`). This used to hardcode `false` on the stated
+    // grounds that "the native front has no in-process recorder (recording runs in
+    // a sibling service)" — which `gs_recording`'s own module docs contradict: the
+    // start and stop are separate requests, so the front holds the one recorder
+    // behind a `OnceLock` for the life of the process. The surface therefore
+    // reported a known-false value while a capture was running (rule 6).
+    let (recording_active, recording_filename) =
+        recording_view(&crate::routes::gs_recording::recorder()).await;
 
     let body = json!({
         "profile": "ground_station",
@@ -239,6 +246,29 @@ pub async fn get_status(State(state): State<AppState>) -> Response {
     });
 
     Json(body).into_response()
+}
+
+/// The `(recording, recording_filename)` legs of the `/status` body, derived from
+/// a live recorder.
+///
+/// Split out so the derivation is exercised without going through `AppState` or
+/// the process-wide `OnceLock`: the handler's only remaining decision is *which*
+/// recorder to ask, and that must be the one `gs_recording` owns.
+///
+/// The filename is reported ONLY while a capture is in flight. The recorder keeps
+/// `current_path` after a stop (the stop reply needs it), so forwarding it
+/// unconditionally would render the last completed capture as if it were still
+/// running — the same class of frozen reading rule 44 exists to prevent.
+async fn recording_view(recorder: &GroundStationRecorder) -> (bool, Value) {
+    if !recorder.is_active().await {
+        return (false, Value::Null);
+    }
+    let filename = recorder
+        .current_filename()
+        .await
+        .map(Value::from)
+        .unwrap_or(Value::Null);
+    (true, filename)
 }
 
 /// The `(paired_drone_id, key_fingerprint)` pair the `/status` route surfaces.
@@ -338,12 +368,11 @@ fn profile_conf_mesh_capable(path: &Path) -> bool {
 /// The reduced live radio link view the `/status` route carries, sourced from
 /// `/run/ados/wfb-stats.json`.
 ///
-/// The ground-station config object has no root `wfb` section (the radio config
-/// lives at `video.wfb`), so the Python `getattr(app.config, "wfb", None)` is
-/// `None` and the config-channel / tx-power seeds are `None` — this view starts
-/// from the same zero base and merges the live snapshot over it. An absent /
-/// unparseable / non-object file degrades to the base; a snapshot older than 10 s
-/// flips `state` to `"stale"`. Mirrors the Python `_link_view`.
+/// The ground-station config object has no root `wfb` section (the radio config lives
+/// at `video.wfb`), so the Python `getattr(app.config, "wfb", None)` is `None` and the
+/// config-channel / tx-power seeds are `None` — this view starts from the same zero
+/// base and merges the live snapshot over it. An absent / unparseable / non-object file
+/// degrades to the base; a snapshot older than 10 s flips `state` to `"stale"`.
 fn link_view() -> Value {
     link_view_from(&wfb_stats_path())
 }
@@ -718,11 +747,10 @@ fn proc_uptime_seconds() -> i64 {
 // The `mesh` sub-block + the relay/receiver routes (store-first, sidecar-fallback).
 // ---------------------------------------------------------------------------
 
-/// The `/status` `mesh` sub-block from the store's `mesh.state` event, projecting
-/// the five fields the live route reads off `mesh-state.json` (`up`, `peer_count` =
-/// neighbor count, `selected_gateway`, `partition`, `mesh_id`). `None` when the
-/// store is unreachable or holds no such event, so the caller falls back to the
-/// sidecar. Mirrors the Python `latest_status_mesh_block` coercions.
+/// The `/status` `mesh` sub-block from the store's `mesh.state` event, projecting the
+/// five fields the live route reads off `mesh-state.json` (`up`, `peer_count` =
+/// neighbor count, `selected_gateway`, `partition`, `mesh_id`). `None` when the store
+/// is unreachable or holds no such event, so the caller falls back to the sidecar.
 async fn latest_status_mesh_block(state: &AppState) -> Option<Value> {
     let detail = latest_event_detail(state, "mesh.state").await?;
     Some(mesh_block_from_snapshot(&detail))
@@ -813,9 +841,8 @@ pub async fn get_atlas_relay_status(State(state): State<AppState>) -> Response {
 /// `GET /api/v1/ground-station/wfb/receiver/relays` → per-relay fragment counters.
 ///
 /// `404` `E_WRONG_ROLE` off a receiver node. On a receiver, reads the store's
-/// most-recent `gs.receiver_state` event projected to `{relays}`, falling back to
-/// the `/run/ados/wfb-receiver.json` sidecar (also projected to `{relays}`).
-/// Mirrors the Python `get_wfb_receiver_relays`.
+/// most-recent `gs.receiver_state` event projected to `{relays}`, falling back to the
+/// `/run/ados/wfb-receiver.json` sidecar (also projected to `{relays}`).
 pub async fn get_wfb_receiver_relays(State(state): State<AppState>) -> Response {
     let role = match ground_station_role(&state) {
         Some(r) => r,
@@ -941,9 +968,8 @@ impl WfbViewConfig {
 // logd query seam: HTTP-over-UDS reads of the store's /v1 events API.
 // ---------------------------------------------------------------------------
 
-/// The newest event's non-empty `detail` map for `event_kind`, or `None` when the
-/// store is unreachable / holds no such event / the detail is absent / non-object /
-/// empty. Mirrors the Python `_latest_event_detail`.
+/// The newest event's non-empty `detail` map for `event_kind`, or `None` when the store
+/// is unreachable / holds no such event / the detail is absent / non-object / empty.
 async fn latest_event_detail(state: &AppState, event_kind: &str) -> Option<Map<String, Value>> {
     let rows = logd_query_events(state, event_kind, 1).await?;
     let row = rows.first()?.as_object()?;
@@ -1607,6 +1633,82 @@ mod tests {
         let (status, body) = parse_http_response(raw).unwrap();
         assert_eq!(status, 200);
         assert_eq!(body, b"{}");
+    }
+
+    /// The radio-learned peer id must land on the key THIS route reads.
+    ///
+    /// Two halves that never met: `ados-radio` latched the beacon's device id into
+    /// `peer-backfill.json` and the only consumer was a Python function with zero
+    /// callers, so `paired_drone.device_id` was null on every auto-bound rig,
+    /// across reboots. Asserting the write and the read against one file is what
+    /// keeps the two ends on the same key.
+    #[test]
+    fn a_backfilled_peer_id_is_what_the_status_route_reports() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        std::fs::write(&cfg, "agent:\n  name: my-gs\n").unwrap();
+
+        assert_eq!(
+            config_gs_peer(&cfg),
+            Value::Null,
+            "null before the back-fill"
+        );
+
+        crate::routes::peer_backfill::persist_peer_device_id(&cfg, true, "drone-abc")
+            .expect("the back-fill persists");
+
+        assert_eq!(config_gs_peer(&cfg), json!("drone-abc"));
+    }
+
+    /// The recording legs must follow the recorder, both ways.
+    ///
+    /// These two fields were hardcoded `false`/`null`, so the ground-station
+    /// status surface denied a capture that was in flight. The active leg is what
+    /// regressed, so it is what this drives: a fake `ffmpeg` on PATH (the same
+    /// technique `ados-video`'s own recorder cycle test uses) makes the running
+    /// state reachable without a real encoder or a rig.
+    #[tokio::test]
+    async fn recording_view_follows_the_recorder_in_both_states() {
+        let bindir = tempfile::tempdir().unwrap();
+        let fake = bindir.path().join("ffmpeg");
+        std::fs::write(&fake, "#!/bin/sh\nsleep 30\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let recdir = tempfile::tempdir().unwrap();
+        let rec = GroundStationRecorder::new(recdir.path(), "rtsp://127.0.0.1:8554/main");
+
+        // Idle: no capture, so no filename either.
+        assert_eq!(recording_view(&rec).await, (false, Value::Null));
+
+        let path_save = std::env::var("PATH").ok();
+        let combined = match &path_save {
+            Some(orig) => format!("{}:{}", bindir.path().display(), orig),
+            None => bindir.path().display().to_string(),
+        };
+        std::env::set_var("PATH", &combined);
+        let started = rec.start(Some("statusleg")).await.expect("start succeeds");
+
+        let (active, filename) = recording_view(&rec).await;
+        assert!(
+            active,
+            "a capture is in flight, so the status leg must say so"
+        );
+        assert_eq!(filename, json!(started["filename"].as_str().unwrap()));
+
+        let _ = rec.stop().await;
+        if let Some(p) = path_save {
+            std::env::set_var("PATH", p);
+        } else {
+            std::env::remove_var("PATH");
+        }
+
+        // After the stop the recorder still holds `current_path` for its own reply,
+        // but the status surface must not render a finished capture as if live.
+        assert_eq!(recording_view(&rec).await, (false, Value::Null));
     }
 
     /// The golden `/status` body for a direct ground-station node with no paired

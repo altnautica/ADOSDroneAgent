@@ -176,7 +176,7 @@ def test_install_status_reports_no_result_when_absent(tmp_path) -> None:
     missing_result = tmp_path / "install-result.json"
     missing_cp = tmp_path / "install-checkpoints"
     with (
-        patch.object(cli_main, "INSTALL_RESULT_PATH", missing_result),
+        patch.object(cli_main, "INSTALL_RESULT", missing_result),
         patch.object(cli_main, "INSTALL_CHECKPOINT_DIR", missing_cp),
     ):
         result = runner.invoke(cli, ["install", "--status"])
@@ -214,7 +214,7 @@ def test_install_status_json_reports_done_and_missing(tmp_path) -> None:
     (cp_dir / "venv.done").touch()
 
     with (
-        patch.object(cli_main, "INSTALL_RESULT_PATH", result_file),
+        patch.object(cli_main, "INSTALL_RESULT", result_file),
         patch.object(cli_main, "INSTALL_CHECKPOINT_DIR", cp_dir),
     ):
         result = runner.invoke(cli, ["install", "--status", "--json"])

@@ -75,8 +75,8 @@ fn profile_mismatch() -> Response {
 /// `404` `E_PROFILE_MISMATCH` off a ground-station node. Otherwise `{devices,
 /// primary_id}`: `devices` is the live evdev enumeration (empty when evdev is
 /// unavailable, the same fault-tolerant shape the Python route falls back to),
-/// `primary_id` is the persisted primary device id or null. Guaranteed 200 on a
-/// ground station. Mirrors the Python `get_gamepads`.
+/// `primary_id` is the persisted primary device id or null. Guaranteed 200 on a ground
+/// station.
 pub async fn get_gamepads(State(state): State<AppState>) -> Response {
     if !is_ground_station(&state) {
         return profile_mismatch();

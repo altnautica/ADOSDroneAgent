@@ -15,8 +15,6 @@ from __future__ import annotations
 
 import struct
 
-import pytest
-
 from ados.services.video.sei_injector import (
     ADOS_LATENCY_SEI_UUID,
     _emulation_prevent,
@@ -155,16 +153,16 @@ def _rbsp_for(ns: int) -> bytes:
 # (the literal `05 18` header), which holds with the stripper replaced by the
 # identity function. Both halves were untested by the test named for them.
 #
-# `0x0000010000000001` is deliberately excluded: it also drives the injector into
-# emitting a literal `00 00 01`, the separate defect recorded as the xfail below.
-# Keeping it out means this test measures the escaper/stripper inverse and not
-# that bug.
+# `0x0000010000000001` is included: it is the value that drove the old injector
+# into emitting a literal `00 00 01` (a false start code for any decoder), and it
+# is the reason the escaper counts emitted zeros instead of looking ahead.
 _ESCAPING_NS = (
     0x1234_0000_0100_0000,
     0x18C6_0000_0200_00AB,
     0x0000_0000_0000_0003,
     0x18C6_7F00_0003_0080,
     0x18C6_7F5B_0000_0100,
+    0x0000_0100_0000_0001,
 )
 
 
@@ -182,22 +180,6 @@ def test_emulation_prevention_round_trips() -> None:
         )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Known defect in the INJECTOR, not the parser: _emulation_prevent uses a "
-        "three-byte lookahead bounded by `i + 2 < n`, so it cannot see a "
-        "forbidden pattern ending at the final byte, and after emitting an "
-        "escape it resumes past the escaped byte, leaving a zero it just wrote "
-        "able to start a new run that is never examined. The NAL then carries a "
-        "literal 00 00 01, which is a false start code for any decoder, not "
-        "only this parser. Measured: 17 of 2006 sampled values across the "
-        "realistic 1 ms - 2 s latency range. Fixing it means making the escaper "
-        "and the existing stripper exact inverses, which is its own change; a "
-        "first attempt traded this bug for a worse one. Remove this marker with "
-        "the fix."
-    ),
-)
 def test_parses_a_timestamp_whose_bytes_need_escaping() -> None:
     """A timestamp containing `00 00 0x` must survive escaping and stripping."""
     ns = 0x0000_0100_0000_0001 & 0xFFFF_FFFF_FFFF_FFFF

@@ -82,6 +82,7 @@ fn base_payload() -> HeartbeatPayload {
         // No fresh lane sidecar in the base ⇒ the whole block is omitted.
         crsf: None,
         wfb_adapter_chipset: None,
+        mac_stability: None,
         // No radio view in the base ⇒ no injection verdict (key omitted).
         wfb_adapter_injection_ok: None,
         lcd_active_page: None,
@@ -95,11 +96,6 @@ fn base_payload() -> HeartbeatPayload {
         video_local_decoder_type: None,
         video_local_decoder_fps: None,
         video_recording: None,
-        video_pipeline_flavor: None,
-        video_encoder_name: None,
-        video_encoder_hw_accel: None,
-        video_camera_source: None,
-        video_pipeline_state: None,
         video_streams: None,
         linked_peers: None,
         display_type: None,

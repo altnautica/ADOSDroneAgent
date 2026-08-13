@@ -119,8 +119,8 @@ impl ManagedProcess {
         matches!(self.inner.try_wait(), Ok(None))
     }
 
-    /// Graceful teardown of the whole process group: `SIGTERM`, wait up to
-    /// `grace`, then `SIGKILL`. Mirrors the Python `_terminate_process_group`.
+    /// Graceful teardown of the whole process group: `SIGTERM`, wait up to `grace`,
+    /// then `SIGKILL`.
     #[cfg(target_os = "linux")]
     pub async fn terminate(&mut self, grace: Duration) {
         use nix::sys::signal::{killpg, Signal};

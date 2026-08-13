@@ -282,10 +282,9 @@ pub trait HostServices: Send + Sync + 'static {
         Ok(not_implemented("radio.aux_stream.close"))
     }
 
-    /// Release every per-session host resource a plugin held when its
-    /// connection drops (component reservations, driver registrations, camera
-    /// claims, telemetry channels). Mirrors `_release_session_resources` in the
-    /// Python server. The default is a no-op; a real host releases its state.
+    /// Release every per-session host resource a plugin held when its connection drops
+    /// (component reservations, driver registrations, camera claims, telemetry
+    /// channels). The default is a no-op; a real host releases its state.
     fn release_plugin(&self, _plugin_id: &str) {}
 
     /// A receiver for the MAVLink frame fanout, when this host has a wired

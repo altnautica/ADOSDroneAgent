@@ -364,8 +364,8 @@ async fn apply_ap_config(
 
 /// Reshape the live hostapd `status()` into the `_ap_view` body: the manager's
 /// `status()` already carries `{running, ssid, channel, interface, gateway,
-/// connected_clients}`; the view adds `enabled` (mirroring `running`) and stamps
-/// the transport `ok:true`. Mirrors the Python `_ap_view` live branch.
+/// connected_clients}`; the view adds `enabled` (mirroring `running`) and stamps the
+/// transport `ok:true`.
 fn ap_view(status: &Value) -> Value {
     let running = status
         .get("running")

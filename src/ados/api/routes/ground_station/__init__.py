@@ -4,7 +4,7 @@ All endpoints gate on `config.agent.profile == "ground_station"` via
 `_require_ground_profile()`. Agents on the default drone profile get
 404 with code `E_PROFILE_MISMATCH`.
 
-Routes are split across six sub-modules grouped by URL prefix. The
+Routes are split across four sub-modules grouped by URL prefix. The
 package-level `router` aggregates them so callers can keep importing
 `from ados.api.routes.ground_station import router`. All shared
 helpers and Pydantic models live in `_common`. The package re-exports
@@ -28,8 +28,6 @@ for _name in dir(_c):
 
 # Sub-router modules. Imported after the bulk re-export so any access
 # they perform on the package at request time finds the helpers above.
-from ados.api.routes.ground_station.modem import router as _modem_router
-from ados.api.routes.ground_station.network import router as _network_router
 from ados.api.routes.ground_station.pairing import router as _pairing_router
 from ados.api.routes.ground_station.recording import router as _recording_router
 from ados.api.routes.ground_station.ui import router as _ui_router
@@ -38,7 +36,7 @@ from ados.api.routes.ground_station.wfb import router as _wfb_router
 
 # Singleton accessor for the ground-station recorder. Exposed on the
 # package so tests can monkeypatch it via `setattr(gs, "_recorder", ...)`
-# the same way `_pair_manager`, `_ethernet_mgr`, etc. work.
+# the same way `_pair_manager` works.
 def _recorder():
     from ados.services.ground_station.recorder import get_recorder
 
@@ -47,11 +45,9 @@ def _recorder():
 
 router = APIRouter()
 router.include_router(_wfb_router)
-router.include_router(_network_router)
 router.include_router(_ui_router)
 router.include_router(_pairing_router)
 router.include_router(_recording_router)
-router.include_router(_modem_router)
 
 
 __all__ = ["router"]

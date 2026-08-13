@@ -1,11 +1,7 @@
 //! Persistent parameter cache.
 //!
-//! Mirrors the Python `ParamCache` (services/mavlink/param_cache.py): an
-//! in-memory map of FC parameters persisted to `/var/lib/ados/params.json` as
-//! `{ "NAME": { "value": f64, "param_type": i64, "last_updated": f64 } }`,
-//! written atomically (temp file + rename) so a crash mid-write never leaves a
-//! truncated cache. Survives across FC reboots and agent restarts so the GCS
-//! does not re-sweep every parameter on each reconnect.
+//! Survives across FC reboots and agent restarts so the GCS does not re-sweep every
+//! parameter on each reconnect.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

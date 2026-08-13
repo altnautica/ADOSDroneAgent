@@ -28,9 +28,9 @@ pub const MAX_TAIL_SUBSCRIBERS: usize = 16;
 /// budget on the LAN edge.
 pub const MAX_CONCURRENT_EXPORTS: usize = 2;
 
-/// A live counter of in-flight exports, shared in the app state. A guard frees
-/// the slot on drop so an export that ends (completes or the client
-/// disconnects) always releases it. Mirrors [`TailSlots`].
+/// A live counter of in-flight exports, shared in the app state. A guard frees the slot
+/// on drop so an export that ends (completes or the client disconnects) always releases
+/// it.
 #[derive(Debug, Default)]
 pub struct ExportSlots {
     active: AtomicUsize,

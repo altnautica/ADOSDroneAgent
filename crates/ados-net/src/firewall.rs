@@ -357,9 +357,8 @@ impl ShareUplinkFirewall {
 
     // ---------------- public apply ----------------
 
-    /// Apply or remove sysctl + NAT MASQUERADE and persist. Best-effort: never
-    /// panics. Mirrors `apply_share_uplink`. Returns `{applied, backend,
-    /// apply_error}`.
+    /// Apply or remove sysctl + NAT MASQUERADE and persist. Best-effort: never panics.
+    /// Returns `{applied, backend, apply_error}`.
     pub async fn apply_share_uplink(&self, enabled: bool, active_iface: Option<&str>) -> Value {
         let backend = self.backend();
         if backend == FirewallBackend::None {
@@ -565,10 +564,8 @@ impl ShareUplinkFirewall {
         }
     }
 
-    /// Reconcile firewall state against a configured share_uplink flag and the
-    /// active iface, on service start. Mirrors `reconcile_on_start` (config
-    /// load + active-iface lookup are the caller's job here; this takes the
-    /// resolved inputs and applies them).
+    /// Reconcile firewall state against a configured share_uplink flag and the active
+    /// iface, on service start.
     pub async fn reconcile_on_start(
         &self,
         configured_enabled: bool,

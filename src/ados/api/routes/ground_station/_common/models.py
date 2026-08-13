@@ -10,9 +10,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
-
-from .validators import _validate_ipv4, _validate_ipv4_cidr
+from pydantic import BaseModel, Field
 
 
 class WfbUpdate(BaseModel):
@@ -21,15 +19,6 @@ class WfbUpdate(BaseModel):
     channel: int | None = None
     bitrate_profile: str | None = None
     fec: str | None = None
-
-
-class ApUpdate(BaseModel):
-    """PUT body for the AP subsection of network config."""
-
-    enabled: bool | None = None
-    ssid: str | None = None
-    passphrase: str | None = None
-    channel: int | None = None
 
 
 class PairRequest(BaseModel):
@@ -125,33 +114,6 @@ class WifiJoinRequest(BaseModel):
     force: bool | None = False
 
 
-class ModemConfigUpdate(BaseModel):
-    """PUT body for /network/modem.
-
-    The GET view reports the cap as ``cap_mb`` (megabytes), so a client that
-    round-trips the view sends ``cap_mb`` back. The route accepts either:
-    ``cap_gb`` wins when both are present, otherwise ``cap_mb`` is converted to
-    ``cap_gb`` before it reaches the manager (which persists in GB).
-    """
-
-    apn: str | None = None
-    cap_gb: float | None = Field(default=None, gt=0, le=9223372036.0)
-    cap_mb: int | None = Field(default=None, gt=0)
-    enabled: bool | None = None
-
-
-class UplinkPriorityUpdate(BaseModel):
-    """PUT body for /network/priority."""
-
-    priority: list[str] = Field(..., min_length=1)
-
-
-class ShareUplinkUpdate(BaseModel):
-    """PUT body for /network/share_uplink."""
-
-    enabled: bool
-
-
 class RoleChangeRequest(BaseModel):
     role: Literal["direct", "relay", "receiver"]
     confirm_token: str | None = None
@@ -185,46 +147,8 @@ class PairJoinRequest(BaseModel):
     receiver_port: int | None = Field(default=None, ge=1, le=65535)
 
 
-class EthernetConfigUpdate(BaseModel):
-    """PUT body for /network/ethernet."""
-
-    mode: Literal["dhcp", "static"]
-    ip: str | None = None
-    gateway: str | None = None
-    dns: list[str] | None = None
-
-    @field_validator("ip")
-    @classmethod
-    def _v_ip(cls, v: str | None) -> str | None:
-        if v is None or v == "":
-            return None
-        if not _validate_ipv4_cidr(v):
-            raise ValueError("ip must be IPv4 with CIDR suffix, e.g. 192.168.1.42/24")
-        return v
-
-    @field_validator("gateway")
-    @classmethod
-    def _v_gateway(cls, v: str | None) -> str | None:
-        if v is None or v == "":
-            return None
-        if not _validate_ipv4(v):
-            raise ValueError("gateway must be a valid IPv4 address")
-        return v
-
-    @field_validator("dns")
-    @classmethod
-    def _v_dns(cls, v: list[str] | None) -> list[str] | None:
-        if v is None:
-            return None
-        for entry in v:
-            if not _validate_ipv4(entry):
-                raise ValueError(f"dns entry {entry!r} is not a valid IPv4 address")
-        return v
-
-
 __all__ = [
     "WfbUpdate",
-    "ApUpdate",
     "PairRequest",
     "OledUpdate",
     "ButtonsUpdate",
@@ -237,9 +161,6 @@ __all__ = [
     "PicConfirmTokenRequest",
     "PicHeartbeatRequest",
     "WifiJoinRequest",
-    "ModemConfigUpdate",
-    "UplinkPriorityUpdate",
-    "ShareUplinkUpdate",
     "RoleChangeRequest",
     "MeshConfigUpdate",
     "MeshGatewayPreferenceUpdate",
@@ -247,5 +168,4 @@ __all__ = [
     "PairApproveRequest",
     "PairRevokeRequest",
     "PairJoinRequest",
-    "EthernetConfigUpdate",
 ]

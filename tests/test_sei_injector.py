@@ -46,14 +46,62 @@ def test_emulation_prevent_passthrough() -> None:
 
 
 def test_emulation_prevent_handles_consecutive_triggers() -> None:
-    # 00 00 00 00 00 00 -> 00 00 03 00 00 00 03 00 00 (two escapes).
+    # 00 00 00 00 00 00 -> 00 00 03 00 00 03 00 00 (two escapes). The escape
+    # goes in front of the trigger byte, and that byte then counts toward the
+    # next zero run — which is what keeps the output free of `00 00 00`.
     src = b"\x00\x00\x00\x00\x00\x00"
     out = _emulation_prevent(src)
+    assert out == b"\x00\x00\x03\x00\x00\x03\x00\x00"
     # Verify we can de-escape it back to the original via the
     # receiver-side stripper (round-trip property).
     from ados.services.video.sei_parser import _remove_emulation_prevention
 
     assert _remove_emulation_prevention(out) == src
+
+
+def test_emulation_prevent_never_emits_a_start_code() -> None:
+    """The escaped NAL must not contain `00 00 00/01/02`.
+
+    The old lookahead escaper turned `00 00 00 00 01` into
+    `00 00 03 00 00 01` — a literal start code, which truncates the SEI in
+    ANY decoder, not just this repo's parser. Measured then: 17 of 2006
+    sampled values across the realistic 1 ms - 2 s latency range.
+    """
+    from ados.services.video.sei_parser import _remove_emulation_prevention
+
+    src = b"\x00\x00\x00\x00\x01"
+    assert _emulation_prevent(src) == b"\x00\x00\x03\x00\x00\x03\x01"
+
+    forbidden = (b"\x00\x00\x00", b"\x00\x00\x01", b"\x00\x00\x02")
+    checked = 0
+    for ns in range(1_000_000, 2_000_000_000, 997_331):
+        rbsp = struct.pack(">Q", ns)
+        escaped = _emulation_prevent(rbsp)
+        for pattern in forbidden:
+            assert pattern not in escaped, (
+                f"{ns} escaped to {escaped.hex()}, which carries {pattern.hex()}"
+            )
+        assert _remove_emulation_prevention(escaped) == rbsp, (
+            f"escaping is not invertible for {ns}"
+        )
+        checked += 1
+    assert checked > 2000, (
+        f"only {checked} timestamps swept; the range is wrong and this proves little"
+    )
+
+
+def test_built_sei_nal_carries_no_second_start_code() -> None:
+    """A whole built NAL must contain exactly one Annex-B start code.
+
+    Guards the end-to-end consequence of the escaper bug: a second start
+    code inside the SEI splits it into two NALs at the decoder.
+    """
+    for ns in (0x0000_0100_0000_0001, 0x0000_0000_0000_0000, 0x1234_0000_0100_0000):
+        nal = build_sei_nal(ns)
+        assert nal.count(b"\x00\x00\x01") == 1, (
+            f"{ns:#018x} produced {nal.hex()}, which carries a second start code"
+        )
+        assert parse_sei_latency_ns(nal) == ns
 
 
 def test_build_sei_nal_layout() -> None:

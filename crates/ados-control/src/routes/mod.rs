@@ -67,6 +67,7 @@ pub mod pairing;
 pub mod params;
 pub mod params_single;
 pub mod params_write;
+pub mod peer_backfill;
 pub mod plugins_config;
 pub mod plugins_state;
 pub mod plugins_tools;
@@ -530,6 +531,18 @@ pub fn build_router(state: AppState, net_native: bool, hid_native: bool) -> Rout
         .route(
             "/api/v1/ground-station/network/share_uplink",
             put(gs_network_write::put_network_share_uplink),
+        )
+        // The Wi-Fi client join/leave the ground station drives when it uplinks
+        // over an existing network. Their Python twins forwarded to this same
+        // command socket behind an in-process fallback; porting them is what
+        // lets the packaged ground-station network island go.
+        .route(
+            "/api/v1/ground-station/network/client/join",
+            put(gs_network_write::put_gs_network_client_join),
+        )
+        .route(
+            "/api/v1/ground-station/network/client",
+            delete(gs_network_write::delete_gs_network_client),
         )
         // Ground-station mesh + WFB-pair writes (role/mesh-config PUTs share their
         // read paths): gateway preference + the WFB rx-key pair/unpair.
