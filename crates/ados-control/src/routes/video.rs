@@ -41,9 +41,8 @@ fn run_dir() -> PathBuf {
     PathBuf::from(std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string()))
 }
 
-/// The LCD-side SEI-latency state file (`/run/ados/lcd-latency.json`), written by
-/// the local tap when the SEI latency probe is enabled. Mirrors the Python
-/// `LCD_LATENCY_STATS_PATH` (with the `/run/ados/lcd-latency.json` fallback).
+/// The LCD-side SEI-latency state file (`/run/ados/lcd-latency.json`), written by the
+/// local tap when the SEI latency probe is enabled.
 fn lcd_latency_path() -> PathBuf {
     run_dir().join("lcd-latency.json")
 }
@@ -158,12 +157,11 @@ const LATENCY_METRICS: [(&str, &str); 3] = [
 
 /// Reconstruct the `/video/latency` route body from the store.
 ///
-/// Maps the `video.latency.*` metrics back to the route keys and reads the
-/// `source` off the latest `video.latency_source` event, falling back to `"sei"`
-/// when that event is not in the window. Returns `None` when neither the
-/// glass-to-glass sample nor the sample count is present (the SEI probe is disabled
-/// or has produced nothing), so the route degrades to the live read. Mirrors the
-/// Python `latest_video_latency`.
+/// Maps the `video.latency.*` metrics back to the route keys and reads the `source` off
+/// the latest `video.latency_source` event, falling back to `"sei"` when that event is
+/// not in the window. Returns `None` when neither the glass-to-glass sample nor the
+/// sample count is present (the SEI probe is disabled or has produced nothing), so the
+/// route degrades to the live read.
 async fn latest_video_latency(state: &AppState) -> Option<Value> {
     let names: Vec<&str> = LATENCY_METRICS.iter().map(|(m, _)| *m).collect();
     let metrics = latest_metrics(state, &names).await;

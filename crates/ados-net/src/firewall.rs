@@ -62,8 +62,7 @@ pub trait BackendDetector: Send + Sync {
 }
 
 /// Production detector: probes PATH for `iptables` / `nft` and checks for the
-/// `/etc/iptables` dir that iptables-persistent owns. Mirrors
-/// `detect_firewall_backend`.
+/// `/etc/iptables` dir that iptables-persistent owns.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct PathBackendDetector;
 
@@ -485,10 +484,10 @@ impl ShareUplinkFirewall {
         })
     }
 
-    /// Apply bandwidth throttle or hard block on the active uplink. Mirrors
-    /// `apply_throttle`. The blocked_100 path removes the qdisc THEN drops the
-    /// MASQUERADE rule (ordering matters: the qdisc must go before NAT stops so
-    /// a stale throttle never lingers on a re-enabled link).
+    /// Apply bandwidth throttle or hard block on the active uplink. The blocked_100
+    /// path removes the qdisc THEN drops the MASQUERADE rule (ordering matters: the
+    /// qdisc must go before NAT stops so a stale throttle never lingers on a re-enabled
+    /// link).
     pub async fn apply_throttle(&self, active_iface: Option<&str>, state: DataCapState) -> Value {
         let iface = match active_iface.filter(|s| !s.is_empty()) {
             Some(i) => i,

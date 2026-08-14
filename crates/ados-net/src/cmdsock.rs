@@ -686,9 +686,9 @@ mod tests {
         let joined = with_ok(json!({"joined": true, "ip": "1.2.3.4"}));
         assert_eq!(joined["ok"], true);
         assert_eq!(joined["ip"], "1.2.3.4");
-        let failed = with_ok(json!({"joined": false, "error": "wlan0_busy_ap_active"}));
+        let failed = with_ok(json!({"joined": false, "error": "station_busy_ap_active"}));
         assert_eq!(failed["ok"], true);
-        assert_eq!(failed["error"], "wlan0_busy_ap_active");
+        assert_eq!(failed["error"], "station_busy_ap_active");
         // A non-object result is a hard transport error.
         assert_eq!(with_ok(json!("oops"))["ok"], false);
     }

@@ -24,6 +24,7 @@ the retry loop, same pattern as the WFB RX service.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import secrets
@@ -131,10 +132,28 @@ _DNSMASQ_CONF_PATH = DNSMASQ_CONF_PATH
 _AP_IFACE = "wlan0"
 
 
+def _radio_interface(run_root: Path | None = None) -> str:
+    """The interface the radio reports it actually opened, or "".
+
+    Driver classification is a guess made from a generated table; this is the
+    radio's own account of what it took. It is the authority when the two
+    disagree, because a table can be wrong and the radio cannot be wrong about
+    the device it opened. Mirrors ``ados_protocol::netif::radio_interface``.
+    """
+    path = (run_root or Path("/run/ados")) / "wfb-stats.json"
+    try:
+        stats = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return ""
+    iface = stats.get("interface") if isinstance(stats, dict) else None
+    return iface.strip() if isinstance(iface, str) else ""
+
+
 def resolve_ap_interface(
     configured: str = "",
     fallback: str = _AP_IFACE,
     net_root: Path | None = None,
+    run_root: Path | None = None,
 ) -> str:
     """Return the interface the access point should bind, resolved by DRIVER.
 
@@ -146,6 +165,12 @@ def resolve_ap_interface(
     Classification uses the generated deny-set the radio itself consults to make
     sure it never grabs management WiFi for injection. Read the other way round,
     that set is exactly "the interface the access point wants".
+
+    The radio's own sidecar overrides that classification wherever the two
+    disagree. This is the ground station's live resolver, so the backstop has to
+    exist here and not only in the Rust twin: a misclassified flight radio that
+    the table failed to recognise is exactly the case a driver table cannot
+    catch, and the cost of getting it wrong is hostapd on the aircraft's link.
 
     Mirrors ``EthernetManager``/``UplinkRouter``, which already resolve their NIC
     at construction time for this same udev-race reason, and the Rust twin in
@@ -159,6 +184,7 @@ def resolve_ap_interface(
     )
 
     root = net_root or Path("/sys/class/net")
+    radio_iface = _radio_interface(run_root)
 
     def driver_of(iface: str) -> str:
         try:
@@ -166,11 +192,19 @@ def resolve_ap_interface(
         except OSError:
             return ""
 
-    def is_radio(driver: str) -> bool:
+    def is_radio(iface: str) -> bool:
+        if radio_iface and iface == radio_iface:
+            return True
+        driver = driver_of(iface)
         return driver.strip().lower() in {d.lower() for d in WFB_COMPATIBLE_DRIVERS}
 
-    def is_onboard(driver: str) -> bool:
-        d = driver.strip().lower()
+    def is_onboard(iface: str) -> bool:
+        # The radio's own account outranks the deny-prefix table: an interface
+        # the radio says it holds is never a candidate, whatever its driver
+        # string looks like.
+        if radio_iface and iface == radio_iface:
+            return False
+        d = driver_of(iface).strip().lower()
         return any(d.startswith(p) for p in WFB_DENY_DRIVER_PREFIXES)
 
     try:
@@ -184,20 +218,23 @@ def resolve_ap_interface(
 
     configured = configured.strip()
     if configured:
-        if configured in wireless and is_radio(driver_of(configured)):
+        if configured in wireless and is_radio(configured):
             log.error(
                 "ap_interface_configured_is_the_wfb_radio",
                 interface=configured,
+                radio_interface=radio_iface or None,
             )
             return fallback
         return configured
 
     for iface in wireless:
-        if is_onboard(driver_of(iface)):
+        if is_onboard(iface):
             return iface
 
     log.error("ap_interface_no_onboard_wifi", candidates=wireless)
     return fallback
+
+
 _AP_ADDR = "192.168.4.1"
 _AP_CIDR = f"{_AP_ADDR}/24"
 _DHCP_RANGE = "192.168.4.10,192.168.4.100,12h"

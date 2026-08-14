@@ -1,10 +1,12 @@
 //! The catalog of managed systemd service units and the per-service runtime
 //! state used by the orchestration loop.
 //!
-//! Mirrors the canonical Python registry one-for-one (name, category, profile
-//! gate, role gate). The supervisor never spawns these processes itself; it
-//! issues `systemctl` against this catalog. systemd remains the process
-//! manager and owns the cgroup, restart, and journald wiring.
+//! This is the authority for which units the supervisor manages. It is NOT a
+//! mirror of anything: several packaged units are deliberately absent because a
+//! native daemon owns their function in-process, and each absence is recorded
+//! where the row would have been. The supervisor never spawns these processes
+//! itself; it issues `systemctl` against this catalog. systemd remains the
+//! process manager and owns the cgroup, restart, and journald wiring.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -194,12 +196,15 @@ pub const SERVICE_REGISTRY: &[ServiceDef] = &[
     // headless KEEP set. Hot-plugging the RC module's USB bridge restarts it
     // via the dedicated Elrs hot-plug class.
     def("ados-crsf", Hardware, Some("drone|ground_station"), None),
-    // Config-over-radio channel: a MAVLink-TUNNEL request/response lane on the
-    // -p1 control plane so a node reachable only over the radio can have its
-    // /api/config read/written from the ground. The unit gates on the
-    // /etc/ados/tunnel-enabled marker (mirroring radio.tunnel.enabled), so an
-    // un-opted node skips it cleanly. Cross-profile (drone terminator + ground
-    // injector), NOT in the headless KEEP set.
+    // Config-over-radio channel: a MAVLink-TUNNEL request/response lane so a
+    // node reachable only over the radio can have its /api/config read and
+    // written from the ground. It rides the radio's auxiliary application lane
+    // on its own multiplex channel, not the control plane, which is fully
+    // occupied by the frequency-hop handshake and carries no demultiplexer. The
+    // unit gates on the /etc/ados/tunnel-enabled marker (mirroring
+    // radio.tunnel.enabled), so an un-opted node skips it cleanly.
+    // Cross-profile (drone terminator + ground injector), NOT in the headless
+    // KEEP set.
     def(
         "ados-tunnel-config",
         Hardware,
@@ -216,7 +221,10 @@ pub const SERVICE_REGISTRY: &[ServiceDef] = &[
         Some("direct"),
     ),
     def("ados-mediamtx-gs", Hardware, Some("ground_station"), None),
-    def("ados-usb-gadget", Hardware, Some("ground_station"), None),
+    // No ados-usb-gadget row: the native ados-net daemon composes the OTG
+    // gadget in-process and the installer always tears the packaged unit down,
+    // so registering it here made the supervisor report a deliberately-dead
+    // service as a managed hardware unit forever.
     // Physical UI + AP + first-boot captive portal.
     def("ados-oled", Hardware, Some("ground_station"), None),
     // Optional I2C status OLED, coexists with the HDMI cockpit (self-skips
@@ -231,11 +239,12 @@ pub const SERVICE_REGISTRY: &[ServiceDef] = &[
     def("ados-pic", Hardware, Some("ground_station"), None),
     // Uplink matrix and cloud relay.
     def("ados-uplink-router", Hardware, Some("ground_station"), None),
-    def("ados-modem", Hardware, Some("ground_station"), None),
-    // WiFi client is profile-agnostic on purpose: a drone-profile rig can also
-    // join a home / bench WiFi instead of running off Ethernet.
-    def("ados-wifi-client", Hardware, None, None),
-    def("ados-ethernet", Hardware, Some("ground_station"), None),
+    // No rows for ados-modem, ados-wifi-client or ados-ethernet. ados-net owns
+    // the modem, the WiFi station and the wired link in-process; their packaged
+    // units are torn down on every profile (the first and last are retired
+    // outright, the station is subsumed on a ground station and disabled on a
+    // drone). A row here would have the supervisor report, and try to
+    // reconcile, a service no install ever leaves running.
     // Distributed-receive role-gated services.
     def(
         "ados-batman",
@@ -332,7 +341,7 @@ mod tests {
     #[test]
     fn registry_has_expected_shape() {
         let specs = build_specs();
-        assert_eq!(specs.len(), 35, "service count drifted from the catalog");
+        assert_eq!(specs.len(), 31, "service count drifted from the catalog");
         // Core tier members. ados-mavlink/api/cloud/health are the cross-profile
         // always-on core (the single cloud unit serves the gateway + heartbeat on
         // both profiles, spawning the ground-station bridge when the role resolves
@@ -366,9 +375,15 @@ mod tests {
         let rx = specs.iter().find(|s| s.name == "ados-wfb-rx").unwrap();
         assert_eq!(rx.profile_gate, Some("ground_station"));
         assert_eq!(rx.role_gate, Some("direct"));
-        // wifi-client stays cross-profile.
-        let wc = specs.iter().find(|s| s.name == "ados-wifi-client").unwrap();
-        assert_eq!(wc.profile_gate, None);
+        // The units ados-net owns in-process carry no row at all: a packaged
+        // unit that every profile tears down must not be something the
+        // supervisor reports on or tries to reconcile.
+        for absent in ["ados-modem", "ados-wifi-client", "ados-ethernet"] {
+            assert!(
+                !specs.iter().any(|s| s.name == absent),
+                "{absent} is torn down on every profile and must not be registered"
+            );
+        }
         // The vision engine is a drone-gated Hardware unit and is NOT in the
         // headless keep set (vision/AI is excluded from the lean core).
         let vis = specs.iter().find(|s| s.name == "ados-vision").unwrap();

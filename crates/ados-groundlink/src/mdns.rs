@@ -249,8 +249,8 @@ fn accept_address(addr: Ipv4Addr, bat_ip: Option<Ipv4Addr>) -> bool {
     }
 }
 
-/// True when `a` and `b` share the same `/24` network. Mirrors the Python
-/// `_same_subnet` default `mask_prefix=24` used for the bat0 receiver scope.
+/// True when `a` and `b` share the same `/24` network. The `mask_prefix=24` default is
+/// the one used for the bat0 receiver scope.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn same_subnet_24(a: Ipv4Addr, b: Ipv4Addr) -> bool {
     let ao = a.octets();

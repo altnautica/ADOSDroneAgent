@@ -160,9 +160,10 @@ impl HitZone {
 
 // ── page-context data model ─────────────────────────────────────────
 
-/// WFB radio-link telemetry. Mirrors the `link` state block plus the `/api/wfb`
-/// snapshot the radio-link surfaces read: signal, throughput, FEC, channel,
-/// and the watchdog counters the diagnostics surfaces care about.
+/// WFB radio-link telemetry. Carries the fields of the `link` state block and
+/// the `/api/wfb` snapshot that `ados_protocol::wfb_status` derives: signal,
+/// throughput, FEC, channel, and the watchdog counters the diagnostics
+/// surfaces care about.
 #[derive(Debug, Clone, Default)]
 pub struct LinkCtx {
     /// Link-layer connection state (`connected`, `connecting`, `unpaired`, …).

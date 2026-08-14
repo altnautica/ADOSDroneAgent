@@ -14,7 +14,7 @@ use anyhow::Result;
 use ados_installer::binaries;
 use ados_installer::checkpoint::Checkpoint;
 use ados_installer::cli::{Args, RunMode, USAGE};
-use ados_installer::ctx::Ctx;
+use ados_installer::ctx::{resolve_channel, rev_channel_conflict, Ctx};
 use ados_installer::env::{self, EnvInfo, RESULT_PATH};
 use ados_installer::exec;
 use ados_installer::graph::run_graph;
@@ -75,6 +75,24 @@ async fn main() -> Result<ExitCode> {
     let already_installed = env::probe_install_present();
     let mode = RunMode::resolve(&args, already_installed);
     tracing::info!(?mode, already_installed, "resolved install run-mode");
+
+    // A revision pin has nothing to apply on macOS: that path builds every binary
+    // from the source tree it is invoked in (`macos::build_and_install_binaries`)
+    // and fetches no prebuilt asset and no wheel, so the pin IS the tree, and
+    // `scripts/install.sh` is what resolves and checks it out before exec'ing this
+    // binary — which is also why it strips the flag. Accepting it here would
+    // silently ignore a pin the operator was told they had; it used to be rejected
+    // as an unknown flag, and it must stay just as loud now that the Linux path
+    // knows the flag.
+    #[cfg(target_os = "macos")]
+    if let Some(rev) = args.rev.as_deref() {
+        eprintln!(
+            "error: --ref is resolved by scripts/install.sh on macOS, not by the installer. \
+             Run `scripts/install.sh --ref {rev}` to pin the tree it builds from, or check \
+             {rev} out yourself and re-run without --ref."
+        );
+        return Ok(ExitCode::from(2));
+    }
 
     // macOS is a rootless per-user launchd node: the install builds the
     // workstation binaries from source and registers LaunchAgents under
@@ -150,6 +168,17 @@ async fn main() -> Result<ExitCode> {
 
 /// Drive the install step chain and write the result contract.
 fn run_install(mut args: Args, mode: RunMode) -> Result<ExitCode> {
+    // A revision pin is only meaningful on the channel that has commit
+    // addressing. Refused here, before the wizard, the UI, and any network
+    // work, so a contradictory invocation costs nothing and says why.
+    if let Some(conflict) = rev_channel_conflict(
+        args.rev.as_deref(),
+        &resolve_channel(args.channel.as_deref()),
+    ) {
+        eprintln!("error: {conflict}");
+        return Ok(ExitCode::from(2));
+    }
+
     // Interactive onboarding: only on a fresh, interactive install where the
     // operator has not already pinned the answers with flags. It collects the
     // choices into `args` + `wizard_extras`, then the install proceeds exactly

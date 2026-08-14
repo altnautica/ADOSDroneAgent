@@ -332,9 +332,9 @@ impl CrsfLaneConfig {
     }
 
     /// Whether a MAVLink-over-ELRS command source exists on this lane and, if so,
-    /// whether its host->FC command-down direction is gated closed. Mirrors the
-    /// MAVLink router's `command_down_gated` predicate — both read the same
-    /// `radio.crsf` block — so a consumer reading ONLY this lane's status can see
+    /// whether its host->FC command-down direction is gated closed. Matches the
+    /// MAVLink router's `command_down_gated` predicate (both read the same
+    /// `radio.crsf` block), so a consumer reading ONLY this lane's status can see
     /// the ELRS command path's gate without the top-level FC status surface.
     ///
     /// Tri-state, honest: `None` when NO MAVLink-over-ELRS source exists (any

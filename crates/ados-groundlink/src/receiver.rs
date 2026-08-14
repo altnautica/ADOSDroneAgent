@@ -171,10 +171,10 @@ pub async fn spawn_aggregator(
     GsWfbProcess::spawn_stderr_piped("wfb_rx", &args).await
 }
 
-/// Parse one aggregator stderr line for the combined counters. Mirrors
-/// `_tail_stats`: a line containing `n_out:` carries the post-dedup count,
-/// `fec_rec:` the repaired count, `bitrate_kbps:` the output rate. Returns
-/// `(after_dedup, fec_repaired, output_kbps)` updates when present.
+/// Parse one aggregator stderr line for the combined counters. A line containing
+/// `n_out:` carries the post-dedup count, `fec_rec:` the repaired count,
+/// `bitrate_kbps:` the output rate. Returns `(after_dedup, fec_repaired, output_kbps)`
+/// updates when present.
 pub fn parse_receiver_stats_line(line: &str) -> (Option<i64>, Option<i64>, Option<i64>) {
     if !line.contains("n_out:") {
         return (None, None, None);
@@ -194,11 +194,11 @@ pub fn parse_receiver_stats_line(line: &str) -> (Option<i64>, Option<i64>, Optio
     (after_dedup, fec_repaired, output_kbps)
 }
 
-/// Upsert the relays seen this poll (by batman-neighbor MAC) into `state`,
-/// refreshing `last_seen_ms` and returning the MACs that were NOT present
-/// before (first sight → caller emits `relay_connected`). Pure over the
-/// serialized `Vec<RelayStats>`. Mirrors the populate half the Python module
-/// never implemented (its `_watch_relay_churn` only ages out).
+/// Upsert the relays seen this poll (by batman-neighbor MAC) into `state`, refreshing
+/// `last_seen_ms` and returning the MACs that were NOT present before (first sight →
+/// caller emits `relay_connected`). Pure over the serialized `Vec<RelayStats>`. This is
+/// the populate half the superseded packaged receiver never implemented: it only aged
+/// relays out.
 fn upsert_relays(state: &mut ReceiverState, macs: &[String], now_ms: i64) -> Vec<String> {
     let mut newly = Vec::new();
     for mac in macs {

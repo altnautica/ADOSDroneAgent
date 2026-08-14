@@ -515,10 +515,10 @@ impl ModemManager {
         self.iface_up()
     }
 
-    /// Read byte counters from `/sys/class/net/<iface>/statistics`. Pure sysfs;
-    /// returns zeros + `available:false` when the iface is absent. Mirrors
-    /// `data_usage`. (The chunk-2 data-cap tracker reads the same counters via
-    /// its own sysfs source; this is the modem-scoped view for the API.)
+    /// Read byte counters from `/sys/class/net/<iface>/statistics`. Pure sysfs; returns
+    /// zeros + `available:false` when the iface is absent. (The chunk-2 data-cap
+    /// tracker reads the same counters via its own sysfs source; this is the
+    /// modem-scoped view for the API.)
     pub fn data_usage(&self) -> Value {
         let iface = self.current_iface();
         let base = self.net_dir.join(&iface).join("statistics");
@@ -545,9 +545,8 @@ impl ModemManager {
     }
 
     /// Update the persisted config sidecar (atomic, byte-parity write). Returns
-    /// the new config as a dict. Mirrors `configure` (the bring-up/down side
-    /// effect is driven by the daemon, not here, to keep this lock-free of I/O
-    /// on the link).
+    /// the new config as a dict. The bring-up/down side effect is driven by the
+    /// daemon, not here, to keep this lock-free of I/O on the link.
     pub async fn configure(
         &self,
         apn: Option<&str>,
@@ -751,8 +750,7 @@ mod zbus_impl {
                 .map_err(|e| e.to_string())
         }
 
-        /// First `/Modem/N` object path (skipping `/Bearer/` children). Mirrors
-        /// `_list_modem_objects` filtering.
+        /// First `/Modem/N` object path (skipping `/Bearer/` children).
         async fn first_modem_path(&self, conn: &Connection) -> Result<String, String> {
             let om = Proxy::new(
                 conn,

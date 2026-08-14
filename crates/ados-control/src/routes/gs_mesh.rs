@@ -355,10 +355,8 @@ fn slice_routes(detail: &Map<String, Value>) -> Value {
     json!({ "routes": detail.get("neighbors").cloned().unwrap_or_else(|| json!([])) })
 }
 
-/// Project the `/mesh/gateways` shape: `{"gateways": ..., "selected": ...}`. The
-/// store path keys `selected` off `selected_gateway`. Mirrors the Python
-/// `slice_gateways` / `{"gateways": snap.get("gateways", []), "selected":
-/// snap.get("selected_gateway")}`.
+/// Project the `/mesh/gateways` shape: `{"gateways": ..., "selected": ...}`. The store
+/// path keys `selected` off `selected_gateway`.
 fn slice_gateways(detail: &Map<String, Value>) -> Value {
     json!({
         "gateways": detail.get("gateways").cloned().unwrap_or_else(|| json!([])),
@@ -374,9 +372,8 @@ fn slice_gateways(detail: &Map<String, Value>) -> Value {
 ///
 /// 404 with `E_PROFILE_MISMATCH` off a ground station. Otherwise always 200 with
 /// `{role, configured, supported, units, all_mesh_units}`: `role` from the on-disk
-/// sentinel, `configured` from the agent config (default `direct`), the supported
-/// list, the units the current role owns, and the full mesh-unit set. Mirrors the
-/// Python `get_role`.
+/// sentinel, `configured` from the agent config (default `direct`), the supported list,
+/// the units the current role owns, and the full mesh-unit set.
 pub async fn get_role() -> Response {
     use axum::response::IntoResponse;
     if !is_ground_station() {

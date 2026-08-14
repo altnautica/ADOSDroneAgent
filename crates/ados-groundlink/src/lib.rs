@@ -44,7 +44,8 @@ pub use ados_protocol::aux_rpc_proxy::{
 };
 pub use atlas_relay::{run_atlas_relay, AtlasRelayStats};
 pub use aux_consumer::{
-    run_aux_consumer, supervise_aux_consumer, AuxCounters, AuxCountersSnapshot,
+    run_aux_consumer, supervise_aux_consumer, AuxCounters, AuxCountersSnapshot, AuxSinks,
+    AuxSinksOwned,
 };
 pub use fanout::{run_default_fanout, run_fanout};
 pub use fleet::{

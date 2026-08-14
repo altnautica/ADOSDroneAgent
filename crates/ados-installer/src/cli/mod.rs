@@ -26,6 +26,10 @@ OPTIONS:
     --branch <name>                    Install from a git branch (dev)
     --channel <name>                   Release channel selector
     --version <ver>                    Pin an explicit agent version
+    --ref <commit>                     Pin the agent package AND the prebuilt
+                                       binaries to one revision, from that
+                                       commit's rev-<sha> release. Requires the
+                                       edge channel.
     --display <hint>                   Display hardware hint
     --camera <hint>                    Camera hardware hint
     --wifi-ssid <ssid>                 Join this Wi-Fi network during a headless

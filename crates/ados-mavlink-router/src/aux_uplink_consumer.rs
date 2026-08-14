@@ -130,6 +130,25 @@ struct CountersInner {
     /// re-running the HTTP call. This is what makes the ground's retransmission
     /// safe: a retried write replays the first answer rather than writing twice.
     rpc_requests_replayed: AtomicU64,
+    /// Config-over-radio request frames received: a config request the ground
+    /// station's injector sent, handed to the local config-tunnel service, which
+    /// serves it against `/api/config` and answers over the aux downlink.
+    config_tunnel_frames: AtomicU64,
+    /// Config-tunnel frames this hop handed to the local ingress socket without
+    /// error. Sub-tally of `config_tunnel_frames`, and the pair to
+    /// `config_tunnel_undelivered`.
+    ///
+    /// It does NOT mean the tunnel service read them. The ingress is an
+    /// unconnected UDP socket by design, so an absent listener cannot latch an
+    /// error onto it; the cost is that a send to an unbound port still
+    /// succeeds. On a node with the channel opted out this counter advances and
+    /// `config_tunnel_undelivered` stays at zero.
+    config_tunnel_forwarded: AtomicU64,
+    /// Config-tunnel frames the hand-off itself failed on: the ingress socket
+    /// could not be bound, or the send returned an error. Sub-tally of
+    /// `config_tunnel_frames`. Not the same thing as the service being absent,
+    /// which this cannot see.
+    config_tunnel_undelivered: AtomicU64,
 }
 
 #[derive(Clone, Default)]
@@ -156,6 +175,9 @@ pub struct AuxUplinkConsumerSnapshot {
     pub rpc_response_abandoned: u64,
     pub rpc_requests_duplicate: u64,
     pub rpc_requests_replayed: u64,
+    pub config_tunnel_frames: u64,
+    pub config_tunnel_forwarded: u64,
+    pub config_tunnel_undelivered: u64,
 }
 
 impl AuxUplinkConsumerCounters {
@@ -185,6 +207,9 @@ impl AuxUplinkConsumerCounters {
             rpc_response_abandoned: c.rpc_response_abandoned.load(Ordering::Relaxed),
             rpc_requests_duplicate: c.rpc_requests_duplicate.load(Ordering::Relaxed),
             rpc_requests_replayed: c.rpc_requests_replayed.load(Ordering::Relaxed),
+            config_tunnel_frames: c.config_tunnel_frames.load(Ordering::Relaxed),
+            config_tunnel_forwarded: c.config_tunnel_forwarded.load(Ordering::Relaxed),
+            config_tunnel_undelivered: c.config_tunnel_undelivered.load(Ordering::Relaxed),
         }
     }
 
@@ -224,16 +249,15 @@ impl AuxUplinkConsumerCounters {
 /// default 5603) and inject every decoded MAVLink frame into `fc`. Relay-proxy
 /// Request frames addressed to `own_device_id` (or broadcast) are forwarded to
 /// the local HTTP API via [`crate::aux_rpc_handler`], with `dedupe` making the
-/// ground's retransmissions idempotent. Runs until `cancel` fires; a bind
+/// ground's retransmissions idempotent. Config-over-radio frames are handed to
+/// the local config-tunnel service through `config_tunnel`, which is inert
+/// unless an operator opted that channel in. Runs until `cancel` fires; a bind
 /// failure is logged and the task exits (the uplink is simply unavailable,
 /// matching how a missing aux receiver already degrades elsewhere in this
 /// pipeline).
 pub async fn run(
     port: u16,
-    fc: Arc<FcConnection>,
-    egress: Option<Arc<AuxEgress>>,
-    own_device_id: Arc<str>,
-    dedupe: Arc<RequestDedupe>,
+    deps: UplinkDeps,
     counters: AuxUplinkConsumerCounters,
     cancel: Arc<Notify>,
 ) {
@@ -257,7 +281,7 @@ pub async fn run(
                 match recvd {
                     Ok(n) => {
                         counters.0.datagrams_received.fetch_add(1, Ordering::Relaxed);
-                        dispatch(&buf[..n], &fc, &counters, &egress, &own_device_id, &dedupe).await;
+                        dispatch(&buf[..n], &deps, &counters).await;
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "aux_uplink_consumer_recv_failed");
@@ -324,14 +348,20 @@ fn warn_target_mismatch_once(target: &[u8], own_device_id: &str) {
     );
 }
 
-async fn dispatch(
-    payload: &[u8],
-    fc: &Arc<FcConnection>,
-    counters: &AuxUplinkConsumerCounters,
-    egress: &Option<Arc<AuxEgress>>,
-    own_device_id: &str,
-    dedupe: &Arc<RequestDedupe>,
-) {
+/// Everything a decoded uplink frame may need, by channel.
+///
+/// Grouped rather than passed one by one: the read loop and the dispatcher both
+/// carry the whole set, so each added channel widened two signatures at once and
+/// pushed them past the argument limit. Adding a channel is now one field.
+pub struct UplinkDeps {
+    pub fc: Arc<FcConnection>,
+    pub egress: Option<Arc<AuxEgress>>,
+    pub own_device_id: Arc<str>,
+    pub dedupe: Arc<RequestDedupe>,
+    pub config_tunnel: Option<Arc<ados_protocol::config_tunnel_ingest::ConfigTunnelIngest>>,
+}
+
+async fn dispatch(payload: &[u8], deps: &UplinkDeps, counters: &AuxUplinkConsumerCounters) {
     let (channel, inner) = match aux_mux::decode(payload) {
         Ok(v) => v,
         Err(AuxDecodeError::BadMagic) => {
@@ -366,7 +396,7 @@ async fn dispatch(
                 // partial frame on the wire for the next one to concatenate
                 // onto, which the FC reports as a CRC failure that reads like
                 // line noise. A timeout there re-opens the link instead.
-                if !fc.send_bytes_bounded(frame, FC_WRITE_TIMEOUT).await {
+                if !deps.fc.send_bytes_bounded(frame, FC_WRITE_TIMEOUT).await {
                     counters
                         .0
                         .mavlink_write_timeouts
@@ -390,15 +420,15 @@ async fn dispatch(
                     // provisioned yet is a far worse failure. A named target that
                     // is not us is still dropped WITHOUT an answer, so the ground
                     // never mistakes this drone's response for the one it asked for.
-                    let addressed_elsewhere = !own_device_id.is_empty()
+                    let addressed_elsewhere = !deps.own_device_id.is_empty()
                         && !request.target.is_empty()
-                        && request.target != own_device_id.as_bytes();
+                        && request.target != deps.own_device_id.as_bytes();
                     if addressed_elsewhere {
                         counters
                             .0
                             .rpc_requests_not_for_us
                             .fetch_add(1, Ordering::Relaxed);
-                        warn_target_mismatch_once(request.target, own_device_id);
+                        warn_target_mismatch_once(request.target, &deps.own_device_id);
                         return;
                     }
                     let Ok(permit) = REQUEST_SLOTS.clone().try_acquire_owned() else {
@@ -409,16 +439,16 @@ async fn dispatch(
                         counters.0.rpc_requests_shed.fetch_add(1, Ordering::Relaxed);
                         return;
                     };
-                    if let Some(egress) = egress {
+                    if let Some(egress) = &deps.egress {
                         let id = request.id;
                         let method = request.method;
                         let path = request.path.to_vec();
                         let body = request.body.to_vec();
                         let ticket = request.ticket.to_vec();
                         let egress = Arc::clone(egress);
-                        let dedupe = Arc::clone(dedupe);
+                        let dedupe = Arc::clone(&deps.dedupe);
                         let counters = counters.clone();
-                        let sender = own_device_id.to_owned();
+                        let sender = deps.own_device_id.to_string();
                         tokio::spawn(async move {
                             let _permit = permit;
                             let req = ados_protocol::aux_rpc::RpcRequest {
@@ -491,6 +521,38 @@ async fn dispatch(
                     counters
                         .0
                         .link_feedback_undecodable
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+        // A config-over-radio frame from the ground station. The config-tunnel
+        // service cannot bind this lane's port — this consumer holds it — so the
+        // frame is handed to that service's own loopback ingress with its aux
+        // framing INTACT, so it re-checks the channel itself instead of trusting
+        // this hop. The service is the only thing that ever interprets a config
+        // frame; nothing here reads or acts on the config payload.
+        //
+        // Forwarded, never spawned: one small datagram per chunk, so the read
+        // loop pays a loopback write rather than a task.
+        AuxChannel::ConfigTunnel => {
+            counters
+                .0
+                .config_tunnel_frames
+                .fetch_add(1, Ordering::Relaxed);
+            match deps.config_tunnel.as_deref() {
+                Some(ingest) if ingest.send(payload).await => {
+                    counters
+                        .0
+                        .config_tunnel_forwarded
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                // The normal case with the channel opted out: nothing is bound
+                // to the ingress, so the frame is counted and dropped rather
+                // than reported as a fault.
+                _ => {
+                    counters
+                        .0
+                        .config_tunnel_undelivered
                         .fetch_add(1, Ordering::Relaxed);
                 }
             }
@@ -604,7 +666,18 @@ mod tests {
         let frame = heartbeat_bytes();
         let datagram = aux_mux::encode(AuxChannel::Mavlink, &frame).unwrap();
 
-        dispatch(&datagram, &fc, &counters, &None, OWN_ID, &dedupe()).await;
+        dispatch(
+            &datagram,
+            &UplinkDeps {
+                fc,
+                egress: None,
+                own_device_id: OWN_ID.into(),
+                dedupe: dedupe(),
+                config_tunnel: None,
+            },
+            &counters,
+        )
+        .await;
 
         assert_eq!(*captured.lock().unwrap(), frame);
         let snap = counters.snapshot();
@@ -624,11 +697,14 @@ mod tests {
         let counters = AuxUplinkConsumerCounters::new();
         dispatch(
             b"not-an-aux-frame-at-all",
-            &fc,
+            &UplinkDeps {
+                fc,
+                egress: None,
+                own_device_id: OWN_ID.into(),
+                dedupe: dedupe(),
+                config_tunnel: None,
+            },
             &counters,
-            &None,
-            OWN_ID,
-            &dedupe(),
         )
         .await;
 
@@ -652,7 +728,18 @@ mod tests {
         batch.extend_from_slice(&one);
         let datagram = aux_mux::encode(AuxChannel::Mavlink, &batch).unwrap();
 
-        dispatch(&datagram, &fc, &counters, &None, OWN_ID, &dedupe()).await;
+        dispatch(
+            &datagram,
+            &UplinkDeps {
+                fc,
+                egress: None,
+                own_device_id: OWN_ID.into(),
+                dedupe: dedupe(),
+                config_tunnel: None,
+            },
+            &counters,
+        )
+        .await;
 
         assert_eq!(
             *captured.lock().unwrap(),
@@ -725,11 +812,14 @@ mod tests {
         let counters = AuxUplinkConsumerCounters::new();
         dispatch(
             &feedback_datagram(&measured_feedback()),
-            &fc,
+            &UplinkDeps {
+                fc,
+                egress: None,
+                own_device_id: OWN_ID.into(),
+                dedupe: dedupe(),
+                config_tunnel: None,
+            },
             &counters,
-            &None,
-            OWN_ID,
-            &dedupe(),
         )
         .await;
 
@@ -773,7 +863,18 @@ mod tests {
         )
         .unwrap();
         let datagram = aux_mux::encode(AuxChannel::Request, &payload).unwrap();
-        dispatch(&datagram, &fc, &counters, &None, OWN_ID, &dedupe()).await;
+        dispatch(
+            &datagram,
+            &UplinkDeps {
+                fc,
+                egress: None,
+                own_device_id: OWN_ID.into(),
+                dedupe: dedupe(),
+                config_tunnel: None,
+            },
+            &counters,
+        )
+        .await;
 
         assert_eq!(
             counters.snapshot().rpc_requests_shed,
@@ -805,11 +906,14 @@ mod tests {
         // The record measures slot 1; this node is slot 2.
         dispatch(
             &feedback_datagram(&measured_feedback()),
-            &fc,
+            &UplinkDeps {
+                fc,
+                egress: None,
+                own_device_id: OWN_ID.into(),
+                dedupe: dedupe(),
+                config_tunnel: None,
+            },
             &counters,
-            &None,
-            OWN_ID,
-            &dedupe(),
         )
         .await;
 
@@ -845,11 +949,14 @@ mod tests {
         let counters = AuxUplinkConsumerCounters::new();
         dispatch(
             &feedback_datagram(&measured_feedback()),
-            &fc,
+            &UplinkDeps {
+                fc,
+                egress: None,
+                own_device_id: OWN_ID.into(),
+                dedupe: dedupe(),
+                config_tunnel: None,
+            },
             &counters,
-            &None,
-            OWN_ID,
-            &dedupe(),
         )
         .await;
 
@@ -874,7 +981,18 @@ mod tests {
         // Truncated record: decoding it as zeros would hand the ladder an
         // artificially clean link and push the rate the wrong way.
         let truncated = aux_mux::encode(AuxChannel::LinkFeedback, &[1u8, 0, 0, 0]).unwrap();
-        dispatch(&truncated, &fc, &counters, &None, OWN_ID, &dedupe()).await;
+        dispatch(
+            &truncated,
+            &UplinkDeps {
+                fc,
+                egress: None,
+                own_device_id: OWN_ID.into(),
+                dedupe: dedupe(),
+                config_tunnel: None,
+            },
+            &counters,
+        )
+        .await;
 
         let snap = counters.snapshot();
         assert_eq!(snap.link_feedback_frames, 1);
@@ -903,7 +1021,18 @@ mod tests {
         .unwrap();
         let datagram = aux_mux::encode(AuxChannel::Request, &payload).unwrap();
 
-        dispatch(&datagram, &fc, &counters, &None, OWN_ID, &dedupe()).await;
+        dispatch(
+            &datagram,
+            &UplinkDeps {
+                fc,
+                egress: None,
+                own_device_id: OWN_ID.into(),
+                dedupe: dedupe(),
+                config_tunnel: None,
+            },
+            &counters,
+        )
+        .await;
 
         let snap = counters.snapshot();
         assert_eq!(snap.rpc_requests, 1);
@@ -928,7 +1057,18 @@ mod tests {
             .unwrap();
             let datagram = aux_mux::encode(AuxChannel::Request, &payload).unwrap();
 
-            dispatch(&datagram, &fc, &counters, &None, OWN_ID, &dedupe()).await;
+            dispatch(
+                &datagram,
+                &UplinkDeps {
+                    fc,
+                    egress: None,
+                    own_device_id: OWN_ID.into(),
+                    dedupe: dedupe(),
+                    config_tunnel: None,
+                },
+                &counters,
+            )
+            .await;
 
             let snap = counters.snapshot();
             assert_eq!(snap.rpc_requests, 1);
@@ -954,7 +1094,18 @@ mod tests {
         .unwrap();
         let datagram = aux_mux::encode(AuxChannel::Request, &payload).unwrap();
 
-        dispatch(&datagram, &fc, &counters, &None, "", &dedupe()).await;
+        dispatch(
+            &datagram,
+            &UplinkDeps {
+                fc,
+                egress: None,
+                own_device_id: "".into(),
+                dedupe: dedupe(),
+                config_tunnel: None,
+            },
+            &counters,
+        )
+        .await;
 
         let snap = counters.snapshot();
         assert_eq!(snap.rpc_requests, 1);
@@ -976,13 +1127,109 @@ mod tests {
         let counters = AuxUplinkConsumerCounters::new();
         let datagram = aux_mux::encode(AuxChannel::Mavlink, &heartbeat_bytes()).unwrap();
 
-        dispatch(&datagram, &fc, &counters, &None, OWN_ID, &dedupe()).await;
+        dispatch(
+            &datagram,
+            &UplinkDeps {
+                fc,
+                egress: None,
+                own_device_id: OWN_ID.into(),
+                dedupe: dedupe(),
+                config_tunnel: None,
+            },
+            &counters,
+        )
+        .await;
 
         let snap = counters.snapshot();
         assert_eq!(snap.mavlink_write_timeouts, 1);
         assert_eq!(
             snap.mavlink_injected, 0,
             "a write that never completed is not an injection"
+        );
+    }
+
+    /// The drone half of the config-over-radio bridge: a request from the ground
+    /// station is handed to the local config-tunnel service with its aux framing
+    /// intact, and never touches the flight controller.
+    #[tokio::test]
+    async fn a_config_tunnel_frame_is_forwarded_to_the_local_service_and_not_to_the_fc() {
+        use ados_protocol::config_tunnel_ingest::ConfigTunnelIngest;
+
+        let (fc, captured) = test_connection();
+        fc.connected
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        *fc.writer.lock().await = Some(Box::pin(CapturingWriter(captured.clone())));
+
+        // Stands in for the config-tunnel service's own loopback ingress.
+        let service = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let tunnel = ConfigTunnelIngest::new(service.local_addr().unwrap().port());
+
+        let counters = AuxUplinkConsumerCounters::new();
+        let datagram = aux_mux::encode(AuxChannel::ConfigTunnel, b"a-tunnel-frame").unwrap();
+        dispatch(
+            &datagram,
+            &UplinkDeps {
+                fc,
+                egress: None,
+                own_device_id: OWN_ID.into(),
+                dedupe: dedupe(),
+                config_tunnel: Some(Arc::new(tunnel)),
+            },
+            &counters,
+        )
+        .await;
+
+        let mut buf = [0u8; 256];
+        let (n, _) = service.recv_from(&mut buf).await.unwrap();
+        assert_eq!(
+            &buf[..n],
+            datagram.as_slice(),
+            "framing must survive the hop"
+        );
+        assert!(
+            captured.lock().unwrap().is_empty(),
+            "a config frame must never reach the flight controller"
+        );
+
+        let snap = counters.snapshot();
+        assert_eq!(snap.config_tunnel_frames, 1);
+        assert_eq!(snap.config_tunnel_forwarded, 1);
+        assert_eq!(snap.config_tunnel_undelivered, 0);
+        assert_eq!(snap.mavlink_injected, 0);
+    }
+
+    /// The channel is opt-in, so most drones run no config-tunnel service. Such
+    /// a frame is counted and dropped rather than read as a fault — and it still
+    /// must not reach the FC.
+    #[tokio::test]
+    async fn a_config_tunnel_frame_with_no_local_service_is_counted_not_lost() {
+        let (fc, captured) = test_connection();
+        fc.connected
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        *fc.writer.lock().await = Some(Box::pin(CapturingWriter(captured.clone())));
+
+        let counters = AuxUplinkConsumerCounters::new();
+        let datagram = aux_mux::encode(AuxChannel::ConfigTunnel, b"a-tunnel-frame").unwrap();
+        dispatch(
+            &datagram,
+            &UplinkDeps {
+                fc,
+                egress: None,
+                own_device_id: OWN_ID.into(),
+                dedupe: dedupe(),
+                config_tunnel: None,
+            },
+            &counters,
+        )
+        .await;
+
+        assert!(captured.lock().unwrap().is_empty());
+        let snap = counters.snapshot();
+        assert_eq!(snap.config_tunnel_frames, 1);
+        assert_eq!(snap.config_tunnel_undelivered, 1);
+        assert_eq!(
+            snap.non_mavlink_channel, 0,
+            "a known channel must not fall through to the unknown-channel tally"
         );
     }
 }

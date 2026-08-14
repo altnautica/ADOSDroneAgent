@@ -91,9 +91,8 @@ fn etc_dir() -> PathBuf {
     PathBuf::from(std::env::var("ADOS_ETC_DIR").unwrap_or_else(|_| "/etc/ados".to_string()))
 }
 
-/// The persisted uplink priority list (`/etc/ados/ground-station-uplink.json`),
-/// the same file the read module reads and the `ados-net` daemon loads. Mirrors
-/// the Python `GS_UPLINK_JSON`.
+/// The persisted uplink priority list (`/etc/ados/ground-station-uplink.json`), the
+/// same file the read module reads and the `ados-net` daemon loads.
 fn gs_uplink_json() -> PathBuf {
     etc_dir().join("ground-station-uplink.json")
 }
@@ -265,13 +264,10 @@ fn socket_unavailable(code: &str) -> Response {
 // PUT /api/v1/ground-station/network/priority — set the uplink priority list.
 // ---------------------------------------------------------------------------
 
-/// The `PUT .../network/priority` request body: the ordered uplink list. Mirrors
-/// the FastAPI `UplinkPriorityUpdate`. The Pydantic model carries `min_length=1`,
-/// so the FastAPI surface rejects an empty list with a 422 *before* the handler;
-/// the front has no such pre-validation, so an empty (or non-string) list reaches
-/// the handler and is rejected by the same `validate_priority` guard the FastAPI
-/// handler runs (the 400 below). The valid path — a non-empty list of strings —
-/// is byte-identical on both surfaces.
+/// The `PUT .../network/priority` request body: the ordered uplink list. There is no
+/// schema pre-validation, so an empty (or non-string) list reaches the handler and is
+/// rejected by the guard below with a 400. The valid path is a non-empty list of
+/// strings.
 #[derive(Debug, Deserialize)]
 pub struct UplinkPriorityUpdate {
     pub priority: Vec<Value>,
@@ -459,14 +455,11 @@ fn hotspot_section_mut(data: &mut serde_norway::Value) -> Option<&mut serde_norw
 // PUT /api/v1/ground-station/network/ethernet — apply the Ethernet IPv4 profile.
 // ---------------------------------------------------------------------------
 
-/// The `PUT .../network/ethernet` request body. Mirrors the FastAPI
-/// `EthernetConfigUpdate`: a required `mode` (`dhcp` | `static`) plus the static
-/// fields. The Pydantic field validators reject a malformed `ip` (must be IPv4
-/// with a CIDR suffix), `gateway` (IPv4), or `dns` (each IPv4) with a 422 before
-/// the handler; the front has no Pydantic pre-validation, so a malformed value
-/// reaches the daemon's `nmcli` apply and surfaces as `E_ETHERNET_APPLY_FAILED`
-/// — the same no-pre-validation posture the priority route documents. The valid
-/// path is byte-identical.
+/// The `PUT .../network/ethernet` request body. A required `mode` (`dhcp` | `static`)
+/// plus the static fields. There is no schema pre-validation, so a malformed `ip` (IPv4
+/// with a CIDR suffix), `gateway` (IPv4) or `dns` (each IPv4) reaches the daemon's
+/// `nmcli` apply and surfaces as `E_ETHERNET_APPLY_FAILED` — the same posture the
+/// priority route documents.
 #[derive(Debug, Deserialize)]
 pub struct EthernetConfigUpdate {
     pub mode: String,
@@ -566,11 +559,10 @@ pub async fn put_network_ethernet(
 // PUT /api/v1/ground-station/network/modem — update the cellular modem config.
 // ---------------------------------------------------------------------------
 
-/// The `PUT .../network/modem` request body. Mirrors the FastAPI
-/// `ModemConfigUpdate`: the GET view reports the cap as `cap_mb`, so a client that
-/// round-trips the view sends `cap_mb` back. `cap_gb` wins when both are present;
-/// otherwise `cap_mb` is converted to `cap_gb` before it reaches the manager
-/// (which persists in GB).
+/// The `PUT .../network/modem` request body. The GET view reports the cap as `cap_mb`,
+/// so a client that round-trips the view sends `cap_mb` back. `cap_gb` wins when both
+/// are present; otherwise `cap_mb` is converted to `cap_gb` before it reaches the
+/// manager (which persists in GB).
 #[derive(Debug, Deserialize)]
 pub struct ModemConfigUpdate {
     #[serde(default)]
@@ -635,8 +627,7 @@ pub async fn put_network_modem(
 // PUT /api/v1/ground-station/network/share_uplink — toggle the NAT share flag.
 // ---------------------------------------------------------------------------
 
-/// The `PUT .../network/share_uplink` request body. Mirrors the FastAPI
-/// `ShareUplinkUpdate`: a single required `enabled` flag.
+/// The `PUT .../network/share_uplink` request body. A single required `enabled` flag.
 #[derive(Debug, Deserialize)]
 pub struct ShareUplinkUpdate {
     pub enabled: bool,
@@ -816,7 +807,7 @@ async fn put_gs_network_client_join_at(sock: &Path, req: GsWifiJoinRequest) -> R
         .get("joined")
         .map(|v| v.as_bool().unwrap_or(false))
         .unwrap_or(false);
-    if !joined && reply.get("error").and_then(Value::as_str) == Some("wlan0_busy_ap_active") {
+    if !joined && reply.get("error").and_then(Value::as_str) == Some("station_busy_ap_active") {
         let hint = reply
             .get("hint")
             .and_then(Value::as_str)
@@ -1268,7 +1259,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sock = canned_socket(
             dir.path(),
-            r#"{"ok":true,"joined":false,"error":"wlan0_busy_ap_active"}"#,
+            r#"{"ok":true,"joined":false,"error":"station_busy_ap_active"}"#,
         )
         .await;
         let resp = put_gs_network_client_join_at(&sock, join("BenchNet", None)).await;

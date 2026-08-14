@@ -253,7 +253,7 @@ async fn put_client_join_at(sock: &std::path::Path, req: WifiJoinRequest) -> Res
     let joined = reply.get("joined").map(json_truthy).unwrap_or(false);
     if !joined {
         let err = reply.get("error").and_then(Value::as_str).unwrap_or("");
-        if err == "wlan0_busy_ap_active" {
+        if err == "station_busy_ap_active" {
             let hint = reply
                 .get("hint")
                 .and_then(Value::as_str)
@@ -682,7 +682,7 @@ mod tests {
     #[tokio::test]
     async fn join_maps_the_ap_busy_result_to_a_409() {
         let out = with_socket(
-            json!({"ok": true, "joined": false, "error": "wlan0_busy_ap_active"}),
+            json!({"ok": true, "joined": false, "error": "station_busy_ap_active"}),
             |sock| async move {
                 put_client_join_at(
                     &sock,

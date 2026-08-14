@@ -73,6 +73,40 @@ fn default_endpoints() -> Vec<EndpointConfig> {
 fn default_ws_proxy_enforce_auth() -> bool {
     true
 }
+/// Whether an unauthorized RAW byte-stream connection (TCP 5760, UDP 14550) is
+/// REFUSED rather than merely recorded.
+///
+/// Off, and the asymmetry with [`default_ws_proxy_enforce_auth`] is deliberate
+/// rather than a rollout that was never finished. The WebSocket enforces
+/// because it has two credential channels an off-box client can actually use:
+/// the `X-ADOS-Key` header for a native client and the `ados-ws-ticket`
+/// subprotocol for a browser. The raw edges have NEITHER -- there is no
+/// handshake and no header on a MAVLink byte stream, so
+/// [`crate::proxies::WsProxyAuth::classify`] presents no key at all. On a
+/// PAIRED node, enforcing there makes every off-box peer unauthorized with no
+/// remedy available on the client side, and the published documentation tells
+/// operators these ports are credential-free precisely so a desktop GCS can
+/// attach. Turning it on is therefore a deliberate lockdown of the third-party
+/// GCS path, not a hardening default.
+fn default_raw_proxy_enforce_auth() -> bool {
+    false
+}
+/// Whether a client whose origin could not be authenticated is REFUSED the
+/// aux-radio uplink rather than merely recorded.
+///
+/// Off. The uplink fallback is taken only when this node has no local flight
+/// controller, i.e. on a ground station relaying a drone that may be flying, so
+/// a refusal lands on the operator's screen mid-flight rather than at install
+/// time. It is a flag so a fleet that has finished credentialing its clients
+/// can close the edge; it is not the default while third-party ground stations
+/// are documented as attaching without one.
+///
+/// Scope note: this gates the `Unauthenticated` origin ONLY. See
+/// [`crate::connection::FcConnection::send_client_bytes`] for why `Relayed` is
+/// exempt under both settings.
+fn default_aux_uplink_enforce_origin() -> bool {
+    false
+}
 fn default_legacy_stream_request() -> bool {
     false
 }
@@ -125,13 +159,29 @@ pub struct MavlinkConfig {
     pub component_id: u8,
     #[serde(default = "default_endpoints")]
     pub endpoints: Vec<EndpointConfig>,
-    /// When true, the direct-GCS WebSocket proxy rejects a paired-agent
-    /// connection from an off-box peer that does not present the stored pairing
-    /// key. When false (the default), an unauthorized connection is logged but
-    /// still admitted, so the data-path behaviour is unchanged until a bench
-    /// session enables enforcement.
+    /// When true (the default), the direct-GCS WebSocket proxy rejects a
+    /// paired-agent connection from an off-box peer that does not present the
+    /// stored pairing key or a valid ticket. When false, an unauthorized
+    /// connection is logged but still admitted, which is the escape hatch for
+    /// an operator whose third-party client can present neither.
     #[serde(default = "default_ws_proxy_enforce_auth")]
     pub ws_proxy_enforce_auth: bool,
+    /// When true, the raw byte-stream proxies (TCP 5760, UDP 14550) refuse an
+    /// unauthorized peer instead of logging it and serving it anyway. False by
+    /// default: unlike the WebSocket, these edges carry no credential channel
+    /// at all, so enforcement on a paired node refuses every off-box GCS with
+    /// nothing the client can do about it. See
+    /// [`default_raw_proxy_enforce_auth`].
+    #[serde(default = "default_raw_proxy_enforce_auth")]
+    pub raw_proxy_enforce_auth: bool,
+    /// When true, a client this router could not authenticate is refused the
+    /// aux-radio uplink instead of being logged and relayed anyway. False by
+    /// default. The `Relayed` origin is exempt under both settings -- it names
+    /// the cloud relay's own declared forwarding, which is the production
+    /// remote-command path for a ground-station-relayed drone. See
+    /// [`default_aux_uplink_enforce_origin`].
+    #[serde(default = "default_aux_uplink_enforce_origin")]
+    pub aux_uplink_enforce_origin: bool,
     /// Whether the legacy `REQUEST_DATA_STREAM` group requests are sent
     /// alongside the modern `SET_MESSAGE_INTERVAL` per-message requests on every
     /// stream refresh. OFF by default — see
@@ -227,6 +277,8 @@ impl Default for MavlinkConfig {
             component_id: default_component_id(),
             endpoints: default_endpoints(),
             ws_proxy_enforce_auth: default_ws_proxy_enforce_auth(),
+            raw_proxy_enforce_auth: default_raw_proxy_enforce_auth(),
+            aux_uplink_enforce_origin: default_aux_uplink_enforce_origin(),
             legacy_stream_request: default_legacy_stream_request(),
             crsf_device: String::new(),
             crsf_enabled: false,
@@ -572,6 +624,51 @@ mod tests {
         let cfg = dir.path().join("config.yaml");
         write(&cfg, "mavlink:\n  ws_proxy_enforce_auth: false\n");
         assert!(!MavlinkConfig::load_from(&cfg).ws_proxy_enforce_auth);
+    }
+
+    #[test]
+    fn raw_proxy_enforce_auth_defaults_off() {
+        // The opposite default from the WebSocket, and deliberately so: the raw
+        // edges carry no credential channel, so enforcement there refuses every
+        // off-box GCS on a paired node with no client-side remedy. A missing
+        // file and a config that omits the flag must both leave it off.
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!MavlinkConfig::load_from(&dir.path().join("nope.yaml")).raw_proxy_enforce_auth);
+        let cfg = dir.path().join("config.yaml");
+        write(&cfg, "mavlink:\n  serial_port: /dev/ttyACM0\n");
+        assert!(!MavlinkConfig::load_from(&cfg).raw_proxy_enforce_auth);
+        // The two edges are separately controlled: turning the raw one on must
+        // not be reachable by accident from the WebSocket's own default.
+        assert!(MavlinkConfig::load_from(&cfg).ws_proxy_enforce_auth);
+    }
+
+    #[test]
+    fn raw_proxy_enforce_auth_can_be_turned_on_explicitly() {
+        // The lockdown exists and is reachable: an operator running only
+        // first-party clients on a paired node can close the raw edges.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        write(&cfg, "mavlink:\n  raw_proxy_enforce_auth: true\n");
+        assert!(MavlinkConfig::load_from(&cfg).raw_proxy_enforce_auth);
+    }
+
+    #[test]
+    fn aux_uplink_enforce_origin_defaults_off() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!MavlinkConfig::load_from(&dir.path().join("nope.yaml")).aux_uplink_enforce_origin);
+        let cfg = dir.path().join("config.yaml");
+        write(&cfg, "mavlink:\n  serial_port: /dev/ttyACM0\n");
+        assert!(!MavlinkConfig::load_from(&cfg).aux_uplink_enforce_origin);
+    }
+
+    #[test]
+    fn aux_uplink_enforce_origin_can_be_turned_on_explicitly() {
+        // A fleet that has finished credentialing its clients can close the
+        // relay edge without waiting for a build.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        write(&cfg, "mavlink:\n  aux_uplink_enforce_origin: true\n");
+        assert!(MavlinkConfig::load_from(&cfg).aux_uplink_enforce_origin);
     }
 
     #[test]

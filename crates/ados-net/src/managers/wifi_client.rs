@@ -1,14 +1,19 @@
 //! WiFi client (station) manager for the ground-station profile.
 //!
-//! The onboard wlan0 radio is either an AP (hostapd) or a station joining an
-//! upstream network for backhaul; the two are mutually exclusive on one radio.
-//! This manager coordinates with the AP service through an advisory file lock
-//! and a "was the AP up?" flag so a failed join restores the AP. NetworkManager
-//! owns credential storage; we persist only the "enabled on boot" flag and the
-//! last SSID. Implements the [`UplinkManager`] trait. Ports
+//! The onboard management radio is either an AP (hostapd) or a station joining
+//! an upstream network for backhaul; the two are mutually exclusive on one
+//! radio. This manager coordinates with the AP service through an advisory file
+//! lock and a "was the AP up?" flag so a failed join restores the AP.
+//! NetworkManager owns credential storage; we persist only the "enabled on
+//! boot" flag and the last SSID. Implements the [`UplinkManager`] trait. Ports
 //! `wifi_client_manager.py`.
 //!
-//! RISK: the wlan0 lock must live across the whole `stop-hostapd → nmcli
+//! The interface is resolved by DRIVER, never assumed to be `wlan0`: names race
+//! at boot, and a station bound to the wrong name runs `nmcli` on the aircraft's
+//! flight radio. The lock file is named after the resolved interface for the
+//! same reason.
+//!
+//! RISK: the station lock must live across the whole `stop-hostapd → nmcli
 //! connect` window and be released only by [`WifiClientManager::leave`] (or a
 //! failed join's cleanup). It is held in the manager struct, not taken and
 //! dropped per call.
@@ -28,9 +33,11 @@ use crate::router::UplinkManager;
 
 use self::lock::Wlan0Lock;
 
-const WLAN_IFACE: &str = "wlan0";
+/// Fallback station interface, used only when driver resolution finds no
+/// onboard WiFi (mirrors the AP guard's `AP_IFACE_FALLBACK`).
+const WLAN_IFACE_FALLBACK: &str = "wlan0";
 const HOSTAPD_UNIT: &str = "ados-hostapd.service";
-const LOCK_PATH: &str = "/var/lock/ados-wlan0.lock";
+const LOCK_DIR: &str = "/var/lock";
 const AP_FLAG_PATH: &str = crate::paths::AP_WAS_ENABLED_FLAG;
 const CLIENT_CONFIG_PATH: &str = "/etc/ados/ground-station-wifi-client.json";
 
@@ -50,25 +57,79 @@ pub struct ClientConfig {
     pub last_ssid: Option<String>,
 }
 
-/// NetworkManager-backed WiFi station manager for wlan0.
+/// The advisory lock file name for a station interface.
+///
+/// Derived from the interface rather than fixed at `ados-wlan0.lock`: the lock
+/// only keeps hostapd off the radio while both holders name the same file, so a
+/// lock named for `wlan0` held while the station drives `wlan1` excludes nobody.
+fn lock_file_name(iface: &str) -> String {
+    format!("ados-{iface}.lock")
+}
+
+/// [`lock_file_name`] under the system lock directory.
+fn lock_path_for(iface: &str) -> PathBuf {
+    PathBuf::from(LOCK_DIR).join(lock_file_name(iface))
+}
+
+/// Pick the station interface out of an already-enumerated wireless set.
+///
+/// The station and the access point contend for ONE radio, so both resolve from
+/// the same inputs by the same rule (`choose_ap_interface`, the pure core of
+/// `resolve_ap_interface`). Measured across three reboots of a ground station,
+/// `wlan0` was the onboard chip twice and the USB long-range radio once, so a
+/// name-bound station would have driven the flight link one boot in three.
+///
+/// Falls back to the historical name rather than refusing, matching the AP
+/// guard: `join` refuses separately when the radio is already claimed.
+fn station_iface_from(
+    ifaces: &[ados_protocol::netif::WirelessIface],
+    configured: &str,
+    radio_iface: Option<&str>,
+) -> String {
+    match ados_protocol::netif::choose_ap_interface(ifaces, configured, radio_iface) {
+        Ok(iface) => iface,
+        Err(exc) => {
+            warn!(error = %exc, fallback = WLAN_IFACE_FALLBACK, "station_iface_unresolved");
+            WLAN_IFACE_FALLBACK.to_string()
+        }
+    }
+}
+
+/// [`station_iface_from`] against the live `/sys/class/net`, the operator's pin,
+/// and the interface the radio itself reports it took.
+fn station_interface() -> String {
+    station_iface_from(
+        &ados_protocol::netif::list_wireless(),
+        &ados_protocol::ap_country::configured_ap_interface(),
+        ados_protocol::netif::radio_interface().as_deref(),
+    )
+}
+
+/// NetworkManager-backed WiFi station manager for the onboard management radio.
 pub struct WifiClientManager {
     interface: String,
     runner: Arc<dyn CmdRunner>,
     lock_path: PathBuf,
     ap_flag_path: PathBuf,
     client_config_path: PathBuf,
-    /// The held wlan0 advisory lock. `Some` while we own the radio for STA mode
+    /// The held station advisory lock. `Some` while we own the radio for STA mode
     /// across the stop-hostapd → connect window; dropped on `leave`.
     lock: Option<Wlan0Lock>,
 }
 
 impl WifiClientManager {
     /// Manager with canonical paths and the production runner.
+    ///
+    /// Resolves the radio at construction, the same point `EthernetManager` and
+    /// the AP guard resolve theirs, so a boot-time udev race cannot leave the
+    /// station pointed at whatever enumerated as `wlan0` this time.
     pub fn new(runner: Arc<dyn CmdRunner>) -> Self {
+        let interface = station_interface();
+        let lock_path = lock_path_for(&interface);
         Self::with_paths(
-            WLAN_IFACE,
+            interface,
             runner,
-            PathBuf::from(LOCK_PATH),
+            lock_path,
             PathBuf::from(AP_FLAG_PATH),
             PathBuf::from(CLIENT_CONFIG_PATH),
         )
@@ -92,14 +153,14 @@ impl WifiClientManager {
         }
     }
 
-    /// True while the manager holds the wlan0 advisory lock.
+    /// True while the manager holds the station advisory lock.
     pub fn holds_lock(&self) -> bool {
         self.lock.is_some()
     }
 
     // ---------------- lock handling ----------------
 
-    /// Acquire the exclusive non-blocking wlan0 lock and stash it in the
+    /// Acquire the exclusive non-blocking station lock and stash it in the
     /// struct. Returns false when another holder owns it.
     fn acquire_lock(&mut self) -> bool {
         if self.lock.is_some() {
@@ -111,7 +172,7 @@ impl WifiClientManager {
                 true
             }
             Err(exc) => {
-                warn!(error = %exc, "wlan0_lock_failed");
+                warn!(error = %exc, "station_lock_failed");
                 false
             }
         }
@@ -189,7 +250,11 @@ impl WifiClientManager {
 
     // ---------------- public API ----------------
 
-    /// Join a WiFi network, coordinating wlan0 with hostapd. Mirrors `join`.
+    /// Join a WiFi network, coordinating the station radio with hostapd.
+    ///
+    /// Every refusal names the interface it is talking about. The station is
+    /// resolved by driver, not by name, so an operator reading `station_locked`
+    /// cannot otherwise tell which radio is held.
     pub async fn join(&mut self, ssid: &str, passphrase: Option<&str>, force: bool) -> Value {
         if ssid.is_empty() {
             return json!({"joined": false, "error": "ssid_required", "ip": null, "gateway": null});
@@ -199,15 +264,22 @@ impl WifiClientManager {
         if ap_active && !force {
             return json!({
                 "joined": false,
-                "error": "wlan0_busy_ap_active",
+                "error": "station_busy_ap_active",
                 "hint": "Stop AP first or force",
+                "interface": self.interface,
                 "ip": null,
                 "gateway": null,
             });
         }
 
         if !self.acquire_lock() {
-            return json!({"joined": false, "error": "wlan0_locked", "ip": null, "gateway": null});
+            return json!({
+                "joined": false,
+                "error": "station_locked",
+                "interface": self.interface,
+                "ip": null,
+                "gateway": null,
+            });
         }
 
         // Record whether the AP was up so leave() (or a failed join) restores it.
@@ -680,10 +752,67 @@ mod tests {
         WifiClientManager::with_paths(
             "wlan0",
             runner,
-            dir.join("ados-wlan0.lock"),
+            dir.join(lock_file_name("wlan0")),
             dir.join("ap-was-enabled"),
             dir.join("ground-station-wifi-client.json"),
         )
+    }
+
+    /// A sysfs `/sys/class/net` stand-in: each entry gets a `phy80211` marker
+    /// (what `is_wireless_in` reads) and a `device/driver` symlink whose target
+    /// name is the driver.
+    fn fake_net_root(dir: &std::path::Path, ifaces: &[(&str, &str)]) -> std::path::PathBuf {
+        let root = dir.join("class-net");
+        for (name, driver) in ifaces {
+            let iface = root.join(name);
+            std::fs::create_dir_all(iface.join("phy80211")).unwrap();
+            std::fs::create_dir_all(iface.join("device")).unwrap();
+            let target = dir.join("drivers").join(driver);
+            std::fs::create_dir_all(&target).unwrap();
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&target, iface.join("device").join("driver")).unwrap();
+        }
+        root
+    }
+
+    #[test]
+    fn station_resolves_past_a_radio_that_enumerated_first() {
+        // The inversion that motivated the change: `wlan0` is the USB injection
+        // radio this boot and the onboard chip came up as `wlan1`. A name-bound
+        // station would run nmcli on the aircraft's flight link.
+        let dir = tempfile::tempdir().unwrap();
+        let root = fake_net_root(dir.path(), &[("wlan0", "rtl88x2eu"), ("wlan1", "brcmfmac")]);
+        let ifaces = ados_protocol::netif::list_wireless_in(&root);
+        assert_eq!(ifaces.first().map(|c| c.name.as_str()), Some("wlan0"));
+        assert_eq!(station_iface_from(&ifaces, "", None), "wlan1");
+        // The lock is named for the radio actually held, so hostapd's holder and
+        // this one collide on the same file instead of passing each other by.
+        assert_eq!(
+            lock_path_for(&station_iface_from(&ifaces, "", None)),
+            std::path::PathBuf::from("/var/lock/ados-wlan1.lock")
+        );
+    }
+
+    #[test]
+    fn station_falls_back_when_no_onboard_wifi_is_present() {
+        // Radio-only box: no onboard management chip to hand the station. The
+        // historical name is returned rather than a refusal, matching the AP
+        // guard; the join path is what refuses when the radio is claimed.
+        let dir = tempfile::tempdir().unwrap();
+        let root = fake_net_root(dir.path(), &[("wlan0", "rtl88x2eu")]);
+        let ifaces = ados_protocol::netif::list_wireless_in(&root);
+        assert_eq!(station_iface_from(&ifaces, "", None), "wlan0");
+    }
+
+    #[test]
+    fn station_refuses_to_take_the_interface_the_radio_reports() {
+        // The radio's own published verdict outranks classification: even when
+        // the driver table would accept `wlan1`, a radio claiming it means the
+        // station must not touch it.
+        let dir = tempfile::tempdir().unwrap();
+        let root = fake_net_root(dir.path(), &[("wlan0", "brcmfmac"), ("wlan1", "brcmfmac")]);
+        let ifaces = ados_protocol::netif::list_wireless_in(&root);
+        assert_eq!(station_iface_from(&ifaces, "", Some("wlan0")), "wlan1");
     }
 
     #[test]
@@ -700,7 +829,7 @@ mod tests {
         let r2 = Arc::new(ScriptedRunner::new());
         let mut m2 = mgr(dir.path(), r2);
         // Point m2 at m1's exact lock file.
-        m2.lock_path = dir.path().join("ados-wlan0.lock");
+        m2.lock_path = dir.path().join(lock_file_name("wlan0"));
         assert!(!m2.acquire_lock(), "second holder must fail while m1 holds");
         assert!(!m2.holds_lock());
 
@@ -773,7 +902,7 @@ mod tests {
         let mut m = mgr(dir.path(), runner);
         let res = m.join("SomeAP", Some("pw"), false).await;
         assert_eq!(res["joined"], false);
-        assert_eq!(res["error"], "wlan0_busy_ap_active");
+        assert_eq!(res["error"], "station_busy_ap_active");
         // Did NOT take the lock on the refusal path.
         assert!(!m.holds_lock());
     }

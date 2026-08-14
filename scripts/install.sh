@@ -10,14 +10,21 @@
 #   curl -sSL .../scripts/install.sh | sudo bash -s -- --profile drone ...
 #
 # All user flags are passed through verbatim to the Rust installer, with one
-# exception: `--ref <commit|branch|tag>` is consumed here. It pins the macOS
-# build-from-source path to an exact revision, and is refused on Linux, where
-# nothing this bootstrap fetches is addressable by commit (see the block guarding
-# it below).
+# exception: `--ref <commit|branch|tag>` is consumed here on macOS, where this
+# script itself resolves the source tree it builds from. On Linux the flag is
+# forwarded: the installer checks the agent tree out at that revision and fetches
+# the service binaries from that commit's `rev-<sha>` release, so both halves of
+# the install are addressed by the same commit.
 # =============================================================================
 set -eu
 
-REL_BASE="https://github.com/altnautica/ADOSDroneAgent/releases/download/prebuilt-installer"
+# Release-download base. Overridable so the shell suite can point every fetch at
+# a fake release tree on disk over file://; an operator never sets it. Exported
+# because the Rust installer honours the same variable for the service-binary
+# fetch, so one override covers the bootstrap and the install it execs.
+ADOS_RELEASE_BASE="${ADOS_RELEASE_BASE:-https://github.com/altnautica/ADOSDroneAgent/releases/download}"
+export ADOS_RELEASE_BASE
+REL_BASE="${ADOS_RELEASE_BASE}/prebuilt-installer"
 # Source clone location for the macOS build-from-source path (kept for --upgrade).
 # Overridable so the shell suite can point the clone at a local fixture repo;
 # an operator never sets it.
@@ -41,8 +48,10 @@ macos_install() {
     #   --branch <name>  branch to clone on a fresh checkout (default main)
     #   --ref <rev>      pin to an exact revision — commit SHA, branch, or tag
     # --ref wins over --branch when both are given (it is the stricter of the
-    # two). It is consumed here and stripped below, because the Rust installer
-    # rejects flags it does not know.
+    # two). It is consumed here and stripped below because on macOS the pin IS
+    # this tree: the installer builds every binary from the source it is handed
+    # and fetches no prebuilt asset, so it has nothing of its own to pin — and it
+    # refuses --ref outright rather than accept a pin it would ignore.
     branch="main"
     ref=""
     saw_ref=0
@@ -218,34 +227,36 @@ if [ "$(uname -s)" = "Darwin" ]; then
     exit $?
 fi
 
-# 0. --ref is a macOS-only flag, and saying so is the point of this block.
+# 0. `--ref` names a commit, and only the edge channel has anything
+#    commit-addressable to point at: it checks the agent tree out at that
+#    revision, and the installer fetches that commit's `rev-<sha>` binaries.
+#    `--channel stable` resolves a wheel from a `v<X.Y.Z>` release tag — a
+#    version, not a revision — so the pair is a contradiction. Honouring only the
+#    half that can be pinned is exactly what leaves a rig carrying a wheel from
+#    one revision beside binaries from another.
 #
-# The macOS path builds every binary from the tree it checks out, so pinning
-# that tree pins the install. The Linux path cannot make the same promise: this
-# bootstrap fetches only the installer binary, and the installer resolves the
-# service binaries from ROLLING per-service release tags (`prebuilt-supervisor`,
-# `prebuilt-video`, … — see crates/ados-installer/src/binaries.rs) and the wheel
-# from a version tag or a branch clone (crates/ados-installer/src/steps/
-# venv_agent.rs). Neither is addressable by commit, and no release carries both
-# for one revision, so there is nothing here a SHA could select.
-#
-# Accepting the flag and pinning only what happens to be pinnable is worse than
-# refusing it: a deploy would report a pin it does not have, which is how a rig
-# ends up carrying a wheel from one revision and binaries from another. Making
-# this real needs a per-revision release in CI plus an installer that resolves
-# against it — an installer change, not a bootstrap change.
+#    Refused here because it costs nothing: no installer download, no network.
+#    The installer repeats the check for the case this cannot see — a box whose
+#    persisted profile.conf already says `stable`, with no --channel on the
+#    command line at all.
+saw_ref=0
+saw_stable=0
+prev=""
 for a in "$@"; do
-    if [ "$a" = "--ref" ]; then
-        echo "ERROR: --ref is not supported on Linux." >&2
-        echo "       The Linux install fetches prebuilt binaries from rolling" >&2
-        echo "       per-service release tags and the wheel from a version tag," >&2
-        echo "       so no commit can be selected here. Honoring --ref would pin" >&2
-        echo "       nothing while reporting that it had." >&2
-        echo "       To pin the agent package, use: --channel edge --branch <branch-or-tag>" >&2
-        echo "       (that pins the wheel only; the Rust binaries stay rolling)." >&2
-        exit 2
+    [ "$a" = "--ref" ] && saw_ref=1
+    if [ "$prev" = "--channel" ] && [ "$a" = "stable" ]; then
+        saw_stable=1
     fi
+    prev="$a"
 done
+if [ "$saw_ref" -eq 1 ] && [ "$saw_stable" -eq 1 ]; then
+    echo "ERROR: --ref requires --channel edge." >&2
+    echo "       The stable channel installs a release wheel resolved from a" >&2
+    echo "       v<X.Y.Z> tag, which addresses a version and not a commit, so" >&2
+    echo "       there is no per-revision wheel to pin." >&2
+    echo "       Use: --channel edge --ref <commit>" >&2
+    exit 2
+fi
 
 # 1. Root requirement (Linux). Every later step writes under /opt, /etc, and
 #    /etc/systemd/system, so a non-root run cannot proceed.

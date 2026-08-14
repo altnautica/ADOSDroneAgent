@@ -39,7 +39,7 @@
 //! binary framing plus a bounded reassembler. Building the outer TUNNEL frame
 //! ([`crate::mavlink::build_tunnel_v2`]) and moving it over a bearer are the
 //! caller's job. The config request/response semantics, the localhost
-//! `/api/config` proxy, and the `-p1` safety gate live in the config-tunnel
+//! `/api/config` proxy, and the opt-in safety gates live in the config-tunnel
 //! service, not here.
 
 use std::collections::HashMap;

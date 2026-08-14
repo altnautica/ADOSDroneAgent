@@ -496,11 +496,10 @@ fn parse_fallback_line(line: &str) -> Option<Value> {
 
 /// Attach a `memory_mb` field to each service entry, in place.
 ///
-/// Resolves each entry's owning systemd unit, sums each distinct unit's grouped
-/// PSS once via a single `/proc` scan, and writes the MiB value back. Entries with
-/// no resolvable unit or a unit with no running process get `0.0` — the same value
-/// the FastAPI live `/proc` scan reports for an absent unit. Mirrors
-/// `_attach_service_memory`.
+/// Resolves each entry's owning systemd unit, sums each distinct unit's grouped PSS
+/// once via a single `/proc` scan, and writes the MiB value back. Entries with no
+/// resolvable unit or a unit with no running process get `0.0` — the same value a live
+/// `/proc` scan reports for an absent unit.
 fn attach_service_memory(services: &mut [Value]) {
     let unit_by_entry: Vec<Option<String>> = services
         .iter()
@@ -673,9 +672,8 @@ async fn wfb_status_view(state: &AppState) -> Option<Map<String, Value>> {
     }
 }
 
-/// The most-recent full wfb-status snapshot + its emit timestamp, or `None` when
-/// the store is unreachable / holds no such event / the detail is empty. Mirrors
-/// the wave-1 `latest_wfb_status`.
+/// The most-recent full wfb-status snapshot + its emit timestamp, or `None` when the
+/// store is unreachable / holds no such event / the detail is empty.
 async fn latest_wfb_status(state: &AppState) -> Option<(Map<String, Value>, i64)> {
     let rows = logd_query_events(state, "link.wfb_status", 1).await?;
     let row = rows.first()?.as_object()?;
@@ -889,11 +887,10 @@ fn build_video_block_with(
     })
 }
 
-/// True only when the ground-station WFB link is actually delivering video: the
-/// receive state must be `active`/`connected` AND a positive valid-decode rate or
-/// packet count confirms frames are flowing now. A reachable WHEP endpoint is not
-/// proof (mediamtx serves WHEP regardless of inbound frames). Mirrors
-/// `_gs_video_delivering`.
+/// True only when the ground-station WFB link is actually delivering video: the receive
+/// state must be `active`/`connected` AND a positive valid-decode rate or packet count
+/// confirms frames are flowing now. A reachable WHEP endpoint is not proof (mediamtx
+/// serves WHEP regardless of inbound frames).
 fn gs_video_delivering(wfb_status: Option<&Map<String, Value>>) -> bool {
     let Some(status) = wfb_status else {
         return false;

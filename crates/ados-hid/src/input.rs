@@ -63,8 +63,8 @@ pub struct HotplugEvent {
     pub path: String,
 }
 
-/// Stable USB device id: `usb:<vendor>:<product>:<node-basename>`. Mirrors the
-/// Python `_device_id_for_usb` (lowercase 4-hex vendor/product, node basename).
+/// Stable USB device id: `usb:<vendor>:<product>:<node-basename>`. Lowercase 4-hex
+/// vendor/product, node basename.
 pub fn device_id_for_usb(vendor: u16, product: u16, path: &str) -> String {
     let base = path
         .rsplit('/')

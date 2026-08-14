@@ -251,6 +251,43 @@ mod tests {
         let _ = drone.await;
     }
 
+    /// The same multichunk exchange as above, but over the REAL bridge instead
+    /// of the in-memory mock: the radio open handshake, the aux framing, a UDP
+    /// hop standing in for `wfb_tx` → air → `wfb_rx` → the rig's plane consumer,
+    /// the aux decode, and the channel filter. The mock proves the chunking
+    /// layer; only this proves the chunking layer survives the bearer.
+    #[tokio::test]
+    async fn the_substrate_round_trips_a_multichunk_body_over_the_aux_bridge() {
+        let pair = crate::transport::aux_fixture::crossed_pair().await;
+        let (sd_tx, sd_rx) = watch::channel(false);
+
+        let big_body = format!(r#"{{"blob":"{}"}}"#, "z".repeat(300)).into_bytes();
+        let client: Arc<dyn ConfigClient> = Arc::new(FixedClient(big_body.clone()));
+        let drone_counters = Arc::new(Counters::default());
+        let drone = tokio::spawn(run_terminator(
+            Arc::new(pair.drone),
+            false,
+            client,
+            drone_counters.clone(),
+            sd_rx.clone(),
+            Arc::new(Notify::new()),
+        ));
+
+        let gs_counters = Arc::new(Counters::default());
+        let injector = Injector::spawn(Arc::new(pair.ground), gs_counters.clone(), sd_rx);
+
+        let resp = injector
+            .submit(br#"{"op":"get"}"#, Duration::from_secs(10))
+            .await
+            .expect("a reply arrives over the aux lane");
+        assert!(!resp.is_error);
+        assert_eq!(resp.body, big_body);
+        assert!(drone_counters.snapshot().tx_frames >= 3); // multi-chunk reply
+
+        let _ = sd_tx.send(true);
+        let _ = drone.await;
+    }
+
     #[tokio::test(start_paused = true)]
     async fn submit_times_out_when_no_terminator_answers() {
         // A GS injector with a dead peer: the request goes out but nothing

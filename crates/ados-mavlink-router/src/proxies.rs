@@ -60,13 +60,18 @@ const PAIRING_TTL: Duration = Duration::from_secs(2);
 /// paired + on-box ⇒ open (the local operator already holds shell privilege),
 /// paired + off-box ⇒ the stored pairing key is required in `X-ADOS-Key`.
 ///
-/// **Two-stage rollout.** `enforce` defaults off. With `enforce` off the gate
-/// is observe-only: an unauthorized connection is logged and STILL admitted, so
-/// the default build does not change the data path. A bench session flips the
-/// config flag to on, after which an unauthorized off-box connection is
-/// rejected at the handshake.
-/// The byte-stream proxies (TCP, UDP) share this gate with the WebSocket, so
-/// the name is an alias rather than a second type: one posture, three edges.
+/// **Two defaults, one mechanism.** `enforce` is supplied by the caller from
+/// the config, and the three edges do not share a value: the WebSocket
+/// enforces by default because a client can present either the `X-ADOS-Key`
+/// header or an `ados-ws-ticket` subprotocol, while the byte-stream edges
+/// (TCP, UDP) default off because they have no credential channel to present
+/// anything on. With `enforce` off the gate is observe-only: an unauthorized
+/// connection is logged and STILL admitted. With it on, an unauthorized
+/// off-box connection is refused at the handshake (WebSocket) or before any
+/// bytes are read (TCP, UDP).
+///
+/// The byte-stream proxies share this gate with the WebSocket, so the name is
+/// an alias rather than a second type: one posture, three edges.
 pub type ProxyAuth = WsProxyAuth;
 
 #[derive(Clone)]
@@ -268,6 +273,50 @@ fn origin_of(access: Access) -> ClientOrigin {
     }
 }
 
+/// Which byte-stream edge a peer arrived on. Exists only so the refusal log
+/// keeps one static event name per edge: an operator greps
+/// `tcp_proxy_unauthorized` / `udp_proxy_unauthorized`, so the two must not
+/// collapse into one formatted message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RawEdge {
+    Tcp,
+    Udp,
+}
+
+/// The accept-time verdict for one raw byte-stream peer: `Some(origin)` to serve
+/// it and stamp that provenance on its bytes, `None` to refuse it outright.
+///
+/// Shared by both loops rather than written twice. Each loop previously carried
+/// its own copy of "classify, log, then serve regardless", and both logged a
+/// hardcoded `admitted = true` that outlived the flag it claimed to describe.
+/// One decision point means the flag cannot be honoured on one edge and
+/// silently dropped on the other.
+fn admit_raw_peer(
+    auth: &ProxyAuth,
+    peer: std::net::IpAddr,
+    port: u16,
+    edge: RawEdge,
+) -> Option<ClientOrigin> {
+    let (admit, access) = auth.classify(peer);
+    if access != Access::Accept {
+        match edge {
+            RawEdge::Tcp => tracing::warn!(
+                port,
+                peer = %peer,
+                admitted = admit,
+                "tcp_proxy_unauthorized"
+            ),
+            RawEdge::Udp => tracing::warn!(
+                port,
+                peer = %peer,
+                admitted = admit,
+                "udp_proxy_unauthorized"
+            ),
+        }
+    }
+    admit.then(|| origin_of(access))
+}
+
 pub const DEFAULT_PROXY_BIND_ADDR: &str = "0.0.0.0";
 
 /// The address the direct-GCS proxies bind, from `ADOS_MAVLINK_BIND_ADDR`.
@@ -304,27 +353,23 @@ pub async fn run_tcp_proxy(
         tokio::select! {
             accepted = listener.accept() => {
                 if let Ok((stream, addr)) = accepted {
-                    // The peer address was previously discarded here. It is the
-                    // only thing this socket knows about its caller: MAVLink is
-                    // a raw byte stream, so there is no header to carry a
-                    // credential and no handshake to hang one on.
+                    // The peer address is the only thing this socket knows
+                    // about its caller: MAVLink is a raw byte stream, so there
+                    // is no header to carry a credential and no handshake to
+                    // hang one on.
                     //
-                    // OBSERVE-ONLY. This port is advertised to operators as the
-                    // QGroundControl / Mission Planner path, so refusing an
-                    // unauthorized caller would break third-party GCS
-                    // compatibility at the operator's screen rather than at
-                    // install time. Log what would have been refused, and let
-                    // the field data decide before anything is enforced.
-                    let (_admit, access) = auth.classify(addr.ip());
-                    if access != Access::Accept {
-                        tracing::warn!(
-                            port,
-                            peer = %addr.ip(),
-                            admitted = true,
-                            "tcp_proxy_unauthorized"
-                        );
-                    }
-                    let origin = origin_of(access);
+                    // Enforcement is therefore opt-in. Off (the default) an
+                    // unauthorized peer is recorded and still served, because
+                    // this port is advertised to operators as the
+                    // QGroundControl / Mission Planner path and refusing would
+                    // break third-party GCS compatibility at the operator's
+                    // screen rather than at install time. On, the connection is
+                    // dropped before a single byte is read, so no client bytes
+                    // ever reach the flight controller.
+                    let Some(origin) = admit_raw_peer(&auth, addr.ip(), port, RawEdge::Tcp) else {
+                        // `stream` drops here, closing the connection.
+                        continue;
+                    };
                     tokio::spawn(handle_tcp_client(fc.clone(), stream, origin));
                 }
             }
@@ -447,17 +492,14 @@ pub async fn run_udp_proxy(
                     // flight controller AND enrols itself into the fan-out, so
                     // the FC's whole telemetry stream is mirrored back to it.
                     //
-                    // OBSERVE-ONLY, as on TCP: logged, still admitted, so the
-                    // field data decides before a shipped path changes.
-                    let (_admit, access) = auth.classify(addr.ip());
-                    if access != Access::Accept {
-                        tracing::warn!(
-                            port,
-                            peer = %addr.ip(),
-                            admitted = true,
-                            "udp_proxy_unauthorized"
-                        );
-                    }
+                    // Enforcement is opt-in, as on TCP. Off (the default) this
+                    // is observe-only. On, BOTH halves are skipped: refusing the
+                    // injection while still enrolling the peer would leave the
+                    // telemetry mirror open, which is the half of this that
+                    // reaches furthest.
+                    let Some(origin) = admit_raw_peer(&auth, addr.ip(), port, RawEdge::Udp) else {
+                        continue;
+                    };
                     {
                         let mut map = peers.lock().await;
                         map.insert(addr, Instant::now());
@@ -465,7 +507,7 @@ pub async fn run_udp_proxy(
                         // drop the least-recently-seen entries.
                         cap_peers(&mut map, UDP_MAX_PEERS);
                     }
-                    fc.send_client_bytes(&buf[..n], origin_of(access), None).await;
+                    fc.send_client_bytes(&buf[..n], origin, None).await;
                 }
             }
             _ = cancel.notified() => {
@@ -786,6 +828,88 @@ mod tests {
         assert_eq!(
             auth.classify("127.0.0.1".parse().unwrap()).1,
             Access::Accept
+        );
+    }
+
+    #[test]
+    fn the_loop_verdict_serves_a_flagged_peer_with_the_flag_off() {
+        // `enforcing_refuses_the_same_peer_it_would_have_flagged` covers
+        // `classify`. This covers what the accept loops actually consume: with
+        // the flag off an unauthorized peer must still be served, and served
+        // with the anonymous provenance rather than as a trusted local caller.
+        let (_dir, auth) = unpaired_auth(false);
+        let lan: std::net::IpAddr = "10.0.0.9".parse().unwrap();
+        for edge in [RawEdge::Tcp, RawEdge::Udp] {
+            assert_eq!(
+                admit_raw_peer(&auth, lan, 5760, edge),
+                Some(ClientOrigin::Unauthenticated),
+                "{edge:?}: observe-only must serve, and record the anonymity"
+            );
+        }
+    }
+
+    #[test]
+    fn the_loop_verdict_refuses_a_flagged_peer_on_both_edges_with_the_flag_on() {
+        // The refusal must reach BOTH loops. A flag honoured on one edge and
+        // dropped on the other closes the door an operator can see and leaves
+        // the one they cannot.
+        //
+        // On UDP the `None` is what skips the peer-table insert as well as the
+        // injection: enrolling a refused source would keep mirroring the FC's
+        // whole telemetry stream back to it even with its own bytes discarded.
+        let (_dir, auth) = unpaired_auth(true);
+        let lan: std::net::IpAddr = "10.0.0.9".parse().unwrap();
+        for edge in [RawEdge::Tcp, RawEdge::Udp] {
+            assert_eq!(
+                admit_raw_peer(&auth, lan, 5760, edge),
+                None,
+                "{edge:?}: enforcement must refuse, not log and continue"
+            );
+        }
+    }
+
+    #[test]
+    fn enforcement_still_serves_the_on_box_and_lifeline_routes() {
+        // The regression that would matter most: enforcing must not strand the
+        // local operator or a fresh unit's only two ways in.
+        let (_dir, auth) = unpaired_auth(true);
+        for ip in ["127.0.0.1", "192.168.4.20", "192.168.7.2", "169.254.3.4"] {
+            for edge in [RawEdge::Tcp, RawEdge::Udp] {
+                assert_eq!(
+                    admit_raw_peer(&auth, ip.parse().unwrap(), 14550, edge),
+                    Some(ClientOrigin::Trusted),
+                    "{ip} on {edge:?} must survive enforcement"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_paired_node_refuses_an_off_box_raw_peer_only_under_the_flag() {
+        // The shipped shape, and the one an operator lives with: paired, so an
+        // off-box peer is unauthorized, and the flag is the ONLY thing deciding
+        // whether it is served. Built over an explicit pairing file rather than
+        // `from_config` + `ADOS_PAIRING_JSON` on purpose: that env var is read by
+        // the injector gate in this same test binary, and setting a process
+        // global would make two unrelated suites race.
+        let dir = tempfile::tempdir().unwrap();
+        let pairing = write_pairing(dir.path(), r#"{"paired": true, "api_key": "k"}"#);
+        let lan: std::net::IpAddr = "10.0.0.9".parse().unwrap();
+
+        assert_eq!(
+            admit_raw_peer(
+                &ProxyAuth::new(false, pairing.clone()),
+                lan,
+                5760,
+                RawEdge::Tcp
+            ),
+            Some(ClientOrigin::Unauthenticated),
+            "the shipped default must keep serving a desktop GCS"
+        );
+        assert_eq!(
+            admit_raw_peer(&ProxyAuth::new(true, pairing), lan, 5760, RawEdge::Tcp),
+            None,
+            "the flag must be the whole difference"
         );
     }
 

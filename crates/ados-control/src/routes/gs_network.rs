@@ -122,9 +122,8 @@ fn gs_wifi_client_json() -> PathBuf {
     etc_dir().join("ground-station-wifi-client.json")
 }
 
-/// The default uplink priority chain, returned when the priority file is absent
-/// / unparseable / carries an empty or non-string list. Mirrors the Python
-/// `DEFAULT_PRIORITY`.
+/// The default uplink priority chain, returned when the priority file is absent /
+/// unparseable / carries an empty or non-string list.
 const DEFAULT_PRIORITY: [&str; 4] = ["eth0", "wlan0_client", "wwan0", "usb0"];
 
 /// The hostapd systemd unit the live AP runs as. `systemctl is-active` on this
@@ -138,8 +137,11 @@ const HOSTAPD_UNIT: &str = "ados-hostapd.service";
 /// `_ap_guard_diagnostics`.
 const AP_GUARD_SIDECAR: &str = "/run/ados/ap-guard.json";
 
-/// The default AP interface the hostapd manager binds (`_AP_IFACE`). The front
-/// honours a configured `network.hotspot.interface` when present, else this.
+/// Last-resort AP interface name, used only when resolution finds nothing.
+///
+/// Not a default in any meaningful sense: interface names are not stable, and
+/// this one has been measured naming the flight radio on one boot in three.
+/// Anything reported to an operator resolves by driver first.
 const AP_IFACE: &str = "wlan0";
 
 /// The AP gateway address the hostapd manager assigns to the AP interface
@@ -303,11 +305,17 @@ fn ap_view_compose(
     })
 }
 
-/// The configured AP interface (`network.hotspot.interface`), defaulting to
-/// `wlan0` (`_AP_IFACE`) when absent / blank / non-string. Mirrors the hostapd
-/// manager's `interface` default.
+/// The AP interface, resolved the way the hostapd manager resolves it.
+///
+/// Reporting the configured value, or a literal when none is set, made this a
+/// surface asserting something nothing had checked: the manager binds
+/// `resolve_ap_interface(hotspot.interface)`, which classifies by driver and
+/// refuses the flight radio, so on a default-config box the two disagreed
+/// exactly when it mattered. The configured value is still the input, and is
+/// still honoured when it names a real non-radio interface.
 fn ap_interface(cfg: &Value) -> String {
-    cfg.get("network")
+    let configured = cfg
+        .get("network")
         .filter(|v| v.is_object())
         .and_then(|v| v.get("hotspot"))
         .filter(|v| v.is_object())
@@ -315,8 +323,22 @@ fn ap_interface(cfg: &Value) -> String {
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .unwrap_or(AP_IFACE)
-        .to_string()
+        .unwrap_or_default();
+
+    ados_protocol::netif::resolve_ap_interface(
+        configured,
+        ados_protocol::netif::radio_interface().as_deref(),
+    )
+    .unwrap_or_else(|_| {
+        // Resolution refused (the configured name is the radio, or the box has
+        // no onboard WiFi). The manager falls back the same way rather than
+        // failing the whole status read.
+        if configured.is_empty() {
+            AP_IFACE.to_string()
+        } else {
+            configured.to_string()
+        }
+    })
 }
 
 /// True when the hostapd unit is active, reproducing the manager's
@@ -964,9 +986,8 @@ fn load_json_object(path: &Path) -> Option<Map<String, Value>> {
     }
 }
 
-/// The `ground_station.share_uplink` flag from the agent config, defaulting to
-/// `false` when the section / field is absent. Mirrors the Python
-/// `_load_share_uplink_flag` (which returns `False` on any read failure).
+/// The `ground_station.share_uplink` flag from the agent config, defaulting to `false`
+/// when the section / field is absent. Any read failure reads the same way.
 fn share_uplink_flag(cfg: &Value) -> bool {
     cfg.get("ground_station")
         .filter(|v| v.is_object())
@@ -1203,15 +1224,20 @@ mod tests {
     }
 
     #[test]
-    fn ap_interface_defaults_to_wlan0_and_honours_an_override() {
-        // No hotspot section → the default AP interface.
+    fn ap_interface_reads_the_configured_value_and_falls_back_when_it_is_blank() {
+        // These assertions pin the CONFIG parsing only. On a host with no
+        // /sys/class/net to enumerate -- every developer machine, and this test
+        // runner -- resolution finds no candidate and the fallback answers, so
+        // a passing run here says nothing about driver classification. The
+        // resolver's own behaviour is pinned where it lives, in
+        // ados_protocol::netif, against a fixture sysfs tree.
         assert_eq!(ap_interface(&json!({})), "wlan0");
-        // A blank interface falls back to the default.
         assert_eq!(
             ap_interface(&json!({"network": {"hotspot": {"interface": "  "}}})),
             "wlan0"
         );
-        // A configured interface is honoured verbatim.
+        // A configured interface this box does not have cannot be classified,
+        // so it is reported as asked for rather than silently replaced.
         assert_eq!(
             ap_interface(&json!({"network": {"hotspot": {"interface": "ap0"}}})),
             "ap0"

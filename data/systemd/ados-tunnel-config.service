@@ -29,8 +29,8 @@ EnvironmentFile=-/etc/ados/env
 
 # The channel binds loopback UDP ports and calls the local config surface on
 # 127.0.0.1:8080 — no raw-socket / net-admin capabilities (it never touches the
-# WFB sockets or the FC lane; a separate radio bridge carries its frames onto
-# -p1).
+# WFB sockets or the FC lane; its frames ride the radio's auxiliary application
+# lane through the aux client the radio service already serves).
 NoNewPrivileges=yes
 ProtectSystem=strict
 PrivateTmp=yes

@@ -1,5 +1,5 @@
 //! `ados-config-tunnel` — the config-over-radio substrate (config request/
-//! response over a MAVLink TUNNEL on the low-rate `-p1` control-plane bearer).
+//! response over a MAVLink TUNNEL on the radio's auxiliary application lane).
 //!
 //! Two agent-side endpoints on one binary, selected by profile:
 //!
@@ -26,10 +26,18 @@
 //! ## Bearer boundary
 //!
 //! The wire framing ([`ados_protocol::tunnel_config`] + the TUNNEL codec) and
-//! the local UDP transport ([`transport`]) are built here; bridging the
-//! service's dedicated local UDP ports onto the `-p1` WFB control plane is a
-//! separate, gated `ados-radio` integration — this crate never touches the raw
-//! WFB sockets or the FC lane.
+//! the bearer transport ([`transport`]) are built here. The bearer is the
+//! auxiliary application lane — the drone's `-p2` downlink and the ground
+//! station's `-p3` uplink — on its own channel of the shared aux multiplex, and
+//! the aux transmit/receive pair is brought up ON DEMAND by the radio service.
+//! This crate never touches the raw WFB sockets or the FC lane: it speaks to the
+//! radio through the same aux client three other crates already use, and one
+//! TUNNEL frame is one aux datagram with no fragmentation.
+//!
+//! An earlier version of these docs claimed the `-p1` control plane as the
+//! bearer. It never was one: `-p1` is fully occupied by the hop announce/ack
+//! exchange, its ports are hard-reserved by the radio's own port guard, and it
+//! carries no demultiplexer, so a second stream had nowhere to land.
 
 use std::time::Duration;
 

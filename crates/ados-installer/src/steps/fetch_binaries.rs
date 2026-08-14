@@ -23,6 +23,120 @@ use crate::verify::{self, Channel};
 /// `<base>/<release_tag>/<asset>` (plus `.sha256` / `.minisig` sidecars).
 const RELEASE_BASE: &str = "https://github.com/altnautica/ADOSDroneAgent/releases/download";
 
+/// Environment override for [`RELEASE_BASE`], for tests only.
+///
+/// The whole fetch stack is anonymous `curl`, which speaks `file://`, so a fake release
+/// tree on disk gives the pinned + unpinned resolution a full end-to-end exercise with
+/// no network and no credential. It follows the driver layer's `ADOS_PREBUILT_BASE_URL`
+/// (`scripts/drivers/lib-prebuilt.sh`), including the part that matters: an operator
+/// never sets it, and nothing in the install writes it.
+pub const RELEASE_BASE_ENV: &str = "ADOS_RELEASE_BASE";
+
+/// The release-download base in force for this run.
+fn release_base() -> String {
+    base_or_default(std::env::var(RELEASE_BASE_ENV).ok().as_deref())
+}
+
+/// Pick the base from an override value (pure). A blank or whitespace-only
+/// override is treated as absent: an exported-but-empty variable must not turn
+/// every asset URL into a relative path curl would refuse.
+fn base_or_default(override_value: Option<&str>) -> String {
+    match override_value.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(v) => v.to_string(),
+        None => RELEASE_BASE.to_string(),
+    }
+}
+
+/// The per-revision release tag CI publishes for one commit.
+///
+/// `rev-<full 40-char sha>`. The tag is derived in-shell inside the workflow
+/// rather than declared as a job variable, because a templated tag is exactly
+/// what the installer's release-tag guard refuses to accept.
+pub fn rev_release_tag(rev: &str) -> String {
+    format!("rev-{rev}")
+}
+
+/// Whether `rev` is the full 40-character object name CI names a release after.
+///
+/// The tag is `rev-<full sha>`, so a prefix cannot address it: `venv_agent`
+/// expands one from the clone's own object store before this step runs. This is
+/// the assertion of that contract rather than a fallback for it.
+fn is_full_object_name(rev: &str) -> bool {
+    rev.len() == 40 && rev.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// The failure text when a pin reaches the fetch still abbreviated.
+///
+/// Reachable in one narrow case: a RESUMED fresh install whose `venv`
+/// checkpoint is already marked skips `venv_agent`, so nothing expanded the
+/// prefix. Worth its own message, because the per-revision-release message
+/// below would blame the workflow's path filter for what is really a skipped
+/// step.
+fn rev_not_expanded(rev: &str) -> String {
+    format!(
+        "--ref {rev} is not a full 40-character commit, and the step that expands it \
+         (the source checkout) did not run this time — a resumed install skips it once its \
+         `venv` checkpoint is marked. Re-run with --force to redo the checkout, or pass the \
+         full 40-character SHA so the per-revision release can be addressed directly."
+    )
+}
+
+/// Where one asset's URL hangs off: the rolling per-service tag normally, or the
+/// commit's per-revision release when the install is pinned with `--ref`.
+///
+/// This is the SOLE place a prebuilt asset URL gets its base, so a pin cannot
+/// half-apply: every binary in the catalog, the onnx vision variant, and the
+/// ONNX Runtime library all resolve through here. `rev` is already the full
+/// object name — `venv_agent` expands an abbreviated `--ref` from the clone
+/// before this step runs, so no prefix is ever handed to a server that cannot
+/// resolve one.
+pub fn asset_base(rev: Option<&str>, tag: &str) -> String {
+    match rev {
+        Some(rev) => format!("{}/{}", release_base(), rev_release_tag(rev)),
+        None => format!("{}/{tag}", release_base()),
+    }
+}
+
+/// The failure text when a pinned install finds no per-revision release.
+///
+/// It names the path filter, because that is the likely reason and it is not
+/// guessable from a 404: `.github/workflows/rust.yml` only runs on changes under
+/// `crates/**`, the four generated `.py` contract files, `data/systemd/**`, and
+/// itself. A commit touching only `src/ados/**` therefore publishes nothing,
+/// and the alternative — dropping the filter — pays ~23 arm64 release builds for
+/// every commit to the Python tree.
+pub fn rev_release_missing(rev: &str) -> String {
+    format!(
+        "no {tag} release exists, so the prebuilt binaries for revision {rev} were never \
+         published. The workflow that builds them runs only on commits touching `crates/**`, \
+         the generated `_*_generated.py` contract files, or `data/systemd/**` — a commit that \
+         changed only `src/ados/**` publishes no per-revision release. Pin a commit that \
+         touched the Rust tree, or re-run without --ref to install from the rolling \
+         per-service release tags.",
+        tag = rev_release_tag(rev)
+    )
+}
+
+/// Whether the per-revision release for `rev` actually carries assets.
+///
+/// One sidecar fetch answers it: `<base>/rev-<sha>/<asset>.sha256` exists only
+/// if CI published that revision. `sample` is a Hard-gated catalog entry, so a
+/// present sidecar means the release holds the assets the install cannot do
+/// without — not merely that a tag of that name exists. Cheap enough to pay for
+/// on every pinned install (a few hundred bytes) and it converts an opaque
+/// per-binary 404 into the one message that names the cause.
+fn rev_release_published(rev: &str, sample: &PrebuiltBinary, tmp_dir: &Path) -> bool {
+    let url = format!(
+        "{}/{}.sha256",
+        asset_base(Some(rev), sample.release_tag),
+        sample.asset
+    );
+    let probe = tmp_dir.join("rev-release-probe.sha256");
+    let ok = net::fetch(&url, &probe).is_ok();
+    let _ = std::fs::remove_file(&probe);
+    ok
+}
+
 /// The trust anchor for prebuilt-binary signatures: the public half of the
 /// keypair CI signs each asset's `.minisig` with (the private half is the
 /// `ADOS_DRIVER_SIGNING_KEY` CI secret). EMBEDDED, not fetched, so a MITM on the
@@ -90,13 +204,16 @@ fn allow_unsigned_for(_channel: Channel) -> bool {
 /// binary itself — the binary is fetched to a `.dl` sibling of the real dest so
 /// the final placement is a same-filesystem `rename` (see [`place_binary`]); the
 /// dir is retained for callers that want a scratch root and for symmetry.
+/// `rev` is the `--ref` pin, which moves every URL off the rolling tag and onto
+/// that commit's per-revision release (see [`asset_base`]).
 fn install_one(
     b: &PrebuiltBinary,
     _tmp_dir: &Path,
     channel: Channel,
     sink: &ProgressSink,
+    rev: Option<&str>,
 ) -> anyhow::Result<()> {
-    let asset_url = format!("{RELEASE_BASE}/{}/{}", b.release_tag, b.asset);
+    let asset_url = format!("{}/{}", asset_base(rev, b.release_tag), b.asset);
     let dest = Path::new(b.dest);
 
     // Ensure /opt/ados/bin exists so the `.dl` sibling and the final rename land
@@ -176,11 +293,12 @@ fn install_one_with_retry(
     tmp_dir: &Path,
     channel: Channel,
     sink: &ProgressSink,
+    rev: Option<&str>,
 ) -> anyhow::Result<()> {
     const MAX_ATTEMPTS: u32 = 3;
     let mut backoff = std::time::Duration::from_secs(1);
     for attempt in 1..=MAX_ATTEMPTS {
-        match install_one(b, tmp_dir, channel, sink) {
+        match install_one(b, tmp_dir, channel, sink, rev) {
             Ok(()) => return Ok(()),
             Err(e) if attempt < MAX_ATTEMPTS => {
                 tracing::warn!(
@@ -212,6 +330,7 @@ fn install_service(
     tmp_dir: &Path,
     channel: Channel,
     sink: &ProgressSink,
+    rev: Option<&str>,
 ) -> anyhow::Result<()> {
     if b.service == "ados-vision" && binaries::board_prefers_onnx_vision(board_model) {
         // The onnx binary links the ONNX Runtime dynamically, so the binary AND
@@ -219,7 +338,7 @@ fn install_service(
         // install falls back to the default (musl, no-onnx) build. Installing the
         // onnx binary without its runtime would leave a vision service that
         // cannot dlopen ORT at start.
-        match install_onnx_vision(tmp_dir, channel, sink) {
+        match install_onnx_vision(tmp_dir, channel, sink, rev) {
             Ok(()) => return Ok(()),
             Err(e) => {
                 tracing::warn!(
@@ -233,7 +352,7 @@ fn install_service(
             }
         }
     }
-    install_one_with_retry(b, tmp_dir, channel, sink)
+    install_one_with_retry(b, tmp_dir, channel, sink, rev)
 }
 
 /// Whether a freshly-placed binary can actually `execve` on this host — probes
@@ -352,13 +471,15 @@ fn install_onnx_vision(
     tmp_dir: &Path,
     channel: Channel,
     sink: &ProgressSink,
+    rev: Option<&str>,
 ) -> anyhow::Result<()> {
-    install_one_with_retry(&binaries::PREBUILT_VISION_ONNX, tmp_dir, channel, sink)?;
+    install_one_with_retry(&binaries::PREBUILT_VISION_ONNX, tmp_dir, channel, sink, rev)?;
     install_one_with_retry(
         &binaries::PREBUILT_VISION_ONNX_RUNTIME,
         tmp_dir,
         channel,
         sink,
+        rev,
     )
     .map_err(|e| anyhow::anyhow!("ONNX Runtime library fetch failed: {e}"))?;
 
@@ -522,11 +643,47 @@ impl Step for FetchBinaries {
         // Drive the determinate "Downloading components" bar: k of N binaries.
         let sink = ctx.progress.clone();
         let bins = binaries::for_profile(&ctx.profile);
+
+        // A pinned install resolves every asset from `rev-<sha>`. Probe that the
+        // release exists BEFORE the loop: without this the first Hard-gate
+        // binary aborts with a bare "could not be installed", which reads as a
+        // broken download rather than as the far likelier "that commit never
+        // published binaries" (see `rev_release_missing`). The pin is read from
+        // `ctx.rev`, which `venv_agent` has already expanded to a full object
+        // name.
+        let rev = ctx.rev.clone();
+        if let Some(rev) = rev.as_deref() {
+            if !is_full_object_name(rev) {
+                let _ = std::fs::remove_dir_all(&tmp_dir);
+                return StepOutcome::Failed(rev_not_expanded(rev));
+            }
+            let sample = bins
+                .iter()
+                .find(|b| b.gate == Gate::Hard)
+                .copied()
+                .unwrap_or(binaries::default_vision_binary());
+            sink.activity(
+                self.id(),
+                format!("checking the {} release", rev_release_tag(rev)),
+            );
+            if !rev_release_published(rev, sample, &tmp_dir) {
+                let _ = std::fs::remove_dir_all(&tmp_dir);
+                return StepOutcome::Failed(rev_release_missing(rev));
+            }
+        }
+
         let total = bins.len() as u64;
         sink.sub_progress(self.id(), 0, total);
         for (i, b) in bins.into_iter().enumerate() {
             sink.activity(self.id(), format!("installing {}", b.service));
-            let ok = match install_service(b, &board_model, &tmp_dir, channel, &sink) {
+            let ok = match install_service(
+                b,
+                &board_model,
+                &tmp_dir,
+                channel,
+                &sink,
+                rev.as_deref(),
+            ) {
                 Ok(()) => {
                     // Kept at debug: the live-detail pane names each component as
                     // it lands, so an info line here would just repeat "installed
@@ -780,6 +937,130 @@ mod tests {
         assert!(
             binary_execs_on_this_host(&script),
             "a non-GLIBC_ failure must not be misread as a linker rejection"
+        );
+    }
+
+    #[test]
+    fn asset_base_hangs_an_unpinned_asset_off_its_rolling_tag() {
+        // The exact URL, not its shape: this string is what a board resolves,
+        // and every previous release-path defect was a wrong URL that still
+        // looked plausible.
+        assert_eq!(
+            asset_base(None, "prebuilt-supervisor"),
+            "https://github.com/altnautica/ADOSDroneAgent/releases/download/prebuilt-supervisor"
+        );
+    }
+
+    #[test]
+    fn asset_base_replaces_the_rolling_tag_with_the_per_revision_release() {
+        let sha = "3b4b8deec0ffee1234567890abcdef1234567890";
+        assert_eq!(
+            asset_base(Some(sha), "prebuilt-supervisor"),
+            format!("https://github.com/altnautica/ADOSDroneAgent/releases/download/rev-{sha}")
+        );
+        // The pin is what selects the release, so two services that differ only
+        // by rolling tag resolve to the SAME per-revision base. That is the
+        // property the flag exists for: one revision, one release, no chance of
+        // a wheel from one commit beside a binary from another.
+        assert_eq!(
+            asset_base(Some(sha), "prebuilt-supervisor"),
+            asset_base(Some(sha), "prebuilt-video")
+        );
+    }
+
+    #[test]
+    fn a_pinned_asset_url_is_the_rev_release_plus_the_unchanged_asset_name() {
+        // The asset filename is NOT rewritten by a pin — CI re-uploads the
+        // byte-identical set under the rev tag, so only the tag moves.
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let b = PREBUILT
+            .iter()
+            .find(|b| b.service == "ados-supervisor")
+            .unwrap();
+        assert_eq!(
+            format!("{}/{}", asset_base(Some(sha), b.release_tag), b.asset),
+            format!(
+                "https://github.com/altnautica/ADOSDroneAgent/releases/download/rev-{sha}/ados-supervisor-aarch64"
+            )
+        );
+    }
+
+    #[test]
+    fn the_rev_tag_is_the_one_ci_publishes() {
+        assert_eq!(rev_release_tag("abc123"), "rev-abc123");
+    }
+
+    #[test]
+    fn a_missing_rev_release_names_the_path_filter_as_the_reason() {
+        // A bare 404 sends the operator looking for a network fault. The likely
+        // cause is that the pinned commit touched only the Python tree, which
+        // the Rust workflow's path filter does not build — unguessable unless
+        // the message says it.
+        let msg = rev_release_missing("3b4b8dee");
+        assert!(msg.contains("rev-3b4b8dee"), "names the missing tag: {msg}");
+        assert!(msg.contains("crates/**"), "names the filter: {msg}");
+        assert!(
+            msg.contains("src/ados/**"),
+            "names the excluded tree: {msg}"
+        );
+        assert!(
+            msg.contains("without --ref"),
+            "names the way forward: {msg}"
+        );
+    }
+
+    #[test]
+    fn the_release_base_override_wins_only_when_it_says_something() {
+        assert_eq!(
+            base_or_default(Some("file:///tmp/fake-release")),
+            "file:///tmp/fake-release"
+        );
+        assert_eq!(base_or_default(None), RELEASE_BASE);
+        // An exported-but-empty variable is a common accident in a CI shell; it
+        // must not turn every asset URL into a relative path.
+        assert_eq!(base_or_default(Some("")), RELEASE_BASE);
+        assert_eq!(base_or_default(Some("   ")), RELEASE_BASE);
+    }
+
+    #[test]
+    fn the_release_base_override_is_the_variable_the_bootstrap_exports() {
+        // Producer/reader symmetry: `scripts/install.sh` resolves the installer
+        // binary from this same base and exports it so the install it execs
+        // inherits it. A rename on either side would leave the shell half of a
+        // file:// test pointed at the fake tree and the Rust half at GitHub —
+        // which reads as a passing test and a fetch that never used the override.
+        let bootstrap = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/install.sh")
+            .canonicalize()
+            .expect("the bootstrap must exist beside the crate it fetches");
+        let text = std::fs::read_to_string(&bootstrap).expect("the bootstrap must be readable");
+        assert!(
+            text.contains(&format!("export {RELEASE_BASE_ENV}")),
+            "{} must export {RELEASE_BASE_ENV} so the installer inherits the same base",
+            bootstrap.display()
+        );
+        assert!(
+            text.contains(&format!("{RELEASE_BASE_ENV}:-{RELEASE_BASE}")),
+            "{} must default {RELEASE_BASE_ENV} to the release base this crate compiles in",
+            bootstrap.display()
+        );
+    }
+
+    #[test]
+    fn only_a_full_object_name_can_address_a_per_revision_release() {
+        let full = "3b4b8deec0ffee1234567890abcdef1234567890";
+        assert!(is_full_object_name(full));
+        assert!(!is_full_object_name(&full[..8]));
+        assert!(!is_full_object_name("main"));
+        assert!(!is_full_object_name(""));
+        // And an abbreviated pin that slipped through says which step did not
+        // run, instead of blaming the workflow's path filter for a skipped
+        // checkout.
+        let msg = rev_not_expanded("3b4b8dee");
+        assert!(msg.contains("--force"), "names the way forward: {msg}");
+        assert!(
+            !msg.contains("crates/**"),
+            "must not misattribute a skipped checkout to the path filter: {msg}"
         );
     }
 }

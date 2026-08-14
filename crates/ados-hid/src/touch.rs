@@ -223,9 +223,9 @@ impl StrokeFsm {
     }
 }
 
-/// Classify a stroke by duration + total displacement. Mirrors the Python
-/// `_classify`: under the displacement floor it is a tap/long_press by duration;
-/// a fast long-enough move is a swipe; otherwise a drag.
+/// Classify a stroke by duration + total displacement. Under the displacement floor it
+/// is a tap/long_press by duration; a fast long-enough move is a swipe; otherwise a
+/// drag.
 pub fn classify(duration_ms: i64, displacement: f64) -> GestureKind {
     if displacement < TAP_DISPLACEMENT_PX {
         return if duration_ms >= TAP_DUR_MS {
@@ -256,9 +256,8 @@ pub fn direction_for(dx: i32, dy: i32) -> Direction {
     }
 }
 
-/// The initial transform for a stroke source: a persisted calibration if one
-/// exists, else the rotation-aware identity. Mirrors the Python
-/// `_initial_affine`.
+/// The initial transform for a stroke source: a persisted calibration if one exists,
+/// else the rotation-aware identity.
 pub fn initial_affine(calib_path: &std::path::Path, rotation: i32, lcd_size: (i32, i32)) -> Affine {
     // load_for, not load: a calibration captured on a different panel geometry or
     // rotation must be rejected so this falls back to the identity (and the

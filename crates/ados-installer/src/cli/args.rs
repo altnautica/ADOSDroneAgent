@@ -2,8 +2,8 @@
 //!
 //! Supports the same surface the bash installer accepts: the profile/name/pair
 //! identity flags, the `--upgrade` / `--force` install-mode flags, the
-//! branch/channel/version source selectors, the display/camera hardware hints,
-//! and the `--uninstall` / `--status` / `--help` actions. A bare positional
+//! branch/channel/version/ref source selectors, the display/camera hardware
+//! hints, and the `--uninstall` / `--status` / `--help` actions. A bare positional
 //! argument is treated as a pair code (the `--pair KEY` shorthand).
 
 /// Parsed command-line arguments.
@@ -26,6 +26,17 @@ pub struct Args {
     pub channel: Option<String>,
     /// `--version <v>` — pin an explicit agent version.
     pub version: Option<String>,
+    /// `--ref <v>` — pin every artifact this install places to ONE git
+    /// revision: the agent package is checked out at that commit and the
+    /// prebuilt service binaries are fetched from that commit's per-revision
+    /// release (`rev-<sha>`) instead of the rolling per-service tags. Requires
+    /// the `edge` channel (`stable` resolves from a `v<X.Y.Z>` tag and has no
+    /// commit addressing). Named `rev` because the value is a revision; the flag
+    /// keeps the bootstrap's `--ref` spelling.
+    ///
+    /// Steps read [`crate::ctx::Ctx::rev`], not this field: an abbreviated value
+    /// here is expanded to the full object name once the clone can resolve it.
+    pub rev: Option<String>,
     /// `--display <v>` — display hardware hint.
     pub display: Option<String>,
     /// `--camera <v>` — camera hardware hint.
@@ -113,6 +124,7 @@ impl Args {
                 "--branch" => args.branch = Some(take_value(&tokens, &mut i, "--branch")?),
                 "--channel" => args.channel = Some(take_value(&tokens, &mut i, "--channel")?),
                 "--version" => args.version = Some(take_value(&tokens, &mut i, "--version")?),
+                "--ref" => args.rev = Some(take_value(&tokens, &mut i, "--ref")?),
                 "--display" => args.display = Some(take_value(&tokens, &mut i, "--display")?),
                 "--camera" => args.camera = Some(take_value(&tokens, &mut i, "--camera")?),
                 "--wifi-ssid" => args.wifi_ssid = Some(take_value(&tokens, &mut i, "--wifi-ssid")?),
@@ -292,5 +304,29 @@ mod tests {
     fn help_short_and_long() {
         assert!(Args::parse(["-h"]).unwrap().help);
         assert!(Args::parse(["--help"]).unwrap().help);
+    }
+
+    #[test]
+    fn parses_the_revision_pin() {
+        // The bootstrap used to strip `--ref` before exec'ing the installer
+        // because the installer rejected the flag; it now forwards it, so an
+        // unrecognised `--ref` would abort every pinned Linux install.
+        let a = Args::parse(["--ref", "3b4b8dee"]).unwrap();
+        assert_eq!(a.rev.as_deref(), Some("3b4b8dee"));
+        assert!(Args::default().rev.is_none());
+    }
+
+    #[test]
+    fn a_ref_with_no_value_is_refused_rather_than_read_as_no_pin() {
+        // "--ref" swallowing the next flag, or defaulting to no pin, would
+        // install tip-of-branch under the impression it had pinned something.
+        assert_eq!(
+            Args::parse(["--ref"]).unwrap_err(),
+            ParseError::MissingValue("--ref".to_string())
+        );
+        assert_eq!(
+            Args::parse(["--ref", "--profile", "drone"]).unwrap_err(),
+            ParseError::MissingValue("--ref".to_string())
+        );
     }
 }

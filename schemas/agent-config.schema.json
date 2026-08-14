@@ -852,11 +852,6 @@
         "ui": {
           "$ref": "#/$defs/GroundStationUiConfig"
         },
-        "use_live_state_ipc": {
-          "default": true,
-          "title": "Use Live State Ipc",
-          "type": "boolean"
-        },
         "wfb_receiver": {
           "$ref": "#/$defs/WfbReceiverConfig",
           "default": {
@@ -1033,6 +1028,11 @@
     },
     "MavlinkConfig": {
       "properties": {
+        "aux_uplink_enforce_origin": {
+          "default": false,
+          "title": "Aux Uplink Enforce Origin",
+          "type": "boolean"
+        },
         "baud_rate": {
           "default": 57600,
           "title": "Baud Rate",
@@ -1053,6 +1053,11 @@
         "legacy_stream_request": {
           "default": false,
           "title": "Legacy Stream Request",
+          "type": "boolean"
+        },
+        "raw_proxy_enforce_auth": {
+          "default": false,
+          "title": "Raw Proxy Enforce Auth",
           "type": "boolean"
         },
         "serial_port": {
@@ -1208,11 +1213,6 @@
           "title": "Beacon Interval",
           "type": "integer"
         },
-        "code_ttl": {
-          "default": 900,
-          "title": "Code Ttl",
-          "type": "integer"
-        },
         "convex_url": {
           "default": "",
           "title": "Convex Url",
@@ -1333,8 +1333,7 @@
           "default": {
             "command_enabled": false,
             "enabled": false,
-            "rx_port": 5820,
-            "tx_port": 5821
+            "rx_port": 5820
           }
         }
       },
@@ -1794,7 +1793,7 @@
       "type": "object"
     },
     "TunnelConfig": {
-      "description": "The config-over-radio channel (a MAVLink-TUNNEL request/response lane on\nthe low-rate WFB ``-p1`` control plane).\n\nIt lets a node reachable only over the radio link (WFB carries no IP) have\nits ``/api/config`` read and written from the ground. It carries CONFIG\nrequest/response ONLY \u2014 never armed-flight command authority (a separate,\ngated concern) \u2014 and its only gate by riding ``-p1`` is the WFB pairing key\n(a pairing-scope gate, not a flight-authorization gate).\n\n``enabled`` is the master opt-in. Off by default: the whole channel is\ninert \u2014 the drone-side terminator acts on no config tunnel and the\nground-side injector refuses every request. It mirrors onto the\n``/etc/ados/tunnel-enabled`` marker the ``ados-tunnel-config`` unit gates\non, so an un-opted node never even runs the unit.\n\n``command_enabled`` opens config WRITES (``PUT /api/config``) over the\nradio. Off by default and NOT implied by opting the channel in: a config\nREAD (``GET``) is served while writes are refused until an operator sets\nthis for a bench-validated write lane, after a safety review.\n\n``rx_port`` / ``tx_port`` are the LOCAL UDP ports the service binds/sends\non. They are dedicated ports (disjoint from the WFB plane ports) that an\n``ados-radio`` bearer bridge connects to the ``-p1`` control plane in a\nseparate, gated radio-integration step.",
+      "description": "The config-over-radio channel (a MAVLink-TUNNEL request/response lane on\nthe radio's auxiliary application lane).\n\nIt lets a node reachable only over the radio link (WFB carries no IP) have\nits ``/api/config`` read and written from the ground. It carries CONFIG\nrequest/response ONLY \u2014 never armed-flight command authority (a separate,\ngated concern) \u2014 and its only gate by riding that lane is the WFB pairing\nkey (a pairing-scope gate, not a flight-authorization gate).\n\nThe bearer is the auxiliary lane the radio already runs (the drone's ``-p2``\ndownlink and the ground station's ``-p3`` uplink) on its own channel of the\nshared aux multiplex, brought up on demand by the radio service. An earlier\nversion of this docstring named the ``-p1`` control plane; that plane is\nfully occupied by the hop announce/ack exchange, its ports are reserved, and\nit carries no multiplexer, so nothing ever rode it.\n\n``enabled`` is the master opt-in. Off by default: the whole channel is\ninert \u2014 the drone-side terminator acts on no config tunnel and the\nground-side injector refuses every request. It mirrors onto the\n``/etc/ados/tunnel-enabled`` marker the ``ados-tunnel-config`` unit gates\non, so an un-opted node never even runs the unit.\n\n``command_enabled`` opens config WRITES (``PUT /api/config``) over the\nradio. Off by default and NOT implied by opting the channel in: a config\nREAD (``GET``) is served while writes are refused until an operator sets\nthis for a bench-validated write lane, after a safety review.\n\n``rx_port`` is the LOCAL loopback ingress the service binds. Frames do not\nland there off the air directly: each rig's aux plane consumer already holds\nthe plane's own port and forwards this channel's frames on, resolving the\nsame value from here. There is no egress port to configure \u2014 the drone\nnegotiates its transmit ingress with the radio service, and the ground\nstation writes to ``video.wfb.aux_tx_port``.",
       "properties": {
         "command_enabled": {
           "default": false,
@@ -1809,11 +1808,6 @@
         "rx_port": {
           "default": 5820,
           "title": "Rx Port",
-          "type": "integer"
-        },
-        "tx_port": {
-          "default": 5821,
-          "title": "Tx Port",
           "type": "integer"
         }
       },
@@ -2017,11 +2011,6 @@
     },
     "VisionConfig": {
       "properties": {
-        "auto_download": {
-          "default": true,
-          "title": "Auto Download",
-          "type": "boolean"
-        },
         "backend": {
           "default": "auto",
           "title": "Backend",
@@ -2406,7 +2395,6 @@
           "oled": {},
           "screens": {}
         },
-        "use_live_state_ipc": true,
         "wfb_receiver": {
           "accept_local_nic": true,
           "listen_port": 5800
@@ -2432,6 +2420,7 @@
     "mavlink": {
       "$ref": "#/$defs/MavlinkConfig",
       "default": {
+        "aux_uplink_enforce_origin": false,
         "baud_rate": 57600,
         "component_id": 191,
         "endpoints": [
@@ -2443,6 +2432,7 @@
           }
         ],
         "legacy_stream_request": false,
+        "raw_proxy_enforce_auth": false,
         "serial_port": "",
         "source": "auto",
         "system_id": 1,
@@ -2491,7 +2481,6 @@
       "default": {
         "beacon_enabled": true,
         "beacon_interval": 30,
-        "code_ttl": 900,
         "convex_url": "",
         "heartbeat_interval": 60,
         "state_path": "/etc/ados/pairing.json"
@@ -2528,8 +2517,7 @@
         "tunnel": {
           "command_enabled": false,
           "enabled": false,
-          "rx_port": 5820,
-          "tx_port": 5821
+          "rx_port": 5820
         }
       }
     },
@@ -2710,7 +2698,6 @@
     "vision": {
       "$ref": "#/$defs/VisionConfig",
       "default": {
-        "auto_download": true,
         "backend": "auto",
         "confidence_threshold": 0.5,
         "enabled": false,

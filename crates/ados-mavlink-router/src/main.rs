@@ -424,10 +424,19 @@ async fn main() {
         tasks.push(tokio::spawn(async move {
             aux_uplink_consumer::run(
                 aux_ports().rx,
-                uplink_fc,
-                Some(uplink_egress),
-                uplink_device_id,
-                uplink_dedupe,
+                aux_uplink_consumer::UplinkDeps {
+                    fc: uplink_fc,
+                    egress: Some(uplink_egress),
+                    own_device_id: uplink_device_id,
+                    dedupe: uplink_dedupe,
+                    // The hand-off to the local config-over-radio service.
+                    // Harmless when that channel is opted out: nothing is bound
+                    // to the ingress port, so a frame is counted and dropped.
+                    config_tunnel: Some(Arc::new(
+                        ados_protocol::config_tunnel_ingest::ConfigTunnelIngest::at_configured_port(
+                        ),
+                    )),
+                },
                 uplink_counters,
                 uplink_cancel,
             )
@@ -719,11 +728,11 @@ async fn main() {
         let cancel = cancel.clone();
         let port = tcp_proxy_port();
         let bind = proxy_bind_addr();
-        // Same posture object the WebSocket uses. Observe-only here regardless
-        // of the flag for now: this port is advertised to operators as the
-        // QGroundControl / Mission Planner path, so it logs what it would have
-        // refused rather than refusing it.
-        let auth = ProxyAuth::from_config(false);
+        // Same posture object the WebSocket uses, on its own flag: these ports
+        // are advertised to operators as the QGroundControl / Mission Planner
+        // path and carry no credential channel, so enforcement is opt-in rather
+        // than the default. See `config::default_raw_proxy_enforce_auth`.
+        let auth = ProxyAuth::from_config(cfg.raw_proxy_enforce_auth);
         tasks.push(tokio::spawn(async move {
             run_tcp_proxy(fc, &bind, port, auth, cancel).await
         }));
@@ -731,7 +740,7 @@ async fn main() {
     for port in udp_proxy_ports() {
         let fc = fc.clone();
         let cancel = cancel.clone();
-        let auth = ProxyAuth::from_config(false);
+        let auth = ProxyAuth::from_config(cfg.raw_proxy_enforce_auth);
         let bind = proxy_bind_addr();
         tasks.push(tokio::spawn(async move {
             run_udp_proxy(fc, &bind, port, auth, cancel).await
@@ -741,9 +750,10 @@ async fn main() {
         let fc = fc.clone();
         let cancel = cancel.clone();
         // The direct WebSocket proxy carries raw MAVLink to/from the FC, so a
-        // paired agent gates an off-box connection on the stored pairing key.
-        // Enforcement is config-driven and defaults off (observe-only), so this
-        // build does not change the data path until a bench session enables it.
+        // paired agent gates an off-box connection on the stored pairing key or
+        // a valid ticket. Enforcement is config-driven and defaults ON: the
+        // endpoint has two credential channels every first-party client already
+        // presents, so the gate is closable without stranding anyone.
         let auth = WsProxyAuth::from_config(cfg.ws_proxy_enforce_auth);
         tasks.push(tokio::spawn(async move {
             run_ws_proxy(fc, ws_port, auth, cancel).await

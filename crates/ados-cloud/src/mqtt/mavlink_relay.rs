@@ -29,7 +29,7 @@ use crate::mqtt::transport::TransportConfig;
 
 /// Frame queue depth. 2000 frames at ~30 msg/s gives ~66 s of headroom before
 /// drops start. The earlier 200-frame size produced a 17.4 % sustained drop
-/// rate over a slow WSS tunnel. Mirrors `_QUEUE_MAXSIZE`.
+/// rate over a slow WSS tunnel.
 pub const QUEUE_MAXSIZE: usize = 2000;
 
 /// In-flight publish ceiling. The MQTT client's low default in-flight limit was

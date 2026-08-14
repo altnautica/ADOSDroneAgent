@@ -244,7 +244,7 @@ const COPTER_MODE_NUMBERS: &[(&str, u32)] = &[
 ];
 
 /// PX4 flight-mode name → `(main_mode, sub_mode)` for the `DO_SET_MODE` command
-/// path. Mirrors the router's PX4 decode table, with both the short operator
+/// path. Matches the router's PX4 decode table, with both the short operator
 /// names (`RTL`, `LOITER`, `MISSION`, `TAKEOFF`, `LAND`) and the dotted names the
 /// state producer reports (`AUTO.RTL`) resolving to the same pair. The `mode`
 /// command resolves a mode name here on a PX4 FC.

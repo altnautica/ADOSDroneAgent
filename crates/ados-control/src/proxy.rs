@@ -275,7 +275,7 @@ mod tests {
     use tokio::net::UnixListener;
 
     /// Serve one canned HTTP/1.1 response on a Unix socket, then exit. Drains the
-    /// request head so the client's write completes before replying. Mirrors the
+    /// request head so the client's write completes before replying. Same shape as the
     /// logd client's `serve_once` test helper.
     fn serve_once(listener: UnixListener, response: Vec<u8>) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {

@@ -267,13 +267,12 @@ fn json_truthy(v: &Value) -> bool {
     }
 }
 
-/// True when `s` matches the YAML implicit timestamp grammar a standard YAML
-/// loader resolves to a date/datetime (and therefore not a plain string).
-/// Reproduces the loader's implicit resolver: either a bare `YYYY-MM-DD` date, or
-/// a full datetime `YYYY-M-D` (single- or double-digit month/day) followed by a
-/// `T`/whitespace separator, `H:MM:SS`, an optional fractional second, and an
-/// optional `Z` or numeric timezone offset. Mirrors the sibling read module's
-/// `is_yaml_timestamp`.
+/// True when `s` matches the YAML implicit timestamp grammar a standard YAML loader
+/// resolves to a date/datetime (and therefore not a plain string). Reproduces the
+/// loader's implicit resolver: either a bare `YYYY-MM-DD` date, or a full datetime
+/// `YYYY-M-D` (single- or double-digit month/day) followed by a `T`/whitespace
+/// separator, `H:MM:SS`, an optional fractional second, and an optional `Z` or numeric
+/// timezone offset. Same rule as the sibling read module's `is_yaml_timestamp`.
 fn is_yaml_timestamp(s: &str) -> bool {
     let b = s.as_bytes();
 

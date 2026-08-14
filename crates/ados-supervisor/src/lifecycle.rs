@@ -701,7 +701,7 @@ mod tests {
         assert!(gate_allows(&spec("ados-wfb"), &c)); // drone-gated
         assert!(!gate_allows(&spec("ados-wfb-rx"), &c)); // ground_station-gated
         assert!(!gate_allows(&spec("ados-oled"), &c));
-        assert!(gate_allows(&spec("ados-wifi-client"), &c)); // cross-profile
+        assert!(gate_allows(&spec("ados-peripherals"), &c)); // cross-profile
     }
 
     #[test]
@@ -728,11 +728,12 @@ mod tests {
         assert!(gate_allows(&spec("ados-wfb"), &c));
         assert!(gate_allows(&spec("ados-control"), &c));
         // Everything else gates off even though the profile/role gates alone
-        // would permit it on a full drone: FastAPI, cloud, health, wifi-client.
+        // would permit it on a full drone: the HTTP front, cloud, health, and a
+        // cross-profile Hardware unit that is not in the keep set.
         assert!(!gate_allows(&spec("ados-api"), &c));
         assert!(!gate_allows(&spec("ados-cloud"), &c));
         assert!(!gate_allows(&spec("ados-health"), &c));
-        assert!(!gate_allows(&spec("ados-wifi-client"), &c));
+        assert!(!gate_allows(&spec("ados-peripherals"), &c));
         // The full-agent gate is unchanged: with headless off, ados-api runs.
         assert!(gate_allows(&spec("ados-api"), &cfg("drone")));
     }

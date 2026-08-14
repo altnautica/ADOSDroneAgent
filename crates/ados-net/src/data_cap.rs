@@ -246,8 +246,8 @@ impl DataCapTracker {
         classify(self.cap_bytes, self.state.cumulative_bytes)
     }
 
-    /// Month-window reset check. Returns `true` when a reset happened. Mirrors
-    /// `_check_month_reset` (compares against the local-time `%Y-%m`).
+    /// Month-window reset check. Returns `true` when a reset happened. Compares against
+    /// the local-time `%Y-%m`.
     pub fn check_month_reset(&mut self) -> bool {
         let now_month = current_month();
         if self.state.last_reset_month != now_month {
@@ -266,9 +266,9 @@ impl DataCapTracker {
         }
     }
 
-    /// fsync-before-rename persist. Mirrors `_save_state`: the fsync defends
-    /// against power loss between write and the kernel flushing dirty pages,
-    /// which would otherwise roll the cap counter back.
+    /// fsync-before-rename persist. The fsync defends against power loss between
+    /// the write and the kernel flushing dirty pages, which would otherwise roll
+    /// the cap counter back.
     fn save_state(&self) {
         let body = self.state.render_json();
         if let Err(exc) = sidecar::write_atomic_fsync(&self.state_path, body.as_bytes()) {
@@ -278,7 +278,7 @@ impl DataCapTracker {
 
     /// One poll. Reads the source, applies counter-reset handling, accumulates,
     /// persists, and emits a `data_cap_threshold` event ONLY on a state
-    /// transition. Mirrors `_poll_once`.
+    /// transition.
     pub async fn poll_once(&mut self) {
         let usage = self.source.data_usage().await;
         let rx = usage.rx_bytes;

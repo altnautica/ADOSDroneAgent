@@ -24,7 +24,7 @@ use ados_config_tunnel::paths::{run_path, write_sidecar, LOCAL_CONFIG_BASE_URL};
 use ados_config_tunnel::sidecar::{build_sidecar, ChannelState, SidecarInputs};
 use ados_config_tunnel::stats::Counters;
 use ados_config_tunnel::terminator::run_terminator;
-use ados_config_tunnel::transport::UdpTunnelTransport;
+use ados_config_tunnel::transport::AuxTunnelTransport;
 
 const CONFIG_YAML: &str = "/etc/ados/config.yaml";
 const PROFILE_CONF: &str = "/etc/ados/profile.conf";
@@ -158,7 +158,11 @@ async fn run_drone(
     shutdown: watch::Receiver<bool>,
     reload: Arc<Notify>,
 ) -> RunExit {
-    let transport = match UdpTunnelTransport::bind(cfg.rx_port, cfg.tx_port).await {
+    // The drone's egress goes through the radio service's aux command socket:
+    // that service owns the transmit/receive pair's lifecycle here and brings it
+    // up on demand, so nothing radiates until the first config frame is sent.
+    let aux_cmd_sock = run_path("radio-aux.sock");
+    let transport = match AuxTunnelTransport::on_drone(&aux_cmd_sock, cfg.rx_port).await {
         Ok(t) => Arc::new(t),
         Err(e) => {
             tracing::warn!(error = %e, rx_port = cfg.rx_port, "tunnel_config_bind_failed_idle");
@@ -172,6 +176,9 @@ async fn run_drone(
     let hb = spawn_heartbeat(
         ChannelState::Terminator,
         cfg.clone(),
+        // The transmit ingress is negotiated per open by the radio service, so
+        // this rig has no statically known egress port to report.
+        None,
         counters.clone(),
         None,
         pass_stop_rx,
@@ -201,10 +208,20 @@ async fn run_ground_station(
     mut shutdown: watch::Receiver<bool>,
     reload: Arc<Notify>,
 ) -> RunExit {
-    let transport = match UdpTunnelTransport::bind(cfg.rx_port, cfg.tx_port).await {
+    // A ground station has no radio command socket: its `wfb_tx -p3` is already
+    // running (spawned by the receive chain), so the aux transmit ingress is a
+    // plain UDP port. Resolved through the shared reader so an operator override
+    // moves this writer with the radio instead of leaving it on a dead port.
+    let aux_tx_port = ados_protocol::aux_ports::AuxPorts::load().tx;
+    let transport = match AuxTunnelTransport::on_ground_station(aux_tx_port, cfg.rx_port).await {
         Ok(t) => Arc::new(t),
         Err(e) => {
-            tracing::warn!(error = %e, rx_port = cfg.rx_port, "tunnel_config_bind_failed_idle");
+            tracing::warn!(
+                error = %e,
+                rx_port = cfg.rx_port,
+                aux_tx_port,
+                "tunnel_config_bind_failed_idle"
+            );
             return idle_disabled(shutdown, reload).await;
         }
     };
@@ -217,12 +234,13 @@ async fn run_ground_station(
         enabled: cfg.enabled,
         command_enabled: cfg.command_enabled,
         rx_port: Some(cfg.rx_port),
-        tx_port: Some(cfg.tx_port),
+        tx_port: Some(aux_tx_port),
         counters: counters.snapshot(),
     })));
     let hb = spawn_heartbeat(
         ChannelState::Injector,
         cfg.clone(),
+        Some(aux_tx_port),
         counters,
         Some(latest_status.clone()),
         pass_stop_rx,
@@ -254,12 +272,15 @@ async fn run_ground_station(
     exit
 }
 
-/// Spawn the ~1 Hz sidecar heartbeat for a pass. When `latest_status` is set
-/// (the GS role), each write also refreshes the in-memory status the command
-/// socket's `status` op serves. Stops when `pass_stop` flips true.
+/// Spawn the ~1 Hz sidecar heartbeat for a pass. `egress_port` is the aux
+/// transmit ingress this rig writes onto, or `None` where the radio service
+/// negotiates it per open (the drone role). When `latest_status` is set (the GS
+/// role), each write also refreshes the in-memory status the command socket's
+/// `status` op serves. Stops when `pass_stop` flips true.
 fn spawn_heartbeat(
     state: ChannelState,
     cfg: TunnelChannelConfig,
+    egress_port: Option<u16>,
     counters: Arc<Counters>,
     latest_status: Option<Arc<Mutex<serde_json::Value>>>,
     mut pass_stop: watch::Receiver<bool>,
@@ -279,7 +300,7 @@ fn spawn_heartbeat(
                         enabled: cfg.enabled,
                         command_enabled: cfg.command_enabled,
                         rx_port: Some(cfg.rx_port),
-                        tx_port: Some(cfg.tx_port),
+                        tx_port: egress_port,
                         counters: counters.snapshot(),
                     };
                     let body = build_sidecar(&inputs);

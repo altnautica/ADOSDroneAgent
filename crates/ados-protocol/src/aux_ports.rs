@@ -34,8 +34,8 @@ pub const CONFIG_YAML: &str = "/etc/ados/config.yaml";
 
 /// The config path, honouring an `ADOS_CONFIG_YAML` override so a test (and a
 /// sim-bench run) can point every reader at the same temp file rather than the
-/// real `/etc/ados/config.yaml`. Mirrors the `ADOS_RUN_DIR` seam the sidecar
-/// paths already use.
+/// real `/etc/ados/config.yaml`. Mirrors the `ADOS_RUN_DIR` seam
+/// (core/paths.py) the sidecar paths already use.
 pub fn config_path() -> std::path::PathBuf {
     match std::env::var("ADOS_CONFIG_YAML") {
         Ok(p) if !p.trim().is_empty() => std::path::PathBuf::from(p),

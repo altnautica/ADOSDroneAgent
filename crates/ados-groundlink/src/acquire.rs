@@ -105,11 +105,10 @@ pub trait ChannelSetter: Send + Sync {
 
 /// Channel numbers to sweep for `band`, current-config-first order.
 ///
-/// The configured band's channels come first so the common case (the peer is on
-/// a channel inside the operator's chosen band) locks fast. Falls back to all
-/// standard channels when the band key is unknown. Mirrors the Python
-/// `candidate_channels`: the band lookup is on the RAW key, so only "u-nii-1",
-/// "u-nii-3", and "all" match; anything else falls through to "all".
+/// The configured band's channels come first so the common case (the peer is on a
+/// channel inside the operator's chosen band) locks fast. Falls back to all standard
+/// channels when the band key is unknown. The band lookup is on the RAW key, so only
+/// "u-nii-1", "u-nii-3", and "all" match; anything else falls through to "all".
 ///
 /// `enabled` filters the list to channels this adapter actually permits.
 /// Channels the regulatory domain disables fail `iw set channel` with -22 and

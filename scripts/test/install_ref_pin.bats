@@ -20,13 +20,25 @@
 #   5. --ref with no value -> refused before any network work.
 #   6. --ref stripped from the argv handed to the Rust installer, which errors
 #                             on an unknown flag.
-#   7. Linux + --ref       -> refused, because nothing the Linux path fetches is
-#                             addressable by commit (rolling per-service
-#                             release tags + a version-tagged wheel).
+#   7. Linux + --ref       -> FORWARDED to the Rust installer, which checks the
+#                             agent tree out at that revision and fetches the
+#                             service binaries from that commit's `rev-<sha>`
+#                             release. Both halves are now commit-addressable, so
+#                             the flag no longer has to be refused here.
+#   8. Linux + --ref, over a fake release tree served from disk -> the pinned
+#                             asset really resolves at
+#                             $ADOS_RELEASE_BASE/rev-<sha>/<asset>, and a
+#                             revision with no release is NOT silently served
+#                             another one.
+#   9. --channel stable --ref -> refused. Stable resolves a wheel from a
+#                             v<X.Y.Z> tag, which addresses a version and not a
+#                             commit, so there is no per-revision wheel to pin.
 #
-# Hermetic: the clone source is a local fixture repo (ADOS_GIT_URL), `cargo` is
-# a stub that records its argv, and `uname` is stubbed to select the platform
-# branch, so the suite touches no network and runs unprivileged on any host.
+# Hermetic: the clone source is a local fixture repo (ADOS_GIT_URL), the release
+# tree is a directory served over file:// (ADOS_RELEASE_BASE), `cargo` and the
+# downloaded installer are stubs that record their argv, and `uname` / `id` /
+# `apt-get` are stubbed so the suite touches no network, installs no packages, and
+# runs unprivileged on any host.
 #
 # Assertions go through the helpers below rather than `[[ ... ]]` or `! cmd`.
 # Under bats 1.13 both of those are exempt from errexit unless they are the
@@ -78,9 +90,67 @@ exit 0
 EOF
     chmod +x "${BIN}/cargo"
 
-    # Platform selector. Every test picks one explicitly.
+    # Platform selector. Every test picks one explicitly. The Linux stub answers
+    # `-m` too, because the Linux branch maps the machine type to a prebuilt
+    # asset name before it fetches anything.
     darwin_uname() { printf '#!/bin/sh\necho Darwin\n' > "${BIN}/uname"; chmod +x "${BIN}/uname"; }
-    linux_uname() { printf '#!/bin/sh\necho Linux\n' > "${BIN}/uname"; chmod +x "${BIN}/uname"; }
+    linux_uname() {
+        cat > "${BIN}/uname" <<'EOF'
+#!/bin/sh
+case "$1" in
+    -m) echo aarch64 ;;
+    *) echo Linux ;;
+esac
+EOF
+        chmod +x "${BIN}/uname"
+    }
+
+    # The Linux branch writes under /opt and /etc, so it requires root. Stubbed
+    # rather than granted: nothing in these tests reaches a real path.
+    root_id() { printf '#!/bin/sh\necho 0\n' > "${BIN}/id"; chmod +x "${BIN}/id"; }
+
+    # The bootstrap best-effort installs minisign before verifying. A no-op stub
+    # keeps the suite from touching a package manager on any host; the fetch then
+    # reports its sha256-only posture and continues, exactly as on a board with
+    # no package index.
+    stub_apt() { printf '#!/bin/sh\nexit 0\n' > "${BIN}/apt-get"; chmod +x "${BIN}/apt-get"; }
+
+    # A fake release tree the bootstrap and the installer both fetch from over
+    # file://, which is the whole point of ADOS_RELEASE_BASE: `net.rs` and this
+    # script shell out to curl, and curl speaks file://, so a directory on disk
+    # exercises the real fetch path with no network and no credential.
+    #
+    # It carries two things: the installer asset the bootstrap verifies and execs
+    # (a stub that records its argv), and one prebuilt under the per-revision tag
+    # `rev-<TIP_SHA>`, laid out exactly as `fetch_binaries::asset_base` builds it.
+    publish_release_tree() {
+        REL="${TMP}/release"
+        INSTALLER_ARGV="${TMP}/installer.argv"
+        REV_FETCHED="${TMP}/rev-fetched.bin"
+        mkdir -p "${REL}/prebuilt-installer" "${REL}/rev-${TIP_SHA}"
+        cat > "${REL}/prebuilt-installer/ados-installer-aarch64" <<EOF
+#!/bin/sh
+# Stand-in for the Rust installer: record the argv the bootstrap handed over,
+# then resolve one prebuilt the way fetch_binaries does under a pin
+# (asset_base(rev, tag) == \${ADOS_RELEASE_BASE}/rev-<sha>).
+printf '%s\n' "\$*" > "${INSTALLER_ARGV}"
+rev=""
+prev=""
+for a in "\$@"; do
+    [ "\$prev" = "--ref" ] && rev="\$a"
+    prev="\$a"
+done
+[ -n "\$rev" ] || exit 0
+curl -fsSL "\${ADOS_RELEASE_BASE}/rev-\${rev}/ados-supervisor-aarch64" -o "${REV_FETCHED}" || exit 9
+EOF
+        chmod +x "${REL}/prebuilt-installer/ados-installer-aarch64"
+        ( cd "${REL}/prebuilt-installer" \
+            && sha256sum ados-installer-aarch64 > ados-installer-aarch64.sha256 )
+        printf 'pinned-supervisor-bytes\n' > "${REL}/rev-${TIP_SHA}/ados-supervisor-aarch64"
+        ( cd "${REL}/rev-${TIP_SHA}" \
+            && sha256sum ados-supervisor-aarch64 > ados-supervisor-aarch64.sha256 )
+        export ADOS_RELEASE_BASE="file://${REL}"
+    }
 
     # The fixture "remote": two commits on main. allowAnySHA1InWant mirrors
     # github.com, where fetching a bare object name is what makes a SHA pin
@@ -222,11 +292,65 @@ boot() {
     [ "$(git -C "${SRC}" rev-parse HEAD)" = "${OLD_SHA}" ]
 }
 
-@test "Linux refuses --ref rather than pinning nothing" {
+@test "Linux forwards --ref instead of refusing it" {
+    # The inverse of the old invariant. It used to be refused because nothing the
+    # Linux path fetched was addressable by commit: the binaries came from rolling
+    # per-service tags and the wheel from a version tag. CI now publishes a
+    # per-revision release and the installer resolves against it, so the flag is
+    # forwarded rather than rejected, and BOTH halves carry the same commit.
     linux_uname
-    boot --profile drone --upgrade --ref "${OLD_SHA}"
+    root_id
+    stub_apt
+    publish_release_tree
+    boot --profile drone --upgrade --ref "${TIP_SHA}"
+    [ "$status" -eq 0 ]
+    assert_not_contains "$output" "not supported on Linux"
+    assert_contains "$(cat "${INSTALLER_ARGV}")" "--ref ${TIP_SHA}"
+    grep -q -- '--profile drone' "${INSTALLER_ARGV}"
+    grep -q -- '--upgrade' "${INSTALLER_ARGV}"
+}
+
+@test "a pinned Linux install resolves its binaries from that revision's release" {
+    # End to end over file://: the bootstrap verifies and execs the installer
+    # asset out of the fake release tree, exports the release base, and the
+    # installer resolves rev-<sha>/<asset> from it. This is the half the old
+    # refusal said could not exist.
+    linux_uname
+    root_id
+    stub_apt
+    publish_release_tree
+    boot --profile drone --ref "${TIP_SHA}"
+    [ "$status" -eq 0 ]
+    [ "$(cat "${REV_FETCHED}")" = "pinned-supervisor-bytes" ]
+}
+
+@test "a revision with no published release is not silently served another one" {
+    # Only rev-<TIP_SHA> exists in the tree. Pinning the other commit must fail
+    # rather than resolve to whatever release happens to be there — a pin that
+    # falls back is the entire bug class this flag closes, and on the Linux path
+    # the binaries are where it would fall back silently.
+    linux_uname
+    root_id
+    stub_apt
+    publish_release_tree
+    boot --profile drone --ref "${OLD_SHA}"
+    [ "$status" -ne 0 ]
+    [ ! -f "${REV_FETCHED}" ]
+}
+
+@test "--channel stable with --ref is refused before anything is fetched" {
+    # Stable resolves its wheel from a v<X.Y.Z> tag, which addresses a version
+    # and not a commit, so there is no per-revision wheel to pin. Honouring only
+    # the binary half would report a pin the wheel does not have.
+    linux_uname
+    root_id
+    stub_apt
+    publish_release_tree
+    boot --profile drone --channel stable --ref "${TIP_SHA}"
     [ "$status" -eq 2 ]
-    assert_contains "$output" "--ref is not supported on Linux"
+    assert_contains "$output" "--ref requires --channel edge"
+    # Refused before the installer was even downloaded.
+    [ ! -f "${INSTALLER_ARGV}" ]
 }
 
 @test "Linux without --ref is untouched" {

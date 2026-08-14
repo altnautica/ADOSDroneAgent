@@ -12,12 +12,15 @@
 //!   2. self-heal a rotted pip (probe `pip --version`, recreate the venv on
 //!      failure)
 //!   3. install the agent package per channel:
-//!      edge   — git clone the repo (honoring --branch) + `pip install <repo>`
+//!      edge   — git clone the repo (honoring --branch) + `pip install <repo>`,
+//!      or, with `--ref <rev>`, clone then fetch + detached-checkout that exact
+//!      revision (a clone's `--branch` never takes a SHA) and hand the expanded
+//!      40-char object name to the binary fetch
 //!      stable — download + SHA256-verify the release wheel for `--version`,
 //!      then `pip install <wheel>` (no on-disk source tree)
 //!
-//! The venv-path + pip-args + wheel-URL builders are pure so a unit test
-//! exercises them without a real interpreter or the network.
+//! The venv-path + pip-args + wheel-URL + git-args builders are pure so a unit
+//! test exercises them without a real interpreter or the network.
 
 use std::path::{Path, PathBuf};
 
@@ -135,6 +138,103 @@ pub fn git_clone_args(dest: &str, branch: Option<&str>) -> Vec<String> {
     args
 }
 
+/// The branch an abbreviated `--ref` is resolved against when no `--branch` was
+/// given. Only used to deepen history far enough to expand a prefix locally.
+const DEFAULT_BRANCH: &str = "main";
+
+/// How far back an abbreviated commit is chased when the server refuses the
+/// prefix. Bounded on purpose: a commit not in the last 500 of the branch is
+/// reported, not hunted. Matches the bootstrap's macOS path.
+const REV_DEEPEN_DEPTH: &str = "500";
+
+/// Build the `git fetch` args that pull ONE revision (pure). Depth 1 because a
+/// pin needs the commit, not its history. `--branch` cannot do this job: it
+/// takes a branch or a tag and never a commit SHA, which is why the pinned path
+/// is a clone followed by a fetch rather than a different clone.
+pub fn git_fetch_rev_args(rev: &str) -> Vec<String> {
+    vec![
+        "fetch".to_string(),
+        "--depth".to_string(),
+        "1".to_string(),
+        "origin".to_string(),
+        rev.to_string(),
+    ]
+}
+
+/// Build the `git fetch` args that deepen `branch` enough to expand an
+/// abbreviated commit locally (pure).
+pub fn git_deepen_args(branch: &str) -> Vec<String> {
+    vec![
+        "fetch".to_string(),
+        "--depth".to_string(),
+        REV_DEEPEN_DEPTH.to_string(),
+        "origin".to_string(),
+        branch.to_string(),
+    ]
+}
+
+/// Build the args that expand a possibly-abbreviated revision to its full object
+/// name against the local object store (pure). `^{commit}` refuses a prefix that
+/// resolves to a tree or a tag rather than a commit.
+pub fn git_rev_parse_args(rev: &str) -> Vec<String> {
+    vec![
+        "rev-parse".to_string(),
+        "--verify".to_string(),
+        "--quiet".to_string(),
+        format!("{rev}^{{commit}}"),
+    ]
+}
+
+/// Build the detached-checkout args for a resolved revision (pure). `--force`
+/// because the staging tree is ours to move; `--detach` because a pin is not a
+/// branch to follow.
+pub fn git_checkout_detached_args(object: &str) -> Vec<String> {
+    vec![
+        "checkout".to_string(),
+        "-q".to_string(),
+        "--force".to_string(),
+        "--detach".to_string(),
+        object.to_string(),
+    ]
+}
+
+/// Build the submodule re-sync args (pure). Moving HEAD to another commit leaves
+/// the submodules where the clone put them, so without this a pinned tree is the
+/// pinned superproject beside submodules from a different revision — the same
+/// mixed-revision install `--ref` exists to prevent.
+pub fn git_submodule_sync_args() -> Vec<String> {
+    vec![
+        "submodule".to_string(),
+        "update".to_string(),
+        "--init".to_string(),
+        "--recursive".to_string(),
+        "--depth".to_string(),
+        "1".to_string(),
+    ]
+}
+
+/// Whether `rev` is an ABBREVIATED commit hex prefix (pure): hex, non-empty, and
+/// shorter than a full 40-character object name.
+///
+/// A server cannot answer a request for a prefix — it is refused with the same
+/// "couldn't find remote ref" a typo gets — so a prefix has to be expanded
+/// locally. A full 40-char SHA the server already refused is genuinely absent, so
+/// it fails fast rather than paying for a deep fetch that cannot contain it. A
+/// branch or tag name is not hex and never reaches the deepen path either.
+pub fn is_abbreviated_commit(rev: &str) -> bool {
+    !rev.is_empty() && rev.len() < 40 && rev.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// The failure text when a `--ref` cannot be resolved.
+pub fn rev_unresolvable(rev: &str, branch: &str) -> String {
+    format!(
+        "could not resolve --ref {rev} in {REPO_URL}. Check that the commit, branch, or tag \
+         exists and is pushed; an abbreviated commit resolves only if it is within the last \
+         {REV_DEEPEN_DEPTH} commits of '{branch}', otherwise pass the full 40-character SHA. \
+         Not falling back to '{branch}' — nothing was installed."
+    )
+}
+
 /// Resolve a Python 3.11+ interpreter for the venv. Prefer a system interpreter
 /// (the fast path); when the board carries none, provision a portable CPython
 /// runtime so the install stays fully automatic on boards whose system Python
@@ -204,14 +304,96 @@ fn ensure_venv_pip(python: &str) -> anyhow::Result<()> {
     }
 }
 
+/// Move an already-cloned tree to the revision `--ref` names, and return that
+/// revision's FULL object name.
+///
+/// Every step is checked. The unpinned path tolerates a failed update and builds
+/// whatever is on disk; doing that with a pin would install a different revision
+/// than the one asked for, which is the entire failure this flag exists to stop.
+///
+/// Resolution order mirrors the bootstrap's macOS path, because a pin has to mean
+/// the same thing on both:
+///   1. fetch the exact object (`FETCH_HEAD`) — works for a full SHA, a branch,
+///      or a tag;
+///   2. only for a hex prefix the server could not answer, deepen the branch once
+///      and expand it locally;
+///   3. otherwise fail loudly, without falling back to the branch tip.
+fn checkout_rev(
+    repo: &Path,
+    rev: &str,
+    branch: &str,
+    sink: &ProgressSink,
+) -> anyhow::Result<String> {
+    let repo_s = repo.to_string_lossy().into_owned();
+    // Every git call runs against the staged tree, so `-C <repo>` is prefixed
+    // once here rather than repeated at each callsite.
+    let git = |args: &[String]| -> exec::CmdResult {
+        let mut argv: Vec<&str> = vec!["-C", &repo_s];
+        argv.extend(args.iter().map(String::as_str));
+        exec::run("git", &argv)
+    };
+
+    let fetch = git_fetch_rev_args(rev);
+    let object = if git(&fetch).success() {
+        "FETCH_HEAD".to_string()
+    } else if is_abbreviated_commit(rev) {
+        sink.sub_log(
+            "venv_agent",
+            &format!("'{rev}' is an abbreviated commit; deepening {branch} to resolve it"),
+        );
+        // Best-effort: the deepen only has to bring the object into the local
+        // store, and rev-parse below is what decides whether it did.
+        let _ = git(&git_deepen_args(branch));
+        let parsed = git(&git_rev_parse_args(rev));
+        let full = parsed.stdout.trim().to_string();
+        if !parsed.success() || full.is_empty() {
+            anyhow::bail!("{}", rev_unresolvable(rev, branch));
+        }
+        full
+    } else {
+        anyhow::bail!("{}", rev_unresolvable(rev, branch));
+    };
+
+    let checkout = git(&git_checkout_detached_args(&object));
+    if !checkout.success() {
+        anyhow::bail!(
+            "resolved --ref {rev} but could not check it out at {repo_s}: {}",
+            checkout.stderr.trim()
+        );
+    }
+
+    // Submodules follow the superproject, or the pinned tree is a mix of
+    // revisions. A tree with no submodules exits 0 here, so this is not
+    // conditional on the repo having any.
+    let submodules = git(&git_submodule_sync_args());
+    if !submodules.success() {
+        anyhow::bail!(
+            "checked out --ref {rev} but could not sync its submodules: {}",
+            submodules.stderr.trim()
+        );
+    }
+
+    let head = git(&["rev-parse".to_string(), "HEAD".to_string()]);
+    let full = head.stdout.trim().to_string();
+    if !head.success() || full.len() != 40 {
+        anyhow::bail!("checked out --ref {rev} but could not read the resulting HEAD at {repo_s}");
+    }
+    Ok(full)
+}
+
 /// Install the agent package on the edge channel: clone the repo (honoring
-/// --branch) into a PERSISTED dir, then `pip install <repo>`. Returns the
-/// cloned repo path so the caller can record it into `ctx.source_dir` — the
-/// downstream `systemd` / `config_identity` / `dkms` steps read `data/systemd`,
-/// `data/udev`, and `scripts/drivers/*` from it. We do NOT delete the clone
-/// (mirrors the bash installer persisting the tree to `/opt/ados/source`); a
-/// reinstall re-clones over it after wiping.
-fn install_agent_edge(ctx: &Ctx) -> anyhow::Result<PathBuf> {
+/// --branch, or checking out `--ref`'s exact revision) into a PERSISTED dir,
+/// then `pip install <repo>`. Returns the cloned repo path so the caller can
+/// record it into `ctx.source_dir` — the downstream `systemd` /
+/// `config_identity` / `dkms` steps read `data/systemd`, `data/udev`, and
+/// `scripts/drivers/*` from it. We do NOT delete the clone (mirrors the bash
+/// installer persisting the tree to `/opt/ados/source`); a reinstall re-clones
+/// over it after wiping.
+///
+/// Takes `&mut Ctx` for one reason: a pinned install writes the EXPANDED object
+/// name back into `ctx.rev`, which is what lets the later binary fetch address
+/// `rev-<full sha>` without asking a server to expand a prefix it cannot.
+fn install_agent_edge(ctx: &mut Ctx) -> anyhow::Result<PathBuf> {
     let sink = ctx.progress.clone();
     let repo = clone_dest()?;
     let repo_s = repo.to_string_lossy().into_owned();
@@ -247,6 +429,32 @@ fn install_agent_edge(ctx: &Ctx) -> anyhow::Result<PathBuf> {
         }
         anyhow::bail!("git clone failed: {}", clone_res.stderr.trim());
     }
+
+    // A `--ref` pin moves the STAGED tree to that revision before it is
+    // promoted, so the tree that gets pip-installed is the pinned one and a
+    // failure still leaves the live tree (and its `scripts/install.sh`) intact.
+    if let Some(rev) = ctx.rev.clone() {
+        let branch = ctx
+            .args
+            .branch
+            .clone()
+            .unwrap_or_else(|| DEFAULT_BRANCH.to_string());
+        match checkout_rev(&staging, &rev, &branch, &sink) {
+            Ok(full) => {
+                sink.sub_log("venv_agent", &format!("✓ source pinned to {full}"));
+                // The full object name is the half of the pin the binary fetch
+                // needs: `rev-<sha>` is the tag CI publishes, and an abbreviated
+                // value would 404 it. Expanded here because this is the only
+                // place in the install that holds a git object store, and this
+                // step runs before `fetch_binaries`.
+                ctx.rev = Some(full);
+            }
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&staging);
+                return Err(e);
+            }
+        }
+    }
     promote_staging(&staging, &repo)?;
 
     let pip = pip_install_edge_args(&repo_s);
@@ -269,6 +477,11 @@ fn install_agent_edge(ctx: &Ctx) -> anyhow::Result<PathBuf> {
 /// steps resolve their unit files / udev rules / driver scripts from the
 /// persisted `/opt/ados/source` (left by a prior install or the package data)
 /// instead. Temp downloads are cleaned up on every exit path.
+///
+/// A `--ref` pin never reaches here: `ctx::rev_channel_conflict` refuses the
+/// stable+`--ref` pair before the install starts, because a `v<X.Y.Z>` release
+/// tag addresses a version and not a commit, so there is no per-revision wheel
+/// this could fetch.
 fn install_agent_stable(ctx: &Ctx) -> anyhow::Result<()> {
     let raw = ctx.args.version.as_deref().ok_or_else(|| {
         anyhow::anyhow!("stable channel requires --version (the release to install)")
@@ -602,5 +815,174 @@ mod tests {
         // Shallow + submodules retained.
         assert!(branched.contains(&"--depth".to_string()));
         assert!(branched.contains(&"--recurse-submodules".to_string()));
+    }
+
+    #[test]
+    fn a_clone_can_never_carry_the_pin_itself() {
+        // `git clone --branch` takes a branch or a tag and never a commit SHA,
+        // which is the whole reason the pinned path is clone-then-fetch. If
+        // someone ever "simplifies" it by passing the rev as a branch, this says
+        // why that cannot work.
+        let sha = "3b4b8deec0ffee1234567890abcdef1234567890";
+        let args = git_clone_args("/tmp/repo", Some(sha));
+        let pos = args.iter().position(|a| a == "--branch").unwrap();
+        assert_eq!(
+            args[pos + 1],
+            sha,
+            "the builder is literal; the refusal comes from git, so the pinned \
+             path must not route a SHA through --branch"
+        );
+        // The pinned path's own fetch asks for the object by name instead.
+        assert_eq!(
+            git_fetch_rev_args(sha),
+            vec!["fetch", "--depth", "1", "origin", sha]
+        );
+    }
+
+    #[test]
+    fn abbreviated_commits_are_the_only_thing_worth_deepening_for() {
+        // A prefix is what a server cannot answer, so it is the only case that
+        // pays for a deep fetch.
+        assert!(is_abbreviated_commit("3b4b8dee"));
+        assert!(is_abbreviated_commit(
+            "3b4b8deec0ffee1234567890abcdef123456789"
+        ));
+        // A full object name the server already refused is genuinely absent.
+        assert!(!is_abbreviated_commit(
+            "3b4b8deec0ffee1234567890abcdef1234567890"
+        ));
+        // Branches and tags are not hex and never reach the deepen path.
+        assert!(!is_abbreviated_commit("main"));
+        assert!(!is_abbreviated_commit("v0.99.359"));
+        assert!(!is_abbreviated_commit(""));
+    }
+
+    #[test]
+    fn the_deepen_and_checkout_args_pin_rather_than_follow() {
+        assert_eq!(
+            git_deepen_args("main"),
+            vec!["fetch", "--depth", "500", "origin", "main"]
+        );
+        assert_eq!(
+            git_rev_parse_args("3b4b8dee"),
+            vec!["rev-parse", "--verify", "--quiet", "3b4b8dee^{commit}"]
+        );
+        // Detached: a pin is a commit, not a branch to follow forward.
+        let co = git_checkout_detached_args("FETCH_HEAD");
+        assert!(co.contains(&"--detach".to_string()));
+        assert!(co.contains(&"--force".to_string()));
+        assert_eq!(co.last().unwrap(), "FETCH_HEAD");
+        // Submodules follow the superproject or the tree is mixed-revision.
+        assert_eq!(
+            git_submodule_sync_args(),
+            vec![
+                "submodule",
+                "update",
+                "--init",
+                "--recursive",
+                "--depth",
+                "1"
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unresolvable_pin_refuses_to_fall_back_to_the_branch() {
+        // The silent fallback is the entire bug class: a deploy that gated on one
+        // commit and then installed whatever the branch had become.
+        let msg = rev_unresolvable("deadbeef", "main");
+        assert!(msg.contains("Not falling back"), "{msg}");
+        assert!(msg.contains("500"), "names the deepen bound: {msg}");
+        assert!(msg.contains("40-character SHA"), "names the fix: {msg}");
+    }
+
+    /// Build a throwaway "remote" with two commits and clone it, so the resolver
+    /// runs against a real object store. `allowAnySHA1InWant` mirrors github.com,
+    /// where fetching a bare object name is what makes a SHA pin possible at all.
+    fn fixture_clone() -> (tempfile::TempDir, PathBuf, String, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let remote = dir.path().join("remote");
+        let git = |args: &[&str]| {
+            let out = exec::run("git", args);
+            assert!(out.success(), "git {args:?} failed: {}", out.stderr);
+            out
+        };
+        std::fs::create_dir_all(&remote).unwrap();
+        let r = remote.to_string_lossy().into_owned();
+        git(&["init", "-q", "-b", "main", &r]);
+        git(&["-C", &r, "config", "user.email", "t@example.com"]);
+        git(&["-C", &r, "config", "user.name", "t"]);
+        git(&["-C", &r, "config", "uploadpack.allowAnySHA1InWant", "true"]);
+        std::fs::write(remote.join("marker"), b"old\n").unwrap();
+        git(&["-C", &r, "add", "-A"]);
+        git(&["-C", &r, "commit", "-qm", "first"]);
+        let old = git(&["-C", &r, "rev-parse", "HEAD"])
+            .stdout
+            .trim()
+            .to_string();
+        std::fs::write(remote.join("marker"), b"new\n").unwrap();
+        git(&["-C", &r, "add", "-A"]);
+        git(&["-C", &r, "commit", "-qm", "second"]);
+        let tip = git(&["-C", &r, "rev-parse", "HEAD"])
+            .stdout
+            .trim()
+            .to_string();
+
+        // `file://` rather than a bare path: the local transport hardlinks the
+        // object store and ignores `--depth`, so a bare path would neither be a
+        // shallow clone nor exercise upload-pack's `allowAnySHA1InWant` — the
+        // very thing a SHA pin depends on.
+        let clone = dir.path().join("clone");
+        let c = clone.to_string_lossy().into_owned();
+        git(&["clone", "-q", "--depth", "1", &format!("file://{r}"), &c]);
+        (dir, clone, old, tip)
+    }
+
+    #[test]
+    fn checkout_rev_moves_the_tree_and_reports_the_full_object_name() {
+        let (_dir, clone, old, _tip) = fixture_clone();
+        let sink = ProgressSink::default();
+        let full = checkout_rev(&clone, &old, "main", &sink).unwrap();
+        assert_eq!(full, old, "the pin's own full object name is returned");
+        assert_eq!(
+            std::fs::read_to_string(clone.join("marker")).unwrap(),
+            "old\n",
+            "the tree is at the pinned commit, not the branch tip"
+        );
+    }
+
+    #[test]
+    fn checkout_rev_expands_an_abbreviated_pin_locally() {
+        // The expansion is what lets `fetch_binaries` address `rev-<full sha>`:
+        // CI publishes the full 40-char tag, so an unexpanded prefix would 404
+        // the whole per-revision release. No GitHub API, no credential — the
+        // clone's own object store answers it.
+        let (_dir, clone, old, _tip) = fixture_clone();
+        let short = &old[..8];
+        let full = checkout_rev(&clone, short, "main", &ProgressSink::default()).unwrap();
+        assert_eq!(full, old);
+        assert_eq!(full.len(), 40);
+    }
+
+    #[test]
+    fn checkout_rev_refuses_an_unknown_pin_and_leaves_the_tree_where_it_was() {
+        let (_dir, clone, _old, tip) = fixture_clone();
+        let err = checkout_rev(
+            &clone,
+            "ffffffffffffffffffffffffffffffffffffffff",
+            "main",
+            &ProgressSink::default(),
+        )
+        .expect_err("an absent commit must fail rather than install the tip");
+        assert!(err.to_string().contains("Not falling back"));
+        let head = exec::run(
+            "git",
+            &["-C", &clone.to_string_lossy(), "rev-parse", "HEAD"],
+        );
+        assert_eq!(
+            head.stdout.trim(),
+            tip,
+            "a failed pin must not have moved the tree"
+        );
     }
 }

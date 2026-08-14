@@ -421,9 +421,8 @@ const FAILOVER_STATES: [&str; 3] = ["local", "cloud_relay", "failed"];
 /// `GET /api/wfb/pair/failover-status` → `{"failover_state": <state>}`.
 ///
 /// Reads the store's most-recent `wfb.pair.failover` event, falling back to the
-/// `wfb_failover.json` sidecar, defaulting to `"local"` when neither has a value.
-/// An unrecognized sidecar value also reads as `"local"`. Mirrors the Python
-/// `get_failover_status`.
+/// `wfb_failover.json` sidecar, defaulting to `"local"` when neither has a value. An
+/// unrecognized sidecar value also reads as `"local"`.
 pub async fn get_failover_status(State(state): State<AppState>) -> Json<Value> {
     if let Some(s) = latest_wfb_failover(&state).await {
         return Json(json!({"failover_state": s}));
@@ -462,10 +461,9 @@ pub async fn get_failover_status(State(state): State<AppState>) -> Json<Value> {
     Json(json!({"failover_state": validated}))
 }
 
-/// The store's most-recent failover state, validated to the accepted set, or
-/// `None` when the store is unreachable / has no such event / carries an
-/// unrecognized value, so the route falls back to the sidecar. Mirrors the Python
-/// `latest_wfb_failover`.
+/// The store's most-recent failover state, validated to the accepted set, or `None`
+/// when the store is unreachable / has no such event / carries an unrecognized value,
+/// so the route falls back to the sidecar.
 async fn latest_wfb_failover(state: &AppState) -> Option<String> {
     let rows = logd_query_events(state, "wfb.pair.failover", 1).await?;
     let row = rows.first()?.as_object()?;

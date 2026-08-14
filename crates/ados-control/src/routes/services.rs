@@ -209,12 +209,11 @@ fn attach_service_memory(services: &mut [Value]) {
 
 /// Resolve a services-list entry name to its systemd unit, or `None`.
 ///
-/// A unit-basename name (`ados-video`) maps to `<name>.service`; a short
-/// in-process label (`video-pipeline`) maps through the fixed table below.
-/// Anything else returns `None`. The systemd-fallback entries this route emits
-/// all carry `ados-*` basenames, so they take the first branch; the short-label
-/// table is carried for full parity with the FastAPI helper. Mirrors the Python
-/// `unit_for_service`.
+/// A unit-basename name (`ados-video`) maps to `<name>.service`; a short in-process
+/// label (`video-pipeline`) maps through the fixed table below. Anything else returns
+/// `None`. The systemd-fallback entries this route emits all carry `ados-*` basenames,
+/// so they take the first branch; the short-label table is carried for the older
+/// in-process labels a stored entry can still name.
 fn unit_for_service(name: &str) -> Option<String> {
     if name.is_empty() {
         return None;

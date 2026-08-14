@@ -130,12 +130,11 @@ pub const PUBLIC_TOPICS_FOR_SUBSCRIBE: &[&str] = &[
     "agent.shutdown",
 ];
 
-/// Reserved namespaces a plugin must not publish into. Mirrors the
-/// `reserved_prefixes` tuple in `events.is_publish_allowed`. The `vision.`
-/// prefix is host-publish-only: the engine publishes frame descriptors and
-/// detections there, and a plugin reaches the surface through the gated
-/// `vision.*` methods, not by publishing the topic itself. A plugin may still
-/// subscribe to `vision.*` with `event.subscribe` plus the matching read cap.
+/// Reserved namespaces a plugin must not publish into. The set is enforced inline by
+/// `is_publish_allowed`. The `vision.` prefix is host-publish-only: the engine
+/// publishes frame descriptors and detections there, and a plugin reaches the surface
+/// through the gated `vision.*` methods, not by publishing the topic itself. A plugin
+/// may still subscribe to `vision.*` with `event.subscribe` plus the matching read cap.
 const RESERVED_PUBLISH_PREFIXES: &[&str] = &[
     "vehicle.", "mavlink.", "mission.", "safety.", "agent.", "swarm.", "gps.", "vision.",
 ];
@@ -173,8 +172,7 @@ pub fn is_publish_allowed(plugin_id: &str, topic: &str, granted_caps: &BTreeSet<
         .any(|p| topic.starts_with(p))
 }
 
-/// Build a `ping` result: `{"pong": true, "plugin_id": <id>}`. Mirrors
-/// `_handle_ping`.
+/// Build a `ping` result: `{"pong": true, "plugin_id": <id>}`.
 pub fn ping_result(plugin_id: &str) -> HostResult {
     Value::Map(vec![
         (Value::from("pong"), Value::Boolean(true)),
@@ -229,10 +227,9 @@ pub enum PublishOutcome {
     Denied(RpcError),
 }
 
-/// Validate an `event.publish` request and build the event to fan out, applying
-/// the inline per-topic check (`is_publish_allowed`). Mirrors
-/// `_handle_event_publish` up to the bus call; the caller publishes and shapes
-/// `{"delivered": n}`.
+/// Validate an `event.publish` request and build the event to fan out, applying the
+/// inline per-topic check (`is_publish_allowed`). This stops at the bus call; the
+/// caller publishes and shapes `{"delivered": n}`.
 pub fn prepare_publish(
     plugin_id: &str,
     args: &Value,

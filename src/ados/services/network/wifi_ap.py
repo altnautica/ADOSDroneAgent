@@ -17,6 +17,10 @@ log = get_logger("services.network.wifi_ap")
 HOSTAPD_CONF = "/tmp/ados-hostapd.conf"
 DNSMASQ_CONF = "/tmp/ados-dnsmasq.conf"
 
+# The sysfs network root. Named so a test can point interface resolution at a
+# fixture tree instead of the host's real /sys.
+_NET_ROOT = Path("/sys/class/net")
+
 
 class WifiApManager:
     """Manages WiFi AP via hostapd + dnsmasq."""
@@ -30,6 +34,7 @@ class WifiApManager:
         captive_portal: bool = True,
         device_id: str = "",
         shutdown_event: asyncio.Event | None = None,
+        interface: str = "",
     ):
         self.ssid_prefix = ssid_prefix
         self.password = password
@@ -45,6 +50,11 @@ class WifiApManager:
         # `192.168.4.1/24` address lingers on wlan0 after stop, which
         # avahi continues to publish via mDNS and confuses LAN clients.
         self._iface: str | None = None
+        # The operator's `network.hotspot.interface` pin, empty when unset. The
+        # hostapd manager passes the same value to the same resolver; dropping
+        # it here would make the two disagree the moment a pin is set, which is
+        # exactly the drift the shared resolver exists to prevent.
+        self.interface = interface
 
     async def run(self) -> None:
         if sys.platform != "linux":
@@ -52,8 +62,8 @@ class WifiApManager:
             await self._shutdown.wait()
             return
 
-        # 1. Find wireless interface
-        iface = await self._find_wireless_iface()
+        # 1. Resolve the wireless interface by DRIVER
+        iface = self._find_wireless_iface()
         if not iface:
             log.warning("no_wireless_interface")
             await self._shutdown.wait()
@@ -78,27 +88,28 @@ class WifiApManager:
         finally:
             await self._stop()
 
-    async def _find_wireless_iface(self) -> str | None:
-        """Find first wireless interface (wlan0, wlp*, etc)."""
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "iw", "dev",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
-            for line in stdout.decode().splitlines():
-                line = line.strip()
-                if line.startswith("Interface"):
-                    return line.split()[-1]
-        except (TimeoutError, FileNotFoundError):
-            pass
+    def _find_wireless_iface(self) -> str | None:
+        """The interface the AP should bind, resolved by driver.
 
-        # Fallback: check sysfs
-        for candidate in ("wlan0", "wlan1"):
-            if Path(f"/sys/class/net/{candidate}").exists():
-                return candidate
-        return None
+        Was "the first `iw dev` Interface line, else literal wlan0/wlan1", which
+        is readdir order: on a ground station carrying both an onboard chip and a
+        USB long-range radio that picked the aircraft's flight link roughly one
+        boot in three, and running hostapd on it takes the aircraft down.
+
+        Delegates to the single AP-interface resolver, passing the operator's
+        interface pin so this cannot drift from the hostapd manager's choice.
+        Returns None only when the resolver's fallback names an interface this
+        box does not have, which is the same "no wireless" outcome the caller
+        already handles.
+        """
+        from ados.services.ground_station.hostapd_manager import (
+            resolve_ap_interface,
+        )
+
+        iface = resolve_ap_interface(self.interface, net_root=_NET_ROOT)
+        if not (_NET_ROOT / iface).exists():
+            return None
+        return iface
 
     async def _configure_interface(self, iface: str) -> None:
         """Set IP on wireless interface."""

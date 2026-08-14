@@ -120,8 +120,8 @@ const ACK_TOLERANCE: f64 = 1e-6;
 /// the poll window, byte-identical to the FastAPI route's text.
 const NO_ACK_MESSAGE: &str = "FC did not echo PARAM_VALUE within 2s";
 
-/// The `POST /api/params/{name}` request body. Mirrors the FastAPI
-/// `ParamSetRequest`: a single required numeric `value` to write to the FC.
+/// The `POST /api/params/{name}` request body. A single required numeric `value` to
+/// write to the FC.
 #[derive(Debug, Deserialize)]
 pub struct ParamSetRequest {
     pub value: f64,

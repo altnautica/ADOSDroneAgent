@@ -19,10 +19,13 @@ use crate::graph::{Step, StepKind, StepOutcome};
 
 /// The ground-station units the start step kicks with `--no-block` (the START
 /// half of `enable_ground_station_units`; the ENABLE half ran in `systemd`).
+///
+/// `ados-usb-gadget.service` is deliberately absent, mirroring the enable list:
+/// the native `ados-net` daemon composes the OTG gadget in-process, so starting
+/// the packaged unit would race a second composer onto the same UDC.
 const GROUND_STATION_START_UNITS: &[&str] = &[
     "ados-wfb-rx.service",
     "ados-mediamtx-gs.service",
-    "ados-usb-gadget.service",
     "ados-oled.service",
     "ados-hostapd.service",
     "ados-dnsmasq-gs.service",
@@ -31,7 +34,9 @@ const GROUND_STATION_START_UNITS: &[&str] = &[
     "ados-input.service",
     "ados-pic.service",
     "ados-uplink-router.service",
-    "ados-wifi-client.service",
+    // ados-wifi-client.service and ados-usb-gadget.service are absent on
+    // purpose: ados-net owns both in-process and the install subsumes their
+    // packaged units, so kicking them here restarts something already stopped.
 ];
 
 /// Start the top-level supervisor unit (+ the GS unit set on a ground station).
@@ -128,5 +133,19 @@ mod tests {
         assert!(GROUND_STATION_START_UNITS.contains(&"ados-wfb-rx.service"));
         assert!(GROUND_STATION_START_UNITS.contains(&"ados-hostapd.service"));
         assert!(GROUND_STATION_START_UNITS.contains(&"ados-setup-captive.service"));
+    }
+
+    #[test]
+    fn a_subsumed_unit_is_never_started() {
+        // ados-net owns these in-process and the systemd step subsumes their
+        // packaged units on every GS install. Starting one here would revive
+        // the unit the same install just stopped. Checked against the subsume
+        // list itself so a new entry cannot quietly reacquire the defect.
+        for unit in crate::steps::systemd::ALWAYS_SUBSUMED_UNITS {
+            assert!(
+                !GROUND_STATION_START_UNITS.contains(unit),
+                "{unit} is subsumed by a native daemon and must not be started"
+            );
+        }
     }
 }

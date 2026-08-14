@@ -89,7 +89,7 @@ jobs:
 
           # Stage exactly the install assets that are NOT in the wheel and
           # that the on-device install lays down: the installer scripts, the
-          # data tree (systemd units, udev, overlays, usb-gadget, avahi,
+          # data tree (systemd units, udev, overlays, avahi,
           # motd, driver-patches), the vendored radio source, and the
           # licence + readme. The wheel already carries the Python package
           # and its package-data.

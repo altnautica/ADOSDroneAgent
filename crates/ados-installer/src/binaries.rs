@@ -412,7 +412,7 @@ pub fn vision_binary(model: &str) -> &'static PrebuiltBinary {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::path::PathBuf;
 
     /// The workflow that builds and publishes every prebuilt this catalog fetches.
@@ -429,14 +429,87 @@ mod tests {
             .expect("the Rust workflow must exist beside the crate that depends on it")
     }
 
+    /// The parsed workflow.
+    fn rust_workflow_root() -> serde_norway::Value {
+        let path = rust_workflow_path();
+        let text = std::fs::read_to_string(&path).expect("the Rust workflow must be readable");
+        serde_norway::from_str(&text).expect("the Rust workflow must be valid YAML")
+    }
+
+    /// The job that assembles the per-revision (`rev-<sha>`) release a
+    /// `--ref`-pinned install fetches from.
+    const REV_MIRROR_JOB: &str = "publish-rev";
+
+    /// The per-revision mirror job's declaration.
+    fn rev_mirror_job() -> serde_norway::Value {
+        rust_workflow_root()
+            .get("jobs")
+            .and_then(|jobs| jobs.get(REV_MIRROR_JOB))
+            .cloned()
+            .unwrap_or_else(|| {
+                panic!(
+                    "no `{REV_MIRROR_JOB}` job in .github/workflows/rust.yml — a `--ref` pinned \
+                     install resolves every asset from `rev-<sha>`, so without that job every \
+                     pinned install 404s"
+                )
+            })
+    }
+
+    /// The rolling tags the per-revision mirror copies assets out of, read from the
+    /// job's `SOURCE_TAGS` variable.
+    fn rev_mirror_source_tags() -> BTreeSet<String> {
+        let job = rev_mirror_job();
+        let raw = job
+            .get("env")
+            .and_then(|e| e.get("SOURCE_TAGS"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_else(|| {
+                panic!(
+                    "`{REV_MIRROR_JOB}` must declare its mirror list as a `SOURCE_TAGS` job \
+                     variable; a list that only appears inside a shell line cannot be tied to \
+                     this catalog"
+                )
+            })
+            .to_string();
+        assert!(
+            !raw.contains("${{"),
+            "`{REV_MIRROR_JOB}`'s SOURCE_TAGS is templated (`{raw}`); this check can only tie \
+             literal tags to the catalog"
+        );
+        raw.split_whitespace().map(str::to_string).collect()
+    }
+
+    /// Everything `publish-rev` waits for.
+    fn rev_mirror_needs() -> BTreeSet<String> {
+        let job = rev_mirror_job();
+        let needs = job
+            .get("needs")
+            .and_then(|n| n.as_sequence())
+            .unwrap_or_else(|| panic!("`{REV_MIRROR_JOB}` must declare `needs`"))
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        needs
+    }
+
+    /// Every publish job in the workflow, the mirror itself excluded.
+    fn publish_jobs() -> BTreeSet<String> {
+        rust_workflow_root()
+            .get("jobs")
+            .and_then(|j| j.as_mapping())
+            .expect("the Rust workflow must declare jobs")
+            .iter()
+            .filter_map(|(name, _)| name.as_str())
+            .filter(|name| name.starts_with("publish-") && *name != REV_MIRROR_JOB)
+            .map(str::to_string)
+            .collect()
+    }
+
     /// Every `tag_name:` the Rust workflow publishes to, mapped to the job that
     /// publishes it. Parsed from the workflow itself — a second hand-maintained copy
     /// of the tag list would drift exactly the way the catalog already did.
     fn published_release_tags() -> BTreeMap<String, String> {
-        let path = rust_workflow_path();
-        let text = std::fs::read_to_string(&path).expect("the Rust workflow must be readable");
-        let root: serde_norway::Value =
-            serde_norway::from_str(&text).expect("the Rust workflow must be valid YAML");
+        let root = rust_workflow_root();
         let jobs = root
             .get("jobs")
             .and_then(|j| j.as_mapping())
@@ -491,7 +564,7 @@ mod tests {
             !found.is_empty(),
             "parsed no publish tags out of {} — the workflow shape changed and this \
              check silently stopped guarding anything",
-            path.display()
+            rust_workflow_path().display()
         );
         found
     }
@@ -589,6 +662,100 @@ mod tests {
                  .github/workflows/rust.yml publishes it any more — drop the exemption"
             );
         }
+    }
+
+    /// The same catalog/workflow symmetry, one layer up: a `--ref <sha>` install
+    /// fetches every asset from the per-revision release, so a tag the mirror does
+    /// not copy is a service that installs fine unpinned and 404s under a pin —
+    /// silently degrading exactly the deploy that asked for certainty.
+    #[test]
+    fn the_per_revision_release_mirrors_every_tag_the_installer_fetches() {
+        let mirrored = rev_mirror_source_tags();
+        let fetched = fetched_release_tags();
+
+        let unmirrored: Vec<String> = fetched
+            .iter()
+            .filter(|(tag, _)| !mirrored.contains(**tag))
+            .map(|(tag, service)| format!("`{tag}` (fetched for {service})"))
+            .collect();
+        assert!(
+            unmirrored.is_empty(),
+            "the `{REV_MIRROR_JOB}` job does not copy these tags into the per-revision \
+             release, so a `--ref` install 404s them: {}",
+            unmirrored.join(", ")
+        );
+
+        // The mirror direction, and it is not cosmetic: copying a tag no install
+        // fetches means the mirror job fails outright once that rolling tag stops
+        // being published, taking every pinned install with it.
+        let unfetched: Vec<&str> = mirrored
+            .iter()
+            .map(String::as_str)
+            .filter(|tag| !fetched.contains_key(tag))
+            .collect();
+        assert!(
+            unfetched.is_empty(),
+            "`{REV_MIRROR_JOB}` copies tags no install fetches: {}. Drop them from \
+             SOURCE_TAGS, or add the catalog row that consumes them.",
+            unfetched.join(", ")
+        );
+    }
+
+    /// The mirror re-uploads assets the SAME run just published, so it has to wait
+    /// for all of them. A publish job missing from `needs` races the download and
+    /// hands the per-revision release the PREVIOUS commit's binary — a pin that
+    /// reports one revision and installs two, which is the failure `--ref` exists to
+    /// close.
+    #[test]
+    fn the_per_revision_mirror_waits_for_every_publish_job() {
+        let needs = rev_mirror_needs();
+        let publishers = publish_jobs();
+        let missing: Vec<&str> = publishers
+            .iter()
+            .map(String::as_str)
+            .filter(|job| !needs.contains(*job))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "`{REV_MIRROR_JOB}` does not wait for these publish jobs, so it can mirror a \
+             stale asset: {}",
+            missing.join(", ")
+        );
+
+        let stale: Vec<&str> = needs
+            .iter()
+            .map(String::as_str)
+            .filter(|job| !publishers.contains(*job))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "`{REV_MIRROR_JOB}` waits for jobs that no longer exist: {}",
+            stale.join(", ")
+        );
+    }
+
+    /// The mirror's own tag is `rev-<commit sha>`, which can only be derived at run
+    /// time. Declaring it as a `RELEASE_TAG` job variable would trip the
+    /// templated-tag refusal in `published_release_tags` and take every other
+    /// symmetry check in this module down with it, so the invariant is pinned here
+    /// rather than discovered by a confusing failure elsewhere.
+    #[test]
+    fn the_per_revision_tag_is_derived_in_shell_not_declared_as_a_job_variable() {
+        let job = rev_mirror_job();
+        let declared = job.get("env").and_then(|e| e.get("RELEASE_TAG"));
+        assert!(
+            declared.is_none(),
+            "`{REV_MIRROR_JOB}` declares a RELEASE_TAG job variable; its tag is per-commit \
+             and must be built in the shell instead"
+        );
+        // And it must not silently stop publishing anything: the tag has to appear
+        // in the job's script.
+        let script = serde_norway::to_string(&job).expect("the job must re-serialize");
+        assert!(
+            script.contains("rev-${GITHUB_SHA}"),
+            "`{REV_MIRROR_JOB}` no longer builds a `rev-<sha>` tag, so a pinned install has \
+             nothing to resolve against"
+        );
     }
 
     #[test]

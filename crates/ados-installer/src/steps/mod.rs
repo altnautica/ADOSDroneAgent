@@ -143,4 +143,24 @@ mod tests {
         assert!(pos("fetch_binaries") < pos("start"));
         assert!(pos("start") < pos("health"));
     }
+
+    /// A `--ref` pin is resolved in two places that must stay in this order: the
+    /// venv step checks the source tree out at that revision and expands an
+    /// abbreviated pin to its full object name against the clone's own object
+    /// store, and the binary fetch then addresses `rev-<full sha>`. Both declare
+    /// only `deps`, so nothing but the insertion order in
+    /// [`full_install_chain`] keeps them this way round — swap them and a
+    /// pinned install with an abbreviated `--ref` asks GitHub for a release tag
+    /// no commit prefix can name, which 404s every binary while the error blames
+    /// the workflow's path filter.
+    #[test]
+    fn the_pin_is_expanded_before_it_is_used_to_address_a_release() {
+        let steps = full_install_chain();
+        let order = topo_order(&steps).expect("the install chain must be a valid DAG");
+        let pos = |id: &str| order.iter().position(|x| x == id).unwrap();
+        assert!(
+            pos("venv_agent") < pos("fetch_binaries"),
+            "venv_agent expands --ref for fetch_binaries; see Ctx::rev"
+        );
+    }
 }

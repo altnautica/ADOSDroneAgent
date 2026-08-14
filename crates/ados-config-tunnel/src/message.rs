@@ -18,10 +18,11 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 /// The largest response body the channel will chunk back over the radio. The
-/// bearer is low-rate (128-byte chunks over a FEC-1/2 control plane), so a
-/// large op — a whole-model `GET /api/config` is several KB — is refused with
-/// an honest "too large, use a LAN" error rather than silently truncated or
-/// flooding the lane. A single-key `PUT` result is small and always fits.
+/// bearer is low-rate (128-byte chunks over the aux lane's FEC-protected
+/// datagrams), so a large op — a whole-model `GET /api/config` is several KB —
+/// is refused with an honest "too large, use a LAN" error rather than silently
+/// truncated or flooding a lane it shares with MAVLink telemetry. A single-key
+/// `PUT` result is small and always fits.
 pub const MAX_CONFIG_RESPONSE_BYTES: usize = 4 * 1024;
 
 /// A parsed, validated config operation, restricted to `/api/config`.

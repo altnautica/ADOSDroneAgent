@@ -240,8 +240,8 @@ pub(crate) fn build_stats_value(
         "version": ados_radio::paths::WFB_STATS_SIDECAR_VERSION,
         "state": state,
         // The state-machine state, surfaced under its own key so the panel can
-        // show the recovery state directly. Mirrors `state` (the same wire
-        // vocabulary, including `reg_blocked`); kept distinct so a future
+        // show the recovery state directly. It carries the same wire vocabulary
+        // as `state` above, including `reg_blocked`; kept distinct so a future
         // state-machine value never collides with the legacy `state` consumers.
         "link_state": state,
         "interface": interface,

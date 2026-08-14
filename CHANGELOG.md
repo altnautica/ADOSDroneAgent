@@ -4,6 +4,91 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.360] - 2026-08-14
+
+### Security
+
+- **The queue that carries flight commands over the cloud relay checked only
+  that a caller was signed in, not that the drone was theirs.** Knowing a device
+  id was enough for any authenticated account to queue an arbitrary command at
+  any node. The agent authenticates itself when it polls, and nothing further
+  down the path re-checks who enqueued, so the row reached the aircraft five
+  seconds later. The command name was unconstrained too, so a forged value could
+  land a row the dispatcher silently ignores.
+
+  Reading a command's status and listing a device's recent commands were open
+  the same way, and an acknowledgement was accepted for any command id at all,
+  so an agent holding one device's valid key could close out, and write result
+  data into, another device's row. All four now resolve ownership, and the
+  command name is validated against the permitted vocabulary at insert time.
+
+- **The two raw MAVLink edges can now refuse an unauthorized peer.** TCP 5760
+  and UDP 14550/14551 classified every connection and then admitted it anyway,
+  logging a hardcoded `admitted = true` whatever the verdict. The classification
+  is now acted on, behind `mavlink.raw_proxy_enforce_auth`.
+
+  The flag defaults off, and that is deliberate rather than timid: these ports
+  are documented as credential-free so a desktop ground station can attach, and
+  the raw byte stream carries no header or subprotocol on which a caller could
+  present a credential. Turning it on locks out every off-box station with no
+  client-side remedy, so it is an operator's choice and not a default.
+
+  `mavlink.aux_uplink_enforce_origin` is the companion gate one hop later, where
+  an anonymous frame would otherwise reach the radio. Frames the cloud relay
+  declares as off-box are exempt under both settings: that is the remote-piloting
+  path for a relayed drone, and refusing it would ground the aircraft.
+
+### Added
+
+- **`ados network ap-passphrase` prints the unit's access-point passphrase.**
+  Every surface that showed it was interactive: the OLED, the on-box panel, the
+  installer's completion card, and the `ados` dashboard, which does reach a
+  headless box over SSH. None of them composes, so an operator scripting a
+  fleet, or just copying the key, had to read it off a screen and retype it.
+  This prints the passphrase alone on stdout and nothing else, and it resolves
+  the file through the platform-aware path helper rather than hardcoding the
+  Linux one the dashboard assumes.
+
+- **Config over the radio has a bearer.** The config tunnel bound its local
+  ports and framed its chunks correctly, but nothing carried them to the other
+  end: the crate documented a control-plane lane that is fully occupied by the
+  frequency-hop handshake and has no demultiplexer. It now rides the auxiliary
+  plane, which already carries several channels and already fans them out on
+  both ends. A tunnel frame is at most about 145 bytes against a 1200-byte
+  budget, so one chunk is one frame and there is nothing to reassemble.
+
+- **A revision pin works on Linux.** `--ref <commit>` was accepted when building
+  from source and refused on the prebuilt path, because service binaries resolve
+  from rolling per-service tags and the wheel from a version tag, neither of
+  which addresses a commit. Continuous integration now mirrors each run's
+  byte-identical asset set to a revision-keyed release, and both halves of the
+  install resolve against it, so a pin covers the Python package and the
+  binaries together or fails loudly saying why.
+
+### Fixed
+
+- **The access point and the WiFi station find their radio by driver, not by
+  name.** Three call sites still assumed `wlan0`, including a lock file whose
+  name encoded the assumption. Measured across three reboots of one ground
+  station, `wlan0` was the onboard chip twice and the long-range radio once, so
+  the captive portal could configure itself on the flight radio. A refusal now
+  also names the interface it is talking about.
+
+- **A ground-station install no longer enables a unit it disables moments
+  later.** The packaged USB-gadget and WiFi-client units were enable-linked and
+  started by the same install that tore them down, because the native network
+  daemon owns both in-process. The supervisor also listed three services no
+  profile runs, so its report carried entries that could never be healthy.
+
+### Removed
+
+- **Three configuration keys that promised behaviour nothing implemented.** A
+  pairing-code lifetime the agent never read, whose real 15-minute window is
+  enforced by the backend that issues the code and disagreed with the agent's own
+  24-hour rotation; a live-state toggle whose module was ported to Rust and now
+  runs unconditionally; and a model auto-download switch with no reader, which
+  nonetheless had a working toggle in the dashboard writing it.
+
 ## [0.99.359] - 2026-08-13
 
 ### Security
@@ -274,6 +359,134 @@ the project follows [Semantic Versioning](https://semver.org/).
   that reverted on the next restart had nothing in the log. The radio still
   accepts the value, so the response is unchanged; what changes is that the
   durability failure is now attributable.
+
+## [0.99.357] - 2026-08-06
+
+### Security
+
+- **The broadcast IPC sockets are restricted to the trusted local plane.** They
+  were bound world-writable (0o666) to match an older Python server, while every
+  other command socket in the tree is 0o660, and two of them carry inbound bytes
+  that are written straight through to the flight controller. Any local process
+  could reach it.
+
+  The mode alone was not enough. These services run as root while plugins run as
+  `ados`, and 0o660 grants the group nothing until the group owns the file, so a
+  socket bound that way is effectively root-only and the plugin it was created
+  for cannot connect. Group ownership now lives in the shared bind helper next to
+  the mode, because the two are one decision. Both stay best-effort so a host
+  without the group still comes up.
+
+### Added
+
+- **A Hailo inference sidecar for the Pi AI HAT.** The RKNN sidecar client is now
+  one `VisionBackend` carrying the accelerator name, so a single IPC path serves
+  `rknn` (Rockchip/Jetson) and `hailo` (Hailo-8): the vendor runtime lives in the
+  Python sidecar, not the Rust engine, so only the socket and the reported name
+  differ. The HailoRT sidecar decodes `.hef` output tensors with the same
+  `decode_yolo_detections` the `.rknn` and `.engine` paths use, so there is one
+  tested decoder and no vendor C++ post-process, and it imports `hailo_platform`
+  lazily so a host without HailoRT returns clean error responses and the engine
+  falls back rather than dying. The `.hef` compile and the on-device run stay
+  hardware-gated, because the compiler is x86-Linux-only.
+
+- **A plugin can fly a flight controller that speaks MSP.** The router already
+  exposed a raw MSP byte pipe on `/run/ados/msp.sock`, but nothing in the tree
+  could build or parse a frame. `ados_protocol::msp` adds MSPv1 (`$M<`, XOR
+  checksum) and MSPv2 (`$X<`, CRC8/DVB-S2) encode and decode, `MSP_SET_RAW_RC`,
+  and the stick scaling the GCS standardised, all pinned by golden byte vectors.
+  Encoding returns nothing rather than truncating an over-length payload, and
+  decoding fails closed on a CRC mismatch, so a corrupt reply is never handed on
+  as valid.
+
+  On top of it: `msp.read` / `msp.write` capabilities with `msp.subscribe` /
+  `msp.send`, a Python codec pinned to the identical vectors so the two halves
+  cannot drift on the wire, `ctx.msp.send_sticks` (normalised roll/pitch/yaw and
+  throttle, scaled and packed in AETR order, since the raw entry point applies no
+  scaling and a 0.0 throttle would otherwise land at PWM 0 rather than idle), and
+  a reassembler that yields whole frames, because the subscribe stream arrives in
+  serial-read chunks and a decoder running once per chunk drops every frame that
+  straddles two of them.
+
+- **A gate that stops an autonomous plugin fighting a human on the controls.** An
+  operator flying by hand and a plugin driving setpoints reach the flight
+  controller through the same socket. A writer now declares itself an autonomous
+  injector with a sticky control frame carrying its client id and an attestation
+  ticket, and the router refuses that writer whenever the PIC arbiter reports a
+  human holds manual control. It fails closed when the arbiter is not reporting,
+  because a dead arbiter is not consent.
+
+  It ships behind `mavlink.injector_arbitration`, default false, so the default
+  posture is unchanged and every command stays on the never-gated operator path.
+  The verdict is cached off the async send path: the first form read
+  `pairing.json` plus the PIC sidecar and ran an HMAC verify per command, which
+  at a 50-100 Hz cadence is two blocking file reads and a crypto verify per frame
+  on the executor thread. The verify is now cached per sticky claim and the PIC
+  read on a 50 ms TTL, so a fresh operator grab is still honoured inside that
+  window.
+
+- **The display fits any panel, and the front-panel buttons drive it.**
+  Scale-to-fit rendering, configurable geometry, a virtual sink, and page
+  navigation driven from the buttons rather than from a timer alone.
+
+- **More of the plugin surface reaches Rust plugins.** GPIO, display, radio and
+  tunnel senders, a real per-plugin data directory, vision detections, button
+  presses and setpoints delivered inbound, and `vision.read_model` so a plugin
+  receives the models resolved for it. The GCS capability mirror gained a
+  self-contained drift guard.
+
+### Fixed
+
+- **A virtual-framebuffer reader could catch a torn frame.** The writer used a
+  truncate-then-write, despite its own comment claiming the write was atomic. It
+  writes a temp sibling and renames it over the target now.
+
+- **A swapped panel or a rotation change silently mis-mapped every touch.** Touch
+  calibration recorded the LCD size and rotation it was captured at and the
+  loader never checked either, so a calibration from a different geometry applied
+  anyway. A mismatch now falls back to the identity transform, which is what
+  makes the wizard re-prompt.
+
+- **A plugin's per-drone data directory is created before the plugin starts**,
+  rather than on first write from inside it.
+
+### Removed
+
+- **The dead `hardware.audio` capability.** Nothing granted it and nothing
+  checked it.
+
+## [0.99.356] - 2026-08-04
+
+### Fixed
+
+- **A MAVLink command to a flight controller that speaks MSP is refused by
+  name.** The command route built a `COMMAND_LONG` for every request. A Betaflight
+  or iNav board never sends a HEARTBEAT, so the autopilot discriminator fell
+  through to its absent-field default of 0 and read as ArduPilot: MAVLink bytes
+  were written to the serial port of a flight controller that does not speak
+  MAVLink, discarded there, while the operator was told the command was sent.
+
+  The agent already knew. The status route surfaces both the link hint the MAVLink
+  service sets when it sees MSP framing and the firmware family off the USB
+  descriptor; the command route simply never consulted them. The decision is a
+  pure function over the state snapshot, so both signals and the absent-field case
+  are covered by tests. An absent snapshot still reads as "not known to be MSP",
+  because the existing connected gate owns that case and a second refusal there
+  would reject a healthy MAVLink board.
+
+### Added
+
+- **`--ref <commit|branch|tag>` pins the installer bootstrap to one revision.**
+  `--upgrade` always pulled latest main, so a deploy that gated on one commit's CI
+  could install a wheel newer than the binaries it verified. Two rigs reported one
+  version while carrying binaries from an earlier one, with a fix present in the
+  wheel and absent from the binary.
+
+  A commit is fetched by object name and checked out detached, since
+  `git clone --branch` never accepts a SHA, and an abbreviated SHA cannot be
+  requested from a server so it is expanded against a bounded deepening of the
+  branch rather than read as absent. Anything unresolvable stops the install and
+  says why: falling back to main is the failure being closed.
 
 ## [0.99.355] - 2026-08-03
 

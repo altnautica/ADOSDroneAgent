@@ -10,7 +10,8 @@
 //! this node's own MAVLink republish seam, so the transports the MAVLink router
 //! already serves carry the drone's vehicle and a ground control station
 //! connected to this ground station sees it exactly as it would on a direct
-//! link. The other channels are counted and ignored until something wants them.
+//! link. Every other channel is dispatched to its own sink where one is
+//! registered, and counted and dropped where none is.
 //!
 //! ## The lane is shared, so decode failures are not all alike
 //!
@@ -129,6 +130,28 @@ struct AuxCountersInner {
     /// peer is sending the wrong direction or a frame was misrouted. Counted for
     /// visibility, not alarmed on — same posture as `request_frames`.
     link_feedback_frames: AtomicU64,
+    /// Datagrams that decoded as the config-over-radio channel: the linked
+    /// drone's answer to a config request this ground station sent. Forwarded to
+    /// the local config-tunnel service, which is inert on a node that never
+    /// opted the channel in.
+    config_tunnel_frames: AtomicU64,
+    /// Config-tunnel datagrams this hop handed to the local ingress socket
+    /// without error. Sub-tally of `config_tunnel_frames`, and the pair to
+    /// `config_tunnel_undelivered`: between them every one is accounted for.
+    ///
+    /// It does NOT mean the tunnel service read them. The ingress is an
+    /// unconnected UDP socket, deliberately, so that an absent listener cannot
+    /// latch an error and poison the next forward once the service starts. The
+    /// cost of that choice is that a send to a port nothing is bound to still
+    /// succeeds, so on a node with the channel off this counter advances and
+    /// `config_tunnel_undelivered` stays at zero. Proof that the service
+    /// consumed a frame lives on the service's own side, not here.
+    config_tunnel_forwarded: AtomicU64,
+    /// Config-tunnel datagrams the hand-off itself failed on: the ingress
+    /// socket could not be bound, or the send returned an error. Sub-tally of
+    /// `config_tunnel_frames`. Rare, and not the same thing as the service
+    /// being absent, which this cannot see.
+    config_tunnel_undelivered: AtomicU64,
     /// Response datagrams whose body did not decode as a relay-proxy response
     /// payload. Sub-tally of `response_frames`, not a terminal outcome, so it
     /// is deliberately absent from [`AuxCountersSnapshot::accounted`].
@@ -180,6 +203,9 @@ impl AuxCounters {
             response_frames: c.response_frames.load(Ordering::Relaxed),
             request_frames: c.request_frames.load(Ordering::Relaxed),
             link_feedback_frames: c.link_feedback_frames.load(Ordering::Relaxed),
+            config_tunnel_frames: c.config_tunnel_frames.load(Ordering::Relaxed),
+            config_tunnel_forwarded: c.config_tunnel_forwarded.load(Ordering::Relaxed),
+            config_tunnel_undelivered: c.config_tunnel_undelivered.load(Ordering::Relaxed),
             response_undecodable: c.response_undecodable.load(Ordering::Relaxed),
             response_dispatched: c.response_dispatched.load(Ordering::Relaxed),
             response_orphan: c.response_orphan.load(Ordering::Relaxed),
@@ -214,6 +240,15 @@ pub struct AuxCountersSnapshot {
     /// was misrouted. Counted for visibility, not alarmed on.
     pub request_frames: u64,
     pub link_feedback_frames: u64,
+    /// Datagrams that decoded as the config-over-radio channel, forwarded to
+    /// the local config-tunnel service.
+    pub config_tunnel_frames: u64,
+    /// Config-tunnel datagrams the local service's ingress took. Sub-tally of
+    /// `config_tunnel_frames`.
+    pub config_tunnel_forwarded: u64,
+    /// Config-tunnel datagrams the hand-off did not take — the normal case with
+    /// the channel opted out. Sub-tally of `config_tunnel_frames`.
+    pub config_tunnel_undelivered: u64,
     /// MAVLink frames the republish seam accepted. Not proof a ground control
     /// station was connected or rendered them.
     pub mavlink_republished: u64,
@@ -300,6 +335,7 @@ impl AuxCountersSnapshot {
             + self.response_frames
             + self.request_frames
             + self.link_feedback_frames
+            + self.config_tunnel_frames
             + self.decode_foreign
             + self.decode_runt
             + self.decode_unsupported_version
@@ -400,16 +436,56 @@ fn mavlink_system_id(frame: &[u8]) -> Option<u8> {
     frame.get(5).copied()
 }
 
+/// Where a decoded aux frame goes, chosen by its channel.
+///
+/// Grouped rather than threaded one by one: every layer of the consumer carries
+/// the whole set, so each new lane widened three signatures at once and pushed
+/// them past the argument limit. Adding a lane is now one field.
+pub struct AuxSinks<'a> {
+    pub mavlink: &'a MavlinkIngest,
+    pub rpc_response: Option<&'a ados_protocol::aux_rpc_proxy::AuxRpcResponseIngest>,
+    pub config_tunnel: Option<&'a ados_protocol::config_tunnel_ingest::ConfigTunnelIngest>,
+}
+
+impl<'a> AuxSinks<'a> {
+    /// Only the MAVLink republish seam is wired. Every other channel is decoded
+    /// and counted, then dropped for want of a consumer.
+    pub fn mavlink_only(mavlink: &'a MavlinkIngest) -> Self {
+        Self {
+            mavlink,
+            rpc_response: None,
+            config_tunnel: None,
+        }
+    }
+}
+
+/// The owned form the service holds, cloned per supervised generation.
+#[derive(Clone)]
+pub struct AuxSinksOwned {
+    pub mavlink: Arc<MavlinkIngest>,
+    pub rpc_response: Option<ados_protocol::aux_rpc_proxy::AuxRpcResponseIngest>,
+    pub config_tunnel: Option<Arc<ados_protocol::config_tunnel_ingest::ConfigTunnelIngest>>,
+}
+
+impl AuxSinksOwned {
+    fn borrow(&self) -> AuxSinks<'_> {
+        AuxSinks {
+            mavlink: &self.mavlink,
+            rpc_response: self.rpc_response.as_ref(),
+            config_tunnel: self.config_tunnel.as_deref(),
+        }
+    }
+}
+
 /// Split from the read loop so the whole decode-and-dispatch decision is
 /// testable without a socket.
 async fn dispatch(
     slot: u8,
     datagram: &[u8],
-    ingest: &MavlinkIngest,
+    sinks: &AuxSinks<'_>,
     counters: &AuxCounters,
     gate: &mut SeamGate,
     peers: &AuxPeerCache,
-    response_ingest: Option<&ados_protocol::aux_rpc_proxy::AuxRpcResponseIngest>,
 ) {
     let c = &counters.0;
     counters.bump(&c.datagrams_received);
@@ -500,7 +576,7 @@ async fn dispatch(
                         );
                     }
                 }
-                match ingest.send_frame(frame).await {
+                match sinks.mavlink.send_frame(frame).await {
                     Ok(()) => {
                         gate.on_success();
                         counters.bump(&c.mavlink_republished);
@@ -557,7 +633,7 @@ async fn dispatch(
             // rather than round-tripped through the encoder.
             match ados_protocol::aux_rpc::decode_response(payload) {
                 Ok(_) => {
-                    if let Some(ingest) = response_ingest {
+                    if let Some(ingest) = sinks.rpc_response {
                         ingest.send(payload).await;
                         // Until now this was never bumped, so it read a
                         // permanent 0 and a working lane looked identical to a
@@ -581,16 +657,28 @@ async fn dispatch(
         AuxChannel::LinkFeedback => {
             counters.bump(&c.link_feedback_frames);
         }
+        // A config-over-radio frame, drone → ground: the linked drone's answer
+        // to a config request this ground station's injector sent. The
+        // config-tunnel service cannot bind this lane's port — this consumer
+        // holds it — so the frame is handed on to that service's own loopback
+        // ingress, aux framing INTACT so it re-checks the channel itself rather
+        // than trusting this hop.
+        //
+        // No ingress on a node that never opted the channel in: the frame is
+        // counted and dropped, which is the honest reading of "a peer is
+        // answering config requests we are not making".
+        AuxChannel::ConfigTunnel => {
+            counters.bump(&c.config_tunnel_frames);
+            match sinks.config_tunnel {
+                Some(ingest) if ingest.send(datagram).await => {
+                    counters.bump(&c.config_tunnel_forwarded);
+                }
+                _ => counters.bump(&c.config_tunnel_undelivered),
+            }
+        }
     }
 }
 
-/// Read the lane's loopback port until cancelled or the socket fails fatally.
-///
-/// Returns `Err` only when the port could not be bound; the caller supervises
-/// the retry. Takes an already-built republish client so a test can point the
-/// consumer at a stand-in seam. `proxy` is `None` on a rig with no relay-
-/// proxy caller registered — Response datagrams it receives anyway are
-/// counted and dropped rather than silently swallowed.
 /// Receive-buffer size asked of the kernel for an aux consumer socket.
 ///
 /// The drone end of this same lane already asks for this; the ground end did
@@ -627,19 +715,29 @@ fn set_recv_buffer(sock: &UdpSocket) {
     }
 }
 
+/// Read the lane's loopback port until cancelled or the socket fails fatally.
+///
+/// Returns `Err` only when the port could not be bound; the caller supervises
+/// the retry. `sinks` carries the destination for each channel, so a test can
+/// point the consumer at a stand-in seam; a sink is `None` on a rig where that
+/// consumer is not running, and a datagram for it is counted and dropped rather
+/// than silently swallowed.
 pub async fn run_aux_consumer(
     slot: u8,
     listen_port: u16,
-    ingest: Arc<MavlinkIngest>,
+    sinks: AuxSinksOwned,
     counters: AuxCounters,
     peers: AuxPeerCache,
-    response_ingest: Option<ados_protocol::aux_rpc_proxy::AuxRpcResponseIngest>,
     cancel: Arc<Notify>,
 ) -> std::io::Result<()> {
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, listen_port));
     let sock = UdpSocket::bind(addr).await?;
     set_recv_buffer(&sock);
     tracing::info!(slot, port = listen_port, "ground_aux_consumer_listening");
+
+    // Borrowed once, not per datagram: the set is fixed for the life of a
+    // generation and this is the hot receive path.
+    let borrowed = sinks.borrow();
 
     let mut gate = SeamGate::default();
     let mut buf = vec![0u8; BUF_SIZE];
@@ -666,7 +764,7 @@ pub async fn run_aux_consumer(
             received = sock.recv_from(&mut buf) => match received {
                 Ok((n, _from)) => {
                     consecutive_errors = 0;
-                    dispatch(slot, &buf[..n], &ingest, &counters, &mut gate, &peers, response_ingest.as_ref()).await;
+                    dispatch(slot, &buf[..n], &borrowed, &counters, &mut gate, &peers).await;
                 }
                 Err(e) => {
                     counters.bump(&counters.0.recv_errors);
@@ -701,10 +799,9 @@ pub async fn run_aux_consumer(
 pub async fn supervise_aux_consumer(
     slot: u8,
     listen_port: u16,
-    ingest: Arc<MavlinkIngest>,
+    sinks: AuxSinksOwned,
     counters: AuxCounters,
     peers: AuxPeerCache,
-    response_ingest: Option<ados_protocol::aux_rpc_proxy::AuxRpcResponseIngest>,
     cancel: Arc<Notify>,
 ) {
     let mut backoff = BIND_BACKOFF_MIN;
@@ -712,10 +809,9 @@ pub async fn supervise_aux_consumer(
         match run_aux_consumer(
             slot,
             listen_port,
-            ingest.clone(),
+            sinks.clone(),
             counters.clone(),
             peers.clone(),
-            response_ingest.clone(),
             cancel.clone(),
         )
         .await
@@ -824,7 +920,12 @@ mod tests {
         let frame = heartbeat();
         let datagram = aux_mux::encode(AuxChannel::Mavlink, &frame).unwrap();
         dispatch(
-            TEST_SLOT, &datagram, &ingest, &counters, &mut gate, &peers, None,
+            TEST_SLOT,
+            &datagram,
+            &AuxSinks::mavlink_only(&ingest),
+            &counters,
+            &mut gate,
+            &peers,
         )
         .await;
 
@@ -876,8 +977,24 @@ mod tests {
         // Two DIFFERENT slots, both presenting the shipped default system id.
         let frame = heartbeat_from(1);
         let datagram = aux_mux::encode(AuxChannel::Mavlink, &frame).unwrap();
-        dispatch(1, &datagram, &ingest, &counters, &mut gate, &peers, None).await;
-        dispatch(2, &datagram, &ingest, &counters, &mut gate, &peers, None).await;
+        dispatch(
+            1,
+            &datagram,
+            &AuxSinks::mavlink_only(&ingest),
+            &counters,
+            &mut gate,
+            &peers,
+        )
+        .await;
+        dispatch(
+            2,
+            &datagram,
+            &AuxSinks::mavlink_only(&ingest),
+            &counters,
+            &mut gate,
+            &peers,
+        )
+        .await;
 
         let first = seam.recv().await.unwrap();
         let second = seam.recv().await.unwrap();
@@ -917,7 +1034,15 @@ mod tests {
 
         for (slot, system_id) in [(1u8, 1u8), (2, 2)] {
             let d = aux_mux::encode(AuxChannel::Mavlink, &heartbeat_from(system_id)).unwrap();
-            dispatch(slot, &d, &ingest, &counters, &mut gate, &peers, None).await;
+            dispatch(
+                slot,
+                &d,
+                &AuxSinks::mavlink_only(&ingest),
+                &counters,
+                &mut gate,
+                &peers,
+            )
+            .await;
         }
 
         assert_eq!(counters.snapshot().system_id_collisions, 0);
@@ -942,7 +1067,12 @@ mod tests {
         let mut truncated = aux_mux::encode(AuxChannel::Mavlink, &heartbeat()).unwrap();
         truncated.truncate(truncated.len() - 3);
         dispatch(
-            TEST_SLOT, &truncated, &ingest, &counters, &mut gate, &peers, None,
+            TEST_SLOT,
+            &truncated,
+            &AuxSinks::mavlink_only(&ingest),
+            &counters,
+            &mut gate,
+            &peers,
         )
         .await;
 
@@ -956,7 +1086,12 @@ mod tests {
         // does not latch shut on one bad datagram.
         let good = aux_mux::encode(AuxChannel::Mavlink, &heartbeat()).unwrap();
         dispatch(
-            TEST_SLOT, &good, &ingest, &counters, &mut gate, &peers, None,
+            TEST_SLOT,
+            &good,
+            &AuxSinks::mavlink_only(&ingest),
+            &counters,
+            &mut gate,
+            &peers,
         )
         .await;
         assert_eq!(seam.recv().await.unwrap(), heartbeat());
@@ -994,7 +1129,12 @@ mod tests {
         }
         let datagram = aux_mux::encode(AuxChannel::Mavlink, &batch).unwrap();
         dispatch(
-            TEST_SLOT, &datagram, &ingest, &counters, &mut gate, &peers, None,
+            TEST_SLOT,
+            &datagram,
+            &AuxSinks::mavlink_only(&ingest),
+            &counters,
+            &mut gate,
+            &peers,
         )
         .await;
 
@@ -1026,7 +1166,12 @@ mod tests {
         let opaque = b"not-a-mavlink-frame".to_vec();
         let datagram = aux_mux::encode(AuxChannel::Mavlink, &opaque).unwrap();
         dispatch(
-            TEST_SLOT, &datagram, &ingest, &counters, &mut gate, &peers, None,
+            TEST_SLOT,
+            &datagram,
+            &AuxSinks::mavlink_only(&ingest),
+            &counters,
+            &mut gate,
+            &peers,
         )
         .await;
 
@@ -1047,15 +1192,19 @@ mod tests {
         dispatch(
             TEST_SLOT,
             b"some other application's datagram",
-            &ingest,
+            &AuxSinks::mavlink_only(&ingest),
             &counters,
             &mut gate,
             &peers,
-            None,
         )
         .await;
         dispatch(
-            TEST_SLOT, b"\xAD", &ingest, &counters, &mut gate, &peers, None,
+            TEST_SLOT,
+            b"\xAD",
+            &AuxSinks::mavlink_only(&ingest),
+            &counters,
+            &mut gate,
+            &peers,
         )
         .await;
 
@@ -1081,11 +1230,10 @@ mod tests {
         dispatch(
             TEST_SLOT,
             &wrong_version,
-            &ingest,
+            &AuxSinks::mavlink_only(&ingest),
             &counters,
             &mut gate,
             &peers,
-            None,
         )
         .await;
 
@@ -1094,11 +1242,10 @@ mod tests {
         dispatch(
             TEST_SLOT,
             &unknown_channel,
-            &ingest,
+            &AuxSinks::mavlink_only(&ingest),
             &counters,
             &mut gate,
             &peers,
-            None,
         )
         .await;
 
@@ -1106,7 +1253,12 @@ mod tests {
         overlong[4] = 0xFF;
         overlong[5] = 0xFF;
         dispatch(
-            TEST_SLOT, &overlong, &ingest, &counters, &mut gate, &peers, None,
+            TEST_SLOT,
+            &overlong,
+            &AuxSinks::mavlink_only(&ingest),
+            &counters,
+            &mut gate,
+            &peers,
         )
         .await;
 
@@ -1131,12 +1283,28 @@ mod tests {
 
         for ch in [AuxChannel::Status, AuxChannel::Identity] {
             let d = aux_mux::encode(ch, b"a compact snapshot").unwrap();
-            dispatch(TEST_SLOT, &d, &ingest, &counters, &mut gate, &peers, None).await;
+            dispatch(
+                TEST_SLOT,
+                &d,
+                &AuxSinks::mavlink_only(&ingest),
+                &counters,
+                &mut gate,
+                &peers,
+            )
+            .await;
         }
         // The MAVLink one after them still republishes, proving the ignore is
         // per-channel and not a lane that stopped.
         let d = aux_mux::encode(AuxChannel::Mavlink, &heartbeat()).unwrap();
-        dispatch(TEST_SLOT, &d, &ingest, &counters, &mut gate, &peers, None).await;
+        dispatch(
+            TEST_SLOT,
+            &d,
+            &AuxSinks::mavlink_only(&ingest),
+            &counters,
+            &mut gate,
+            &peers,
+        )
+        .await;
 
         assert_eq!(seam.recv().await.unwrap(), heartbeat());
         let snap = counters.snapshot();
@@ -1161,7 +1329,15 @@ mod tests {
 
         let d = aux_mux::encode(AuxChannel::Mavlink, &heartbeat()).unwrap();
         for _ in 0..5 {
-            dispatch(TEST_SLOT, &d, &ingest, &counters, &mut gate, &peers, None).await;
+            dispatch(
+                TEST_SLOT,
+                &d,
+                &AuxSinks::mavlink_only(&ingest),
+                &counters,
+                &mut gate,
+                &peers,
+            )
+            .await;
         }
 
         let snap = counters.snapshot();
@@ -1215,7 +1391,15 @@ mod tests {
         ];
         let sent = datagrams.len() as u64;
         for d in &datagrams {
-            dispatch(TEST_SLOT, d, &ingest, &counters, &mut gate, &peers, None).await;
+            dispatch(
+                TEST_SLOT,
+                d,
+                &AuxSinks::mavlink_only(&ingest),
+                &counters,
+                &mut gate,
+                &peers,
+            )
+            .await;
         }
 
         let snap = counters.snapshot();
@@ -1253,10 +1437,13 @@ mod tests {
         let task = tokio::spawn(run_aux_consumer(
             TEST_SLOT,
             port,
-            Arc::new(MavlinkIngest::new(&sock)),
+            AuxSinksOwned {
+                mavlink: Arc::new(MavlinkIngest::new(&sock)),
+                rpc_response: None,
+                config_tunnel: None,
+            },
             counters.clone(),
             AuxPeerCache::new(),
-            None,
             cancel.clone(),
         ));
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1312,11 +1499,14 @@ mod tests {
             run_aux_consumer(
                 TEST_SLOT,
                 port,
-                ingest.clone(),
+                AuxSinksOwned {
+                    mavlink: ingest.clone(),
+                    rpc_response: None,
+                    config_tunnel: None
+                },
                 counters.clone(),
                 AuxPeerCache::new(),
-                None,
-                cancel.clone(),
+                cancel.clone()
             )
             .await
             .is_err(),
@@ -1331,10 +1521,13 @@ mod tests {
         let task = tokio::spawn(supervise_aux_consumer(
             TEST_SLOT,
             port,
-            ingest,
+            AuxSinksOwned {
+                mavlink: ingest,
+                rpc_response: None,
+                config_tunnel: None,
+            },
             counters.clone(),
             AuxPeerCache::new(),
-            None,
             cancel.clone(),
         ));
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1378,7 +1571,12 @@ mod tests {
         ] {
             let framed = aux_mux::encode(channel, &body).unwrap();
             dispatch(
-                TEST_SLOT, &framed, &ingest, &counters, &mut gate, &peers, None,
+                TEST_SLOT,
+                &framed,
+                &AuxSinks::mavlink_only(&ingest),
+                &counters,
+                &mut gate,
+                &peers,
             )
             .await;
         }
@@ -1407,7 +1605,12 @@ mod tests {
 
         let framed = aux_mux::encode(AuxChannel::Status, b"not msgpack").unwrap();
         dispatch(
-            TEST_SLOT, &framed, &ingest, &counters, &mut gate, &peers, None,
+            TEST_SLOT,
+            &framed,
+            &AuxSinks::mavlink_only(&ingest),
+            &counters,
+            &mut gate,
+            &peers,
         )
         .await;
 
@@ -1439,11 +1642,14 @@ mod tests {
         dispatch(
             TEST_SLOT,
             &framed,
-            &ingest,
+            &AuxSinks {
+                mavlink: &ingest,
+                rpc_response: Some(&proxy),
+                config_tunnel: None,
+            },
             &counters,
             &mut gate,
             &peers,
-            Some(&proxy),
         )
         .await;
 
@@ -1451,6 +1657,77 @@ mod tests {
         assert_eq!(snap.response_frames, 1);
         assert_eq!(snap.response_dispatched, 1);
         assert_eq!(snap.response_orphan, 0, "an ingest was registered");
+        assert_eq!(snap.accounted(), snap.datagrams_received);
+    }
+
+    /// The ground half of the config-over-radio bridge: a reply from the linked
+    /// drone is handed to the local config-tunnel service with its aux framing
+    /// intact, so that service re-checks the channel rather than trusting this
+    /// hop.
+    #[tokio::test]
+    async fn a_config_tunnel_frame_is_forwarded_to_the_local_service_verbatim() {
+        use ados_protocol::config_tunnel_ingest::ConfigTunnelIngest;
+
+        let ingest = MavlinkIngest::new("/nonexistent/ingest.sock");
+        let counters = AuxCounters::new();
+        let mut gate = SeamGate::default();
+        let peers = AuxPeerCache::new();
+
+        // Stands in for the config-tunnel service's own loopback ingress.
+        let service = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let tunnel = ConfigTunnelIngest::new(service.local_addr().unwrap().port());
+
+        let framed = aux_mux::encode(AuxChannel::ConfigTunnel, b"a-tunnel-frame").unwrap();
+        dispatch(
+            TEST_SLOT,
+            &framed,
+            &AuxSinks {
+                mavlink: &ingest,
+                rpc_response: None,
+                config_tunnel: Some(&tunnel),
+            },
+            &counters,
+            &mut gate,
+            &peers,
+        )
+        .await;
+
+        let mut buf = [0u8; 256];
+        let (n, _) = service.recv_from(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], framed.as_slice(), "framing must survive the hop");
+
+        let snap = counters.snapshot();
+        assert_eq!(snap.config_tunnel_frames, 1);
+        assert_eq!(snap.config_tunnel_forwarded, 1);
+        assert_eq!(snap.config_tunnel_undelivered, 0);
+        assert_eq!(snap.accounted(), snap.datagrams_received);
+    }
+
+    /// The channel is opt-in, so most rigs run no config-tunnel service at all.
+    /// Such a frame must be counted and dropped: silence here would read as a
+    /// lane carrying nothing, which is the opposite of what happened.
+    #[tokio::test]
+    async fn a_config_tunnel_frame_with_no_local_service_is_counted_not_lost() {
+        let ingest = MavlinkIngest::new("/nonexistent/ingest.sock");
+        let counters = AuxCounters::new();
+        let mut gate = SeamGate::default();
+        let peers = AuxPeerCache::new();
+
+        let framed = aux_mux::encode(AuxChannel::ConfigTunnel, b"a-tunnel-frame").unwrap();
+        dispatch(
+            TEST_SLOT,
+            &framed,
+            &AuxSinks::mavlink_only(&ingest),
+            &counters,
+            &mut gate,
+            &peers,
+        )
+        .await;
+
+        let snap = counters.snapshot();
+        assert_eq!(snap.config_tunnel_frames, 1);
+        assert_eq!(snap.config_tunnel_forwarded, 0);
+        assert_eq!(snap.config_tunnel_undelivered, 1);
         assert_eq!(snap.accounted(), snap.datagrams_received);
     }
 }

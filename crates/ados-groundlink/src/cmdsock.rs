@@ -212,11 +212,10 @@ async fn apply(cmd: Command) -> Value {
     }
 }
 
-/// Persist the gateway preference + apply the batman gateway mode. Mirrors the
-/// FastAPI `put_gateway_preference` body: write `/etc/ados/mesh/gateway.json`
-/// (atomic, sorted keys) then `batctl gw_mode off|client` (+ `gw_sel <mac>` when
-/// pinned). The persist runs first; a persist failure still applies but surfaces
-/// `persist_error`. A missing `batctl` (the spawn fails) maps to
+/// Persist the gateway preference + apply the batman gateway mode. Writes
+/// `/etc/ados/mesh/gateway.json` (atomic, sorted keys) then `batctl gw_mode off|client`
+/// (+ `gw_sel <mac>` when pinned). The persist runs first; a persist failure still
+/// applies but surfaces `persist_error`. A missing `batctl` (the spawn fails) maps to
 /// `E_BATCTL_UNAVAILABLE`.
 async fn apply_gateway_preference(mode: &str, pinned_mac: Option<&str>) -> Value {
     use std::time::Duration;

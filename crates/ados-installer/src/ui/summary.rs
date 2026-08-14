@@ -35,10 +35,12 @@ const NOTE_MDNS: &str = "The .local (mDNS) name needs a desktop app on the LAN."
 /// The access-point block, when this profile runs one.
 ///
 /// The passphrase is generated per unit rather than being one published
-/// default on every box, so this is the first place an operator can read it.
-/// Nothing else in the product showed it before; if this block is removed, the
-/// generation in the AP manager has to go back to a known value with it or the
-/// unit becomes unjoinable.
+/// default on every box, so it has to be readable somewhere. This is the first
+/// place an operator sees it and the only one that appears without being
+/// sought; the OLED, the `ados` dashboard and `ados network ap-passphrase` all
+/// require knowing to look. Removing this block does not strand a unit an
+/// operator can already reach, but it does mean a fresh install hands back a
+/// network nobody has been told the key to.
 fn ap_lines(s: &SummaryData) -> Vec<(String, String)> {
     match (&s.ap_ssid, &s.ap_passphrase) {
         (Some(ssid), Some(pass)) => vec![
@@ -520,9 +522,10 @@ mod tests {
         assert_eq!(mdns_host("  "), None);
     }
 
-    /// A generated per-unit passphrase is only safe because it is displayed.
-    /// If this block ever stops rendering, the generation in the AP manager
-    /// has to go back to a known value with it, or the unit is unjoinable.
+    /// The install is the one moment the key appears unprompted. Other surfaces
+    /// exist (the OLED, the `ados` dashboard, `ados network ap-passphrase`),
+    /// so losing this block is not fatal, but it turns a fresh install into one
+    /// that finishes by naming a network and withholding its key.
     #[test]
     fn the_access_point_credentials_are_shown_when_there_is_an_access_point() {
         let mut s = sample("ok");

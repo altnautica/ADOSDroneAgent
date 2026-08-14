@@ -3,9 +3,14 @@
 //! A THIN DELEGATION WRAPPER over the existing kernel bring-up primitives
 //! (`adapter` selection, `bringup` monitor/channel/radiate guards, `process`
 //! group spawn). It moves no code out of those modules; it calls them in the same
-//! order `run_service` does so a later wave can put the service loop on the
-//! [`RadioBackend`] seam without changing behaviour. Phase A: never called from
-//! the live path.
+//! order `run_service` does, so putting the service loop on the
+//! [`RadioBackend`] seam is a behaviour-preserving move when it happens.
+//!
+//! Never called from the live path, deliberately — see [`super`] for the three
+//! facts that keep this seam inert (the second backend is specified and
+//! owner-deferred, [`super::BroughtUp`]'s process handle has to be reshaped
+//! before a userspace backend can implement the trait at all, and wiring the
+//! loop is verifiable only against a real radio). Hence the dead-code allowance.
 
 #![allow(dead_code)]
 
@@ -124,7 +129,7 @@ impl RadioBackend for KernelMonitorBackend {
         // order run_service drives them (adapter select → verified monitor +
         // channel → coax the PHY off the muted floor → spawn the process group).
         // No code is moved out of adapter / bringup / process; the full
-        // regulatory-gate orchestration stays in run_service (Phase A: inert).
+        // regulatory-gate orchestration stays in run_service (this seam is inert).
         let outcome = ados_radio::adapter::detect_and_select(&cfg.interface).await;
         let adapter = outcome.selected.ok_or(RadioError::NoAdapter)?;
         let iface = adapter.ifname.clone();

@@ -7,13 +7,34 @@
 //! cross-platform userspace USB (devourer) backend drives the same dongle on a
 //! laptop with no kernel monitor mode. This module is the abstraction both share.
 //!
-//! Phase A is a PURE-ADD: the trait + the kernel wrapper + the selector are built
-//! and unit-tested but NOT wired into the service loop. The live bring-up still
-//! lives inline in `run_service`; `KernelMonitorBackend` is a thin delegation
-//! wrapper over the EXISTING `adapter` / `bringup` / `process` primitives so a
-//! later wave can swap the loop onto this seam with no behaviour change. Nothing
-//! here is reachable from the live path yet, hence the module-wide dead-code
-//! allowance.
+//! ## Why this seam is built, inert, and staying that way for now
+//!
+//! Nothing here is reachable from the live path: the trait, the kernel wrapper
+//! and the selector are built and unit-tested, while the live bring-up still
+//! runs inline in `run_service`. `KernelMonitorBackend` is a thin delegation
+//! wrapper over the existing `adapter` / `bringup` / `process` primitives, so
+//! putting the service loop on this seam is a behaviour-preserving move when it
+//! happens. Hence the module-wide dead-code allowance.
+//!
+//! Three facts decide "wire it or delete it", and they are recorded here because
+//! that question has been re-opened three times:
+//!
+//! 1. **The second backend is specified and deliberately deferred by the project
+//!    owner.** The cross-platform userspace-USB backend has a written design (the
+//!    radio-backend abstraction spec under `product/specs/ados-direct-link/`),
+//!    and the owner's build plan explicitly defers it — ship the kernel path,
+//!    leave this trait inert. Deleting it would throw away specced substrate that
+//!    a named, scheduled piece of work resumes from.
+//! 2. **The trait cannot host that backend as it stands.** [`BroughtUp`] carries
+//!    an `Arc<Mutex<RadioProcesses>>` — a forked `wfb_tx`/`wfb_rx` process group.
+//!    A userspace backend has no forked process at all (it drives the dongle
+//!    in-process), so it cannot produce that handle. Resuming therefore begins by
+//!    reshaping this trait's bring-up result, NOT by wiring the kernel backend
+//!    into `run_service` first; wiring first would harden the leak.
+//! 3. **Wiring is verifiable only on real radio hardware.** Whether the loop on
+//!    this seam behaves identically is a claim about monitor mode, injection and
+//!    a live link, so no off-rig test can settle it. It belongs to a bench
+//!    session with a radio attached, not to a refactor pass.
 
 #![allow(dead_code)]
 
@@ -30,9 +51,10 @@ pub mod kernel;
 pub mod select;
 
 // `kernel::KernelMonitorBackend` and `select::{select_backend, BackendSelection}`
-// are reachable via their submodule paths. No flat re-exports yet: Phase A wires
-// nothing into the live path, so a re-export would warn as unused. The wave that
-// puts `run_service` on this seam adds the ergonomic re-exports then.
+// are reachable via their submodule paths. No flat re-exports while the seam is
+// inert: nothing in the live path uses them, so a re-export would warn as
+// unused. Whatever puts `run_service` on this seam adds the ergonomic re-exports
+// then.
 
 /// Which concrete radio backend is driving the link. Surfaced (via
 /// [`BackendKind::as_wire`]) on the `wfb-stats.json` `backend` field so Mission
@@ -135,9 +157,13 @@ pub struct PlaneStats {
 }
 
 /// The handle a successful kernel bring-up produces: the selected injection
-/// interface, the verified adapter, and the running radio process group. The
-/// (future) `run_service` wiring consumes this; Phase A only constructs it inside
-/// [`RadioBackend::bring_up`].
+/// interface, the verified adapter, and the running radio process group.
+///
+/// The (future) `run_service` wiring consumes this; while the seam is inert it is
+/// only constructed inside [`RadioBackend::bring_up`]. It is also the structural
+/// reason a second backend cannot implement this trait unchanged: a userspace
+/// backend drives the dongle in-process and has no `RadioProcesses` group to hand
+/// back, so resuming that work starts by reshaping this type.
 pub struct BroughtUp {
     pub iface: String,
     pub adapter: SelectedAdapter,

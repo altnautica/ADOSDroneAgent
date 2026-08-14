@@ -111,11 +111,10 @@ fn autopilot_from_snapshot(snapshot: Option<&Value>) -> i64 {
         .unwrap_or(0)
 }
 
-/// Whether any `SIGNING_*` param is present in the cached param map. An empty map
-/// (no cache file, an unreadable one, or an FC that has not answered a
-/// `PARAM_REQUEST_LIST` yet) reads as not present. Mirrors the Python
-/// `_cached_params` (returns the params dict or `{}`) feeding
-/// `detect_capability`'s `SIGNING_*` scan.
+/// Whether any `SIGNING_*` param is present in the cached param map. An empty map (no
+/// cache file, an unreadable one, or an FC that has not answered a `PARAM_REQUEST_LIST`
+/// yet) reads as not present. This is the same reading the capability detection's
+/// `SIGNING_*` scan consumes.
 fn signing_params_present(params: &serde_json::Map<String, Value>) -> bool {
     params.keys().any(|name| name.starts_with("SIGNING_"))
 }

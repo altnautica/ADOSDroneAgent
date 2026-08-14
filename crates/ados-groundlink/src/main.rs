@@ -417,21 +417,33 @@ async fn run_direct(
     // peer cache, the MAVLink ingest and the RPC response ingest, all of which
     // are already keyed per device id, so the fleet reports as one aggregate.
     let mavlink_ingest = Arc::new(ados_protocol::mavlink_ingest::MavlinkIngest::at_default_path());
+    // The hand-off to the local config-over-radio service. Shared by every slot:
+    // config replies correlate by request id inside the tunnel, so one ingress
+    // serves the whole fleet the same way the RPC response ingest does. Built
+    // unconditionally and harmless when the channel is opted out — nothing is
+    // bound to the ingress port then, so a frame is counted and dropped.
+    let config_tunnel_ingest =
+        Arc::new(ados_protocol::config_tunnel_ingest::ConfigTunnelIngest::at_configured_port());
     let spawn_aux_consumer = {
-        let mavlink_ingest = mavlink_ingest.clone();
         let aux_counters = aux_counters.clone();
         let aux_peers = aux_peers.clone();
         let aux_shutdown = aux_shutdown.clone();
+        // One sink set for every slot: the destinations are process-wide, only
+        // the listen port differs per slot.
+        let sinks = ados_groundlink::AuxSinksOwned {
+            mavlink: mavlink_ingest.clone(),
+            rpc_response: Some(ados_protocol::aux_rpc_proxy::AuxRpcResponseIngest::new(
+                ados_protocol::aux_rpc_proxy::DEFAULT_RESPONSE_SOCK,
+            )),
+            config_tunnel: Some(config_tunnel_ingest.clone()),
+        };
         move |slot: u8| -> tokio::task::JoinHandle<()> {
             tokio::spawn(ados_groundlink::supervise_aux_consumer(
                 slot,
                 wfb_rx::aux_rx_port(slot),
-                mavlink_ingest.clone(),
+                sinks.clone(),
                 aux_counters.clone(),
                 aux_peers.clone(),
-                Some(ados_protocol::aux_rpc_proxy::AuxRpcResponseIngest::new(
-                    ados_protocol::aux_rpc_proxy::DEFAULT_RESPONSE_SOCK,
-                )),
                 aux_shutdown.clone(),
             ))
         }

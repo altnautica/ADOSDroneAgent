@@ -142,11 +142,10 @@ impl Drop for SocatProcess {
     }
 }
 
-/// Sweep stale bind socats left by a previously aborted session (the drone
-/// listener / gs client that would otherwise hold port 5555 on 10.5.99.2 and
-/// crash the next attempt with `Address already in use`). Mirrors
-/// `_kill_stale_bind_socats`: `pkill -9 -f <pattern>` for both shapes, each
-/// bounded to 5s. Idempotent + best-effort.
+/// Sweep stale bind socats left by a previously aborted session (the drone listener /
+/// gs client that would otherwise hold port 5555 on 10.5.99.2 and crash the next
+/// attempt with `Address already in use`). `pkill -9 -f <pattern>` for both shapes,
+/// each bounded to 5s. Idempotent + best-effort.
 pub async fn kill_stale_bind_socats() {
     let patterns = [
         format!("socat.*TCP4-LISTEN:{BIND_TCP_PORT},bind={DRONE_BIND_PEER_IP}"),

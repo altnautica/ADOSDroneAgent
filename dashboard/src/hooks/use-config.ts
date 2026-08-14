@@ -84,7 +84,6 @@ export interface AgentConfig {
     confidence_threshold?: number;
     models_dir?: string;
     models_cache_max_mb?: number;
-    auto_download?: boolean;
   };
   atlas?: {
     enabled?: boolean;

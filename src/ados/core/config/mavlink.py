@@ -51,6 +51,29 @@ class MavlinkConfig(BaseModel):
     # write silently pins every node to the losing side, and the migration that
     # removes the stale recorded value is undone by the write that follows it.
     ws_proxy_enforce_auth: bool = True
+    # When true, the raw byte-stream proxies (TCP 5760, UDP 14550) refuse an
+    # unauthorized off-box peer instead of recording it and serving it anyway.
+    #
+    # Off, and the disagreement with the WebSocket flag above is the point.
+    # The WebSocket enforces because a client can present either the
+    # `X-ADOS-Key` header or an `ados-ws-ticket` subprotocol. The raw edges
+    # have no credential channel at all -- no handshake, no headers -- so on a
+    # paired node enforcement there refuses every off-box ground station with
+    # nothing the client can do about it, and the published documentation tells
+    # operators those ports are credential-free precisely so a desktop GCS can
+    # attach. Declared here for the same reason as the flag above: the router
+    # reads it, and a key this model does not declare is stripped from the file
+    # on the next config write.
+    raw_proxy_enforce_auth: bool = False
+    # When true, a client the router could not authenticate is refused the
+    # aux-radio uplink instead of being recorded and relayed anyway.
+    #
+    # Off. The uplink fallback is taken only on a node with no local flight
+    # controller, i.e. a ground station relaying a drone that may be airborne,
+    # so a refusal lands mid-flight on the operator's screen rather than at
+    # install time. The relay's own declared forwarding is exempt from this
+    # flag in every case, or remote piloting of a relayed drone stops working.
+    aux_uplink_enforce_origin: bool = False
     # Whether the legacy `REQUEST_DATA_STREAM` group requests are sent alongside
     # the modern `SET_MESSAGE_INTERVAL` per-message requests on every stream
     # refresh. OFF by default: measured MAVLink ingest on ArduPilot was 66.5

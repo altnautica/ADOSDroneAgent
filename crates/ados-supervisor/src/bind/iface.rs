@@ -36,10 +36,9 @@ pub async fn wait_for_iface(iface: &str, timeout: Duration) -> bool {
     false
 }
 
-/// Read `/sys/class/net/<iface>/statistics/rx_packets` as a counter. `None` if
-/// the iface is absent / torn down / the value is unparseable — the caller
-/// treats "no signal" and "iface missing" uniformly. Mirrors
-/// `_read_rx_packets_counter`.
+/// Read `/sys/class/net/<iface>/statistics/rx_packets` as a counter. `None` if the
+/// iface is absent / torn down / the value is unparseable — the caller treats "no
+/// signal" and "iface missing" uniformly.
 pub fn read_rx_packets_counter(iface: &str) -> Option<u64> {
     let path = format!("/sys/class/net/{iface}/statistics/rx_packets");
     std::fs::read_to_string(Path::new(&path))

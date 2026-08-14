@@ -47,9 +47,8 @@ use crate::vision_client::VisionClient;
 // MAVLink classification constants (host_services.py)
 // ---------------------------------------------------------------------
 
-/// Message ids the pose-injection path covers. A send whose msg id is in this
-/// set demands `estimator.pose.inject` on top of `mavlink.write`. Mirrors
-/// `POSE_INJECT_MSG_IDS`.
+/// Message ids the pose-injection path covers. A send whose msg id is in this set
+/// demands `estimator.pose.inject` on top of `mavlink.write`.
 pub const POSE_INJECT_MSG_IDS: &[u32] = &[
     331,   // ODOMETRY
     102,   // VISION_POSITION_ESTIMATE
@@ -59,8 +58,7 @@ pub const POSE_INJECT_MSG_IDS: &[u32] = &[
 ];
 
 /// Component ids the VIO permission covers. Registering one of these requires
-/// `mavlink.component.vio` on top of the matching component kind. Mirrors
-/// `VIO_COMPONENT_IDS`.
+/// `mavlink.component.vio` on top of the matching component kind.
 pub const VIO_COMPONENT_IDS: &[i64] = &[197, 198];
 
 /// Driver kind -> required capability.
@@ -93,8 +91,7 @@ struct ComponentRegistration {
     kind: String,
 }
 
-/// Tracks per-plugin MAVLink component-id reservations. Mirrors
-/// `ComponentRegistrar`.
+/// Tracks per-plugin MAVLink component-id reservations.
 #[derive(Default)]
 struct ComponentRegistrar {
     by_plugin: BTreeMap<String, BTreeMap<i64, ComponentRegistration>>,
@@ -347,13 +344,11 @@ impl CameraClaimTracker {
 // Config store
 // ---------------------------------------------------------------------
 
-/// Per-scope config store with optional on-disk persistence. Reads consult
-/// drone scope first, then global, then the request default. Mirrors the Python
-/// `ConfigStore` plus its optional persistence hook. The `_MISSING` sentinel of
-/// the Python store is expressed here as `Option<Value>`: a stored `nil` is
-/// `Some(Value::Nil)` (a present value) and is distinct from absent (`None`),
-/// so a key explicitly set to nil shadows global and default exactly as the
-/// Python sentinel does.
+/// Per-scope config store with optional on-disk persistence. Reads consult drone scope
+/// first, then global, then the request default. Absence is expressed as
+/// `Option<Value>`: a stored `nil` is `Some(Value::Nil)` (a present value) and is
+/// distinct from absent (`None`), so a key explicitly set to nil shadows global and
+/// default rather than falling through to them.
 ///
 /// When `persist_path` is set, every `set` flushes the whole store to a 0600
 /// JSON file (atomic temp-then-rename), and [`ConfigStore::load`] reads it back

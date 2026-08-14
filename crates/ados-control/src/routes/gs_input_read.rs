@@ -161,12 +161,10 @@ fn gs_input_json_path(state: &AppState) -> PathBuf {
 
 /// `GET /api/v1/ground-station/bluetooth/paired` → the paired Bluetooth devices.
 ///
-/// `404` `E_PROFILE_MISMATCH` off a ground-station node. Otherwise `{devices}`:
-/// the `bluetoothctl paired-devices` output parsed into the same `{device_id,
-/// mac, name, type, connected}` records the Python `paired_bluetooth` returns. A
-/// non-zero exit / a missing `bluetoothctl` degrades to an empty list, matching
-/// the Python `if rc != 0: return []` and its spawn-failure path. Mirrors the
-/// Python `get_bluetooth_paired`.
+/// `404` `E_PROFILE_MISMATCH` off a ground-station node. Otherwise `{devices}`: the
+/// `bluetoothctl paired-devices` output parsed into one `{device_id, mac, name, type,
+/// connected}` record per device. A non-zero exit / a missing `bluetoothctl` degrades
+/// to an empty list rather than an error.
 pub async fn get_bluetooth_paired(State(state): State<AppState>) -> Response {
     if !is_ground_station(&state) {
         return profile_mismatch();

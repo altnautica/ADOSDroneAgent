@@ -656,7 +656,7 @@ impl VideoOrchestrator {
         }
     }
 
-    /// Stop the decoupled vision frame tap. Mirrors
+    /// Stop the decoupled vision frame tap. Parallels
     /// [`stop_wfb_tee`](Self::stop_wfb_tee).
     pub async fn stop_vision_tap(&mut self) {
         if let Some(h) = self.vision_tap_reframer.take() {

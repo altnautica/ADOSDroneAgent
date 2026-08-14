@@ -3,7 +3,7 @@
 Covers manifest parsing (cache + remote), registry HTTP fetch with ETag
 caching, installed-model enumeration, variant selection by NPU TOPS,
 cache-usage accounting against ``models_cache_max_mb``, and the
-``auto_download`` / registry-disabled paths.
+registry-disabled path.
 
 External I/O is mocked at the ``httpx.AsyncClient`` layer so no real
 network or DNS happens. File system writes are scoped to ``tmp_path``.

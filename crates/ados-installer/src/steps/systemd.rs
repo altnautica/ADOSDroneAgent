@@ -70,10 +70,16 @@ const UNIVERSAL_UNITS: &[&str] = &[
 ];
 
 /// Ground-station units enable-linked here (the START half is the `start` step's job).
+///
+/// `ados-usb-gadget.service` is deliberately NOT here. The native `ados-net`
+/// daemon composes the OTG gadget in-process (`UsbGadgetManager::setup`), so
+/// enabling the packaged unit puts a second composer on the same UDC; it is
+/// stopped + disabled on every GS install by `reconcile_rust_cutover_units`.
+/// Enabling and then immediately subsuming it was the contradiction this list
+/// used to encode.
 const GROUND_STATION_ENABLE_UNITS: &[&str] = &[
     "ados-wfb-rx.service",
     "ados-mediamtx-gs.service",
-    "ados-usb-gadget.service",
     "ados-oled.service",
     "ados-oled-i2c.service",
     "ados-hostapd.service",
@@ -83,7 +89,10 @@ const GROUND_STATION_ENABLE_UNITS: &[&str] = &[
     "ados-input.service",
     "ados-pic.service",
     "ados-uplink-router.service",
-    "ados-wifi-client.service",
+    // ados-wifi-client.service is deliberately absent, for the same reason as
+    // ados-usb-gadget.service: ados-net owns the station in-process, and both
+    // names are in ALWAYS_SUBSUMED_UNITS, so enable-linking either one here
+    // means an install enables a unit it disables again in the same run.
 ];
 
 /// Units the agent shipped in a prior release but has since deleted. The
@@ -112,6 +121,12 @@ const RETIRED_UNITS: &[&str] = &[
     // is gone.
     "ados-ethernet.service",
     "ados-modem.service",
+    // The env-gated libcomposite composer oneshot. Its ExecStart named a
+    // helper script the installer copied only under ADOS_ENABLE_USB_GADGET=1,
+    // and both the script and that gate are gone: the native ados-net daemon
+    // builds the gadget tree itself, so a second composer on the same UDC was
+    // never a path worth keeping. Left on disk its ExecStart points at nothing.
+    "ados-usb-gadget-setup.service",
 ];
 
 /// Udev rules retired with the units they triggered. Same reasoning as
@@ -215,11 +230,10 @@ const AVAHI_GS_AP_FILE: &str = "/etc/avahi/services/ados-gs-ap.service";
 /// tmpfiles drop-in that ages out the agent's own append-only files on disk.
 const LOG_RETENTION_TMPFILES: &str = "/etc/tmpfiles.d/99-ados-log-retention.conf";
 
-/// Build the video-pipeline UDP-buffer sysctl drop-in body (pure). Mirrors
-/// 03-kernel.sh `install_video_sysctl`: bumps the kernel socket-buffer ceilings
-/// so the wfb_rx + fanout + mediamtx UDP sockets can actually allocate the 4 MiB
-/// SO_RCVBUF/SO_SNDBUF they request at bind time instead of being clamped to the
-/// stock ~208 KiB `net.core.rmem_max`.
+/// Build the video-pipeline UDP-buffer sysctl drop-in body (pure). It bumps the kernel
+/// socket-buffer ceilings so the wfb_rx + fanout + mediamtx UDP sockets can actually
+/// allocate the 4 MiB SO_RCVBUF/SO_SNDBUF they request at bind time instead of being
+/// clamped to the stock ~208 KiB `net.core.rmem_max`.
 pub fn video_sysctl_body() -> String {
     "# ADOS video pipeline UDP buffer ceiling. Allows the wfb_rx +\n\
 # video_fanout + mediamtx UDP sockets to actually allocate the\n\
@@ -338,10 +352,9 @@ wifi.powersave = 2\n"
         .to_string()
 }
 
-/// Build the fallback WiFi-power-save udev rule body (pure), prefixed with the
-/// resolved `iw` path when one is known (so the RUN+= line is absolute) and an
-/// inline `/bin/sh -c 'iw ...'` fallback otherwise. Mirrors
-/// `install_power_hardening` step 2.
+/// Build the fallback WiFi-power-save udev rule body (pure), prefixed with the resolved
+/// `iw` path when one is known (so the RUN+= line is absolute) and an inline `/bin/sh
+/// -c 'iw ...'` fallback otherwise.
 pub fn wifi_powersave_rule_body(iw_bin: Option<&str>) -> String {
     let mut out =
         String::from("# ADOS: disable WiFi power-save on every wlan* interface as it appears.\n");
@@ -822,6 +835,12 @@ fn mask_conflicting_standalone_services() {
     }
 }
 
+/// The packaged units a native daemon always owns instead. Module-level so the
+/// enable/start lists can be pinned against it: a name here must never also be
+/// enable-linked, or an install enables a unit it then disables in the same run.
+pub(crate) const ALWAYS_SUBSUMED_UNITS: &[&str] =
+    &["ados-wifi-client.service", "ados-usb-gadget.service"];
+
 /// Reconcile the packaged units a native consolidator daemon subsumes
 /// (`reconcile_rust_cutover_units`). GROUND-STATION ONLY. Net and hid are both
 /// native-only now (the packaged uplink entrypoints + the PIC arbiter / input
@@ -832,9 +851,7 @@ fn reconcile_rust_cutover_units() {
     // ados-ethernet + ados-modem moved to RETIRED_UNITS (their Python
     // entrypoints were deleted), so the prune removes them outright rather than
     // leaving a disabled unit on disk.
-    let always_subsumed = ["ados-wifi-client.service", "ados-usb-gadget.service"];
-
-    for unit in always_subsumed {
+    for &unit in ALWAYS_SUBSUMED_UNITS {
         let _ = exec::run("systemctl", &["stop", unit]);
         let _ = exec::run("systemctl", &["disable", unit]);
         let _ = exec::run("systemctl", &["reset-failed", unit]);
@@ -1425,53 +1442,6 @@ fn install_avahi_gs_ap(source: Option<&Path>) {
     tracing::info!(path = AVAHI_GS_AP_FILE, "avahi service file installed");
 }
 
-/// Install the env-gated libcomposite USB-gadget composer (GROUND-STATION only).
-/// Gated on `ADOS_ENABLE_USB_GADGET=1` (default off) until the gadget is bench
-/// validated. Ports the gated block at the head of `enable_ground_station_units`:
-/// copy the composer script, ensure `dwc2` is loaded, enable the setup oneshot.
-fn install_usb_gadget_composer(source: Option<&Path>) {
-    if std::env::var("ADOS_ENABLE_USB_GADGET").as_deref() != Ok("1") {
-        return;
-    }
-    let src = source.map(|s| s.join("data/usb-gadget/ados-cdc-ncm-rndis.sh"));
-    let src = match src.as_deref().filter(|p| p.is_file()) {
-        Some(p) => p,
-        None => {
-            tracing::warn!(
-                "USB gadget composer script not found; skipping (ADOS_ENABLE_USB_GADGET=1 was set)"
-            );
-            return;
-        }
-    };
-    let dst_dir = "/usr/local/lib/ados/usb-gadget";
-    let _ = std::fs::create_dir_all(dst_dir);
-    let dst = format!("{dst_dir}/ados-cdc-ncm-rndis.sh");
-    if std::fs::copy(src, &dst).is_err() {
-        tracing::warn!("copying USB gadget composer failed");
-        return;
-    }
-    set_mode(Path::new(&dst), 0o755);
-    tracing::info!("USB gadget composer script installed (ADOS_ENABLE_USB_GADGET=1)");
-
-    // Ensure dwc2 is loaded on OTG-capable boards so the gadget subsystem has a
-    // UDC to bind to. No-op on boards that lack OTG hardware.
-    let modules_has_dwc2 = std::fs::read_to_string("/etc/modules")
-        .map(|s| s.lines().any(|l| l.trim() == "dwc2"))
-        .unwrap_or(false);
-    if !modules_has_dwc2 {
-        if let Ok(mut existing) = std::fs::read_to_string("/etc/modules") {
-            if !existing.ends_with('\n') {
-                existing.push('\n');
-            }
-            existing.push_str("dwc2\n");
-            let _ = std::fs::write("/etc/modules", existing);
-        }
-    }
-    let _ = exec::run("modprobe", &["dwc2"]);
-    let _ = exec::run("modprobe", &["libcomposite"]);
-    enable_if_present("ados-usb-gadget-setup.service");
-}
-
 /// Provision the `ados` system user and group (idempotent). Several downstream
 /// steps assume this identity already exists: the plugin runtime dir is created
 /// `0750 ados ados` (`install_plugin_tmpfiles`), every plugin subprocess unit
@@ -1722,10 +1692,9 @@ impl Step for Systemd {
 
         // 6. Profile-specific enable + teardown.
         if ctx.profile == "ground_station" {
-            // The env-gated USB-gadget composer (default off) and the
-            // hardware-access group memberships are GS-only — they belong to the
-            // tether + button/joystick/OLED service set.
-            install_usb_gadget_composer(Some(&source));
+            // The mDNS AP service file and the hardware-access group
+            // memberships are GS-only — they belong to the AP +
+            // button/joystick/OLED service set.
             install_avahi_gs_ap(Some(&source));
             for unit in GROUND_STATION_ENABLE_UNITS {
                 enable_if_present(unit);
@@ -1765,6 +1734,27 @@ mod tests {
         // cross-profile and declares SupplementaryGroups=gpio, so without it the
         // unit aborts at 216/GROUP before ExecStart.
         assert!(ADOS_HARDWARE_GROUPS.contains(&"gpio"));
+    }
+
+    #[test]
+    fn a_subsumed_unit_is_never_enabled() {
+        // A native daemon owns each of these in-process, so the packaged unit
+        // must be torn down and never enable-linked. An install that enables a
+        // unit and then disables it in the same run is the contradiction this
+        // pins shut, and it shipped twice: the gadget unit was enabled, started,
+        // and subsumed all in one install, and the wifi-client unit alongside it.
+        //
+        // Generalised over the whole list on purpose. Pinning one name leaves
+        // the next entry free to reacquire exactly the defect just removed.
+        for unit in ALWAYS_SUBSUMED_UNITS {
+            assert!(
+                !GROUND_STATION_ENABLE_UNITS.contains(unit),
+                "{unit} is subsumed by a native daemon and must not be enable-linked"
+            );
+        }
+        // The retired composer oneshot is pruned, not merely disabled, so an
+        // upgraded box does not keep an orphan whose script no longer exists.
+        assert!(RETIRED_UNITS.contains(&"ados-usb-gadget-setup.service"));
     }
 
     #[test]
@@ -2238,8 +2228,9 @@ mod tests {
     #[test]
     fn gs_enable_list_is_subset_of_other_profile_drone_teardown() {
         // Everything the GS install enables, the drone install must explicitly
-        // disable (the 07-systemd.sh invariant), except the env-gated gadget
-        // composer which is not in the enable list here.
+        // disable (the 07-systemd.sh invariant). The drone teardown list is the
+        // wider one: it also names units the GS never enables, such as the
+        // gadget unit ados-net owns natively and its retired composer oneshot.
         let drone_teardown = other_profile_units("drone");
         for unit in GROUND_STATION_ENABLE_UNITS {
             assert!(

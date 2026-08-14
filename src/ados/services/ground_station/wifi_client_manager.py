@@ -1,6 +1,6 @@
 """WiFi client (station) manager for the ground-station profile.
 
-Part of the uplink matrix. The ground station's onboard wlan0 radio
+Part of the uplink matrix. The ground station's onboard management radio
 can act as an AP (hostapd_manager) or as a station joining an upstream
 WiFi network for internet backhaul. The two modes are mutually
 exclusive on the same radio, so this manager coordinates with
@@ -15,13 +15,14 @@ Published events (consumed by uplink_router):
     WifiClientEvent{kind, ssid, signal, ip, timestamp_ms}
 
 Mutex:
-    /var/lock/ados-wlan0.lock via fcntl.flock(LOCK_EX). Held across
-    systemctl stop ados-hostapd -> nmcli connect. Released after leave()
-    restarts hostapd (if it was the prior owner).
+    /var/lock/ados-<iface>.lock via fcntl.flock(LOCK_EX), named after the
+    interface actually resolved. Held across systemctl stop ados-hostapd ->
+    nmcli connect. Released after leave() restarts hostapd (if it was the
+    prior owner).
 
 State flag:
     /var/run/ados/ap-was-enabled  -> "1" if hostapd was active when we
-    stole wlan0, "0" otherwise. Cleared after restoration.
+    stole the radio, "0" otherwise. Cleared after restoration.
 """
 
 from __future__ import annotations
@@ -44,8 +45,10 @@ from ados.core.subprocess import CmdTimeout, run_cmd_sync
 
 log = get_logger("ground_station.wifi_client")
 
-_WLAN_IFACE = "wlan0"
-_LOCK_PATH = Path("/var/lock/ados-wlan0.lock")
+# The lock file is named after the interface the manager actually resolved
+# (see WifiClientManager.__init__), so it lives under this directory rather
+# than being a fixed path.
+_LOCK_DIR = Path("/var/lock")
 _AP_FLAG_PATH = Path("/var/run/ados/ap-was-enabled")
 _CLIENT_CONFIG_PATH = GS_WIFI_CLIENT_JSON
 _HOSTAPD_UNIT = "ados-hostapd.service"
@@ -171,10 +174,25 @@ def _parse_nmcli_terse(text: str, fields: int) -> list[list[str]]:
 
 
 class WifiClientManager:
-    """NetworkManager-backed WiFi station manager for wlan0."""
+    """NetworkManager-backed WiFi station manager for the onboard radio."""
 
-    def __init__(self, interface: str = _WLAN_IFACE) -> None:
-        self._interface = interface
+    def __init__(self, interface: str = "") -> None:
+        # Resolved by DRIVER at construction, the same point EthernetManager and
+        # the AP resolve theirs. Interface names race at boot -- measured across
+        # three reboots of a ground station, "wlan0" was the onboard chip twice
+        # and the USB flight radio once -- so a name-bound station had a
+        # one-in-three chance of running nmcli on the aircraft's link. An
+        # explicit argument is an operator/test pin the resolver honours unless
+        # it names the radio.
+        from ados.services.ground_station.hostapd_manager import (
+            resolve_ap_interface,
+        )
+
+        self._interface = resolve_ap_interface(interface)
+        # Named after the radio actually held: the lock excludes hostapd only
+        # while both holders name the same file, so a lock called
+        # "ados-wlan0.lock" taken while the station drives wlan1 excludes nobody.
+        self._lock_path = _LOCK_DIR / f"ados-{self._interface}.lock"
         self._bus = WifiClientEventBus()
         self._lock_fd: int | None = None
         self._last_status: dict = {}
@@ -188,13 +206,13 @@ class WifiClientManager:
 
     def _acquire_lock(self) -> bool:
         try:
-            _LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
-            fd = os.open(str(_LOCK_PATH), os.O_CREAT | os.O_RDWR, 0o644)
+            self._lock_path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(str(self._lock_path), os.O_CREAT | os.O_RDWR, 0o644)
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             self._lock_fd = fd
             return True
         except (OSError, BlockingIOError) as exc:
-            log.warning("wlan0_lock_failed", error=str(exc))
+            log.warning("station_lock_failed", error=str(exc))
             return False
 
     def _release_lock(self) -> None:
@@ -336,7 +354,12 @@ class WifiClientManager:
         passphrase: str | None,
         force: bool = False,
     ) -> dict:
-        """Join a WiFi network. Coordinates wlan0 with hostapd."""
+        """Join a WiFi network. Coordinates the station radio with hostapd.
+
+        Every refusal names the interface it is talking about. The station is
+        resolved by driver, not by name, so an operator reading
+        ``station_locked`` cannot otherwise tell which radio is held.
+        """
         if not ssid or not isinstance(ssid, str):
             return {"joined": False, "error": "ssid_required", "ip": None, "gateway": None}
 
@@ -344,8 +367,9 @@ class WifiClientManager:
         if ap_active and not force:
             return {
                 "joined": False,
-                "error": "wlan0_busy_ap_active",
+                "error": "station_busy_ap_active",
                 "hint": "Stop AP first or force",
+                "interface": self._interface,
                 "ip": None,
                 "gateway": None,
             }
@@ -353,7 +377,8 @@ class WifiClientManager:
         if not self._acquire_lock():
             return {
                 "joined": False,
-                "error": "wlan0_locked",
+                "error": "station_locked",
+                "interface": self._interface,
                 "ip": None,
                 "gateway": None,
             }

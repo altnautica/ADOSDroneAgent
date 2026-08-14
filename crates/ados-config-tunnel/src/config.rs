@@ -15,29 +15,33 @@
 //!   review.
 //!
 //! This channel carries **config request/response ONLY** — never armed-flight
-//! command authority (a separate, gated safety concern). It rides the low-rate
-//! `-p1` control-plane bearer; the "gate" it inherits by riding `-p1` is the
-//! WFB pairing key (only a paired peer can inject/decode), which is a
-//! pairing-scope gate, not a flight-authorization gate.
+//! command authority (a separate, gated safety concern). It rides the radio's
+//! auxiliary application lane (the drone's `-p2` downlink and the ground
+//! station's `-p3` uplink) on its own multiplex channel; the aux transmit and
+//! receive pair is brought up ON DEMAND by the radio service, so an opted-out
+//! node radiates nothing and spawns nothing. The "gate" the channel inherits by
+//! riding that lane is the WFB pairing key (only a paired peer can inject or
+//! decode), which is a pairing-scope gate, not a flight-authorization gate.
 
 use std::path::Path;
 
 use serde::Deserialize;
 
-/// Default local UDP ingress port the service binds to receive its inbound
-/// TUNNEL frames off the bearer.
-pub const DEFAULT_RX_PORT: u16 = 5820;
-/// Default local UDP egress port the service sends outbound TUNNEL frames to.
-pub const DEFAULT_TX_PORT: u16 = 5821;
+/// Default loopback ingress port this service binds for inbound TUNNEL frames.
+///
+/// Defined as the shared constant the rigs' aux plane consumers forward to, so
+/// the two sides of the loopback hand-off cannot drift apart on a default.
+pub const DEFAULT_RX_PORT: u16 = ados_protocol::config_tunnel_ingest::DEFAULT_INGRESS_PORT;
 
 /// The `radio.tunnel` block of `/etc/ados/config.yaml`.
 ///
-/// `rx_port` / `tx_port` are the LOCAL UDP ports the service binds/sends on.
-/// They are dedicated ports (disjoint from the WFB plane ports 5600/5601/5803/
-/// 5810 and the aux plane) that an `ados-radio` bearer bridge connects to the
-/// `-p1` control plane in a separate, gated radio-integration step. Until that
-/// bridge is wired the service still binds and reports honestly (a received
-/// counter that stays 0 means nothing is arriving), never a fabricated green.
+/// `rx_port` is the LOCAL loopback ingress this service binds. Frames do not
+/// arrive there off the air directly: the rig's aux plane consumer already holds
+/// the plane's own port (only one process may) and forwards this channel's frames
+/// on, resolving the same port through
+/// [`ados_protocol::config_tunnel_ingest::ingress_port`]. Egress needs no port
+/// here — the drone negotiates its transmit ingress with the radio service and
+/// the ground station writes to the configured aux uplink ingress.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TunnelChannelConfig {
     /// Master opt-in. Absent/false ⇒ the service idles harmlessly.
@@ -46,10 +50,9 @@ pub struct TunnelChannelConfig {
     /// Off by default; a read-only channel until set for a bench-validated
     /// write lane.
     pub command_enabled: bool,
-    /// Local UDP ingress port for inbound TUNNEL frames.
+    /// Local loopback ingress port for inbound TUNNEL frames, which the rig's
+    /// aux plane consumer forwards this channel's frames to.
     pub rx_port: u16,
-    /// Local UDP egress port for outbound TUNNEL frames.
-    pub tx_port: u16,
 }
 
 impl Default for TunnelChannelConfig {
@@ -58,7 +61,6 @@ impl Default for TunnelChannelConfig {
             enabled: false,
             command_enabled: false,
             rx_port: DEFAULT_RX_PORT,
-            tx_port: DEFAULT_TX_PORT,
         }
     }
 }
@@ -83,8 +85,6 @@ struct TunnelSection {
     command_enabled: bool,
     #[serde(default)]
     rx_port: Option<u16>,
-    #[serde(default)]
-    tx_port: Option<u16>,
 }
 
 impl TunnelChannelConfig {
@@ -104,7 +104,6 @@ impl TunnelChannelConfig {
             enabled: t.enabled,
             command_enabled: t.command_enabled,
             rx_port: t.rx_port.filter(|p| *p != 0).unwrap_or(DEFAULT_RX_PORT),
-            tx_port: t.tx_port.filter(|p| *p != 0).unwrap_or(DEFAULT_TX_PORT),
         }
     }
 }
@@ -173,21 +172,39 @@ mod tests {
         assert!(!cfg.enabled);
         assert!(!cfg.command_enabled);
         assert_eq!(cfg.rx_port, DEFAULT_RX_PORT);
-        assert_eq!(cfg.tx_port, DEFAULT_TX_PORT);
     }
 
     #[test]
-    fn parses_enable_command_and_ports() {
+    fn parses_the_enable_gates_and_the_ingress_port() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_file(
             &dir,
             "config.yaml",
-            "radio:\n  tunnel:\n    enabled: true\n    command_enabled: true\n    rx_port: 6001\n    tx_port: 6002\n",
+            "radio:\n  tunnel:\n    enabled: true\n    command_enabled: true\n    rx_port: 6001\n",
         );
         let cfg = TunnelChannelConfig::load_from(&path);
         assert!(cfg.enabled && cfg.command_enabled);
         assert_eq!(cfg.rx_port, 6001);
-        assert_eq!(cfg.tx_port, 6002);
+    }
+
+    #[test]
+    fn the_ingress_port_agrees_with_what_the_plane_consumers_forward_to() {
+        // Two independent readers resolve this port: this service, which binds
+        // it, and each rig's aux plane consumer, which forwards to it from a
+        // crate that cannot depend on this one. If they ever disagree the lane
+        // goes silent with no error anywhere — frames arrive over the air,
+        // decode fine, and land on a port nobody is bound to.
+        let text = "radio:\n  tunnel:\n    enabled: true\n    rx_port: 6001\n";
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(&dir, "config.yaml", text);
+        assert_eq!(
+            TunnelChannelConfig::load_from(&path).rx_port,
+            ados_protocol::config_tunnel_ingest::ingress_port_from_yaml(text)
+        );
+        assert_eq!(
+            TunnelChannelConfig::default().rx_port,
+            ados_protocol::config_tunnel_ingest::DEFAULT_INGRESS_PORT
+        );
     }
 
     #[test]

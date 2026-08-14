@@ -100,7 +100,6 @@ pairing:
   convex_url: "https://convex-site.altnautica.com"
   beacon_interval: 30
   heartbeat_interval: 60
-  code_ttl: 900
 
 discovery:
   mdns_enabled: true

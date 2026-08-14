@@ -43,13 +43,12 @@ pub const fn control_rx_port(slot: u8) -> u16 {
 /// its own slot 0, which every drone in the fleet receives, so a fleet-wide
 /// control frame is one transmission rather than N.
 pub const TX_CONTROL_PORT: u16 = 5810;
-/// GS aux-uplink loopback ingress: whatever is written here is radiated on
-/// radio_id 3, the ground→drone half of the aux pair. Mirrors the drone's
-/// `aux_tx_port` default (the two rigs never share a host, so the same number
-/// on both sides is the symmetric choice, not a collision). NOT per-slot, for
-/// the same reason as [`TX_CONTROL_PORT`]: one uplink transmitter serves the
-/// whole fleet. Deliberately outside the per-slot receive span so the uplink
-/// ingress can never be fed by a downlink egress.
+/// GS aux-uplink loopback ingress: whatever is written here is radiated on radio_id 3,
+/// the ground→drone half of the aux pair. It matches the drone's `aux_tx_port` default
+/// (the two rigs never share a host, so the same number on both sides is the symmetric
+/// choice, not a collision). NOT per-slot, for the same reason as [`TX_CONTROL_PORT`]:
+/// one uplink transmitter serves the whole fleet. Deliberately outside the per-slot
+/// receive span so the uplink ingress can never be fed by a downlink egress.
 pub const AUX_TX_PORT: u16 = 5602;
 // Kept as the DEFAULT only. `gs_aux_tx_args` takes the resolved value, because
 // the port is operator-settable and the writers into this lane resolve it from
@@ -112,10 +111,10 @@ pub fn data_rx_args(iface: &str, rx_key: &Path, channel_port: u16, link_id: u32)
     ]
 }
 
-/// GS Atlas-aux RX `wfb_rx` args: radio_id 2 (the aux application stream the
-/// drone radiates small Atlas events on), decoded to `atlas_port`. Mirrors
-/// `data_rx_args` with the aux radio_id; the asymmetric-by-direction aux pair
-/// means the GS receives on `-p 2` (the drone egresses on p2), never p3.
+/// GS Atlas-aux RX `wfb_rx` args: radio_id 2 (the aux application stream the drone
+/// radiates small Atlas events on), decoded to `atlas_port`. Same shape as
+/// `data_rx_args` with the aux radio_id; the asymmetric-by-direction aux pair means the
+/// GS receives on `-p 2` (the drone egresses on p2), never p3.
 ///
 /// `link_id` is the transmitting drone's — one instance per registered slot.
 pub fn gs_atlas_rx_args(iface: &str, rx_key: &Path, atlas_port: u16, link_id: u32) -> Vec<String> {

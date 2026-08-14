@@ -2,9 +2,12 @@
 //!
 //! Resolves the configured [`BackendChoice`] (`video.wfb.backend`) plus the build
 //! platform into a concrete backend, NON-DESTRUCTIVELY (no adapter command is
-//! issued — that is `bring_up`'s job). Phase A only constructs the kernel monitor
-//! backend; the userspace USB arm is `userspace-usb`-gated and reports an
-//! availability verdict until the devourer backend lands.
+//! issued — that is `bring_up`'s job). Only the kernel monitor backend is
+//! constructible; the userspace-USB arm is feature-gated and reports an
+//! availability verdict until that backend lands.
+//!
+//! Inert on purpose, like the rest of this seam — see [`super`] for why it is
+//! neither wired nor deleted. Hence the dead-code allowance.
 
 #![allow(dead_code)]
 
@@ -15,8 +18,8 @@ use super::{BackendAvailability, BackendKind};
 
 /// The outcome of backend selection.
 pub enum BackendSelection {
-    /// The kernel monitor-mode backend (the SBC default; the only backend
-    /// constructible in Phase A). Boxed: the kernel backend carries a config
+    /// The kernel monitor-mode backend (the SBC default, and the only backend
+    /// constructible today). Boxed: the kernel backend carries a config
     /// snapshot, so it dwarfs the `Unavailable` variant.
     Kernel(Box<KernelMonitorBackend>),
     /// No usable backend for the requested choice on this build/platform. Carries

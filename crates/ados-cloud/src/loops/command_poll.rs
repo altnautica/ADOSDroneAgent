@@ -13,9 +13,8 @@ use crate::dispatch::CommandResult;
 /// Poll cadence: a 5 s sleep, as the receiver expects.
 pub const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Build the ACK payload for a dispatched command. Mirrors the Python
-/// `ack_payload` shape: `{commandId, deviceId, status, result?, data?}`. `result`
-/// is included when non-null; `data` when present.
+/// Build the ACK payload for a dispatched command. The shape is `{commandId, deviceId,
+/// status, result?, data?}`. `result` is included when non-null; `data` when present.
 pub fn build_ack(command_id: &str, device_id: &str, result: &CommandResult) -> serde_json::Value {
     let mut ack = serde_json::Map::new();
     ack.insert("commandId".to_string(), serde_json::json!(command_id));

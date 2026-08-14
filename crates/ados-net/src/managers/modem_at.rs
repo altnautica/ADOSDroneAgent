@@ -277,10 +277,9 @@ mod serial_impl {
         }
     }
 
-    /// Scan `/dev` for control ports by name prefix and return a transport for
-    /// the first that answers a bare `AT` with `OK`. Falls back to the last
-    /// `ttyUSB*` (the Quectel AT port is usually the last enumerated). Mirrors
-    /// `_find_modem`.
+    /// Scan `/dev` for control ports by name prefix and return a transport for the
+    /// first that answers a bare `AT` with `OK`. Falls back to the last `ttyUSB*` (the
+    /// Quectel AT port is usually the last enumerated).
     pub async fn open_first_answering(
         prefixes: &[&str],
         baud: u32,

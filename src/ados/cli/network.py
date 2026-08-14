@@ -1,4 +1,4 @@
-"""``ados network`` CLI: inspect and manage stable-MAC pinning.
+"""``ados network`` CLI: stable-MAC pinning, operating region, AP passphrase.
 
 Some onboard USB WiFi chipsets have no efuse MAC and randomize their address
 each boot, churning the DHCP lease (and the box's IP). The agent auto-pins a
@@ -10,6 +10,10 @@ unpin.
 when the API is down; ``pin`` / ``unpin`` go through the local REST API (so the
 override is validated + persisted through the running config); ``verify`` runs
 ``udevadm`` to show which ``.link`` currently wins for an interface.
+
+``regulatory`` writes the operating-region posture to config.yaml.
+``ap-passphrase`` reads the per-unit access point key off disk. Every other
+surface for it is interactive, so this is the one that composes.
 """
 
 from __future__ import annotations
@@ -22,7 +26,7 @@ from pathlib import Path
 import click
 
 from ados.cli.radio import _request
-from ados.core.paths import CONFIG_YAML
+from ados.core.paths import AP_PASSPHRASE_PATH, CONFIG_YAML
 
 _STATE_PATH = Path("/etc/ados/mac-pins.state")
 
@@ -245,6 +249,52 @@ def regulatory_region(code: str) -> None:
     _write_regulatory("region", region)
     click.echo(f"Operating region pinned to {region}.")
     click.echo("Restart the agent (or reboot) to apply.")
+
+
+# --- Access point passphrase --------------------------------------------------
+
+
+@network_group.command(
+    "ap-passphrase",
+    help="Print this unit's WiFi access point passphrase.",
+)
+def ap_passphrase() -> None:
+    """Read the per-unit AP passphrase off disk.
+
+    Every other surface for it is interactive: the OLED, the on-box panel, the
+    installer's completion card, and the ``ados`` dashboard, which does reach a
+    headless unit over SSH. None of them can be piped or scripted, so reading
+    the key meant a human retyping it off a screen.
+
+    Prints the passphrase and nothing else, so it composes:
+    ``ados network ap-passphrase | pbcopy``. The path comes from
+    ``ados.core.paths``, which resolves the platform's etc directory -- the
+    dashboard's own reader hardcodes the Linux literal, and a sibling command
+    that did the same printed a path that cannot exist on the host the operator
+    was reading it from.
+    """
+    # Imported here rather than at module scope: this is the AP manager's own
+    # read-only accessor (it deliberately does NOT generate, so asking does not
+    # mint a second passphrase hostapd never loaded), and pulling the
+    # ground-station service stack into every `ados` invocation to reach it
+    # would cost every other command startup time.
+    from ados.services.ground_station.hostapd_manager import read_ap_passphrase
+
+    value = read_ap_passphrase()
+    if value:
+        click.echo(value)
+        return
+    if not AP_PASSPHRASE_PATH.exists():
+        raise click.ClickException(
+            f"no access point passphrase on this unit: {AP_PASSPHRASE_PATH} does "
+            "not exist. The access point writes it the first time it starts, and "
+            "a configured network.hotspot.password is used instead of generating "
+            "one."
+        )
+    raise click.ClickException(
+        f"{AP_PASSPHRASE_PATH} holds no readable passphrase. It is stored 0600, "
+        "so try again as root."
+    )
 
 
 __all__ = ["network_group"]

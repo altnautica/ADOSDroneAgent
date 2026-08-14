@@ -16,7 +16,6 @@ class VisionConfig(BaseModel):
     models_dir: str = "/opt/ados/models/vision"
     models_cache_max_mb: int = 500
     registry_url: str = "https://raw.githubusercontent.com/altnautica/ADOSMissionControl/main/public/models/registry.json"
-    auto_download: bool = True
 
 
 class AtlasCameraConfig(BaseModel):
@@ -158,7 +157,6 @@ class PairingConfig(BaseModel):
     convex_url: str = ""  # Convex HTTP endpoint for cloud pairing
     beacon_interval: int = 30  # seconds
     heartbeat_interval: int = 60  # seconds
-    code_ttl: int = 900  # 15 minutes
     # Cloud pair beacon publishes the unpaired agent's short-lived
     # pair code to ``convex_url`` so a GCS reached from any network
     # (e.g. command.altnautica.com) can claim by code. Loop runs only

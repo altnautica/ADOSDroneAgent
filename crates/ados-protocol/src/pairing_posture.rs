@@ -97,12 +97,11 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     std::hint::black_box(diff) == 0
 }
 
-/// True when the request originates on this host's loopback interface and was
-/// not relayed by a proxy or tunnel. Mirrors the Python middleware's
-/// `_is_on_box`: an on-box caller (the local `ados` CLI, a root-owned job)
-/// already holds shell-level privilege that strictly exceeds API auth, so it is
-/// trusted past the pairing gate. A proxy or tunnel that terminates on loopback
-/// is excluded by the forwarding-header check.
+/// True when the request originates on this host's loopback interface and was not
+/// relayed by a proxy or tunnel. An on-box caller (the local `ados` CLI, a root-owned
+/// job) already holds shell-level privilege that strictly exceeds API auth, so it is
+/// trusted past the pairing gate. A proxy or tunnel that terminates on loopback is
+/// excluded by the forwarding-header check.
 ///
 /// `peer_is_loopback` is whether the connection peer is `127.0.0.1`/`::1`;
 /// `has_forwarding_header` is whether any of [`FORWARDED_HEADERS`] is present on

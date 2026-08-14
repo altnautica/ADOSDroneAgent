@@ -52,6 +52,7 @@ pub mod aux_rpc_proxy;
 pub mod buttons;
 pub mod capabilities;
 pub mod compute;
+pub mod config_tunnel_ingest;
 pub mod contracts;
 pub mod crypto;
 pub mod dashboard_session;

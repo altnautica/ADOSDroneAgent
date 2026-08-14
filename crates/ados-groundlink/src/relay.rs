@@ -153,9 +153,9 @@ pub async fn spawn_forwarder(
     GsWfbProcess::spawn_stderr_piped("wfb_rx", &args).await
 }
 
-/// Parse one `wfb_rx` stderr line for the relay fragment counters. Mirrors
-/// `_tail_stats`: a `PKT` line carries `n_all:<seen>` and `n_out:<forwarded>`.
-/// Returns `(seen, forwarded)` updates when present.
+/// Parse one `wfb_rx` stderr line for the relay fragment counters. A `PKT` line carries
+/// `n_all:<seen>` and `n_out:<forwarded>`. Returns `(seen, forwarded)` updates when
+/// present.
 pub fn parse_relay_stats_line(line: &str) -> (Option<i64>, Option<i64>) {
     if !line.contains("PKT") {
         return (None, None);

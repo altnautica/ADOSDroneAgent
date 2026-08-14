@@ -121,7 +121,7 @@ impl EthernetManager {
         parse_inet(&out.stdout)
     }
 
-    /// Live link + IP + gateway + speed. Mirrors `status`.
+    /// Live link + IP + gateway + speed.
     pub async fn status(&self) -> Value {
         let link = self.read_carrier();
         let speed = if link { self.read_speed() } else { None };
@@ -135,10 +135,9 @@ impl EthernetManager {
         })
     }
 
-    /// Discover the primary NM ethernet connection name. Prefers an ACTIVE
-    /// ethernet connection on this iface; else the first ethernet profile on
-    /// this device; else the first ethernet profile. Mirrors
-    /// `_discover_primary_connection` (returns the connection name only).
+    /// Discover the primary NM ethernet connection name. Prefers an ACTIVE ethernet
+    /// connection on this iface; else the first ethernet profile on this device; else
+    /// the first ethernet profile. Returns the connection name only.
     async fn discover_primary_connection(&self) -> Option<String> {
         let show = self
             .runner
@@ -204,8 +203,7 @@ impl EthernetManager {
         None
     }
 
-    /// Apply static IPv4 via nmcli on the primary connection. Mirrors
-    /// `configure_static`.
+    /// Apply static IPv4 via nmcli on the primary connection.
     pub async fn configure_static(&self, ip: &str, gateway: &str, dns: &[String]) -> Value {
         let name = match self.discover_primary_connection().await {
             Some(n) => n,
@@ -255,7 +253,7 @@ impl EthernetManager {
     }
 
     /// The persisted-profile config view backing `GET .../network/ethernet` and
-    /// the success body of the ethernet PUT. Mirrors `config`: the mode + static
+    /// the success body of the ethernet PUT. The mode + static
     /// fields come from the NM connection PROFILE (`nmcli -t -f
     /// ipv4.method,ipv4.addresses,ipv4.gateway,ipv4.dns connection show <name>`,
     /// so the UI reflects what applies on next reconnect, not the runtime `ip

@@ -97,13 +97,20 @@ class CrsfConfig(BaseModel):
 
 class TunnelConfig(BaseModel):
     """The config-over-radio channel (a MAVLink-TUNNEL request/response lane on
-    the low-rate WFB ``-p1`` control plane).
+    the radio's auxiliary application lane).
 
     It lets a node reachable only over the radio link (WFB carries no IP) have
     its ``/api/config`` read and written from the ground. It carries CONFIG
     request/response ONLY — never armed-flight command authority (a separate,
-    gated concern) — and its only gate by riding ``-p1`` is the WFB pairing key
-    (a pairing-scope gate, not a flight-authorization gate).
+    gated concern) — and its only gate by riding that lane is the WFB pairing
+    key (a pairing-scope gate, not a flight-authorization gate).
+
+    The bearer is the auxiliary lane the radio already runs (the drone's ``-p2``
+    downlink and the ground station's ``-p3`` uplink) on its own channel of the
+    shared aux multiplex, brought up on demand by the radio service. An earlier
+    version of this docstring named the ``-p1`` control plane; that plane is
+    fully occupied by the hop announce/ack exchange, its ports are reserved, and
+    it carries no multiplexer, so nothing ever rode it.
 
     ``enabled`` is the master opt-in. Off by default: the whole channel is
     inert — the drone-side terminator acts on no config tunnel and the
@@ -116,16 +123,17 @@ class TunnelConfig(BaseModel):
     READ (``GET``) is served while writes are refused until an operator sets
     this for a bench-validated write lane, after a safety review.
 
-    ``rx_port`` / ``tx_port`` are the LOCAL UDP ports the service binds/sends
-    on. They are dedicated ports (disjoint from the WFB plane ports) that an
-    ``ados-radio`` bearer bridge connects to the ``-p1`` control plane in a
-    separate, gated radio-integration step.
+    ``rx_port`` is the LOCAL loopback ingress the service binds. Frames do not
+    land there off the air directly: each rig's aux plane consumer already holds
+    the plane's own port and forwards this channel's frames on, resolving the
+    same value from here. There is no egress port to configure — the drone
+    negotiates its transmit ingress with the radio service, and the ground
+    station writes to ``video.wfb.aux_tx_port``.
     """
 
     enabled: bool = False
     command_enabled: bool = False
     rx_port: int = 5820
-    tx_port: int = 5821
 
 
 class RadioConfig(BaseModel):

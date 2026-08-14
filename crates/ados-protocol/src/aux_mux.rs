@@ -82,6 +82,19 @@ pub enum AuxChannel {
     /// bitrate ladder steps on that instead of a permanent sentinel. Payload is
     /// [`crate::link_feedback::LinkFeedback`].
     LinkFeedback = 6,
+    /// Config-over-radio TUNNEL frames, both directions: a request rides the
+    /// uplink (radio_id 3) ground → drone and its response rides the downlink
+    /// (radio_id 2) drone → ground, so one channel carries the whole exchange
+    /// (the L3 chunk header's own `is_response` flag says which way a frame is
+    /// going). Payload is one complete MAVLink TUNNEL frame — at most ~145
+    /// bytes against [`AUX_MAX_PAYLOAD`], so a chunk is always exactly one aux
+    /// frame and the bridge never fragments.
+    ///
+    /// Each rig's plane consumer hands a frame on this channel to the local
+    /// `ados-tunnel-config` service's loopback ingress
+    /// ([`crate::config_tunnel_ingest`]); nothing else interprets it, and the
+    /// service is inert unless an operator opted the channel in.
+    ConfigTunnel = 7,
 }
 
 impl AuxChannel {
@@ -95,6 +108,7 @@ impl AuxChannel {
             4 => Some(Self::Request),
             5 => Some(Self::Response),
             6 => Some(Self::LinkFeedback),
+            7 => Some(Self::ConfigTunnel),
             _ => None,
         }
     }
@@ -389,7 +403,13 @@ mod tests {
         assert_eq!(AuxChannel::Identity as u8, 3);
         assert_eq!(AuxChannel::Request as u8, 4);
         assert_eq!(AuxChannel::Response as u8, 5);
+        assert_eq!(AuxChannel::LinkFeedback as u8, 6);
+        assert_eq!(AuxChannel::ConfigTunnel as u8, 7);
         assert_eq!(AuxChannel::from_u8(1), Some(AuxChannel::Mavlink));
+        assert_eq!(AuxChannel::from_u8(7), Some(AuxChannel::ConfigTunnel));
         assert_eq!(AuxChannel::from_u8(0), None);
+        // 8 is the next free value: an older build must drop a channel it does
+        // not know rather than parse it as the highest one it does.
+        assert_eq!(AuxChannel::from_u8(8), None);
     }
 }

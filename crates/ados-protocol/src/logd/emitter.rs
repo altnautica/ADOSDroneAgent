@@ -255,9 +255,9 @@ fn encode_ingest_batch(batch: &[IngestFrame]) -> Vec<u8> {
     buf
 }
 
-/// Drain the ingest channel and ship over the shared transport. Mirrors
-/// [`shipper_task`] but over the [`IngestFrame`] channel so the one shipper
-/// carries both telemetry and events.
+/// Drain the ingest channel and ship over the shared transport. Parallels
+/// [`shipper_task`] but over the [`IngestFrame`] channel so the one shipper carries
+/// both telemetry and events.
 async fn ingest_shipper_task(
     rx: mpsc::Receiver<IngestFrame>,
     path: PathBuf,

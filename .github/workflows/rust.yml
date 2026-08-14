@@ -1539,3 +1539,113 @@ jobs:
           gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
             --prerelease --title "Prebuilt mediamtx (mirrored)" --notes ""
           gh release upload "$RELEASE_TAG" rel/* --clobber
+
+  # Assemble ONE per-revision release out of the rolling tags this same run just
+  # published, so `install.sh --ref <sha>` resolves every service binary from a
+  # single commit instead of ~22 tags that each roll independently.
+  #
+  # Why a release and not run artifacts: the entire download stack on a board is
+  # anonymous `curl -fsSL` (scripts/install.sh, crates/ados-installer/src/net.rs)
+  # with no Authorization header anywhere, while GitHub's artifact-zip endpoint is
+  # auth-only — pinning through artifacts would push a token onto every board
+  # running the `curl | sudo bash` one-liner. Releases are anonymous, so the pin
+  # costs the rig nothing.
+  #
+  # Why a mirror and not 22 more builds: the assets are re-uploaded BYTE-IDENTICAL
+  # from the tags above, so the pinned install and the rolling install place the
+  # same bytes, and the job costs one download+upload rather than another full
+  # arm64 build matrix.
+  #
+  # Cost, stated plainly: this creates one prerelease per commit that touches the
+  # paths this workflow filters on. Nothing prunes them yet.
+  #
+  # The installer's own catalog guard (crates/ados-installer/src/binaries.rs)
+  # asserts that SOURCE_TAGS is exactly the set of tags an install fetches, in
+  # both directions, and that this job waits for every publish job in the file —
+  # a new service otherwise reaches the rolling tags and 404s under a pin.
+  publish-rev:
+    needs:
+      - publish-tui
+      - publish-supervisor
+      - publish-mavlink-router
+      - publish-radio
+      - publish-swarmbus
+      - publish-gpio
+      - publish-crsf
+      - publish-tunnel-config
+      - publish-video
+      - publish-plugin-host
+      - publish-control
+      - publish-cloud
+      - publish-compute
+      - publish-atlas
+      - publish-groundlink
+      - publish-net
+      - publish-hid
+      - publish-display
+      - publish-vision
+      - publish-vision-onnx
+      - publish-vision-onnx-sign
+      - publish-installer
+      - publish-logd
+      - publish-mediamtx
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write
+    env:
+      # Every tag the installer's prebuilt catalog fetches. `prebuilt-installer`
+      # is deliberately absent: scripts/install.sh downloads that binary to
+      # bootstrap the install, before it could know about a pin, so mirroring it
+      # would publish an asset nothing resolves from here.
+      SOURCE_TAGS: >-
+        prebuilt-tui
+        prebuilt-supervisor
+        prebuilt-mavlink-router
+        prebuilt-radio
+        prebuilt-swarmbus
+        prebuilt-gpio
+        prebuilt-crsf
+        prebuilt-tunnel-config
+        prebuilt-video
+        prebuilt-plugin-host
+        prebuilt-control
+        prebuilt-cloud
+        prebuilt-compute
+        prebuilt-atlas
+        prebuilt-groundlink
+        prebuilt-net
+        prebuilt-hid
+        prebuilt-display
+        prebuilt-vision
+        prebuilt-vision-onnx
+        prebuilt-logd
+        prebuilt-mediamtx
+    steps:
+      # Checked out only because every `run` step in this workflow has
+      # `working-directory: crates`, which must exist.
+      - uses: actions/checkout@v4
+
+      - name: Mirror this run's assets into the per-revision release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Derived here, in the shell, and NOT as an env.RELEASE_TAG job
+          # variable: the installer's release-tag guard reads those variables
+          # structurally and refuses a templated value, because a tag it cannot
+          # resolve at test time would drop out of the catalog symmetry check.
+          # This tag is per-commit by construction, so it can only be templated.
+          tag="rev-${GITHUB_SHA}"
+          rm -rf rev && mkdir -p rev
+          for src in ${SOURCE_TAGS}; do
+            # Per-tag subdir: an asset name colliding across two tags would
+            # otherwise silently overwrite one of them before the upload.
+            gh release download "$src" --dir "rev/${src}"
+          done
+          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" \
+            --prerelease \
+            --title "ADOS binaries for ${GITHUB_SHA}" \
+            --notes "Per-revision mirror of the rolling prebuilt tags, published so \`install.sh --ref ${GITHUB_SHA}\` resolves every service binary from one commit. Byte-identical to the rolling assets from this run."
+          gh release upload "$tag" rev/*/* --clobber

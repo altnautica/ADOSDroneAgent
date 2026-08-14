@@ -965,9 +965,6 @@ fn peer_evidence_verdict(role: BindRole, frames_seen: bool, key_fresh: bool) -> 
     PeerEvidence::Verified
 }
 
-/// Background poller: stamp `last_frame_at` when the bind TUN RX counter
-/// advances; self-exits when the session leaves the active set. Mirrors
-/// `_poll_peer_presence_forever`.
 /// True when `path` exists and its mtime is at or after `since` — i.e. the
 /// upstream key was deposited by THIS bind session's wire transfer, not left
 /// over from an earlier one. Total: any metadata error reads as not-fresh.
@@ -978,6 +975,8 @@ fn upstream_key_fresh(path: &Path, since: std::time::SystemTime) -> bool {
         .unwrap_or(false)
 }
 
+/// Background poller: stamp `last_frame_at` when the bind TUN RX counter
+/// advances; self-exits when the session leaves the active set.
 async fn peer_poll(session: Arc<Mutex<Option<BindSession>>>, iface: String) {
     let mut last: Option<u64> = None;
     loop {

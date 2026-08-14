@@ -102,9 +102,11 @@ pub fn read_fb_name(sys_root: &Path, fb_name: &str) -> String {
 }
 
 /// Whether a candidate framebuffer's driver name is acceptable for the SPI-LCD
-/// UI. Mirrors the probe rule: when an `expected` name is configured, accept
-/// only a framebuffer whose driver name contains it; otherwise accept only a
-/// known SPI-LCD fbtft driver so the primary HDMI/DRM fb is never grabbed.
+/// UI. Mirrors the `_resolve_fb_path` probe rule (api/routes/display.py), which
+/// still owns the `/api/v1/display` surface: when an `expected` name is
+/// configured, accept only a framebuffer whose driver name contains it;
+/// otherwise accept only a known SPI-LCD fbtft driver so the primary HDMI/DRM
+/// fb is never grabbed.
 pub fn driver_name_acceptable(driver_name: &str, expected: &str) -> bool {
     let expected = expected.trim();
     if !expected.is_empty() {

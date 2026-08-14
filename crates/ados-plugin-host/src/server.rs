@@ -1030,7 +1030,7 @@ impl<H: HostServices> Connection<H> {
     }
 
     /// Push a vision detection batch to the plugin as a `vision.deliver_detection`
-    /// envelope. Mirrors the frame deliver shape: kind `event`, method
+    /// envelope. The frame deliver shape is kind `event`, method
     /// `vision.deliver_detection`, capability `vision.detection.subscribe`, args
     /// `{batch: bytes, timestamp_ms}`, request_id `vis-det-<ms>`. The `batch`
     /// bytes are an encoded `ados_protocol::framebus::DetectionBatch`; the plugin
@@ -1145,8 +1145,7 @@ async fn write_frame<W: AsyncWriteExt + Unpin>(
     Ok(())
 }
 
-/// Send a `response` envelope carrying `result` as its args. Mirrors
-/// `_send_response`.
+/// Send a `response` envelope carrying `result` as its args.
 async fn send_response<W: AsyncWriteExt + Unpin>(
     write_half: &mut W,
     request_id: &str,
@@ -1165,8 +1164,7 @@ async fn send_response<W: AsyncWriteExt + Unpin>(
     write_frame(write_half, &env).await
 }
 
-/// Send a `response` envelope with the `error` field set. Mirrors
-/// `_send_error`.
+/// Send a `response` envelope with the `error` field set.
 async fn send_error<W: AsyncWriteExt + Unpin>(
     write_half: &mut W,
     request_id: &str,

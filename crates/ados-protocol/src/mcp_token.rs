@@ -76,7 +76,7 @@ pub struct McpClaims {
     pub label: String,
 }
 
-/// The scope class a route requires. Mirrors the connector's safety classes, plus
+/// The scope class a route requires. Carries the connector's safety classes, plus
 /// `SecretRead` for a read route whose body carries a secret: it needs the
 /// `secret_read` scope, NOT plain `read`, so a `read`-only token cannot reach it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

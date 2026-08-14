@@ -167,9 +167,8 @@ impl<T: MqttTransport, W: WhepPoster> WebrtcSignalingRelay<T, W> {
             .await
     }
 
-    /// Handle one SDP offer: POST it to the local WHEP endpoint, then publish the
-    /// SDP answer (or a JSON error) to the answer topic at q1. Mirrors
-    /// `_handle_offer`.
+    /// Handle one SDP offer: POST it to the local WHEP endpoint, then publish the SDP
+    /// answer (or a JSON error) to the answer topic at q1.
     pub async fn handle_offer(&self, sdp_offer: &str) -> Result<(), TransportError> {
         let result = self.whep.post_offer(sdp_offer);
         let payload = build_answer(result).into_bytes();

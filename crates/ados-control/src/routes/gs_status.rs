@@ -799,8 +799,7 @@ fn mesh_block_from_sidecar(path: &Path) -> Value {
 ///
 /// `404` `E_WRONG_ROLE` off a relay node. On a relay, reads the store's most-recent
 /// `gs.relay_state` event (the relay loop ships the same body it writes to the
-/// sidecar), falling back to the `/run/ados/wfb-relay.json` sidecar. Mirrors the
-/// Python `get_wfb_relay_status`.
+/// sidecar), falling back to the `/run/ados/wfb-relay.json` sidecar.
 pub async fn get_wfb_relay_status(State(state): State<AppState>) -> Response {
     let role = match ground_station_role(&state) {
         Some(r) => r,
@@ -862,9 +861,8 @@ pub async fn get_wfb_receiver_relays(State(state): State<AppState>) -> Response 
 ///
 /// `404` `E_WRONG_ROLE` off a receiver node. On a receiver, reads the store's
 /// `gs.receiver_state` event projected to `{fragments_after_dedup, fec_repaired,
-/// output_kbps, up}`, falling back to the `/run/ados/wfb-receiver.json` sidecar
-/// (same projection + per-key defaults). Mirrors the Python
-/// `get_wfb_receiver_combined`.
+/// output_kbps, up}`, falling back to the `/run/ados/wfb-receiver.json` sidecar (same
+/// projection + per-key defaults).
 pub async fn get_wfb_receiver_combined(State(state): State<AppState>) -> Response {
     let role = match ground_station_role(&state) {
         Some(r) => r,
@@ -880,19 +878,17 @@ pub async fn get_wfb_receiver_combined(State(state): State<AppState>) -> Respons
     Json(slice_receiver_combined(&snap)).into_response()
 }
 
-/// Project the `/wfb/receiver/relays` shape from a receiver-state body: `{relays}`,
-/// the `relays` key defaulting to the empty list when absent. Mirrors the Python
-/// `slice_receiver_relays` / the sidecar `{"relays": snap.get("relays", [])}`.
+/// Project the `/wfb/receiver/relays` shape from a receiver-state body: `{relays}`, the
+/// `relays` key defaulting to the empty list when absent.
 fn slice_receiver_relays(detail: &Map<String, Value>) -> Value {
     json!({
         "relays": detail.get("relays").cloned().unwrap_or_else(|| json!([])),
     })
 }
 
-/// Project the `/wfb/receiver/combined` shape from a receiver-state body, applying
-/// the same per-key defaults the live route applies so an omitted key coalesces
-/// identically whether it is absent from the stored detail or the sidecar. Mirrors
-/// the Python `slice_receiver_combined`.
+/// Project the `/wfb/receiver/combined` shape from a receiver-state body, applying the
+/// same per-key defaults the live route applies so an omitted key coalesces identically
+/// whether it is absent from the stored detail or the sidecar.
 fn slice_receiver_combined(detail: &Map<String, Value>) -> Value {
     json!({
         "fragments_after_dedup": detail.get("fragments_after_dedup").cloned().unwrap_or_else(|| json!(0)),

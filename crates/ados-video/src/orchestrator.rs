@@ -462,7 +462,7 @@ impl VideoOrchestrator {
     }
 
     /// Stop the encoding pipeline and mediamtx. Teardown order: wfb_tee →
-    /// sei_tap → cloud_push → encoder → mediamtx. Mirrors `stop_stream`.
+    /// sei_tap → cloud_push → encoder → mediamtx.
     pub async fn stop_stream(&mut self) {
         tracing::info!("stop_stream_begin");
         self.stop_wfb_tee().await;
@@ -1038,11 +1038,10 @@ impl VideoOrchestrator {
         }
     }
 
-    /// Stamp a healthy probe and clear the restart counter once the run has
-    /// been continuously healthy for the reset window. Mirrors
-    /// `_note_healthy_tick`: the first healthy tick after an unhealthy probe
-    /// (or cold start) only stamps `last_healthy_at`; the counter clears only
-    /// after the window elapses with no intervening unhealthy tick.
+    /// Stamp a healthy probe and clear the restart counter once the run has been
+    /// continuously healthy for the reset window. The first healthy tick after an
+    /// unhealthy probe (or cold start) only stamps `last_healthy_at`; the counter
+    /// clears only after the window elapses with no intervening unhealthy tick.
     fn note_healthy_tick(&mut self) {
         let now = Instant::now();
         let Some(since) = self.last_healthy_at else {

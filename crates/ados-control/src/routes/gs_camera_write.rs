@@ -100,10 +100,9 @@ enum CameraCount {
     Unknown(&'static str),
 }
 
-/// The `POST .../camera/switch` request body. Mirrors the FastAPI
-/// `CameraSwitchRequest`: a required `camera_id` (1..=32 chars). The valid form
-/// is a small positive integer encoded as a string (so the wire contract stays
-/// symmetrical with a future named-source variant).
+/// The `POST .../camera/switch` request body. A required `camera_id` (1..=32 chars).
+/// The valid form is a small positive integer encoded as a string (so the wire contract
+/// stays symmetrical with a future named-source variant).
 #[derive(Debug, Deserialize)]
 pub struct CameraSwitchRequest {
     pub camera_id: String,

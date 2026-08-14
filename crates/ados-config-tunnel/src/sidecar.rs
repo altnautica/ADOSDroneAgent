@@ -44,8 +44,11 @@ pub struct SidecarInputs {
     pub enabled: bool,
     /// The WRITE gate: `false` ⇒ reads served, writes refused.
     pub command_enabled: bool,
-    /// The local UDP ports, when the channel is active.
+    /// The loopback ingress this service binds, when the channel is active.
     pub rx_port: Option<u16>,
+    /// The aux transmit ingress this rig writes onto, or `None` where the radio
+    /// service negotiates it per open (the drone role) — never a fabricated
+    /// number for a port this process does not actually use.
     pub tx_port: Option<u16>,
     pub counters: CountersSnapshot,
 }
@@ -62,10 +65,11 @@ pub fn build_sidecar(inputs: &SidecarInputs) -> Value {
         // over the radio are open (default closed until a safety review).
         "command_enabled": inputs.command_enabled,
         // Honest scope: this channel carries config request/response ONLY —
-        // never armed-flight command authority — and rides the -p1 control
-        // plane (the WFB pairing key is its only gate).
+        // never armed-flight command authority — and rides the radio's auxiliary
+        // application lane on its own multiplex channel (the WFB pairing key is
+        // its only gate).
         "carries": "config",
-        "bearer": "-p1",
+        "bearer": "aux",
         "rx_port": inputs.rx_port,
         "tx_port": inputs.tx_port,
         "rx_frames": c.rx_frames,
@@ -96,18 +100,24 @@ mod tests {
         assert_eq!(body["state"], "disabled");
         assert_eq!(body["enabled"], false);
         assert_eq!(body["carries"], "config");
+        // The bearer the service actually rides. It read `-p1` while the code
+        // has never touched that plane, which is exactly the class of surface
+        // an operator makes a decision on.
+        assert_eq!(body["bearer"], "aux");
         assert_eq!(body["last_rx_ms"], Value::Null);
         assert_eq!(body["v"], TUNNEL_CONFIG_SIDECAR_VERSION);
     }
 
     #[test]
-    fn active_terminator_reports_ports_and_counters() {
+    fn an_active_terminator_reports_its_ingress_and_counters() {
         let body = build_sidecar(&SidecarInputs {
             state: ChannelState::Terminator,
             enabled: true,
             command_enabled: false,
             rx_port: Some(5820),
-            tx_port: Some(5821),
+            // The drone role: the radio service negotiates the transmit ingress
+            // per open, so there is no static egress port to claim.
+            tx_port: None,
             counters: CountersSnapshot {
                 rx_frames: 3,
                 requests: 1,
@@ -118,8 +128,25 @@ mod tests {
         assert_eq!(body["state"], "terminator");
         assert_eq!(body["command_enabled"], false);
         assert_eq!(body["rx_port"], 5820);
+        assert_eq!(body["tx_port"], Value::Null);
         assert_eq!(body["rx_frames"], 3);
         assert_eq!(body["requests"], 1);
         assert_eq!(body["last_rx_ms"], 42);
+    }
+
+    #[test]
+    fn an_active_injector_reports_the_aux_transmit_ingress() {
+        let body = build_sidecar(&SidecarInputs {
+            state: ChannelState::Injector,
+            enabled: true,
+            command_enabled: true,
+            rx_port: Some(5820),
+            // The ground station writes straight onto the already-running aux
+            // uplink transmit ingress.
+            tx_port: Some(5602),
+            counters: CountersSnapshot::default(),
+        });
+        assert_eq!(body["state"], "injector");
+        assert_eq!(body["tx_port"], 5602);
     }
 }

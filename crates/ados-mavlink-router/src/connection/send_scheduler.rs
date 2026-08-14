@@ -207,11 +207,14 @@ impl FcConnection {
     /// reach than the local case, since it needs no proximity to the vehicle.
     ///
     /// `caller` now carries the classification the socket made, so the fallback
-    /// can tell an authorised relay client from an anonymous one. It is
-    /// reported rather than refused for the same reason the socket gates are
-    /// observation-only: this port is advertised as the path for a third-party
-    /// ground station, and a ground station relaying a linked drone is exactly
-    /// the shape that takes this fallback.
+    /// can tell an authorised relay client from an anonymous one. An anonymous
+    /// caller is reported and still relayed by default, and refused when
+    /// `mavlink.aux_uplink_enforce_origin` is set: this port is advertised as
+    /// the path for a third-party ground station, and a ground station relaying
+    /// a linked drone is exactly the shape that takes this fallback, so the
+    /// refusal lands mid-flight on the operator's screen rather than at install
+    /// time. [`ClientOrigin::Relayed`] is exempt from that flag in every case —
+    /// see the match arm for why.
     ///
     /// **The claim that a boundary exists for every caller was not true of the
     /// on-box IPC lane either.** That lane was described as trusted because the
@@ -263,8 +266,25 @@ impl FcConnection {
             // caller anywhere the broker is reachable from.
             match caller {
                 ClientOrigin::Unauthenticated => {
+                    if self.cfg.aux_uplink_enforce_origin {
+                        tracing::warn!(
+                            len = data.len(),
+                            "relay_uplink_refused_unauthenticated_client"
+                        );
+                        return;
+                    }
                     tracing::warn!(len = data.len(), "relay_uplink_from_unauthenticated_client");
                 }
+                // NEVER gated, under either setting, and not an oversight to be
+                // tidied up later. `Relayed` is not a guess about a peer: it is
+                // the cloud MQTT relay's own sticky self-declaration on its IPC
+                // socket, and that relay runs on the very ground-station profile
+                // where this aux uplink is installed. So the frames it labels
+                // are the production remote-command path for a drone this node
+                // is relaying, and refusing them would delete remote piloting
+                // rather than close an exposure. Its authority comes from the
+                // relay's own authentication boundary; what this arm adds is
+                // that the reach is recorded.
                 ClientOrigin::Relayed => {
                     tracing::warn!(len = data.len(), "relay_uplink_from_off_box_source");
                 }
@@ -793,38 +813,104 @@ mod tests {
         (crate::aux_uplink::spawn(port), listener)
     }
 
+    /// A connection whose aux uplink is armed, with the origin gate set either
+    /// way. `MavlinkConfig` is the only input, so this is the same construction
+    /// the router performs from a config file.
+    fn conn_with_origin_gate(enforce: bool) -> std::sync::Arc<FcConnection> {
+        let state = std::sync::Arc::new(Mutex::new(VehicleState::default()));
+        let params = std::sync::Arc::new(Mutex::new(ParamCache::new(
+            "/tmp/ados-origin-gate-params.json",
+        )));
+        FcConnection::new(
+            MavlinkConfig {
+                aux_uplink_enforce_origin: enforce,
+                ..MavlinkConfig::default()
+            },
+            state,
+            params,
+        )
+    }
+
+    /// Send one frame from `caller` into an armed aux uplink and report whether
+    /// it crossed, asserting the bytes are exact when it did.
+    async fn crosses_the_uplink(enforce: bool, caller: ClientOrigin) -> bool {
+        let conn = conn_with_origin_gate(enforce);
+        let (sender, listener) = test_uplink().await;
+        conn.set_aux_uplink(sender).await;
+
+        let frame = command_long_bytes();
+        conn.send_client_bytes(&frame, caller, None).await;
+
+        let mut buf = [0u8; 256];
+        match tokio::time::timeout(Duration::from_millis(300), listener.recv_from(&mut buf)).await {
+            Ok(Ok((n, _))) => {
+                let (_, payload) = ados_protocol::aux_mux::decode(&buf[..n]).unwrap();
+                assert_eq!(payload, frame, "whatever crosses must be the exact bytes");
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// A linked ground agent holds full authority over the node it relays, so
     /// every frame a connected client sends reaches the uplink. This used to be
     /// filtered by a message-id denylist that covered only this MAVLink lane
     /// while the relay's HTTP lane carried the same vehicle commands ungated,
     /// so it filtered one door and left the other open. Authority now belongs
     /// to the relay's authentication boundary.
+    ///
+    /// The amplifying case: with no local vehicle these bytes leave over the
+    /// radio to one that may be flying, so the reach is longer than the
+    /// local-controller case — it needs no proximity to the aircraft. That is
+    /// what makes the gate worth having at all, and what makes it a flag rather
+    /// than a default.
     #[tokio::test]
-    async fn an_anonymous_client_still_reaches_the_uplink_but_is_recorded() {
-        // The amplifying case. With no local vehicle these bytes leave over the
-        // radio to one that may be flying, so the reach is longer than the
-        // local-controller case: it needs no proximity to the aircraft.
-        //
-        // Still delivered, deliberately. A ground station relaying a linked
-        // drone is exactly the shape that takes this fallback, and these ports
-        // are advertised for third-party ground stations, so refusing here
-        // would break the workflow at the operator rather than at install. The
-        // provenance is what changes.
-        let conn = test_connection();
-        let (sender, listener) = test_uplink().await;
-        conn.set_aux_uplink(sender).await;
+    async fn the_default_still_relays_an_anonymous_client_and_records_it() {
+        // Unchanged shipped behaviour: these ports are advertised for
+        // third-party ground stations, so with the flag off a refusal here would
+        // break the workflow at the operator rather than at install time. The
+        // provenance is the only thing the classification changed.
+        assert!(
+            crosses_the_uplink(false, ClientOrigin::Unauthenticated).await,
+            "the shipped default must keep relaying an anonymous client"
+        );
+    }
 
-        let frame = command_long_bytes();
-        conn.send_client_bytes(&frame, ClientOrigin::Unauthenticated, None)
-            .await;
+    #[tokio::test]
+    async fn the_flag_drops_an_anonymous_client_before_the_radio() {
+        // The whole point of the flag: a fleet whose clients all authenticate
+        // can stop radiating an unidentified caller's commands to an airborne
+        // vehicle.
+        assert!(
+            !crosses_the_uplink(true, ClientOrigin::Unauthenticated).await,
+            "with the flag on an anonymous frame must not reach the radio"
+        );
+    }
 
-        let mut buf = [0u8; 256];
-        let (n, _) = tokio::time::timeout(Duration::from_millis(300), listener.recv_from(&mut buf))
-            .await
-            .expect("an anonymous client's frame still reaches the uplink today")
-            .unwrap();
-        let (_, payload) = ados_protocol::aux_mux::decode(&buf[..n]).unwrap();
-        assert_eq!(payload, frame, "the exact bytes still cross");
+    #[tokio::test]
+    async fn a_relayed_frame_crosses_under_both_settings() {
+        // The exemption, pinned so a later sweep cannot quietly fold `Relayed`
+        // in with `Unauthenticated`. `Relayed` is the cloud relay's own declared
+        // forwarding on an IPC socket it had to be granted, and that relay runs
+        // on this same ground-station profile: the frames it labels are the
+        // production remote-command path for a drone this node is relaying.
+        // Refusing them deletes remote piloting rather than closing a hole.
+        for enforce in [false, true] {
+            assert!(
+                crosses_the_uplink(enforce, ClientOrigin::Relayed).await,
+                "enforce={enforce}: a relayed frame must always cross"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_trusted_frame_crosses_under_both_settings() {
+        for enforce in [false, true] {
+            assert!(
+                crosses_the_uplink(enforce, ClientOrigin::Trusted).await,
+                "enforce={enforce}: a locally produced frame must always cross"
+            );
+        }
     }
 
     #[test]

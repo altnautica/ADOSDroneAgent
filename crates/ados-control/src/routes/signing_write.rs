@@ -89,12 +89,10 @@ const EPOCH_2015_UNIX_SECONDS: i64 = 1_420_070_400;
 /// 10-µs units, so seconds-since-2015 is scaled by this (`* 100_000` in Python).
 const TEN_US_PER_SECOND: f64 = 100_000.0;
 
-/// Body for `POST /api/mavlink/signing/enroll-fc`. Mirrors the Python
-/// `EnrollRequest`: `key_hex` is the 32-byte key as exactly 64 lowercase hex
-/// chars (NEVER logged); the three target/link fields default to the Python
-/// defaults when omitted. The numeric fields are bounded in the handler to mirror
-/// the Pydantic field validators (`ge`/`le`), so an out-of-range value is a 400,
-/// not a clamp.
+/// Body for `POST /api/mavlink/signing/enroll-fc`. `key_hex` is the 32-byte key as
+/// exactly 64 lowercase hex chars (NEVER logged); the three target/link fields fall
+/// back to their documented defaults when omitted. The numeric fields are bounded in
+/// the handler, so an out-of-range value is a 400, not a clamp.
 #[derive(Debug, Deserialize)]
 pub struct EnrollRequest {
     /// The 32-byte MAVLink signing key as 64 lowercase hex chars. Sensitive: never
@@ -119,8 +117,7 @@ fn default_target_component() -> i64 {
     DEFAULT_TARGET_COMPONENT as i64
 }
 
-/// Body for `PUT /api/mavlink/signing/require`. Mirrors the Python
-/// `RequireRequest`: a single required `require` boolean.
+/// Body for `PUT /api/mavlink/signing/require`. A single required `require` boolean.
 #[derive(Debug, Deserialize)]
 pub struct RequireRequest {
     pub require: bool,

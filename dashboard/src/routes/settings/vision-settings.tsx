@@ -102,14 +102,6 @@ export function VisionSettings() {
                 max={1}
               />
               <div className="border-t border-border pt-5">
-                <ConfigToggle
-                  configKey="vision.auto_download"
-                  label="Auto-download models"
-                  hint="Fetch a selected model from the registry when it is not already on disk."
-                  value={vision.auto_download}
-                />
-              </div>
-              <div className="border-t border-border pt-5">
                 <ConfigNumberField
                   configKey="vision.models_cache_max_mb"
                   id="vision-cache"
