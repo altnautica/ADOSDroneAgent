@@ -95,6 +95,10 @@ export interface GsStatus {
  *  the mapping from these to menu navigation. */
 export interface ButtonEvent {
   button: string;
+  /* The stable friendly id (b1..b4) the binding table keys on; added to the
+   * wire by the emitter so the binding no longer needs to guess from the raw
+   * BCM pin. */
+  label?: string;
   kind?: string;
   action?: string;
   timestamp_ms?: number;
@@ -210,6 +214,9 @@ export interface RosterCamera {
   /** Per-leg WHEP endpoint, when the agent advertises one. The primary leg is
    *  reached through the fixed `/whep` proxy. */
   whep_url?: string;
+  /** Per-leg HLS endpoint (relative, e.g. `/hls/<id>/index.m3u8`), when the
+   *  agent advertises one. Absent for single-stream nodes. */
+  hls_url?: string;
 }
 
 /** A minimal, tolerant view of `GET /api/video/config` — only the blocks the

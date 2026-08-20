@@ -128,6 +128,15 @@ const SECTIONS: SectionLink[] = [
     allow: ["drone"],
   },
   {
+    to: "/settings/camera",
+    label: "Camera",
+    icon: Monitor,
+    blurb: "Image orientation: rotation, hflip, vflip.",
+    group: "Video & vision",
+    // Only the drone owns an encode pipeline for its onboard camera.
+    allow: ["drone"],
+  },
+  {
     to: "/settings/atlas-swarm",
     label: "Atlas & swarm",
     icon: Boxes,

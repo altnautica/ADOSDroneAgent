@@ -24,6 +24,7 @@ export default defineConfig(({ mode }) => {
       proxy: {
         "/api": { target, changeOrigin: true, ws: true },
         "/whep": { target, changeOrigin: true },
+        "/hls": { target, changeOrigin: true },
         "/brand.svg": { target },
       },
     },

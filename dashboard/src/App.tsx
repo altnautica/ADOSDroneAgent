@@ -27,6 +27,7 @@ import { PeripheralsRoute } from "@/routes/peripherals-route";
 import { AdvancedSettings } from "@/routes/settings/advanced-settings";
 import { AtlasSwarmSettings } from "@/routes/settings/atlas-swarm-settings";
 import { CellularSettings } from "@/routes/settings/cellular-settings";
+import { CameraSettings } from "@/routes/settings/camera-settings";
 import { CloudSettings } from "@/routes/settings/cloud-settings";
 import { DiscoverySettings } from "@/routes/settings/discovery-settings";
 import { DisplaySettings } from "@/routes/settings/display-settings";
@@ -175,6 +176,14 @@ export function App() {
                     element={
                       <ProfileGate allow={["drone"]}>
                         <VisionSettings />
+                      </ProfileGate>
+                    }
+                  />
+                  <Route
+                    path="camera"
+                    element={
+                      <ProfileGate allow={["drone"]}>
+                        <CameraSettings />
                       </ProfileGate>
                     }
                   />

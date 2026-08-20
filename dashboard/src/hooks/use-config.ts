@@ -49,6 +49,13 @@ export interface AgentConfig {
       allow_ppps?: boolean;
       cold_boot_enum_aid?: boolean;
     };
+    camera?: {
+      // Image-orientation transforms applied before encode (see the Camera
+      // settings page). rotation is clockwise degrees ∈ {0,90,180,270}.
+      rotation?: number;
+      hflip?: boolean;
+      vflip?: boolean;
+    };
   };
   server?: {
     mode?: string;
