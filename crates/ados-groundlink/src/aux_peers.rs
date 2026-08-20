@@ -410,7 +410,7 @@ mod tests {
         let t0 = 1_700_000_000.0;
         cache.record_status_at(status("drone-a", 1), t0);
         cache.record_identity_at(
-            NodeIdentity::build("drone-a", Some("Alpha"), Some("drone"), Some("1.2.3")),
+            NodeIdentity::build("drone-a", Some("Alpha"), Some("drone"), Some("1.2.3"), &[]),
             t0,
         );
 
@@ -435,7 +435,7 @@ mod tests {
         let cache = AuxPeerCache::new();
         let t0 = 1_700_000_000.0;
         cache.record_status_at(status("drone-a", 1), t0);
-        cache.record_identity_at(NodeIdentity::build("drone-a", None, None, None), t0);
+        cache.record_identity_at(NodeIdentity::build("drone-a", None, None, None, &[]), t0);
         let p = cache.peers_payload(t0 + 3.0);
         assert_eq!(p[0]["status_age_s"], 3.0);
         assert_eq!(p[0]["identity_age_s"], 3.0);
@@ -549,7 +549,7 @@ mod tests {
         let cache = AuxPeerCache::new();
         let t0 = 1_700_000_000.0;
         cache.record_identity_at(
-            NodeIdentity::build("drone-a", Some("Alpha"), Some("drone"), None),
+            NodeIdentity::build("drone-a", Some("Alpha"), Some("drone"), None, &[]),
             t0,
         );
         assert_eq!(

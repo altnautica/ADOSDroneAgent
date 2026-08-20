@@ -11,6 +11,7 @@
 
 pub mod adapter;
 pub mod aux_cmd;
+pub mod aux_rx;
 pub mod bitrate;
 pub mod channel;
 pub mod cmdsock;

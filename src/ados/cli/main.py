@@ -18,7 +18,7 @@ import click
 import httpx
 
 from ados.cli import _ansi, api_bases, default_api_base
-from ados.core.paths import INSTALL_CHECKPOINT_DIR, INSTALL_RESULT, PAIRING_JSON
+from ados.core.paths import ADOS_RUN_DIR, INSTALL_CHECKPOINT_DIR, INSTALL_RESULT, PAIRING_JSON
 from ados.core.profile import _read_profile_conf_value
 
 API_BASE = default_api_base()
@@ -45,6 +45,20 @@ def _load_api_key() -> str | None:
 def _auth_headers() -> dict[str, str]:
     key = _load_api_key()
     return {"X-ADOS-Key": key} if key else {}
+
+
+def _answered_locally() -> bool:
+    """Whether a ``_request`` can only have been served by the agent on this box.
+
+    The video-binary marker ``_plain_status`` prints is a LOCAL filesystem fact,
+    while every other value on that line comes from the HTTP response. It may
+    only be attributed to a node this CLI actually reached on this machine — a
+    remote agent's missing binary is not this box's marker, and this box's
+    marker says nothing about the remote one. ``_request`` will accept an answer
+    from any candidate base, so the honest predicate is that every candidate is
+    loopback.
+    """
+    return all(_ansi.is_localhost(base) for base in api_bases())
 
 
 def _request(method: str, path: str, **kwargs: Any) -> dict[str, Any]:
@@ -138,6 +152,11 @@ def _viewer_url_from_whep(whep_url: str | None) -> str | None:
     """
     if not whep_url:
         return None
+    # The agent advertises a same-origin relative path (`/whep`) with no host for
+    # a clickable link. `ados status` runs on-box, so point the operator at the
+    # local mediamtx viewer directly.
+    if whep_url.startswith("/"):
+        return "http://127.0.0.1:8889/main/"
     base = whep_url.rstrip("/")
     if base.endswith("/whep"):
         base = base[: -len("/whep")]
@@ -215,7 +234,20 @@ def _plain_status(data: dict[str, Any]) -> None:
     video = data.get("video", {})
     viewer_url = _viewer_url_from_whep(video.get("whep_url"))
     state = video.get("state", "unknown")
-    click.echo(_ansi.kv(theme, "Video", state + (f"  {viewer_url}" if viewer_url else "")))
+    # A video block is only useful if it says WHY. `error` used to be
+    # unreachable here because the status surface reported `running` off
+    # mediamtx readiness alone; now that it can report a real failure, the
+    # reason, the encoder identity, and a skipped-binary marker all print.
+    detail = ""
+    if video.get("reason"):
+        detail += f"  ({video['reason']})"
+    if video.get("encoder"):
+        detail += f"  encoder={video['encoder']}"
+    if viewer_url:
+        detail += f"  {viewer_url}"
+    if _answered_locally() and (ADOS_RUN_DIR / "video-binary-missing").exists():
+        detail += "  [ados-video binary missing; re-run the installer]"
+    click.echo(_ansi.kv(theme, "Video", state + detail))
 
     cloud_choice = data.get("cloud_choice", {}) or {}
     cloud_paired = bool(cloud_choice.get("paired"))

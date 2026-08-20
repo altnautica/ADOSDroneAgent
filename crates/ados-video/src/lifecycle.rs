@@ -30,6 +30,61 @@ const MAX_SECONDARY_RESPAWNS: u32 = 5;
 use crate::wfb_tee::{drain_wfb_tee_stderr, orphan_pattern, spawn_wfb_tee, ProgressTracker};
 
 impl VideoOrchestrator {
+    /// Re-persist `camera-state.json` with the pipeline's outcome stamped on it.
+    ///
+    /// Discovery and streaming are sequential but independent steps of one
+    /// `start_stream`, and `persist_camera_state` runs BEFORE every `StartError`
+    /// bail. Without this the sidecar keeps saying `state: "ready"` with a live
+    /// model name for a pipeline sitting in `Error`, which is exactly how a node
+    /// ends up showing a confident camera card and no video. This is the ONLY
+    /// writer of the file after the initial discovery persist — every exit of
+    /// `start_stream`, `stop_stream`, and every health tick through
+    /// [`VideoOrchestrator::refresh_camera_state`] — so the two facts can never
+    /// disagree and no caller can silently reset the outcome to `unknown`.
+    ///
+    /// Honors [`VideoOrchestrator::camera_state_path`] (the canonical contract
+    /// path when `None`), so a test can observe the stamp without writing to the
+    /// developer's real `/run/ados/camera-state.json`.
+    pub(crate) fn persist_pipeline_outcome(&self, outcome: crate::camera_state::PipelineOutcome) {
+        // A retry is not a fresh start. The health loop re-enters `start_stream`
+        // on its backoff, and stamping `starting` there erased the standing
+        // failure: on a node with no usable encoder the surface flapped between
+        // `error` with its reason and `connecting` with none, every few seconds,
+        // for a pipeline that had not recovered at all. The last failure stands
+        // until this attempt resolves it — success stamps `streaming`, another
+        // failure stamps its own reason.
+        let outcome = match outcome {
+            crate::camera_state::PipelineOutcome::Starting
+                if self.last_start_error != StartError::None =>
+            {
+                crate::camera_state::PipelineOutcome::Error
+            }
+            other => other,
+        };
+        // A reason belongs to a failure. Carrying the previous cycle's
+        // StartError onto a `starting` or `stopped` stamp points the operator at
+        // a subsystem that is not the one holding this pipeline back.
+        let reason = match outcome {
+            crate::camera_state::PipelineOutcome::Error => {
+                self.last_start_error.reason().map(str::to_string)
+            }
+            _ => None,
+        };
+        let encoder = self.encoder_label.clone();
+        let encoder_hw = encoder.as_deref().map(crate::encoder::encoder_is_hardware);
+        let snapshot = self
+            .last_cameras
+            .camera_state_snapshot()
+            .with_pipeline(outcome, reason, encoder, encoder_hw);
+        let path = self
+            .camera_state_path
+            .as_deref()
+            .unwrap_or(std::path::Path::new(crate::camera_state::CAMERA_STATE_JSON));
+        if let Err(e) = snapshot.write_to(path) {
+            tracing::warn!(error = %e, "camera_state_pipeline_persist_failed");
+        }
+    }
+
     /// Start the encoding + streaming pipeline. Returns `true` on success.
     ///
     /// Exact order mirrors `pipeline.py::start_stream`: reap stale encoder →
@@ -60,6 +115,13 @@ impl VideoOrchestrator {
         }
 
         self.state = PipelineState::Starting;
+        // The previous cycle's encoder was reaped above, so the identity it
+        // published is no longer true. Stamp the transition: a cold start can
+        // take tens of seconds (discovery, orphan sweeps, the mediamtx gate),
+        // and for that whole window the sidecar otherwise still reads
+        // `streaming` for a pipeline that has no encoder at all.
+        self.encoder_label = None;
+        self.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Starting);
 
         // Resolve the capture source. An explicit network source
         // (`video.camera.source: rtsp://…` / `http://…`) streams from that URL
@@ -75,13 +137,22 @@ impl VideoOrchestrator {
             }
             None => discover::discover(&self.python_executable, discover::DISCOVERY_TIMEOUT).await,
         };
-        discover::persist_camera_state(&discovery);
         self.last_cameras = discovery;
+        // Publish the fresh discovery through the one writer. The bare
+        // `persist_camera_state` this replaces rebuilt the snapshot from
+        // discovery alone, so it reset the outcome to `unknown` and bypassed the
+        // sidecar-path override tests rely on.
+        self.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Starting);
 
         let Some(primary) = self.last_cameras.primary_camera_info() else {
             tracing::error!("no_primary_camera");
+            // A node with no camera has no encoder identity either; leaving the
+            // previous cycle's kind in place publishes one in the sidecar.
+            self.encoder_type = None;
+            self.encoder_label = None;
             self.last_start_error = StartError::NoPrimaryCamera;
             self.state = PipelineState::Error;
+            self.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Error);
             return false;
         };
         let device_path = primary.device_path.clone();
@@ -103,8 +174,10 @@ impl VideoOrchestrator {
         let Some(kind) = kind else {
             tracing::error!("no_encoder_available");
             self.encoder_type = None;
+            self.encoder_label = None;
             self.last_start_error = StartError::NoEncoder;
             self.state = PipelineState::Error;
+            self.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Error);
             return false;
         };
         self.encoder_type = Some(kind);
@@ -113,9 +186,16 @@ impl VideoOrchestrator {
         // encoder-only respawn below, so a hero/thumbnail change produces
         // byte-identical argv to a cold start at the same settings.
         let Some(cmd) = self.build_primary_encoder_command(&primary, &device_path, kind) else {
+            // Distinct from the spawn and mediamtx failures: without its own
+            // variant this bail publishes whichever reason the previous cycle
+            // left behind, sending the operator after the wrong subsystem.
+            self.encoder_label = None;
+            self.last_start_error = StartError::EncoderCommandFailed;
             self.state = PipelineState::Error;
+            self.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Error);
             return false;
         };
+        self.encoder_label = Some(crate::encoder::encoder_label(kind, &cmd));
 
         // Configure + start mediamtx (gates on the RTSP port internally). The
         // primary publishes into `main`; any secondary legs are added as their
@@ -126,6 +206,7 @@ impl VideoOrchestrator {
             tracing::error!(error = %e, "mediamtx_config_write_failed");
             self.last_start_error = StartError::MediamtxFailed;
             self.state = PipelineState::Error;
+            self.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Error);
             return false;
         }
         match self.mediamtx.start().await {
@@ -134,6 +215,7 @@ impl VideoOrchestrator {
                 tracing::error!("mediamtx_start_failed; cannot stream without mediamtx");
                 self.last_start_error = StartError::MediamtxFailed;
                 self.state = PipelineState::Error;
+                self.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Error);
                 return false;
             }
         }
@@ -148,6 +230,7 @@ impl VideoOrchestrator {
                 tracing::error!(error = %e, encoder = ?kind, "encoder_spawn_failed");
                 self.last_start_error = StartError::EncoderSpawnFailed;
                 self.teardown_after_partial_start().await;
+                self.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Error);
                 return false;
             }
         };
@@ -170,6 +253,7 @@ impl VideoOrchestrator {
         self.last_healthy_at = None;
         self.last_start_error = StartError::None;
         tracing::info!(encoder = ?kind, "pipeline_started");
+        self.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Streaming);
 
         // Publish the resolved leg list so the status surfaces + the GCS stream
         // switcher can advertise each `:8889/<id>/whep` leg.
@@ -325,6 +409,9 @@ impl VideoOrchestrator {
         let Some(cmd) = self.build_primary_encoder_command(&primary, &device_path, kind) else {
             return false;
         };
+        // An attention switch rebuilds the argv, so re-resolve the identity the
+        // sidecar publishes from the command actually about to run.
+        self.encoder_label = Some(crate::encoder::encoder_label(kind, &cmd));
 
         if let Some(mut enc) = self.encoder.take() {
             if enc.is_running() {

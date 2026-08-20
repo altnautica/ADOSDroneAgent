@@ -50,12 +50,40 @@ pub enum StartError {
     NoPrimaryCamera,
     /// No encoder backend available for the camera.
     NoEncoder,
+    /// The encoder argv could not be composed for the discovered camera.
+    EncoderCommandFailed,
     /// The encoder subprocess failed to spawn.
     EncoderSpawnFailed,
     /// mediamtx failed to start.
     MediamtxFailed,
     /// The last start succeeded or the cause is unknown — 5-minute cap.
     None,
+}
+
+impl StartError {
+    /// The operator's words for this failure, for the camera-state sidecar and
+    /// the status surface. Every arm names what to check, because "error" with
+    /// no reason is what sends an operator hunting through journals.
+    pub fn reason(self) -> Option<&'static str> {
+        Some(match self {
+            StartError::NoPrimaryCamera => {
+                "no camera was discovered (check the CSI ribbon / USB enumeration)"
+            }
+            StartError::NoEncoder => {
+                "no encoder backend is available for this camera (CSI needs rpicam-vid + ffmpeg; \
+                 USB/IP needs ffmpeg + gst-launch)"
+            }
+            StartError::EncoderCommandFailed => {
+                "the encoder command could not be built for this camera (check the \
+                 video.camera source / geometry settings in the agent config)"
+            }
+            StartError::EncoderSpawnFailed => {
+                "the encoder process failed to start (check its stderr in the ados-video journal)"
+            }
+            StartError::MediamtxFailed => "mediamtx failed to start or accept its configuration",
+            StartError::None => return Option::None,
+        })
+    }
 }
 
 // --- pure health-decision functions (testable without subprocesses) ----------

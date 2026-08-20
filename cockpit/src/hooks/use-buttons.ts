@@ -46,20 +46,20 @@ const BUTTON_BINDINGS: Record<string, NavCommand> = {
   cycle_screen: "cycle-tab",
 };
 
-/** Act only on the leading edge of a gesture so a press+release pair does not
- *  fire twice. If the frame carries a press/hold/release `action`, act on
- *  `press`; otherwise the frame is one classified event per gesture, so act on
- *  anything that is not an explicit `cancel`. */
-function shouldAct(ev: ButtonEvent): boolean {
-  if (ev.action) return ev.action === "press";
-  return ev.kind !== "cancel";
-}
-
 /** Resolve a button event to a command, or null when it is not actionable. A
- *  long-press of the back/menu button opens the quick menu. */
+ *  long-press of the back/menu button opens the quick menu.
+ *
+ *  Act on any event that is not an explicit `cancel`: the emitter sends one
+ *  classified event per gesture (short/long in `kind`), and `action` is the
+ *  mapped SEMANTIC (e.g. `cycle_screen`), never `press`, so gating on `action
+ *  === "press"` discarded every real press. The binding keys on the stable
+ *  `label` (b1..b4) the emitter now sends, falling back to the raw pin. */
 function eventToCommand(ev: ButtonEvent): NavCommand | null {
-  if (!shouldAct(ev)) return null;
-  const id = (ev.button ?? "").toString().trim().toLowerCase();
+  if (ev.kind === "cancel") return null;
+  const id = (ev.label ?? ev.button ?? "")
+    .toString()
+    .trim()
+    .toLowerCase();
   if (!id) return null;
   const base = BUTTON_BINDINGS[id];
   if (base == null) return null;

@@ -73,6 +73,22 @@ class CameraConfig(BaseModel):
     # a different aircraft. See :class:`CameraThumbnailProfile` for the airtime
     # arithmetic that fixes these numbers.
     thumbnail: CameraThumbnailProfile = CameraThumbnailProfile()
+    # Clockwise image rotation in degrees — 0 | 90 | 180 | 270, default 0. This
+    # is an IMAGE transform applied before encode, distinct from the coarse
+    # physical-mount ``orientation`` metadata (which the pipeline ignores).
+    rotation: int = 0
+    # Mirror the image horizontally before encode (default False).
+    hflip: bool = False
+    # Mirror the image vertically before encode (default False).
+    vflip: bool = False
+    # Encoder selection override: "auto" (default, probe the board) | "omx"
+    # (Allwinner OMX hardware) | "v4l2m2m" (ffmpeg V4L2-M2M hardware) |
+    # "software" (libx264). Mirror the Rust CameraConfig default.
+    encoder: Literal["auto", "omx", "v4l2m2m", "software"] = "auto"
+    # Keyframe (GOP) interval in frames; 0 (default) lets the encoder pick a
+    # short low-latency GOP (0.5 s at the configured fps) so radio FEC recovers
+    # fast. An explicit value is honoured as ``-g`` / ``key-int-max``.
+    keyframe_interval: int = 0
 
 
 class CameraMatch(BaseModel):
@@ -144,6 +160,16 @@ class CameraLeg(BaseModel):
     # the wire key ``match`` (a Python keyword), aliased to the ``camera_match``
     # attribute.
     camera_match: CameraMatch | None = Field(default=None, alias="match")
+    # --- Encode-plane (image-transform + encoder-selection) keys. Unlike the
+    # roster metadata above, these ARE read by the encode pipeline. All additive
+    # + default-safe (mirror the Rust CameraLeg).
+    # Clockwise image rotation in degrees — 0 | 90 | 180 | 270, default 0
+    # (distinct from the coarse-mount ``orientation`` metadata above).
+    rotation: int = 0
+    hflip: bool = False
+    vflip: bool = False
+    encoder: Literal["auto", "omx", "v4l2m2m", "software"] = "auto"
+    keyframe_interval: int = 0
 
     model_config = ConfigDict(populate_by_name=True)
 

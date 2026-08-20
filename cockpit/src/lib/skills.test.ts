@@ -23,20 +23,38 @@ describe("resolveSkillState", () => {
     }
   });
 
-  it("names the real reason for a relayed vehicle instead of blaming the link", () => {
-    // A relayed aircraft is not undrivable because the link is dead — it is
-    // drivable, just not from this node. Saying "no flight controller link"
-    // while a live horizon moves in front of the operator is the kind of
-    // contradiction that trains distrust of every other reading on screen.
+  it("keeps a healthy relayed vehicle commandable from this node", () => {
+    // A relayed aircraft is commanded THROUGH this node's relay proxy to the
+    // linked drone, so a live relayed reading is as reachable as a directly
+    // attached FC — the skill stays enabled, never blamed on the link. (The
+    // armed-state-gated arm/disarm commands are excluded: with `armed:
+    // false`, disarm is correctly inapplicable regardless of reachability.)
     for (const s of CORE_SKILLS) {
+      if (s.cmd === "arm" || s.cmd === "disarm") continue;
       const state = resolveSkillState(s, {
         fcConnected: false,
         armed: false,
         relayed: true,
       });
-      expect(state.enabled).toBe(false);
-      expect(state.reason).toBe("Relayed vehicle — command it from its own node");
+      expect(state.enabled).toBe(true);
+      expect(state.reason).toBeUndefined();
     }
+    // Arm (currently disarmed) is itself reachable-and-enabled.
+    const arm = resolveSkillState(skill("arm"), {
+      fcConnected: false,
+      armed: false,
+      relayed: true,
+    });
+    expect(arm.enabled).toBe(true);
+    // Disarm (currently disarmed) stays inapplicable — that is an armed-state
+    // gate, not a reachability one.
+    const disarm = resolveSkillState(skill("disarm"), {
+      fcConnected: false,
+      armed: false,
+      relayed: true,
+    });
+    expect(disarm.enabled).toBe(false);
+    expect(disarm.reason).toBe("Not armed");
   });
 
   it("still drives skills normally on a directly attached FC", () => {
@@ -47,7 +65,7 @@ describe("resolveSkillState", () => {
       armed: false,
       relayed: false,
     });
-    expect(state.reason).not.toBe("Relayed vehicle — command it from its own node");
+    expect(state.reason).toBeUndefined();
   });
 
   it("disables arm while armed, and disarm while disarmed", () => {

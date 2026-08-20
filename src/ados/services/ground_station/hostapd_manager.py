@@ -178,25 +178,23 @@ def resolve_ap_interface(
     raising: the caller's start path refuses separately if the fallback turns
     out to be the radio.
     """
-    from ados.services.wfb._wfb_tables_generated import (
-        WFB_COMPATIBLE_DRIVERS,
-        WFB_DENY_DRIVER_PREFIXES,
+    from ados.services.network.interface_roles import (
+        driver_of as _driver_of,
+        is_denied_management_driver,
+        is_wfb_compatible_driver,
+        wireless_interfaces,
     )
 
     root = net_root or Path("/sys/class/net")
     radio_iface = _radio_interface(run_root)
 
     def driver_of(iface: str) -> str:
-        try:
-            return (root / iface / "device" / "driver").resolve().name
-        except OSError:
-            return ""
+        return _driver_of(iface, root)
 
     def is_radio(iface: str) -> bool:
         if radio_iface and iface == radio_iface:
             return True
-        driver = driver_of(iface)
-        return driver.strip().lower() in {d.lower() for d in WFB_COMPATIBLE_DRIVERS}
+        return is_wfb_compatible_driver(driver_of(iface))
 
     def is_onboard(iface: str) -> bool:
         # The radio's own account outranks the deny-prefix table: an interface
@@ -204,17 +202,9 @@ def resolve_ap_interface(
         # string looks like.
         if radio_iface and iface == radio_iface:
             return False
-        d = driver_of(iface).strip().lower()
-        return any(d.startswith(p) for p in WFB_DENY_DRIVER_PREFIXES)
+        return is_denied_management_driver(driver_of(iface))
 
-    try:
-        wireless = sorted(
-            p.name
-            for p in root.iterdir()
-            if (p / "phy80211").exists() or (p / "wireless").exists()
-        )
-    except OSError:
-        return configured.strip() or fallback
+    wireless = wireless_interfaces(root)
 
     configured = configured.strip()
     if configured:

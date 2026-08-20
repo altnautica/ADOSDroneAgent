@@ -86,7 +86,8 @@ mavlink:\n  \
 serial_port: \"{fc_port}\"\n  \
 baud_rate: 57600\n  \
 system_id: 1\n  \
-component_id: 191\n\
+component_id: 191\n  \
+injector_arbitration: true\n\
 \n\
 logging:\n  \
 level: \"info\"\n  \
@@ -130,8 +131,10 @@ camera:\n    \
 width: 1280\n    \
 height: 720\n    \
 fps: 30\n    \
-codec: \"h264\"\n    \
-bitrate_kbps: 4000\n\
+    codec: \"h264\"\n    \
+    bitrate_kbps: 4000\n  \
+wfb:\n    \
+    aux_enable: true\n\
 \n\
 {network}"
     )
@@ -510,29 +513,20 @@ const PLUGIN_KEYS_DIR: &str = "/etc/ados/plugin-keys";
 /// Peripheral seed manifests dir under /etc/ados.
 const PERIPHERALS_DIR: &str = "/etc/ados/peripherals";
 
-/// Provision the first-party plugin trust keys at `/etc/ados/plugin-keys/` so
-/// the agent can verify signed `.adosplug` archives against the
-/// `FIRST_PARTY_SIGNERS` allowlist. Ports 09-config.sh `provision_plugin_keys`:
-/// copy every `*.pem` from `<source>/scripts/plugin-keys/` (the keys ship in the
-/// repo and the Rust installer clones to `/opt/ados/source`, so they are always
-/// on disk). Idempotent overwrite — the key bytes are stable across reinstalls.
-///
-/// This closes an install/uninstall asymmetry: the dir was created but the keys
-/// were never copied, so a fresh Rust install could not verify any signed plugin.
-fn provision_plugin_keys(source: Option<&Path>) {
-    let _ = std::fs::create_dir_all(PLUGIN_KEYS_DIR);
-    set_mode(Path::new(PLUGIN_KEYS_DIR), 0o700);
-    let src_dir = match source.map(|s| s.join("scripts/plugin-keys")) {
-        Some(p) if p.is_dir() => p,
-        _ => {
-            tracing::warn!("plugin-keys source dir not found; skipping trust-key provisioning");
-            return;
-        }
-    };
-    let read = match std::fs::read_dir(&src_dir) {
-        Ok(r) => r,
-        Err(_) => return,
-    };
+/// Out-of-band operator/OEM trust-provisioning directory: every `*.pem` here is
+/// copied into `/etc/ados/plugin-keys/` on install, so an operator can trust an
+/// OEM or defense signer without committing a named key to a public repo (the
+/// key material is cryptographically public, the NAME can be classified). The
+/// directory is created (0700) if absent; a key dropped here lands on install.
+const TRUST_D_DIR: &str = "/opt/ados/trust.d";
+
+/// Copy every `*.pem` from `src_dir` into the plugin trust-key dir (0600),
+/// returning how many were copied. `None` when `src_dir` is absent.
+fn copy_pems_from(src_dir: &Path) -> Option<usize> {
+    if !src_dir.is_dir() {
+        return None;
+    }
+    let read = std::fs::read_dir(src_dir).ok()?;
     let mut copied = 0usize;
     for entry in read.flatten() {
         let path = entry.path();
@@ -546,7 +540,64 @@ fn provision_plugin_keys(source: Option<&Path>) {
             copied += 1;
         }
     }
-    tracing::info!(count = copied, "first-party plugin trust keys provisioned");
+    Some(copied)
+}
+
+/// Provision the first-party plugin trust keys at `/etc/ados/plugin-keys/` so
+/// the agent can verify signed `.adosplug` archives against the
+/// `FIRST_PARTY_SIGNERS` allowlist. Ports 09-config.sh `provision_plugin_keys`:
+/// copy every `*.pem` from `<source>/scripts/plugin-keys/` (the keys ship in the
+/// repo and the Rust installer clones to `/opt/ados/source`, so they are always
+/// on disk), plus every `*.pem` from the out-of-band [`TRUST_D_DIR`] (operator /
+/// OEM trust provisioning — the primary path for a non-first-party signer whose
+/// key name must never reach a public repo). Idempotent overwrite — the key
+/// bytes are stable across reinstalls.
+///
+/// This closes an install/uninstall asymmetry: the dir was created but the keys
+/// were never copied, so a fresh Rust install could not verify any signed plugin.
+fn provision_plugin_keys(source: Option<&Path>) {
+    let _ = std::fs::create_dir_all(PLUGIN_KEYS_DIR);
+    set_mode(Path::new(PLUGIN_KEYS_DIR), 0o700);
+    let mut copied = 0usize;
+
+    let src_dir = match source.map(|s| s.join("scripts/plugin-keys")) {
+        Some(p) if p.is_dir() => p,
+        _ => {
+            tracing::warn!("plugin-keys source dir not found; skipping first-party trust keys");
+            std::path::PathBuf::new()
+        }
+    };
+    copied += copy_pems_from(&src_dir).unwrap_or(0);
+
+    // Out-of-band operator/OEM trust provisioning. Create the dir so a pre-seeded
+    // trust.d survives and the first-party path above is not the only one.
+    let _ = std::fs::create_dir_all(TRUST_D_DIR);
+    set_mode(Path::new(TRUST_D_DIR), 0o700);
+    copied += copy_pems_from(Path::new(TRUST_D_DIR)).unwrap_or(0);
+
+    tracing::info!(count = copied, "plugin trust keys provisioned");
+}
+
+/// Copy the explicitly-named plugin trust keys (`--plugin-key <path>`) into
+/// the trust-key dir, returning how many landed.
+fn provision_named_plugin_keys(paths: &[String]) -> usize {
+    let mut copied = 0usize;
+    for p in paths {
+        let src = std::path::Path::new(p);
+        let Some(name) = src.file_name().and_then(|n| n.to_str()) else {
+            tracing::warn!(path = %p, "plugin-key has no filename");
+            continue;
+        };
+        let dst = Path::new(PLUGIN_KEYS_DIR).join(name);
+        match std::fs::copy(src, &dst) {
+            Ok(_) => {
+                set_mode(&dst, 0o600);
+                copied += 1;
+            }
+            Err(e) => tracing::warn!(path = %p, error = %e, "plugin-key copy failed"),
+        }
+    }
+    copied
 }
 
 /// Seed the default BOM peripheral manifests at `/etc/ados/peripherals/` so the
@@ -682,6 +733,7 @@ impl Step for ConfigIdentity {
         //    Peripherals page renders on a fresh board). Both copy from the
         //    cloned source tree; idempotent + operator-state-preserving.
         provision_plugin_keys(source.as_deref());
+        provision_named_plugin_keys(&ctx.args.plugin_key);
         seed_default_peripherals(source.as_deref());
 
         // 7. Deploy the operator note describing how to revert the radio
@@ -761,6 +813,10 @@ mod tests {
         assert!(cfg.contains(&format!("convex_url: \"{CONVEX_URL}\"")));
         // Video defaults present.
         assert!(cfg.contains("bitrate_kbps: 4000"));
+        // Install-honesty defaults: injector arbitration armed and the aux lane
+        // enabled, so a fresh install is not inert by default.
+        assert!(cfg.contains("injector_arbitration: true"));
+        assert!(cfg.contains("aux_enable: true"));
         // Local-first server mode + the unrestricted region default.
         assert!(cfg.contains("mode: \"local\""));
         assert!(cfg.contains("mode: \"unrestricted\""));

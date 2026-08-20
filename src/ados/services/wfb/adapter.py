@@ -14,7 +14,7 @@ from ados.hal.usb import UsbCategory, discover_usb_devices
 from ados.services.wfb._wfb_tables_generated import (
     WFB_COMPATIBLE,
     WFB_COMPATIBLE_DRIVERS,
-    WFB_DENY_DRIVER_PREFIXES,
+    WFB_DENY_DRIVER_PREFIXES,  # noqa: F401 — re-exported for parity (tables test)
     WFB_DENY_USB_VENDORS,
 )
 
@@ -36,14 +36,17 @@ def _is_denied_management_wifi(usb_vid: int, driver: str) -> bool:
 
     Belt-and-suspenders gate so a management WiFi (AIC8800, brcmfmac)
     can never be tagged WFB-compatible regardless of how the USB ID walk
-    resolved. Matches on USB vendor first, then a driver-name prefix
-    check that tolerates the `_fdrv` / `_usb` driver suffixes those
+    resolved. Matches on USB vendor first, then the driver-name prefix
+    check, which tolerates the `_fdrv` / `_usb` driver suffixes those
     chips bind under.
     """
     if usb_vid and usb_vid in WFB_DENY_USB_VENDORS:
         return True
-    drv = (driver or "").strip().lower()
-    return any(drv.startswith(prefix) for prefix in WFB_DENY_DRIVER_PREFIXES)
+    # Driver classification is owned by the single role resolver so the radio
+    # and the control/mgmt side can never disagree on what a driver means.
+    from ados.services.network.interface_roles import is_denied_management_driver
+
+    return is_denied_management_driver(driver)
 
 
 def control_interface() -> str | None:
@@ -392,31 +395,17 @@ def _injection_rank(adapter: WifiAdapterInfo) -> int:
     radio, so it ranks first; RTL8812AU rebadges next; any other adapter
     that merely passed the compat filter last. This makes selection
     independent of USB bus order so a management WiFi enumerated first
-    can never win by accident.
+    can never win by accident. Delegates to the single role resolver so
+    the radio and the control/mgmt side rank drivers identically.
     """
-    label = (adapter.chipset or "").upper()
-    driver = (adapter.driver or "").lower()
-    is_eu = (
-        "8812EU" in label
-        or "88X2EU" in label
-        or driver in {"8812eu", "rtl8812eu", "rtl88x2eu"}
+    from ados.services.network.interface_roles import wfb_rank
+
+    return wfb_rank(
+        adapter.driver,
+        adapter.chipset,
+        adapter.usb_vid,
+        adapter.usb_pid,
     )
-    is_au = (
-        "8812AU" in label
-        or "88XXAU" in label
-        or driver in {"8812au", "rtl8812au", "rtl88xxau"}
-    )
-    is_known = (
-        (adapter.usb_vid, adapter.usb_pid) in WFB_COMPATIBLE
-        or driver in WFB_COMPATIBLE_DRIVERS
-    )
-    if is_eu:
-        return 0
-    if is_au:
-        return 1
-    if is_known:
-        return 2
-    return 3
 
 
 def select_wfb_interface(

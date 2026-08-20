@@ -34,6 +34,7 @@ Compatibility checks at install time:
 from __future__ import annotations
 
 import hashlib
+import json
 import shutil
 import subprocess
 import urllib.error
@@ -62,8 +63,15 @@ from ados.plugins.loader import load_builtin_manifests
 from ados.plugins.manifest import PluginManifest
 from ados.plugins.signing import (
     is_first_party_signer,
+    load_trusted_keys,
     verify_archive_signature,
 )
+from ados.services.signing import verify_signature
+
+# A high-risk plugin may be granted ahead of time so it installs unattended
+# with a SIGNED grant rather than a human clicking approve. A grant lives at
+# /etc/ados/plugin-grants/<plugin_id>.json.
+GRANT_DIR = "/etc/ados/plugin-grants"
 from ados.plugins.state import (
     PluginInstall,
     filter_permissions_against_manifest,
@@ -255,6 +263,57 @@ class PluginSupervisor:
             risk=manifest.risk,
             permissions_requested=sorted(manifest.declared_permissions()),
         )
+
+    def grant_covers(self, plugin_id: str, requested: list[str]) -> list[str]:
+        """The subset of `requested` covered by a valid signed grant.
+
+        A grant at ``/etc/ados/plugin-grants/<plugin_id>.json`` is
+        ``{plugin_id, permissions: [cap id...], signer, sig}`` where ``sig``
+        is base64 Ed25519 over the canonical JSON (``{plugin_id,
+        permissions(sorted), signer}``, ``sort_keys``, compact separators),
+        verifiable under a key in ``/etc/ados/plugin-keys/``. An absent,
+        malformed, unknown-signer, or bad-signature grant yields an empty
+        list (fail closed). The grant can only vouch for permissions the
+        archive actually declared — a grant naming an undeclared capability
+        is meaningless and ignored.
+        """
+        if not requested:
+            return []
+        grant_path = Path(GRANT_DIR) / f"{plugin_id}.json"
+        if not grant_path.is_file():
+            return []
+        try:
+            grant = json.loads(grant_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        if not isinstance(grant, dict):
+            return []
+        signer = grant.get("signer")
+        sig = grant.get("sig")
+        granted_perms = grant.get("permissions")
+        if not isinstance(signer, str) or not isinstance(sig, str):
+            return []
+        if not isinstance(granted_perms, list) or not all(
+            isinstance(p, str) for p in granted_perms
+        ):
+            return []
+        keys = load_trusted_keys()
+        key = keys.get(signer)
+        if key is None:
+            return []
+        canonical = json.dumps(
+            {
+                "plugin_id": plugin_id,
+                "permissions": sorted(granted_perms),
+                "signer": signer,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if not verify_signature(canonical, sig, key.pem):
+            return []
+        covered = set(granted_perms)
+        return [p for p in sorted(set(requested)) if p in covered]
 
     def grant_permission(self, plugin_id: str, permission_id: str) -> None:
         with state_lock():

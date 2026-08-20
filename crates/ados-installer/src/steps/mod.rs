@@ -47,6 +47,7 @@ pub mod systemd;
 pub mod venv_agent;
 pub mod watchdog;
 pub mod wfb_ng;
+pub mod wfb_unmanaged;
 pub mod wifi_join;
 
 /// Assemble the full fresh-install step chain. The graph engine orders these
@@ -57,6 +58,10 @@ pub fn full_install_chain() -> Vec<Box<dyn Step>> {
         Box::new(preflight::Preflight),
         Box::new(purge_residue::PurgeResidue),
         Box::new(deps::Deps),
+        // Watermark the WFB radios as NM-unmanaged from the first boot, before
+        // any network service (and NM itself) can autoconnect a client profile
+        // to the flight radio.
+        Box::new(wfb_unmanaged::WfbUnmanaged),
         // Right after the packages land, before the venv / fetched binaries /
         // DKMS build ask for space: the downloaded .debs have no further use.
         Box::new(apt_reclaim::AptReclaim),
@@ -94,7 +99,7 @@ mod tests {
     fn full_chain_orders_cleanly() {
         let steps = full_install_chain();
         let order = topo_order(&steps).expect("the install chain must be a valid DAG");
-        assert_eq!(order.len(), 21);
+        assert_eq!(order.len(), 22);
 
         let pos = |id: &str| order.iter().position(|x| x == id).unwrap();
         // Spot-check the load-bearing edges.

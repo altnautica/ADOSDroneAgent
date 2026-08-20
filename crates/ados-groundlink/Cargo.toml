@@ -24,6 +24,10 @@ ados-config = { path = "../ados-config" }
 # The Atlas stream lane: the GS relay re-POSTs decoded WFB-aux datagrams into the
 # compute receiver via the LAN bearer.
 ados-atlas-transport = { path = "../ados-atlas-transport" }
+# The installed-plugin inventory (id + contract version) the aux node-identity
+# consumer compares a peer against, so a version mismatch across an
+# upgrade-mixed pair is surfaced instead of silently misreading the plugin wire.
+ados-plugin-host = { path = "../ados-plugin-host" }
 
 tokio = { workspace = true }
 serde = { workspace = true }

@@ -318,6 +318,46 @@ def test_camera_leg_management_field_defaults_match_rust():
     assert leg.mount_pitch_deg is None
     assert leg.calibration is None
     assert leg.camera_match is None
+    # The encode-plane keys default like the Rust CameraLeg / CameraConfig: no
+    # image transform, encoder auto, auto (short low-latency) keyframe interval.
+    assert leg.rotation == 0
+    assert leg.hflip is False
+    assert leg.vflip is False
+    assert leg.encoder == "auto"
+    assert leg.keyframe_interval == 0
+
+
+def test_camera_leg_encode_plane_keys_parse_and_default():
+    """The image-transform + encoder-selection keys parse from a leg and default
+    safely (rotation 0 / flips off / encoder auto / keyframe 0)."""
+    from ados.core.config.video import CameraLeg
+
+    leg = CameraLeg(
+        id="belly",
+        source="/dev/video2",
+        rotation=180,
+        hflip=True,
+        encoder="omx",
+        keyframe_interval=5,
+    )
+    assert leg.rotation == 180
+    assert leg.hflip is True
+    assert leg.vflip is False  # untouched → default
+    assert leg.encoder == "omx"
+    assert leg.keyframe_interval == 5
+
+
+def test_camera_rotate_and_encoder_defaults_match_rust():
+    """The top-level CameraConfig encode-plane keys default the same as the Rust
+    CameraConfig (the encoder.rs branch fixtures hinge on them)."""
+    from ados.core.config.video import CameraConfig
+
+    cam = CameraConfig()
+    assert cam.rotation == 0
+    assert cam.hflip is False
+    assert cam.vflip is False
+    assert cam.encoder == "auto"
+    assert cam.keyframe_interval == 0
 
 
 def test_camera_leg_management_fields_round_trip():

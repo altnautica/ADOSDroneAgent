@@ -204,34 +204,20 @@ def _ensure_mesh_identity(role: str, config: ADOSConfig) -> tuple[str, bytes]:
 def _pick_mesh_iface(configured: str | None) -> str | None:
     """Return the wireless interface batman-adv should bind to.
 
-    Priority: explicit config > first wlan* that is not the primary WFB
-    adapter. We detect "primary WFB adapter" by checking for monitor
-    mode on an RTL8812 family interface.
+    Priority: explicit config > the mesh role from the single driver-keyed
+    role resolver. The resolver never assigns the WFB flight radio to the
+    mesh (it is by construction a non-WFB radio), and decides by the bound
+    kernel driver, not by the racing interface name.
     """
     if configured:
         return configured
 
-    net_dir = Path("/sys/class/net")
-    if not net_dir.is_dir():
-        return None
+    from ados.services.network.interface_roles import assign_roles
 
-    candidates: list[str] = []
-    for p in sorted(net_dir.iterdir()):
-        if not p.name.startswith("wlan"):
-            continue
-        # Skip interfaces already in monitor mode. The primary WFB
-        # adapter is typically wlan0 after `iw set wlan0 type monitor`.
-        mode_path = p / "type"
-        try:
-            mode = mode_path.read_text().strip()
-        except OSError:
-            mode = ""
-        # type 1 is "infrastructure-or-mesh" in sysfs, type 803 is monitor.
-        if mode == "803":
-            continue
-        candidates.append(p.name)
-
-    return candidates[0] if candidates else None
+    roles = assign_roles()
+    # mesh is the second non-WFB radio; fall back to the single control radio
+    # (mgmt_wifi) when the box has exactly one non-WFB adapter.
+    return roles.mesh or roles.mgmt_wifi
 
 
 def _modprobe_batman() -> bool:

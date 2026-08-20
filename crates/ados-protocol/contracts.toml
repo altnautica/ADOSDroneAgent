@@ -159,7 +159,7 @@ description = "Auxiliary radio lane multiplex header (magic, version, channel, l
 
 [[contract]]
 id = "aux.node_status"
-version = 1
+version = 2
 wire = "msgpack"
 transport = "udp"
 status = "active"
@@ -327,10 +327,10 @@ description = "Mesh role and membership state."
 
 [[sidecar]]
 id = "camera-state"
-version = 1
+version = 2
 path = "/run/ados/camera-state.json"
 rust_const = "ados_video::camera_state::CAMERA_STATE_JSON"
-description = "Camera pipeline readiness state."
+description = "Camera discovery readiness AND the streaming pipeline's outcome for that camera, so a detected camera can never read as a streaming one. Keys: version, state, primary_path, primary_name, total_cameras, pipeline_state (unknown|starting|streaming|error|stopped), pipeline_reason (set only on error), encoder (rpicam-vid, or <ffmpeg|gstreamer>-<codec element> e.g. ffmpeg-h264_v4l2m2m / ffmpeg-libx264), encoder_hw, updated_at_unix."
 
 [[sidecar]]
 id = "video-streams"

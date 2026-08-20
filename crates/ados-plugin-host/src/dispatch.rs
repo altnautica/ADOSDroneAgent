@@ -69,6 +69,7 @@ pub enum Method {
     ProcessSpawn,
     // Display: set the reserved data-driven page's content.
     DisplayPageSet,
+    DisplayZoneSubscribe,
     // GPIO output: drive a status buzzer/LED line, or play a bounded beep.
     GpioOutputSet,
     GpioBuzzerBeep,
@@ -77,6 +78,8 @@ pub enum Method {
     // Radio: open / close an additive auxiliary application stream on the link.
     RadioAuxStreamOpen,
     RadioAuxStreamClose,
+    RadioAuxStreamSend,
+    RadioAuxStreamSubscribe,
     // Vision: frame-descriptor subscribe, model register, inference, and
     // detection publish. The engine owns the cameras and the inference backend;
     // the host proxies these to it over its socket.
@@ -161,11 +164,14 @@ impl Method {
             "config.set" => Self::ConfigSet,
             "process.spawn" => Self::ProcessSpawn,
             "display.page.set" => Self::DisplayPageSet,
+            "display.zone.subscribe" => Self::DisplayZoneSubscribe,
             "gpio.output.set" => Self::GpioOutputSet,
             "gpio.buzzer.beep" => Self::GpioBuzzerBeep,
             "flight.guided_setpoint.send" => Self::GuidedSetpointSend,
             "radio.aux_stream.open" => Self::RadioAuxStreamOpen,
             "radio.aux_stream.close" => Self::RadioAuxStreamClose,
+            "radio.aux_stream.send" => Self::RadioAuxStreamSend,
+            "radio.aux_stream.subscribe" => Self::RadioAuxStreamSubscribe,
             "compute.dataset.write" => Self::ComputeDatasetWrite,
             "compute.job.submit" => Self::ComputeJobSubmit,
             "compute.job.read" => Self::ComputeJobRead,
@@ -207,11 +213,14 @@ impl Method {
             Self::ConfigSet => "config.set",
             Self::ProcessSpawn => "process.spawn",
             Self::DisplayPageSet => "display.page.set",
+            Self::DisplayZoneSubscribe => "display.zone.subscribe",
             Self::GpioOutputSet => "gpio.output.set",
             Self::GpioBuzzerBeep => "gpio.buzzer.beep",
             Self::GuidedSetpointSend => "flight.guided_setpoint.send",
             Self::RadioAuxStreamOpen => "radio.aux_stream.open",
             Self::RadioAuxStreamClose => "radio.aux_stream.close",
+            Self::RadioAuxStreamSend => "radio.aux_stream.send",
+            Self::RadioAuxStreamSubscribe => "radio.aux_stream.subscribe",
             Self::VisionSubscribeFrames => vision_methods::SUBSCRIBE_FRAMES,
             Self::VisionRegisterModel => vision_methods::REGISTER_MODEL,
             Self::VisionReadModel => vision_methods::READ_MODEL,
@@ -366,15 +375,21 @@ mod tests {
 
     #[test]
     fn display_page_set_gates_on_the_display_capability() {
-        // Refused without the cap, allowed with it.
-        assert_eq!(
-            gate("display.page.set", false, &caps(&[])),
-            Gate::CapabilityDenied("capability_denied: display.oled.page".to_string())
-        );
-        assert_eq!(
-            gate("display.page.set", false, &caps(&["display.oled.page"])),
-            Gate::Allow(Method::DisplayPageSet)
-        );
+        // Both the page-set and the zone-subscribe methods are refused without
+        // the cap, allowed with it.
+        for (method, variant) in [
+            ("display.page.set", Method::DisplayPageSet),
+            ("display.zone.subscribe", Method::DisplayZoneSubscribe),
+        ] {
+            assert_eq!(
+                gate(method, false, &caps(&[])),
+                Gate::CapabilityDenied("capability_denied: display.oled.page".to_string())
+            );
+            assert_eq!(
+                gate(method, false, &caps(&["display.oled.page"])),
+                Gate::Allow(variant)
+            );
+        }
     }
 
     #[test]
@@ -398,12 +413,15 @@ mod tests {
 
     #[test]
     fn radio_aux_stream_methods_gate_on_the_aux_stream_capability() {
-        // Both open and close are refused without the aux-stream cap, allowed
-        // with it. A plugin can never bring up an additive radio stream without
-        // the operator-granted capability.
+        // All aux-stream methods (open, close, send, subscribe) are refused
+        // without the aux-stream cap, allowed with it. A plugin can never bring
+        // up or use an additive radio stream without the operator-granted
+        // capability.
         for (method, variant) in [
             ("radio.aux_stream.open", Method::RadioAuxStreamOpen),
             ("radio.aux_stream.close", Method::RadioAuxStreamClose),
+            ("radio.aux_stream.send", Method::RadioAuxStreamSend),
+            ("radio.aux_stream.subscribe", Method::RadioAuxStreamSubscribe),
         ] {
             assert_eq!(
                 gate(method, false, &caps(&[])),
@@ -500,11 +518,14 @@ mod tests {
         Method::ConfigSet,
         Method::ProcessSpawn,
         Method::DisplayPageSet,
+        Method::DisplayZoneSubscribe,
         Method::GpioOutputSet,
         Method::GpioBuzzerBeep,
         Method::GuidedSetpointSend,
         Method::RadioAuxStreamOpen,
         Method::RadioAuxStreamClose,
+        Method::RadioAuxStreamSend,
+        Method::RadioAuxStreamSubscribe,
         Method::VisionSubscribeFrames,
         Method::VisionRegisterModel,
         Method::VisionReadModel,

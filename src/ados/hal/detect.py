@@ -262,6 +262,18 @@ class ComputeSection(BaseModel):
     local_inference: Literal["none", "onnx"] = "none"
 
 
+class GpioOutput(BaseModel):
+    """One GPIO output line a board exposes (a buzzer, a status LED).
+
+    ``pin`` is the BCM/SoC-native pin number the service drives. ``function``
+    names the purpose (``buzzer``, ``led``) so a plugin can look up its pin by
+    role instead of hardcoding one (operating rule: no hardcoded pins)."""
+
+    id: str
+    pin: int
+    function: str
+
+
 class BoardProfile(BaseModel):
     """Pydantic model for YAML board profile validation."""
 
@@ -272,6 +284,7 @@ class BoardProfile(BaseModel):
     model_patterns: list[str] = []
     default_tier: int = 2
     gpio_pins: list[int] = []
+    gpio_outputs: list[GpioOutput] = Field(default_factory=list)
     uart_paths: list[str] = []
     hw_video_codecs: list[str] = []
 

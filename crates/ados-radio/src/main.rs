@@ -1234,10 +1234,22 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
         // SAFE-BY-DEFAULT: nothing starts here at bring-up — the pair exists only
         // between an explicit open and its close. Spawned + aborted per bring-up
         // like the sibling sockets.
+        // Application datagram fan-out shared by the aux-RX receive loop (the
+        // process-lifetime task that decodes inbound app frames off the loopback
+        // port) and every aux `subscribe` connection, which streams from it.
+        let (aux_app_tx, _) = tokio::sync::broadcast::channel::<(u8, Vec<u8>)>(256);
         let aux_cmd_state = AuxCmdState {
             proc: proc.clone(),
             cfg: Arc::new(cfg.clone()),
+            rx_tx: aux_app_tx,
         };
+        // Process-lifetime aux-RX receive half: binds the loopback aux-rx port
+        // and fans decoded AppStream/AppCommand frames to subscribers. Started
+        // beside, not inside, the per-bring-up aux command socket so it survives
+        // a re-bring-up; when no aux pair is open it sits idle on recv_from.
+        let aux_rx_tx = aux_cmd_state.rx_tx.clone();
+        let aux_rx_cfg = Arc::new(cfg.clone());
+        tokio::spawn(ados_radio::aux_rx::run_rx_loop(aux_rx_cfg, aux_rx_tx));
         let aux_cmd_cancel = task_cancel.clone();
         let aux_cmd_sock_path = ados_radio::paths::run_path("radio-aux.sock");
         let aux_cmd_server = tokio::spawn(async move {

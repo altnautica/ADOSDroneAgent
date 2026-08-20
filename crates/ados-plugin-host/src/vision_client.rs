@@ -32,7 +32,7 @@ use ados_protocol::frame::{decode_len, HEADER_SIZE, PLUGIN_MAX_FRAME};
 use ados_protocol::framebus::methods;
 use ados_protocol::ipc::connect_with_retry;
 use ados_protocol::plugin::{Envelope, PROTOCOL_VERSION};
-use rmpv::Value;
+use rmpv::{Value, ValueRef};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::OwnedReadHalf;
 use tokio::sync::{broadcast, Mutex};
@@ -75,6 +75,29 @@ pub struct VisionClient {
     /// Detection-batch fanout: encoded `DetectionBatch` bytes pulled from the
     /// engine's `vision.deliver_detection` pushes.
     detections: broadcast::Sender<Vec<u8>>,
+    /// Whether the ENGINE has been asked to push on this connection. The engine
+    /// starts a per-connection push task only when it receives
+    /// `vision.subscribe_frames` / `vision.subscribe_detections`
+    /// (`ados-vision/src/visionsock.rs`), so holding a receiver on the fanout
+    /// above is not by itself a subscription: without these the fanout is
+    /// permanently empty and a subscribing plugin sees silence with no error.
+    /// Armed lazily, once per process, on the first plugin subscribe.
+    ///
+    /// A mutex held across the engine round-trip, not an `AtomicBool` tested and
+    /// set before it. Two plugins subscribing at host startup is the normal
+    /// case, and with a test-and-set the second one read `true` while the first
+    /// one's request was still in flight, returned, and let its caller hand the
+    /// plugin a receiver; if that request then failed, the flag went back to
+    /// `false` and NOBODY was armed — the second plugin sat on a permanently
+    /// empty fanout with not one log line naming its subscription, which is the
+    /// exact silence this flag exists to prevent. Holding the flag makes a
+    /// concurrent second subscriber wait for the first attempt's verdict and
+    /// retry it.
+    ///
+    /// Lock order: the `request` mutex is acquired INSIDE these two and never
+    /// the other way round. Keep it that way.
+    frames_armed: Mutex<bool>,
+    detections_armed: Mutex<bool>,
     reader: JoinHandle<()>,
 }
 
@@ -111,6 +134,8 @@ impl VisionClient {
             }),
             frames,
             detections,
+            frames_armed: Mutex::new(false),
+            detections_armed: Mutex::new(false),
             reader,
         })
     }
@@ -127,6 +152,52 @@ impl VisionClient {
     /// than blocking the reader. Mirrors [`Self::subscribe_frames`].
     pub fn subscribe_detections(&self) -> broadcast::Receiver<Vec<u8>> {
         self.detections.subscribe()
+    }
+
+    /// Ask the ENGINE to start pushing frame descriptors on this connection.
+    /// Idempotent: the flag is held across the round-trip and set only once the
+    /// engine has accepted, so a refused attempt is retried by the next
+    /// subscriber instead of leaving it on a dead subscription.
+    pub async fn arm_frame_push(&self) {
+        let mut armed = self.frames_armed.lock().await;
+        if *armed {
+            return;
+        }
+        if let Err(e) = self
+            .request(
+                methods::SUBSCRIBE_FRAMES,
+                "vision.frame.read",
+                &Value::Map(vec![]),
+            )
+            .await
+        {
+            tracing::warn!(error = %e, "vision frame push could not be armed");
+        } else {
+            *armed = true;
+            tracing::info!("vision frame push armed on the engine connection");
+        }
+    }
+
+    /// Ask the ENGINE to start pushing detection batches on this connection.
+    /// Same arming contract as [`Self::arm_frame_push`].
+    pub async fn arm_detection_push(&self) {
+        let mut armed = self.detections_armed.lock().await;
+        if *armed {
+            return;
+        }
+        if let Err(e) = self
+            .request(
+                methods::SUBSCRIBE_DETECTIONS,
+                "vision.detection.subscribe",
+                &Value::Map(vec![]),
+            )
+            .await
+        {
+            tracing::warn!(error = %e, "vision detection push could not be armed");
+        } else {
+            *armed = true;
+            tracing::info!("vision detection push armed on the engine connection");
+        }
     }
 
     /// Proxy a `register_model` request to the engine and return its response
@@ -209,6 +280,9 @@ impl Drop for VisionClient {
 /// `responses`. A clean EOF or a malformed/oversized header stops the loop and
 /// closes both channels, so callers awaiting a response see the close and any
 /// frame subscriber sees the channel end on its next recv.
+///
+/// A push whose fanout has no receivers is dropped without being decoded; see
+/// [`peek_push_kind`].
 async fn read_loop(
     mut read_half: OwnedReadHalf,
     frames: broadcast::Sender<Vec<u8>>,
@@ -227,6 +301,21 @@ async fn read_loop(
         let mut body = vec![0u8; len];
         if read_half.read_exact(&mut body).await.is_err() {
             break;
+        }
+        // Nobody holds a receiver on the fanout this push would feed: drop it
+        // before the decode. Arming is process-lifetime and there is no engine
+        // `vision.unsubscribe_frames`, so one short-lived plugin that
+        // subscribed once would otherwise leave the host decoding every
+        // camera's descriptors at capture rate for the rest of the process,
+        // allocating the payload twice per frame for a `send` that can only
+        // return `Err`. The probe is skipped entirely while both fanouts have
+        // subscribers, so the fully-subscribed path pays nothing for it.
+        if frames.receiver_count() == 0 || detections.receiver_count() == 0 {
+            match peek_push_kind(&body) {
+                PushKind::Frame if frames.receiver_count() == 0 => continue,
+                PushKind::Detection if detections.receiver_count() == 0 => continue,
+                _ => {}
+            }
         }
         let env = match Envelope::from_msgpack(&body) {
             Ok(env) => env,
@@ -256,6 +345,42 @@ async fn read_loop(
             break;
         }
     }
+}
+
+/// Which of the engine's two push events an envelope body is, if either.
+enum PushKind {
+    Frame,
+    Detection,
+    Other,
+}
+
+/// Classify an envelope body by its `method` field without decoding it.
+///
+/// `rmpv`'s borrowing reader walks the bytes and copies no payload, so a push
+/// the host is about to drop costs one structural walk instead of a full
+/// [`Envelope`] — which allocates the binary `descriptor` once in `args` and
+/// again in the extraction below. Anything that is not recognisably one of the
+/// two push methods is [`PushKind::Other`] and takes the normal decode path, so
+/// a response is never misrouted by a partial read.
+fn peek_push_kind(body: &[u8]) -> PushKind {
+    let Ok(ValueRef::Map(entries)) = rmpv::decode::read_value_ref(&mut &body[..]) else {
+        return PushKind::Other;
+    };
+    for (key, value) in entries {
+        let ValueRef::String(key) = key else { continue };
+        if key.as_str() != Some("method") {
+            continue;
+        }
+        let ValueRef::String(method) = value else {
+            return PushKind::Other;
+        };
+        return match method.as_str() {
+            Some(methods::DELIVER_FRAME) => PushKind::Frame,
+            Some(methods::DELIVER_DETECTION) => PushKind::Detection,
+            _ => PushKind::Other,
+        };
+    }
+    PushKind::Other
 }
 
 /// Extract the frame-descriptor bytes from a `vision.deliver` envelope. The
@@ -475,5 +600,92 @@ mod tests {
         let args = Value::Map(vec![(Value::from("model_id"), Value::from("missing"))]);
         let err = client.infer(&args).await.unwrap_err();
         assert_eq!(err, VisionRpcError("model not found".to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_refused_arm_is_retried_by_the_concurrent_second_subscriber() {
+        let path = temp_sock("arm-race");
+        // `Some(16)` hands the fake engine the host's own requests, so the test
+        // can count how many subscribe attempts actually reached the wire.
+        let (server, inbound) = IpcBroadcast::bind(&path, 256, false, Some(16))
+            .await
+            .unwrap();
+        let mut inbound = inbound.expect("inbound channel requested");
+        let server = std::sync::Arc::new(server);
+
+        let client = VisionClient::connect(&path).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // The engine refuses the first subscribe and accepts the second.
+        let engine_server = server.clone();
+        let engine = tokio::spawn(async move {
+            let mut seen = Vec::new();
+            for attempt in 0..2 {
+                let cmd = inbound.recv().await.expect("a host request");
+                let req = Envelope::from_msgpack(&cmd.payload).expect("a request envelope");
+                seen.push(req.method.clone());
+                let reply = Envelope {
+                    version: PROTOCOL_VERSION,
+                    kind: "response".to_string(),
+                    method: "response".to_string(),
+                    capability: String::new(),
+                    args: Value::Map(vec![]),
+                    request_id: req.request_id,
+                    token: String::new(),
+                    error: (attempt == 0).then(|| "engine busy".to_string()),
+                };
+                let body = reply.to_msgpack().unwrap();
+                engine_server
+                    .broadcast(encode_frame(&body, PLUGIN_MAX_FRAME).unwrap())
+                    .await;
+            }
+            seen
+        });
+
+        // Two plugins subscribing at host startup, the normal case. A
+        // test-and-set flag let the second one return on the first one's
+        // in-flight `true` and then be stranded when that attempt failed.
+        tokio::join!(client.arm_frame_push(), client.arm_frame_push());
+
+        let seen = tokio::time::timeout(Duration::from_secs(2), engine)
+            .await
+            .expect("the engine answered both attempts")
+            .unwrap();
+        assert_eq!(
+            seen,
+            vec![
+                methods::SUBSCRIBE_FRAMES.to_string(),
+                methods::SUBSCRIBE_FRAMES.to_string()
+            ],
+            "the refused arm must be retried by the second subscriber"
+        );
+
+        // Armed now, so a third subscriber returns without another round-trip —
+        // there is no engine task left to answer one.
+        tokio::time::timeout(Duration::from_millis(500), client.arm_frame_push())
+            .await
+            .expect("an armed connection does not re-request");
+    }
+
+    #[tokio::test]
+    async fn a_frame_push_with_no_subscriber_is_dropped_before_the_decode() {
+        let path = temp_sock("idle-fanout");
+        let (server, _inbound) = IpcBroadcast::bind(&path, 256, false, None).await.unwrap();
+
+        let client = VisionClient::connect(&path).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // A push arriving while no plugin holds a receiver, then a response.
+        // The reader must stay on the wire: dropping the push must not consume
+        // or reorder the response behind it.
+        server
+            .broadcast(deliver_envelope(b"not-a-descriptor"))
+            .await;
+        let result = Value::Map(vec![(Value::from("registered"), Value::Boolean(true))]);
+        server.broadcast(response_envelope(result.clone())).await;
+
+        let args = Value::Map(vec![(Value::from("model_id"), Value::from("m1"))]);
+        let got = client.register_model(&args).await.unwrap();
+        assert_eq!(got, result);
     }
 }

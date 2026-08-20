@@ -46,6 +46,7 @@ pub mod dispatch;
 pub mod errors;
 pub mod handlers;
 pub mod host;
+pub mod inventory;
 pub mod invoke;
 pub mod manifest;
 pub mod mavlink_client;

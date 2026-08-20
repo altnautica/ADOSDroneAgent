@@ -17,12 +17,14 @@ import {
   SlidersHorizontal,
   Cpu,
   Settings,
+  Blocks,
 } from "lucide-react";
 
 import { FeedScreen } from "@/components/screens/feed-screen";
 import { LinkScreen } from "@/components/screens/link-screen";
 import { MeshScreen } from "@/components/screens/mesh-screen";
 import { PairScreen } from "@/components/screens/pair-screen";
+import { PluginScreen } from "@/components/screens/plugin-screen";
 import { SettingsScreen } from "@/components/screens/settings-screen";
 import { SystemScreen } from "@/components/screens/system-screen";
 import { UplinkScreen } from "@/components/screens/uplink-screen";
@@ -79,6 +81,16 @@ const SCREENS: ScreenSpec[] = [
     icon: Cpu,
     kind: "tab",
     render: () => <SystemScreen />,
+  },
+  {
+    id: "plugin",
+    title: "Plugin",
+    icon: Blocks,
+    kind: "tab",
+    // Unconditionally present in the menu; the screen resolves an installed
+    // GCS-bearing plugin and renders it, or a clean no-plugin panel when none
+    // is installed.
+    render: () => <PluginScreen />,
   },
   {
     id: "settings",

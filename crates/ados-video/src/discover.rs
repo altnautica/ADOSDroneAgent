@@ -24,7 +24,6 @@
 //! treated as no-primary (an empty result), never an error: the orchestrator's
 //! no-primary backoff path then takes over cleanly.
 
-use std::path::Path;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -233,22 +232,11 @@ pub async fn discover_default() -> DiscoveryResult {
     discover(&python_executable(), DISCOVERY_TIMEOUT).await
 }
 
-/// Persist the discovery's camera-state sidecar to [`crate::camera_state::CAMERA_STATE_JSON`].
-/// Best-effort: an I/O error is logged at `warn` and discarded.
-pub fn persist_camera_state(result: &DiscoveryResult) {
-    persist_camera_state_to(result, Path::new(crate::camera_state::CAMERA_STATE_JSON));
-}
-
-/// Persist the discovery's camera-state sidecar to an explicit `path`. The
-/// canonical [`persist_camera_state`] delegates here with the contract path;
-/// the parameterized form lets the orchestrator target a test path. Best-effort:
-/// an I/O error is logged at `warn` and discarded.
-pub fn persist_camera_state_to(result: &DiscoveryResult, path: &Path) {
-    let snapshot = result.camera_state_snapshot();
-    if let Err(e) = snapshot.write_to(path) {
-        tracing::warn!(error = %e, "camera_state_persist_failed");
-    }
-}
+// The sidecar is written in exactly one place — the orchestrator's
+// `persist_pipeline_outcome` — because a writer that builds the snapshot from
+// discovery alone resets `pipeline_state` to `unknown` and erases the outcome
+// a live pipeline just stamped. `camera_state_snapshot()` below is the
+// discovery half of that snapshot; it does not write.
 
 /// Parse the discovery JSON out of the subprocess stdout.
 ///

@@ -67,6 +67,14 @@ class VideoAccess(BaseModel):
     # Per-leg streams when the node exposes more than one; the top-level
     # `whep_url` / `hls_url` stay the primary (`main`) leg for back-compat.
     streams: list[VideoStreamAccess] = Field(default_factory=list)
+    # The streaming pipeline's own verdict, from the `camera-state.json` sidecar.
+    # Mediamtx readiness is NOT evidence that video exists — it serves WHEP with
+    # zero publishers — so this surface reports what the pipeline said, and says
+    # why when it failed. Mirrors the `/api/status/full` video block.
+    pipeline_state: str | None = None
+    reason: str | None = None
+    encoder: str | None = None
+    encoder_hw: bool | None = None
 
 
 class MavlinkAccess(BaseModel):

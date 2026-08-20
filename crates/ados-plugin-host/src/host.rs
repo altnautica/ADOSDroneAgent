@@ -282,6 +282,37 @@ pub trait HostServices: Send + Sync + 'static {
         Ok(not_implemented("radio.aux_stream.close"))
     }
 
+    /// Send one application datagram on the open auxiliary stream. A real host
+    /// validates the channel, encodes the aux frame, and forwards it to the radio
+    /// service's auxiliary command socket. Gated at the dispatch level on
+    /// `radio.aux_stream`.
+    fn radio_aux_stream_send(&self, _plugin_id: &str, _args: &Value)
+        -> Result<HostResult, HostError> { Ok(not_implemented("radio.aux_stream.send")) }
+
+    /// Subscribe to application datagrams received on an open auxiliary stream. A
+    /// real host arms a forwarder off the radio receive path and pushes each frame
+    /// as `radio.aux_stream.deliver`. Gated at the dispatch level on
+    /// `radio.aux_stream`.
+    fn radio_aux_stream_subscribe(&self, _plugin_id: &str, _args: &Value)
+        -> Result<HostResult, HostError> { Ok(not_implemented("radio.aux_stream.subscribe")) }
+
+    /// A receiver for the auxiliary-stream application-datagram fanout, when this
+    /// host has a wired aux reader. The server obtains one per
+    /// `radio.aux_stream.subscribe` and pushes each `(channel, payload)` to the
+    /// plugin as a `radio.aux_stream.deliver` envelope. Mirrors the
+    /// button-subscription seam.
+    ///
+    /// The default returns `None`, which keeps [`NoopHost`] unaffected (no push
+    /// stream). A real host returns a receiver armed off the radio service's aux
+    /// command socket; `Some` is returned even when the service is down so the
+    /// subscription succeeds and stays quiet while the reader retries.
+    fn radio_aux_stream_subscribe_stream(
+        &self,
+        _plugin_id: &str,
+    ) -> Option<tokio::sync::broadcast::Receiver<(u8, Vec<u8>)>> {
+        None
+    }
+
     /// Release every per-session host resource a plugin held when its connection drops
     /// (component reservations, driver registrations, camera claims, telemetry
     /// channels). The default is a no-op; a real host releases its state.
@@ -366,6 +397,21 @@ pub trait HostServices: Send + Sync + 'static {
     /// rather than failing and making a plugin treat "no buttons here" as an
     /// error it has to handle.
     fn button_subscribe_stream(
+        &self,
+        _plugin_id: &str,
+    ) -> Option<tokio::sync::broadcast::Receiver<Vec<u8>>> {
+        None
+    }
+
+    /// A receiver for the reserved plugin OLED page's touch-zone taps, when this
+    /// host has a display sidecar. The server obtains one per
+    /// `display.zone.subscribe` and pushes each `key` to the plugin as a
+    /// `display.zone.tapped` envelope. Mirrors the button-subscription seam.
+    ///
+    /// The default returns `None`, so [`NoopHost`] and any node without a
+    /// display yield no taps. That is the honest resting state for a board with
+    /// no front panel: the subscription succeeds and stays quiet.
+    fn display_zone_tap_stream(
         &self,
         _plugin_id: &str,
     ) -> Option<tokio::sync::broadcast::Receiver<Vec<u8>>> {

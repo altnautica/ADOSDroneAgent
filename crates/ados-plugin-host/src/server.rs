@@ -276,6 +276,22 @@ impl<H: HostServices> Connection<H> {
         let mut msp_subscribed = false;
         let (msp_tx, mut msp_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
 
+        // Auxiliary-stream application subscribe. One `radio.aux_stream.subscribe`
+        // per connection arms a forwarder off the host's shared aux reader into
+        // this merged channel, so the select loop writes the `radio.aux_stream.
+        // deliver` envelopes with no competing writers. Same shape as the button
+        // pump; each item is `(channel, payload)`.
+        let mut aux_subscribed = false;
+        let (aux_tx, mut aux_rx) = tokio::sync::mpsc::channel::<(u8, Vec<u8>)>(64);
+
+        // Plugin-page touch-zone subscribe. One `display.zone.subscribe` per
+        // connection arms a forwarder off the host's shared tap watcher into this
+        // merged channel, so the select loop writes the `display.zone.tapped`
+        // envelopes with no competing writers. Same shape as the button pump;
+        // each item is the tapped zone `key`.
+        let mut dz_subscribed = false;
+        let (dz_tx, mut dz_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+
         // MCP tool invocation: register an outbound-request sender so the control
         // socket can reach THIS live connection (the host->plugin request flow),
         // and track pending replies here so the read branch can resolve them. On
@@ -337,6 +353,10 @@ impl<H: HostServices> Connection<H> {
                             &btn_tx,
                             &mut msp_subscribed,
                             &msp_tx,
+                            &mut aux_subscribed,
+                            &aux_tx,
+                            &mut dz_subscribed,
+                            &dz_tx,
                             &mut forwarders,
                         )
                         .await
@@ -446,6 +466,34 @@ impl<H: HostServices> Connection<H> {
                         }
                     }
                 }
+                app = aux_rx.recv() => {
+                    // None means every aux forwarder dropped its sender; keep
+                    // serving requests rather than tearing the session down.
+                    if let Some((channel, payload)) = app {
+                        if let Err(e) = self
+                            .deliver_aux_stream(&mut write_half, &token, channel, &payload)
+                            .await
+                        {
+                            break Err(e);
+                        }
+                    }
+                }
+                key = dz_rx.recv() => {
+                    // None means every zone forwarder dropped its sender; keep
+                    // serving requests rather than tearing the session down.
+                    if let Some(key) = key {
+                        // Zone keys are ASCII; a non-UTF-8 key is a host bug, so
+                        // drop it rather than send a broken envelope.
+                        if let Ok(key) = String::from_utf8(key) {
+                            if let Err(e) = self
+                                .deliver_display_zone_tap(&mut write_half, &token, &key)
+                                .await
+                            {
+                                break Err(e);
+                            }
+                        }
+                    }
+                }
                 delivery = det_rx.recv() => {
                     // None means every detection forwarder dropped its sender;
                     // keep serving requests rather than tearing down.
@@ -500,6 +548,10 @@ impl<H: HostServices> Connection<H> {
         btn_tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
         msp_subscribed: &mut bool,
         msp_tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
+        aux_subscribed: &mut bool,
+        aux_tx: &tokio::sync::mpsc::Sender<(u8, Vec<u8>)>,
+        dz_subscribed: &mut bool,
+        dz_tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
         forwarders: &mut Vec<JoinHandle<()>>,
     ) -> Result<(), ServerError> {
         let req_id = env.request_id.clone();
@@ -527,6 +579,10 @@ impl<H: HostServices> Connection<H> {
                     btn_tx,
                     msp_subscribed,
                     msp_tx,
+                    aux_subscribed,
+                    aux_tx,
+                    dz_subscribed,
+                    dz_tx,
                     forwarders,
                 )
                 .await
@@ -554,6 +610,10 @@ impl<H: HostServices> Connection<H> {
         btn_tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
         msp_subscribed: &mut bool,
         msp_tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
+        aux_subscribed: &mut bool,
+        aux_tx: &tokio::sync::mpsc::Sender<(u8, Vec<u8>)>,
+        dz_subscribed: &mut bool,
+        dz_tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
         forwarders: &mut Vec<JoinHandle<()>>,
     ) -> Result<(), ServerError> {
         match method {
@@ -795,6 +855,86 @@ impl<H: HostServices> Connection<H> {
                 let result = Value::Map(vec![(Value::from("subscribed"), Value::Boolean(true))]);
                 send_response(write_half, &env.request_id, result).await
             }
+            // radio.aux_stream.subscribe arms the per-connection application-
+            // datagram push stream off the host's shared aux reader, exactly like
+            // button.subscribe arms the press stream. A second subscribe on the
+            // same connection is idempotent rather than an error: re-arming would
+            // duplicate every app frame to that plugin. The plugin that subscribed
+            // IS this connection, so no separate owner gate is required — a plugin
+            // only ever receives the app frames it asked for on its own stream.
+            Method::RadioAuxStreamSubscribe => {
+                if *aux_subscribed {
+                    let result = Value::Map(vec![(
+                        Value::from("already_subscribed"),
+                        Value::Boolean(true),
+                    )]);
+                    return send_response(write_half, &env.request_id, result).await;
+                }
+                *aux_subscribed = true;
+                if let Some(mut rx) = self.host.radio_aux_stream_subscribe_stream(&self.plugin_id) {
+                    let tx = aux_tx.clone();
+                    forwarders.push(tokio::spawn(async move {
+                        loop {
+                            match rx.recv().await {
+                                Ok(app) => {
+                                    if tx.send(app).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                // Lagged: this subscriber fell behind and the
+                                // oldest frames were dropped. Keep going — the app
+                                // lane is lossy-tolerant by design.
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                    continue
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                            }
+                        }
+                    }));
+                }
+                let result = Value::Map(vec![(Value::from("subscribed"), Value::Boolean(true))]);
+                send_response(write_half, &env.request_id, result).await
+            }
+            // display.zone.subscribe arms the per-connection touch-zone tap stream
+            // for the plugin's reserved display page, exactly like button.subscribe
+            // arms the press stream. A second subscribe on the same connection is
+            // idempotent (re-arming would duplicate every tap to that plugin). The
+            // plugin that subscribed IS the page owner for that connection, so no
+            // separate owner gate is needed — taps only ever reach the plugin that
+            // asked for them on its own stream.
+            Method::DisplayZoneSubscribe => {
+                if *dz_subscribed {
+                    let result = Value::Map(vec![(
+                        Value::from("already_subscribed"),
+                        Value::Boolean(true),
+                    )]);
+                    return send_response(write_half, &env.request_id, result).await;
+                }
+                *dz_subscribed = true;
+                if let Some(mut rx) = self.host.display_zone_tap_stream(&self.plugin_id) {
+                    let tx = dz_tx.clone();
+                    forwarders.push(tokio::spawn(async move {
+                        loop {
+                            match rx.recv().await {
+                                Ok(key) => {
+                                    if tx.send(key).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                // Lagged: the watcher produced taps faster than this
+                                // subscriber drained them. Drop the oldest — a
+                                // missed tap is better than a dead stream.
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                    continue
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                            }
+                        }
+                    }));
+                }
+                let result = Value::Map(vec![(Value::from("subscribed"), Value::Boolean(true))]);
+                send_response(write_half, &env.request_id, result).await
+            }
             // vision.subscribe_detections arms the per-connection detection-batch
             // push stream, exactly like vision.subscribe_frames arms the frame
             // pump. On the first subscribe to a camera we obtain a batch receiver
@@ -1023,6 +1163,66 @@ impl<H: HostServices> Connection<H> {
                 (Value::from("timestamp_ms"), Value::Integer(ts.into())),
             ]),
             request_id: format!("msp-{ts}"),
+            token: token.to_token_string(),
+            error: None,
+        };
+        write_frame(write_half, &env).await
+    }
+
+    /// Push one decoded application datagram to the plugin as a
+    /// `radio.aux_stream.deliver` event: kind `event`, method
+    /// `radio.aux_stream.deliver`, capability `radio.aux_stream`, args
+    /// `{channel, payload, timestamp_ms}`, request_id `aux-<ms>`. The `payload`
+    /// is the application bytes the host forwarded as-is (the host never decodes
+    /// the app stream — the plugin's codec owns that), and `channel` is the
+    /// AppStream/AppCommand byte.
+    async fn deliver_aux_stream<W: AsyncWriteExt + Unpin>(
+        &self,
+        write_half: &mut W,
+        token: &CapabilityToken,
+        channel: u8,
+        payload: &[u8],
+    ) -> Result<(), ServerError> {
+        let ts = now_ms();
+        let env = Envelope {
+            version: PROTOCOL_VERSION,
+            kind: "event".to_string(),
+            method: "radio.aux_stream.deliver".to_string(),
+            capability: "radio.aux_stream".to_string(),
+            args: Value::Map(vec![
+                (Value::from("channel"), Value::Integer(channel.into())),
+                (Value::from("payload"), Value::Binary(payload.to_vec())),
+                (Value::from("timestamp_ms"), Value::Integer(ts.into())),
+            ]),
+            request_id: format!("aux-{ts}"),
+            token: token.to_token_string(),
+            error: None,
+        };
+        write_frame(write_half, &env).await
+    }
+
+    /// Push one touch-zone tap on the plugin's reserved display page as a
+    /// `display.zone.tapped` event: kind `event`, method `display.zone.tapped`,
+    /// capability `display.oled.page`, args `{key, timestamp_ms}`, request_id
+    /// `dz-<ms>`. The `key` is the tapped zone's key string from the display
+    /// sidecar's tap record.
+    async fn deliver_display_zone_tap<W: AsyncWriteExt + Unpin>(
+        &self,
+        write_half: &mut W,
+        token: &CapabilityToken,
+        key: &str,
+    ) -> Result<(), ServerError> {
+        let ts = now_ms();
+        let env = Envelope {
+            version: PROTOCOL_VERSION,
+            kind: "event".to_string(),
+            method: "display.zone.tapped".to_string(),
+            capability: "display.oled.page".to_string(),
+            args: Value::Map(vec![
+                (Value::from("key"), Value::from(key.to_string())),
+                (Value::from("timestamp_ms"), Value::Integer(ts.into())),
+            ]),
+            request_id: format!("dz-{ts}"),
             token: token.to_token_string(),
             error: None,
         };

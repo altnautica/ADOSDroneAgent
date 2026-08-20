@@ -323,6 +323,47 @@ impl RadioClient {
     pub async fn close_aux_stream(&self) -> Result<Value, ClientError> {
         self.ipc.radio_aux_stream_close().await
     }
+
+    /// Send one application datagram on the open auxiliary stream.
+    ///
+    /// `channel` must be the reserved app channel this plugin's direction uses
+    /// (`AppStream` 8 or `AppCommand` 9); the host refuses any other. The payload
+    /// is opaque to the host; a payload over the aux-frame maximum is refused
+    /// before it is sent.
+    pub async fn send_aux(&self, channel: u8, payload: &[u8]) -> Result<Value, ClientError> {
+        self.ipc.radio_aux_stream_send(channel, payload).await
+    }
+
+    /// Subscribe to application datagrams received on the open auxiliary stream.
+    ///
+    /// The callback receives each `(channel, payload)` the host forwards; the
+    /// plugin's codec routes by channel. A stream with no inbound frames never
+    /// fires the callback — the resting state, not an error. Register before
+    /// subscribing so no early frame is missed.
+    pub async fn subscribe_aux<F: Fn(u8, Vec<u8>) + Send + Sync + 'static>(
+        &self,
+        cb: F,
+    ) -> Result<(), ClientError> {
+        let on_deliver = move |args: Value| {
+            let Some(m) = args.as_map() else { return };
+            let ch = m
+                .iter()
+                .find(|(k, _)| k.as_str() == Some("channel"))
+                .and_then(|(_, v)| v.as_u64())
+                .unwrap_or(0) as u8;
+            let pl = match m
+                .iter()
+                .find(|(k, _)| k.as_str() == Some("payload"))
+                .map(|(_, v)| v)
+            {
+                Some(Value::Binary(b)) => b.clone(),
+                _ => Vec::new(),
+            };
+            cb(ch, pl);
+        };
+        self.ipc.register_aux_callback(Arc::new(on_deliver));
+        self.ipc.radio_aux_stream_subscribe().await.map(|_| ())
+    }
 }
 
 /// `ctx.buttons` — front-panel presses.

@@ -56,6 +56,38 @@ def _stream_legs(
     return out
 
 
+# The `camera-state.json` freshness window, matching `CAMERA_STATE_FRESH_S` in
+# the Rust status surface: past it the writer has stopped and the file's last
+# words are not evidence of anything.
+_CAMERA_STATE_FRESH_S = 300.0
+
+
+def _pipeline_sidecar() -> dict[str, Any] | None:
+    """The streaming pipeline's own verdict, or ``None`` when nobody is asserting one.
+
+    ``None`` covers three cases the caller must not conflate with a verdict: no
+    sidecar (ados-video has never run this boot), a sidecar past the freshness
+    window (the writer stopped), and an unreadable one.
+    """
+    import json
+    import time
+
+    from ados.core.paths import ADOS_RUN_DIR
+
+    try:
+        doc = json.loads((ADOS_RUN_DIR / "camera-state.json").read_bytes())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(doc, dict):
+        return None
+    stamped = doc.get("updated_at_unix")
+    if not isinstance(stamped, (int, float)):
+        return None
+    if time.time() - float(stamped) > _CAMERA_STATE_FRESH_S:
+        return None
+    return doc
+
+
 async def _video_access(
     runtime: Any, host_name: str, config: Any = None
 ) -> VideoAccess:
@@ -89,6 +121,28 @@ async def _video_access(
             ),
         )
 
+    # THE RULE, mirrored from `build_video_block_with` in ados-control: mediamtx
+    # readiness is NOT evidence that video exists. Its WHEP endpoint answers with
+    # zero publishers, so it proves only that mediamtx is bound. The pipeline's
+    # own verdict outranks it, and a state that is not `streaming` never gets a
+    # playable URL. This is the payload `ados status` prints, so a surface that
+    # disagrees with `/api/status/full` is a surface that trains distrust.
+    sidecar = _pipeline_sidecar()
+    verdict = sidecar.get("pipeline_state") if sidecar else None
+    encoder = sidecar.get("encoder") if sidecar else None
+    encoder_hw = sidecar.get("encoder_hw") if sidecar else None
+    if verdict == "error":
+        return VideoAccess(
+            state="error",
+            pipeline_state="error",
+            reason=(sidecar or {}).get("pipeline_reason")
+            or "the video pipeline is in an error state",
+            encoder=encoder,
+            encoder_hw=encoder_hw,
+        )
+
+    ready = False
+    webrtc_port, hls_port = 8889, 8888
     try:
         from ados.api.routes.video import (
             _probe_mediamtx,
@@ -102,19 +156,60 @@ async def _video_access(
             # auth-blind and confirms the surface is serving frames.
             mtx = await _probe_mediamtx_via_whep() or mtx
         if mtx and mtx.get("ready"):
+            ready = True
             webrtc_port = int(mtx.get("webrtc_port", 8889))
             hls_port = int(mtx.get("hls_port", 8888))
-            return VideoAccess(
-                state="running",
-                whep_url=f"http://{host_name}:{webrtc_port}/main/whep",
-                hls_url=f"http://{host_name}:{hls_port}/main/index.m3u8",
-                recording=False,
-                streams=_stream_legs(config, host_name, webrtc_port, hls_port),
-            )
     except Exception:
         pass
 
-    return VideoAccess(state="not_initialized")
+    def running() -> VideoAccess:
+        return VideoAccess(
+            state="running",
+            whep_url=f"http://{host_name}:{webrtc_port}/main/whep",
+            hls_url=f"http://{host_name}:{hls_port}/main/index.m3u8",
+            recording=False,
+            streams=_stream_legs(config, host_name, webrtc_port, hls_port),
+            pipeline_state=verdict,
+            encoder=encoder,
+            encoder_hw=encoder_hw,
+        )
+
+    def plain(state: str) -> VideoAccess:
+        return VideoAccess(
+            state=state,
+            pipeline_state=verdict,
+            encoder=encoder,
+            encoder_hw=encoder_hw,
+        )
+
+    if verdict == "streaming":
+        return running() if ready else plain("connecting")
+    if verdict == "starting":
+        return plain("connecting")
+    if verdict == "stopped":
+        return plain("stopped")
+    if sidecar is not None and verdict is None and ready:
+        # A fresh sidecar with no verdict is an older ados-video that IS alive and
+        # writing, so the previous readiness-only answer is preserved for it rather
+        # than downgraded — the GCS drops video entirely for anything but `running`.
+        return running()
+    if _is_ground_profile(config) and ready:
+        # A ground station has no local pipeline to ask: mediamtx's publisher is the
+        # drone across the link, so readiness is the only local signal there is.
+        return running()
+    # No sidecar, or one past the freshness window: ados-video has never run this
+    # boot or its writer stopped. Either way nobody is asserting a pipeline, and a
+    # bound mediamtx is not a substitute. Same answer as `/api/status/full`.
+    return plain("not_initialized")
+
+
+def _is_ground_profile(config: Any) -> bool:
+    """True on a ground station, where mediamtx's publisher is the drone and no
+    local pipeline writes `camera-state.json`."""
+    profile = getattr(config, "profile", None) or getattr(
+        getattr(config, "agent", None), "profile", None
+    )
+    return str(profile or "").lower() in {"ground", "ground_station", "groundstation"}
 
 
 def _mission_control_url(*, config: Any) -> str:

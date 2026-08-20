@@ -115,6 +115,12 @@ struct AuxCountersInner {
     status_undecodable: AtomicU64,
     status_out_of_order: AtomicU64,
     identity_undecodable: AtomicU64,
+    /// Peer identity frames whose advertised plugin contract version diverges
+    /// from this node's own for a plugin both run. A non-zero count is the
+    /// operator-facing signal that an upgrade-mixed pair will disagree on the
+    /// plugin wire; a SUB-TALLY of `identity_frames`, so it is deliberately
+    /// absent from [`AuxCountersSnapshot::accounted`].
+    identity_plugin_version_mismatch: AtomicU64,
     /// Datagrams that decoded as the relay-proxy Response channel. Routed to the
     /// registered proxy if any; otherwise counted and dropped. A ground rig
     /// running no proxy caller still receives these when a peer buildAnswers
@@ -164,6 +170,20 @@ struct AuxCountersInner {
     /// numbers on a reordering lane (the caller timed out and removed itself
     /// between send and response). Sub-tally of `response_frames`.
     response_orphan: AtomicU64,
+    /// Datagrams that decoded as the neutral application-stream channel,
+    /// drone → ground. Routed to the registered application sink if any;
+    /// otherwise counted and dropped so a rig running no consumer can still
+    /// tell the lane is alive.
+    app_stream: AtomicU64,
+    /// AppStream datagrams dropped for want of a registered sink. Sub-tally of
+    /// `app_stream`, the pair that between them accounts for every one received.
+    app_stream_undelivered: AtomicU64,
+    /// Datagrams that decoded as the application-command channel. That channel
+    /// is an uplink (ground → drone); a ground downlink consumer never
+    /// legitimately receives one, so a non-zero count means a peer sent the
+    /// wrong direction or a frame was misrouted. Counted and dropped, never
+    /// forwarded.
+    app_command_unexpected: AtomicU64,
     recv_errors: AtomicU64,
     bind_failures: AtomicU64,
 }
@@ -200,6 +220,9 @@ impl AuxCounters {
             status_undecodable: c.status_undecodable.load(Ordering::Relaxed),
             status_out_of_order: c.status_out_of_order.load(Ordering::Relaxed),
             identity_undecodable: c.identity_undecodable.load(Ordering::Relaxed),
+            identity_plugin_version_mismatch: c
+                .identity_plugin_version_mismatch
+                .load(Ordering::Relaxed),
             response_frames: c.response_frames.load(Ordering::Relaxed),
             request_frames: c.request_frames.load(Ordering::Relaxed),
             link_feedback_frames: c.link_feedback_frames.load(Ordering::Relaxed),
@@ -209,6 +232,9 @@ impl AuxCounters {
             response_undecodable: c.response_undecodable.load(Ordering::Relaxed),
             response_dispatched: c.response_dispatched.load(Ordering::Relaxed),
             response_orphan: c.response_orphan.load(Ordering::Relaxed),
+            app_stream: c.app_stream.load(Ordering::Relaxed),
+            app_stream_undelivered: c.app_stream_undelivered.load(Ordering::Relaxed),
+            app_command_unexpected: c.app_command_unexpected.load(Ordering::Relaxed),
             recv_errors: c.recv_errors.load(Ordering::Relaxed),
             bind_failures: c.bind_failures.load(Ordering::Relaxed),
         }
@@ -291,6 +317,10 @@ pub struct AuxCountersSnapshot {
     /// Identity datagrams whose body did not decode. Sub-tally of
     /// `identity_frames`.
     pub identity_undecodable: u64,
+    /// Peer identity frames whose advertised plugin contract version diverges
+    /// from this node's own for a plugin both run. Sub-tally of
+    /// `identity_frames`; the upgrade-mismatch signal.
+    pub identity_plugin_version_mismatch: u64,
     /// Response datagrams whose body did not decode as a relay-proxy response.
     /// Sub-tally of `response_frames`.
     pub response_undecodable: u64,
@@ -300,6 +330,17 @@ pub struct AuxCountersSnapshot {
     /// Response datagrams whose id matched no pending caller. Sub-tally of
     /// `response_frames`.
     pub response_orphan: u64,
+    /// Datagrams that decoded as the neutral application-stream channel,
+    /// drone → ground. Routed to the registered sink if any, else counted and
+    /// dropped.
+    pub app_stream: u64,
+    /// AppStream datagrams dropped for want of a registered sink. Sub-tally of
+    /// `app_stream`.
+    pub app_stream_undelivered: u64,
+    /// Datagrams that decoded as the application-command channel — an uplink a
+    /// ground downlink consumer never legitimately receives. Counted and
+    /// dropped.
+    pub app_command_unexpected: u64,
     /// Failed reads on the loopback socket.
     pub recv_errors: u64,
     /// Failed attempts to bind the lane's loopback port. A non-zero value with
@@ -342,6 +383,8 @@ impl AuxCountersSnapshot {
             + self.decode_unknown_channel
             + self.decode_damaged
             + self.decode_overlong
+            + self.app_stream
+            + self.app_command_unexpected
     }
 }
 
@@ -436,6 +479,15 @@ fn mavlink_system_id(frame: &[u8]) -> Option<u8> {
     frame.get(5).copied()
 }
 
+/// A sink for the neutral application-stream channel ([`AuxChannel::AppStream`]).
+///
+/// Registered by whatever service consumes application datagrams a paired drone
+/// radiates; `None` on a rig running no such consumer, where an AppStream frame
+/// is counted and dropped rather than silently swallowed.
+pub trait AppStreamSink: Send + Sync {
+    fn deliver(&self, payload: &[u8]);
+}
+
 /// Where a decoded aux frame goes, chosen by its channel.
 ///
 /// Grouped rather than threaded one by one: every layer of the consumer carries
@@ -445,6 +497,11 @@ pub struct AuxSinks<'a> {
     pub mavlink: &'a MavlinkIngest,
     pub rpc_response: Option<&'a ados_protocol::aux_rpc_proxy::AuxRpcResponseIngest>,
     pub config_tunnel: Option<&'a ados_protocol::config_tunnel_ingest::ConfigTunnelIngest>,
+    pub app_stream: Option<&'a dyn AppStreamSink>,
+    /// This node's own installed plugins and their contract versions, so the
+    /// identity consumer can flag a peer advertising a different version for a
+    /// plugin both run. `None` where no comparison is wanted.
+    pub local_plugins: Option<&'a std::collections::HashMap<String, u16>>,
 }
 
 impl<'a> AuxSinks<'a> {
@@ -455,6 +512,8 @@ impl<'a> AuxSinks<'a> {
             mavlink,
             rpc_response: None,
             config_tunnel: None,
+            app_stream: None,
+            local_plugins: None,
         }
     }
 }
@@ -465,6 +524,8 @@ pub struct AuxSinksOwned {
     pub mavlink: Arc<MavlinkIngest>,
     pub rpc_response: Option<ados_protocol::aux_rpc_proxy::AuxRpcResponseIngest>,
     pub config_tunnel: Option<Arc<ados_protocol::config_tunnel_ingest::ConfigTunnelIngest>>,
+    pub app_stream: Option<Arc<dyn AppStreamSink>>,
+    pub local_plugins: Option<Arc<std::collections::HashMap<String, u16>>>,
 }
 
 impl AuxSinksOwned {
@@ -473,6 +534,8 @@ impl AuxSinksOwned {
             mavlink: &self.mavlink,
             rpc_response: self.rpc_response.as_ref(),
             config_tunnel: self.config_tunnel.as_deref(),
+            app_stream: self.app_stream.as_deref(),
+            local_plugins: self.local_plugins.as_deref(),
         }
     }
 }
@@ -607,7 +670,34 @@ async fn dispatch(
         AuxChannel::Identity => {
             counters.bump(&c.identity_frames);
             match NodeIdentity::decode(payload) {
-                Some(identity) => peers.record_identity(identity),
+                Some(identity) => {
+                    // Compare the peer's advertised plugin contract versions
+                    // against this node's own, for any plugin both run. A
+                    // divergence means the two halves would silently disagree on
+                    // the plugin wire (an AD05-class field reshape), so it is
+                    // surfaced as a counter and a warning rather than left to
+                    // climb as an unexplained decode statistic on one rig.
+                    if let (Some(local), Some(pl)) =
+                        (sinks.local_plugins, identity.pl.as_deref())
+                    {
+                        for (id, peer_ver) in
+                            ados_protocol::node_status::parse_plugin_list(pl)
+                        {
+                            if let Some(&own_ver) = local.get(&id) {
+                                if own_ver != peer_ver {
+                                    counters.bump(&c.identity_plugin_version_mismatch);
+                                    tracing::warn!(
+                                        plugin_id = %id,
+                                        peer_contract_version = peer_ver,
+                                        own_contract_version = own_ver,
+                                        "ground_aux_plugin_contract_version_mismatch"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    peers.record_identity(identity);
+                }
                 None => counters.bump(&c.identity_undecodable),
             }
         }
@@ -675,6 +765,27 @@ async fn dispatch(
                 }
                 _ => counters.bump(&c.config_tunnel_undelivered),
             }
+        }
+        // A neutral application-stream frame, drone → ground: an on-board
+        // application (e.g. a vision or analytics plugin) radiating its own
+        // datagrams to the paired ground node. Handed to the registered
+        // application sink verbatim; without one it is counted and dropped, the
+        // honest reading of "an application is streaming to a consumer this node
+        // is not running".
+        AuxChannel::AppStream => {
+            counters.bump(&c.app_stream);
+            match &sinks.app_stream {
+                Some(s) => s.deliver(payload),
+                None => counters.bump(&c.app_stream_undelivered),
+            }
+        }
+        // The uplink mirror of `AppStream`, ground → drone. A ground downlink
+        // consumer is the SENDER of that channel, never a receiver, so a
+        // non-zero count means a peer sent the wrong direction or a frame was
+        // misrouted. Counted for visibility and dropped, never forwarded.
+        AuxChannel::AppCommand => {
+            counters.bump(&c.app_command_unexpected);
+            tracing::debug!("ground_aux_unexpected_app_command_channel");
         }
     }
 }
@@ -1382,6 +1493,8 @@ mod tests {
             aux_mux::encode(AuxChannel::Mavlink, &heartbeat()).unwrap(),
             aux_mux::encode(AuxChannel::Status, b"status").unwrap(),
             aux_mux::encode(AuxChannel::Identity, b"identity").unwrap(),
+            aux_mux::encode(AuxChannel::AppStream, b"app-stream").unwrap(),
+            aux_mux::encode(AuxChannel::AppCommand, b"app-command").unwrap(),
             b"foreign application traffic".to_vec(),
             b"\xAD".to_vec(),
             wrong_version,
@@ -1415,6 +1528,9 @@ mod tests {
         assert_eq!(snap.republish_lane_down, 1);
         assert_eq!(snap.decode_damaged, 1);
         assert_eq!(snap.decode_foreign, 1);
+        assert_eq!(snap.app_stream, 1);
+        assert_eq!(snap.app_stream_undelivered, 1, "no app-stream sink is wired");
+        assert_eq!(snap.app_command_unexpected, 1);
     }
 
     #[tokio::test]
@@ -1441,6 +1557,8 @@ mod tests {
                 mavlink: Arc::new(MavlinkIngest::new(&sock)),
                 rpc_response: None,
                 config_tunnel: None,
+                app_stream: None,
+                local_plugins: None,
             },
             counters.clone(),
             AuxPeerCache::new(),
@@ -1502,7 +1620,9 @@ mod tests {
                 AuxSinksOwned {
                     mavlink: ingest.clone(),
                     rpc_response: None,
-                    config_tunnel: None
+                    config_tunnel: None,
+                    app_stream: None,
+                    local_plugins: None,
                 },
                 counters.clone(),
                 AuxPeerCache::new(),
@@ -1525,6 +1645,8 @@ mod tests {
                 mavlink: ingest,
                 rpc_response: None,
                 config_tunnel: None,
+                app_stream: None,
+                local_plugins: None,
             },
             counters.clone(),
             AuxPeerCache::new(),
@@ -1561,6 +1683,7 @@ mod tests {
             Some("Alpha"),
             Some("drone"),
             Some("1.2.3"),
+            &[],
         )
         .encode()
         .unwrap();
@@ -1646,6 +1769,8 @@ mod tests {
                 mavlink: &ingest,
                 rpc_response: Some(&proxy),
                 config_tunnel: None,
+                app_stream: None,
+                local_plugins: None,
             },
             &counters,
             &mut gate,
@@ -1685,6 +1810,8 @@ mod tests {
                 mavlink: &ingest,
                 rpc_response: None,
                 config_tunnel: Some(&tunnel),
+                app_stream: None,
+                local_plugins: None,
             },
             &counters,
             &mut gate,
@@ -1729,5 +1856,72 @@ mod tests {
         assert_eq!(snap.config_tunnel_forwarded, 0);
         assert_eq!(snap.config_tunnel_undelivered, 1);
         assert_eq!(snap.accounted(), snap.datagrams_received);
+    }
+
+    /// Two halves of a plugin on different contract versions must be flagged,
+    /// not left to disagree on the wire in silence. A plugin the peer runs but
+    /// this node does not is ignored: there is nothing here to disagree with.
+    #[tokio::test]
+    async fn a_plugin_contract_version_mismatch_is_flagged() {
+        use std::collections::HashMap;
+        let ingest = MavlinkIngest::new("/nonexistent/ingest.sock");
+        let counters = AuxCounters::new();
+        let mut gate = SeamGate::default();
+        let peers = AuxPeerCache::new();
+
+        // This node runs the plugin at contract version 3.
+        let local: HashMap<String, u16> = [("ados.example.two-halves".to_string(), 3u16)]
+            .into_iter()
+            .collect();
+        // The peer advertises the same plugin at version 2, plus a second plugin
+        // this node does not run (which must not count).
+        let peer_plugins = vec![
+            ("ados.example.two-halves".to_string(), 2u16),
+            ("ados.example.other".to_string(), 9u16),
+        ];
+        let identity =
+            NodeIdentity::build("drone-a", None, Some("drone"), None, &peer_plugins);
+        let framed = aux_mux::encode(AuxChannel::Identity, &identity.encode().unwrap()).unwrap();
+
+        let mut sinks = AuxSinks::mavlink_only(&ingest);
+        sinks.local_plugins = Some(&local);
+        dispatch(TEST_SLOT, &framed, &sinks, &counters, &mut gate, &peers).await;
+
+        let snap = counters.snapshot();
+        assert_eq!(snap.identity_frames, 1);
+        assert_eq!(
+            snap.identity_plugin_version_mismatch, 1,
+            "only the shared plugin with a differing version is a mismatch"
+        );
+    }
+
+    /// The same plugin at the same version on both halves is not a mismatch.
+    #[tokio::test]
+    async fn matching_plugin_contract_versions_are_not_flagged() {
+        use std::collections::HashMap;
+        let ingest = MavlinkIngest::new("/nonexistent/ingest.sock");
+        let counters = AuxCounters::new();
+        let mut gate = SeamGate::default();
+        let peers = AuxPeerCache::new();
+
+        let local: HashMap<String, u16> = [("ados.example.two-halves".to_string(), 3u16)]
+            .into_iter()
+            .collect();
+        let identity = NodeIdentity::build(
+            "drone-a",
+            None,
+            Some("drone"),
+            None,
+            &[("ados.example.two-halves".to_string(), 3u16)],
+        );
+        let framed = aux_mux::encode(AuxChannel::Identity, &identity.encode().unwrap()).unwrap();
+
+        let mut sinks = AuxSinks::mavlink_only(&ingest);
+        sinks.local_plugins = Some(&local);
+        dispatch(TEST_SLOT, &framed, &sinks, &counters, &mut gate, &peers).await;
+
+        let snap = counters.snapshot();
+        assert_eq!(snap.identity_frames, 1);
+        assert_eq!(snap.identity_plugin_version_mismatch, 0);
     }
 }

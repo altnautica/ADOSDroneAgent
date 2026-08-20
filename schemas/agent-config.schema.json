@@ -286,6 +286,17 @@
           "title": "Codec Preference",
           "type": "string"
         },
+        "encoder": {
+          "default": "auto",
+          "enum": [
+            "auto",
+            "omx",
+            "v4l2m2m",
+            "software"
+          ],
+          "title": "Encoder",
+          "type": "string"
+        },
         "expected": {
           "default": "auto",
           "enum": [
@@ -306,6 +317,21 @@
           "title": "Height",
           "type": "integer"
         },
+        "hflip": {
+          "default": false,
+          "title": "Hflip",
+          "type": "boolean"
+        },
+        "keyframe_interval": {
+          "default": 0,
+          "title": "Keyframe Interval",
+          "type": "integer"
+        },
+        "rotation": {
+          "default": 0,
+          "title": "Rotation",
+          "type": "integer"
+        },
         "source": {
           "default": "csi",
           "title": "Source",
@@ -319,6 +345,11 @@
             "height": 180,
             "width": 320
           }
+        },
+        "vflip": {
+          "default": false,
+          "title": "Vflip",
+          "type": "boolean"
         },
         "width": {
           "default": 1280,
@@ -359,6 +390,17 @@
           "title": "Enabled",
           "type": "boolean"
         },
+        "encoder": {
+          "default": "auto",
+          "enum": [
+            "auto",
+            "omx",
+            "v4l2m2m",
+            "software"
+          ],
+          "title": "Encoder",
+          "type": "string"
+        },
         "fov_deg": {
           "anyOf": [
             {
@@ -381,10 +423,20 @@
           "title": "Height",
           "type": "integer"
         },
+        "hflip": {
+          "default": false,
+          "title": "Hflip",
+          "type": "boolean"
+        },
         "id": {
           "default": "main",
           "title": "Id",
           "type": "string"
+        },
+        "keyframe_interval": {
+          "default": 0,
+          "title": "Keyframe Interval",
+          "type": "integer"
         },
         "match": {
           "anyOf": [
@@ -464,10 +516,20 @@
           "default": null,
           "title": "Role"
         },
+        "rotation": {
+          "default": 0,
+          "title": "Rotation",
+          "type": "integer"
+        },
         "source": {
           "default": "csi",
           "title": "Source",
           "type": "string"
+        },
+        "vflip": {
+          "default": false,
+          "title": "Vflip",
+          "type": "boolean"
         },
         "width": {
           "default": 1280,
@@ -1902,9 +1964,13 @@
             "bitrate_kbps": 4000,
             "codec": "h264",
             "codec_preference": "auto",
+            "encoder": "auto",
             "expected": "auto",
             "fps": 30,
             "height": 720,
+            "hflip": false,
+            "keyframe_interval": 0,
+            "rotation": 0,
             "source": "csi",
             "thumbnail": {
               "bitrate_kbps": 50,
@@ -1912,6 +1978,7 @@
               "height": 180,
               "width": 320
             },
+            "vflip": false,
             "width": 1280
           }
         },
@@ -2628,9 +2695,13 @@
           "bitrate_kbps": 4000,
           "codec": "h264",
           "codec_preference": "auto",
+          "encoder": "auto",
           "expected": "auto",
           "fps": 30,
           "height": 720,
+          "hflip": false,
+          "keyframe_interval": 0,
+          "rotation": 0,
           "source": "csi",
           "thumbnail": {
             "bitrate_kbps": 50,
@@ -2638,6 +2709,7 @@
             "height": 180,
             "width": 320
           },
+          "vflip": false,
           "width": 1280
         },
         "cameras": [],

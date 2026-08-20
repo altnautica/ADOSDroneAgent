@@ -663,7 +663,7 @@ risk = "medium"
 risk_reason = "Publishes a callable interface to an AI client; effect is bounded by the plugin's other capabilities and the token scope."
 
 # ===========================================================================
-# Plugin RPC dispatch table (47): wire method -> dispatch-level required cap.
+# Plugin RPC dispatch table (50): wire method -> dispatch-level required cap.
 #
 # The single source of truth for the gate the native host applies BEFORE routing
 # a request. Codegen emits this into both the Rust host
@@ -844,6 +844,14 @@ required_cap = "vision.track.designate"
 id = "display.page.set"
 required_cap = "display.oled.page"
 
+# Subscribe to touch-zone taps on the plugin's reserved display page. Arms a
+# per-connection push stream; the host watches the display sidecar's tap record
+# and pushes each tap to the owning plugin as a `display.zone.tapped` event.
+# Read-only and scoped to the plugin's own page.
+[[method]]
+id = "display.zone.subscribe"
+required_cap = "display.oled.page"
+
 # ---- front-panel buttons ----
 # Subscribe to the host's front-panel button presses. Arms a per-connection push
 # stream (like the vision subscriptions): the host reads the already-decoded
@@ -892,6 +900,21 @@ required_cap = "radio.aux_stream"
 
 [[method]]
 id = "radio.aux_stream.close"
+required_cap = "radio.aux_stream"
+
+# Send one application datagram on an open auxiliary stream — the payload is
+# framed on the neutral application channel and written to the radio service's
+# command socket. No per-send state: the stream is between the matching open and
+# close.
+[[method]]
+id = "radio.aux_stream.send"
+required_cap = "radio.aux_stream"
+
+# Subscribe to application datagrams received on an open auxiliary stream. The
+# host forwards each received frame to the subscribing plugin as a push (the
+# same delivery shape as button presses).
+[[method]]
+id = "radio.aux_stream.subscribe"
 required_cap = "radio.aux_stream"
 
 # ---- compute offload ----

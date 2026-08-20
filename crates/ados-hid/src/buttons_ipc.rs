@@ -249,6 +249,9 @@ async fn stream_button_events(
             Ok(ev) => {
                 let mut body = serde_json::to_vec(&json!({
                     "button": ev.button,
+                    // The stable friendly id (B1..B4) the cockpit and plugin
+                    // bindings key on; additive so no existing reader breaks.
+                    "label": crate::buttons::pin_to_label(ev.button).to_lowercase(),
                     "kind": ev.kind,
                     "action": ev.action,
                     "timestamp_ms": ev.timestamp_ms,

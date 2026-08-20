@@ -124,9 +124,9 @@ def test_post_whep_returns_sdp_answer_with_location(
     assert resp.status_code == 201
     assert resp.content == answer_sdp
     assert resp.headers["content-type"] == "application/sdp"
-    # Location header is forwarded unmodified so the Android client can
-    # dereference it back through the proxy.
-    assert resp.headers["location"] == "/main/whep/abc-123"
+    # Location is rewritten to the proxy's own /whep/<session>?camera=<leg> so the
+    # client's DELETE/PATCH route back through the proxy, not mediamtx's loopback.
+    assert resp.headers["location"] == "/whep/abc-123?camera=main"
     assert len(captured) == 1
 
 
@@ -188,19 +188,27 @@ def test_delete_whep_terminates_session(
 
 
 # ---------------------------------------------------------------------------
-# Profile gate
+# Profile-agnostic: the on-drone cockpit needs its own WHEP proxy
 # ---------------------------------------------------------------------------
 
 
-def test_profile_gate_drone_profile_returns_404(
+def test_drone_profile_serves_whep(
     drone_client: TestClient,
     install_mock_upstream: InstallUpstream,
 ) -> None:
-    """Drone profile gets 404 with the canonical profile-mismatch code."""
+    """The on-drone cockpit reaches its own video plane through the same-origin
+    proxy, so a non-ground profile forwards to the local mediamtx just as the
+    ground station does — there is no profile gate."""
+    answer_sdp = b"v=0\r\ns=-\r\n"
 
     def _handler(request: httpx.Request) -> httpx.Response:
-        # The proxy must short-circuit before reaching the upstream.
-        raise AssertionError("upstream contacted on drone profile")
+        assert request.method == "POST"
+        assert str(request.url) == "http://127.0.0.1:8889/main/whep"
+        return httpx.Response(
+            201,
+            headers={"content-type": "application/sdp", "location": "/main/whep/xyz"},
+            content=answer_sdp,
+        )
 
     captured = install_mock_upstream(_handler)
 
@@ -210,10 +218,10 @@ def test_profile_gate_drone_profile_returns_404(
         headers={"content-type": "application/sdp"},
     )
 
-    assert resp.status_code == 404
-    body = resp.json()
-    assert body["detail"]["error"]["code"] == "E_PROFILE_MISMATCH"
-    assert captured == []
+    assert resp.status_code == 201
+    assert resp.content == answer_sdp
+    assert resp.headers["location"] == "/whep/xyz?camera=main"
+    assert len(captured) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -266,3 +274,67 @@ def test_upstream_unreachable_returns_503(
     )
 
     assert resp.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# Per-leg WHEP + HLS passthrough
+# ---------------------------------------------------------------------------
+
+
+def test_post_whep_secondary_leg_targets_that_path(
+    ground_client: TestClient,
+    install_mock_upstream: InstallUpstream,
+) -> None:
+    """``?camera=<id>`` forwards to that leg's mediamtx path and rewrites the
+    Location back to the proxy with the leg preserved."""
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == "http://127.0.0.1:8889/ir/whep"
+        return httpx.Response(
+            201,
+            headers={"content-type": "application/sdp", "location": "/ir/whep/s1"},
+            content=b"v=0\r\n",
+        )
+
+    captured = install_mock_upstream(_handler)
+    resp = ground_client.post(
+        "/whep?camera=ir",
+        content=b"v=0\r\n",
+        headers={"content-type": "application/sdp"},
+    )
+    assert resp.status_code == 201
+    assert resp.headers["location"] == "/whep/s1?camera=ir"
+    assert len(captured) == 1
+
+
+def test_invalid_camera_id_is_rejected(ground_client: TestClient) -> None:
+    """A non-path-safe leg id is a 400, never a traversal into another route."""
+    resp = ground_client.post(
+        "/whep?camera=../admin",
+        content=b"v=0\r\n",
+        headers={"content-type": "application/sdp"},
+    )
+    assert resp.status_code == 400
+
+
+def test_hls_proxy_preserves_leg_subpath(
+    ground_client: TestClient,
+    install_mock_upstream: InstallUpstream,
+) -> None:
+    """``/hls/<leg>/<file>`` forwards to mediamtx's :8888 preserving the subpath so
+    the playlist's relative segment URIs resolve back through the proxy."""
+    playlist = b"#EXTM3U\n#EXT-X-VERSION:3\n"
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == "http://127.0.0.1:8888/main/index.m3u8"
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/vnd.apple.mpegurl"},
+            content=playlist,
+        )
+
+    captured = install_mock_upstream(_handler)
+    resp = ground_client.get("/hls/main/index.m3u8")
+    assert resp.status_code == 200
+    assert resp.content == playlist
+    assert len(captured) == 1

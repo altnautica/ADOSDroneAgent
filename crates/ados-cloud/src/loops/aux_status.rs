@@ -156,6 +156,11 @@ fn summarize_services(services: &[Value]) -> ServiceSummary {
 /// A lingering sidecar from a stopped pipeline must not keep advertising a
 /// camera as ready, so an un-refreshed file reads as unknown rather than as its
 /// last value (operating rule 44).
+///
+/// A camera that was DISCOVERED but whose pipeline failed is not `ready`
+/// either: the cockpit raises its no-camera overlay only for `missing`, so a
+/// `ready` pill over a failed pipeline is a confident card above a dead pane
+/// with no warning anywhere. Discovery stays authoritative for `missing`.
 fn read_camera_state(path: &str, now: f64) -> Option<String> {
     let doc: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
     let updated = doc.get("updated_at_unix").and_then(Value::as_f64)?;
@@ -163,7 +168,14 @@ fn read_camera_state(path: &str, now: f64) -> Option<String> {
         return None;
     }
     let state = doc.get("state").and_then(Value::as_str)?;
-    matches!(state, "ready" | "missing" | "error").then(|| state.to_string())
+    if !matches!(state, "ready" | "missing" | "error") {
+        return None;
+    }
+    let failed = doc.get("pipeline_state").and_then(Value::as_str) == Some("error");
+    if state == "ready" && failed {
+        return Some("error".to_string());
+    }
+    Some(state.to_string())
 }
 
 /// Derive a one-word video state from the streams sidecar, staleness-gated.
@@ -341,11 +353,17 @@ pub async fn run(config: Arc<CloudConfig>, mut shutdown: watch::Receiver<bool>) 
     let identity_interval = wfb.identity_interval();
     let egress = AuxEgress::new(format!("{}/{AUX_CMD_SOCK_FILE}", run_dir()));
     let version = env!("CARGO_PKG_VERSION").to_string();
+    // The installed plugin inventory rides the identity frame so a paired node
+    // running a different build can detect a contract-version disagreement
+    // instead of silently misreading the plugin wire. Read once: identity is
+    // sent rarely and the set does not change without a restart.
+    let plugins = ados_plugin_host::inventory::installed_contract_versions_default();
     let identity = NodeIdentity::build(
         &device_id,
         Some(&config.agent.name),
         Some(&config.agent.profile),
         Some(&version),
+        &plugins,
     );
 
     tracing::info!(
@@ -689,6 +707,43 @@ mod tests {
         let later = now + 120.0;
         assert_eq!(read_camera_state(cam.to_str().unwrap(), later), None);
         assert_eq!(read_video_state(vid.to_str().unwrap(), later), None);
+    }
+
+    /// The cockpit raises its no-camera overlay only for `missing`, so a
+    /// discovered camera whose pipeline failed used to reach the operator as a
+    /// confident `ready` pill above a dead pane, with no warning anywhere.
+    #[test]
+    fn a_discovered_camera_with_a_failed_pipeline_reports_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let cam = dir.path().join("camera-state.json");
+        let now = 1_700_000_000.0;
+        let write = |state: &str, pipeline: &str| {
+            std::fs::write(
+                &cam,
+                json!({"state": state, "pipeline_state": pipeline, "updated_at_unix": now})
+                    .to_string(),
+            )
+            .unwrap();
+        };
+
+        write("ready", "error");
+        assert_eq!(
+            read_camera_state(cam.to_str().unwrap(), now),
+            Some("error".into())
+        );
+
+        write("ready", "streaming");
+        assert_eq!(
+            read_camera_state(cam.to_str().unwrap(), now),
+            Some("ready".into())
+        );
+
+        // Discovery stays authoritative for `missing`.
+        write("missing", "error");
+        assert_eq!(
+            read_camera_state(cam.to_str().unwrap(), now),
+            Some("missing".into())
+        );
     }
 
     #[test]

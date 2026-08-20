@@ -32,6 +32,18 @@ fn default_codec_preference() -> String {
 fn default_true() -> bool {
     true
 }
+fn default_rotation() -> u32 {
+    0
+}
+fn default_flip() -> bool {
+    false
+}
+fn default_encoder() -> String {
+    "auto".to_string()
+}
+fn default_keyframe_interval() -> u32 {
+    0
+}
 
 /// True when a source string is a network capture URL — a stream mediamtx pulls
 /// (or ffmpeg reads) rather than a local V4L2/CSI device. Recognises plain and
@@ -111,6 +123,29 @@ pub struct CameraConfig {
     /// the operator's attention is on a different aircraft.
     #[serde(default)]
     pub thumbnail: CameraProfile,
+    /// Clockwise image rotation in degrees — 0 | 90 | 180 | 270, default 0.
+    /// This is an IMAGE transform applied before encode, distinct from the
+    /// coarse physical-mount `orientation` metadata (which the pipeline ignores).
+    #[serde(default = "default_rotation")]
+    pub rotation: u32,
+    /// Mirror the image horizontally before encode (default false).
+    #[serde(default = "default_flip")]
+    pub hflip: bool,
+    /// Mirror the image vertically before encode (default false).
+    #[serde(default = "default_flip")]
+    pub vflip: bool,
+    /// Encoder selection override: "auto" (default, probe the board) |
+    /// "omx" (Allwinner OMX hardware) | "v4l2m2m" (ffmpeg V4L2-M2M hardware) |
+    /// "software" (libx264). "auto" routes a vendor/Allwinner board to the OMX
+    /// GStreamer hardware encoder when `omxh264videoenc` is present, else falls
+    /// back to the probed ffmpeg/gstreamer path.
+    #[serde(default = "default_encoder")]
+    pub encoder: String,
+    /// Keyframe (GOP) interval in frames; 0 (default) lets the encoder pick a
+    /// short low-latency GOP (0.5 s at the configured fps) so radio FEC
+    /// recovers fast. An explicit value is honoured as `-g` / `key-int-max`.
+    #[serde(default = "default_keyframe_interval")]
+    pub keyframe_interval: u32,
 }
 
 impl Default for CameraConfig {
@@ -124,6 +159,11 @@ impl Default for CameraConfig {
             bitrate_kbps: default_bitrate_kbps(),
             codec_preference: default_codec_preference(),
             thumbnail: CameraProfile::default(),
+            rotation: default_rotation(),
+            hflip: default_flip(),
+            vflip: default_flip(),
+            encoder: default_encoder(),
+            keyframe_interval: default_keyframe_interval(),
         }
     }
 }
@@ -265,6 +305,26 @@ pub struct CameraLeg {
     /// Physical fingerprint that re-pins `source` → `id` across a device rename.
     #[serde(default, rename = "match")]
     pub camera_match: Option<CameraMatch>,
+    // --- Encode-plane (image-transform + encoder-selection) keys. Unlike the
+    // roster metadata above, these ARE read by the encode pipeline, so they plug
+    // straight through to the encoder command builder via [`ResolvedLeg`]. All
+    // additive + default-safe (mirror Python `CameraLeg`).
+    /// Clockwise image rotation in degrees — 0 | 90 | 180 | 270, default 0
+    /// (distinct from the coarse-mount `orientation` metadata above).
+    #[serde(default = "default_rotation")]
+    pub rotation: u32,
+    /// Mirror the image horizontally before encode (default false).
+    #[serde(default = "default_flip")]
+    pub hflip: bool,
+    /// Mirror the image vertically before encode (default false).
+    #[serde(default = "default_flip")]
+    pub vflip: bool,
+    /// Encoder override: "auto" | "omx" | "v4l2m2m" | "software" (default "auto").
+    #[serde(default = "default_encoder")]
+    pub encoder: String,
+    /// Keyframe interval in frames; 0 ⇒ encoder picks a short low-latency GOP.
+    #[serde(default = "default_keyframe_interval")]
+    pub keyframe_interval: u32,
 }
 
 impl CameraLeg {
@@ -296,6 +356,14 @@ pub struct ResolvedLeg {
     pub height: u32,
     pub fps: u32,
     pub bitrate_kbps: u32,
+    /// Clockwise image rotation in degrees (0 | 90 | 180 | 270), default 0.
+    pub rotation: u32,
+    pub hflip: bool,
+    pub vflip: bool,
+    /// Encoder override: "auto" | "omx" | "v4l2m2m" | "software".
+    pub encoder: String,
+    /// Keyframe interval in frames; 0 ⇒ encoder picks a short low-latency GOP.
+    pub keyframe_interval: u32,
 }
 
 impl ResolvedLeg {
@@ -303,7 +371,9 @@ impl ResolvedLeg {
     /// reuse the same encoder command builder as the primary. `codec_preference`
     /// defaults to `"auto"` (the leg carries only the concrete `codec`), and the
     /// `thumbnail` attention profile is the default and unread: only the PRIMARY
-    /// leg rides the shared radio channel, so only it is attention-switched.
+    /// leg rides the shared radio channel, so only it is attention-switched. The
+    /// encode-plane keys (rotation/hflip/vflip/encoder/keyframe_interval) carry
+    /// through so a per-leg orientation/encoder override reaches the builder.
     pub fn to_camera_config(&self) -> CameraConfig {
         CameraConfig {
             source: self.source.clone(),
@@ -314,6 +384,11 @@ impl ResolvedLeg {
             bitrate_kbps: self.bitrate_kbps,
             codec_preference: "auto".to_string(),
             thumbnail: CameraProfile::default(),
+            rotation: self.rotation,
+            hflip: self.hflip,
+            vflip: self.vflip,
+            encoder: self.encoder.clone(),
+            keyframe_interval: self.keyframe_interval,
         }
     }
 
@@ -579,6 +654,11 @@ impl AgentVideoConfig {
                 height: camera.height,
                 fps: camera.fps,
                 bitrate_kbps: camera.bitrate_kbps,
+                rotation: camera.rotation,
+                hflip: camera.hflip,
+                vflip: camera.vflip,
+                encoder: camera.encoder.clone(),
+                keyframe_interval: camera.keyframe_interval,
             }];
         }
         let primary_idx = self
@@ -618,6 +698,11 @@ impl AgentVideoConfig {
                     height: c.height,
                     fps: c.fps,
                     bitrate_kbps: c.bitrate_kbps,
+                    rotation: c.rotation,
+                    hflip: c.hflip,
+                    vflip: c.vflip,
+                    encoder: c.encoder.clone(),
+                    keyframe_interval: c.keyframe_interval,
                 }
             })
             .collect()
@@ -734,6 +819,13 @@ mod tests {
         assert_eq!(c.fps, 30);
         assert_eq!(c.bitrate_kbps, 4000);
         assert_eq!(c.codec_preference, "auto");
+        // Encode-plane keys: image transform off, encoder auto (probe), and the
+        // keyframe interval 0 meaning the encoder picks a short low-latency GOP.
+        assert_eq!(c.rotation, 0);
+        assert!(!c.hflip);
+        assert!(!c.vflip);
+        assert_eq!(c.encoder, "auto");
+        assert_eq!(c.keyframe_interval, 0);
     }
 
     #[test]
@@ -1068,6 +1160,13 @@ video:
         assert!(leg.mount_pitch_deg.is_none());
         assert!(leg.calibration.is_none());
         assert!(leg.camera_match.is_none());
+        // The encode-plane keys default like the Rust CameraConfig / Python
+        // CameraLeg: no image transform, encoder auto, auto keyframe interval.
+        assert_eq!(leg.rotation, 0);
+        assert!(!leg.hflip);
+        assert!(!leg.vflip);
+        assert_eq!(leg.encoder, "auto");
+        assert_eq!(leg.keyframe_interval, 0);
         // A single declared leg (no role) is the primary owned encoder.
         let legs = cfg.resolve_legs(&CameraConfig::default());
         assert_eq!(legs.len(), 1);
@@ -1231,5 +1330,46 @@ video:
         assert_eq!(cam.codec, "h265");
         assert_eq!(cam.width, 640);
         assert_eq!(cam.fps, 15);
+    }
+
+    // --- encode-plane keys propagate to the encoder --------------------
+
+    #[test]
+    fn camera_leg_encode_plane_keys_reach_to_camera_config() {
+        // The image-transform + encoder-selection keys are the ONE set of
+        // per-leg keys the pipeline reads, so unlike the roster metadata they
+        // must survive `resolve_legs` → `to_camera_config` (the per-leg encoder
+        // command is built from that CameraConfig view).
+        let yaml = "\
+video:
+  cameras:
+    - id: eo
+      source: /dev/video0
+      role: primary
+    - id: belly
+      source: /dev/video1
+      role: eo_wide
+      rotation: 180
+      hflip: true
+      vflip: false
+      encoder: omx
+      keyframe_interval: 5
+";
+        let (_dir, path) = write_tmp(yaml);
+        let legs = AgentVideoConfig::load_from(&path).resolve_legs(&CameraConfig::default());
+        let belly = legs
+            .iter()
+            .find(|l| l.id == "belly" && l.role == "eo_wide" && !l.is_primary)
+            .unwrap();
+        assert_eq!(belly.rotation, 180);
+        assert!(belly.hflip);
+        assert!(!belly.vflip);
+        assert_eq!(belly.encoder, "omx");
+        assert_eq!(belly.keyframe_interval, 5);
+        let cam = belly.to_camera_config();
+        assert_eq!(cam.rotation, 180);
+        assert!(cam.hflip);
+        assert_eq!(cam.encoder, "omx");
+        assert_eq!(cam.keyframe_interval, 5);
     }
 }

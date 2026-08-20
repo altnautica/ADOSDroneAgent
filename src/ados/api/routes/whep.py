@@ -32,18 +32,41 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from ados.api.routes.ground_station._common import _require_ground_profile
 from ados.core.logging import get_logger
 
 log = get_logger("api.whep")
 
 router = APIRouter()
 
-# Local MediaMTX WHEP target. The path component is the published
-# stream name; the ground-station mediamtx config publishes ``main`` so
-# the resource path is ``/main/whep``. Module-level so tests can swap.
-_UPSTREAM_BASE = "http://127.0.0.1:8889"
-_UPSTREAM_PATH = "/main/whep"
+# Local MediaMTX media endpoints, fronted so a browser reaches the live video
+# plane through the SAME host:port as the REST + WebSocket surface. Advertising
+# absolute ``:8889`` / ``:8888`` URLs broke off-LAN (a ``.local`` name a remote
+# GCS cannot resolve, or an IP the browser cannot route) and under an HTTPS GCS
+# (mixed content); a same-origin ``/whep`` + ``/hls`` path resolves against
+# whatever host reached the agent. WHEP (WebRTC) is served per published leg at
+# ``:8889/<leg>/whep``, HLS at ``:8888/<leg>/index.m3u8``. PROFILE-AGNOSTIC: the
+# on-drone cockpit needs its own proxy, not only the ground station. Module-level
+# so tests can swap the upstreams.
+_WHEP_BASE = "http://127.0.0.1:8889"
+_HLS_BASE = "http://127.0.0.1:8888"
+
+# The primary published leg. A multi-leg node addresses a secondary leg by
+# ``?camera=<id>`` (WHEP) or ``/hls/<id>/index.m3u8`` (HLS).
+_DEFAULT_CAMERA = "main"
+
+
+def _camera_id(request: Request) -> str:
+    """The requested leg id from ``?camera=``, defaulting to the primary ``main``.
+
+    Validated path-safe (it becomes a mediamtx path segment): alphanumerics plus
+    ``-`` / ``_``, matching the roster's own leg-id rule. A bad value is a 400,
+    never a path traversal into another mediamtx route.
+    """
+    camera = request.query_params.get("camera", _DEFAULT_CAMERA)
+    if not camera or not all(c.isalnum() or c in "-_" for c in camera):
+        raise HTTPException(status_code=400, detail="invalid camera id")
+    return camera
+
 
 # Headers we must NOT forward verbatim on either leg of the proxy.
 # ``Host`` is rewritten by httpx based on the upstream URL. The hop-by-
@@ -108,21 +131,26 @@ def _filter_response_headers(resp: httpx.Response) -> dict[str, str]:
 
 async def _forward(
     method: str,
-    upstream_path: str,
+    upstream_url: str,
     request: Request,
+    *,
+    camera: str | None = None,
 ) -> StreamingResponse:
-    """Forward a request to the local MediaMTX WHEP endpoint.
+    """Forward a request to a local MediaMTX media endpoint (WHEP or HLS).
 
-    Reads the request body in full because the SDP / SDP-fragment
-    payload is small (a few KB at most) and MediaMTX expects a known
-    Content-Length. The response is streamed back to the caller so
-    chunked transfer encodings from MediaMTX flow through cleanly.
+    ``upstream_url`` is the absolute loopback target. Reads the request body in
+    full (the SDP / SDP-fragment payload is a few KB and MediaMTX expects a known
+    Content-Length); the response is streamed back so chunked encodings and HLS
+    segments flow through cleanly.
+
+    When ``camera`` is set (a WHEP offer), the upstream ``Location`` — a mediamtx
+    resource path like ``/<camera>/whep/<session>`` — is rewritten to this proxy's
+    own ``/whep/<session>?camera=<camera>`` so the client tears the session down
+    (DELETE) and restarts ICE (PATCH) back through the proxy instead of dialing
+    mediamtx's loopback address, which is unreachable from the browser.
     """
-    _require_ground_profile()
-
     body = await request.body()
     headers = _filter_request_headers(request)
-    upstream_url = f"{_UPSTREAM_BASE}{upstream_path}"
     client = _get_client()
 
     try:
@@ -131,29 +159,30 @@ async def _forward(
             upstream_url,
             content=body,
             headers=headers,
-            params=request.query_params,
         )
     except httpx.ConnectError:
-        log.warning("whep_upstream_unreachable", url=upstream_url)
+        log.warning("media_upstream_unreachable", url=upstream_url)
         raise HTTPException(
             status_code=503,
-            detail="upstream WHEP endpoint unreachable",
+            detail="upstream media endpoint unreachable",
         )
     except httpx.TimeoutException:
-        log.warning("whep_upstream_timeout", url=upstream_url)
+        log.warning("media_upstream_timeout", url=upstream_url)
         raise HTTPException(
             status_code=504,
-            detail="upstream WHEP endpoint timed out",
+            detail="upstream media endpoint timed out",
         )
 
     response_headers = _filter_response_headers(upstream)
+    if camera is not None:
+        _rewrite_whep_location(response_headers, camera)
     media_type = upstream.headers.get("content-type")
 
     log.debug(
-        "whep_proxy",
+        "media_proxy",
         method=method,
         upstream_status=upstream.status_code,
-        upstream_path=upstream_path,
+        upstream_url=upstream_url,
     )
 
     return StreamingResponse(
@@ -164,19 +193,53 @@ async def _forward(
     )
 
 
+def _rewrite_whep_location(headers: dict[str, str], camera: str) -> None:
+    """Rewrite a mediamtx WHEP ``Location`` (``/<camera>/whep/<session>``) to this
+    proxy's ``/whep/<session>?camera=<camera>`` so the session-resource DELETE /
+    PATCH route back here. Best-effort: an absent or unexpected Location is left
+    untouched (the exchange still succeeds; only explicit teardown is affected).
+    """
+    prefix = f"/{camera}/whep"
+    for key in list(headers):
+        if key.lower() != "location":
+            continue
+        loc = headers[key]
+        if loc.startswith(prefix):
+            headers[key] = f"/whep{loc[len(prefix):]}?camera={camera}"
+        return
+
+
 @router.post("/whep")
 async def whep_offer(request: Request) -> StreamingResponse:
-    """Forward a WHEP SDP offer to the local MediaMTX instance."""
-    return await _forward("POST", _UPSTREAM_PATH, request)
+    """Forward a WHEP SDP offer to the requested leg (``?camera=<id>``, default
+    the primary ``main``)."""
+    camera = _camera_id(request)
+    return await _forward(
+        "POST", f"{_WHEP_BASE}/{camera}/whep", request, camera=camera
+    )
 
 
 @router.delete("/whep/{session_id}")
 async def whep_terminate(session_id: str, request: Request) -> StreamingResponse:
-    """Forward a WHEP session termination request."""
-    return await _forward("DELETE", f"{_UPSTREAM_PATH}/{session_id}", request)
+    """Forward a WHEP session termination for the requested leg."""
+    camera = _camera_id(request)
+    return await _forward(
+        "DELETE", f"{_WHEP_BASE}/{camera}/whep/{session_id}", request
+    )
 
 
 @router.patch("/whep/{session_id}")
 async def whep_ice_restart(session_id: str, request: Request) -> StreamingResponse:
-    """Forward a trickle-ICE SDP fragment for ICE restart."""
-    return await _forward("PATCH", f"{_UPSTREAM_PATH}/{session_id}", request)
+    """Forward a trickle-ICE SDP fragment (ICE restart) for the requested leg."""
+    camera = _camera_id(request)
+    return await _forward(
+        "PATCH", f"{_WHEP_BASE}/{camera}/whep/{session_id}", request
+    )
+
+
+@router.get("/hls/{path:path}")
+async def hls_proxy(path: str, request: Request) -> StreamingResponse:
+    """Forward an HLS playlist or segment to the local MediaMTX HLS server,
+    preserving the leg subpath (``/hls/<id>/index.m3u8`` → ``:8888/<id>/index.m3u8``)
+    so the playlist's relative segment URIs resolve back through this proxy."""
+    return await _forward("GET", f"{_HLS_BASE}/{path}", request)

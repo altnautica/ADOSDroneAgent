@@ -476,6 +476,14 @@ def test_viewer_url_from_whep_none_passthrough() -> None:
     assert cli_main._viewer_url_from_whep(None) is None
     assert cli_main._viewer_url_from_whep("") is None
 
+
+def test_viewer_url_from_whep_relative_points_at_local_mediamtx() -> None:
+    # The agent now advertises a same-origin relative path; the on-box CLI cannot
+    # build a browser-clickable absolute URL from it, so it falls back to the
+    # local mediamtx viewer.
+    assert cli_main._viewer_url_from_whep("/whep") == "http://127.0.0.1:8889/main/"
+
+
 def test_update_pins_the_boxs_own_profile_so_it_cannot_be_reprofiled() -> None:
     """An upgrade must never change what a box IS.
 

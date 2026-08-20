@@ -254,6 +254,19 @@ fn validate_cameras(cameras: &[Value]) -> Result<(), String> {
                 return Err(format!("unknown orientation {orientation:?}"));
             }
         }
+        // The image-transform `rotation` (distinct from the coarse-mount
+        // `orientation` metadata) must be one of the four supported clockwise
+        // values; mirrors the encoder-config schema so a bad value is a clear
+        // 400 before the socket round-trip.
+        if let Some(rot) = obj.get("rotation") {
+            let bad = match rot {
+                Value::Number(n) => !matches!(n.as_i64(), Some(0 | 90 | 180 | 270)),
+                _ => true, // absent is fine, but any non-integer value is not
+            };
+            if bad {
+                return Err("camera rotation must be one of 0, 90, 180, 270".to_string());
+            }
+        }
         match obj.get("purpose") {
             // Absent or explicitly null → no purpose (the empty list on reload).
             None | Some(Value::Null) => {}
@@ -404,6 +417,11 @@ fn declared_legs(cfg: &RosterVideoConfig, has_discovered: bool) -> Vec<CameraLeg
         mount_pitch_deg: None,
         calibration: None,
         camera_match: None,
+        rotation: 0,
+        hflip: false,
+        vflip: false,
+        encoder: "auto".to_string(),
+        keyframe_interval: 0,
     }]
 }
 
@@ -711,6 +729,11 @@ mod tests {
             mount_pitch_deg: None,
             calibration: None,
             camera_match: None,
+            rotation: 0,
+            hflip: false,
+            vflip: false,
+            encoder: "auto".to_string(),
+            keyframe_interval: 0,
         }
     }
 
@@ -1077,10 +1100,37 @@ mod tests {
     #[test]
     fn validate_cameras_accepts_a_well_formed_list() {
         let cams = vec![
-            json!({"id": "eo", "source": "/dev/video0", "role": "primary", "orientation": "forward", "purpose": ["feed", "detect"]}),
-            json!({"id": "belly", "source": "/dev/video1", "orientation": "down", "purpose": ["precision-landing"]}),
+            json!({"id": "eo", "source": "/dev/video0", "role": "primary", "orientation": "forward", "purpose": ["feed", "detect"], "rotation": 90, "hflip": true, "vflip": false, "encoder": "omx", "keyframe_interval": 5}),
+            json!({"id": "belly", "source": "/dev/video1", "orientation": "down", "purpose": ["precision-landing"], "rotation": 270, "hflip": false, "vflip": true}),
         ];
         assert!(validate_cameras(&cams).is_ok());
+    }
+
+    #[test]
+    fn validate_cameras_rejects_bad_rotation_values() {
+        // rotation must be one of 0 / 90 / 180 / 270 (mirrors the encoder
+        // schema; distinct from the coarse-mount `orientation` metadata). A
+        // degenerate value is a clear 400 before the socket round-trip.
+        for bad in [45, 360, -90, 190] {
+            assert!(
+                validate_cameras(&[json!({"id": "eo", "source": "/dev/video0", "rotation": bad})])
+                    .is_err(),
+                "rotation {bad} must be rejected"
+            );
+        }
+        // A non-integer rotation is rejected too (it would break the reload).
+        assert!(
+            validate_cameras(&[json!({"id": "eo", "source": "/dev/video0", "rotation": "90"})])
+                .is_err()
+        );
+        // The four supported values are accepted.
+        for good in [0, 90, 180, 270] {
+            assert!(
+                validate_cameras(&[json!({"id": "eo", "source": "/dev/video0", "rotation": good})])
+                    .is_ok(),
+                "rotation {good} must be accepted"
+            );
+        }
     }
 
     #[test]

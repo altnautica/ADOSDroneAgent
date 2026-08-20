@@ -121,6 +121,11 @@ mod tests {
             height: 720,
             fps: 30,
             bitrate_kbps: 4000,
+            rotation: 0,
+            hflip: false,
+            vflip: false,
+            encoder: "auto".into(),
+            keyframe_interval: 0,
         }
     }
 

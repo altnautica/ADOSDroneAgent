@@ -3,12 +3,17 @@ Description=ADOS Video Pipeline
 After=ados-mavlink.service
 PartOf=ados-supervisor.service
 # Video capture/encode runs on the air side only; the installer fetches the
-# binary on the drone profile, never on a ground station (a receiver). Gate the
-# unit on the binary's presence so a node that did not fetch it skips cleanly
-# instead of crash-looping "binary missing" forever under Restart=always. The
-# installer's health gate is the loud failure for a genuinely missing binary on
-# a profile that SHOULD have it.
-ConditionPathExists=/opt/ados/bin/ados-video
+# binary on the drone profile, never on a ground station (a receiver), and only
+# enables this unit where it fetched it.
+#
+# There is deliberately NO `ConditionPathExists` here. It used to gate on
+# /opt/ados/bin/ados-video so a node without the binary "skipped cleanly" — but
+# a skipped unit is INVISIBLE: `systemctl is-active` says `inactive`, nothing
+# lands in the journal, and the ExecStart's own missing-binary branch below
+# could never run. A drone that upgraded without fetching the binary
+# therefore looked identical to one that simply had video off, while the GCS
+# still rendered a camera card from the discovery sidecar. A binary that is
+# missing on a profile that needs it is a failure and must read as one.
 # No start-limit: a USB camera that wedges off the bus (cheap UVC modules
 # mishandle resume) must never make systemd give up and leave the pipeline
 # inactive. The native orchestrator already backs off internally and the
@@ -21,17 +26,36 @@ StartLimitIntervalSec=0
 Slice=ados.slice
 Type=simple
 # The native video orchestrator is the only implementation; the standalone
-# Python video service was removed once the binary was bench-validated. exec the
-# binary unconditionally (failing loudly if it is absent rather than running a
-# stale path); the installer always provisions it. `exec` replaces the shell
-# image so SupplementaryGroups=video carries over. Three Python modules under
-# services/video stay, each with a live consumer: mediamtx (the ground-station
-# manager), camera_mgr (the HAL camera CLI and the demo pipeline), and the sei_*
-# pair, which this binary spawns by module name. The pipeline, encoder and
-# local_tap modules named here previously are deleted -- the native service owns
-# all three paths.
-ExecStart=/bin/sh -c 'if [ -x /opt/ados/bin/ados-video ]; then exec /opt/ados/bin/ados-video; else echo "ados-video binary missing; reinstall to fetch it" >&2; exit 1; fi'
+# Python video service was removed once the binary was bench-validated. Three
+# Python modules under services/video stay, each with a live consumer: mediamtx
+# (the ground-station manager), camera_mgr (the HAL camera CLI and the demo
+# pipeline), and the sei_* pair, which this binary spawns by module name. The
+# pipeline, encoder and local_tap modules named here previously are deleted --
+# the native service owns all three paths.
+#
+# The missing-binary case, made loud and observable exactly ONCE: a marker under
+# /run/ados that `ados status` reads, a journal line, and exit 78, which
+# RestartPreventExitStatus below turns into a terminal `failed` state. This is
+# what the removed `ConditionPathExists` used to hide.
+#
+# The check lives in the main process, not an ExecStartPre. RestartPreventExitStatus=
+# does not apply to ExecStartPre (systemd.service(5)), so with Restart=always and
+# RestartSec=3 a genuinely missing binary retried forever at ~20 cycles/min --
+# ~28,800 a day, each paying a fork, a 5-mount namespace setup and three journal
+# records. A real crash of a binary that DID start still restarts unboundedly,
+# which is the behaviour a wedged USB camera needs.
+#
+# There is no `mkdir -p /run/ados` here either. It could never run: ReadWritePaths=
+# lists /run/ados without a `-` prefix, so an absent path aborts namespace setup
+# with 226/NAMESPACE before any Exec* line, and an ExecStartPre without a `+`
+# prefix runs inside that sandbox where ProtectSystem=strict makes the hierarchy
+# read-only. The directory always exists in practice, from /etc/tmpfiles.d/ados.conf
+# written by the installer.
+#
+# `exec` replaces the shell image so SupplementaryGroups=video carries over.
+ExecStart=/bin/sh -c 'if [ -x /opt/ados/bin/ados-video ]; then rm -f /run/ados/video-binary-missing; exec /opt/ados/bin/ados-video; fi; date -Is > /run/ados/video-binary-missing; echo "ados-video binary missing at /opt/ados/bin/ados-video; re-run the installer to fetch it" >&2; exit 78'
 Restart=always
+RestartPreventExitStatus=78
 RestartSec=3
 Environment=ADOS_CONFIG=/etc/ados/config.yaml
 EnvironmentFile=-/etc/ados/env

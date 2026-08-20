@@ -4,6 +4,133 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.363] - 2026-08-20
+
+### Fixed
+
+- The live video plane advertised absolute `:8889` / `:8888` URLs, so a browser
+  off the drone LAN saw "No video source". The status surface and the per-leg
+  roster built WHEP and HLS URLs from the request `Host` header, which a `.local`
+  name off-LAN cannot resolve and an HTTPS ground station rejects as mixed
+  content. The agent now advertises same-origin relative paths (`/whep`,
+  `/whep?camera=<id>`, `/hls/main/index.m3u8`, `/hls/<id>/index.m3u8`) that
+  resolve against whatever host reached the agent.
+- The WHEP proxy was ground-station only, so the on-drone cockpit's own `/whep`
+  returned 404. The WHEP and HLS proxy is now profile-agnostic, gained per-leg
+  addressing (`?camera=<id>`) and an `/hls/<path>` passthrough, and rewrites the
+  WHEP `Location` header so session teardown routes back through the proxy
+  instead of the media server's loopback address.
+- Two radios could be pinned the same MAC, and NetworkManager could autoconnect
+  a client profile onto a WFB monitor radio at boot, before the agent set
+  monitor mode. An installer step now writes a persistent `unmanaged-devices`
+  rule keyed by driver, and interface roles (wfb, management wifi, mesh) are
+  assigned by driver identity rather than by kernel interface name.
+
+### Added
+
+- Hardware H.264 encoding on Allwinner vendor (OpenMAX / Cedar) boards. A
+  GStreamer `omxh264videoenc` path (constant bitrate, short keyframe interval,
+  frame-dropping queue) is selected automatically when the board's HAL profile
+  declares a vendor encoder API and the element is present, in place of the
+  software encoder, which remains the fallback. The status surface reports
+  `encoder_hw=true`.
+- Operator-controllable camera image orientation. New `video.camera` (and
+  per-leg) config keys `rotation` (0, 90, 180, 270), `hflip`, and `vflip`,
+  applied before encode on both the ffmpeg and GStreamer paths and exposed in the
+  on-drone console and the ground station settings.
+- Encoder selection and keyframe-interval config knobs
+  (`video.camera.encoder`, `video.camera.keyframe_interval`).
+
+### Changed
+
+- The cockpit video layer falls back from WHEP to HLS when WebRTC does not
+  connect, so a remote viewer over a routed link still gets video. `ados status`
+  resolves the relative viewer URL to the local media server.
+
+## [0.99.361] - 2026-08-16
+
+### Fixed
+
+- **A drone that was streaming could report `not_initialized` with no playable
+  endpoint, and a drone whose pipeline had failed could report `running` with
+  one.** Two writers were racing over `/run/ados/camera-state.json`. The
+  pipeline stamped its own outcome at every `start_stream` exit, and the health
+  check, five seconds later and every five seconds after that, rebuilt the same
+  file from camera discovery alone and reset the outcome to `unknown`. The
+  status surface then had nothing to go on, so it fell through to
+  `not_initialized` on a healthy node and erased the operator-facing reason on a
+  failed one. There is now one writer: the health check stamps the pipeline's
+  current state instead of overwriting it, a deliberate stop records `stopped`
+  rather than leaving the file claiming `streaming`, and the start records
+  `starting`.
+
+- **The reader of that file trusted it forever.** Every other sidecar on the
+  status surface is age-gated; this one was read with a bare filesystem read at
+  a hardcoded path. When the video service died its last words stayed on the
+  wire, and because the media server is a separate unit and stays bound, the
+  node advertised a dialable endpoint for a pipeline that no longer existed. It
+  is now resolved through the run directory and gated on the same freshness
+  window as its siblings, so a stopped writer reads as `not_initialized` rather
+  than as the last thing it said.
+
+- **The camera pill said `ready` for a camera whose pipeline had failed.** Both
+  the local status surface and the cloud heartbeat published the discovery
+  verdict alone, so a node with a detected camera and a dead pipeline showed no
+  warning at all next to an empty video pane. Discovery still decides
+  `missing`; a failed pipeline now downgrades `ready` to `error`.
+
+- **The reported encoder could not answer the question it was added for.** It
+  was the internal backend name, and one of those three names covers both the
+  hardware and the software H.264 paths, so "running the software fallback" and
+  "running on the video engine" printed identically. The label is now derived
+  from the command actually built — `rpicam-vid`, `ffmpeg-h264_v4l2m2m`,
+  `ffmpeg-libx264`, `gstreamer-x264enc` and so on — and a companion
+  `encoder_hw` boolean answers the hardware question directly instead of
+  leaving every consumer to guess from the string.
+
+- **A failure to build the encoder command reported the previous cycle's
+  error**, which could send an operator to the media server for an encoder
+  problem, and a node with no camera at all still published an encoder
+  identity. Both now report what actually happened.
+
+- **A missing `ados-video` binary retried forever.** The unit restarted it
+  about twenty times a minute, indefinitely, each cycle paying a process
+  spawn, a sandbox setup and three journal records, because the guard was in a
+  pre-start step where the "do not restart on this exit code" directive does
+  not apply. The check moved into the main command, so the unit now fails
+  loudly once — journal line, marker file, `systemctl --failed` — while a real
+  crash of a binary that did start still restarts as before. The pre-start
+  `mkdir` was deleted with it: it could never have run, and the run directory
+  is created by the tmpfiles rule anyway.
+
+- **Two plugins subscribing to the vision stream at the same moment could
+  leave both unarmed.** The arming flag was a compare-and-set, so the second
+  caller saw "already arming", returned, and handed its plugin a receiver that
+  would never fill if the first attempt then failed. Arming is serialized now
+  and the flag is set only on success. The host also drops a pushed frame
+  before decoding it when nothing is subscribed, instead of decoding and
+  cloning a descriptor per frame to hand to an empty fan-out.
+
+### Changed
+
+- **`camera-state.json` is schema 2**: it carries the streaming pipeline's own
+  outcome (`pipeline_state`, `pipeline_reason`) and the encoder identity
+  (`encoder`, `encoder_hw`) alongside the discovery verdict, so a consumer can
+  no longer read a detected camera as a streaming one.
+
+- **The `/api/status/full` video block reports its basis.** It carries
+  `pipeline_state` on every branch where the sidecar answered, and where the
+  endpoint is being advertised on media-server readiness alone — an older agent
+  that is alive and writing but does not report a pipeline state — it says so
+  with `whep_url_basis: "mediamtx_readiness_only"` rather than presenting a
+  guess as a fact.
+
+- **`ados status` prints the reason and the encoder** next to the video state,
+  and flags a missing `ados-video` binary when the status it is showing came
+  from the agent on this machine. The marker is a local filesystem fact and was
+  previously printed against remote agents too, where it described the wrong
+  box.
+
 ## [0.99.360] - 2026-08-14
 
 ### Security

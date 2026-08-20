@@ -12,13 +12,11 @@ in-process recorder state. Nothing here is served from the logging store.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter
 
 from ados.api.deps import get_agent_app
 
 from ._common import (
-    _MEDIAMTX_HLS_PORT,
-    _MEDIAMTX_WEBRTC_PORT,
     _empty_recording_block,
     _get_video_pipeline,
     _probe_mediamtx,
@@ -53,7 +51,7 @@ def _discover_cameras_for_api() -> dict:
 
 
 @router.get("/video")
-async def get_video_status(request: Request):
+async def get_video_status():
     """Video pipeline status: cameras, streams, recording, mediamtx, WHEP URL."""
     from ados.core.deps import check_video_dependencies
 
@@ -79,9 +77,8 @@ async def get_video_status(request: Request):
             mtx = await _probe_mediamtx_via_whep() or mtx
         recording_block = _empty_recording_block()
         if mtx and mtx.get("ready"):
-            host = request.headers.get("host", "localhost").split(":")[0]
-            whep_url = f"http://{host}:{_MEDIAMTX_WEBRTC_PORT}/main/whep"
-            hls_url = f"http://{host}:{_MEDIAMTX_HLS_PORT}/main/index.m3u8"
+            whep_url = "/whep"
+            hls_url = "/hls/main/index.m3u8"
             return {
                 "state": "running",
                 "cameras": cameras_payload,
@@ -111,10 +108,8 @@ async def get_video_status(request: Request):
     # path, drone prefers WHEP for the local-camera low-latency
     # path.
     if status.get("mediamtx", {}).get("running"):
-        webrtc_port = status["mediamtx"].get("webrtc_port", _MEDIAMTX_WEBRTC_PORT)
-        host = request.headers.get("host", "localhost").split(":")[0]
-        status["whep_url"] = f"http://{host}:{webrtc_port}/main/whep"
-        status["hls_url"] = f"http://{host}:{_MEDIAMTX_HLS_PORT}/main/index.m3u8"
+        status["whep_url"] = "/whep"
+        status["hls_url"] = "/hls/main/index.m3u8"
     else:
         status["whep_url"] = None
         status["hls_url"] = None

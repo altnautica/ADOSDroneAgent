@@ -46,6 +46,12 @@ pub struct Args {
     /// wired cable. The join reuses the same nmcli path as the onboarding
     /// wizard and never touches the interface the SSH session rides on.
     pub wifi_ssid: Option<String>,
+    /// `--plugin-key <path>` (repeatable) — an operator/OEM plugin trust key to
+    /// copy into `/etc/ados/plugin-keys/` on install, an alternative to dropping
+    /// the PEM into `/opt/ados/trust.d/`. Framed generically as trust
+    /// provisioning so a defense signer's key never needs to be committed to a
+    /// public repo.
+    pub plugin_key: Vec<String>,
     /// `--wifi-pass <v>` — password for `--wifi-ssid` (omit for an open network).
     pub wifi_pass: Option<String>,
     /// `--uninstall` — remove the agent.
@@ -129,6 +135,10 @@ impl Args {
                 "--camera" => args.camera = Some(take_value(&tokens, &mut i, "--camera")?),
                 "--wifi-ssid" => args.wifi_ssid = Some(take_value(&tokens, &mut i, "--wifi-ssid")?),
                 "--wifi-pass" => args.wifi_pass = Some(take_value(&tokens, &mut i, "--wifi-pass")?),
+                "--plugin-key" | "-k" => {
+                    args.plugin_key
+                        .push(take_value(&tokens, &mut i, "--plugin-key")?)
+                }
                 other if other.starts_with('-') => {
                     return Err(ParseError::UnknownFlag(other.to_string()));
                 }

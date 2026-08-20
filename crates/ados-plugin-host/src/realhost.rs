@@ -28,6 +28,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rmpv::Value;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::sync::{broadcast, Notify};
 use tokio::task::JoinHandle;
 
@@ -1142,6 +1143,64 @@ fn pairing_key(path: &std::path::Path) -> Option<String> {
 static BUTTON_CLIENT: std::sync::OnceLock<crate::button_client::ButtonClient> =
     std::sync::OnceLock::new();
 
+/// A process-global watcher for touch-zone taps on the reserved plugin OLED
+/// page. The display sidecar (`/run/ados/lcd-plugin-tap.json`) receives a new
+/// tap record each time an operator taps a zone; this watcher polls the file
+/// (the writer uses tmp+rename, so the read is atomic) and on a change
+/// broadcasts the tapped zone `key` to every subscriber. Follows
+/// [`BUTTON_CLIENT`]: one poller for the whole host, N plugins share it.
+/// Started on first `display.zone.subscribe`; a board with no display never
+/// starts it.
+struct DisplayTapWatcher {
+    tx: broadcast::Sender<Vec<u8>>,
+}
+
+impl DisplayTapWatcher {
+    fn spawn() -> Self {
+        let (tx, _rx) = broadcast::channel(DISPLAY_TAP_BROADCAST_DEPTH);
+        let task_tx = tx.clone();
+        tokio::spawn(display_tap_poll_loop(task_tx));
+        Self { tx }
+    }
+
+    fn subscribe(&self) -> broadcast::Receiver<Vec<u8>> {
+        self.tx.subscribe()
+    }
+}
+
+static DISPLAY_TAP_CLIENT: std::sync::OnceLock<DisplayTapWatcher> =
+    std::sync::OnceLock::new();
+
+/// Poll the display-tap sidecar and broadcast each changed `key`, forever.
+/// Tolerates an absent file (no display / no page yet) by polling quietly; a
+/// malformed record is skipped. The read is atomic because the writer replaces
+/// the file via tmp+rename, so we never observe a torn middle.
+async fn display_tap_poll_loop(tx: broadcast::Sender<Vec<u8>>) {
+    let path = std::path::Path::new(LCD_PLUGIN_TAP_PATH);
+    // The last observed (ts_ms, key); a tap is emitted only when this pair
+    // changes, so the initial present-record is not replayed as a tap.
+    let mut seen: Option<(u64, String)> = None;
+    loop {
+        if let Ok(record) = std::fs::read_to_string(path) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&record) {
+                if let (Some(ts), Some(key)) = (
+                    v.get("ts_ms").and_then(|x| x.as_u64()),
+                    v.get("key").and_then(|x| x.as_str()).map(str::to_string),
+                ) {
+                    if seen.as_ref() != Some(&(ts, key.clone())) {
+                        // `send` fails only when nobody is subscribed, the normal
+                        // resting state; not an error. Lagged subscribers drop
+                        // oldest by design (human-rate taps).
+                        let _ = tx.send(key.clone().into_bytes());
+                        seen = Some((ts, key));
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(DISPLAY_TAP_POLL_INTERVAL).await;
+    }
+}
+
 pub struct RealHost {
     components: Mutex<ComponentRegistrar>,
     telemetry: Mutex<TelemetryExtender>,
@@ -1184,6 +1243,13 @@ pub struct RealHost {
     /// stream automatically when its owner disconnects (the SAFE-by-default
     /// invariant: a stream never outlives the plugin that opened it).
     aux_stream_owner: Mutex<Option<String>>,
+    /// The process-global aux-subscribe reader, started lazily on the first
+    /// `radio.aux_stream.subscribe` and shared by every subscribing plugin. One
+    /// connection to the radio service's aux command socket feeds this broadcast;
+    /// mirrors the [`BUTTON_CLIENT`] single-connection philosophy. Initialized
+    /// per-instance (rather than `static`) so a test host with an overridden
+    /// `radio_aux_cmd_path` round-trips against its stub.
+    aux_reader: std::sync::OnceLock<tokio::sync::broadcast::Sender<(u8, Vec<u8>)>>,
     /// Live streaming perception-offload sessions a plugin opened, keyed by
     /// session id. Each holds its cancel handle + orchestrator task + the node
     /// reach for health reads. A session is closed on an explicit
@@ -1214,6 +1280,22 @@ pub struct RealHost {
 /// dependency path).
 const LCD_PLUGIN_PAGE_PATH: &str = "/run/ados/lcd-plugin-page.json";
 
+/// Canonical sidecar the display writes each touch-zone tap on the reserved
+/// plugin page to. Kept in sync with
+/// `ados_display::sidecar::LCD_PLUGIN_TAP_PATH` by the cross-crate JSON shape,
+/// not a build dependency (the display crate is not on the host's dependency
+/// path).
+const LCD_PLUGIN_TAP_PATH: &str = "/run/ados/lcd-plugin-tap.json";
+
+/// Broadcast depth of the display-tap watcher. Taps are human-rate; a subscriber
+/// this far behind is wedged, and dropping the oldest beats growing without
+/// bound. Matches the button bus depth.
+const DISPLAY_TAP_BROADCAST_DEPTH: usize = 64;
+
+/// Poll interval for the display-tap watcher. A tap is a human event, so 100 ms
+/// is far faster than the operator; the read is atomic (the writer tmp+renames).
+const DISPLAY_TAP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// Canonical GPIO-output command socket the host forwards `gpio.*` methods to.
 /// Kept in sync with `ados_gpio::GPIO_CMD_SOCK` by the cross-crate wire string,
 /// not a build dependency (the gpio crate is not on the host's dependency path).
@@ -1230,6 +1312,67 @@ const RADIO_AUX_CMD_SOCK: &str = "/run/ados/radio-aux.sock";
 /// wire string, not a build dependency (the supervisor crate is not on the host's
 /// dependency path).
 const VIDEO_CMD_SOCK: &str = "/run/ados/video-cmd.sock";
+
+/// Broadcast depth of the host's shared aux-subscribe reader. App frames are
+/// lossy-tolerant by design (the ARQ lives at the application layer), so a
+/// subscriber this far behind drops oldest first rather than growing without
+/// bound. Matches the button bus depth.
+const AUX_BROADCAST_DEPTH: usize = 256;
+
+/// Reconnect backoff bounds for the aux-subscribe reader. The radio service (and
+/// the aux pair it owns) may restart while a plugin stays subscribed; the reader
+/// retries quietly so a restart heals without the plugin noticing.
+const AUX_RECONNECT_MIN: std::time::Duration = std::time::Duration::from_millis(500);
+const AUX_RECONNECT_MAX: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// One aux-subscribe connection's lifetime: subscribe, then re-broadcast each
+/// decoded application datagram until EOF or error. Called by the reader task,
+/// which reconnects on a bounded backoff. The first line is the service's
+/// `{"ok":true}` ack (or a `{"ok":false,...}` refuse); every later line is a
+/// `{"channel":N,"payload":[...]}` datagram.
+async fn aux_subscribe_pump(
+    path: &std::path::Path,
+    tx: &tokio::sync::broadcast::Sender<(u8, Vec<u8>)>,
+) -> std::io::Result<()> {
+    let mut stream = tokio::net::UnixStream::connect(path).await?;
+    stream.write_all(b"{\"op\":\"subscribe\"}\n").await?;
+    stream.flush().await?;
+
+    let mut lines = tokio::io::BufReader::new(stream).lines();
+    // The single ack / refuse line. A refuse (e.g. E_AUX_DISABLED) is a quiet,
+    // resting state: the stream closes right after and the reader retries, so a
+    // disabled deployment arms but yields nothing (mirrors the button/vision
+    // pumps when their sources are absent).
+    if let Some(ack) = lines.next_line().await? {
+        if !ack.contains("\"ok\":true") {
+            tracing::debug!(error = %ack, "aux subscribe refused");
+        }
+    }
+    while let Some(line) = lines.next_line().await? {
+        if let Some((channel, payload)) = decode_aux_line(&line) {
+            // `send` fails only when nobody is subscribed, which is the normal
+            // case on a node with no aux-using plugin. Not an error.
+            let _ = tx.send((channel, payload));
+        }
+    }
+    Ok(())
+}
+
+/// Decode one aux-subscribe stream line into its application (`channel`,
+/// `payload`). Returns `None` for a line that is not a well-formed datagram. The
+/// channel is passed through as the AppStream/AppCommand byte; the payload is
+/// the application bytes the service forwarded (the host never decodes it).
+fn decode_aux_line(line: &str) -> Option<(u8, Vec<u8>)> {
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    let channel = v.get("channel")?.as_u64()? as u8;
+    let payload = v
+        .get("payload")?
+        .as_array()?
+        .iter()
+        .filter_map(|n| n.as_u64().and_then(|n| u8::try_from(n).ok()))
+        .collect::<Vec<u8>>();
+    Some((channel, payload))
+}
 
 impl RealHost {
     /// A host with empty facades and every external slot unwired, matching
@@ -1252,6 +1395,7 @@ impl RealHost {
             radio_aux_cmd_path: PathBuf::from(RADIO_AUX_CMD_SOCK),
             video_cmd_path: PathBuf::from(VIDEO_CMD_SOCK),
             aux_stream_owner: Mutex::new(None),
+            aux_reader: std::sync::OnceLock::new(),
             offload_streams: Mutex::new(HashMap::new()),
             offload_session_seq: AtomicU64::new(0),
             pairing_path: PathBuf::from(DEFAULT_PAIRING_PATH),
@@ -1568,11 +1712,14 @@ const ALL_DISPATCH_METHODS: &[crate::dispatch::Method] = {
         ConfigSet,
         ProcessSpawn,
         DisplayPageSet,
+        DisplayZoneSubscribe,
         GpioOutputSet,
         GpioBuzzerBeep,
         GuidedSetpointSend,
         RadioAuxStreamOpen,
         RadioAuxStreamClose,
+        RadioAuxStreamSend,
+        RadioAuxStreamSubscribe,
         VisionSubscribeFrames,
         VisionRegisterModel,
         VisionReadModel,
@@ -2353,6 +2500,75 @@ impl HostServices for RealHost {
         Ok(reply)
     }
 
+    fn radio_aux_stream_send(
+        &self,
+        _plugin_id: &str,
+        args: &Value,
+    ) -> Result<HostResult, HostError> {
+        // The dispatch gate already enforced the auxiliary-stream capability. A
+        // send carries an aux channel (AppStream 8 or AppCommand 9) plus the
+        // application payload. The host validates the channel onto the two
+        // reserved application channels, frames the payload as an aux frame
+        // (the radio service forwards opaque app datagrams), and one-shots the
+        // datagram to the radio service's command socket.
+        let channel = map_get(args, "channel")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| HostError::Rpc("channel missing or not an integer".to_string()))?
+            as u8;
+        if channel != 8 && channel != 9 {
+            return Err(HostError::Rpc(format!("unsupported aux channel {channel}")));
+        }
+        let payload = map_get(args, "payload")
+            .map(|v| coerce_msg_bytes(v).map_err(|_| "payload must be bytes".to_string()))
+            .transpose()
+            .map_err(HostError::Rpc)?
+            .ok_or_else(|| HostError::Rpc("payload missing".to_string()))?;
+        let aux_channel = ados_protocol::aux_mux::AuxChannel::from_u8(channel)
+            .expect("channel validated to 8/9 above");
+        let frame = ados_protocol::aux_mux::encode(aux_channel, &payload).ok_or_else(|| {
+            HostError::Rpc("payload exceeds the aux frame maximum".to_string())
+        })?;
+        let req = serde_json::json!({"op": "send", "frame": frame});
+        let (reply, _ok) = self.forward_radio_aux(req, "radio.aux_stream.send");
+        Ok(reply)
+    }
+
+    fn radio_aux_stream_subscribe_stream(
+        &self,
+        _plugin_id: &str,
+    ) -> Option<tokio::sync::broadcast::Receiver<(u8, Vec<u8>)>> {
+        // One connection to the radio service's aux command socket for the whole
+        // host process, shared by every subscriber — mirrors the BUTTON_CLIENT
+        // single-connection philosophy. Started lazily (per-instance, so a test
+        // with an overridden `radio_aux_cmd_path` round-trips against its stub).
+        //
+        // Always `Some`: an absent aux pair (or a down radio service) is a normal
+        // resting state, so the subscription succeeds and stays quiet while the
+        // reader retries underneath. Returning `None` would make every plugin
+        // treat "no app frames yet" as an error.
+        let tx = self.aux_reader.get_or_init(|| {
+            let (tx, _rx) = tokio::sync::broadcast::channel(AUX_BROADCAST_DEPTH);
+            let path = self.radio_aux_cmd_path.clone();
+            let task_tx = tx.clone();
+            tokio::spawn(async move {
+                let mut backoff = AUX_RECONNECT_MIN;
+                loop {
+                    match aux_subscribe_pump(&path, &task_tx).await {
+                        Ok(()) => {
+                            backoff = AUX_RECONNECT_MIN;
+                            tracing::debug!("aux subscribe stream closed; reconnecting");
+                        }
+                        Err(e) => tracing::debug!(error = %e, "aux subscribe stream unavailable"),
+                    }
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(AUX_RECONNECT_MAX);
+                }
+            });
+            tx
+        });
+        Some(tx.subscribe())
+    }
+
     fn guided_setpoint_send(
         &self,
         _plugin_id: &str,
@@ -2505,7 +2721,17 @@ impl HostServices for RealHost {
         // per-camera filter is applied plugin-side (the SDK subscribe_frames
         // callback drops a non-matching camera). When the engine socket is not
         // up the slot is None and no stream arms, matching the MAVLink posture.
-        self.vision.as_ref().map(|c| c.subscribe_frames())
+        //
+        // The engine pushes `vision.deliver` ONLY to a connection that asked for
+        // it, so handing back a receiver is not enough: the upstream
+        // subscription has to be armed too, or the fanout stays permanently
+        // empty and every subscribing plugin sees silence with no error
+        // anywhere. Armed once per process, lazily, so a node whose plugins
+        // never ask for frames never pays for the push.
+        let client = self.vision.as_ref()?.clone();
+        let rx = client.subscribe_frames();
+        tokio::spawn(async move { client.arm_frame_push().await });
+        Some(rx)
     }
 
     fn vision_subscribe_detection_stream(
@@ -2517,7 +2743,12 @@ impl HostServices for RealHost {
         // the per-camera filter is applied plugin-side (the SDK callback drops a
         // non-matching camera). When the engine socket is not up the slot is None
         // and no stream arms, matching the frame-stream posture.
-        self.vision.as_ref().map(|c| c.subscribe_detections())
+        //
+        // Same upstream-arming rule as the frame stream above.
+        let client = self.vision.as_ref()?.clone();
+        let rx = client.subscribe_detections();
+        tokio::spawn(async move { client.arm_detection_push().await });
+        Some(rx)
     }
 
     fn button_subscribe_stream(&self, _plugin_id: &str) -> Option<broadcast::Receiver<Vec<u8>>> {
@@ -2537,6 +2768,22 @@ impl HostServices for RealHost {
                         crate::button_client::BUTTONS_SOCK,
                     ))
                 })
+                .subscribe(),
+        )
+    }
+
+    fn display_zone_tap_stream(&self, _plugin_id: &str) -> Option<broadcast::Receiver<Vec<u8>>> {
+        // One poller for the whole host process watches the display-tap sidecar,
+        // shared by every subscriber — mirrors BUTTON_CLIENT's single-connection
+        // philosophy. Started on first use rather than at construction so a node
+        // whose plugins never subscribe to taps never starts it.
+        //
+        // Always `Some`: an absent display is a normal resting state (a drone has
+        // no front panel), so the subscription succeeds and stays quiet while the
+        // poller watches an empty file path.
+        Some(
+            DISPLAY_TAP_CLIENT
+                .get_or_init(DisplayTapWatcher::spawn)
                 .subscribe(),
         )
     }
@@ -4872,6 +5119,107 @@ gcs:
 
     #[cfg(unix)]
     #[test]
+    fn radio_aux_send_forwards_the_aux_framed_datagram() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("radio-aux.sock");
+        let stub = gpio_stub(path.clone(), r#"{"ok":true}"#);
+        let host = RealHost::new().with_radio_aux_cmd_path(path);
+
+        // A payload on the AppStream channel (8). The host frames it as an aux
+        // datagram, so the forwarded `frame` is the encoded bytes and the radio
+        // service writes them verbatim to the aux transmit ingress.
+        let payload: Vec<u8> = b"hello".to_vec();
+        let args = map(&[
+            ("channel", Value::from(8)),
+            ("payload", Value::Binary(payload)),
+        ]);
+        let m = ok_map(host.radio_aux_stream_send("p", &args));
+        assert_eq!(field(&m, "ok").and_then(Value::as_bool), Some(true));
+
+        let sent = stub.join().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&sent).unwrap();
+        assert_eq!(v["op"], "send");
+        // The encoded AppStream frame for "hello":
+        // magic [0xAD,0x02] + version 0x01 + channel 0x08 + len 0x0005 + payload.
+        assert_eq!(
+            v["frame"],
+            serde_json::json!([0xAD, 0x02, 0x01, 0x08, 0x00, 0x05, 104, 101, 108, 108, 111])
+        );
+        // A send never touches the owner record (the stream stays between the
+        // matching open and close).
+        assert!(host.aux_stream_owner.lock().unwrap().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn radio_aux_send_accepts_both_application_channels() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("radio-aux.sock");
+        // Two sends against two one-shot stubs: AppStream (8) and AppCommand (9)
+        // both forward.
+        for (i, channel) in [8u64, 9u64].iter().enumerate() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(format!("radio-aux-{i}.sock"));
+            let stub = gpio_stub(path.clone(), r#"{"ok":true}"#);
+            let host = RealHost::new().with_radio_aux_cmd_path(path);
+            let args = map(&[
+                ("channel", Value::from(*channel)),
+                ("payload", Value::Binary(vec![1, 2, 3])),
+            ]);
+            let m = ok_map(host.radio_aux_stream_send("p", &args));
+            assert_eq!(field(&m, "ok").and_then(Value::as_bool), Some(true));
+            let sent = stub.join().unwrap();
+            let v: serde_json::Value = serde_json::from_str(&sent).unwrap();
+            assert_eq!(v["frame"][3], *channel, "channel byte must be echoed into the frame");
+        }
+    }
+
+    #[test]
+    fn radio_aux_send_rejects_bad_channel_or_payload_before_forwarding() {
+        // Validation happens before any socket IO, so no socket is needed.
+        let host = RealHost::new();
+        // Missing channel.
+        assert_eq!(
+            err_body(host.radio_aux_stream_send(
+                "p",
+                &map(&[("payload", Value::Binary(vec![1]))])
+            )),
+            "channel missing or not an integer"
+        );
+        // Unsupported channel (this host is profile-agnostic; only 8/9 apply).
+        assert_eq!(
+            err_body(host.radio_aux_stream_send(
+                "p",
+                &map(&[
+                    ("channel", Value::from(3)),
+                    ("payload", Value::Binary(vec![1])),
+                ])
+            )),
+            "unsupported aux channel 3"
+        );
+        // Missing payload.
+        assert_eq!(
+            err_body(host.radio_aux_stream_send(
+                "p",
+                &map(&[("channel", Value::from(8))])
+            )),
+            "payload missing"
+        );
+        // A string payload is not bytes.
+        assert_eq!(
+            err_body(host.radio_aux_stream_send(
+                "p",
+                &map(&[
+                    ("channel", Value::from(8)),
+                    ("payload", Value::from("hello")),
+                ])
+            )),
+            "payload must be bytes"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn radio_aux_close_forwards_and_clears_the_owner() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("radio-aux.sock");
@@ -4954,6 +5302,8 @@ gcs:
         for (method, variant) in [
             ("radio.aux_stream.open", Method::RadioAuxStreamOpen),
             ("radio.aux_stream.close", Method::RadioAuxStreamClose),
+            ("radio.aux_stream.send", Method::RadioAuxStreamSend),
+            ("radio.aux_stream.subscribe", Method::RadioAuxStreamSubscribe),
         ] {
             assert_eq!(
                 gate(method, false, &caps(&[])),

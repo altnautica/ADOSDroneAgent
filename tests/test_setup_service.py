@@ -837,3 +837,104 @@ def test_setup_steps_hardware_check_state_follows_required_items() -> None:
     )
     hw_step = next(s for s in steps if s.id == "hardware_check")
     assert hw_step.state == "needs_action"
+
+
+# ── the video block `ados status` prints ────────────────────────────────────
+#
+# Mediamtx readiness is not evidence that video exists: it serves WHEP with zero
+# publishers. These pin the pipeline verdict outranking it, which is what stops
+# `ados status` disagreeing with `/api/status/full` about the same node.
+
+
+def _write_camera_state(tmp_path, **fields) -> None:
+    import json
+    import time
+
+    doc = {
+        "version": 2,
+        "state": "ready",
+        "total_cameras": 1,
+        "updated_at_unix": time.time(),
+    }
+    doc.update(fields)
+    (tmp_path / "camera-state.json").write_text(json.dumps(doc))
+
+
+class _NoPipelineRuntime:
+    def video_pipeline(self):
+        return None
+
+
+async def _video(monkeypatch, tmp_path, *, ready: bool):
+    import ados.core.paths as _paths
+    from ados.setup.service._access_urls import _video_access
+
+    monkeypatch.setattr(_paths, "ADOS_RUN_DIR", tmp_path)
+
+    async def _probe():
+        return {"ready": ready, "webrtc_port": 8889, "hls_port": 8888}
+
+    async def _probe_whep():
+        return None
+
+    import ados.api.routes.video as _video_routes
+
+    monkeypatch.setattr(_video_routes, "_probe_mediamtx", _probe)
+    monkeypatch.setattr(_video_routes, "_probe_mediamtx_via_whep", _probe_whep)
+    return await _video_access(_NoPipelineRuntime(), "node.local", None)
+
+
+@pytest.mark.asyncio
+async def test_video_access_reports_a_failed_pipeline_with_its_reason(
+    monkeypatch, tmp_path
+) -> None:
+    _write_camera_state(
+        tmp_path,
+        pipeline_state="error",
+        pipeline_reason="no usable encoder for the primary camera",
+        encoder=None,
+    )
+    v = await _video(monkeypatch, tmp_path, ready=True)
+    assert v.state == "error"
+    assert v.reason == "no usable encoder for the primary camera"
+    assert v.whep_url is None, "a failed pipeline never gets a playable endpoint"
+
+
+@pytest.mark.asyncio
+async def test_video_access_reports_running_only_when_the_pipeline_says_streaming(
+    monkeypatch, tmp_path
+) -> None:
+    _write_camera_state(
+        tmp_path,
+        pipeline_state="streaming",
+        encoder="ffmpeg-h264_v4l2m2m",
+        encoder_hw=True,
+    )
+    v = await _video(monkeypatch, tmp_path, ready=True)
+    assert v.state == "running"
+    assert v.whep_url == "http://node.local:8889/main/whep"
+    assert v.encoder == "ffmpeg-h264_v4l2m2m" and v.encoder_hw is True
+
+
+@pytest.mark.asyncio
+async def test_video_access_does_not_call_a_bound_mediamtx_running(
+    monkeypatch, tmp_path
+) -> None:
+    # The headline defect: mediamtx stays bound after the pipeline stops, and the
+    # old code read that as `running` with a dialable URL.
+    _write_camera_state(tmp_path, pipeline_state="stopped")
+    v = await _video(monkeypatch, tmp_path, ready=True)
+    assert v.state == "stopped"
+    assert v.whep_url is None
+
+
+@pytest.mark.asyncio
+async def test_video_access_ignores_a_stale_sidecar(monkeypatch, tmp_path) -> None:
+    import json
+
+    (tmp_path / "camera-state.json").write_text(
+        json.dumps({"version": 2, "pipeline_state": "streaming", "updated_at_unix": 1.0})
+    )
+    v = await _video(monkeypatch, tmp_path, ready=True)
+    assert v.state == "not_initialized", "a stopped writer's last words are not a verdict"
+    assert v.whep_url is None

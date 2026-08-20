@@ -77,9 +77,20 @@ pub struct EncoderEnv {
     pub hw_h264: Probed<EncoderDevice>,
     /// GStreamer `mpph264enc` (Rockchip VPU) is installed.
     pub has_mpph264enc: bool,
+    /// GStreamer `omxh264videoenc` (Allwinner Cedar OMX HW encoder) is installed.
+    /// Its presence is the honest Allwinner vendor gate: the element only ships
+    /// on a board with the Cedar video engine, so probing it IS how we learn the
+    /// board's HAL `encoder_api == "vendor"` from Rust (there is no Rust-side
+    /// board-YAML reader; the element is the ground truth).
+    pub has_omxh264videoenc: bool,
     /// GStreamer `rtspclientsink` element is installed (direct RTSP RECORD;
     /// otherwise the gstreamer RTSP path pipes through ffmpeg).
     pub has_rtspclientsink: bool,
+    /// The board's HAL `video.encoder_api` capability: "vendor" (Allwinner
+    /// OMX/Cedar), "rkmpp"/"mpp" (Rockchip VPU), "v4l2", "rkmedia", "none",
+    /// "unknown". Derived at probe time from which HW GStreamer element is
+    /// present (see [`EncoderEnv::detect`]); consumed to pick the OMX branch.
+    pub encoder_api: String,
     /// Absolute path to the Python interpreter used to splice the SEI
     /// injector (`<python> -m ados.services.video.sei_injector`). Equivalent
     /// to Python's `sys.executable`.
@@ -99,10 +110,21 @@ impl EncoderEnv {
             ados_protocol::hwcaps::ProbePhase::BootPreArm,
         );
 
+        let has_mpph264enc = gst_element_present("mpph264enc");
+        let has_omxh264videoenc = gst_element_present("omxh264videoenc");
+        let encoder_api = if has_omxh264videoenc {
+            "vendor".to_string()
+        } else if has_mpph264enc {
+            "rkmpp".to_string()
+        } else {
+            "unknown".to_string()
+        };
         Self {
             hw_h264,
-            has_mpph264enc: gst_element_present("mpph264enc"),
+            has_mpph264enc,
+            has_omxh264videoenc,
             has_rtspclientsink: gst_element_present("rtspclientsink"),
+            encoder_api,
             python_executable: current_python_executable(),
         }
     }
@@ -113,7 +135,9 @@ impl EncoderEnv {
         Self {
             hw_h264: Probed::NotProbed,
             has_mpph264enc: false,
+            has_omxh264videoenc: false,
             has_rtspclientsink: false,
+            encoder_api: "unknown".to_string(),
             python_executable: current_python_executable(),
         }
     }
@@ -146,6 +170,15 @@ pub struct EncoderParams {
     pub height: u32,
     pub fps: u32,
     pub bitrate_kbps: u32,
+    /// Encoder override: "auto" (probe) | "omx" | "v4l2m2m" | "software".
+    pub encoder: String,
+    /// Clockwise image rotation in degrees (0 | 90 | 180 | 270).
+    pub rotation: u32,
+    pub hflip: bool,
+    pub vflip: bool,
+    /// Keyframe (GOP) interval in frames; 0 ⇒ encoder picks a short low-latency
+    /// GOP (0.5 s at the configured fps).
+    pub keyframe_interval: u32,
 }
 
 impl EncoderParams {
@@ -159,6 +192,11 @@ impl EncoderParams {
             height: cfg.height,
             fps: cfg.fps,
             bitrate_kbps: cfg.bitrate_kbps,
+            encoder: cfg.encoder.clone(),
+            rotation: cfg.rotation,
+            hflip: cfg.hflip,
+            vflip: cfg.vflip,
+            keyframe_interval: cfg.keyframe_interval,
         }
     }
 }
@@ -201,6 +239,115 @@ impl std::fmt::Display for EncoderError {
 
 impl std::error::Error for EncoderError {}
 
+/// The effective GOP (keyframe) interval for a camera. An explicit
+/// `keyframe_interval` (frames) wins; the default 0 yields a short low-latency
+/// GOP of half a second at the configured fps so radio FEC recovers fast.
+fn gop_interval(params: &EncoderParams) -> u32 {
+    if params.keyframe_interval > 0 {
+        params.keyframe_interval
+    } else {
+        (params.fps / 2).max(1)
+    }
+}
+
+/// The ffmpeg `-vf` image-transform chain for the configured orientation, or
+/// `None` when no transform is set (so an unconfigured rig emits no `-vf` and
+/// the argv stays byte-identical). 90 = one `transpose=1`; 270 = `transpose=2`;
+/// 180 = `transpose=2,transpose=2`; hflip/vflip append `hflip`/`vflip`.
+fn ffmpeg_vf(rotation: u32, hflip: bool, vflip: bool) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    match rotation {
+        90 => parts.push("transpose=1"),
+        180 => parts.push("transpose=2,transpose=2"),
+        270 => parts.push("transpose=2"),
+        _ => {}
+    }
+    if hflip {
+        parts.push("hflip");
+    }
+    if vflip {
+        parts.push("vflip");
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(","))
+    }
+}
+
+/// The GStreamer `videoflip` element chain for the configured orientation,
+/// returned as `"videoflip method=… ! … ! "` (trailing separator) when any
+/// transform is set, else `""`. Each transform is its own element (GStreamer
+/// `videoflip` carries a single method), so a rotate + flip emits two chained
+/// elements. Map: 90 = clockwise, 180 = rotate-180, 270 = counterclockwise;
+/// hflip = horizontal-flip, vflip = vertical-flip.
+fn gst_videoflip_chain(rotation: u32, hflip: bool, vflip: bool) -> String {
+    let mut els: Vec<&str> = Vec::new();
+    match rotation {
+        90 => els.push("videoflip method=clockwise"),
+        180 => els.push("videoflip method=rotate-180"),
+        270 => els.push("videoflip method=counterclockwise"),
+        _ => {}
+    }
+    if hflip {
+        els.push("videoflip method=horizontal-flip");
+    }
+    if vflip {
+        els.push("videoflip method=vertical-flip");
+    }
+    let chain = els.join(" ! ");
+    if chain.is_empty() {
+        chain
+    } else {
+        format!("{chain} ! ")
+    }
+}
+
+/// True when the GStreamer builder should use the Allwinner OMX hardware
+/// encoder: the board's HAL `encoder_api` is "vendor" AND `omxh264videoenc` is
+/// present. An explicit `encoder: "software"` always overrides off (the OMX
+/// branch is a hardware path); `encoder: "omx"` requires the same vendor gate
+/// (an OMX request on a non-Allwinner board falls through to mpp/x264).
+fn use_omx_encoder(params: &EncoderParams, env: &EncoderEnv) -> bool {
+    if params.encoder == "software" {
+        return false;
+    }
+    env.encoder_api == "vendor" && env.has_omxh264videoenc
+}
+
+/// Resolve the effective [`EncoderKind`] after applying the per-camera `encoder`
+/// override and the board's HAL `encoder_api`.
+///
+/// * "v4l2m2m" → ffmpeg (h264_v4l2m2m, decided inside [`build_ffmpeg_command`]).
+/// * "software" → keep the probed builder family and use a software codec inside
+///   it (libx264 in ffmpeg, x264enc in GStreamer) — "software" names the CODEC,
+///   not the family, so a GStreamer-only board still gets a runnable command.
+/// * "omx" → GStreamer when the board is an Allwinner vendor with the element
+///   present; otherwise the probed base kind.
+/// * "auto" (default) → GStreamer-OMX on an Allwinner vendor board (the whole
+///   point: a USB camera there must hit the HW OMX encoder, not ffmpeg
+///   libx264), else the probed base kind.
+fn resolve_kind(base: EncoderKind, params: &EncoderParams, env: &EncoderEnv) -> EncoderKind {
+    match params.encoder.as_str() {
+        "v4l2m2m" => EncoderKind::Ffmpeg,
+        "software" => base,
+        "omx" => {
+            if env.encoder_api == "vendor" && env.has_omxh264videoenc {
+                EncoderKind::Gstreamer
+            } else {
+                base
+            }
+        }
+        _ => {
+            if env.encoder_api == "vendor" && env.has_omxh264videoenc {
+                EncoderKind::Gstreamer
+            } else {
+                base
+            }
+        }
+    }
+}
+
 /// Build the full argv vector for the given encoder configuration.
 ///
 /// Returns the program plus its arguments. For the bash-pipeline cases (rpicam
@@ -215,7 +362,10 @@ pub fn build_encoder_command(
 ) -> Result<Vec<String>, EncoderError> {
     let source = validate_source(source)?;
     let output = validate_source(output)?;
-    let cmd = match params.kind {
+    // Apply the per-camera encoder override + board HAL encoder_api before
+    // dispatching (builder-private; the probed base kind stays on `params.kind`).
+    let kind = resolve_kind(params.kind, params, env);
+    let cmd = match kind {
         EncoderKind::RpicamVid => build_rpicam_command(params, source, output),
         EncoderKind::Ffmpeg => build_ffmpeg_command(params, source, output, camera, env),
         EncoderKind::Gstreamer => build_gstreamer_command(params, source, output, camera, env),
@@ -381,7 +531,15 @@ fn build_ffmpeg_command(
     // encoder device is Present; otherwise map the codec to a sw encoder. A
     // mere `-encoders` listing is NOT enough — a wrapper with no backing device
     // makes ffmpeg exit at init and the camera streams zero bytes.
-    let use_hw_h264 = matches!(params.codec.as_str(), "h264" | "H264") && env.hw_h264.is_present();
+    // An explicit `encoder` override biases this: "software" always picks
+    // libx264; "v4l2m2m" forces the HW M2M wrapper even if the probe was back-
+    // level. "omx"/"auto" keep the probe-driven decision.
+    let force_sw = params.encoder == "software";
+    let force_v4l2m2m = params.encoder == "v4l2m2m";
+    let use_hw_h264 = !force_sw
+        && (force_v4l2m2m
+            || (matches!(params.codec.as_str(), "h264" | "H264")
+                && env.hw_h264.is_present()));
 
     let ffmpeg_codec: String = if use_hw_h264 {
         "h264_v4l2m2m".to_string()
@@ -453,6 +611,15 @@ fn build_ffmpeg_command(
     cmd.push("-r".into());
     cmd.push(params.fps.to_string());
 
+    // Image orientation: when rotation/hflip/vflip are set, insert a `-vf`
+    // transform before encode. On the HW paths (h264_v4l2m2m) this is a CPU
+    // filter between capture and encode — a small latency/CPU cost, acceptable
+    // because the OMX/V4L2 HW encoders on these boards do not rotate natively.
+    if let Some(vf) = ffmpeg_vf(params.rotation, params.hflip, params.vflip) {
+        cmd.push("-vf".into());
+        cmd.push(vf);
+    }
+
     cmd.push("-c:v".into());
     cmd.push(ffmpeg_codec.clone());
     cmd.push("-b:v".into());
@@ -464,7 +631,7 @@ fn build_ffmpeg_command(
         // which the browser MSE player hardcodes; force a 0.5s GOP and the
         // low-latency x264-params. intra-refresh is forbidden — it removes
         // true IDR NALs and the ingest parser cannot bootstrap SPS/PPS.
-        let gop = (params.fps / 2).max(1);
+        let gop = gop_interval(params);
         cmd.extend(
             [
                 "-pix_fmt",
@@ -503,8 +670,8 @@ fn build_ffmpeg_command(
         cmd.push("-bsf:v".into());
         cmd.push("h264_mp4toannexb".into());
     } else if ffmpeg_codec == "h264_v4l2m2m" {
-        // Pi V4L2 M2M HW encoder: force yuv420p, same 0.5s GOP, no B-frames.
-        let gop_hw = (params.fps / 2).max(1);
+        // Pi V4L2 M2M HW encoder: force yuv420p, same short GOP, no B-frames.
+        let gop_hw = gop_interval(params);
         cmd.push("-pix_fmt".into());
         cmd.push("yuv420p".into());
         cmd.push("-g".into());
@@ -568,10 +735,30 @@ fn build_gstreamer_command(
         )
     };
 
-    let gop = (params.fps / 2).max(1);
-    // The Rockchip VPU element is only installable on a board with the VPU, so
-    // its presence is itself the honest gate — no separate SoC-family check.
-    let encoder = if env.has_mpph264enc {
+    // Image orientation: a chain of `videoflip` elements applied after decode /
+    // before encode. On the OMX/HW path this is a CPU transform (the HW
+    // encoders do not rotate natively) — a small latency/CPU cost, acceptable.
+    let flip = gst_videoflip_chain(params.rotation, params.hflip, params.vflip);
+
+    let gop = gop_interval(params);
+    let use_omx = use_omx_encoder(params, env);
+    let encoder = if params.encoder == "software" {
+        // Explicit software override — always desktop x264enc, never a HW path.
+        format!(
+            "x264enc bitrate={} speed-preset=ultrafast tune=zerolatency \
+             threads=2 sliced-threads=false key-int-max={gop}",
+            params.bitrate_kbps
+        )
+    } else if use_omx {
+        // Allwinner Cedar OMX HW H.264 encoder. CBR via
+        // `control-rate=constant target-bitrate=<bps>` (bps = kbps*1000) so the
+        // radio FEC never sees a starving/scene-crazy bitrate; a short GOP
+        // aligned to FEC recovery. Property names verified on-rig
+        // (`gst-inspect-1.0 omxh264videoenc`); if the board's OMX proves
+        // unusable, software libx264 remains the fallback.
+        let bps = params.bitrate_kbps * 1000;
+        format!("omxh264videoenc control-rate=constant target-bitrate={bps} key-int-max={gop}")
+    } else if env.has_mpph264enc {
         // mpph264enc HW VPU: bps = bits/sec, VBR (rc-mode=1) with bounded
         // bps-max/bps-min so a scene change cannot starve the wfb_tx FEC,
         // header-mode=1 inserts SPS/PPS before every IDR for late joiners.
@@ -591,13 +778,34 @@ fn build_gstreamer_command(
         )
     };
 
+    // Capture → decode → orientation prefix, ending right before h264parse.
+    // The OMX path is capture-direct with `io-mode=mmap`, forces NV12 for the
+    // OMX encoder, and adds the frame-dropping `queue max-size-buffers=4
+    // leaky=downstream` so the HW encoder never backs up behind the source.
+    let core = if use_omx {
+        format!(
+            "v4l2src device={safe_source} io-mode=mmap do-timestamp=true ! {src_caps} ! \
+             {decode} ! {flip}video/x-raw,format=NV12,width={},height={},framerate={}/1 ! \
+             queue max-size-buffers=4 leaky=downstream ! {encoder}",
+            params.width, params.height, params.fps
+        )
+    } else {
+        format!("v4l2src device={safe_source} ! {src_caps} ! {decode} ! {flip}{encoder}")
+    };
+    // `h264parse config-interval=1` on the OMX path re-stamps SPS/PPS before
+    // every IDR so a radio FEC recovery / late joiner resyncs instantly.
+    let h264parse = if use_omx {
+        " ! h264parse config-interval=1"
+    } else {
+        " ! h264parse"
+    };
+
     if output.starts_with("rtsp://") {
         let safe_output = gst_quote(output);
         if env.has_rtspclientsink {
             // Direct GStreamer → mediamtx via rtspclientsink (RTSP RECORD).
             let pipeline = format!(
-                "v4l2src device={safe_source} ! {src_caps} ! \
-                 {decode} ! {encoder} ! h264parse ! \
+                "{core}{h264parse} ! \
                  rtspclientsink location={safe_output} protocols=tcp latency=0"
             );
             let mut out: Vec<String> = vec!["gst-launch-1.0".into(), "-e".into()];
@@ -606,8 +814,7 @@ fn build_gstreamer_command(
         }
         // Fallback: pipe GStreamer H.264 → ffmpeg for RTSP muxing.
         let gst_cmd = format!(
-            "gst-launch-1.0 -q v4l2src device={safe_source} ! {src_caps} ! \
-             {decode} ! {encoder} ! h264parse ! \
+            "gst-launch-1.0 -q {core}{h264parse} ! \
              'video/x-h264,stream-format=byte-stream' ! fdsink fd=1"
         );
         let ffmpeg_cmd = format!(
@@ -624,11 +831,7 @@ fn build_gstreamer_command(
 
     // File / other output: direct GStreamer pipeline.
     let safe_output = gst_quote(output);
-    let pipeline = format!(
-        "v4l2src device={safe_source} ! {src_caps} ! \
-         {decode} ! {encoder} ! h264parse ! \
-         filesink location={safe_output}"
-    );
+    let pipeline = format!("{core}{h264parse} ! filesink location={safe_output}");
     let mut out: Vec<String> = vec!["gst-launch-1.0".into(), "-e".into()];
     out.extend(pipeline.split(' ').map(|s| s.to_string()));
     out
@@ -916,6 +1119,65 @@ pub fn binary_present(program: &str) -> bool {
     false
 }
 
+/// The codec elements the label is derived from, hardware first. An argv can
+/// only ever carry one of them, so the order is a tie-break that never fires
+/// in practice; it is fixed so the emitted value is deterministic.
+const ENCODER_ELEMENTS: [&str; 8] = [
+    "h264_v4l2m2m",
+    "hevc_v4l2m2m",
+    "mpph264enc",
+    "mpph265enc",
+    "omxh264videoenc",
+    "x264enc",
+    "libx264",
+    "libx265",
+];
+
+/// The on-wire encoder identity for the `camera-state.json` sidecar.
+///
+/// [`EncoderKind`] cannot answer this: `Ffmpeg` covers both the hardware
+/// `h264_v4l2m2m` path and the software `libx264` fallback, so a label derived
+/// from the kind tells an operator nothing about whether the node fell back to
+/// software — which is the one question the sidecar field exists to answer. The
+/// codec element appears only in the built command, so that is what is scanned.
+///
+/// Values: `rpicam-vid`, and `<family>-<element>` for `ffmpeg` / `gstreamer`
+/// (e.g. `ffmpeg-h264_v4l2m2m`, `gstreamer-x264enc`), falling back to
+/// `<family>-unknown` when no known element is present.
+pub fn encoder_label(kind: EncoderKind, cmd: &[String]) -> String {
+    if kind == EncoderKind::RpicamVid {
+        return "rpicam-vid".to_string();
+    }
+    let family = match kind {
+        EncoderKind::Gstreamer => "gstreamer",
+        _ => "ffmpeg",
+    };
+    for token in cmd {
+        // The rpicam / gstreamer / SEI-wrapped forms are `bash -c "<pipeline>"`,
+        // which carries the whole command in one token, so argv position alone
+        // cannot order the elements: match as a substring and take the earliest
+        // hit within the token.
+        let hit = ENCODER_ELEMENTS
+            .iter()
+            .filter_map(|el| token.find(el).map(|at| (at, *el)))
+            .min();
+        if let Some((_, element)) = hit {
+            return format!("{family}-{element}");
+        }
+    }
+    format!("{family}-unknown")
+}
+
+/// Whether [`encoder_label`] names a hardware encoder. Published as its own
+/// sidecar field so no consumer has to sniff the label string to find out that
+/// a node is burning its CPU on the software fallback.
+pub fn encoder_is_hardware(label: &str) -> bool {
+    label == "rpicam-vid"
+        || label.contains("v4l2m2m")
+        || label.contains("mpp")
+        || label.contains("omxh264videoenc")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1009,7 +1271,9 @@ mod tests {
         EncoderEnv {
             hw_h264: hw_node_missing(),
             has_mpph264enc: false,
+            has_omxh264videoenc: false,
             has_rtspclientsink: true,
+            encoder_api: "unknown".into(),
             python_executable: PY_EXE.into(),
         }
     }
@@ -1017,7 +1281,9 @@ mod tests {
         EncoderEnv {
             hw_h264: hw_node_missing(),
             has_mpph264enc: false,
+            has_omxh264videoenc: false,
             has_rtspclientsink: true,
+            encoder_api: "unknown".into(),
             python_executable: PY_EXE.into(),
         }
     }
@@ -1025,7 +1291,9 @@ mod tests {
         EncoderEnv {
             hw_h264: hw_present(),
             has_mpph264enc: false,
+            has_omxh264videoenc: false,
             has_rtspclientsink: true,
+            encoder_api: "unknown".into(),
             python_executable: PY_EXE.into(),
         }
     }
@@ -1033,7 +1301,9 @@ mod tests {
         EncoderEnv {
             hw_h264: hw_node_missing(),
             has_mpph264enc: true,
+            has_omxh264videoenc: false,
             has_rtspclientsink: true,
+            encoder_api: "rkmpp".into(),
             python_executable: PY_EXE.into(),
         }
     }
@@ -1041,6 +1311,17 @@ mod tests {
         EncoderEnv {
             has_rtspclientsink: false,
             ..rk_mpp()
+        }
+    }
+    /// An Allwinner vendor board (Cedar OMX) with `omxh264videoenc` present.
+    fn allwinner_omx() -> EncoderEnv {
+        EncoderEnv {
+            hw_h264: hw_node_missing(),
+            has_mpph264enc: false,
+            has_omxh264videoenc: true,
+            has_rtspclientsink: true,
+            encoder_api: "vendor".into(),
+            python_executable: PY_EXE.into(),
         }
     }
 
@@ -1052,6 +1333,35 @@ mod tests {
             height: h,
             fps,
             bitrate_kbps: kbps,
+            encoder: "auto".into(),
+            rotation: 0,
+            hflip: false,
+            vflip: false,
+            keyframe_interval: 0,
+        }
+    }
+
+    /// Build params with a specific encode config (orientation / encoder
+    /// override / keyframe) on top of the given geometry.
+    fn params_cfg(
+        kind: EncoderKind,
+        w: u32,
+        h: u32,
+        fps: u32,
+        kbps: u32,
+        encoder: &str,
+        rotation: u32,
+        hflip: bool,
+        vflip: bool,
+        keyframe_interval: u32,
+    ) -> EncoderParams {
+        EncoderParams {
+            encoder: encoder.into(),
+            rotation,
+            hflip,
+            vflip,
+            keyframe_interval,
+            ..params(kind, w, h, fps, kbps)
         }
     }
 
@@ -1332,7 +1642,9 @@ mod tests {
         let env = EncoderEnv {
             hw_h264: hw_node_missing(),
             has_mpph264enc: false,
+            has_omxh264videoenc: false,
             has_rtspclientsink: true,
+            encoder_api: "unknown".into(),
             python_executable: PY_EXE.into(),
         };
         let got = build(
@@ -1355,7 +1667,9 @@ mod tests {
         let env = EncoderEnv {
             hw_h264: hw_present(),
             has_mpph264enc: false,
+            has_omxh264videoenc: false,
             has_rtspclientsink: true,
+            encoder_api: "unknown".into(),
             python_executable: PY_EXE.into(),
         };
         let got = build(
@@ -1437,6 +1751,95 @@ mod tests {
             detect_encoder_for_camera(CameraType::Ip, false, false, false),
             None
         );
+    }
+
+    #[test]
+    fn encoder_label_names_the_codec_element_the_command_actually_runs() {
+        // The sidecar field exists so an operator can tell a node that fell back
+        // to software from one on its hardware encoder. EncoderKind::Ffmpeg
+        // covers both, so the label is read off the built argv.
+        let sw = build(
+            &params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000),
+            "/dev/video1",
+            RTSP_OUT,
+            &usb_mjpeg(),
+            &non_rk_sw(),
+            false,
+        );
+        assert!(sw.iter().any(|a| a == "libx264"), "fixture sanity");
+        assert_eq!(encoder_label(EncoderKind::Ffmpeg, &sw), "ffmpeg-libx264");
+        assert!(!encoder_is_hardware("ffmpeg-libx264"));
+
+        let hw = build(
+            &params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000),
+            "/dev/video1",
+            RTSP_OUT,
+            &usb_mjpeg(),
+            &non_rk_hw(),
+            false,
+        );
+        assert_eq!(
+            encoder_label(EncoderKind::Ffmpeg, &hw),
+            "ffmpeg-h264_v4l2m2m"
+        );
+        assert!(encoder_is_hardware("ffmpeg-h264_v4l2m2m"));
+
+        // CSI: the backend answers before the argv is looked at, because the
+        // rpicam pipeline hands its elementary stream to a `-c copy` ffmpeg and
+        // carries no codec element of its own.
+        let csi_cmd = build(
+            &params(EncoderKind::RpicamVid, 1280, 720, 30, 4000),
+            "/dev/video0",
+            RTSP_OUT,
+            &csi(),
+            &rockchip(),
+            false,
+        );
+        assert_eq!(
+            encoder_label(EncoderKind::RpicamVid, &csi_cmd),
+            "rpicam-vid"
+        );
+        assert!(encoder_is_hardware("rpicam-vid"));
+
+        // GStreamer, both halves of the Rockchip split.
+        let gst_hw = build(
+            &params(EncoderKind::Gstreamer, 1280, 720, 30, 4000),
+            "/dev/video1",
+            RTSP_OUT,
+            &usb_mjpeg(),
+            &rk_mpp(),
+            false,
+        );
+        assert_eq!(
+            encoder_label(EncoderKind::Gstreamer, &gst_hw),
+            "gstreamer-mpph264enc"
+        );
+        assert!(encoder_is_hardware("gstreamer-mpph264enc"));
+
+        let gst_sw = build(
+            &params(EncoderKind::Gstreamer, 1280, 720, 30, 4000),
+            "/dev/video1",
+            RTSP_OUT,
+            &usb_mjpeg(),
+            &non_rk_sw(),
+            false,
+        );
+        assert_eq!(
+            encoder_label(EncoderKind::Gstreamer, &gst_sw),
+            "gstreamer-x264enc"
+        );
+        assert!(!encoder_is_hardware("gstreamer-x264enc"));
+
+        // A command with no recognised element is labelled unknown rather than
+        // guessed at.
+        assert_eq!(
+            encoder_label(
+                EncoderKind::Ffmpeg,
+                &["ffmpeg".to_string(), "-c".into(), "copy".into()]
+            ),
+            "ffmpeg-unknown"
+        );
+        assert!(!encoder_is_hardware("ffmpeg-unknown"));
     }
 
     #[test]
@@ -1538,5 +1941,260 @@ mod tests {
             "/s.sock",
         );
         assert_eq!(augmented, base);
+    }
+
+    // --- Allwinner OMX hardware encode (A733) ------------------------
+
+    #[test]
+    fn gst_omx_selects_omxh264videoenc_with_nv12_and_low_latency() {
+        // On an Allwinner vendor board with omxh264videoenc present, an
+        // auto default must use the OMX hardware encoder: CBR constant bitrate
+        // (bps = kbps*1000), NV12 into the encoder, the frame-dropping queue,
+        // and `h264parse config-interval=1` so radio FEC recovery resyncs fast.
+        let got = build(
+            &params(EncoderKind::Gstreamer, 1280, 720, 30, 4000),
+            "/dev/video2",
+            RTSP_OUT,
+            &usb_yuyv(),
+            &allwinner_omx(),
+            false,
+        );
+        assert_eq!(got, expected("gst_omx_argv"));
+        assert!(got.iter().any(|a| a == "omxh264videoenc"));
+        assert!(encoder_is_hardware("gstreamer-omxh264videoenc"));
+    }
+
+    #[test]
+    fn gst_omx_rotation90_inserts_videoflip() {
+        let got = build(
+            &params_cfg(EncoderKind::Gstreamer, 1280, 720, 30, 4000, "auto", 90, false, false, 0),
+            "/dev/video2",
+            RTSP_OUT,
+            &usb_yuyv(),
+            &allwinner_omx(),
+            false,
+        );
+        assert_eq!(got, expected("gst_omx_rot90"));
+    }
+
+    #[test]
+    fn gst_explicit_omx_and_software_override() {
+        // Explicit encoder: omx → OMX (same argv as auto on the vendor board);
+        // software → never the HW branch, always desktop x264enc even with the
+        // OMX element present (software names the codec, keeps the GStreamer
+        // family).
+        let omx = build(
+            &params_cfg(EncoderKind::Gstreamer, 1280, 720, 30, 4000, "omx", 0, false, false, 0),
+            "/dev/video2",
+            RTSP_OUT,
+            &usb_yuyv(),
+            &allwinner_omx(),
+            false,
+        );
+        assert_eq!(omx, expected("gst_omx_explicit"));
+        assert_eq!(omx, expected("gst_omx_argv"), "explicit omx == auto on vendor");
+
+        let sw = build(
+            &params_cfg(EncoderKind::Gstreamer, 1280, 720, 30, 4000, "software", 0, false, false, 0),
+            "/dev/video2",
+            RTSP_OUT,
+            &usb_yuyv(),
+            &allwinner_omx(),
+            false,
+        );
+        assert_eq!(sw, expected("gst_omx_sw_override"));
+        assert!(!sw.iter().any(|a| a == "omxh264videoenc"));
+        assert!(sw.iter().any(|a| a == "x264enc"));
+        assert!(!encoder_is_hardware("gstreamer-x264enc"));
+    }
+
+    // --- orientation filters, ffmpeg builder --------------------------
+
+    #[test]
+    fn ffmpeg_rotation_and_flip_filter_insertion() {
+        // Every rotation value + hflip/vflip yields the exact `-vf` chain. An
+        // unrotated, unflipped camera emits NO -vf (covered by the existing
+        // fixtures, which pass untouched). 90=transpose=1, 180=transpose=2,
+        // transpose=2, 270=transpose=2; then hflip/vflip append.
+        let ff = |rot: u32, h: bool, v: bool| {
+            build(
+                &params_cfg(EncoderKind::Ffmpeg, 1280, 720, 30, 4000, "auto", rot, h, v, 0),
+                "/dev/video1",
+                RTSP_OUT,
+                &usb_mjpeg(),
+                &rockchip(),
+                false,
+            )
+        };
+        assert_eq!(ff(90, false, false), expected("ffmpeg_rot90"));
+        assert_eq!(ff(180, false, false), expected("ffmpeg_rot180"));
+        assert_eq!(ff(270, false, false), expected("ffmpeg_rot270"));
+        assert_eq!(ff(0, true, false), expected("ffmpeg_hflip"));
+        assert_eq!(ff(0, false, true), expected("ffmpeg_vflip"));
+        assert_eq!(ff(180, true, false), expected("ffmpeg_rot180_hflip"));
+        for (rot, want) in [
+            (90, "transpose=1"),
+            (180, "transpose=2,transpose=2"),
+            (270, "transpose=2"),
+        ] {
+            let vf = ff(rot, false, false);
+            let fi = vf.iter().position(|t| t == "-vf").unwrap();
+            assert_eq!(vf[fi + 1], want);
+        }
+        let flip = ff(0, true, true);
+        let fi = flip.iter().position(|t| t == "-vf").unwrap();
+        assert_eq!(flip[fi + 1], "hflip,vflip");
+    }
+
+    // --- orientation filters, gstreamer builder -----------------------
+
+    #[test]
+    fn gst_x264_rotation_and_flip_filter_insertion() {
+        // videoflip element chain on the software x264 gstreamer path, with the
+        // legacy (non-OMX) capture prefix otherwise unchanged.
+        let g = |rot: u32, h: bool, v: bool| {
+            build(
+                &params_cfg(EncoderKind::Gstreamer, 1280, 720, 30, 4000, "auto", rot, h, v, 0),
+                "/dev/video1",
+                RTSP_OUT,
+                &usb_mjpeg(),
+                &non_rk_sw(),
+                false,
+            )
+        };
+        assert_eq!(g(90, false, false), expected("gst_x264_rot90"));
+        assert_eq!(g(180, false, false), expected("gst_x264_rot180"));
+        assert_eq!(g(270, false, false), expected("gst_x264_rot270"));
+        assert_eq!(g(0, true, false), expected("gst_x264_hflip"));
+        assert_eq!(g(0, false, true), expected("gst_x264_vflip"));
+        for (rot, method) in [
+            (90, "method=clockwise"),
+            (180, "method=rotate-180"),
+            (270, "method=counterclockwise"),
+        ] {
+            let tok = g(rot, false, false).to_vec();
+            // The GStreamer pipeline is token-split on spaces, so `videoflip
+            // method=…` lands as two tokens; check the method token is present
+            // and is preceded by a `videoflip` element token.
+            assert!(tok.iter().any(|t| t == method), "missing {method}");
+            assert!(
+                tok.iter()
+                    .position(|t| t == method)
+                    .map(|i| i >= 1 && tok[i - 1] == "videoflip")
+                    .unwrap_or(false),
+                "{method} not preceded by a videoflip element"
+            );
+        }
+        let flip = g(0, true, true);
+        assert!(flip.iter().any(|t| t == "method=horizontal-flip"));
+        assert!(flip.iter().any(|t| t == "method=vertical-flip"));
+    }
+
+    // --- encoder override selection -----------------------------------
+
+    #[test]
+    fn ffmpeg_override_software_and_v4l2m2m() {
+        // software → libx264 even when a real HW device is present.
+        let sw = build(
+            &params_cfg(EncoderKind::Ffmpeg, 1280, 720, 30, 4000, "software", 0, false, false, 0),
+            "/dev/video1",
+            RTSP_OUT,
+            &usb_mjpeg(),
+            &non_rk_hw(),
+            false,
+        );
+        assert_eq!(sw, expected("ffmpeg_override_software"));
+        assert!(sw.iter().any(|a| a == "libx264"));
+        assert!(!encoder_is_hardware("ffmpeg-libx264"));
+
+        // v4l2m2m → force the HW M2M wrapper even when the probe found no device
+        // (an operator explicitly opting into the wrapper takes the risk).
+        let hw = build(
+            &params_cfg(EncoderKind::Ffmpeg, 1280, 720, 30, 4000, "v4l2m2m", 0, false, false, 0),
+            "/dev/video1",
+            RTSP_OUT,
+            &usb_mjpeg(),
+            &rockchip(),
+            false,
+        );
+        assert_eq!(hw, expected("ffmpeg_override_v4l2m2m"));
+        assert!(hw.iter().any(|a| a == "h264_v4l2m2m"));
+        assert!(encoder_is_hardware("ffmpeg-h264_v4l2m2m"));
+    }
+
+    #[test]
+    fn auto_default_stays_ffmpeg_off_vendor_boards() {
+        // A non-Allwinner board (encoder_api unknown, no omxh264videoenc) with
+        // the auto default must NOT be hijacked into the OMX gstreamer path —
+        // it stays on ffmpeg libx264 (byte-identical legacy behavior).
+        let p = params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000);
+        let got = build_encoder_command(
+            &p,
+            "/dev/video1",
+            RTSP_OUT,
+            Some(&usb_mjpeg()),
+            &rockchip(),
+        )
+        .unwrap();
+        assert!(got.iter().any(|a| a == "libx264"));
+        assert!(!got.iter().any(|a| a == "omxh264videoenc"));
+    }
+
+    #[test]
+    fn ffmpeg_keyframe_interval_overrides_the_gop() {
+        // keyframe_interval=5 → -g 5 (instead of the 0.5 s default of 15).
+        let got = build(
+            &params_cfg(EncoderKind::Ffmpeg, 1280, 720, 30, 4000, "auto", 0, false, false, 5),
+            "/dev/video1",
+            RTSP_OUT,
+            &usb_mjpeg(),
+            &rockchip(),
+            false,
+        );
+        assert_eq!(got, expected("ffmpeg_keyframe5"));
+        let gi = got.iter().position(|t| t == "-g").unwrap();
+        assert_eq!(got[gi + 1], "5");
+        // Default (0) keeps the existing 0.5 s GOP: fps30 → 15 (see the legacy
+        // fixtures, which still pass with -g 15).
+        assert_eq!(gop_interval(&params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000)), 15);
+        assert_eq!(
+            gop_interval(&params_cfg(EncoderKind::Ffmpeg, 1280, 720, 30, 4000, "auto", 0, false, false, 5)),
+            5
+        );
+    }
+
+    #[test]
+    fn gstreamer_keyframe_interval_reaches_key_int_max() {
+        // keyframe_interval=5 → key-int-max=5 on the x264/mpp/omx paths.
+        let got = build(
+            &params_cfg(EncoderKind::Gstreamer, 1280, 720, 30, 4000, "auto", 0, false, false, 5),
+            "/dev/video1",
+            RTSP_OUT,
+            &usb_yuyv(),
+            &allwinner_omx(),
+            false,
+        );
+        let tok = got.to_vec();
+        assert!(tok.iter().any(|t| t.contains("key-int-max=5")), "missing key-int-max=5");
+    }
+
+    #[test]
+    fn omx_encoder_label_and_hardware_flag() {
+        // The on-wire label for the OMX branch is gstreamer-omxh264videoenc and
+        // it must read encoder_hw=true (the camera_state sidecar field).
+        let got = build(
+            &params(EncoderKind::Gstreamer, 1280, 720, 30, 4000),
+            "/dev/video2",
+            RTSP_OUT,
+            &usb_yuyv(),
+            &allwinner_omx(),
+            false,
+        );
+        assert_eq!(
+            encoder_label(EncoderKind::Gstreamer, &got),
+            "gstreamer-omxh264videoenc"
+        );
+        assert!(encoder_is_hardware("gstreamer-omxh264videoenc"));
+        assert!(!encoder_is_hardware("gstreamer-x264enc"));
     }
 }

@@ -211,15 +211,32 @@ def install(
         for perm in result.permissions_requested:
             sup.grant_permission(result.plugin_id, perm)
     elif auto_yes:
+        # A provisioned, signed grant can authorize an unattended install of a
+        # high/critical-risk plugin. With the grant covering EVERY requested
+        # permission the install proceeds and is enabled; otherwise it fails
+        # closed and is removed, exactly as before.
         if result.risk in ("high", "critical"):
-            _emit_err(
-                as_json,
-                EXIT_PERMISSION_DENIED,
-                f"--yes refuses {result.risk}-risk plugins",
-                hint="Re-run interactively and approve the permissions after review.",
-            )
-            sup.remove(result.plugin_id, keep_data=False)
-            sys.exit(EXIT_PERMISSION_DENIED)
+            covered = sup.grant_covers(result.plugin_id, result.permissions_requested)
+            if sorted(covered) != sorted(set(result.permissions_requested)):
+                _emit_err(
+                    as_json,
+                    EXIT_PERMISSION_DENIED,
+                    f"--yes refuses {result.risk}-risk plugins",
+                    hint=(
+                        "No signed grant covers every requested permission. "
+                        "Re-run interactively and approve them after review, or "
+                        "provision a grant at /etc/ados/plugin-grants/."
+                    ),
+                )
+                sup.remove(result.plugin_id, keep_data=False)
+                sys.exit(EXIT_PERMISSION_DENIED)
+            for perm in result.permissions_requested:
+                sup.grant_permission(result.plugin_id, perm)
+            sup.enable(result.plugin_id)
+            if not as_json:
+                click.echo(f"Installed and enabled {result.plugin_id} (granted).")
+            _emit_ok(as_json, asdict(result))
+            return
         for perm in result.permissions_requested:
             sup.grant_permission(result.plugin_id, perm)
 

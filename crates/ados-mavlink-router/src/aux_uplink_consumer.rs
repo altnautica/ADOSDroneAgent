@@ -36,7 +36,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::Notify;
 
 use crate::aux_rpc_dedupe::RequestDedupe;
-use crate::connection::FcConnection;
+use crate::connection::{ClientOrigin, FcConnection};
 
 /// Largest datagram read in one go. Matches `ados_protocol::aux_mux::AUX_MAX_PAYLOAD`
 /// plus header room; a datagram over this size cannot be one of ours anyway.
@@ -388,21 +388,33 @@ async fn dispatch(payload: &[u8], deps: &UplinkDeps, counters: &AuxUplinkConsume
                 .mavlink_frames
                 .fetch_add(frames.len() as u64, Ordering::Relaxed);
             for frame in frames {
-                // Bounded, not spawned: MAVLink frame order must be preserved,
-                // and the recv loop this runs on is the same one the relay-proxy
-                // Request lane depends on.
-                // The bound is applied inside the writer lock, not by wrapping
-                // the call here: cancelling the write mid-flight can leave a
-                // partial frame on the wire for the next one to concatenate
-                // onto, which the FC reports as a CRC failure that reads like
-                // line noise. A timeout there re-opens the link instead.
-                if !deps.fc.send_bytes_bounded(frame, FC_WRITE_TIMEOUT).await {
-                    counters
-                        .0
-                        .mavlink_write_timeouts
-                        .fetch_add(1, Ordering::Relaxed);
-                    continue;
+                // Item 13 — a private-payload TUNNEL frame (payload_type above
+                // the reserved max) is plugin-addressed APPLICATION traffic (an
+                // AD05-style cross-link frame), not an FC command. Publish it to
+                // the router's frame fan-out so an on-board plugin subscribed to
+                // TUNNEL actually receives the ground→drone frame. It must NEVER
+                // go down the FC serial cable — where, before this, it was handed
+                // to the FC and silently disappeared (the drone-side plugin never
+                // saw the operator's command).
+                if let Some(pt) = ados_protocol::mavlink::tunnel_payload_type(frame) {
+                    if pt > ados_protocol::mavlink::TUNNEL_RESERVED_PAYLOAD_TYPE_MAX {
+                        deps.fc.inject_frame(frame.to_vec());
+                        counters.0.mavlink_injected.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
                 }
+                // Item 14 (safety-critical) — a genuine FC-bound uplink frame is
+                // routed through the ARBITRATED client path, not the ungated
+                // serial write it used to take. `send_client_bytes` is the single
+                // PIC choke point the drone's own autonomous injector also passes
+                // through, so a relayed operator command and an autonomous write
+                // are adjudicated by one decision function and cannot drift. The
+                // relayed frame carries no injector claim — it is the human path,
+                // and the operator beats the injector by construction; the
+                // autonomous guidance write declares its injector and is gated.
+                deps.fc
+                    .send_client_bytes(frame, ClientOrigin::Relayed, None)
+                    .await;
                 counters.0.mavlink_injected.fetch_add(1, Ordering::Relaxed);
             }
         }

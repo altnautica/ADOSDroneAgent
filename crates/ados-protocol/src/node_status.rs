@@ -66,7 +66,7 @@ use crate::aux_mux::AUX_MAX_PAYLOAD;
 /// Bump on any breaking field-shape change. A reader that does not recognise the
 /// version drops the frame rather than misreading it: the two rigs are upgraded
 /// independently, so a mixed-version pair is a normal state, not an error.
-pub const NODE_STATUS_VERSION: u8 = 1;
+pub const NODE_STATUS_VERSION: u8 = 2;
 
 /// Longest device id carried. Real ids are 12 hex characters, so this is
 /// headroom rather than a limit that bites.
@@ -89,6 +89,11 @@ pub const MAX_FAILED_NAMES: usize = 6;
 /// Longest single failed-unit name carried.
 pub const MAX_UNIT_NAME: usize = 40;
 
+/// Longest plugin-inventory string carried: `pluginId@contractVersion` entries
+/// joined by commas. Capped so a node with many plugins degrades predictably
+/// instead of overflowing the frame; a real node runs a handful.
+pub const MAX_PLUGIN_LIST: usize = 240;
+
 /// Truncate `s` to at most `max` characters, respecting character boundaries so
 /// a multi-byte name never becomes invalid UTF-8.
 fn clip(s: &str, max: usize) -> String {
@@ -106,6 +111,36 @@ fn clip_opt(s: Option<&str>, max: usize) -> Option<String> {
         return None;
     }
     Some(clip(v, max))
+}
+
+/// Format an installed-plugin inventory as `id@ver` entries joined by commas,
+/// sorted by id so the string is stable regardless of install order. `None`
+/// when the inventory is empty. Plugin ids are reverse-DNS and carry no `@`, so
+/// the last `@` always separates id from version on decode.
+pub fn plugin_list_string(plugins: &[(String, u16)]) -> Option<String> {
+    if plugins.is_empty() {
+        return None;
+    }
+    let mut entries: Vec<String> = plugins.iter().map(|(id, v)| format!("{id}@{v}")).collect();
+    entries.sort();
+    Some(entries.join(","))
+}
+
+/// Parse a plugin-inventory string produced by [`plugin_list_string`] back into
+/// `(id, contractVersion)` pairs. A malformed entry is skipped rather than
+/// failing the whole parse, so one bad token never blinds a version check.
+pub fn parse_plugin_list(s: &str) -> Vec<(String, u16)> {
+    s.split(',')
+        .filter_map(|tok| {
+            let (id, ver) = tok.trim().rsplit_once('@')?;
+            let ver: u16 = ver.trim().parse().ok()?;
+            let id = id.trim();
+            if id.is_empty() {
+                return None;
+            }
+            Some((id.to_string(), ver))
+        })
+        .collect()
 }
 
 /// A drone's identity, sent less often than status because it does not change.
@@ -129,6 +164,17 @@ pub struct NodeIdentity {
     /// Agent version string.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ver: Option<String>,
+    /// The highest plugin contract version any installed plugin declares, a
+    /// coarse node-wide signal a peer can glance at. The authoritative per-plugin
+    /// detail is [`Self::pl`]. Absent when no plugin is installed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pv: Option<u16>,
+    /// The installed plugin inventory as a comma-joined list of
+    /// `pluginId@contractVersion`, clipped to [`MAX_PLUGIN_LIST`]. Lets a peer
+    /// compare per-plugin contract versions and detect an AD05-class wire
+    /// disagreement instead of silently misreading a field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pl: Option<String>,
 }
 
 impl NodeIdentity {
@@ -139,13 +185,17 @@ impl NodeIdentity {
         name: Option<&str>,
         profile: Option<&str>,
         version: Option<&str>,
+        plugins: &[(String, u16)],
     ) -> Self {
+        let pl = plugin_list_string(plugins);
         Self {
             v: NODE_STATUS_VERSION,
             id: clip(device_id.trim(), MAX_DEVICE_ID),
             nm: clip_opt(name, MAX_NAME),
             pr: clip_opt(profile, MAX_SHORT),
             ver: clip_opt(version, MAX_SHORT),
+            pv: plugins.iter().map(|(_, v)| *v).max(),
+            pl: clip_opt(pl.as_deref(), MAX_PLUGIN_LIST),
         }
     }
 
@@ -608,7 +658,7 @@ mod tests {
         let bytes = rmp_serde::to_vec_named(&s).unwrap();
         assert!(NodeStatus::decode(&bytes).is_none());
 
-        let idy = NodeIdentity::build("", None, None, None);
+        let idy = NodeIdentity::build("", None, None, None, &[]);
         let bytes = rmp_serde::to_vec_named(&idy).unwrap();
         assert!(NodeIdentity::decode(&bytes).is_none());
     }
@@ -620,6 +670,7 @@ mod tests {
             Some(&"n".repeat(99)),
             Some("drone"),
             Some("0.99.241"),
+            &[],
         );
         assert_eq!(idy.id.chars().count(), MAX_DEVICE_ID);
         assert_eq!(idy.nm.as_ref().unwrap().chars().count(), MAX_NAME);
@@ -643,10 +694,52 @@ mod tests {
     fn a_multibyte_name_clips_without_breaking_utf8() {
         // Clipping on characters, not bytes, so a name of multi-byte glyphs
         // never becomes invalid UTF-8 on the wire.
-        let idy = NodeIdentity::build("abc", Some(&"\u{00e9}".repeat(200)), None, None);
+        let idy = NodeIdentity::build("abc", Some(&"\u{00e9}".repeat(200)), None, None, &[]);
         let name = idy.nm.as_ref().unwrap();
         assert_eq!(name.chars().count(), MAX_NAME);
         let bytes = idy.encode().unwrap();
         assert_eq!(NodeIdentity::decode(&bytes).unwrap().nm, idy.nm);
+    }
+
+    #[test]
+    fn identity_carries_and_parses_a_plugin_inventory() {
+        let plugins = vec![
+            ("ados.example.beta".to_string(), 3u16),
+            ("ados.example.alpha".to_string(), 1u16),
+        ];
+        let idy = NodeIdentity::build(
+            "abcdef123456",
+            Some("Drone"),
+            Some("drone"),
+            Some("1.0.0"),
+            &plugins,
+        );
+        assert_eq!(idy.pv, Some(3), "pv is the highest contract version present");
+        // The list is sorted by id, so it is stable regardless of install order.
+        assert_eq!(
+            idy.pl.as_deref(),
+            Some("ados.example.alpha@1,ados.example.beta@3")
+        );
+        let bytes = idy.encode().expect("encodes");
+        let back = NodeIdentity::decode(&bytes).expect("round-trips");
+        assert_eq!(back, idy);
+        assert_eq!(
+            parse_plugin_list(back.pl.as_deref().unwrap()),
+            vec![
+                ("ados.example.alpha".to_string(), 1),
+                ("ados.example.beta".to_string(), 3)
+            ]
+        );
+    }
+
+    #[test]
+    fn an_identity_from_a_future_schema_is_dropped_not_misread() {
+        // A mixed-version pair across an upgrade is exactly when the two halves
+        // would silently disagree on the plugin wire; decode must reject it loud
+        // rather than misread a reshaped field.
+        let mut raw = NodeIdentity::build("abcdef123456", None, None, None, &[]);
+        raw.v = NODE_STATUS_VERSION + 1;
+        let bytes = rmp_serde::to_vec_named(&raw).unwrap();
+        assert!(NodeIdentity::decode(&bytes).is_none());
     }
 }

@@ -341,6 +341,12 @@ pub async fn route_host_method<H: HostServices + ?Sized>(
         Method::GuidedSetpointSend => host.guided_setpoint_send(plugin_id, args),
         Method::RadioAuxStreamOpen => host.radio_aux_stream_open(plugin_id, args),
         Method::RadioAuxStreamClose => host.radio_aux_stream_close(plugin_id, args),
+        Method::RadioAuxStreamSend => host.radio_aux_stream_send(plugin_id, args),
+        // Subscribe is handled in the server (it arms the per-connection aux
+        // push stream) and never reaches here, exactly like button.subscribe.
+        Method::RadioAuxStreamSubscribe => {
+            Ok(crate::host::not_implemented("radio.aux_stream.subscribe"))
+        }
         // Vision request/response methods proxy to the engine and await its
         // reply. (vision.subscribe_frames is handled in the server, where it
         // arms the frame-descriptor push stream, never reaching here.)
@@ -374,7 +380,10 @@ pub async fn route_host_method<H: HostServices + ?Sized>(
         | Method::VisionSubscribeFrames
         | Method::VisionSubscribeDetections
         | Method::MspSubscribe
-        | Method::ButtonSubscribe => Ok(crate::host::not_implemented("event")),
+        | Method::ButtonSubscribe
+        // display.zone.subscribe arms the tap push stream in the server (like
+        // button.subscribe) and never reaches the facade.
+        | Method::DisplayZoneSubscribe => Ok(crate::host::not_implemented("event")),
     }
 }
 

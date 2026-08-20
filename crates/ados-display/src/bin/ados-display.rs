@@ -193,7 +193,7 @@ async fn run_page_ui(
     use ados_display::pages::PageContext;
     use ados_display::render_loop::pack_frame_fitted;
     use ados_display::sidecar::{
-        write_snapshot_png, LcdLatency, LCD_LATENCY_PATH, LCD_SNAPSHOT_PATH,
+        write_plugin_tap, write_snapshot_png, LcdLatency, LCD_LATENCY_PATH, LCD_SNAPSHOT_PATH,
     };
     use ados_display::state_source::StateSource;
     use ados_display::touch_input::{TouchTransformHandle, TOUCH_CALIB_PATH};
@@ -472,6 +472,13 @@ async fn run_page_ui(
                         // A page-defined custom key (slider drag, list row) or an
                         // inert tap has no navigator-owned surface change; the
                         // interaction boost already quickened the next render.
+                        //
+                        // A custom key on the reserved plugin page is a zone tap:
+                        // surface it to the plugin that owns that page so its
+                        // interactive zones are real, not decorative.
+                        if let Dispatch::Custom(key) = dispatch {
+                            let _ = write_plugin_tap(&key, now_ms);
+                        }
                     }
                 }
             }
@@ -500,6 +507,16 @@ async fn run_page_ui(
                             let canvas = build_canvas(&calibration, &navigator, &ctx, &palette);
                             present_frame(&writer, bpp, &canvas, xres, yres);
                             last_render = Some(now);
+                        }
+                        // A custom key (including an unmapped-button fallback to an
+                        // on-page action) surfaces as a plugin tap the same way a
+                        // touch-zone tap does.
+                        if let Dispatch::Custom(key) = dispatch {
+                            let ts_ms = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis() as i64)
+                                .unwrap_or(0);
+                            let _ = write_plugin_tap(&key, ts_ms);
                         }
                     }
                 }

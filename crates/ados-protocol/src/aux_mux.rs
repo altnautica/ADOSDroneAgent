@@ -95,6 +95,19 @@ pub enum AuxChannel {
     /// ([`crate::config_tunnel_ingest`]); nothing else interprets it, and the
     /// service is inert unless an operator opted the channel in.
     ConfigTunnel = 7,
+    /// Application datagram stream, drone → ground over the downlink (radio_id
+    /// 2). A neutrally-named lane an on-board application (e.g. a vision or
+    /// analytics plugin) uses to radiate its own datagrams to the paired ground
+    /// node without borrowing the flight-control TUNNEL budget. Opaque to the
+    /// router: the payload is whatever the application framed, delivered to the
+    /// ground node's aux application sink. Reserved and MUST NOT be renumbered.
+    AppStream = 8,
+    /// Application command datagram, ground → drone over the uplink (radio_id
+    /// 3). The uplink mirror of [`AuxChannel::AppStream`]: a ground-side
+    /// application sends a datagram its on-board counterpart consumes. Opaque to
+    /// the router; carries an explicit application-level ack in its own payload.
+    /// Reserved and MUST NOT be renumbered.
+    AppCommand = 9,
 }
 
 impl AuxChannel {
@@ -109,6 +122,8 @@ impl AuxChannel {
             5 => Some(Self::Response),
             6 => Some(Self::LinkFeedback),
             7 => Some(Self::ConfigTunnel),
+            8 => Some(Self::AppStream),
+            9 => Some(Self::AppCommand),
             _ => None,
         }
     }
@@ -407,9 +422,11 @@ mod tests {
         assert_eq!(AuxChannel::ConfigTunnel as u8, 7);
         assert_eq!(AuxChannel::from_u8(1), Some(AuxChannel::Mavlink));
         assert_eq!(AuxChannel::from_u8(7), Some(AuxChannel::ConfigTunnel));
+        assert_eq!(AuxChannel::from_u8(8), Some(AuxChannel::AppStream));
+        assert_eq!(AuxChannel::from_u8(9), Some(AuxChannel::AppCommand));
         assert_eq!(AuxChannel::from_u8(0), None);
-        // 8 is the next free value: an older build must drop a channel it does
-        // not know rather than parse it as the highest one it does.
-        assert_eq!(AuxChannel::from_u8(8), None);
+        // 10 is the next free value: an older build must drop a channel it
+        // does not know rather than parse it as the highest one it does.
+        assert_eq!(AuxChannel::from_u8(10), None);
     }
 }

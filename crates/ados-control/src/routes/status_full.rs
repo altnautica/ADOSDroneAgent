@@ -73,7 +73,6 @@ use ados_protocol::wfb_status::{
     json_truthy, WfbStatusConfig,
 };
 use axum::extract::State;
-use axum::http::HeaderMap;
 use axum::Json;
 use serde_json::{json, Map, Value};
 
@@ -89,7 +88,7 @@ use crate::state::AppState;
 /// logging store, the radio sidecar, systemd, and the config), exactly as the
 /// FastAPI route's no-in-process-object branch does. Guaranteed 200: each block
 /// degrades in place when its source is unavailable.
-pub async fn get_full_status(State(state): State<AppState>, headers: HeaderMap) -> Json<Value> {
+pub async fn get_full_status(State(state): State<AppState>) -> Json<Value> {
     let config_profile = config_agent_profile(&state.pairing_paths.config);
     let (resolved_profile, resolved_role) =
         crate::profile::current_profile_and_role(&config_profile);
@@ -116,8 +115,7 @@ pub async fn get_full_status(State(state): State<AppState>, headers: HeaderMap) 
     let wfb_status = wfb_status_view(&state).await;
 
     // --- Video (multi-process branch: no in-process pipeline) ---
-    let host = host_from_headers(&headers);
-    let video = build_video_block(&resolved_profile, &wfb_status, &host).await;
+    let video = build_video_block(&resolved_profile, &wfb_status).await;
 
     // --- Telemetry (vehicle state minus the four runtime-only extras) ---
     let telemetry = crate::routes::status::project_telemetry(snapshot);
@@ -262,18 +260,6 @@ fn config_agent_profile(config_path: &Path) -> String {
     crate::config::PairingConfig::load_from(config_path)
         .agent
         .profile
-}
-
-/// The request `Host` header's host part (the value before any `:port`), the
-/// source the video block builds its WHEP URL from. Defaults to `"localhost"`
-/// when the header is absent, matching the Python `request.headers.get("host",
-/// "localhost").split(":")[0]`.
-fn host_from_headers(headers: &HeaderMap) -> String {
-    headers
-        .get("host")
-        .and_then(|v| v.to_str().ok())
-        .map(|h| h.split(':').next().unwrap_or("localhost").to_string())
-        .unwrap_or_else(|| "localhost".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -767,22 +753,75 @@ const MEDIAMTX_WEBRTC_PORT: u16 = 8889;
 async fn build_video_block(
     resolved_profile: &str,
     wfb_status: &Option<Map<String, Value>>,
-    host: &str,
 ) -> Value {
     build_video_block_with(
         resolved_profile,
         wfb_status,
-        host,
         resolve_mediamtx_ready().await,
-        read_video_streams(host),
+        read_video_streams(),
+        read_pipeline_outcome(),
     )
 }
 
+/// The pipeline's own answer, read out of the `camera-state.json` sidecar that
+/// ados-video re-stamps at every lifecycle transition.
+///
+/// `fresh` is the load-bearing field: it separates "the writer is alive and
+/// simply did not name a state" (a legacy ados-video, which still deserves a
+/// playable endpoint) from "nobody has written this file recently" (the writer
+/// died, and the `streaming` it left behind must not keep a dead node dialable).
+#[derive(Debug, Default, Clone)]
+struct PipelineSidecar {
+    /// The sidecar was present, parseable AND within [`CAMERA_STATE_FRESH_S`].
+    fresh: bool,
+    /// `pipeline_state`. Absent under `fresh` means a legacy writer.
+    state: Option<String>,
+    reason: Option<String>,
+    encoder: Option<String>,
+    /// `encoder_hw`: whether that encoder is hardware-backed. Absent on a
+    /// writer that predates the field.
+    encoder_hw: Option<bool>,
+}
+
+/// Read the pipeline sidecar the way every other sidecar block in this file
+/// reads its own: resolved under [`run_dir`], staleness-gated on
+/// `updated_at_unix`.
+///
+/// This exists because mediamtx readiness is NOT evidence that video is
+/// flowing: the WHEP fallback probe accepts 200/204/405 on `:8889/main/whep`,
+/// which mediamtx serves with ZERO publishers, so a node whose encoder never
+/// started still reported `state: "running"` with a dialable `whep_url`. The
+/// freshness gate closes the same hole from the other side: when ados-video
+/// dies, mediamtx stays bound (a separate unit) and the sidecar left behind
+/// still says `streaming`, so an unread clock kept a dead node dialable
+/// forever.
+fn read_pipeline_outcome() -> PipelineSidecar {
+    read_pipeline_outcome_in(&run_dir(), now_unix_secs())
+}
+
+/// The path-injectable core of [`read_pipeline_outcome`], so a test drives it
+/// with a tempdir instead of the process-global `ADOS_RUN_DIR`.
+fn read_pipeline_outcome_in(run_dir: &Path, now: f64) -> PipelineSidecar {
+    let Some(doc) = read_sidecar_object(&run_dir.join("camera-state.json")) else {
+        return PipelineSidecar::default();
+    };
+    if !sidecar_fresh(&doc, now, CAMERA_STATE_FRESH_S) {
+        return PipelineSidecar::default();
+    }
+    PipelineSidecar {
+        fresh: true,
+        state: doc.get("pipeline_state").and_then(Value::as_str).map(str::to_string),
+        reason: doc.get("pipeline_reason").and_then(Value::as_str).map(str::to_string),
+        encoder: doc.get("encoder").and_then(Value::as_str).map(str::to_string),
+        encoder_hw: doc.get("encoder_hw").and_then(Value::as_bool),
+    }
+}
+
 /// Read the video-streams sidecar (`/run/ados/video-streams.json`, written by
-/// ados-video on pipeline start) and resolve each leg to a dialable WHEP URL, so
-/// the status surface can advertise every `:8889/<id>/whep` leg for the GCS
+/// ados-video on pipeline start) and resolve each leg to the agent's own
+/// same-origin WHEP + HLS proxy paths, so the status surface advertises every leg
 /// stream switcher. Best-effort: any read/parse failure yields an empty list.
-fn read_video_streams(host: &str) -> Vec<Value> {
+fn read_video_streams() -> Vec<Value> {
     let Ok(body) = std::fs::read("/run/ados/video-streams.json") else {
         return Vec::new();
     };
@@ -800,7 +839,8 @@ fn read_video_streams(host: &str) -> Vec<Value> {
                 "id": id,
                 "role": leg.get("role").and_then(|r| r.as_str()).unwrap_or(""),
                 "codec": leg.get("codec").and_then(|c| c.as_str()).unwrap_or(""),
-                "whep": format!("http://{host}:{MEDIAMTX_WEBRTC_PORT}/{id}/whep"),
+                "whep": format!("/whep?camera={id}"),
+                "hls": format!("/hls/{id}/index.m3u8"),
                 // Per-leg liveness (null when the agent has not sampled it yet).
                 "live": leg.get("live").cloned().unwrap_or(Value::Null),
             }))
@@ -820,71 +860,136 @@ async fn resolve_mediamtx_ready() -> bool {
     mtx.as_ref().map(mtx_ready).unwrap_or(false)
 }
 
-/// The mediamtx-readiness-injectable core of [`build_video_block`]. Pure over
-/// `mediamtx_ready` (the resolved probe outcome), so tests exercise every branch
-/// deterministically without a live loopback port.
+/// The injectable core of [`build_video_block`]. Pure over `mediamtx_ready`
+/// (the resolved probe outcome) and `pipeline` (the sidecar verdict), so tests
+/// exercise every branch deterministically without a live loopback port.
+///
+/// THE RULE, after a node reported `state: "running"` with a dialable
+/// `whep_url` while its pipeline sat in `Error`: mediamtx readiness alone is
+/// NOT evidence that video exists. The WHEP fallback probe accepts 200/204/405
+/// on an endpoint mediamtx serves with zero publishers, so it proves only that
+/// mediamtx is bound. The pipeline's own verdict outranks it, and a state that
+/// is not `streaming` NEVER gets a `whep_url`.
+///
+/// The one exception is a FRESH sidecar carrying no `pipeline_state` at all: a
+/// legacy ados-video that is alive and writing. Answering `connecting` there
+/// would cost a mid-upgrade fleet its cloud video AND its auto-retry, both of
+/// which the cockpit gates on `videoState === "running"`. That branch keeps the
+/// previous answer and publishes `whep_url_basis`, so a consumer can see the
+/// endpoint rests on mediamtx readiness alone instead of having to guess.
 fn build_video_block_with(
     resolved_profile: &str,
     wfb_status: &Option<Map<String, Value>>,
-    host: &str,
     mediamtx_ready: bool,
     streams: Vec<Value>,
+    pipeline: PipelineSidecar,
 ) -> Value {
-    // Default: not initialised, no playable endpoint.
-    let default = json!({
-        "state": "not_initialized",
-        "whep_url": null,
-        "recording": false,
-        "recording_filename": null,
-        "recording_started_at": null,
-    });
+    let PipelineSidecar {
+        fresh,
+        state: pipeline_state,
+        reason: pipeline_reason,
+        encoder,
+        encoder_hw,
+    } = pipeline;
 
-    let running = || {
+    // The encoder identity 0.99.359 dropped: without it the GCS cannot tell a
+    // software fallback from a hardware encoder, or either from silence. The
+    // label is the on-wire value ados-video derives from the command it built
+    // (`rpicam-vid`, `ffmpeg-h264_v4l2m2m`, `gstreamer-x264enc`, and so on);
+    // `encoder_hw` answers the hardware question as a field, so no consumer has
+    // to re-encode a list of codec element names to sniff it out of the string.
+    let with_encoder = |block: &mut Value| {
+        if let Some(enc) = encoder.as_deref() {
+            block["encoder"] = json!(enc);
+        }
+        if let Some(hw) = encoder_hw {
+            block["encoder_hw"] = json!(hw);
+        }
+    };
+
+    let plain = |state: &str| {
         let mut block = json!({
-            "state": "running",
-            "whep_url": format!("http://{host}:{MEDIAMTX_WEBRTC_PORT}/main/whep"),
+            "state": state,
+            "whep_url": null,
             "recording": false,
             "recording_filename": null,
             "recording_started_at": null,
         });
+        with_encoder(&mut block);
+        block
+    };
+
+    let running = || {
+        let mut block = json!({
+            "state": "running",
+            "whep_url": "/whep",
+            "hls_url": "/hls/main/index.m3u8",
+            "recording": false,
+            "recording_filename": null,
+            "recording_started_at": null,
+        });
+        with_encoder(&mut block);
         // Advertise the per-leg streams (only when a live pipeline wrote the
-        // sidecar) so the GCS switcher can address each `:8889/<id>/whep` leg.
+        // sidecar) so the GCS switcher can address each leg's same-origin path.
         if !streams.is_empty() {
             block["streams"] = Value::Array(streams.clone());
         }
         block
     };
 
-    if resolved_profile == "drone" {
-        if mediamtx_ready {
-            return running();
+    let mut block = if pipeline_state.as_deref() == Some("error") {
+        // A pipeline that FAILED outranks every readiness probe, on either profile.
+        let mut block = plain("error");
+        block["reason"] = match pipeline_reason.as_deref() {
+            Some(r) => json!(r),
+            None => json!("the video pipeline is in an error state"),
+        };
+        block
+    } else if resolved_profile == "drone" {
+        // On the air side the pipeline IS the publisher, so its verdict is the
+        // question. `streaming` plus a ready mediamtx is the only "running".
+        match (pipeline_state.as_deref(), mediamtx_ready) {
+            (Some("streaming"), true) => running(),
+            // Publishing but mediamtx has not caught up yet.
+            (Some("streaming"), false) => plain("connecting"),
+            // mediamtx is bound and the pipeline has not said it is publishing:
+            // exactly the case the old code called "running".
+            (Some("starting"), _) => plain("connecting"),
+            (Some("stopped"), _) => plain("stopped"),
+            // A legacy ados-video: no `pipeline_state` key, but the file is
+            // fresh, which is positive evidence the writer is alive.
+            (None, true) if fresh => {
+                let mut block = running();
+                block["whep_url_basis"] = json!("mediamtx_readiness_only");
+                block
+            }
+            (None, false) if fresh => plain("connecting"),
+            // Everything else — no sidecar at all, a stale one (the writer
+            // died), or a current writer explicitly saying `unknown` — has not
+            // earned a playable endpoint.
+            _ => plain("not_initialized"),
         }
-        return default;
-    }
-
-    // Ground-station path: gate on the receive link actually delivering video.
-    if gs_video_delivering(wfb_status.as_ref()) {
+    } else if gs_video_delivering(wfb_status.as_ref()) {
+        // Ground-station path: gate on the receive link actually delivering
+        // video. There is no local pipeline here — the publisher is the drone.
         if mediamtx_ready {
-            return running();
+            running()
+        } else {
+            // Link delivering frames but WHEP not yet serving — still coming up.
+            plain("connecting")
         }
-        // Link delivering frames but WHEP not yet serving — still coming up.
-        return json!({
-            "state": "connecting",
-            "whep_url": null,
-            "recording": false,
-            "recording_filename": null,
-            "recording_started_at": null,
-        });
-    }
+    } else {
+        // No live downlink: stopped with no playable endpoint.
+        plain("stopped")
+    };
 
-    // No live downlink: stopped with no playable endpoint.
-    json!({
-        "state": "stopped",
-        "whep_url": null,
-        "recording": false,
-        "recording_filename": null,
-        "recording_started_at": null,
-    })
+    // Report what the pipeline said on every branch where it answered, so a
+    // consumer can tell "the agent says it is streaming" from "the agent cannot
+    // say". A fresh sidecar with no key is a legacy writer: `unknown`.
+    if fresh {
+        block["pipeline_state"] = json!(pipeline_state.as_deref().unwrap_or("unknown"));
+    }
+    block
 }
 
 /// True only when the ground-station WFB link is actually delivering video: the receive
@@ -1212,6 +1317,14 @@ fn read_camera_status_in(run_dir: &Path, now: f64) -> Vec<(String, Value)> {
         if sidecar_fresh(&camera, now, CAMERA_STATE_FRESH_S) {
             if let Some(state) = camera.get("state").and_then(Value::as_str) {
                 if matches!(state, "ready" | "missing" | "error") {
+                    // Discovery alone is not health. The cockpit raises its
+                    // no-camera overlay only for `missing`, so a node with a
+                    // detected camera and a failed pipeline showed a confident
+                    // camera pill over a dead pane and no warning anywhere.
+                    // Discovery stays authoritative for `missing`.
+                    let failed = camera.get("pipeline_state").and_then(Value::as_str)
+                        == Some("error");
+                    let state = if state == "ready" && failed { "error" } else { state };
                     out.push(("cameraState".to_string(), json!(state)));
                 }
             }
@@ -2251,12 +2364,34 @@ mod tests {
         assert!(gs_video_delivering(Some(&connected)));
     }
 
+    /// No sidecar the reader would trust: absent, unparseable, or stale past
+    /// `CAMERA_STATE_FRESH_S`.
+    fn no_pipeline() -> PipelineSidecar {
+        PipelineSidecar::default()
+    }
+
+    /// A FRESH sidecar from a legacy ados-video: the writer is alive, but names
+    /// no `pipeline_state`.
+    fn legacy_pipeline() -> PipelineSidecar {
+        PipelineSidecar { fresh: true, ..PipelineSidecar::default() }
+    }
+
+    fn pipeline(state: &str, reason: Option<&str>, encoder: Option<&str>) -> PipelineSidecar {
+        PipelineSidecar {
+            fresh: true,
+            state: Some(state.to_string()),
+            reason: reason.map(str::to_string),
+            encoder: encoder.map(str::to_string),
+            encoder_hw: None,
+        }
+    }
+
     #[test]
     fn video_block_with_no_mediamtx_is_default_on_drone() {
         // mediamtx absent (readiness injected false) → not_initialized, no whep.
         // The readiness is threaded in explicitly, so the assertion holds
         // deterministically regardless of whatever answers 9997/8889 on the host.
-        let v = build_video_block_with("drone", &None, "localhost", false, vec![]);
+        let v = build_video_block_with("drone", &None, false, vec![], no_pipeline());
         assert_eq!(v["state"], json!("not_initialized"));
         assert_eq!(v["whep_url"], Value::Null);
         assert_eq!(v["recording"], json!(false));
@@ -2264,27 +2399,109 @@ mod tests {
     }
 
     #[test]
-    fn video_block_on_drone_with_ready_mediamtx_is_running() {
-        // mediamtx ready (readiness injected true) → running + a WHEP URL.
-        let v = build_video_block_with("drone", &None, "example-host", true, vec![]);
+    fn video_block_on_drone_with_a_streaming_pipeline_is_running() {
+        let v = build_video_block_with(
+            "drone", &None, true, vec![],
+            PipelineSidecar {
+                encoder_hw: Some(true),
+                ..pipeline("streaming", None, Some("rpicam-vid"))
+            },
+        );
         assert_eq!(v["state"], json!("running"));
-        assert_eq!(v["whep_url"], json!("http://example-host:8889/main/whep"));
+        assert_eq!(v["whep_url"], json!("/whep"), "relative: resolved against whatever host reached the agent");
+        assert_eq!(v["hls_url"], json!("/hls/main/index.m3u8"), "HLS fallback for remote / mixed-content viewers");
+        assert_eq!(v["encoder"], json!("rpicam-vid"), "the encoder identity is back");
+        assert_eq!(v["encoder_hw"], json!(true), "and whether it is hardware-backed");
+        assert_eq!(v["pipeline_state"], json!("streaming"), "the sidecar's own word");
+        // A pipeline that says it is publishing needs no readiness alibi.
+        assert!(v.get("whep_url_basis").is_none());
         // No sidecar streams → no `streams` key (single-stream nodes unchanged).
         assert!(v.get("streams").is_none());
+    }
+
+    /// The customer report, as a test. A camera is detected and mediamtx is
+    /// bound, but the pipeline never started: the old code answered
+    /// `state: "running"` with a dialable `whep_url`, which is how a node shows
+    /// a confident camera card and no video.
+    #[test]
+    fn a_failed_pipeline_is_never_reported_as_running() {
+        let v = build_video_block_with(
+            "drone", &None, true, vec![],
+            pipeline("error", Some("no encoder backend is available for this camera"), None),
+        );
+        assert_eq!(v["state"], json!("error"));
+        assert_eq!(v["whep_url"], Value::Null, "a failed pipeline gets no playable endpoint");
+        assert_eq!(
+            v["reason"],
+            json!("no encoder backend is available for this camera"),
+            "the operator is told WHY, not just that something is wrong"
+        );
+    }
+
+    /// A LEGACY ados-video: the sidecar is fresh, so the writer is alive, but it
+    /// names no `pipeline_state`. Answering `connecting` here would cost a
+    /// mid-upgrade fleet its cloud video AND its auto-retry, both of which the
+    /// cockpit gates on `videoState === "running"`, so the previous answer
+    /// stands — labelled with the basis it actually rests on.
+    #[test]
+    fn a_fresh_sidecar_with_no_pipeline_state_is_a_live_legacy_agent() {
+        let v = build_video_block_with("drone", &None, true, vec![], legacy_pipeline());
+        assert_eq!(v["state"], json!("running"));
+        assert_eq!(v["whep_url"], json!("/whep"));
+        assert_eq!(v["whep_url_basis"], json!("mediamtx_readiness_only"));
+        assert_eq!(v["pipeline_state"], json!("unknown"), "it is alive but cannot say");
+    }
+
+    /// The same legacy agent with mediamtx unbound: there is nothing to dial, so
+    /// nothing is advertised and no basis is claimed.
+    #[test]
+    fn a_legacy_agent_whose_mediamtx_is_not_bound_is_connecting() {
+        let v = build_video_block_with("drone", &None, false, vec![], legacy_pipeline());
+        assert_eq!(v["state"], json!("connecting"));
+        assert_eq!(v["whep_url"], Value::Null);
+        assert!(v.get("whep_url_basis").is_none());
+    }
+
+    /// No sidecar at all: ados-video has never run this boot. mediamtx readiness
+    /// alone is not evidence of a publisher — the WHEP probe accepts an endpoint
+    /// mediamtx serves with zero publishers.
+    #[test]
+    fn an_absent_sidecar_is_not_initialized_even_with_a_ready_mediamtx() {
+        let v = build_video_block_with("drone", &None, true, vec![], no_pipeline());
+        assert_eq!(v["state"], json!("not_initialized"));
+        assert_eq!(v["whep_url"], Value::Null);
+        assert!(
+            v.get("pipeline_state").is_none(),
+            "nothing answered, so the block claims no verdict"
+        );
+    }
+
+    #[test]
+    fn a_streaming_pipeline_whose_mediamtx_is_not_ready_is_connecting() {
+        let v = build_video_block_with(
+            "drone", &None, false, vec![],
+            pipeline("streaming", None, Some("ffmpeg-h264_v4l2m2m")),
+        );
+        assert_eq!(v["state"], json!("connecting"));
+        assert_eq!(v["whep_url"], Value::Null);
+        assert_eq!(v["encoder"], json!("ffmpeg-h264_v4l2m2m"));
+        assert_eq!(v["pipeline_state"], json!("streaming"));
     }
 
     #[test]
     fn video_block_advertises_per_leg_streams_when_present() {
         let streams = vec![
-            json!({ "id": "main", "role": "eo", "codec": "h265", "whep": "http://h:8889/main/whep" }),
-            json!({ "id": "ir", "role": "ir", "codec": "h264", "whep": "http://h:8889/ir/whep" }),
+            json!({ "id": "main", "role": "eo", "codec": "h265", "whep": "/whep?camera=main" }),
+            json!({ "id": "ir", "role": "ir", "codec": "h264", "whep": "/whep?camera=ir" }),
         ];
-        let v = build_video_block_with("drone", &None, "h", true, streams);
+        let v = build_video_block_with(
+            "drone", &None, true, streams, pipeline("streaming", None, None),
+        );
         assert_eq!(v["state"], json!("running"));
         let legs = v["streams"].as_array().unwrap();
         assert_eq!(legs.len(), 2);
         assert_eq!(legs[1]["id"], json!("ir"));
-        assert_eq!(legs[1]["whep"], json!("http://h:8889/ir/whep"));
+        assert_eq!(legs[1]["whep"], json!("/whep?camera=ir"));
     }
 
     #[test]
@@ -2292,7 +2509,9 @@ mod tests {
         // A ground station whose WFB link is not delivering reports stopped, no
         // whep — regardless of mediamtx reachability (the gate is the link). Inject
         // mediamtx ready=true to prove the link gate dominates even then.
-        let v = build_video_block_with("ground-station", &None, "localhost", true, vec![]);
+        let v = build_video_block_with(
+            "ground-station", &None, true, vec![], no_pipeline(),
+        );
         assert_eq!(v["state"], json!("stopped"));
         assert_eq!(v["whep_url"], Value::Null);
     }
@@ -2304,9 +2523,87 @@ mod tests {
             ("state", json!("active")),
             ("valid_rx_packets_per_s", json!(120.0)),
         ]));
-        let v = build_video_block_with("ground-station", &wfb, "localhost", false, vec![]);
+        let v = build_video_block_with(
+            "ground-station", &wfb, false, vec![], no_pipeline(),
+        );
         assert_eq!(v["state"], json!("connecting"));
         assert_eq!(v["whep_url"], Value::Null);
+    }
+
+    /// A ground station has no local pipeline, but if one somehow reported an
+    /// error the surface must still not claim a playable endpoint.
+    #[test]
+    fn a_gs_with_a_live_link_still_reports_a_failed_local_pipeline() {
+        let wfb = Some(signals(&[
+            ("state", json!("active")),
+            ("valid_rx_packets_per_s", json!(120.0)),
+        ]));
+        let v = build_video_block_with(
+            "ground-station", &wfb, true, vec![],
+            pipeline("error", Some("mediamtx failed to start"), None),
+        );
+        assert_eq!(v["state"], json!("error"));
+        assert_eq!(v["whep_url"], Value::Null);
+    }
+
+    /// The writer died. mediamtx stays bound (a separate unit) and the sidecar
+    /// left behind still names a state, which is how a dead node stayed dialable
+    /// forever. A stale file is evidence of nothing, so nothing in it — not even
+    /// its `error` — reaches the block.
+    #[test]
+    fn a_stale_camera_state_sidecar_answers_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = 1_700_000_000.0;
+        // 10 minutes old > the 300 s window.
+        let stale = now - 600.0;
+        std::fs::write(
+            dir.path().join("camera-state.json"),
+            format!(
+                r#"{{"version":2,"state":"ready","pipeline_state":"error","pipeline_reason":"the encoder exited","updated_at_unix":{stale}}}"#
+            ),
+        )
+        .unwrap();
+        let sidecar = read_pipeline_outcome_in(dir.path(), now);
+        assert!(!sidecar.fresh);
+        assert_eq!(sidecar.state, None);
+        let v = build_video_block_with("drone", &None, true, vec![], sidecar);
+        assert_eq!(v["state"], json!("not_initialized"), "not `error`: nobody is asserting it");
+        assert_eq!(v["whep_url"], Value::Null);
+        assert!(v.get("pipeline_state").is_none());
+    }
+
+    /// A fresh sidecar is read whole, under the run dir, including the encoder
+    /// identity and the hardware flag the GCS needs.
+    #[test]
+    fn a_fresh_camera_state_sidecar_carries_the_verdict_and_the_encoder() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = 1_700_000_000.0;
+        let stamped = now - 1.0;
+        std::fs::write(
+            dir.path().join("camera-state.json"),
+            format!(
+                r#"{{"version":2,"state":"ready","pipeline_state":"streaming","encoder":"ffmpeg-h264_v4l2m2m","encoder_hw":true,"updated_at_unix":{stamped}}}"#
+            ),
+        )
+        .unwrap();
+        let sidecar = read_pipeline_outcome_in(dir.path(), now);
+        assert!(sidecar.fresh);
+        assert_eq!(sidecar.state.as_deref(), Some("streaming"));
+        assert_eq!(sidecar.encoder.as_deref(), Some("ffmpeg-h264_v4l2m2m"));
+        assert_eq!(sidecar.encoder_hw, Some(true));
+        let v = build_video_block_with("drone", &None, true, vec![], sidecar);
+        assert_eq!(v["state"], json!("running"));
+        assert_eq!(v["encoder_hw"], json!(true));
+        assert_eq!(v["pipeline_state"], json!("streaming"));
+    }
+
+    #[test]
+    fn an_absent_camera_state_sidecar_answers_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let sidecar = read_pipeline_outcome_in(dir.path(), 1_700_000_000.0);
+        assert!(!sidecar.fresh);
+        assert_eq!(sidecar.state, None);
+        assert_eq!(sidecar.encoder, None);
     }
 
     // -------- mesh --------
@@ -2583,6 +2880,51 @@ mod tests {
         )
         .unwrap();
         assert!(read_camera_status_in(dir.path(), now).is_empty());
+    }
+
+    /// The customer symptom through the camera field: a discovered camera whose
+    /// pipeline failed used to keep a confident `ready` pill, and the cockpit
+    /// raises its no-camera overlay only for `missing` — so the operator saw a
+    /// healthy card above a dead pane and no warning anywhere.
+    #[test]
+    fn camera_status_downgrades_ready_to_error_for_a_failed_pipeline() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = 1_700_000_000.0;
+        std::fs::write(
+            dir.path().join("camera-state.json"),
+            format!(r#"{{"state":"ready","pipeline_state":"error","updated_at_unix":{now}}}"#),
+        )
+        .unwrap();
+        let map: Map<String, Value> = read_camera_status_in(dir.path(), now).into_iter().collect();
+        assert_eq!(map.get("cameraState"), Some(&json!("error")));
+    }
+
+    #[test]
+    fn camera_status_keeps_ready_while_the_pipeline_is_streaming() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = 1_700_000_000.0;
+        std::fs::write(
+            dir.path().join("camera-state.json"),
+            format!(r#"{{"state":"ready","pipeline_state":"streaming","updated_at_unix":{now}}}"#),
+        )
+        .unwrap();
+        let map: Map<String, Value> = read_camera_status_in(dir.path(), now).into_iter().collect();
+        assert_eq!(map.get("cameraState"), Some(&json!("ready")));
+    }
+
+    /// Discovery stays authoritative for `missing`: a node with no camera does
+    /// not get re-labelled by a pipeline that also failed.
+    #[test]
+    fn camera_status_leaves_missing_alone_when_the_pipeline_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = 1_700_000_000.0;
+        std::fs::write(
+            dir.path().join("camera-state.json"),
+            format!(r#"{{"state":"missing","pipeline_state":"error","updated_at_unix":{now}}}"#),
+        )
+        .unwrap();
+        let map: Map<String, Value> = read_camera_status_in(dir.path(), now).into_iter().collect();
+        assert_eq!(map.get("cameraState"), Some(&json!("missing")));
     }
 
     // -------- crsf RC-lane fold --------

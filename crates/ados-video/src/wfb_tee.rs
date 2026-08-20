@@ -133,6 +133,20 @@ pub fn rtp_destination_url() -> String {
 /// the RTP destination so a stale ffmpeg from a prior crashed run cannot fight
 /// the fresh one for the socket. This helper composes the source/destination
 /// URLs and the arg vector and hands them to the shared spawner.
+///
+/// /!\ LATENCY: this whole ffmpeg is a pure re-read hop — it pulls the already-
+/// H.264-encoded RTSP `/main` out of mediamtx and re-mounts it as RTP to UDP
+/// :5600 for the radio. Every packet crosses an extra ffmpeg + the mediamtx
+/// RTSP demux/mux, adding ~glass-to-glass latency. The low-risk fix is to have
+/// the ENCODER itself emit the RTP copy directly (a second output to
+/// `rtp://127.0.0.1:5600?...` in `crates/ados-video/src/encoder.rs`
+/// `build_encoder_command`/`build_ffmpeg_command` — the encoder already knows
+/// the target RTP profile via the `h264_mp4toannexb` bsf) while STILL
+/// publishing the RTSP path for WHEP, then make `VideoPipeline::start_wfb_tee`
+/// (`crates/ados-video/src/lifecycle.rs`) skip spawning this tee.
+/// NOT done here: it restructures the orchestrator/process spawn, which cannot
+/// be captured by this module's byte-exact argv fixtures. Do it on-rig with the
+/// encoder-side fixture test updated in the same commit.
 pub fn spawn_wfb_tee(rtsp_port: u16) -> std::io::Result<ManagedProcess> {
     let rtsp_in = local_rtsp_url(rtsp_port);
     let rtp_out = rtp_destination_url();

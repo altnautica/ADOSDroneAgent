@@ -27,6 +27,10 @@ pub const LCD_PLUGIN_PAGE_PATH: &str = "/run/ados/lcd-plugin-page.json";
 /// after each render so the REST snapshot endpoint can serve exactly what the
 /// LCD shows without re-reading the framebuffer or depending on PIL.
 pub const LCD_SNAPSHOT_PATH: &str = "/run/ados/lcd-snapshot.png";
+/// A plugin-defined display action fired by a touch zone or button. The plugin
+/// host watches this file and pushes the tap to the plugin that owns the
+/// reserved `plugin` page. Absent file = no pending tap.
+pub const LCD_PLUGIN_TAP_PATH: &str = "/run/ados/lcd-plugin-tap.json";
 
 /// Encode an RGB888 panel frame to PNG and atomically write it to `path`.
 ///
@@ -200,6 +204,17 @@ impl LcdLatency {
         let body = serde_json::to_vec(self).map_err(std::io::Error::other)?;
         atomic_write(path, &body)
     }
+}
+
+/// Atomically write a plugin-defined display tap (`{key, ts_ms}`) to the
+/// canonical [`LCD_PLUGIN_TAP_PATH`], mirroring the other sidecar writers. The
+/// plugin-host watcher reads this to deliver `display.zone.tapped` to the
+/// plugin that owns the reserved `plugin` page. Best-effort: an I/O error is
+/// returned for the caller to log and discard.
+pub fn write_plugin_tap(key: &str, ts_ms: i64) -> std::io::Result<()> {
+    let body = serde_json::to_vec(&serde_json::json!({ "key": key, "ts_ms": ts_ms }))
+        .map_err(std::io::Error::other)?;
+    atomic_write(Path::new(LCD_PLUGIN_TAP_PATH), &body)
 }
 
 /// Atomic tmp-sibling write (tmp name disambiguated by pid).

@@ -122,6 +122,77 @@ def test_install_unsigned_when_signing_required_fails(
         sup.install_archive(archive)
 
 
+def _write_grant(tmp_path: Path, grants_dir: Path, plugin_id, permissions, signer):
+    """Write `{plugin_id,permissions,signer,sig}` signed by a fresh Ed25519 key;
+    the public key lands in `tmp_path/keys/<signer>.pem`. Returns the grant
+    dict (without the sig)."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    import base64
+    import json
+
+    key = Ed25519PrivateKey.generate()
+    pub_pem = key.public_key().public_bytes(
+        serialization.Encoding.PEM,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    keys_dir = tmp_path / "keys"
+    keys_dir.mkdir(exist_ok=True)
+    (keys_dir / f"{signer}.pem").write_bytes(pub_pem)
+
+    grants_dir.mkdir(exist_ok=True)
+    body = {
+        "plugin_id": plugin_id,
+        "permissions": sorted(permissions),
+        "signer": signer,
+    }
+    canonical = json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
+    sig = base64.b64encode(key.sign(canonical)).decode("ascii")
+    grant_path = grants_dir / f"{plugin_id}.json"
+    grant_path.write_text(json.dumps({**body, "sig": sig}), encoding="utf-8")
+    return body
+
+
+def test_grant_covers_only_signed_permissions(
+    isolated_paths, tmp_path: Path, monkeypatch
+):
+    import json
+
+    from ados.plugins import supervisor as sup_mod
+
+    sup = PluginSupervisor(
+        install_dir=isolated_paths["install_dir"], require_signed=False
+    )
+    sup.discover()
+
+    grants_dir = tmp_path / "grants"
+    monkeypatch.setattr(sup_mod, "GRANT_DIR", grants_dir)
+
+    # No grant -> nothing covered (fail closed).
+    assert sup.grant_covers("com.example.basic", ["event.publish"]) == []
+
+    # A valid signed grant covering only one of two requested permissions vouch
+    # for exactly that one — the untrusted permission is NOT auto-approved.
+    _write_grant(
+        tmp_path, grants_dir, "com.example.basic", ["event.publish"], "grantor"
+    )
+    covered = sup.grant_covers(
+        "com.example.basic", ["event.publish", "config.set"]
+    )
+    assert covered == ["event.publish"], covered
+
+    # A tampered signature fails closed to empty.
+    grant_path = grants_dir / "com.example.basic.json"
+    grant = json.loads(grant_path.read_text())
+    grant["sig"] = "A" * 64
+    grant_path.write_text(json.dumps(grant))
+    assert sup.grant_covers("com.example.basic", ["event.publish"]) == []
+
+    # An unknown grantor (no trusted key for it) fails closed.
+    (tmp_path / "keys" / "grantor.pem").unlink(missing_ok=True)
+    assert sup.grant_covers("com.example.basic", ["event.publish"]) == []
+
+
 def _build_gcs_archive(
     tmp_path: Path,
     plugin_id: str = "com.example.gcsplug",

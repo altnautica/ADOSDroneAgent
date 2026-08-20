@@ -987,6 +987,124 @@ fn reconcile_hotspot_marker() {
     }
 }
 
+/// Parse `hardware.gpio_out_enabled` from config.yaml text. Absent / malformed
+/// → `true` (the native GPIO-output path is on by default: it is required for
+/// the ground station's beeper/status output, and the marker merely un-gates it
+/// from a fresh flash that ships the service exec'ing `/bin/true` until the
+/// marker exists). An explicit `false` opts the native path out. Pure.
+pub fn parse_gpio_rust_enabled(text: &str) -> bool {
+    #[derive(serde::Deserialize, Default)]
+    struct Raw {
+        #[serde(default)]
+        hardware: Hardware,
+    }
+    #[derive(serde::Deserialize, Default)]
+    struct Hardware {
+        #[serde(default)]
+        gpio_out_enabled: Option<bool>,
+    }
+    serde_norway::from_str::<Raw>(text)
+        .ok()
+        .and_then(|r| r.hardware.gpio_out_enabled)
+        .unwrap_or(true)
+}
+
+/// Reconcile the native GPIO-output enable marker from the operator config: the
+/// `/etc/ados/gpio-rust-enabled` marker the `ados-gpio` unit gates on
+/// (`ConditionPathExists`; without it the service execs `/bin/true`) mirrors
+/// `hardware.gpio_out_enabled`. Default true, so a fresh flash with no key
+/// present boots the real GPIO service — the beeper and status lines are part
+/// of the ground station's shipped behaviour, not an opt-in. An explicit
+/// `false` in config removes the marker and the unit stays inert. Idempotent;
+/// runs on every install so a partial state self-heals.
+fn reconcile_gpio_rust_marker() {
+    const GATED_UNIT: &str = "ados-gpio.service";
+    let enabled = std::fs::read_to_string(crate::env::CONFIG_YAML)
+        .map(|text| parse_gpio_rust_enabled(&text))
+        .unwrap_or(true);
+    let marker = Path::new(CONFIG_DIR).join("gpio-rust-enabled");
+    if enabled {
+        if let Err(e) = std::fs::write(&marker, b"") {
+            tracing::warn!(error = %e, "gpio-rust enable marker write failed");
+        }
+        // Kick the gate only when the marker was newly created or rewritten on
+        // an already-provisioned node; a fresh flash starts it via the marker
+        // on first boot.
+        let _ = exec::run("systemctl", &["kill", "-s", "SIGHUP", GATED_UNIT]);
+    } else {
+        let _ = std::fs::remove_file(&marker);
+    }
+}
+
+/// Insert `key: value` under the given top-level YAML block if the key is
+/// entirely absent from the file, preserving everything else (including any
+/// operator-set value for that key — an existing key is never overwritten).
+///
+/// `block_header` is the line (e.g. `mavlink:`) that begins the block; the
+/// insertion is written directly under it at `indent` spaces. Returns true when
+/// a line was inserted. A missing block or a present key is a safe no-op, so
+/// this never corrupts operator config and never fights an explicit choice.
+fn ensure_block_key_if_absent(
+    body: &mut String,
+    block_header: &str,
+    key: &str,
+    indent: usize,
+) -> bool {
+    if body.lines().any(|l| l.trim_start().starts_with(key)) {
+        return false;
+    }
+    let pad = " ".repeat(indent);
+    // Find the block header as a line that begins it (top-level `mavlink:`).
+    let mut out = String::with_capacity(body.len() + 64);
+    let mut found = false;
+    for line in body.lines() {
+        let is_header =
+            line.trim_end() == block_header || line.trim_end() == format!("{block_header} #");
+        if !found && (is_header || line.trim_end() == block_header) {
+            out.push_str(line);
+            out.push('\n');
+            if line.trim_end() == block_header || is_header {
+                out.push_str(&format!("{pad}{key}\n"));
+                found = true;
+                continue;
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    if found {
+        *body = out;
+    }
+    found
+}
+
+/// Ensure `mavlink.injector_arbitration: true` in an already-provisioned
+/// config, so an upgrade-mixed node does not silently run without the FC-write
+/// arbiter that the plugin host's ground FIRE path depends on. Only inserts the
+/// key when absent; an operator-set value is never touched. Idempotent.
+fn reconcile_injector_arbitration() {
+    let path = Path::new(CONFIG_DIR).join("config.yaml");
+    let Ok(mut body) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    if ensure_block_key_if_absent(&mut body, "mavlink:", "injector_arbitration: true", 2) {
+        let _ = std::fs::write(&path, body);
+    }
+}
+
+/// Ensure `video.wfb.aux_enable: true` in an already-provisioned config so the
+/// plugin aux lane is not silently disabled. Only inserts the key when absent;
+/// an operator-set value is never touched. Idempotent.
+fn reconcile_aux_enable() {
+    let path = Path::new(CONFIG_DIR).join("config.yaml");
+    let Ok(mut body) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    if ensure_block_key_if_absent(&mut body, "wfb:", "aux_enable: true", 4) {
+        let _ = std::fs::write(&path, body);
+    }
+}
+
 /// Reconcile the config-over-radio enable marker from the operator config: the
 /// `/etc/ados/tunnel-enabled` marker the ados-tunnel-config unit gates on
 /// (`ConditionPathExists`) mirrors `radio.tunnel.enabled`, so enabling the
@@ -1661,6 +1779,19 @@ impl Step for Systemd {
         //     fails forever trying to bind an interface that is serving as a
         //     WiFi client.
         reconcile_hotspot_marker();
+
+        // 5a-quinquies. Mirror `hardware.gpio_out_enabled` onto the marker the
+        //     ados-gpio unit's ConditionPathExists gates on (without it the
+        //     service execs /bin/true). Default on, because the beeper and
+        //     status lines are shipped behaviour, not an opt-in.
+        reconcile_gpio_rust_marker();
+
+        // 5a-sexies. Ensure the mavlink injector arbiter and the radio aux lane
+        //     are on in an already-provisioned config (fresh installs get them
+        //     from the generated default). Insert-only: operator-set values are
+        //     never overwritten.
+        reconcile_injector_arbitration();
+        reconcile_aux_enable();
 
         // 5b. The logging and telemetry store is on by default (the log-view
         //     endpoints read it). Enable it unless the fallback marker pins it
@@ -2517,6 +2648,24 @@ mod tests {
         assert!(!parse_hotspot_enabled("network: {}\n"));
         assert!(!parse_hotspot_enabled("agent:\n  name: x\n"));
         assert!(!parse_hotspot_enabled(": : not yaml"));
+    }
+
+    #[test]
+    fn parse_gpio_rust_enabled_defaults_on() {
+        // The native GPIO-output path is shipped behaviour (a beeper/status
+        // line on a ground station), so an absent key resolves ON — the
+        // opposite default from the opt-in gates like crsf/hotspot.
+        assert!(parse_gpio_rust_enabled(""));
+        assert!(parse_gpio_rust_enabled("agent:\n  name: x\n"));
+        assert!(parse_gpio_rust_enabled(": : not yaml"));
+        assert!(parse_gpio_rust_enabled("hardware: {}\n"));
+        // An explicit false opts the native path out.
+        assert!(!parse_gpio_rust_enabled(
+            "hardware:\n  gpio_out_enabled: false\n"
+        ));
+        assert!(parse_gpio_rust_enabled(
+            "hardware:\n  gpio_out_enabled: true\n"
+        ));
     }
 
     #[test]

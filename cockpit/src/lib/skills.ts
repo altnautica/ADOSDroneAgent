@@ -89,12 +89,10 @@ export interface SkillContext {
   fcConnected: boolean;
   /** Whether the vehicle is armed (from the live telemetry snapshot). */
   armed: boolean;
-  /** Whether the readings on screen came over the radio from another node.
-   *  Purely to make the disabled reason accurate: a relayed aircraft is not
-   *  undrivable because the link is dead — it is drivable, just not from here,
-   *  and telling the operator "no flight controller link" while a live horizon
-   *  moves in front of them is precisely the kind of lying surface that trains
-   *  distrust of every other reading. */
+  /** Whether the readings on screen came over the radio from another node and
+   *  that node is reachable through this node's relay proxy. A relayed vehicle
+   *  is commanded THROUGH this node's relay to the linked drone, so a healthy
+   *  relayed reading is as reachable as a directly attached FC. */
   relayed?: boolean;
 }
 
@@ -106,21 +104,17 @@ export interface SkillState {
 }
 
 /**
- * Whether a skill can be driven right now, and if not, why. Without a live FC
- * link nothing is drivable (the command would never reach a flight controller).
- * With a link, arm is inapplicable while armed and disarm while disarmed; every
- * other action is available. The reason strings are what the bar shows on a
- * disabled control (Rule 44 — never a control the node cannot drive without a
- * plain reason).
+ * Whether a skill can be driven right now, and if not, why. A vehicle is
+ * reachable when it has a live local flight-controller link OR a healthy
+ * relayed reading (commanded through this node's relay proxy to the linked
+ * drone); only a node with neither is undrivable. With a link, arm is
+ * inapplicable while armed and disarm while disarmed; every other action is
+ * available. The reason strings are what the bar shows on a disabled control
+ * (Rule 44 — never a control the node cannot drive without a plain reason).
  */
 export function resolveSkillState(skill: Skill, ctx: SkillContext): SkillState {
-  if (!ctx.fcConnected) {
-    return {
-      enabled: false,
-      reason: ctx.relayed
-        ? "Relayed vehicle — command it from its own node"
-        : "No flight controller link",
-    };
+  if (!ctx.fcConnected && !ctx.relayed) {
+    return { enabled: false, reason: "No flight controller link" };
   }
   if (skill.cmd === "arm" && ctx.armed) {
     return { enabled: false, reason: "Already armed" };

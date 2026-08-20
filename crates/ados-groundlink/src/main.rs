@@ -424,6 +424,16 @@ async fn run_direct(
     // bound to the ingress port then, so a frame is counted and dropped.
     let config_tunnel_ingest =
         Arc::new(ados_protocol::config_tunnel_ingest::ConfigTunnelIngest::at_configured_port());
+    // This node's own installed plugins and their contract versions, read once.
+    // The identity consumer compares a peer's advertised inventory against this
+    // so an upgrade-mixed pair (each half on a different plugin build) is
+    // surfaced as a mismatch counter instead of silently disagreeing on the
+    // plugin wire.
+    let local_plugins: Arc<std::collections::HashMap<String, u16>> = Arc::new(
+        ados_plugin_host::inventory::installed_contract_versions_default()
+            .into_iter()
+            .collect(),
+    );
     let spawn_aux_consumer = {
         let aux_counters = aux_counters.clone();
         let aux_peers = aux_peers.clone();
@@ -436,6 +446,11 @@ async fn run_direct(
                 ados_protocol::aux_rpc_proxy::DEFAULT_RESPONSE_SOCK,
             )),
             config_tunnel: Some(config_tunnel_ingest.clone()),
+            // No application-stream consumer runs on a ground node yet: an
+            // AppStream frame is counted and dropped until a sink service
+            // registers here.
+            app_stream: None,
+            local_plugins: Some(local_plugins.clone()),
         };
         move |slot: u8| -> tokio::task::JoinHandle<()> {
             tokio::spawn(ados_groundlink::supervise_aux_consumer(

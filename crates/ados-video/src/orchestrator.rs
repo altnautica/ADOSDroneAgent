@@ -117,6 +117,12 @@ pub struct VideoOrchestrator {
 
     pub(crate) last_cameras: DiscoveryResult,
     pub(crate) encoder_type: Option<EncoderKind>,
+    /// The on-wire encoder identity of the CURRENT command, resolved by
+    /// [`crate::encoder::encoder_label`] once the argv is built. Held here
+    /// rather than derived from [`Self::encoder_type`] because the kind cannot
+    /// tell a hardware `h264_v4l2m2m` run from the software `libx264` fallback.
+    /// `None` whenever no encoder command is in force.
+    pub(crate) encoder_label: Option<String>,
 
     pub(crate) state: PipelineState,
     pub(crate) started_at: Instant,
@@ -228,6 +234,7 @@ impl VideoOrchestrator {
             vision_tap_progress: ProgressTracker::new(),
             last_cameras: DiscoveryResult::empty(),
             encoder_type: None,
+            encoder_label: None,
             state: PipelineState::Stopped,
             started_at: now,
             first_packet_seen: false,
@@ -341,15 +348,24 @@ impl VideoOrchestrator {
     }
 
     /// Re-persist the camera-state sidecar from the last-known discovery
-    /// snapshot. Used both on a healthy tick and across the wedge/park backoff
-    /// sleeps so a present-but-wedged camera does not read as `unknown` to the
-    /// staleness gate while the orchestrator is stuck. Honors
-    /// [`Self::camera_state_path`] (canonical path when `None`).
+    /// snapshot, stamped with the CURRENT pipeline outcome. Used both on a
+    /// healthy tick and across the wedge/park backoff sleeps so a
+    /// present-but-wedged camera does not read as `unknown` to the staleness
+    /// gate while the orchestrator is stuck.
+    ///
+    /// It goes through [`Self::persist_pipeline_outcome`] because this runs on
+    /// every 5 s health tick: rebuilding the snapshot from discovery alone
+    /// yields `pipeline_state: unknown`, which erased the `streaming` stamp
+    /// `start_stream` had just written (and the circuit breaker's reason with
+    /// it) one tick after the pipeline came up — a streaming drone then read as
+    /// `not_initialized`, with no playable endpoint, to every status consumer.
     fn refresh_camera_state(&self) {
-        match self.camera_state_path.as_deref() {
-            Some(p) => discover::persist_camera_state_to(&self.last_cameras, p),
-            None => discover::persist_camera_state(&self.last_cameras),
-        }
+        self.persist_pipeline_outcome(match self.state {
+            PipelineState::Running => crate::camera_state::PipelineOutcome::Streaming,
+            PipelineState::Starting => crate::camera_state::PipelineOutcome::Starting,
+            PipelineState::Error => crate::camera_state::PipelineOutcome::Error,
+            PipelineState::Stopped => crate::camera_state::PipelineOutcome::Stopped,
+        });
     }
 
     /// Write the video-streams sidecar (the resolved leg list: id/role/codec)
@@ -479,6 +495,13 @@ impl VideoOrchestrator {
         }
         self.mediamtx.stop().await;
         self.state = PipelineState::Stopped;
+        // The encoder is gone with the pipeline; keeping its identity would
+        // read as "something is still encoding".
+        self.encoder_label = None;
+        // Without this a deliberate stop leaves the sidecar claiming
+        // `streaming` for the entire stopped window, and every status consumer
+        // keeps offering a WHEP endpoint nothing is publishing to.
+        self.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Stopped);
         tracing::info!("pipeline_stopped");
     }
 
@@ -1336,6 +1359,11 @@ mod tests {
             height: 720,
             fps: 30,
             bitrate_kbps: 4000,
+            rotation: 0,
+            hflip: false,
+            vflip: false,
+            encoder: "auto".into(),
+            keyframe_interval: 0,
         }
     }
 
@@ -1645,6 +1673,130 @@ mod tests {
             v2["updated_at_unix"].as_f64().unwrap() >= first_ts,
             "each wedge re-persist must refresh the timestamp"
         );
+    }
+
+    #[test]
+    fn a_health_tick_preserves_the_streaming_stamp() {
+        // The P0 this closes: refresh_camera_state runs on EVERY healthy 5 s
+        // tick, and while it rebuilt the snapshot from discovery alone it wrote
+        // `pipeline_state: "unknown"` over the `streaming` stamp start_stream
+        // had just made. The status surface has no arm for `unknown`, so a drone
+        // that was actually streaming reported `not_initialized` with a null
+        // whep_url within 5 s of coming up.
+        //
+        // start_stream itself is not driven here: it spawns mediamtx and a real
+        // encoder. Its observable tail is the Streaming stamp plus the resolved
+        // encoder label, which is what is set up.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("camera-state.json");
+        let mut o = test_orch();
+        o.last_cameras = present_camera_discovery();
+        o.camera_state_path = Some(path.clone());
+        o.encoder_type = Some(EncoderKind::Ffmpeg);
+        o.encoder_label = Some("ffmpeg-h264_v4l2m2m".to_string());
+        o.state = PipelineState::Running;
+        o.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Streaming);
+
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(v["pipeline_state"], "streaming");
+
+        o.refresh_camera_state();
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            v["pipeline_state"], "streaming",
+            "the health tick must stamp the live outcome, never reset it to unknown"
+        );
+        assert_eq!(v["state"], "ready");
+        assert_eq!(v["encoder"], "ffmpeg-h264_v4l2m2m");
+        assert_eq!(v["encoder_hw"], true);
+        assert!(v["pipeline_reason"].is_null(), "streaming has no reason");
+    }
+
+    #[test]
+    fn a_retry_does_not_erase_the_standing_failure() {
+        // Measured on the bench: with no usable encoder the health loop re-enters
+        // start_stream every few seconds, and its `starting` stamp overwrote the
+        // `error` + reason from the attempt before. The surface flapped between
+        // `error  (no encoder backend…)` and a bare `connecting` while nothing
+        // about the node had changed. The standing failure holds until an attempt
+        // resolves it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("camera-state.json");
+        let mut o = test_orch();
+        o.last_cameras = present_camera_discovery();
+        o.camera_state_path = Some(path.clone());
+        o.last_start_error = StartError::NoEncoder;
+        o.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Error);
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(v["pipeline_state"], "error");
+        let reason = v["pipeline_reason"].as_str().unwrap().to_string();
+
+        // The next retry's Starting stamp.
+        o.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Starting);
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(v["pipeline_state"], "error", "a retry is not a fresh start");
+        assert_eq!(v["pipeline_reason"], serde_json::json!(reason));
+
+        // Once the attempt succeeds the failure is cleared and `starting` means it.
+        o.last_start_error = StartError::None;
+        o.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Starting);
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(v["pipeline_state"], "starting");
+        assert!(v["pipeline_reason"].is_null());
+    }
+
+    #[test]
+    fn a_wedged_pipeline_keeps_its_error_reason_across_the_park() {
+        // The circuit breaker sets Error, then refresh_camera_state keeps the
+        // sidecar fresh across the 5-minute park. The reason that motivated the
+        // park must survive that refresh — erasing it one line later is what
+        // sent operators hunting through journals.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("camera-state.json");
+        let mut o = test_orch();
+        o.last_cameras = present_camera_discovery();
+        o.camera_state_path = Some(path.clone());
+        o.last_start_error = StartError::EncoderCommandFailed;
+        o.state = PipelineState::Error;
+
+        o.refresh_camera_state();
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(v["pipeline_state"], "error");
+        assert_eq!(
+            v["pipeline_reason"],
+            StartError::EncoderCommandFailed.reason().unwrap()
+        );
+        // No encoder command is in force, so no identity is published.
+        assert!(v["encoder"].is_null());
+        assert!(v["encoder_hw"].is_null());
+    }
+
+    #[tokio::test]
+    async fn a_deliberate_stop_stamps_the_sidecar_stopped() {
+        // `stopped` was a dead variant: nothing ever wrote it, so a pipeline the
+        // operator stopped kept advertising `streaming` — and a dialable WHEP
+        // endpoint — for the whole stopped window.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("camera-state.json");
+        let mut o = VideoOrchestrator::new(
+            AgentVideoConfig::default(),
+            CameraConfig::default(),
+            dir.path(),
+        );
+        o.last_cameras = present_camera_discovery();
+        o.camera_state_path = Some(path.clone());
+        o.encoder_label = Some("ffmpeg-libx264".to_string());
+        o.state = PipelineState::Running;
+        o.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Streaming);
+
+        o.stop_stream().await;
+
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(v["pipeline_state"], "stopped");
+        assert!(v["encoder"].is_null());
+        assert!(v["encoder_hw"].is_null());
+        // Discovery is untouched by a stop: the camera is still plugged in.
+        assert_eq!(v["state"], "ready");
     }
 
     // --- no placeholder telemetry -------------------------------------------

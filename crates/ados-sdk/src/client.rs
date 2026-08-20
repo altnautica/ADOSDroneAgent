@@ -98,6 +98,11 @@ pub struct PluginIpcClient {
     /// MSP byte-plane callbacks. Keyed on the wildcard only: MSP has no per-
     /// message topic, so every subscriber sees every FC->host chunk.
     msp_callbacks: CallbackMap,
+    /// Auxiliary-stream application-datagram callbacks for
+    /// `radio.aux_stream.deliver` pushes. Keyed on the wildcard only: an app
+    /// datagram has no subject to filter on, so every subscriber sees every
+    /// frame (the plugin's own codec routes by channel).
+    aux_callbacks: CallbackMap,
     reader_task: Mutex<Option<JoinHandle<()>>>,
     next_id: AtomicU64,
     request_timeout: Duration,
@@ -127,6 +132,7 @@ impl PluginIpcClient {
             detection_callbacks: Arc::new(Mutex::new(HashMap::new())),
             button_callbacks: Arc::new(Mutex::new(HashMap::new())),
             msp_callbacks: Arc::new(Mutex::new(HashMap::new())),
+            aux_callbacks: Arc::new(Mutex::new(HashMap::new())),
             reader_task: Mutex::new(None),
             next_id: AtomicU64::new(0),
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
@@ -657,6 +663,53 @@ impl PluginIpcClient {
             .args)
     }
 
+    /// Send one application datagram on the open auxiliary stream.
+    ///
+    /// `channel` is the reserved aux application channel: `AppStream` (8, the
+    /// stream direction) or `AppCommand` (9, the command direction). The payload
+    /// is the application bytes, opaque to the host; a payload over
+    /// [`ados_protocol::aux_mux::AUX_MAX_PAYLOAD`] is refused by the host before
+    /// it is sent. Gated on `radio.aux_stream`.
+    pub async fn radio_aux_stream_send(
+        &self,
+        channel: u8,
+        payload: &[u8],
+    ) -> Result<Value, ClientError> {
+        let args = Value::Map(vec![
+            (Value::from("channel"), Value::Integer(channel.into())),
+            (Value::from("payload"), Value::Binary(payload.to_vec())),
+        ]);
+        Ok(self
+            .send_request("radio.aux_stream.send", "radio.aux_stream", args)
+            .await?
+            .args)
+    }
+
+    /// Subscribe to application datagrams received on the open auxiliary stream.
+    ///
+    /// The host forwards each received `(channel, payload)` as a
+    /// `radio.aux_stream.deliver` event to every registered [`aux`-callback]
+    /// (the plugin's codec routes by channel). Register a callback first with
+    /// [`Self::register_aux_callback`] so no early frame is missed. Gated on
+    /// `radio.aux_stream`. Mirrors the button subscribe shape.
+    pub async fn radio_aux_stream_subscribe(&self) -> Result<Value, ClientError> {
+        Ok(self
+            .send_request(
+                "radio.aux_stream.subscribe",
+                "radio.aux_stream",
+                Value::Map(vec![]),
+            )
+            .await?
+            .args)
+    }
+
+    /// Register a callback for `radio.aux_stream.deliver` pushes. Mirrors the
+    /// button callback shape: every subscriber receives every application
+    /// datagram.
+    pub fn register_aux_callback(&self, callback: EventCallback) {
+        register_callback(&self.aux_callbacks, VISION_ANY_CAMERA, callback);
+    }
+
     /// Send one application payload over a MAVLink TUNNEL frame.
     ///
     /// `payload_type` must be a private type (> 32767); the host validates it
@@ -862,6 +915,7 @@ impl PluginIpcClient {
         let detection_callbacks = self.detection_callbacks.clone();
         let button_callbacks = self.button_callbacks.clone();
         let msp_callbacks = self.msp_callbacks.clone();
+        let aux_callbacks = self.aux_callbacks.clone();
         let plugin_id = self.plugin_id.clone();
         tokio::spawn(async move {
             let mut reader = read_half;
@@ -882,6 +936,11 @@ impl PluginIpcClient {
                                 dispatch_button(&button_callbacks, &env);
                             } else if env.method == "msp.deliver" {
                                 dispatch_button(&msp_callbacks, &env);
+                            } else if env.method == "radio.aux_stream.deliver" {
+                                // Wildcard-only fan-out, exactly like buttons:
+                                // every aux subscriber receives every datagram
+                                // and its own codec routes by channel.
+                                dispatch_button(&aux_callbacks, &env);
                             } else {
                                 dispatch_event(&event_callbacks, &env);
                             }
