@@ -421,7 +421,10 @@ mod tests {
             ("radio.aux_stream.open", Method::RadioAuxStreamOpen),
             ("radio.aux_stream.close", Method::RadioAuxStreamClose),
             ("radio.aux_stream.send", Method::RadioAuxStreamSend),
-            ("radio.aux_stream.subscribe", Method::RadioAuxStreamSubscribe),
+            (
+                "radio.aux_stream.subscribe",
+                Method::RadioAuxStreamSubscribe,
+            ),
         ] {
             assert_eq!(
                 gate(method, false, &caps(&[])),

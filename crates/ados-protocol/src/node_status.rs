@@ -714,7 +714,11 @@ mod tests {
             Some("1.0.0"),
             &plugins,
         );
-        assert_eq!(idy.pv, Some(3), "pv is the highest contract version present");
+        assert_eq!(
+            idy.pv,
+            Some(3),
+            "pv is the highest contract version present"
+        );
         // The list is sorted by id, so it is stable regardless of install order.
         assert_eq!(
             idy.pl.as_deref(),

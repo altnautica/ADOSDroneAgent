@@ -1168,8 +1168,7 @@ impl DisplayTapWatcher {
     }
 }
 
-static DISPLAY_TAP_CLIENT: std::sync::OnceLock<DisplayTapWatcher> =
-    std::sync::OnceLock::new();
+static DISPLAY_TAP_CLIENT: std::sync::OnceLock<DisplayTapWatcher> = std::sync::OnceLock::new();
 
 /// Poll the display-tap sidecar and broadcast each changed `key`, forever.
 /// Tolerates an absent file (no display / no page yet) by polling quietly; a
@@ -2525,9 +2524,8 @@ impl HostServices for RealHost {
             .ok_or_else(|| HostError::Rpc("payload missing".to_string()))?;
         let aux_channel = ados_protocol::aux_mux::AuxChannel::from_u8(channel)
             .expect("channel validated to 8/9 above");
-        let frame = ados_protocol::aux_mux::encode(aux_channel, &payload).ok_or_else(|| {
-            HostError::Rpc("payload exceeds the aux frame maximum".to_string())
-        })?;
+        let frame = ados_protocol::aux_mux::encode(aux_channel, &payload)
+            .ok_or_else(|| HostError::Rpc("payload exceeds the aux frame maximum".to_string()))?;
         let req = serde_json::json!({"op": "send", "frame": frame});
         let (reply, _ok) = self.forward_radio_aux(req, "radio.aux_stream.send");
         Ok(reply)
@@ -5153,8 +5151,6 @@ gcs:
     #[cfg(unix)]
     #[test]
     fn radio_aux_send_accepts_both_application_channels() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("radio-aux.sock");
         // Two sends against two one-shot stubs: AppStream (8) and AppCommand (9)
         // both forward.
         for (i, channel) in [8u64, 9u64].iter().enumerate() {
@@ -5170,7 +5166,10 @@ gcs:
             assert_eq!(field(&m, "ok").and_then(Value::as_bool), Some(true));
             let sent = stub.join().unwrap();
             let v: serde_json::Value = serde_json::from_str(&sent).unwrap();
-            assert_eq!(v["frame"][3], *channel, "channel byte must be echoed into the frame");
+            assert_eq!(
+                v["frame"][3], *channel,
+                "channel byte must be echoed into the frame"
+            );
         }
     }
 
@@ -5180,10 +5179,7 @@ gcs:
         let host = RealHost::new();
         // Missing channel.
         assert_eq!(
-            err_body(host.radio_aux_stream_send(
-                "p",
-                &map(&[("payload", Value::Binary(vec![1]))])
-            )),
+            err_body(host.radio_aux_stream_send("p", &map(&[("payload", Value::Binary(vec![1]))]))),
             "channel missing or not an integer"
         );
         // Unsupported channel (this host is profile-agnostic; only 8/9 apply).
@@ -5199,10 +5195,7 @@ gcs:
         );
         // Missing payload.
         assert_eq!(
-            err_body(host.radio_aux_stream_send(
-                "p",
-                &map(&[("channel", Value::from(8))])
-            )),
+            err_body(host.radio_aux_stream_send("p", &map(&[("channel", Value::from(8))]))),
             "payload missing"
         );
         // A string payload is not bytes.
@@ -5303,7 +5296,10 @@ gcs:
             ("radio.aux_stream.open", Method::RadioAuxStreamOpen),
             ("radio.aux_stream.close", Method::RadioAuxStreamClose),
             ("radio.aux_stream.send", Method::RadioAuxStreamSend),
-            ("radio.aux_stream.subscribe", Method::RadioAuxStreamSubscribe),
+            (
+                "radio.aux_stream.subscribe",
+                Method::RadioAuxStreamSubscribe,
+            ),
         ] {
             assert_eq!(
                 gate(method, false, &caps(&[])),

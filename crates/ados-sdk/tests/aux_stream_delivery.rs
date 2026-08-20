@@ -58,9 +58,7 @@ fn harness() -> Harness {
     let issuer = Arc::new(TokenIssuer::new(b"aux-delivery-secret".to_vec()));
     let bus = Arc::new(EventBus::new());
     let (app, _rx) = broadcast::channel(64);
-    let host = Arc::new(AuxStreamHost {
-        app: app.clone(),
-    });
+    let host = Arc::new(AuxStreamHost { app: app.clone() });
     let server = PluginIpcServer::new(dir.path(), issuer.clone(), bus, host);
     let (path, accept) = server.serve_plugin(PLUGIN_ID).expect("bind plugin socket");
     Harness {
@@ -82,13 +80,17 @@ async fn connect(h: &Harness, granted: &[&str]) -> Arc<PluginIpcClient> {
     ipc
 }
 
+/// The last `(channel, payload)` the aux callback observed, shared with the test
+/// body. Named to keep the shared-state type out of the clippy complexity lint.
+type LastAuxDatagram = Arc<Mutex<Option<(u8, Vec<u8>)>>>;
+
 #[tokio::test]
 async fn pushed_aux_datagram_reaches_the_aux_callback() {
     let h = harness();
     let ipc = connect(&h, &["radio.aux_stream"]).await;
 
     let hits = Arc::new(AtomicUsize::new(0));
-    let last: Arc<Mutex<Option<(u8, Vec<u8>)>>> = Arc::new(Mutex::new(None));
+    let last: LastAuxDatagram = Arc::new(Mutex::new(None));
     let h_hits = hits.clone();
     let h_last = last.clone();
     ipc.register_aux_callback(Arc::new(move |args: Value| {
@@ -129,7 +131,10 @@ async fn pushed_aux_datagram_reaches_the_aux_callback() {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert!(saw, "the radio.aux_stream.deliver push never reached the callback");
+    assert!(
+        saw,
+        "the radio.aux_stream.deliver push never reached the callback"
+    );
     assert_eq!(
         last.lock().unwrap().as_ref(),
         Some(&want),

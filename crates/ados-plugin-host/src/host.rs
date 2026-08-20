@@ -286,15 +286,25 @@ pub trait HostServices: Send + Sync + 'static {
     /// validates the channel, encodes the aux frame, and forwards it to the radio
     /// service's auxiliary command socket. Gated at the dispatch level on
     /// `radio.aux_stream`.
-    fn radio_aux_stream_send(&self, _plugin_id: &str, _args: &Value)
-        -> Result<HostResult, HostError> { Ok(not_implemented("radio.aux_stream.send")) }
+    fn radio_aux_stream_send(
+        &self,
+        _plugin_id: &str,
+        _args: &Value,
+    ) -> Result<HostResult, HostError> {
+        Ok(not_implemented("radio.aux_stream.send"))
+    }
 
     /// Subscribe to application datagrams received on an open auxiliary stream. A
     /// real host arms a forwarder off the radio receive path and pushes each frame
     /// as `radio.aux_stream.deliver`. Gated at the dispatch level on
     /// `radio.aux_stream`.
-    fn radio_aux_stream_subscribe(&self, _plugin_id: &str, _args: &Value)
-        -> Result<HostResult, HostError> { Ok(not_implemented("radio.aux_stream.subscribe")) }
+    fn radio_aux_stream_subscribe(
+        &self,
+        _plugin_id: &str,
+        _args: &Value,
+    ) -> Result<HostResult, HostError> {
+        Ok(not_implemented("radio.aux_stream.subscribe"))
+    }
 
     /// A receiver for the auxiliary-stream application-datagram fanout, when this
     /// host has a wired aux reader. The server obtains one per

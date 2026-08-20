@@ -142,8 +142,8 @@ async fn serve_connection(stream: &mut UnixStream, state: &AuxCmdState) -> io::R
 /// Write one newline-terminated JSON line and flush. Mirrors the shared one-shot
 /// helper's framing (line + trailing newline, then flush).
 async fn write_json_line<W: AsyncWriteExt + Unpin>(w: &mut W, v: &Value) -> io::Result<()> {
-    let mut bytes = serde_json::to_vec(v)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("E_ENCODE: {e}")))?;
+    let mut bytes =
+        serde_json::to_vec(v).map_err(|e| io::Error::other(format!("E_ENCODE: {e}")))?;
     bytes.push(b'\n');
     w.write_all(&bytes).await?;
     w.flush().await
@@ -229,9 +229,7 @@ fn parse_command(line: &[u8]) -> Parsed {
         "status" => Parsed::Cmd(Command::Status),
         "send" => match req.frame {
             Some(frame) => Parsed::Cmd(Command::Send { frame }),
-            None => {
-                Parsed::Reply(json!({"ok": false, "error": "E_BAD_REQUEST: missing frame"}))
-            }
+            None => Parsed::Reply(json!({"ok": false, "error": "E_BAD_REQUEST: missing frame"})),
         },
         "subscribe" => Parsed::Subscribe,
         other => Parsed::Reply(json!({"ok": false, "error": format!("E_UNKNOWN_OP: {other}")})),
@@ -300,11 +298,12 @@ async fn apply(cmd: Command, state: &AuxCmdState) -> Value {
             // open/close, with no per-send state.
             let sock = match tokio::net::UdpSocket::bind(("127.0.0.1", 0)).await {
                 Ok(s) => s,
-                Err(e) => {
-                    return json!({"ok": false, "error": format!("E_AUX_SEND_UDP: {e}")})
-                }
+                Err(e) => return json!({"ok": false, "error": format!("E_AUX_SEND_UDP: {e}")}),
             };
-            if let Err(e) = sock.send_to(&frame, ("127.0.0.1", state.cfg.aux_tx_port)).await {
+            if let Err(e) = sock
+                .send_to(&frame, ("127.0.0.1", state.cfg.aux_tx_port))
+                .await
+            {
                 return json!({"ok": false, "error": format!("E_AUX_SEND: {e}")});
             }
             json!({"ok": true})
@@ -356,7 +355,9 @@ mod tests {
         // A `send` carries the already-aux-framed datagram bytes. Well-formed
         // sends round-trip the exact frame; a send without a frame is a clean
         // E_BAD_REQUEST, never a silent no-op or a panic.
-        let frame: Vec<u8> = vec![0xAD, 0x02, 0x01, 0x08, 0x00, 0x05, b'h', b'e', b'l', b'l', b'o'];
+        let frame: Vec<u8> = vec![
+            0xAD, 0x02, 0x01, 0x08, 0x00, 0x05, b'h', b'e', b'l', b'l', b'o',
+        ];
         let c = cmd(br#"{"op":"send","frame":[173,2,1,8,0,5,104,101,108,108,111]}"#);
         assert_eq!(c, Command::Send { frame });
         let v = reply(br#"{"op":"send"}"#);

@@ -26,9 +26,8 @@ use crate::config::WfbConfig;
 /// [`ados_protocol::aux_mux::AUX_MAX_PAYLOAD`] is the largest payload; the frame
 /// is header + payload, and we allow slack so a slightly-oversized datagram is
 /// read in full and rejected by the decoder rather than being silently trimmed.
-const RX_BUF_LEN: usize = ados_protocol::aux_mux::AUX_MAX_PAYLOAD
-    + ados_protocol::aux_mux::AUX_HEADER_LEN
-    + 64;
+const RX_BUF_LEN: usize =
+    ados_protocol::aux_mux::AUX_MAX_PAYLOAD + ados_protocol::aux_mux::AUX_HEADER_LEN + 64;
 
 /// Broadcast a decoded application datagram to every aux-subscribe subscriber.
 /// Each item is `(channel as u8, payload)` where `channel` is `AppStream` (8) or

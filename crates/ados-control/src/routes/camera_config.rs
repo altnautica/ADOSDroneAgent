@@ -1119,10 +1119,10 @@ mod tests {
             );
         }
         // A non-integer rotation is rejected too (it would break the reload).
-        assert!(
-            validate_cameras(&[json!({"id": "eo", "source": "/dev/video0", "rotation": "90"})])
-                .is_err()
-        );
+        assert!(validate_cameras(&[
+            json!({"id": "eo", "source": "/dev/video0", "rotation": "90"})
+        ])
+        .is_err());
         // The four supported values are accepted.
         for good in [0, 90, 180, 270] {
             assert!(

@@ -412,10 +412,27 @@ async fn dispatch(payload: &[u8], deps: &UplinkDeps, counters: &AuxUplinkConsume
                 // relayed frame carries no injector claim — it is the human path,
                 // and the operator beats the injector by construction; the
                 // autonomous guidance write declares its injector and is gated.
-                deps.fc
-                    .send_client_bytes(frame, ClientOrigin::Relayed, None)
-                    .await;
-                counters.0.mavlink_injected.fetch_add(1, Ordering::Relaxed);
+                // A wedged or flow-controlled FC must not stall this recv loop,
+                // which also feeds the relay-proxy Request lane. Bound the write to
+                // FC_WRITE_TIMEOUT: a write that does not finish in time is dropped
+                // and counted rather than blocking the loop.
+                match tokio::time::timeout(
+                    FC_WRITE_TIMEOUT,
+                    deps.fc
+                        .send_client_bytes(frame, ClientOrigin::Relayed, None),
+                )
+                .await
+                {
+                    Ok(_) => {
+                        counters.0.mavlink_injected.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(_) => {
+                        counters
+                            .0
+                            .mavlink_write_timeouts
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                }
             }
         }
         AuxChannel::Request => {

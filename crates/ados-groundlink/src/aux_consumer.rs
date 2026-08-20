@@ -677,12 +677,8 @@ async fn dispatch(
                     // the plugin wire (an AD05-class field reshape), so it is
                     // surfaced as a counter and a warning rather than left to
                     // climb as an unexplained decode statistic on one rig.
-                    if let (Some(local), Some(pl)) =
-                        (sinks.local_plugins, identity.pl.as_deref())
-                    {
-                        for (id, peer_ver) in
-                            ados_protocol::node_status::parse_plugin_list(pl)
-                        {
+                    if let (Some(local), Some(pl)) = (sinks.local_plugins, identity.pl.as_deref()) {
+                        for (id, peer_ver) in ados_protocol::node_status::parse_plugin_list(pl) {
                             if let Some(&own_ver) = local.get(&id) {
                                 if own_ver != peer_ver {
                                     counters.bump(&c.identity_plugin_version_mismatch);
@@ -1529,7 +1525,10 @@ mod tests {
         assert_eq!(snap.decode_damaged, 1);
         assert_eq!(snap.decode_foreign, 1);
         assert_eq!(snap.app_stream, 1);
-        assert_eq!(snap.app_stream_undelivered, 1, "no app-stream sink is wired");
+        assert_eq!(
+            snap.app_stream_undelivered, 1,
+            "no app-stream sink is wired"
+        );
         assert_eq!(snap.app_command_unexpected, 1);
     }
 
@@ -1879,8 +1878,7 @@ mod tests {
             ("ados.example.two-halves".to_string(), 2u16),
             ("ados.example.other".to_string(), 9u16),
         ];
-        let identity =
-            NodeIdentity::build("drone-a", None, Some("drone"), None, &peer_plugins);
+        let identity = NodeIdentity::build("drone-a", None, Some("drone"), None, &peer_plugins);
         let framed = aux_mux::encode(AuxChannel::Identity, &identity.encode().unwrap()).unwrap();
 
         let mut sinks = AuxSinks::mavlink_only(&ingest);

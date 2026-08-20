@@ -113,7 +113,10 @@ impl Step for WfbUnmanaged {
             tracing::warn!(error = %e, "failed to write WFB unmanaged-devices rule");
             return StepOutcome::Failed(format!("could not write {NM_CONF_PATH}: {e}"));
         }
-        tracing::info!(drivers = WFB_UNMANAGED_DRIVERS.len(), "wrote WFB unmanaged-devices rule");
+        tracing::info!(
+            drivers = WFB_UNMANAGED_DRIVERS.len(),
+            "wrote WFB unmanaged-devices rule"
+        );
         StepOutcome::Ok
     }
 }

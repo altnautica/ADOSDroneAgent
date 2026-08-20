@@ -810,9 +810,18 @@ fn read_pipeline_outcome_in(run_dir: &Path, now: f64) -> PipelineSidecar {
     }
     PipelineSidecar {
         fresh: true,
-        state: doc.get("pipeline_state").and_then(Value::as_str).map(str::to_string),
-        reason: doc.get("pipeline_reason").and_then(Value::as_str).map(str::to_string),
-        encoder: doc.get("encoder").and_then(Value::as_str).map(str::to_string),
+        state: doc
+            .get("pipeline_state")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        reason: doc
+            .get("pipeline_reason")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        encoder: doc
+            .get("encoder")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         encoder_hw: doc.get("encoder_hw").and_then(Value::as_bool),
     }
 }
@@ -1322,9 +1331,13 @@ fn read_camera_status_in(run_dir: &Path, now: f64) -> Vec<(String, Value)> {
                     // detected camera and a failed pipeline showed a confident
                     // camera pill over a dead pane and no warning anywhere.
                     // Discovery stays authoritative for `missing`.
-                    let failed = camera.get("pipeline_state").and_then(Value::as_str)
-                        == Some("error");
-                    let state = if state == "ready" && failed { "error" } else { state };
+                    let failed =
+                        camera.get("pipeline_state").and_then(Value::as_str) == Some("error");
+                    let state = if state == "ready" && failed {
+                        "error"
+                    } else {
+                        state
+                    };
                     out.push(("cameraState".to_string(), json!(state)));
                 }
             }
@@ -2373,7 +2386,10 @@ mod tests {
     /// A FRESH sidecar from a legacy ados-video: the writer is alive, but names
     /// no `pipeline_state`.
     fn legacy_pipeline() -> PipelineSidecar {
-        PipelineSidecar { fresh: true, ..PipelineSidecar::default() }
+        PipelineSidecar {
+            fresh: true,
+            ..PipelineSidecar::default()
+        }
     }
 
     fn pipeline(state: &str, reason: Option<&str>, encoder: Option<&str>) -> PipelineSidecar {
@@ -2401,18 +2417,41 @@ mod tests {
     #[test]
     fn video_block_on_drone_with_a_streaming_pipeline_is_running() {
         let v = build_video_block_with(
-            "drone", &None, true, vec![],
+            "drone",
+            &None,
+            true,
+            vec![],
             PipelineSidecar {
                 encoder_hw: Some(true),
                 ..pipeline("streaming", None, Some("rpicam-vid"))
             },
         );
         assert_eq!(v["state"], json!("running"));
-        assert_eq!(v["whep_url"], json!("/whep"), "relative: resolved against whatever host reached the agent");
-        assert_eq!(v["hls_url"], json!("/hls/main/index.m3u8"), "HLS fallback for remote / mixed-content viewers");
-        assert_eq!(v["encoder"], json!("rpicam-vid"), "the encoder identity is back");
-        assert_eq!(v["encoder_hw"], json!(true), "and whether it is hardware-backed");
-        assert_eq!(v["pipeline_state"], json!("streaming"), "the sidecar's own word");
+        assert_eq!(
+            v["whep_url"],
+            json!("/whep"),
+            "relative: resolved against whatever host reached the agent"
+        );
+        assert_eq!(
+            v["hls_url"],
+            json!("/hls/main/index.m3u8"),
+            "HLS fallback for remote / mixed-content viewers"
+        );
+        assert_eq!(
+            v["encoder"],
+            json!("rpicam-vid"),
+            "the encoder identity is back"
+        );
+        assert_eq!(
+            v["encoder_hw"],
+            json!(true),
+            "and whether it is hardware-backed"
+        );
+        assert_eq!(
+            v["pipeline_state"],
+            json!("streaming"),
+            "the sidecar's own word"
+        );
         // A pipeline that says it is publishing needs no readiness alibi.
         assert!(v.get("whep_url_basis").is_none());
         // No sidecar streams → no `streams` key (single-stream nodes unchanged).
@@ -2426,11 +2465,22 @@ mod tests {
     #[test]
     fn a_failed_pipeline_is_never_reported_as_running() {
         let v = build_video_block_with(
-            "drone", &None, true, vec![],
-            pipeline("error", Some("no encoder backend is available for this camera"), None),
+            "drone",
+            &None,
+            true,
+            vec![],
+            pipeline(
+                "error",
+                Some("no encoder backend is available for this camera"),
+                None,
+            ),
         );
         assert_eq!(v["state"], json!("error"));
-        assert_eq!(v["whep_url"], Value::Null, "a failed pipeline gets no playable endpoint");
+        assert_eq!(
+            v["whep_url"],
+            Value::Null,
+            "a failed pipeline gets no playable endpoint"
+        );
         assert_eq!(
             v["reason"],
             json!("no encoder backend is available for this camera"),
@@ -2449,7 +2499,11 @@ mod tests {
         assert_eq!(v["state"], json!("running"));
         assert_eq!(v["whep_url"], json!("/whep"));
         assert_eq!(v["whep_url_basis"], json!("mediamtx_readiness_only"));
-        assert_eq!(v["pipeline_state"], json!("unknown"), "it is alive but cannot say");
+        assert_eq!(
+            v["pipeline_state"],
+            json!("unknown"),
+            "it is alive but cannot say"
+        );
     }
 
     /// The same legacy agent with mediamtx unbound: there is nothing to dial, so
@@ -2479,7 +2533,10 @@ mod tests {
     #[test]
     fn a_streaming_pipeline_whose_mediamtx_is_not_ready_is_connecting() {
         let v = build_video_block_with(
-            "drone", &None, false, vec![],
+            "drone",
+            &None,
+            false,
+            vec![],
             pipeline("streaming", None, Some("ffmpeg-h264_v4l2m2m")),
         );
         assert_eq!(v["state"], json!("connecting"));
@@ -2495,7 +2552,11 @@ mod tests {
             json!({ "id": "ir", "role": "ir", "codec": "h264", "whep": "/whep?camera=ir" }),
         ];
         let v = build_video_block_with(
-            "drone", &None, true, streams, pipeline("streaming", None, None),
+            "drone",
+            &None,
+            true,
+            streams,
+            pipeline("streaming", None, None),
         );
         assert_eq!(v["state"], json!("running"));
         let legs = v["streams"].as_array().unwrap();
@@ -2509,9 +2570,7 @@ mod tests {
         // A ground station whose WFB link is not delivering reports stopped, no
         // whep — regardless of mediamtx reachability (the gate is the link). Inject
         // mediamtx ready=true to prove the link gate dominates even then.
-        let v = build_video_block_with(
-            "ground-station", &None, true, vec![], no_pipeline(),
-        );
+        let v = build_video_block_with("ground-station", &None, true, vec![], no_pipeline());
         assert_eq!(v["state"], json!("stopped"));
         assert_eq!(v["whep_url"], Value::Null);
     }
@@ -2523,9 +2582,7 @@ mod tests {
             ("state", json!("active")),
             ("valid_rx_packets_per_s", json!(120.0)),
         ]));
-        let v = build_video_block_with(
-            "ground-station", &wfb, false, vec![], no_pipeline(),
-        );
+        let v = build_video_block_with("ground-station", &wfb, false, vec![], no_pipeline());
         assert_eq!(v["state"], json!("connecting"));
         assert_eq!(v["whep_url"], Value::Null);
     }
@@ -2539,7 +2596,10 @@ mod tests {
             ("valid_rx_packets_per_s", json!(120.0)),
         ]));
         let v = build_video_block_with(
-            "ground-station", &wfb, true, vec![],
+            "ground-station",
+            &wfb,
+            true,
+            vec![],
             pipeline("error", Some("mediamtx failed to start"), None),
         );
         assert_eq!(v["state"], json!("error"));
@@ -2567,7 +2627,11 @@ mod tests {
         assert!(!sidecar.fresh);
         assert_eq!(sidecar.state, None);
         let v = build_video_block_with("drone", &None, true, vec![], sidecar);
-        assert_eq!(v["state"], json!("not_initialized"), "not `error`: nobody is asserting it");
+        assert_eq!(
+            v["state"],
+            json!("not_initialized"),
+            "not `error`: nobody is asserting it"
+        );
         assert_eq!(v["whep_url"], Value::Null);
         assert!(v.get("pipeline_state").is_none());
     }

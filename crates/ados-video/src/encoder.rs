@@ -538,8 +538,7 @@ fn build_ffmpeg_command(
     let force_v4l2m2m = params.encoder == "v4l2m2m";
     let use_hw_h264 = !force_sw
         && (force_v4l2m2m
-            || (matches!(params.codec.as_str(), "h264" | "H264")
-                && env.hw_h264.is_present()));
+            || (matches!(params.codec.as_str(), "h264" | "H264") && env.hw_h264.is_present()));
 
     let ffmpeg_codec: String = if use_hw_h264 {
         "h264_v4l2m2m".to_string()
@@ -1343,6 +1342,7 @@ mod tests {
 
     /// Build params with a specific encode config (orientation / encoder
     /// override / keyframe) on top of the given geometry.
+    #[allow(clippy::too_many_arguments)]
     fn params_cfg(
         kind: EncoderKind,
         w: u32,
@@ -1967,7 +1967,18 @@ mod tests {
     #[test]
     fn gst_omx_rotation90_inserts_videoflip() {
         let got = build(
-            &params_cfg(EncoderKind::Gstreamer, 1280, 720, 30, 4000, "auto", 90, false, false, 0),
+            &params_cfg(
+                EncoderKind::Gstreamer,
+                1280,
+                720,
+                30,
+                4000,
+                "auto",
+                90,
+                false,
+                false,
+                0,
+            ),
             "/dev/video2",
             RTSP_OUT,
             &usb_yuyv(),
@@ -1984,7 +1995,18 @@ mod tests {
         // OMX element present (software names the codec, keeps the GStreamer
         // family).
         let omx = build(
-            &params_cfg(EncoderKind::Gstreamer, 1280, 720, 30, 4000, "omx", 0, false, false, 0),
+            &params_cfg(
+                EncoderKind::Gstreamer,
+                1280,
+                720,
+                30,
+                4000,
+                "omx",
+                0,
+                false,
+                false,
+                0,
+            ),
             "/dev/video2",
             RTSP_OUT,
             &usb_yuyv(),
@@ -1992,10 +2014,25 @@ mod tests {
             false,
         );
         assert_eq!(omx, expected("gst_omx_explicit"));
-        assert_eq!(omx, expected("gst_omx_argv"), "explicit omx == auto on vendor");
+        assert_eq!(
+            omx,
+            expected("gst_omx_argv"),
+            "explicit omx == auto on vendor"
+        );
 
         let sw = build(
-            &params_cfg(EncoderKind::Gstreamer, 1280, 720, 30, 4000, "software", 0, false, false, 0),
+            &params_cfg(
+                EncoderKind::Gstreamer,
+                1280,
+                720,
+                30,
+                4000,
+                "software",
+                0,
+                false,
+                false,
+                0,
+            ),
             "/dev/video2",
             RTSP_OUT,
             &usb_yuyv(),
@@ -2018,7 +2055,18 @@ mod tests {
         // transpose=2, 270=transpose=2; then hflip/vflip append.
         let ff = |rot: u32, h: bool, v: bool| {
             build(
-                &params_cfg(EncoderKind::Ffmpeg, 1280, 720, 30, 4000, "auto", rot, h, v, 0),
+                &params_cfg(
+                    EncoderKind::Ffmpeg,
+                    1280,
+                    720,
+                    30,
+                    4000,
+                    "auto",
+                    rot,
+                    h,
+                    v,
+                    0,
+                ),
                 "/dev/video1",
                 RTSP_OUT,
                 &usb_mjpeg(),
@@ -2054,7 +2102,18 @@ mod tests {
         // legacy (non-OMX) capture prefix otherwise unchanged.
         let g = |rot: u32, h: bool, v: bool| {
             build(
-                &params_cfg(EncoderKind::Gstreamer, 1280, 720, 30, 4000, "auto", rot, h, v, 0),
+                &params_cfg(
+                    EncoderKind::Gstreamer,
+                    1280,
+                    720,
+                    30,
+                    4000,
+                    "auto",
+                    rot,
+                    h,
+                    v,
+                    0,
+                ),
                 "/dev/video1",
                 RTSP_OUT,
                 &usb_mjpeg(),
@@ -2096,7 +2155,18 @@ mod tests {
     fn ffmpeg_override_software_and_v4l2m2m() {
         // software → libx264 even when a real HW device is present.
         let sw = build(
-            &params_cfg(EncoderKind::Ffmpeg, 1280, 720, 30, 4000, "software", 0, false, false, 0),
+            &params_cfg(
+                EncoderKind::Ffmpeg,
+                1280,
+                720,
+                30,
+                4000,
+                "software",
+                0,
+                false,
+                false,
+                0,
+            ),
             "/dev/video1",
             RTSP_OUT,
             &usb_mjpeg(),
@@ -2110,7 +2180,18 @@ mod tests {
         // v4l2m2m → force the HW M2M wrapper even when the probe found no device
         // (an operator explicitly opting into the wrapper takes the risk).
         let hw = build(
-            &params_cfg(EncoderKind::Ffmpeg, 1280, 720, 30, 4000, "v4l2m2m", 0, false, false, 0),
+            &params_cfg(
+                EncoderKind::Ffmpeg,
+                1280,
+                720,
+                30,
+                4000,
+                "v4l2m2m",
+                0,
+                false,
+                false,
+                0,
+            ),
             "/dev/video1",
             RTSP_OUT,
             &usb_mjpeg(),
@@ -2128,14 +2209,9 @@ mod tests {
         // the auto default must NOT be hijacked into the OMX gstreamer path —
         // it stays on ffmpeg libx264 (byte-identical legacy behavior).
         let p = params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000);
-        let got = build_encoder_command(
-            &p,
-            "/dev/video1",
-            RTSP_OUT,
-            Some(&usb_mjpeg()),
-            &rockchip(),
-        )
-        .unwrap();
+        let got =
+            build_encoder_command(&p, "/dev/video1", RTSP_OUT, Some(&usb_mjpeg()), &rockchip())
+                .unwrap();
         assert!(got.iter().any(|a| a == "libx264"));
         assert!(!got.iter().any(|a| a == "omxh264videoenc"));
     }
@@ -2144,7 +2220,18 @@ mod tests {
     fn ffmpeg_keyframe_interval_overrides_the_gop() {
         // keyframe_interval=5 → -g 5 (instead of the 0.5 s default of 15).
         let got = build(
-            &params_cfg(EncoderKind::Ffmpeg, 1280, 720, 30, 4000, "auto", 0, false, false, 5),
+            &params_cfg(
+                EncoderKind::Ffmpeg,
+                1280,
+                720,
+                30,
+                4000,
+                "auto",
+                0,
+                false,
+                false,
+                5,
+            ),
             "/dev/video1",
             RTSP_OUT,
             &usb_mjpeg(),
@@ -2156,9 +2243,23 @@ mod tests {
         assert_eq!(got[gi + 1], "5");
         // Default (0) keeps the existing 0.5 s GOP: fps30 → 15 (see the legacy
         // fixtures, which still pass with -g 15).
-        assert_eq!(gop_interval(&params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000)), 15);
         assert_eq!(
-            gop_interval(&params_cfg(EncoderKind::Ffmpeg, 1280, 720, 30, 4000, "auto", 0, false, false, 5)),
+            gop_interval(&params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000)),
+            15
+        );
+        assert_eq!(
+            gop_interval(&params_cfg(
+                EncoderKind::Ffmpeg,
+                1280,
+                720,
+                30,
+                4000,
+                "auto",
+                0,
+                false,
+                false,
+                5
+            )),
             5
         );
     }
@@ -2167,7 +2268,18 @@ mod tests {
     fn gstreamer_keyframe_interval_reaches_key_int_max() {
         // keyframe_interval=5 → key-int-max=5 on the x264/mpp/omx paths.
         let got = build(
-            &params_cfg(EncoderKind::Gstreamer, 1280, 720, 30, 4000, "auto", 0, false, false, 5),
+            &params_cfg(
+                EncoderKind::Gstreamer,
+                1280,
+                720,
+                30,
+                4000,
+                "auto",
+                0,
+                false,
+                false,
+                5,
+            ),
             "/dev/video1",
             RTSP_OUT,
             &usb_yuyv(),
@@ -2175,7 +2287,10 @@ mod tests {
             false,
         );
         let tok = got.to_vec();
-        assert!(tok.iter().any(|t| t.contains("key-int-max=5")), "missing key-int-max=5");
+        assert!(
+            tok.iter().any(|t| t.contains("key-int-max=5")),
+            "missing key-int-max=5"
+        );
     }
 
     #[test]

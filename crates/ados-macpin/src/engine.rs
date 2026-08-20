@@ -844,15 +844,48 @@ mod tests {
             vid: 0xa69c,
             pid: 0x8d81,
         };
-        let single = classify_adapter(id, "wlan0", "a69c:8d81", Some(machine_id), "", &cfg(true), true, None, false);
+        let single = classify_adapter(
+            id,
+            "wlan0",
+            "a69c:8d81",
+            Some(machine_id),
+            "",
+            &cfg(true),
+            true,
+            None,
+            false,
+        );
         // A lone randomizer keeps the proven, bit-for-bit "" parity MAC.
         assert_eq!(
             single,
-            Decision::Pin { mac: MacAddr::parse("02:c6:75:83:1a:3e").unwrap(), source: AdapterSource::Quirk }
+            Decision::Pin {
+                mac: MacAddr::parse("02:c6:75:83:1a:3e").unwrap(),
+                source: AdapterSource::Quirk
+            }
         );
         // Two randomizers, distinct USB paths -> distinct MACs, both valid.
-        let a = classify_adapter(id, "wlan0", "a69c:8d81", Some(machine_id), "5-1.3", &cfg(true), true, None, false);
-        let b = classify_adapter(id, "wlan1", "a69c:8d81", Some(machine_id), "5-1.4", &cfg(true), true, None, false);
+        let a = classify_adapter(
+            id,
+            "wlan0",
+            "a69c:8d81",
+            Some(machine_id),
+            "5-1.3",
+            &cfg(true),
+            true,
+            None,
+            false,
+        );
+        let b = classify_adapter(
+            id,
+            "wlan1",
+            "a69c:8d81",
+            Some(machine_id),
+            "5-1.4",
+            &cfg(true),
+            true,
+            None,
+            false,
+        );
         let (Decision::Pin { mac: mac_a, .. }, Decision::Pin { mac: mac_b, .. }) = (a, b) else {
             panic!("both quirk adapters should pin");
         };
