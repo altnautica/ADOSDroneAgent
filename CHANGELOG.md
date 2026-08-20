@@ -4,6 +4,20 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.364] - 2026-08-20
+
+### Fixed
+
+- Allwinner OMX H.264 encoder crash-loop: the OMX branch set `key-int-max`,
+  which `omxh264videoenc` does not expose, so GStreamer rejected the whole
+  pipeline and no video reached the media server (the camera never sustained
+  capture). Use `interval-intraframes`, the gst-omx GOP property, so hardware
+  H.264 encode runs on the Allwinner vendor path.
+- MAC-pin duplicate address: a lone MAC randomizer derived a machine-id-only
+  address that could collide with another radio's, bringing both interfaces up
+  with the same MAC. The pinned MAC is now always salted by the adapter's
+  stable USB path, so each radio gets a distinct, port-stable address.
+
 ## [0.99.363] - 2026-08-20
 
 ### Fixed
