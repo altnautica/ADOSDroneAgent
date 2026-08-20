@@ -321,7 +321,13 @@ impl VideoOrchestrator {
         kind: crate::encoder::EncoderKind,
     ) -> Option<Vec<String>> {
         let pipe_uri = self.pipe_uri();
-        let params = EncoderParams::from_camera_config(kind, &self.camera_cfg);
+        let mut params = EncoderParams::from_camera_config(kind, &self.camera_cfg);
+        if self.force_software {
+            // The hardware / GStreamer encoder was abandoned this session (it
+            // never produced a packet); force the always-runnable software path
+            // (ffmpeg libx264) so video keeps flowing instead of crash-looping.
+            params.encoder = "software".to_string();
+        }
         let cmd = match build_encoder_command(
             &params,
             device_path,

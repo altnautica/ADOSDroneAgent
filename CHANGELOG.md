@@ -4,6 +4,17 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.365] - 2026-08-20
+
+### Fixed
+
+- A video encoder that cannot stream on a given board no longer crash-loops
+  forever with no video. If the hardware / GStreamer encoder fails to produce a
+  first packet after a few restart attempts, the pipeline falls back to the
+  software (ffmpeg libx264) path, which always runs — so a node can never be
+  left without video by an encoder that will not start. The hardware path is
+  retried fresh on the next process start.
+
 ## [0.99.364] - 2026-08-20
 
 ### Fixed

@@ -45,10 +45,10 @@ use crate::wfb_tee::{
 // `orchestrator::backoff_delay`, etc. callers keep resolving unchanged.
 pub use crate::health::{
     backoff_delay, circuit_breaker_tripped, grace_decision, healthy_window_elapsed,
-    inbound_decision, retry_cap, GraceDecision, InboundDecision, PipelineState, StartError,
-    BASE_RESTART_DELAY, CIRCUIT_BREAKER_ATTEMPTS, HEALTHY_RESET_WINDOW, HEALTH_CHECK_INTERVAL,
-    INBOUND_FLOW_STALL, MAX_RESTART_DELAY, MAX_RESTART_DELAY_NO_CAMERA, STARTUP_GRACE_MAX,
-    WFB_TEE_RESTART_CEILING,
+    inbound_decision, retry_cap, should_fallback_to_software, GraceDecision, InboundDecision,
+    PipelineState, StartError, BASE_RESTART_DELAY, CIRCUIT_BREAKER_ATTEMPTS, HEALTHY_RESET_WINDOW,
+    HEALTH_CHECK_INTERVAL, INBOUND_FLOW_STALL, MAX_RESTART_DELAY, MAX_RESTART_DELAY_NO_CAMERA,
+    STARTUP_GRACE_MAX, WFB_TEE_RESTART_CEILING,
 };
 
 // --- orchestrator ------------------------------------------------------------
@@ -143,6 +143,15 @@ pub struct VideoOrchestrator {
     pub(crate) wfb_tee_restart_count: u32,
     pub(crate) vision_tap_restart_count: u32,
     pub(crate) last_start_error: StartError,
+    /// Consecutive cold-start attempts whose encoder never produced a first
+    /// packet. Drives the software fallback: a hardware / GStreamer encoder that
+    /// cannot stream on this box is abandoned for ffmpeg libx264 rather than
+    /// crash-looped until the circuit breaker.
+    pub(crate) no_first_packet_failures: u32,
+    /// Latched once the hardware / GStreamer encoder has been abandoned this
+    /// process lifetime, forcing the encoder command onto the software path. A
+    /// process restart / reboot clears it, so the hardware path is retried fresh.
+    pub(crate) force_software: bool,
 
     /// Earliest instant the cloud-push branch may retry, or `None` when it may
     /// retry now. The cloud relay is the SECONDARY path; its backoff/park must
@@ -247,6 +256,8 @@ impl VideoOrchestrator {
             wfb_tee_restart_count: 0,
             vision_tap_restart_count: 0,
             last_start_error: StartError::None,
+            no_first_packet_failures: 0,
+            force_software: false,
             cloud_retry_after: None,
             restart_lock: Arc::new(Mutex::new(())),
             camera_plugged: Arc::new(Notify::new()),
@@ -533,6 +544,7 @@ impl VideoOrchestrator {
             match grace_decision(path_ready, elapsed) {
                 GraceDecision::FirstPacket => {
                     self.first_packet_seen = true;
+                    self.no_first_packet_failures = 0;
                     tracing::info!(elapsed_s = elapsed.as_secs_f64(), "pipeline_first_packet");
                     return true;
                 }
@@ -837,6 +849,27 @@ impl VideoOrchestrator {
         self.supervise_secondary_encoders().await;
 
         if !health_ok {
+            // A run that never produced a first packet is an encoder that cannot
+            // stream on this box (a hardware/GStreamer path that will not
+            // negotiate/publish here). After a few such failures, abandon it for
+            // the software ffmpeg path rather than crash-loop until the circuit
+            // breaker — the software path always runs, so a bad HW encoder can no
+            // longer brick video. A run that streamed then stalled has
+            // first_packet_seen set, so it resets the counter instead of tripping
+            // this.
+            if !self.first_packet_seen {
+                self.no_first_packet_failures += 1;
+                if should_fallback_to_software(self.no_first_packet_failures, self.force_software) {
+                    tracing::warn!(
+                        failures = self.no_first_packet_failures,
+                        "encoder_fallback_to_software: the hardware/GStreamer encoder never produced video; forcing the software libx264 path"
+                    );
+                    self.force_software = true;
+                    self.no_first_packet_failures = 0;
+                }
+            } else {
+                self.no_first_packet_failures = 0;
+            }
             self.restart_count += 1;
             if circuit_breaker_tripped(self.restart_count) {
                 tracing::error!(

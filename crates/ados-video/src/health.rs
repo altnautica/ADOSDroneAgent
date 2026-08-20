@@ -118,6 +118,22 @@ pub fn circuit_breaker_tripped(restart_count: u32) -> bool {
     restart_count >= CIRCUIT_BREAKER_ATTEMPTS
 }
 
+/// Consecutive cold-start attempts that never produced a first packet before the
+/// orchestrator abandons the current (hardware / GStreamer) encoder for the
+/// always-available software (ffmpeg libx264) path. Small so a wedged HW encoder
+/// recovers to working video within a few restart cycles instead of crash-looping
+/// until the 5-minute circuit breaker.
+pub const ENCODER_FALLBACK_ATTEMPTS: u32 = 3;
+
+/// Whether the run loop should abandon the current encoder for the software
+/// fallback: it has failed to produce a first packet [`ENCODER_FALLBACK_ATTEMPTS`]
+/// times in a row and is not already on the software path. Pure so the trigger is
+/// unit-tested without a subprocess. The hardware path is retried fresh on the
+/// next process start (a reboot / service restart), never latched to disk.
+pub fn should_fallback_to_software(no_first_packet_failures: u32, already_software: bool) -> bool {
+    !already_software && no_first_packet_failures >= ENCODER_FALLBACK_ATTEMPTS
+}
+
 /// Should a sustained-healthy run clear the restart counter? True once the
 /// pipeline has been continuously healthy for strictly longer than
 /// [`HEALTHY_RESET_WINDOW`] (the Python `> window` comparison).
@@ -402,5 +418,29 @@ mod tests {
             inbound_decision(2000, 1500, Duration::from_secs(20), HEALTH_CHECK_INTERVAL),
             InboundDecision::Stalled
         );
+    }
+
+    #[test]
+    fn software_fallback_triggers_only_after_the_threshold_and_never_when_already_software() {
+        // Below the threshold: keep trying the hardware / GStreamer encoder.
+        assert!(!should_fallback_to_software(0, false));
+        assert!(!should_fallback_to_software(
+            ENCODER_FALLBACK_ATTEMPTS - 1,
+            false
+        ));
+        // At/above the threshold on a non-software encoder: fall back.
+        assert!(should_fallback_to_software(
+            ENCODER_FALLBACK_ATTEMPTS,
+            false
+        ));
+        assert!(should_fallback_to_software(
+            ENCODER_FALLBACK_ATTEMPTS + 5,
+            false
+        ));
+        // Already on software: never fall back again (no flip-flop).
+        assert!(!should_fallback_to_software(
+            ENCODER_FALLBACK_ATTEMPTS + 5,
+            true
+        ));
     }
 }
