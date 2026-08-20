@@ -779,16 +779,20 @@ fn build_gstreamer_command(
         )
     };
 
-    // Capture → decode → orientation prefix, ending right before h264parse.
-    // The OMX path is capture-direct with `io-mode=mmap`, forces NV12 for the
-    // OMX encoder, and adds the frame-dropping `queue max-size-buffers=4
-    // leaky=downstream` so the HW encoder never backs up behind the source.
+    // Capture → decode → orientation prefix, ending right before h264parse. The
+    // OMX path is capture-direct with `io-mode=mmap` + the frame-dropping `queue
+    // max-size-buffers=4 leaky=downstream` so the Cedar HW encoder never backs up
+    // behind the source. NOTE (verified on the A733 Cedar): `omxh264videoenc`
+    // will NOT negotiate if the source carries `do-timestamp=true` OR the NV12
+    // caps pin a `framerate` — in either case the encoder silently falls back to
+    // its 176x144 default and the pipeline fails to preroll. So set neither here;
+    // the framerate flows from the `image/jpeg` source caps.
     let core = if use_omx {
         format!(
-            "v4l2src device={safe_source} io-mode=mmap do-timestamp=true ! {src_caps} ! \
-             {decode} ! {flip}video/x-raw,format=NV12,width={},height={},framerate={}/1 ! \
+            "v4l2src device={safe_source} io-mode=mmap ! {src_caps} ! \
+             {decode} ! {flip}video/x-raw,format=NV12,width={},height={} ! \
              queue max-size-buffers=4 leaky=downstream ! {encoder}",
-            params.width, params.height, params.fps
+            params.width, params.height
         )
     } else {
         format!("v4l2src device={safe_source} ! {src_caps} ! {decode} ! {flip}{encoder}")

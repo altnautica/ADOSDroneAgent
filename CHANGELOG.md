@@ -4,6 +4,18 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.366] - 2026-08-20
+
+### Fixed
+
+- Allwinner OMX hardware H.264 encode now negotiates and streams. The OMX
+  GStreamer pipeline set `do-timestamp=true` on the capture source and pinned a
+  `framerate` on the intermediate NV12 caps; on the A733 Cedar encoder either one
+  makes `omxh264videoenc` fall back to its 176x144 default and the pipeline fails
+  to preroll. Both are removed on the OMX path (the framerate flows from the
+  camera's source caps), so hardware encode runs instead of falling back to
+  software.
+
 ## [0.99.365] - 2026-08-20
 
 ### Fixed
