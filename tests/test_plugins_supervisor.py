@@ -126,10 +126,11 @@ def _write_grant(tmp_path: Path, grants_dir: Path, plugin_id, permissions, signe
     """Write `{plugin_id,permissions,signer,sig}` signed by a fresh Ed25519 key;
     the public key lands in `tmp_path/keys/<signer>.pem`. Returns the grant
     dict (without the sig)."""
-    from cryptography.hazmat.primitives import serialization
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
     import base64
     import json
+
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
     key = Ed25519PrivateKey.generate()
     pub_pem = key.public_key().public_bytes(

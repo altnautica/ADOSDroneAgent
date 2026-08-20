@@ -180,6 +180,8 @@ def resolve_ap_interface(
     """
     from ados.services.network.interface_roles import (
         driver_of as _driver_of,
+    )
+    from ados.services.network.interface_roles import (
         is_denied_management_driver,
         is_wfb_compatible_driver,
         wireless_interfaces,
