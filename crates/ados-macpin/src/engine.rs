@@ -126,8 +126,9 @@ pub fn parse_match_block(link_body: &str) -> Option<String> {
 
 /// The pure per-adapter decision. `learner` is the adapter's record AFTER the
 /// caller has folded in this boot's observation (so `mac_change_count` is
-/// current). `salt` is empty for the only randomizer on the box, else the USB
-/// path. Does no I/O.
+/// current). `salt` is the adapter's stable USB path, so every pinned adapter
+/// derives a MAC unique to its port and no two radios can collapse to one MAC.
+/// Does no I/O.
 #[allow(clippy::too_many_arguments)]
 pub fn classify_adapter(
     usb_id: UsbId,
@@ -579,15 +580,6 @@ mod linux {
         let link_mechanism = link_mechanism_available();
         let now = now_unix();
 
-        let quirk_count = adapters
-            .iter()
-            .filter(|a| {
-                a.usb_id
-                    .map(|id| is_quirk_randomizer(id).is_some())
-                    .unwrap_or(false)
-            })
-            .count();
-
         let mut verdicts = Vec::new();
         for a in &adapters {
             let usb_id = match a.usb_id {
@@ -595,11 +587,10 @@ mod linux {
                 None => continue, // skip non-USB
             };
             let vidpid = format!("{:04x}:{:04x}", usb_id.vid, usb_id.pid);
-            let salt = if quirk_count > 1 {
-                a.usb_path.as_str()
-            } else {
-                ""
-            };
+            // Always salt the derived MAC by the adapter's stable USB path, so a
+            // lone randomizer can never derive the same machine-id-only MAC that
+            // collides with another radio's (the 2026-08 A7S dup-MAC bug).
+            let salt = a.usb_path.as_str();
 
             // Fold this boot into the learner memory for unknown adapters (not
             // quirk, not known-efuse, not override). The record is keyed by the

@@ -756,7 +756,9 @@ fn build_gstreamer_command(
         // (`gst-inspect-1.0 omxh264videoenc`); if the board's OMX proves
         // unusable, software libx264 remains the fallback.
         let bps = params.bitrate_kbps * 1000;
-        format!("omxh264videoenc control-rate=constant target-bitrate={bps} key-int-max={gop}")
+        format!(
+            "omxh264videoenc control-rate=constant target-bitrate={bps} interval-intraframes={gop}"
+        )
     } else if env.has_mpph264enc {
         // mpph264enc HW VPU: bps = bits/sec, VBR (rc-mode=1) with bounded
         // bps-max/bps-min so a scene change cannot starve the wfb_tx FEC,
@@ -2265,8 +2267,8 @@ mod tests {
     }
 
     #[test]
-    fn gstreamer_keyframe_interval_reaches_key_int_max() {
-        // keyframe_interval=5 → key-int-max=5 on the x264/mpp/omx paths.
+    fn gstreamer_keyframe_interval_reaches_the_omx_gop() {
+        // keyframe_interval=5 → interval-intraframes=5 on the Allwinner OMX path.
         let got = build(
             &params_cfg(
                 EncoderKind::Gstreamer,
@@ -2288,8 +2290,8 @@ mod tests {
         );
         let tok = got.to_vec();
         assert!(
-            tok.iter().any(|t| t.contains("key-int-max=5")),
-            "missing key-int-max=5"
+            tok.iter().any(|t| t == "interval-intraframes=5"),
+            "missing interval-intraframes=5"
         );
     }
 
