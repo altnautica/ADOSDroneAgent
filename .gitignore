@@ -51,13 +51,11 @@ logs/
 # Distribution
 *.tar.gz
 *.whl
-.claude/
 
 # Rust
 crates/target/
 target/
 **/*.rs.bk
 
-# Local agent tooling directory (not part of the project)
-.opencode/
-opencode.jsonc
+# Local omp agent tooling directory (not part of the project)
+.omp/
