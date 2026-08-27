@@ -131,7 +131,7 @@ def sha256_file(path: str | Path, chunk: int = 1 << 20) -> str:
 
 
 def board_family(board_id: str | None) -> str:
-    """Map a board identifier to the model ``board_match`` family (rk3588 | orin | cpu | generic).
+    """Map a board identifier to the model ``board_match`` family (raspberrypi-5 | rk3588 | orin | cpu | generic).
 
     Substring-matched + case-insensitive so a SoC string ("RK3582"), a board slug
     ("rock-5c-lite") or a display name ("Radxa ROCK 5C Lite (RK3582)") all resolve. The
@@ -154,6 +154,13 @@ def board_family(board_id: str | None) -> str:
         return "orin"
     if any(k in b for k in ("rk3588", "rk3582", "orange-pi-5", "rock-5c", "rock5c")):
         return "rk3588"
+    if any(k in b for k in ("raspberrypi-5", "raspberry pi 5", "raspberrypi5", "bcm2712")):
+        # Raspberry Pi 5 (BCM2712). A plugin that ships an accelerator variant keyed to this
+        # family expects the Pi 5's add-on AI HAT (Hailo-class); a bare Pi 5 with no HAT should
+        # still declare — and will then match — the plugin's cpu/generic fallback via the second
+        # pass in ``select_ref_for_board``. (Presence-gating the accelerator on measured NPU TOPS
+        # is the follow-up refinement; this restores the family the board was silently missing.)
+        return "raspberrypi-5"
     if any(k in b for k in ("a733", "sun60i", "cubie-a7s", "cubie a7s")):
         return "cpu"
     return "generic"
@@ -518,7 +525,7 @@ class ModelManager:
         """Report total model cache size and limit."""
         total_bytes = 0
         if self._models_dir.is_dir():
-            valid_suffixes = {".rknn", ".tflite", ".onnx", ".engine"}
+            valid_suffixes = {".rknn", ".tflite", ".onnx", ".engine", ".hef"}
             for f in self._models_dir.iterdir():
                 if f.is_file() and f.suffix in valid_suffixes:
                     total_bytes += f.stat().st_size
@@ -577,7 +584,7 @@ class ModelManager:
             raise ValueError("model ref has no source")
         self._models_dir.mkdir(parents=True, exist_ok=True)
         suffix = {"rknn": ".rknn", "tensorrt": ".engine", "tflite": ".tflite",
-                  "pytorch": ".pt"}.get(ref.runtime, ".onnx")
+                  "pytorch": ".pt", "hailo": ".hef"}.get(ref.runtime, ".onnx")
         dest = self._models_dir / f"{ref.id}-{ref.board_match}{suffix}"
         tmp = dest.with_suffix(dest.suffix + ".tmp")
         headers = registry_auth_headers(ref.source)  # empty unless the host needs a credential
