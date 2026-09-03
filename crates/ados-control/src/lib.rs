@@ -21,6 +21,7 @@ pub mod ipc;
 pub mod mcp;
 pub mod pairing_store;
 pub mod param_store;
+pub mod probe;
 pub mod profile;
 pub mod proxy;
 pub mod proxy_auth;

@@ -9,8 +9,11 @@ use std::time::Duration;
 use crate::config::CONFIG_YAML;
 
 pub(super) const DEFAULT_DEBOUNCE_S: u64 = 20;
-pub(super) const DEFAULT_MAX_ATTEMPTS: u32 = 3;
-pub(super) const DEFAULT_COOLDOWN_SCHEDULE_S: [u64; 3] = [10, 30, 60];
+/// Fixed wait between camera-recovery attempts, replacing a three-attempt
+/// budget and an escalating `[10, 30, 60]` s schedule. See
+/// `usb_rehome::DEFAULT_COOLDOWN_S` for why the interval is this long and why
+/// there is no longer a budget.
+pub(super) const DEFAULT_COOLDOWN_S: u64 = 60;
 pub(super) const DEFAULT_HEALTHY_RESET_S: u64 = 120;
 pub(super) const DEFAULT_TICK_INTERVAL_S: u64 = 5;
 pub(super) const DEFAULT_BOOT_RESET_WINDOW_S: u64 = 180;
@@ -23,8 +26,9 @@ pub struct CameraRecoveryConfig {
     /// "auto" | "true" | "false" — whether a camera is expected on this rig.
     pub expected: String,
     pub debounce: Duration,
-    pub max_attempts: u32,
-    pub cooldown_schedule: Vec<u64>,
+    /// Fixed wait between recovery attempts. There is no attempt ceiling: see
+    /// [`DEFAULT_COOLDOWN_S`].
+    pub cooldown: Duration,
     pub healthy_reset: Duration,
     pub tick_interval: Duration,
     /// Opt-in: allow a shared-hub reset (boot-time-only, guard-gated).
@@ -47,8 +51,7 @@ impl Default for CameraRecoveryConfig {
             enabled: true,
             expected: "auto".to_string(),
             debounce: Duration::from_secs(DEFAULT_DEBOUNCE_S),
-            max_attempts: DEFAULT_MAX_ATTEMPTS,
-            cooldown_schedule: DEFAULT_COOLDOWN_SCHEDULE_S.to_vec(),
+            cooldown: Duration::from_secs(DEFAULT_COOLDOWN_S),
             healthy_reset: Duration::from_secs(DEFAULT_HEALTHY_RESET_S),
             tick_interval: Duration::from_secs(DEFAULT_TICK_INTERVAL_S),
             allow_hub_reset: false,
@@ -86,7 +89,8 @@ pub fn read_config_from(text: &str) -> CameraRecoveryConfig {
         #[serde(default)]
         debounce_s: Option<u64>,
         #[serde(default)]
-        max_attempts: Option<u32>,
+        cooldown_s: Option<u64>,
+        /// Legacy escalating schedule; see the parse below.
         #[serde(default)]
         cooldown_schedule_s: Option<Vec<u64>>,
         #[serde(default)]
@@ -116,11 +120,22 @@ pub fn read_config_from(text: &str) -> CameraRecoveryConfig {
         if let Some(r) = raw.video.usb_recovery {
             cfg.enabled = r.enabled;
             cfg.debounce = Duration::from_secs(r.debounce_s.unwrap_or(DEFAULT_DEBOUNCE_S).max(1));
-            cfg.max_attempts = r.max_attempts.unwrap_or(DEFAULT_MAX_ATTEMPTS).max(1);
-            cfg.cooldown_schedule = r
-                .cooldown_schedule_s
-                .filter(|v| !v.is_empty())
-                .unwrap_or_else(|| DEFAULT_COOLDOWN_SCHEDULE_S.to_vec());
+            // No attempt ceiling: `max_attempts` used to gate an `exhausted`
+            // latch that could not clear without the attempts it stopped, so a
+            // camera that did not come back within three rebinds was abandoned
+            // for the rest of the boot. A legacy `cooldown_schedule_s` is read
+            // for its largest value so an operator who tuned that schedule
+            // keeps the steady-state pacing they asked for.
+            cfg.cooldown = Duration::from_secs(
+                r.cooldown_s
+                    .or_else(|| {
+                        r.cooldown_schedule_s
+                            .as_deref()
+                            .and_then(|v| v.iter().copied().max())
+                    })
+                    .unwrap_or(DEFAULT_COOLDOWN_S)
+                    .max(1),
+            );
             cfg.healthy_reset =
                 Duration::from_secs(r.healthy_reset_s.unwrap_or(DEFAULT_HEALTHY_RESET_S).max(1));
             cfg.tick_interval =
@@ -167,7 +182,7 @@ mod tests {
         let cfg = read_config_from("agent:\n  name: x\n");
         assert!(cfg.enabled);
         assert_eq!(cfg.expected, "auto");
-        assert_eq!(cfg.max_attempts, DEFAULT_MAX_ATTEMPTS);
+        assert_eq!(cfg.cooldown, Duration::from_secs(DEFAULT_COOLDOWN_S));
         assert_eq!(cfg.debounce, Duration::from_secs(DEFAULT_DEBOUNCE_S));
         assert!(!cfg.allow_hub_reset);
         assert!(cfg.allow_ppps);
@@ -177,15 +192,32 @@ mod tests {
     #[test]
     fn explicit_tunables_and_expected() {
         let cfg = read_config_from(
-            "video:\n  camera:\n    expected: \"true\"\n  usb_recovery:\n    enabled: false\n    debounce_s: 5\n    max_attempts: 2\n    allow_hub_reset: true\n    allow_ppps: false\n    allow_shared_hub_reset: true\n",
+            "video:\n  camera:\n    expected: \"true\"\n  usb_recovery:\n    enabled: false\n    debounce_s: 5\n    cooldown_s: 25\n    allow_hub_reset: true\n    allow_ppps: false\n    allow_shared_hub_reset: true\n",
         );
         assert!(!cfg.enabled);
         assert_eq!(cfg.expected, "true");
         assert_eq!(cfg.debounce, Duration::from_secs(5));
-        assert_eq!(cfg.max_attempts, 2);
+        assert_eq!(cfg.cooldown, Duration::from_secs(25));
         assert!(cfg.allow_hub_reset);
         assert!(!cfg.allow_ppps);
         assert!(cfg.allow_shared_hub_reset);
+    }
+
+    #[test]
+    fn a_legacy_escalating_schedule_becomes_its_steady_state_value() {
+        let cfg =
+            read_config_from("video:\n  usb_recovery:\n    cooldown_schedule_s: [10, 30, 90]\n");
+        assert_eq!(cfg.cooldown, Duration::from_secs(90));
+    }
+
+    #[test]
+    fn a_stale_max_attempts_key_is_ignored_rather_than_rejected() {
+        // A node still carrying the removed key must load. Failing to parse
+        // would disable camera recovery on exactly the nodes this is for.
+        let cfg =
+            read_config_from("video:\n  usb_recovery:\n    max_attempts: 2\n    cooldown_s: 15\n");
+        assert!(cfg.enabled);
+        assert_eq!(cfg.cooldown, Duration::from_secs(15));
     }
 
     #[test]

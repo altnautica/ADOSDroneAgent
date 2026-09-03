@@ -170,7 +170,7 @@ pub async fn get_ground_station_network(State(state): State<AppState>) -> Respon
     let cfg = crate::config::load_config_object_default();
     let active_uplink = latest_uplink_active(&state).await.unwrap_or(Value::Null);
     let body = json!({
-        "ap": ap_view(&cfg),
+        "ap": ap_view(&cfg).await,
         "wifi_client": wifi_client_view().await,
         "ethernet": ethernet_view_default(),
         "modem_4g": modem_view(&state).await,
@@ -203,7 +203,14 @@ pub async fn get_ground_station_network(State(state): State<AppState>) -> Respon
 ///   `status()` reports the gateway only when the unit is up).
 /// - `connected_clients` — the associated station MACs from
 ///   `iw dev <iface> station dump` while running, else the empty list.
-fn ap_view(cfg: &Value) -> Value {
+///
+/// `async` rather than taking the two live legs as injected parameters: the pure
+/// composition is already split out into `ap_view_compose`, so what is left here
+/// IS the I/O shell, and hoisting the probes into the handler would have to hoist
+/// `ap_interface(cfg)` with them (the `iw` probe needs the resolved interface) —
+/// moving config derivation out of the view and buying no testability, since the
+/// shape is already tested through `ap_view_compose`.
+async fn ap_view(cfg: &Value) -> Value {
     let hotspot = cfg
         .get("network")
         .filter(|v| v.is_object())
@@ -226,9 +233,13 @@ fn ap_view(cfg: &Value) -> Value {
         .unwrap_or(AP_DEFAULT_CHANNEL);
     let interface = ap_interface(cfg);
 
-    let running = hostapd_running();
+    // `systemctl is-active ados-hostapd.service` trimming to `active`, reproducing
+    // the manager's `_is_unit_active`. An absent `systemctl` / a spawn error / a
+    // timeout all read as not running, matching the manager's `except` returning
+    // `False`.
+    let running = crate::probe::unit_is_active(HOSTAPD_UNIT).await;
     let clients = if running {
-        station_dump_macs(&interface)
+        station_dump_macs(&interface).await
     } else {
         Vec::new()
     };
@@ -341,38 +352,21 @@ fn ap_interface(cfg: &Value) -> String {
     })
 }
 
-/// True when the hostapd unit is active, reproducing the manager's
-/// `_is_unit_active`: run `systemctl is-active ados-hostapd.service` and treat a
-/// trimmed `active` stdout as running. A missing `systemctl` / spawn error reads
-/// as not running, matching the manager's `except` returning `False`.
-fn hostapd_running() -> bool {
-    let output = match std::process::Command::new("systemctl")
-        .args(["is-active", HOSTAPD_UNIT])
-        .output()
-    {
-        Ok(o) => o,
-        Err(_) => return false,
-    };
-    String::from_utf8_lossy(&output.stdout).trim() == "active"
-}
-
 /// The associated station MACs from `iw dev <iface> station dump`, parsing the
 /// `Station <mac> (on <iface>)` header lines and lowercasing each MAC, reproducing
 /// the manager's `_connected_clients`. A missing `iw` / a non-zero exit / a spawn
-/// error all yield the empty list, matching the manager's `except` / `not ok`
-/// returns.
-fn station_dump_macs(interface: &str) -> Vec<String> {
-    let output = match std::process::Command::new("iw")
-        .args(["dev", interface, "station", "dump"])
-        .output()
-    {
-        Ok(o) => o,
-        Err(_) => return Vec::new(),
-    };
-    if !output.status.success() {
-        return Vec::new();
-    }
-    parse_station_dump(&String::from_utf8_lossy(&output.stdout))
+/// error / a timeout all yield the empty list, matching the manager's `except` /
+/// `not ok` returns.
+async fn station_dump_macs(interface: &str) -> Vec<String> {
+    parse_station_dump(
+        crate::probe::capture(
+            "iw",
+            &["dev", interface, "station", "dump"],
+            crate::probe::PROBE_TIMEOUT,
+        )
+        .await
+        .text(),
+    )
 }
 
 /// Parse the MAC addresses out of `iw … station dump` output: each associated
@@ -540,6 +534,7 @@ pub async fn get_network_ethernet() -> Response {
         return profile_mismatch();
     }
     let connection_name = discover_primary_connection_name(ETH_IFACE)
+        .await
         .map(Value::String)
         .unwrap_or(Value::Null);
     Json(json!({
@@ -565,9 +560,20 @@ const ETH_IFACE: &str = "eth0";
 /// with a read-only `nmcli` and picks the primary name. Returns `None` when
 /// `nmcli` is absent / errors / lists no ethernet profile — the same `null` the
 /// Python view reports on a non-NM box.
-fn discover_primary_connection_name(interface: &str) -> Option<String> {
-    let saved = nmcli_connections(&["NAME", "TYPE", "DEVICE"], false);
-    let active = nmcli_connections(&["NAME", "TYPE", "DEVICE"], true);
+async fn discover_primary_connection_name(interface: &str) -> Option<String> {
+    // The saved and active listings are two independent `nmcli` runs, so they go
+    // on the wire together. `nmcli` is the slowest probe on this surface even
+    // when healthy, and running them in sequence doubled this route's floor for
+    // no reason: neither listing is an input to the other.
+    //
+    // The field list is bound OUTSIDE the `join!`: an array literal written in a
+    // macro argument is a temporary of the expansion's own `let`, dropped before
+    // the poll loop the futures borrowing it are driven by.
+    let fields: &[&str] = &["NAME", "TYPE", "DEVICE"];
+    let (saved, active) = tokio::join!(
+        nmcli_connections(fields, false),
+        nmcli_connections(fields, true),
+    );
     pick_primary_connection_name(&saved, &active, interface)
 }
 
@@ -617,9 +623,13 @@ fn pick_primary_connection_name(
 
 /// Run a read-only `nmcli -t -f <fields> connection show [--active]` and parse
 /// the terse rows. Each row is truncated to `fields.len()` columns. An absent
-/// `nmcli` / a non-zero exit / a spawn error all yield an empty list, so the
-/// caller degrades to the no-connection `null`.
-pub(crate) fn nmcli_connections(fields: &[&str], active: bool) -> Vec<Vec<String>> {
+/// `nmcli` / a non-zero exit / a spawn error / a timeout all yield an empty list,
+/// so the caller degrades to the no-connection `null`.
+///
+/// Bounded by `SLOW_PROBE_TIMEOUT` rather than the default: `nmcli` re-reads
+/// every connection profile and takes hundreds of milliseconds on a healthy box,
+/// so the short bound would turn a working listing into an empty one.
+pub(crate) async fn nmcli_connections(fields: &[&str], active: bool) -> Vec<Vec<String>> {
     let mut args = vec!["-t", "-f"];
     let field_spec = fields.join(",");
     args.push(&field_spec);
@@ -628,15 +638,12 @@ pub(crate) fn nmcli_connections(fields: &[&str], active: bool) -> Vec<Vec<String
     if active {
         args.push("--active");
     }
-    let output = match std::process::Command::new("nmcli").args(&args).output() {
-        Ok(o) => o,
-        Err(_) => return Vec::new(),
-    };
-    if !output.status.success() {
-        return Vec::new();
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    parse_nmcli_terse(&text, fields.len())
+    parse_nmcli_terse(
+        crate::probe::capture("nmcli", &args, crate::probe::SLOW_PROBE_TIMEOUT)
+            .await
+            .text(),
+        fields.len(),
+    )
 }
 
 /// Parse `nmcli -t` (terse) multi-line output into rows, skipping blank lines and
@@ -760,24 +767,15 @@ pub async fn get_modem_status() -> Response {
     if !is_ground_station() {
         return profile_mismatch();
     }
-    let reason = if mmcli_available() {
+    // The Python `_which_mmcli` gate: `which mmcli` exiting zero. An absent
+    // `which` / any spawn error / a timeout all read as ModemManager absent,
+    // matching the Python `except` returning `False`.
+    let reason = if crate::probe::on_path("mmcli").await {
         "no_modem"
     } else {
         "modemmanager_not_installed"
     };
     Json(json!({"present": false, "reason": reason})).into_response()
-}
-
-/// True when `mmcli` (the ModemManager CLI) is on PATH, reproducing the Python
-/// `_which_mmcli` gate: run `which mmcli` and treat a zero exit with non-empty
-/// output as present. A missing `which` binary / any spawn error reads as absent,
-/// matching the Python `except` returning `False`.
-fn mmcli_available() -> bool {
-    let output = match std::process::Command::new("which").arg("mmcli").output() {
-        Ok(o) => o,
-        Err(_) => return false,
-    };
-    output.status.success() && !output.stdout.iter().all(u8::is_ascii_whitespace)
 }
 
 // ---------------------------------------------------------------------------
@@ -1555,14 +1553,19 @@ mod tests {
         );
     }
 
-    #[test]
-    fn modem_status_reason_tracks_the_mmcli_gate() {
+    #[tokio::test]
+    async fn modem_status_reason_tracks_the_mmcli_gate() {
         // The reason is the Python `which mmcli` gate: `modemmanager_not_installed`
         // when mmcli is absent, else `no_modem`. The CI host has no ModemManager,
         // so the reason here is `modemmanager_not_installed`; assert the reason
         // selection is consistent with the gate rather than pinning the host's
         // mmcli presence.
-        let reason = if mmcli_available() {
+        //
+        // The gate is probed once and the answer reused: two probes could
+        // disagree on a box where ModemManager is installed mid-test, leaving the
+        // final assertion reading a reason the first branch never chose.
+        let mmcli_present = crate::probe::on_path("mmcli").await;
+        let reason = if mmcli_present {
             "no_modem"
         } else {
             "modemmanager_not_installed"
@@ -1575,7 +1578,7 @@ mod tests {
         // On the CI host (no ModemManager) the gate resolves to the
         // not-installed reason — the shape the bench observed against the live
         // Python, NOT the prior hard-coded `no_modem`.
-        if !mmcli_available() {
+        if !mmcli_present {
             assert_eq!(body["reason"], json!("modemmanager_not_installed"));
         }
     }

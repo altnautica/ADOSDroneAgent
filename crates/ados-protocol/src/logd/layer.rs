@@ -57,10 +57,12 @@ const BATCH_MAX_FRAMES: usize = 128;
 /// How long the shipper waits to accumulate a batch before flushing what it has.
 const BATCH_LINGER: Duration = Duration::from_millis(100);
 
-/// Reconnect backoff schedule (milliseconds). The writer steps through these on
-/// repeated connect failures and holds at the last value, so an absent socket
-/// produces a slow, quiet retry rather than a hot loop.
-const BACKOFF_MS: [u64; 5] = [250, 500, 1000, 2000, 5000];
+/// Reconnect pacing. This was a byte-identical copy of the ladder in
+/// [`crate::logd::emitter`] — two independently-maintained copies of the same
+/// wrong answer for the same local socket. Both now name the one fixed pace in
+/// [`crate::retry`]; see that module for why a recovery loop here neither grows
+/// nor gives up.
+const RECONNECT_PACE: crate::retry::RetryPace = crate::retry::LOCAL_SOCKET;
 
 /// Counters surfaced for diagnostics: frames enqueued for shipping and frames
 /// dropped because the channel was full. A visible drop is better than a silent
@@ -290,22 +292,17 @@ where
 }
 
 /// The reconnecting socket writer. Holds at most one live connection; on any I/O
-/// error it drops the connection and reconnects on the backoff schedule. All
+/// error it drops the connection and reconnects on the fixed pace. All
 /// failures are swallowed — the socket being absent is the expected steady state
 /// before the daemon's unit is enabled, so it must never log or panic.
 struct SocketWriter {
     path: PathBuf,
     stream: Option<UnixStream>,
-    backoff_idx: usize,
 }
 
 impl SocketWriter {
     fn new(path: PathBuf) -> Self {
-        Self {
-            path,
-            stream: None,
-            backoff_idx: 0,
-        }
+        Self { path, stream: None }
     }
 
     /// Ensure a live connection, connecting if needed. Returns `false` (after a
@@ -318,13 +315,11 @@ impl SocketWriter {
         match UnixStream::connect(&self.path).await {
             Ok(s) => {
                 self.stream = Some(s);
-                self.backoff_idx = 0;
+
                 true
             }
             Err(_) => {
-                let ms = BACKOFF_MS[self.backoff_idx.min(BACKOFF_MS.len() - 1)];
-                self.backoff_idx = (self.backoff_idx + 1).min(BACKOFF_MS.len() - 1);
-                tokio::time::sleep(Duration::from_millis(ms)).await;
+                tokio::time::sleep(RECONNECT_PACE.wait()).await;
                 false
             }
         }

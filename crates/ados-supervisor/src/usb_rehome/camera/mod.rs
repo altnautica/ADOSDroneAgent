@@ -181,21 +181,10 @@ impl CameraUsbRecovery {
         let verified_healthy = ready;
         let armed = self.trigger.observe(cond, now);
 
-        let schedule = cfg.cooldown_schedule.clone();
-        let cooldown_for = |n: u32| {
-            let idx = (n.saturating_sub(1) as usize).min(schedule.len().saturating_sub(1));
-            Duration::from_secs(
-                *schedule
-                    .get(idx)
-                    .unwrap_or(&config::DEFAULT_COOLDOWN_SCHEDULE_S[0]),
-            )
-        };
-
         let step = self.machine.step(
             armed,
             verified_healthy,
-            cfg.max_attempts,
-            cooldown_for,
+            cfg.cooldown,
             cfg.healthy_reset,
             now,
         );
@@ -207,15 +196,14 @@ impl CameraUsbRecovery {
                 self.emit("success", &cfg, 0);
                 None
             }
-            RehomeStep::Exhausted => {
-                if self.state != "exhausted" {
-                    self.emit("exhausted", &cfg, self.machine.attempts());
-                }
-                self.state = "exhausted".to_string();
-                None
-            }
             RehomeStep::Cooldown { .. } => {
-                self.state = "monitoring".to_string();
+                // Still failing, still trying. Announce once per episode at the
+                // point the old code parked, so a camera that has not come back
+                // is loud without the vehicle having given up on it.
+                if self.state != "retrying" {
+                    self.emit("retrying", &cfg, self.machine.attempts());
+                }
+                self.state = "retrying".to_string();
                 None
             }
             RehomeStep::Idle => {
@@ -238,7 +226,7 @@ impl CameraUsbRecovery {
             }
         };
 
-        self.write_sidecar(self.machine.attempts(), cfg.max_attempts);
+        self.write_sidecar(self.machine.attempts(), cfg.cooldown.as_secs());
         plan
     }
 
@@ -387,22 +375,25 @@ impl CameraUsbRecovery {
         }
         d.insert("attempt".to_string(), Value::from(attempt as u64));
         d.insert(
-            "max_attempts".to_string(),
-            Value::from(cfg.max_attempts as u64),
+            "cooldown_s".to_string(),
+            Value::from(cfg.cooldown.as_secs()),
         );
         d.insert("present".to_string(), Value::from(self.camera_present));
         if !reason.is_empty() {
             d.insert("reason".to_string(), Value::from(reason));
         }
         let level = match state {
-            "exhausted" | "needs_hub_reset" | "guard_blocked" => Level::Warn,
+            // `retrying` replaces the old terminal `exhausted`: still loud,
+            // because a camera that has not come back is worth an operator's
+            // attention, but no longer an announcement that we stopped trying.
+            "retrying" | "needs_hub_reset" | "guard_blocked" => Level::Warn,
             _ => Level::Info,
         };
         self.events.emit(CAMERA_RECOVERY_KIND, level, d);
     }
 
     #[cfg(target_os = "linux")]
-    fn write_sidecar(&self, attempts: u32, max_attempts: u32) {
+    fn write_sidecar(&self, attempts: u32, cooldown_s: u64) {
         #[derive(serde::Serialize)]
         struct Snap<'a> {
             /// Sidecar schema version (best-effort drift signal for readers).
@@ -410,7 +401,7 @@ impl CameraUsbRecovery {
             camera_usb_recovery_state: &'a str,
             case: &'a str,
             attempts: u32,
-            max_attempts: u32,
+            cooldown_s: u64,
             camera_present: bool,
             expected: bool,
             bind_id: &'a str,
@@ -435,7 +426,7 @@ impl CameraUsbRecovery {
             camera_usb_recovery_state: &self.state,
             case: &self.case,
             attempts,
-            max_attempts,
+            cooldown_s,
             camera_present: self.camera_present,
             expected: self.expected,
             bind_id: &self.bind_id,

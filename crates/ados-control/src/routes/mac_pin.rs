@@ -318,26 +318,46 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
 /// The interface carrying the default route (the management path), used to refuse
 /// a live re-tag that would drop the operator's own connection. Mirrors the
 /// Python `_default_route_iface()` (`ip route get 1.1.1.1` → the token after
-/// `dev`). `None` on any spawn / parse fault, which the caller treats as
-/// "uncertain" and refuses the live re-tag for safety.
+/// `dev`). `None` on any spawn / timeout / parse fault, which the caller treats
+/// as "uncertain" and refuses the live re-tag for safety.
+///
+/// Deliberately still `ip route get 1.1.1.1` rather than the `/proc/net/route`
+/// parse in [`super::reachable_addr::default_route_iface`]: the two can disagree
+/// (policy routing, per-destination routes), and this answer decides whether a
+/// MAC pin is applied to the live control interface. Swapping the resolution
+/// strategy here is a separate decision from making the call non-blocking.
 #[cfg(target_os = "linux")]
-fn default_route_iface() -> Option<String> {
-    let out = std::process::Command::new("ip")
-        .args(["route", "get", "1.1.1.1"])
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    let parts: Vec<&str> = text.split_whitespace().collect();
-    let dev_idx = parts.iter().position(|&p| p == "dev")?;
-    parts.get(dev_idx + 1).map(|s| s.to_string())
+async fn default_route_iface() -> Option<String> {
+    let out = crate::probe::capture(
+        "ip",
+        &["route", "get", "1.1.1.1"],
+        crate::probe::PROBE_TIMEOUT,
+    )
+    .await;
+    parse_route_get_dev(out.text())
 }
 
 #[cfg(not(target_os = "linux"))]
-fn default_route_iface() -> Option<String> {
+async fn default_route_iface() -> Option<String> {
     // The dev host has no `ip route get`; treat the management interface as
     // undeterminable so the live re-tag is refused for safety (the same posture
     // the Python takes when detection fails).
     None
+}
+
+/// The token following `dev` in `ip route get` output, or `None`.
+///
+/// Split out of the spawn so the token walk is unit-testable without a process.
+/// Whitespace-splits the whole output rather than per line, which is what the
+/// blocking version did — `ip route get` answers on one line, and a multi-line
+/// answer's first `dev` is still the chosen egress.
+// Only the Linux probe calls this; the non-Linux stub never spawns `ip`, so the
+// parser would be dead code there outside the unit tests.
+#[cfg(any(target_os = "linux", test))]
+fn parse_route_get_dev(text: &str) -> Option<String> {
+    let parts: Vec<&str> = text.split_whitespace().collect();
+    let dev_idx = parts.iter().position(|&p| p == "dev")?;
+    parts.get(dev_idx + 1).map(|s| s.to_string())
 }
 
 /// Re-tag the live interface to `mac` now (down → set address → up), reusing the
@@ -457,8 +477,18 @@ async fn post_mac_pin_at(config_path: &Path, state_path: &Path, req: MacPinReque
 
     // 4. The optional live re-tag, gated three ways (config flag, mgmt-iface
     //    determinable, the named iface is NOT the mgmt iface).
+    //
+    //    The management-interface probe is resolved HERE, on the handler, and
+    //    injected into the gate: `apply_now_outcome` stays a sync, pure decision
+    //    over facts, the way `routes::reachable_addr` takes its route table as a
+    //    parameter. Hoisting rather than making the gate async is what keeps the
+    //    gate testable on both branches without a host default route. It costs
+    //    one read-only `ip route get` on the flag-off path (which previously
+    //    short-circuited before resolving), which is the price of keeping all
+    //    three gate decisions in one place.
     let outcome = if req.apply_now {
-        apply_now_outcome(config_path, &req.iface, &mac)
+        let mgmt_iface = default_route_iface().await;
+        apply_now_outcome(config_path, &req.iface, &mac, mgmt_iface.as_deref())
     } else {
         ApplyOutcome {
             applied_live: false,
@@ -484,7 +514,16 @@ async fn post_mac_pin_at(config_path: &Path, state_path: &Path, req: MacPinReque
 /// config flag is off, when the management interface cannot be determined, or when
 /// the named interface IS the management interface — each with the FastAPI note;
 /// otherwise re-tag the live interface and report success (or the failure note).
-fn apply_now_outcome(config_path: &Path, iface: &str, mac: &str) -> ApplyOutcome {
+///
+/// `mgmt_iface` is the already-resolved default-route interface (`None` when it
+/// could not be determined), injected by the caller so this remains a pure
+/// function of its inputs.
+fn apply_now_outcome(
+    config_path: &Path,
+    iface: &str,
+    mac: &str,
+    mgmt_iface: Option<&str>,
+) -> ApplyOutcome {
     if !apply_live_allowed(config_path) {
         return ApplyOutcome {
             applied_live: false,
@@ -492,9 +531,9 @@ fn apply_now_outcome(config_path: &Path, iface: &str, mac: &str) -> ApplyOutcome
                 .to_string(),
         };
     }
-    // Resolve the management interface ONCE; an undeterminable route is "uncertain"
-    // and refuses the live re-tag for safety (never falls through to it).
-    let mgmt_iface = match default_route_iface() {
+    // An undeterminable route is "uncertain" and refuses the live re-tag for
+    // safety (never falls through to it).
+    let mgmt_iface = match mgmt_iface {
         Some(m) => m,
         None => {
             return ApplyOutcome {
@@ -883,28 +922,56 @@ mod tests {
     fn apply_now_outcome_refuses_when_the_flag_is_off() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.yaml");
-        // No flag → refused, not permitted.
-        let out = apply_now_outcome(&cfg, "wlan0", "02:c6:75:83:1a:3e");
+        // No flag → refused, not permitted. A determinable management interface
+        // is passed in so the assertion is that the flag gate wins first.
+        let out = apply_now_outcome(&cfg, "wlan0", "02:c6:75:83:1a:3e", Some("eth0"));
         assert!(!out.applied_live);
         assert!(out.note.contains("not permitted"));
     }
 
+    /// The management-interface gate, both branches. This used to be guarded on
+    /// `default_route_iface().is_none()`, so on any host that HAS a default route
+    /// it executed no assertions at all. The interface is now an injected
+    /// parameter, so both refusals are asserted unconditionally.
+    ///
+    /// The third branch (a determinable mgmt iface that is NOT the named one)
+    /// is deliberately not exercised here: it proceeds to `apply_live`, which on
+    /// Linux would re-tag a real interface.
     #[test]
-    fn apply_now_outcome_refuses_when_the_mgmt_iface_is_undeterminable() {
+    fn apply_now_outcome_refuses_on_both_mgmt_iface_branches() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.yaml");
         std::fs::write(&cfg, "network:\n  mac_pin:\n    apply_live_allowed: true\n").unwrap();
-        // On the non-Linux dev host default_route_iface() is None, so the gate
-        // refuses for safety (the "could not determine" note). On Linux this asserts
-        // the same refusal whenever `ip route get` yields no dev (e.g. no default
-        // route on the CI box), which the conformance harness covers in sandbox.
-        let out = apply_now_outcome(&cfg, "wlan0", "02:c6:75:83:1a:3e");
-        if default_route_iface().is_none() {
-            assert!(!out.applied_live);
-            assert!(out
-                .note
-                .contains("could not determine the management interface"));
-        }
+
+        // Undeterminable route → "uncertain", refuse for safety.
+        let undeterminable = apply_now_outcome(&cfg, "wlan0", "02:c6:75:83:1a:3e", None);
+        assert!(!undeterminable.applied_live);
+        assert!(undeterminable
+            .note
+            .contains("could not determine the management interface"));
+
+        // The named interface IS the management interface → refuse rather than
+        // drop the operator's own connection.
+        let is_mgmt = apply_now_outcome(&cfg, "wlan0", "02:c6:75:83:1a:3e", Some("wlan0"));
+        assert!(!is_mgmt.applied_live);
+        assert!(is_mgmt
+            .note
+            .contains("refusing to re-tag wlan0 live: it carries the management route"));
+    }
+
+    #[test]
+    fn parse_route_get_dev_reads_the_token_after_dev() {
+        // The real single-line answer.
+        assert_eq!(
+            parse_route_get_dev("1.1.1.1 via 192.168.1.1 dev eth0 src 192.168.1.50 uid 0\n")
+                .as_deref(),
+            Some("eth0")
+        );
+        // No `dev` token, and a trailing `dev` with nothing after it, are both
+        // "undeterminable" — which the gate turns into a refusal.
+        assert_eq!(parse_route_get_dev("RTNETLINK answers: unreachable"), None);
+        assert_eq!(parse_route_get_dev(""), None);
+        assert_eq!(parse_route_get_dev("1.1.1.1 via 192.168.1.1 dev"), None);
     }
 
     // ── DELETE handler ────────────────────────────────────────────────────────

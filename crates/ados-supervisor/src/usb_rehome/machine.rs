@@ -1,5 +1,28 @@
-//! Pure trigger debounce + bounded retry/cooldown state machine for the
-//! USB-rehome self-heal. No OS calls — both are unit-tested on every host.
+//! Pure trigger debounce + retry/cooldown state machine for the USB-rehome
+//! self-heal. No OS calls — both are unit-tested on every host.
+//!
+//! ## Why there is no attempt budget any more
+//!
+//! This machine used to spend a budget of three attempts and then latch an
+//! `exhausted` state, and the latch was unescapable by construction. The only
+//! exit was a sustained-healthy window; the adapter can only become healthy
+//! after a successful rehome; and `exhausted` was precisely the state in which
+//! no further rehome is attempted. So a genuinely wedged USB radio — the exact
+//! fault this self-heal exists to repair — was abandoned after ninety seconds
+//! and stayed abandoned until someone rebooted the vehicle or cleared it over
+//! SSH. On a drone in a field those are the same thing as a dead vehicle.
+//!
+//! The budget also carried an escalating `[10, 30, 60]` s cooldown. Growth is
+//! the reflex answer for a client of a shared remote service; it is the wrong
+//! answer for a board recovering its own peripheral, where there is no herd to
+//! spread and the growth only delays recovery.
+//!
+//! So: retry forever, at a fixed interval, and report the attempt count so an
+//! operator can see the vehicle is still trying and how long it has been
+//! trying. What the machine keeps is the part that was load-bearing — the
+//! anti-flap `healthy_reset` window, which stops a flapping adapter from
+//! churning the episode, and the cooldown itself, which stops a rehome (a real
+//! USB unbind/rebind) from thrashing the bus.
 
 use std::time::{Duration, Instant};
 
@@ -86,29 +109,29 @@ impl Default for RehomeTrigger {
     }
 }
 
-/// What the retry machine decided this tick. Pure so the budget + cooldown +
-/// anti-flap contract is tested without OS calls or a real clock.
+/// What the retry machine decided this tick. Pure so the cooldown + anti-flap
+/// contract is tested without OS calls or a real clock.
+///
+/// There is deliberately no terminal variant. Every state here is one the
+/// machine can leave on its own.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RehomeStep {
-    /// Nothing to do (healthy, or armed-but-mid-cooldown handled separately).
+    /// Nothing to do (healthy, or not armed).
     Idle,
     /// Fire a rehome attempt now (1-based index).
     Attempt { index: u32 },
     /// Armed but inside the post-attempt cooldown: wait.
     Cooldown { remaining_s: u64 },
-    /// The attempt budget is spent and the fault persists: parked.
-    Exhausted,
     /// The adapter verified healthy for the full reset window: episode reset.
     Recovered,
 }
 
-/// Bounded retry + cooldown + anti-flap state machine for one rehome episode.
+/// Retry + cooldown + anti-flap state machine for one rehome episode.
 #[derive(Debug, Clone, Default)]
 pub struct RehomeMachine {
     attempts: u32,
     last_attempt: Option<Instant>,
     healthy_since: Option<Instant>,
-    exhausted: bool,
 }
 
 impl RehomeMachine {
@@ -120,13 +143,9 @@ impl RehomeMachine {
         self.attempts
     }
 
-    pub fn is_exhausted(&self) -> bool {
-        self.exhausted
-    }
-
-    /// Undo the most recent attempt (the guard refused it, so it must not count
-    /// against the budget). Clears the last-attempt timestamp so a re-evaluation
-    /// is not blocked by a phantom cooldown.
+    /// Undo the most recent attempt (the guard refused it, so it must not be
+    /// counted as one). Clears the last-attempt timestamp so a re-evaluation is
+    /// not blocked by a phantom cooldown.
     pub fn refund_attempt(&mut self) {
         self.attempts = self.attempts.saturating_sub(1);
         self.last_attempt = None;
@@ -134,29 +153,30 @@ impl RehomeMachine {
 
     /// One step. `armed` is the trigger level; `verified_healthy` is the
     /// post-rehome good state (high-speed USB AND reception confirmed) read from
-    /// the fresh sidecar this tick. `cooldown_for(n)` is the wait owed after the
-    /// n-th attempt; `healthy_reset` is the sustained-healthy window that resets
-    /// the episode budget (anti-flap). Pure.
+    /// the fresh sidecar this tick. `cooldown` is the wait owed after each
+    /// attempt; `healthy_reset` is the sustained-healthy window that closes the
+    /// episode (anti-flap). Pure.
+    ///
+    /// `attempts` only ever grows within an episode and is reported, never
+    /// compared against a ceiling: the count is diagnostic, not a budget.
     pub fn step(
         &mut self,
         armed: bool,
         verified_healthy: bool,
-        max_attempts: u32,
-        cooldown_for: impl Fn(u32) -> Duration,
+        cooldown: Duration,
         healthy_reset: Duration,
         now: Instant,
     ) -> RehomeStep {
         if verified_healthy {
-            // Track sustained health; only reset the episode after the full
-            // window so a flapping adapter cannot earn a fresh budget every few
-            // seconds.
+            // Track sustained health; only close the episode after the full
+            // window, so a flapping adapter cannot reset its attempt count
+            // every few seconds and hide how long it has been failing.
             let healthy_since = *self.healthy_since.get_or_insert(now);
             if now.saturating_duration_since(healthy_since) >= healthy_reset {
-                let was_mid_episode = self.attempts > 0 || self.exhausted;
+                let was_mid_episode = self.attempts > 0;
                 self.attempts = 0;
                 self.last_attempt = None;
                 self.healthy_since = None;
-                self.exhausted = false;
                 return if was_mid_episode {
                     RehomeStep::Recovered
                 } else {
@@ -171,21 +191,19 @@ impl RehomeMachine {
         if !armed {
             return RehomeStep::Idle;
         }
-        if self.exhausted {
-            return RehomeStep::Exhausted;
-        }
-        if self.attempts >= max_attempts {
-            self.exhausted = true;
-            return RehomeStep::Exhausted;
-        }
-        // Respect the cooldown owed after the most recent attempt.
+        // No budget check here. There used to be one, and the state it latched
+        // could not clear without the attempts it stopped.
+        //
+        // Respect the cooldown owed after the most recent attempt: a rehome is
+        // a real USB unbind/rebind, so the wait is what keeps a permanent fault
+        // from thrashing the bus. It is the same wait on the hundredth attempt
+        // as on the second.
         if self.attempts > 0 {
             if let Some(last) = self.last_attempt {
-                let cd = cooldown_for(self.attempts);
                 let elapsed = now.saturating_duration_since(last);
-                if elapsed < cd {
+                if elapsed < cooldown {
                     return RehomeStep::Cooldown {
-                        remaining_s: (cd - elapsed).as_secs(),
+                        remaining_s: (cooldown - elapsed).as_secs(),
                     };
                 }
             }
@@ -205,7 +223,7 @@ pub fn usb_rehome_detail(
     iface: &str,
     bind_id: &str,
     attempt: u32,
-    max_attempts: u32,
+    cooldown_s: u64,
     before_speed_mbps: Option<u32>,
     after_speed_mbps: Option<u32>,
     reason: Option<&str>,
@@ -215,7 +233,7 @@ pub fn usb_rehome_detail(
     d.insert("iface".to_string(), MpVal::from(iface));
     d.insert("bind_id".to_string(), MpVal::from(bind_id));
     d.insert("attempt".to_string(), MpVal::from(attempt as u64));
-    d.insert("max_attempts".to_string(), MpVal::from(max_attempts as u64));
+    d.insert("cooldown_s".to_string(), MpVal::from(cooldown_s));
     if let Some(s) = before_speed_mbps {
         d.insert("before_usb_speed_mbps".to_string(), MpVal::from(s as u64));
     }
@@ -260,8 +278,12 @@ mod tests {
         assert!(!t.observe(true, t0 + Duration::from_secs(11)));
     }
 
-    fn cd(_n: u32) -> Duration {
-        Duration::from_secs(10)
+    const COOLDOWN: Duration = Duration::from_secs(10);
+    const HEALTHY_RESET: Duration = Duration::from_secs(120);
+
+    /// One step with the fixed cooldown and reset window every test uses.
+    fn step_at(m: &mut RehomeMachine, armed: bool, healthy: bool, at: Instant) -> RehomeStep {
+        m.step(armed, healthy, COOLDOWN, HEALTHY_RESET, at)
     }
 
     #[test]
@@ -270,177 +292,180 @@ mod tests {
         let t0 = Instant::now();
         // Armed + faulty + no prior attempt → fire attempt 1 immediately.
         assert_eq!(
-            m.step(true, false, 3, cd, Duration::from_secs(120), t0),
+            step_at(&mut m, true, false, t0),
             RehomeStep::Attempt { index: 1 }
         );
         // Inside the cooldown: wait.
-        match m.step(
-            true,
-            false,
-            3,
-            cd,
-            Duration::from_secs(120),
-            t0 + Duration::from_secs(3),
-        ) {
+        match step_at(&mut m, true, false, t0 + Duration::from_secs(3)) {
             RehomeStep::Cooldown { .. } => {}
             other => panic!("expected cooldown, got {other:?}"),
         }
         // After the cooldown: attempt 2.
         assert_eq!(
-            m.step(
-                true,
-                false,
-                3,
-                cd,
-                Duration::from_secs(120),
-                t0 + Duration::from_secs(11)
-            ),
+            step_at(&mut m, true, false, t0 + Duration::from_secs(11)),
             RehomeStep::Attempt { index: 2 }
         );
     }
 
     #[test]
-    fn budget_caps_to_exhausted_once() {
+    fn a_persistent_fault_never_stops_being_retried() {
+        // This replaces a test called `budget_caps_to_exhausted_once`, whose
+        // comment read "it stays exhausted (no re-loop)". That was the defect,
+        // pinned: the budget latched a state whose only exit was a sustained
+        // healthy window, the adapter could only become healthy after a
+        // successful rehome, and no rehome was attempted while latched. A
+        // wedged radio was abandoned after ~90 s until someone rebooted.
         let mut m = RehomeMachine::new();
         let t0 = Instant::now();
-        m.step(true, false, 2, cd, Duration::from_secs(120), t0);
-        m.step(
-            true,
-            false,
-            2,
-            cd,
-            Duration::from_secs(120),
-            t0 + Duration::from_secs(11),
-        );
-        // Budget (2) spent → exhausted, and it stays exhausted (no re-loop).
+
+        // Walk far past any budget the old code had (3) and keep walking.
+        let mut attempts = Vec::new();
+        for tick in 0..200u64 {
+            let at = t0 + Duration::from_secs(tick * 11);
+            if let RehomeStep::Attempt { index } = step_at(&mut m, true, false, at) {
+                attempts.push(index);
+            }
+        }
+
         assert_eq!(
-            m.step(
-                true,
-                false,
-                2,
-                cd,
-                Duration::from_secs(120),
-                t0 + Duration::from_secs(22)
-            ),
-            RehomeStep::Exhausted
+            attempts.len(),
+            200,
+            "recovery stopped attempting after {} tries",
+            attempts.len()
         );
-        assert!(m.is_exhausted());
-        assert_eq!(
-            m.step(
-                true,
-                false,
-                2,
-                cd,
-                Duration::from_secs(120),
-                t0 + Duration::from_secs(40)
-            ),
-            RehomeStep::Exhausted
-        );
+        // The count keeps climbing so an operator can see how long this has
+        // been going on; it is diagnostic, never a ceiling.
+        assert_eq!(attempts.first(), Some(&1));
+        assert_eq!(attempts.last(), Some(&200));
+    }
+
+    #[test]
+    fn the_wait_between_attempts_never_grows() {
+        // The other half of the old design: an escalating [10, 30, 60] s
+        // schedule. On a board recovering its own peripheral there is no herd
+        // to spread, so growth only delays recovery.
+        let mut m = RehomeMachine::new();
+        let t0 = Instant::now();
+        for tick in 0..20u64 {
+            let fired = t0 + Duration::from_secs(tick * 11);
+            assert!(
+                matches!(
+                    step_at(&mut m, true, false, fired),
+                    RehomeStep::Attempt { .. }
+                ),
+                "attempt {tick} did not fire 11s after the previous one, so the \
+                 cooldown grew past the fixed {COOLDOWN:?}"
+            );
+        }
     }
 
     #[test]
     fn not_armed_is_idle() {
         let mut m = RehomeMachine::new();
         let t0 = Instant::now();
-        assert_eq!(
-            m.step(false, false, 3, cd, Duration::from_secs(120), t0),
-            RehomeStep::Idle
-        );
+        assert_eq!(step_at(&mut m, false, false, t0), RehomeStep::Idle);
     }
 
     #[test]
-    fn sustained_health_recovers_and_resets_the_budget() {
+    fn sustained_health_recovers_and_closes_the_episode() {
         let mut m = RehomeMachine::new();
         let t0 = Instant::now();
         // Spend an attempt.
-        m.step(true, false, 3, cd, Duration::from_secs(120), t0);
-        // Healthy but not yet for the reset window → Idle, budget not reset.
+        step_at(&mut m, true, false, t0);
+        // Healthy but not yet for the reset window → Idle, count not reset.
         assert_eq!(
-            m.step(
-                false,
-                true,
-                3,
-                cd,
-                Duration::from_secs(120),
-                t0 + Duration::from_secs(60)
-            ),
+            step_at(&mut m, false, true, t0 + Duration::from_secs(60)),
             RehomeStep::Idle
         );
-        // Healthy past the reset window → Recovered + episode reset.
+        // Healthy past the reset window → Recovered + episode closed.
         assert_eq!(
-            m.step(
-                false,
-                true,
-                3,
-                cd,
-                Duration::from_secs(120),
-                t0 + Duration::from_secs(181)
-            ),
+            step_at(&mut m, false, true, t0 + Duration::from_secs(181)),
             RehomeStep::Recovered
         );
         assert_eq!(m.attempts(), 0);
-        // A fresh fault can attempt again from index 1.
+        // A fresh fault attempts again from index 1.
         assert_eq!(
-            m.step(
-                true,
-                false,
-                3,
-                cd,
-                Duration::from_secs(120),
-                t0 + Duration::from_secs(200)
-            ),
+            step_at(&mut m, true, false, t0 + Duration::from_secs(200)),
             RehomeStep::Attempt { index: 1 }
         );
     }
 
     #[test]
-    fn a_brief_healthy_blip_does_not_reset_mid_episode() {
+    fn a_long_running_episode_still_recovers_when_the_adapter_comes_back() {
+        // The property the latch destroyed. After a hundred failed attempts,
+        // sustained health must still close the episode — under the old design
+        // this path was unreachable, because reaching health required the
+        // attempts the latch had stopped.
         let mut m = RehomeMachine::new();
         let t0 = Instant::now();
-        m.step(true, false, 3, cd, Duration::from_secs(120), t0);
-        // Brief health (under the reset window), then faulty again: the healthy
-        // timer resets so the next sustained-health window starts fresh, and the
-        // attempt count is preserved (not reset by the blip).
-        m.step(
-            false,
-            true,
-            3,
-            cd,
-            Duration::from_secs(120),
-            t0 + Duration::from_secs(20),
-        );
-        assert_eq!(m.attempts(), 1);
-        // Faulty again, cooldown elapsed → attempt 2 (budget was not reset).
+        for tick in 0..100u64 {
+            step_at(&mut m, true, false, t0 + Duration::from_secs(tick * 11));
+        }
+        assert_eq!(m.attempts(), 100);
+        let healed = t0 + Duration::from_secs(100 * 11);
+        step_at(&mut m, false, true, healed);
         assert_eq!(
-            m.step(
-                true,
-                false,
-                3,
-                cd,
-                Duration::from_secs(120),
-                t0 + Duration::from_secs(40)
-            ),
+            step_at(&mut m, false, true, healed + HEALTHY_RESET),
+            RehomeStep::Recovered
+        );
+        assert_eq!(m.attempts(), 0);
+    }
+
+    #[test]
+    fn a_brief_healthy_blip_does_not_close_the_episode() {
+        let mut m = RehomeMachine::new();
+        let t0 = Instant::now();
+        step_at(&mut m, true, false, t0);
+        // Brief health (under the reset window), then faulty again: the healthy
+        // timer resets so the next sustained-health window starts fresh, and
+        // the attempt count is preserved (not reset by the blip) — otherwise a
+        // flapping adapter would hide how long it has been failing.
+        step_at(&mut m, false, true, t0 + Duration::from_secs(20));
+        assert_eq!(m.attempts(), 1);
+        assert_eq!(
+            step_at(&mut m, true, false, t0 + Duration::from_secs(40)),
             RehomeStep::Attempt { index: 2 }
         );
     }
 
     #[test]
+    fn a_refunded_attempt_is_not_counted_and_clears_the_cooldown() {
+        // The guard can refuse an attempt after the machine authorised it. That
+        // must not consume anything, and must not leave a phantom cooldown.
+        let mut m = RehomeMachine::new();
+        let t0 = Instant::now();
+        assert_eq!(
+            step_at(&mut m, true, false, t0),
+            RehomeStep::Attempt { index: 1 }
+        );
+        m.refund_attempt();
+        assert_eq!(m.attempts(), 0);
+        assert_eq!(
+            step_at(&mut m, true, false, t0 + Duration::from_secs(1)),
+            RehomeStep::Attempt { index: 1 }
+        );
+    }
+
+    #[test]
     fn detail_is_bland_and_omits_absent_fields() {
-        let d = usb_rehome_detail("rehoming", "wlan1", "1-1", 1, 3, Some(12), None, None);
+        let d = usb_rehome_detail("rehoming", "wlan1", "1-1", 1, 60, Some(12), None, None);
         assert_eq!(d.get("state").and_then(|v| v.as_str()), Some("rehoming"));
         assert_eq!(d.get("bind_id").and_then(|v| v.as_str()), Some("1-1"));
+        assert_eq!(d.get("cooldown_s").and_then(|v| v.as_u64()), Some(60));
         assert_eq!(
             d.get("before_usb_speed_mbps").and_then(|v| v.as_u64()),
             Some(12)
         );
         assert!(!d.contains_key("after_usb_speed_mbps"));
         assert!(!d.contains_key("reason"));
+        // The old field named a budget that no longer exists.
+        assert!(!d.contains_key("max_attempts"));
         let g = usb_rehome_detail(
             "guard_blocked",
             "wlan1",
             "1-1",
             0,
-            3,
+            60,
             None,
             None,
             Some("shares_device"),

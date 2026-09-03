@@ -195,8 +195,9 @@ mod tests {
     }
 
     struct NoopRoute;
+    #[async_trait::async_trait]
     impl RouteApplier for NoopRoute {
-        fn apply(&self, _iface: &str, _gateway: Option<&str>) -> bool {
+        async fn apply(&self, _iface: &str, _gateway: Option<&str>) -> bool {
             true
         }
     }

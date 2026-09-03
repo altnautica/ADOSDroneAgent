@@ -89,7 +89,7 @@ pub async fn put_detector(
         return detail(StatusCode::INTERNAL_SERVER_ERROR, msg);
     }
 
-    let restart = restart_unit(VISION_UNIT);
+    let restart = restart_unit(VISION_UNIT).await;
     Json(json!({
         "status": "ok",
         "model_id": model_id,
@@ -105,7 +105,7 @@ pub async fn delete_detector(State(_state): State<AppState>) -> Response {
         return detail(StatusCode::INTERNAL_SERVER_ERROR, msg);
     }
 
-    let restart = restart_unit(VISION_UNIT);
+    let restart = restart_unit(VISION_UNIT).await;
     Json(json!({
         "status": "ok",
         "model_id": Value::Null,

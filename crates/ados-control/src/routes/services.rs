@@ -24,9 +24,10 @@
 //!   `null` (the fallback path does not resolve MainPIDs), and `memory_mb` is the
 //!   unit's grouped PSS in MiB.
 //! - **`systemd_available`** — `false` only when `systemctl` itself could not be
-//!   reached (binary missing, spawn error); `true` when systemd answered even if
-//!   no `ados-*` unit exists (an empty `services` list). The dashboard renders a
-//!   different empty state for each case.
+//!   reached (binary missing, spawn error, unreachable bus, or a probe that timed
+//!   out); `true` when systemd answered even if no `ados-*` unit exists (an empty
+//!   `services` list). The dashboard renders a different empty state for each
+//!   case.
 //! - **`process`** — `{pid, cpu_percent, memory_mb}` for the serving process. The
 //!   CPU figure is `0.0` (the FastAPI route's per-request psutil sampler reports
 //!   `0.0` on its first observation, which is the only observation a stateless
@@ -39,7 +40,6 @@
 //! 500.
 
 use std::collections::BTreeMap;
-use std::process::Command;
 
 use axum::Json;
 use serde_json::{json, Value};
@@ -56,7 +56,7 @@ const SYSTEMD_FALLBACK_GLOB: &str = "ados-*.service";
 /// an absent `systemctl` degrades to an empty list with `systemd_available:false`
 /// and an unreadable `/proc` degrades each unit's memory to `0.0`.
 pub async fn list_services() -> Json<Value> {
-    let (mut services, systemd_available) = systemd_inventory();
+    let (mut services, systemd_available) = systemd_inventory().await;
 
     // Resolve each entry's owning unit once, dedupe via the scan, write the
     // per-unit PSS back onto every entry. Entries whose unit has no running
@@ -77,18 +77,25 @@ pub async fn list_services() -> Json<Value> {
 ///
 /// Returns `(entries, available)`. `entries` is the list of service objects (each
 /// without `memory_mb` yet — the caller attaches that). `available` is `false`
-/// only when `systemctl` itself could not be reached (binary missing, spawn
-/// error), distinct from "systemd answered but no `ados-*` unit exists" (an empty
-/// list with `available:true`).
+/// when `systemctl` could not be reached, distinct from "systemd answered but no
+/// `ados-*` unit exists" (an empty list with `available:true`).
 ///
-/// Forces `SYSTEMD_COLORS=0` + an empty pager + `LANG=C` so the output is plain
-/// columns: the default failed-unit rows are prefixed with a status glyph
-/// (`● foo`, `× bar`), and a naive whitespace split would drop those rows — yet
-/// failed units are exactly the rows the dashboard most needs. The leading glyph
-/// is stripped before parsing so a failed unit still surfaces.
-fn systemd_inventory() -> (Vec<Value>, bool) {
-    let output = Command::new("systemctl")
-        .args([
+/// The probe forces `SYSTEMD_COLORS=0` + an empty pager + `LANG=C` (see
+/// [`crate::probe::capture_systemctl`], which owns those three variables now) so
+/// the output is plain columns: the default failed-unit rows are prefixed with a
+/// status glyph (`● foo`, `× bar`), and a naive whitespace split would drop those
+/// rows — yet failed units are exactly the rows the dashboard most needs. The
+/// leading glyph is stripped before parsing so a failed unit still surfaces.
+///
+/// `available:false` now also covers a non-zero exit and a timeout, which the
+/// blocking version reported as `available:true` with empty stdout.
+/// [`crate::probe::ProbeOutput`] cannot express the distinction, and folding them
+/// in is the reading that keeps the field honest: `list-units` with a glob that
+/// matches nothing still exits zero, so a non-zero exit means the bus could not
+/// be queried — which is what `available:false` already means to the dashboard.
+async fn systemd_inventory() -> (Vec<Value>, bool) {
+    let out = crate::probe::capture_systemctl(
+        &[
             "list-units",
             "--type=service",
             "--all",
@@ -96,21 +103,19 @@ fn systemd_inventory() -> (Vec<Value>, bool) {
             "--no-pager",
             "--plain",
             SYSTEMD_FALLBACK_GLOB,
-        ])
-        .env("SYSTEMD_COLORS", "0")
-        .env("SYSTEMD_PAGER", "")
-        .env("LANG", "C")
-        .output();
+        ],
+        crate::probe::PROBE_TIMEOUT,
+    )
+    .await;
 
-    let stdout = match output {
-        Ok(out) => String::from_utf8_lossy(&out.stdout).into_owned(),
-        // Binary missing or spawn error: distinct from "no units" — the
-        // dashboard renders a different empty state. Mirrors the Python
-        // `except (SubprocessError, FileNotFoundError)` branch.
-        Err(_) => return (Vec::new(), false),
-    };
+    // Unreachable systemd: distinct from "no units" — the dashboard renders a
+    // different empty state. Widens the Python `except (SubprocessError,
+    // FileNotFoundError)` branch to the timeout the bounded probe adds.
+    if !out.is_ok() {
+        return (Vec::new(), false);
+    }
 
-    let entries = stdout.lines().filter_map(parse_unit_line).collect();
+    let entries = out.text().lines().filter_map(parse_unit_line).collect();
     (entries, true)
 }
 

@@ -335,7 +335,7 @@ pub async fn put_atlas_config(Json(body): Json<AtlasConfigBody>) -> Response {
         Ok(enabled) => enabled,
         Err(msg) => return detail(StatusCode::INTERNAL_SERVER_ERROR, msg),
     };
-    let restart = restart_unit(ATLAS_UNIT);
+    let restart = restart_unit(ATLAS_UNIT).await;
     Json(json!({
         "status": "ok",
         "enabled": effective_enabled,

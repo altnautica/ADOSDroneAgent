@@ -66,7 +66,6 @@
 //! params and never mutates.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use ados_protocol::wfb_status::{
     build_radio_block, build_status_from_stats_file_at, derive_wfb_status, get_or_null,
@@ -109,7 +108,7 @@ pub async fn get_full_status(State(state): State<AppState>) -> Json<Value> {
     let resources = derive_resources_subset(signals.as_ref());
 
     // --- Services (systemd-fallback shape; no in-process tracker here) ---
-    let services = build_services_list();
+    let services = build_services_list().await;
 
     // --- WFB status, read once and reused by the video gate + the radio block ---
     let wfb_status = wfb_status_view(&state).await;
@@ -390,8 +389,8 @@ fn round_int(v: f64) -> i64 {
 /// `state`; `task_done` is `state != "running"`; `uptimeSeconds` is always `0`
 /// (the fallback path carries no transition log); `memory_mb` is the unit's
 /// grouped PSS. An absent / failing `systemctl` degrades to an empty list.
-fn build_services_list() -> Value {
-    let mut services = systemd_services_fallback();
+async fn build_services_list() -> Value {
+    let mut services = systemd_services_fallback().await;
     attach_service_memory(&mut services);
     Value::Array(services)
 }
@@ -406,29 +405,29 @@ fn build_services_list() -> Value {
 /// `parts[3]`, and the object is built from those. A non-`.service` unit, a row
 /// with fewer than four columns, an `rc != 0`, or a missing `systemctl` yields an
 /// empty list.
-fn systemd_services_fallback() -> Vec<Value> {
-    let output = Command::new("systemctl")
-        .args([
+///
+/// The probe forces `SYSTEMD_COLORS=0` + an empty pager + `LANG=C` (see
+/// [`crate::probe::capture_systemctl`], which owns those three variables now):
+/// systemd prefixes a failed unit's row with a status glyph and will colour or
+/// page its output otherwise, and this parser splits on columns. `rc != 0` and a
+/// missing binary both arrive as [`crate::probe::ProbeOutput::Unavailable`],
+/// which is the empty list the Python returns for either — as is a probe that
+/// times out on a wedged bus.
+async fn systemd_services_fallback() -> Vec<Value> {
+    let out = crate::probe::capture_systemctl(
+        &[
             "list-units",
             "--type=service",
             "--all",
             "--no-pager",
             "--no-legend",
             "ados-*.service",
-        ])
-        .env("SYSTEMD_COLORS", "0")
-        .env("SYSTEMD_PAGER", "")
-        .env("LANG", "C")
-        .output();
+        ],
+        crate::probe::PROBE_TIMEOUT,
+    )
+    .await;
 
-    let out = match output {
-        Ok(o) if o.status.success() => o,
-        // rc != 0, a missing binary, or a spawn error → the Python returns [].
-        _ => return Vec::new(),
-    };
-
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    stdout.lines().filter_map(parse_fallback_line).collect()
+    out.text().lines().filter_map(parse_fallback_line).collect()
 }
 
 /// Parse one `systemctl list-units` row into the fallback service object, or
@@ -1364,7 +1363,7 @@ fn read_camera_status_in(run_dir: &Path, now: f64) -> Vec<(String, Value)> {
                         | "hub_resetting"
                         | "needs_hub_reset"
                         | "guard_blocked"
-                        | "exhausted"
+                        | "retrying"
                 ) {
                     out.push((
                         "cameraUsbRecovery".to_string(),
@@ -1372,7 +1371,7 @@ fn read_camera_status_in(run_dir: &Path, now: f64) -> Vec<(String, Value)> {
                             "state": state,
                             "case": rec.get("case").cloned().unwrap_or(Value::Null),
                             "attempts": rec.get("attempts").cloned().unwrap_or(json!(0)),
-                            "maxAttempts": rec.get("max_attempts").cloned().unwrap_or(json!(0)),
+                            "cooldownSeconds": rec.get("cooldown_s").cloned().unwrap_or(json!(0)),
                             "cameraPresent": json_truthy_default_false(&rec, "camera_present"),
                             "expected": json_truthy_default_false(&rec, "expected"),
                             "pppsCapable": json_truthy_default_false(&rec, "ppps_capable"),
@@ -1474,20 +1473,25 @@ fn read_reconciler_status_in(run_dir: &Path, now: f64) -> Vec<(String, Value)> {
     }
 
     // --- USB rehome → `usbRehomeState` + the attempt scalars -------------------
+    //
+    // There is no `exhausted` state to report any more: the recovery machine no
+    // longer has a terminal state, because the one it had could not clear
+    // without the attempts it stopped. `usbRehomeAttempts` climbing with
+    // `usbRehomeCooldownSeconds` fixed is what now tells an operator that a
+    // radio has been failing for a while — a number that keeps moving, rather
+    // than a state that says the vehicle gave up.
     if let Some(ur) = read_versioned_sidecar(&run_dir.join("usb-rehome.json"), "usb-rehome") {
         if sidecar_fresh(&ur, now, USB_REHOME_FRESH_S) {
             if let Some(state) = ur.get("usb_rehome_state").and_then(Value::as_str) {
-                if matches!(state, "idle" | "rehoming" | "exhausted" | "guard_blocked") {
+                if matches!(state, "idle" | "rehoming" | "guard_blocked") {
                     out.push(("usbRehomeState".to_string(), json!(state)));
                     out.push((
                         "usbRehomeAttempts".to_string(),
                         ur.get("usb_rehome_attempts").cloned().unwrap_or(json!(0)),
                     ));
                     out.push((
-                        "usbRehomeMaxAttempts".to_string(),
-                        ur.get("usb_rehome_max_attempts")
-                            .cloned()
-                            .unwrap_or(json!(0)),
+                        "usbRehomeCooldownSeconds".to_string(),
+                        ur.get("usb_rehome_cooldown_s").cloned().unwrap_or(json!(0)),
                     ));
                     out.push((
                         "usbRehomeLastResult".to_string(),
@@ -2811,14 +2815,18 @@ mod tests {
         std::fs::write(
             dir.path().join("usb-rehome.json"),
             format!(
-                r#"{{"version":1,"usb_rehome_state":"rehoming","usb_rehome_attempts":2,"usb_rehome_max_attempts":3,"usb_rehome_last_result":"retry","updated_at_unix":{now}}}"#
+                r#"{{"version":1,"usb_rehome_state":"rehoming","usb_rehome_attempts":2,"usb_rehome_cooldown_s":60,"usb_rehome_last_result":"retry","updated_at_unix":{now}}}"#
             ),
         )
         .unwrap();
         let map = reconciler_map(dir.path(), now);
         assert_eq!(map.get("usbRehomeState"), Some(&json!("rehoming")));
         assert_eq!(map.get("usbRehomeAttempts"), Some(&json!(2)));
-        assert_eq!(map.get("usbRehomeMaxAttempts"), Some(&json!(3)));
+        assert_eq!(map.get("usbRehomeCooldownSeconds"), Some(&json!(60)));
+        // The recovery machine has no terminal state, so the surface must
+        // not advertise one: a `usbRehomeMaxAttempts` on the wire would tell
+        // an operator the vehicle has a give-up point.
+        assert!(map.get("usbRehomeMaxAttempts").is_none());
         assert_eq!(map.get("usbRehomeLastResult"), Some(&json!("retry")));
 
         let stale = now - USB_REHOME_FRESH_S - 1.0;
@@ -2897,7 +2905,7 @@ mod tests {
         std::fs::write(
             dir.path().join("camera-usb-recovery.json"),
             format!(
-                r#"{{"camera_usb_recovery_state":"rebinding","case":"wedged","attempts":2,"max_attempts":3,"camera_present":false,"expected":true,"ppps_capable":true,"updated_at_unix":{now}}}"#
+                r#"{{"camera_usb_recovery_state":"rebinding","case":"wedged","attempts":2,"cooldown_s":60,"camera_present":false,"expected":true,"ppps_capable":true,"updated_at_unix":{now}}}"#
             ),
         )
         .unwrap();
@@ -2906,7 +2914,8 @@ mod tests {
         assert_eq!(rec["state"], json!("rebinding"));
         assert_eq!(rec["case"], json!("wedged"));
         assert_eq!(rec["attempts"], json!(2));
-        assert_eq!(rec["maxAttempts"], json!(3));
+        assert_eq!(rec["cooldownSeconds"], json!(60));
+        assert!(rec.get("maxAttempts").is_none());
         assert_eq!(rec["cameraPresent"], json!(false));
         assert_eq!(rec["expected"], json!(true));
         assert_eq!(rec["pppsCapable"], json!(true));
@@ -2922,7 +2931,7 @@ mod tests {
         std::fs::write(
             dir.path().join("camera-usb-recovery.json"),
             format!(
-                r#"{{"camera_usb_recovery_state":"needs_hub_reset","case":"absent","attempts":0,"max_attempts":3,"camera_present":true,"expected":true,"ppps_capable":false,"power_contention":true,"contention_peer":"1-1.2","updated_at_unix":{now}}}"#
+                r#"{{"camera_usb_recovery_state":"needs_hub_reset","case":"absent","attempts":0,"cooldown_s":60,"camera_present":true,"expected":true,"ppps_capable":false,"power_contention":true,"contention_peer":"1-1.2","updated_at_unix":{now}}}"#
             ),
         )
         .unwrap();

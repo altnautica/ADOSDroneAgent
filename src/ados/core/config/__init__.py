@@ -24,7 +24,11 @@ per-domain files alongside this barrel:
   :class:`WifiDirectConfig`, :class:`UiConfig`
 * ``ground_station.py`` — ground-station-profile-only models
 * ``root.py`` — :class:`ADOSConfig` (top-level)
-* ``_migrators.py`` — legacy side-file migrators + ``_deep_merge``
+* ``_migrators.py`` — pure in-memory legacy normalisers + ``_deep_merge``
+* ``_lock.py`` — the reader/writer flock shared with the native writers
+* ``_yaml.py`` — the YAML loader that keeps ISO-8601 timestamps as strings
+* ``maintenance.py`` — the off-startup-path migration pass that persists
+  what ``_migrators`` normalises
 """
 
 from __future__ import annotations
@@ -36,13 +40,9 @@ import yaml
 
 from ados.core.paths import CONFIG_YAML
 
-from ._migrators import (
-    _deep_merge,
-    _migrate_api_from_scripting,
-    _migrate_gs_ui_from_legacy_json,
-    _migrate_share_uplink_from_legacy_json,
-    _migrate_ws_proxy_enforce_default,
-)
+from ._lock import shared_config_lock
+from ._migrators import _deep_merge, apply_migrations
+from ._yaml import StringTimestampLoader
 from .agent import AgentConfig
 from .api import ApiConfig, RestApiConfig
 from .cloud import (
@@ -153,25 +153,28 @@ __all__ = [
 ]
 
 
-class _StringTimestampLoader(yaml.SafeLoader):
-    """A SafeLoader that keeps ISO-8601 timestamps as plain strings.
+# Kept as a module-level alias so the loader has one name in the package.
+_StringTimestampLoader = StringTimestampLoader
 
-    The native config writers persist timestamps (e.g. ``video.wfb.paired_at``)
-    as unquoted ISO-8601 values. The stock loader resolves those to ``datetime``,
-    which then fails the str-typed config fields. Dropping the timestamp implicit
-    resolver keeps every unquoted timestamp a string on the read side, so the
-    YAML written by any process round-trips into the models unchanged.
-    """
+# One INFO line per process when a node is running un-migrated config, so an
+# operator whose installer step never ran can see it. The read path applies
+# every normalisation in memory, so this is a hygiene notice, not a fault.
+_PENDING_LOGGED = False
 
 
-_StringTimestampLoader.yaml_implicit_resolvers = {
-    first_char: [
-        (tag, regexp)
-        for tag, regexp in resolvers
-        if tag != "tag:yaml.org,2002:timestamp"
-    ]
-    for first_char, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
-}
+def _note_pending(applied: list[str]) -> None:
+    global _PENDING_LOGGED
+    if not applied or _PENDING_LOGGED:
+        return
+    _PENDING_LOGGED = True
+    # Plain logging, not `ados.core.logging`: that module calls
+    # `load_config()`, so importing it here is a cycle.
+    import logging as _logging
+
+    _logging.getLogger("ados.core.config").info(
+        "config normalised in memory; run `ados config migrate` to persist: "
+        + ", ".join(applied)
+    )
 
 
 def load_config(path: str | Path | None = None) -> ADOSConfig:
@@ -182,6 +185,19 @@ def load_config(path: str | Path | None = None) -> ADOSConfig:
     2. /etc/ados/config.yaml
     3. ./config.yaml
     4. Pure defaults (no file)
+
+    **This function never writes.** It is on the startup path of every unit
+    on the node, and they start concurrently; a read-modify-write here is
+    eleven unsynchronised rewrites of the file that carries the radio
+    pairing key, the profile and the role. Legacy shapes are normalised in
+    memory by :func:`ados.core.config._migrators.apply_migrations` and
+    persisted separately by :mod:`ados.core.config.maintenance`, which the
+    installer runs.
+
+    The read is taken under a shared :mod:`ados.core.config._lock` flock —
+    the same lock the native writers take — on a bounded deadline, so it
+    cannot interleave with a writer's read-modify-write window and cannot
+    delay a unit's start if the lock is unavailable.
     """
     candidates: list[Path] = []
     if path:
@@ -192,25 +208,16 @@ def load_config(path: str | Path | None = None) -> ADOSConfig:
     ])
 
     raw: dict[str, Any] = {}
-    picked_path: Path | None = None
-    for candidate in candidates:
-        if candidate.is_file():
-            with open(candidate) as f:
-                loaded = yaml.load(f, Loader=_StringTimestampLoader)
-                if isinstance(loaded, dict):
-                    raw = loaded
-            picked_path = candidate
-            break
+    with shared_config_lock():
+        for candidate in candidates:
+            if candidate.is_file():
+                with open(candidate) as f:
+                    loaded = yaml.load(f, Loader=StringTimestampLoader)
+                    if isinstance(loaded, dict):
+                        raw = loaded
+                break
 
-    # Legacy migration: pull share_uplink out of the pre-package-split
-    # side-file into the Pydantic-backed ground_station section. Idempotent,
-    # runs at most once per process.
-    raw = _migrate_share_uplink_from_legacy_json(raw, picked_path)
-    raw = _migrate_gs_ui_from_legacy_json(raw, picked_path)
-    # Relocate the REST-API surface config out of the legacy `scripting`
-    # block into the dedicated `api` section. Idempotent, one-shot.
-    raw = _migrate_api_from_scripting(raw, picked_path)
-    raw = _migrate_ws_proxy_enforce_default(raw, picked_path)
+    _note_pending(apply_migrations(raw))
 
     # Load defaults.yaml from package data
     import importlib.resources
@@ -218,7 +225,7 @@ def load_config(path: str | Path | None = None) -> ADOSConfig:
     try:
         defaults_ref = importlib.resources.files("ados.core").joinpath("defaults.yaml")
         defaults_text = defaults_ref.read_text(encoding="utf-8")
-        loaded = yaml.load(defaults_text, Loader=_StringTimestampLoader)
+        loaded = yaml.load(defaults_text, Loader=StringTimestampLoader)
         if isinstance(loaded, dict):
             defaults = loaded
     except (FileNotFoundError, TypeError):

@@ -7,13 +7,14 @@
 //! next viable uplink. Ports `uplink/failover.py`.
 
 use std::path::Path;
-use std::process::Command;
+use std::time::Duration;
 
 use serde_json::Value;
 use tracing::{info, warn};
 
+use crate::cmd::CmdRunner;
 use crate::sidecar;
-use crate::sysfs::detect_ethernet_iface;
+use crate::sysfs::detect_ethernet_iface_async;
 
 /// Default priority chain. The LAN-side AP SSID served to phones and laptops
 /// is not an uplink, so it is absent here.
@@ -44,8 +45,14 @@ pub fn priority_metric_for(iface: &str, wired_iface: &str) -> u32 {
 /// Resolve the route metric for `iface`, detecting the wired iface from sysfs.
 /// Mirrors `PRIORITY_METRIC.get(iface, 500)` with the wired slot resolved to
 /// whatever the board calls its NIC.
-pub fn priority_metric(iface: &str) -> u32 {
-    priority_metric_for(iface, &detect_ethernet_iface())
+///
+/// `async` because the sysfs scan under it is a blocking directory walk and the
+/// only caller ([`apply_default_route`]) runs on the router's `tick` path. There
+/// is deliberately no sync twin: one would be a blocking filesystem call reachable
+/// from a sync helper, which is the shape this module is moving away from. Callers
+/// that already know the wired iface name use the pure [`priority_metric_for`].
+pub async fn priority_metric(iface: &str) -> u32 {
+    priority_metric_for(iface, &detect_ethernet_iface_async().await)
 }
 
 /// Three consecutive fails flip us down to the next viable uplink.
@@ -98,6 +105,19 @@ pub fn load_priority(path: &Path) -> Vec<String> {
     }
 }
 
+/// [`load_priority`] with the blocking read moved off the reactor.
+///
+/// `UplinkRouter::reload_priority` runs this at the top of every tick, so without
+/// the offload the read lands on the reactor once per health cycle. A join
+/// failure degrades to the default chain, which is already what every other
+/// loader failure does.
+pub async fn load_priority_async(path: &Path) -> Vec<String> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || load_priority(&path))
+        .await
+        .unwrap_or_else(|_| default_priority())
+}
+
 /// Render `{"priority": [...]}` byte-identically to Python `json.dumps` default
 /// separators (`", "` between items, `": "` after the key), single line, no
 /// trailing newline. `serde_json::to_string` is compact (no spaces) so the body
@@ -122,6 +142,25 @@ pub fn save_priority(path: &Path, priority: &[String]) {
     let body = render_priority_json(priority);
     if let Err(exc) = sidecar::write_atomic(path, body.as_bytes()) {
         warn!(error = %exc, "uplink.priority_save_failed");
+    }
+}
+
+/// [`save_priority`] with the blocking write moved off the reactor.
+///
+/// The JSON body is rendered here — pure and sub-microsecond — and only the
+/// create-dir + write + rename goes to the blocking pool, the same split
+/// `ActiveFlagWriter::sync_async` uses for the active-uplink flag. Best-effort in
+/// the same way as the sync version: a write error, and a join failure that means
+/// the write never ran at all, both log under one event and are swallowed.
+pub async fn save_priority_async(path: &Path, priority: &[String]) {
+    let body = render_priority_json(priority);
+    let path = path.to_path_buf();
+    let res =
+        tokio::task::spawn_blocking(move || sidecar::write_atomic(&path, body.as_bytes())).await;
+    match res {
+        Ok(Ok(())) => {}
+        Ok(Err(exc)) => warn!(error = %exc, "uplink.priority_save_failed"),
+        Err(exc) => warn!(error = %exc, "uplink.priority_save_failed"),
     }
 }
 
@@ -186,51 +225,69 @@ pub fn select_higher_priority(
         .collect()
 }
 
+/// The bound for the `ip route replace` spawn. Programming a route is a local
+/// netlink write that answers in milliseconds; a spawn still running after five
+/// seconds is wedged, and on the failover path waiting on it is strictly worse
+/// than reporting the failure and letting the next tick retry. Matches the
+/// hardware managers' `RUN_TIMEOUT`.
+const ROUTE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Replace the kernel default route to point at `iface`. Returns `true` on a
-/// zero exit, `false` on a non-zero exit or a spawn failure. Mirrors
+/// zero exit, `false` on a non-zero exit, a spawn failure, or a timeout. Mirrors
 /// `failover.apply_default_route`.
-pub fn apply_default_route(iface: &str, gateway: Option<&str>) -> bool {
-    let metric = priority_metric(iface);
+///
+/// The spawn goes through the crate's [`CmdRunner`] seam — the same one every
+/// hardware manager uses — rather than a blocking `std::process::Command`. This
+/// runs on the router's `tick` path, so a blocking spawn here stalled a reactor
+/// worker for the life of `ip`, unbounded, at precisely the moment an uplink had
+/// dropped. Injecting the runner also makes the argv assertable from a unit test
+/// with no routing table.
+///
+/// A spawn fault and a timeout arrive as [`CmdOut`](crate::cmd::CmdOut) failure
+/// codes (1 and 124) rather than as separate arms, so the two `warn!` events the
+/// blocking version emitted collapse into one `uplink.route_replace_failed`
+/// carrying `rc` + `stderr`; `TokioCmdRunner` still logs the spawn fault itself
+/// under `uplink.cmd_spawn_failed`. The returned verdict is unchanged: every
+/// non-success is `false`.
+pub async fn apply_default_route(
+    runner: &dyn CmdRunner,
+    iface: &str,
+    gateway: Option<&str>,
+) -> bool {
+    let metric = priority_metric(iface).await;
     let metric_s = metric.to_string();
-    let mut cmd = Command::new("ip");
-    cmd.args(["route", "replace", "default"]);
-    match gateway {
-        Some(gw) => {
-            cmd.args(["via", gw, "dev", iface, "metric", &metric_s]);
-        }
-        None => {
-            cmd.args(["dev", iface, "metric", &metric_s]);
-        }
+    // `via <gw>` is the only optional segment; `dev`/`metric` are common to both
+    // forms, so appending them once keeps the two argv shapes provably identical
+    // apart from the gateway.
+    let mut argv: Vec<&str> = vec!["ip", "route", "replace", "default"];
+    if let Some(gw) = gateway {
+        argv.extend_from_slice(&["via", gw]);
     }
-    match cmd.output() {
-        Ok(result) => {
-            if !result.status.success() {
-                warn!(
-                    iface = iface,
-                    rc = result.status.code().unwrap_or(-1),
-                    stderr = %String::from_utf8_lossy(&result.stderr).trim(),
-                    "uplink.route_replace_failed"
-                );
-                return false;
-            }
-            info!(
-                iface = iface,
-                gateway = gateway,
-                metric = metric,
-                "uplink.route_applied"
-            );
-            true
-        }
-        Err(exc) => {
-            warn!(error = %exc, "uplink.route_apply_exc");
-            false
-        }
+    argv.extend_from_slice(&["dev", iface, "metric", metric_s.as_str()]);
+    let out = runner.run(&argv, ROUTE_TIMEOUT).await;
+    if !out.ok() {
+        warn!(
+            iface = iface,
+            rc = out.rc,
+            stderr = %out.stderr.trim(),
+            "uplink.route_replace_failed"
+        );
+        return false;
     }
+    info!(
+        iface = iface,
+        gateway = gateway,
+        metric = metric,
+        "uplink.route_applied"
+    );
+    true
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cmd::testing::ScriptedRunner;
+    use crate::cmd::CmdOut;
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()
@@ -359,5 +416,48 @@ mod tests {
     fn validate_rejects_empty() {
         assert!(validate_priority(&s(&["eth0"])).is_ok());
         assert!(validate_priority(&[]).is_err());
+    }
+
+    /// The `ip` argv the route applier builds, asserted over the scripted
+    /// runner. Both ifaces here are non-wired, so their metric is fixed by the
+    /// table regardless of what this board calls its NIC — which keeps the
+    /// assertion deterministic without a live `/sys/class/net`.
+    #[tokio::test]
+    async fn route_apply_builds_the_ip_argv_with_a_gateway() {
+        let runner = ScriptedRunner::new();
+        runner.push(CmdOut {
+            rc: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        });
+        assert!(apply_default_route(&runner, "wlan0_client", Some("192.168.1.50")).await);
+        assert_eq!(
+            runner.recorded()[0],
+            [
+                "ip",
+                "route",
+                "replace",
+                "default",
+                "via",
+                "192.168.1.50",
+                "dev",
+                "wlan0_client",
+                "metric",
+                "200",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn route_apply_omits_via_without_a_gateway_and_degrades_to_false() {
+        let runner = ScriptedRunner::new();
+        // rc 124 is the runner's timeout code. A timeout, a non-zero exit and a
+        // spawn fault are all one verdict here: `false`.
+        runner.push(CmdOut::failed(124, "timeout"));
+        assert!(!apply_default_route(&runner, "usb0", None).await);
+        assert_eq!(
+            runner.recorded()[0],
+            ["ip", "route", "replace", "default", "dev", "usb0", "metric", "400"]
+        );
     }
 }

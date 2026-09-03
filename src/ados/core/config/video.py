@@ -188,8 +188,21 @@ class UsbRecoveryConfig(BaseModel):
 
     enabled: bool = True
     debounce_s: int = Field(default=20, ge=1)
-    max_attempts: int = Field(default=3, ge=1)
-    cooldown_schedule_s: list[int] = Field(default_factory=lambda: [10, 30, 60])
+    # Fixed wait between recovery attempts. There is deliberately no attempt
+    # ceiling: `max_attempts` used to gate an `exhausted` latch in the Rust
+    # reconciler that could not clear without the attempts it stopped, so a
+    # camera that did not come back within three rebinds was abandoned for the
+    # rest of the boot. Both `max_attempts` and the escalating
+    # `cooldown_schedule_s: [10, 30, 60]` are gone from the schema.
+    #
+    # Absent from the model is the point, not an oversight: the save path
+    # re-serialises the whole merged model, so a key left declared here would
+    # be written back into every node's config file as an explicit value the
+    # reconciler no longer honours. A node whose file still carries either key
+    # loads fine (unknown keys are ignored) and the Rust parser reads a legacy
+    # `cooldown_schedule_s` for its largest value, so an operator who tuned
+    # that schedule keeps the pacing they asked for.
+    cooldown_s: int = Field(default=60, ge=1)
     healthy_reset_s: int = Field(default=120, ge=1)
     tick_interval_s: int = Field(default=5, ge=1)
     # Opt-in: allow a shared-hub reset (boot-time-only, guard-gated) to recover a

@@ -228,7 +228,7 @@ pub async fn get_status(State(state): State<AppState>) -> Response {
         },
         "link": link_view(),
         "gcs": {"clients": [], "pic_id": Value::Null},
-        "network": network_view(&state),
+        "network": network_view(&state).await,
         "system": system_snapshot(&state).await,
         "recording": recording_active,
         "video": {
@@ -571,9 +571,19 @@ const AP_GATEWAY_IP: &str = "192.168.4.1";
 /// `uplink_reachable` are the same static legs the Python view carries. When the
 /// AP unit is down, `ap_ip` is null (the manager's status reports the gateway only
 /// while up), while `ap_ssid` still resolves off config.
-fn network_view(state: &AppState) -> Value {
+///
+/// This is the I/O shell, so it is the frame that goes `async`: the composition
+/// stays pure in [`network_view_compose`], which already takes the running flag
+/// injected, so there is nothing to hoist out of here and no reason to grow
+/// `get_status` a parameter.
+async fn network_view(state: &AppState) -> Value {
     let cfg = crate::config::load_config_object(&state.pairing_paths.config);
-    let running = hostapd_running();
+    // The one definition of this liveness probe now lives in
+    // `crate::probe::unit_is_active`. It used to be a byte-identical local
+    // `hostapd_running()` here AND another in `routes::gs_network`, which is
+    // exactly how two surfaces come to give an operator two different answers
+    // about the same unit; keep it centralised so it cannot drift again.
+    let running = crate::probe::unit_is_active(HOSTAPD_UNIT).await;
     network_view_compose(&ap_ssid_from_config(&cfg), running)
 }
 
@@ -639,21 +649,6 @@ fn short_id(device_id: &str) -> String {
         format!("{hex_only}0000")
     };
     padded.chars().take(4).collect::<String>().to_uppercase()
-}
-
-/// True when the hostapd unit is active, reproducing the manager's
-/// `_is_unit_active`: run `systemctl is-active ados-hostapd.service` and treat a
-/// trimmed `active` stdout as running. A missing `systemctl` / spawn error reads
-/// as not running.
-fn hostapd_running() -> bool {
-    let output = match std::process::Command::new("systemctl")
-        .args(["is-active", HOSTAPD_UNIT])
-        .output()
-    {
-        Ok(o) => o,
-        Err(_) => return false,
-    };
-    String::from_utf8_lossy(&output.stdout).trim() == "active"
 }
 
 // ---------------------------------------------------------------------------

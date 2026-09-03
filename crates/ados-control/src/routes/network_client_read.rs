@@ -88,7 +88,7 @@ fn client_status_view(reply: Option<serde_json::Map<String, Value>>) -> Value {
 /// `configured_connections()` body. An absent / failing `nmcli` yields the empty
 /// list, the same body the Python route returns when the listing fails.
 pub async fn get_client_configured() -> Response {
-    let rows = nmcli_connections(&["NAME", "TYPE", "DEVICE", "AUTOCONNECT"], false);
+    let rows = nmcli_connections(&["NAME", "TYPE", "DEVICE", "AUTOCONNECT"], false).await;
     Json(json!({"connections": configured_connections_from(&rows)})).into_response()
 }
 

@@ -102,6 +102,13 @@ def _lib_base() -> Path:
 
 ADOS_RUN_DIR = _run_base()
 
+# The config reader/writer flock. Not the config file's own path: an flock on
+# the file itself would be held across an `os.replace`, which swaps the inode
+# out from under it. A separate, never-replaced lock file on tmpfs is what the
+# native writers already serialise on (`bind::CONFIG_LOCK_PATH`), so this must
+# resolve to the same `/run/ados/config.yaml.lock` on Linux.
+CONFIG_LOCK = ADOS_RUN_DIR / "config.yaml.lock"
+
 # IPC sockets
 MAVLINK_SOCK = ADOS_RUN_DIR / "mavlink.sock"
 STATE_SOCK = ADOS_RUN_DIR / "state.sock"
@@ -423,6 +430,14 @@ MCP_TOKEN_PATH = ADOS_ETC_DIR / "mcp-token.json"
 WFB_KEY_DIR = ADOS_ETC_DIR / "wfb"
 CERTS_DIR = ADOS_ETC_DIR / "certs"
 SETUP_COMPLETE_PATH = _lib_base() / "setup-complete"
+
+# Ledger of completed one-shot config cleanups. Lives in the
+# install-orchestration dir because the migration pass is an installer step,
+# and must survive a reboot: a one-shot that forgets it ran would re-apply on
+# every pass, and a cleanup that removes an operator's recorded value is only
+# correct the first time. Distinct from the idempotent shape normalisers,
+# which need no ledger because re-running them is a no-op by construction.
+CONFIG_MIGRATIONS_PATH = _lib_base() / "config-migrations.json"
 
 #: Files a factory reset unlinks. Credentials first, so an interrupted run has
 #: already destroyed what grants access rather than only what identifies the box.

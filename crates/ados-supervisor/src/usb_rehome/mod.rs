@@ -34,11 +34,22 @@ use topo::GuardVerdict;
 #[cfg(target_os = "linux")]
 use crate::config::CONFIG_YAML;
 
-/// Default attempt budget per episode.
-const DEFAULT_MAX_ATTEMPTS: u32 = 3;
-/// Default escalating cooldown (seconds) between attempts.
-const DEFAULT_COOLDOWN_SCHEDULE_S: [u64; 3] = [10, 30, 60];
-/// Default sustained-healthy window that resets the episode budget (anti-flap).
+/// Fixed wait between rehome attempts.
+///
+/// This replaces a three-attempt budget and an escalating `[10, 30, 60]` s
+/// schedule. The budget latched an `exhausted` state that could not clear
+/// without the attempts it stopped, so a genuinely wedged radio — the fault
+/// this self-heal exists to repair — was abandoned after ninety seconds until
+/// someone rebooted the vehicle. There is no budget now; recovery keeps going.
+///
+/// 60 s rather than the 2-5 s a socket reconnect would use, and deliberately
+/// so: a rehome is a real USB unbind/rebind that stops the radio for over a
+/// second and re-enumerates the bus. Retrying that every few seconds forever
+/// would be its own fault. 60 s was the terminal value of the old schedule, so
+/// a permanent fault now paces exactly as the old code's last rung did — it
+/// simply never stops.
+const DEFAULT_COOLDOWN_S: u64 = 60;
+/// Default sustained-healthy window that closes the episode (anti-flap).
 const DEFAULT_HEALTHY_RESET_S: u64 = 120;
 /// Default reconcile cadence.
 const DEFAULT_TICK_INTERVAL_S: u64 = 5;
@@ -83,8 +94,9 @@ const USB_BIND_PATH: &str = "/sys/bus/usb/drivers/usb/bind";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsbRehomeConfig {
     pub enabled: bool,
-    pub max_attempts: u32,
-    pub cooldown_schedule: Vec<u64>,
+    /// Fixed wait between attempts. There is no attempt ceiling: see
+    /// [`DEFAULT_COOLDOWN_S`].
+    pub cooldown: Duration,
     pub healthy_reset: Duration,
     pub tick_interval: Duration,
 }
@@ -93,8 +105,7 @@ impl Default for UsbRehomeConfig {
     fn default() -> Self {
         UsbRehomeConfig {
             enabled: true,
-            max_attempts: DEFAULT_MAX_ATTEMPTS,
-            cooldown_schedule: DEFAULT_COOLDOWN_SCHEDULE_S.to_vec(),
+            cooldown: Duration::from_secs(DEFAULT_COOLDOWN_S),
             healthy_reset: Duration::from_secs(DEFAULT_HEALTHY_RESET_S),
             tick_interval: Duration::from_secs(DEFAULT_TICK_INTERVAL_S),
         }
@@ -118,7 +129,10 @@ pub fn read_config_from(text: &str) -> UsbRehomeConfig {
         #[serde(default = "default_true")]
         enabled: bool,
         #[serde(default)]
-        max_attempts: Option<u32>,
+        cooldown_s: Option<u64>,
+        /// Legacy. Read so a node that tuned the old escalating schedule keeps
+        /// the pacing it asked for; the fixed cooldown becomes the largest
+        /// value in it, which was that schedule's steady state.
         #[serde(default)]
         cooldown_schedule_s: Option<Vec<u64>>,
         #[serde(default)]
@@ -132,14 +146,18 @@ pub fn read_config_from(text: &str) -> UsbRehomeConfig {
     match serde_norway::from_str::<Raw>(text) {
         Ok(raw) => match raw.network.usb_rehome {
             Some(r) => {
-                let cooldown_schedule = r
-                    .cooldown_schedule_s
-                    .filter(|v| !v.is_empty())
-                    .unwrap_or_else(|| DEFAULT_COOLDOWN_SCHEDULE_S.to_vec());
+                let cooldown_s = r
+                    .cooldown_s
+                    .or_else(|| {
+                        r.cooldown_schedule_s
+                            .as_deref()
+                            .and_then(|v| v.iter().copied().max())
+                    })
+                    .unwrap_or(DEFAULT_COOLDOWN_S)
+                    .max(1);
                 UsbRehomeConfig {
                     enabled: r.enabled,
-                    max_attempts: r.max_attempts.unwrap_or(DEFAULT_MAX_ATTEMPTS).max(1),
-                    cooldown_schedule,
+                    cooldown: Duration::from_secs(cooldown_s),
                     healthy_reset: Duration::from_secs(
                         r.healthy_reset_s.unwrap_or(DEFAULT_HEALTHY_RESET_S).max(1),
                     ),
@@ -250,17 +268,10 @@ impl UsbRehome {
         }
         let armed = self.trigger.observe(cond, now);
 
-        let schedule = cfg.cooldown_schedule.clone();
-        let cooldown_for = |n: u32| {
-            let idx = (n.saturating_sub(1) as usize).min(schedule.len().saturating_sub(1));
-            Duration::from_secs(*schedule.get(idx).unwrap_or(&DEFAULT_COOLDOWN_SCHEDULE_S[0]))
-        };
-
         let step = self.machine.step(
             armed,
             verified_healthy,
-            cfg.max_attempts,
-            cooldown_for,
+            cfg.cooldown,
             cfg.healthy_reset,
             now,
         );
@@ -277,7 +288,7 @@ impl UsbRehome {
                         &sig.iface,
                         "",
                         0,
-                        cfg.max_attempts,
+                        cfg.cooldown.as_secs(),
                         None,
                         sig.usb_speed_mbps,
                         None,
@@ -285,27 +296,28 @@ impl UsbRehome {
                 );
                 None
             }
-            RehomeStep::Exhausted => {
-                if self.last_result != "exhausted" {
+            RehomeStep::Cooldown { .. } => {
+                // Still failing, still trying. Announce once per episode at the
+                // point the old code would have parked, so an operator sees a
+                // vehicle that has been retrying for a while rather than
+                // nothing at all — the previous `exhausted` warning was the
+                // only loud signal here, and it was attached to giving up.
+                if self.last_result != "retry" {
                     self.events.emit(
                         machine::USB_REHOME_KIND,
                         ados_protocol::logd::Level::Warn,
                         usb_rehome_detail(
-                            "exhausted",
+                            "retry",
                             &sig.iface,
                             "",
                             self.machine.attempts(),
-                            cfg.max_attempts,
+                            cfg.cooldown.as_secs(),
                             None,
                             sig.usb_speed_mbps,
                             None,
                         ),
                     );
                 }
-                self.last_result = "exhausted";
-                None
-            }
-            RehomeStep::Cooldown { .. } => {
                 self.last_result = "retry";
                 None
             }
@@ -322,13 +334,13 @@ impl UsbRehome {
                     self.machine.refund_attempt();
                     None
                 } else {
-                    self.authorize_attempt(unit, &sig, index, cfg.max_attempts)
+                    self.authorize_attempt(unit, &sig, index, cfg.cooldown.as_secs())
                         .await
                 }
             }
         };
 
-        self.write_sidecar(self.machine.attempts(), cfg.max_attempts);
+        self.write_sidecar(self.machine.attempts(), cfg.cooldown.as_secs());
         plan
     }
 
@@ -340,14 +352,14 @@ impl UsbRehome {
         unit: &'static str,
         sig: &WfbSignals,
         index: u32,
-        max_attempts: u32,
+        cooldown_s: u64,
     ) -> Option<RehomePlan> {
         let Some(target) = topo::resolve_usb_topo(&sig.iface).await else {
             // The WFB interface is not USB-backed: nothing to rebind.
             self.machine.refund_attempt();
             self.guard_blocked = true;
             self.last_result = "guard_blocked";
-            self.emit_guard_blocked(&sig.iface, "", "not_usb", max_attempts);
+            self.emit_guard_blocked(&sig.iface, "", "not_usb", cooldown_s);
             return None;
         };
         let default_iface = crate::mgmt_link_guardian::detection::default_route_iface().await;
@@ -361,7 +373,7 @@ impl UsbRehome {
                 &sig.iface,
                 &target.bind_id,
                 verdict.reason().unwrap_or("blocked"),
-                max_attempts,
+                cooldown_s,
             );
             return None;
         }
@@ -374,7 +386,7 @@ impl UsbRehome {
                 &sig.iface,
                 &target.bind_id,
                 index,
-                max_attempts,
+                cooldown_s,
                 sig.usb_speed_mbps,
                 None,
                 None,
@@ -390,7 +402,7 @@ impl UsbRehome {
     }
 
     #[cfg(target_os = "linux")]
-    fn emit_guard_blocked(&self, iface: &str, bind_id: &str, reason: &str, max_attempts: u32) {
+    fn emit_guard_blocked(&self, iface: &str, bind_id: &str, reason: &str, cooldown_s: u64) {
         self.events.emit(
             machine::USB_REHOME_KIND,
             ados_protocol::logd::Level::Warn,
@@ -399,7 +411,7 @@ impl UsbRehome {
                 iface,
                 bind_id,
                 0,
-                max_attempts,
+                cooldown_s,
                 None,
                 None,
                 Some(reason),
@@ -408,20 +420,22 @@ impl UsbRehome {
     }
 
     #[cfg(target_os = "linux")]
-    fn write_sidecar(&self, attempts: u32, max_attempts: u32) {
+    fn write_sidecar(&self, attempts: u32, cooldown_s: u64) {
         #[derive(serde::Serialize)]
         struct Snap<'a> {
             version: u16,
             usb_rehome_state: &'a str,
             usb_rehome_attempts: u32,
-            usb_rehome_max_attempts: u32,
+            usb_rehome_cooldown_s: u64,
             usb_rehome_last_result: &'a str,
             updated_at_unix: u64,
         }
-        // The renderable state: idle / rehoming / exhausted / guard_blocked.
+        // The renderable state: idle / rehoming / guard_blocked. There is no
+        // longer an `exhausted` state to render, because recovery no longer
+        // reaches one -- `usb_rehome_attempts` is what tells an operator how
+        // long this has been going on.
         let state = match self.last_result {
             "rehoming" | "retry" => "rehoming",
-            "exhausted" => "exhausted",
             "guard_blocked" => "guard_blocked",
             _ => "idle",
         };
@@ -429,7 +443,7 @@ impl UsbRehome {
             version: USB_REHOME_SIDECAR_VERSION,
             usb_rehome_state: state,
             usb_rehome_attempts: attempts,
-            usb_rehome_max_attempts: max_attempts,
+            usb_rehome_cooldown_s: cooldown_s,
             usb_rehome_last_result: self.last_result,
             updated_at_unix: now_unix(),
         };
@@ -594,8 +608,7 @@ mod tests {
     fn absent_section_is_enabled_with_defaults() {
         let cfg = read_config_from("agent:\n  name: x\n");
         assert!(cfg.enabled);
-        assert_eq!(cfg.max_attempts, DEFAULT_MAX_ATTEMPTS);
-        assert_eq!(cfg.cooldown_schedule, vec![10, 30, 60]);
+        assert_eq!(cfg.cooldown, Duration::from_secs(DEFAULT_COOLDOWN_S));
         assert_eq!(
             cfg.healthy_reset,
             Duration::from_secs(DEFAULT_HEALTHY_RESET_S)
@@ -605,21 +618,49 @@ mod tests {
     #[test]
     fn explicit_disable_and_tunables() {
         let cfg = read_config_from(
-            "network:\n  usb_rehome:\n    enabled: false\n    max_attempts: 5\n    cooldown_schedule_s: [5, 15]\n    healthy_reset_s: 90\n",
+            "network:\n  usb_rehome:\n    enabled: false\n    cooldown_s: 20\n    healthy_reset_s: 90\n",
         );
         assert!(!cfg.enabled);
-        assert_eq!(cfg.max_attempts, 5);
-        assert_eq!(cfg.cooldown_schedule, vec![5, 15]);
+        assert_eq!(cfg.cooldown, Duration::from_secs(20));
         assert_eq!(cfg.healthy_reset, Duration::from_secs(90));
     }
 
     #[test]
-    fn zero_max_attempts_floors_to_one_and_empty_schedule_defaults() {
+    fn a_legacy_escalating_schedule_becomes_its_steady_state_value() {
+        // A node in the field that tuned the old `[10, 30, 60]`-style schedule
+        // asked for a particular steady-state pacing. There is no schedule any
+        // more, so honour that intent by taking the largest rung rather than
+        // silently reverting the node to the shipped default.
+        let cfg =
+            read_config_from("network:\n  usb_rehome:\n    cooldown_schedule_s: [5, 15, 45]\n");
+        assert_eq!(cfg.cooldown, Duration::from_secs(45));
+    }
+
+    #[test]
+    fn an_explicit_cooldown_beats_a_legacy_schedule() {
         let cfg = read_config_from(
-            "network:\n  usb_rehome:\n    max_attempts: 0\n    cooldown_schedule_s: []\n",
+            "network:\n  usb_rehome:\n    cooldown_s: 7\n    cooldown_schedule_s: [5, 15, 45]\n",
         );
-        assert_eq!(cfg.max_attempts, 1);
-        assert_eq!(cfg.cooldown_schedule, vec![10, 30, 60]);
+        assert_eq!(cfg.cooldown, Duration::from_secs(7));
+    }
+
+    #[test]
+    fn a_zero_or_empty_cooldown_floors_rather_than_hot_looping() {
+        let cfg = read_config_from("network:\n  usb_rehome:\n    cooldown_s: 0\n");
+        assert_eq!(cfg.cooldown, Duration::from_secs(1));
+        let empty = read_config_from("network:\n  usb_rehome:\n    cooldown_schedule_s: []\n");
+        assert_eq!(empty.cooldown, Duration::from_secs(DEFAULT_COOLDOWN_S));
+    }
+
+    #[test]
+    fn a_stale_max_attempts_key_is_ignored_rather_than_rejected() {
+        // The key is gone from the model. A node that still carries it must
+        // load, not fail: an unparseable config would take the supervisor down
+        // on exactly the nodes this change is for.
+        let cfg =
+            read_config_from("network:\n  usb_rehome:\n    max_attempts: 5\n    cooldown_s: 12\n");
+        assert!(cfg.enabled);
+        assert_eq!(cfg.cooldown, Duration::from_secs(12));
     }
 
     #[test]

@@ -3,9 +3,12 @@
 //!
 //! `POST /api/services/{name}/restart` restarts a single named agent unit, and
 //! `POST /api/v1/system/restart-supervisor` restarts the supervisor unit that
-//! owns the whole agent process tree. Both shell `systemctl` through
-//! [`std::process::Command`], the same write seam the read-side service
-//! inventory uses.
+//! owns the whole agent process tree. Both shell `systemctl` through a bounded
+//! `tokio::process` spawn. The property reads and the supervisor's
+//! fire-and-forget restart go through [`crate::probe`]; the single-unit restart
+//! builds its own bounded spawn because it needs a non-zero exit, a timeout and
+//! a spawn fault kept apart (the `RestartRun` outcomes), which the probe seam
+//! deliberately folds into one degraded value.
 //!
 //! ## Why these answer HTTP 200 with a status field, not a 4xx
 //!
@@ -55,12 +58,13 @@
 //! reply flush) and returns at once. The route reports `ok:false` only when it
 //! cannot even schedule the restart (no `systemctl` on PATH).
 
-use std::process::Command;
+use std::process::Stdio;
 use std::time::Duration;
 
 use axum::extract::Path;
 use axum::Json;
 use serde_json::{json, Value};
+use tokio::process::Command;
 
 /// The set of units the restart route may touch. A request name is normalized to
 /// `ados-<name>` and must land in this set or it is rejected. Mirrors the FastAPI
@@ -104,6 +108,8 @@ const CONFIRM_ITERATIONS: u32 = 50;
 const CONFIRM_SLEEP: Duration = Duration::from_millis(100);
 
 /// The `systemctl restart` subprocess timeout, matching the FastAPI `timeout=30`.
+/// It also bounds the supervisor restart: `probe::PROBE_TIMEOUT` is sized for a
+/// read-only probe and would kill a healthy supervisor restart mid-flight.
 const RESTART_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// `POST /api/services/{name}/restart` → `{"status": ...}` at HTTP 200.
@@ -115,7 +121,7 @@ const RESTART_TIMEOUT: Duration = Duration::from_secs(30);
 /// an unknown name, a failed restart, an unconfirmed restart, and a timeout are
 /// all `{"status":"error", ...}` bodies, never an HTTP error.
 pub async fn restart_service(Path(name): Path<String>) -> Json<Value> {
-    Json(restart_service_result(&name))
+    Json(restart_service_result(&name).await)
 }
 
 /// Restart one allowlisted `ados-*` unit and return the same verdict body the
@@ -124,16 +130,18 @@ pub async fn restart_service(Path(name): Path<String>) -> Json<Value> {
 /// `ados-vision`). The name flows through the identical allowlist guard +
 /// GS-alias + restart-confirmation path, so a unit outside the fixed set is
 /// refused here too; the caller folds the returned `{status, ...}` into its own
-/// response without trusting an arbitrary unit name.
-pub fn restart_unit(name: &str) -> Value {
-    restart_service_result(name)
+/// response without trusting an arbitrary unit name. `async` because the systemd
+/// shell-outs underneath are bounded `tokio::process` spawns; a caller already
+/// inside an axum handler awaits it.
+pub async fn restart_unit(name: &str) -> Value {
+    restart_service_result(name).await
 }
 
 /// The pure restart logic + the systemd shell-outs, factored out of the axum
 /// handler so the name guard and the body shapes are testable without the HTTP
 /// layer. Returns the exact JSON body the FastAPI route returns for the same
 /// input.
-fn restart_service_result(name: &str) -> Value {
+async fn restart_service_result(name: &str) -> Value {
     // Normalize to the `ados-<name>` form, then gate on the allowlist. The error
     // body echoes the *original* request name, matching the FastAPI
     // `f"Unknown service: {name}"`.
@@ -160,7 +168,7 @@ fn restart_service_result(name: &str) -> Value {
         svc_name = "ados-wfb-rx".to_string();
     }
 
-    perform_restart(&svc_name, aliased_from.as_deref())
+    perform_restart(&svc_name, aliased_from.as_deref()).await
 }
 
 /// Whether the agent config's raw `agent.profile` is a ground-station value.
@@ -178,22 +186,19 @@ fn profile_is_ground_station() -> bool {
 /// executed. Returns the `status:ok` body on a confirmed restart, an error body
 /// on a non-zero `systemctl` return, an unconfirmed restart, or a subprocess
 /// fault. `aliased_from` is folded into every body verbatim (null when absent).
-fn perform_restart(svc_name: &str, aliased_from: Option<&str>) -> Value {
-    let unit_type = show_value(svc_name, "Type");
+async fn perform_restart(svc_name: &str, aliased_from: Option<&str>) -> Value {
+    let unit_type = show_value(svc_name, "Type").await;
     let unit_type = if unit_type.is_empty() {
         "simple".to_string()
     } else {
         unit_type
     };
-    let pid_before = main_pid(svc_name);
-    let ts_before = active_enter_ts(svc_name);
+    let pid_before = main_pid(svc_name).await;
+    let ts_before = active_enter_ts(svc_name).await;
 
     // `systemctl restart` with the 30 s timeout. A spawn failure (no systemctl)
     // or a timeout map to the same error bodies the FastAPI `except` arms emit.
-    match run_with_timeout(
-        Command::new("systemctl").args(["restart", svc_name]),
-        RESTART_TIMEOUT,
-    ) {
+    match run_with_timeout("systemctl", &["restart", svc_name], RESTART_TIMEOUT).await {
         RestartRun::Completed { code, stderr } => {
             if code != 0 {
                 let msg = if stderr.trim().is_empty() {
@@ -218,7 +223,7 @@ fn perform_restart(svc_name: &str, aliased_from: Option<&str>) -> Value {
         }
     }
 
-    confirm_restart(svc_name, aliased_from, &unit_type, pid_before, &ts_before)
+    confirm_restart(svc_name, aliased_from, &unit_type, pid_before, &ts_before).await
 }
 
 /// Poll for the unit's restart signal after a `systemctl restart` returned 0.
@@ -229,8 +234,10 @@ fn perform_restart(svc_name: &str, aliased_from: Option<&str>) -> Value {
 /// the signal. Polls up to [`CONFIRM_ITERATIONS`] × [`CONFIRM_SLEEP`]. A confirmed
 /// signal yields the `status:ok` body (with the type-appropriate before/after
 /// fields); exhausting the poll yields the "did not show a restart signal" error
-/// body. Mirrors the FastAPI confirmation loop exactly.
-fn confirm_restart(
+/// body. Mirrors the FastAPI confirmation loop exactly. The inter-poll wait is
+/// `tokio::time::sleep`, not a thread sleep: the loop can occupy the full ~5 s
+/// window, which a thread sleep would take out of a reactor worker.
+async fn confirm_restart(
     svc_name: &str,
     aliased_from: Option<&str>,
     unit_type: &str,
@@ -240,9 +247,9 @@ fn confirm_restart(
     let pid_based = matches!(unit_type, "simple" | "notify" | "dbus" | "exec");
 
     for _ in 0..CONFIRM_ITERATIONS {
-        std::thread::sleep(CONFIRM_SLEEP);
-        let ts_after = active_enter_ts(svc_name);
-        let pid_after = main_pid(svc_name);
+        tokio::time::sleep(CONFIRM_SLEEP).await;
+        let ts_after = active_enter_ts(svc_name).await;
+        let pid_after = main_pid(svc_name).await;
 
         if pid_based {
             if pid_after != 0 && pid_after != pid_before {
@@ -285,27 +292,41 @@ fn confirm_restart(
 /// string on any spawn / non-UTF-8 / read error, matching the FastAPI `_show`
 /// helper's `except subprocess.SubprocessError: return ""` plus its
 /// already-stripped output (a missing systemctl yields `""` here too).
-fn show_value(unit: &str, prop: &str) -> String {
-    match Command::new("systemctl")
-        .args(["show", unit, "-p", prop, "--value"])
-        .output()
-    {
-        Ok(out) => String::from_utf8_lossy(&out.stdout).trim().to_string(),
-        Err(_) => String::new(),
-    }
+///
+/// Routed through [`crate::probe::capture_systemctl`], which additionally folds a
+/// non-zero exit into `""`. That is the same answer the blocking version gave in
+/// both reachable cases: `systemctl show -p <prop> --value` exits 0 even for a
+/// unit systemd has never heard of (printing the property default), and when it
+/// does exit non-zero — a host with systemctl present but systemd not on PID 1 —
+/// it writes the reason to stderr and nothing to stdout, so the old
+/// `stdout.trim()` was `""` as well.
+///
+/// The probe forces `LANG=C`, which pins the `ActiveEnterTimestamp` wording. The
+/// confirmation only ever compares two reads taken through this same function,
+/// so the comparison is unaffected; the before/after strings echoed in the
+/// response body are simply locale-independent now.
+async fn show_value(unit: &str, prop: &str) -> String {
+    crate::probe::capture_systemctl(
+        &["show", unit, "-p", prop, "--value"],
+        crate::probe::PROBE_TIMEOUT,
+    )
+    .await
+    .text()
+    .trim()
+    .to_string()
 }
 
 /// The unit's `MainPID` as an integer, or `0` when the property is empty or not a
 /// number.
-fn main_pid(unit: &str) -> i64 {
-    let raw = show_value(unit, "MainPID");
+async fn main_pid(unit: &str) -> i64 {
+    let raw = show_value(unit, "MainPID").await;
     raw.parse::<i64>().unwrap_or(0)
 }
 
 /// The unit's `ActiveEnterTimestamp` string (the systemd-formatted last-active time),
 /// empty on any read error.
-fn active_enter_ts(unit: &str) -> String {
-    show_value(unit, "ActiveEnterTimestamp")
+async fn active_enter_ts(unit: &str) -> String {
+    show_value(unit, "ActiveEnterTimestamp").await
 }
 
 /// The outcome of a bounded `systemctl restart` run.
@@ -319,43 +340,42 @@ enum RestartRun {
     SpawnError(String),
 }
 
-/// Spawn a command, capture its output, and bound it to a wall-clock timeout. On
-/// the agent's boards `systemctl restart` settles well within the timeout; this
-/// kills a wedged restart so the route returns the FastAPI timeout body rather
-/// than hanging the connection. A spawn failure (binary absent) is reported
-/// distinctly so the caller can surface its error string.
-fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> RestartRun {
-    use std::io::Read;
-
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
-
-    let mut child = match cmd.spawn() {
+/// Spawn `program args…`, capture its output, and bound it to a wall-clock
+/// timeout. On the agent's boards `systemctl restart` settles well within the
+/// timeout; this kills a wedged restart so the route returns the FastAPI timeout
+/// body rather than hanging the connection. A spawn failure (binary absent) is
+/// reported distinctly so the caller can surface its error string.
+///
+/// This builds the bounded spawn here rather than calling [`crate::probe`]
+/// because `ProbeOutput` folds a non-zero exit, a timeout and a spawn fault into
+/// one `Unavailable`, and all three are separate response bodies on this route.
+/// The idiom is the probe seam's: `tokio::process` + `tokio::time::timeout` +
+/// `kill_on_drop`, which replaced a hand-rolled `try_wait()` / 50 ms thread-sleep
+/// poll that held a reactor worker for the whole restart — up to the full 30 s
+/// when the restart wedged. `kill_on_drop` also reaps the child when the timeout
+/// (or a disconnected client) drops this future, which the old loop only did on
+/// the timeout path.
+async fn run_with_timeout(program: &str, args: &[&str], timeout: Duration) -> RestartRun {
+    let child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn();
+    let child = match child {
         Ok(c) => c,
         Err(e) => return RestartRun::SpawnError(e.to_string()),
     };
-
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let mut stderr = String::new();
-                if let Some(mut handle) = child.stderr.take() {
-                    let _ = handle.read_to_string(&mut stderr);
-                }
-                let code = status.code().unwrap_or(-1);
-                return RestartRun::Completed { code, stderr };
-            }
-            Ok(None) => {
-                if std::time::Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return RestartRun::TimedOut;
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(e) => return RestartRun::SpawnError(e.to_string()),
-        }
+    match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(Ok(out)) => RestartRun::Completed {
+            code: out.status.code().unwrap_or(-1),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        },
+        // An I/O fault while collecting the child's exit was the `try_wait`
+        // `Err(e)` arm, which reported `SpawnError`. Keep it there.
+        Ok(Err(e)) => RestartRun::SpawnError(e.to_string()),
+        Err(_) => RestartRun::TimedOut,
     }
 }
 
@@ -380,13 +400,17 @@ pub async fn restart_supervisor() -> Json<Value> {
     // restart kills the agent process the supervisor owns, so any post-spawn
     // error is benign (the unit IS restarting).
     tokio::spawn(async move {
+        // The 200 ms delay is load-bearing: it is what lets the response above
+        // reach the client before the supervisor restarts the process serving it.
         tokio::time::sleep(Duration::from_millis(200)).await;
-        let _ = tokio::task::spawn_blocking(|| {
-            let _ = Command::new("systemctl")
-                .args(["restart", SUPERVISOR_UNIT])
-                .output();
-        })
-        .await;
+        // Bounded at RESTART_TIMEOUT, not `probe::PROBE_TIMEOUT`: a supervisor
+        // restart cycles the whole agent process tree and legitimately runs far
+        // longer than a 3 s read-only probe, so the shorter bound would kill a
+        // healthy restart. The bound exists only so a wedged systemctl cannot
+        // leave a child behind; the exit status is ignored either way, because
+        // the restart kills the process that would read it.
+        let argv = ["restart", SUPERVISOR_UNIT];
+        let _ = crate::probe::status_only("systemctl", &argv, RESTART_TIMEOUT).await;
     });
 
     Json(json!({
@@ -414,12 +438,12 @@ fn which_systemctl() -> Option<std::path::PathBuf> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn an_unknown_service_is_rejected_before_any_restart() {
+    #[tokio::test]
+    async fn an_unknown_service_is_rejected_before_any_restart() {
         // A non-ados unit can never be restarted: it is normalized to
         // `ados-<name>`, misses the allowlist, and returns the error body that
         // echoes the original request name — all with no systemctl call.
-        let body = restart_service_result("sshd");
+        let body = restart_service_result("sshd").await;
         assert_eq!(body["status"], json!("error"));
         assert_eq!(body["message"], json!("Unknown service: sshd"));
         // No `unit` / `aliased_from` keys on the unknown-name branch (matching the
@@ -428,12 +452,12 @@ mod tests {
         assert!(body.as_object().unwrap().get("aliased_from").is_none());
     }
 
-    #[test]
-    fn an_arbitrary_path_like_name_is_rejected() {
+    #[tokio::test]
+    async fn an_arbitrary_path_like_name_is_rejected() {
         // A name that already carries the prefix but is not in the allowlist is
         // still rejected (so `ados-` is necessary but not sufficient — only the
         // fixed unit set is allowed).
-        let body = restart_service_result("ados-not-a-real-unit");
+        let body = restart_service_result("ados-not-a-real-unit").await;
         assert_eq!(body["status"], json!("error"));
         assert_eq!(
             body["message"],
@@ -441,14 +465,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_bare_name_is_normalized_to_the_ados_prefix_for_the_guard() {
+    #[tokio::test]
+    async fn a_bare_name_is_normalized_to_the_ados_prefix_for_the_guard() {
         // `mavlink` → `ados-mavlink` is in the allowlist, so it passes the guard
         // and proceeds to the restart path. On a dev host with no systemctl the
         // restart cannot spawn, so the body is the spawn-error shape — but the
         // KEY parity point here is that the guard did NOT reject it (the message
         // is not an "Unknown service" rejection).
-        let body = restart_service_result("mavlink");
+        let body = restart_service_result("mavlink").await;
         assert_eq!(body["status"], json!("error"));
         let msg = body["message"].as_str().unwrap();
         assert!(
@@ -457,15 +481,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn every_allowlisted_name_passes_the_guard() {
+    #[tokio::test]
+    async fn every_allowlisted_name_passes_the_guard() {
         // Each allowlisted unit clears the name guard (it does not produce an
         // "Unknown service" rejection). On a dev host the subsequent restart
         // fails to spawn, which is a different, non-rejection error body.
         for unit in ALLOWED_UNITS {
             // Strip the `ados-` prefix to exercise the normalization path too.
             let bare = unit.strip_prefix("ados-").unwrap();
-            let body = restart_service_result(bare);
+            let body = restart_service_result(bare).await;
             let msg = body["message"].as_str().unwrap_or_default();
             assert!(
                 !msg.starts_with("Unknown service"),
@@ -474,8 +498,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn perform_restart_emits_a_spawn_error_body_when_systemctl_is_absent() {
+    #[tokio::test]
+    async fn perform_restart_emits_a_spawn_error_body_when_systemctl_is_absent() {
         // On a host with no systemctl the restart subprocess cannot spawn. The
         // FastAPI catch-all returns `{"status":"error","message": str(exc)}`; this
         // surface returns the same shape with the spawn error string. (This test
@@ -487,7 +511,7 @@ mod tests {
             // error-status shape. Skip the spawn-error assertion there.
             return;
         }
-        let body = perform_restart("ados-api", None);
+        let body = perform_restart("ados-api", None).await;
         assert_eq!(body["status"], json!("error"));
         assert!(body["message"].is_string());
     }
@@ -514,12 +538,12 @@ mod tests {
         assert_eq!(body["pid_after"], json!(200));
     }
 
-    #[test]
-    fn aliased_from_is_null_in_the_body_when_no_alias_applies() {
+    #[tokio::test]
+    async fn aliased_from_is_null_in_the_body_when_no_alias_applies() {
         // The non-aliased path always serializes `aliased_from` as JSON null (not
         // an absent key), matching the FastAPI `aliased_from: None` field that is
         // always present in the ok/timeout-confirm bodies.
-        let body = confirm_restart("ados-api", None, "simple", 0, "");
+        let body = confirm_restart("ados-api", None, "simple", 0, "").await;
         // On a dev host the confirm loop exhausts (no real restart), so the body
         // is the unconfirmed-error shape — which still carries `aliased_from`.
         assert!(body.as_object().unwrap().contains_key("aliased_from"));
@@ -571,9 +595,9 @@ mod tests {
     /// This is the deterministic, host-independent golden the conformance harness
     /// pins for the route (the success + confirmation bodies depend on a live
     /// systemd unit and are bench-validated, not asserted here).
-    #[test]
-    fn golden_unknown_service_body() {
-        let body = restart_service_result("nginx");
+    #[tokio::test]
+    async fn golden_unknown_service_body() {
+        let body = restart_service_result("nginx").await;
         let golden = json!({
             "status": "error",
             "message": "Unknown service: nginx",

@@ -78,6 +78,7 @@ pub mod pairing_posture;
 pub mod plugin;
 pub mod relay_ticket;
 pub mod rest;
+pub mod retry;
 pub mod secret_gen;
 pub mod sidecar;
 pub mod state;

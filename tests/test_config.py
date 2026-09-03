@@ -505,17 +505,25 @@ def test_camera_thumbnail_is_overridable_per_field():
 
 
 def _ws_migrate(tmp_path, mavlink_block):
-    """Run the migration over a config file and return (in_memory, on_disk)."""
+    """Run the normaliser + the maintenance pass and return (in_memory, on_disk).
+
+    The normalisation is pure and in-memory; the persistence is a separate
+    pass under the config lock, because the read path is not allowed to
+    write. Both halves are exercised here so the on-disk assertions below
+    still mean what they meant when one function did both.
+    """
     import yaml as _yaml
 
-    from ados.core.config import _migrators
+    from ados.core.config import _lock, _migrators
+    from ados.core.config.maintenance import migrate_config_file
 
-    _migrators._WS_ENFORCE_DEFAULT_MIGRATED = False
+    _lock.CONFIG_LOCK = tmp_path / "config.yaml.lock"
     cfg = tmp_path / "config.yaml"
     cfg.write_text(_yaml.safe_dump({"mavlink": mavlink_block, "video": {}}))
     raw = _yaml.safe_load(cfg.read_text())
-    out = _migrators._migrate_ws_proxy_enforce_default(raw, cfg)
-    return out, _yaml.safe_load(cfg.read_text())
+    _migrators.apply_ws_proxy_enforce_default(raw)
+    migrate_config_file(cfg, ledger_path=tmp_path / "config-migrations.json")
+    return raw, _yaml.safe_load(cfg.read_text())
 
 
 def test_a_recorded_enforce_false_is_dropped_from_memory_and_disk(tmp_path):

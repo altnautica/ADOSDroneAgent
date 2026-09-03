@@ -18,9 +18,9 @@
 use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use ados_protocol::ipc::read_newline_line;
+use ados_protocol::retry::RetryPace;
 use serde_json::Value;
 use tokio::io::BufReader;
 use tokio::net::UnixStream;
@@ -34,10 +34,11 @@ pub const SWARM_SOCKET_NAME: &str = "swarm.sock";
 /// read buffer without bound.
 const MAX_LINE: usize = 256 * 1024;
 
-/// Reconnect backoff bounds. A missing socket is the common case, so the first retry
-/// is quick and the delay grows to a ceiling to avoid spinning.
-const BACKOFF_START: Duration = Duration::from_millis(250);
-const BACKOFF_MAX: Duration = Duration::from_secs(5);
+/// Reconnect pacing. Was a verbatim copy of `state_client`'s 250 ms→5 s
+/// doubling ladder, which is how two independently-maintained copies of the
+/// same wrong answer came to exist. Both now name the shared pace in
+/// [`ados_protocol::retry`], which is fixed and never gives up.
+const RECONNECT_PACE: RetryPace = ados_protocol::retry::LOCAL_SOCKET;
 
 /// The runtime directory the swarm socket lives under, honouring the `ADOS_RUN_DIR`
 /// override the way every other socket path in the agent does.
@@ -114,7 +115,7 @@ impl SwarmIpcClient {
 /// Connect-then-read-then-reconnect loop, run until the stop signal fires.
 async fn read_loop(socket_path: PathBuf, published: Published, stop: oneshot::Receiver<()>) {
     tokio::pin!(stop);
-    let mut backoff = BACKOFF_START;
+
     tracing::info!(path = %socket_path.display(), "swarm client started");
     loop {
         tokio::select! {
@@ -126,7 +127,7 @@ async fn read_loop(socket_path: PathBuf, published: Published, stop: oneshot::Re
             connected = UnixStream::connect(&socket_path) => {
                 match connected {
                     Ok(stream) => {
-                        backoff = BACKOFF_START;
+
                         tracing::debug!(path = %socket_path.display(), "swarm socket connected");
                         process_stream(BufReader::new(stream), &published, &mut stop).await;
                     }
@@ -136,8 +137,7 @@ async fn read_loop(socket_path: PathBuf, published: Published, stop: oneshot::Re
                             error = %e,
                             "swarm socket absent; will retry"
                         );
-                        let wait = backoff;
-                        backoff = (backoff * 2).min(BACKOFF_MAX);
+                        let wait = RECONNECT_PACE.wait();
                         tokio::select! {
                             _ = &mut stop => return,
                             _ = tokio::time::sleep(wait) => {}
@@ -181,6 +181,8 @@ async fn process_stream<R>(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use serde_json::json;
     use std::io::Cursor;

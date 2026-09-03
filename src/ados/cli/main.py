@@ -1209,6 +1209,7 @@ def demo(port: int) -> None:
 
 # Wire subcommand groups. Done at import time so the entry point in
 # pyproject.toml (ados = ados.cli.main:cli) sees the full command tree.
+from ados.cli.config import config_group  # noqa: E402
 from ados.cli.diag import diag_group  # noqa: E402
 from ados.cli.hardware import hardware_group  # noqa: E402
 from ados.cli.help import help_command  # noqa: E402
@@ -1233,6 +1234,7 @@ cli.add_command(logs_group)
 cli.add_command(support_bundle)
 
 for _group in (
+    config_group,
     diag_group,
     hardware_group,
     mcp_group,

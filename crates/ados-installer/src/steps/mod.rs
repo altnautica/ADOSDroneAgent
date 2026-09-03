@@ -30,6 +30,7 @@ pub mod aic8800_tune;
 pub mod appliance;
 pub mod apt_reclaim;
 pub mod config_identity;
+pub mod config_migrate;
 pub mod deps;
 pub mod dkms;
 pub mod fetch_binaries;
@@ -72,6 +73,10 @@ pub fn full_install_chain() -> Vec<Box<dyn Step>> {
         Box::new(dkms::Dkms),
         Box::new(config_identity::ConfigIdentity),
         Box::new(network_mac_pin::NetworkMacPin),
+        // Right after the config exists and before `systemd`/`start` bring any
+        // unit up: migration is an install-time action, never a per-process
+        // boot action, and no unit has loaded config yet at this point.
+        Box::new(config_migrate::ConfigMigrate),
         Box::new(wifi_join::WifiJoin),
         Box::new(rtl_regulatory::RtlRegulatory),
         Box::new(aic8800_tune::Aic8800Tune),
@@ -99,7 +104,7 @@ mod tests {
     fn full_chain_orders_cleanly() {
         let steps = full_install_chain();
         let order = topo_order(&steps).expect("the install chain must be a valid DAG");
-        assert_eq!(order.len(), 22);
+        assert_eq!(order.len(), 23);
 
         let pos = |id: &str| order.iter().position(|x| x == id).unwrap();
         // Spot-check the load-bearing edges.
@@ -147,6 +152,13 @@ mod tests {
         assert!(pos("systemd") < pos("start"));
         assert!(pos("fetch_binaries") < pos("start"));
         assert!(pos("start") < pos("health"));
+        // Config migration runs after the config is written and before
+        // anything starts a unit that would load it. This edge is the whole
+        // point of the step: it is what keeps migration off eleven concurrent
+        // startup paths.
+        assert!(pos("config_identity") < pos("config_migrate"));
+        assert!(pos("config_migrate") < pos("systemd"));
+        assert!(pos("config_migrate") < pos("start"));
     }
 
     /// A `--ref` pin is resolved in two places that must stay in this order: the

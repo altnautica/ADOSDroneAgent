@@ -34,3 +34,17 @@ pub fn detect_ethernet_iface() -> String {
         .next()
         .unwrap_or_else(|| "eth0".to_string())
 }
+
+/// [`detect_ethernet_iface`] with the sysfs scan moved off the reactor.
+///
+/// The scan is a `read_dir` plus two `exists()` stats per wired candidate. Small
+/// when healthy, but it is a blocking filesystem walk and it sits on the router's
+/// `tick` path via `failover::priority_metric`, so it follows the same rule the
+/// router's own carrier read states: no blocking filesystem call on the reactor.
+/// A join failure degrades to the same `eth0` fallback the sync version uses for
+/// an unreadable `/sys/class/net`.
+pub async fn detect_ethernet_iface_async() -> String {
+    tokio::task::spawn_blocking(detect_ethernet_iface)
+        .await
+        .unwrap_or_else(|_| "eth0".to_string())
+}

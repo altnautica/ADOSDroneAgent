@@ -28,9 +28,22 @@ def _isolate_agent_globals(tmp_path, monkeypatch):
       (as ``ground_station`` on a generic board with no FC), which then flips
       every later ``auto`` client's resolved profile. Point the reader at a
       fresh per-test file so one test's write can never reach another.
+
+    And two node-level paths the config machinery owns, for the same reason:
+
+    * ``ados.core.config._lock.CONFIG_LOCK`` — the reader/writer flock. A
+      test that took the real one would serialise against a live agent on
+      the developer's own box.
+    * ``ados.core.config.maintenance.CONFIG_MIGRATIONS_PATH`` — the
+      one-shot-cleanup ledger. This one bites hardest: a test run that
+      recorded a cleanup in the real ledger made a *later* test in the same
+      suite pass or fail depending on whether an earlier run had happened,
+      which is exactly the order-dependence this fixture exists to kill.
     """
     import ados.api.deps as deps
     import ados.core.profile as profile
+    from ados.core.config import _lock
+    from ados.core.config import maintenance as config_maintenance
 
     # Force the singleton empty around each test (raw, not monkeypatch-restore,
     # so a value leaked by a prior test can never be restored back).
@@ -38,6 +51,12 @@ def _isolate_agent_globals(tmp_path, monkeypatch):
     # Point the profile-conf reader at a fresh per-test file (monkeypatch
     # restores the real path afterward).
     monkeypatch.setattr(profile, "PROFILE_CONF", tmp_path / "profile.conf")
+    monkeypatch.setattr(_lock, "CONFIG_LOCK", tmp_path / "config.yaml.lock")
+    monkeypatch.setattr(
+        config_maintenance,
+        "CONFIG_MIGRATIONS_PATH",
+        tmp_path / "config-migrations.json",
+    )
     yield
     deps._agent_app = None
 

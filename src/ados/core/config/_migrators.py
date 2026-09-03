@@ -1,402 +1,234 @@
-"""Legacy config-file migrators (idempotent, one-shot per process)."""
+"""Legacy config normalisers — pure, in-memory, and side-effect free.
+
+Every function here takes the raw mapping loaded from ``config.yaml``,
+mutates it in place to the current shape, and reports whether it changed
+anything. **None of them touches the disk**, and that is the point.
+
+These used to write. Each one, on a hit, serialised the whole merged
+mapping back over ``/etc/ados/config.yaml`` with a tmp-write and an
+``os.replace``, from inside ``load_config()`` — which every one of the
+node's units calls on its own startup path, concurrently, with no lock,
+against the one file that carries the radio pairing key, the profile and
+the role. The native writers take ``/run/ados/config.yaml.lock``; a lock
+only one side takes protects nobody.
+
+Splitting the normalisation from the persistence fixes both halves at once:
+
+* the read path applies the current shape in memory, so an un-migrated
+  node behaves correctly without writing anything;
+* :mod:`ados.core.config.maintenance` persists the same result once, off
+  the startup path, under the lock, re-reading the file inside it.
+
+Each normaliser checks its **destination** before its **source**, so a
+node that has already been migrated does no file I/O at all. That matters
+because the legacy side files are deliberately preserved on disk for
+rollback, so "already migrated" is the steady state, not a rare one.
+"""
 
 from __future__ import annotations
 
-import os as _os
+import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from ados.core.paths import GS_UI_JSON
-
-# One-shot per-process guard. Keeps the INFO log from spamming even
-# though the migrator is cheap and idempotent after the first run.
-_SHARE_UPLINK_MIGRATED: bool = False
-_GS_UI_MIGRATED: bool = False
-_API_FROM_SCRIPTING_MIGRATED: bool = False
-_WS_ENFORCE_DEFAULT_MIGRATED: bool = False
 
 _LEGACY_GS_UI_PATH = GS_UI_JSON
 _GS_UI_KEYS = ("oled", "buttons", "screens")
 
 
-def _migrate_share_uplink_from_legacy_json(
-    raw: dict[str, Any],
-    yaml_path: Path | None,
-) -> dict[str, Any]:
-    """Pull `share_uplink` out of the legacy ground-station-ui.json side-file.
-
-    Runs at most once per process (guarded by `_SHARE_UPLINK_MIGRATED`)
-    and is a no-op if:
-    - the legacy file does not exist, OR
-    - the legacy file has no `share_uplink` key, OR
-    - `raw['ground_station']['share_uplink']` is already set (Pydantic
-      value wins).
-
-    On a live migration the resolved value is written into `raw`
-    in-memory AND flushed back to the on-disk YAML so later reads see
-    the Pydantic field without needing the legacy file. The legacy
-    JSON is preserved on disk for rollback and audit.
-    """
-    global _SHARE_UPLINK_MIGRATED
-    if _SHARE_UPLINK_MIGRATED:
-        return raw
-
+def _read_legacy_gs_ui() -> dict[str, Any] | None:
+    """Parse the legacy ground-station-ui side file, or ``None``."""
     try:
         if not _LEGACY_GS_UI_PATH.is_file():
-            _SHARE_UPLINK_MIGRATED = True
-            return raw
-
-        import json
-
-        try:
-            legacy_data = json.loads(
-                _LEGACY_GS_UI_PATH.read_text(encoding="utf-8")
-            )
-        except (OSError, ValueError):
-            _SHARE_UPLINK_MIGRATED = True
-            return raw
-
-        if not isinstance(legacy_data, dict):
-            _SHARE_UPLINK_MIGRATED = True
-            return raw
-
-        if "share_uplink" not in legacy_data:
-            _SHARE_UPLINK_MIGRATED = True
-            return raw
-
-        gs_section = raw.get("ground_station")
-        if not isinstance(gs_section, dict):
-            gs_section = {}
-        if "share_uplink" in gs_section:
-            # Pydantic config already has a value. Do not overwrite.
-            _SHARE_UPLINK_MIGRATED = True
-            return raw
-
-        legacy_value = bool(legacy_data.get("share_uplink", False))
-        gs_section["share_uplink"] = legacy_value
-        raw["ground_station"] = gs_section
-
-        # Flush to disk so subsequent loads do not need the legacy file.
-        # Best-effort: on failure we still return the in-memory merge.
-        if yaml_path is not None:
-            try:
-                to_write: dict[str, Any] = {}
-                if yaml_path.is_file():
-                    with open(yaml_path, encoding="utf-8") as fh:
-                        loaded = yaml.safe_load(fh)
-                    if isinstance(loaded, dict):
-                        to_write = loaded
-                disk_gs = to_write.get("ground_station")
-                if not isinstance(disk_gs, dict):
-                    disk_gs = {}
-                disk_gs["share_uplink"] = legacy_value
-                to_write["ground_station"] = disk_gs
-
-                body = yaml.safe_dump(
-                    to_write,
-                    sort_keys=False,
-                    default_flow_style=False,
-                )
-                yaml_path.parent.mkdir(parents=True, exist_ok=True)
-                tmp_path = yaml_path.with_suffix(yaml_path.suffix + ".tmp")
-                tmp_path.write_text(body, encoding="utf-8")
-                _os.replace(str(tmp_path), str(yaml_path))
-            except (OSError, yaml.YAMLError):
-                # Non-fatal. In-memory value still applies for this run.
-                pass
-
-        # Log once. Use plain logging to avoid a circular import on
-        # `ados.core.logging`, which itself may call `load_config()`.
-        import logging as _logging
-
-        _logging.getLogger("ados.core.config").info(
-            f"migrated share_uplink from {GS_UI_JSON} (legacy file preserved)"
-        )
-    finally:
-        _SHARE_UPLINK_MIGRATED = True
-
-    return raw
+            return None
+        data = json.loads(_LEGACY_GS_UI_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
-def _migrate_gs_ui_from_legacy_json(
-    raw: dict[str, Any],
-    yaml_path: Path | None,
-) -> dict[str, Any]:
-    """Pull oled/buttons/screens out of the legacy ground-station-ui.json side-file.
+def _section(raw: dict[str, Any], key: str) -> dict[str, Any]:
+    """Return ``raw[key]`` as a dict, replacing a non-dict with a fresh one.
 
-    Same shape as `_migrate_share_uplink_from_legacy_json`. Per-key check:
-    if `raw['ground_station']['ui'][key]` is already set, do not overwrite.
-    Legacy file is preserved on disk for rollback.
+    Not created in ``raw`` unless the caller stores it back, so a
+    normaliser that decides against a change leaves no empty section
+    behind for the maintenance pass to persist.
     """
-    global _GS_UI_MIGRATED
-    if _GS_UI_MIGRATED:
-        return raw
-
-    try:
-        if not _LEGACY_GS_UI_PATH.is_file():
-            _GS_UI_MIGRATED = True
-            return raw
-
-        import json
-
-        try:
-            legacy_data = json.loads(
-                _LEGACY_GS_UI_PATH.read_text(encoding="utf-8")
-            )
-        except (OSError, ValueError):
-            _GS_UI_MIGRATED = True
-            return raw
-
-        if not isinstance(legacy_data, dict):
-            _GS_UI_MIGRATED = True
-            return raw
-
-        gs_section = raw.get("ground_station")
-        if not isinstance(gs_section, dict):
-            gs_section = {}
-        ui_section = gs_section.get("ui")
-        if not isinstance(ui_section, dict):
-            ui_section = {}
-
-        merged_any = False
-        for key in _GS_UI_KEYS:
-            if key in legacy_data and isinstance(legacy_data[key], dict):
-                if key not in ui_section:
-                    ui_section[key] = legacy_data[key]
-                    merged_any = True
-
-        if not merged_any:
-            _GS_UI_MIGRATED = True
-            return raw
-
-        gs_section["ui"] = ui_section
-        raw["ground_station"] = gs_section
-
-        if yaml_path is not None:
-            try:
-                to_write: dict[str, Any] = {}
-                if yaml_path.is_file():
-                    with open(yaml_path, encoding="utf-8") as fh:
-                        loaded = yaml.safe_load(fh)
-                    if isinstance(loaded, dict):
-                        to_write = loaded
-                disk_gs = to_write.get("ground_station")
-                if not isinstance(disk_gs, dict):
-                    disk_gs = {}
-                disk_ui = disk_gs.get("ui")
-                if not isinstance(disk_ui, dict):
-                    disk_ui = {}
-                for key in _GS_UI_KEYS:
-                    if key in ui_section and key not in disk_ui:
-                        disk_ui[key] = ui_section[key]
-                disk_gs["ui"] = disk_ui
-                to_write["ground_station"] = disk_gs
-
-                body = yaml.safe_dump(
-                    to_write,
-                    sort_keys=False,
-                    default_flow_style=False,
-                )
-                yaml_path.parent.mkdir(parents=True, exist_ok=True)
-                tmp_path = yaml_path.with_suffix(yaml_path.suffix + ".tmp")
-                tmp_path.write_text(body, encoding="utf-8")
-                _os.replace(str(tmp_path), str(yaml_path))
-            except (OSError, yaml.YAMLError):
-                pass
-
-        import logging as _logging
-
-        _logging.getLogger("ados.core.config").info(
-            "migrated ground_station.ui (oled/buttons/screens) from "
-            f"{GS_UI_JSON} (legacy file preserved)"
-        )
-    finally:
-        _GS_UI_MIGRATED = True
-
-    return raw
+    value = raw.get(key)
+    return value if isinstance(value, dict) else {}
 
 
-def _migrate_api_from_scripting(
-    raw: dict[str, Any],
-    yaml_path: Path | None,
-) -> dict[str, Any]:
-    """Relocate the REST-API surface config out of the legacy ``scripting`` block.
+def apply_share_uplink_from_legacy_json(raw: dict[str, Any]) -> bool:
+    """Pull ``share_uplink`` out of the legacy ground-station-ui side file.
 
-    The host/port for the agent's main HTTP server and the optional
-    Mission Control URL used to live under ``scripting.rest_api`` and
-    ``scripting.mission_control_url``. They now live under the dedicated
-    ``api`` section (``api.rest`` and ``api.mission_control_url``).
-
-    Runs at most once per process (guarded by
-    ``_API_FROM_SCRIPTING_MIGRATED``). Per-field check: a value already
-    present under ``api`` wins and is never overwritten. On a live
-    migration the resolved values are written into ``raw`` in-memory AND
-    flushed back to the on-disk YAML so an operator who customized the
-    REST port keeps it after the legacy block is dropped on load.
+    A value already present under ``ground_station`` wins and is never
+    overwritten, so this is a backfill, not a sync.
     """
-    global _API_FROM_SCRIPTING_MIGRATED
-    if _API_FROM_SCRIPTING_MIGRATED:
-        return raw
+    gs_section = _section(raw, "ground_station")
+    if "share_uplink" in gs_section:
+        return False
 
-    try:
-        legacy = raw.get("scripting")
-        if not isinstance(legacy, dict):
-            _API_FROM_SCRIPTING_MIGRATED = True
-            return raw
+    legacy = _read_legacy_gs_ui()
+    if legacy is None or "share_uplink" not in legacy:
+        return False
 
-        legacy_rest = legacy.get("rest_api")
-        legacy_mc_url = legacy.get("mission_control_url")
-        if not isinstance(legacy_rest, dict) and legacy_mc_url is None:
-            _API_FROM_SCRIPTING_MIGRATED = True
-            return raw
-
-        api_section = raw.get("api")
-        if not isinstance(api_section, dict):
-            api_section = {}
-
-        merged_any = False
-
-        if isinstance(legacy_rest, dict):
-            rest_section = api_section.get("rest")
-            if not isinstance(rest_section, dict):
-                rest_section = {}
-            for key in ("enabled", "host", "port"):
-                if key in legacy_rest and key not in rest_section:
-                    rest_section[key] = legacy_rest[key]
-                    merged_any = True
-            if rest_section:
-                api_section["rest"] = rest_section
-
-        if legacy_mc_url is not None and "mission_control_url" not in api_section:
-            api_section["mission_control_url"] = legacy_mc_url
-            merged_any = True
-
-        if not merged_any:
-            _API_FROM_SCRIPTING_MIGRATED = True
-            return raw
-
-        raw["api"] = api_section
-
-        if yaml_path is not None:
-            try:
-                to_write: dict[str, Any] = {}
-                if yaml_path.is_file():
-                    with open(yaml_path, encoding="utf-8") as fh:
-                        loaded = yaml.safe_load(fh)
-                    if isinstance(loaded, dict):
-                        to_write = loaded
-                disk_api = to_write.get("api")
-                if not isinstance(disk_api, dict):
-                    disk_api = {}
-                if "rest" in api_section and "rest" not in disk_api:
-                    disk_api["rest"] = api_section["rest"]
-                if (
-                    "mission_control_url" in api_section
-                    and "mission_control_url" not in disk_api
-                ):
-                    disk_api["mission_control_url"] = api_section[
-                        "mission_control_url"
-                    ]
-                to_write["api"] = disk_api
-
-                body = yaml.safe_dump(
-                    to_write,
-                    sort_keys=False,
-                    default_flow_style=False,
-                )
-                yaml_path.parent.mkdir(parents=True, exist_ok=True)
-                tmp_path = yaml_path.with_suffix(yaml_path.suffix + ".tmp")
-                tmp_path.write_text(body, encoding="utf-8")
-                _os.replace(str(tmp_path), str(yaml_path))
-            except (OSError, yaml.YAMLError):
-                pass
-
-        import logging as _logging
-
-        _logging.getLogger("ados.core.config").info(
-            "migrated rest_api + mission_control_url into the api section "
-            "(legacy scripting block ignored on load)"
-        )
-    finally:
-        _API_FROM_SCRIPTING_MIGRATED = True
-
-    return raw
+    gs_section["share_uplink"] = bool(legacy.get("share_uplink", False))
+    raw["ground_station"] = gs_section
+    return True
 
 
-def _migrate_ws_proxy_enforce_default(
-    raw: dict[str, Any],
-    yaml_path: Path | None,
-) -> dict[str, Any]:
-    """Drop a persisted ``mavlink.ws_proxy_enforce_auth: false`` so the shipped
-    default applies.
+def apply_gs_ui_from_legacy_json(raw: dict[str, Any]) -> bool:
+    """Pull oled/buttons/screens out of the legacy side file.
 
-    The MAVLink WebSocket proxy used to log an unauthorized connection and serve
-    it anyway, and that posture was the shipped default. Every node written
-    while it was has the value ``false`` recorded in its own config file, so
-    changing the default in code changes nothing on any of them: an explicit
-    value wins over a default, which is the whole point of an explicit value.
-    Proven on a bench node, where the proxy reported
-    ``enforce_auth=false admitted=true`` while running a build whose default
-    was ``true``.
-
-    So the recorded value is removed rather than rewritten. Removing it lets
-    the node follow the shipped posture now and in future, where writing
-    ``true`` would freeze today's answer into the file and reproduce this same
-    problem the next time the default moves.
-
-    Only a ``false`` is dropped. An operator who deliberately set ``true`` has
-    said something the default cannot say, and a node with a third-party client
-    that cannot present a credential keeps its opt-out: the way to disable
-    enforcement is now to set it after this runs, which no longer looks like
-    the value this migration cleans up, because that one is gone.
+    Per key: a key already present under ``ground_station.ui`` wins.
     """
-    global _WS_ENFORCE_DEFAULT_MIGRATED
-    if _WS_ENFORCE_DEFAULT_MIGRATED:
-        return raw
+    gs_section = _section(raw, "ground_station")
+    ui_section = _section(gs_section, "ui")
+    if all(key in ui_section for key in _GS_UI_KEYS):
+        return False
 
-    try:
-        mav = raw.get("mavlink")
-        if not isinstance(mav, dict) or mav.get("ws_proxy_enforce_auth") is not False:
-            return raw
+    legacy = _read_legacy_gs_ui()
+    if legacy is None:
+        return False
 
-        mav.pop("ws_proxy_enforce_auth", None)
+    changed = False
+    for key in _GS_UI_KEYS:
+        if key in ui_section:
+            continue
+        legacy_value = legacy.get(key)
+        if isinstance(legacy_value, dict):
+            ui_section[key] = legacy_value
+            changed = True
 
-        if yaml_path is not None and yaml_path.exists():
-            try:
-                on_disk = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
-                if isinstance(on_disk, dict):
-                    disk_mav = on_disk.get("mavlink")
-                    if (
-                        isinstance(disk_mav, dict)
-                        and disk_mav.get("ws_proxy_enforce_auth") is False
-                    ):
-                        disk_mav.pop("ws_proxy_enforce_auth", None)
-                        body = yaml.safe_dump(
-                            on_disk,
-                            sort_keys=False,
-                            default_flow_style=False,
-                        )
-                        yaml_path.parent.mkdir(parents=True, exist_ok=True)
-                        tmp_path = yaml_path.with_suffix(yaml_path.suffix + ".tmp")
-                        tmp_path.write_text(body, encoding="utf-8")
-                        _os.replace(str(tmp_path), str(yaml_path))
-            except (OSError, yaml.YAMLError):
-                # An unwritable config is not a reason to refuse to start. The
-                # in-memory removal above still takes effect for this process.
-                pass
+    if not changed:
+        return False
 
-        import logging as _logging
+    gs_section["ui"] = ui_section
+    raw["ground_station"] = gs_section
+    return True
 
-        _logging.getLogger("ados.core.config").info(
-            "dropped a recorded ws_proxy_enforce_auth=false so the shipped "
-            "WebSocket authentication posture applies"
-        )
-    finally:
-        _WS_ENFORCE_DEFAULT_MIGRATED = True
 
-    return raw
+def apply_api_from_scripting(raw: dict[str, Any]) -> bool:
+    """Relocate the REST-API surface out of the legacy ``scripting`` block.
+
+    The host/port for the agent's HTTP server and the optional Mission
+    Control URL used to live under ``scripting.rest_api`` and
+    ``scripting.mission_control_url``; they now live under ``api.rest`` and
+    ``api.mission_control_url``. Per field: a value already present under
+    ``api`` wins, so an operator who customised the REST port keeps it.
+    """
+    legacy = raw.get("scripting")
+    if not isinstance(legacy, dict):
+        return False
+
+    legacy_rest = legacy.get("rest_api")
+    legacy_mc_url = legacy.get("mission_control_url")
+    if not isinstance(legacy_rest, dict) and legacy_mc_url is None:
+        return False
+
+    api_section = _section(raw, "api")
+    changed = False
+
+    if isinstance(legacy_rest, dict):
+        rest_section = _section(api_section, "rest")
+        for key in ("enabled", "host", "port"):
+            if key in legacy_rest and key not in rest_section:
+                rest_section[key] = legacy_rest[key]
+                changed = True
+        if rest_section:
+            api_section["rest"] = rest_section
+
+    if legacy_mc_url is not None and "mission_control_url" not in api_section:
+        api_section["mission_control_url"] = legacy_mc_url
+        changed = True
+
+    if not changed:
+        return False
+
+    raw["api"] = api_section
+    return True
+
+
+def apply_ws_proxy_enforce_default(raw: dict[str, Any]) -> bool:
+    """Drop a persisted ``mavlink.ws_proxy_enforce_auth: false``.
+
+    The MAVLink WebSocket proxy used to log an unauthorized connection and
+    serve it anyway, and that posture was the shipped default. Every node
+    written while it was has ``false`` recorded in its own config file, so
+    changing the default in code changes nothing on any of them: an
+    explicit value wins over a default, which is the whole point of an
+    explicit value. Proven on a bench node, where the proxy reported
+    ``enforce_auth=false admitted=true`` while running a build whose
+    default was ``true``.
+
+    So the recorded value is removed rather than rewritten. Removing it
+    lets the node follow the shipped posture now and in future, where
+    writing ``true`` would freeze today's answer into the file and
+    reproduce this same problem the next time the default moves.
+
+    **This is a one-shot cleanup, not a normalisation, and the difference
+    is load-bearing.** Removing a recorded ``false`` is only correct for a
+    value some older build wrote. A ``false`` an operator sets *after* the
+    cleanup has run is a deliberate opt-out — a node with a third-party
+    client that cannot present a credential needs it — and re-applying
+    this would silently override it on every read, forever. So it runs
+    once per node, gated on the ledger in
+    :mod:`ados.core.config.maintenance`, and never on the read path.
+    """
+    mav = raw.get("mavlink")
+    if not isinstance(mav, dict) or mav.get("ws_proxy_enforce_auth") is not False:
+        return False
+    mav.pop("ws_proxy_enforce_auth", None)
+    return True
+
+
+Migration = Callable[[dict[str, Any]], bool]
+
+# Idempotent shape translations. Each backfills a destination from a legacy
+# source and lets an existing destination win, so applying it twice is a
+# no-op and applying it on the read path is free of consequence. These run
+# on both the read path and the maintenance pass, from this one list, so the
+# two can never drift into applying different sets.
+NORMALISERS: tuple[tuple[str, Migration], ...] = (
+    ("share_uplink_from_legacy_json", apply_share_uplink_from_legacy_json),
+    ("gs_ui_from_legacy_json", apply_gs_ui_from_legacy_json),
+    ("api_from_scripting", apply_api_from_scripting),
+)
+
+# One-shot cleanups. These *remove* a recorded value, which is only correct
+# the first time — after that, the same value means something different
+# (an operator said it, not an old build). Run by the maintenance pass only,
+# once per node, recorded in a persistent ledger. Never on the read path.
+ONE_SHOTS: tuple[tuple[str, Migration], ...] = (
+    ("ws_proxy_enforce_default", apply_ws_proxy_enforce_default),
+)
+
+ALL_MIGRATION_IDS: tuple[str, ...] = tuple(
+    name for name, _ in (*NORMALISERS, *ONE_SHOTS)
+)
+
+
+def apply_migrations(raw: dict[str, Any]) -> list[str]:
+    """Bring ``raw`` to the current shape in place; return what changed.
+
+    Normalisers only — this is what the read path runs, and the read path
+    must not apply a one-shot cleanup.
+    """
+    return [name for name, fn in NORMALISERS if fn(raw)]
+
+
+def apply_one_shots(raw: dict[str, Any], completed: set[str]) -> list[str]:
+    """Apply the one-shot cleanups not already recorded in ``completed``."""
+    return [
+        name for name, fn in ONE_SHOTS if name not in completed and fn(raw)
+    ]
+
+
+def legacy_gs_ui_path() -> Path:
+    """The legacy side file, for operator-facing reporting."""
+    return _LEGACY_GS_UI_PATH
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:

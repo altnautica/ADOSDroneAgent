@@ -793,7 +793,25 @@ mod param_syntax_tests {
                         .unwrap_or_default()
                         .to_string();
                     if let Ok(text) = fs::read_to_string(&path) {
-                        sources.push((name, text));
+                        // Strip line comments before the scan. A `mod::item`
+                        // spelled inside a doc comment is a cross-reference,
+                        // not a call — an intra-doc link to a sibling module is
+                        // exactly how you explain why this module does NOT use
+                        // it — and counting one as a caller made this guard
+                        // report a module as wired when nothing calls it.
+                        //
+                        // Only `//` lines are dropped, deliberately. Dropping
+                        // lines that begin with `*` would also drop a real
+                        // deref-assignment statement (`*guard = ...`), and the
+                        // failure that produces is a caller silently NOT
+                        // counted — which is the direction that turns this
+                        // guard into a false alarm nobody trusts.
+                        let code: String = text
+                            .lines()
+                            .filter(|l| !l.trim_start().starts_with("//"))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        sources.push((name, code));
                     }
                 }
             }

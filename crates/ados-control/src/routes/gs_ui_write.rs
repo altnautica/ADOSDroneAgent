@@ -60,9 +60,11 @@
 //!
 //! Best-effort as to the RESPONSE -- the write is already durable, so a reload
 //! that does not land costs a restart, not the setting -- but not silent: a
-//! refused or unsendable signal is logged with the unit, because otherwise the
+//! signal that does not land is logged with the unit, because otherwise the
 //! write returns 200 while the running config is unchanged and nothing explains
-//! why. See [`signal_reload`].
+//! why. It is also BOUNDED: the SIGHUP goes through [`crate::probe`], so a
+//! `systemctl` blocked on a busy bus can no longer stall the write's response.
+//! See [`signal_reload`].
 //!
 //! ## The profile gate
 //!
@@ -586,6 +588,15 @@ fn write_atomic_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
 
 // ---------------------------------------------------------------------------
 // SIGHUP the live UI services so a config write takes effect without a restart.
+//
+// The signal is raised by the async handlers, not by the sync `put_*_at` writers
+// that used to raise it. Bounding the SIGHUP makes `signal_reload` async, and
+// hoisting the effect one frame up was the smaller and better change than
+// turning the write logic — and the seven unit tests that call it directly —
+// async for a fire-and-forget call whose result is discarded either way. Each
+// handler fires it on exactly the previous condition: the persist having
+// succeeded, which for these writers is the same thing as the response being a
+// success (the only other outcome is the `E_UI_SAVE_FAILED` 500).
 // ---------------------------------------------------------------------------
 
 /// SIGHUP the named systemd unit so it reloads its UI config without a restart.
@@ -598,39 +609,46 @@ fn write_atomic_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
 /// returns 200 while the running config is unchanged, with nothing to explain
 /// why. `systemctl kill -s HUP <unit>` targets the unit rather than resolving a
 /// MainPID, so it needs no knowledge of the process tree.
-#[cfg(target_os = "linux")]
-fn signal_reload(unit: &str) {
-    match std::process::Command::new("systemctl")
-        .args(["kill", "-s", "HUP", unit])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
+///
+/// Bounded through [`crate::probe::status_only`] rather than a blocking
+/// `Command::status()`. That call WAITED for `systemctl` to exit, on the reactor,
+/// inside a config-write handler: a `systemctl` blocking on a busy D-Bus stalled
+/// the write's response for as long as the bus took, which is unbounded. The
+/// probe kills and reaps the child at [`crate::probe::PROBE_TIMEOUT`], so the
+/// worst case is a late warning instead of a wedged request.
+///
+/// The two failures the blocking version told apart (a refused signal vs. one
+/// that could not be sent) collapse into one warning, because `status_only`
+/// folds a non-zero exit, a spawn error and a timeout together. The operator's
+/// action is the same in each case and the response never depended on which it
+/// was, so nothing downstream loses information.
+async fn signal_reload(unit: &str) {
+    // A non-Linux dev host has no systemd, so there is no unit to signal and
+    // nothing to report. Keeping the guaranteed no-op (rather than letting the
+    // cross-platform probe spawn a `systemctl` that cannot exist) avoids both the
+    // pointless spawn and a warning on every UI write that would be true and
+    // useless.
+    if cfg!(not(target_os = "linux")) {
+        return;
+    }
+    if !crate::probe::status_only(
+        "systemctl",
+        &["kill", "-s", "HUP", unit],
+        crate::probe::PROBE_TIMEOUT,
+    )
+    .await
     {
-        Ok(status) if status.success() => {}
-        Ok(status) => tracing::warn!(
+        tracing::warn!(
             unit,
-            code = status.code(),
-            "UI config saved but the reload signal was refused; \
+            "UI config saved but the reload signal did not land; \
              the running config is unchanged until the unit restarts"
-        ),
-        Err(e) => tracing::warn!(
-            unit,
-            error = %e,
-            "UI config saved but the reload signal could not be sent; \
-             the running config is unchanged until the unit restarts"
-        ),
+        );
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-fn signal_reload(_unit: &str) {
-    // No systemd on a dev host, so there is no unit to signal and nothing to
-    // report: the write still lands and the panel reads it on next start.
-}
-
 /// SIGHUP the OLED display service so it reloads its config.
-fn signal_oled_reload() {
-    signal_reload("ados-oled.service");
+async fn signal_oled_reload() {
+    signal_reload("ados-oled.service").await;
 }
 
 /// SIGHUP the daemon that owns the button mapping so a write takes effect.
@@ -640,8 +658,8 @@ fn signal_oled_reload() {
 /// button service it replaced is gone. Signalling that old unit meant the write
 /// reported success while the mapping stayed as it was until the daemon next
 /// restarted.
-fn signal_buttons_reload() {
-    signal_reload("ados-pic.service");
+async fn signal_buttons_reload() {
+    signal_reload("ados-pic.service").await;
 }
 
 // ---------------------------------------------------------------------------
@@ -684,7 +702,11 @@ pub async fn put_ui_oled(
     if !is_ground_station(&state) {
         return profile_mismatch();
     }
-    put_ui_oled_at(&config_yaml_path(&state), &ui_config_path(&state), &update)
+    let resp = put_ui_oled_at(&config_yaml_path(&state), &ui_config_path(&state), &update);
+    if resp.status().is_success() {
+        signal_oled_reload().await;
+    }
+    resp
 }
 
 /// The OLED-write logic against explicit config + side-file paths. The public
@@ -712,7 +734,6 @@ fn put_ui_oled_at(config_path: &Path, ui_path: &Path, update: &OledUpdate) -> Re
     if let Err(e) = persist_gs_ui_section(config_path, "oled", &oled_value) {
         return error_message(StatusCode::INTERNAL_SERVER_ERROR, "E_UI_SAVE_FAILED", e);
     }
-    signal_oled_reload();
     Json(Value::Object(data)).into_response()
 }
 
@@ -743,7 +764,11 @@ pub async fn put_ui_buttons(
     if !is_ground_station(&state) {
         return profile_mismatch();
     }
-    put_ui_buttons_at(&config_yaml_path(&state), &ui_config_path(&state), &update)
+    let resp = put_ui_buttons_at(&config_yaml_path(&state), &ui_config_path(&state), &update);
+    if resp.status().is_success() {
+        signal_buttons_reload().await;
+    }
+    resp
 }
 
 /// The button-write logic against explicit config + side-file paths.
@@ -772,7 +797,6 @@ fn put_ui_buttons_at(config_path: &Path, ui_path: &Path, update: &ButtonsUpdate)
     if let Err(e) = persist_gs_ui_section(config_path, "buttons", &buttons_value) {
         return error_message(StatusCode::INTERNAL_SERVER_ERROR, "E_UI_SAVE_FAILED", e);
     }
-    signal_buttons_reload();
     Json(Value::Object(data)).into_response()
 }
 
@@ -803,7 +827,11 @@ pub async fn put_ui_screens(
     if !is_ground_station(&state) {
         return profile_mismatch();
     }
-    put_ui_screens_at(&config_yaml_path(&state), &ui_config_path(&state), &update)
+    let resp = put_ui_screens_at(&config_yaml_path(&state), &ui_config_path(&state), &update);
+    if resp.status().is_success() {
+        signal_oled_reload().await;
+    }
+    resp
 }
 
 /// The screen-write logic against explicit config + side-file paths.
@@ -831,7 +859,6 @@ fn put_ui_screens_at(config_path: &Path, ui_path: &Path, update: &ScreensUpdate)
     if let Err(e) = persist_gs_ui_section(config_path, "screens", &screens_value) {
         return error_message(StatusCode::INTERNAL_SERVER_ERROR, "E_UI_SAVE_FAILED", e);
     }
-    signal_oled_reload();
     Json(Value::Object(data)).into_response()
 }
 

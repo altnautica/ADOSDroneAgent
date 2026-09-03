@@ -30,7 +30,7 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
@@ -65,10 +65,16 @@ const BATCH_MAX_FRAMES: usize = 64;
 /// freshest state — the one an RCA wants — is the one retained.
 const SHIPPER_BUFFER_MAX_FRAMES: usize = 1024;
 
-/// Reconnect backoff schedule (milliseconds). The writer steps through these on
-/// repeated connect failures and holds at the last value, so an absent socket
-/// produces a slow, quiet retry rather than a hot loop.
-const BACKOFF_MS: [u64; 5] = [250, 500, 1000, 2000, 5000];
+/// Reconnect pacing.
+///
+/// Was a `[250, 500, 1000, 2000, 5000]` ms ladder that held at the last value.
+/// The socket is `/run/ados/logd.sock` on the same board, and this is its only
+/// writer, so the growth spread no herd — it just meant that after a handful of
+/// failures every producer waited five seconds before noticing the store had
+/// come up, and shipped nothing in the meantime. Fixed instead, from
+/// [`crate::retry`], which is also where the byte-identical second copy of this
+/// ladder in [`crate::logd::layer`] now gets its pace.
+const RECONNECT_PACE: crate::retry::RetryPace = crate::retry::LOCAL_SOCKET;
 
 /// Counters surfaced for diagnostics: events enqueued for shipping and events
 /// dropped because the channel was full. A visible drop is better than a silent
@@ -375,22 +381,17 @@ fn now_us() -> i64 {
 }
 
 /// The reconnecting socket writer. Holds at most one live connection; on any I/O
-/// error it drops the connection and reconnects on the backoff schedule. All
+/// error it drops the connection and reconnects on the fixed pace. All
 /// failures are swallowed — the socket being absent is the expected steady state
 /// before the daemon's unit is enabled, so it must never log or panic.
 struct SocketWriter {
     path: PathBuf,
     stream: Option<UnixStream>,
-    backoff_idx: usize,
 }
 
 impl SocketWriter {
     fn new(path: PathBuf) -> Self {
-        Self {
-            path,
-            stream: None,
-            backoff_idx: 0,
-        }
+        Self { path, stream: None }
     }
 
     /// Ensure a live connection, connecting if needed. Returns `false` (after a
@@ -403,13 +404,11 @@ impl SocketWriter {
         match UnixStream::connect(&self.path).await {
             Ok(s) => {
                 self.stream = Some(s);
-                self.backoff_idx = 0;
+
                 true
             }
             Err(_) => {
-                let ms = BACKOFF_MS[self.backoff_idx.min(BACKOFF_MS.len() - 1)];
-                self.backoff_idx = (self.backoff_idx + 1).min(BACKOFF_MS.len() - 1);
-                tokio::time::sleep(Duration::from_millis(ms)).await;
+                tokio::time::sleep(RECONNECT_PACE.wait()).await;
                 false
             }
         }
@@ -457,6 +456,8 @@ async fn shipper_task(rx: mpsc::Receiver<EventFrame>, path: PathBuf, stats: Arc<
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use rmpv::Value as MpVal;
     use tokio::io::AsyncReadExt;

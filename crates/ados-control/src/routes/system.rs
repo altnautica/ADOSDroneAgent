@@ -98,7 +98,7 @@ pub async fn get_time() -> Json<Value> {
     Json(json!({
         "time_ns": wall_clock_ns(),
         "monotonic_ns": monotonic_ns(),
-        "ntp_synced": ntp_synced(),
+        "ntp_synced": ntp_synced().await,
     }))
 }
 
@@ -169,64 +169,51 @@ fn monotonic_ns() -> u128 {
 /// probes chrony, then `timedatectl`, then the systemd-timesyncd marker file,
 /// failing closed to `false`. Off Linux there is no such daemon convention, so it
 /// is `false` (the dev-host / off-rig answer).
+///
+/// Both command probes go through [`crate::probe::capture`], which bounds them
+/// and folds an absent binary into `Unavailable`. That is why there is no
+/// `which` pre-flight any more: this is the highest-frequency shell-out in the
+/// crate (the GCS polls `/api/time` continuously to run Cristian's algorithm),
+/// and a `which` gate meant spawning a process to decide whether to spawn a
+/// process. An absent `chronyc` now falls through on the probe itself, which is
+/// the same outcome the gate produced.
 #[cfg(target_os = "linux")]
-fn ntp_synced() -> bool {
+async fn ntp_synced() -> bool {
     use std::path::Path;
-    use std::process::Command;
 
     // chrony (preferred): a successful `chronyc -c tracking` with a non-empty row
     // means chrony has a reference.
-    if which_on_path("chronyc") {
-        if let Ok(out) = Command::new("chronyc").args(["-c", "tracking"]).output() {
-            if out.status.success() && !out.stdout.is_empty() {
-                let s = String::from_utf8_lossy(&out.stdout);
-                if !s.trim().is_empty() {
-                    return true;
-                }
-            }
-        }
+    let chrony =
+        crate::probe::capture("chronyc", &["-c", "tracking"], crate::probe::PROBE_TIMEOUT).await;
+    if chrony.is_ok() && !chrony.text().trim().is_empty() {
+        return true;
     }
 
-    // timedatectl fallback: NTPSynchronized=yes.
-    if which_on_path("timedatectl") {
-        if let Ok(out) = Command::new("timedatectl")
-            .args(["show", "-p", "NTPSynchronized", "--value"])
-            .output()
-        {
-            if String::from_utf8_lossy(&out.stdout)
-                .trim()
-                .eq_ignore_ascii_case("yes")
-            {
-                return true;
-            }
-        }
+    // timedatectl fallback: NTPSynchronized=yes. The blocking version read
+    // stdout without checking the exit status; `capture` yields text only on a
+    // zero exit. `timedatectl show -p <prop> --value` exits zero whenever it
+    // prints a value, so the only case that changes is a non-zero exit that
+    // still printed `yes` — which then falls through to the marker file below
+    // rather than short-circuiting to `true`.
+    let synced = crate::probe::capture(
+        "timedatectl",
+        &["show", "-p", "NTPSynchronized", "--value"],
+        crate::probe::PROBE_TIMEOUT,
+    )
+    .await;
+    if synced.text().trim().eq_ignore_ascii_case("yes") {
+        return true;
     }
 
-    // systemd-timesyncd marker file: written once a reference is acquired.
+    // systemd-timesyncd marker file: written once a reference is acquired. Left
+    // as a synchronous `stat` — it is one lookup on tmpfs, so handing it to the
+    // blocking pool would cost more than it saves.
     Path::new("/run/systemd/timesync/synchronized").is_file()
 }
 
 #[cfg(not(target_os = "linux"))]
-fn ntp_synced() -> bool {
+async fn ntp_synced() -> bool {
     false
-}
-
-/// True when `name` is found as an executable on `PATH`. A bare-command lookup
-/// matching `shutil.which`, used to gate the chrony / timedatectl probes so a
-/// fresh rootfs without either tool fails closed. Linux-only (the call sites are
-/// Linux-gated).
-#[cfg(target_os = "linux")]
-fn which_on_path(name: &str) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    let Ok(path_var) = std::env::var("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&path_var).any(|dir| {
-        let candidate = dir.join(name);
-        std::fs::metadata(&candidate)
-            .map(|m| m.is_file() && (m.permissions().mode() & 0o111 != 0))
-            .unwrap_or(false)
-    })
 }
 
 #[cfg(test)]
@@ -266,11 +253,11 @@ mod tests {
         assert!(b >= a, "monotonic clock went backwards: {a} -> {b}");
     }
 
-    #[test]
-    fn ntp_synced_returns_a_bool_without_panicking() {
+    #[tokio::test]
+    async fn ntp_synced_returns_a_bool_without_panicking() {
         // Off Linux this is false; on Linux it is a best-effort probe. Either way
         // the call must not panic.
-        let _ = ntp_synced();
+        let _ = ntp_synced().await;
     }
 
     #[test]

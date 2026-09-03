@@ -27,6 +27,7 @@ use async_trait::async_trait;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
+use crate::cmd::{CmdRunner, TokioCmdRunner};
 use crate::paths;
 use active_flag::ActiveFlagWriter;
 use events::{UplinkEvent, UplinkEventBus, UplinkEventKind};
@@ -88,18 +89,50 @@ impl Prober for CloudProber {
 }
 
 /// The kernel-routing seam. The production impl forwards to
-/// [`failover::apply_default_route`]; tests inject a recording no-op.
+/// [`failover::apply_default_route`] over the shared [`CmdRunner`]; tests inject
+/// a recording no-op.
+///
+/// `apply` is `async` because `ip route replace` is a process spawn. A sync
+/// trait method is what let a blocking `std::process::Command` sit on the
+/// reactor two frames below [`tick`](UplinkRouter::tick) with nothing in the
+/// type system objecting; an `async` method makes that unrepresentable.
+#[async_trait]
 pub trait RouteApplier: Send + Sync {
-    fn apply(&self, iface: &str, gateway: Option<&str>) -> bool;
+    async fn apply(&self, iface: &str, gateway: Option<&str>) -> bool;
 }
 
-/// Production route applier: `ip route replace default ...`.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct IpRouteApplier;
+/// Production route applier: `ip route replace default ...` over the crate's
+/// async command runner, bounded by a timeout so a wedged `ip` cannot occupy a
+/// worker for the life of the process.
+///
+/// The runner is held rather than constructed per call, mirroring how the
+/// hardware managers hold theirs. The unit-testable seam is
+/// [`failover::apply_default_route`], which takes the runner as a parameter, so
+/// the argv is assertable against a scripted runner with no routing table.
+#[derive(Clone)]
+pub struct IpRouteApplier {
+    runner: Arc<dyn CmdRunner>,
+}
 
+impl IpRouteApplier {
+    /// Applier over the production `tokio::process` runner.
+    pub fn new() -> Self {
+        Self {
+            runner: Arc::new(TokioCmdRunner),
+        }
+    }
+}
+
+impl Default for IpRouteApplier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
 impl RouteApplier for IpRouteApplier {
-    fn apply(&self, iface: &str, gateway: Option<&str>) -> bool {
-        failover::apply_default_route(iface, gateway)
+    async fn apply(&self, iface: &str, gateway: Option<&str>) -> bool {
+        failover::apply_default_route(self.runner.as_ref(), iface, gateway).await
     }
 }
 
@@ -114,6 +147,26 @@ struct RouterState {
     /// Monotonic instant of the last switch; `None` == never switched (treated
     /// as "cooldown elapsed", matching the Python `_last_switch_at = 0.0`).
     last_switch_at: Option<Instant>,
+}
+
+/// The externally-visible effects of a decided switch, cloned out of
+/// [`RouterState`] under the lock so the I/O they imply can run with the lock
+/// released. See [`UplinkRouter::commit_switch`].
+struct SwitchEffect {
+    previous: Option<String>,
+    uplink: Option<String>,
+    available: Vec<String>,
+    reachable: bool,
+}
+
+/// What a failed probe decided. Computed inside the state critical section, then
+/// executed outside it.
+enum FailoverOutcome {
+    /// The failing uplink is the only one available: reachability drops and the
+    /// route stays where it is.
+    LostReachability(Option<String>),
+    /// A lower-priority uplink is viable: commit the switch to it.
+    Switch(SwitchEffect),
 }
 
 /// Priority-based uplink failover with hysteresis and health probing.
@@ -147,7 +200,7 @@ impl UplinkRouter {
             priority,
             priority_config_path,
             Arc::new(CloudProber),
-            Arc::new(IpRouteApplier),
+            Arc::new(IpRouteApplier::new()),
             ActiveFlagWriter::new(),
         )
     }
@@ -169,7 +222,7 @@ impl UplinkRouter {
             priority,
             priority_config_path,
             Arc::new(CloudProber),
-            Arc::new(IpRouteApplier),
+            Arc::new(IpRouteApplier::new()),
             ActiveFlagWriter::new().with_emitter(emitter),
         )
     }
@@ -221,14 +274,18 @@ impl UplinkRouter {
     /// Validate, store, and atomically persist a new priority list. Takes
     /// `&self` (the list is interior-mutable) so the daemon, which owns the
     /// router behind an `Arc`, can also drive it.
-    pub fn set_priority(&self, priority_list: Vec<String>) -> Result<(), String> {
+    ///
+    /// `async` because the persist is a blocking write that used to run on the
+    /// reactor. The `std::sync::Mutex` critical section is the swap only; its
+    /// guard is dropped before the write is awaited.
+    pub async fn set_priority(&self, priority_list: Vec<String>) -> Result<(), String> {
         failover::validate_priority(&priority_list)?;
         {
             let mut p = self.priority.lock().unwrap_or_else(|e| e.into_inner());
             *p = priority_list;
         }
         let snapshot = self.priority_snapshot();
-        failover::save_priority(&self.priority_config_path, &snapshot);
+        failover::save_priority_async(&self.priority_config_path, &snapshot).await;
         info!(priority = ?snapshot, "uplink.priority_updated");
         Ok(())
     }
@@ -241,8 +298,11 @@ impl UplinkRouter {
     /// cap. Best-effort: a missing / malformed file resolves to the default,
     /// which is the loader's documented behavior, so a transient read error
     /// never wedges the failover order.
-    pub fn reload_priority(&self) -> bool {
-        let on_disk = failover::load_priority(&self.priority_config_path);
+    ///
+    /// The read is awaited first and the `std::sync::Mutex` taken only for the
+    /// compare-and-swap that follows, so the guard never spans it.
+    pub async fn reload_priority(&self) -> bool {
+        let on_disk = failover::load_priority_async(&self.priority_config_path).await;
         let mut p = self.priority.lock().unwrap_or_else(|e| e.into_inner());
         if *p == on_disk {
             return false;
@@ -339,28 +399,56 @@ impl UplinkRouter {
         });
     }
 
-    /// Switch the active uplink, re-program the default route, reconcile the
-    /// active-uplink flag, and publish an `uplink_changed` event. Ports
-    /// `_switch_to`. Caller holds the state lock.
-    async fn switch_to(
-        &self,
+    /// Apply a switch to the in-memory state and hand back the effects it
+    /// implies.
+    ///
+    /// Synchronous by construction: this is the whole of the state critical
+    /// section, and the route-apply / flag-write / event-publish that follow are
+    /// deliberately *not* part of it — see [`commit_switch`](Self::commit_switch).
+    fn record_switch(
         st: &mut RouterState,
         uplink: Option<String>,
         available: Vec<String>,
-    ) {
+    ) -> SwitchEffect {
         let previous = st.active_uplink.clone();
         st.active_uplink = uplink.clone();
         st.fail_streak = 0;
         st.success_streak = 0;
         st.last_switch_at = Some(Instant::now());
+        SwitchEffect {
+            previous,
+            uplink,
+            available,
+            reachable: st.internet_reachable,
+        }
+    }
 
-        if let Some(ref name) = uplink {
+    /// Re-program the default route, reconcile the active-uplink flag, and
+    /// publish an `uplink_changed` event. The I/O half of `_switch_to`.
+    ///
+    /// Runs with the router state mutex **released**. It used to run with the
+    /// guard held, because `_switch_to` took `st: &mut RouterState`: the manager
+    /// gateway lookup, the `ip route replace` spawn and the flag write all held
+    /// the one lock every other router operation needs — `active_iface`,
+    /// `get_state`, `set_data_cap_state`, the next tick. On the failover path
+    /// that meant the lock was held longest at the worst possible moment, when
+    /// the link had already dropped. Everything this needs from the state is
+    /// carried in the [`SwitchEffect`] instead, so nothing here touches it.
+    async fn commit_switch(&self, effect: SwitchEffect) {
+        let SwitchEffect {
+            previous,
+            uplink,
+            available,
+            reachable,
+        } = effect;
+
+        if let Some(name) = &uplink {
             let iface = self
                 .uplink_iface(name)
                 .await
                 .unwrap_or_else(|| name.clone());
             let gateway = self.uplink_gateway(name).await;
-            self.route.apply(&iface, gateway.as_deref());
+            self.route.apply(&iface, gateway.as_deref()).await;
         }
 
         // Presence of the flag is the mesh gateway-election signal: write it on
@@ -368,7 +456,7 @@ impl UplinkRouter {
         self.active_flag
             .lock()
             .await
-            .sync_async(uplink.as_deref(), st.internet_reachable)
+            .sync_async(uplink.as_deref(), reachable)
             .await;
 
         info!(
@@ -381,32 +469,70 @@ impl UplinkRouter {
             kind: UplinkEventKind::UplinkChanged,
             active_uplink: uplink,
             available,
-            internet_reachable: st.internet_reachable,
+            internet_reachable: reachable,
             data_cap_state: None,
             timestamp_ms: self.now_ms(),
         });
     }
 
+    /// Switch the active uplink and run the side effects it implies. Ports
+    /// `_switch_to`, split across the lock boundary: record under the guard,
+    /// commit without it. Callers must NOT hold the state lock.
+    async fn switch_to(&self, uplink: Option<String>, available: Vec<String>) {
+        let effect = {
+            let mut st = self.state.lock().await;
+            Self::record_switch(&mut st, uplink, available)
+        };
+        self.commit_switch(effect).await;
+    }
+
     /// One control-loop iteration. Ports `_tick`.
+    ///
+    /// The Python original held one lock for the whole tick, and so did this
+    /// until the route apply became a bounded async spawn. It now takes the state
+    /// mutex only for the synchronous decision points and releases it across
+    /// every `.await`: the manager reads, the cloud probe, the route apply, the
+    /// flag write. `tick` has a single driver (the daemon's health interval), so
+    /// what that interleaving admits is only the short state readers — which are
+    /// exactly what a wedged `ip route replace` used to block. Effect ordering
+    /// inside the tick is unchanged: a switch is still committed before the
+    /// uplink it selected is probed.
     pub async fn tick(&self) {
         // Pick up an operator priority change (`PUT /network/priority` rewrote
         // the file) before evaluating viability, so a new failover order takes
         // effect this very tick. Then snapshot the order once so this whole
         // iteration sees a consistent list even if the file is rewritten again
         // mid-tick.
-        self.reload_priority();
+        self.reload_priority().await;
         let priority = self.priority_snapshot();
 
-        let mut st = self.state.lock().await;
+        // Viability reads the managers only — it never touches router state — so
+        // it runs before the lock is taken. It used to run under it, which meant
+        // every manager `is_up` (a carrier read, or an `ip`/`nmcli` shell-out)
+        // held the state mutex.
         let available = self.viable_uplinks(&priority).await;
 
         // No viable uplink at all. Clear state if we had one.
         if available.is_empty() {
-            if st.active_uplink.is_some() {
-                self.switch_to(&mut st, None, Vec::new()).await;
-            }
-            if st.internet_reachable {
+            // One critical section decides both effects; both then execute with
+            // the guard released, in the original order. The switch is recorded
+            // *before* `internet_reachable` is cleared, so its `uplink_changed`
+            // event still carries the pre-clear reachability the Python emitted.
+            let (switch, was_reachable) = {
+                let mut st = self.state.lock().await;
+                let switch = if st.active_uplink.is_some() {
+                    Some(Self::record_switch(&mut st, None, Vec::new()))
+                } else {
+                    None
+                };
+                let was_reachable = st.internet_reachable;
                 st.internet_reachable = false;
+                (switch, was_reachable)
+            };
+            if let Some(effect) = switch {
+                self.commit_switch(effect).await;
+            }
+            if was_reachable {
                 self.publish_health_change(None, Vec::new(), false).await;
             } else {
                 // Even with no prior reachability, ensure the flag is gone when
@@ -417,117 +543,165 @@ impl UplinkRouter {
         }
 
         // First-time pick: highest-priority viable uplink.
-        if st.active_uplink.is_none() {
-            let first = available[0].clone();
-            self.switch_to(&mut st, Some(first), available.clone())
-                .await;
+        let first_pick = {
+            let mut st = self.state.lock().await;
+            if st.active_uplink.is_none() {
+                Some(Self::record_switch(
+                    &mut st,
+                    Some(available[0].clone()),
+                    available.clone(),
+                ))
+            } else {
+                None
+            }
+        };
+        if let Some(effect) = first_pick {
+            self.commit_switch(effect).await;
         }
 
-        // Probe the current uplink.
-        let current = st.active_uplink.clone().unwrap_or_default();
+        // Probe the current uplink. The name is cloned out and the guard dropped
+        // before the iface lookup and the probe, both of which are I/O.
+        let current = {
+            let st = self.state.lock().await;
+            st.active_uplink.clone().unwrap_or_default()
+        };
         let iface = self.uplink_iface(&current).await;
         let ok = self.prober.probe(iface.as_deref()).await;
 
-        let cooldown_ok = match st.last_switch_at {
+        let last_switch_at = self.state.lock().await.last_switch_at;
+        let cooldown_ok = match last_switch_at {
             Some(t) => t.elapsed().as_secs_f64() >= failover::SWITCH_COOLDOWN_SECONDS,
             None => true,
         };
 
         if ok {
-            self.handle_probe_success(&mut st, &priority, available, cooldown_ok)
+            self.handle_probe_success(&priority, available, cooldown_ok)
                 .await;
         } else {
-            self.handle_probe_failure(&mut st, &priority, available, cooldown_ok)
+            self.handle_probe_failure(&priority, available, cooldown_ok)
                 .await;
         }
     }
 
-    /// Ports `_handle_probe_success`. Caller holds the state lock.
+    /// Ports `_handle_probe_success`.
+    ///
+    /// Takes no state guard: it acquires the mutex for two short synchronous
+    /// critical sections and releases it across the reachability publish, the
+    /// candidate probe and the switch — all I/O.
     async fn handle_probe_success(
         &self,
-        st: &mut RouterState,
         priority: &[String],
         available: Vec<String>,
         cooldown_ok: bool,
     ) {
-        st.fail_streak = 0;
-        if !st.internet_reachable {
-            st.internet_reachable = true;
-            let active = st.active_uplink.clone();
+        let (recovered, active) = {
+            let mut st = self.state.lock().await;
+            st.fail_streak = 0;
+            let recovered = !st.internet_reachable;
+            if recovered {
+                st.internet_reachable = true;
+            }
+            (recovered, st.active_uplink.clone())
+        };
+        if recovered {
             info!(uplink = ?active, "uplink.health_recovered");
             self.publish_health_change(active.as_deref(), available.clone(), true)
                 .await;
         }
 
-        let active = match (cooldown_ok, st.active_uplink.clone()) {
+        let active = match (cooldown_ok, active) {
             (true, Some(a)) => a,
             _ => return,
         };
 
-        let higher = failover::select_higher_priority(priority, &available, Some(&active));
-        if higher.is_empty() {
-            st.success_streak = 0;
-            return;
-        }
-
-        st.success_streak += 1;
-        if st.success_streak < failover::SUCCESS_UP_THRESHOLD {
-            return;
-        }
+        // `select_higher_priority` is pure, so the streak bookkeeping and the
+        // selection that gates it share one critical section with no await in it.
+        let candidate = {
+            let mut st = self.state.lock().await;
+            let higher = failover::select_higher_priority(priority, &available, Some(&active));
+            if higher.is_empty() {
+                st.success_streak = 0;
+                return;
+            }
+            st.success_streak += 1;
+            if st.success_streak < failover::SUCCESS_UP_THRESHOLD {
+                return;
+            }
+            higher[0].clone()
+        };
 
         // Probe the higher-priority uplink before switching up so we do not
         // drop off a working link for a dead one.
-        let candidate = higher[0].clone();
         let cand_iface = self
             .uplink_iface(&candidate)
             .await
             .unwrap_or_else(|| candidate.clone());
         if self.prober.probe(Some(&cand_iface)).await {
-            self.switch_to(st, Some(candidate), available).await;
+            self.switch_to(Some(candidate), available).await;
         }
     }
 
-    /// Ports `_handle_probe_failure`. Caller holds the state lock.
+    /// Ports `_handle_probe_failure`.
+    ///
+    /// The whole decision — streak bookkeeping, the pure failover selection, the
+    /// reachability clear — is one synchronous critical section, and the effect it
+    /// produces is awaited with the guard released. This is the uplink-failover
+    /// path, so it is the one that most needs the lock back before `ip` runs.
     async fn handle_probe_failure(
         &self,
-        st: &mut RouterState,
         priority: &[String],
         available: Vec<String>,
         cooldown_ok: bool,
     ) {
-        st.success_streak = 0;
-        st.fail_streak += 1;
-        if st.fail_streak < failover::FAIL_DOWN_THRESHOLD {
-            return;
-        }
-        if !cooldown_ok {
-            return;
-        }
-
-        let next_uplink =
-            failover::select_failover_target(priority, &available, st.active_uplink.as_deref());
-        let next_uplink = match next_uplink {
-            Some(n) => n,
-            None => {
-                // Only the current (failing) uplink is available.
-                if st.internet_reachable {
-                    st.internet_reachable = false;
-                    let active = st.active_uplink.clone();
-                    self.publish_health_change(active.as_deref(), available, false)
-                        .await;
-                }
+        let outcome = {
+            let mut st = self.state.lock().await;
+            st.success_streak = 0;
+            st.fail_streak += 1;
+            if st.fail_streak < failover::FAIL_DOWN_THRESHOLD {
                 return;
+            }
+            if !cooldown_ok {
+                return;
+            }
+
+            let next_uplink =
+                failover::select_failover_target(priority, &available, st.active_uplink.as_deref());
+            match next_uplink {
+                None => {
+                    // Only the current (failing) uplink is available.
+                    if !st.internet_reachable {
+                        return;
+                    }
+                    st.internet_reachable = false;
+                    FailoverOutcome::LostReachability(st.active_uplink.clone())
+                }
+                Some(next_uplink) => {
+                    warn!(
+                        from_uplink = ?st.active_uplink,
+                        to_uplink = next_uplink,
+                        fail_streak = st.fail_streak,
+                        "uplink.failover"
+                    );
+                    // Cleared before the switch is recorded, so the
+                    // `uplink_changed` event carries `internet_reachable: false`
+                    // exactly as it did before.
+                    st.internet_reachable = false;
+                    FailoverOutcome::Switch(Self::record_switch(
+                        &mut st,
+                        Some(next_uplink),
+                        available.clone(),
+                    ))
+                }
             }
         };
 
-        warn!(
-            from_uplink = ?st.active_uplink,
-            to_uplink = next_uplink,
-            fail_streak = st.fail_streak,
-            "uplink.failover"
-        );
-        st.internet_reachable = false;
-        self.switch_to(st, Some(next_uplink), available).await;
+        match outcome {
+            FailoverOutcome::LostReachability(active) => {
+                self.publish_health_change(active.as_deref(), available, false)
+                    .await;
+            }
+            FailoverOutcome::Switch(effect) => self.commit_switch(effect).await,
+        }
     }
 
     /// The kernel iface name of the currently-active uplink, or `None` when no
@@ -574,7 +748,7 @@ impl UplinkRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()
@@ -616,12 +790,44 @@ mod tests {
     struct RecordingRoute {
         calls: std::sync::Mutex<Vec<(String, Option<String>)>>,
     }
+    #[async_trait]
     impl RouteApplier for RecordingRoute {
-        fn apply(&self, iface: &str, gateway: Option<&str>) -> bool {
+        async fn apply(&self, iface: &str, gateway: Option<&str>) -> bool {
             self.calls
                 .lock()
                 .unwrap()
                 .push((iface.to_string(), gateway.map(|g| g.to_string())));
+            true
+        }
+    }
+
+    /// Route applier that reads the router's own state while the route is being
+    /// applied.
+    ///
+    /// This is the regression guard for the substantive fix: `commit_switch`
+    /// runs the route apply with the state mutex released, so a concurrent
+    /// reader completes. Back when `_switch_to` took `st: &mut RouterState` the
+    /// guard was still held here, and every state reader — `active_iface`,
+    /// `get_state`, the data-cap consumer — queued behind an `ip route replace`
+    /// spawn. The read is bounded so a regression fails as an assertion rather
+    /// than as a hung test.
+    #[derive(Default)]
+    struct ReentrantRoute {
+        router: std::sync::OnceLock<std::sync::Weak<UplinkRouter>>,
+        state_readable: AtomicBool,
+    }
+    #[async_trait]
+    impl RouteApplier for ReentrantRoute {
+        async fn apply(&self, _iface: &str, _gateway: Option<&str>) -> bool {
+            let Some(router) = self.router.get().and_then(|w| w.upgrade()) else {
+                return true;
+            };
+            // Bounded so a regression is a failed assertion, not a hung test.
+            let bound = std::time::Duration::from_secs(2);
+            let read = tokio::time::timeout(bound, router.get_state()).await;
+            if read.is_ok() {
+                self.state_readable.store(true, Ordering::SeqCst);
+            }
             true
         }
     }
@@ -723,7 +929,7 @@ mod tests {
         // The flag is still present: a lower uplink is now active.
         assert!(flag.is_file());
         // set_priority is the persisted-config writer; exercise it once here.
-        assert!(r.set_priority(s(&["eth0", "wlan0_client"])).is_ok());
+        assert!(r.set_priority(s(&["eth0", "wlan0_client"])).await.is_ok());
     }
 
     #[tokio::test]
@@ -827,13 +1033,13 @@ mod tests {
         );
         assert_eq!(r.get_priority(), s(&["wlan0_client", "eth0"]));
         // An unchanged file → reload is a no-op.
-        assert!(!r.reload_priority());
+        assert!(!r.reload_priority().await);
         // Operator rewrites the file (the REST PUT does this) → reload adopts it.
         failover::save_priority(&cfg, &s(&["eth0", "wlan0_client", "wwan0"]));
-        assert!(r.reload_priority());
+        assert!(r.reload_priority().await);
         assert_eq!(r.get_priority(), s(&["eth0", "wlan0_client", "wwan0"]));
         // A second reload with no further change → no-op.
-        assert!(!r.reload_priority());
+        assert!(!r.reload_priority().await);
     }
 
     #[tokio::test]
@@ -868,5 +1074,33 @@ mod tests {
         arm_cooldown(&r).await;
         r.tick().await; // fail_streak 3 + cooldown → fail over to eth0.
         assert_eq!(r.get_state().await["active_uplink"], "eth0");
+    }
+
+    #[tokio::test]
+    async fn the_state_mutex_is_not_held_across_the_route_apply() {
+        let dir = tempfile::tempdir().unwrap();
+        let flag = dir.path().join("uplink-active");
+        let route = Arc::new(ReentrantRoute::default());
+        let r = Arc::new(UplinkRouter::with_seams(
+            managers(&[("eth0", true)]),
+            Some(s(&["eth0"])),
+            Some(flag.with_extension("cfg.json")),
+            Arc::new(ScriptedProber {
+                verdict: true,
+                calls: AtomicUsize::new(0),
+            }),
+            Arc::clone(&route) as Arc<dyn RouteApplier>,
+            ActiveFlagWriter::with_path(flag),
+        ));
+        route.router.set(Arc::downgrade(&r)).unwrap();
+
+        // The first tick has no active uplink, so it picks eth0 — the route-apply
+        // path — and the applier reads the state from inside the apply.
+        r.tick().await;
+        assert_eq!(r.get_state().await["active_uplink"], "eth0");
+        assert!(
+            route.state_readable.load(Ordering::SeqCst),
+            "a router state read must complete while the default route is being applied"
+        );
     }
 }

@@ -127,7 +127,7 @@ impl AtlasControlClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ados_protocol::atlas::{CaptureState, VioHealth};
+    use ados_protocol::atlas::{CaptureState, PoseSource, VioHealth};
     use tokio::net::UnixListener;
 
     fn fixed_status() -> CaptureStatus {
@@ -138,6 +138,10 @@ mod tests {
             vio_health: VioHealth::Good,
             camera_count: 1,
             ingest_rate_hz: 9.5,
+            capped: false,
+            anchored: true,
+            pose_tier: PoseSource::LocalVio,
+            dropped_keyframes: 0,
         }
     }
 

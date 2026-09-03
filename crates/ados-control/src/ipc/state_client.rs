@@ -25,8 +25,8 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
+use ados_protocol::retry::RetryPace;
 use ados_protocol::state::read_state_value;
 use serde_json::Value;
 use tokio::io::BufReader;
@@ -46,10 +46,18 @@ pub fn default_state_socket() -> PathBuf {
     Path::new(&run_dir).join(STATE_SOCKET_NAME)
 }
 
-/// Reconnect backoff bounds. A missing socket is the common case (an idle agent),
-/// so the first retry is quick and the delay grows to a ceiling to avoid spinning.
-const BACKOFF_START: Duration = Duration::from_millis(250);
-const BACKOFF_MAX: Duration = Duration::from_secs(5);
+/// Reconnect pacing.
+///
+/// This was a 250 ms ladder doubling to a 5 s ceiling. On a *local Unix
+/// socket* that growth buys nothing and costs the only thing that matters:
+/// there is one reader per socket, so there is no herd to spread, and the
+/// socket reappearing is the common case (the state hub restarted). The ladder
+/// meant the reader sat idle for up to five seconds after the peer was already
+/// back, with `/api/status/full` and `/api/telemetry` serving a stale snapshot
+/// for that whole window. Fixed and short instead — see
+/// [`ados_protocol::retry`] for why no recovery loop in this tree grows or
+/// gives up.
+const RECONNECT_PACE: RetryPace = ados_protocol::retry::LOCAL_SOCKET;
 
 /// The shared, latest vehicle-state snapshot. `None` until the first frame
 /// decodes (and after a reconnect window where no frame has arrived yet). A route
@@ -136,7 +144,8 @@ impl StateIpcClient {
 /// back to the reconnect path.
 async fn read_loop(socket_path: PathBuf, snapshot: Snapshot, stop: oneshot::Receiver<()>) {
     tokio::pin!(stop);
-    let mut backoff = BACKOFF_START;
+    // No mutable pacing state: the interval after the hundredth failure is the
+    // interval after the first, which is the contract.
     tracing::info!(path = %socket_path.display(), "state client started");
     loop {
         tokio::select! {
@@ -148,7 +157,6 @@ async fn read_loop(socket_path: PathBuf, snapshot: Snapshot, stop: oneshot::Rece
             connected = UnixStream::connect(&socket_path) => {
                 match connected {
                     Ok(stream) => {
-                        backoff = BACKOFF_START;
                         tracing::debug!(path = %socket_path.display(), "state socket connected");
                         process_stream(BufReader::new(stream), &snapshot, &mut stop).await;
                         // The stream ended (EOF or error). Loop to reconnect.
@@ -159,8 +167,7 @@ async fn read_loop(socket_path: PathBuf, snapshot: Snapshot, stop: oneshot::Rece
                             error = %e,
                             "state socket absent; will retry"
                         );
-                        let wait = backoff;
-                        backoff = (backoff * 2).min(BACKOFF_MAX);
+                        let wait = RECONNECT_PACE.wait();
                         tokio::select! {
                             _ = &mut stop => return,
                             _ = tokio::time::sleep(wait) => {}
@@ -200,6 +207,8 @@ async fn process_stream<R>(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use ados_protocol::state::{encode_v1, encode_v2};
     use serde_json::json;

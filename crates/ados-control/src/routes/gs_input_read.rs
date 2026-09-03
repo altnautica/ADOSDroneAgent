@@ -169,16 +169,16 @@ pub async fn get_bluetooth_paired(State(state): State<AppState>) -> Response {
     if !is_ground_station(&state) {
         return profile_mismatch();
     }
-    let devices = paired_bluetooth_records();
+    let devices = paired_bluetooth_records().await;
     Json(json!({ "devices": devices })).into_response()
 }
 
 /// Run `bluetoothctl paired-devices` and render its output as the Python
-/// `paired_bluetooth` record set. A non-zero exit, a missing `bluetoothctl`, or
-/// any spawn failure yields the empty list (the Python route returns `[]` on
-/// `rc != 0` and treats a spawn failure as `rc=127`).
-fn paired_bluetooth_records() -> Vec<Value> {
-    let stdout = match bluetoothctl_paired_devices() {
+/// `paired_bluetooth` record set. A non-zero exit, a missing `bluetoothctl`, a
+/// spawn failure, or a probe timeout all yield the empty list (the Python route
+/// returns `[]` on `rc != 0` and treats a spawn failure as `rc=127`).
+async fn paired_bluetooth_records() -> Vec<Value> {
+    let stdout = match bluetoothctl_paired_devices().await {
         Some(out) => out,
         None => return Vec::new(),
     };
@@ -197,17 +197,25 @@ fn paired_bluetooth_records() -> Vec<Value> {
 }
 
 /// The stdout of `bluetoothctl paired-devices`, or `None` when the command could
-/// not be spawned or exited non-zero. Lossy-decodes the stdout the same way the
-/// Python `_btctl` does (`decode(errors="replace")`).
-fn bluetoothctl_paired_devices() -> Option<String> {
-    let output = std::process::Command::new("bluetoothctl")
-        .arg("paired-devices")
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+/// not be spawned, exited non-zero, or did not answer inside
+/// [`crate::probe::SLOW_PROBE_TIMEOUT`]. Lossy-decodes the stdout the same way
+/// the Python `_btctl` does (`decode(errors="replace")`).
+///
+/// Bounded via `probe::capture` rather than spawned inline: `bluetoothctl` talks
+/// to `bluetoothd` over D-Bus and never returns when `bluetoothd` is wedged, so
+/// a blocking spawn here parked a reactor worker for the life of the process.
+/// `routes::gs_bluetooth::btctl` already made this exact call this way.
+async fn bluetoothctl_paired_devices() -> Option<String> {
+    match crate::probe::capture(
+        "bluetoothctl",
+        &["paired-devices"],
+        crate::probe::SLOW_PROBE_TIMEOUT,
+    )
+    .await
+    {
+        crate::probe::ProbeOutput::Ok(out) => Some(out),
+        crate::probe::ProbeOutput::Unavailable => None,
     }
-    Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// Parse `Device <MAC> <Name>` lines from `bluetoothctl` output into `(mac,
