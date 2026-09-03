@@ -45,7 +45,10 @@ impl VideoOrchestrator {
     /// Honors [`VideoOrchestrator::camera_state_path`] (the canonical contract
     /// path when `None`), so a test can observe the stamp without writing to the
     /// developer's real `/run/ados/camera-state.json`.
-    pub(crate) fn persist_pipeline_outcome(&self, outcome: crate::camera_state::PipelineOutcome) {
+    pub(crate) async fn persist_pipeline_outcome(
+        &self,
+        outcome: crate::camera_state::PipelineOutcome,
+    ) {
         // A retry is not a fresh start. The health loop re-enters `start_stream`
         // on its backoff, and stamping `starting` there erased the standing
         // failure: on a node with no usable encoder the surface flapped between
@@ -78,9 +81,9 @@ impl VideoOrchestrator {
             .with_pipeline(outcome, reason, encoder, encoder_hw);
         let path = self
             .camera_state_path
-            .as_deref()
-            .unwrap_or(std::path::Path::new(crate::camera_state::CAMERA_STATE_JSON));
-        if let Err(e) = snapshot.write_to(path) {
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from(crate::camera_state::CAMERA_STATE_JSON));
+        if let Err(e) = snapshot.write_to_async(path).await {
             tracing::warn!(error = %e, "camera_state_pipeline_persist_failed");
         }
     }
@@ -121,7 +124,8 @@ impl VideoOrchestrator {
         // and for that whole window the sidecar otherwise still reads
         // `streaming` for a pipeline that has no encoder at all.
         self.encoder_label = None;
-        self.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Starting);
+        self.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Starting)
+            .await;
 
         // Resolve the capture source. An explicit network source
         // (`video.camera.source: rtsp://…` / `http://…`) streams from that URL
@@ -129,6 +133,18 @@ impl VideoOrchestrator {
         // synthetic single-camera result flows through the exact same start
         // sequence (primary → encoder detect → command build) as a discovered
         // camera. Otherwise probe for a local V4L2/CSI camera as before.
+        //
+        // /!\ This re-probe is LOAD-BEARING for camera format renegotiation and
+        // must never be cached across restarts. `select_input_format`
+        // (`encoder.rs`) resolves MJPEG-vs-YUYV from `CameraInfo::capabilities`
+        // at argv-build time, so a UVC camera that renegotiates or enumerates
+        // differently after a replug would otherwise be driven with the stale
+        // `-input_format` forever and ffmpeg would die on every attempt.
+        // Because the health-check recovery path is `stop_stream` →
+        // `start_stream`, every restart re-enumerates here and the argv is
+        // rebuilt from the CURRENT capabilities. Hoisting this out of
+        // `start_stream` (or memoising `last_cameras`) would turn recovery into
+        // a blind cold-start against a format the device no longer offers.
         let net_source = self.camera_cfg.network_source().map(str::to_string);
         let discovery = match net_source {
             Some(url) => {
@@ -142,7 +158,8 @@ impl VideoOrchestrator {
         // `persist_camera_state` this replaces rebuilt the snapshot from
         // discovery alone, so it reset the outcome to `unknown` and bypassed the
         // sidecar-path override tests rely on.
-        self.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Starting);
+        self.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Starting)
+            .await;
 
         let Some(primary) = self.last_cameras.primary_camera_info() else {
             tracing::error!("no_primary_camera");
@@ -152,7 +169,8 @@ impl VideoOrchestrator {
             self.encoder_label = None;
             self.last_start_error = StartError::NoPrimaryCamera;
             self.state = PipelineState::Error;
-            self.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Error);
+            self.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Error)
+                .await;
             return false;
         };
         let device_path = primary.device_path.clone();
@@ -177,7 +195,8 @@ impl VideoOrchestrator {
             self.encoder_label = None;
             self.last_start_error = StartError::NoEncoder;
             self.state = PipelineState::Error;
-            self.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Error);
+            self.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Error)
+                .await;
             return false;
         };
         self.encoder_type = Some(kind);
@@ -192,7 +211,8 @@ impl VideoOrchestrator {
             self.encoder_label = None;
             self.last_start_error = StartError::EncoderCommandFailed;
             self.state = PipelineState::Error;
-            self.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Error);
+            self.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Error)
+                .await;
             return false;
         };
         self.encoder_label = Some(crate::encoder::encoder_label(kind, &cmd));
@@ -202,11 +222,12 @@ impl VideoOrchestrator {
         // own mediamtx paths (sourceOnDemand pulls) so mediamtx serves each at
         // `:8889/<id>/whep` independently. A single-leg node yields exactly the
         // one `main` publisher path (byte-identical to the single-stream path).
-        if let Err(e) = self.mediamtx.write_config(&self.legs_to_streams()) {
+        if let Err(e) = self.mediamtx.write_config(&self.legs_to_streams()).await {
             tracing::error!(error = %e, "mediamtx_config_write_failed");
             self.last_start_error = StartError::MediamtxFailed;
             self.state = PipelineState::Error;
-            self.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Error);
+            self.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Error)
+                .await;
             return false;
         }
         match self.mediamtx.start().await {
@@ -215,7 +236,8 @@ impl VideoOrchestrator {
                 tracing::error!("mediamtx_start_failed; cannot stream without mediamtx");
                 self.last_start_error = StartError::MediamtxFailed;
                 self.state = PipelineState::Error;
-                self.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Error);
+                self.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Error)
+                    .await;
                 return false;
             }
         }
@@ -230,7 +252,8 @@ impl VideoOrchestrator {
                 tracing::error!(error = %e, encoder = ?kind, "encoder_spawn_failed");
                 self.last_start_error = StartError::EncoderSpawnFailed;
                 self.teardown_after_partial_start().await;
-                self.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Error);
+                self.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Error)
+                    .await;
                 return false;
             }
         };
@@ -253,11 +276,12 @@ impl VideoOrchestrator {
         self.last_healthy_at = None;
         self.last_start_error = StartError::None;
         tracing::info!(encoder = ?kind, "pipeline_started");
-        self.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Streaming);
+        self.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Streaming)
+            .await;
 
         // Publish the resolved leg list so the status surfaces + the GCS stream
         // switcher can advertise each `:8889/<id>/whep` leg.
-        self.refresh_video_streams();
+        self.refresh_video_streams().await;
 
         // Publish the attention state the encoder actually cold-started with,
         // so the swarm beacon's hero bit and the adaptive ladder's self-heal
@@ -272,7 +296,8 @@ impl VideoOrchestrator {
             desired.profile,
             desired.ceiling_kbps,
             settings,
-        ));
+        ))
+        .await;
 
         // Bring up the owned encoders for any LOCAL secondary legs (each
         // publishes its camera into its own mediamtx path). Additive + isolated.
@@ -691,14 +716,40 @@ impl VideoOrchestrator {
         // One pass splits the encoders into still-running and dead (is_running
         // polls the child, so it needs &mut and cannot run inside a closure that
         // also borrows the counter maps).
+        //
+        // "Dead" is NOT just "exited". `sample_leg_liveness` already derives a
+        // per-leg `live` flag from each leg's mediamtx inbound-byte counter and
+        // stamps it on the sidecar — and that was the whole of it: a secondary
+        // encoder that is alive and MUTE was reported dead to the operator and
+        // then left running forever, because respawn was exit-only. Process
+        // liveness is never proof of work, so a leg the byte counter says is not
+        // live is fed into the same respawn ladder that handles an exit.
+        //
+        // Only an explicit `Some(false)` counts. A leg absent from `leg_live` is
+        // UNKNOWN (a `sourceOnDemand` network pull with no reader attached is
+        // legitimately flat and is deliberately recorded as unknown rather than
+        // degraded), and a network-pull leg owns no process here anyway.
         let now = Instant::now();
+        // Snapshot the mute set before the `iter_mut` borrow of the encoders.
+        let mute: std::collections::HashSet<String> = self
+            .leg_live
+            .iter()
+            .filter(|(_, live)| !**live)
+            .map(|(id, _)| id.clone())
+            .collect();
         let mut dead_ids: Vec<String> = Vec::new();
         let mut running_ids: Vec<String> = Vec::new();
         for (id, p) in self.secondary_encoders.iter_mut() {
-            if p.is_running() {
-                running_ids.push(id.clone());
-            } else {
+            if !p.is_running() {
                 dead_ids.push(id.clone());
+            } else if mute.contains(id) {
+                tracing::warn!(
+                    leg = %id,
+                    "secondary_encoder_mute: alive but inbound bytes flat; respawning"
+                );
+                dead_ids.push(id.clone());
+            } else {
+                running_ids.push(id.clone());
             }
         }
         // Clear the respawn count for any leg that has run healthy (process alive)
@@ -797,6 +848,10 @@ impl VideoOrchestrator {
             tokio::spawn(crate::stderr_drain::drain_plain(stderr, "sei_tap"));
         }
         self.sei_tap = Some(tap);
+        // Stamped so the supervisor can bound ONE session's wall time: a
+        // one-shot that never returns stays `is_running()` forever and the
+        // exit-triggered respawn can never fire.
+        self.sei_tap_started_at = Some(Instant::now());
         tracing::info!("headless_sei_tap_started");
     }
 
@@ -836,6 +891,16 @@ impl VideoOrchestrator {
             "rtsp".into(),
             "-rtsp_transport".into(),
             "tcp".into(),
+            // Force the status report to stderr as flushed `key=value` lines
+            // once per second. This is the liveness signal, not decoration:
+            // ffmpeg suppresses the status line entirely when stderr is not a
+            // tty, and `total_size=N` (bytes the muxer has written to the
+            // relay) is the only OUTPUT-side proof the push is still moving.
+            // Without it the health check had nothing but `is_running()`, and
+            // a cloud push wedged on a half-open relay socket is alive and
+            // mute — the exact state process liveness cannot see.
+            "-progress".into(),
+            "pipe:2".into(),
             push_url.clone(),
         ];
         let mut push = match ManagedProcess::spawn("cloud_push", "ffmpeg", &args) {
@@ -845,8 +910,15 @@ impl VideoOrchestrator {
                 return false;
             }
         };
+        // A fresh tracker per spawn, so the new push gets the full window
+        // before the output-stall check can trip and `total_size` restarting
+        // from zero does not read as flat.
+        self.cloud_push_progress = ProgressTracker::new();
         if let Some(stderr) = push.take_stderr() {
-            tokio::spawn(crate::stderr_drain::drain_plain(stderr, "cloud_push"));
+            tokio::spawn(crate::wfb_tee::drain_wfb_tee_stderr(
+                stderr,
+                self.cloud_push_progress.clone(),
+            ));
         }
         self.cloud_push = Some(push);
         tracing::info!(destination = %push_url, "cloud_push_started");

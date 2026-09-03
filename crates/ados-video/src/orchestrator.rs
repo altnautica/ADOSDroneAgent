@@ -45,10 +45,11 @@ use crate::wfb_tee::{
 // `orchestrator::backoff_delay`, etc. callers keep resolving unchanged.
 pub use crate::health::{
     backoff_delay, circuit_breaker_tripped, grace_decision, healthy_window_elapsed,
-    inbound_decision, retry_cap, should_fallback_to_software, GraceDecision, InboundDecision,
-    PipelineState, StartError, BASE_RESTART_DELAY, CIRCUIT_BREAKER_ATTEMPTS, HEALTHY_RESET_WINDOW,
-    HEALTH_CHECK_INTERVAL, INBOUND_FLOW_STALL, MAX_RESTART_DELAY, MAX_RESTART_DELAY_NO_CAMERA,
-    STARTUP_GRACE_MAX, WFB_TEE_RESTART_CEILING,
+    inbound_decision, retry_cap, sei_tap_session_wedged, should_fallback_to_software,
+    GraceDecision, InboundDecision, PipelineState, StartError, BASE_RESTART_DELAY,
+    CIRCUIT_BREAKER_ATTEMPTS, HEALTHY_RESET_WINDOW, HEALTH_CHECK_INTERVAL, INBOUND_FLOW_STALL,
+    MAX_RESTART_DELAY, MAX_RESTART_DELAY_NO_CAMERA, SEI_TAP_SESSION_MAX, STARTUP_GRACE_MAX,
+    WFB_TEE_RESTART_CEILING,
 };
 
 // --- orchestrator ------------------------------------------------------------
@@ -114,6 +115,19 @@ pub struct VideoOrchestrator {
     /// alone is never proof of work; the tap can hold the sink open while
     /// pushing nothing).
     pub(crate) vision_tap_progress: ProgressTracker,
+    /// Output-progress clock for the cloud relay push. Process liveness is
+    /// never proof of work: a cloud push wedged on a half-open relay socket
+    /// holds its PID and pushes nothing, and the health check used to accept
+    /// exactly that as healthy.
+    pub(crate) cloud_push_progress: ProgressTracker,
+    /// When the current one-shot SEI tap session began, or `None` when no tap
+    /// is running. A `--once` tap is expected to EXIT, so `!is_running()` is
+    /// its correct respawn trigger — but a session that never returns (an RTSP
+    /// connect that blocks forever) stays `is_running()` and the exit check can
+    /// never fire, so latency telemetry stops silently. This bounds one
+    /// session's wall time, which is the delta-equivalent for work that is
+    /// finite by construction.
+    pub(crate) sei_tap_started_at: Option<Instant>,
 
     pub(crate) last_cameras: DiscoveryResult,
     pub(crate) encoder_type: Option<EncoderKind>,
@@ -204,10 +218,19 @@ pub struct VideoOrchestrator {
 impl VideoOrchestrator {
     /// Build an orchestrator for the given config. `config_dir` is where the
     /// mediamtx config file is written (canonically `/etc/ados`).
+    ///
+    /// `env` is passed in ALREADY PROBED rather than resolved here.
+    /// [`EncoderEnv::detect`] shells `gst-inspect-1.0` up to three times, and
+    /// `gst-inspect` on a cold SBC page cache is not fast — running it inline
+    /// stalled a reactor worker that the video routes and every watchdog tick
+    /// share. Taking it as a parameter means an async caller MUST resolve it
+    /// through [`EncoderEnv::detect_async`] (which does the probe on the
+    /// blocking pool), so the inline-blocking version cannot come back.
     pub fn new(
         config: AgentVideoConfig,
         camera_cfg: CameraConfig,
         config_dir: &std::path::Path,
+        env: EncoderEnv,
     ) -> Self {
         let now = Instant::now();
         let legs = config.resolve_legs(&camera_cfg);
@@ -223,13 +246,26 @@ impl VideoOrchestrator {
         let boot_settings = crate::profile::base_settings(boot, &camera_cfg);
         apply_settings_to(&mut camera_cfg, boot_settings);
 
+        // Resolved before the struct literal so the borrow of `config` ends
+        // before it is moved in.
+        let recording_params = config.recording.to_params();
+
         Self {
             config,
             camera_cfg,
             legs,
             leg_inbound: std::collections::HashMap::new(),
             leg_live: std::collections::HashMap::new(),
-            mediamtx: MediamtxManager::new(config_dir),
+            // The air profile: LAN/direct WHEP readers, so no STUN and no TCP
+            // ICE candidate. Recording rides `video.recording` straight into
+            // mediamtx's native fMP4 recorder — a single-encode tee of the
+            // stream already being served, so it costs zero extra encoder
+            // cycles on an SBC that is already loaded.
+            mediamtx: MediamtxManager::for_profile(
+                crate::mediamtx::MediamtxProfile::Air,
+                config_dir,
+            )
+            .with_recording(recording_params),
             encoder: None,
             secondary_encoders: Vec::new(),
             secondary_respawn_attempts: std::collections::HashMap::new(),
@@ -240,6 +276,8 @@ impl VideoOrchestrator {
             vision_tap: None,
             vision_tap_reframer: None,
             wfb_tee_progress: ProgressTracker::new(),
+            cloud_push_progress: ProgressTracker::new(),
+            sei_tap_started_at: None,
             vision_tap_progress: ProgressTracker::new(),
             last_cameras: DiscoveryResult::empty(),
             encoder_type: None,
@@ -262,7 +300,7 @@ impl VideoOrchestrator {
             restart_lock: Arc::new(Mutex::new(())),
             camera_plugged: Arc::new(Notify::new()),
             python_executable: discover::python_executable(),
-            env: EncoderEnv::detect(),
+            env,
             camera_state_path: None,
             video_streams_path: None,
             hero_base,
@@ -288,8 +326,9 @@ impl VideoOrchestrator {
     /// Publish the attention state so the out-of-process readers (the state
     /// snapshot that feeds the swarm beacon's hero bit, the adaptive ladder's
     /// self-heal check) see what the encoder is actually running.
-    pub(crate) fn publish_encoder_state(&self, state: &EncoderState) {
-        if let Err(e) = crate::profile::write_sidecar(self.video_profile_path(), state) {
+    pub(crate) async fn publish_encoder_state(&self, state: &EncoderState) {
+        let path = self.video_profile_path().to_path_buf();
+        if let Err(e) = crate::profile::write_sidecar_async(path, *state).await {
             tracing::warn!(error = %e, "video_profile_sidecar_write_failed");
         }
     }
@@ -331,7 +370,7 @@ impl VideoOrchestrator {
         if target == self.live_encoder_settings() {
             self.encoder_control
                 .note_applied(state, desired.generation, false);
-            self.publish_encoder_state(&state);
+            self.publish_encoder_state(&state).await;
             return;
         }
 
@@ -355,7 +394,7 @@ impl VideoOrchestrator {
         };
         self.encoder_control
             .note_applied(state, desired.generation, restarted);
-        self.publish_encoder_state(&state);
+        self.publish_encoder_state(&state).await;
     }
 
     /// Re-persist the camera-state sidecar from the last-known discovery
@@ -370,13 +409,14 @@ impl VideoOrchestrator {
     /// `start_stream` had just written (and the circuit breaker's reason with
     /// it) one tick after the pipeline came up — a streaming drone then read as
     /// `not_initialized`, with no playable endpoint, to every status consumer.
-    fn refresh_camera_state(&self) {
+    async fn refresh_camera_state(&self) {
         self.persist_pipeline_outcome(match self.state {
             PipelineState::Running => crate::camera_state::PipelineOutcome::Streaming,
             PipelineState::Starting => crate::camera_state::PipelineOutcome::Starting,
             PipelineState::Error => crate::camera_state::PipelineOutcome::Error,
             PipelineState::Stopped => crate::camera_state::PipelineOutcome::Stopped,
-        });
+        })
+        .await;
     }
 
     /// Write the video-streams sidecar (the resolved leg list: id/role/codec)
@@ -427,14 +467,14 @@ impl VideoOrchestrator {
         self.leg_live.retain(|k, _| present.contains(k.as_str()));
     }
 
-    pub(crate) fn refresh_video_streams(&self) {
+    pub(crate) async fn refresh_video_streams(&self) {
         let snap =
             crate::video_streams::VideoStreamsSnapshot::from_legs(&self.legs, &self.leg_live);
         let path = self
             .video_streams_path
-            .as_deref()
-            .unwrap_or_else(|| std::path::Path::new(crate::video_streams::VIDEO_STREAMS_JSON));
-        if let Err(e) = snap.write_to(path) {
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from(crate::video_streams::VIDEO_STREAMS_JSON));
+        if let Err(e) = snap.write_to_async(path).await {
             tracing::warn!(error = %e, "video_streams_sidecar_write_failed");
         }
     }
@@ -512,7 +552,8 @@ impl VideoOrchestrator {
         // Without this a deliberate stop leaves the sidecar claiming
         // `streaming` for the entire stopped window, and every status consumer
         // keeps offering a WHEP endpoint nothing is publishing to.
-        self.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Stopped);
+        self.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Stopped)
+            .await;
         tracing::info!("pipeline_stopped");
     }
 
@@ -610,8 +651,8 @@ impl VideoOrchestrator {
         }
     }
 
-    /// Is the cloud push still alive? `true` when healthy or — for the absent
-    /// slot — only when cloud relay is NOT configured to be running here.
+    /// Is the cloud push alive AND producing? `true` when healthy or — for the
+    /// absent slot — only when cloud relay is NOT configured to be running here.
     ///
     /// The None branch is the same shape as the wfb-tee None-branch: a full pipeline
     /// restart (`stop_stream` → `start_stream`) clears `cloud_push` and `start_stream`
@@ -620,19 +661,43 @@ impl VideoOrchestrator {
     /// slot WHILE cloud is enabled AND the pipeline is Running so the run-loop ladder
     /// re-arms it; when cloud is disabled, or the pipeline is not running, the absent
     /// slot is correct and healthy.
-    fn check_cloud_push_health(&mut self) -> bool {
-        match self.cloud_push.as_mut() {
-            None => !(self.config.cloud_enabled() && self.state == PipelineState::Running),
-            Some(p) => {
-                if p.is_running() {
-                    true
-                } else {
-                    tracing::warn!("cloud_push_process_exited");
-                    self.cloud_push = None;
-                    false
-                }
-            }
+    ///
+    /// The Some branch used to be `is_running()` and nothing else, which accepts
+    /// a push wedged on a half-open relay socket as healthy: alive, holding its
+    /// PID, delivering nothing to the cloud, forever. It now carries the same
+    /// two-signal check the wfb tap has — the progress-token stamp plus the
+    /// output-BYTE counter, because ffmpeg keeps printing `progress=continue`
+    /// with a frozen `total_size` when its input wedges, so the token stamp
+    /// alone reads such a push as alive.
+    async fn check_cloud_push_health(&mut self) -> bool {
+        let Some(p) = self.cloud_push.as_mut() else {
+            return !(self.config.cloud_enabled() && self.state == PipelineState::Running);
+        };
+        if !p.is_running() {
+            tracing::warn!("cloud_push_process_exited");
+            self.cloud_push = None;
+            return false;
         }
+        let last = self.cloud_push_progress.last_progress_at().await;
+        if wfb_tee_progress_is_stale(last, Instant::now()) {
+            tracing::warn!(
+                threshold_s = WFB_TEE_PROGRESS_TIMEOUT.as_secs(),
+                "cloud_push_zombie_detected: alive but progress flat; forcing restart"
+            );
+            return false;
+        }
+        // Gated on `output_seen` so it can never trip during the RTSP handshake
+        // and first-IDR wait, where no output is expected yet.
+        let output_seen = self.cloud_push_progress.last_output_bytes().await >= 0;
+        let last_out = self.cloud_push_progress.last_output_advance_at().await;
+        if wfb_tee_output_is_stalled(last_out, output_seen, Instant::now()) {
+            tracing::warn!(
+                threshold_s = WFB_TEE_PROGRESS_TIMEOUT.as_secs(),
+                "cloud_push_zombie_detected: alive with progress tokens but output bytes flat; forcing restart"
+            );
+            return false;
+        }
+        true
     }
 
     /// Is the wfb tap alive AND producing? `true` when healthy or never started.
@@ -836,10 +901,10 @@ impl VideoOrchestrator {
         // restart-ladder) must not let the sidecar go stale and drop the healthy
         // secondary legs from the heartbeat/switcher.
         self.sample_leg_liveness().await;
-        self.refresh_video_streams();
+        self.refresh_video_streams().await;
         if health_ok {
             self.note_healthy_tick();
-            self.refresh_camera_state();
+            self.refresh_camera_state().await;
         } else {
             self.note_unhealthy_tick();
         }
@@ -880,7 +945,7 @@ impl VideoOrchestrator {
                 // Keep the camera-state sidecar fresh across the long park so a
                 // present camera does not read as `unknown` to the staleness
                 // gate while the orchestrator is wedged.
-                self.refresh_camera_state();
+                self.refresh_camera_state().await;
                 interruptible_sleep(MAX_RESTART_DELAY, shutdown, &self.camera_plugged, false).await;
                 self.restart_count = 0;
                 return;
@@ -895,7 +960,7 @@ impl VideoOrchestrator {
             // the lock is never held across the long sleep). Refresh the
             // camera-state sidecar before the sleep so it stays fresh while the
             // pipeline is unhealthy.
-            self.refresh_camera_state();
+            self.refresh_camera_state().await;
             let pre = delay.saturating_sub(HEALTH_CHECK_INTERVAL);
             interruptible_sleep(pre, shutdown, &self.camera_plugged, false).await;
             let _guard = self.restart_lock.clone().lock_owned().await;
@@ -990,16 +1055,35 @@ impl VideoOrchestrator {
 
         // Healthy tick — if SEI latency is on and the one-shot tap exited (it
         // runs a single read session), respawn it. No circuit breaker (latency
-        // telemetry retries forever per Rule 26); deferred when the path is not
+        // telemetry retries forever); deferred when the path is not
         // ready so there is no hot-loop against a dead source.
+        //
+        // `!is_running()` alone is not sufficient even for a one-shot. The tap
+        // is a real RTSP consumer, and a session whose connect blocks forever
+        // stays `is_running()` — so the exit check never fires, the tap is
+        // never respawned, and latency telemetry stops with no symptom. A
+        // one-shot's work is finite by construction, so its wall time IS the
+        // delta signal: past the session ceiling it is wedged, not working.
         if self.sei_latency_on() {
             let exited = self
                 .sei_tap
                 .as_mut()
                 .map(|p| !p.is_running())
                 .unwrap_or(true);
-            if exited {
+            let wedged = !exited && sei_tap_session_wedged(self.sei_tap_started_at, Instant::now());
+            if wedged {
+                tracing::warn!(
+                    ceiling_s = SEI_TAP_SESSION_MAX.as_secs(),
+                    "sei_tap_zombie_detected: one-shot session past its ceiling; reaping"
+                );
+                if let Some(mut tap) = self.sei_tap.take() {
+                    tap.terminate(Duration::from_secs(2)).await;
+                }
+                self.sei_tap_started_at = None;
+            }
+            if exited || wedged {
                 self.sei_tap = None;
+                self.sei_tap_started_at = None;
                 self.start_sei_tap().await;
             }
         }
@@ -1017,7 +1101,7 @@ impl VideoOrchestrator {
     /// the deadline on the following due tick. On a healthy push it clears the
     /// deadline and the counter.
     async fn tick_cloud_push(&mut self) {
-        if self.check_cloud_push_health() {
+        if self.check_cloud_push_health().await {
             // Healthy (or not configured / not running) — nothing to do; clear
             // any leftover backoff state.
             self.cloud_retry_after = None;
@@ -1069,7 +1153,7 @@ impl VideoOrchestrator {
         // `unknown` to the staleness gate while the pipeline is parked in the
         // Error state. `start_stream` re-discovers + re-persists on the actual
         // retry; this only covers the long sleep windows.
-        self.refresh_camera_state();
+        self.refresh_camera_state().await;
         if circuit_breaker_tripped(self.restart_count) {
             tracing::warn!(
                 attempts = self.restart_count,
@@ -1182,6 +1266,7 @@ mod tests {
             AgentVideoConfig::default(),
             CameraConfig::default(),
             std::path::Path::new("/tmp"),
+            EncoderEnv::detect(),
         )
     }
 
@@ -1225,7 +1310,12 @@ mod tests {
             mode: "cloud".into(),
             ..Default::default()
         };
-        let o = VideoOrchestrator::new(cfg, CameraConfig::default(), std::path::Path::new("/tmp"));
+        let o = VideoOrchestrator::new(
+            cfg,
+            CameraConfig::default(),
+            std::path::Path::new("/tmp"),
+            EncoderEnv::detect(),
+        );
         assert_eq!(o.live_encoder_settings(), o.hero_base);
         assert_eq!(o.encoder_control().desired().profile, VideoProfile::Hero);
     }
@@ -1358,7 +1448,23 @@ mod tests {
         assert_eq!(clamped.width, 1280, "a clamp never changes geometry");
 
         // The sidecar the state snapshot (and thus the beacon's hero bit) reads.
-        let published = crate::profile::read_state_from(&sidecar).unwrap();
+        //
+        // Polled, not read once: the sidecar is published by the applier task,
+        // not by the socket handler, so it was always eventually-consistent
+        // with the socket ack — and the write now goes through the blocking
+        // pool (a sync `fsync` does not belong on a reactor worker), which
+        // widens that window from "usually already there" to "very shortly
+        // after". Every real consumer polls this file at ~10 Hz, so eventual
+        // is the contract; asserting instantaneous would be asserting an
+        // accident of the old same-thread write.
+        let mut published = crate::profile::read_state_from(&sidecar).unwrap();
+        for _ in 0..200 {
+            if published.ceiling_kbps == Some(1200) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            published = crate::profile::read_state_from(&sidecar).unwrap();
+        }
         assert_eq!(published.profile, VideoProfile::Hero);
         assert_eq!(published.ceiling_kbps, Some(1200));
 
@@ -1431,13 +1537,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn refresh_video_streams_writes_the_resolved_leg_list() {
+    #[tokio::test]
+    async fn refresh_video_streams_writes_the_resolved_leg_list() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("video-streams.json");
         let mut o = test_orch();
         o.video_streams_path = Some(path.clone());
-        o.refresh_video_streams();
+        o.refresh_video_streams().await;
         let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         // Default (back-compat) config resolves to a single primary "main" leg.
         let streams = v["streams"].as_array().unwrap();
@@ -1464,12 +1570,18 @@ mod tests {
             cfg.clone(),
             CameraConfig::default(),
             std::path::Path::new("/tmp"),
+            EncoderEnv::detect(),
         );
         assert!(o.vision_enabled());
         // On a ground-station profile the air-side tap is suppressed even when
         // enabled in config.
         cfg.profile = Some("ground_station".into());
-        let o = VideoOrchestrator::new(cfg, CameraConfig::default(), std::path::Path::new("/tmp"));
+        let o = VideoOrchestrator::new(
+            cfg,
+            CameraConfig::default(),
+            std::path::Path::new("/tmp"),
+            EncoderEnv::detect(),
+        );
         assert!(!o.vision_enabled());
     }
 
@@ -1528,40 +1640,220 @@ mod tests {
             ..AgentVideoConfig::default()
         };
         assert!(cfg.cloud_enabled());
-        VideoOrchestrator::new(cfg, CameraConfig::default(), std::path::Path::new("/tmp"))
+        VideoOrchestrator::new(
+            cfg,
+            CameraConfig::default(),
+            std::path::Path::new("/tmp"),
+            EncoderEnv::detect(),
+        )
     }
 
+    /// A live-but-mute cloud push must read UNHEALTHY.
+    ///
+    /// This is the defect: the Some branch was `is_running()` and nothing else,
+    /// so a push wedged on a half-open relay socket was accepted as healthy —
+    /// alive, holding its PID, delivering nothing to the cloud, forever.
+    #[tokio::test]
+    async fn cloud_push_alive_with_flat_output_bytes_is_unhealthy() {
+        let mut o = cloud_orch();
+        o.state = PipelineState::Running;
+        // A genuinely long-running child, so `is_running()` is true and the
+        // ONLY thing that can make this unhealthy is the byte counter.
+        let mut p = ManagedProcess::spawn("test-cloud-push", "sleep", &["30".into()]).unwrap();
+        assert!(p.is_running(), "the premise: the process is alive");
+        o.cloud_push = Some(p);
+
+        // It produced output once, then stopped, past the window.
+        let stale = Instant::now() - (WFB_TEE_PROGRESS_TIMEOUT + Duration::from_secs(1));
+        o.cloud_push_progress.stamp(Instant::now()).await;
+        o.cloud_push_progress
+            .observe_output_bytes(4096, stale)
+            .await;
+
+        assert!(
+            !o.check_cloud_push_health().await,
+            "a cloud push whose output-byte counter has gone flat is wedged, \
+             not healthy — process liveness is never proof of work"
+        );
+        if let Some(mut p) = o.cloud_push.take() {
+            p.terminate(Duration::from_secs(1)).await;
+        }
+    }
+
+    /// The output-stall check must not fire before the first byte: the RTSP
+    /// handshake and first-IDR wait legitimately produce nothing.
+    #[tokio::test]
+    async fn cloud_push_before_its_first_output_byte_is_healthy() {
+        let mut o = cloud_orch();
+        o.state = PipelineState::Running;
+        let p = ManagedProcess::spawn("test-cloud-push", "sleep", &["30".into()]).unwrap();
+        o.cloud_push = Some(p);
+        // Progress tokens are flowing but no `total_size` has been seen yet.
+        o.cloud_push_progress.stamp(Instant::now()).await;
+        assert!(o.cloud_push_progress.last_output_bytes().await < 0);
+
+        assert!(o.check_cloud_push_health().await);
+        if let Some(mut p) = o.cloud_push.take() {
+            p.terminate(Duration::from_secs(1)).await;
+        }
+    }
+
+    /// An advancing counter is healthy.
+    #[tokio::test]
+    async fn cloud_push_with_advancing_output_bytes_is_healthy() {
+        let mut o = cloud_orch();
+        o.state = PipelineState::Running;
+        let p = ManagedProcess::spawn("test-cloud-push", "sleep", &["30".into()]).unwrap();
+        o.cloud_push = Some(p);
+        let now = Instant::now();
+        o.cloud_push_progress.stamp(now).await;
+        o.cloud_push_progress.observe_output_bytes(4096, now).await;
+
+        assert!(o.check_cloud_push_health().await);
+        if let Some(mut p) = o.cloud_push.take() {
+            p.terminate(Duration::from_secs(1)).await;
+        }
+    }
+
+    /// A secondary encoder that is alive and MUTE must be respawned.
+    ///
+    /// The defect: `sample_leg_liveness` derived the per-leg `live` flag from
+    /// the mediamtx inbound-byte counter and stamped it on the sidecar — and
+    /// that was all it did. Respawn was exit-only, so a mute-but-alive encoder
+    /// was honestly reported dead to the operator and then left running
+    /// forever.
+    #[tokio::test]
+    async fn a_mute_but_alive_secondary_encoder_is_respawned() {
+        let mut o = test_orch();
+        o.state = PipelineState::Running;
+        let mut p = ManagedProcess::spawn("test-secondary", "sleep", &["30".into()]).unwrap();
+        assert!(p.is_running(), "the premise: the process is alive");
+        o.secondary_encoders.push(("cam2".to_string(), p));
+        // The byte counter says this leg is delivering nothing.
+        o.leg_live.insert("cam2".to_string(), false);
+
+        o.supervise_secondary_encoders().await;
+
+        // The mute encoder was retained-out of the live set and counted as a
+        // respawn attempt, which is what routes it into the respawn ladder.
+        assert_eq!(
+            o.secondary_respawn_attempts.get("cam2"),
+            Some(&1),
+            "a mute leg must enter the same respawn ladder an exit does"
+        );
+        assert!(
+            !o.secondary_encoders.iter().any(|(id, _)| id == "cam2"),
+            "the wedged process must be dropped, not left running forever"
+        );
+    }
+
+    /// A live leg with an advancing counter must be left alone.
+    #[tokio::test]
+    async fn a_live_secondary_encoder_is_left_running() {
+        let mut o = test_orch();
+        o.state = PipelineState::Running;
+        let p = ManagedProcess::spawn("test-secondary", "sleep", &["30".into()]).unwrap();
+        o.secondary_encoders.push(("cam2".to_string(), p));
+        o.leg_live.insert("cam2".to_string(), true);
+
+        o.supervise_secondary_encoders().await;
+
+        assert!(!o.secondary_respawn_attempts.contains_key("cam2"));
+        assert!(o.secondary_encoders.iter().any(|(id, _)| id == "cam2"));
+        if let Some((_, mut p)) = o.secondary_encoders.pop() {
+            p.terminate(Duration::from_secs(1)).await;
+        }
+    }
+
+    /// A leg ABSENT from `leg_live` is unknown, not degraded, and must not be
+    /// respawned: a `sourceOnDemand` network pull with no reader attached is
+    /// legitimately flat, which is exactly why `liveness_on_flat` records it as
+    /// unknown rather than dead.
+    #[tokio::test]
+    async fn a_leg_with_unknown_liveness_is_not_respawned() {
+        let mut o = test_orch();
+        o.state = PipelineState::Running;
+        let p = ManagedProcess::spawn("test-secondary", "sleep", &["30".into()]).unwrap();
+        o.secondary_encoders.push(("cam2".to_string(), p));
+        assert!(!o.leg_live.contains_key("cam2"));
+
+        o.supervise_secondary_encoders().await;
+
+        assert!(!o.secondary_respawn_attempts.contains_key("cam2"));
+        if let Some((_, mut p)) = o.secondary_encoders.pop() {
+            p.terminate(Duration::from_secs(1)).await;
+        }
+    }
+
+    /// Every `start_stream` must RE-ENUMERATE the camera, never reuse the
+    /// previous cycle's discovery.
+    ///
+    /// This is what makes camera format renegotiation work at all.
+    /// `select_input_format` resolves MJPEG-vs-YUYV from
+    /// `CameraInfo::capabilities` at argv-build time, and the health-check
+    /// recovery path is `stop_stream` → `start_stream`. So a UVC camera that
+    /// renegotiates or enumerates differently after a replug is picked up on
+    /// the next restart — but only because discovery is re-run inside
+    /// `start_stream`. Memoising `last_cameras`, or hoisting the probe out to
+    /// the cold start, would leave recovery driving a format the device no
+    /// longer offers and ffmpeg dying on every attempt.
+    #[tokio::test]
+    async fn start_stream_re_enumerates_the_camera_instead_of_reusing_discovery() {
+        let mut o = test_orch();
+        // Seed a stale roster, as a previous cycle would have left behind.
+        o.last_cameras = present_camera_discovery();
+        assert!(
+            o.last_cameras.primary_camera_info().is_some(),
+            "the premise: a stale camera is on record"
+        );
+        // `printf` stands in for the discovery interpreter and prints its own
+        // format string rather than JSON, so the probe resolves to an empty
+        // roster. A start that REUSED the stale roster would keep the camera.
+        o.python_executable = "printf".to_string();
+
+        // Bails at the no-primary gate, which is immediately after the probe —
+        // no mediamtx or encoder is spawned.
+        assert!(!o.start_stream().await);
+
+        assert!(
+            o.last_cameras.primary_camera_info().is_none(),
+            "start_stream must replace the roster from a fresh probe; a cached \
+             one would leave recovery rebuilding the argv from a format the \
+             device may no longer offer"
+        );
+        assert_eq!(o.last_start_error, StartError::NoPrimaryCamera);
+    }
     // --- cloud push must re-arm after a full pipeline restart ---------------
 
-    #[test]
-    fn cloud_push_health_none_unhealthy_when_enabled_and_running() {
+    #[tokio::test]
+    async fn cloud_push_health_none_unhealthy_when_enabled_and_running() {
         // After a full restart cloud_push is None; with cloud configured and the
         // pipeline Running the absent slot must read UNHEALTHY so the run-loop
         // ladder re-arms it (the bug: it read healthy and stayed dead).
         let mut o = cloud_orch();
         o.state = PipelineState::Running;
         assert!(o.cloud_push.is_none());
-        assert!(!o.check_cloud_push_health());
+        assert!(!o.check_cloud_push_health().await);
     }
 
-    #[test]
-    fn cloud_push_health_none_healthy_when_not_running() {
+    #[tokio::test]
+    async fn cloud_push_health_none_healthy_when_not_running() {
         // Absent slot + pipeline not running → correct + healthy (nothing to
         // supervise; e.g. between stop_stream and start_stream).
         let mut o = cloud_orch();
         o.state = PipelineState::Stopped;
-        assert!(o.check_cloud_push_health());
+        assert!(o.check_cloud_push_health().await);
     }
 
-    #[test]
-    fn cloud_push_health_none_healthy_when_cloud_disabled() {
+    #[tokio::test]
+    async fn cloud_push_health_none_healthy_when_cloud_disabled() {
         // No cloud_relay_url configured → the absent slot is always healthy,
         // even while Running (the local-only default must not loop re-arming).
         let mut o = test_orch();
         assert!(!o.config.cloud_enabled());
         o.state = PipelineState::Running;
         assert!(o.cloud_push.is_none());
-        assert!(o.check_cloud_push_health());
+        assert!(o.check_cloud_push_health().await);
     }
 
     // --- a down cloud relay must not starve wfb recovery --------------------
@@ -1670,8 +1962,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn refresh_camera_state_writes_fresh_ready_snapshot_while_wedged() {
+    #[tokio::test]
+    async fn refresh_camera_state_writes_fresh_ready_snapshot_while_wedged() {
         // The wedge/park paths call refresh_camera_state(). With a present
         // camera cached in last_cameras it must (re)write a `ready` snapshot so
         // the staleness gate never drops the camera pill to `unknown` while the
@@ -1684,7 +1976,7 @@ mod tests {
 
         // No sidecar yet.
         assert!(!path.exists());
-        o.refresh_camera_state();
+        o.refresh_camera_state().await;
         assert!(path.exists(), "the wedge re-persist must write the sidecar");
 
         let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
@@ -1700,7 +1992,7 @@ mod tests {
         // A second refresh (a later wedge tick) advances the timestamp — the
         // freshness the staleness gate keys on.
         std::thread::sleep(Duration::from_millis(20));
-        o.refresh_camera_state();
+        o.refresh_camera_state().await;
         let v2: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert!(
             v2["updated_at_unix"].as_f64().unwrap() >= first_ts,
@@ -1708,8 +2000,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_health_tick_preserves_the_streaming_stamp() {
+    #[tokio::test]
+    async fn a_health_tick_preserves_the_streaming_stamp() {
         // The P0 this closes: refresh_camera_state runs on EVERY healthy 5 s
         // tick, and while it rebuilt the snapshot from discovery alone it wrote
         // `pipeline_state: "unknown"` over the `streaming` stamp start_stream
@@ -1728,12 +2020,13 @@ mod tests {
         o.encoder_type = Some(EncoderKind::Ffmpeg);
         o.encoder_label = Some("ffmpeg-h264_v4l2m2m".to_string());
         o.state = PipelineState::Running;
-        o.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Streaming);
+        o.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Streaming)
+            .await;
 
         let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(v["pipeline_state"], "streaming");
 
-        o.refresh_camera_state();
+        o.refresh_camera_state().await;
         let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(
             v["pipeline_state"], "streaming",
@@ -1745,8 +2038,8 @@ mod tests {
         assert!(v["pipeline_reason"].is_null(), "streaming has no reason");
     }
 
-    #[test]
-    fn a_retry_does_not_erase_the_standing_failure() {
+    #[tokio::test]
+    async fn a_retry_does_not_erase_the_standing_failure() {
         // Measured on the bench: with no usable encoder the health loop re-enters
         // start_stream every few seconds, and its `starting` stamp overwrote the
         // `error` + reason from the attempt before. The surface flapped between
@@ -1759,27 +2052,30 @@ mod tests {
         o.last_cameras = present_camera_discovery();
         o.camera_state_path = Some(path.clone());
         o.last_start_error = StartError::NoEncoder;
-        o.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Error);
+        o.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Error)
+            .await;
         let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(v["pipeline_state"], "error");
         let reason = v["pipeline_reason"].as_str().unwrap().to_string();
 
         // The next retry's Starting stamp.
-        o.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Starting);
+        o.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Starting)
+            .await;
         let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(v["pipeline_state"], "error", "a retry is not a fresh start");
         assert_eq!(v["pipeline_reason"], serde_json::json!(reason));
 
         // Once the attempt succeeds the failure is cleared and `starting` means it.
         o.last_start_error = StartError::None;
-        o.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Starting);
+        o.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Starting)
+            .await;
         let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(v["pipeline_state"], "starting");
         assert!(v["pipeline_reason"].is_null());
     }
 
-    #[test]
-    fn a_wedged_pipeline_keeps_its_error_reason_across_the_park() {
+    #[tokio::test]
+    async fn a_wedged_pipeline_keeps_its_error_reason_across_the_park() {
         // The circuit breaker sets Error, then refresh_camera_state keeps the
         // sidecar fresh across the 5-minute park. The reason that motivated the
         // park must survive that refresh — erasing it one line later is what
@@ -1792,7 +2088,7 @@ mod tests {
         o.last_start_error = StartError::EncoderCommandFailed;
         o.state = PipelineState::Error;
 
-        o.refresh_camera_state();
+        o.refresh_camera_state().await;
         let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(v["pipeline_state"], "error");
         assert_eq!(
@@ -1815,12 +2111,14 @@ mod tests {
             AgentVideoConfig::default(),
             CameraConfig::default(),
             dir.path(),
+            EncoderEnv::detect(),
         );
         o.last_cameras = present_camera_discovery();
         o.camera_state_path = Some(path.clone());
         o.encoder_label = Some("ffmpeg-libx264".to_string());
         o.state = PipelineState::Running;
-        o.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Streaming);
+        o.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Streaming)
+            .await;
 
         o.stop_stream().await;
 

@@ -176,6 +176,18 @@ impl CameraStateSnapshot {
         std::fs::rename(&tmp, path)?;
         Ok(())
     }
+
+    /// [`Self::write_to`] on the blocking pool.
+    ///
+    /// The atomic tmp-plus-rename is correct and unchanged; what was wrong was
+    /// running it on a reactor worker. This is written on every pipeline
+    /// outcome transition and the sync body ends in an `fsync` (`sync_all`),
+    /// which on a loaded SBC with a cheap SD card is not a bounded-cost call.
+    pub async fn write_to_async(self, path: std::path::PathBuf) -> std::io::Result<()> {
+        tokio::task::spawn_blocking(move || self.write_to(&path))
+            .await
+            .map_err(std::io::Error::other)?
+    }
 }
 
 fn now_unix() -> f64 {

@@ -71,7 +71,12 @@ async fn main() {
     }
 
     let cloud_enabled = config.cloud_enabled();
-    let mut orch = VideoOrchestrator::new(config, camera_cfg, Path::new(CONFIG_DIR));
+    // Probe the encoder environment on the blocking pool before constructing
+    // the orchestrator: the probe shells `gst-inspect-1.0` up to three times
+    // and is slow on a cold SBC page cache, so it must not run on a reactor
+    // worker.
+    let env = ados_video::encoder::EncoderEnv::detect_async().await;
+    let mut orch = VideoOrchestrator::new(config, camera_cfg, Path::new(CONFIG_DIR), env);
     let camera_plugged = orch.camera_plugged_handle();
 
     // Shutdown + signal wiring. SIGTERM / SIGINT trigger the shutdown handle;

@@ -33,6 +33,27 @@ pub const WFB_TEE_RESTART_CEILING: Duration = Duration::from_secs(5);
 /// Consecutive-failure count that trips the 5-minute circuit-breaker park.
 pub const CIRCUIT_BREAKER_ATTEMPTS: u32 = 10;
 
+/// Wall-clock ceiling on ONE `--once` SEI-tap session.
+///
+/// The tap is expected to exit, so `!is_running()` is its respawn trigger —
+/// but a session whose RTSP connect blocks forever stays `is_running()`, the
+/// exit check never fires, and latency telemetry stops with no symptom. Work
+/// that is finite by construction can use its wall time as the delta signal.
+///
+/// 60 s is generous against the real session: the tap reads a short stretch of
+/// the live bitstream, so a healthy run is seconds. The margin covers a cold
+/// SBC and a slow first IDR without ever reaping a session that is progressing.
+pub const SEI_TAP_SESSION_MAX: Duration = Duration::from_secs(60);
+
+/// Is a running one-shot SEI tap wedged rather than working?
+///
+/// `started_at` is `None` when no session is in flight. Pure so the ceiling is
+/// unit-tested without a subprocess, and so the decision has one home rather
+/// than being inlined in the tick body where it cannot be asserted on.
+pub fn sei_tap_session_wedged(started_at: Option<Instant>, now: Instant) -> bool {
+    started_at.is_some_and(|since| now.saturating_duration_since(since) >= SEI_TAP_SESSION_MAX)
+}
+
 /// Pipeline lifecycle state (`PipelineState`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipelineState {
@@ -211,6 +232,32 @@ pub fn inbound_decision(
 mod tests {
     use super::*;
 
+    /// A one-shot with no session in flight is never wedged: `!is_running()`
+    /// is the correct respawn trigger and this check must not double-fire.
+    #[test]
+    fn no_sei_tap_session_is_not_wedged() {
+        assert!(!sei_tap_session_wedged(None, Instant::now()));
+    }
+
+    /// A session inside the ceiling is progressing, not wedged.
+    #[test]
+    fn a_young_sei_tap_session_is_not_wedged() {
+        let now = Instant::now();
+        let started = now - (SEI_TAP_SESSION_MAX - Duration::from_secs(5));
+        assert!(!sei_tap_session_wedged(Some(started), now));
+    }
+
+    /// THE CASE `!is_running()` CANNOT SEE. The tap is a real RTSP consumer,
+    /// so a session whose connect blocks forever stays running — the
+    /// exit-triggered respawn never fires and latency telemetry stops with no
+    /// symptom. A one-shot's work is finite by construction, so its wall time
+    /// is the delta signal.
+    #[test]
+    fn a_sei_tap_session_past_its_ceiling_is_wedged() {
+        let now = Instant::now();
+        let started = now - (SEI_TAP_SESSION_MAX + Duration::from_secs(1));
+        assert!(sei_tap_session_wedged(Some(started), now));
+    }
     #[test]
     fn backoff_ladder_matches_python_shape() {
         // base 5s, cap 300s → 5,10,20,40,80,160,300(capped),300,...

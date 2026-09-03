@@ -338,6 +338,19 @@ pub fn write_sidecar(path: &Path, state: &EncoderState) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
+/// [`write_sidecar`] on the blocking pool.
+///
+/// Called from the async health tick; the tmp-plus-rename is correct and the
+/// sync filesystem work is what does not belong on a reactor worker.
+pub async fn write_sidecar_async(
+    path: std::path::PathBuf,
+    state: EncoderState,
+) -> std::io::Result<()> {
+    tokio::task::spawn_blocking(move || write_sidecar(&path, &state))
+        .await
+        .map_err(std::io::Error::other)?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
