@@ -32,7 +32,14 @@ ed25519-dalek = { version = "2", features = ["pem"] }
 # .adosplug archive reader. Stored/deflate zip; the reader walks the central
 # directory, rejects traversal/symlink entries, and bounds per-entry + total
 # size before reading any payload.
-zip = { version = "2", default-features = false, features = ["deflate"] }
+#
+# Floor is 2.3, not 2: zip < 2.3.0 carries RUSTSEC-2025-0168 / CVE-2025-29787,
+# a symlink path-traversal in `ZipArchive::extract` that lets a crafted archive
+# write outside the destination. Nothing here calls `extract` (the reader walks
+# entries itself), so the vulnerable path is not reachable today, but this crate
+# parses operator-supplied plugin archives and a floor of "2" still permits a
+# vulnerable resolve on any host with a cold or pinned registry cache.
+zip = { version = "2.3", default-features = false, features = ["deflate"] }
 # blake2b-8 → the 16-hex WFB key fingerprint (peer-public-half digest).
 blake2 = "0.10"
 hex = "0.4"

@@ -416,7 +416,7 @@ impl VehicleState {
                 None
             }
             MavMessage::PARAM_VALUE(m) => {
-                let name = param_id_to_string(&m.param_id);
+                let name = param_id_to_string(&m.param_id[..]);
                 self.param_count = m.param_count as i64;
                 Some((name, m.param_value, m.param_type as i64))
             }
@@ -725,7 +725,7 @@ mod tests {
                 param_value: 1234.5,
                 param_count: 700,
                 param_index: 1,
-                param_id,
+                param_id: param_id.into(),
                 param_type:
                     ados_protocol::mavlink::ardupilotmega::MavParamType::MAV_PARAM_TYPE_REAL32,
             }),

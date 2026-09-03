@@ -395,7 +395,7 @@ fn build_param_set_require_frame(
     let msg = MavMessage::PARAM_SET(PARAM_SET_DATA {
         target_system,
         target_component,
-        param_id,
+        param_id: param_id.into(),
         param_value: if require { REQUIRE_ON } else { REQUIRE_OFF },
         param_type: PARAM_TYPE_UINT8,
     });

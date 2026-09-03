@@ -61,12 +61,29 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Floors here are not "roughly recent" — each is the oldest version at which the
+# gate below still means what it is written to mean. A floor years under the
+# version a gate is verified against makes the gate's verdict depend on which
+# resolve a contributor happened to get.
 dev = [
-    "pytest>=7.4.0",
-    "pytest-asyncio>=0.23.0",
-    "ruff>=0.2.0",
+    # pytest-asyncio 1.x declares `pytest>=8.4,<10`. With a 7.4 floor a resolver
+    # is free to satisfy `pytest` at 7.4 and then back-solve pytest-asyncio down
+    # to a 0.x that accepts it — silently changing what `asyncio_mode = "auto"`
+    # does to the whole suite. Floor the pair together instead.
+    "pytest>=8.4.0",
+    # 1.0 is where auto-mode's fixture event-loop scoping settled and the 0.x
+    # compatibility behaviours were removed. Below it, the
+    # `asyncio_mode = "auto"` line in [tool.pytest.ini_options] configures
+    # different semantics than the suite is written against.
+    "pytest-asyncio>=1.0.0",
+    # ruff is the only gate over the Python half, and it is pre-1.0: rule
+    # behaviour moves between minors with no stability promise. 0.15 is the
+    # coherence floor for this file's own config — UP042 (in the `ignore` list
+    # below) did not exist before 0.3.6 and stayed preview-only until 0.15, so
+    # under any earlier ruff that entry is either an unknown code or inert while
+    # `select = ["UP"]` is on.
+    "ruff>=0.15",
     "mypy>=1.8.0",
-    "black>=24.1.0",
 ]
 # Ground-station profile extras. Pulled only when the installer detects
 # the ground_station profile or when a developer runs

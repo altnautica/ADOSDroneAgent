@@ -5504,6 +5504,10 @@ gcs:
     }
 
     #[tokio::test]
+    // Asserts on the spec-superseded MAV_FRAME_BODY_NED, which is what the
+    // guided-setpoint builder emits and ArduPilot reads; see
+    // `ados_protocol::mavlink::mav_frame_from_u8`.
+    #[allow(deprecated)]
     async fn guided_setpoint_frame_reaches_the_router_and_decodes() {
         // With a live mavlink client wired to a stub router socket, the handler
         // builds the SET_POSITION_TARGET_LOCAL_NED (84) frame and writes it; the

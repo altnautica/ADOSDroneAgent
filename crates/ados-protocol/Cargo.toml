@@ -41,7 +41,18 @@ raptorq = "2"
 # The MAVLink dialect is a large, slow-to-compile generated enum, and most
 # consumers (e.g. the TUI) do not need it, so it is behind the `mavlink`
 # feature. Renamed to avoid clashing with this crate's own `mavlink` module.
-rust_mavlink = { package = "mavlink", version = "0.13", default-features = false, features = ["ardupilotmega", "std"], optional = true }
+#
+# 0.18 over 0.13 for two properties the FC link needs, not for currency: the
+# v1/v2 readers no longer allocate on an oversized declared payload length
+# (this decoder is fed straight from the FC serial stream and the aux tee, so a
+# corrupt length field is an availability bug on a flight daemon), and unknown
+# enum bits are tolerated instead of rejected, so a newer ArduPilot's frames
+# still decode against this generated dialect. Feature names moved in 0.15:
+# `ardupilotmega` -> `dialect-ardupilotmega`, and `serde` / `transport-*` /
+# `format-generated-code` became default-on, so `default-features = false`
+# keeps the same lean surface (no UDP/TCP/serial transports, no serde impls on
+# the generated types) that 0.13 had here.
+rust_mavlink = { package = "mavlink", version = "0.18", default-features = false, features = ["dialect-ardupilotmega", "std"], optional = true }
 # Producer-side log shipping. Only the service binaries that ship logs to the
 # daemon pull these in (via the `tracing-layer` feature); the daemon and the
 # build tools stay lean without them.

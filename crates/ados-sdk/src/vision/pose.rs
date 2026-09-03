@@ -133,6 +133,12 @@ impl Odometry {
     /// Build the `ODOMETRY` message. The reference frames default to local NED
     /// for the pose and body NED for the twist, matching a forward-facing VIO
     /// source feeding ArduPilot.
+    ///
+    /// `#[allow(deprecated)]`: the dialect marks `MAV_FRAME_BODY_NED`
+    /// superseded by `MAV_FRAME_BODY_FRD`, but ArduPilot's ODOMETRY handler
+    /// reads `child_frame_id` against the older value, so switching it would
+    /// change what the flight controller does with the twist.
+    #[allow(deprecated)]
     pub fn to_odometry(&self) -> MavMessage {
         let (w, x, y, z) = self.pose.orientation;
         let vel_cov = match self.velocity_covariance {

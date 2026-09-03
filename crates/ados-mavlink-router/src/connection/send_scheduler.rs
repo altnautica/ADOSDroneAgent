@@ -9,6 +9,11 @@
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+// `REQUEST_DATA_STREAM_DATA` is marked superseded by MAV_CMD_SET_MESSAGE_INTERVAL
+// in the dialect, and it is deliberately retained here: see the comment on the
+// `legacy_stream_request` branch in `tick_streams` — it is the only stream-rate
+// mechanism iNav, Betaflight and pre-4.1 ArduPilot honor.
+#[allow(deprecated)]
 use ados_protocol::mavlink::ardupilotmega::{
     MavAutopilot, MavCmd, MavMessage, MavModeFlag, MavState, MavType, COMMAND_LONG_DATA,
     HEARTBEAT_DATA, PARAM_REQUEST_LIST_DATA, REQUEST_DATA_STREAM_DATA,
@@ -361,6 +366,11 @@ impl FcConnection {
     /// Adaptive stream request. Picks the interval from how long the link has
     /// been idle (stalled link re-requests fast; healthy link relaxes toward
     /// the max), then re-sends the per-message rates when the interval elapses.
+    ///
+    /// `#[allow(deprecated)]`: the `legacy_stream_request` branch below builds a
+    /// spec-superseded `REQUEST_DATA_STREAM` on purpose; the branch comment says
+    /// why.
+    #[allow(deprecated)]
     pub async fn tick_streams(&self) {
         if !self.transport_open() {
             return;
@@ -732,6 +742,8 @@ mod tests {
         );
     }
 
+    // Exercises the spec-superseded legacy request on purpose; see `tick_streams`.
+    #[allow(deprecated)]
     #[test]
     fn request_data_stream_serializes_and_round_trips() {
         // The legacy stream request must be a real ardupilotmega variant and must

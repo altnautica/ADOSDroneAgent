@@ -1100,7 +1100,7 @@ mod tests {
             header,
             &MavMessage::STATUSTEXT(STATUSTEXT_DATA {
                 severity: MavSeverity::MAV_SEVERITY_WARNING,
-                text: buf,
+                text: buf.into(),
             }),
         )
         .unwrap()

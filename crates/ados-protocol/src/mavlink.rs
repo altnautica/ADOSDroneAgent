@@ -12,13 +12,13 @@ use std::io::Cursor;
 
 use thiserror::Error;
 
-pub use rust_mavlink::ardupilotmega::MavMessage;
+pub use rust_mavlink::dialects::ardupilotmega::MavMessage;
 pub use rust_mavlink::{MavHeader, MavlinkVersion};
 
 // Re-export the dialect module so services built on this crate (the router)
 // can construct and match the concrete message payloads and enums without
 // declaring their own copy of the dialect dependency.
-pub use rust_mavlink::ardupilotmega;
+pub use rust_mavlink::dialects::ardupilotmega;
 
 #[derive(Debug, Error)]
 pub enum MavlinkError {
@@ -483,6 +483,13 @@ fn clamp_to_i32(v: f64) -> i32 {
 /// Map a numeric coordinate-frame id to the dialect enum. An id outside the
 /// validated frame sets never reaches here (the builder validates first), so an
 /// unexpected value falls back to the enum default rather than panicking.
+///
+/// `#[allow(deprecated)]`: the dialect marks MAV_FRAME_GLOBAL_INT,
+/// _GLOBAL_RELATIVE_ALT_INT, _LOCAL_OFFSET_NED, _BODY_NED and _BODY_OFFSET_NED
+/// superseded, but supersession is a spec-authoring statement, not a wire
+/// change: ids 5..=9 are still what a flight controller puts on the link, and
+/// dropping the arms would silently map live frames onto the enum default.
+#[allow(deprecated)]
 fn mav_frame_from_u8(frame: u8) -> ardupilotmega::MavFrame {
     use ardupilotmega::MavFrame::*;
     match frame {
@@ -861,15 +868,15 @@ pub fn tunnel_payload(frame: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rust_mavlink::ardupilotmega::HEARTBEAT_DATA;
+    use rust_mavlink::dialects::ardupilotmega::HEARTBEAT_DATA;
 
     fn heartbeat() -> MavMessage {
         MavMessage::HEARTBEAT(HEARTBEAT_DATA {
             custom_mode: 0,
-            mavtype: rust_mavlink::ardupilotmega::MavType::MAV_TYPE_QUADROTOR,
-            autopilot: rust_mavlink::ardupilotmega::MavAutopilot::MAV_AUTOPILOT_ARDUPILOTMEGA,
-            base_mode: rust_mavlink::ardupilotmega::MavModeFlag::empty(),
-            system_status: rust_mavlink::ardupilotmega::MavState::MAV_STATE_STANDBY,
+            mavtype: ardupilotmega::MavType::MAV_TYPE_QUADROTOR,
+            autopilot: ardupilotmega::MavAutopilot::MAV_AUTOPILOT_ARDUPILOTMEGA,
+            base_mode: ardupilotmega::MavModeFlag::empty(),
+            system_status: ardupilotmega::MavState::MAV_STATE_STANDBY,
             mavlink_version: 3,
         })
     }
@@ -891,10 +898,7 @@ mod tests {
         assert_eq!(got_header.sequence, 42);
         match got_msg {
             MavMessage::HEARTBEAT(hb) => {
-                assert_eq!(
-                    hb.mavtype,
-                    rust_mavlink::ardupilotmega::MavType::MAV_TYPE_QUADROTOR
-                );
+                assert_eq!(hb.mavtype, ardupilotmega::MavType::MAV_TYPE_QUADROTOR);
                 assert_eq!(hb.mavlink_version, 3);
             }
             other => panic!("expected HEARTBEAT, got {other:?}"),
@@ -1033,7 +1037,7 @@ mod tests {
         // COMMAND_LONG's, but the message id + payload layout are the same, so we
         // compare the frame bytes up to (but excluding) the 2-byte CRC, then assert
         // both CRCs are well-formed 2-byte tails.
-        use rust_mavlink::ardupilotmega::{MavCmd, COMMAND_LONG_DATA};
+        use rust_mavlink::dialects::ardupilotmega::{MavCmd, COMMAND_LONG_DATA};
         let header = MavHeader {
             system_id: 1,
             component_id: 191,
@@ -1113,6 +1117,9 @@ mod tests {
     }
 
     #[test]
+    // Asserts on MAV_FRAME_BODY_NED, superseded in the spec but still the frame
+    // id this builder is asked for; see `mav_frame_from_u8`.
+    #[allow(deprecated)]
     fn local_ned_setpoint_builds_and_round_trips() {
         // A pure-velocity local setpoint in the body frame builds, serializes to
         // a real v2 frame, and decodes back to the SAME message id + fields.
@@ -1150,6 +1157,8 @@ mod tests {
     }
 
     #[test]
+    // Asserts on MAV_FRAME_GLOBAL_RELATIVE_ALT_INT: see `mav_frame_from_u8`.
+    #[allow(deprecated)]
     fn global_int_setpoint_builds_and_round_trips() {
         // A pure-velocity global-int setpoint builds, serializes, and decodes back
         // to message id 86 with the velocity fields intact.

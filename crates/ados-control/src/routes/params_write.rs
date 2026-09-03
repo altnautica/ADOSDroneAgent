@@ -286,7 +286,7 @@ fn build_param_set(name: &str, value: f64) -> MavMessage {
         param_value: value as f32,
         target_system: TARGET_SYSTEM,
         target_component: TARGET_COMPONENT,
-        param_id,
+        param_id: param_id.into(),
         param_type: MavParamType::MAV_PARAM_TYPE_REAL32,
     })
 }
