@@ -9,9 +9,9 @@ MediamtxGsManager`` continue to work via the re-exports below.
 from __future__ import annotations
 
 from ados.services.ground_station.mediamtx import (
-    _FFMPEG_FRAME_RE,
-    FFMPEG_FRAME_STALL_SECONDS,
+    _FFMPEG_TOTAL_SIZE_RE,
     FFMPEG_MONITOR_TICK_SECONDS,
+    FFMPEG_OUTPUT_STALL_SECONDS,
     GROUND_INGEST_UDP_PORT,
     GROUND_RTP_PAYLOAD_TYPE,
     GROUND_RTSP_PATH,
@@ -32,8 +32,8 @@ from ados.services.ground_station.mediamtx import (
 __all__ = [
     "MediamtxGsManager",
     "main",
-    "_FFMPEG_FRAME_RE",
-    "FFMPEG_FRAME_STALL_SECONDS",
+    "_FFMPEG_TOTAL_SIZE_RE",
+    "FFMPEG_OUTPUT_STALL_SECONDS",
     "FFMPEG_MONITOR_TICK_SECONDS",
     "drain_ffmpeg_stderr",
     "GROUND_INGEST_UDP_PORT",

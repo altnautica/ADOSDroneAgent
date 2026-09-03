@@ -22,9 +22,9 @@ import path that re-exports the same names.
 from __future__ import annotations
 
 from .ffmpeg_monitor import (
-    _FFMPEG_FRAME_RE,
-    FFMPEG_FRAME_STALL_SECONDS,
+    _FFMPEG_TOTAL_SIZE_RE,
     FFMPEG_MONITOR_TICK_SECONDS,
+    FFMPEG_OUTPUT_STALL_SECONDS,
     drain_ffmpeg_stderr,
 )
 from .manager import MediamtxGsManager, main
@@ -50,8 +50,8 @@ __all__ = [
     "MediamtxGsManager",
     "main",
     # ffmpeg monitor
-    "_FFMPEG_FRAME_RE",
-    "FFMPEG_FRAME_STALL_SECONDS",
+    "_FFMPEG_TOTAL_SIZE_RE",
+    "FFMPEG_OUTPUT_STALL_SECONDS",
     "FFMPEG_MONITOR_TICK_SECONDS",
     "drain_ffmpeg_stderr",
     # rtsp / sdp config

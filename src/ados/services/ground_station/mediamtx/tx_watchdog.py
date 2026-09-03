@@ -15,7 +15,10 @@ import json
 import time
 from typing import TYPE_CHECKING
 
-from .ffmpeg_monitor import FFMPEG_MONITOR_TICK_SECONDS
+from .ffmpeg_monitor import (
+    FFMPEG_MONITOR_TICK_SECONDS,
+    FFMPEG_OUTPUT_STALL_SECONDS,
+)
 
 if TYPE_CHECKING:
     import structlog
@@ -34,6 +37,16 @@ WFB_STATS_FRESH_SECONDS = 10.0
 # the reap well before it fires; short enough that an idle appliance
 # stops spinning ffmpeg promptly.
 NO_SOURCE_REAP_SECONDS = 15.0
+
+# Window over which a flat mediamtx `bytesReceived` on /main, while the radio
+# is confirmed delivering, means the publish has wedged.
+#
+# Deliberately WIDER than the ffmpeg-side output window: this counter is
+# sampled once per monitor tick (2 s) rather than read from a 1 Hz progress
+# block, so it has coarser resolution and less headroom against a single
+# missed sample. 12 s is six ticks — a flat counter across six consecutive
+# samples on a live link is not sampling noise.
+INBOUND_STALL_SECONDS = 12.0
 
 
 def _read_wfb_stats() -> dict | None:
@@ -138,13 +151,31 @@ async def monitor_ffmpeg(
     shutdown: asyncio.Event,
     slog: structlog.BoundLogger,
 ) -> None:
-    """Supervise the ffmpeg ingest until ``shutdown`` is set.
+    """Supervise the mediamtx core AND the ffmpeg ingest until ``shutdown``.
 
     The first attempt at boot can exit because wfb_rx hasn't received
     any radio frames yet (UDP 5600 silent, ffmpeg's probe gives up).
     Without this loop, mediamtx ends up with no publisher and the
     ground-station path stays empty forever even after pairing
     completes and the radio starts delivering.
+
+    Tick order matters and is the fix for two ways the ground station used to
+    go dark forever:
+
+    1. **Core liveness first, unconditionally.** The core probe used to live
+       INSIDE the ``if not ffmpeg_alive()`` branch. So mediamtx OOMing while
+       ffmpeg stayed blocked on a half-open RTSP socket left nothing bound to
+       8554 and nothing restarting it — ffmpeg looked alive, the branch never
+       ran, and the operator's video was gone permanently. The core owns the
+       port every other participant needs, so it is checked every tick before
+       anything else.
+    2. **Then the output-counter delta.** ``ffmpeg_alive()`` (``returncode is
+       None``) was the ONLY liveness test, because the previous stall watchdog
+       false-positived and was disabled. A wedged-but-alive ingest therefore
+       held ``/main`` and froze the video indefinitely. Process liveness is
+       never proof of work: the ingest must be shown to be moving bytes, which
+       is what ``ffmpeg_output_stalled`` (ffmpeg's own ``total_size``) and the
+       mediamtx-side ``bytesReceived`` delta each independently prove.
     """
     backoff = 5.0
     max_backoff = 60.0
@@ -152,6 +183,11 @@ async def monitor_ffmpeg(
     # live source and no publisher (a stuck codec probe). Reset whenever
     # a live source or an actual publisher reappears.
     no_source_since: float | None = None
+    # mediamtx-side inbound-byte watchdog state: the last counter value and
+    # when it last advanced. Independent of ffmpeg's own view, and measured on
+    # the far side of the RTSP socket.
+    inbound_bytes: int = -1
+    inbound_advanced_at: float = time.monotonic()
     while not shutdown.is_set():
         try:
             await asyncio.wait_for(
@@ -160,28 +196,34 @@ async def monitor_ffmpeg(
             return
         except TimeoutError:
             pass
+
+        # --- 1. Core liveness, every tick, regardless of ffmpeg's state ---
+        #
+        # Hoisted out of the dead-ffmpeg branch. A dead core is unrecoverable
+        # by any amount of ffmpeg respawning: ffmpeg's push socket is broken
+        # and nothing else rebinds 8554.
+        if not manager.core_alive():
+            slog.warning("ground_mediamtx_core_dead_restarting")
+            if not await manager.restart_core():
+                slog.error(
+                    "ground_mediamtx_core_restart_failed",
+                    backoff_seconds=backoff,
+                )
+                backoff = min(backoff * 2, max_backoff)
+                continue
+            slog.info("ground_mediamtx_core_restarted")
+            # The core just came back, so whatever ffmpeg was doing it was
+            # pushing into a dead port. Reap it and let the branch below bring
+            # a fresh one up against the new listener.
+            await manager.stop_ffmpeg_ingest()
+            no_source_since = None
+            inbound_bytes = -1
+            inbound_advanced_at = time.monotonic()
+
         if not manager.ffmpeg_alive():
             # ffmpeg is not alive — it cannot be a stuck probe, so clear
             # the reap timer. A fresh spawn starts its grace window clean.
             no_source_since = None
-            # Mediamtx-core liveness FIRST: this loop only ever supervised the
-            # ffmpeg ingest sidecar, never the mediamtx core that owns the RTSP
-            # port. If the core crashed/OOMed, ffmpeg's push socket breaks and
-            # restart_ffmpeg() can never re-bind (nothing rebinds 8554), so the
-            # loop respawns ffmpeg forever and the ground path stays dark. Bring
-            # the core back before the ffmpeg restart so the publisher has a
-            # port to push to.
-            if not manager._core.is_running():
-                slog.warning("ground_mediamtx_core_dead_restarting")
-                await manager._core.stop()
-                if not await manager._core.start():
-                    slog.error(
-                        "ground_mediamtx_core_restart_failed",
-                        backoff_seconds=backoff,
-                    )
-                    backoff = min(backoff * 2, max_backoff)
-                    continue
-                slog.info("ground_mediamtx_core_restarted")
             # Cold-boot gate: ffmpeg's SDP probe exits with "Output
             # file does not contain any stream" the moment its probe
             # window ends with zero inbound packets. If wfb_rx hasn't
@@ -214,37 +256,71 @@ async def monitor_ffmpeg(
             if ok:
                 slog.info("ground_ffmpeg_restarted")
                 backoff = 5.0
+                inbound_bytes = -1
+                inbound_advanced_at = time.monotonic()
             else:
                 # Capped exponential backoff so a persistently broken
                 # ffmpeg doesn't spin the supervisor.
                 backoff = min(backoff * 2, max_backoff)
             continue
-        # NB: the in-process frame-stall watchdog is DISABLED here.
-        # Both of its liveness signals false-positive on a healthy
-        # ffmpeg under steady-state RTSP push on this rig:
+
+        # --- 2. The delta-counter checks on a LIVE ffmpeg -------------------
         #
-        # 1. /proc/<pid>/io wchar bumps once on the RTSP handshake
-        #    burst, then barely advances for the per-frame TCP
-        #    writes that follow (Linux's io accounting does not
-        #    consistently count small recurring write() calls to
-        #    sockets the way it counts file writes).
-        # 2. The stderr `frame=NNNN` parser sees nothing for many
-        #    seconds because ffmpeg block-buffers its stderr when
-        #    the stream is a subprocess pipe; the 8 s stall window
-        #    expires before the buffer flushes for the first time.
-        #
-        # Result: the watchdog reaped ffmpeg every ~10 s, mediamtx
-        # never accumulated an HLS segment ring, and every segment
-        # request 404'd against a freshly-rebuilt muxer. The user-
-        # visible symptom was "video freezes after a few seconds"
-        # on both HLS and the cascaded WebRTC fallback.
-        #
-        # Until a real liveness signal lands (line-buffered stderr
-        # via stdbuf or -progress -, or a mediamtx-side bytesIn
-        # delta probe), rely on the dead-process branch above plus
-        # mediamtx's own broken-pipe recovery. ffmpeg restarts on
-        # an actual crash or pipe break; that's enough.
-        #
+        # Both are gated on a source actually delivering. Neither counter can
+        # advance when the radio is silent, so treating "flat" as a fault
+        # while there is nothing to carry would reap a healthy idle ingest —
+        # which is the false-positive class that got the previous watchdog
+        # disabled. When there is no source the no-source reaper below is the
+        # correct owner instead.
+        source_live = wfb_source_signal() == "live"
+
+        if source_live:
+            # 2a. ffmpeg's own output-side counter.
+            if manager.ffmpeg_output_stalled():
+                slog.warning(
+                    "ground_ffmpeg_output_stalled_restarting",
+                    stall_window_s=FFMPEG_OUTPUT_STALL_SECONDS,
+                    total_size=manager.ffmpeg_output_bytes(),
+                    msg=(
+                        "ffmpeg is alive but its cumulative output-byte "
+                        "counter has gone flat while the radio is "
+                        "delivering; the ingest is wedged and holding /main"
+                    ),
+                )
+                await manager.stop_ffmpeg_ingest()
+                inbound_bytes = -1
+                inbound_advanced_at = time.monotonic()
+                continue
+
+            # 2b. mediamtx's own view, on the far side of the RTSP socket.
+            # An independent confirmation: ffmpeg can believe it is writing
+            # into a socket mediamtx is no longer draining.
+            current = await manager.path_inbound_bytes()
+            now = time.monotonic()
+            if current is None:
+                # Unreachable API or absent path. Not treated as a stall —
+                # it is not evidence about the byte flow, and the core probe
+                # at the top of the tick is what owns "is mediamtx there".
+                inbound_bytes = -1
+                inbound_advanced_at = now
+            elif inbound_bytes < 0 or current > inbound_bytes:
+                inbound_bytes = current
+                inbound_advanced_at = now
+            elif (now - inbound_advanced_at) >= INBOUND_STALL_SECONDS:
+                slog.warning(
+                    "ground_mediamtx_inbound_stalled_restarting",
+                    stall_window_s=INBOUND_STALL_SECONDS,
+                    bytes_received=current,
+                    msg=(
+                        "mediamtx reports no new bytes on /main while the "
+                        "radio is delivering; the publish has wedged"
+                    ),
+                )
+                await manager.stop_ffmpeg_ingest()
+                inbound_bytes = -1
+                inbound_advanced_at = now
+                continue
+
         # No-source reaper: an ffmpeg spawned against a silent UDP port
         # (no drone, no frames) never finishes its codec probe — it
         # neither exits nor registers a publisher, and spins CPU on an
@@ -255,7 +331,7 @@ async def monitor_ffmpeg(
         # Requiring "no publisher" means a healthy publisher is never
         # reaped, so a brief source dropout on a live link rides through
         # untouched (its RTSP session keeps the publisher registered).
-        if wfb_source_signal() != "live" and not await manager.path_has_publisher():
+        if not source_live and not await manager.path_has_publisher():
             now = time.monotonic()
             if no_source_since is None:
                 no_source_since = now

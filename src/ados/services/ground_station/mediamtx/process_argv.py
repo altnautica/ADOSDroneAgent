@@ -158,6 +158,28 @@ def build_ffmpeg_ingest_argv(
         binary,
         "-fflags", "nobuffer",
         "-flags", "low_delay",
+        # Force the periodic status report to stderr as plain newline-
+        # terminated `key=value` lines once per second. THIS IS THE LIVENESS
+        # SIGNAL, not decoration.
+        #
+        # ffmpeg suppresses the status line entirely when stderr is not a tty,
+        # and it block-buffers stderr behind a subprocess pipe. That is why the
+        # ingest's stall watchdog was disabled: its `frame=` parser saw nothing
+        # for many seconds on a perfectly healthy ffmpeg because the buffer had
+        # not flushed yet, and its other signal (`/proc/<pid>/io` wchar) barely
+        # advanced because Linux io accounting does not consistently count the
+        # small recurring socket write()s of a per-frame RTSP push. Both
+        # false-positived, the watchdog reaped ffmpeg every ~10 s, and the
+        # operator saw "video freezes after a few seconds".
+        #
+        # `-progress pipe:2` removes both failure modes at once: ffmpeg emits
+        # and FLUSHES a structured block including `total_size=N`, the
+        # cumulative count of bytes the muxer has written to the RTSP output.
+        # A wedged ffmpeg keeps printing `progress=continue` with a FROZEN
+        # `total_size`, so keying liveness off that counter ADVANCING is direct
+        # proof the publish is still moving bytes. Same mechanism the air-side
+        # wfb tap already uses.
+        "-progress", "pipe:2",
         # NB: do NOT add `-max_delay 0` here. We tried it as a
         # latency micro-optimization and it broke codec discovery
         # — ffmpeg returned "Could not find codec parameters for

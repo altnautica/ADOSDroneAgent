@@ -52,7 +52,8 @@ from ados.core.logging import configure_logging, get_logger
 from ados.services.video.mediamtx import MediamtxManager, _detect_lan_ips
 
 from .ffmpeg_monitor import (
-    FFMPEG_FRAME_STALL_SECONDS,
+    FFMPEG_FIRST_OUTPUT_GRACE_SECONDS,
+    FFMPEG_OUTPUT_STALL_SECONDS,
     drain_ffmpeg_stderr,
 )
 from .process_argv import build_ffmpeg_ingest_argv, build_mediamtx_yaml
@@ -94,26 +95,31 @@ class MediamtxGsManager:
         self._ffmpeg_stderr_task: asyncio.Task | None = None
         self._config_path: str = ""
         self._running = False
-        # TX-liveness tracking. Two signals:
-        #   1. /proc/<ffmpeg_pid>/io wchar — cumulative write() bytes.
-        #      Advances on every RTSP socket send regardless of how
-        #      chatty ffmpeg's stderr is at the moment. Primary signal.
-        #   2. ffmpeg's `frame=NNNN` stderr progress lines, parsed by
-        #      the stderr drain. Fallback when /proc/<pid>/io is gated
-        #      (kernel.yama.ptrace_scope hardening, rare on the rigs
-        #      we run but kept for resilience).
-        # The supervisor in main() compares the wall time since the
-        # last advance against a stall threshold so a publisher whose
-        # downstream RTSP write has wedged (mediamtx back-pressure /
-        # broken pipe build-up) is reaped before the broken-pipe
-        # restart cascade kicks in. Per Rule 37, a kernel counter
-        # delta is preferred over parsing subprocess stderr because
-        # delayed log flushes can starve the text parser even while
-        # the process is healthy.
-        self._ffmpeg_frame_count: int = 0
-        self._ffmpeg_last_frame_at: float = 0.0
-        self._ffmpeg_last_wchar: int = -1
-        self._ffmpeg_last_wchar_at: float = 0.0
+        # TX-liveness tracking: ONE signal, the ffmpeg `-progress` block's
+        # cumulative `total_size=N` output-byte counter.
+        #
+        # Two earlier signals were tried and both false-positived on a healthy
+        # ffmpeg, which is why the stall watchdog ended up disabled entirely:
+        #   * `/proc/<ffmpeg_pid>/io` wchar barely advanced, because Linux io
+        #     accounting does not consistently count the small recurring
+        #     write()s of a per-frame RTSP socket push the way it counts file
+        #     writes;
+        #   * the `frame=NNNN` stderr parse starved, because ffmpeg
+        #     block-buffers stderr behind a subprocess pipe and suppresses the
+        #     status line outright when stderr is not a tty.
+        # The watchdog reaped ffmpeg every ~10 s and the operator saw "video
+        # freezes after a few seconds".
+        #
+        # `-progress pipe:2` fixes the cause rather than the symptom: ffmpeg
+        # emits and FLUSHES a structured block once per second regardless of
+        # tty-ness, and `total_size` is the OUTPUT-side counter — bytes the
+        # muxer has actually written to the RTSP push. A wedged ffmpeg keeps
+        # printing `progress=continue` with a frozen `total_size`, so keying on
+        # that value ADVANCING is the delta-counter check that process liveness
+        # cannot provide. Same mechanism the air-side wfb tap uses.
+        self._ffmpeg_output_bytes: int = -1
+        self._ffmpeg_output_advanced_at: float = 0.0
+        self._ffmpeg_started_at: float = 0.0
         # Background task that probes the live RTSP session for SPS +
         # PPS NAL units once after each ffmpeg start and bakes them
         # into the SDP. See _bake_sprop_into_sdp.
@@ -226,13 +232,15 @@ class MediamtxGsManager:
             )
             # Reset liveness counters so the new ffmpeg gets a fresh
             # stall window starting from the spawn moment, not from
-            # whatever the previous process left behind.
-            self._ffmpeg_frame_count = 0
-            self._ffmpeg_last_frame_at = time.monotonic()
-            self._ffmpeg_last_wchar = -1
-            self._ffmpeg_last_wchar_at = time.monotonic()
+            # whatever the previous process left behind. `total_size`
+            # restarts from 0 on a respawn, so the high-water mark must be
+            # re-seeded to -1 or the fresh process reads as "flat".
+            now = time.monotonic()
+            self._ffmpeg_output_bytes = -1
+            self._ffmpeg_output_advanced_at = now
+            self._ffmpeg_started_at = now
             self._ffmpeg_stderr_task = asyncio.create_task(
-                drain_ffmpeg_stderr(self._ffmpeg, self._record_frame)
+                drain_ffmpeg_stderr(self._ffmpeg, self._record_output_bytes)
             )
             log.info(
                 "ground_ffmpeg_ingest_started",
@@ -260,11 +268,18 @@ class MediamtxGsManager:
             log.error("ground_ffmpeg_start_failed", error=str(exc))
             return False
 
-    def _record_frame(self, latest: int) -> None:
-        """Callback the stderr drain invokes when a fresher frame counter is seen."""
-        if latest > self._ffmpeg_frame_count:
-            self._ffmpeg_frame_count = latest
-            self._ffmpeg_last_frame_at = time.monotonic()
+    def _record_output_bytes(self, latest: int) -> None:
+        """Callback the stderr drain invokes on a fresher ``total_size``.
+
+        Only a strict increase stamps the advance clock. `total_size` resets to
+        a lower value across an ffmpeg respawn, so a lower value re-seeds the
+        high-water mark without counting as forward progress.
+        """
+        if latest > self._ffmpeg_output_bytes:
+            self._ffmpeg_output_bytes = latest
+            self._ffmpeg_output_advanced_at = time.monotonic()
+        elif latest < self._ffmpeg_output_bytes:
+            self._ffmpeg_output_bytes = latest
 
     async def _bake_sprop_into_sdp(self, rtsp_url: str) -> None:
         """One-shot SDP bake task. Delegates to :func:`bake_sprop_into_sdp`."""
@@ -274,74 +289,86 @@ class MediamtxGsManager:
             payload_type=GROUND_RTP_PAYLOAD_TYPE,
         )
 
-    def ffmpeg_frame_stalled(self, window_s: float = FFMPEG_FRAME_STALL_SECONDS) -> bool:
-        """True when ffmpeg's frame counter has not advanced for window_s.
+    def ffmpeg_output_stalled(
+        self,
+        window_s: float = FFMPEG_OUTPUT_STALL_SECONDS,
+        grace_s: float = FFMPEG_FIRST_OUTPUT_GRACE_SECONDS,
+    ) -> bool:
+        """True when ffmpeg is alive but its output-byte counter has gone flat.
 
-        Caller (the monitor loop) treats a True return as authorization
-        to terminate the ffmpeg subprocess and restart it. The check is
-        skipped while no process is alive — the dead-process path is
-        handled by the existing ``ffmpeg_alive()`` branch.
+        This is the "alive but wedged" check ``ffmpeg_alive()`` cannot make. A
+        wedged ingest holds the ``/main`` path with a live PID and pushes
+        nothing, and the operator's video is frozen for as long as nobody
+        notices. Caller treats a True return as authorization to reap and
+        respawn ffmpeg.
+
+        No process alive ⇒ False: that is the dead-process branch's job, not
+        this one's.
+
+        Before the first byte leaves the muxer the check is held off for
+        ``grace_s``, because nothing is expected on the output side during the
+        RTSP handshake, the first-IDR wait and the SPS/PPS probe window —
+        tripping inside it would be a false positive by construction, which is
+        precisely how the previous watchdog earned its disable.
         """
         if not self.ffmpeg_alive():
             return False
-        # Primary signal: /proc/<ffmpeg_pid>/io wchar. Advances on
-        # every write() ffmpeg does — including RTSP socket sends —
-        # so a process actively pushing frames is detected as healthy
-        # regardless of whether its stderr progress lines have made
-        # it through the journal buffer yet. Same Rule-37 pattern as
-        # the wfb_tx zombie watchdog: kernel counter delta > userspace
-        # text parse.
         now = time.monotonic()
-        wchar = self._read_ffmpeg_wchar()
-        if wchar is not None:
-            if self._ffmpeg_last_wchar == -1:
-                self._ffmpeg_last_wchar = wchar
-                self._ffmpeg_last_wchar_at = now
-                # First sample — give it the cold-start grace window
-                # so we don't false-positive before any frame has
-                # been produced.
-                first_frame_grace = 28.0
-                since_start = now - self._ffmpeg_last_frame_at
-                return since_start >= first_frame_grace
-            if wchar > self._ffmpeg_last_wchar:
-                self._ffmpeg_last_wchar = wchar
-                self._ffmpeg_last_wchar_at = now
-                return False
-            return (now - self._ffmpeg_last_wchar_at) >= window_s
+        if self._ffmpeg_output_bytes < 0:
+            # No `total_size` seen yet. Only a grace overrun counts, and it
+            # means ffmpeg never got as far as writing one output byte.
+            return (now - self._ffmpeg_started_at) >= grace_s
+        return (now - self._ffmpeg_output_advanced_at) >= window_s
 
-        # Fallback: /proc/<pid>/io unreadable. Use the stderr
-        # frame-counter parse. Known false-positive risk on healthy
-        # ffmpeg when the stderr drain is slow to flush; kept here
-        # so a hardened kernel still has some signal.
-        first_frame_grace = 28.0
-        if self._ffmpeg_frame_count == 0:
-            since_start = now - self._ffmpeg_last_frame_at
-            return since_start >= first_frame_grace
-        return (now - self._ffmpeg_last_frame_at) >= window_s
+    def ffmpeg_output_bytes(self) -> int:
+        """Latest cumulative ``total_size`` observed, or ``-1`` if none yet."""
+        return self._ffmpeg_output_bytes
 
-    def _read_ffmpeg_wchar(self) -> int | None:
-        """Cumulative write() bytes for the live ffmpeg subprocess.
+    def core_alive(self) -> bool:
+        """True when the mediamtx core process is running.
 
-        Returns ``None`` when the process is gone, the file is
-        unreadable, or the kernel gates ``/proc/<pid>/io`` (e.g.,
-        ``kernel.yama.ptrace_scope`` tightened beyond what
-        ``CAP_DAC_OVERRIDE`` covers). Caller falls back to the
-        stderr-frame parser.
+        Exposed because the monitor must probe the CORE on every tick, not
+        only when ffmpeg has already died: mediamtx can OOM while ffmpeg stays
+        blocked on a half-open RTSP socket, and then nothing is bound to 8554
+        and nothing is restarting it.
         """
-        if self._ffmpeg is None or self._ffmpeg.pid is None:
-            return None
-        try:
-            with open(f"/proc/{self._ffmpeg.pid}/io") as f:
-                for line in f:
-                    if line.startswith("wchar:"):
-                        return int(line.split(":", 1)[1].strip())
-        except (FileNotFoundError, PermissionError, OSError, ValueError):
-            return None
-        return None
+        return self._core.is_running()
 
-    def ffmpeg_frame_count(self) -> int:
-        """Latest ``frame=`` value observed in ffmpeg's stderr."""
-        return self._ffmpeg_frame_count
+    async def restart_core(self) -> bool:
+        """Stop and restart the mediamtx core. Returns True on a live core."""
+        await self._core.stop()
+        return await self._core.start()
+
+    async def path_inbound_bytes(self) -> int | None:
+        """``bytesReceived`` for the ``/main`` path, or ``None`` when the
+        mediamtx API cannot be reached or the path does not exist.
+
+        The second, independent delta signal. ``total_size`` is measured inside
+        ffmpeg; this is measured inside mediamtx, on the far side of the RTSP
+        socket. Together they distinguish "ffmpeg thinks it is writing" from
+        "mediamtx is actually receiving" — and a ``None`` is itself meaningful,
+        because an unreachable API is how a dead core presents. This mirrors
+        what the air side already does correctly through its own inbound-byte
+        watchdog.
+        """
+        import httpx
+
+        api_port = self._core._api_port
+        try:
+            async with httpx.AsyncClient(
+                base_url=f"http://127.0.0.1:{api_port}",
+                timeout=httpx.Timeout(2.0, connect=0.5),
+            ) as client:
+                resp = await client.get(f"/v3/paths/get/{GROUND_RTSP_PATH}")
+                if resp.status_code != 200:
+                    return None
+                data = resp.json()
+                if not isinstance(data, dict):
+                    return None
+                value = data.get("bytesReceived")
+                return int(value) if isinstance(value, (int, float)) else None
+        except Exception:
+            return None
 
     async def start(self) -> bool:
         """Start mediamtx and the ffmpeg ingest."""
