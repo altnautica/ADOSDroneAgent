@@ -459,7 +459,10 @@ mod tests {
         assert!(is_subscribe_allowed(
             "demo",
             ados_protocol::atlas::PLUGIN_ATLAS_OCCUPANCY_TOPIC,
-            &caps(&["event.subscribe", ados_protocol::atlas::ATLAS_WORLD_READ_CAP])
+            &caps(&[
+                "event.subscribe",
+                ados_protocol::atlas::ATLAS_WORLD_READ_CAP
+            ])
         ));
     }
 
@@ -469,11 +472,18 @@ mod tests {
         // The pose is the same class of data as vehicle telemetry, in the
         // world frame, so it takes the capability that already covers that —
         // and the artifact capability does not substitute for it.
-        assert!(!is_subscribe_allowed("demo", topic, &caps(&["event.subscribe"])));
         assert!(!is_subscribe_allowed(
             "demo",
             topic,
-            &caps(&["event.subscribe", ados_protocol::atlas::ATLAS_WORLD_READ_CAP])
+            &caps(&["event.subscribe"])
+        ));
+        assert!(!is_subscribe_allowed(
+            "demo",
+            topic,
+            &caps(&[
+                "event.subscribe",
+                ados_protocol::atlas::ATLAS_WORLD_READ_CAP
+            ])
         ));
         assert!(is_subscribe_allowed(
             "demo",
@@ -508,7 +518,10 @@ mod tests {
         assert!(!is_subscribe_allowed(
             "demo",
             "plugin.atlas.occupancy.evil",
-            &caps(&["event.subscribe", ados_protocol::atlas::ATLAS_WORLD_READ_CAP])
+            &caps(&[
+                "event.subscribe",
+                ados_protocol::atlas::ATLAS_WORLD_READ_CAP
+            ])
         ));
     }
 
