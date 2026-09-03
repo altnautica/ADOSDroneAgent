@@ -43,14 +43,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use ados_atlas_transport::{atlas_event_router, AtlasEvent};
+use ados_atlas_transport::{atlas_event_router, world_ws_router, AtlasEvent, WorldBroadcaster};
 use ados_compute::{
     artifact_router, build_atlas_jobs_sidecar, build_rerun_output, build_router_with_base,
-    derive_public_base, offload_ws_router, rewrite_output_to_artifact_url, submit_reconstruct_job,
-    write_atlas_jobs_sidecar, write_compute_heartbeat, AtlasIngest, BackendResult, Cluster,
-    ComputeAuth, ComputeJobState, DetectionBroadcaster, Detector, Engine, JobStore,
-    LiveReconstructConfig, MockDetector, OffloadSessionManager, Prepared, PreparedInput, Scheduler,
-    SelectingReconstructor, SessionSpec, DEFAULT_PAIRING_PATH,
+    derive_descriptors, derive_occupancy, derive_public_base, offload_ws_router,
+    rewrite_output_to_artifact_url, submit_reconstruct_job, write_atlas_jobs_sidecar,
+    write_compute_heartbeat, AtlasIngest, BackendResult, Cluster, ComputeAuth, ComputeJobState,
+    DetectionBroadcaster, Detector, Engine, JobStore, LiveReconstructConfig, MockDetector,
+    OffloadSessionManager, Prepared, PreparedInput, Scheduler, SelectingReconstructor, SessionSpec,
+    WorldDescriptorSet, DEFAULT_PAIRING_PATH,
 };
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex};
@@ -71,6 +72,11 @@ const LIVE_CADENCE_TICK_SECS: u64 = 2;
 /// lane. A slow WS subscriber past this buffer lags and skips (never blocking the
 /// detector); the pump keeps pace with the detector on this bound.
 const OFFLOAD_WS_CHANNEL_CAP: usize = 64;
+/// Per-subscriber buffer depth (descriptors) on the world-model descriptor
+/// stream. A descriptor is a few hundred bytes and one generation emits at most
+/// four, so 64 gives a subscriber room to miss several generations of a fast
+/// live cadence before it lags and skips.
+const WORLD_WS_CHANNEL_CAP: usize = 64;
 
 fn init_logging() {
     use ados_protocol::logd::layer::LogdLayer;
@@ -400,12 +406,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // (claim_next_queued), runs its backend WITHOUT the engine lock, and
     // finalizes under the lock, so N backends run in parallel while the API stays
     // responsive. A separate task runs retention on a fixed cadence.
+    // Fan-out for world-model descriptors, created unconditionally so the worker
+    // can hold a handle; the route is mounted only under the atlas gate, and with
+    // no route there are no subscribers, so a non-atlas node publishes into a
+    // channel nobody reads and costs one Arc.
+    let world_broadcaster = Arc::new(WorldBroadcaster::new(WORLD_WS_CHANNEL_CAP));
+
     for _ in 0..workers.max(1) {
         let ws = state.clone();
         let wr = work_root.clone();
         let pb = public_base.clone();
         let sessions = offload_sessions.clone();
-        tokio::spawn(async move { worker_loop(ws, wr, pb, sessions).await });
+        let world = world_broadcaster.clone();
+        tokio::spawn(async move { worker_loop(ws, wr, pb, sessions, world).await });
     }
     let rs = state.clone();
     tokio::spawn(async move { retention_loop(rs, retention_ms).await });
@@ -453,13 +466,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let live_config = live_reconstruct_config();
         let (atlas_tx, atlas_rx) = mpsc::channel::<AtlasEvent>(ATLAS_EVENT_CHANNEL_CAP);
         router = router.merge(atlas_event_router(atlas_tx));
+        // The world model as shared DATA, not only as a picture: every completed
+        // generation publishes `plugin.atlas.{splat,pointcloud,mesh,occupancy}`
+        // descriptors here, and a consumer (the GCS Live World, or a drone
+        // republishing onto its own plugin bus) subscribes per device at
+        // /ws/atlas/<device_id>. Before this, the four topics were declared in
+        // the protocol with no publisher and no subscriber anywhere in the tree.
+        router = router.merge(world_ws_router(world_broadcaster.clone()));
         let rs = state.clone();
         let wr = work_root.clone();
         tokio::spawn(async move { atlas_receiver_loop(atlas_rx, rs, wr, live_config).await });
         tracing::info!(
             channel_cap = ATLAS_EVENT_CHANNEL_CAP,
             live_reconstruct = live_config.enabled,
-            "atlas enabled: world-model event receiver mounted at POST /api/atlas/event"
+            "atlas enabled: world-model event receiver mounted at POST /api/atlas/event, \
+             descriptor stream at GET /ws/atlas/<device_id>"
         );
     }
 
@@ -500,6 +521,7 @@ async fn worker_loop(
     work_root: PathBuf,
     public_base: String,
     sessions: Arc<OffloadSessionManager>,
+    world: Arc<WorldBroadcaster>,
 ) {
     loop {
         let (prepared, reconstructor, detector) = {
@@ -592,6 +614,13 @@ async fn worker_loop(
                 for output in &mut result.outputs {
                     rewrite_output_to_artifact_url(output, &work_root, &public_base);
                 }
+                // Publish the generation as shared world-model DATA before
+                // finalize consumes the result. This is the step that turns Atlas
+                // from a private pipeline ending in a viewer into a consumable
+                // data product: a plugin, a planner, or the GCS reads the
+                // descriptors and pulls only the artifact it needs.
+                publish_world_generation(&world, &job, &result.outputs, &work_root, &public_base)
+                    .await;
                 let outcome = {
                     let engine = state.lock().await;
                     engine.scheduler().finalize(&job, result, now_ms())
@@ -611,6 +640,119 @@ async fn worker_loop(
             }
         }
     }
+}
+
+/// Publish one completed reconstruction generation onto the world-model
+/// descriptor stream, tagged with the drone that captured it.
+///
+/// Derived facts only: a gaussian count comes from the backend's own metadata or
+/// from parsing the real `.ply`, bounds come from the real points, and the ESDF
+/// is computed from the real geometry — a generation with nothing readable
+/// publishes nothing rather than an empty world. Best-effort throughout: a
+/// publish reaching zero subscribers is normal (no consumer connected), and a
+/// derivation fault is logged without touching the job's own outcome.
+async fn publish_world_generation(
+    world: &Arc<WorldBroadcaster>,
+    job: &ados_compute::JobRecord,
+    outputs: &[ados_compute::Output],
+    work_root: &std::path::Path,
+    public_base: &str,
+) {
+    // A reconstruct job always carries its capture session; without one there is
+    // nothing to attribute a world model to.
+    let Some(session_id) = job.params.get("session_id").and_then(|v| v.as_str()) else {
+        return;
+    };
+    // The drone the descriptors belong to. Absent on a pre-attribution capture,
+    // and the per-device stream cannot route without it, so skip rather than
+    // publish a world model under an empty device id.
+    let Some(device_id) = job.params.get("device_id").and_then(|v| v.as_str()) else {
+        tracing::debug!(job = %job.id, "world-model generation has no device attribution; not published");
+        return;
+    };
+    let generation = job
+        .params
+        .get("generation")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    let mut set: WorldDescriptorSet =
+        derive_descriptors(session_id, generation, outputs, work_root);
+    // The ESDF is a real distance transform over the reconstruction, so it runs
+    // off the async runtime like the backend does.
+    let (sid, outs, wr, jid, pb) = (
+        session_id.to_string(),
+        outputs.to_vec(),
+        work_root.to_path_buf(),
+        job.id.clone(),
+        public_base.to_string(),
+    );
+    match tokio::task::spawn_blocking(move || {
+        derive_occupancy(&sid, generation, &outs, &wr, &jid, &pb)
+    })
+    .await
+    {
+        Ok(Ok(Some((desc, grid)))) => {
+            tracing::info!(
+                job = %job.id,
+                generation,
+                dims = ?desc.dims,
+                resolution_m = desc.resolution_m,
+                voxels = grid.distances.len(),
+                "atlas esdf derived"
+            );
+            set.occupancy = Some(desc);
+        }
+        Ok(Ok(None)) => {}
+        Ok(Err(e)) => tracing::warn!(job = %job.id, error = %e, "atlas_esdf_derive_failed"),
+        Err(e) => tracing::warn!(job = %job.id, error = %e, "atlas_esdf_task_panicked"),
+    }
+
+    if set.is_empty() {
+        return;
+    }
+    let mut published = 0usize;
+    for (topic, payload) in [
+        (
+            ados_protocol::atlas::PLUGIN_ATLAS_SPLAT_TOPIC,
+            set.splat.as_ref().map(|d| d.to_msgpack()),
+        ),
+        (
+            ados_protocol::atlas::PLUGIN_ATLAS_POINTCLOUD_TOPIC,
+            set.pointcloud.as_ref().map(|d| d.to_msgpack()),
+        ),
+        (
+            ados_protocol::atlas::PLUGIN_ATLAS_MESH_TOPIC,
+            set.mesh.as_ref().map(|d| d.to_msgpack()),
+        ),
+        (
+            ados_protocol::atlas::PLUGIN_ATLAS_OCCUPANCY_TOPIC,
+            set.occupancy.as_ref().map(|d| d.to_msgpack()),
+        ),
+    ] {
+        match payload {
+            Some(Ok(body)) => {
+                world.publish(
+                    device_id,
+                    AtlasEvent::new(topic, Some(device_id.to_string()), body),
+                );
+                published += 1;
+            }
+            Some(Err(e)) => {
+                tracing::warn!(topic, error = %e, "world_descriptor_encode_failed")
+            }
+            None => {}
+        }
+    }
+    tracing::info!(
+        job = %job.id,
+        device = %device_id,
+        session = %session_id,
+        generation,
+        descriptors = published,
+        subscribers = world.subscriber_count(),
+        "world-model generation published as shared data"
+    );
 }
 
 /// Periodically reclaim terminal jobs older than the retention window.

@@ -20,8 +20,8 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ados_protocol::atlas::{
-    AtlasForwardStatus, CaptureState, CaptureStatus, VioHealth, ATLAS_FORWARD_SIDECAR,
-    ATLAS_FORWARD_SIDECAR_VERSION,
+    bearer_carries_keyframes, bearer_keyframe_degraded_reason, AtlasForwardStatus, CaptureState,
+    CaptureStatus, PoseSource, VioHealth, ATLAS_FORWARD_SIDECAR, ATLAS_FORWARD_SIDECAR_VERSION,
 };
 use ados_protocol::sidecar::check_sidecar_version;
 use serde::Serialize;
@@ -69,6 +69,32 @@ struct AtlasStateSlice<'a> {
     /// Epoch ms a keyframe was last forwarded, from the forwarder handoff.
     #[serde(skip_serializing_if = "Option::is_none")]
     last_kf_at: Option<i64>,
+    /// Whether the ACTIVE bearer can carry a full keyframe.
+    ///
+    /// Without this the Stream card reported `bearer: "wfb-relay"` as though the
+    /// lane were working, while the relay's 1300-byte datagram ceiling means no
+    /// keyframe has ever crossed it — so the operator saw a live transport and
+    /// got no world model, with nothing on any surface saying why. Omitted (like
+    /// the other transport fields) when there is no fresh handoff, because with
+    /// no known bearer there is nothing honest to claim.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    keyframes_carried: Option<bool>,
+    /// The operator-facing reason the active bearer cannot carry keyframes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    degraded_reason: Option<&'a str>,
+    /// True once the session-wide keyframe cap stopped selection: the capture is
+    /// still `capturing` and the count is frozen on purpose.
+    capped: bool,
+    /// True once the session's geo anchor latched. Keyframe selection is refused
+    /// before it, so a capture with `anchored: false` is running and producing
+    /// nothing — which is otherwise indistinguishable from a stalled camera.
+    anchored: bool,
+    /// Which producer filled the pose being tagged (`local_vio` /
+    /// `offloaded_slam`), so a silent switch to offloaded SLAM is visible.
+    pose_tier: &'a PoseSource,
+    /// Keyframes that reached no subscriber, so the ingested count is not read
+    /// as reconstruction input that exists.
+    dropped_keyframes: u64,
 }
 
 fn write_atomic(path: &Path, body: &[u8]) -> std::io::Result<()> {
@@ -125,6 +151,11 @@ pub fn write_atlas_state_sidecar_to(
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
+    // The keyframe-carrying fact is a pure property of the bearer name, decided
+    // once in the contract so the forwarder, this writer and the GCS cannot
+    // give three answers. With no fresh handoff there is no known bearer, so
+    // both fields stay absent rather than defaulting to a claim.
+    let bearer = forward.and_then(|f| f.bearer.as_deref());
     let slice = AtlasStateSlice {
         version: ATLAS_STATE_SIDECAR_VERSION,
         generated_at_ms: now_ms,
@@ -135,8 +166,14 @@ pub fn write_atlas_state_sidecar_to(
         camera_count: status.camera_count,
         vio_health: &status.vio_health,
         compute_node_id: forward.and_then(|f| f.compute_node_id.as_deref()),
-        bearer: forward.and_then(|f| f.bearer.as_deref()),
+        bearer,
         last_kf_at: forward.and_then(|f| f.last_kf_at_ms),
+        keyframes_carried: bearer.map(bearer_carries_keyframes),
+        degraded_reason: bearer.and_then(bearer_keyframe_degraded_reason),
+        capped: status.capped,
+        anchored: status.anchored,
+        pose_tier: &status.pose_tier,
+        dropped_keyframes: status.dropped_keyframes,
     };
     match serde_json::to_vec(&slice) {
         Ok(body) => {
@@ -160,6 +197,10 @@ mod tests {
             vio_health: VioHealth::Good,
             camera_count: 3,
             ingest_rate_hz: 9.5,
+            capped: false,
+            anchored: true,
+            pose_tier: PoseSource::LocalVio,
+            dropped_keyframes: 0,
         }
     }
 

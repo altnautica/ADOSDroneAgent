@@ -142,6 +142,9 @@ async fn run_sequential_session<S: OffloadFrameStream>(
     cancel: Arc<tokio::sync::Notify>,
     progress: SessionProgress,
 ) -> SessionExit {
+    // One dedicated inference thread for the session's lifetime, off the shared
+    // blocking pool. See `InferenceWorker`.
+    let worker = InferenceWorker::spawn(session_id, detector);
     let mut seq: u64 = 0;
     // Hold ONE notified future for the whole session so a cancel is never missed
     // between iterations (a fresh `cancel.notified()` per loop can race with the
@@ -162,11 +165,7 @@ async fn run_sequential_session<S: OffloadFrameStream>(
                 return SessionExit::StreamEnded;
             }
         };
-        match detect_and_emit(
-            session_id, camera_id, seq, frame, &detector, &sink, &progress,
-        )
-        .await
-        {
+        match detect_and_emit(session_id, camera_id, seq, frame, &worker, &sink, &progress).await {
             Step::Continue => seq = seq.wrapping_add(1),
             Step::Stop(exit) => return exit,
         }
@@ -213,6 +212,11 @@ async fn run_process_latest_session<S: OffloadFrameStream + 'static>(
         })
     };
 
+    // One dedicated inference thread for the session's lifetime, off the shared
+    // blocking pool. See `InferenceWorker`. The depth-1 request channel composes
+    // with the depth-1 newest-frame watch above: a detector slower than the
+    // source still infers on the freshest frame, and never queues stale ones.
+    let worker = InferenceWorker::spawn(session_id, detector);
     let mut seq: u64 = 0;
     // One notified future for the whole session so an external cancel is never
     // missed between iterations (mirrors the sequential path).
@@ -236,11 +240,7 @@ async fn run_process_latest_session<S: OffloadFrameStream + 'static>(
             continue;
         };
 
-        match detect_and_emit(
-            session_id, camera_id, seq, frame, &detector, &sink, &progress,
-        )
-        .await
-        {
+        match detect_and_emit(session_id, camera_id, seq, frame, &worker, &sink, &progress).await {
             Step::Continue => seq = seq.wrapping_add(1),
             Step::Stop(e) => break e,
         }
@@ -323,6 +323,128 @@ enum Step {
     Stop(SessionExit),
 }
 
+/// One inference request handed to the session's dedicated detector thread.
+struct InferRequest {
+    frame_ref: FrameRef,
+    pixels: Vec<u8>,
+    reply: tokio::sync::oneshot::Sender<Result<Vec<Detection>>>,
+}
+
+/// A dedicated OS thread that owns the detector for one session's lifetime.
+///
+/// Inference here is **steady-rate** work — one call per frame, at the camera's
+/// frame rate, for as long as the session lives — and `spawn_blocking` is the
+/// wrong tool for that. Three reasons, in order of how badly each bites:
+///
+/// 1. **The blocking pool is shared.** The same runtime runs the reconstruct
+///    backend (minutes per job, on `spawn_blocking`), the GPU sampler (which
+///    shells out to `system_profiler` / `powermetrics` and can hang for
+///    seconds), and the Rerun world-model write. A long reconstruction or a
+///    wedged `powermetrics` occupies pool workers and directly delays the next
+///    frame's inference, on the one path whose whole product promise is that
+///    detections track the moving scene.
+/// 2. **No backpressure.** The blocking pool's queue is unbounded and grows to
+///    ~512 threads, so a detector slower than the frame rate silently
+///    accumulates work instead of pushing back. The depth-1 request channel
+///    here IS the backpressure: the async side awaits, so a slow model slows
+///    ingestion rather than growing a queue.
+/// 3. **Thread affinity.** A real backend caches per-thread state (an ONNX
+///    Runtime session's arena, a CUDA context). Bouncing across pool workers
+///    re-warms it; one owned thread does not.
+///
+/// `spawn_blocking` stays correct for the sporadic users it was designed for;
+/// this is the steady-rate one.
+struct InferenceWorker {
+    tx: tokio::sync::mpsc::Sender<InferRequest>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl InferenceWorker {
+    /// Spawn the worker thread for `session_id`. The thread ends when the
+    /// request sender is dropped, so the worker's lifetime is exactly the
+    /// session's.
+    fn spawn(session_id: &str, detector: Arc<dyn Detector>) -> Self {
+        // Depth 1: at most one request in flight and one queued, so a detector
+        // slower than the source applies backpressure instead of buffering.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<InferRequest>(1);
+        let name = format!("ados-infer-{}", short_session_tag(session_id));
+        let handle = std::thread::Builder::new()
+            .name(name)
+            .spawn(move || {
+                while let Some(req) = rx.blocking_recv() {
+                    let out = detector
+                        .infer(&req.frame_ref, Some(&req.pixels))
+                        .map_err(|e| anyhow!("detector: {e}"));
+                    // A closed reply channel means the session moved on; drop the
+                    // result and take the next request.
+                    let _ = req.reply.send(out);
+                }
+            })
+            .ok()
+            .map(Some)
+            .unwrap_or(None);
+        if handle.is_none() {
+            tracing::error!(
+                session = session_id,
+                "offload inference thread spawn failed; session cannot infer"
+            );
+        }
+        Self { tx, handle }
+    }
+
+    /// Run the detector on `frame`, consuming its pixels so they move to the
+    /// worker thread with no copy; only the detections come back.
+    async fn infer(&self, frame: OffloadFrame) -> Result<Vec<Detection>> {
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        let req = InferRequest {
+            frame_ref: FrameRef {
+                camera_id: frame.camera_id,
+                width: frame.width,
+                height: frame.height,
+                ts_ms: frame.ts_ms,
+            },
+            pixels: frame.pixels,
+            reply,
+        };
+        // Awaiting the send IS the backpressure: with the worker busy and one
+        // request already queued, ingestion waits here rather than piling up.
+        self.tx
+            .send(req)
+            .await
+            .map_err(|_| anyhow!("inference worker gone"))?;
+        rx.await
+            .map_err(|_| anyhow!("inference worker dropped the request"))?
+    }
+}
+
+impl Drop for InferenceWorker {
+    fn drop(&mut self) {
+        // Dropping the sender ends the worker's `blocking_recv` loop. Joining is
+        // bounded by one in-flight inference, and it guarantees the detector (and
+        // whatever native context it holds) is torn down before the session task
+        // returns, rather than outliving it on a detached thread.
+        if let Some(handle) = self.handle.take() {
+            let tx = std::mem::replace(&mut self.tx, tokio::sync::mpsc::channel(1).0);
+            drop(tx);
+            let _ = handle.join();
+        }
+    }
+}
+
+/// A short, thread-name-safe tag from a session id (OS thread names are capped
+/// at 15 bytes on Linux, so a full `atlas-<device>-<ms>` would be truncated
+/// arbitrarily).
+fn short_session_tag(session_id: &str) -> String {
+    session_id
+        .chars()
+        .rev()
+        .take(6)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
+}
+
 /// Run the detector on `frame`, tag the batch with `seq`, and push it onto `sink`.
 /// Returns [`Step::Stop`] with the reason when the detector failed (a backend
 /// fault) or the sink closed (the pump left) — both end the session. On a
@@ -332,13 +454,13 @@ async fn detect_and_emit(
     camera_id: &str,
     seq: u64,
     frame: OffloadFrame,
-    detector: &Arc<dyn Detector>,
+    worker: &InferenceWorker,
     sink: &tokio::sync::mpsc::Sender<OffloadDetectionBatch>,
     progress: &SessionProgress,
 ) -> Step {
     // Read the batch metadata off the frame before its pixels move into inference.
     let (ts_ms, width, height) = (frame.ts_ms, frame.width, frame.height);
-    let detections = match run_detector(detector, frame).await {
+    let detections = match worker.infer(frame).await {
         Ok(d) => d,
         Err(e) => {
             tracing::warn!(session = session_id, error = %e, "offload session detector failed; stopping");
@@ -360,24 +482,6 @@ async fn detect_and_emit(
     // A batch reached the pump: the session is producing → Live + throughput.
     progress.on_batch();
     Step::Continue
-}
-
-/// Run the detector on one frame on a blocking thread (a real model can take tens
-/// of ms; the async runtime must not block on it). Consumes the frame so its
-/// pixels move into the blocking task with no copy; only the detections come back.
-async fn run_detector(detector: &Arc<dyn Detector>, frame: OffloadFrame) -> Result<Vec<Detection>> {
-    let detector = detector.clone();
-    let frame_ref = FrameRef {
-        camera_id: frame.camera_id,
-        width: frame.width,
-        height: frame.height,
-        ts_ms: frame.ts_ms,
-    };
-    let pixels = frame.pixels;
-    tokio::task::spawn_blocking(move || detector.infer(&frame_ref, Some(&pixels)))
-        .await
-        .map_err(|e| anyhow!("detector task join: {e}"))?
-        .map_err(|e| anyhow!("detector: {e}"))
 }
 
 fn now_ms() -> i64 {

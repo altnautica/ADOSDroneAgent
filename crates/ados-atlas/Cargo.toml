@@ -31,6 +31,14 @@ anyhow = { workspace = true }
 # The capture loop, the frame/pose source readers, and the publish bus are all
 # async over the same Unix-socket IPC the other services use.
 tokio = { workspace = true }
+# Pointer-sized shared caches (the latest pose, the anchor latch) guarded
+# without a poisoning error path to unwrap at each call site.
+parking_lot = { workspace = true }
+# The link-aware freshness gate: the capture path age-gates the pose it tags a
+# frame with, so a dead flight-controller link stops keyframe production instead
+# of baking a frozen pose into the reconstruction. Pure logic, serde-only leaf
+# crate, and `ados-offload` does not depend on `ados-atlas`.
+ados-offload = { path = "../ados-offload" }
 # Map the /dev/shm camera ring a frame descriptor names and read the slot.
 memmap2 = { workspace = true }
 # Encode a selected keyframe's raw ring frame to JPEG before it ships to the

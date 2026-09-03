@@ -11,8 +11,8 @@
 use std::sync::Arc;
 
 use ados_atlas_transport::{
-    atlas_event_router, AtlasBearer, AtlasEvent, BearerKind, BearerLadder, DeltaBroadcaster,
-    LanHttpBearer, LoopbackBearer,
+    atlas_event_router, AtlasBearer, AtlasEvent, BearerKind, BearerLadder, LanHttpBearer,
+    LoopbackBearer, WorldBroadcaster,
 };
 use ados_compute::{
     submit_reconstruct_job, AtlasIngest, Cluster, Engine, JobRecord, JobStore,
@@ -20,10 +20,10 @@ use ados_compute::{
     Scheduler,
 };
 use ados_protocol::atlas::{
-    CameraIntrinsics, CameraRole, CaptureState, CaptureStatus, Distortion, ImageEncoding,
-    ImuSample, KeyframeEnvelope, KeyframeFlags, KeyframeImage, KeyframeTier, Pose, PoseSource,
-    SplatDescriptor, VioHealth, ATLAS_CAPTURE_STATE_TOPIC, ATLAS_KEYFRAME_TOPIC,
-    PLUGIN_ATLAS_SPLAT_TOPIC,
+    CameraIntrinsics, CameraRole, CaptureState, CaptureStatus, Distortion, GlobalAnchor,
+    ImageEncoding, ImuSample, KeyframeEnvelope, KeyframeFlags, KeyframeImage, KeyframeTier, Pose,
+    PoseSource, SplatDescriptor, TimeAlignment, VioHealth, ATLAS_CAPTURE_STATE_TOPIC,
+    ATLAS_KEYFRAME_TOPIC, PLUGIN_ATLAS_OCCUPANCY_TOPIC, PLUGIN_ATLAS_SPLAT_TOPIC, POSE_COV_LEN,
 };
 use ados_protocol::compute::{ComputeJobKind, ComputeJobState, ComputeRole, SlaveDescriptor};
 use tokio::net::TcpListener;
@@ -56,6 +56,10 @@ fn bagged(keyframes: u64) -> AtlasEvent {
         vio_health: VioHealth::Good,
         camera_count: 1,
         ingest_rate_hz: 9.0,
+        capped: false,
+        anchored: true,
+        pose_tier: PoseSource::LocalVio,
+        dropped_keyframes: 0,
     };
     AtlasEvent::new(
         ATLAS_CAPTURE_STATE_TOPIC,
@@ -265,6 +269,7 @@ fn keyframe_env(session_id: &str, camera_id: &str, kf_id: u64) -> KeyframeEnvelo
             bytes: vec![],
         },
         camera: CameraIntrinsics {
+            calibrated: true,
             k: [900.0, 0.0, 640.0, 0.0, 900.0, 360.0, 0.0, 0.0, 1.0],
             distortion: Distortion {
                 model: "radtan".into(),
@@ -276,8 +281,15 @@ fn keyframe_env(session_id: &str, camera_id: &str, kf_id: u64) -> KeyframeEnvelo
             t: [kf_id as f64, 0.0, 0.0],
             cov: None,
         },
+        pose_cov: vec![0.0009; POSE_COV_LEN],
         pose_source: PoseSource::LocalVio,
-        global_anchor: None,
+        time: TimeAlignment::unmeasured(),
+        global_anchor: Some(GlobalAnchor {
+            lat: 12.97,
+            lon: 77.59,
+            alt_m: 920.0,
+            yaw_rad: 0.0,
+        }),
         imu_window: vec![ImuSample {
             t_ms: 999,
             gyro: [0.1, 0.2, 0.3],
@@ -316,6 +328,10 @@ async fn g1_rerun_recording_maps_keyframes_for_the_gcs_viewer() {
     }
     rec.push_splat(
         &SplatDescriptor {
+            session_id: "g0".into(),
+            generation: 1,
+            manifest_url: None,
+            lod_levels: 0,
             gaussian_count: 4800,
             step: 200,
             url: Some("spz://sitl".into()),
@@ -432,17 +448,17 @@ async fn g2_bag_pipeline_reconstructs_to_a_delivered_output() {
     );
 }
 
-/// G3: the shared-data delta lane isolates per device — one drone's world model
-/// never crosses into another drone's plugin view — and an NPU-less drone's
-/// perception offload runs the (mock) detector and returns a detection.
+/// G3: the shared-data descriptor lane isolates per device — one drone's world
+/// model never crosses into another drone's plugin view — and an NPU-less
+/// drone's perception offload runs the (mock) detector and returns a detection.
 #[tokio::test]
 async fn g3_plugin_data_share_isolates_per_device_and_offloads() {
-    let broadcaster = DeltaBroadcaster::new(16);
+    let broadcaster = WorldBroadcaster::new(16);
     let mut rx_one = broadcaster.subscribe();
     let mut rx_two = broadcaster.subscribe();
     assert_eq!(broadcaster.subscriber_count(), 2);
 
-    // One drone's splat update is published for its device only.
+    // One drone's splat generation is published for its device only.
     let splat = AtlasEvent::new(PLUGIN_ATLAS_SPLAT_TOPIC, None, vec![1, 2, 3]);
     broadcaster.publish("drone-1", splat);
 
@@ -452,11 +468,11 @@ async fn g3_plugin_data_share_isolates_per_device_and_offloads() {
     assert_eq!(
         for_one.as_ref().map(|e| e.topic.as_str()),
         Some(PLUGIN_ATLAS_SPLAT_TOPIC),
-        "drone-1's plugin view receives its own world delta"
+        "drone-1's plugin view receives its own world descriptor"
     );
     assert!(
         for_two.is_none(),
-        "drone-2's plugin view never sees drone-1's world delta (device isolation)"
+        "drone-2's plugin view never sees drone-1's world descriptor (device isolation)"
     );
 
     // The NPU-less offload path: the node runs the detector and returns a result.
@@ -645,6 +661,10 @@ async fn g5_multi_cam_fuses_into_one_world() {
         vio_health: VioHealth::Good,
         camera_count: N as u32,
         ingest_rate_hz: 9.0,
+        capped: false,
+        anchored: true,
+        pose_tier: PoseSource::LocalVio,
+        dropped_keyframes: 0,
     };
     ladder
         .send(&AtlasEvent::new(
@@ -718,5 +738,85 @@ async fn g5_multi_cam_fuses_into_one_world() {
         pinhole_paths.len(),
         N,
         "the N intrinsics sit on N distinct camera paths"
+    );
+}
+
+/// G3, the part that was missing: the world model is CONSUMABLE DATA, not only a
+/// picture. A completed reconstruction's geometry becomes an occupancy/ESDF
+/// descriptor a planner can act on, and it crosses the per-device shared-data
+/// lane to a subscriber that never touched the compute node's filesystem.
+///
+/// Before this, `plugin.atlas.occupancy` was a constant in the protocol with no
+/// publisher and no subscriber anywhere in the tree, so a repo-wide search for a
+/// consumer of the world model found a viewer and nothing else.
+#[tokio::test]
+async fn the_world_model_is_consumable_as_a_planning_input_over_the_shared_data_lane() {
+    use ados_compute::{derive_descriptors, derive_occupancy, Output};
+    use ados_protocol::atlas::{OccupancyDescriptor, OccupancyField};
+
+    let dir = tempfile::tempdir().unwrap();
+    // A real reconstruction artifact: three surface points in an L, as a .ply the
+    // node's own parser reads.
+    let ply = dir.path().join("cloud.ply");
+    std::fs::write(
+        &ply,
+        "ply\nformat ascii 1.0\nelement vertex 3\nproperty float x\nproperty float y\n\
+         property float z\nend_header\n0 0 0\n1 0 0\n0 1 0\n",
+    )
+    .unwrap();
+    let outputs = vec![Output {
+        id: "out-cloud".into(),
+        job_id: "recon-g0".into(),
+        kind: "pointcloud".into(),
+        uri: format!("file://{}", ply.display()),
+        meta: serde_json::Value::Null,
+        created_ms: 0,
+    }];
+
+    // The descriptors are derived from the real artifact, stamped with the
+    // capture session and the generation a viewer diffs on.
+    let set = derive_descriptors("g0", 4, &outputs, dir.path());
+    let cloud = set.pointcloud.expect("a point-cloud descriptor");
+    assert_eq!(cloud.session_id, "g0");
+    assert_eq!(cloud.generation, 4);
+    assert_eq!(cloud.point_count, 3, "the count is measured, not guessed");
+
+    // And the planning input: an ESDF, not a voxel dump.
+    let (occ, grid) = derive_occupancy("g0", 4, &outputs, dir.path(), "recon-g0", "http://node")
+        .unwrap()
+        .expect("real geometry yields a planning input");
+    assert_eq!(occ.field, OccupancyField::Esdf);
+    assert!(occ.truncation_m > 0.0);
+    assert_eq!(grid.voxel_count(), grid.distances.len());
+    assert!(
+        grid.distances.contains(&0.0),
+        "the field reaches zero at the surface"
+    );
+
+    // It crosses the per-device shared-data lane and decodes on the other side —
+    // the subscriber holds a planning input having read no files at all.
+    let broadcaster = WorldBroadcaster::new(16);
+    let mut consumer = broadcaster.subscribe();
+    assert_eq!(
+        broadcaster.publish(
+            "drone-1",
+            AtlasEvent::new(
+                PLUGIN_ATLAS_OCCUPANCY_TOPIC,
+                Some("drone-1".into()),
+                occ.to_msgpack().unwrap(),
+            ),
+        ),
+        1
+    );
+    let (device, event) = consumer.recv().await.unwrap();
+    assert_eq!(device, "drone-1");
+    assert_eq!(event.topic, PLUGIN_ATLAS_OCCUPANCY_TOPIC);
+    let received = OccupancyDescriptor::from_msgpack(&event.payload).unwrap();
+    assert_eq!(received, occ, "the planning input crosses the lane intact");
+    assert_eq!(received.field, OccupancyField::Esdf);
+    assert_eq!(received.generation, 4);
+    assert!(
+        received.url.is_some(),
+        "the descriptor names where the consumer fetches the field"
     );
 }

@@ -37,27 +37,30 @@ pub mod state_sidecar;
 
 pub use config::{CameraConfig, CaptureConfig, CaptureProfile, SelectionParams};
 pub use selector::{rotation_angle, KeyframeSelector};
-pub use session::{CaptureOutput, CaptureSession, FrameInput};
+pub use session::{CaptureOutput, CaptureSession, FrameInput, PoseInput};
 
 pub use control::{serve_control, AtlasControlCmd};
 pub use encode::encode_keyframe_jpeg;
 pub use frame_source::{AtlasFrameSource, CapturedFrame, SyntheticFrameSource, VisionFrameSource};
 pub use pose_source::{
-    build_pose_provider, euler_to_rotation, geodetic_to_enu, HybridPose, OffloadPose, PoseProvider,
-    PoseSample, ReplayPose, StateSockPose,
+    build_pose_provider, clock_offset_ns, diagonal_cov, euler_to_rotation, geodetic_to_enu,
+    mono_ms, mono_ns, HybridPose, OffloadPose, PoseProvider, PoseSample, ReplayPose, StateSockPose,
 };
 pub use publish::AtlasPublisher;
 pub use runtime::{
-    default_intrinsics, select_pose_tier, AtlasRuntimeConfig, PoseTier, PoseTierConfig,
+    default_intrinsics, select_pose_tier, AtlasRuntimeConfig, PosePrior, PoseTier, PoseTierConfig,
 };
 pub use service::{new_session_id, run_capture_loop};
 
 // Re-export the shared wire contract so callers get one import surface.
 pub use ados_protocol::atlas::{
     CameraIntrinsics, CameraRole, CaptureState, CaptureStatus, Distortion, GlobalAnchor,
-    ImageEncoding, ImuSample, KeyframeEnvelope, KeyframeFlags, KeyframeImage, KeyframeTier, Pose,
-    PoseDescriptor, PoseSource, VioHealth, ATLAS_CAPTURE_STATE_TOPIC, ATLAS_POSE_OFFLOAD_TOPIC,
-    PLUGIN_ATLAS_POSE_TOPIC,
+    ImageEncoding, ImuSample, KeyframeBudget, KeyframeEnvelope, KeyframeFlags, KeyframeImage,
+    KeyframeReject, KeyframeTier, MeshDescriptor, OccupancyDescriptor, OccupancyField,
+    PointCloudDescriptor, Pose, PoseDescriptor, PoseSource, SplatDescriptor, TimeAlignment,
+    VioHealth, ATLAS_CAPTURE_STATE_TOPIC, ATLAS_POSE_OFFLOAD_TOPIC, PLUGIN_ATLAS_MESH_TOPIC,
+    PLUGIN_ATLAS_OCCUPANCY_TOPIC, PLUGIN_ATLAS_POINTCLOUD_TOPIC, PLUGIN_ATLAS_POSE_TOPIC,
+    PLUGIN_ATLAS_SPLAT_TOPIC,
 };
 
 /// Errors from the Atlas capture core. The frame-by-frame capture path is

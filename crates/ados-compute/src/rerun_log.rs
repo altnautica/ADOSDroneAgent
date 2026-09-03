@@ -285,6 +285,7 @@ mod tests {
                 bytes: vec![],
             },
             camera: CameraIntrinsics {
+                calibrated: true,
                 k: [900.0, 0.0, 640.0, 0.0, 900.0, 360.0, 0.0, 0.0, 1.0],
                 distortion: Distortion {
                     model: "radtan".into(),
@@ -296,7 +297,9 @@ mod tests {
                 t: [1.0, 2.0, 3.0],
                 cov: None,
             },
+            pose_cov: vec![0.0009; ados_protocol::atlas::POSE_COV_LEN],
             pose_source: PoseSource::LocalVio,
+            time: ados_protocol::atlas::TimeAlignment::unmeasured(),
             global_anchor: None,
             imu_window: vec![ImuSample {
                 t_ms: 999,
@@ -364,8 +367,12 @@ mod tests {
     fn world_model_descriptors_map_to_world_subtree_with_payloads() {
         let splat = log_splat(
             &SplatDescriptor {
+                session_id: "sess-test".into(),
+                generation: 1,
                 gaussian_count: 5,
                 step: 50,
+                manifest_url: None,
+                lod_levels: 0,
                 url: None,
                 handle: None,
             },
@@ -383,6 +390,8 @@ mod tests {
 
         let cloud = log_pointcloud(
             &PointCloudDescriptor {
+                session_id: "sess-test".into(),
+                generation: 1,
                 point_count: 9,
                 bounds: [-1.0, -1.0, -1.0, 1.0, 1.0, 1.0],
                 shm_name: None,
@@ -403,6 +412,8 @@ mod tests {
 
         let mesh = log_mesh(
             &MeshDescriptor {
+                session_id: "sess-test".into(),
+                generation: 1,
                 vertex_count: 1,
                 face_count: 2,
                 url: None,
@@ -421,6 +432,11 @@ mod tests {
 
         let occ = log_occupancy(
             &OccupancyDescriptor {
+                session_id: "sess-test".into(),
+                generation: 1,
+                field: ados_protocol::atlas::OccupancyField::Esdf,
+                truncation_m: 4.0,
+                url: None,
                 origin: [0.5, 0.0, 0.0],
                 resolution_m: 0.05,
                 dims: [10, 10, 4],
@@ -462,8 +478,12 @@ mod tests {
         rec.push_keyframe(&keyframe());
         rec.push_splat(
             &SplatDescriptor {
+                session_id: "sess-test".into(),
+                generation: 1,
                 gaussian_count: 1200,
                 step: 50,
+                manifest_url: None,
+                lod_levels: 0,
                 url: None,
                 handle: None,
             },

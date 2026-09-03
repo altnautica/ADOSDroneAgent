@@ -324,6 +324,7 @@ mod tests {
                     model: "radtan".into(),
                     params: vec![0.1, -0.2, 0.001, 0.002],
                 },
+                calibrated: true,
             },
             // A non-trivial rotation so the OpenCV->OpenGL column flip is visible.
             pose: Pose {
@@ -331,8 +332,15 @@ mod tests {
                 t: [1.5, -2.0, 0.5],
                 cov: None,
             },
+            pose_cov: vec![0.0009; ados_protocol::atlas::POSE_COV_LEN],
             pose_source: PoseSource::LocalVio,
-            global_anchor: None,
+            time: ados_protocol::atlas::TimeAlignment::unmeasured(),
+            global_anchor: Some(ados_protocol::atlas::GlobalAnchor {
+                lat: 12.97,
+                lon: 77.59,
+                alt_m: 920.0,
+                yaw_rad: 0.0,
+            }),
             imu_window: Vec::new(),
             flags: KeyframeFlags::default(),
         }

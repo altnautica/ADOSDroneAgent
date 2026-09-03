@@ -20,8 +20,8 @@
 use std::collections::{HashMap, HashSet};
 
 use ados_protocol::atlas::{
-    AtlasEvent, CaptureState, CaptureStatus, KeyframeEnvelope, ATLAS_CAPTURE_STATE_TOPIC,
-    ATLAS_KEYFRAME_TOPIC,
+    AtlasEvent, CaptureState, CaptureStatus, KeyframeBudget, KeyframeEnvelope,
+    ATLAS_CAPTURE_STATE_TOPIC, ATLAS_KEYFRAME_TOPIC,
 };
 use ados_protocol::compute::{ComputeJobKind, ComputeJobState};
 
@@ -87,6 +87,20 @@ impl SessionLive {
 pub struct AtlasIngest {
     /// Keyframe events seen this session (received-side delivery count).
     keyframes_seen: u64,
+    /// Keyframe events REFUSED as reconstruction input (see
+    /// [`AtlasIngest::keyframes_rejected`]).
+    keyframes_rejected: u64,
+    /// Keyframes accepted whose clock offset was never measured, so the dataset
+    /// can carry the honest fact rather than the reconstruction quietly
+    /// inheriting an undisciplined clock.
+    keyframes_undisciplined_clock: u64,
+    /// What a keyframe must satisfy to enter a dataset. Defaults to
+    /// [`KeyframeBudget::default`]: covariance, pairing residual and anchor are
+    /// gated hard; the clock-offset sigma is carried and reported rather than
+    /// gated, because a node without a PPS-disciplined clock honestly reports it
+    /// unmeasured and rejecting every frame there would yield zero
+    /// reconstructions with no operator-visible cause.
+    budget: KeyframeBudget,
     persister: KeyframePersister,
     /// Live-reconstruction cadence config (disabled by default → final bag only).
     live_config: LiveReconstructConfig,
@@ -124,12 +138,35 @@ impl AtlasIngest {
     ) -> Self {
         Self {
             keyframes_seen: 0,
+            keyframes_rejected: 0,
+            keyframes_undisciplined_clock: 0,
+            budget: KeyframeBudget::default(),
             persister: KeyframePersister::new(work_root),
             live_config,
             sessions: HashMap::new(),
             session_devices: HashMap::new(),
             train_iters: default_train_iters(),
         }
+    }
+
+    /// Override what a keyframe must satisfy to enter a dataset — the opt-in for
+    /// a rig with a PPS-disciplined clock ([`KeyframeBudget::strict`]).
+    pub fn with_budget(mut self, budget: KeyframeBudget) -> Self {
+        self.budget = budget;
+        self
+    }
+
+    /// Keyframes refused as reconstruction input. Every one of these would
+    /// otherwise have entered a dataset and baked a wrong pose into the
+    /// reconstruction with no other symptom — a mis-posed keyframe does not make
+    /// the output visibly broken, it makes it subtly, confidently wrong.
+    pub fn keyframes_rejected(&self) -> u64 {
+        self.keyframes_rejected
+    }
+
+    /// Accepted keyframes whose clock offset was never measured.
+    pub fn keyframes_undisciplined_clock(&self) -> u64 {
+        self.keyframes_undisciplined_clock
     }
 
     /// Keyframe events received so far (the received-side delivery proof — the
@@ -156,6 +193,28 @@ impl AtlasIngest {
                 match KeyframeEnvelope::from_msgpack(&event.payload) {
                     Ok(kf) => {
                         self.note_device(&kf.session_id, event.device_id.as_deref());
+                        // Refuse a frame the reconstructor cannot trust BEFORE it
+                        // reaches disk. A frame with no position-prior sigma
+                        // destabilises the bundle adjustment, one whose pose was
+                        // paired too far from its exposure instant is placed where
+                        // the aircraft was not, and one captured before the geo
+                        // anchor latched sits in a different frame of reference
+                        // from every other frame in the same session.
+                        if let Err(reason) = kf.validate_with(&self.budget) {
+                            self.keyframes_rejected += 1;
+                            tracing::warn!(
+                                session = %kf.session_id,
+                                kf_id = kf.kf_id,
+                                camera = %kf.camera_id,
+                                rejected_total = self.keyframes_rejected,
+                                reason = %reason,
+                                "atlas_keyframe_rejected"
+                            );
+                            return Ok(None);
+                        }
+                        if !kf.clock_is_disciplined() {
+                            self.keyframes_undisciplined_clock += 1;
+                        }
                         match self.persister.persist(&kf) {
                             Ok(()) => self.note_persisted(&kf, now_ms),
                             Err(e) => tracing::warn!(error = %e, "atlas_keyframe_persist_failed"),
@@ -302,10 +361,16 @@ impl AtlasIngest {
             // compute→cloud producer can attribute the world model to the drone
             // (`cmd_atlasJobs.deviceId`). Both stay absent when unknown rather than
             // asserting a wrong id.
+            // The generation is the world-model artifact set's monotonic
+            // version, and the cycle index IS that version for a live session:
+            // each cycle publishes an immutable set the viewer can diff against
+            // the last. The worker reads it back off the job to stamp the
+            // descriptors it publishes.
             let mut params = serde_json::json!({
                 "backend": DEFAULT_RECONSTRUCT_BACKEND,
                 "session_id": session_id.clone(),
                 "steps": self.train_iters,
+                "generation": cycle,
             });
             if let Some(dev) = &device_id {
                 meta["device_id"] = serde_json::Value::String(dev.clone());
@@ -357,11 +422,24 @@ impl AtlasIngest {
             return Ok(None);
         }
         let device_id = self.session_devices.get(&status.session_id).cloned();
+        // The final bag is the generation AFTER every periodic cycle, so a viewer
+        // holding cycle N-1 sees the full-set artifact as strictly newer.
+        let generation = self
+            .sessions
+            .get(&status.session_id)
+            .map(|l| l.driver.cycles())
+            .unwrap_or(0);
 
         let mut meta = serde_json::json!({
             "keyframes": status.keyframes,
             "cameras": status.camera_count,
             "received_keyframes": self.keyframes_seen,
+            // Honest reconstruction-input accounting: how many frames were
+            // refused, and how many were accepted from an undisciplined clock.
+            // Both are properties of the dataset a quality gate must weigh, and
+            // neither is visible from the keyframe count alone.
+            "rejected_keyframes": self.keyframes_rejected,
+            "undisciplined_clock_keyframes": self.keyframes_undisciplined_clock,
         });
         if let Some(path) = &input_path {
             meta["input_path"] = serde_json::Value::String(path.to_string_lossy().into_owned());
@@ -375,6 +453,7 @@ impl AtlasIngest {
             "backend": DEFAULT_RECONSTRUCT_BACKEND,
             "session_id": status.session_id.clone(),
             "steps": self.train_iters,
+            "generation": generation,
         });
         if let Some(dev) = &device_id {
             meta["device_id"] = serde_json::Value::String(dev.clone());
@@ -456,14 +535,22 @@ mod tests {
                     model: "radtan".into(),
                     params: vec![0.0, 0.0, 0.0, 0.0],
                 },
+                calibrated: true,
             },
             pose: Pose {
                 r: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
                 t: [0.0, 0.0, 0.0],
                 cov: None,
             },
+            pose_cov: vec![0.0009; ados_protocol::atlas::POSE_COV_LEN],
             pose_source: PoseSource::LocalVio,
-            global_anchor: None,
+            time: ados_protocol::atlas::TimeAlignment::unmeasured(),
+            global_anchor: Some(ados_protocol::atlas::GlobalAnchor {
+                lat: 12.97,
+                lon: 77.59,
+                alt_m: 920.0,
+                yaw_rad: 0.0,
+            }),
             imu_window: Vec::new(),
             flags: KeyframeFlags::default(),
         };
@@ -485,6 +572,10 @@ mod tests {
             vio_health: VioHealth::Good,
             camera_count: 1,
             ingest_rate_hz: 9.0,
+            capped: false,
+            anchored: true,
+            pose_tier: PoseSource::LocalVio,
+            dropped_keyframes: 0,
         };
         AtlasEvent::new(
             ATLAS_CAPTURE_STATE_TOPIC,

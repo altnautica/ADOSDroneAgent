@@ -50,6 +50,7 @@ mod serving_config;
 mod session;
 mod session_registry;
 mod store;
+mod world_descriptors;
 
 pub use api::{build_router, build_router_with_base, ApiState, CancelResponse, SubmitResponse};
 pub use artifacts::{
@@ -108,6 +109,10 @@ pub use session_registry::{
     StreamingSession, WorkPriority,
 };
 pub use store::{Dataset, JobRecord, JobStore, Output};
+pub use world_descriptors::{
+    derive_descriptors, derive_occupancy, esdf_from_points, EsdfError, EsdfGrid,
+    WorldDescriptorSet, DEFAULT_ESDF_RESOLUTION_M, DEFAULT_ESDF_TRUNCATION_M, MAX_ESDF_VOXELS,
+};
 
 // Re-export the shared wire contract so callers get one import surface.
 pub use ados_protocol::compute::{

@@ -14,16 +14,17 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use ados_protocol::atlas::{CaptureState, ImageEncoding, KeyframeImage, PoseDescriptor, VioHealth};
+use ados_offload::{FreshnessGate, GateState};
+use ados_protocol::atlas::{CaptureState, ImageEncoding, KeyframeImage, TimeAlignment, VioHealth};
 use tokio::sync::{mpsc, Notify};
 
 use crate::control::AtlasControlCmd;
 use crate::encode::encode_keyframe_jpeg;
 use crate::frame_source::{AtlasFrameSource, CapturedFrame};
-use crate::pose_source::PoseProvider;
+use crate::pose_source::{clock_offset_ns, mono_ns, PoseProvider, PoseSample};
 use crate::publish::AtlasPublisher;
 use crate::runtime::AtlasRuntimeConfig;
-use crate::session::{CaptureSession, FrameInput};
+use crate::session::{CaptureSession, FrameInput, PoseInput};
 
 /// A globally-unique session id every run's keyframes share. Embeds the drone's
 /// device id so two drones streaming to ONE shared compute node never collide on
@@ -54,7 +55,15 @@ pub fn new_session_id(device_id: &str) -> String {
 
 /// Reduce a device id to id-safe chars (ASCII alphanumerics, `-`, `_`), mapping
 /// anything else to `-` and trimming leading/trailing separators, so the session
-/// id stays safe as a dataset directory name, a URL path, and an upsert key.
+/// id stays safe as a dataset directory name, a URL path, and an upsert key,
+/// then append a short hash of the ORIGINAL id.
+///
+/// The hash suffix is load-bearing. Mapping every non-id-safe character to `-`
+/// is many-to-one: `dr one/7`, `dr-one-7` and `dr/one/7` all collapse to
+/// `dr-one-7`, so two genuinely different drones streaming to one shared compute
+/// node would mint the same session-id prefix and corrupt each other's dataset —
+/// the exact collision the session id exists to prevent. The hash is of the
+/// pre-sanitization id, so distinct inputs stay distinct.
 fn sanitize_id(id: &str) -> String {
     let mapped: String = id
         .chars()
@@ -66,7 +75,22 @@ fn sanitize_id(id: &str) -> String {
             }
         })
         .collect();
-    mapped.trim_matches('-').to_string()
+    let trimmed = mapped.trim_matches('-');
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    format!("{trimmed}-{:06x}", short_hash(id))
+}
+
+/// A 24-bit FNV-1a hash of `s`, for disambiguating a sanitized id. Not a
+/// security primitive: it only has to separate ids a lossy character map merged.
+fn short_hash(s: &str) -> u32 {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in s.as_bytes() {
+        h ^= *b as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    h & 0x00ff_ffff
 }
 
 /// What we publish capture state on a change of (so we re-publish only when the
@@ -76,6 +100,14 @@ struct StateKey {
     state: CaptureState,
     keyframes: u64,
     health: VioHealth,
+    /// The keyframe cap stops selection while state and count both freeze, so
+    /// without this in the key the transition is never republished and the
+    /// operator surface shows "capturing" against a frozen count forever.
+    capped: bool,
+    /// The anchor latch gates keyframe selection, so the operator must see it
+    /// flip — before it, a capture is running and producing nothing.
+    anchored: bool,
+    dropped_keyframes: u64,
 }
 
 /// One iteration's selected work: an operator control command, or the next
@@ -136,6 +168,15 @@ pub async fn run_capture_loop(
     let mut last_key = state_key(&session);
     publisher.publish_capture_state(&session.status()).await;
 
+    // The pose freshness gate. Anchored on THIS host's monotonic clock, so a
+    // producer that stops publishing while its socket stays up is caught: the
+    // socket-drop path clears the cache, but a wedged producer never drops the
+    // socket and only an age check sees it. Without this, a flight-controller
+    // link that dies mid-flight left `pose.latest()` returning the last pose
+    // forever, and EVERY subsequent frame was tagged with that frozen pose and
+    // entered the reconstruction as truth.
+    let mut pose_gate = FreshnessGate::new(runtime.pose_max_age_ms);
+
     // Whether the control channel is still open. A closed channel (its sender
     // dropped — e.g. the control socket failed to bind) makes `recv()` resolve
     // immediately forever, so once it closes we disable the branch rather than
@@ -176,7 +217,16 @@ pub async fn run_capture_loop(
                 }
             }
             LoopStep::Frame(Some(f)) => {
-                process_frame(&mut session, &publisher, &runtime, &pose, f, &mut last_key).await;
+                process_frame(
+                    &mut session,
+                    &publisher,
+                    &runtime,
+                    &pose,
+                    &mut pose_gate,
+                    f,
+                    &mut last_key,
+                )
+                .await;
             }
         }
     }
@@ -232,26 +282,85 @@ async fn handle_control(
     }
 }
 
+/// Build the [`TimeAlignment`] for a frame paired with `ps`.
+///
+/// `ts_monotonic_ns` is this host's monotonic instant for the frame,
+/// `clock_offset_ns` lets a consumer rederive the wall stamp from it, and the
+/// residual is the REAL measured gap between the frame and the pose it was
+/// paired with, on the one clock where that subtraction means something.
+///
+/// `trigger_seq` is deliberately `None`: pairing a frame to a pose by the
+/// flight controller's `CAMERA_TRIGGER.seq` requires the FC to be publishing
+/// that message and the camera to be hardware-triggered from it, and neither is
+/// wired on this platform. Claiming a sequence we did not join on would assert
+/// an exact pairing where an interpolated one happened, so the field stays
+/// absent and the residual carries the honest cost.
+fn time_alignment(frame_mono_ns: i64, ps: &PoseSample, sigma_ns: i64) -> TimeAlignment {
+    let residual_ns = frame_mono_ns - ps.arrival_mono_ns;
+    TimeAlignment {
+        ts_monotonic_ns: frame_mono_ns,
+        clock_offset_ns: clock_offset_ns(),
+        clock_offset_sigma_ns: sigma_ns,
+        trigger_seq: None,
+        pose_pairing_residual_ms: residual_ns as f64 / 1_000_000.0,
+    }
+}
+
 /// Ingest one captured frame: tag it with the latest pose, encode a keyframe only
 /// when the session would select it, feed the session, and publish the pose (+
-/// keyframe) plus the capture state on a change. A frame with no pose yet (the
-/// flight controller link is not up) is dropped rather than tagged with a guess.
+/// keyframe) plus the capture state on a change.
+///
+/// A frame with no pose, or with a pose past its age budget, is DROPPED. Both
+/// mean the same thing operationally — there is no current pose — and tagging a
+/// frame with a stale one puts it into the reconstruction at a place the
+/// aircraft was not.
+#[allow(clippy::too_many_arguments)]
 async fn process_frame(
     session: &mut CaptureSession,
     publisher: &AtlasPublisher,
     runtime: &AtlasRuntimeConfig,
     pose: &Arc<dyn PoseProvider>,
+    pose_gate: &mut FreshnessGate,
     f: CapturedFrame,
     last_key: &mut StateKey,
 ) {
+    // One monotonic read per frame, used for both the freshness decision and
+    // the frame's own exposure stamp, so the two cannot disagree.
+    let frame_mono_ns = mono_ns();
+    let now_mono_ms = frame_mono_ns / 1_000_000;
+
     let Some(ps) = pose.latest() else {
-        // No pose yet (the flight controller link is not up): a frame cannot be
-        // pose-tagged, so it is dropped rather than tagged with a guess.
+        // No pose at all (the flight controller link never came up, or the
+        // reader cleared its cache on disconnect). A frame cannot be pose-tagged,
+        // so it is dropped rather than tagged with a guess.
+        pose_gate.set_link(false);
+        degrade_to_lost(session, publisher, last_key).await;
         return;
     };
-    session.set_vio_health(ps.health);
 
-    let intrinsics = runtime.intrinsics_for(&f.camera_id, f.width, f.height);
+    // The pose exists; record its arrival on the gate's clock and ask whether it
+    // is still inside the age budget.
+    pose_gate.set_link(true);
+    pose_gate.record(ps.arrival_mono_ns / 1_000_000);
+    if pose_gate.state(now_mono_ms) != GateState::Fresh {
+        // A pose past its budget is treated as ABSENT, never held forward and
+        // never extrapolated: the socket may still be up while the producer has
+        // stopped, which is exactly the stall a liveness check cannot see.
+        tracing::debug!(
+            camera = %f.camera_id,
+            age_ms = now_mono_ms.saturating_sub(ps.arrival_mono_ns / 1_000_000),
+            budget_ms = runtime.pose_max_age_ms,
+            "atlas_frame_dropped_stale_pose"
+        );
+        degrade_to_lost(session, publisher, last_key).await;
+        return;
+    }
+
+    session.set_vio_health(ps.health);
+    session.set_pose_tier(ps.source);
+    // The anchor latch is observable from the sample: the reader fills `anchor`
+    // once the first 3D fix lands and every later sample carries it.
+    session.set_anchored(ps.anchor.is_some());
 
     // Encode the JPEG only when this frame will actually become a keyframe, and
     // off the reactor: the per-pixel YUV->RGB + JPEG pass is tens of ms on a
@@ -267,27 +376,18 @@ async fn process_frame(
                 // stays whole and the selector baseline is NOT advanced, so the
                 // next good frame retries the keyframe at this point.
                 tracing::warn!(camera = %f.camera_id, error = %e, "keyframe_encode_failed");
-                publisher
-                    .publish_pose(&PoseDescriptor {
-                        pose: ps.pose,
-                        anchor: ps.anchor,
-                        ts_ms: f.ts_ms,
-                    })
-                    .await;
+                publish_pose_only(session, publisher, &f.camera_id, &ps, f.ts_ms).await;
                 return;
             }
             Err(join) => {
                 tracing::error!(camera = %f.camera_id, error = %join, "keyframe_encode_task_panicked");
-                publisher
-                    .publish_pose(&PoseDescriptor {
-                        pose: ps.pose,
-                        anchor: ps.anchor,
-                        ts_ms: f.ts_ms,
-                    })
-                    .await;
+                publish_pose_only(session, publisher, &f.camera_id, &ps, f.ts_ms).await;
                 return;
             }
         };
+        // Compute the alignment before the sample's fields move into the frame
+        // input; the alignment reads the pose's arrival instant, not its pose.
+        let time = time_alignment(frame_mono_ns, &ps, runtime.pose_prior.clock_offset_sigma_ns);
         let fi = FrameInput {
             image: KeyframeImage {
                 encoding: ImageEncoding::Jpeg,
@@ -295,40 +395,67 @@ async fn process_frame(
                 height: h,
                 bytes: jpeg,
             },
-            camera: intrinsics,
+            camera: runtime.intrinsics_for(&f.camera_id, w, h),
             pose: ps.pose,
+            pose_cov: ps.cov,
             pose_source: ps.source,
+            time,
             global_anchor: ps.anchor,
             imu_window: Vec::new(),
         };
         if let Some(out) = session.on_frame(&f.camera_id, fi, f.ts_ms) {
-            publisher.publish_pose(&out.pose).await;
+            if let Some(pd) = &out.pose {
+                publisher.publish_pose(pd).await;
+            }
             if let Some(kf) = out.keyframe {
-                publisher.publish_keyframe(&kf).await;
+                let dropped = publisher.publish_keyframe(&kf).await;
+                session.note_keyframe_dropped(dropped);
             }
         }
     } else {
-        // Not a keyframe: feed on_frame an empty image (unused) so the pose stream
-        // still flows, with no encode.
-        let fi = FrameInput {
-            image: KeyframeImage {
-                encoding: ImageEncoding::Jpeg,
-                width: f.width,
-                height: f.height,
-                bytes: Vec::new(),
-            },
-            camera: intrinsics,
-            pose: ps.pose,
-            pose_source: ps.source,
-            global_anchor: ps.anchor,
-            imu_window: Vec::new(),
-        };
-        if let Some(out) = session.on_frame(&f.camera_id, fi, f.ts_ms) {
-            publisher.publish_pose(&out.pose).await;
-        }
+        // Not a keyframe: the pose-only path, which builds no image, resolves no
+        // intrinsics and allocates nothing per frame.
+        publish_pose_only(session, publisher, &f.camera_id, &ps, f.ts_ms).await;
     }
 
     // Re-publish capture state only when the operator-visible status moved.
+    let key = state_key(session);
+    if key != *last_key {
+        publisher.publish_capture_state(&session.status()).await;
+        *last_key = key;
+    }
+}
+
+/// Feed the session the pose side of a frame and publish the descriptor when
+/// the rig-wide cadence is due.
+async fn publish_pose_only(
+    session: &mut CaptureSession,
+    publisher: &AtlasPublisher,
+    camera_id: &str,
+    ps: &PoseSample,
+    ts_ms: i64,
+) {
+    let input = PoseInput {
+        pose: ps.pose.clone(),
+        global_anchor: ps.anchor,
+    };
+    if let Some(pd) = session.on_pose_only(camera_id, input, ts_ms) {
+        publisher.publish_pose(&pd).await;
+    }
+}
+
+/// Report the pose stream as LOST and republish the capture state if that moved
+/// the operator-visible status.
+///
+/// The status must say `lost` rather than hold the last health: a capture that
+/// is producing no keyframes because it has no pose looks identical, from the
+/// outside, to one that is simply between selections.
+async fn degrade_to_lost(
+    session: &mut CaptureSession,
+    publisher: &AtlasPublisher,
+    last_key: &mut StateKey,
+) {
+    session.set_vio_health(VioHealth::Lost);
     let key = state_key(session);
     if key != *last_key {
         publisher.publish_capture_state(&session.status()).await;
@@ -342,6 +469,9 @@ fn state_key(session: &CaptureSession) -> StateKey {
         state: st.state,
         keyframes: st.keyframes,
         health: st.vio_health,
+        capped: st.capped,
+        anchored: st.anchored,
+        dropped_keyframes: st.dropped_keyframes,
     }
 }
 

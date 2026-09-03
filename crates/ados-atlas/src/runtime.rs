@@ -101,6 +101,8 @@ impl IntrinsicsOverride {
                     self.distortion_params.clone()
                 },
             },
+            // An operator-supplied override IS the calibration.
+            calibrated: true,
         }
     }
 }
@@ -108,6 +110,12 @@ impl IntrinsicsOverride {
 /// Derive an uncalibrated pinhole from the frame size and horizontal field of
 /// view: `fx = fy = (width/2) / tan(hfov/2)`, principal point at the centre, no
 /// distortion. The compute node treats these as an initial guess to refine.
+///
+/// The result is stamped `calibrated: false`. This matters: a rig captured on a
+/// nominal 70-degree pinhole with zero distortion produces a metrically wrong
+/// reconstruction — scaled, and bent at the frame edges — and nothing else in
+/// the output says so. Labelling the guess is what lets the operator surface
+/// badge it and the reconstructor treat it as an estimate.
 pub fn default_intrinsics(width: u32, height: u32, hfov_deg: f64) -> CameraIntrinsics {
     let w = width.max(1) as f64;
     let h = height.max(1) as f64;
@@ -119,7 +127,110 @@ pub fn default_intrinsics(width: u32, height: u32, hfov_deg: f64) -> CameraIntri
             model: "radtan".to_string(),
             params: vec![0.0, 0.0, 0.0, 0.0],
         },
+        calibrated: false,
     }
+}
+
+/// The DOP assumed when the flight controller reports none, so a pose still
+/// carries a stated prior rather than silently carrying none. Chosen as a
+/// mid-range open-sky figure; a rig that reports real DOP never uses it.
+const ASSUMED_DOP: f64 = 2.0;
+
+/// The pose uncertainty this rig states on every keyframe.
+///
+/// This is a DECLARED PRIOR, not a measurement, and that distinction is the
+/// whole reason it is configuration. The state socket republishes GPS_RAW_INT's
+/// `eph`/`epv`, which are dilution-of-precision figures — UNITLESS — because the
+/// metric `h_acc`/`v_acc` extension fields are not carried there. A metre sigma
+/// is therefore `DOP x UERE`, and the UERE depends on the receiver: roughly
+/// 0.02 m on an RTK-fixed module and 2-3 m on a consumer one. Only the operator
+/// knows which module is bolted to the aircraft, so the default is the
+/// conservative consumer figure and an operator with better hardware states it.
+///
+/// Erring large is the safe direction for a reconstruction prior: it biases the
+/// bundle adjustment toward trusting its own imagery over the GNSS. Erring
+/// small pins cameras to wrong positions and is exactly what makes
+/// `pose_prior_mapper` unstable.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct PosePrior {
+    /// Position sigma in metres, stated outright. When set it wins over the
+    /// DOP derivation — the right knob for an RTK rig.
+    pub position_sigma_m: Option<f64>,
+    /// The receiver's user-equivalent range error in metres, multiplied by the
+    /// reported DOP when `position_sigma_m` is unset.
+    pub gnss_uere_m: f64,
+    /// Orientation sigma in radians. The flight controller publishes no
+    /// attitude uncertainty on the state socket, so this is a declared figure;
+    /// the default is ~1.1 degrees.
+    pub orientation_sigma_rad: f64,
+    /// Position sigma in metres for an offloaded SLAM pose.
+    pub slam_position_sigma_m: f64,
+    /// Orientation sigma in radians for an offloaded SLAM pose.
+    pub slam_orientation_sigma_rad: f64,
+    /// One-sigma uncertainty of this node's `CLOCK_REALTIME`, in nanoseconds,
+    /// or negative for UNMEASURED (the default and the honest value on a node
+    /// with no PPS-disciplined clock). A rig running chrony against a GPS PPS
+    /// refclock states its real figure here, which is what lets the consumer
+    /// apply the strict keyframe budget.
+    pub clock_offset_sigma_ns: i64,
+}
+
+impl Default for PosePrior {
+    fn default() -> Self {
+        Self {
+            position_sigma_m: None,
+            gnss_uere_m: 2.5,
+            orientation_sigma_rad: 0.02,
+            slam_position_sigma_m: 0.25,
+            slam_orientation_sigma_rad: 0.01,
+            clock_offset_sigma_ns: -1,
+        }
+    }
+}
+
+impl PosePrior {
+    /// The row-major 6x6 covariance for a flight-controller pose with the given
+    /// reported `dop` (unitless, `None` when the FC reported none).
+    ///
+    /// Returns EMPTY without a 3D fix: with no fix the position is the local
+    /// origin rather than a measurement, so there is no position to state a
+    /// sigma for, and inventing one would hand the reconstructor a prior on a
+    /// value that is not a position at all.
+    pub fn covariance(&self, dop: Option<f64>, has_fix: bool) -> Vec<f64> {
+        if !has_fix {
+            return Vec::new();
+        }
+        let sigma = self
+            .position_sigma_m
+            .unwrap_or_else(|| dop.unwrap_or(ASSUMED_DOP) * self.gnss_uere_m)
+            .max(f64::MIN_POSITIVE);
+        crate::pose_source::diagonal_cov(sigma, self.orientation_sigma_rad)
+    }
+
+    /// The row-major 6x6 covariance for an offloaded SLAM pose.
+    pub fn slam_covariance(&self) -> Vec<f64> {
+        crate::pose_source::diagonal_cov(
+            self.slam_position_sigma_m,
+            self.slam_orientation_sigma_rad,
+        )
+    }
+}
+
+/// The default keyframe-to-pose age budget (ms). A pose older than this cannot
+/// pose a frame: at 15 m/s a 500 ms-old position is 7.5 m away, which is larger
+/// than the keyframe selector's own baseline threshold, so the frame would be
+/// entered into the reconstruction at a place the aircraft was not.
+fn default_pose_max_age_ms() -> i64 {
+    500
+}
+
+/// The default interval (ms) between published pose descriptors — the ~10 Hz
+/// the contract documents. Publishing per accepted frame per camera instead
+/// multiplied pose traffic by the camera count and raised eviction pressure on
+/// the same 16-deep bus that carries multi-MB keyframes.
+fn default_pose_publish_interval_ms() -> i64 {
+    100
 }
 
 /// The capture service's full runtime configuration.
@@ -136,6 +247,12 @@ pub struct AtlasRuntimeConfig {
     pub pose_tier: PoseTierConfig,
     pub hfov_deg: f64,
     pub intrinsics: HashMap<String, IntrinsicsOverride>,
+    /// The uncertainty this rig states on every pose (see [`PosePrior`]).
+    pub pose_prior: PosePrior,
+    /// Age budget for the pose a frame is tagged with, in milliseconds.
+    pub pose_max_age_ms: i64,
+    /// Minimum interval between published pose descriptors, in milliseconds.
+    pub pose_publish_interval_ms: i64,
 }
 
 impl Default for AtlasRuntimeConfig {
@@ -149,6 +266,9 @@ impl Default for AtlasRuntimeConfig {
             pose_tier: PoseTierConfig::Auto,
             hfov_deg: default_hfov_deg(),
             intrinsics: HashMap::new(),
+            pose_prior: PosePrior::default(),
+            pose_max_age_ms: default_pose_max_age_ms(),
+            pose_publish_interval_ms: default_pose_publish_interval_ms(),
         }
     }
 }
@@ -189,6 +309,12 @@ impl AtlasRuntimeConfig {
             hfov_deg: f64,
             #[serde(default)]
             intrinsics: HashMap<String, IntrinsicsOverride>,
+            #[serde(default)]
+            pose_prior: PosePrior,
+            #[serde(default = "default_pose_max_age_ms")]
+            pose_max_age_ms: i64,
+            #[serde(default = "default_pose_publish_interval_ms")]
+            pose_publish_interval_ms: i64,
         }
 
         let Ok(text) = std::fs::read_to_string(path) else {
@@ -231,6 +357,9 @@ impl AtlasRuntimeConfig {
             pose_tier: a.pose_tier,
             hfov_deg: a.hfov_deg,
             intrinsics: a.intrinsics,
+            pose_prior: a.pose_prior,
+            pose_max_age_ms: a.pose_max_age_ms,
+            pose_publish_interval_ms: a.pose_publish_interval_ms,
         }
     }
 
