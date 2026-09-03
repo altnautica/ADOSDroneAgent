@@ -74,3 +74,40 @@ jobs:
       # checked-in .bats files never gated a push. Run all of them.
       - name: bats suites
         run: bats scripts/test/*.bats
+
+      # ...and assert the run collected what it should have. `bats` over a
+      # glob that matches nothing, or over a file whose @test blocks were
+      # commented out, prints a plan of zero and exits 0 — indistinguishable
+      # in the log from a suite that passed. These 34 tests are the only thing
+      # that executes scripts/install.sh anywhere in CI (against a file://
+      # fake release tree, via ADOS_RELEASE_BASE), so a silent collection of
+      # zero would leave the installer bootstrap with no coverage at all while
+      # the job stayed green.
+      #
+      # The count is a floor, not an equality: adding a test must never be
+      # blocked by a gate. Raise it when the suite grows.
+      - name: bats suite collected the reviewed number of tests
+        run: |
+          set -uo pipefail
+          FLOOR=34
+
+          declared="$(grep -h -c '^@test' scripts/test/*.bats | paste -sd+ - | bc)"
+          counted="$(bats --count scripts/test/*.bats)"
+
+          echo "declared @test blocks: ${declared:-0}"
+          echo "bats --count:          ${counted:-0}"
+
+          if [ "${counted:-0}" -lt "$FLOOR" ]; then
+            echo "FAIL: bats collected ${counted:-0} tests, floor is $FLOOR."
+            echo "  A suite stopped being collected. Check the glob and that every"
+            echo "  .bats file still has its @test blocks."
+            exit 1
+          fi
+          # The two numbers disagreeing means a file is present and declaring
+          # tests that bats is not running (a syntax error above the first
+          # @test does exactly this, and bats reports it as a plan of zero for
+          # that file while the run as a whole still passes).
+          if [ "${counted:-0}" -ne "${declared:-0}" ]; then
+            echo "FAIL: ${declared:-0} @test blocks are declared but bats collected ${counted:-0}."
+            exit 1
+          fi

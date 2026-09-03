@@ -48,6 +48,17 @@ on:
   push:
     tags:
       - "drivers-v*"
+  # A change to the build script or the blessed-image matrix used to merge
+  # unbuilt: with only a tag, a dispatch and a nightly cron, the first time
+  # anything compiled was hours after the merge, on the cron, where a failure
+  # reads as an infrastructure flake rather than as the change that caused it.
+  # One row on the pull request is enough to catch a broken build script; the
+  # cron still covers the full fleet.
+  pull_request:
+    paths:
+      - "scripts/drivers/**"
+      - ".github/driver-matrix.json"
+      - ".github/workflows/driver-build.yml"
   workflow_dispatch:
   schedule:
     - cron: "17 4 * * *"
@@ -70,7 +81,23 @@ jobs:
           command -v jq >/dev/null || { sudo apt-get update && sudo apt-get install -y jq; }
           # driver-matrix.json is a JSON array of row objects; feed it straight
           # into strategy.matrix.include via fromJSON.
-          echo "include=$(jq -c . .github/driver-matrix.json)" >> "$GITHUB_OUTPUT"
+          #
+          # On a pull request take ONE row. The point of the PR run is to prove
+          # the build script still builds, which one kernel image establishes;
+          # fanning out over the whole fleet on every push to a driver script
+          # would spend the CI budget to learn the same thing many times.
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            include="$(jq -c '[.[0]]' .github/driver-matrix.json)"
+          else
+            include="$(jq -c . .github/driver-matrix.json)"
+          fi
+          rows="$(printf '%s' "$include" | jq 'length')"
+          if [ "$rows" -lt 1 ]; then
+            echo "FAIL: the matrix resolved to zero rows; nothing would be built and this workflow would report success."
+            exit 1
+          fi
+          echo "matrix rows: $rows"
+          echo "include=$include" >> "$GITHUB_OUTPUT"
 
   build:
     name: build (${{ matrix.flavor }})
@@ -220,7 +247,14 @@ jobs:
     # must not withhold the other verified .ko's from the fleet. `!cancelled()`
     # runs this after a partial build; the assemble step below aborts loudly only
     # if EVERY row failed (nothing to publish).
-    if: ${{ !cancelled() }}
+    #
+    # `github.event_name != 'pull_request'` is load-bearing now that pull
+    # requests trigger this workflow. Without it the "Publish rolling
+    # prerelease" step below would fire on a PR — its only guard is
+    # `github.ref_type != 'tag'`, and a pull request's ref type is a branch —
+    # so an unreviewed branch would overwrite the prebuilt-drivers assets that
+    # every fresh install fetches, from a single-row build.
+    if: ${{ !cancelled() && github.event_name != 'pull_request' }}
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/download-artifact@v4

@@ -105,14 +105,18 @@ jobs:
       # which has no aarch64-musl prebuilt, so --all-features cannot target
       # musl; the host clippy above already covers the onnx path.
       - name: Clippy (aarch64-musl target, default features)
-        # ados-logd, ados-cloud, and ados-compute carry bundled C (SQLite, zstd,
-        # and — via rerun's re_redap_client — ring) and are excluded here: the
-        # host clippy above already lint-covers them, and clippy compiles build
-        # scripts which would need the C cross-compiler. ados-plugin-host is also
-        # excluded because it depends on ados-compute, so linting it drags the
-        # same bundled C in transitively. Their musl cross-builds are proven by
-        # the zig steps below.
-        run: cargo clippy --all-targets --target aarch64-unknown-linux-musl --workspace --exclude ados-logd --exclude ados-cloud --exclude ados-compute --exclude ados-plugin-host -- -D warnings
+        # No per-crate excludes. ados-logd, ados-cloud, ados-compute and
+        # ados-plugin-host were excluded because their bundled C (SQLite,
+        # zstd, and ring via rerun's re_redap_client) needs an
+        # aarch64-linux-musl C compiler that clippy invokes through their
+        # build scripts. The zig cross-cc shim installed in the two steps
+        # directly above IS that compiler and runs before this step, so the
+        # reason no longer holds.
+        #
+        # Worth naming what the excludes cost: ados-plugin-host owns the
+        # flight-command capability gate and was getting no musl lint at all,
+        # on the exact target the shipped binaries are built for.
+        run: cargo clippy --all-targets --target aarch64-unknown-linux-musl --workspace -- -D warnings
 
       - name: Test (default features)
         run: cargo test
@@ -125,6 +129,70 @@ jobs:
 
       - name: Release build (arm64)
         run: cargo build --release --all-features
+
+  # The workspace declares `rust-version = "1.88"`, and nothing ever built
+  # against it. `dtolnay/rust-toolchain@stable` in the job above installs
+  # whatever stable is today, so the declared floor was a claim in a manifest
+  # rather than a tested property: any 2024-edition construct or a
+  # newer-than-1.88 API would compile green here and then fail for a
+  # contributor or a distro toolchain pinned at the declared minimum.
+  #
+  # The toolchain is read FROM the manifest rather than pinned here on
+  # purpose. A second hard-coded version in CI is a second source of truth,
+  # and the two drift silently in the direction that makes CI pass.
+  msrv:
+    name: MSRV (the declared rust-version actually builds)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read and floor-check the declared MSRV
+        id: msrv
+        run: |
+          set -uo pipefail
+          V="$(sed -n 's/^rust-version *= *"\([0-9][0-9.]*\)".*/\1/p' Cargo.toml | head -1)"
+          if [ -z "$V" ]; then
+            echo "FAIL: crates/Cargo.toml declares no rust-version; this gate has nothing to enforce."
+            exit 1
+          fi
+
+          # Hard floor. Dropping the declared minimum below this is a product
+          # decision, not a build fix, and it must not happen by someone
+          # editing a manifest line to make a build pass.
+          FLOOR=1.88
+          lowest="$(printf '%s\n%s\n' "$FLOOR" "$V" | sort -V | head -1)"
+          if [ "$lowest" != "$FLOOR" ]; then
+            echo "FAIL: declared rust-version $V is below the $FLOOR floor."
+            exit 1
+          fi
+
+          # Self-test the comparison. `sort -V` silently degrades to a
+          # lexicographic sort on a build without version sorting, which would
+          # make the floor check above pass for anything.
+          if [ "$(printf '1.9\n1.10\n' | sort -V | head -1)" != "1.9" ]; then
+            echo "FAIL: sort -V is not version-sorting on this runner; the floor check cannot be trusted."
+            exit 1
+          fi
+
+          echo "declared MSRV $V (floor $FLOOR)"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            crates/target
+          key: arm64-msrv-${{ steps.msrv.outputs.version }}-${{ hashFiles('crates/Cargo.lock') }}
+          restore-keys: arm64-msrv-${{ steps.msrv.outputs.version }}-
+
+      - name: The whole workspace compiles on the declared minimum
+        run: cargo check --workspace --all-targets
 
   # Every publish job below uploads with the `gh` CLI rather than the release
   # action. That action replaces a rolling tag's contents by deleting all of its

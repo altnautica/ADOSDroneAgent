@@ -1,0 +1,140 @@
+name: deep-tests
+
+# The `#[ignore]`d tests are the only place this repository exercises a real
+# ONNX model against real pixels. Nothing scheduled them, and none of the
+# environment variables they read (ADOS_TEST_COCO_ONNX, ADOS_TEST_PERSON_RGB,
+# ADOS_TEST_RTSP) was set by any workflow, so the entire real-model proof
+# surface had never run in CI. `cargo test` does compile them, so what was
+# missing is execution, not compilation.
+#
+# Kept out of the push path deliberately: downloading a model on every push
+# buys nothing, and a slow gate on the hot path is a gate people route around.
+
+on:
+  workflow_dispatch:
+    inputs:
+      model_url:
+        description: "Override the COCO YOLOv8n ONNX URL for this run"
+        required: false
+        type: string
+  schedule:
+    # Weekly, Monday 03:23 UTC. Off-peak, and far from the daily driver refresh.
+    - cron: "23 3 * * 1"
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: crates
+
+jobs:
+  real-model:
+    name: Real-model tests
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            crates/target
+          key: arm64-deep-${{ hashFiles('crates/Cargo.lock') }}
+          restore-keys: arm64-deep-
+
+      # Report the inventory unconditionally. Whatever else this run can or
+      # cannot do, the set of tests that only ever run here must be visible in
+      # the run summary rather than inferred from a green tick.
+      - name: Inventory the ignored tests and what each one needs
+        working-directory: .
+        run: |
+          set -uo pipefail
+          {
+            echo "### Ignored tests in this repository"
+            echo
+            grep -rn --include='*.rs' -E '^[[:space:]]*#\[ignore' crates/ \
+              | sed 's/^/- `/; s/$/`/'
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          grep -rn --include='*.rs' -E '^[[:space:]]*#\[ignore' crates/
+
+      - name: Fetch the COCO model when a source is configured
+        id: model
+        working-directory: .
+        env:
+          # A repository variable, not a secret: it is a URL to a public model.
+          MODEL_URL: ${{ inputs.model_url || vars.ADOS_TEST_COCO_ONNX_URL }}
+          PERSON_RGB_URL: ${{ vars.ADOS_TEST_PERSON_RGB_URL }}
+        run: |
+          set -uo pipefail
+          if [ -z "${MODEL_URL:-}" ]; then
+            {
+              echo "### Real-model tests: NOT RUN"
+              echo
+              echo "\`ADOS_TEST_COCO_ONNX_URL\` is not set on this repository, so the"
+              echo "COCO ONNX model cannot be fetched and these tests did not execute:"
+              echo
+              echo "- \`ados-compute/tests/onnx_offload.rs\`"
+              echo "- \`ados-vision/tests/onnx_coco_infer.rs\` (both cases)"
+              echo
+              echo "Set the repository variable to a URL for the YOLOv8n COCO ONNX export"
+              echo "to turn this job on. Until then this job proves only that the ignored"
+              echo "set has not drifted."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "configured=no" >> "$GITHUB_OUTPUT"
+            echo "NOTICE: ADOS_TEST_COCO_ONNX_URL is unset; the real-model tests did not run."
+            exit 0
+          fi
+
+          mkdir -p "$RUNNER_TEMP/models"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/models/coco.onnx" "$MODEL_URL"
+          # A truncated or HTML error page downloads happily and then fails
+          # inside the test with an opaque parse error. ONNX is protobuf and
+          # always larger than this.
+          size="$(wc -c < "$RUNNER_TEMP/models/coco.onnx")"
+          if [ "$size" -lt 1000000 ]; then
+            echo "FAIL: downloaded model is $size bytes, which is too small to be a YOLOv8n export."
+            exit 1
+          fi
+          echo "model=$RUNNER_TEMP/models/coco.onnx" >> "$GITHUB_OUTPUT"
+
+          if [ -n "${PERSON_RGB_URL:-}" ]; then
+            curl -fsSL --retry 3 -o "$RUNNER_TEMP/models/person.rgb" "$PERSON_RGB_URL"
+            echo "person=$RUNNER_TEMP/models/person.rgb" >> "$GITHUB_OUTPUT"
+          fi
+          echo "configured=yes" >> "$GITHUB_OUTPUT"
+
+      - name: Run the model-gated ignored tests
+        if: steps.model.outputs.configured == 'yes'
+        env:
+          ADOS_TEST_COCO_ONNX: ${{ steps.model.outputs.model }}
+          ADOS_TEST_PERSON_RGB: ${{ steps.model.outputs.person }}
+        run: |
+          set -uo pipefail
+          # --ignored runs ONLY the ignored tests. ADOS_TEST_RTSP is left unset
+          # on purpose: offload_live_rtsp needs a live camera, which a hosted
+          # runner does not have and cannot fake, and g3_gate needs a real
+          # flight controller. Both are named in the inventory above so their
+          # absence is recorded rather than implied.
+          cargo test --features onnx -p ados-vision -p ados-compute -- --ignored --nocapture
+
+      - name: Record the outcome
+        if: always()
+        working-directory: .
+        run: |
+          set -uo pipefail
+          if [ "${{ steps.model.outputs.configured }}" = "yes" ]; then
+            echo "### Real-model tests: RAN" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          {
+            echo
+            echo "Never runnable on a hosted runner, by design:"
+            echo "- \`ados-compute/tests/offload_live_rtsp.rs\` — needs a live RTSP camera"
+            echo "- \`ados-mavlink-router/tests/g3_gate.rs\` — needs a real flight controller"
+          } >> "$GITHUB_STEP_SUMMARY"

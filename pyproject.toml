@@ -159,6 +159,38 @@ ignore = [
 python_version = "3.11"
 strict = true
 
+# Third-party modules that ship no type information, or that are optional
+# extras absent from a base install. Without this, a large share of every
+# mypy run is "Library stubs not installed for X" — noise that says nothing
+# about this codebase, and worse, noise whose VOLUME depends on which optional
+# extras happen to be installed. That made the error count unusable as a
+# regression signal, which is one reason mypy was configured and then never
+# run by any gate.
+#
+# This suppresses only the import resolution. Everything reached through these
+# modules is still checked at strict settings.
+[[tool.mypy.overrides]]
+module = [
+    "yaml",
+    "yaml.*",
+    "psutil",
+    "msgpack",
+    "jsonschema",
+    "jsonschema.*",
+    "piexif",
+    "numpy",
+    "numpy.*",
+    "PIL",
+    "PIL.*",
+    "pycuda",
+    "pycuda.*",
+    "torch",
+    "torch.*",
+    "transformers",
+    "transformers.*",
+]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

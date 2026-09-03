@@ -1,0 +1,269 @@
+name: Guards
+
+# Repository guards that are neither tests nor lint: they assert properties of
+# the tree, of the commits, and of the generated artifacts this repository
+# shares with the ground-station repository.
+#
+# Every job carries a self-test that plants a known-positive sample and asserts
+# the matcher fires on it, because a guard that cannot fail still reads as
+# proof. The concrete failure being defended against: a `\b` in a
+# `git grep -E` pattern matches nothing and reports a clean tree.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  leak-guard:
+    name: Tree and commit hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Tracked tree has no private bridge, planning tag, or absolute home path
+        run: |
+          set -uo pipefail
+          fail=0
+
+          # An internal record number in a public file is permanent. The digit
+          # run is {2,} rather than {3}: two-digit and four-digit tags are both
+          # real, and a fixed {3} makes both invisible. No \b anywhere — git
+          # grep's ERE does not support it and matches nothing when present.
+          TAG_PATTERN='(^|[^A-Za-z])(DEC|MSN|LRN)-[0-9]{2,}|(^|[^A-Za-z])Wave [0-9]'
+
+          # An absolute home path is a developer machine baked into shipped
+          # source. Placeholder and service-account names are allowed: tests
+          # need one, and installer paths legitimately name the accounts a
+          # board really runs as.
+          HOME_PATTERN='/(Users|home)/[A-Za-z][A-Za-z0-9_.-]*/'
+          HOME_ALLOW='/(Users|home)/(tester|test|op|x|y|user|username|you|me|someone|somebody|developer|dev|example|alice|bob|runner|ubuntu|pi|root|node|ados)/'
+
+          # ---- self-test. Both samples are assembled at run time: writing the
+          # literals into this file would make the file its own first hit, and
+          # "the guard found itself" is indistinguishable from a real leak.
+          SAMPLE_TAG="$(printf 'DEC%s284' '-')"
+          SAMPLE_HOME="$(printf '/Users/%s/src/x' 'realname')"
+          printf 'ref %s and path %s\n' "$SAMPLE_TAG" "$SAMPLE_HOME" > .guard-selftest
+          git add -f .guard-selftest
+          if ! git grep -qIE "$TAG_PATTERN" -- .guard-selftest; then
+            echo "SELF-TEST FAILED: the planning-tag pattern does not match a known tag."
+            echo "  The pattern is broken; this job would have reported a clean tree."
+            fail=1
+          fi
+          if ! git grep -IE "$HOME_PATTERN" -- .guard-selftest | grep -qvE "$HOME_ALLOW"; then
+            echo "SELF-TEST FAILED: the home-path pattern does not match a known absolute home path."
+            fail=1
+          fi
+          git rm -q --cached .guard-selftest
+          rm -f .guard-selftest
+          [ "$fail" -eq 0 ] || exit 1
+
+          # ---- check 1: the generated private context bridge is gitignored
+          # and must never be tracked. Checked by path, so expressing it needs
+          # no private vocabulary in this public file.
+          if git ls-files | grep -E '(^|/)\.omp/'; then
+            echo "FAIL: a file under .omp/ is tracked. That directory is generated, private, and gitignored."
+            fail=1
+          fi
+
+          # ---- check 2: planning tags. This file is deliberately not excluded
+          # from its own scan; an exclusion would be the one place a real leak
+          # could hide.
+          if git grep -nIE "$TAG_PATTERN" -- .; then
+            echo "FAIL: an internal planning tag is present in a tracked file (see above)."
+            echo "  Describe the change, not the record that authorised it."
+            fail=1
+          fi
+
+          # ---- check 3: absolute home paths
+          hits="$(git grep -nIE "$HOME_PATTERN" -- . | grep -vE "$HOME_ALLOW" || true)"
+          if [ -n "$hits" ]; then
+            printf '%s\n' "$hits"
+            echo "FAIL: an absolute home-directory path is present in a tracked file (see above)."
+            echo "  Use a relative path, an env var, or one of the placeholder names."
+            fail=1
+          fi
+
+          [ "$fail" -eq 0 ] && echo "PASS: tracked tree is clean."
+          exit "$fail"
+
+      - name: Commit messages in this range carry no AI co-author trailer
+        run: |
+          set -uo pipefail
+          BASE="${{ github.event.pull_request.base.sha || github.event.before }}"
+          if [ -z "$BASE" ] || ! git cat-file -e "$BASE" 2>/dev/null; then
+            RANGE="HEAD --not --remotes=origin"
+          else
+            RANGE="$BASE..HEAD"
+          fi
+
+          TRAILER='(Co-[Aa]uthored-[Bb]y|Signed-off-by):.*(claude|anthropic|copilot|openai|chatgpt|cursor|codex|gemini)'
+
+          if ! printf 'x\n\nCo-Authored-By: Bot <noreply@%s>\n' 'anthropic.com' | grep -qiE "$TRAILER"; then
+            echo "SELF-TEST FAILED: the trailer pattern does not match a known trailer."
+            exit 1
+          fi
+
+          # shellcheck disable=SC2086
+          msgs="$(git log --format='%H %s%n%b%n' $RANGE || true)"
+          if printf '%s' "$msgs" | grep -inE "$TRAILER"; then
+            echo "FAIL: a commit in this range carries an AI co-author trailer."
+            exit 1
+          fi
+          echo "PASS: no AI co-author trailer in $RANGE."
+
+  changelog-order:
+    name: CHANGELOG is newest-first
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 3,700+ lines, newest-first. At that size an entry appended at the
+      # bottom is invisible to every reader.
+      - name: Version headings decrease, top to bottom
+        run: |
+          set -uo pipefail
+          awk '
+            function vercmp(a, b,   x, y, i) {
+              split(a, x, "."); split(b, y, ".")
+              for (i = 1; i <= 3; i++) {
+                if ((x[i] + 0) < (y[i] + 0)) return -1
+                if ((x[i] + 0) > (y[i] + 0)) return 1
+              }
+              return 0
+            }
+            /^## / {
+              if ($0 ~ /^## *\[[Uu]nreleased\]/) {
+                if (entries > 0) { print "FAIL:" NR ": [Unreleased] appears below a released entry"; bad++ }
+                next
+              }
+              ver = ""; date = ""
+              if (match($0, /\[[0-9]+\.[0-9]+\.[0-9]+[^]]*\]/)) ver = substr($0, RSTART + 1, RLENGTH - 2)
+              if (match($0, /[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/)) date = substr($0, RSTART, RLENGTH)
+              if (ver == "" && date == "") next
+              entries++
+              if (prev_ver != "" && ver != "") {
+                c = vercmp(ver, prev_ver)
+                if (c > 0) { print "FAIL:" NR ": version " ver " is higher than " prev_ver " above it"; bad++ }
+                else if (c == 0) { print "FAIL:" NR ": version " ver " repeats the entry above it"; bad++ }
+              }
+              if (prev_date != "" && date != "" && date > prev_date) {
+                print "FAIL:" NR ": date " date " is newer than " prev_date " above it"; bad++
+              }
+              if (ver != "") prev_ver = ver
+              if (date != "") prev_date = date
+              next
+            }
+            END {
+              # The parser engaging is part of the assertion. A heading-format
+              # change would otherwise reduce this to reading a file, matching
+              # nothing, and reporting success.
+              if (entries + 0 < 3) { print "FAIL: only " entries + 0 " entries parsed; the heading format changed and this check stopped measuring anything"; bad++ }
+              if (bad + 0 > 0) exit 1
+              print "PASS: " entries " entries, newest-first"
+            }
+          ' CHANGELOG.md
+
+  gcs-mirror:
+    name: Generated GCS mirror matches this repo
+    runs-on: ubuntu-latest
+    steps:
+      # gcs-mirror.sha256 records the expected sha256 of three generated files
+      # that live in the ground-station repository. Inside this repository the
+      # codegen's own --check recomputes those hashes from capabilities.toml,
+      # so forgetting to regenerate here is uncommittable — but nothing has
+      # ever compared them to the files actually sitting in the other repo.
+      # The two repositories are pushed together, so cross-repo drift is a real
+      # and currently unproven state: the agent enforces a contract the GCS may
+      # not be honouring.
+      - uses: actions/checkout@v4
+        with:
+          path: ADOSDroneAgent
+
+      - uses: actions/checkout@v4
+        with:
+          repository: altnautica/ADOSMissionControl
+          path: ADOSMissionControl
+
+      - name: Mirror hashes match
+        run: |
+          set -uo pipefail
+          MANIFEST=ADOSDroneAgent/crates/ados-capabilities-codegen/gcs-mirror.sha256
+
+          # The manifest's paths are relative to a parent holding both
+          # checkouts, which is exactly the runner's workspace layout above.
+          rows="$(grep -cE '^[0-9a-f]{64}  ' "$MANIFEST" || true)"
+          if [ "${rows:-0}" -lt 1 ]; then
+            echo "FAIL: no hash rows parsed from $MANIFEST; the manifest format changed and this job stopped measuring anything."
+            exit 1
+          fi
+          echo "checking $rows mirrored file(s)"
+
+          # Feed sha256sum ONLY the hash rows. The manifest carries three
+          # leading comment lines, and GNU coreutils' sha256sum -c treats an
+          # unparseable line as an error ("N lines are improperly formatted")
+          # and can exit non-zero on it — a red gate for a benign reason,
+          # which is how a gate gets disabled. BSD sha256sum only warns, so
+          # this difference would not have shown up in local testing.
+          grep -E '^[0-9a-f]{64}  ' "$MANIFEST" > mirror-rows.sha256
+          if ! sha256sum -c mirror-rows.sha256; then
+            echo
+            echo "FAIL: a generated GCS mirror file does not match what this repository's"
+            echo "  codegen produced. Regenerate in the agent repo and commit the"
+            echo "  resulting .ts files in the ground-station repo in the same push."
+            exit 1
+          fi
+          echo "PASS: every mirrored generated file matches"
+
+  ignored-test-inventory:
+    name: The ignored-test set is a decision, not a drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Six `#[ignore]`d Rust tests are the entire real-model and
+      # real-hardware proof surface in this repository, and no workflow
+      # scheduled any of them, so adding an ignore was a free way to make a
+      # test stop mattering. Pinning the count makes the set a reviewed
+      # decision: removing an ignore is always fine, adding one requires
+      # updating this number and saying why in the same change.
+      #
+      # This measures source text on purpose. The thing being asserted IS the
+      # presence of an attribute, and reading it any other way would require
+      # compiling the workspace to learn something a grep already knows.
+      - name: Ignored-test count matches the reviewed inventory
+        run: |
+          set -uo pipefail
+          EXPECTED=6
+
+          # Attribute position only: a doc comment that mentions the attribute
+          # is prose, not an ignored test.
+          hits="$(grep -rn --include='*.rs' -E '^[[:space:]]*#\[ignore' crates/ || true)"
+          n="$(printf '%s' "$hits" | grep -c . || true)"
+
+          printf '%s\n' "$hits"
+          echo
+          echo "ignored tests: ${n:-0} (reviewed inventory: $EXPECTED)"
+
+          if [ "${n:-0}" -eq 0 ]; then
+            echo "FAIL: no #[ignore] attributes found at all. Either every one was removed"
+            echo "  (lower EXPECTED to 0 in this workflow) or the matcher stopped working."
+            exit 1
+          fi
+          if [ "${n:-0}" -gt "$EXPECTED" ]; then
+            echo "FAIL: $n ignored tests, inventory says $EXPECTED. A test was made to stop"
+            echo "  running. If that is intended, raise EXPECTED here and say why; if the"
+            echo "  test needs hardware or a model, wire it into deep-tests.yml instead."
+            exit 1
+          fi
+          if [ "${n:-0}" -lt "$EXPECTED" ]; then
+            echo "An ignore was removed — good. Lower EXPECTED to $n in this workflow."
+          fi
+          echo "PASS: ignored-test inventory matches"

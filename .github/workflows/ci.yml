@@ -31,8 +31,22 @@ jobs:
           # lazy so no on-device inference package is needed here).
           pip install -e ".[dev,ground-station,vision]"
 
+      # `ruff check .`, not `ruff check src/ tests/`.
+      #
+      # The narrow scope silently exempted 30 tracked Python files from every
+      # lint this repository runs: scripts/emit_config_schema.py,
+      # scripts/emit_manifest_schema.py, scripts/emit_openapi.py, the two
+      # crates/**/tests/interop/generate_fixtures.py generators, and the whole
+      # of tools/api-conformance/ and tools/logd-conformance/ — two test
+      # harnesses with their own pytest suites. `.` picks up 31 more paths and
+      # the tree is already clean at that scope, so widening it costs nothing
+      # and closes the gap. (dashboard/ and cockpit/ hold no Python at all;
+      # they are Vite/TypeScript, so they were never the omission.)
+      #
+      # AGENTS.md documents the gate as `ruff check .`; this makes CI agree
+      # with the documented command instead of quietly checking less.
       - name: Lint with ruff
-        run: ruff check src/ tests/
+        run: ruff check .
 
       - name: Demo boots
         # `ados demo` is the supported no-hardware path and nothing else in CI
@@ -52,6 +66,145 @@ jobs:
 
       - name: Run tests
         run: pytest -v
+
+      # The Python<->Rust parity tests are skip-guarded on the native crate
+      # being present in the checkout. That guard is correct for a wheel-only
+      # install, and in CI it is always satisfied — which means a skip here is
+      # not a neutral outcome, it is the gate silently not running. A skipped
+      # parity test and a passing parity test both print a green suite.
+      #
+      # Asserting zero skips over exactly these files, rather than over the
+      # whole suite, keeps the check environment-independent: the rest of the
+      # suite legitimately skips on hardware and optional extras.
+      - name: Cross-language parity tests ran (did not skip)
+        if: matrix.python-version == '3.11'
+        run: |
+          set -uo pipefail
+          FILES='tests/test_adaptive_keys_agree_across_transports.py
+          tests/test_mavlink_proxy_flag_defaults_agree.py
+          tests/test_conformance_cases_are_served.py'
+          # `|| true` is load-bearing, not decoration. A `run:` step executes
+          # under `bash -e`, and an assignment from a failing command takes
+          # that command's status, so a non-zero pytest (including exit 5, "no
+          # tests collected") would abort the step before any line below runs —
+          # and the stale-file-list message would never print.
+          # shellcheck disable=SC2086
+          out="$(pytest -q -rs $(printf '%s ' $FILES) 2>&1 || true)"
+          printf '%s\n' "$out" | tail -20
+          if printf '%s' "$out" | grep -qE '[0-9]+ skipped'; then
+            echo
+            echo "FAIL: a cross-language parity test SKIPPED. In CI the native crate is"
+            echo "  always present, so the skip condition cannot legitimately hold here."
+            exit 1
+          fi
+          # A run that collected nothing also prints no 'skipped'. Require the
+          # passes to be there, or this step congratulates itself on nothing.
+          if ! printf '%s' "$out" | grep -qE '[0-9]+ passed'; then
+            echo "FAIL: the parity tests collected nothing; the file list is stale."
+            exit 1
+          fi
+
+  # Static types. `[tool.mypy]` has declared `strict = true` since the config
+  # was written and NO gate has ever executed mypy, so the setting described
+  # an intention rather than a property of the tree.
+  #
+  # Running strict mypy over all of src/ reports 659 errors, so a pass/fail
+  # gate is not reachable from here. What is reachable, and what this job does,
+  # is a per-package ceiling: the count for each allowlisted package must not
+  # rise. That fails on a new type error in code that is already covered while
+  # leaving the backlog visible instead of blocking on it.
+  #
+  # The ceilings are a ratchet: lower them as packages are cleaned, never raise
+  # one to make a build pass. A package that reaches 0 stays in the table at 0,
+  # which is then a plain pass/fail gate for it.
+  #
+  # To bring another package under the gate:
+  #   pip install -e ".[dev]" && pip install mypy==2.3.1
+  #   mypy --no-incremental src/ados/<pkg>     # read the "Found N errors" line
+  # then add `src/ados/<pkg> N` to the table and bump the parse-count floor at
+  # the bottom of the step.
+  #
+  # src/ados/core (including core/config) and src/ados/cli are the two obvious
+  # remaining packages and are deliberately absent: both were being rewritten
+  # while this gate was written, and a ceiling measured mid-edit is a number
+  # nobody can reproduce. Measure and add them on a quiet tree.
+  types:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Base dev extra only, deliberately: the optional ground-station and
+          # vision extras change which third-party modules resolve, which
+          # changes the error count for reasons that have nothing to do with
+          # this codebase. The ceilings below were measured in exactly this
+          # environment.
+          pip install -e ".[dev]"
+          # Pinned. A mypy release moves error counts on unchanged code, and a
+          # ratchet whose measuring instrument drifts is a gate that goes red
+          # for no reason and then gets deleted. Upgrading is a deliberate
+          # step: bump this pin and re-measure every ceiling in the same commit.
+          pip install "mypy==2.3.1"
+
+      - name: Per-package strict-mypy ceilings
+        run: |
+          set -uo pipefail
+          fail=0
+
+          # package<TAB>ceiling, measured with mypy 2.3.1 on a .[dev] install
+          CEILINGS='src/ados/hal 5
+          src/ados/setup 21
+          src/ados/sdk 31
+          src/ados/plugins 169
+          src/ados/api 191'
+
+          checked=0
+          while read -r pkg ceiling; do
+            [ -n "$pkg" ] || continue
+            # `|| true`: mypy exits non-zero whenever it finds an error, which
+            # is the normal case here. Under the runner's `bash -e` the bare
+            # assignment would abort the step on the first package instead of
+            # comparing it to its ceiling.
+            out="$(mypy --no-incremental "$pkg" 2>&1 || true)"
+            # mypy's own summary line is the count. Deriving it by grepping for
+            # ': error:' also matches note lines wrapped across output and
+            # drifts between versions.
+            n="$(printf '%s' "$out" | sed -n 's/^Found \([0-9]*\) error.*/\1/p' | tail -1)"
+            if [ -z "$n" ]; then
+              if printf '%s' "$out" | grep -q '^Success'; then
+                n=0
+              else
+                echo "FAIL: could not read an error count for $pkg; mypy output format changed and this ceiling stopped measuring anything:"
+                printf '%s\n' "$out" | tail -5
+                fail=1
+                continue
+              fi
+            fi
+            checked=$((checked + 1))
+            if [ "$n" -gt "$ceiling" ]; then
+              echo "FAIL: $pkg has $n strict-mypy errors, ceiling is $ceiling"
+              printf '%s\n' "$out" | grep ': error:' | head -20
+              fail=1
+            elif [ "$n" -lt "$ceiling" ]; then
+              echo "OK:   $pkg has $n errors, ceiling $ceiling — LOWER THE CEILING to $n in this workflow."
+            else
+              echo "OK:   $pkg at ceiling $ceiling"
+            fi
+          done <<< "$(printf '%s\n' "$CEILINGS" | sed 's/^[[:space:]]*//')"
+
+          # The loop having run is part of the assertion: a quoting mistake in
+          # the table would otherwise make this job check nothing and pass.
+          if [ "$checked" -lt 5 ]; then
+            echo "FAIL: only $checked package(s) checked; the ceiling table did not parse."
+            fail=1
+          fi
+          exit "$fail"
 
   # The prebuilt catalog's signing coverage is a checked fact, not an
   # assumption. It has silently regressed three separate ways: a job whose
