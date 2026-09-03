@@ -182,7 +182,7 @@ fn is_rfc1918_v4(o: [u8; 4]) -> bool {
 /// LAN (`10/8`, `172.16/12`, `192.168/16`), i.e. plausibly the operator's own
 /// browser on the local network rather than a random public-WAN host.
 ///
-/// These are the peers the founder's PIN-gated cockpit design trusts for the
+/// These are the peers the PIN-gated cockpit design trusts for the
 /// operator-UI DATA scope while the node is unpaired: they may reach status/video/
 /// command through the HTTP control surface, but (unlike the first-boot lifelines)
 /// only when they present a dashboard PIN session, which the `ados-control` gate
@@ -193,7 +193,7 @@ fn is_rfc1918_v4(o: [u8; 4]) -> bool {
 /// including the direct MAVLink WebSocket proxy that also consults this module. If
 /// the private-LAN set were folded into `unpaired_peer_allowed`, that proxy would
 /// blindly open flight-control bytes to the whole LAN while unpaired — exactly the
-/// blind trusted-network-open the founder rejected — and the PIN gate would be
+/// blind trusted-network-open this design refuses — and the PIN gate would be
 /// bypassable off the HTTP surface. So the HTTP gate layers this predicate on top
 /// of the lifeline set and applies the PIN requirement itself.
 pub fn trusted_operator_lan_peer(peer: &std::net::IpAddr) -> bool {
@@ -260,7 +260,7 @@ mod tests {
     #[test]
     fn an_ordinary_lan_peer_is_refused_while_unpaired() {
         for ip in [
-            "192.168.200.50", // the office LAN this is typically on
+            "192.168.1.50", // a typical private LAN address
             "192.168.1.10",
             "10.0.0.5",
             "172.16.4.4",
@@ -275,16 +275,15 @@ mod tests {
         }
     }
 
-    /// The founder's ask: a browser on a private trusted LAN is a trusted
-    /// operator-LAN peer for the PIN-gated operator-UI scope. The predicate is
-    /// the RFC1918 signal, kept distinct from the first-boot lifeline set so the
-    /// MAVLink surface stays lifeline-only while the HTTP gate layers the PIN on
-    /// top of this.
+    /// A browser on a private trusted LAN is a trusted operator-LAN peer for the
+    /// PIN-gated operator-UI scope. The predicate is the RFC1918 signal, kept
+    /// distinct from the first-boot lifeline set so the MAVLink surface stays
+    /// lifeline-only while the HTTP gate layers the PIN on top of this.
     #[test]
     fn a_private_lan_peer_is_a_trusted_operator_peer() {
         for ip in [
             "192.168.1.10",
-            "192.168.200.50", // the office LAN the founder hit
+            "192.168.1.50",
             "10.0.0.5",
             "10.255.255.1",
             "172.16.4.4",
@@ -342,7 +341,7 @@ mod tests {
     fn an_ipv4_lifeline_mapped_onto_v6_is_still_allowed() {
         let mapped: IpAddr = "::ffff:192.168.4.20".parse().unwrap();
         assert!(unpaired_peer_allowed(&mapped));
-        let mapped_lan: IpAddr = "::ffff:192.168.200.50".parse().unwrap();
+        let mapped_lan: IpAddr = "::ffff:192.168.1.50".parse().unwrap();
         assert!(!unpaired_peer_allowed(&mapped_lan));
     }
 

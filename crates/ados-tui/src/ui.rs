@@ -792,7 +792,7 @@ mod tests {
     fn sample() -> Dashboard {
         let data = json!({
             "version": "0.99.108",
-            "device_name": "skynodepi",
+            "device_name": "ados-x",
             "profile": "drone",
             "paired": true,
             "access_urls": [

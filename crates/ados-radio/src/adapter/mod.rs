@@ -95,7 +95,7 @@ mod tests {
 
     #[test]
     fn parse_default_route_extracts_dev_iface() {
-        let line = "default via 192.168.200.1 dev end1 proto dhcp metric 100";
+        let line = "default via 192.168.1.1 dev end1 proto dhcp metric 100";
         assert_eq!(parse_default_route_iface(line).as_deref(), Some("end1"));
         // A `dev`-first ordering (no `via`) still resolves.
         assert_eq!(

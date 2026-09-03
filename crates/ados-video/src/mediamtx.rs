@@ -578,7 +578,7 @@ mod tests {
 
     #[test]
     fn config_has_exact_ports_and_main_path() {
-        let lan = vec!["192.168.200.115".to_string()];
+        let lan = vec!["192.168.1.115".to_string()];
         let streams = vec![("main".to_string(), "publisher".to_string())];
         let yaml = mediamtx_config_yaml(&default_params(&lan, &streams));
 
@@ -613,7 +613,7 @@ mod tests {
         assert_eq!(v["webrtcLocalTCPAddress"], ":8189");
         assert_eq!(
             v["webrtcAdditionalHosts"],
-            Value::from(vec!["192.168.200.115"])
+            Value::from(vec!["192.168.1.115"])
         );
 
         // HLS low-latency, 7 segs x 1s, always remux.

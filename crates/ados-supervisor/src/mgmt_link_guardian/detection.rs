@@ -433,7 +433,7 @@ mod tests {
     #[test]
     fn routable_ipv4_excludes_loopback_and_link_local() {
         assert!(parse_has_routable_ipv4(
-            "    inet 192.168.200.50/24 brd 192.168.200.255 scope global dynamic eth0\n"
+            "    inet 192.168.1.50/24 brd 192.168.1.255 scope global dynamic eth0\n"
         ));
         assert!(!parse_has_routable_ipv4(
             "    inet 127.0.0.1/8 scope host lo\n"
@@ -446,11 +446,11 @@ mod tests {
 
     #[test]
     fn default_route_iface_and_gateway() {
-        let text = "default via 192.168.200.1 dev eth0 proto dhcp src 192.168.200.50 metric 100\n";
+        let text = "default via 192.168.1.1 dev eth0 proto dhcp src 192.168.1.50 metric 100\n";
         assert_eq!(parse_default_route_iface(text).as_deref(), Some("eth0"));
-        assert_eq!(parse_gateway(text).as_deref(), Some("192.168.200.1"));
+        assert_eq!(parse_gateway(text).as_deref(), Some("192.168.1.1"));
         // No default route → both None.
-        let none = "192.168.200.0/24 proto kernel scope link src 192.168.200.50\n";
+        let none = "192.168.1.0/24 proto kernel scope link src 192.168.1.50\n";
         assert_eq!(parse_default_route_iface(none), None);
         assert_eq!(parse_gateway(none), None);
     }
@@ -458,16 +458,16 @@ mod tests {
     #[test]
     fn neighbor_reachable_states() {
         assert!(parse_neighbor_reachable(
-            "192.168.200.1 dev eth0 lladdr aa:bb:cc:dd:ee:ff REACHABLE\n"
+            "192.168.1.1 dev eth0 lladdr aa:bb:cc:dd:ee:ff REACHABLE\n"
         ));
         assert!(parse_neighbor_reachable(
-            "192.168.200.1 dev eth0 lladdr aa:bb:cc:dd:ee:ff STALE\n"
+            "192.168.1.1 dev eth0 lladdr aa:bb:cc:dd:ee:ff STALE\n"
         ));
         assert!(!parse_neighbor_reachable(
-            "192.168.200.1 dev eth0  INCOMPLETE\n"
+            "192.168.1.1 dev eth0  INCOMPLETE\n"
         ));
         assert!(!parse_neighbor_reachable(
-            "192.168.200.1 dev eth0 lladdr aa:bb:cc:dd:ee:ff FAILED\n"
+            "192.168.1.1 dev eth0 lladdr aa:bb:cc:dd:ee:ff FAILED\n"
         ));
         assert!(!parse_neighbor_reachable(""));
     }

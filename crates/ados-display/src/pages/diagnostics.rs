@@ -367,7 +367,7 @@ mod tests {
         ctx.device.board_name = Some("Reference SBC".to_string());
         ctx.device.version = Some("0.49.41".to_string());
         ctx.device.device_id = Some("ados-58c27faf".to_string());
-        ctx.device.primary_ip = Some("192.168.200.178".to_string());
+        ctx.device.primary_ip = Some("192.168.1.178".to_string());
         ctx.device.primary_mac = Some("dc:a6:32:01:02:03".to_string());
         ctx.diagnostics.agent_logs = vec![
             "supervisor started".to_string(),

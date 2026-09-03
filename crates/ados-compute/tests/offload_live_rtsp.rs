@@ -4,10 +4,10 @@
 //! `run_offload_session` → real `OnnxDetector`) minus the job daemon.
 //!
 //! `#[ignore]` by default: it needs a live RTSP camera + the COCO model. Run it
-//! on the workstation with a drone streaming (e.g. skynodepi at
-//! `rtsp://192.168.200.179:8554/main`):
+//! on the workstation with a drone streaming, for example
+//! `rtsp://192.168.1.50:8554/main`:
 //!
-//!   ADOS_TEST_RTSP=rtsp://192.168.200.179:8554/main \
+//!   ADOS_TEST_RTSP=rtsp://192.168.1.50:8554/main \
 //!     cargo test -p ados-compute --features coreml --test offload_live_rtsp -- --ignored --nocapture
 
 #![cfg(feature = "onnx")]
@@ -31,7 +31,7 @@ fn model_path() -> PathBuf {
 }
 
 fn rtsp_url() -> String {
-    std::env::var("ADOS_TEST_RTSP").unwrap_or_else(|_| "rtsp://192.168.200.179:8554/main".into())
+    std::env::var("ADOS_TEST_RTSP").unwrap_or_else(|_| "rtsp://192.168.1.179:8554/main".into())
 }
 
 fn coco_meta(path: &Path) -> ModelMetadata {

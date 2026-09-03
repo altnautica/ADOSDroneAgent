@@ -321,26 +321,26 @@ hotspot:802-11-wireless:wlan0:activated
 
     #[test]
     fn parses_gateway_from_default_route() {
-        let text = "default via 192.168.200.1 proto dhcp src 192.168.200.50 metric 600\n";
-        assert_eq!(parse_gateway(text).as_deref(), Some("192.168.200.1"));
+        let text = "default via 192.168.1.1 proto dhcp src 192.168.1.50 metric 600\n";
+        assert_eq!(parse_gateway(text).as_deref(), Some("192.168.1.1"));
     }
 
     #[test]
     fn no_gateway_when_no_default_route() {
-        let text = "192.168.200.0/24 proto kernel scope link src 192.168.200.50\n";
+        let text = "192.168.1.0/24 proto kernel scope link src 192.168.1.50\n";
         assert_eq!(parse_gateway(text), None);
     }
 
     #[test]
     fn neighbor_reachable_states() {
         assert!(parse_neighbor_reachable(
-            "192.168.200.1 dev wlan0 lladdr aa:bb:cc:dd:ee:ff REACHABLE\n"
+            "192.168.1.1 dev wlan0 lladdr aa:bb:cc:dd:ee:ff REACHABLE\n"
         ));
         assert!(parse_neighbor_reachable(
-            "192.168.200.1 dev wlan0 lladdr aa:bb:cc:dd:ee:ff STALE\n"
+            "192.168.1.1 dev wlan0 lladdr aa:bb:cc:dd:ee:ff STALE\n"
         ));
         assert!(parse_neighbor_reachable(
-            "192.168.200.1 dev wlan0 lladdr aa:bb:cc:dd:ee:ff DELAY\n"
+            "192.168.1.1 dev wlan0 lladdr aa:bb:cc:dd:ee:ff DELAY\n"
         ));
     }
 
@@ -348,10 +348,10 @@ hotspot:802-11-wireless:wlan0:activated
     fn neighbor_unreachable_states() {
         // INCOMPLETE / FAILED / empty all mean the gateway does not answer ARP.
         assert!(!parse_neighbor_reachable(
-            "192.168.200.1 dev wlan0  INCOMPLETE\n"
+            "192.168.1.1 dev wlan0  INCOMPLETE\n"
         ));
         assert!(!parse_neighbor_reachable(
-            "192.168.200.1 dev wlan0 lladdr aa:bb:cc:dd:ee:ff FAILED\n"
+            "192.168.1.1 dev wlan0 lladdr aa:bb:cc:dd:ee:ff FAILED\n"
         ));
         assert!(!parse_neighbor_reachable(""));
     }

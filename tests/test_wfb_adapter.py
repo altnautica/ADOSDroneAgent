@@ -434,7 +434,7 @@ def test_control_interface_parses_default_route(mock_subprocess):
     res = MagicMock()
     res.returncode = 0
     res.stdout = (
-        "default via 192.168.200.1 dev end1 proto dhcp src 192.168.200.115 metric 100\n"
+        "default via 192.168.1.1 dev end1 proto dhcp src 192.168.1.115 metric 100\n"
     )
     mock_subprocess.run.return_value = res
     assert control_interface() == "end1"
@@ -479,7 +479,7 @@ def test_detect_excludes_control_interface(mock_platform, mock_usb, mock_subproc
     # any driver lookup, so no candidate remains.
     control_result = MagicMock()
     control_result.returncode = 0
-    control_result.stdout = "default via 192.168.200.1 dev wlan0 proto dhcp metric 600\n"
+    control_result.stdout = "default via 192.168.1.1 dev wlan0 proto dhcp metric 600\n"
     mock_subprocess.run.side_effect = [dev_result, phy_result, control_result]
 
     assert detect_wfb_adapters() == []
@@ -491,7 +491,7 @@ def test_monitor_mode_refuses_control_interface(mock_platform, mock_subprocess):
     mock_platform.system.return_value = "Linux"
     res = MagicMock()
     res.returncode = 0
-    res.stdout = "default via 192.168.200.1 dev wlan0 proto dhcp metric 600\n"
+    res.stdout = "default via 192.168.1.1 dev wlan0 proto dhcp metric 600\n"
     mock_subprocess.run.return_value = res
     # wlan0 carries the control session -> monitor mode refused before any
     # nmcli / ip link command runs.

@@ -171,13 +171,13 @@ def test_apply_cloud_self_hosted_missing_url_is_structured_failure(
 def test_apply_network_writes_to_live_config(client, agent_app) -> None:
     resp = client.post(
         "/api/v1/setup/apply",
-        json={"network": {"wifi_ssid": "skynet", "hotspot_enabled": False}},
+        json={"network": {"wifi_ssid": "mycompany-wifi", "hotspot_enabled": False}},
     )
     assert resp.status_code == 200
     data = resp.json()
     assert data["overall"] is True
     assert data["sections"]["network"]["ok"] is True
-    assert agent_app.config.network.wifi_client.ssid == "skynet"
+    assert agent_app.config.network.wifi_client.ssid == "mycompany-wifi"
     assert agent_app.config.network.hotspot.enabled is False
 
 

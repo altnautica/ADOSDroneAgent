@@ -174,12 +174,12 @@ wlan0\t00000000\t01C8A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0
         // The live case: a ground station on eth0 .201 and wlan0 .202, both in
         // the same /24. It was declared down while serving happily on .201.
         let addrs = [
-            a("eth0", "192.168.200.201", 24),
-            a("wlan0", "192.168.200.202", 24),
+            a("eth0", "192.168.1.201", 24),
+            a("wlan0", "192.168.1.202", 24),
         ];
         assert_eq!(
             unreachable_addrs(&addrs, "eth0"),
-            vec!["192.168.200.202".to_string()]
+            vec!["192.168.1.202".to_string()]
         );
     }
 
@@ -189,7 +189,7 @@ wlan0\t00000000\t01C8A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0
         // own route. Reporting it would cry wolf on every node running a
         // hotspot, which is most of them.
         let addrs = [
-            a("eth0", "192.168.200.201", 24),
+            a("eth0", "192.168.1.201", 24),
             a("wlan0", "192.168.4.1", 24),
         ];
         assert!(unreachable_addrs(&addrs, "eth0").is_empty());
@@ -199,19 +199,19 @@ wlan0\t00000000\t01C8A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0
     fn the_real_ground_station_layout_flags_exactly_one_address() {
         // All three addresses the box actually carries.
         let addrs = [
-            a("eth0", "192.168.200.201", 24),
-            a("wlan0", "192.168.200.202", 24),
+            a("eth0", "192.168.1.201", 24),
+            a("wlan0", "192.168.1.202", 24),
             a("wlan0", "192.168.4.1", 24),
         ];
         assert_eq!(
             unreachable_addrs(&addrs, "eth0"),
-            vec!["192.168.200.202".to_string()]
+            vec!["192.168.1.202".to_string()]
         );
     }
 
     #[test]
     fn the_default_routes_own_address_is_never_called_unreachable() {
-        let addrs = [a("eth0", "192.168.200.201", 24)];
+        let addrs = [a("eth0", "192.168.1.201", 24)];
         assert!(unreachable_addrs(&addrs, "eth0").is_empty());
     }
 
@@ -220,8 +220,8 @@ wlan0\t00000000\t01C8A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0
         // With no default route there is no basis for calling one address worse
         // than another, and guessing would take a working node off the air.
         let addrs = [
-            a("eth0", "192.168.200.201", 24),
-            a("wlan0", "192.168.200.202", 24),
+            a("eth0", "192.168.1.201", 24),
+            a("wlan0", "192.168.1.202", 24),
         ];
         assert!(unreachable_addrs(&addrs, "ppp0").is_empty());
     }
@@ -229,12 +229,12 @@ wlan0\t00000000\t01C8A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0
     #[test]
     fn the_preferred_address_is_the_one_that_can_answer() {
         let addrs = [
-            a("wlan0", "192.168.200.202", 24),
-            a("eth0", "192.168.200.201", 24),
+            a("wlan0", "192.168.1.202", 24),
+            a("eth0", "192.168.1.201", 24),
         ];
         assert_eq!(
             preferred_addr(&addrs, "eth0").as_deref(),
-            Some("192.168.200.201"),
+            Some("192.168.1.201"),
             "order in the list must not decide it"
         );
     }
@@ -244,12 +244,12 @@ wlan0\t00000000\t01C8A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0
         // The default-route interface has no address of its own, so the choice
         // falls to the others -- but not to one the rule already condemned.
         let addrs = [
-            a("wlan0", "192.168.200.202", 24),
+            a("wlan0", "192.168.1.202", 24),
             a("usb0", "192.168.7.1", 24),
         ];
         assert_eq!(
             preferred_addr(&addrs, "eth0").as_deref(),
-            Some("192.168.200.202"),
+            Some("192.168.1.202"),
             "nothing is shadowed without a primary to shadow against"
         );
     }
@@ -259,8 +259,8 @@ wlan0\t00000000\t01C8A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0
         // A /16 on one side covers the /24 on the other, so the kernel still
         // has one route across both and the second address still cannot answer.
         let addrs = [
-            a("eth0", "192.168.200.201", 16),
-            a("wlan0", "192.168.200.202", 24),
+            a("eth0", "192.168.1.201", 16),
+            a("wlan0", "192.168.1.202", 24),
         ];
         assert_eq!(unreachable_addrs(&addrs, "eth0").len(), 1);
     }
@@ -268,7 +268,7 @@ wlan0\t00000000\t01C8A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0
     #[test]
     fn a_malformed_address_is_not_condemned_on_a_guess() {
         let addrs = [
-            a("eth0", "192.168.200.201", 24),
+            a("eth0", "192.168.1.201", 24),
             a("wlan0", "not-an-address", 24),
         ];
         assert!(unreachable_addrs(&addrs, "eth0").is_empty());
