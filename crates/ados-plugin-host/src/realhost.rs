@@ -2666,11 +2666,7 @@ impl HostServices for RealHost {
         }
     }
 
-    fn rate_setpoint_send(
-        &self,
-        _plugin_id: &str,
-        args: &Value,
-    ) -> Result<HostResult, HostError> {
+    fn rate_setpoint_send(&self, _plugin_id: &str, args: &Value) -> Result<HostResult, HostError> {
         // Parse + validate into an attitude setpoint, build the single
         // SET_ATTITUDE_TARGET frame, and write it to the MAVLink socket. The
         // dispatch gate already enforced the attitude/rate-setpoint capability

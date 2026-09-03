@@ -759,11 +759,7 @@ impl PluginIpcClient {
     /// re-sends above the autopilot's setpoint timeout or the vehicle reverts.
     pub async fn flight_rate_setpoint(&self, args: Value) -> Result<Value, ClientError> {
         Ok(self
-            .send_request(
-                "flight.rate_setpoint.send",
-                "flight.rate_setpoint",
-                args,
-            )
+            .send_request("flight.rate_setpoint.send", "flight.rate_setpoint", args)
             .await?
             .args)
     }

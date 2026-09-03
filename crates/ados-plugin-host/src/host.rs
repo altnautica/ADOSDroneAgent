@@ -260,11 +260,7 @@ pub trait HostServices: Send + Sync + 'static {
     /// must re-send above the autopilot's setpoint-timeout rate and must itself
     /// have placed the vehicle in a mode that accepts offboard attitude (e.g.
     /// GUIDED). The default returns `not_implemented` so [`NoopHost`] stays inert.
-    fn rate_setpoint_send(
-        &self,
-        _plugin_id: &str,
-        _args: &Value,
-    ) -> Result<HostResult, HostError> {
+    fn rate_setpoint_send(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
         Ok(not_implemented("flight.rate_setpoint.send"))
     }
 
