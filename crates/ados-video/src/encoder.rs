@@ -9,8 +9,12 @@
 //! tests at the bottom of this file.
 //!
 //! ## Encoder selection
-//! - **CSI** camera → `rpicam-vid` (Pi VideoCore HW encoder), falling back to
-//!   ffmpeg when rpicam is absent.
+//! - **CSI** camera → `rpicam-vid`, falling back to ffmpeg when rpicam is
+//!   absent. Note that `rpicam-vid` is only a *hardware* encoder up to
+//!   BCM2711 (Pi 4 / CM4, VideoCore VI). On BCM2712 (Pi 5 / CM5, VideoCore
+//!   VII) there is no H.264 encode block at all and rpicam runs
+//!   libavcodec/x264 in software, which is why the builder gates
+//!   `--low-latency` on [`EncoderEnv::pi5_class`].
 //! - **USB / IP** camera → ffmpeg. The H.264 backend is chosen by *probing for a
 //!   real V4L2 hardware encoder device*, not by trusting ffmpeg's `-encoders`
 //!   listing. A board can list the `h264_v4l2m2m` wrapper while shipping no
@@ -21,11 +25,14 @@
 //!   `libx264`.
 //!
 //! ## Hardware detection as an input
-//! The H.264 encoder decision is a probed [`Probed<EncoderDevice>`] carried on
+//! The H.264 encoder decision is a probed [`Probed<EncoderDevice>`] and the
+//! board family is a probed device-tree `compatible` list, both carried on
 //! [`EncoderEnv`]; the GStreamer-element probes are plain booleans. Gathering
 //! them up front keeps the builder itself pure and testable without touching any
 //! device or subprocess. [`EncoderEnv::detect`] does the real probing on Linux
-//! (the HW encoder via [`ados_hal_probe`]); the builder takes the resolved env.
+//! (the HW encoder and the SoC identity via [`ados_hal_probe`]); the builder
+//! takes the resolved env. `detect` blocks on subprocesses and device ioctls,
+//! so async callers use [`EncoderEnv::detect_async`].
 
 use std::path::Path;
 
@@ -91,6 +98,15 @@ pub struct EncoderEnv {
     /// "unknown". Derived at probe time from which HW GStreamer element is
     /// present (see [`EncoderEnv::detect`]); consumed to pick the OMX branch.
     pub encoder_api: String,
+    /// The board is Pi-5-class silicon (BCM2712 — Raspberry Pi 5 / CM5).
+    ///
+    /// Probed from the kernel's own device-tree `compatible` list via
+    /// [`ados_hal_probe::probe_soc`] and classified by [`soc_is_pi5_class`].
+    /// This family has **no** hardware H.264 encoder (VideoCore VII dropped
+    /// the encode block that VideoCore VI on the Pi 4 / CM4 had), so
+    /// `rpicam-vid` there is a software x264 encoder and must be given
+    /// `--low-latency` or it buffers a constant 8-frame pipeline.
+    pub pi5_class: bool,
     /// Absolute path to the Python interpreter used to splice the SEI
     /// injector (`<python> -m ados.services.video.sei_injector`). Equivalent
     /// to Python's `sys.executable`.
@@ -100,6 +116,11 @@ pub struct EncoderEnv {
 impl EncoderEnv {
     /// Probe the real environment. On non-Linux hosts the probes are no-ops
     /// so the builder is exercisable on the dev host; the rig path is Linux.
+    ///
+    /// This blocks: it shells `gst-inspect-1.0` up to three times and
+    /// trial-inits a V4L2 encoder device, and `gst-inspect` on a cold SBC page
+    /// cache is not fast. Async callers MUST use [`EncoderEnv::detect_async`]
+    /// instead; this entry point stays for the synchronous callers and tests.
     #[cfg(target_os = "linux")]
     pub fn detect() -> Self {
         // Probe for a REAL hardware H.264 encoder device rather than trusting
@@ -109,6 +130,12 @@ impl EncoderEnv {
         let hw_h264 = ados_hal_probe::probe::video::probe_h264_encoder(
             ados_protocol::hwcaps::ProbePhase::BootPreArm,
         );
+
+        // Board family, from the same probe-first HAL: read-only, phase-free,
+        // and the kernel's own answer rather than a board-YAML declaration.
+        let pi5_class = ados_hal_probe::probe_soc()
+            .value()
+            .is_some_and(|soc| soc_is_pi5_class(&soc.0));
 
         let has_mpph264enc = gst_element_present("mpph264enc");
         let has_omxh264videoenc = gst_element_present("omxh264videoenc");
@@ -125,6 +152,7 @@ impl EncoderEnv {
             has_omxh264videoenc,
             has_rtspclientsink: gst_element_present("rtspclientsink"),
             encoder_api,
+            pi5_class,
             python_executable: current_python_executable(),
         }
     }
@@ -138,8 +166,33 @@ impl EncoderEnv {
             has_omxh264videoenc: false,
             has_rtspclientsink: false,
             encoder_api: "unknown".to_string(),
+            pi5_class: false,
             python_executable: current_python_executable(),
         }
+    }
+
+    /// [`EncoderEnv::detect`] moved off the async runtime.
+    ///
+    /// The probes are blocking subprocess spawns and device ioctls; running
+    /// them inline on a tokio worker stalls every other task on that worker
+    /// for as long as `gst-inspect-1.0` takes to fault its plugin registry in.
+    /// Async callers must use this. The closure is the unchanged sync body, so
+    /// there is exactly one probe implementation.
+    pub async fn detect_async() -> Self {
+        tokio::task::spawn_blocking(Self::detect)
+            .await
+            // `detect` cannot panic (every probe is fallible-and-defaulted), so
+            // a JoinError here can only mean runtime shutdown; the honest answer
+            // then is the same all-absent env the non-Linux path returns.
+            .unwrap_or_else(|_| Self {
+                hw_h264: Probed::NotProbed,
+                has_mpph264enc: false,
+                has_omxh264videoenc: false,
+                has_rtspclientsink: false,
+                encoder_api: "unknown".to_string(),
+                pi5_class: false,
+                python_executable: current_python_executable(),
+            })
     }
 }
 
@@ -150,6 +203,25 @@ fn gst_element_present(element: &str) -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+/// True when a device-tree `compatible` list names Pi-5-class silicon.
+///
+/// The list is what `/proc/device-tree/compatible` exposes, most-specific
+/// first: `raspberrypi,5-model-b` + `brcm,bcm2712` on a Pi 5,
+/// `raspberrypi,5-compute-module` + `brcm,bcm2712` on a CM5. Either the SoC
+/// entry or the board entry is enough, so a downstream device tree that omits
+/// one of them still classifies correctly.
+///
+/// The family matters to the builder because it is the boundary of the
+/// hardware H.264 encoder: BCM2711 (Pi 4 / CM4, VideoCore VI) has one and
+/// BCM2712 (Pi 5 / CM5, VideoCore VII) does not, so on Pi-5-class boards
+/// `rpicam-vid` is a software encoder and needs `--low-latency`.
+pub fn soc_is_pi5_class(compatibles: &[String]) -> bool {
+    compatibles.iter().any(|c| {
+        let c = c.to_ascii_lowercase();
+        c.contains("bcm2712") || c.contains("raspberrypi,5")
+    })
 }
 
 /// Best-effort resolution of the running interpreter for the SEI splice.
@@ -249,6 +321,23 @@ fn gop_interval(params: &EncoderParams) -> u32 {
         (params.fps / 2).max(1)
     }
 }
+
+/// The H.264 quantizer floor handed to the `h264_v4l2m2m` hardware encoder.
+///
+/// This is not an invented number: it is the default `bcm2835-codec` itself
+/// registers for `V4L2_CID_MPEG_VIDEO_H264_MIN_QP`, i.e. the floor the Pi
+/// firmware considers sane for its own rate controller. ffmpeg's
+/// `v4l2_m2m_enc.c` writes that control unconditionally and substitutes **0**
+/// whenever `-qmin` is unset, so an argv that omits `-qmin` silently replaces
+/// the firmware's floor with "spend whatever you like".
+///
+/// It is deliberately a fixed floor rather than something derived from
+/// `bitrate_kbps`: the QP-to-bitrate mapping is content-dependent and cannot be
+/// computed while building an argv. The bitrate-derived clamp on this path
+/// would be a VBV, and ffmpeg exposes no VBV control for `h264_v4l2m2m`
+/// (`rc_max_rate` / `rc_buffer_size` are never read), so this floor is the
+/// bound that actually reaches the driver.
+const V4L2M2M_MIN_QP: u32 = 20;
 
 /// The ffmpeg `-vf` image-transform chain for the configured orientation, or
 /// `None` when no transform is set (so an unconfigured rig emits no `-vf` and
@@ -366,7 +455,7 @@ pub fn build_encoder_command(
     // dispatching (builder-private; the probed base kind stays on `params.kind`).
     let kind = resolve_kind(params.kind, params, env);
     let cmd = match kind {
-        EncoderKind::RpicamVid => build_rpicam_command(params, source, output),
+        EncoderKind::RpicamVid => build_rpicam_command(params, source, output, env),
         EncoderKind::Ffmpeg => build_ffmpeg_command(params, source, output, camera, env),
         EncoderKind::Gstreamer => build_gstreamer_command(params, source, output, camera, env),
     };
@@ -381,7 +470,19 @@ pub fn build_encoder_command(
 /// primaries / transfer / matrix into the SPS VUI so browsers render natural
 /// colour instead of a magenta cast. For non-RTSP sinks the direct rpicam
 /// output is kept.
-fn build_rpicam_command(params: &EncoderParams, source: &str, output: &str) -> Vec<String> {
+fn build_rpicam_command(
+    params: &EncoderParams,
+    source: &str,
+    output: &str,
+    env: &EncoderEnv,
+) -> Vec<String> {
+    // The GOP contract, not a hardcoded frame count. `gop_interval` yields
+    // frames (default = fps/2, a 0.5s GOP), and `--intra` takes a frame count,
+    // so it is passed straight through. The previous hardcoded `--intra 30`
+    // was a 1.0s GOP at 30fps — double the contracted worst-case radio-FEC
+    // recovery time, on the flagship drone camera, regardless of what
+    // `keyframe_interval` was configured to.
+    let gop = gop_interval(params);
     let mut rpicam_args: Vec<String> = vec![
         "rpicam-vid".into(),
         "--width".into(),
@@ -400,16 +501,35 @@ fn build_rpicam_command(params: &EncoderParams, source: &str, output: &str) -> V
         // --inline embeds SPS/PPS before every IDR so a downstream parser can
         // recover mid-stream without restarting the pipeline.
         "--inline".into(),
-        // Constrained Baseline profile is the safe least-common-denominator
-        // across all WebRTC stacks (Chromium / Safari / Firefox / WebView).
+        // High 4.1 — `avc1.640029`, which is exactly what the browser MSE
+        // player is pinned to. This used to emit `--profile baseline --level 4`
+        // (Constrained Baseline), so a CSI drone published a stream the player
+        // could not initialise: a silent, permanent black screen on the receive
+        // side with no error anywhere. The ffmpeg libx264 path already encodes
+        // High 4.1; all three encode paths now agree with the player.
+        // `rpicam-vid --profile` accepts baseline|main|high and `--level`
+        // accepts 4|4.1|4.2.
         "--profile".into(),
-        "baseline".into(),
+        "high".into(),
         "--level".into(),
-        "4".into(),
-        // Tighter intra interval so a dropped frame recovers within ~1s.
+        "4.1".into(),
         "--intra".into(),
-        "30".into(),
+        gop.to_string(),
     ];
+
+    if env.pi5_class {
+        // Pi-5-class silicon (BCM2712: Pi 5, CM5) has NO hardware H.264
+        // encoder — VideoCore VII dropped the encode block VideoCore VI
+        // (Pi 4 / CM4) had — so `rpicam-vid` runs libavcodec/x264 in software
+        // here. The software encoder buffers a constant 8-frame pipeline
+        // (~267ms at 30fps), which on its own exceeds this system's entire
+        // glass-to-glass budget. `--low-latency` drops that to ~1 frame by
+        // giving up B-frames and CABAC. It is only accepted by
+        // rpicam-apps >= 1.6.0, and it is a no-op on hardware-encoder boards,
+        // which is why it is gated on the board family rather than always
+        // emitted.
+        rpicam_args.push("--low-latency".into());
+    }
 
     if !source.is_empty() && source != "-" {
         // rpicam-vid expects a camera index (0, 1, ...) not a device path.
@@ -573,6 +693,20 @@ fn build_ffmpeg_command(
         cmd.push(source.to_string());
     } else {
         // V4L2 device — low-latency input flags then the selected format.
+        //
+        // `-thread_queue_size 128`: this is queue DEPTH in packets between the
+        // kernel's V4L2 buffers and ffmpeg's demuxer thread, and it is NOT a
+        // latency knob. A queue only adds latency while it is actually
+        // occupied, and it is only occupied while the consumer is behind. The
+        // previous depth of 4 meant any scheduler hiccup longer than ~130ms at
+        // 30fps overran it, and an overrun on a capture input does not delay
+        // frames, it DROPS them outright — the one failure mode a video link
+        // cannot recover from. 128 packets covers a >4s stall at 30fps, far
+        // beyond any plausible hiccup on a loaded SBC, while staying bounded:
+        // this builder prefers the compressed `mjpeg` input format
+        // (see `select_input_format`), where 128 queued frames is tens of MB
+        // of transient buffer, and even the raw `yuyv` fallback stays in the
+        // low hundreds of MB in the pathological case where it fills at all.
         let input_fmt = select_input_format(camera);
         cmd.extend(
             [
@@ -585,7 +719,7 @@ fn build_ffmpeg_command(
                 "-analyzeduration",
                 "0",
                 "-thread_queue_size",
-                "4",
+                "128",
                 "-f",
                 "v4l2",
             ]
@@ -669,7 +803,28 @@ fn build_ffmpeg_command(
         cmd.push("-bsf:v".into());
         cmd.push("h264_mp4toannexb".into());
     } else if ffmpeg_codec == "h264_v4l2m2m" {
-        // Pi V4L2 M2M HW encoder: force yuv420p, same short GOP, no B-frames.
+        // Pi V4L2 M2M HW encoder (`bcm2835-codec` on Pi 4 / CM4): force
+        // yuv420p, same short GOP, no B-frames, plus an EXPLICIT quantizer
+        // bound.
+        //
+        // The quantizer bound is the rate control on this path, and it is not
+        // optional. `bcm2835-codec` registers `V4L2_CID_MPEG_VIDEO_H264_MIN_QP`
+        // with a driver default of 20 — a sane floor for its VBR controller,
+        // which is also the driver's default bitrate mode. But ffmpeg's
+        // `v4l2_m2m_enc.c` writes that control unconditionally, and its own
+        // fallback for H.264 when `-qmin` is unset is **0**. So an argv without
+        // `-qmin` does not "leave the driver alone": it actively replaces the
+        // firmware's floor of 20 with 0 and licenses the encoder to spend
+        // unbounded bits at QP 0 on a scene change. That surplus lands in the
+        // wfb_tx FEC block, where it is not extra quality — it is queue depth,
+        // and then loss. `-qmin` sized to the link budget is what stops it.
+        //
+        // Deliberately NOT emitted here: `-maxrate` / `-bufsize`. They set
+        // `rc_max_rate` / `rc_buffer_size`, and `v4l2_m2m_enc.c` never reads
+        // either — it plumbs only BITRATE, FRAME_RC_ENABLE, GOP_SIZE, B_FRAMES,
+        // and MIN_QP/MAX_QP to the driver. Emitting them would look like a VBV
+        // and enforce nothing. There is no VBV control exposed on this path;
+        // the quantizer floor is the substitute, and this is why.
         let gop_hw = gop_interval(params);
         cmd.push("-pix_fmt".into());
         cmd.push("yuv420p".into());
@@ -680,6 +835,10 @@ fn build_ffmpeg_command(
                 .iter()
                 .map(|s| s.to_string()),
         );
+        cmd.push("-qmin".into());
+        cmd.push(V4L2M2M_MIN_QP.to_string());
+        cmd.push("-qmax".into());
+        cmd.push("51".into());
     }
 
     // Output muxer.
@@ -755,20 +914,46 @@ fn build_gstreamer_command(
         // aligned to FEC recovery. Property names verified on-rig
         // (`gst-inspect-1.0 omxh264videoenc`); if the board's OMX proves
         // unusable, software libx264 remains the fallback.
+        //
+        // VERDICT — settled, do not re-litigate. On Allwinner this OMX path is
+        // correct and it is the *only* viable hardware encode path. Mainline
+        // Cedrus is decode-only, and out-of-tree Cedar encode support exists
+        // only for V3 / V3s / S3. So the alternatives to `omxh264videoenc`
+        // here are not "a cleaner V4L2 M2M encoder" — they are software
+        // x264enc. The `encoder_api == "vendor"` + element-presence gate above
+        // is the honest board test (there is no Rust-side board-YAML reader),
+        // and the code below stays as it is.
         let bps = params.bitrate_kbps * 1000;
         format!(
             "omxh264videoenc control-rate=constant target-bitrate={bps} interval-intraframes={gop}"
         )
     } else if env.has_mpph264enc {
-        // mpph264enc HW VPU: bps = bits/sec, VBR (rc-mode=1) with bounded
-        // bps-max/bps-min so a scene change cannot starve the wfb_tx FEC,
-        // header-mode=1 inserts SPS/PPS before every IDR for late joiners.
+        // Rockchip VPU. Rate control is pinned to the radio's link budget:
+        //
+        // * `rc-mode=vbr` is spelled **by name**, never by number.
+        //   `MppEncRcMode` is `VBR=0, CBR=1, FIXQP=2`, so the `rc-mode=1` this
+        //   builder used to emit was CBR — the mode with the known upstream
+        //   RK3588 rate-control defect (rockchip-linux/mpp#429) — while the
+        //   comment beside it claimed VBR. A numeric literal here has already
+        //   cost two blind retest cycles; see
+        //   [`detect_encoder_for_camera`] for the full retest procedure.
+        // * `bps-max` IS the VBV ceiling, and it is sized to the configured
+        //   bitrate (1.0x), not 1.5x. The old 1.5x let a scene change put 50%
+        //   more than the link can carry into the wfb_tx FEC block, where the
+        //   surplus does not become "more quality", it becomes queue depth and
+        //   then loss. A ceiling above the link budget is not a latency win.
+        // * `qp-min=18` bounds the first I-frame, which is emitted before the
+        //   rate controller has converged and is therefore the one frame
+        //   `bps-max` cannot retroactively clamp. `qp-min=5` permitted a
+        //   near-lossless keyframe straight into a bitrate-sized radio link.
+        //
+        // `header-mode=1` inserts SPS/PPS before every IDR for late joiners.
         let bps = params.bitrate_kbps * 1000;
-        let bps_max = (params.bitrate_kbps as f64 * 1.5) as u32 * 1000;
-        let bps_min = (params.bitrate_kbps as f64 * 0.5) as u32 * 1000;
+        let bps_max = bps;
+        let bps_min = params.bitrate_kbps / 2 * 1000;
         format!(
             "mpph264enc bps={bps} bps-max={bps_max} bps-min={bps_min} \
-             qp-min=5 qp-max=51 rc-mode=1 gop={gop} header-mode=1"
+             qp-min=18 qp-max=51 rc-mode=vbr gop={gop} header-mode=1"
         )
     } else {
         // x264enc software fallback bounded to ~2 frames of pipeline latency.
@@ -1078,8 +1263,45 @@ fn strip_flag_with_value(args: &mut Vec<String>, flag: &str) {
 /// Pick the encoder backend for a camera, given which binaries are present.
 ///
 /// CSI → rpicam-vid (fallback ffmpeg). USB/IP → ffmpeg (the Rockchip
-/// `mpph264enc` VPU path is disabled because it emits corrupt frames; fallback
-/// gstreamer). The binary-presence flags are taken as inputs to keep this pure.
+/// `mpph264enc` VPU path is disabled, see below; fallback gstreamer). The
+/// binary-presence flags are taken as inputs to keep this pure.
+///
+/// # Why `mpph264enc` is disabled, and exactly how to retest it
+///
+/// The reason on record is "emits corrupt frames". That is not evidence of a
+/// broken VPU — the RK3588 VPU is the single largest latency win available in
+/// this fleet — it is the signature of a known upstream rkmpp *rate-control*
+/// defect: `rc-mode=cbr` does not honour the requested bitrate on RK3588
+/// (rockchip-linux/mpp#429), and the bitstream that falls out of it trips
+/// `h264parse` with "NAL unit of length 0" (rockchip-linux/mpp#177) — i.e.
+/// exactly "corrupt frames".
+///
+/// Both prior attempts almost certainly ran in CBR without knowing it:
+/// `MppEncRcMode` is `VBR=0, CBR=1, FIXQP=2`, so the `rc-mode=1` this builder
+/// historically emitted *was* CBR, despite the comment beside it claiming VBR.
+///
+/// Retest procedure — run exactly this. Do not improvise, and do not retry the
+/// blind `rc-mode=1` configuration a third time:
+///
+/// 1. Pin `rc-mode=vbr` **by name**, never by number. The numeric enum has
+///    already been misread once and cost two retest cycles.
+/// 2. Set `bps` and `bps-max` explicitly, both sized to the radio's link
+///    budget. Leaving either at 0 makes the element auto-derive
+///    `bps = width * height / 8 * fps` and `bps-max = bps * 17/16`, so the
+///    peak silently escapes the link budget.
+/// 3. Feed the encoder NV12. Any other input format forces a conversion it
+///    does not want.
+/// 4. **No RGA anywhere in the path** — no `rgaconvert`, and no RGA-backed
+///    `rotation` / `width` / `height` property on the element. Rockchip's own
+///    GStreamer user guide (RK-YH-YF-921) states RGA is abnormal on RK3588 and
+///    recommends against using it, so an RGA in the pipeline invalidates the
+///    result whichever way it comes out.
+/// 5. Run on a BSP 6.1 or 5.10 kernel. Mainline carries no rkmpp VPU path, so
+///    a mainline-kernel run tests nothing.
+///
+/// Only a sustained clean run under *that* configuration earns
+/// `EncoderKind::Gstreamer` for USB/IP on a board with `mpph264enc`. Until
+/// then the disable stays in force.
 pub fn detect_encoder_for_camera(
     camera_type: CameraType,
     has_rpicam: bool,
@@ -1098,7 +1320,8 @@ pub fn detect_encoder_for_camera(
         }
         CameraType::Usb | CameraType::Ip => {
             // mpph264enc (Rockchip VPU) is disabled — fall back to ffmpeg
-            // libx264, then gstreamer x264enc.
+            // libx264, then gstreamer x264enc. See this function's doc comment
+            // for the exact retest procedure before re-enabling it.
             if has_ffmpeg {
                 Some(EncoderKind::Ffmpeg)
             } else if has_gst_launch {
@@ -1279,6 +1502,7 @@ mod tests {
             has_omxh264videoenc: false,
             has_rtspclientsink: true,
             encoder_api: "unknown".into(),
+            pi5_class: false,
             python_executable: PY_EXE.into(),
         }
     }
@@ -1289,6 +1513,7 @@ mod tests {
             has_omxh264videoenc: false,
             has_rtspclientsink: true,
             encoder_api: "unknown".into(),
+            pi5_class: false,
             python_executable: PY_EXE.into(),
         }
     }
@@ -1299,6 +1524,7 @@ mod tests {
             has_omxh264videoenc: false,
             has_rtspclientsink: true,
             encoder_api: "unknown".into(),
+            pi5_class: false,
             python_executable: PY_EXE.into(),
         }
     }
@@ -1309,6 +1535,7 @@ mod tests {
             has_omxh264videoenc: false,
             has_rtspclientsink: true,
             encoder_api: "rkmpp".into(),
+            pi5_class: false,
             python_executable: PY_EXE.into(),
         }
     }
@@ -1326,7 +1553,16 @@ mod tests {
             has_omxh264videoenc: true,
             has_rtspclientsink: true,
             encoder_api: "vendor".into(),
+            pi5_class: false,
             python_executable: PY_EXE.into(),
+        }
+    }
+    /// A Pi-5-class board (BCM2712: Pi 5 / CM5) — no hardware H.264 encoder,
+    /// so `rpicam-vid` there is software x264 and needs `--low-latency`.
+    fn pi5() -> EncoderEnv {
+        EncoderEnv {
+            pi5_class: true,
+            ..rockchip()
         }
     }
 
@@ -1427,6 +1663,152 @@ mod tests {
             false,
         );
         assert_eq!(got, expected("csi_rpicam_file"));
+    }
+
+    /// The value that follows `flag` in an argv, whether the argv is a plain
+    /// vector or a `bash -c "<pipeline>"` triple. Fixture assertions pin whole
+    /// argv vectors; these contract tests pin a single flag, so they keep
+    /// holding when an unrelated flag moves.
+    fn flag_value(cmd: &[String], flag: &str) -> Option<String> {
+        if cmd.first().map(String::as_str) == Some("bash") {
+            let mut it = cmd[2].split(' ');
+            while let Some(t) = it.next() {
+                if t == flag {
+                    return it.next().map(str::to_string);
+                }
+            }
+            return None;
+        }
+        cmd.iter()
+            .position(|t| t == flag)
+            .and_then(|i| cmd.get(i + 1))
+            .cloned()
+    }
+
+    fn has_flag(cmd: &[String], flag: &str) -> bool {
+        if cmd.first().map(String::as_str) == Some("bash") {
+            return cmd[2].split(' ').any(|t| t == flag);
+        }
+        cmd.iter().any(|t| t == flag)
+    }
+
+    #[test]
+    fn rpicam_intra_follows_the_gop_contract_not_a_hardcoded_30() {
+        // `keyframe_interval: 0` is the documented default and means "a 0.5s
+        // GOP at the configured fps so radio FEC recovers fast". `--intra`
+        // takes a frame count, so it must be exactly `gop_interval`. The old
+        // hardcoded `--intra 30` was a 1.0s GOP at 30fps — double the
+        // contracted worst-case packet-loss recovery time.
+        //
+        // Three fps values, so no single constant can satisfy all of them:
+        // restoring `--intra 30` fails the 30fps and 15fps cases.
+        for (fps, want_intra) in [(30u32, "15"), (60, "30"), (15, "7")] {
+            let p = params(EncoderKind::RpicamVid, 1280, 720, fps, 4000);
+            assert_eq!(p.keyframe_interval, 0, "default keyframe_interval");
+            let got = build(&p, "/dev/video0", RTSP_OUT, &csi(), &rockchip(), false);
+            assert_eq!(
+                flag_value(&got, "--intra").as_deref(),
+                Some(want_intra),
+                "--intra at {fps}fps must equal gop_interval"
+            );
+        }
+        // An explicit keyframe_interval still wins over the derived default.
+        let p = params_cfg(
+            EncoderKind::RpicamVid,
+            1280,
+            720,
+            30,
+            4000,
+            "auto",
+            0,
+            false,
+            false,
+            45,
+        );
+        let got = build(&p, "/dev/video0", RTSP_OUT, &csi(), &rockchip(), false);
+        assert_eq!(flag_value(&got, "--intra").as_deref(), Some("45"));
+    }
+
+    #[test]
+    fn rpicam_encodes_high_4_1_to_match_the_browser_player() {
+        // The browser MSE player is pinned to `avc1.640029` = H.264 High 4.1,
+        // and the ffmpeg libx264 path already encodes High 4.1. A CSI drone
+        // publishing Constrained Baseline into that player is a silent,
+        // permanent black screen on the receive side, so all three encode
+        // paths must agree.
+        for out in [RTSP_OUT, "/var/lib/ados/out.h264"] {
+            let got = build(
+                &params(EncoderKind::RpicamVid, 1280, 720, 30, 4000),
+                "/dev/video0",
+                out,
+                &csi(),
+                &rockchip(),
+                false,
+            );
+            assert_eq!(flag_value(&got, "--profile").as_deref(), Some("high"));
+            assert_eq!(flag_value(&got, "--level").as_deref(), Some("4.1"));
+            assert!(!has_flag(&got, "baseline"), "no baseline profile anywhere");
+        }
+    }
+
+    #[test]
+    fn rpicam_low_latency_only_on_pi5_class_boards() {
+        // BCM2712 (Pi 5 / CM5) has no H.264 encode block, so rpicam runs
+        // software x264 and buffers a constant 8-frame pipeline (~267ms at
+        // 30fps) without `--low-latency`. A board with a real hardware encoder
+        // must NOT get the flag (older rpicam-apps reject it outright, and it
+        // buys nothing there).
+        let p = params(EncoderKind::RpicamVid, 1280, 720, 30, 4000);
+        let on_pi5 = build(&p, "/dev/video0", RTSP_OUT, &csi(), &pi5(), false);
+        assert!(has_flag(&on_pi5, "--low-latency"));
+        let elsewhere = build(&p, "/dev/video0", RTSP_OUT, &csi(), &rockchip(), false);
+        assert!(!has_flag(&elsewhere, "--low-latency"));
+
+        // The flag must survive the file-output form and the SEI splice too.
+        let file = build(
+            &p,
+            "/dev/video0",
+            "/var/lib/ados/out.h264",
+            &csi(),
+            &pi5(),
+            false,
+        );
+        assert!(has_flag(&file, "--low-latency"));
+        let sei = build(&p, "/dev/video0", RTSP_OUT, &csi(), &pi5(), true);
+        assert!(has_flag(&sei, "--low-latency"));
+    }
+
+    #[test]
+    fn soc_compatible_classifies_pi5_class_silicon() {
+        // Real `/proc/device-tree/compatible` contents, most-specific first.
+        let pi5 = [
+            "raspberrypi,5-model-b".to_string(),
+            "brcm,bcm2712".to_string(),
+        ];
+        let cm5 = [
+            "raspberrypi,5-compute-module".to_string(),
+            "brcm,bcm2712".to_string(),
+        ];
+        assert!(soc_is_pi5_class(&pi5));
+        assert!(soc_is_pi5_class(&cm5));
+        // Either entry alone is enough (a downstream DT may carry only one).
+        assert!(soc_is_pi5_class(&["brcm,bcm2712".to_string()]));
+
+        // Pi 4 / CM4 are BCM2711 and DO have a hardware encoder — they must not
+        // classify as Pi-5-class or they would be handed `--low-latency`.
+        assert!(!soc_is_pi5_class(&[
+            "raspberrypi,4-model-b".to_string(),
+            "brcm,bcm2711".to_string(),
+        ]));
+        assert!(!soc_is_pi5_class(&[
+            "raspberrypi,4-compute-module".to_string(),
+            "brcm,bcm2711".to_string(),
+        ]));
+        assert!(!soc_is_pi5_class(&[
+            "radxa,rock-5c".to_string(),
+            "rockchip,rk3588s".to_string(),
+        ]));
+        assert!(!soc_is_pi5_class(&[]));
     }
 
     // --- USB MJPEG → ffmpeg libx264 (Rockchip) -------------------------
@@ -1651,6 +2033,7 @@ mod tests {
             has_omxh264videoenc: false,
             has_rtspclientsink: true,
             encoder_api: "unknown".into(),
+            pi5_class: false,
             python_executable: PY_EXE.into(),
         };
         let got = build(
@@ -1676,6 +2059,7 @@ mod tests {
             has_omxh264videoenc: false,
             has_rtspclientsink: true,
             encoder_api: "unknown".into(),
+            pi5_class: false,
             python_executable: PY_EXE.into(),
         };
         let got = build(
@@ -2317,5 +2701,124 @@ mod tests {
         );
         assert!(encoder_is_hardware("gstreamer-omxh264videoenc"));
         assert!(!encoder_is_hardware("gstreamer-x264enc"));
+    }
+
+    #[test]
+    fn v4l2_capture_queue_is_deep_enough_to_absorb_a_scheduler_hiccup() {
+        // `-thread_queue_size` is queue DEPTH in packets between the kernel's
+        // V4L2 buffers and ffmpeg's demuxer thread. It only adds latency while
+        // occupied; overrunning it does not delay frames, it DROPS them. The
+        // old depth of 4 overran on any hiccup past ~130ms at 30fps.
+        for env in [rockchip(), non_rk_hw()] {
+            let got = build(
+                &params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000),
+                "/dev/video1",
+                RTSP_OUT,
+                &usb_mjpeg(),
+                &env,
+                false,
+            );
+            let depth: u32 = flag_value(&got, "-thread_queue_size")
+                .expect("v4l2 input carries -thread_queue_size")
+                .parse()
+                .expect("numeric queue depth");
+            assert!(
+                depth >= 64,
+                "capture queue depth {depth} drops frames on a loaded SBC"
+            );
+        }
+        // A network source has no v4l2 input stage, so it must not grow one.
+        let ip = build(
+            &params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000),
+            "rtsp://10.0.0.9:554/live",
+            RTSP_OUT,
+            &ip_cam(),
+            &rockchip(),
+            false,
+        );
+        assert!(!has_flag(&ip, "-thread_queue_size"));
+    }
+
+    #[test]
+    fn h264_v4l2m2m_carries_an_explicit_quantizer_bound() {
+        // ffmpeg's v4l2_m2m_enc.c writes V4L2_CID_MPEG_VIDEO_H264_MIN_QP
+        // unconditionally and substitutes 0 when `-qmin` is unset, clobbering
+        // the `bcm2835-codec` firmware default of 20 and licensing an unbounded
+        // bit spend on a scene change. Omitting `-qmin` is therefore NOT
+        // "leaving the driver alone".
+        let got = build(
+            &params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000),
+            "/dev/video1",
+            RTSP_OUT,
+            &usb_mjpeg(),
+            &non_rk_hw(),
+            false,
+        );
+        assert!(got.iter().any(|t| t == "h264_v4l2m2m"), "HW path selected");
+        let qmin: u32 = flag_value(&got, "-qmin")
+            .expect("h264_v4l2m2m carries -qmin")
+            .parse()
+            .expect("numeric qmin");
+        assert_eq!(qmin, V4L2M2M_MIN_QP);
+        assert!(qmin > 0, "qmin 0 is ffmpeg's unbounded default");
+        assert_eq!(flag_value(&got, "-qmax").as_deref(), Some("51"));
+
+        // `-maxrate` / `-bufsize` must NOT be emitted here: v4l2_m2m_enc.c
+        // never reads rc_max_rate / rc_buffer_size, so they would look like a
+        // VBV and enforce nothing.
+        assert!(!has_flag(&got, "-maxrate"));
+        assert!(!has_flag(&got, "-bufsize"));
+    }
+
+    #[test]
+    fn mpph264enc_rate_control_is_pinned_to_the_link_budget() {
+        // The VBV ceiling is the configured bitrate, not 1.5x it: surplus above
+        // what the radio can carry does not become quality, it becomes queue
+        // depth in the wfb_tx FEC block and then loss.
+        for kbps in [4000u32, 12000] {
+            let got = build(
+                &params(EncoderKind::Gstreamer, 1280, 720, 30, kbps),
+                "/dev/video1",
+                RTSP_OUT,
+                &usb_mjpeg(),
+                &rk_mpp(),
+                false,
+            );
+            let joined = got.join(" ");
+            let bps = kbps * 1000;
+            assert!(
+                joined.contains(&format!("bps={bps} ")),
+                "target bps: {joined}"
+            );
+            assert!(
+                joined.contains(&format!("bps-max={bps} ")),
+                "VBV ceiling must equal the link budget: {joined}"
+            );
+            // Spelled by name. MppEncRcMode is VBR=0, CBR=1, so `rc-mode=1`
+            // was CBR — the mode with the known RK3588 rate-control defect —
+            // while the comment beside it claimed VBR.
+            assert!(joined.contains("rc-mode=vbr"), "rc-mode by name: {joined}");
+            assert!(!joined.contains("rc-mode=1"), "no numeric rc-mode");
+            // The first I-frame lands before the rate controller converges, so
+            // bps-max cannot clamp it retroactively; qp-min must.
+            assert!(joined.contains("qp-min=18"), "qp-min bound: {joined}");
+        }
+    }
+
+    #[tokio::test]
+    async fn detect_async_matches_the_sync_probe() {
+        // `detect` blocks on subprocess spawns and device ioctls; `detect_async`
+        // is the same body moved onto a blocking pool, so the resolved env must
+        // be identical. This also proves the async entry point is callable from
+        // a runtime without the sync body panicking on it.
+        let sync = EncoderEnv::detect();
+        let async_env = EncoderEnv::detect_async().await;
+        assert_eq!(sync.hw_h264.is_present(), async_env.hw_h264.is_present());
+        assert_eq!(sync.has_mpph264enc, async_env.has_mpph264enc);
+        assert_eq!(sync.has_omxh264videoenc, async_env.has_omxh264videoenc);
+        assert_eq!(sync.has_rtspclientsink, async_env.has_rtspclientsink);
+        assert_eq!(sync.encoder_api, async_env.encoder_api);
+        assert_eq!(sync.pi5_class, async_env.pi5_class);
+        assert_eq!(sync.python_executable, async_env.python_executable);
     }
 }
