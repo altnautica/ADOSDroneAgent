@@ -342,6 +342,47 @@ class _FlightClient:
             }
         )
 
+    async def rate_setpoint(
+        self,
+        *,
+        type_mask: int,
+        qw: float = 1.0,
+        qx: float = 0.0,
+        qy: float = 0.0,
+        qz: float = 0.0,
+        body_roll_rate: float = 0.0,
+        body_pitch_rate: float = 0.0,
+        body_yaw_rate: float = 0.0,
+        thrust: float = 0.0,
+    ) -> dict:
+        """Command a ``SET_ATTITUDE_TARGET`` setpoint (attitude quaternion and/or
+        body rates, plus collective thrust) for a GUIDED-mode vehicle.
+
+        ``type_mask`` is the ignore-axis bitmask (a set bit ignores that axis:
+        bit0 body-roll-rate, bit1 body-pitch-rate, bit2 body-yaw-rate, bit6
+        throttle, bit7 attitude). The quaternion is ``(qw, qx, qy, qz)`` in
+        MAVLink order (identity ``(1, 0, 0, 0)``); body rates are rad/s;
+        ``thrust`` is normalized ``-1..1``. Requires the ``flight.rate_setpoint``
+        capability, and the vehicle must be in a mode that accepts offboard
+        attitude (e.g. GUIDED).
+
+        Returns ``{"sent": bool, ...}`` (or a ``not_available`` shape when the
+        MAVLink router is unreachable).
+        """
+        return await self._ipc.flight_rate_setpoint_send(
+            {
+                "type_mask": int(type_mask),
+                "qw": float(qw),
+                "qx": float(qx),
+                "qy": float(qy),
+                "qz": float(qz),
+                "body_roll_rate": float(body_roll_rate),
+                "body_pitch_rate": float(body_pitch_rate),
+                "body_yaw_rate": float(body_yaw_rate),
+                "thrust": float(thrust),
+            }
+        )
+
 
 class _TelemetryClient:
     def __init__(self, ipc: PluginIpcClient) -> None:

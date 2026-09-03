@@ -391,6 +391,19 @@ class PluginIpcClient:
             )
         ).args
 
+    async def flight_rate_setpoint_send(self, setpoint: dict) -> dict:
+        """Send an attitude/body-rate + thrust setpoint (SET_ATTITUDE_TARGET) to
+        the flight controller. The host forwards it to the MAVLink router, which
+        encodes the SET_ATTITUDE_TARGET message. Gated on the
+        ``flight.rate_setpoint`` capability."""
+        return (
+            await self._send_request(
+                "flight.rate_setpoint.send",
+                capability="flight.rate_setpoint",
+                args=dict(setpoint),
+            )
+        ).args
+
     # ---- Config kv ----------------------------------------------------
 
     async def config_get(self, key: str, default: Any = None) -> Any:

@@ -253,6 +253,21 @@ pub trait HostServices: Send + Sync + 'static {
         Ok(not_implemented("flight.guided_setpoint.send"))
     }
 
+    /// Send one `SET_ATTITUDE_TARGET` setpoint (an attitude quaternion and/or
+    /// body rates, plus collective thrust) to the flight controller via the
+    /// scoped attitude sender. Like [`Host::guided_setpoint_send`] this is a
+    /// single-shot send: the host owns no flight mode or schedule, so the caller
+    /// must re-send above the autopilot's setpoint-timeout rate and must itself
+    /// have placed the vehicle in a mode that accepts offboard attitude (e.g.
+    /// GUIDED). The default returns `not_implemented` so [`NoopHost`] stays inert.
+    fn rate_setpoint_send(
+        &self,
+        _plugin_id: &str,
+        _args: &Value,
+    ) -> Result<HostResult, HostError> {
+        Ok(not_implemented("flight.rate_setpoint.send"))
+    }
+
     /// Open an additive auxiliary application stream on the radio link. A real
     /// host forwards the request to the radio service's auxiliary command socket,
     /// which brings up a transmit/receive pair on a separate radio-port from the

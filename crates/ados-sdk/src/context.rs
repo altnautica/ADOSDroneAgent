@@ -436,6 +436,13 @@ impl FlightClient {
     pub async fn guided_setpoint(&self, args: Value) -> Result<Value, ClientError> {
         self.ipc.flight_guided_setpoint(args).await
     }
+
+    /// Send one attitude/body-rate + thrust setpoint (SET_ATTITUDE_TARGET).
+    /// `args` is the setpoint map the host validates (`type_mask`, `qw`/`qx`/
+    /// `qy`/`qz`, `body_*_rate`, `thrust`).
+    pub async fn rate_setpoint(&self, args: Value) -> Result<Value, ClientError> {
+        self.ipc.flight_rate_setpoint(args).await
+    }
 }
 
 /// The static config is the manifest dict read at runner start; `get`/`set`

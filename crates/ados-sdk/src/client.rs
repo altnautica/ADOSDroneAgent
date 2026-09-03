@@ -749,6 +749,25 @@ impl PluginIpcClient {
             .args)
     }
 
+    /// Send one attitude/body-rate + thrust setpoint (SET_ATTITUDE_TARGET)
+    /// through the scoped sender.
+    ///
+    /// `args` is the setpoint map the host validates (`type_mask`, `qw`/`qx`/
+    /// `qy`/`qz`, `body_*_rate`, `thrust`, optional `target_system`/
+    /// `target_component`). Single-shot by design, like the guided sender: the
+    /// host owns no flight mode and no schedule, so a caller holding an attitude
+    /// re-sends above the autopilot's setpoint timeout or the vehicle reverts.
+    pub async fn flight_rate_setpoint(&self, args: Value) -> Result<Value, ClientError> {
+        Ok(self
+            .send_request(
+                "flight.rate_setpoint.send",
+                "flight.rate_setpoint",
+                args,
+            )
+            .await?
+            .args)
+    }
+
     /// Subscribe to vision frame descriptors. The host starts (or widens) the
     /// engine's frame stream toward this plugin and then delivers descriptors
     /// as `vision.deliver` events. `camera_id` of `None` requests every

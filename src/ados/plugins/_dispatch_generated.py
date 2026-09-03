@@ -51,6 +51,7 @@ REQUIRED_CAP: dict[str, str | None] = {
     "gpio.output.set": "hardware.gpio_out",
     "gpio.buzzer.beep": "hardware.gpio_out",
     "flight.guided_setpoint.send": "flight.guided_setpoint",
+    "flight.rate_setpoint.send": "flight.rate_setpoint",
     "radio.aux_stream.open": "radio.aux_stream",
     "radio.aux_stream.close": "radio.aux_stream",
     "radio.aux_stream.send": "radio.aux_stream",

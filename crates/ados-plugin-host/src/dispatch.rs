@@ -75,6 +75,8 @@ pub enum Method {
     GpioBuzzerBeep,
     // Flight: send one guided-mode position/velocity setpoint to the FC.
     GuidedSetpointSend,
+    // Flight: send one attitude/body-rate + thrust setpoint (SET_ATTITUDE_TARGET).
+    RateSetpointSend,
     // Radio: open / close an additive auxiliary application stream on the link.
     RadioAuxStreamOpen,
     RadioAuxStreamClose,
@@ -168,6 +170,7 @@ impl Method {
             "gpio.output.set" => Self::GpioOutputSet,
             "gpio.buzzer.beep" => Self::GpioBuzzerBeep,
             "flight.guided_setpoint.send" => Self::GuidedSetpointSend,
+            "flight.rate_setpoint.send" => Self::RateSetpointSend,
             "radio.aux_stream.open" => Self::RadioAuxStreamOpen,
             "radio.aux_stream.close" => Self::RadioAuxStreamClose,
             "radio.aux_stream.send" => Self::RadioAuxStreamSend,
@@ -217,6 +220,7 @@ impl Method {
             Self::GpioOutputSet => "gpio.output.set",
             Self::GpioBuzzerBeep => "gpio.buzzer.beep",
             Self::GuidedSetpointSend => "flight.guided_setpoint.send",
+            Self::RateSetpointSend => "flight.rate_setpoint.send",
             Self::RadioAuxStreamOpen => "radio.aux_stream.open",
             Self::RadioAuxStreamClose => "radio.aux_stream.close",
             Self::RadioAuxStreamSend => "radio.aux_stream.send",
@@ -525,6 +529,7 @@ mod tests {
         Method::GpioOutputSet,
         Method::GpioBuzzerBeep,
         Method::GuidedSetpointSend,
+        Method::RateSetpointSend,
         Method::RadioAuxStreamOpen,
         Method::RadioAuxStreamClose,
         Method::RadioAuxStreamSend,

@@ -91,6 +91,7 @@ ENFORCED_AGENT_CAPABILITIES: frozenset[str] = frozenset(
         "vision.track.designate",
         "button.subscribe",
         "flight.guided_setpoint",
+        "flight.rate_setpoint",
         "mavlink.tunnel",
         "radio.aux_stream",
         "display.oled.page",
@@ -406,10 +407,10 @@ CAPABILITY_CATALOG: dict[str, dict[str, str]] = {
     },
     "flight.rate_setpoint": {
         "label": "Emit attitude/rate setpoints",
-        "description": "Lets a control lane command the flight controller with body-rate/thrust SET_ATTITUDE_TARGET setpoints through a scoped sender (the attitude rung). This is a second way to fly the aircraft on top of guided-mode setpoints; until the G3 gate (a real Betaflight FC) passes it must never emit a live command to an airframe.",
+        "description": "Lets a plugin command the flight controller with SET_ATTITUDE_TARGET setpoints (an attitude quaternion and/or body rates, plus collective thrust) through a scoped sender, for GUIDED-mode vehicles that accept attitude/rate offboard control. This is a second flight-command surface alongside guided-mode position/velocity setpoints; the setpoint stream is the only flight-command surface this capability grants.",
         "category": "flight_control",
         "risk": "critical",
-        "risk_reason": "Directly commands aircraft body rates and thrust at tick rate; a faulty rate stream can fly the aircraft outside guided-mode limits.",
+        "risk_reason": "Directly commands aircraft attitude/body rates and thrust at tick rate; a faulty stream can fly the aircraft outside guided-mode limits.",
     },
     "mavlink.tunnel": {
         "label": "Send and receive MAVLink TUNNEL payloads",

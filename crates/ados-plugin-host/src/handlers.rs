@@ -339,6 +339,7 @@ pub async fn route_host_method<H: HostServices + ?Sized>(
         Method::GpioOutputSet => host.gpio_output_set(plugin_id, args),
         Method::GpioBuzzerBeep => host.gpio_buzzer_beep(plugin_id, args),
         Method::GuidedSetpointSend => host.guided_setpoint_send(plugin_id, args),
+        Method::RateSetpointSend => host.rate_setpoint_send(plugin_id, args),
         Method::RadioAuxStreamOpen => host.radio_aux_stream_open(plugin_id, args),
         Method::RadioAuxStreamClose => host.radio_aux_stream_close(plugin_id, args),
         Method::RadioAuxStreamSend => host.radio_aux_stream_send(plugin_id, args),

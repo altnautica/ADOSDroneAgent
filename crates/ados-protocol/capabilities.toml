@@ -407,24 +407,14 @@ risk = "high"
 risk_reason = "Commands vehicle motion in guided mode; a faulty stream can fly the aircraft."
 enforced = true
 
-# RESERVED, not dead: this capability is the plugin-facing half of the rate/stick
-# control-output work. The ados-rate-control crate exists (pure, tested) and is
-# inert by construction; the method + sender land when that work reaches a live
-# FC command path. Kept declared so the manifest vocabulary and the grant surface
-# stay stable across its arrival, rather than churning the capability in and out.
 [[agent]]
 id = "flight.rate_setpoint"
 label = "Emit attitude/rate setpoints"
-description = "Lets a control lane command the flight controller with body-rate/thrust SET_ATTITUDE_TARGET setpoints through a scoped sender (the attitude rung). This is a second way to fly the aircraft on top of guided-mode setpoints; until the G3 gate (a real Betaflight FC) passes it must never emit a live command to an airframe."
+description = "Lets a plugin command the flight controller with SET_ATTITUDE_TARGET setpoints (an attitude quaternion and/or body rates, plus collective thrust) through a scoped sender, for GUIDED-mode vehicles that accept attitude/rate offboard control. This is a second flight-command surface alongside guided-mode position/velocity setpoints; the setpoint stream is the only flight-command surface this capability grants."
 category = "flight_control"
 risk = "critical"
-risk_reason = "Directly commands aircraft body rates and thrust at tick rate; a faulty rate stream can fly the aircraft outside guided-mode limits."
-# NOT enforced at the plugin-capability dispatch layer yet: the attitude rung's
-# only gate today is its own control-law precedence (armed + own-state freshness +
-# PIC arbiter) in ados-mavlink-router, which is not a plugin-capability gate that
-# `actually_gated()` can see. Marking it enforced would claim a runtime gate the
-# plugin host does not perform (the "dangerous direction" `nothing_claims_a_gate_"
-# test). Flip to enforced = true when a plugin command path reaches the rung.
+risk_reason = "Directly commands aircraft attitude/body rates and thrust at tick rate; a faulty stream can fly the aircraft outside guided-mode limits."
+enforced = true
 
 [[agent]]
 id = "mavlink.tunnel"
@@ -663,7 +653,7 @@ risk = "medium"
 risk_reason = "Publishes a callable interface to an AI client; effect is bounded by the plugin's other capabilities and the token scope."
 
 # ===========================================================================
-# Plugin RPC dispatch table (50): wire method -> dispatch-level required cap.
+# Plugin RPC dispatch table (51): wire method -> dispatch-level required cap.
 #
 # The single source of truth for the gate the native host applies BEFORE routing
 # a request. Codegen emits this into both the Rust host
@@ -885,6 +875,19 @@ required_cap = "hardware.gpio_out"
 [[method]]
 id = "flight.guided_setpoint.send"
 required_cap = "flight.guided_setpoint"
+
+
+# ---- attitude/rate setpoint sender ----
+# Send one SET_ATTITUDE_TARGET frame (an attitude quaternion and/or body rates
+# plus collective thrust) to the flight controller via the scoped attitude
+# sender, instead of the raw MAVLink write surface. Fully gated at the dispatch
+# level on the attitude/rate-setpoint capability. Single-shot like the guided
+# sender: the host owns no flight state or mode, so a caller holding an attitude
+# must re-send above the autopilot's setpoint timeout and must itself have the
+# vehicle in a mode that accepts offboard attitude (e.g. GUIDED).
+[[method]]
+id = "flight.rate_setpoint.send"
+required_cap = "flight.rate_setpoint"
 
 # ---- auxiliary radio stream ----
 # Open or close a dedicated auxiliary stream on the radio link (a separate

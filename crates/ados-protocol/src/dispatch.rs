@@ -61,6 +61,7 @@ pub const DISPATCH_METHODS: &[DispatchMethod] = &[
     DispatchMethod { method: "gpio.output.set", required_cap: Some("hardware.gpio_out"), inline: false },
     DispatchMethod { method: "gpio.buzzer.beep", required_cap: Some("hardware.gpio_out"), inline: false },
     DispatchMethod { method: "flight.guided_setpoint.send", required_cap: Some("flight.guided_setpoint"), inline: false },
+    DispatchMethod { method: "flight.rate_setpoint.send", required_cap: Some("flight.rate_setpoint"), inline: false },
     DispatchMethod { method: "radio.aux_stream.open", required_cap: Some("radio.aux_stream"), inline: false },
     DispatchMethod { method: "radio.aux_stream.close", required_cap: Some("radio.aux_stream"), inline: false },
     DispatchMethod { method: "radio.aux_stream.send", required_cap: Some("radio.aux_stream"), inline: false },

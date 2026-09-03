@@ -1061,6 +1061,40 @@ fn parse_guided_setpoint(
     })
 }
 
+/// Parse a `flight.rate_setpoint.send` request into an [`AttitudeSetpoint`].
+///
+/// Required: `type_mask` (an integer that fits u8; a set bit ignores that axis).
+/// The attitude quaternion is read as `qw`/`qx`/`qy`/`qz` (MAVLink `(w,x,y,z)`
+/// order) and the body rates as `body_roll_rate`/`body_pitch_rate`/
+/// `body_yaw_rate`, all defaulting to 0 when absent (an ignored axis is
+/// conventionally left unset); `thrust` likewise. The finiteness /
+/// unit-quaternion / thrust-range checks are NOT applied here — they live in
+/// [`AttitudeSetpoint::validate`], called by `build_message`, so the policy
+/// lives in one place.
+fn parse_rate_setpoint(
+    args: &Value,
+) -> Result<ados_protocol::mavlink::AttitudeSetpoint, HostError> {
+    let type_mask = match arg_i64(args, "type_mask") {
+        Some(n) if (0..=u8::MAX as i64).contains(&n) => n as u8,
+        Some(_) => return Err(HostError::Rpc("type_mask out of range".to_string())),
+        None => return Err(HostError::Rpc("type_mask must be an integer".to_string())),
+    };
+
+    Ok(ados_protocol::mavlink::AttitudeSetpoint {
+        type_mask,
+        q: [
+            arg_f32(args, "qw")?,
+            arg_f32(args, "qx")?,
+            arg_f32(args, "qy")?,
+            arg_f32(args, "qz")?,
+        ],
+        body_roll_rate: arg_f32(args, "body_roll_rate")?,
+        body_pitch_rate: arg_f32(args, "body_pitch_rate")?,
+        body_yaw_rate: arg_f32(args, "body_yaw_rate")?,
+        thrust: arg_f32(args, "thrust")?,
+    })
+}
+
 // ---------------------------------------------------------------------
 // RealHost
 // ---------------------------------------------------------------------
@@ -1715,6 +1749,7 @@ const ALL_DISPATCH_METHODS: &[crate::dispatch::Method] = {
         GpioOutputSet,
         GpioBuzzerBeep,
         GuidedSetpointSend,
+        RateSetpointSend,
         RadioAuxStreamOpen,
         RadioAuxStreamClose,
         RadioAuxStreamSend,
@@ -2621,6 +2656,66 @@ impl HostServices for RealHost {
                     (
                         Value::from("msg_id"),
                         Value::Integer((setpoint_msg_id(&setpoint) as i64).into()),
+                    ),
+                    (
+                        Value::from("len"),
+                        Value::Integer((frame.len() as i64).into()),
+                    ),
+                ]))
+            }
+        }
+    }
+
+    fn rate_setpoint_send(
+        &self,
+        _plugin_id: &str,
+        args: &Value,
+    ) -> Result<HostResult, HostError> {
+        // Parse + validate into an attitude setpoint, build the single
+        // SET_ATTITUDE_TARGET frame, and write it to the MAVLink socket. The
+        // dispatch gate already enforced the attitude/rate-setpoint capability
+        // before this runs. Single-shot like the guided sender: the host owns no
+        // flight mode or schedule, so a caller holding an attitude must re-send
+        // above the autopilot's setpoint timeout and must itself have the vehicle
+        // in a mode that accepts offboard attitude (e.g. GUIDED).
+        let setpoint = parse_rate_setpoint(args)?;
+
+        // Optional target overrides; default to the single-vehicle ArduPilot
+        // identity. An out-of-range override is a clear error rather than a wrap.
+        let target_system = u8_arg_or(args, "target_system", GUIDED_TARGET_SYSTEM)?;
+        let target_component = u8_arg_or(args, "target_component", GUIDED_TARGET_COMPONENT)?;
+
+        // Build the typed message (re-validates inside) and serialize it to a v2
+        // frame stamped with the companion source identity, so the bytes are
+        // wire-identical to a SET_ATTITUDE_TARGET any other agent surface emits.
+        let msg = setpoint
+            .build_message(target_system, target_component)
+            .map_err(|e| HostError::Rpc(e.to_string()))?;
+        let header = ados_protocol::mavlink::MavHeader {
+            system_id: GUIDED_SOURCE_SYSTEM_ID,
+            component_id: GUIDED_SOURCE_COMPONENT_ID,
+            sequence: 0,
+        };
+        let frame = ados_protocol::mavlink::serialize_v2(header, &msg)
+            .map_err(|e| HostError::Rpc(format!("setpoint frame encode failed: {e}")))?;
+
+        match &self.mavlink {
+            None => Ok(Value::Map(vec![
+                (Value::from("error"), Value::from("not_available")),
+                (
+                    Value::from("method"),
+                    Value::from("flight.rate_setpoint.send"),
+                ),
+            ])),
+            Some(client) => {
+                client.send_bytes(&frame);
+                Ok(Value::Map(vec![
+                    (Value::from("sent"), Value::Boolean(true)),
+                    (
+                        Value::from("msg_id"),
+                        Value::Integer(
+                            (ados_protocol::mavlink::MSG_ID_SET_ATTITUDE_TARGET as i64).into(),
+                        ),
                     ),
                     (
                         Value::from("len"),
