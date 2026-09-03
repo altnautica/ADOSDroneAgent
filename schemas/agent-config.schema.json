@@ -1916,12 +1916,11 @@
           "title": "Cold Boot Enum Aid",
           "type": "boolean"
         },
-        "cooldown_schedule_s": {
-          "items": {
-            "type": "integer"
-          },
-          "title": "Cooldown Schedule S",
-          "type": "array"
+        "cooldown_s": {
+          "default": 60,
+          "minimum": 1,
+          "title": "Cooldown S",
+          "type": "integer"
         },
         "debounce_s": {
           "default": 20,
@@ -1938,12 +1937,6 @@
           "default": 120,
           "minimum": 1,
           "title": "Healthy Reset S",
-          "type": "integer"
-        },
-        "max_attempts": {
-          "default": 3,
-          "minimum": 1,
-          "title": "Max Attempts",
           "type": "integer"
         },
         "tick_interval_s": {
@@ -2031,15 +2024,10 @@
             "allow_ppps": true,
             "boot_reset_window_s": 180,
             "cold_boot_enum_aid": false,
-            "cooldown_schedule_s": [
-              10,
-              30,
-              60
-            ],
+            "cooldown_s": 60,
             "debounce_s": 20,
             "enabled": true,
             "healthy_reset_s": 120,
-            "max_attempts": 3,
             "tick_interval_s": 5
           }
         },
@@ -2728,15 +2716,10 @@
           "allow_ppps": true,
           "boot_reset_window_s": 180,
           "cold_boot_enum_aid": false,
-          "cooldown_schedule_s": [
-            10,
-            30,
-            60
-          ],
+          "cooldown_s": 60,
           "debounce_s": 20,
           "enabled": true,
           "healthy_reset_s": 120,
-          "max_attempts": 3,
           "tick_interval_s": 5
         },
         "wfb": {
