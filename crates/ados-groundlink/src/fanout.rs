@@ -14,8 +14,15 @@
 //! The fan-out is a stateless RTP forwarder (viewers read UDP directly).
 //! Datagrams are RTP packets; we don't parse them, just copy + send. A single
 //! `recv_from`/`send_to` loop with no queueing, reordering, or drop policy
-//! beyond what the kernel UDP socket buffer enforces. A drop counter on send
-//! failure surfaces in the log so the supervisor captures sustained problems.
+//! beyond what the kernel UDP socket buffer enforces — which is why both
+//! sockets ask the kernel for a 4 MB buffer instead of running on the ~208 KB
+//! default that sheds packets the moment a consumer stalls.
+//!
+//! The forwarded and drop totals are supervised rather than merely published: a
+//! generation that has forwarded at least one datagram and then goes flat for
+//! [`FANOUT_STALL_WINDOW`] is rebound, and a sustained climb in send failures is
+//! reported as its own downstream degradation. A relay whose counter is frozen
+//! is doing no work, so its own liveness proves nothing.
 //!
 //! The receive side of that loop is resilient: a transient `recv_from` error
 //! (an ICMP port-unreachable surfacing as a connreset on the local socket, a
@@ -76,6 +83,70 @@ impl FanoutCounters {
 /// 5 GHz video link sit well under this; the headroom covers jumbo edge cases.
 const BUF_SIZE: usize = 65536;
 
+/// Receive/send buffer size asked of the kernel for the two fan-out sockets.
+///
+/// This hop carries EVERY ground-side video packet, and the kernel default
+/// (~208 KB on Linux) drops datagrams as soon as a consumer stalls even
+/// briefly — the reason the Python fan-out this was ported from asked for 4 MB
+/// on both sockets. The port lost that `setsockopt` and silently returned the
+/// video hop to the default. The loss happens BELOW the application: a datagram
+/// the kernel had nowhere to put never reaches `recv_from`, so neither
+/// `recv_errors` nor `drops` ever sees it, and the only symptom is corrupt
+/// video. 4 MB covers the 5 GHz stream's burst size while the single read loop
+/// is mid-`send_to`.
+const FANOUT_SOCKET_BUFFER_BYTES: usize = 4 * 1024 * 1024;
+
+/// Ask the kernel for a larger receive buffer on the decoder-side socket and
+/// log what it actually granted.
+///
+/// Linux silently doubles the request (its own bookkeeping overhead) and caps
+/// it at `net.core.rmem_max`, so a readback never equals the request; the
+/// obtained value is logged rather than asserted. Failure is non-fatal and must
+/// stay that way: forwarding with the default buffer is a small buffer, while
+/// failing the bind over a refused socket option is going dark.
+fn set_recv_buffer(sock: &UdpSocket) {
+    let opts = socket2::SockRef::from(sock);
+    if let Err(e) = opts.set_recv_buffer_size(FANOUT_SOCKET_BUFFER_BYTES) {
+        tracing::warn!(
+            error = %e,
+            requested = FANOUT_SOCKET_BUFFER_BYTES,
+            "fanout_rcvbuf_set_failed"
+        );
+        return;
+    }
+    match opts.recv_buffer_size() {
+        Ok(actual) => tracing::info!(
+            requested = FANOUT_SOCKET_BUFFER_BYTES,
+            actual,
+            "fanout_rcvbuf"
+        ),
+        Err(e) => tracing::warn!(error = %e, "fanout_rcvbuf_read_failed"),
+    }
+}
+
+/// Ask the kernel for a larger send buffer on the relay socket, so it can queue
+/// a burst of forwarded packets instead of blocking the recv loop. Same clamp
+/// and same non-fatal contract as [`set_recv_buffer`].
+fn set_send_buffer(sock: &UdpSocket) {
+    let opts = socket2::SockRef::from(sock);
+    if let Err(e) = opts.set_send_buffer_size(FANOUT_SOCKET_BUFFER_BYTES) {
+        tracing::warn!(
+            error = %e,
+            requested = FANOUT_SOCKET_BUFFER_BYTES,
+            "fanout_sndbuf_set_failed"
+        );
+        return;
+    }
+    match opts.send_buffer_size() {
+        Ok(actual) => tracing::info!(
+            requested = FANOUT_SOCKET_BUFFER_BYTES,
+            actual,
+            "fanout_sndbuf"
+        ),
+        Err(e) => tracing::warn!(error = %e, "fanout_sndbuf_read_failed"),
+    }
+}
+
 /// Run the fan-out forever: forward every datagram from `listen_addr` to each
 /// address in `targets`. Returns only on a fatal socket error or when the
 /// future is dropped (cancellation). The caller supervises lifecycle and
@@ -96,9 +167,11 @@ pub async fn run_fanout(
     }
 
     let in_sock = UdpSocket::bind(listen_addr).await?;
+    set_recv_buffer(&in_sock);
     // One output socket for all destinations. Bind to the unspecified address
     // so the kernel picks an ephemeral source port; we only ever `send_to`.
     let out_sock = UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)).await?;
+    set_send_buffer(&out_sock);
 
     tracing::info!(
         listen = %listen_addr,
@@ -192,6 +265,183 @@ pub const HERO_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// under this, and a permanently unbindable one must not spin the reactor.
 const REBIND_BACKOFF: Duration = Duration::from_millis(500);
 
+/// How long the generation's forwarded count must sit flat before the fan-out
+/// is judged stalled.
+///
+/// Chosen against this hop's real cadence, not copied: the fan-out relays
+/// FEC-decoded RTP video at tens of Mbps in ~1.4 KB datagrams, so `forwarded`
+/// advances several thousand times a second and the normal gap between two
+/// advances is well under a millisecond. Flat for three seconds is therefore
+/// four orders of magnitude past the inter-datagram gap — thousands of missing
+/// datagrams, unambiguously not jitter.
+///
+/// The window is deliberately not set at the edge of that measurement. Decoded
+/// output can legitimately pause for a beat (a channel re-acquisition, an FEC
+/// block waiting on its last fragment, a mid-flight hero re-point), and
+/// rebinding on an ordinary radio hiccup would cost more video than it saves.
+/// Three seconds is far enough above the hiccup and still below the point where
+/// an operator staring at a frozen picture would rather the socket had been
+/// rebound.
+pub const FANOUT_STALL_WINDOW: Duration = Duration::from_secs(3);
+
+/// How often the watchdog samples the counters — several times per window, so a
+/// stall is caught at the window edge rather than a whole window late.
+const FANOUT_SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Per-target `send_to` failures within one [`FANOUT_STALL_WINDOW`] that mark
+/// the downstream as not draining.
+///
+/// A consumer that is restarting produces a handful of failures as its socket
+/// goes away and comes back; a consumer that is genuinely not draining fails at
+/// the stream's own rate, i.e. thousands per second. A hundred failures inside
+/// one window sits between the two with room to spare in both directions.
+pub const FANOUT_DROP_DEGRADED_DELTA: u64 = 100;
+
+/// What the forward path is doing across a pair of counter samples.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForwardState {
+    /// Nothing has been forwarded since this socket was bound, so there is
+    /// nothing to forward: an idle ground station with no drone paired, or one
+    /// whose drone has powered off. NOT a fault, and the gate that keeps the
+    /// stall check from ever tripping before the first datagram — the same
+    /// `output_seen` gate the wfb tap's output watchdog uses.
+    AwaitingFirstDatagram,
+    /// The counter advanced since the previous sample — healthy.
+    Advancing { datagrams: u64 },
+    /// Flat, but still inside the stall window — healthy.
+    WithinStallWindow,
+    /// Flat for the whole window after at least one datagram was forwarded:
+    /// the real fault. Carries the frozen count so the log names it.
+    Stalled { frozen_at: u64 },
+}
+
+/// Whether the downstream consumers are draining what the fan-out sends them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrainState {
+    /// No sustained send failure over the window.
+    Draining,
+    /// `send_to` kept failing across the window: a downstream consumer is not
+    /// draining its socket. Reported separately from a flat `forwarded` on
+    /// purpose — here the fan-out is reading and relaying correctly and the far
+    /// end is what is behind, so rebinding this socket would fix nothing.
+    NotDraining { drops: u64 },
+}
+
+/// The fan-out watchdog verdict over one counter sample.
+///
+/// The two axes are independent: a fan-out can be forwarding perfectly into a
+/// consumer that has stopped draining, and a stalled fan-out drops nothing at
+/// all because it has nothing to send. Collapsing them into one health flag
+/// would report the wrong fault in both directions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FanoutDecision {
+    /// The forward path's state.
+    pub forward: ForwardState,
+    /// The downstream drain state.
+    pub drain: DrainState,
+}
+
+/// The fan-out watchdog decision, pure so it is testable without sockets.
+///
+/// `prev` and `current` are datagrams forwarded SINCE THE CURRENT BIND, not the
+/// process-cumulative total: the never-forwarded gate has to be per-generation
+/// or a ground station whose drone has powered off would read as "once
+/// forwarded, now flat" forever and rebind its loopback socket on every window
+/// for the rest of the flight day.
+///
+/// `since_advance` is how long `current` has sat flat, and `drops_delta` is the
+/// send failures accumulated within the current `window`.
+pub fn fanout_decision(
+    prev: u64,
+    current: u64,
+    since_advance: Duration,
+    drops_delta: u64,
+    window: Duration,
+) -> FanoutDecision {
+    let forward = if current == 0 {
+        // Nothing has ever arrived to forward. Not a fault: no source is
+        // delivering, so a flat counter is the correct reading.
+        ForwardState::AwaitingFirstDatagram
+    } else if current > prev {
+        ForwardState::Advancing {
+            datagrams: current - prev,
+        }
+    } else if since_advance < window {
+        ForwardState::WithinStallWindow
+    } else {
+        ForwardState::Stalled { frozen_at: current }
+    };
+    let drain = if drops_delta >= FANOUT_DROP_DEGRADED_DELTA {
+        DrainState::NotDraining { drops: drops_delta }
+    } else {
+        DrainState::Draining
+    };
+    FanoutDecision { forward, drain }
+}
+
+/// Sample `counters` until the forward path stalls, then return the frozen
+/// cumulative `forwarded` value for the caller to log and act on.
+///
+/// `baseline` is the cumulative `forwarded` total at the moment this bind
+/// generation started, which is what makes [`fanout_decision`]'s
+/// never-forwarded gate per-generation.
+///
+/// A sustained drop climb is warned about and does NOT return: the fan-out
+/// itself is healthy in that case, and rebinding its socket would not make a
+/// downstream consumer drain any faster. One warning per window, re-armed when
+/// the window rolls over, so a persistently wedged consumer is visible without
+/// flooding the journal.
+async fn watch_for_fanout_stall(
+    counters: &FanoutCounters,
+    baseline: u64,
+    window: Duration,
+    interval: Duration,
+) -> u64 {
+    let mut prev: u64 = 0;
+    let mut last_advance = tokio::time::Instant::now();
+    let mut drop_anchor = counters.drops();
+    let mut drop_window_start = last_advance;
+    let mut drop_warned = false;
+    loop {
+        tokio::time::sleep(interval).await;
+        let now = tokio::time::Instant::now();
+        let current = counters.forwarded().saturating_sub(baseline);
+        let drops_delta = counters.drops().saturating_sub(drop_anchor);
+        let decision = fanout_decision(
+            prev,
+            current,
+            now.saturating_duration_since(last_advance),
+            drops_delta,
+            window,
+        );
+
+        if let DrainState::NotDraining { drops } = decision.drain {
+            if !drop_warned {
+                tracing::warn!(
+                    drops,
+                    window_s = window.as_secs_f64(),
+                    "fanout_downstream_not_draining"
+                );
+                drop_warned = true;
+            }
+        }
+        if now.saturating_duration_since(drop_window_start) >= window {
+            drop_anchor = counters.drops();
+            drop_window_start = now;
+            drop_warned = false;
+        }
+
+        match decision.forward {
+            ForwardState::Advancing { .. } => {
+                prev = current;
+                last_advance = now;
+            }
+            ForwardState::AwaitingFirstDatagram | ForwardState::WithinStallWindow => {}
+            ForwardState::Stalled { .. } => return counters.forwarded(),
+        }
+    }
+}
+
 /// Which fleet slot the fan-out should be serving right now.
 ///
 /// The published hero selection wins when it is live — the sidecar names a slot
@@ -227,10 +477,18 @@ pub fn resolve_fanout_slot(fallback_slot: u8, hero_path: &Path, registry_path: &
 /// interruption. `resolve` returning the same slot forever (the absent-sidecar
 /// case) therefore costs one poll per interval and no rebind at all.
 ///
+/// The counters are supervised, not merely published: a generation whose
+/// `forwarded` total freezes for [`FANOUT_STALL_WINDOW`] after having forwarded
+/// at least one datagram is rebound through the same path a fatal socket error
+/// takes, because a fan-out that is alive with a frozen counter is doing no
+/// work at all and process liveness is not proof of work.
+///
 /// Returns only when `resolve` cannot be served at all is not a case: a fatal
 /// socket error backs off and re-resolves rather than ending the fan-out for the
 /// generation, because going permanently dark is a worse answer than retrying a
-/// bind that is very likely transient.
+/// bind that is very likely transient. The stall rebind takes the same bounded
+/// [`REBIND_BACKOFF`] — a fixed retry, never an exponential ladder and never a
+/// terminal give-up state that would need a shell on the vehicle to clear.
 pub async fn run_repointing_fanout<R, P>(
     resolve: R,
     port_for: P,
@@ -245,6 +503,10 @@ where
     loop {
         let slot = resolve();
         let listen: SocketAddr = (std::net::Ipv4Addr::LOCALHOST, port_for(slot)).into();
+        // The forwarded total at this bind's start, so the stall watchdog's
+        // "has anything arrived yet" gate is about THIS socket rather than the
+        // process lifetime.
+        let baseline = counters.forwarded();
         tokio::select! {
             res = run_fanout(listen, targets, counters) => {
                 match res {
@@ -264,6 +526,21 @@ where
             }
             next = wait_for_slot_change(&resolve, slot, poll) => {
                 tracing::info!(from = slot, to = next, "fanout_repointed_to_hero_slot");
+            }
+            frozen_at = watch_for_fanout_stall(
+                counters,
+                baseline,
+                FANOUT_STALL_WINDOW,
+                FANOUT_SAMPLE_INTERVAL,
+            ) => {
+                tracing::warn!(
+                    slot,
+                    listen = %listen,
+                    stall_window_s = FANOUT_STALL_WINDOW.as_secs_f64(),
+                    forwarded = frozen_at,
+                    "fanout_forward_stalled_rebinding"
+                );
+                tokio::time::sleep(REBIND_BACKOFF).await;
             }
         }
     }
@@ -702,5 +979,227 @@ mod tests {
         }
 
         fanout.abort();
+    }
+
+    #[test]
+    fn an_idle_ground_station_with_no_drone_paired_is_not_a_stall() {
+        // Nothing has ever been forwarded on this bind, so a flat counter is the
+        // correct reading, not a fault. If this ever reported Stalled the
+        // watchdog would rebind the socket of every ground station that is
+        // simply powered on ahead of its aircraft — including forever, since the
+        // condition never clears on its own.
+        let d = fanout_decision(0, 0, Duration::from_secs(600), 0, FANOUT_STALL_WINDOW);
+        assert_eq!(d.forward, ForwardState::AwaitingFirstDatagram);
+        assert_eq!(d.drain, DrainState::Draining);
+    }
+
+    #[test]
+    fn an_advancing_forward_count_is_healthy() {
+        // The live-video case: the counter moved since the last sample.
+        let d = fanout_decision(1_000, 4_500, Duration::ZERO, 0, FANOUT_STALL_WINDOW);
+        assert_eq!(d.forward, ForwardState::Advancing { datagrams: 3_500 });
+
+        // Flat, but only just: inside the window this is still healthy, because
+        // decoded output is allowed the odd hiccup without a rebind.
+        let d = fanout_decision(
+            4_500,
+            4_500,
+            FANOUT_STALL_WINDOW - Duration::from_millis(1),
+            0,
+            FANOUT_STALL_WINDOW,
+        );
+        assert_eq!(d.forward, ForwardState::WithinStallWindow);
+    }
+
+    #[test]
+    fn a_forward_count_frozen_for_the_window_after_forwarding_is_stalled() {
+        // The real fault: this bind DID forward video, and then the count froze
+        // for the whole window. At thousands of datagrams a second that is not
+        // jitter, and the frozen value must travel with the verdict so the log
+        // names it.
+        let d = fanout_decision(9_001, 9_001, FANOUT_STALL_WINDOW, 0, FANOUT_STALL_WINDOW);
+        assert_eq!(d.forward, ForwardState::Stalled { frozen_at: 9_001 });
+        // The stall is a forward-path fault only: a fan-out with nothing to send
+        // drops nothing, so the drain axis must stay clean.
+        assert_eq!(d.drain, DrainState::Draining);
+    }
+
+    #[test]
+    fn climbing_drops_are_reported_as_their_own_degradation() {
+        // A consumer that is not draining is a DIFFERENT fault from a flat
+        // forward count: the fan-out is reading and relaying correctly, so
+        // rebinding its socket would fix nothing. The two must be separable.
+        let d = fanout_decision(
+            1_000,
+            5_000,
+            Duration::ZERO,
+            FANOUT_DROP_DEGRADED_DELTA,
+            FANOUT_STALL_WINDOW,
+        );
+        assert_eq!(
+            d.drain,
+            DrainState::NotDraining {
+                drops: FANOUT_DROP_DEGRADED_DELTA
+            }
+        );
+        assert_eq!(d.forward, ForwardState::Advancing { datagrams: 4_000 });
+
+        // A consumer restarting sheds a handful of datagrams; that is not a
+        // sustained climb and must not be reported as one.
+        let d = fanout_decision(1_000, 5_000, Duration::ZERO, 3, FANOUT_STALL_WINDOW);
+        assert_eq!(d.drain, DrainState::Draining);
+    }
+
+    #[test]
+    fn the_stall_window_is_far_above_the_hops_packet_cadence() {
+        // The window has to be orders of magnitude longer than the real
+        // inter-datagram gap (sub-millisecond at tens of Mbps) so a flat counter
+        // across it is unambiguous, and short enough that a frozen picture is
+        // acted on rather than watched.
+        assert!(FANOUT_STALL_WINDOW >= Duration::from_secs(1));
+        assert!(FANOUT_STALL_WINDOW <= Duration::from_secs(10));
+        // Several samples per window, or a stall is caught a window late.
+        assert!(FANOUT_SAMPLE_INTERVAL * 3 <= FANOUT_STALL_WINDOW);
+    }
+
+    #[tokio::test]
+    async fn the_watchdog_returns_the_frozen_count_once_forwarding_stops() {
+        // The wiring seam: a generation that forwarded and then froze must make
+        // the watchdog return, which is what drives the rebind in
+        // `run_repointing_fanout`.
+        let counters = FanoutCounters::new();
+        counters.forwarded.fetch_add(42, Ordering::Relaxed);
+        let frozen = tokio::time::timeout(
+            Duration::from_secs(5),
+            watch_for_fanout_stall(
+                &counters,
+                0,
+                Duration::from_millis(200),
+                Duration::from_millis(20),
+            ),
+        )
+        .await
+        .expect("the watchdog never reported the stalled fan-out");
+        assert_eq!(frozen, 42, "the stall must name the frozen counter value");
+    }
+
+    #[tokio::test]
+    async fn the_watchdog_stays_quiet_while_nothing_has_arrived_and_while_forwarding() {
+        // Two non-faults the watchdog must never act on, because acting on
+        // either would rebind a working (or idle) socket in a loop.
+        let counters = FanoutCounters::new();
+
+        // (1) No datagram has ever arrived on this bind.
+        let idle = tokio::time::timeout(
+            Duration::from_millis(600),
+            watch_for_fanout_stall(
+                &counters,
+                0,
+                Duration::from_millis(100),
+                Duration::from_millis(10),
+            ),
+        )
+        .await;
+        assert!(
+            idle.is_err(),
+            "an idle ground station was reported as a stalled fan-out"
+        );
+
+        // (2) The counter keeps advancing, as it does with video flowing.
+        let bump = {
+            let counters = counters.clone();
+            tokio::spawn(async move {
+                loop {
+                    counters.forwarded.fetch_add(1_000, Ordering::Relaxed);
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+        };
+        let flowing = tokio::time::timeout(
+            Duration::from_millis(600),
+            watch_for_fanout_stall(
+                &counters,
+                counters.forwarded(),
+                Duration::from_millis(100),
+                Duration::from_millis(10),
+            ),
+        )
+        .await;
+        bump.abort();
+        assert!(
+            flowing.is_err(),
+            "a fan-out that is forwarding was reported as stalled"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_input_socket_absorbs_a_burst_the_default_buffer_would_drop() {
+        // The regression this pins: the port dropped the 4 MB `SO_RCVBUF` the
+        // Python fan-out set, so a burst arriving while nothing is draining the
+        // socket is discarded by the kernel BELOW the application, invisible to
+        // every counter. Asserted behaviourally rather than by size, because
+        // Linux doubles the request and caps it at `rmem_max`: a clamped buffer
+        // still absorbs far more than the default.
+        const DATAGRAMS: usize = 1_200;
+        let payload = [0xABu8; 1_400];
+
+        let sock = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        set_recv_buffer(&sock);
+        let addr = sock.local_addr().unwrap();
+
+        let sender = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        // Nothing reads while the burst lands, exactly like the read loop being
+        // busy in `send_to` — the kernel buffer is the only thing holding it.
+        for _ in 0..DATAGRAMS {
+            sender.send_to(&payload, addr).await.unwrap();
+        }
+
+        let mut buf = [0u8; 2_048];
+        let mut received = 0usize;
+        while received < DATAGRAMS {
+            match tokio::time::timeout(Duration::from_millis(200), sock.recv(&mut buf)).await {
+                Ok(Ok(n)) => {
+                    assert_eq!(n, payload.len());
+                    received += 1;
+                }
+                _ => break,
+            }
+        }
+
+        // The default buffer (~208 KB on Linux, ~768 KB on macOS) cannot hold
+        // 1.68 MB of datagrams; the 4 MB request can. 700 is comfortably above
+        // what any stock default holds and below the full burst, so the
+        // assertion survives a kernel clamp without asserting a size.
+        assert!(
+            received >= 700,
+            "only {received}/{DATAGRAMS} datagrams survived the burst: the receive buffer is at the kernel default"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_output_socket_send_buffer_request_takes_effect() {
+        // The send side cannot be observed by absorbing a burst, so pin what is
+        // observable: the request moved the socket off its default. The exact
+        // value is deliberately not asserted — Linux doubles the request for its
+        // own bookkeeping and caps it at `wmem_max`.
+        let fresh = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let default = socket2::SockRef::from(&fresh).send_buffer_size().unwrap();
+
+        let sized = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        set_send_buffer(&sized);
+        let actual = socket2::SockRef::from(&sized).send_buffer_size().unwrap();
+
+        assert!(
+            actual > default,
+            "the send buffer stayed at the kernel default ({default} -> {actual})"
+        );
     }
 }
