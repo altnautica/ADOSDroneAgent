@@ -44,8 +44,6 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
-use ados_video::recorder::GroundStationRecorder;
-
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -208,14 +206,16 @@ pub async fn get_status(State(state): State<AppState>) -> Response {
     };
 
     // Recorder state, read off the process-wide recorder this same binary owns
-    // (`gs_recording::recorder`). This used to hardcode `false` on the stated
-    // grounds that "the native front has no in-process recorder (recording runs in
-    // a sibling service)" — which `gs_recording`'s own module docs contradict: the
-    // start and stop are separate requests, so the front holds the one recorder
-    // behind a `OnceLock` for the life of the process. The surface therefore
-    // reported a known-false value while a capture was running (rule 6).
+    // (`gs_recording::recorder`), through the derivation `gs_recording` owns so
+    // this surface and the `/recording/list` envelope cannot drift. Both used to
+    // hardcode `false` on the stated grounds that "the native front has no
+    // in-process recorder (recording runs in a sibling service)" — which
+    // `gs_recording`'s own module docs contradict: the start and stop are separate
+    // requests, so the front holds the one recorder behind a `OnceLock` for the
+    // life of the process. The surface therefore reported a known-false value
+    // while a capture was running (rule 6).
     let (recording_active, recording_filename) =
-        recording_view(&crate::routes::gs_recording::recorder()).await;
+        crate::routes::gs_recording::recording_view(&crate::routes::gs_recording::recorder()).await;
 
     let body = json!({
         "profile": "ground_station",
@@ -246,29 +246,6 @@ pub async fn get_status(State(state): State<AppState>) -> Response {
     });
 
     Json(body).into_response()
-}
-
-/// The `(recording, recording_filename)` legs of the `/status` body, derived from
-/// a live recorder.
-///
-/// Split out so the derivation is exercised without going through `AppState` or
-/// the process-wide `OnceLock`: the handler's only remaining decision is *which*
-/// recorder to ask, and that must be the one `gs_recording` owns.
-///
-/// The filename is reported ONLY while a capture is in flight. The recorder keeps
-/// `current_path` after a stop (the stop reply needs it), so forwarding it
-/// unconditionally would render the last completed capture as if it were still
-/// running — the same class of frozen reading rule 44 exists to prevent.
-async fn recording_view(recorder: &GroundStationRecorder) -> (bool, Value) {
-    if !recorder.is_active().await {
-        return (false, Value::Null);
-    }
-    let filename = recorder
-        .current_filename()
-        .await
-        .map(Value::from)
-        .unwrap_or(Value::Null);
-    (true, filename)
 }
 
 /// The `(paired_drone_id, key_fingerprint)` pair the `/status` route surfaces.
@@ -1654,57 +1631,6 @@ mod tests {
             .expect("the back-fill persists");
 
         assert_eq!(config_gs_peer(&cfg), json!("drone-abc"));
-    }
-
-    /// The recording legs must follow the recorder, both ways.
-    ///
-    /// These two fields were hardcoded `false`/`null`, so the ground-station
-    /// status surface denied a capture that was in flight. The active leg is what
-    /// regressed, so it is what this drives: a fake `ffmpeg` on PATH (the same
-    /// technique `ados-video`'s own recorder cycle test uses) makes the running
-    /// state reachable without a real encoder or a rig.
-    #[tokio::test]
-    async fn recording_view_follows_the_recorder_in_both_states() {
-        let bindir = tempfile::tempdir().unwrap();
-        let fake = bindir.path().join("ffmpeg");
-        std::fs::write(&fake, "#!/bin/sh\nsleep 30\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-
-        let recdir = tempfile::tempdir().unwrap();
-        let rec = GroundStationRecorder::new(recdir.path(), "rtsp://127.0.0.1:8554/main");
-
-        // Idle: no capture, so no filename either.
-        assert_eq!(recording_view(&rec).await, (false, Value::Null));
-
-        let path_save = std::env::var("PATH").ok();
-        let combined = match &path_save {
-            Some(orig) => format!("{}:{}", bindir.path().display(), orig),
-            None => bindir.path().display().to_string(),
-        };
-        std::env::set_var("PATH", &combined);
-        let started = rec.start(Some("statusleg")).await.expect("start succeeds");
-
-        let (active, filename) = recording_view(&rec).await;
-        assert!(
-            active,
-            "a capture is in flight, so the status leg must say so"
-        );
-        assert_eq!(filename, json!(started["filename"].as_str().unwrap()));
-
-        let _ = rec.stop().await;
-        if let Some(p) = path_save {
-            std::env::set_var("PATH", p);
-        } else {
-            std::env::remove_var("PATH");
-        }
-
-        // After the stop the recorder still holds `current_path` for its own reply,
-        // but the status surface must not render a finished capture as if live.
-        assert_eq!(recording_view(&rec).await, (false, Value::Null));
     }
 
     /// The golden `/status` body for a direct ground-station node with no paired

@@ -368,27 +368,41 @@ async fn enforce_caps(
         let cap = cfg.caps.get(category);
         match category {
             Category::Recordings => {
+                // Both layouts under the recordings root, and the same floor
+                // every other recordings rule honours: the keep-newest count
+                // PLUS whatever a capture is appending to right now. The cap is
+                // not licence to reclaim the segment mediamtx is mid-fragment on.
+                let entries = reclaim::recording_entries(&roots.recordings);
+                let protected = plan::protected_recordings(
+                    &entries,
+                    cfg.recording_keep_newest.max(1),
+                    now_unix(),
+                );
                 out.recordings =
                     out.recordings
-                        .saturating_add(reclaim::reclaim_to_cap_oldest_first(
+                        .saturating_add(reclaim::reclaim_entries_to_cap_oldest_first(
                             &roots.recordings,
-                            |n| n.ends_with(".mp4") || n.ends_with(".mkv") || n.ends_with(".ts"),
+                            entries,
                             cap,
-                            cfg.recording_keep_newest.max(1),
+                            &protected,
                         ));
             }
             Category::QuarantinedStores => {
-                out.quarantined_stores =
-                    out.quarantined_stores
-                        .saturating_add(reclaim::reclaim_to_cap_oldest_first(
-                            &roots.logd_store,
-                            |n| n.starts_with("logs.db.corrupt-"),
-                            cap,
-                            // The floor that outranks the cap. A single corpse
-                            // larger than the whole quarantine share is the case
-                            // that actually happens, and it stays.
-                            cfg.quarantine_keep_newest.max(1),
-                        ));
+                let entries = reclaim::entries_with_mtime(&roots.logd_store, |n| {
+                    n.starts_with("logs.db.corrupt-")
+                });
+                // The floor that outranks the cap. A single corpse larger than
+                // the whole quarantine share is the case that actually happens,
+                // and it stays.
+                let protected = plan::newest_names(&entries, cfg.quarantine_keep_newest.max(1));
+                out.quarantined_stores = out.quarantined_stores.saturating_add(
+                    reclaim::reclaim_entries_to_cap_oldest_first(
+                        &roots.logd_store,
+                        entries,
+                        cap,
+                        &protected,
+                    ),
+                );
             }
             Category::Apt => {
                 out.apt_archives = out
@@ -431,7 +445,17 @@ async fn enforce_caps(
 /// Run one pass over `roots` under `cfg`, returning what it freed and the rung
 /// it ran at. Separated from the reconciler so a test drives a whole sweep
 /// against a temporary tree with no timer, no config file and no clock.
-pub async fn sweep(roots: &Roots, cfg: &JanitorConfig, free_pct: Option<f64>) -> (Rung, Reclaimed) {
+///
+/// `free_pct` selects the rung; `free_bytes` is the recordings volume's absolute
+/// headroom, which drives the recording floor. Both are injected for the same
+/// reason: a `statvfs` belongs to the reconciler, not to the decision.
+pub async fn sweep(
+    roots: &Roots,
+    cfg: &JanitorConfig,
+    free_pct: Option<f64>,
+    free_bytes: Option<u64>,
+) -> (Rung, Reclaimed) {
+    let now = now_unix();
     let footprint = measure_footprint(roots);
     let rung = cfg.rung_for(free_pct, &footprint);
     let p = cfg.plan(rung);
@@ -446,9 +470,22 @@ pub async fn sweep(roots: &Roots, cfg: &JanitorConfig, free_pct: Option<f64>) ->
     let audit_log =
         reclaim::trim_append_only(&roots.audit_log, cfg.audit_max_bytes, cfg.audit_keep_bytes);
 
-    let cutoff = now_unix().saturating_sub(p.recording_cutoff.as_secs() as i64);
-    let recordings =
-        reclaim::reclaim_recordings(&roots.recordings, cutoff, p.recording_keep_newest);
+    let cutoff = now.saturating_sub(p.recording_cutoff.as_secs() as i64);
+    let mut recordings =
+        reclaim::reclaim_recordings(&roots.recordings, cutoff, p.recording_keep_newest, now);
+
+    // The recording volume's space floor. Time-based retention cannot cover
+    // this: mediamtx's own 24h `recordDeleteAfter` window does not fire until
+    // long after a high-bitrate day has filled the card, and a full card stops
+    // the recorder dead mid-flight. Reclaims oldest-first through the SAME
+    // machinery the age and cap rules use, so there is one reclaimer over this
+    // directory rather than two fighting.
+    recordings = recordings.saturating_add(reclaim::reclaim_recordings_to_free_floor(
+        &roots.recordings,
+        plan::free_space_deficit(free_bytes, plan::RECORD_MIN_FREE_BYTES),
+        p.recording_keep_newest,
+        now,
+    ));
 
     // Things with residual value, only once space is short.
     let apt_lists = if p.apt_lists {
@@ -513,9 +550,14 @@ pub fn reclaimable(roots: &Roots, cfg: &JanitorConfig) -> Reclaimed {
         .and_then(|len| plan::trim_from(len, cfg.audit_max_bytes, cfg.audit_keep_bytes))
         .unwrap_or(0);
 
-    let cutoff = now_unix().saturating_sub(p.recording_cutoff.as_secs() as i64);
-    let recordings =
-        reclaim::recording_reclaimable_bytes(&roots.recordings, cutoff, p.recording_keep_newest);
+    let now = now_unix();
+    let cutoff = now.saturating_sub(p.recording_cutoff.as_secs() as i64);
+    let recordings = reclaim::recording_reclaimable_bytes(
+        &roots.recordings,
+        cutoff,
+        p.recording_keep_newest,
+        now,
+    );
 
     let journal = p
         .journal_target_bytes
@@ -556,7 +598,7 @@ impl Janitor {
     }
 
     /// One reconcile. Cheap when nothing is over its cap: a handful of directory
-    /// reads and one `statvfs`.
+    /// reads and two `statvfs` calls.
     pub async fn tick(&mut self) {
         #[cfg(target_os = "linux")]
         {
@@ -576,7 +618,10 @@ impl Janitor {
 
             let roots = Roots::default();
             let before = reclaim::free_pct(std::path::Path::new(PRESSURE_PATH));
-            let (rung, freed) = sweep(&roots, &cfg, before).await;
+            // The recordings volume's own headroom, which may be a different
+            // filesystem from the one the rung is chosen on.
+            let record_free = reclaim::free_bytes(&roots.recordings);
+            let (rung, freed) = sweep(&roots, &cfg, before, record_free).await;
             let after = reclaim::free_pct(std::path::Path::new(PRESSURE_PATH));
 
             // Measured AFTER the sweep, so the sidecar answers "what is left to
@@ -844,7 +889,7 @@ mod tests {
         let cfg = tight_config();
 
         // Plenty of free space.
-        let (rung, freed) = sweep(&roots, &cfg, Some(80.0)).await;
+        let (rung, freed) = sweep(&roots, &cfg, Some(80.0), None).await;
         assert_eq!(rung, Rung::Routine);
         assert_eq!(freed.apt_archives, 4_000);
         assert!(freed.plugin_logs > 0);
@@ -874,7 +919,7 @@ mod tests {
     async fn nothing_is_reclaimed_without_a_per_category_number() {
         let tmp = tempfile::tempdir().unwrap();
         let roots = populate(tmp.path());
-        let (_, freed) = sweep(&roots, &tight_config(), Some(5.0)).await;
+        let (_, freed) = sweep(&roots, &tight_config(), Some(5.0), None).await;
 
         // The invariant: whatever came off the disk is attributed to a named
         // category, so the event can carry it. A category that freed bytes with
@@ -894,7 +939,7 @@ mod tests {
     async fn the_critical_rung_still_leaves_the_newest_quarantined_store() {
         let tmp = tempfile::tempdir().unwrap();
         let roots = populate(tmp.path());
-        let (rung, freed) = sweep(&roots, &tight_config(), Some(1.0)).await;
+        let (rung, freed) = sweep(&roots, &tight_config(), Some(1.0), None).await;
 
         assert_eq!(rung, Rung::Critical);
         assert_eq!(freed.quarantined_stores, 4_000, "two of three corpses");
@@ -924,9 +969,9 @@ mod tests {
         let roots = populate(tmp.path());
         let cfg = tight_config();
 
-        let (_, first) = sweep(&roots, &cfg, Some(1.0)).await;
+        let (_, first) = sweep(&roots, &cfg, Some(1.0), None).await;
         assert!(first.total() > 0);
-        let (_, second) = sweep(&roots, &cfg, Some(1.0)).await;
+        let (_, second) = sweep(&roots, &cfg, Some(1.0), None).await;
         assert_eq!(
             second.total(),
             0,
@@ -966,7 +1011,7 @@ mod tests {
         );
 
         // After a full pass there is nothing left to give.
-        let (_, freed) = sweep(&roots, &cfg, Some(1.0)).await;
+        let (_, freed) = sweep(&roots, &cfg, Some(1.0), None).await;
         assert!(freed.total() > 0);
         assert_eq!(
             reclaimable(&roots, &cfg).total(),
@@ -997,7 +1042,7 @@ mod tests {
         };
 
         // Four 1 000-byte recordings against a 2 500-byte cap.
-        let (rung, freed) = sweep(&roots, &cfg, Some(90.0)).await;
+        let (rung, freed) = sweep(&roots, &cfg, Some(90.0), None).await;
         assert_eq!(rung, Rung::Routine, "plenty of free space, tiny footprint");
         assert_eq!(
             freed.recordings, 2_000,
@@ -1026,7 +1071,7 @@ mod tests {
             ..JanitorConfig::default()
         };
 
-        let (_, freed) = sweep(&roots, &cfg, Some(90.0)).await;
+        let (_, freed) = sweep(&roots, &cfg, Some(90.0), None).await;
         assert_eq!(freed.quarantined_stores, 4_000, "two of the three corpses");
         assert!(
             roots.logd_store.join("logs.db.corrupt-2").exists(),
@@ -1082,7 +1127,7 @@ mod tests {
             ..JanitorConfig::default()
         };
         // The most aggressive pass this config can produce.
-        let (rung, _) = sweep(&roots, &cfg, Some(0.5)).await;
+        let (rung, _) = sweep(&roots, &cfg, Some(0.5), None).await;
         assert_eq!(rung, Rung::Critical);
         assert_eq!(
             measure_footprint(&roots).installed,
@@ -1106,9 +1151,9 @@ mod tests {
             },
             ..JanitorConfig::default()
         };
-        let (_, first) = sweep(&roots, &cfg, Some(90.0)).await;
+        let (_, first) = sweep(&roots, &cfg, Some(90.0), None).await;
         assert!(first.total() > 0);
-        let (_, second) = sweep(&roots, &cfg, Some(90.0)).await;
+        let (_, second) = sweep(&roots, &cfg, Some(90.0), None).await;
         assert_eq!(
             second.total(),
             0,
@@ -1134,9 +1179,179 @@ mod tests {
     async fn an_unmeasured_disk_sweeps_routinely_not_critically() {
         let tmp = tempfile::tempdir().unwrap();
         let roots = populate(tmp.path());
-        let (rung, freed) = sweep(&roots, &tight_config(), None).await;
+        let (rung, freed) = sweep(&roots, &tight_config(), None, None).await;
         assert_eq!(rung, Rung::Routine);
         assert_eq!(freed.quarantined_stores, 0);
         assert_eq!(freed.apt_lists, 0);
+    }
+
+    // --- the recordings space floor + the in-flight capture -----------------
+
+    /// Lay down TWO mediamtx segment streams: settled segments plus, on each
+    /// path, one segment a capture is appending to right now.
+    ///
+    /// Two paths, not one, so `recording_keep_newest: 1` is spent on the newest
+    /// file OVERALL (`sub/seg-live.mp4`) and `main/seg-live.mp4` can be saved by
+    /// nothing but the in-flight rule. With a single path the keep-newest count
+    /// would cover the live segment and the in-flight test would pass with the
+    /// rule deleted.
+    fn populate_segments(base: &std::path::Path) -> Roots {
+        let roots = populate(base);
+        let now = now_unix();
+        let main = roots.recordings.join("main");
+        let sub = roots.recordings.join("sub");
+        fs::create_dir_all(&main).unwrap();
+        fs::create_dir_all(&sub).unwrap();
+        for (i, age) in [7_200i64, 5_400, 3_600].iter().enumerate() {
+            let path = main.join(format!("seg-{i}.mp4"));
+            fs::write(&path, vec![0u8; 1_000]).unwrap();
+            set_mtime(&path, now - age);
+        }
+        for (dir, age) in [(&main, 40i64), (&sub, 5)] {
+            let live = dir.join("seg-live.mp4");
+            fs::write(&live, vec![0u8; 1_000]).unwrap();
+            set_mtime(&live, now - age);
+        }
+        // The flat on-demand captures `populate` wrote are settled; age them out
+        // of the in-flight window so this fixture isolates the segment streams.
+        for i in 0..4 {
+            set_mtime(
+                &roots.recordings.join(format!("flight-{i}.mp4")),
+                now - 9_000,
+            );
+        }
+        roots
+    }
+
+    fn set_mtime(path: &std::path::Path, unix_secs: i64) {
+        let when = std::time::UNIX_EPOCH + Duration::from_secs(unix_secs as u64);
+        let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        f.set_modified(when).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_sweep_never_reclaims_the_segment_of_an_in_flight_capture() {
+        // The regression this guards: mediamtx writes a continuous segment
+        // stream, so the newest segment of a recording path is being appended to
+        // at this instant. A janitor that reclaims it truncates the capture an
+        // operator is deliberately making — the janitor and the recorder fighting
+        // over one file.
+        //
+        // Everything is set up to make it a target: every rule is at its most
+        // aggressive (age cutoff of zero, a cap of zero, keep_newest at its floor
+        // of 1, and a free-space reading far below the floor), so only the
+        // in-flight rule can save it.
+        let tmp = tempfile::tempdir().unwrap();
+        let roots = populate_segments(tmp.path());
+        let live = roots.recordings.join("main/seg-live.mp4");
+        let cfg = JanitorConfig {
+            recording_retention: Duration::from_secs(0),
+            recording_pressure_retention: Duration::from_secs(0),
+            recording_keep_newest: 1,
+            caps: budget::Caps {
+                recordings: 0,
+                ..budget::Caps::default()
+            },
+            ..JanitorConfig::default()
+        };
+        let (_, freed) = sweep(&roots, &cfg, Some(1.0), Some(0)).await;
+        assert_eq!(
+            freed.recordings, 7_000,
+            "every settled capture came off: four flat plus three settled segments"
+        );
+        assert!(
+            live.exists(),
+            "the segment an in-flight capture is appending to must survive every \
+             rule at once — the keep-newest count is spent on the other path, so \
+             only the in-flight rule can have saved it"
+        );
+        assert!(
+            roots.recordings.join("sub/seg-live.mp4").exists(),
+            "and the other path's live segment survives too"
+        );
+        assert!(
+            !roots.recordings.join("main/seg-0.mp4").exists(),
+            "the settled segments are still reclaimable"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_volume_under_the_free_space_floor_reclaims_recordings_by_space() {
+        // The guard `recordDeleteAfter: 24h` cannot provide: a high-bitrate day
+        // fills the volume long before the window elapses, and a full volume
+        // stops the recorder dead. Nothing here is old enough or over its cap, so
+        // space is the ONLY thing that can trigger the reclaim.
+        let tmp = tempfile::tempdir().unwrap();
+        let roots = populate_segments(tmp.path());
+        let cfg = JanitorConfig {
+            // A decade of retention and a cap far above the fixture: the age and
+            // cap rules are both inert.
+            recording_retention: Duration::from_secs(86_400 * 3650),
+            recording_pressure_retention: Duration::from_secs(86_400 * 3650),
+            recording_keep_newest: 1,
+            ..JanitorConfig::default()
+        };
+
+        // Above the floor: nothing is taken, because nothing else says to.
+        let (_, plenty) = sweep(
+            &roots,
+            &cfg,
+            Some(90.0),
+            Some(plan::RECORD_MIN_FREE_BYTES * 2),
+        )
+        .await;
+        assert_eq!(
+            plenty.recordings, 0,
+            "a volume with headroom must not reclaim on age or cap here"
+        );
+
+        // Below the floor by 2 500 bytes: 1 000-byte files come off oldest-first
+        // until the shortfall is covered, so three go (the loop stops as soon as
+        // it is met, it does not keep going to a round number).
+        let (_, tight) = sweep(
+            &roots,
+            &cfg,
+            Some(90.0),
+            Some(plan::RECORD_MIN_FREE_BYTES - 2_500),
+        )
+        .await;
+        assert_eq!(
+            tight.recordings, 3_000,
+            "the space floor is what reclaimed, and only as far as the deficit"
+        );
+        // Oldest first: the flat captures aged out to 9 000s predate every
+        // segment, so they are what went.
+        for i in 0..3 {
+            assert!(
+                !roots.recordings.join(format!("flight-{i}.mp4")).exists(),
+                "flight-{i}.mp4 is among the three oldest and must have gone"
+            );
+        }
+        assert!(
+            roots.recordings.join("main/seg-0.mp4").exists(),
+            "the deficit was covered before the newer segments were reached"
+        );
+        assert!(
+            roots.recordings.join("main/seg-live.mp4").exists(),
+            "and the in-flight segment is never a space-floor target"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unmeasured_recordings_volume_never_reclaims_on_space() {
+        // "I could not read the filesystem" is not grounds for deleting an
+        // operator's recordings. This is the same rule the rung selection applies
+        // to an unreadable free percentage, and it is why the floor takes an
+        // `Option` rather than defaulting to zero free.
+        let tmp = tempfile::tempdir().unwrap();
+        let roots = populate_segments(tmp.path());
+        let cfg = JanitorConfig {
+            recording_retention: Duration::from_secs(86_400 * 3650),
+            recording_pressure_retention: Duration::from_secs(86_400 * 3650),
+            recording_keep_newest: 1,
+            ..JanitorConfig::default()
+        };
+        let (_, freed) = sweep(&roots, &cfg, Some(90.0), None).await;
+        assert_eq!(freed.recordings, 0);
     }
 }

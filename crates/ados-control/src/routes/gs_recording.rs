@@ -22,8 +22,10 @@
 //! long-lived daemon that serves the ground-station routes, so it holds the one
 //! [`GroundStationRecorder`] for the life of the process behind a `OnceLock`,
 //! mirroring the Python `get_recorder()` module-level singleton the FastAPI
-//! route read. The listing read ([`crate::routes::gs_recording_list`]) is
-//! stateless (it scans the directory directly) and does not need this handle.
+//! route read. Both READ surfaces — the `/status` recording legs and the
+//! `/recording/list` envelope — derive their live recording state from this same
+//! handle through [`recording_view`], so there is one answer to "is a capture in
+//! flight" rather than one per route.
 //!
 //! The recorder lifecycle logic lives in the `ados-video` crate (it is the owner
 //! of the media subprocesses' process-group teardown); this module is the thin
@@ -96,6 +98,38 @@ pub(crate) fn recorder() -> Arc<GroundStationRecorder> {
     RECORDER
         .get_or_init(|| Arc::new(GroundStationRecorder::default_recorder()))
         .clone()
+}
+
+/// The `(recording, current_filename)` pair BOTH ground-station surfaces report:
+/// the `/status` recording legs and the `/recording/list` envelope, derived from
+/// the one live recorder this module owns.
+///
+/// ONE derivation, deliberately. The listing route hardcoded `recording: false`
+/// on the stated grounds that the front has no in-process recorder — the same
+/// false justification the status route once carried — so the two surfaces
+/// answered differently about the same capture and one of them was known-false
+/// (rule 6). A second copy of this logic would be the same defect, so both
+/// routes call THIS.
+///
+/// Takes the recorder rather than reading the `OnceLock` itself, so the
+/// derivation is exercised without `AppState` or a process-wide singleton: each
+/// handler's only remaining decision is *which* recorder to ask, and that must be
+/// the one [`recorder`] holds.
+///
+/// The filename is reported ONLY while a capture is in flight. The recorder keeps
+/// `current_path` after a stop (the stop reply needs it), so forwarding it
+/// unconditionally would render the last completed capture as if it were still
+/// running — the same class of frozen reading rule 44 exists to prevent.
+pub(crate) async fn recording_view(recorder: &GroundStationRecorder) -> (bool, Value) {
+    if !recorder.is_active().await {
+        return (false, Value::Null);
+    }
+    let filename = recorder
+        .current_filename()
+        .await
+        .map(Value::from)
+        .unwrap_or(Value::Null);
+    (true, filename)
 }
 
 // ---------------------------------------------------------------------------
@@ -199,6 +233,7 @@ fn json_ok(body: Value) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     /// Read a response body as JSON.
     async fn body_json(resp: Response) -> Value {
@@ -310,5 +345,137 @@ mod tests {
             Arc::ptr_eq(&a, &b),
             "the recorder singleton must be one instance across calls"
         );
+    }
+
+    /// Serialises the tests that put a fake `ffmpeg` on `PATH`.
+    ///
+    /// `PATH` is process-global and the test harness runs these on separate
+    /// threads, so two of them mutating it concurrently would make each other
+    /// flaky. A `tokio::sync::Mutex` (not a `std` one) because the guard is held
+    /// across the recorder's awaits.
+    static PATH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// A directory holding an `ffmpeg` that just sleeps, so a real capture can be
+    /// driven into the running state without an encoder or a rig — the same
+    /// technique `ados-video`'s own recorder cycle test uses.
+    fn fake_ffmpeg_dir() -> tempfile::TempDir {
+        let bindir = tempfile::tempdir().unwrap();
+        let fake = bindir.path().join("ffmpeg");
+        std::fs::write(&fake, "#!/bin/sh\nsleep 30\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        bindir
+    }
+
+    /// Prepend `dir` to `PATH`, returning the previous value to restore.
+    fn path_prepend(dir: &Path) -> Option<String> {
+        let saved = std::env::var("PATH").ok();
+        let combined = match &saved {
+            Some(orig) => format!("{}:{}", dir.display(), orig),
+            None => dir.display().to_string(),
+        };
+        std::env::set_var("PATH", &combined);
+        saved
+    }
+
+    fn path_restore(saved: Option<String>) {
+        match saved {
+            Some(p) => std::env::set_var("PATH", p),
+            None => std::env::remove_var("PATH"),
+        }
+    }
+
+    /// The recording legs must follow the recorder, both ways.
+    ///
+    /// These two fields were hardcoded `false`/`null`, so the ground-station
+    /// status surface denied a capture that was in flight. The active leg is what
+    /// regressed, so it is what this drives.
+    #[tokio::test]
+    async fn recording_view_follows_the_recorder_in_both_states() {
+        let _guard = PATH_LOCK.lock().await;
+        let bindir = fake_ffmpeg_dir();
+        let recdir = tempfile::tempdir().unwrap();
+        let rec = GroundStationRecorder::new(recdir.path(), "rtsp://127.0.0.1:8554/main");
+
+        // Idle: no capture, so no filename either.
+        assert_eq!(recording_view(&rec).await, (false, Value::Null));
+
+        let saved = path_prepend(bindir.path());
+        let started = rec.start(Some("statusleg")).await.expect("start succeeds");
+
+        let (active, filename) = recording_view(&rec).await;
+        assert!(
+            active,
+            "a capture is in flight, so the status leg must say so"
+        );
+        assert_eq!(filename, json!(started["filename"].as_str().unwrap()));
+
+        let _ = rec.stop().await;
+        path_restore(saved);
+
+        // After the stop the recorder still holds `current_path` for its own reply,
+        // but the status surface must not render a finished capture as if live.
+        assert_eq!(recording_view(&rec).await, (false, Value::Null));
+    }
+
+    /// The two surfaces that report a live capture must agree, in BOTH states.
+    ///
+    /// This is the regression that shipped: `/status` read the live recorder while
+    /// `/recording/list` hardcoded `recording: false`, so the cockpit's listing
+    /// panel denied the capture its own status panel was reporting. Pinning both
+    /// envelopes against ONE recorder is what stops a second derivation being
+    /// added back.
+    #[tokio::test]
+    async fn the_listing_and_status_envelopes_agree_on_the_recording_flag() {
+        let _guard = PATH_LOCK.lock().await;
+        let bindir = fake_ffmpeg_dir();
+        let recdir = tempfile::tempdir().unwrap();
+        let rec = GroundStationRecorder::new(recdir.path(), "rtsp://127.0.0.1:8554/main");
+
+        // Idle: both surfaces say no capture, with no filename.
+        let listing =
+            crate::routes::gs_recording_list::recording_list_body(recdir.path(), &rec).await;
+        let (status_active, status_filename) = recording_view(&rec).await;
+        assert_eq!(listing["recording"], json!(false));
+        assert_eq!(listing["recording"], json!(status_active));
+        assert_eq!(listing["current_filename"], status_filename);
+        assert_eq!(listing["current_filename"], Value::Null);
+
+        // In flight: both surfaces say so, and name the same file.
+        let saved = path_prepend(bindir.path());
+        let started = rec
+            .start(Some("bothsurfaces"))
+            .await
+            .expect("start succeeds");
+
+        let listing =
+            crate::routes::gs_recording_list::recording_list_body(recdir.path(), &rec).await;
+        let (status_active, status_filename) = recording_view(&rec).await;
+        assert_eq!(
+            listing["recording"],
+            json!(true),
+            "a capture is in flight, so the LISTING envelope must say so too"
+        );
+        assert_eq!(listing["recording"], json!(status_active));
+        assert_eq!(listing["current_filename"], status_filename);
+        assert_eq!(
+            listing["current_filename"],
+            json!(started["filename"].as_str().unwrap())
+        );
+
+        let _ = rec.stop().await;
+        path_restore(saved);
+
+        // And after the stop both fall back together, rather than one of them
+        // freezing on the finished capture.
+        let listing =
+            crate::routes::gs_recording_list::recording_list_body(recdir.path(), &rec).await;
+        let (status_active, status_filename) = recording_view(&rec).await;
+        assert_eq!(listing["recording"], json!(false));
+        assert_eq!(listing["recording"], json!(status_active));
+        assert_eq!(listing["current_filename"], status_filename);
     }
 }

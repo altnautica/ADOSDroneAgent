@@ -133,7 +133,12 @@ async fn proxy_plain(socket: &Path, request: Request) -> Response {
 /// Turn the upstream `Response<Incoming>` into an axum response: copy the status,
 /// copy every header except the hop-by-hop set, and stream the body through
 /// unbuffered.
-fn relay_response(upstream: http::Response<Incoming>) -> Response {
+///
+/// `pub(crate)` because the ground-station recordings routes relay mediamtx's
+/// loopback playback server through the same one-shot HTTP/1.1 exchange, and a
+/// clip is a whole video file: it MUST stream rather than be buffered, which is
+/// exactly what this does.
+pub(crate) fn relay_response(upstream: http::Response<Incoming>) -> Response {
     let (parts, body) = upstream.into_parts();
     let mut out = Response::new(Body::new(body));
     *out.status_mut() = parts.status;

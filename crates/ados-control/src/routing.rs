@@ -222,6 +222,11 @@ fn native_routes() -> Vec<NativeRoute> {
         post("/api/v1/ground-station/relayed/config"),
         // Ground-station reads ported in the read-tail wave (profile-gated).
         get("/api/v1/ground-station/recording/list"),
+        // Recordings playback reads: mediamtx's segment inventory and the fMP4
+        // clip cut, both proxied off its loopback playback server so the media
+        // server never faces the network itself.
+        get("/api/v1/ground-station/recording/segments"),
+        get("/api/v1/ground-station/recording/clip"),
         get("/api/v1/ground-station/ui"),
         get("/api/v1/ground-station/display"),
         get("/api/v1/ground-station/gamepads"),
@@ -298,6 +303,10 @@ fn native_routes() -> Vec<NativeRoute> {
         post("/api/v1/ground-station/recording/start"),
         post("/api/v1/ground-station/recording/stop"),
         post("/api/v1/ground-station/camera/switch"),
+        // Remove one recording segment. A `{segment}` template, so it is
+        // method-scoped: the GET siblings above keep their own literal templates
+        // and a DELETE is the only method this one claims.
+        delete("/api/v1/ground-station/recording/{segment}"),
         // Fleet attention: promote one drone to the full video profile and
         // demote every other registered slot, in one operation.
         post("/api/v1/ground-station/fleet/hero"),
@@ -655,7 +664,7 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            152,
+            155,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);

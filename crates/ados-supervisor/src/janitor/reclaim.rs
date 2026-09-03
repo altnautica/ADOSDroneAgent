@@ -116,8 +116,15 @@ fn tree_bytes_depth(dir: &Path, depth: usize) -> u64 {
     total
 }
 
-/// Reclaim oldest-first from a directory until it is at or under `cap`, never
-/// taking the newest `keep_newest` whatever happens. Returns the bytes freed.
+/// Reclaim oldest-first from a pre-enumerated set of entries until the total is
+/// at or under `cap`, never taking anything in `protected`. Returns the bytes
+/// freed.
+///
+/// Takes the entries rather than a name predicate because the two categories
+/// that need this enumerate differently: quarantined stores are flat files under
+/// one directory, recordings span the flat on-demand captures AND mediamtx's
+/// per-path segment directories (see [`recording_entries`]). Names are relative
+/// to `dir`, so `dir.join(name)` resolves either shape.
 ///
 /// Oldest-first because within one category the oldest item is the least likely
 /// to be wanted, and because it makes the outcome predictable: an operator can
@@ -127,29 +134,22 @@ fn tree_bytes_depth(dir: &Path, depth: usize) -> u64 {
 /// a single quarantined store larger than the whole quarantine cap is the case
 /// that actually happens on these boxes. The caller reports the residue rather
 /// than looping.
-pub fn reclaim_to_cap_oldest_first(
+pub fn reclaim_entries_to_cap_oldest_first(
     dir: &Path,
-    select: impl Fn(&str) -> bool,
+    mut entries: Vec<(String, i64)>,
     cap: u64,
-    keep_newest: usize,
+    protected: &std::collections::BTreeSet<String>,
 ) -> u64 {
-    let mut entries = entries_with_mtime(dir, &select);
-    let sizes: std::collections::BTreeMap<String, u64> = entries
+    let mut total: u64 = entries
         .iter()
-        .filter_map(|(name, _)| {
-            std::fs::metadata(dir.join(name))
-                .ok()
-                .map(|m| (name.clone(), m.len()))
-        })
-        .collect();
-    let mut total: u64 = sizes.values().fold(0u64, |a, b| a.saturating_add(*b));
+        .filter_map(|(name, _)| std::fs::metadata(dir.join(name)).ok().map(|m| m.len()))
+        .fold(0u64, |a, b| a.saturating_add(b));
     if total <= cap {
         return 0;
     }
 
     // Oldest first; a tie falls back to the name so the order is deterministic.
     entries.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
-    let protected = super::plan::newest_names(&entries, keep_newest);
 
     let mut freed = 0u64;
     for (name, _) in &entries {
@@ -194,6 +194,48 @@ pub fn entries_with_mtime(dir: &Path, keep: impl Fn(&str) -> bool) -> Vec<(Strin
             Some((name, mtime))
         })
         .collect()
+}
+
+/// True when `name` is one of the capture files the janitor owns. Anything else
+/// in the recordings tree belongs to whoever put it there.
+fn is_capture_name(name: &str) -> bool {
+    name.ends_with(".mp4") || name.ends_with(".mkv") || name.ends_with(".ts")
+}
+
+/// `(name, mtime_unix)` for every capture file the janitor may consider, named
+/// RELATIVE to `dir` so `dir.join(name)` resolves.
+///
+/// **Two layouts live under the recordings root at once.** The on-demand ground
+/// recorder writes flat `<stamp>.mp4` captures into the root; mediamtx's native
+/// recorder writes a continuous segment stream one level down, under
+/// `<root>/<stream>/<stamp>.mp4`, because its record path carries `%path`. A
+/// flat-only scan sees nothing of the second layout, which would leave the
+/// footprint measurement (a bounded tree walk) reporting recordings permanently
+/// over their cap while every reclaim found nothing to take — a janitor that
+/// says the disk is full and does nothing about it.
+///
+/// One level, not a walk: `%path` is a single segment, and an unbounded descent
+/// on an SD card costs more than the generality is worth.
+pub fn recording_entries(dir: &Path) -> Vec<(String, i64)> {
+    let mut out = entries_with_mtime(dir, is_capture_name);
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if !meta.is_dir() {
+            continue;
+        }
+        let Some(stream) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        for (name, mtime) in entries_with_mtime(&entry.path(), is_capture_name) {
+            out.push((format!("{stream}/{name}"), mtime));
+        }
+    }
+    out
 }
 
 /// Empty the apt archive cache: the `.deb` files apt downloaded to install
@@ -251,13 +293,17 @@ pub fn plugin_log_trimmable(dir: &Path, max_bytes: u64, keep_bytes: u64) -> u64 
         .fold(0u64, |a, b| a.saturating_add(b))
 }
 
-/// How much reclaiming recordings would free at `cutoff_unix`, with
-/// `keep_newest` protected.
-pub fn recording_reclaimable_bytes(dir: &Path, cutoff_unix: i64, keep_newest: usize) -> u64 {
-    let entries = entries_with_mtime(dir, |name| {
-        name.ends_with(".mp4") || name.ends_with(".mkv") || name.ends_with(".ts")
-    });
-    super::plan::older_than_keeping_newest(&entries, cutoff_unix, keep_newest)
+/// How much reclaiming recordings would free at `cutoff_unix`, with the
+/// `keep_newest` floor and whatever is in flight at `now_unix` protected.
+pub fn recording_reclaimable_bytes(
+    dir: &Path,
+    cutoff_unix: i64,
+    keep_newest: usize,
+    now_unix: i64,
+) -> u64 {
+    let entries = recording_entries(dir);
+    let protected = super::plan::protected_recordings(&entries, keep_newest, now_unix);
+    super::plan::older_than_excluding(&entries, cutoff_unix, &protected)
         .iter()
         .filter_map(|name| std::fs::metadata(dir.join(name)).ok().map(|m| m.len()))
         .fold(0u64, |a, b| a.saturating_add(b))
@@ -412,18 +458,58 @@ pub fn trim_plugin_logs(dir: &Path, max_bytes: u64, keep_bytes: u64) -> u64 {
 }
 
 /// Reclaim recordings older than `cutoff_unix`, keeping the newest
-/// `keep_newest` whatever their age.
-pub fn reclaim_recordings(dir: &Path, cutoff_unix: i64, keep_newest: usize) -> u64 {
-    let entries = entries_with_mtime(dir, |name| {
-        // Only the capture files. Anything else in the directory belongs to
-        // whoever put it there.
-        name.ends_with(".mp4") || name.ends_with(".mkv") || name.ends_with(".ts")
-    });
-    let doomed = super::plan::older_than_keeping_newest(&entries, cutoff_unix, keep_newest);
-    doomed
+/// `keep_newest` whatever their age and never touching what a capture is
+/// writing at `now_unix`.
+pub fn reclaim_recordings(dir: &Path, cutoff_unix: i64, keep_newest: usize, now_unix: i64) -> u64 {
+    let entries = recording_entries(dir);
+    let protected = super::plan::protected_recordings(&entries, keep_newest, now_unix);
+    super::plan::older_than_excluding(&entries, cutoff_unix, &protected)
         .iter()
         .map(|name| remove_file_guarded(&dir.join(name)))
         .fold(0u64, |a, b| a.saturating_add(b))
+}
+
+/// Reclaim recordings oldest-first until `deficit` bytes have come off the
+/// volume, honouring the same floor every other recordings rule honours.
+///
+/// **The space floor the time window cannot provide.** mediamtx's own
+/// `recordDeleteAfter` is a 24h window; a high-bitrate day fills the volume long
+/// before it elapses and the recorder then stops dead. This is the guard for
+/// that, and it lives HERE rather than in a `runOnRecordSegmentComplete` hook
+/// binary on purpose: the janitor already owns oldest-first recordings reclaim
+/// with the keep-newest floor and the `janitor.reclaimed` accounting, and a
+/// second reclaimer over the same directory would race it with no shared floor,
+/// would only fire while segments were completing (so a volume filled by
+/// anything else would never trigger it), and would not run at all if mediamtx
+/// died mid-write — which is exactly when the volume is worst off.
+///
+/// The floor can stop this short of the deficit. That is the floor doing its
+/// job: the alternative is deleting the capture being written to make room for
+/// the capture being written. The caller reports the residue.
+pub fn reclaim_recordings_to_free_floor(
+    dir: &Path,
+    deficit: u64,
+    keep_newest: usize,
+    now_unix: i64,
+) -> u64 {
+    if deficit == 0 {
+        return 0;
+    }
+    let mut entries = recording_entries(dir);
+    let protected = super::plan::protected_recordings(&entries, keep_newest, now_unix);
+    // Oldest first; a tie falls back to the name so the order is deterministic.
+    entries.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    let mut freed = 0u64;
+    for (name, _) in &entries {
+        if freed >= deficit {
+            break;
+        }
+        if protected.contains(name) {
+            continue;
+        }
+        freed = freed.saturating_add(remove_file_guarded(&dir.join(name)));
+    }
+    freed
 }
 
 /// Reclaim quarantined copies of a torn logging store, keeping the newest
@@ -491,6 +577,24 @@ pub fn free_pct(path: &Path) -> Option<f64> {
 
 #[cfg(not(target_os = "linux"))]
 pub fn free_pct(_path: &Path) -> Option<f64> {
+    None
+}
+
+/// Free space on the filesystem holding `path`, in BYTES. `None` when it cannot
+/// be read — which the plan treats as "do not act", never as zero.
+///
+/// Bytes as well as a percentage because the recording floor is an absolute:
+/// the recorder stops when there is no room for the next fragment, and "8% free"
+/// is a different amount of room on a 16 GB card than on a 512 GB one.
+#[cfg(target_os = "linux")]
+pub fn free_bytes(path: &Path) -> Option<u64> {
+    let st = nix::sys::statvfs::statvfs(path).ok()?;
+    let block = st.fragment_size() as u64;
+    Some(st.blocks_available() as u64 * block)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn free_bytes(_path: &Path) -> Option<u64> {
     None
 }
 
@@ -639,11 +743,103 @@ mod tests {
         fs::write(dir.join("README"), b"not a recording").unwrap();
 
         // A cutoff far in the future makes every file older than the window.
-        let freed = reclaim_recordings(dir, i64::MAX, 2);
+        let freed = reclaim_recordings(dir, i64::MAX, 2, crate::janitor::now_unix());
         assert_eq!(freed, 3_000, "five recordings, the newest two kept");
         let left = fs::read_dir(dir).unwrap().count();
         assert_eq!(left, 3, "two recordings plus the file that is not one");
         assert!(dir.join("README").exists());
+    }
+
+    #[test]
+    fn a_mediamtx_segment_tree_is_enumerated_one_level_down() {
+        // The layout mediamtx's native recorder writes: `<root>/<stream>/<stamp>.mp4`.
+        // A flat-only scan would see none of it, so the category would read as
+        // permanently over its cap while every reclaim found nothing to take.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        fs::create_dir(dir.join("main")).unwrap();
+        fs::write(dir.join("main/seg-01.mp4"), vec![0u8; 500]).unwrap();
+        fs::write(dir.join("main/seg-02.mp4"), vec![0u8; 500]).unwrap();
+        fs::write(dir.join("main/notes.txt"), b"x").unwrap();
+        fs::write(dir.join("flat.mp4"), vec![0u8; 100]).unwrap();
+
+        let mut names: Vec<String> = recording_entries(dir)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "flat.mp4".to_string(),
+                "main/seg-01.mp4".to_string(),
+                "main/seg-02.mp4".to_string(),
+            ]
+        );
+        // And a relative name resolves back to the file it names.
+        assert!(dir.join("main/seg-01.mp4").exists());
+    }
+
+    #[test]
+    fn the_free_space_floor_reclaims_oldest_first_and_stops_at_the_deficit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let now = crate::janitor::now_unix();
+        // Four settled segments, oldest first by mtime. Nothing is in flight.
+        for (i, age) in [7_200i64, 5_400, 3_600, 1_800].iter().enumerate() {
+            let path = dir.join(format!("seg-{i}.mp4"));
+            fs::write(&path, vec![0u8; 1_000]).unwrap();
+            set_mtime(&path, now - age);
+        }
+
+        // A 2 500-byte shortfall takes the three oldest (the fourth is the
+        // keep-newest floor), and stops as soon as the deficit is covered.
+        let freed = reclaim_recordings_to_free_floor(dir, 2_500, 1, now);
+        assert_eq!(freed, 3_000, "oldest-first until the deficit is covered");
+        assert!(!dir.join("seg-0.mp4").exists());
+        assert!(!dir.join("seg-1.mp4").exists());
+        assert!(!dir.join("seg-2.mp4").exists());
+        assert!(dir.join("seg-3.mp4").exists(), "the newest survives");
+
+        // No deficit → no reclaim, which is what makes a settled box a no-op.
+        assert_eq!(reclaim_recordings_to_free_floor(dir, 0, 1, now), 0);
+    }
+
+    #[test]
+    fn the_free_space_floor_never_takes_the_segment_of_an_in_flight_capture() {
+        // The janitor and the recorder must not fight over the same file: the
+        // newest segment of an actively-recording path is being appended to right
+        // now, and even a volume under its floor must leave it alone.
+        //
+        // TWO recording paths, both live, with `keep_newest` at its floor of 1 —
+        // so the keep-newest count covers only the newest file OVERALL and the
+        // second path's live segment can be saved by nothing but the in-flight
+        // rule. A one-path fixture would still pass with that rule deleted.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let now = crate::janitor::now_unix();
+        fs::create_dir(dir.join("main")).unwrap();
+        fs::create_dir(dir.join("sub")).unwrap();
+        let settled = dir.join("main/seg-01.mp4");
+        let live = dir.join("main/seg-02.mp4");
+        let newest_overall = dir.join("sub/seg-01.mp4");
+        for path in [&settled, &live, &newest_overall] {
+            fs::write(path, vec![0u8; 1_000]).unwrap();
+        }
+        set_mtime(&settled, now - 3_600);
+        set_mtime(&live, now - 40);
+        set_mtime(&newest_overall, now - 5);
+
+        // A deficit larger than everything on disk.
+        let freed = reclaim_recordings_to_free_floor(dir, 10_000, 1, now);
+        assert_eq!(freed, 1_000, "only the settled segment came off");
+        assert!(!settled.exists());
+        assert!(
+            live.exists(),
+            "the segment an in-flight capture is appending to must survive, and \
+             the keep-newest count is spent on the other path"
+        );
+        assert!(newest_overall.exists());
     }
 
     #[test]
@@ -653,7 +849,23 @@ mod tests {
         assert_eq!(reclaim_apt_archives(missing), 0);
         assert_eq!(reclaim_apt_lists(missing), 0);
         assert_eq!(trim_plugin_logs(missing, 1, 1), 0);
-        assert_eq!(reclaim_recordings(missing, i64::MAX, 1), 0);
+        assert_eq!(
+            reclaim_recordings(missing, i64::MAX, 1, crate::janitor::now_unix()),
+            0
+        );
+        assert_eq!(
+            reclaim_recordings_to_free_floor(missing, 10_000, 1, crate::janitor::now_unix()),
+            0
+        );
+        assert_eq!(recording_entries(missing), Vec::new());
         assert_eq!(prune_quarantines(missing, 1), 0);
+    }
+
+    /// Set a file's mtime to a Unix second, so the age-ordered tests do not
+    /// depend on filesystem write-order timing.
+    fn set_mtime(path: &Path, unix_secs: i64) {
+        let when = std::time::UNIX_EPOCH + std::time::Duration::from_secs(unix_secs as u64);
+        let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        f.set_modified(when).unwrap();
     }
 }

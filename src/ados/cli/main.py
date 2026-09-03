@@ -1219,6 +1219,7 @@ from ados.cli.pair import pair, unpair  # noqa: E402
 from ados.cli.plugin import plugin_group  # noqa: E402
 from ados.cli.profile import profile_group  # noqa: E402
 from ados.cli.radio import radio_group  # noqa: E402
+from ados.cli.record import record_group  # noqa: E402
 from ados.cli.rust import rust_group  # noqa: E402
 from ados.cli.support import support_bundle  # noqa: E402
 
@@ -1239,6 +1240,7 @@ for _group in (
     plugin_group,
     profile_group,
     radio_group,
+    record_group,
     rust_group,
 ):
     _group.hidden = True

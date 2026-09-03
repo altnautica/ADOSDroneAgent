@@ -87,8 +87,11 @@ sha2 = { workspace = true }
 hmac = { workspace = true }
 # UTC clock for the signing-enroll `enrolled_at` ISO-8601 timestamp and the
 # MAVLink signing initial-timestamp (10us units since the 2015 signing epoch).
+# `parsing` validates the RFC 3339 `start` the recordings clip route forwards to
+# mediamtx's playback server: a real parse, so a timestamp mediamtx would reject
+# is refused here with a code that names the parameter.
 # Matches the sibling crates' `time` usage.
-time = { version = "0.3", features = ["std", "formatting"] }
+time = { version = "0.3", features = ["std", "formatting", "parsing"] }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

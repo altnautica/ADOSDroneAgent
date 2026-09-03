@@ -67,6 +67,27 @@ pub const DEFAULT_RECORDING_RETENTION_S: u64 = 90 * 86_400;
 pub const DEFAULT_RECORDING_PRESSURE_RETENTION_S: u64 = 14 * 86_400;
 /// Recordings that survive regardless of age, newest first.
 pub const DEFAULT_RECORDING_KEEP_NEWEST: usize = 3;
+/// How recently a capture file must have been written for the janitor to treat
+/// it as the one an in-flight capture is appending to.
+///
+/// Two segment durations of slack: mediamtx closes a segment every 60s, so a
+/// window shorter than that could judge a live path idle in the gap between two
+/// segments, and a much longer one would protect segments nothing is writing.
+pub const RECORDING_IN_FLIGHT_WINDOW_S: i64 = 120;
+/// The free space the recordings volume must keep, below which recordings are
+/// reclaimed oldest-first regardless of age or cap.
+///
+/// **Time-based retention cannot do this job.** mediamtx's own `recordDeleteAfter`
+/// is a 24h window, and a high-bitrate day fills the volume long before 24h
+/// elapse — at which point the recorder stops dead mid-flight, which is the
+/// failure this floor exists to prevent. 1 GiB is roughly a minute of 1080p at
+/// 15 Mbps: enough headroom for the recorder to keep writing while a sweep
+/// reclaims, and small enough that it is not itself a large reservation.
+///
+/// A constant, not a tunable. This is the point below which recording stops
+/// working; an operator lowering it does not gain capacity, they only move the
+/// cliff closer to the edge.
+pub const RECORD_MIN_FREE_BYTES: u64 = 1024 * 1024 * 1024;
 /// Journal size the Pressure rung vacuums down to.
 pub const DEFAULT_JOURNAL_PRESSURE_BYTES: u64 = 128 * 1024 * 1024;
 /// The journal is never vacuumed below this, at any rung. A kernel oops trace
@@ -233,14 +254,84 @@ pub fn newest_names(entries: &[(String, i64)], keep: usize) -> std::collections:
         .collect()
 }
 
+/// The one capture per recording path that a capture is appending to right now,
+/// judged by how recently the file itself was written. Pure.
+///
+/// **The signal is the artifact, not a process.** Process liveness is never
+/// proof of work, and the janitor has no handle on mediamtx to ask anyway: a
+/// running recorder that has stopped producing bytes would still answer "yes" to
+/// a liveness question and "no" to this one. A file whose mtime moved inside the
+/// window is a file something wrote inside the window.
+///
+/// The newest of each path, not every fresh file: with a 60s segment duration a
+/// broader rule would pin a couple of finished segments as well, and this floor
+/// has to be as small as it can be while still covering the file being appended
+/// to. Paths are grouped on the directory part of the relative name, which is
+/// mediamtx's `%path` segment directory.
+pub fn in_flight_names(
+    entries: &[(String, i64)],
+    now_unix: i64,
+    window_s: i64,
+) -> std::collections::BTreeSet<String> {
+    let cutoff = now_unix.saturating_sub(window_s.max(0));
+    let mut newest: std::collections::BTreeMap<&str, (&str, i64)> =
+        std::collections::BTreeMap::new();
+    for (name, mtime) in entries {
+        let group = match name.rfind('/') {
+            Some(idx) => &name[..idx],
+            None => "",
+        };
+        // Newest wins; a tie falls back to the lexicographically first name, the
+        // same deterministic order `newest_names` picks.
+        let better = match newest.get(group) {
+            None => true,
+            Some((best_name, best_mtime)) => {
+                *mtime > *best_mtime || (*mtime == *best_mtime && name.as_str() < *best_name)
+            }
+        };
+        if better {
+            newest.insert(group, (name.as_str(), *mtime));
+        }
+    }
+    newest
+        .into_values()
+        .filter(|(_, mtime)| *mtime >= cutoff)
+        .map(|(name, _)| name.to_string())
+        .collect()
+}
+
+/// The capture names no rule may reclaim, at any rung: the `keep_newest` newest
+/// whatever their age, PLUS whatever an in-flight capture is writing. Pure.
+///
+/// **The in-flight rule.** mediamtx's native recorder writes a continuous
+/// segment stream, so the newest segment of an actively-recording path is being
+/// appended to at this instant. Reclaiming it would take the file out from under
+/// the writer mid-fragment and truncate the capture an operator is deliberately
+/// making — the janitor and the recorder fighting over the same file, which is
+/// the defect, not the fix. `keep_newest` alone is not this guarantee: it is a
+/// count, and a configured count of 1 on a box with two recording paths protects
+/// one of them.
+pub fn protected_recordings(
+    entries: &[(String, i64)],
+    keep_newest: usize,
+    now_unix: i64,
+) -> std::collections::BTreeSet<String> {
+    let mut protected = newest_names(entries, keep_newest);
+    protected.extend(in_flight_names(
+        entries,
+        now_unix,
+        RECORDING_IN_FLIGHT_WINDOW_S,
+    ));
+    protected
+}
+
 /// Given `(name, mtime_unix)` pairs, the names older than `cutoff_unix` — but
-/// never the `keep_newest` newest, whatever their age. Pure.
-pub fn older_than_keeping_newest(
+/// never anything in `protected`. Pure.
+pub fn older_than_excluding(
     entries: &[(String, i64)],
     cutoff_unix: i64,
-    keep_newest: usize,
+    protected: &std::collections::BTreeSet<String>,
 ) -> Vec<String> {
-    let protected = newest_names(entries, keep_newest);
     let mut out: Vec<String> = entries
         .iter()
         .filter(|(name, mtime)| *mtime < cutoff_unix && !protected.contains(name))
@@ -248,6 +339,20 @@ pub fn older_than_keeping_newest(
         .collect();
     out.sort();
     out
+}
+
+/// Bytes that must come off the recordings volume to restore the free-space
+/// floor, or zero when there is nothing to do. Pure.
+///
+/// An UNMEASURED free ratio contributes zero, never the whole floor: "I could
+/// not read the filesystem" is not grounds for deleting an operator's
+/// recordings, the same rule [`JanitorConfig::rung_for`] applies to an
+/// unreadable free percentage.
+pub fn free_space_deficit(free_bytes: Option<u64>, floor_bytes: u64) -> u64 {
+    match free_bytes {
+        Some(free) => floor_bytes.saturating_sub(free),
+        None => 0,
+    }
 }
 
 /// Where to cut an over-long append-only file so the last `keep_bytes` survive.
@@ -377,7 +482,7 @@ mod tests {
         let entries: Vec<(String, i64)> = (0..10)
             .map(|i| (format!("flight-{i:02}.mp4"), 1_000 + i as i64))
             .collect();
-        let doomed = older_than_keeping_newest(&entries, 100_000, 3);
+        let doomed = older_than_excluding(&entries, 100_000, &newest_names(&entries, 3));
         assert_eq!(doomed.len(), 7);
         for keeper in ["flight-09.mp4", "flight-08.mp4", "flight-07.mp4"] {
             assert!(
@@ -393,7 +498,85 @@ mod tests {
             ("recent-a.mp4".to_string(), 9_000),
             ("recent-b.mp4".to_string(), 9_500),
         ];
-        assert!(older_than_keeping_newest(&entries, 1_000, 1).is_empty());
+        assert!(older_than_excluding(&entries, 1_000, &newest_names(&entries, 1)).is_empty());
+    }
+
+    #[test]
+    fn the_newest_segment_of_each_recording_path_is_in_flight_when_fresh() {
+        let now = 1_000_000i64;
+        // Two mediamtx segment directories plus a flat on-demand capture. Each
+        // path's newest segment was written seconds ago; the older ones were not.
+        let entries = vec![
+            ("main/seg-01.mp4".to_string(), now - 600),
+            ("main/seg-02.mp4".to_string(), now - 60),
+            ("sub/seg-01.mp4".to_string(), now - 700),
+            ("sub/seg-02.mp4".to_string(), now - 30),
+            ("flight.mp4".to_string(), now - 5),
+        ];
+        let live = in_flight_names(&entries, now, RECORDING_IN_FLIGHT_WINDOW_S);
+        assert!(live.contains("main/seg-02.mp4"));
+        assert!(live.contains("sub/seg-02.mp4"));
+        assert!(live.contains("flight.mp4"));
+        // The finished segments behind them are not in flight and stay reclaimable.
+        assert!(!live.contains("main/seg-01.mp4"));
+        assert!(!live.contains("sub/seg-01.mp4"));
+        assert_eq!(live.len(), 3);
+    }
+
+    #[test]
+    fn a_settled_recording_path_has_nothing_in_flight() {
+        // Nothing has been written for an hour: the recorder is not running, so
+        // no file is being appended to and the freshness rule protects none of
+        // them. This is the half that keeps the rule from becoming a permanent
+        // floor on the newest file of every path.
+        let now = 1_000_000i64;
+        let entries = vec![
+            ("main/seg-01.mp4".to_string(), now - 4_000),
+            ("main/seg-02.mp4".to_string(), now - 3_600),
+        ];
+        assert!(in_flight_names(&entries, now, RECORDING_IN_FLIGHT_WINDOW_S).is_empty());
+    }
+
+    #[test]
+    fn an_undatable_capture_is_never_read_as_in_flight() {
+        // An unreadable mtime sorts as epoch, which makes it a reclaim candidate
+        // before anything datable. It must not come back as "being written now".
+        let now = 1_000_000i64;
+        let entries = vec![("main/undatable.mp4".to_string(), 0)];
+        assert!(in_flight_names(&entries, now, RECORDING_IN_FLIGHT_WINDOW_S).is_empty());
+    }
+
+    #[test]
+    fn the_protected_set_is_the_keep_floor_plus_whatever_is_in_flight() {
+        let now = 1_000_000i64;
+        // keep_newest=1 with two recording paths: the count alone protects the
+        // newest ONE file overall, so the second path's live segment is only
+        // covered by the in-flight rule.
+        let entries = vec![
+            ("main/seg-01.mp4".to_string(), now - 900),
+            ("main/seg-02.mp4".to_string(), now - 10),
+            ("sub/seg-01.mp4".to_string(), now - 800),
+            ("sub/seg-02.mp4".to_string(), now - 40),
+        ];
+        let protected = protected_recordings(&entries, 1, now);
+        assert!(protected.contains("main/seg-02.mp4"));
+        assert!(
+            protected.contains("sub/seg-02.mp4"),
+            "the second path's live segment must be protected even at keep_newest=1"
+        );
+        assert!(!protected.contains("main/seg-01.mp4"));
+        assert!(!protected.contains("sub/seg-01.mp4"));
+    }
+
+    #[test]
+    fn the_free_space_deficit_is_the_shortfall_and_zero_when_unmeasured() {
+        // Below the floor: the shortfall is what must come off.
+        assert_eq!(free_space_deficit(Some(200), 1_000), 800);
+        // At or above the floor: nothing to do, so nothing is deleted.
+        assert_eq!(free_space_deficit(Some(1_000), 1_000), 0);
+        assert_eq!(free_space_deficit(Some(5_000), 1_000), 0);
+        // Unmeasured is never grounds for deleting evidence.
+        assert_eq!(free_space_deficit(None, 1_000), 0);
     }
 
     #[test]
