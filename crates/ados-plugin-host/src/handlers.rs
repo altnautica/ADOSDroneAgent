@@ -140,8 +140,23 @@ const RESERVED_PUBLISH_PREFIXES: &[&str] = &[
 ];
 
 /// Whether the plugin may subscribe to `topic_pattern`. Mirrors
-/// `events.is_subscribe_allowed`: requires `event.subscribe`, then the
-/// plugin's own `plugin.<id>.` namespace or a public lifecycle topic.
+/// `events.is_subscribe_allowed`: requires `event.subscribe`, then a
+/// capability-gated shared-data topic, the plugin's own `plugin.<id>.`
+/// namespace, or a public lifecycle topic.
+///
+/// The shared-data arm is an ADDITIONAL requirement on top of
+/// `event.subscribe`, never a replacement for it. `plugin.atlas.*` is
+/// documented as a namespace any plugin may consume, but the namespace check
+/// below grants a plugin only its OWN `plugin.<id>.` prefix, so before this
+/// arm existed the world model was reachable by exactly one plugin: whichever
+/// one happened to be named `atlas`. A plugin id is not a capability model.
+///
+/// Adding the topics to `PUBLIC_TOPICS_FOR_SUBSCRIBE` would have been the
+/// opposite error. A reconstruction is derived imagery of wherever the
+/// aircraft flew and an occupancy field is a planning input, so neither is
+/// public. The mapping lives in `ados_protocol::atlas` beside the topic
+/// constants themselves and matches exact topics, so a look-alike such as
+/// `plugin.atlas.occupancy.evil` inherits nothing.
 pub fn is_subscribe_allowed(
     plugin_id: &str,
     topic_pattern: &str,
@@ -149,6 +164,9 @@ pub fn is_subscribe_allowed(
 ) -> bool {
     if !granted_caps.contains("event.subscribe") {
         return false;
+    }
+    if let Some(cap) = ados_protocol::atlas::atlas_topic_subscribe_capability(topic_pattern) {
+        return granted_caps.contains(cap);
     }
     if topic_pattern.starts_with(&format!("plugin.{plugin_id}.")) {
         return true;
@@ -421,6 +439,76 @@ mod tests {
             "demo",
             "custom.topic",
             &caps(&["event.publish"])
+        ));
+    }
+
+    #[test]
+    fn subscribe_refuses_shared_world_data_without_the_read_capability() {
+        // `event.subscribe` alone is not enough. A reconstruction descriptor
+        // names where imagery of wherever the aircraft flew can be fetched, so
+        // it is gated on top of the subscribe capability rather than by it.
+        assert!(!is_subscribe_allowed(
+            "demo",
+            ados_protocol::atlas::PLUGIN_ATLAS_OCCUPANCY_TOPIC,
+            &caps(&["event.subscribe"])
+        ));
+    }
+
+    #[test]
+    fn subscribe_allows_shared_world_data_with_the_read_capability() {
+        assert!(is_subscribe_allowed(
+            "demo",
+            ados_protocol::atlas::PLUGIN_ATLAS_OCCUPANCY_TOPIC,
+            &caps(&["event.subscribe", ados_protocol::atlas::ATLAS_WORLD_READ_CAP])
+        ));
+    }
+
+    #[test]
+    fn subscribe_gates_the_world_pose_on_telemetry_read() {
+        let topic = ados_protocol::atlas::PLUGIN_ATLAS_POSE_TOPIC;
+        // The pose is the same class of data as vehicle telemetry, in the
+        // world frame, so it takes the capability that already covers that —
+        // and the artifact capability does not substitute for it.
+        assert!(!is_subscribe_allowed("demo", topic, &caps(&["event.subscribe"])));
+        assert!(!is_subscribe_allowed(
+            "demo",
+            topic,
+            &caps(&["event.subscribe", ados_protocol::atlas::ATLAS_WORLD_READ_CAP])
+        ));
+        assert!(is_subscribe_allowed(
+            "demo",
+            topic,
+            &caps(&["event.subscribe", ados_protocol::atlas::ATLAS_POSE_READ_CAP])
+        ));
+    }
+
+    #[test]
+    fn a_plugin_named_atlas_no_longer_gets_the_namespace_for_free() {
+        // The revocation this gate performs, stated as a test so it cannot be
+        // mistaken for a no-op: the own-namespace rule used to hand the whole
+        // shared world-model namespace to whichever plugin was named `atlas`.
+        assert!(!is_subscribe_allowed(
+            "atlas",
+            ados_protocol::atlas::PLUGIN_ATLAS_SPLAT_TOPIC,
+            &caps(&["event.subscribe"])
+        ));
+        // Its own non-shared topics are unaffected.
+        assert!(is_subscribe_allowed(
+            "atlas",
+            "plugin.atlas.private-metric",
+            &caps(&["event.subscribe"])
+        ));
+    }
+
+    #[test]
+    fn subscribe_does_not_let_a_look_alike_topic_inherit_the_grant() {
+        // The mapping matches exact topics, so a longer topic that merely
+        // starts with a gated one names no capability and falls through to the
+        // ordinary namespace rule.
+        assert!(!is_subscribe_allowed(
+            "demo",
+            "plugin.atlas.occupancy.evil",
+            &caps(&["event.subscribe", ados_protocol::atlas::ATLAS_WORLD_READ_CAP])
         ));
     }
 
