@@ -2,6 +2,7 @@
 name = "ados-rate-control"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Pure attitude/rate control laws: the body-rate/thrust command set and the saturation ceilings. No I/O, no clock — a library of control laws a router rung invokes, structured like ados-swarm-control."

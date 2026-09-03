@@ -2,6 +2,7 @@
 name = "ados-swarmbus"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Decentralized swarm state bus: a 20-byte position/velocity beacon every node in a fleet broadcasts at 2 Hz on the shared monitor interface, plus the neighbour table the onboard autonomy layer flies against."

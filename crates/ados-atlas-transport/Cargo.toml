@@ -2,6 +2,7 @@
 name = "ados-atlas-transport"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Atlas world-model stream lane: the bearer-agnostic AtlasTransport over a priority failover ladder (direct LAN HTTP primary; WFB relay + cloud bearers added with their carriers), carrying keyframes drone->compute and splat deltas compute->GCS as the identical framed envelope on every bearer."

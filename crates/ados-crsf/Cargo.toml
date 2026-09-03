@@ -2,6 +2,7 @@
 name = "ados-crsf"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "CRSF / ExpressLRS RC control lane: frame codec, 420 kbaud serial transport, fixed-cadence RC channel transmitter, telemetry decode, and the lane state sidecar."

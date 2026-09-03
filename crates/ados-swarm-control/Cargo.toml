@@ -2,6 +2,7 @@
 name = "ados-swarm-control"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Onboard swarm autonomy: the separation / flocking / formation control laws and CBBA task allocation, arbitrated by a fixed precedence ladder into SET_POSITION_TARGET_GLOBAL_INT setpoints. Consumes the swarm neighbour table; adds no radio traffic of its own."

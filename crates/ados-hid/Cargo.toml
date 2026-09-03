@@ -2,6 +2,7 @@
 name = "ados-hid"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Human-interface devices: touchscreen affine calibration + gesture FSM, the pilot-in-command arbiter FSM + IPC seam, the ados-pic / ados-input daemons, the GPIO front-panel button service, and gamepad enumeration + hotplug."

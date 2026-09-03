@@ -2,6 +2,7 @@
 name = "ados-installer"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Rust installer for the ADOS Drone Agent: a step-graph orchestrator that turns a freshly-flashed SBC into a paired, running agent."

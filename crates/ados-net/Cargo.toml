@@ -2,6 +2,7 @@
 name = "ados-net"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Ground-station uplink matrix: priority failover, cloud-reachability health probing, and the active-uplink sidecar that drives mesh gateway election."

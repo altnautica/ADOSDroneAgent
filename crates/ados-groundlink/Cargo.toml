@@ -2,6 +2,7 @@
 name = "ados-groundlink"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Ground-station data-plane: WFB receive, channel acquisition, video UDP fan-out, and the self-healing local wireless mesh."

@@ -2,6 +2,7 @@
 name = "ados-capabilities-codegen"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Generates the ADOS capability catalog (Python, Rust, TypeScript) from a single capabilities.toml source of truth."

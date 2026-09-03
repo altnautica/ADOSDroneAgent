@@ -58,11 +58,14 @@ impl Canvas {
 
     /// Paint every pixel `color`.
     pub fn clear_color(&mut self, color: Rgb888) {
-        for px in self.buf.chunks_exact_mut(3) {
-            px[0] = color.r();
-            px[1] = color.g();
-            px[2] = color.b();
+        // `as_chunks_mut` gives real `[u8; 3]` pixels, so the three writes
+        // below are bounds-checked once for the whole buffer rather than per
+        // component, and the RGB888 stride is stated in the type.
+        let (pixels, rest) = self.buf.as_chunks_mut::<3>();
+        for px in pixels {
+            *px = [color.r(), color.g(), color.b()];
         }
+        debug_assert!(rest.is_empty(), "an RGB888 buffer is whole pixels");
     }
 
     /// Read one pixel. Out-of-bounds reads return black.

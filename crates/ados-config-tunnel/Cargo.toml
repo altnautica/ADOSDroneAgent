@@ -2,6 +2,7 @@
 name = "ados-config-tunnel"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Config-over-radio substrate: a MAVLink-TUNNEL request/response channel that reads /api/config on the drone and proxies it over the radio's auxiliary application lane. Ships inert (opt-in), config request/response only."

@@ -2,6 +2,7 @@
 name = "ados-plugin-host"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Plugin RPC host: serves a per-plugin Unix socket, verifies the capability token at handshake, and gates each request on its required capability before routing to a host service."

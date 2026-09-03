@@ -2,6 +2,7 @@
 name = "ados-macpin"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Stable-MAC pinning for network adapters with no efuse MAC that randomize their address each boot: a chipset quirk table, deterministic per-board MAC derivation, and a systemd-networkd .link provisioner. Shared by the installer step and the supervisor reconciler."

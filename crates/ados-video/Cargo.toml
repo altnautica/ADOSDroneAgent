@@ -2,6 +2,7 @@
 name = "ados-video"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Video pipeline orchestrator: supervises the ffmpeg/mediamtx/wfb_tee subprocesses with setsid/killpg process-group ownership, drives the encoder + local RTSP + RTP-to-WFB tap."

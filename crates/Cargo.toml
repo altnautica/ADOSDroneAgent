@@ -5,6 +5,14 @@ members = ["ados-protocol", "ados-config", "ados-capabilities-codegen", "ados-tu
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
+# Minimum supported Rust. `slice::as_chunks` / `as_chunks_mut`, which the
+# protocol decode, the display blitter and the vision crop use to state a
+# fixed stride in the type, stabilised in 1.88. Declared rather than left to
+# whatever rustc a build host happens to have: the cross-compiles that produce
+# the shipped aarch64 binaries run on hosts this repo does not control, and an
+# undeclared requirement surfaces there as a raw compile error instead of a
+# readable "needs a newer toolchain".
+rust-version = "1.88"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/altnautica/ADOSDroneAgent"
 

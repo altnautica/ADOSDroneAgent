@@ -80,7 +80,8 @@ impl LoadedModel for ScriptedReid {
         if px == 0 {
             return Ok(Some(vec![0.0, 0.0, 0.0]));
         }
-        for p in crop.chunks_exact(3) {
+        let (pixels, _) = crop.as_chunks::<3>();
+        for p in pixels {
             sum[0] += p[0] as f64;
             sum[1] += p[1] as f64;
             sum[2] += p[2] as f64;

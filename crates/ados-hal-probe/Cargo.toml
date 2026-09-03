@@ -2,6 +2,7 @@
 name = "ados-hal-probe"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Probe-first hardware-capability detection: derives capabilities by reading real silicon (sysfs, device-tree, ioctl, sandboxed trial-init) rather than trusting declarations."

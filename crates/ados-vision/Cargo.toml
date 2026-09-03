@@ -2,6 +2,7 @@
 name = "ados-vision"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Vision engine host: owns the per-camera shared-memory frame rings, the model registry, the accelerator lease arbiter, and the vision.sock plugin bridge."

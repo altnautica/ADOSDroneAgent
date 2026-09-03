@@ -2,6 +2,7 @@
 name = "ados-display"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Display layer: the off-thread framebuffer writer (latest-wins, dup-skip), the SPI-LCD/OLED probe + geometry parse, the RGB565/RGB888/xRGB packers, the SSD1306/SH1106 OLED driver, and the boot-time display probe with apply-verify-auto-revert."

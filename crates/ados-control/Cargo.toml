@@ -2,6 +2,7 @@
 name = "ados-control"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Native HTTP control surface: the same status/pairing/command API the GCS speaks, served on the trusted local socket and the LAN port, with no Python runtime."

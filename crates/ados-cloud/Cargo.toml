@@ -2,6 +2,7 @@
 name = "ados-cloud"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Cloud relay for the ADOS Drone Agent: heartbeat status push, command poll, MAVLink and WebRTC-signaling relays, and the update poller."

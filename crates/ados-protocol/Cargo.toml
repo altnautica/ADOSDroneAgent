@@ -2,6 +2,7 @@
 name = "ados-protocol"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Canonical implementation of the ADOS Drone Agent IPC wire contracts: length-prefixed framing, plugin RPC envelope and capability tokens, and the vehicle-state codec."

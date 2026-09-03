@@ -2,6 +2,7 @@
 name = "ados-mavlink-router"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Owns the flight-controller serial link, fans MAVLink frames to the IPC socket, and produces the vehicle-state snapshot on the state socket."

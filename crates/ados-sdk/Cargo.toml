@@ -2,6 +2,7 @@
 name = "ados-sdk"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Plugin author SDK for the ADOS Drone Agent: an async IPC client, the plugin-facing context facade, the hardware driver traits, and the lifecycle runner. A Rust plugin built on this SDK speaks the same length-prefixed msgpack wire and capability-token handshake as the Python plugin host."

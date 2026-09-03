@@ -127,8 +127,9 @@ mod tests {
 
     fn solid_frame(w: u32, h: u32, rgb: [u8; 3]) -> Vec<u8> {
         let mut f = vec![0u8; (w * h * 3) as usize];
-        for px in f.chunks_exact_mut(3) {
-            px.copy_from_slice(&rgb);
+        let (pixels, _) = f.as_chunks_mut::<3>();
+        for px in pixels {
+            *px = rgb;
         }
         f
     }
@@ -145,7 +146,9 @@ mod tests {
         let crop = crop_resize_rgb24(&frame, 64, 64, &bbox, 256, 128).expect("crop");
         assert_eq!(crop.len(), 256 * 128 * 3);
         // Every pixel of a solid-colour crop is that colour (within rounding).
-        for px in crop.chunks_exact(3) {
+        let (pixels, rest) = crop.as_chunks::<3>();
+        assert!(rest.is_empty(), "an RGB24 crop is whole pixels");
+        for px in pixels {
             assert_eq!(px, &[10, 20, 30]);
         }
     }

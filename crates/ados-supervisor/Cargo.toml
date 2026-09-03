@@ -2,6 +2,7 @@
 name = "ados-supervisor"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Process orchestrator for the ADOS Drone Agent: gates, starts, and supervises the systemd service units."

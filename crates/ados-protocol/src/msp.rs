@@ -321,11 +321,9 @@ mod tests {
             assert_eq!(frame.dir, DIR_TO_FC);
             assert_eq!(frame.version, if v2 { 2 } else { 1 });
             // Payload decodes back to the channel values.
-            let chans: Vec<u16> = frame
-                .payload
-                .chunks_exact(2)
-                .map(|c| u16::from_le_bytes([c[0], c[1]]))
-                .collect();
+            let (pairs, rest) = frame.payload.as_chunks::<2>();
+            assert!(rest.is_empty(), "an RC payload is whole u16 channels");
+            let chans: Vec<u16> = pairs.iter().copied().map(u16::from_le_bytes).collect();
             assert_eq!(chans, vec![1000, 1500, 2000, 1500]);
         }
     }
