@@ -40,6 +40,7 @@ import yaml
 
 from ados.core.paths import CONFIG_YAML
 
+from ._defaults import packaged_defaults
 from ._lock import shared_config_lock
 from ._migrators import _deep_merge, apply_migrations
 from ._yaml import StringTimestampLoader
@@ -219,17 +220,5 @@ def load_config(path: str | Path | None = None) -> ADOSConfig:
 
     _note_pending(apply_migrations(raw))
 
-    # Load defaults.yaml from package data
-    import importlib.resources
-    defaults: dict[str, Any] = {}
-    try:
-        defaults_ref = importlib.resources.files("ados.core").joinpath("defaults.yaml")
-        defaults_text = defaults_ref.read_text(encoding="utf-8")
-        loaded = yaml.load(defaults_text, Loader=StringTimestampLoader)
-        if isinstance(loaded, dict):
-            defaults = loaded
-    except (FileNotFoundError, TypeError):
-        pass
-
-    merged = _deep_merge(defaults, raw)
+    merged = _deep_merge(packaged_defaults(), raw)
     return ADOSConfig(**merged)

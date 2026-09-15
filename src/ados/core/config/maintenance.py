@@ -26,24 +26,16 @@ free and running it on an already-current node writes nothing.
 from __future__ import annotations
 
 import json
-import os
-import stat
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
-import yaml
-
+from ados.core.atomic import atomic_write_text
 from ados.core.paths import CONFIG_MIGRATIONS_PATH, CONFIG_YAML
 
-from ._lock import WRITE_LOCK_TIMEOUT_S, exclusive_config_lock
+from ._lock import WRITE_LOCK_TIMEOUT_S
 from ._migrators import ALL_MIGRATION_IDS, apply_migrations, apply_one_shots
-from ._yaml import dump_mapping, read_mapping
-
-# The config carries secrets (mqtt_password, api_key, hmac_secret, pair
-# fingerprints). A file created by this pass, or one whose mode we could not
-# read, gets the restrictive mode rather than the umask default.
-_SECRET_MODE = 0o600
+from .writer import read_config_mapping, update_config
 
 
 @dataclass
@@ -68,35 +60,10 @@ class MigrationResult:
         return f"{self.path}: applied {', '.join(self.applied)}"
 
 
-def _atomic_write(path: Path, body: str, mode: int) -> None:
-    """Replace ``path`` with ``body``, atomically and with an explicit mode.
-
-    The temp file is created in the destination directory so the
-    ``os.replace`` is a same-filesystem rename, which is the part that makes
-    a concurrent reader see either the old file or the new one and never a
-    partial write.
-    """
-    fd, tmp_name = tempfile.mkstemp(
-        dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
-    )
-    tmp_path = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(body)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.chmod(tmp_path, mode)
-        os.replace(str(tmp_path), str(path))
-    except BaseException:
-        tmp_path.unlink(missing_ok=True)
-        raise
-
-
-def _current_mode(path: Path) -> int:
-    try:
-        return stat.S_IMODE(os.stat(path).st_mode)
-    except OSError:
-        return _SECRET_MODE
+def _ledger_mode() -> int:
+    # The ledger records which one-shot cleanups a node has had. It carries no
+    # secret, and an operator reading it is a supported diagnostic.
+    return 0o644
 
 
 def completed_one_shots(path: Path | None = None) -> set[str]:
@@ -125,11 +92,10 @@ def _record_one_shots(names: list[str], path: Path | None = None) -> None:
     ledger_path = path if path is not None else CONFIG_MIGRATIONS_PATH
     merged = sorted(completed_one_shots(ledger_path) | set(names))
     try:
-        ledger_path.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write(
+        atomic_write_text(
             ledger_path,
             json.dumps({"version": 1, "applied": merged}, indent=2) + "\n",
-            0o644,
+            mode=_ledger_mode(),
         )
     except OSError:
         pass
@@ -162,52 +128,34 @@ def migrate_config_file(
         # file runs on shipped defaults, which are by definition current.
         return result
 
-    with exclusive_config_lock(timeout_s) as acquired:
-        result.locked = acquired
-        if not acquired:
-            # Declining is the whole point. Another writer is mid
-            # read-modify-write; proceeding would serialise a mapping that
-            # predates its commit and silently revert it.
-            result.error = "config lock unavailable, migration skipped"
-            return result
+    # `applied` is what a write would land; `changed` is what a write did
+    # land. Keeping them separate is what makes `dry_run` honest and a failed
+    # write honest in the same shape.
+    one_shots: list[str] = []
 
-        # The read that feeds the write, taken inside the lock.
-        try:
-            raw = read_mapping(config_path)
-        except (OSError, yaml.YAMLError) as exc:
-            # Same posture as the native writers: never write over a file we
-            # could not parse, because that write is a truncation of whatever
-            # the operator actually has.
-            result.error = f"config is unreadable or unparseable: {exc}"
-            return result
-
-        # `applied` is what a write would land; `changed` is what a write
-        # did land. Keeping them separate is what makes `dry_run` honest
-        # and a failed write honest in the same shape.
-        #
-        # Normalisers first, then the ledger-gated one-shots: a one-shot
-        # that removes a key has to see the shape the normalisers produce,
-        # not the legacy shape.
+    def _mutate(raw: dict[str, Any]) -> None:
+        # Normalisers first, then the ledger-gated one-shots: a one-shot that
+        # removes a key has to see the shape the normalisers produce, not the
+        # legacy shape.
         done = completed_one_shots(ledger_path)
-        one_shots = apply_one_shots(raw, done)
-        result.applied = apply_migrations(raw) + one_shots
-        if not result.applied or dry_run:
-            return result
+        one_shots.clear()
+        one_shots.extend(apply_one_shots(raw, done))
+        result.applied = apply_migrations(raw) + list(one_shots)
 
-        try:
-            _atomic_write(
-                config_path, dump_mapping(raw), _current_mode(config_path)
-            )
-            result.changed = True
-        except OSError as exc:
-            result.error = f"config write failed: {exc}"
-            return result
+    write = update_config(
+        _mutate, path=config_path, timeout_s=timeout_s, dry_run=dry_run
+    )
+    result.locked = write.locked
+    if not write.ok:
+        result.error = write.error
+        return result
 
-        # Only after the config write landed. Recording a one-shot whose
-        # write failed would skip it on the retry that is supposed to fix
-        # the failure.
-        if one_shots:
-            _record_one_shots(one_shots, ledger_path)
+    result.changed = write.wrote
+
+    # Only after the config write landed. Recording a one-shot whose write
+    # failed would skip it on the retry that is supposed to fix the failure.
+    if one_shots and result.changed:
+        _record_one_shots(one_shots, ledger_path)
 
     return result
 
@@ -223,10 +171,7 @@ def pending_migrations(
     config_path = Path(path) if path is not None else CONFIG_YAML
     if not config_path.is_file():
         return []
-    try:
-        raw = read_mapping(config_path)
-    except (OSError, yaml.YAMLError):
-        return []
+    raw = read_config_mapping(config_path)
     done = completed_one_shots(ledger_path)
     return apply_migrations(raw) + apply_one_shots(raw, done)
 

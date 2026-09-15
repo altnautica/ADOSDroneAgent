@@ -22,6 +22,7 @@ import json
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -138,53 +139,49 @@ def mac_verify(iface: str) -> None:
 # posture on its next restart.
 
 
-def _read_config_yaml() -> dict:
-    path = Path(CONFIG_YAML)
-    if not path.exists():
-        return {}
-    try:
-        import yaml
+def _read_config_yaml() -> dict[str, Any]:
+    from ados.core.config.writer import read_config_mapping
 
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except (OSError, ValueError):
-        return {}
-    except ImportError as exc:
-        raise click.ClickException("pyyaml is required to read config.yaml") from exc
-    return data if isinstance(data, dict) else {}
+    return read_config_mapping(Path(CONFIG_YAML))
 
 
 def _write_regulatory(mode: str, region: str | None) -> None:
-    """Persist ``network.regulatory.*`` to config.yaml without touching unrelated keys."""
-    try:
-        import yaml
-    except ImportError as exc:
-        raise click.ClickException("pyyaml is required to update config.yaml") from exc
+    """Persist ``network.regulatory.*`` to config.yaml without touching unrelated keys.
 
-    path = Path(CONFIG_YAML)
-    data = _read_config_yaml()
-    network = data.setdefault("network", {})
-    if not isinstance(network, dict):
-        network = {}
-        data["network"] = network
-    reg = network.setdefault("regulatory", {})
-    if not isinstance(reg, dict):
-        reg = {}
-        network["regulatory"] = reg
+    Goes through ``ados.core.config.writer``, the one config writer: the read
+    that feeds the write is taken inside the write lock, so this cannot lose a
+    concurrent settings PUT, and the keys the Rust radio owns are untouched.
+    """
+    from ados.core.config.writer import update_config
 
-    reg["mode"] = mode
-    reg["region"] = region
-    reg["ack_operator"] = reg.get("ack_operator") or "cli"
-    reg["ack_at"] = (
+    acked_at = (
         datetime.now(timezone.utc).astimezone().replace(microsecond=0).isoformat()
     )
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(
-        yaml.safe_dump(data, sort_keys=False, default_flow_style=False),
-        encoding="utf-8",
+    def _apply(data: dict[str, Any]) -> None:
+        network = data.get("network")
+        if not isinstance(network, dict):
+            network = {}
+            data["network"] = network
+        reg = network.get("regulatory")
+        if not isinstance(reg, dict):
+            reg = {}
+            network["regulatory"] = reg
+        reg["mode"] = mode
+        reg["region"] = region
+        reg["ack_operator"] = reg.get("ack_operator") or "cli"
+        reg["ack_at"] = acked_at
+
+    result = update_config(
+        _apply,
+        path=Path(CONFIG_YAML),
+        changed=("network.regulatory.mode", "network.regulatory.region"),
     )
-    tmp.replace(path)
+    if not result:
+        raise click.ClickException(
+            f"Could not update {CONFIG_YAML}: {result.error}\n"
+            "If this is a permission failure, re-run with sudo."
+        )
 
 
 @network_group.group(

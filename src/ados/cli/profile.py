@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -215,40 +216,29 @@ def _write_profile_conf(target: str) -> None:
 def _write_config_yaml(target: str, role: str | None) -> None:
     """Persist agent.profile (and optional ground_station.role) to config.yaml.
 
-    Idempotent: never wipes unrelated keys, only sets the targeted
-    fields. Uses pyyaml in safe-load/safe-dump mode.
+    Idempotent: never wipes unrelated keys, only sets the targeted fields.
+    Goes through ``ados.core.config.writer``, the one config writer, so this
+    takes the same flock as the agent's own settings writes.
     """
-    try:
-        import yaml
-    except ImportError as exc:
-        raise RuntimeError("pyyaml is required to update config.yaml") from exc
+    from ados.core.config.writer import update_config
 
-    path = Path(CONFIG_YAML)
-    if path.exists():
-        try:
-            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        except (OSError, yaml.YAMLError):
-            data = {}
-    else:
-        data = {}
-
-    if not isinstance(data, dict):
-        data = {}
-
-    agent = data.setdefault("agent", {})
-    if isinstance(agent, dict):
+    def _apply(data: dict[str, Any]) -> None:
+        agent = data.get("agent")
+        if not isinstance(agent, dict):
+            agent = {}
+            data["agent"] = agent
         agent["profile"] = target
 
-    if target == "ground_station" and role is not None:
-        gs = data.setdefault("ground_station", {})
-        if isinstance(gs, dict):
+        if target == "ground_station" and role is not None:
+            gs = data.get("ground_station")
+            if not isinstance(gs, dict):
+                gs = {}
+                data["ground_station"] = gs
             gs.setdefault("role", role)
             gs.setdefault("mesh_capable", False)
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(
-        yaml.safe_dump(data, sort_keys=False, default_flow_style=False),
-        encoding="utf-8",
+    result = update_config(
+        _apply, path=Path(CONFIG_YAML), changed=("agent.profile",)
     )
-    tmp.replace(path)
+    if not result:
+        raise RuntimeError(f"could not update {CONFIG_YAML}: {result.error}")

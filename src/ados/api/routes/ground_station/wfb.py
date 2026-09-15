@@ -50,16 +50,15 @@ async def put_ground_station_wfb(update: WfbUpdate) -> dict[str, Any]:
     if update.fec is not None and hasattr(wfb_cfg, "fec"):
         setattr(wfb_cfg, "fec", update.fec)
 
-    # Persist via the runtime's save_config helper. Previously this
-    # branch inlined the load-modify-save dance against the raw YAML
-    # dict; that's now centralized on the runtime so flock + euid
-    # checks apply uniformly across every PUT surface.
-    persisted = False
-    persist_error: str | None = None
-    try:
-        persisted = bool(app.save_config())
-    except Exception as exc:  # noqa: BLE001
-        persist_error = str(exc)
+    # Persist via the runtime's save_config helper — the one merge path for
+    # /etc/ados/config.yaml, so the write preserves the radio keys the Rust
+    # side owns and reports its own failure reason rather than a bare false.
+    write = app.save_config()
+    persisted = bool(write)
+    persist_error = None if persisted else (
+        write.error or "the agent could not persist this change"
+    )
+    if persist_error is not None:
         from structlog import get_logger
         get_logger().warning(
             "wfb_config_persist_failed",

@@ -9,11 +9,12 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-import yaml
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from ados.api.deps import get_agent_app
+from ados.core.config.writer import merge_into_config
+from ados.core.logging import get_logger
 from ados.core.paths import ADOS_RUN_DIR, CONFIG_YAML, WFB_FAILOVER_STATE_JSON
 from ados.services.wfb.channel import get_channel
 
@@ -323,40 +324,24 @@ def _native_radio_running() -> bool:
 
 
 def _persist_wfb_fields(updates: dict[str, Any]) -> bool:
-    """Atomically merge `updates` into the `video.wfb` block of the on-disk
-    config so operator tuning survives a service restart.
+    """Merge `updates` into the `video.wfb` block of the on-disk config so
+    operator tuning survives a service restart.
 
-    Mirrors the tmp-write + os.replace idiom used elsewhere in the agent.
-    Returns True on success, False if the file is unreadable or unwritable.
+    Routes through `ados.core.config.writer`, the one config writer: the merge
+    happens on the document read inside the write lock, so a concurrent PUT
+    cannot lose this update and the radio keys the Rust side owns
+    (`reg_gate_strict`, `dfs_allowed`, `rendezvous_channel`) are untouched.
     """
     if not updates:
         return True
-    path = Path(str(CONFIG_YAML))
-    try:
-        data: dict[str, Any] = {}
-        if path.is_file():
-            with open(path, encoding="utf-8") as fh:
-                loaded = yaml.safe_load(fh)
-            if isinstance(loaded, dict):
-                data = loaded
-        video = data.get("video")
-        if not isinstance(video, dict):
-            video = {}
-        wfb_section = video.get("wfb")
-        if not isinstance(wfb_section, dict):
-            wfb_section = {}
-        wfb_section.update(updates)
-        video["wfb"] = wfb_section
-        data["video"] = video
-
-        body = yaml.safe_dump(data, sort_keys=False, default_flow_style=False)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = path.with_suffix(path.suffix + ".tmp")
-        tmp_path.write_text(body, encoding="utf-8")
-        os.replace(str(tmp_path), str(path))
-        return True
-    except (OSError, yaml.YAMLError):
-        return False
+    result = merge_into_config(
+        {"video": {"wfb": dict(updates)}}, path=Path(str(CONFIG_YAML))
+    )
+    if not result:
+        get_logger("api.wfb").warning(
+            "wfb_field_persist_failed", fields=sorted(updates), error=result.error
+        )
+    return bool(result)
 
 
 def _persist_tx_power(dbm: int) -> bool:

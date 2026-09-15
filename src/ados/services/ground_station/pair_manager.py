@@ -39,8 +39,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-import yaml
-
+from ados.core.config.writer import read_config_mapping, update_config
 from ados.core.logging import get_logger
 from ados.core.paths import (
     CONFIG_YAML,
@@ -102,140 +101,14 @@ def _atomic_write(path: Path, data: bytes, mode: int = 0o600) -> None:
     os.rename(tmp_path, path)
 
 
-_CONFIG_LOCK_PATH = Path("/run/ados/config.yaml.lock")
-
-
 def _load_config_dict() -> dict[str, Any]:
-    """Load `/etc/ados/config.yaml` as a raw dict, tolerating absence."""
-    if not _CONFIG_PATH.is_file():
-        return {}
-    try:
-        with open(_CONFIG_PATH, encoding="utf-8") as fh:
-            loaded = yaml.safe_load(fh)
-        if isinstance(loaded, dict):
-            return loaded
-    except (OSError, yaml.YAMLError) as exc:
-        log.warning("config_read_failed", path=str(_CONFIG_PATH), error=str(exc))
-    return {}
+    """Load `/etc/ados/config.yaml` as a raw dict, tolerating absence.
 
-
-def _save_config_dict(data: dict[str, Any]) -> bool:
-    """Atomically rewrite `/etc/ados/config.yaml` with the given dict.
-
-    mode 0o600 because this file carries secrets (mqtt_password,
-    api_key, hmac_secret, pair fingerprints).
-
-    Serialized via a `/run/ados/config.yaml.lock` flock so concurrent
-    PUTs from two GCS tabs or a GCS+CLI race do not silently lose the
-    first write. The flock window covers only the YAML serialize +
-    atomic-write (the caller has already loaded + mutated their own
-    copy); a true compare-and-swap that re-reads under the lock is
-    out of scope here because every callsite already round-trips
-    `_load_config_dict()` immediately before this call.
-
-    Requires euid 0 because the file is created mode 0o600 owned by
-    root. A non-root caller will get EPERM from `open()`; we surface
-    that as a clear log line rather than a silent False.
+    Read-only projection for the status paths below. A read that feeds a WRITE
+    must not use this: `update_config` takes its own read inside the write
+    lock, which is the only read a write may rely on.
     """
-    import fcntl
-
-    if os.geteuid() != 0:
-        log.error(
-            "config_write_requires_root",
-            path=str(_CONFIG_PATH),
-            euid=os.geteuid(),
-        )
-        return False
-
-    try:
-        _CONFIG_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
-        lock_fd = os.open(
-            str(_CONFIG_LOCK_PATH),
-            os.O_CREAT | os.O_WRONLY,
-            0o600,
-        )
-    except OSError as exc:
-        log.error(
-            "config_lock_open_failed",
-            path=str(_CONFIG_LOCK_PATH),
-            error=str(exc),
-        )
-        # Fall through to the write anyway. Losing the lock is worse
-        # than racing because the file system primitives are still
-        # atomic at the rename level.
-        lock_fd = -1
-
-    # Snapshot the on-disk config before overwriting it, so the post-write
-    # sync can tell whether the CRSF lane slice actually changed (best-effort;
-    # a missing/garbled file reads as no previous config).
-    previous_config: dict[str, Any] | None
-    try:
-        loaded = yaml.safe_load(_CONFIG_PATH.read_text())
-        previous_config = loaded if isinstance(loaded, dict) else None
-    except (OSError, yaml.YAMLError):
-        previous_config = None
-
-    try:
-        if lock_fd >= 0:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        try:
-            body = yaml.safe_dump(
-                data, sort_keys=False, default_flow_style=False,
-            )
-            _atomic_write(_CONFIG_PATH, body.encode("utf-8"), mode=0o600)
-            # Keep the CRSF lane's enable marker + unit true to the persisted
-            # config (the marker mirrors radio.crsf.enabled; the unit gets a
-            # no-block reload-or-restart only when the lane slice changed).
-            # Best-effort by contract: a marker/systemctl hiccup never fails
-            # the write that already landed.
-            try:
-                from ados.core.crsf_marker import sync_after_config_write
-
-                sync_after_config_write(previous_config, data)
-            except Exception as exc:  # noqa: BLE001 — the write already landed
-                log.warning("crsf_config_sync_failed", error=str(exc))
-            # Keep the config-over-radio channel's enable marker + unit true to
-            # the persisted config (the marker mirrors radio.tunnel.enabled; the
-            # unit gets a no-block reload-or-restart only when the slice
-            # changed). Best-effort: a hiccup never fails the landed write.
-            try:
-                from ados.core.tunnel_marker import (
-                    sync_after_config_write as tunnel_sync_after_config_write,
-                )
-
-                tunnel_sync_after_config_write(previous_config, data)
-            except Exception as exc:  # noqa: BLE001 — the write already landed
-                log.warning("tunnel_config_sync_failed", error=str(exc))
-            # Keep the ground-station setup AP's enable marker + units true to
-            # the persisted config (the marker mirrors network.hotspot.enabled;
-            # the units are kicked only when the slice changed). Best-effort: a
-            # hiccup never fails the landed write.
-            try:
-                from ados.core.hotspot_marker import (
-                    sync_after_config_write as hotspot_sync_after_config_write,
-                )
-
-                hotspot_sync_after_config_write(previous_config, data)
-            except Exception as exc:  # noqa: BLE001 — the write already landed
-                log.warning("hotspot_config_sync_failed", error=str(exc))
-            return True
-        except (OSError, yaml.YAMLError) as exc:
-            log.error(
-                "config_write_failed",
-                path=str(_CONFIG_PATH),
-                error=str(exc),
-            )
-            return False
-    finally:
-        if lock_fd >= 0:
-            try:
-                fcntl.flock(lock_fd, fcntl.LOCK_UN)
-            except OSError:
-                pass
-            try:
-                os.close(lock_fd)
-            except OSError:
-                pass
+    return read_config_mapping(_CONFIG_PATH)
 
 
 def _get_section(data: dict[str, Any], key: str) -> dict[str, Any]:
@@ -260,12 +133,13 @@ def _clear_configured_hotspot_password() -> None:
     up on exactly the key it had before — which is the opposite of what a
     factory reset promises, and silently so.
     """
-    data = _load_config_dict()
-    hotspot = data.get("network", {}).get("hotspot")
-    if not isinstance(hotspot, dict) or "password" not in hotspot:
-        return
-    hotspot.pop("password", None)
-    if _save_config_dict(data):
+    def _clear(data: dict[str, Any]) -> None:
+        network = data.get("network")
+        hotspot = network.get("hotspot") if isinstance(network, dict) else None
+        if isinstance(hotspot, dict):
+            hotspot.pop("password", None)
+
+    if update_config(_clear, path=_CONFIG_PATH, changed=("network.hotspot.password",)):
         log.info("factory_reset_cleared_configured_hotspot_password")
 
 
@@ -279,33 +153,44 @@ def _persist_pair_state(
     """Update the persisted pair fields under `video.wfb` (canonical) and
     mirror onto `ground_station.paired_drone_id` / `paired_at` for the GS
     profile so older code paths that read the legacy fields keep working.
+
+    Goes through the one config writer, so the read that feeds the write is
+    taken inside the write lock: an unpair racing an operator's settings PUT
+    can no longer resurrect the peer id the unpair just removed.
     """
-    data = _load_config_dict()
-    wfb = _get_video_wfb_section(data)
+    def _apply(data: dict[str, Any]) -> None:
+        wfb = _get_video_wfb_section(data)
 
-    if peer_device_id is None:
-        wfb.pop("paired_with_device_id", None)
-    else:
-        wfb["paired_with_device_id"] = peer_device_id
-
-    if paired_at is None:
-        wfb.pop("paired_at", None)
-    else:
-        wfb["paired_at"] = paired_at
-
-    if auto_pair_enabled is not None:
-        wfb["auto_pair_enabled"] = bool(auto_pair_enabled)
-
-    if role == "gs":
-        gs = _get_section(data, "ground_station")
         if peer_device_id is None:
-            gs.pop("paired_drone_id", None)
-            gs.pop("paired_at", None)
+            wfb.pop("paired_with_device_id", None)
         else:
-            gs["paired_drone_id"] = peer_device_id
-            gs["paired_at"] = paired_at
+            wfb["paired_with_device_id"] = peer_device_id
 
-    _save_config_dict(data)
+        if paired_at is None:
+            wfb.pop("paired_at", None)
+        else:
+            wfb["paired_at"] = paired_at
+
+        if auto_pair_enabled is not None:
+            wfb["auto_pair_enabled"] = bool(auto_pair_enabled)
+
+        if role == "gs":
+            gs = _get_section(data, "ground_station")
+            if peer_device_id is None:
+                gs.pop("paired_drone_id", None)
+                gs.pop("paired_at", None)
+            else:
+                gs["paired_drone_id"] = peer_device_id
+                gs["paired_at"] = paired_at
+
+    result = update_config(_apply, path=_CONFIG_PATH)
+    if not result:
+        log.error(
+            "pair_state_persist_failed",
+            role=role,
+            peer_device_id=peer_device_id,
+            error=result.error,
+        )
 
     # The audit trail: a pair transition is what admits a peer to the fleet (or
     # removes it), and the radio keypair it rides on is the fleet's join gate. An

@@ -330,7 +330,9 @@ def test_a_failed_config_write_does_not_record_the_one_shot(
     def _explode(*args, **kwargs):
         raise OSError("read-only filesystem")
 
-    monkeypatch.setattr(maintenance, "_atomic_write", _explode)
+    # The migration writes through the one config writer, so that is where the
+    # failure has to be injected.
+    monkeypatch.setattr("ados.core.config.writer.atomic_write_text", _explode)
     result = migrate_config_file(cfg, ledger_path=ledger)
 
     assert result.changed is False
@@ -408,7 +410,7 @@ def test_migrate_config_file_rereads_inside_the_lock(monkeypatch, tmp_path):
 
     monkeypatch.setattr(lock_mod, "exclusive_config_lock", _writing_lock)
     monkeypatch.setattr(
-        "ados.core.config.maintenance.exclusive_config_lock", _writing_lock
+        "ados.core.config.writer.exclusive_config_lock", _writing_lock
     )
 
     result = migrate_config_file(cfg)

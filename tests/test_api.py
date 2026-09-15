@@ -11,7 +11,8 @@ from fastapi.testclient import TestClient
 
 from ados.api.server import create_app
 from ados.core.config import ADOSConfig
-from tests.api_runtime_utils import build_api_runtime
+from ados.core.config.writer import ConfigWriteResult
+from tests.api_runtime_utils import ApiRuntimeTestDouble, build_api_runtime
 
 _SCHEMA_PATH = (
     Path(__file__).resolve().parents[1] / "schemas" / "agent-config.schema.json"
@@ -90,6 +91,52 @@ def test_update_config_accepts_a_native_json_boolean(client):
     assert data["status"] == "ok"
     assert data["value"] is True
     assert client.get("/api/config").json()["swarm"]["enabled"] is True
+
+
+def test_update_config_reports_a_reason_when_the_write_never_reached_disk():
+    """A write the agent could not persist must carry WHY, not a bare false.
+
+    The GCS renders `persist_error`; without it the surface has nothing to
+    distinguish "saved" from "accepted in memory and gone at the next
+    restart", and every caller reads the 200 as success.
+    """
+
+    class _UnpersistableRuntime(ApiRuntimeTestDouble):
+        def save_config(self):
+            return ConfigWriteResult(
+                ok=False, error="/etc/ados/config.yaml is not writable by this process"
+            )
+
+    runtime = _UnpersistableRuntime()
+    with TestClient(create_app(runtime)) as failing_client:
+        resp = failing_client.put(
+            "/api/config", json={"key": "agent.name", "value": "new-drone"}
+        )
+
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["persisted"] is False
+    assert "not writable" in data["persist_error"]
+
+
+def test_update_config_reports_no_error_when_the_write_landed():
+    """The success shape must not carry a `persist_error` a surface could
+    render alongside a successful save."""
+
+    class _PersistingRuntime(ApiRuntimeTestDouble):
+        def save_config(self):
+            return ConfigWriteResult(ok=True, wrote=True, changed=("agent.name",))
+
+    runtime = _PersistingRuntime()
+    with TestClient(create_app(runtime)) as ok_client:
+        resp = ok_client.put(
+            "/api/config", json={"key": "agent.name", "value": "new-drone"}
+        )
+
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["persisted"] is True
+    assert "persist_error" not in data
 
 
 def test_update_config_still_accepts_a_string_boolean(client):

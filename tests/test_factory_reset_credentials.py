@@ -129,12 +129,11 @@ class TestClearingTheHotspotPassword:
             ),
             encoding="utf-8",
         )
+        # The one config writer derives the lock from the document path, so
+        # redirecting the document is the whole isolation. No euid stand-in is
+        # needed: the writer attempts the write and reports the real errno
+        # rather than guessing at permissions up front.
         monkeypatch.setattr(pm, "_CONFIG_PATH", cfg)
-        # The writer refuses to run as non-root, which is correct on a rig and
-        # inconvenient here. Stand in for the euid check rather than relaxing
-        # it, so the guard keeps protecting the real path.
-        monkeypatch.setattr(pm.os, "geteuid", lambda: 0)
-        monkeypatch.setattr(pm, "_CONFIG_LOCK_PATH", tmp_path / "config.lock")
 
         pm._clear_configured_hotspot_password()
 

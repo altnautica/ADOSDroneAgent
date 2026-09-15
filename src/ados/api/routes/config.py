@@ -180,23 +180,23 @@ async def update_config(update: ConfigUpdate):
 
     setattr(parent, last, val)
 
-    # Persist via the runtime's save_config helper, which is now the
-    # single point of contention for /etc/ados/config.yaml writes.
-    persisted = False
-    try:
-        persisted = bool(app.save_config())
-    except Exception as exc:  # noqa: BLE001
+    # Persist via the runtime's save_config helper, which is the single point
+    # of contention for /etc/ados/config.yaml writes. A write that did not
+    # reach disk reports `persisted: false` WITH a reason: the GCS renders
+    # `persist_error`, and a silent false would have it toast "Saved".
+    result = app.save_config()
+    if not result:
         return {
             "status": "ok",
             "key": update.key,
             "value": val,
             "persisted": False,
-            "persist_error": str(exc),
+            "persist_error": result.error or "the agent could not persist this change",
         }
 
     return {
         "status": "ok",
         "key": update.key,
         "value": val,
-        "persisted": persisted,
+        "persisted": True,
     }

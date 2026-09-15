@@ -63,9 +63,9 @@ def _load_display_config() -> dict[str, Any]:
     shape. The native ``ados-control`` read route projects the same section
     identically.
     """
-    from ados.services.ground_station.pair_manager import _load_config_dict
+    from ados.core.config.writer import read_config_mapping
 
-    data = _load_config_dict()
+    data = read_config_mapping()
     gs = data.get("ground_station") if isinstance(data, dict) else None
     kiosk = gs.get("kiosk") if isinstance(gs, dict) else None
     if not isinstance(kiosk, dict):
@@ -88,24 +88,29 @@ def _persist_gs_ui_section(section: str, value: dict[str, Any]) -> None:
     so it round-trips through save cycles and is consumed by the live
     services. The legacy JSON side-file is no longer written, but
     remains on disk for rollback (the load-time migrator preserves it).
-    """
-    from ados.services.ground_station.pair_manager import (
-        _load_config_dict,
-        _save_config_dict,
-    )
 
-    data = _load_config_dict()
-    gs_section = data.get("ground_station")
-    if not isinstance(gs_section, dict):
-        gs_section = {}
-        data["ground_station"] = gs_section
-    ui_section = gs_section.get("ui")
-    if not isinstance(ui_section, dict):
-        ui_section = {}
-        gs_section["ui"] = ui_section
-    ui_section[section] = value
-    if not _save_config_dict(data):
-        raise OSError("failed to persist ground_station.ui to /etc/ados/config.yaml")
+    The section is written as one value, not merged: the route hands over the
+    complete section and a key the operator removed has to leave the file.
+    """
+    from ados.core.config.writer import update_config
+
+    def _assign(document: dict[str, Any]) -> None:
+        gs = document.get("ground_station")
+        if not isinstance(gs, dict):
+            gs = {}
+            document["ground_station"] = gs
+        ui = gs.get("ui")
+        if not isinstance(ui, dict):
+            ui = {}
+            gs["ui"] = ui
+        ui[section] = dict(value)
+
+    result = update_config(_assign, changed=(f"ground_station.ui.{section}",))
+    if not result:
+        raise OSError(
+            f"failed to persist ground_station.ui.{section} to the agent config: "
+            f"{result.error}"
+        )
 
 
 def _refresh_in_memory_ui(app: Any, section: str, value: dict[str, Any]) -> None:

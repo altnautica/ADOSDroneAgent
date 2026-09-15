@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from ados.core.config import ADOSConfig
+from ados.core.config.writer import ConfigWriteResult, persist_config_model
 from ados.core.service_tracker import ServiceTracker
 
 
@@ -98,7 +99,7 @@ class ApiRuntimeFacade:
     def model_manager(self) -> Any:
         return getattr(self._runtime, "model_manager", None)
 
-    def save_config(self) -> bool:
+    def save_config(self) -> ConfigWriteResult:
         """Persist the underlying runtime's config to disk.
 
         Delegates to `runtime.save_config()` when available. The legacy
@@ -106,16 +107,25 @@ class ApiRuntimeFacade:
         with the facade as `app`; surfacing the method on the facade keeps
         every historical callsite working.
 
-        Returns False (no-op) if the runtime doesn't expose `save_config`,
-        so the caller can flag `persisted: false` to the operator.
+        A runtime that exposes no `save_config`, or one whose save raised, is
+        reported as a failed write with the reason attached — never as a bare
+        False that leaves the route with nothing to tell the operator.
         """
         saver = getattr(self._runtime, "save_config", None)
-        if callable(saver):
-            try:
-                return bool(saver())
-            except Exception:
-                return False
-        return False
+        if not callable(saver):
+            return ConfigWriteResult(
+                ok=False,
+                error="this runtime cannot persist config (no save_config)",
+            )
+        try:
+            result = saver()
+        except Exception as exc:  # noqa: BLE001 — surfaced as persist_error
+            return ConfigWriteResult(ok=False, error=str(exc))
+        if isinstance(result, ConfigWriteResult):
+            return result
+        # A test double or an alternative runtime may still answer with a
+        # plain truthiness. Honour it rather than calling its write failed.
+        return ConfigWriteResult(ok=bool(result) or result is None)
 
     def health_dict(self) -> dict:
         # Refresh the sample before serializing. The standalone API
@@ -273,28 +283,26 @@ class StandaloneApiRuntime:
     def uptime_seconds(self) -> float:
         return 0.0
 
-    def save_config(self) -> bool:
-        """Persist `self.config` to `/etc/ados/config.yaml`.
+    def save_config(self) -> ConfigWriteResult:
+        """Persist the fields a caller changed on `self.config`.
 
-        Multiple route handlers (`_gs._save_config(app)` in the
-        ground-station tree, six callers under `setup/`) used to rely
-        on `getattr(runtime, "save_config", None)`. The method was
-        never actually defined on the runtime, so every persist call
-        was a silent no-op and config changes were lost on the next
-        service restart. The bench session of 2026-05-20 surfaced this
-        when `/api/config` PUTs reported `status: ok` while the YAML
-        file on disk stayed empty.
+        Delegates to the one config writer, which merges the changed leaves
+        into the on-disk document under the write lock. Two properties matter
+        to every caller of this method:
 
-        Returns True on success, False on any persistence failure.
-        Persistence failures are already logged inside
-        `_save_config_dict()`; this wrapper just bubbles the result up
-        so callers can flag a `persisted: false` to the operator.
+        * A key this Python model does not declare — `mavlink.injector_arbitration`
+          (the FC-write arbiter), `network.watchdog.enabled` (the SoC watchdog),
+          `agent.headless`, `video.wfb.reg_gate_strict` — survives the write
+          verbatim. The previous implementation serialised `model_dump()` over
+          the whole file and deleted all of them.
+        * A field nobody touched is not written, so a node keeps tracking the
+          shipped default instead of freezing this release's value.
+
+        The result is truthy on success, so `bool(app.save_config())` reads
+        correctly; a caller that owes the operator a reason reads
+        `result.error`, which is never None on failure.
         """
-        from ados.services.ground_station.pair_manager import (
-            _save_config_dict,
-        )
-
-        return _save_config_dict(self.config.model_dump())
+        return persist_config_model(self.config)
 
     def _initialize_model_manager(self, log: Any) -> None:
         try:

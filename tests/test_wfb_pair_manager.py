@@ -1,19 +1,19 @@
 """Tests for the WFB pair-state manager.
 
 Round-trips the apply / status / unpair lifecycle against a temp key
-directory so the tests don't touch /etc/ados/wfb/. Patches
-`_systemctl` and `_save_config_dict` so neither real systemd nor the
-real /etc/ados/config.yaml is touched. The legacy SHA-256 POC is not
-covered: the code path is deleted.
+directory so the tests don't touch /etc/ados/wfb/. Patches `_systemctl` and
+redirects the config document at a tmp file, so the real merge writer runs
+without touching the real /etc/ados/config.yaml. The legacy SHA-256 POC is
+not covered: the code path is deleted.
 """
 
 from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
+import yaml
 
 from ados.services.ground_station import pair_manager as pm_mod
 from ados.services.ground_station.pair_manager import (
@@ -27,18 +27,11 @@ def isolated_pm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> PairManager:
     """A PairManager pointed at a tmp key dir, with all side-effects stubbed."""
     monkeypatch.setattr(pm_mod, "_systemctl", lambda action, unit, **_kw: True)
 
-    saved: dict = {}
-
-    def fake_save(data: dict) -> bool:
-        saved.clear()
-        saved.update(data)
-        return True
-
-    def fake_load() -> dict:
-        return dict(saved)
-
-    monkeypatch.setattr(pm_mod, "_save_config_dict", fake_save)
-    monkeypatch.setattr(pm_mod, "_load_config_dict", fake_load)
+    # The pair state is persisted through the one config writer. Redirecting
+    # the document at a tmp file exercises that writer for real instead of
+    # stubbing it, which is what makes the auto-pair assertions below
+    # meaningful: they read what actually landed on disk.
+    monkeypatch.setattr(pm_mod, "_CONFIG_PATH", tmp_path / "config.yaml")
     # Send setup-complete sentinel to a sibling tmp file so the helper
     # doesn't poke /var/lib/ados/.
     monkeypatch.setattr(
@@ -62,6 +55,17 @@ def isolated_pm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> PairManager:
 
 def _make_blob(seed: int = 0xAA) -> bytes:
     return bytes([seed]) * 32 + bytes([seed ^ 0xFF]) * 32
+
+
+def _on_disk_wfb(tmp_path: Path) -> dict:
+    """The `video.wfb` block the pair manager actually persisted."""
+    cfg = tmp_path / "config.yaml"
+    if not cfg.is_file():
+        return {}
+    data = yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}
+    video = data.get("video") if isinstance(data, dict) else None
+    wfb = video.get("wfb") if isinstance(video, dict) else None
+    return wfb if isinstance(wfb, dict) else {}
 
 
 def test_apply_keypair_writes_64_bytes_drone(
@@ -148,38 +152,26 @@ def test_unpair_wipes_both_files(
     assert not (tmp_path / "rx.key").is_file()
 
 
-def test_apply_flips_auto_pair_off(isolated_pm: PairManager) -> None:
+def test_apply_flips_auto_pair_off(
+    isolated_pm: PairManager, tmp_path: Path
+) -> None:
     """apply_keypair must persist auto_pair_enabled=false so the
     supervisor's first-boot loop self-disarms."""
-    fake_state: dict = {}
-
-    def fake_save(data: dict) -> bool:
-        fake_state.clear()
-        fake_state.update(data)
-        return True
-
-    with patch.object(pm_mod, "_save_config_dict", side_effect=fake_save):
-        asyncio.run(
-            isolated_pm.apply_keypair(_make_blob(0xCD), "drone", peer_device_id="x")
-        )
-    wfb = fake_state.get("video", {}).get("wfb", {})
+    asyncio.run(
+        isolated_pm.apply_keypair(_make_blob(0xCD), "drone", peer_device_id="x")
+    )
+    wfb = _on_disk_wfb(tmp_path)
     assert wfb.get("auto_pair_enabled") is False
 
 
-def test_apply_flips_auto_pair_off_without_peer_id(isolated_pm: PairManager) -> None:
+def test_apply_flips_auto_pair_off_without_peer_id(
+    isolated_pm: PairManager, tmp_path: Path
+) -> None:
     """A local radio bind carries no peer device-id, but a successful key
     write is still a real pair: auto_pair must disarm so the next boot does
     not re-run the bind and wipe the freshly written key."""
-    fake_state: dict = {}
-
-    def fake_save(data: dict) -> bool:
-        fake_state.clear()
-        fake_state.update(data)
-        return True
-
-    with patch.object(pm_mod, "_save_config_dict", side_effect=fake_save):
-        asyncio.run(isolated_pm.apply_keypair(_make_blob(0xAB), "drone"))
-    wfb = fake_state.get("video", {}).get("wfb", {})
+    asyncio.run(isolated_pm.apply_keypair(_make_blob(0xAB), "drone"))
+    wfb = _on_disk_wfb(tmp_path)
     assert wfb.get("auto_pair_enabled") is False
 
 

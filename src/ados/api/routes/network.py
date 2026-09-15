@@ -203,13 +203,21 @@ async def post_mac_pin(req: MacPinRequest) -> dict[str, Any]:
     overrides = dict(app.config.network.mac_pin.overrides or {})
     overrides[req.iface] = mac
     app.config.network.mac_pin.overrides = overrides
-    try:
-        persisted = bool(app.save_config())
-    except Exception as exc:  # noqa: BLE001
+    write = app.save_config()
+    if not write:
+        # A pin that never reached disk is gone at the next reconcile. Fail the
+        # call rather than answering `persisted: false` alongside a 200 that
+        # every caller reads as success.
         raise HTTPException(
             status_code=500,
-            detail={"error": {"code": "E_PERSIST", "message": str(exc)}},
-        ) from exc
+            detail={
+                "error": {
+                    "code": "E_PERSIST",
+                    "message": write.error or "the agent could not persist this pin",
+                }
+            },
+        )
+    persisted = True
 
     applied_live = False
     note = "pinned for next boot; the agent writes the .link on its next reconcile"
@@ -255,20 +263,27 @@ async def delete_mac_pin(iface: str) -> dict[str, Any]:
     app = get_agent_app()
     overrides = dict(app.config.network.mac_pin.overrides or {})
     removed_override = overrides.pop(iface, None) is not None
+    persist_error: str | None = None
     if removed_override:
         app.config.network.mac_pin.overrides = overrides
-        try:
-            app.save_config()
-        except Exception:  # noqa: BLE001
-            pass
+        # `overrides` is a free-form mapping, so the writer replaces the whole
+        # value rather than merging it — which is what makes the removal
+        # actually leave the file.
+        write = app.save_config()
+        if not write:
+            removed_override = False
+            persist_error = write.error or "the agent could not persist this change"
     removed_link = _remove_link_file(iface)
-    return {
+    response: dict[str, Any] = {
         "status": "ok",
         "iface": iface,
         "removedOverride": removed_override,
         "removedLinkFile": removed_link,
         "note": "a known no-efuse adapter is re-pinned automatically unless network.mac_pin.enabled is false",
     }
+    if persist_error is not None:
+        response["persistError"] = persist_error
+    return response
 
 
 __all__ = ["router"]

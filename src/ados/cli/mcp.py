@@ -183,36 +183,21 @@ CONTROL_UNIT = "ados-control"
 def _write_token_accept(enabled: bool) -> Path:
     """Set ``mcp.token_accept_enabled`` in config.yaml, leaving other keys intact.
 
-    Idempotent, atomic (tmp + replace), pyyaml safe-load/safe-dump — mirrors
-    ``profile._write_config_yaml``.
+    Idempotent. Goes through ``ados.core.config.writer``, the one config
+    writer, so the flag lands as a merge under the same flock every other
+    writer takes — an operator flipping this while the agent is serving a
+    settings PUT can no longer lose either write.
     """
-    try:
-        import yaml
-    except ImportError as exc:  # pragma: no cover - pyyaml is a hard dep
-        raise click.ClickException("pyyaml is required to update config.yaml") from exc
+    from ados.core.config.writer import set_config_values
 
     path = Path(CONFIG_YAML)
-    if path.exists():
-        try:
-            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        except (OSError, yaml.YAMLError):
-            data = {}
-    else:
-        data = {}
-    if not isinstance(data, dict):
-        data = {}
-
-    mcp = data.setdefault("mcp", {})
-    if isinstance(mcp, dict):
-        mcp["token_accept_enabled"] = enabled
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(
-        yaml.safe_dump(data, sort_keys=False, default_flow_style=False),
-        encoding="utf-8",
-    )
-    tmp.replace(path)
+    result = set_config_values({"mcp.token_accept_enabled": enabled}, path=path)
+    if not result:
+        raise click.ClickException(
+            f"Could not update {path}: {result.error}\n"
+            f"If this is a permission failure, re-run with sudo: "
+            f"`sudo ados mcp {'enable' if enabled else 'disable'}`."
+        )
     return path
 
 
@@ -236,13 +221,7 @@ def _restart_control() -> tuple[bool, str]:
 
 def _apply_token_accept(enabled: bool, no_restart: bool) -> None:
     """Write the flag and (unless suppressed) restart the control front."""
-    try:
-        path = _write_token_accept(enabled)
-    except PermissionError as exc:
-        raise click.ClickException(
-            f"Cannot write {CONFIG_YAML} (need root). Re-run with sudo: "
-            f"`sudo ados mcp {'enable' if enabled else 'disable'}`."
-        ) from exc
+    path = _write_token_accept(enabled)
     state = "enabled" if enabled else "disabled"
     click.echo(f"MCP token acceptance {state} in {path}.")
     if no_restart:
