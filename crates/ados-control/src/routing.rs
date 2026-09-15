@@ -327,6 +327,20 @@ fn native_routes() -> Vec<NativeRoute> {
     ]
 }
 
+/// The native `(method, path)` set as plain data, for the tools that have to
+/// enumerate it rather than query it: the `docs/api-surface.md` generator and
+/// the CI check that every client path literal resolves against a real route.
+///
+/// There is no second list — this projects [`native_routes`], so a route added
+/// to the router and the auth edge appears in the table and the check without
+/// anyone remembering to update a third place.
+pub fn native_route_table() -> Vec<(Method, &'static str)> {
+    native_routes()
+        .into_iter()
+        .map(|r| (r.method, r.path))
+        .collect()
+}
+
 /// The path prefixes the agent keeps in Python by design — the ecosystem-bound
 /// features (vision/AI, the plugin runtime, the setup facade, peripherals,
 /// the WebRTC playback endpoint, the LCD/OLED display surface). A request under

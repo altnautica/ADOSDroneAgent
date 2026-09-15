@@ -335,11 +335,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // The base URL the GCS fetches artifacts from: the explicit override, else
     // derived from the bind (the node hostname stands in for a wildcard bind so
-    // the URL is reachable off-box). The artifact host matches the mDNS target.
+    // the URL is reachable off-box). The artifact host matches the mDNS target
+    // exactly — both resolve through `ados_protocol::reach` — and a host with
+    // no dialable name falls back to loopback rather than to a fabricated one.
     let public_base = derive_public_base(
         &bind,
         std::env::var("ADOS_COMPUTE_PUBLIC_URL").ok().as_deref(),
-        Some(&ados_compute::mdns::system_hostname()),
+        ados_protocol::reach::system_hostname().as_deref(),
     );
 
     if db != ":memory:" {

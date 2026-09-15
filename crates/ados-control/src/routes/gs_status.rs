@@ -218,7 +218,16 @@ pub async fn get_status(State(state): State<AppState>) -> Response {
         crate::routes::gs_recording::recording_view(&crate::routes::gs_recording::recorder()).await;
 
     let body = json!({
-        "profile": "ground_station",
+        // The canonical hyphen form — the spelling `profile::current_profile_and_role_at`
+        // resolves, the relay-proxy profile gate compares against
+        // (`gs_relay_proxy::is_ground_station`) and the plugin target-profile
+        // vocabulary uses. This route was the one producer spelling it
+        // `ground_station`, so the first consumer to compare a value read here
+        // against that vocabulary would silently never match, which is how a
+        // plugin gets filtered off every ground station. (The setup wizard's
+        // `/api/v1/setup/profile` keeps `ground_station`: that is a different
+        // enum — an operator's install-time choice, not the runtime profile.)
+        "profile": "ground-station",
         "paired_drone": {
             "device_id": paired_drone_id,
             "key_fingerprint": key_fingerprint,
@@ -1648,7 +1657,7 @@ mod tests {
             "mesh_capable": false,
         });
         let body = json!({
-            "profile": "ground_station",
+            "profile": "ground-station",
             "paired_drone": {
                 "device_id": Value::Null,
                 "key_fingerprint": Value::Null,
@@ -1684,7 +1693,12 @@ mod tests {
         for k in want_keys {
             assert!(obj.contains_key(k), "missing key {k}");
         }
-        assert_eq!(body["profile"], json!("ground_station"));
+        assert_eq!(
+            body["profile"],
+            json!("ground-station"),
+            "one spelling of the profile enum across the wire: the hyphen form \
+             every other producer and the relay-proxy gate use"
+        );
         assert_eq!(body["paired_drone"]["device_id"], Value::Null);
         assert_eq!(body["paired_drone"]["key_fingerprint"], Value::Null);
         assert_eq!(body["gcs"], json!({"clients": [], "pic_id": null}));

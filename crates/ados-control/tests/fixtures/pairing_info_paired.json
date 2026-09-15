@@ -5,7 +5,7 @@
   "fc_baud": null,
   "fc_connected": false,
   "fc_port": null,
-  "mdns_host": "ados-abcdef.local",
+  "mdns_host": "skynode.local",
   "name": "test-drone",
   "owner_id": "user-42",
   "paired": true,

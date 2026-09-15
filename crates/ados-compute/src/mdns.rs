@@ -67,27 +67,24 @@ fn advert_fields(node_id: &str, job_api_port: u16) -> (String, Vec<(String, Stri
     (instance, txt)
 }
 
-/// Best-effort cross-platform hostname (the SRV target). Linux exposes it as a
-/// file; elsewhere fall back to the `hostname` command, then a stable default.
-/// Public so the daemon can derive an artifact URL host that matches the mDNS
-/// `.local` target this advert uses.
-pub fn system_hostname() -> String {
-    std::fs::read_to_string("/proc/sys/kernel/hostname")
-        .ok()
-        .or_else(|| {
-            std::process::Command::new("hostname")
-                .output()
-                .ok()
-                .and_then(|o| String::from_utf8(o.stdout).ok())
-        })
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "ados".to_string())
+/// The SRV target for this node's advert: the resolvable `.local` name, or
+/// `None` when this host has no hostname another machine could dial.
+///
+/// One rule, shared with every other surface that hands out a reach
+/// ([`ados_protocol::reach`]) — a name is advertised only when it resolves,
+/// and `localhost` yields no reach rather than `localhost.local`. Public so
+/// the daemon derives an artifact URL host that matches the mDNS target this
+/// advert uses.
+pub fn advert_hostname() -> Option<String> {
+    ados_protocol::reach::mdns_hostname()
 }
 
 /// Advertise this compute node on `_ados._tcp` so the GCS Add-a-Node card
-/// discovers it for LAN pairing. Returns `None` when mDNS is unavailable; the
-/// caller treats that as "no auto-discovery", not a fatal error.
+/// discovers it for LAN pairing. Returns `None` when mDNS is unavailable or
+/// when this host has no resolvable hostname to name as the SRV target; the
+/// caller treats either as "no auto-discovery", not a fatal error.
+/// Advertising a name that resolves nowhere is worse than advertising nothing
+/// — the GCS stores it as the node's reach and then cannot dial it.
 pub fn advertise_compute(node_id: &str, job_api_port: u16) -> Option<ComputeAdvert> {
     let daemon = match ServiceDaemon::new() {
         Ok(d) => d,
@@ -96,8 +93,12 @@ pub fn advertise_compute(node_id: &str, job_api_port: u16) -> Option<ComputeAdve
             return None;
         }
     };
-    let hostname = system_hostname();
-    let server = format!("{hostname}.local.");
+    let Some(hostname) = advert_hostname() else {
+        tracing::warn!("compute_mdns_skipped_no_resolvable_hostname");
+        let _ = daemon.shutdown();
+        return None;
+    };
+    let server = format!("{hostname}.");
     let (instance, txt) = advert_fields(node_id, job_api_port);
     let txt_refs: Vec<(&str, &str)> = txt.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
 
@@ -241,11 +242,6 @@ mod tests {
         assert_eq!(get("path"), Some("/api/pairing"));
         assert_eq!(get("jobApi"), Some("8092"));
         assert_eq!(get("deviceId"), Some("node-abcdef0123456789"));
-    }
-
-    #[test]
-    fn hostname_is_never_empty() {
-        assert!(!system_hostname().is_empty());
     }
 
     #[tokio::test]

@@ -164,7 +164,10 @@ async def test_register_uses_configured_port_and_service_type(
         device_id=_DEVICE_ID, port=9090, name="bench", version="1.2.3", board="rpi4b"
     )
 
-    with patch.object(svc, "_get_local_ip", return_value="192.168.1.10"):
+    with (
+        patch.object(svc, "_get_local_ip", return_value="192.168.1.10"),
+        patch("ados.services.discovery.socket.gethostname", return_value="drone-rig"),
+    ):
         await svc.register(paired=False, code="654321", profile="drone")
 
     assert info_class.call_count == 1
@@ -173,7 +176,13 @@ async def test_register_uses_configured_port_and_service_type(
     assert args[1] == f"ADOS-{_EXPECTED_SHORT}.{SERVICE_TYPE}"
     assert kwargs["port"] == 9090
     assert kwargs["addresses"] == [socket.inet_aton("192.168.1.10")]
-    assert kwargs["server"] == f"ados-{_EXPECTED_SHORT}.local."
+    # `server` must be the RESOLVABLE system hostname, never a name derived
+    # from the device id: publishing a service record with an invented
+    # `server=` does not create a matching A/AAAA record, so the operator is
+    # handed an address that does not resolve. The service INSTANCE name still
+    # carries the short device id, which is what makes two nodes on one LAN
+    # distinguishable.
+    assert kwargs["server"] == "drone-rig.local."
 
     # TXT records carry the pair code and profile.
     properties = kwargs["properties"]

@@ -112,11 +112,7 @@ pub async fn handle(
         )
         .await
     {
-        Ok(resp) => {
-            let status =
-                StatusCode::from_u16(resp.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            (status, Body::from(resp.body)).into_response()
-        }
+        Ok(resp) => relayed_response(resp),
         Err(e) => {
             // Without this the lane's only witness is the one HTTP caller that
             // happened to be waiting; a failing radio left no trace anywhere.
@@ -157,6 +153,40 @@ pub async fn handle(
     }
 }
 
+/// Project a completed relay call onto the HTTP response this route returns:
+/// the drone's status, its body, and the headers that crossed with it.
+///
+/// The headers are the point. The route used to return a bare
+/// `(StatusCode, Body)` tuple, which sets no headers at all, so every relayed
+/// response arrived untyped — a log artifact, a CSV export, a `text/plain`
+/// error and the WHEP `Location` that routes session teardown back through the
+/// proxy were each delivered as a body a strict consumer refuses or a browser
+/// renders as a download. The drone allow-lists what it sends
+/// (`aux_rpc_handler::FORWARDED_RESPONSE_HEADERS`), so this replays that set
+/// verbatim and adds nothing of its own.
+fn relayed_response(resp: ados_protocol::aux_rpc_proxy::RpcResponseOwned) -> Response {
+    let status = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let mut builder = Response::builder().status(status);
+    for (name, value) in &resp.headers {
+        match (
+            axum::http::HeaderName::from_bytes(name.as_bytes()),
+            axum::http::HeaderValue::from_str(value),
+        ) {
+            (Ok(name), Ok(value)) => builder = builder.header(name, value),
+            // A name or value the radio damaged into something the HTTP layer
+            // refuses. Drop that one header and keep the body: a missing
+            // content-type degrades, a failed response does not.
+            _ => tracing::warn!(
+                header = %name,
+                "relay_proxy_dropped_malformed_response_header"
+            ),
+        }
+    }
+    builder
+        .body(Body::from(resp.body))
+        .unwrap_or_else(|_| (status, Body::empty()).into_response())
+}
+
 fn is_ground_station(state: &AppState) -> bool {
     let cfg = crate::config::PairingConfig::load_from(&state.pairing_paths.config);
     let (profile, _role) = crate::profile::current_profile_and_role_at(
@@ -182,7 +212,87 @@ fn path_is_safe(path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::path_is_safe;
+    use super::{relayed_response, path_is_safe};
+    use ados_protocol::aux_rpc_proxy::RpcResponseOwned;
+
+    fn relayed(status: u16, headers: &[(&str, &str)], body: &[u8]) -> axum::response::Response {
+        relayed_response(RpcResponseOwned {
+            status,
+            body: body.to_vec(),
+            headers: headers
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        })
+    }
+
+    #[test]
+    fn a_relayed_bodys_content_type_survives_the_proxy() {
+        let resp = relayed(
+            200,
+            &[("content-type", "application/octet-stream")],
+            b"\x00\x01\x02",
+        );
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .map(|v| v.to_str().unwrap()),
+            Some("application/octet-stream"),
+            "a relayed body must arrive with the type the drone gave it"
+        );
+    }
+
+    #[test]
+    fn a_whep_location_and_a_download_filename_cross_too() {
+        // The two headers whose absence silently broke a whole feature: WHEP
+        // session teardown routes through `Location`, and an artifact download
+        // is named by `Content-Disposition`.
+        let resp = relayed(
+            201,
+            &[
+                ("location", "/whep/session/abc123"),
+                (
+                    "content-disposition",
+                    "attachment; filename=\"flight.ndjson\"",
+                ),
+            ],
+            b"",
+        );
+        assert_eq!(resp.status(), axum::http::StatusCode::CREATED);
+        assert_eq!(
+            resp.headers().get("location").unwrap(),
+            "/whep/session/abc123"
+        );
+        assert_eq!(
+            resp.headers().get("content-disposition").unwrap(),
+            "attachment; filename=\"flight.ndjson\""
+        );
+    }
+
+    #[test]
+    fn a_header_the_radio_damaged_is_dropped_and_the_body_still_arrives() {
+        // A corrupt header must never cost the answer. An embedded newline is
+        // the case that matters: an HTTP layer that accepted it would be
+        // response-splitting.
+        let resp = relayed(
+            200,
+            &[("content-type", "text/plain\r\nX-Injected: 1")],
+            b"still here",
+        );
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        assert!(resp.headers().get("x-injected").is_none());
+        assert!(resp.headers().get(axum::http::header::CONTENT_TYPE).is_none());
+    }
+
+    #[test]
+    fn a_drone_that_sent_no_headers_still_yields_its_status_and_body() {
+        // The compatibility case: an agent older than the header block reports
+        // an empty list, and the route must behave exactly as it always did.
+        let resp = relayed(404, &[], br#"{"detail":"Not Found"}"#);
+        assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
+        assert!(resp.headers().get(axum::http::header::CONTENT_TYPE).is_none());
+    }
 
     #[test]
     fn an_ordinary_path_with_a_query_string_is_forwarded() {

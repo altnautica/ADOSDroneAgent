@@ -21,7 +21,6 @@ import { HomeRoute } from "@/routes/home";
 import { IndexRedirect } from "@/routes/index-redirect";
 import { IoRoute } from "@/routes/io-route";
 import { LogsRoute } from "@/routes/logs-route";
-import { OtaRoute } from "@/routes/ota-route";
 import { PairingRoute } from "@/routes/pairing-route";
 import { PeripheralsRoute } from "@/routes/peripherals-route";
 import { AdvancedSettings } from "@/routes/settings/advanced-settings";
@@ -111,7 +110,6 @@ export function App() {
                 />
                 <Route path="/plugins" element={<PluginsRoute />} />
                 <Route path="/peripherals" element={<PeripheralsRoute />} />
-                <Route path="/ota" element={<OtaRoute />} />
                 <Route path="/logs" element={<LogsRoute />} />
                 <Route path="/diagnostics" element={<DiagnosticsRoute />} />
                 <Route

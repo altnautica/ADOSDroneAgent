@@ -70,9 +70,20 @@ pub fn advertise_receiver(
             return None;
         }
     };
-    let hostname = system_hostname();
+    // The SRV target goes through the one shared reach rule. A record is only
+    // useful if its name resolves, and `localhost` must not become
+    // `localhost.local.`. The instance name falls back to the mesh IP, which
+    // is unique per node on this fabric, so a node with no hostname still
+    // advertises — the resolver dials the attached address, not the name.
+    let reach = ados_protocol::reach::mdns_hostname();
+    let hostname = reach
+        .clone()
+        .unwrap_or_else(|| format!("ados-{}", mesh_ip.to_string().replace('.', "-")));
     let ty = normalise_service_type(service_type);
-    let server = format!("{hostname}.local.");
+    let server = match reach {
+        Some(name) => format!("{name}."),
+        None => format!("{hostname}.local."),
+    };
     // `ServiceInfo::new` accepts an `IpAddr` (not a bare `Ipv4Addr`) for the
     // address argument; wrap the resolved mesh IPv4 accordingly.
     let info = match ServiceInfo::new(
@@ -268,16 +279,6 @@ fn normalise_service_type(service_type: &str) -> String {
     } else {
         format!("{trimmed}.local.")
     }
-}
-
-/// Best-effort hostname for the advertised instance name.
-#[cfg(target_os = "linux")]
-fn system_hostname() -> String {
-    std::fs::read_to_string("/proc/sys/kernel/hostname")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "ados".to_string())
 }
 
 /// Parse the first IPv4 address bound to `iface` out of `ip -4 addr show dev`.

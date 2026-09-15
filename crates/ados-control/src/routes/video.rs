@@ -2,12 +2,16 @@
 //!
 //! Two read-only routes the GCS Video Link panel + the LCD page poll:
 //!
-//! - **`GET /api/video/latency`** — the most-recent SEI-probe glass-to-glass
-//!   latency. Reads the durable store first (the store's sidecar tailer samples the
-//!   same `lcd-latency.json` the local tap writes into a `video.latency.*` metric
-//!   series + a `video.latency_source` event), falling back to a live read of
+//! - **`GET /api/video/latency`** — the most-recent SEI-probe latency, or an
+//!   explicit statement that there is no current one. Reads the durable store
+//!   first (the store's sidecar tailer samples the same `lcd-latency.json` the
+//!   local tap writes into a `video.latency.*` metric series + a
+//!   `video.latency_source` event), falling back to a live read of
 //!   `lcd-latency.json` when the store is unreachable or the probe has produced
-//!   nothing. Degrades to `{"latency_ms": null, "source": "unavailable"}`.
+//!   nothing. BOTH paths are freshness-gated on the same window: a sample or a
+//!   file older than it reports `{"latency_ms": null, "source": "stale"}` with
+//!   the age, never the last number the probe happened to produce. An absent
+//!   file reports `{"latency_ms": null, "source": "unavailable"}`.
 //! - **`GET /api/video/config`** — the composite encoder + radio config snapshot.
 //!   The static radio/encoder blocks come from `/etc/ados/config.yaml`; the dynamic
 //!   `adaptive` / `hopping` / `link` blocks come from the sidecars the wfb-side
@@ -85,7 +89,7 @@ fn build_adaptive_block(available: bool, stats: Option<&Map<String, Value>>) -> 
 /// healthy-looking dead link Rule 44 forbids — the same reasoning the `link`
 /// block already documents for its own counters.
 fn read_stats_if_fresh(path: &Path) -> Option<Map<String, Value>> {
-    if stats_age_seconds(path).is_some_and(|age| age <= LINK_STALE_AFTER_S) {
+    if sidecar_age_seconds(path).is_some_and(|age| age <= LINK_STALE_AFTER_S) {
         read_state_file(path)
     } else {
         None
@@ -134,12 +138,12 @@ fn read_state_file(path: &Path) -> Option<Map<String, Value>> {
 // GET /api/video/latency
 // ===========================================================================
 
-/// `GET /api/video/latency` → the most-recent SEI-probe glass-to-glass latency.
+/// `GET /api/video/latency` → the most-recent SEI-probe latency, or an explicit
+/// statement that there is no current one.
 ///
 /// Reads the store first; falls back to the live `lcd-latency.json` read when the
-/// store is unreachable or the SEI probe has produced no samples, so the route
-/// degrades to the same `{latency_ms: None, source: ...}` shape it always did.
-/// Guaranteed 200.
+/// store is unreachable, the SEI probe has produced no samples, or every sample
+/// in the store is older than [`LATENCY_STALE_AFTER_S`]. Guaranteed 200.
 pub async fn get_video_latency(State(state): State<AppState>) -> Json<Value> {
     if let Some(derived) = latest_video_latency(&state).await {
         return Json(derived);
@@ -160,11 +164,17 @@ const LATENCY_METRICS: [(&str, &str); 3] = [
 /// Maps the `video.latency.*` metrics back to the route keys and reads the `source` off
 /// the latest `video.latency_source` event, falling back to `"sei"` when that event is
 /// not in the window. Returns `None` when neither the glass-to-glass sample nor the
-/// sample count is present (the SEI probe is disabled or has produced nothing), so the
-/// route degrades to the live read.
+/// sample count is present WITHIN [`LATENCY_STALE_AFTER_S`] (the SEI probe is
+/// disabled, has produced nothing, or stopped producing), so the route degrades to
+/// the live read — which reports `stale` or `unavailable` rather than a number.
+///
+/// The freshness argument is the same one the live read makes, and it has to be
+/// made here too: the store query is a row-count page, not a time window, so the
+/// last sample the probe ever recorded stays inside it for as long as the box is
+/// quiet enough not to push it out.
 async fn latest_video_latency(state: &AppState) -> Option<Value> {
     let names: Vec<&str> = LATENCY_METRICS.iter().map(|(m, _)| *m).collect();
-    let metrics = latest_metrics(state, &names).await;
+    let metrics = latest_metrics(state, &names, LATENCY_STALE_AFTER_S).await;
     let glass = metric_value(metrics.as_ref(), "video.latency.glass_ms");
     let samples = metric_value(metrics.as_ref(), "video.latency.samples");
     if glass.is_none() && samples.is_none() {
@@ -190,15 +200,58 @@ fn read_latency_live() -> Value {
     project_latency_live(&lcd_latency_path())
 }
 
+/// Beyond this age the `lcd-latency.json` snapshot can no longer describe the
+/// pipeline NOW, so the route reports it as stale rather than as a reading.
+///
+/// The producing tap rewrites the file once per second, and only on a poll where
+/// it actually parsed a new SEI marker (`_PERSIST_INTERVAL_S = 1.0` in
+/// `src/ados/services/video/sei_tap.py`), so a probe that is genuinely in the
+/// byte path refreshes it ten times inside this window while a probe that has
+/// been switched off stops refreshing it immediately. 10 s is the same budget the
+/// durable store's sidecar tailer already applies to this exact file
+/// (`DEFAULT_STALENESS` in `crates/ados-logd/src/taps/sidecar.rs`) and the same
+/// ceiling [`LINK_STALE_AFTER_S`] applies to `wfb-stats.json`, so the store path,
+/// the live path and the link block all flip at one moment instead of three.
+const LATENCY_STALE_AFTER_S: f64 = 10.0;
+
 /// Project a latency state file into the route body.
 ///
-/// Reads `lcd-latency.json` when present, projecting the latency fields, and
-/// returns `{latency_ms: None, source: "unavailable"}` when the file is absent,
-/// `{..., source: "read_failed"}` on a read/parse error, and `{..., source:
-/// "unexpected_shape"}` for a well-formed-but-non-object body.
+/// Reads `lcd-latency.json` when present, fresh, and actually a latency
+/// snapshot. The degraded shapes, all `latency_ms: null`, are distinguished by
+/// `source` so a consumer learns which one it hit: `"unavailable"` (no file —
+/// the probe never ran), `"stale"` (a file older than
+/// [`LATENCY_STALE_AFTER_S`], carrying its `age_s` — the probe ran and stopped),
+/// `"read_failed"` (read/parse error) and `"unexpected_shape"` (a well-formed
+/// body that is not a latency snapshot).
+///
+/// The stale branch is the load-bearing one. Nothing deletes this file when the
+/// SEI probe is disabled or `ados-video` restarts without it, so an ungated read
+/// kept serving the last number the probe ever produced as a current one — a
+/// surface reporting a known-false value, and one an operator could only
+/// disprove by going to the box and running `pgrep -af sei_injector`.
+///
+/// `unexpected_shape` covers one live collision, not just a malformed file: on a
+/// node with an SPI LCD, `ados-display` writes its own framebuffer-writer stats
+/// (`writes` / `drops` / `skipped_duplicates` / `last_write_ms`) to this same
+/// path at 1 Hz. That body is fresh, well-formed, and carries no latency
+/// reading, so keying the `"sei"` default on the mere absence of a `source`
+/// field labelled it an SEI measurement. The presence of a `latency_ms` KEY is
+/// what makes a body a latency snapshot — `latency_ms: null` is a running probe
+/// with no sample yet, and that still reads as `"sei"`.
 fn project_latency_live(path: &Path) -> Value {
-    if !path.is_file() {
+    let Some(age_s) = sidecar_age_seconds(path) else {
+        // Absent, or an mtime this host cannot read: either way there is no
+        // reading whose freshness can be established.
         return json!({"latency_ms": null, "source": "unavailable"});
+    };
+    if age_s > LATENCY_STALE_AFTER_S {
+        return json!({
+            "latency_ms": null,
+            "ewma_ms": null,
+            "samples": null,
+            "source": "stale",
+            "age_s": (age_s * 10.0).round() / 10.0,
+        });
     }
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
@@ -208,7 +261,7 @@ fn project_latency_live(path: &Path) -> Value {
         Ok(v) => v,
         Err(_) => return json!({"latency_ms": null, "source": "read_failed"}),
     };
-    let Some(map) = blob.as_object() else {
+    let Some(map) = blob.as_object().filter(|m| m.contains_key("latency_ms")) else {
         return json!({"latency_ms": null, "source": "unexpected_shape"});
     };
     // `ewma_ms` prefers `latency_ewma_ms`, then `ewma_ms`. `source` defaults "sei".
@@ -314,12 +367,12 @@ pub async fn get_video_config() -> Json<Value> {
 /// `/api/wfb` uses to flip its `state` to `"stale"`.
 const LINK_STALE_AFTER_S: f64 = 10.0;
 
-/// Age of the stats snapshot in seconds, or `None` when the file is absent or its
-/// mtime is unreadable. Drives the staleness gate on the received-side verdict.
-fn stats_age_seconds(stats_path: &Path) -> Option<f64> {
-    let mtime = std::fs::metadata(stats_path)
-        .and_then(|m| m.modified())
-        .ok()?;
+/// Age of a sidecar snapshot in seconds, or `None` when the file is absent or its
+/// mtime is unreadable. Drives every staleness gate in this module: the link
+/// block's received-side verdict, the adaptive block's controller state, and the
+/// latency route's live read.
+fn sidecar_age_seconds(path: &Path) -> Option<f64> {
+    let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
     // A clock that moved backwards yields an Err elapsed; treat that as fresh
     // rather than inventing an age, the same way the status route does.
     Some(mtime.elapsed().map(|d| d.as_secs_f64()).unwrap_or(0.0))
@@ -430,7 +483,7 @@ fn link_snapshot(config_channel: i64, stats_path: &Path) -> Value {
         // holding a stale advancing `tx_bytes_per_s` or a stale `channel_locked`
         // renders a dead link as if live (operating rule 44). `channel` stays null
         // when stale too and falls back to the configured value below.
-        let fresh = stats_age_seconds(stats_path).is_some_and(|age| age <= LINK_STALE_AFTER_S);
+        let fresh = sidecar_age_seconds(stats_path).is_some_and(|age| age <= LINK_STALE_AFTER_S);
         if fresh {
             for f in FIELDS {
                 if let Some(v) = status.get(f) {
@@ -611,29 +664,74 @@ impl VideoConfig {
 // ---------------------------------------------------------------------------
 
 /// The newest value (as a JSON value) per named metric from a recent `metrics`
-/// page, newest-wins. Returns `None` when the store is unreachable OR when none of
-/// the named metrics is in the window; a name not seen is simply absent from a
-/// non-empty map. Mirrors the Python `latest_metrics`, whose `return out or None`
-/// collapses an empty result to `None` — the latency route relies on that `None`
-/// to fall through to its live file read rather than reporting a snapshot of nulls
-/// as a real measurement.
-async fn latest_metrics(state: &AppState, names: &[&str]) -> Option<Map<String, Value>> {
+/// page, newest-wins, dropping any sample older than `max_age_s`. Returns `None`
+/// when the store is unreachable OR when none of the named metrics has a FRESH
+/// sample in the page; a name not seen is simply absent from a non-empty map.
+/// Mirrors the Python `latest_metrics`, whose `return out or None` collapses an
+/// empty result to `None` — the latency route relies on that `None` to fall
+/// through to its live file read rather than reporting a snapshot of nulls, or a
+/// frozen last-known reading, as a real measurement.
+async fn latest_metrics(
+    state: &AppState,
+    names: &[&str],
+    max_age_s: f64,
+) -> Option<Map<String, Value>> {
     let rows = logd_query_rows(state, "metrics", 200, None).await?;
+    // `out or None`: an empty map reads as "no data", matching the Python helper.
+    collapse_empty_metrics(fresh_metric_values(&rows, names, now_micros(), max_age_s))
+}
+
+/// Epoch microseconds now, the unit the store stamps its rows in (`ts_us`). A
+/// clock before the epoch reads as 0, which ages every row out rather than
+/// inventing freshness.
+fn now_micros() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as i64)
+        .unwrap_or(0)
+}
+
+/// Newest-wins value per named metric across a `metrics` page, keeping only
+/// samples stamped within `max_age_s` of `now_us`. Pure over the rows so the
+/// freshness rule is testable without a store.
+///
+/// Rows arrive newest-first (`ORDER BY ts_us DESC` in the store's query), so the
+/// first sighting of a name is its newest sample and later ones are ignored.
+///
+/// A row whose `ts_us` is absent or not an integer is DROPPED, not kept: a sample
+/// whose age cannot be established cannot be shown as current. That is the whole
+/// point of the gate — the alternative is the frozen-number-as-live-reading this
+/// route shipped with.
+fn fresh_metric_values(
+    rows: &[Value],
+    names: &[&str],
+    now_us: i64,
+    max_age_s: f64,
+) -> Map<String, Value> {
+    let max_age_us = (max_age_s * 1_000_000.0) as i64;
     let mut out: Map<String, Value> = Map::new();
     for row in rows {
         let Some(obj) = row.as_object() else { continue };
         let Some(metric) = obj.get("metric").and_then(Value::as_str) else {
             continue;
         };
-        if names.contains(&metric) && !out.contains_key(metric) {
-            out.insert(
-                metric.to_string(),
-                obj.get("value").cloned().unwrap_or(Value::Null),
-            );
+        if !names.contains(&metric) || out.contains_key(metric) {
+            continue;
         }
+        let Some(ts_us) = obj.get("ts_us").and_then(Value::as_i64) else {
+            continue;
+        };
+        // A row stamped in the future (a clock that stepped back after it was
+        // written) is not stale; only a row too far in the past is.
+        if now_us.saturating_sub(ts_us) > max_age_us {
+            continue;
+        }
+        out.insert(
+            metric.to_string(),
+            obj.get("value").cloned().unwrap_or(Value::Null),
+        );
     }
-    // `out or None`: an empty map reads as "no data", matching the Python helper.
-    collapse_empty_metrics(out)
+    out
 }
 
 /// Collapse an empty metric map to `None`, mirroring the Python helper's final
@@ -876,6 +974,157 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_sidecar_past_the_freshness_window_reads_stale_not_as_a_measurement() {
+        // The bug this closes: nothing deletes /run/ados/lcd-latency.json when the
+        // SEI probe is turned off and ados-video restarts, so the ungated read
+        // kept answering with the last number the probe ever wrote. A consumer
+        // polling at 1 Hz saw a plausible live figure for a pipeline that had no
+        // injector in its byte path at all, and the only way to disprove it was to
+        // SSH to the box and `pgrep -af sei_injector`.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lcd-latency.json");
+        let body = r#"{"latency_ms": 82.5, "latency_ewma_ms": 80.0, "samples": 30, "source": "sei"}"#;
+
+        // Inside the window the same bytes are a reading.
+        write_sidecar_aged(&path, body, 2);
+        let fresh = project_latency_live(&path);
+        assert_eq!(fresh["latency_ms"], json!(82.5));
+        assert_eq!(fresh["ewma_ms"], json!(80.0));
+        assert_eq!(fresh["source"], json!("sei"));
+
+        // Past it, every value reads null and the body SAYS it is stale (not
+        // "unavailable", which would claim the probe never ran) and how old it is.
+        write_sidecar_aged(&path, body, (LATENCY_STALE_AFTER_S as u64) + 5);
+        let stale = project_latency_live(&path);
+        assert_eq!(stale["latency_ms"], Value::Null);
+        assert_eq!(stale["ewma_ms"], Value::Null);
+        assert_eq!(stale["samples"], Value::Null);
+        assert_eq!(stale["source"], json!("stale"));
+        assert!(
+            stale["age_s"].as_f64().unwrap() >= LATENCY_STALE_AFTER_S,
+            "the stale body must carry the age that disqualified it: {stale}"
+        );
+    }
+
+    #[test]
+    fn the_latency_window_matches_the_other_two_gates_on_the_same_file() {
+        // Three surfaces gate on this data: the store's sidecar tailer stops
+        // sampling lcd-latency.json past its budget, this route's live read stops
+        // believing the file, and the sibling link block stops believing
+        // wfb-stats.json. Different windows would mean the store path and the file
+        // path disagree about whether there is a reading, which is the same
+        // healthy-looking-dead-surface failure with an extra step.
+        assert_eq!(LATENCY_STALE_AFTER_S, LINK_STALE_AFTER_S);
+        let tailer = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../ados-logd/src/taps/sidecar.rs")
+            .canonicalize()
+            .expect("the sidecar tailer must exist beside this crate");
+        let body = std::fs::read_to_string(&tailer).unwrap();
+        assert!(
+            body.contains(&format!(
+                "const DEFAULT_STALENESS: Duration = Duration::from_secs({});",
+                LATENCY_STALE_AFTER_S as u64
+            )),
+            "{} must apply the same {}s budget this route does",
+            tailer.display(),
+            LATENCY_STALE_AFTER_S as u64
+        );
+    }
+
+    #[test]
+    fn a_store_sample_past_the_window_is_dropped_so_the_route_falls_to_the_file() {
+        // The store query is a 200-row page, not a time window, so on a quiet box
+        // the last sample the probe ever recorded stays inside it indefinitely.
+        // Gating only the file read would have moved the stale number from one
+        // path to the other rather than removing it.
+        let now_us = 1_800_000_000_000_000_i64;
+        let names = ["video.latency.glass_ms", "video.latency.samples"];
+        let row = |metric: &str, value: f64, age_s: i64| {
+            json!({"metric": metric, "value": value, "ts_us": now_us - age_s * 1_000_000})
+        };
+
+        let fresh = fresh_metric_values(
+            &[
+                row("video.latency.glass_ms", 82.5, 1),
+                row("video.latency.samples", 30.0, 1),
+            ],
+            &names,
+            now_us,
+            LATENCY_STALE_AFTER_S,
+        );
+        assert_eq!(fresh.get("video.latency.glass_ms"), Some(&json!(82.5)));
+        assert!(collapse_empty_metrics(fresh).is_some());
+
+        let stale = fresh_metric_values(
+            &[
+                row("video.latency.glass_ms", 82.5, 120),
+                row("video.latency.samples", 30.0, 120),
+            ],
+            &names,
+            now_us,
+            LATENCY_STALE_AFTER_S,
+        );
+        assert!(stale.is_empty(), "a two-minute-old sample is not a reading");
+        assert_eq!(collapse_empty_metrics(stale), None);
+
+        // Newest-wins still holds inside the window: the page is ordered
+        // newest-first, so a fresh sample is not displaced by an older duplicate.
+        let mixed = fresh_metric_values(
+            &[
+                row("video.latency.glass_ms", 82.5, 1),
+                row("video.latency.glass_ms", 900.0, 5),
+            ],
+            &names,
+            now_us,
+            LATENCY_STALE_AFTER_S,
+        );
+        assert_eq!(mixed.get("video.latency.glass_ms"), Some(&json!(82.5)));
+
+        // A row whose age cannot be established is dropped, never shown as
+        // current.
+        let undatable = fresh_metric_values(
+            &[json!({"metric": "video.latency.glass_ms", "value": 82.5})],
+            &names,
+            now_us,
+            LATENCY_STALE_AFTER_S,
+        );
+        assert!(undatable.is_empty());
+    }
+
+    #[test]
+    fn the_display_services_framebuffer_stats_are_not_read_as_an_sei_measurement() {
+        // Two writers, one path: on an SPI-LCD node `ados-display` writes its
+        // framebuffer-writer stats to /run/ados/lcd-latency.json at 1 Hz. That
+        // body is fresh and well-formed and has no latency reading in it, so
+        // defaulting `source` to "sei" on the absence of a `source` field
+        // labelled a display counter blob an SEI measurement.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lcd-latency.json");
+        std::fs::write(
+            &path,
+            r#"{"writes": 100, "drops": 0, "skipped_duplicates": 3, "last_write_ms": 12.0}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            project_latency_live(&path),
+            json!({"latency_ms": null, "source": "unexpected_shape"})
+        );
+
+        // A running probe that has not produced a sample yet writes the key with
+        // a null value. That IS a latency snapshot and still reads as "sei" — the
+        // discrimination is on the key, not on the value.
+        std::fs::write(
+            &path,
+            r#"{"latency_ms": null, "latency_ewma_ms": null, "samples": 0, "source": "sei"}"#,
+        )
+        .unwrap();
+        let out = project_latency_live(&path);
+        assert_eq!(out["latency_ms"], Value::Null);
+        assert_eq!(out["source"], json!("sei"));
+        assert_eq!(out["samples"], json!(0));
+    }
+
     // ----- /api/video/config -----
 
     #[test]
@@ -1105,7 +1354,7 @@ mod tests {
             "session_packets",
         ];
 
-        write_stats_aged(&path, body, 2);
+        write_sidecar_aged(&path, body, 2);
         let fresh = link_snapshot(149, &path);
         assert_eq!(fresh["state"], json!("connected"));
         assert_eq!(fresh["link_state"], json!("connected"));
@@ -1118,7 +1367,7 @@ mod tests {
         assert_eq!(fresh["packets_bad"], json!(2));
         assert_eq!(fresh["session_packets"], json!(6398));
 
-        write_stats_aged(&path, body, 30);
+        write_sidecar_aged(&path, body, 30);
         let stale = link_snapshot(149, &path);
         for key in EXPLAINERS {
             assert_eq!(
@@ -1129,9 +1378,10 @@ mod tests {
         }
     }
 
-    /// Write a stats sidecar and back-date its mtime by `age_s` seconds, so the
-    /// staleness gate can be driven without sleeping.
-    fn write_stats_aged(path: &Path, body: &str, age_s: u64) {
+    /// Write a runtime sidecar and back-date its mtime by `age_s` seconds, so any
+    /// of this module's staleness gates can be driven without sleeping. Shared by
+    /// the `wfb-stats.json` gates and the `lcd-latency.json` one.
+    fn write_sidecar_aged(path: &Path, body: &str, age_s: u64) {
         std::fs::write(path, body).unwrap();
         if age_s > 0 {
             let when = std::time::SystemTime::now() - std::time::Duration::from_secs(age_s);
@@ -1155,7 +1405,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wfb-stats.json");
 
-        write_stats_aged(
+        write_sidecar_aged(
             &path,
             r#"{"rf_unverified": true, "channel_locked": false, "tx_bytes_per_s": 750000}"#,
             0,
@@ -1165,7 +1415,7 @@ mod tests {
         // Its other half rides the same block: injecting blind is not locked.
         assert_eq!(link["channel_locked"], json!(false));
 
-        write_stats_aged(
+        write_sidecar_aged(
             &path,
             r#"{"rf_unverified": false, "channel_locked": true}"#,
             0,
@@ -1180,15 +1430,15 @@ mod tests {
 
         // Absent from the snapshot (a sidecar written before the field existed):
         // unknown, never a confident false claiming the path was proven.
-        write_stats_aged(&path, r#"{"channel_locked": true}"#, 0);
+        write_sidecar_aged(&path, r#"{"channel_locked": true}"#, 0);
         assert_eq!(link_snapshot(149, &path)["rf_unverified"], Value::Null);
 
         // Present but not a boolean: a garbled body is no reading either.
-        write_stats_aged(&path, r#"{"rf_unverified": "yes"}"#, 0);
+        write_sidecar_aged(&path, r#"{"rf_unverified": "yes"}"#, 0);
         assert_eq!(link_snapshot(149, &path)["rf_unverified"], Value::Null);
 
         // An explicit JSON null is already no reading.
-        write_stats_aged(&path, r#"{"rf_unverified": null}"#, 0);
+        write_sidecar_aged(&path, r#"{"rf_unverified": null}"#, 0);
         assert_eq!(link_snapshot(149, &path)["rf_unverified"], Value::Null);
     }
 
@@ -1202,7 +1452,7 @@ mod tests {
         let path = dir.path().join("wfb-stats.json");
         let body = r#"{"rf_unverified": false, "channel_locked": true, "tx_bytes_per_s": 750000}"#;
 
-        write_stats_aged(&path, body, 30);
+        write_sidecar_aged(&path, body, 30);
         let stale = link_snapshot(149, &path);
         assert_eq!(stale["rf_unverified"], Value::Null);
         // The sibling liveness counters are gated on the SAME freshness window: a
@@ -1213,7 +1463,7 @@ mod tests {
 
         // The same body inside the ceiling reports the real verdict AND the live
         // counters.
-        write_stats_aged(&path, body, 2);
+        write_sidecar_aged(&path, body, 2);
         let fresh = link_snapshot(149, &path);
         assert_eq!(fresh["rf_unverified"], json!(false));
         assert_eq!(fresh["tx_bytes_per_s"], json!(750000));
@@ -1231,7 +1481,7 @@ mod tests {
             "channel_locked": true, "acquire_state": "locked", "channel": 165,
             "video_inbound_bytes_per_s": 900000, "rx_silent_seconds": 0.0}"#;
 
-        write_stats_aged(&path, body, 30);
+        write_sidecar_aged(&path, body, 30);
         let stale = link_snapshot(149, &path);
         for key in [
             "tx_bytes_per_s",
@@ -1248,7 +1498,7 @@ mod tests {
         assert_eq!(stale["channel"], json!(149));
 
         // Inside the ceiling the same body reports the live counters verbatim.
-        write_stats_aged(&path, body, 2);
+        write_sidecar_aged(&path, body, 2);
         let fresh = link_snapshot(149, &path);
         assert_eq!(fresh["tx_bytes_per_s"], json!(750000));
         assert_eq!(fresh["valid_rx_packets_per_s"], json!(42.5));

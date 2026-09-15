@@ -33,6 +33,31 @@ fn fixture(name: &str) -> Value {
     serde_json::from_str(&text).unwrap_or_else(|e| panic!("parse fixture {name}: {e}"))
 }
 
+/// `mdns_host` must be the name THIS host actually answers to, not a value
+/// frozen at capture time.
+///
+/// The field used to be `format!("ados-{device_id[:6]}.local")` — a name
+/// nothing publishes an A-record for, which the GCS then stored as the node's
+/// canonical reach and preferred over the IPv4 it had just proved. The fixture
+/// therefore pins the KEY and the SHAPE; the value is asserted against the one
+/// reach rule instead, because the correct answer differs per machine.
+fn assert_reach_name(got: &Value) {
+    let want = ados_protocol::reach::mdns_hostname().unwrap_or_default();
+    assert_eq!(
+        got,
+        &Value::String(want.clone()),
+        "mdns_host must be this host's resolvable reach name (or empty when it \
+         has none), never a constructed one"
+    );
+    if let Some(name) = got.as_str() {
+        assert!(
+            !name.starts_with("ados-") || name == want,
+            "a constructed `ados-<id>.local` resolves nowhere and must never be \
+             advertised as a reach"
+        );
+    }
+}
+
 /// A running server bound to temp sockets/port, with a stop trigger.
 struct Harness {
     socket: PathBuf,
@@ -1039,7 +1064,7 @@ async fn pairing_info_unpaired_matches_the_golden_shape() {
     // Static scalars the native surface CAN match byte-for-byte.
     assert_eq!(got["device_id"], want["device_id"]);
     assert_eq!(got["name"], want["name"]);
-    assert_eq!(got["mdns_host"], want["mdns_host"], "mdns_host format");
+    assert_reach_name(&got["mdns_host"]);
     assert_eq!(got["profile"], want["profile"]);
     assert_eq!(got["role"], want["role"]); // null for a drone
     assert_eq!(got["runtime_mode"], serde_json::json!("packaged"));
@@ -1218,7 +1243,7 @@ async fn pairing_claim_writes_pairing_json_like_the_pairing_manager() {
     assert_same_keys(&got, &want, "/api/pairing/claim");
     assert_eq!(got["device_id"], want["device_id"]);
     assert_eq!(got["name"], want["name"]);
-    assert_eq!(got["mdns_host"], want["mdns_host"]);
+    assert_reach_name(&got["mdns_host"]);
     // The pending key is preferred verbatim (the PairingManager contract).
     assert_eq!(got["api_key"], serde_json::json!("ados_PENDING"));
 

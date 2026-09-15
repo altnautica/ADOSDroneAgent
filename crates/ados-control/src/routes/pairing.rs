@@ -20,12 +20,17 @@
 //! - **`POST /api/pairing/unpair`** — clear pairing + mint a fresh code; 409 when
 //!   not paired. Gated by the auth middleware (it is not in the public set).
 //!
-//! The mDNS hostname is computed as `ados-{device_id[:6].lower()}.local`, the
-//! same format the FastAPI route falls back to. When a live discovery service is
-//! running, the FastAPI route may override `mdns_host` with the live mDNS
-//! hostname and update the mDNS TXT records on claim/unpair; the native surface
-//! has no in-process discovery reader, so it uses the computed format and does
-//! NOT touch mDNS. See the module note on `mdns_host` for that deliberate gap.
+//! `mdns_host` is the RESOLVABLE reach name — the system hostname avahi
+//! publishes (`<hostname>.local`, or the name verbatim when it already carries
+//! a domain), resolved through [`ados_protocol::reach::mdns_hostname`], the same
+//! rule `DiscoveryService.mdns_hostname` applies on the Python side. It is
+//! deliberately NOT a constructed `ados-<6hex>.local`: nothing publishes an
+//! A-record for that name, so a GCS that stores it as a node's canonical reach
+//! stores a name that resolves nowhere. A host with no usable hostname has no
+//! mDNS reach at all and the field is emitted as `""` rather than as a name this
+//! node cannot prove. The `_ados._tcp` advert this daemon publishes at boot
+//! (`crate::mdns`) uses the identical name as its SRV target, so the browse
+//! record and the probe response name one host.
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -65,8 +70,10 @@ pub async fn get_pairing_info(State(state): State<AppState>) -> Json<Value> {
         current_profile_and_role_at(&cfg.agent.profile, &paths.profile_conf, &paths.mesh_role);
     let radio_peer_device_id = cfg.radio_peer_device_id();
 
-    let short_id = short_device_id(&device_id);
-    let mdns_host = format!("ados-{short_id}.local");
+    // The name this host actually answers to. Empty when the host has no
+    // usable hostname: the GCS falls back to the IPv4 it just reached us on,
+    // which is a proven reach, where a constructed name is not.
+    let mdns_host = ados_protocol::reach::mdns_hostname().unwrap_or_default();
 
     // Cloud-pair state off pairing.json.
     let doc = PairingDoc::load(&paths.pairing_json);
@@ -210,17 +217,19 @@ pub async fn claim_pairing(
     let cfg = PairingConfig::load_from(&paths.config);
     let device_id = cfg.agent.device_id.clone();
     // The FastAPI claim emits `app.config.agent.name` RAW (no "ADOS Agent"
-    // fallback — that fallback is the /info route's, not the claim's), and builds
-    // mdns from `device_id[:6].lower()` with NO "unknown" fallback (again unlike
-    // /info). Mirror that exactly so the claim response is byte-identical.
+    // fallback — that fallback is the /info route's, not the claim's).
     let name = cfg.agent.name.clone();
-    let short_id: String = device_id.chars().take(6).collect::<String>().to_lowercase();
-    let mdns_host = format!("ados-{short_id}.local");
+    // The GCS persists this as the node's canonical reach and six consumers
+    // prefer it over the IPv4 they just proved. So it must be the name this
+    // host answers to, identical to the one `/api/pairing/info` reported and
+    // the one the `_ados._tcp` advert targets.
+    let mdns_host = ados_protocol::reach::mdns_hostname().unwrap_or_default();
 
-    // mDNS TXT update is deferred: the FastAPI claim updates the discovery
-    // service's TXT records here, but the native surface has no in-process
-    // discovery reader. The load-bearing pairing.json write is done; the TXT
-    // refresh is a deferred follow-up (see the module note).
+    // The `_ados._tcp` advert's `paired` TXT is refreshed by the same daemon
+    // that publishes it (`crate::mdns`), which re-reads pairing.json on a fixed
+    // cadence rather than being poked from here — a claim that lands while the
+    // advert thread is mid-publish must not be able to wedge the write path
+    // the operator is waiting on.
 
     (
         StatusCode::OK,
@@ -288,18 +297,6 @@ pub async fn unpair(State(state): State<AppState>) -> Response {
 }
 
 // --- helpers ---
-
-/// The truncated, lowercased device-id used in the mDNS hostname. Mirrors the
-/// FastAPI `device_id[:6].lower() or "unknown"`: an empty device id yields
-/// `"unknown"`.
-fn short_device_id(device_id: &str) -> String {
-    let short: String = device_id.chars().take(6).collect::<String>().to_lowercase();
-    if short.is_empty() {
-        "unknown".to_string()
-    } else {
-        short
-    }
-}
 
 /// Whether a role-appropriate WFB key file is present, the `radio_paired` signal.
 /// Mirrors `key_mgr.key_exists()` with no explicit role: either `tx.key` or
@@ -389,13 +386,6 @@ fn now_unix_seconds() -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn short_device_id_truncates_lowercases_and_defaults() {
-        assert_eq!(short_device_id("ABCDEF1234567890"), "abcdef");
-        assert_eq!(short_device_id("Ab12"), "ab12");
-        assert_eq!(short_device_id(""), "unknown");
-    }
 
     #[test]
     fn fc_triple_is_disconnected_with_nulls_when_the_snapshot_is_absent() {

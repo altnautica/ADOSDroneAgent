@@ -97,13 +97,19 @@ class DiscoveryService:
             txt_records = self._build_txt_records(paired, code, owner, profile, role)
             service_name = f"ADOS-{self._short_id}.{SERVICE_TYPE}"
 
+            # The SRV target must be a name that resolves. Publishing a record
+            # with `server="ados-<short_id>.local."` does not create a matching
+            # A-record — avahi publishes exactly one resolvable
+            # `<hostname>.local`, the system hostname — so a browser that
+            # follows the SRV name instead of the attached address gets a
+            # lookup failure. Use the same reach name `mdns_hostname` reports.
             self._info = AsyncServiceInfo(
                 SERVICE_TYPE,
                 service_name,
                 addresses=[socket.inet_aton(local_ip)],
                 port=self._port,
                 properties=txt_records,
-                server=f"ados-{self._short_id}.local.",
+                server=f"{self.mdns_hostname}.",
             )
 
             self._zeroconf = AsyncZeroconf(ip_version=IPVersion.V4Only)

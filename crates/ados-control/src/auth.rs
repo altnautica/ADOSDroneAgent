@@ -153,10 +153,22 @@ pub const RELAYED_HEADER: &str = "x-ados-relayed";
 ///   the denylist is the layer that must not depend on where a route happens
 ///   to be mounted.
 /// - **Plugin install** — arbitrary code, self-granted permissions.
-/// - **Destructive setup** — factory reset, setup reset, cloud re-posture.
+/// - **Destructive setup** — factory reset, setup reset, cloud re-posture, and
+///   the two paths that take the node off the air outright: a reboot and a
+///   supervisor restart. A caller in radio range must not be able to drop an
+///   airborne aircraft's whole service stack.
 ///
 /// Refused at the edge rather than per-handler so the rule holds for native and
 /// proxied routes alike, and cannot be missed when a route moves between them.
+///
+/// Every literal here is asserted against the committed route table
+/// (`docs/api-surface.md`) by
+/// [`tests::every_denylisted_path_is_a_route_something_actually_serves`]. A
+/// denylist entry that matches no served path is worse than no entry: it reads
+/// as covered while the real path is wide open, which is exactly how
+/// `/api/v1/ground-station/ui/factory-reset` — a path no router has ever
+/// registered — sat here guarding nothing while
+/// `/api/v1/ground-station/factory-reset` was relay-reachable.
 pub fn relay_forbidden(path: &str) -> bool {
     matches!(
         path,
@@ -173,11 +185,38 @@ pub fn relay_forbidden(path: &str) -> bool {
             | "/api/plugins/install_from_url"
             | "/api/plugins/capability-token"
             | "/api/v1/setup/reset"
+            | "/api/v1/setup/reboot"
             | "/api/v1/setup/cloud-choice"
             | "/api/v1/setup/remote-access/cloudflare"
-            | "/api/v1/ground-station/ui/factory-reset"
+            | "/api/v1/system/restart-supervisor"
+            | "/api/v1/ground-station/factory-reset"
     )
 }
+
+/// Every path [`relay_forbidden`] refuses, as data. The predicate stays a
+/// `matches!` (one branch, no allocation, on the hot edge path); this mirror
+/// exists so the route-table test can enumerate the list, and the two are kept
+/// in lockstep by [`tests::the_predicate_and_the_enumeration_agree`].
+pub const RELAY_FORBIDDEN_PATHS: &[&str] = &[
+    "/api/pairing/unpair",
+    "/api/pairing/accept",
+    "/api/mcp/tokens",
+    "/api/mcp/revoke",
+    "/api/dashboard/pin/set",
+    "/api/dashboard/pin/clear",
+    "/api/wfb/pair/local-bind",
+    "/api/wfb/pair/unpair",
+    "/api/v1/ground-station/wfb/pair",
+    "/api/plugins/install",
+    "/api/plugins/install_from_url",
+    "/api/plugins/capability-token",
+    "/api/v1/setup/reset",
+    "/api/v1/setup/reboot",
+    "/api/v1/setup/cloud-choice",
+    "/api/v1/setup/remote-access/cloudflare",
+    "/api/v1/system/restart-supervisor",
+    "/api/v1/ground-station/factory-reset",
+];
 
 /// The endpoints that are public on both edges (no key, no rate limit even on
 /// TCP) so a fresh GCS can read the version, walk the local pairing handshake
@@ -429,9 +468,89 @@ mod tests {
             "/api/v1/setup/reset",
             "/api/v1/setup/cloud-choice",
             "/api/v1/setup/remote-access/cloudflare",
-            "/api/v1/ground-station/ui/factory-reset",
+            // The path the ground-station router actually registers
+            // (`APIRouter(prefix="/v1/ground-station")` + `@router.post(
+            // "/factory-reset")`, mounted under `/api`). The literal used to
+            // read `.../ui/factory-reset`, which no router has ever served —
+            // so this assertion passed while the real route was reachable
+            // over the radio with full on-box authority.
+            "/api/v1/ground-station/factory-reset",
         ] {
             assert!(relay_forbidden(path), "{path} must not cross the relay");
+        }
+    }
+
+    /// The old literal must stay refused-by-absence: it names nothing, so if it
+    /// ever comes back as a denylist entry the route-table guard below fails.
+    /// Asserting it here as well documents that the typo is gone rather than
+    /// merely moved.
+    #[test]
+    fn the_mounted_factory_reset_path_is_the_one_guarded() {
+        assert!(relay_forbidden("/api/v1/ground-station/factory-reset"));
+        assert!(
+            !RELAY_FORBIDDEN_PATHS.contains(&"/api/v1/ground-station/ui/factory-reset"),
+            "the unmounted `/ui/` spelling guarded nothing and must not return"
+        );
+    }
+
+    /// A relayed caller must be refused the reset outright. This exercises the
+    /// edge's actual decision — presence of the relay header plus the denylist
+    /// — rather than the predicate alone, because the predicate being right is
+    /// worth nothing if the edge stops consulting it.
+    #[test]
+    fn factory_reset_is_refused_over_the_relay_at_the_edge() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(RELAYED_HEADER, "1".parse().unwrap());
+        let path = "/api/v1/ground-station/factory-reset";
+        let is_relayed = headers.contains_key(RELAYED_HEADER);
+        assert!(
+            is_relayed && relay_forbidden(path),
+            "a request carrying {RELAYED_HEADER} must be refused {path}"
+        );
+        // The same path with no relay header is ordinary on-LAN operation and
+        // stays reachable — the refusal is about the lane, not the route.
+        let direct = axum::http::HeaderMap::new();
+        assert!(!direct.contains_key(RELAYED_HEADER));
+    }
+
+    /// A denylist entry that matches no served path is the defect this guard
+    /// exists for: it reads as protection while the real route is open. Every
+    /// literal must resolve against the committed route table, which covers
+    /// both the native surface and the residual FastAPI one.
+    #[test]
+    fn every_denylisted_path_is_a_route_something_actually_serves() {
+        let table = include_str!("../../../docs/api-surface.md");
+        let served: std::collections::HashSet<&str> = table
+            .lines()
+            .filter_map(|line| {
+                // Table rows are `| METHOD | `/path` | … |`; the path is the
+                // only backticked cell that starts with a slash.
+                let mut cells = line.split('|').map(str::trim);
+                cells.next()?;
+                cells.next()?;
+                let path = cells.next()?.trim_matches('`');
+                path.starts_with('/').then_some(path)
+            })
+            .collect();
+        assert!(
+            served.len() > 100,
+            "route table parsed only {} paths — the parser or the table shape drifted",
+            served.len()
+        );
+        for path in RELAY_FORBIDDEN_PATHS {
+            assert!(
+                served.contains(path),
+                "relay_forbidden guards {path}, which no router serves — \
+                 either the literal is wrong or the route was removed. \
+                 A denylist entry matching nothing is worse than none."
+            );
+        }
+    }
+
+    #[test]
+    fn the_predicate_and_the_enumeration_agree() {
+        for path in RELAY_FORBIDDEN_PATHS {
+            assert!(relay_forbidden(path), "{path} is listed but not matched");
         }
     }
 

@@ -18,6 +18,7 @@ pub mod config;
 pub mod dashboard_pin;
 pub mod hw_local;
 pub mod ipc;
+pub mod mdns;
 pub mod mcp;
 pub mod pairing_store;
 pub mod param_store;
@@ -265,10 +266,43 @@ fn sd_watchdog() {
 #[cfg(not(target_os = "linux"))]
 fn sd_watchdog() {}
 
-/// Run the daemon to completion: bind both listeners, serve the shared Router on
-/// each, wait for `SIGTERM`/`SIGINT`, shut down cleanly. The production entry.
+/// Run the daemon to completion: publish the node's `_ados._tcp` record, bind
+/// both listeners, serve the shared Router on each, wait for `SIGTERM`/
+/// `SIGINT`, shut down cleanly. The production entry.
+///
+/// The mDNS advert lives here rather than inside [`run_with_paths`] because it
+/// is a property of the PROCESS, not of the lifecycle: one real node publishes
+/// one record on the host's multicast group, while `run_with_paths` is the
+/// parameterized form a test drives dozens of times concurrently against temp
+/// sockets. A record is published only by a daemon that will actually answer
+/// `/api/pairing/*` on the advertised port, and it is withdrawn before the
+/// process exits.
 pub async fn run_daemon() -> Result<()> {
-    run_with_paths(DaemonPaths::default(), shutdown_signal()).await
+    let paths = DaemonPaths::default();
+    // `_ados._tcp`, on EVERY profile. The GCS Add-a-Node card browses this
+    // service and probes whatever answers; without it a fresh drone or ground
+    // station never appears in the discovered list and the operator has to
+    // know and type a hostname. The SRV target is the same resolvable name
+    // `/api/pairing/info` reports as `mdns_host`.
+    let advert = crate::mdns::advertise(
+        &crate::state::PairingPaths {
+            config: paths.config_path.clone(),
+            pairing_json: paths.pairing_path.clone(),
+            wfb_key_dir: paths.wfb_key_dir.clone(),
+            bind_state: paths.bind_state_path.clone(),
+            profile_conf: paths.profile_conf_path.clone(),
+            mesh_role: paths.mesh_role_path.clone(),
+        },
+        paths.board_path.clone(),
+        paths.control_tcp_port,
+    );
+    let result = run_with_paths(paths, shutdown_signal()).await;
+    // Withdraw before exiting, so a GCS browsing mid-shutdown does not list a
+    // node whose pairing front has already stopped answering.
+    if let Some(advert) = advert {
+        advert.shutdown();
+    }
+    result
 }
 
 /// The lifecycle, parameterized over the paths and the stop trigger so tests can
@@ -334,7 +368,7 @@ where
         mavlink_client,
         logd_client,
         paths.board_path.clone(),
-        pairing_paths,
+        pairing_paths.clone(),
         Arc::clone(&dashboard_pin),
         Arc::clone(&mcp_tokens),
     )

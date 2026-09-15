@@ -131,6 +131,12 @@ socket2 = { version = "0.5", features = ["all"] }
 # logging store has no merged snapshot (its collector is not running off-SBC), the
 # system + status routes read CPU/memory/disk/cores/board directly off this.
 sysinfo = { workspace = true }
+# The always-on `_ados._tcp` advert. The GCS Add-a-Node card browses this
+# service, so the process that answers `/api/pairing/*` is the one that must
+# publish it — a record pointing at a front that is not running is worse than
+# no record. Same version the compute + groundlink adverts use, so one mDNS
+# implementation ships on the box.
+mdns-sd = "0.13"
 
 [dev-dependencies]
 tempfile = "3"

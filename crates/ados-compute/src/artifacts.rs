@@ -182,20 +182,12 @@ fn split_host_port(bind: &str) -> (String, String) {
     }
 }
 
-/// An mDNS-resolvable host for `hostname`: the bare name gets a `.local` suffix
-/// (matching the mDNS SRV target the node advertises), a dotted name is used as-is.
-fn mdns_host(hostname: &str) -> String {
-    if hostname.contains('.') {
-        hostname.to_string()
-    } else {
-        format!("{hostname}.local")
-    }
-}
-
 /// Derive the public base URL the GCS uses to fetch artifacts. The explicit
-/// override wins; otherwise the base is built from the bind address, substituting
-/// the node hostname (mDNS `.local`) for an unspecified bind host so the URL is
-/// reachable off-box, and `127.0.0.1` when no hostname is available.
+/// override wins; otherwise the base is built from the bind address,
+/// substituting the node hostname — resolved through the one shared reach rule
+/// (`ados_protocol::reach::mdns_name_from`), so the artifact host is byte-for-byte
+/// the mDNS SRV target this node advertises — for an unspecified bind host,
+/// and `127.0.0.1` when the host has no name another machine could dial.
 pub fn derive_public_base(
     bind: &str,
     override_url: Option<&str>,
@@ -210,7 +202,7 @@ pub fn derive_public_base(
     let (host, port) = split_host_port(bind);
     let host = if is_unspecified_host(&host) {
         hostname
-            .map(mdns_host)
+            .map(ados_protocol::reach::mdns_name_from)
             .unwrap_or_else(|| "127.0.0.1".to_string())
     } else {
         host
