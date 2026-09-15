@@ -102,6 +102,13 @@ struct VideoStreamsSidecarDoc {
 /// Read + parse the video-streams sidecar, folding its per-leg list onto the
 /// heartbeat so a cloud-relayed multi-stream node's legs reach the GCS switcher.
 /// `None` when absent, unparseable, empty, or STALE.
+///
+/// Each leg's `whepUrl` is DERIVED here as the same-origin relative path the
+/// agent's media proxy actually serves (`/whep?camera=<id>`), never read from
+/// the sidecar and never an absolute `host:port`. The contract this replaces
+/// told the GCS to build `:8889/<id>/whep` against the node host: a port the
+/// agent does not proxy, unreachable off-LAN, mixed content under an HTTPS
+/// ground station, and bypassing the media-auth gate the cockpit relies on.
 fn read_video_streams_sidecar_from(
     path: &std::path::Path,
     now_ms: i64,
@@ -113,7 +120,15 @@ fn read_video_streams_sidecar_from(
         && now_ms.saturating_sub(gen_ms) <= VIDEO_STREAMS_STALE_MS
         && !doc.streams.is_empty()
     {
-        Some(doc.streams)
+        Some(
+            doc.streams
+                .into_iter()
+                .map(|mut leg| {
+                    leg.whep_url = Some(format!("/whep?camera={}", leg.id));
+                    leg
+                })
+                .collect(),
+        )
     } else {
         None
     }
@@ -759,6 +774,48 @@ mod tests {
             .write_all(body.to_string().as_bytes())
             .unwrap();
         path
+    }
+
+    #[test]
+    fn folded_video_legs_advertise_a_same_origin_whep_path_only() {
+        // VID-09: the GCS must never be handed an absolute `host:port` media
+        // endpoint. The agent proxies `/whep?camera=<id>` on its own :8080
+        // (behind the media-auth gate); `:8889/<id>/whep` is a name it does not
+        // serve, cannot resolve off-LAN, and is mixed content under an HTTPS
+        // ground station.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("video-streams.json");
+        let now_ms = 1_800_000_000_000_i64;
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "updated_at_unix": (now_ms as f64) / 1000.0,
+                "streams": [
+                    {"id": "main", "role": "eo", "codec": "h264", "live": true},
+                    {"id": "ir", "role": "ir", "codec": "h264"},
+                ],
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let legs = read_video_streams_sidecar_from(&path, now_ms).expect("fresh sidecar folds");
+        assert_eq!(
+            legs.iter()
+                .map(|l| l.whep_url.clone().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["/whep?camera=main", "/whep?camera=ir"],
+        );
+        // On the wire: the relative path under `whepUrl`, no port anywhere, and
+        // no `hlsUrl` (nothing consuming this payload can play HLS).
+        let wire = serde_json::to_value(&legs).unwrap();
+        let text = wire.to_string();
+        assert!(text.contains("\"whepUrl\":\"/whep?camera=main\""), "{text}");
+        assert!(!text.contains("8889"), "no advertised port: {text}");
+        assert!(!text.contains("hls"), "no unplayable reach: {text}");
+        // Liveness still rides through untouched.
+        assert_eq!(legs[0].live, Some(true));
+        assert_eq!(legs[1].live, None);
     }
 
     #[test]

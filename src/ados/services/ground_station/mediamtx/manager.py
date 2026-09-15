@@ -39,24 +39,24 @@ from __future__ import annotations
 import asyncio
 import shutil
 import signal
+import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
 
 import structlog
-import yaml
 
 from ados.core.config import load_config
 from ados.core.logging import configure_logging, get_logger
-from ados.services.video.mediamtx import MediamtxManager, _detect_lan_ips
+from ados.services.video.mediamtx import MediamtxManager
 
 from .ffmpeg_monitor import (
     FFMPEG_FIRST_OUTPUT_GRACE_SECONDS,
     FFMPEG_OUTPUT_STALL_SECONDS,
     drain_ffmpeg_stderr,
 )
-from .process_argv import build_ffmpeg_ingest_argv, build_mediamtx_yaml
+from .process_argv import build_ffmpeg_ingest_argv
 from .rtsp_config import (
     GROUND_INGEST_UDP_PORT,
     GROUND_RTP_PAYLOAD_TYPE,
@@ -68,6 +68,16 @@ from .rtsp_config import (
 from .tx_watchdog import monitor_ffmpeg, wfb_source_signal
 
 log = get_logger("ground_station.mediamtx")
+
+#: The native binary that renders every profile's mediamtx config. Installed at
+#: ``/opt/ados/bin/ados-groundlink`` on a ground station; resolved on ``PATH``
+#: first so a development checkout can run its own build.
+GROUNDLINK_BIN = "/opt/ados/bin/ados-groundlink"
+
+#: Wall-clock ceiling for the config render. It is a pure string render plus a
+#: routing-table lookup and a ``/sys/class/net`` walk, so anything approaching
+#: this is a wedged host rather than slow work.
+GENERATE_CONFIG_TIMEOUT_S = 15.0
 
 
 class MediamtxGsManager:
@@ -138,27 +148,26 @@ class MediamtxGsManager:
         return self._core.webrtc_port
 
     def generate_config(self) -> str:
-        """Write a ground-profile mediamtx YAML to a temp file.
+        """Render the ground-profile mediamtx YAML to a temp file.
 
-        Delegates to :func:`build_mediamtx_yaml` for the dict body and
-        owns only the disk write + side-file SDP refresh.
+        The DOCUMENT comes from the fleet's one mediamtx generator, the Rust
+        ``ados_video::mediamtx`` renderer, via
+        ``ados-groundlink --emit-mediamtx-config``. This method owns only the
+        disk write and the side-file SDP refresh.
+
+        Returns ``""`` when the renderer cannot be run or rejects the ports —
+        ``start()`` then fails loudly instead of starting mediamtx against a
+        stale or half-written config. There is deliberately no local fallback
+        generator: a second renderer is the defect this replaces.
         """
-        lan_ips = _detect_lan_ips()
-        log.info("ground_mediamtx_webrtc_hosts", hosts=lan_ips)
-
-        config = build_mediamtx_yaml(
-            api_port=self._core._api_port,
-            rtsp_port=self._core._rtsp_port,
-            webrtc_port=self._core._webrtc_port,
-            lan_ips=lan_ips,
-        )
+        rendered = self._render_config()
+        if rendered is None:
+            return ""
 
         config_dir = Path(tempfile.gettempdir()) / "ados"
         config_dir.mkdir(parents=True, exist_ok=True)
         config_path = config_dir / "mediamtx-gs.yml"
-
-        with open(config_path, "w") as f:
-            yaml.dump(config, f, default_flow_style=False)
+        config_path.write_text(rendered)
 
         self._config_path = str(config_path)
         # Piggyback onto the core manager's config state so its start()
@@ -190,6 +199,60 @@ class MediamtxGsManager:
             udp_ingest=self._udp_port,
         )
         return self._config_path
+
+    def _render_config(self) -> str | None:
+        """The ground mediamtx YAML, straight from the Rust generator.
+
+        ``None`` on any failure (binary absent, non-zero exit, empty output,
+        timeout), with the reason logged. The caller must not write a file in
+        that case: mediamtx rejects an unrecognised key outright, so a
+        half-formed document leaves the node with no media server at all, and a
+        local re-implementation is exactly the divergence this removes.
+        """
+        binary = shutil.which(GROUNDLINK_BIN) or (
+            GROUNDLINK_BIN if Path(GROUNDLINK_BIN).exists() else None
+        )
+        if not binary:
+            log.error(
+                "ground_mediamtx_generator_missing",
+                binary=GROUNDLINK_BIN,
+                msg="mediamtx config is rendered by ados-groundlink; install it",
+            )
+            return None
+        cmd = [
+            binary,
+            "--emit-mediamtx-config",
+            "--api-port",
+            str(self._core._api_port),
+            "--rtsp-port",
+            str(self._core._rtsp_port),
+            "--webrtc-port",
+            str(self._core._webrtc_port),
+        ]
+        try:
+            done = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=GENERATE_CONFIG_TIMEOUT_S,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            log.error("ground_mediamtx_generator_failed", error=str(exc))
+            return None
+        if done.returncode != 0 or not done.stdout.strip():
+            log.error(
+                "ground_mediamtx_generator_rejected",
+                returncode=done.returncode,
+                stderr=(done.stderr or "").strip()[:500],
+            )
+            return None
+        log.info(
+            "ground_mediamtx_config_rendered",
+            generator=binary,
+            bytes=len(done.stdout),
+        )
+        return done.stdout
 
     async def _start_ffmpeg_ingest(self) -> bool:
         """Spawn ffmpeg that reads RTP from UDP 5600 and publishes to mediamtx.
@@ -372,8 +435,16 @@ class MediamtxGsManager:
 
     async def start(self) -> bool:
         """Start mediamtx and the ffmpeg ingest."""
-        if not self._config_path:
-            self.generate_config()
+        if not self._config_path and not self.generate_config():
+            # No config, no media server. Reporting the failure here is what
+            # lets the service's restart loop retry the render (the generator
+            # binary can land mid-upgrade) instead of starting mediamtx against
+            # whatever happened to be on disk.
+            log.error(
+                "ground_mediamtx_config_unavailable",
+                msg="mediamtx not started; see the generator error above",
+            )
+            return False
 
         ok = await self._core.start()
         if not ok:

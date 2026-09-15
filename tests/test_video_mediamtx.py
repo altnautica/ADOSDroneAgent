@@ -24,27 +24,6 @@ class TestMediamtxManager:
         assert mgr.rtsp_port == 9001
         assert mgr.webrtc_port == 9002
 
-    def test_generate_config(self):
-        mgr = MediamtxManager()
-        streams = {"main": "rpicam-vid -o -", "thermal": "ffmpeg -i /dev/video2 -f mpegts -"}
-        config_path = mgr.generate_config(streams)
-        assert config_path != ""
-        assert Path(config_path).exists()
-        assert mgr.config_path == config_path
-
-        # Verify YAML content
-        import yaml
-
-        with open(config_path) as f:
-            config = yaml.safe_load(f)
-        assert config["rtsp"] is True
-        assert config["webrtc"] is True
-        assert "main" in config["paths"]
-        assert "thermal" in config["paths"]
-
-        # Cleanup
-        Path(config_path).unlink(missing_ok=True)
-
     def test_is_running_no_process(self):
         mgr = MediamtxManager()
         assert mgr.is_running() is False

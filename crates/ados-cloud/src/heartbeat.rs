@@ -485,10 +485,18 @@ pub struct HeartbeatPayload {
     pub video_local_decoder_fps: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub video_recording: Option<bool>,
-    /// Per-leg video streams (id/role/codec) a multi-stream node serves, folded
-    /// from the /run/ados/video-streams.json sidecar. Absent on a single-stream
-    /// node so the heartbeat stays byte-identical. The GCS resolves each leg's
-    /// `:8889/<id>/whep` URL against the node's reachable host.
+    /// Per-leg video streams a multi-stream node serves, folded from the
+    /// /run/ados/video-streams.json sidecar. Absent on a single-stream node so
+    /// the heartbeat stays byte-identical.
+    ///
+    /// Each entry carries the SAME-ORIGIN relative `whepUrl` the node actually
+    /// serves, so the GCS resolves it against the node's own reachable base URL
+    /// and the media plane keeps going through the agent's :8080 proxy (and its
+    /// `ados_session` media-auth gate). Never an absolute `host:port`: this
+    /// contract used to instruct the GCS to build `:8889/<id>/whep` against the
+    /// node host — a name the agent does not proxy, which an HTTPS ground
+    /// station rejects as mixed content, which cannot resolve off-LAN, and which
+    /// nothing in the agent proves reachable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub video_streams: Option<Vec<VideoStreamHb>>,
     /// The WFB peers a ground station relays (the drones a GCS paired only to
@@ -573,9 +581,12 @@ pub struct ConfigErrorEntry {
 }
 
 /// One advertised video leg on the heartbeat: its stable id (the mediamtx path
-/// and WHEP id), a logical role (eo, eo_wide, ir), and the codec. The GCS
-/// resolves each leg's WHEP URL (webrtc port 8889) against the node's reachable
-/// host. Keys are single words, so the casing is identical either way.
+/// and WHEP id), a logical role (eo, eo_wide, ir), the codec, and the
+/// same-origin relative URL the node serves that leg at.
+///
+/// Keys are single words, so the casing is identical either way, except
+/// `whep_url` → `whepUrl`, which is renamed explicitly to match the
+/// `RosterCamera.whep_url` shape the cockpit already consumes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VideoStreamHb {
     pub id: String,
@@ -584,9 +595,25 @@ pub struct VideoStreamHb {
     /// Per-leg liveness, deserialized straight from the sidecar's `live`:
     /// `Some(true)` the path is receiving, `Some(false)` a publisher leg is flat
     /// (degraded), absent = not sampled / an idle on-demand leg (unknown, not
-    /// dead — the GCS keeps it selectable). Absent on agents predating the field.
+    /// dead — the GCS keeps it selectable).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live: Option<bool>,
+    /// The leg's WHEP endpoint as a SAME-ORIGIN relative path
+    /// (`/whep?camera=<id>`), which is the form the agent's media proxy really
+    /// serves. Derived when the sidecar is folded, never read from it, so a
+    /// stale sidecar cannot pin an old URL shape.
+    ///
+    /// Deliberately no `hlsUrl` companion: the only consumer of this payload is
+    /// the cloud GCS, which has no HLS player, and advertising a reach nothing
+    /// can use is the same defect as the absolute port this field replaced. The
+    /// agent's own on-box cockpit gets `hls_url` from `/api/status/full`
+    /// instead.
+    #[serde(
+        rename = "whepUrl",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub whep_url: Option<String>,
 }
 
 /// One WFB peer a ground station reports it relays, folded from the

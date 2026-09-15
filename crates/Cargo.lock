@@ -301,6 +301,7 @@ dependencies = [
  "ados-protocol",
  "ados-radio",
  "ados-supervisor",
+ "ados-video",
  "anyhow",
  "axum",
  "base64",
@@ -335,8 +336,10 @@ dependencies = [
  "nix 0.29.0",
  "serde",
  "serde_json",
+ "serde_norway",
  "tempfile",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -604,6 +607,7 @@ name = "ados-supervisor"
 version = "0.1.0"
 dependencies = [
  "ados-config",
+ "ados-hal-probe",
  "ados-macpin",
  "ados-protocol",
  "anyhow",

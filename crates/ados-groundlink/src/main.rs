@@ -51,6 +51,16 @@ const RX_KEY: &str = ados_radio::paths::WFB_RX_KEY;
 /// to the card twelve times a minute.
 const UNPAIRED_SIDECAR_REFRESH: Duration = Duration::from_secs(20);
 
+/// Fixed retry between receive-plane attempts: adapter detect, the regulatory
+/// gate, the chain spawn and the generation restart all wait exactly this long.
+///
+/// Flat, with no ceiling and no attempt cap. The ladder this replaces doubled to
+/// a 30 s ceiling, so a ground station whose RTL adapter re-enumerated after a
+/// USB glitch — or whose regulatory gate transiently blocked — left the operator
+/// staring at a black video panel for up to half a minute after the hardware was
+/// already back.
+const RETRY_INTERVAL: Duration = Duration::from_secs(5);
+
 /// The run role the service dispatches on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Role {
@@ -134,8 +144,99 @@ fn init_logging() {
         .try_init();
 }
 
+/// Render the ground profile's `mediamtx.yml` on stdout and exit, when asked.
+///
+/// There is ONE mediamtx config generator for the whole fleet
+/// ([`ados_video::mediamtx::mediamtx_config_yaml`]), and this is how the ground
+/// station reaches it. The ground `mediamtx` process is still supervised by the
+/// Python `ados-mediamtx-gs` unit, which used to render its own YAML — a second
+/// generator that had silently drifted from the Rust one on `writeQueueSize`,
+/// `udpMaxPayloadSize`, the WebRTC handshake/STUN timeouts, the STUN list, the
+/// TCP ICE candidate and `rtspTransports`, with no gate able to see it. That
+/// unit now shells out to this subcommand for the document and owns only the
+/// disk write and the process lifecycle.
+///
+/// Ports are taken from the caller so the Python side stays the single owner of
+/// its port configuration; anything omitted falls back to the shared defaults.
+/// A parse failure exits non-zero with a message on stderr rather than emitting
+/// a half-formed config, because the caller writes whatever it gets straight
+/// into the file mediamtx is started with.
+///
+/// Returns `None` when the flag is absent, so the service continues normally.
+fn emit_mediamtx_config(args: &[String]) -> Option<i32> {
+    if !args.iter().any(|a| a == "--emit-mediamtx-config") {
+        return None;
+    }
+    let value_of = |name: &str| -> Option<&String> {
+        let mut it = args.iter();
+        while let Some(a) = it.next() {
+            if a == name {
+                return it.next();
+            }
+        }
+        None
+    };
+    let port = |name: &str, default: u16| -> Result<u16, String> {
+        match value_of(name) {
+            None => Ok(default),
+            Some(raw) => raw
+                .parse::<u16>()
+                .map_err(|e| format!("{name} {raw:?} is not a port: {e}")),
+        }
+    };
+    let ports = (
+        port("--api-port", ados_video::mediamtx::DEFAULT_API_PORT),
+        port("--rtsp-port", ados_video::mediamtx::DEFAULT_RTSP_PORT),
+        port("--webrtc-port", ados_video::mediamtx::DEFAULT_WEBRTC_PORT),
+        port("--hls-port", ados_video::mediamtx::DEFAULT_HLS_PORT),
+        port("--playback-port", ados_video::mediamtx::DEFAULT_PLAYBACK_PORT),
+    );
+    let (api, rtsp, webrtc, hls, playback) = match ports {
+        (Ok(a), Ok(r), Ok(w), Ok(h), Ok(p)) => (a, r, w, h, p),
+        (a, r, w, h, p) => {
+            let err = [a.err(), r.err(), w.err(), h.err(), p.err()]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join("; ");
+            eprintln!("ados-groundlink --emit-mediamtx-config: {err}");
+            return Some(2);
+        }
+    };
+
+    // The ground station publishes the radio-decoded stream into `main` from
+    // its ffmpeg ingest, so `main` is a publisher path exactly as on the air
+    // side. LAN IPs are advertised as WebRTC host-candidate hints.
+    let lan_ips = ados_video::mediamtx::detect_lan_ips();
+    let streams = [(
+        ados_video::mediamtx::MAIN_PATH.to_string(),
+        "publisher".to_string(),
+    )];
+    let yaml = ados_video::mediamtx::mediamtx_config_yaml(&ados_video::mediamtx::ConfigParams {
+        profile: ados_video::mediamtx::MediamtxProfile::Ground,
+        api_port: api,
+        rtsp_port: rtsp,
+        webrtc_port: webrtc,
+        hls_port: hls,
+        playback_port: playback,
+        lan_ips: &lan_ips,
+        streams: &streams,
+        recording: ados_video::mediamtx::RecordingParams::default(),
+    });
+    print!("{yaml}");
+    Some(0)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    // One-shot modes run BEFORE any logging is initialised: the fmt layer
+    // writes to stdout on a non-journald host, and stdout here is the emitted
+    // document.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(code) = emit_mediamtx_config(&args) {
+        std::process::exit(code);
+    }
+
     init_logging();
 
     // Publish this service's config-status sidecar so a malformed `ground_station:`
@@ -664,7 +765,6 @@ async fn receive_loop(
     // non-blocking, like the drone-side radio emitter.
     let ingest = ados_protocol::logd::emitter::IngestEmitter::new("ados-groundlink");
 
-    let mut backoff = 1.0_f64;
     // When the unpaired sidecar was last refreshed. The gate polls every 5 s so a
     // key landing is picked up promptly, but the sidecar only needs to stay
     // fresh, not be rewritten twelve times a minute on a flash card.
@@ -746,15 +846,13 @@ async fn receive_loop(
                     usb_degraded = adapter.usb_degraded,
                     "ground_wfb_adapter_no_injection"
                 );
-                tokio::time::sleep(Duration::from_secs(backoff as u64)).await;
-                backoff = (backoff * 2.0).min(30.0);
+                tokio::time::sleep(RETRY_INTERVAL).await;
                 continue;
             }
             None => {
                 manager.set_adapter(wfb_rx::GsAdapterInfo::default());
                 tracing::warn!("ground_no_wfb_adapter_found");
-                tokio::time::sleep(Duration::from_secs(backoff as u64)).await;
-                backoff = (backoff * 2.0).min(30.0);
+                tokio::time::sleep(RETRY_INTERVAL).await;
                 continue;
             }
         };
@@ -792,8 +890,7 @@ async fn receive_loop(
                 e.reason_code(),
                 Some(&ingest),
             );
-            tokio::time::sleep(Duration::from_secs(backoff as u64)).await;
-            backoff = (backoff * 2.0).min(30.0);
+            tokio::time::sleep(RETRY_INTERVAL).await;
             continue;
         }
 
@@ -811,8 +908,7 @@ async fn receive_loop(
             Ok(chain) => chain,
             Err(e) => {
                 tracing::error!(error = %e, slot = primary_slot, "ground_wfb_rx_failed_to_start");
-                tokio::time::sleep(Duration::from_secs(backoff as u64)).await;
-                backoff = (backoff * 2.0).min(5.0);
+                tokio::time::sleep(RETRY_INTERVAL).await;
                 continue;
             }
         };
@@ -835,7 +931,6 @@ async fn receive_loop(
             slots = ?slots,
             "ground_receive_chain_spawned"
         );
-        backoff = 1.0;
 
         let stdout = chain.video.take_stdout();
         // The rest of the chain (the primary's aux + control receivers and the
@@ -1108,8 +1203,7 @@ async fn receive_loop(
             t.abort();
         }
 
-        tokio::time::sleep(Duration::from_secs(backoff as u64)).await;
-        backoff = (backoff * 2.0).min(5.0);
+        tokio::time::sleep(RETRY_INTERVAL).await;
     }
 }
 

@@ -28,7 +28,7 @@ from .ffmpeg_monitor import (
     drain_ffmpeg_stderr,
 )
 from .manager import MediamtxGsManager, main
-from .process_argv import build_ffmpeg_ingest_argv, build_mediamtx_yaml
+from .process_argv import build_ffmpeg_ingest_argv
 from .rtsp_config import (
     GROUND_INGEST_UDP_PORT,
     GROUND_RTP_PAYLOAD_TYPE,
@@ -67,7 +67,6 @@ __all__ = [
     "_extract_sps_pps_from_nals",
     "_probe_sprop_parameter_sets",
     "bake_sprop_into_sdp",
-    "build_mediamtx_yaml",
     "build_ffmpeg_ingest_argv",
     # watchdog
     "monitor_ffmpeg",

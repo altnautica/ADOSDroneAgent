@@ -29,6 +29,11 @@ ados-atlas-transport = { path = "../ados-atlas-transport" }
 # consumer compares a peer against, so a version mismatch across an
 # upgrade-mixed pair is surfaced instead of silently misreading the plugin wire.
 ados-plugin-host = { path = "../ados-plugin-host" }
+# The ONE mediamtx config generator (air, ground and cloud-relay profiles) plus
+# the shared port defaults. Linked for the `--emit-mediamtx-config` one-shot
+# that the ground mediamtx unit renders its config through, so the ground
+# station cannot drift from the air side the way two generators did.
+ados-video = { path = "../ados-video" }
 
 tokio = { workspace = true }
 serde = { workspace = true }
