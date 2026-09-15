@@ -71,11 +71,13 @@ const SEAM_BACKOFF_MIN: Duration = Duration::from_secs(1);
 /// time is probed occasionally rather than continuously.
 const SEAM_BACKOFF_MAX: Duration = Duration::from_secs(30);
 
-/// First retry delay after a failed bind of the lane's loopback port.
-const BIND_BACKOFF_MIN: Duration = Duration::from_secs(1);
-
-/// Ceiling on the bind retry delay.
-const BIND_BACKOFF_MAX: Duration = Duration::from_secs(30);
+/// Fixed retry between attempts to bind the lane's loopback port.
+///
+/// Flat, with no ceiling and no attempt cap: a bind that keeps failing is a
+/// consumer that receives nothing, and the ladder this replaces doubled to 30 s
+/// before each further attempt. The interval floor is what keeps a hard-failing
+/// bind from busy-spinning.
+const BIND_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
 /// How often the counters are logged, and only when something changed.
 const COUNTER_REPORT_INTERVAL: Duration = Duration::from_secs(60);
@@ -895,8 +897,8 @@ pub async fn run_aux_consumer(
     Ok(())
 }
 
-/// Supervise the consumer for the service lifetime, re-binding with bounded
-/// backoff when the port cannot be taken.
+/// Supervise the consumer for the service lifetime, re-binding on a fixed
+/// interval when the port cannot be taken.
 ///
 /// The port is bound once for the whole service rather than per receive
 /// generation: the generations respawn on link loss, and re-binding a UDP port
@@ -911,7 +913,7 @@ pub async fn supervise_aux_consumer(
     peers: AuxPeerCache,
     cancel: Arc<Notify>,
 ) {
-    let mut backoff = BIND_BACKOFF_MIN;
+    // No `backoff` state: every re-bind waits exactly BIND_RETRY_INTERVAL.
     loop {
         match run_aux_consumer(
             slot,
@@ -930,16 +932,15 @@ pub async fn supervise_aux_consumer(
                 tracing::warn!(
                     port = listen_port,
                     error = %e,
-                    retry_s = backoff.as_secs(),
+                    retry_s = BIND_RETRY_INTERVAL.as_secs(),
                     "ground_aux_consumer_bind_failed"
                 );
             }
         }
         tokio::select! {
             _ = cancel.notified() => return,
-            _ = tokio::time::sleep(backoff) => {}
+            _ = tokio::time::sleep(BIND_RETRY_INTERVAL) => {}
         }
-        backoff = (backoff * 2).min(BIND_BACKOFF_MAX);
     }
 }
 

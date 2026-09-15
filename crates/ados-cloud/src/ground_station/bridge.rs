@@ -34,18 +34,25 @@ pub const MSP_SOCK: &str = "/run/ados/msp.sock";
 /// The vehicle-state IPC socket the GS heartbeat enriches from.
 pub const STATE_SOCK: &str = "/run/ados/state.sock";
 
-// ── Reconnect tunables (mirror the Python module constants) ──────────────
-const RECONNECT_BASE: Duration = Duration::from_secs(2);
-const RECONNECT_MAX: Duration = Duration::from_secs(300);
-const RECONNECT_MULTIPLIER: u32 = 2;
+// ── Reconnect tunables ───────────────────────────────────────────────────
+/// Fixed delay before a relay that exited fast is respawned.
+///
+/// Flat, with no ceiling and no attempt cap. The ladder this replaces doubled
+/// 2 s → 300 s, so a broker that rejected for the first few minutes of a cold
+/// boot (clock skew, DNS not yet up, a captive-portal uplink) left the node
+/// invisible to the cloud fleet view for up to five minutes after the uplink
+/// genuinely recovered, with no way for an operator to force a retry short of
+/// restarting the unit. The 5 s floor is what the ladder was really there for:
+/// it stops a broken seam hot-looping a respawn on every poll tick.
+const RELAY_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const UPLINK_SETTLE: Duration = Duration::from_secs(2);
 const STATUS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 
 /// The minimum the relay task must stay alive before its run counts as
 /// "healthy". A relay that exits sooner than this (a flapping IPC socket, an
-/// immediate broker reject) is treated as a fast exit: the backoff advances so a
-/// broken seam cannot hot-loop a respawn every tick. A run that lasts at least
-/// this long resets the backoff to its base on the next reap.
+/// immediate broker reject) is treated as a fast exit and waits
+/// [`RELAY_RETRY_INTERVAL`] before the respawn; a run that lasts at least this
+/// long is respawned immediately on the next reap.
 const RELAY_HEALTHY_AFTER: Duration = Duration::from_secs(30);
 
 /// The data-cap throttle level driving what the bridge forwards to the cloud.
@@ -169,40 +176,6 @@ pub trait StateSnapshotSource: Send + Sync {
     fn latest(&self) -> Option<serde_json::Value>;
 }
 
-/// The current connection backoff, exposed so the supervision loop and tests
-/// share the same ladder (2 s → ×2 → 300 s cap).
-#[derive(Debug, Clone, Copy)]
-pub struct Backoff {
-    current: Duration,
-}
-
-impl Backoff {
-    pub fn new() -> Self {
-        Self {
-            current: RECONNECT_BASE,
-        }
-    }
-    /// The delay to wait before the next attempt.
-    pub fn delay(&self) -> Duration {
-        self.current
-    }
-    /// Advance the backoff after a failed attempt (×2, capped at 300 s).
-    pub fn advance(&mut self) {
-        let next = self.current.saturating_mul(RECONNECT_MULTIPLIER);
-        self.current = next.min(RECONNECT_MAX);
-    }
-    /// Reset to the base delay after a successful connect.
-    pub fn reset(&mut self) {
-        self.current = RECONNECT_BASE;
-    }
-}
-
-impl Default for Backoff {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// What the bridge should do in response to an uplink/health transition. The
 /// pure decision the live loop then executes. Keeping this as data makes the
 /// reconcile logic testable without driving real MQTT.
@@ -248,12 +221,12 @@ pub struct CloudRelayBridge {
     /// flag onto. The relay sets it once the transport is dialed (the flag then
     /// flips to true on the broker ConnAck). `None` between relay runs.
     relay_conn_rx: Option<watch::Receiver<Option<Arc<AtomicBool>>>>,
-    backoff: Backoff,
     // When the current relay task was spawned, used to tell a healthy run from a
     // fast exit when the task is reaped.
     relay_started_at: Option<std::time::Instant>,
-    // The earliest time a fresh relay may be spawned. Set from the backoff ladder
-    // after a fast exit so a broken seam does not hot-loop the respawn.
+    // The earliest time a fresh relay may be spawned: one fixed
+    // RELAY_RETRY_INTERVAL after a fast exit, so a broken seam does not hot-loop
+    // the respawn on every poll tick.
     relay_retry_at: Option<std::time::Instant>,
     // The MSP byte-plane relay task, spawned alongside the MAVLink relay and torn
     // down with it (both share the MAVLink relay's shutdown watch; this handle is
@@ -292,7 +265,6 @@ impl CloudRelayBridge {
             mqtt_connected: false,
             relay_connected_flag: None,
             relay_conn_rx: None,
-            backoff: Backoff::new(),
             relay_started_at: None,
             relay_retry_at: None,
             msp_relay_task: None,
@@ -397,14 +369,15 @@ impl CloudRelayBridge {
 
     /// Account for a relay task that has exited, given how long it ran and the
     /// current instant. A fast exit (`ran_for` < [`RELAY_HEALTHY_AFTER`])
-    /// advances the backoff and schedules the next attempt after the new delay,
-    /// so a flapping IPC socket or an immediate broker reject cannot hot-loop a
-    /// respawn every poll tick. A healthy run (ran at least that long) resets the
-    /// backoff to its base and clears the retry delay so the relay comes straight
-    /// back. Either way the relay is no longer connected.
+    /// schedules the next attempt one fixed [`RELAY_RETRY_INTERVAL`] out, so a
+    /// flapping IPC socket or an immediate broker reject cannot hot-loop a
+    /// respawn every poll tick — and never waits longer than that, however many
+    /// times it has failed. A healthy run (ran at least that long) clears the
+    /// retry delay so the relay comes straight back. Either way the relay is no
+    /// longer connected.
     ///
     /// Returns the delay before the next spawn is allowed (`0` after a healthy
-    /// run). Pure over the bridge's own state so the ladder is unit-testable
+    /// run). Pure over the bridge's own state so the schedule is unit-testable
     /// without driving real MQTT.
     fn on_relay_exit(&mut self, ran_for: Duration, now: std::time::Instant) -> Duration {
         // A dead relay carries no broker session; drop the confirmed-connection
@@ -412,24 +385,21 @@ impl CloudRelayBridge {
         self.mark_relay_down();
         self.relay_started_at = None;
         if ran_for < RELAY_HEALTHY_AFTER {
-            let delay = self.backoff.delay();
-            self.backoff.advance();
-            self.relay_retry_at = Some(now + delay);
+            self.relay_retry_at = Some(now + RELAY_RETRY_INTERVAL);
             warn!(
                 ran_ms = ran_for.as_millis() as u64,
-                next_attempt_s = delay.as_secs(),
+                next_attempt_s = RELAY_RETRY_INTERVAL.as_secs(),
                 "cloud_relay.relay_fast_exit"
             );
-            delay
+            RELAY_RETRY_INTERVAL
         } else {
-            self.backoff.reset();
             self.relay_retry_at = None;
             debug!(ran_s = ran_for.as_secs(), "cloud_relay.relay_clean_exit");
             Duration::ZERO
         }
     }
 
-    /// Whether the backoff schedule currently permits spawning a fresh relay. A
+    /// Whether the retry schedule currently permits spawning a fresh relay. A
     /// healthy/first attempt has no pending retry; a fast exit holds the spawn
     /// off until the scheduled instant.
     fn relay_spawn_allowed(&self, now: std::time::Instant) -> bool {
@@ -522,8 +492,7 @@ impl CloudRelayBridge {
                             self.mark_relay_down();
                             self.relay_started_at = None;
                             // A deliberate uplink switch is not a relay failure;
-                            // do not penalise the next connect with the backoff.
-                            self.backoff.reset();
+                            // do not hold the next connect behind the retry gate.
                             self.relay_retry_at = None;
                             tokio::time::sleep(UPLINK_SETTLE).await;
                             self.bring_up_relay(&mut relay_task, &mut relay_shutdown);
@@ -540,7 +509,7 @@ impl CloudRelayBridge {
                         MqttAction::Noop => {
                             // Restore the relay whenever it is down but should be
                             // up (video-off→ok, or a reaped task), honouring the
-                            // backoff schedule so a fast-exiting relay waits.
+                            // retry gate so a fast-exiting relay waits.
                             if self.throttle.forward_telemetry()
                                 && relay_task.is_none()
                                 && self.current_uplink.is_some()
@@ -596,7 +565,7 @@ impl CloudRelayBridge {
             debug!("cloud_relay.relay_suppressed_by_data_cap");
             return;
         }
-        // Hold the spawn off until the backoff schedule allows it so a relay that
+        // Hold the spawn off until the retry gate allows it so a relay that
         // keeps exiting fast cannot be respawned every poll tick.
         if !self.relay_spawn_allowed(std::time::Instant::now()) {
             debug!("cloud_relay.relay_respawn_deferred");
@@ -908,20 +877,12 @@ mod tests {
     }
 
     #[test]
-    fn backoff_ladder_doubles_to_300s_cap_and_resets() {
-        let mut b = Backoff::new();
-        assert_eq!(b.delay(), Duration::from_secs(2));
-        b.advance();
-        assert_eq!(b.delay(), Duration::from_secs(4));
-        b.advance();
-        assert_eq!(b.delay(), Duration::from_secs(8));
-        // Climb to the cap.
-        for _ in 0..20 {
-            b.advance();
-        }
-        assert_eq!(b.delay(), Duration::from_secs(300));
-        b.reset();
-        assert_eq!(b.delay(), Duration::from_secs(2));
+    fn the_relay_retry_interval_is_flat_and_inside_the_recovery_band() {
+        // The ladder this replaces doubled 2 s → 300 s, which left a node
+        // invisible to the cloud fleet view for up to five minutes after the
+        // uplink recovered, with no operator-reachable way to force a retry.
+        assert!(RELAY_RETRY_INTERVAL >= Duration::from_secs(2));
+        assert!(RELAY_RETRY_INTERVAL <= Duration::from_secs(5));
     }
 
     #[test]
@@ -1130,7 +1091,7 @@ mod tests {
     }
 
     #[test]
-    fn fast_relay_exit_advances_backoff_and_defers_respawn() {
+    fn every_fast_relay_exit_waits_the_same_fixed_interval_with_no_cap() {
         let mut br = bridge();
         // Simulate a reachable uplink + an "up" relay.
         let snap = UplinkSnapshot {
@@ -1142,46 +1103,51 @@ mod tests {
         br.mqtt_connected = true;
         br.relay_started_at = Some(std::time::Instant::now());
 
-        // The relay exits almost immediately (a flapping IPC socket): the backoff
-        // must advance and a respawn must be deferred.
-        let now = std::time::Instant::now();
+        // The relay exits almost immediately (a flapping IPC socket): the
+        // respawn is deferred by exactly one interval.
+        let mut now = std::time::Instant::now();
         let delay = br.on_relay_exit(Duration::from_millis(5), now);
-        assert_eq!(
-            delay, RECONNECT_BASE,
-            "first fast exit waits the base delay"
-        );
+        assert_eq!(delay, RELAY_RETRY_INTERVAL);
         assert!(!br.mqtt_connected, "a dead relay is not connected");
         assert!(
             !br.relay_spawn_allowed(now),
             "a respawn is held off until the scheduled instant"
         );
-        // The schedule clears once the delay has elapsed.
-        assert!(br.relay_spawn_allowed(now + RECONNECT_BASE));
+        // The schedule clears once the interval has elapsed.
+        assert!(br.relay_spawn_allowed(now + RELAY_RETRY_INTERVAL));
 
-        // A second fast exit doubles the delay (the ladder is load-bearing).
-        let now2 = now + RECONNECT_BASE;
-        let delay2 = br.on_relay_exit(Duration::from_millis(5), now2);
-        assert_eq!(delay2, RECONNECT_BASE * RECONNECT_MULTIPLIER);
+        // And it NEVER grows, however long the seam stays broken: a broker that
+        // rejects for the first minutes of a cold boot must not push the node
+        // out of the fleet view for minutes after the uplink recovers.
+        for attempt in 0..60 {
+            now += RELAY_RETRY_INTERVAL;
+            assert_eq!(
+                br.on_relay_exit(Duration::from_millis(5), now),
+                RELAY_RETRY_INTERVAL,
+                "attempt {attempt} must wait the same fixed interval"
+            );
+            assert!(
+                br.relay_spawn_allowed(now + RELAY_RETRY_INTERVAL),
+                "attempt {attempt} must be retried, not capped out"
+            );
+        }
     }
 
     #[test]
-    fn healthy_relay_run_resets_the_backoff() {
+    fn a_healthy_relay_run_clears_the_retry_hold() {
         let mut br = bridge();
-        // Climb the backoff with two fast exits.
         let t0 = std::time::Instant::now();
         br.on_relay_exit(Duration::from_millis(1), t0);
         br.on_relay_exit(Duration::from_millis(1), t0);
-        assert!(br.backoff.delay() > RECONNECT_BASE, "backoff climbed");
+        assert!(
+            !br.relay_spawn_allowed(t0),
+            "a fast exit holds the respawn off"
+        );
 
-        // A run that lasted past the healthy threshold resets the ladder and
-        // clears the retry hold so the relay comes straight back.
+        // A run that lasted past the healthy threshold clears the retry hold so
+        // the relay comes straight back.
         let delay = br.on_relay_exit(RELAY_HEALTHY_AFTER + Duration::from_secs(1), t0);
         assert_eq!(delay, Duration::ZERO);
-        assert_eq!(
-            br.backoff.delay(),
-            RECONNECT_BASE,
-            "ladder reset after a clean run"
-        );
         assert!(
             br.relay_spawn_allowed(t0),
             "no retry hold after a clean run"

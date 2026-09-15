@@ -262,6 +262,24 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
     // and between the bitrate controller and the operator command socket so the
     // auto/manual link-tier toggle survives a watchdog kill or a channel hop.
     let adaptive_enabled: EnabledHandle = new_enabled(cfg);
+
+    // Application datagram fan-out, shared by the aux-RX receive loop and every
+    // aux `subscribe` connection. Created ONCE, outside the respawn loop, like
+    // `bitrate_snapshot` / `adaptive_enabled` above: a fresh channel per
+    // bring-up left generation N-1's receive task publishing into a channel
+    // with no subscribers while generation N's subscribers attached to a
+    // channel nothing fed, so every inbound auxiliary application datagram
+    // (config-over-radio replies, payload command lanes) was lost for the rest
+    // of the process lifetime after the first respawn — and respawns are
+    // routine (a wfb_tx stall kill, an FEC/MCS retune crash, a hop end).
+    let (aux_app_tx, _) = tokio::sync::broadcast::channel::<(u8, Vec<u8>)>(256);
+    // The receive half is likewise spawned ONCE. It owns the aux-RX loopback
+    // UDP port for the process lifetime, so a second spawn could only fail on
+    // EADDRINUSE against its own predecessor.
+    tokio::spawn(ados_radio::aux_rx::run_rx_loop(
+        Arc::new(cfg.clone()),
+        aux_app_tx.clone(),
+    ));
     loop {
         // Latched shutdown gate at the top of the respawn loop: if SIGTERM flipped
         // the watch while we were tearing down a radio group below, never start
@@ -1234,22 +1252,15 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
         // SAFE-BY-DEFAULT: nothing starts here at bring-up — the pair exists only
         // between an explicit open and its close. Spawned + aborted per bring-up
         // like the sibling sockets.
-        // Application datagram fan-out shared by the aux-RX receive loop (the
-        // process-lifetime task that decodes inbound app frames off the loopback
-        // port) and every aux `subscribe` connection, which streams from it.
-        let (aux_app_tx, _) = tokio::sync::broadcast::channel::<(u8, Vec<u8>)>(256);
+        // The fan-out sender and its receive loop are process-lifetime state
+        // hoisted above the respawn loop; this bring-up's command socket just
+        // takes a clone, so a subscriber attached after a respawn is fed by the
+        // same still-running receive half.
         let aux_cmd_state = AuxCmdState {
             proc: proc.clone(),
             cfg: Arc::new(cfg.clone()),
-            rx_tx: aux_app_tx,
+            rx_tx: aux_app_tx.clone(),
         };
-        // Process-lifetime aux-RX receive half: binds the loopback aux-rx port
-        // and fans decoded AppStream/AppCommand frames to subscribers. Started
-        // beside, not inside, the per-bring-up aux command socket so it survives
-        // a re-bring-up; when no aux pair is open it sits idle on recv_from.
-        let aux_rx_tx = aux_cmd_state.rx_tx.clone();
-        let aux_rx_cfg = Arc::new(cfg.clone());
-        tokio::spawn(ados_radio::aux_rx::run_rx_loop(aux_rx_cfg, aux_rx_tx));
         let aux_cmd_cancel = task_cancel.clone();
         let aux_cmd_sock_path = ados_radio::paths::run_path("radio-aux.sock");
         let aux_cmd_server = tokio::spawn(async move {

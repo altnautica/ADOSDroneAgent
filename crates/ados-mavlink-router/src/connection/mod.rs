@@ -62,9 +62,17 @@ use transport::{
     ProbeOutcome, UdpAdapter, BAUD_CANDIDATES, BAUD_FALLBACK,
 };
 
-/// Reconnect backoff bounds.
-const RECONNECT_MIN: Duration = Duration::from_secs(1);
-const RECONNECT_MAX: Duration = Duration::from_secs(30);
+/// Fixed interval between flight-controller reconnect attempts.
+///
+/// Flat, with no ceiling and no attempt cap. This is the sole
+/// command-and-control path to the vehicle and there is no packaged fallback,
+/// so a ladder that walked 1→2→4→8→16→30 s left a drone up to half a minute
+/// with no FC link and no telemetry after a USB replug or a brownout, and an
+/// operator staring at a dead vehicle with no explanation for why reconnection
+/// was slow. The 3 s floor is what keeps a persistently unwritable port (one
+/// that opens but never accepts a write, so the 1 Hz companion heartbeat fails
+/// every time) from pinning the loop in a hot re-open cycle.
+const RECONNECT_INTERVAL: Duration = Duration::from_secs(3);
 
 /// A decoded HEARTBEAT older than this means the FC link is open but the
 /// autopilot is no longer talking: the transport may still be up (the serial
@@ -139,10 +147,6 @@ pub struct FcConnection {
     // pub(crate): same reasoning as `writer` above — a sibling module's tests
     // need to mark a fake link live.
     pub(crate) connected: AtomicBool,
-    /// True once a write to the FC has succeeded since the current link opened.
-    /// Drives the reconnect backoff: a session that proved writable resets to
-    /// the minimum, while a port that opens but never accepts a write backs off.
-    wrote_since_open: AtomicBool,
     /// True when the most recent open attempt FAILED to establish a transport
     /// (the socket/serial device could not be opened at all). Drives the
     /// `source_unreachable` link hint: a configured (non-auto) source whose
@@ -231,7 +235,6 @@ impl FcConnection {
             seq: AtomicU8::new(0),
             target_system: AtomicU8::new(1),
             connected: AtomicBool::new(false),
-            wrote_since_open: AtomicBool::new(false),
             open_failed: AtomicBool::new(false),
             port: Mutex::new(String::new()),
             fc_variant: Mutex::new(None),
@@ -543,12 +546,10 @@ impl FcConnection {
     /// went away), `cancel` fires (shutdown), or a write failure raises the
     /// reconnect signal (a transient agent->FC write error). All three fall
     /// through to one teardown + re-open path so the writer is always replaced
-    /// with a fresh half. A persistently unwritable port is kept from
-    /// tight-looping by a bounded backoff that only grows while the link never
-    /// proves healthy, and resets the moment a session holds long enough to be
-    /// considered up.
+    /// with a fresh half, after a fixed [`RECONNECT_INTERVAL`] that never grows
+    /// and never gives up. The interval floor is also what keeps a persistently
+    /// unwritable port from tight-looping on its failed writes.
     pub async fn run(&self, cancel: std::sync::Arc<tokio::sync::Notify>) {
-        let mut backoff = RECONNECT_MIN;
         loop {
             let stream = tokio::select! {
                 s = self.open() => s,
@@ -561,10 +562,9 @@ impl FcConnection {
                 // connected".
                 self.open_failed.store(true, Ordering::Relaxed);
                 tokio::select! {
-                    _ = tokio::time::sleep(backoff) => {}
+                    _ = tokio::time::sleep(RECONNECT_INTERVAL) => {}
                     _ = cancel.notified() => return,
                 }
-                backoff = (backoff * 2).min(RECONNECT_MAX);
                 continue;
             };
             // A transport opened — clear the unreachable flag.
@@ -595,7 +595,6 @@ impl FcConnection {
                 tracing::info!(port = %port, baud, "fc_connected");
             }
             self.connected.store(true, Ordering::Relaxed);
-            self.wrote_since_open.store(false, Ordering::Relaxed);
             *self.last_msg_at.lock().await = Instant::now();
 
             tokio::select! {
@@ -630,20 +629,14 @@ impl FcConnection {
             self.param_last_cached_count.store(0, Ordering::Relaxed);
             tracing::warn!("fc_disconnected");
 
-            // A session that proved writable (at least one write to the FC
-            // succeeded) is healthy: reset and re-open immediately so the common
-            // transient case recovers fast. A port that opens but never accepts
-            // a write (readable-but-unwritable) never sets this, so it backs off
-            // instead of re-opening on every failed write — including the 1 Hz
-            // companion heartbeat, which would otherwise pin the loop at ~1 Hz.
-            if self.wrote_since_open.load(Ordering::Relaxed) {
-                backoff = RECONNECT_MIN;
-            } else {
-                tokio::select! {
-                    _ = tokio::time::sleep(backoff) => {}
-                    _ = cancel.notified() => return,
-                }
-                backoff = (backoff * 2).min(RECONNECT_MAX);
+            // Re-open on the fixed interval — no ladder, no cap. A port that
+            // opens but never accepts a write (readable-but-unwritable) used to
+            // select a doubling backoff here; the interval floor bounds that
+            // tight loop on its own, and the `source_unreachable` link hint
+            // (driven by `open_failed`) is what names the cause to the operator.
+            tokio::select! {
+                _ = tokio::time::sleep(RECONNECT_INTERVAL) => {}
+                _ = cancel.notified() => return,
             }
         }
     }
@@ -1417,7 +1410,6 @@ mod command_gate_tests {
             written.load(Ordering::Relaxed) > 0,
             "the FC command path wrote the heartbeat"
         );
-        assert!(c.wrote_since_open.load(Ordering::Relaxed));
     }
 }
 
@@ -1648,6 +1640,70 @@ mod liveness_tests {
 
     fn conn_source(cfg: MavlinkConfig) -> &'static str {
         conn_with(cfg).source()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_fc_reconnect_retries_on_a_flat_interval_with_no_attempt_cap() {
+        // ROUTER-FC-RECONNECT-BACKOFF regression. This is the sole C2 path with
+        // no packaged fallback, so the retry must be flat: the old ladder walked
+        // 1→2→4→8→16→30 s (and never reset for a port that opens but never
+        // accepts a write), leaving a drone up to half a minute with no FC link
+        // after a replug or a brownout.
+        //
+        // A real listener that accepts and immediately drops each connection
+        // turns every reconnect attempt into one countable accept, so the shape
+        // of the retry is measured rather than asserted about a constant.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener bind");
+        let addr = listener.local_addr().expect("listener addr");
+        let accepts = std::sync::Arc::new(AtomicUsize::new(0));
+        let accept_counter = accepts.clone();
+        tokio::spawn(async move {
+            loop {
+                match listener.accept().await {
+                    // Drop the peer immediately: the router sees EOF, tears the
+                    // session down and re-opens after the fixed interval.
+                    Ok((peer, _)) => {
+                        accept_counter.fetch_add(1, Ordering::Relaxed);
+                        drop(peer);
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let c = conn_with(MavlinkConfig {
+            source: "tcp".into(),
+            serial_port: format!("tcp:{}:{}", addr.ip(), addr.port()),
+            ..MavlinkConfig::default()
+        });
+        let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
+        let run_conn = c.clone();
+        let run_cancel = cancel.clone();
+        tokio::spawn(async move { run_conn.run(run_cancel).await });
+
+        // Drive 40 retry intervals of simulated time. A flat 3 s interval gives
+        // ~40 attempts; the old doubling ladder would have spent the same 120 s
+        // on about six.
+        const CYCLES: usize = 40;
+        for _ in 0..CYCLES {
+            tokio::time::advance(RECONNECT_INTERVAL).await;
+            for _ in 0..8 {
+                tokio::task::yield_now().await;
+            }
+        }
+        cancel.notify_waiters();
+
+        let seen = accepts.load(Ordering::Relaxed);
+        assert!(
+            seen >= CYCLES / 2,
+            "the reconnect must retry on a flat interval with no cap: \
+             {seen} attempts across {CYCLES} intervals"
+        );
+        // And the interval itself stays inside the fixed recovery band.
+        assert!(RECONNECT_INTERVAL >= Duration::from_secs(2));
+        assert!(RECONNECT_INTERVAL <= Duration::from_secs(5));
     }
 }
 

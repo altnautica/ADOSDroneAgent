@@ -606,15 +606,15 @@ async fn listen_on_slot(
     }
 }
 
-/// Backoff bounds for the listener supervisor: a re-bind after a fatal socket
-/// error starts at 1 s and doubles to a 30 s ceiling, then resets once the
-/// listener has run long enough to be considered healthy.
-const LISTEN_BACKOFF_START: Duration = Duration::from_secs(1);
-const LISTEN_BACKOFF_MAX: Duration = Duration::from_secs(30);
-/// A listener generation that survives at least this long is treated as a clean
-/// run, so the next failure backs off from the start again instead of compounding
-/// a single long-healthy session's eventual exit into a long stall.
-const LISTEN_HEALTHY_RUNTIME: Duration = Duration::from_secs(60);
+/// Fixed interval between listener re-binds after a fatal socket error or a
+/// panic in the listen path.
+///
+/// Flat, with no ceiling and no attempt cap: the ladder this replaces doubled to
+/// 30 s, and the presence input is what tells a ground station where the drone
+/// actually is — a re-bind that is minutes late is a rendezvous the operator has
+/// to drive by hand. The interval floor is what keeps a hard-failing bind from
+/// busy-spinning.
+const LISTEN_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Sidecar carrying the listener-supervisor's restart accounting so a flapping
 /// presence listener is observable cross-process (the REST/heartbeat layer reads
@@ -666,7 +666,7 @@ fn write_listener_health_to(path: &std::path::Path, health: &ListenerHealth) {
 ///
 /// `listen_loop` only returns on a fatal socket error (its per-slot recv loops
 /// continue over transient errors), so a return is a genuine fault: the
-/// supervisor re-binds every slot after a bounded, resetting backoff. The
+/// supervisor re-binds every slot after a fixed [`LISTEN_RETRY_INTERVAL`]. The
 /// listener handle is awaited rather than dropped, so a panic in the listen path
 /// surfaces as a `JoinError` here (logged + counted) instead of being silently
 /// swallowed. The restart accounting is published to a GS sidecar so a flapping
@@ -679,7 +679,7 @@ pub async fn listen_supervisor(
     follower: Option<HopFollower>,
     slots: Vec<u8>,
 ) {
-    let mut backoff = LISTEN_BACKOFF_START;
+    // No `backoff` state: every re-bind waits exactly LISTEN_RETRY_INTERVAL.
     let mut health = ListenerHealth {
         starts: 0,
         restarts: 0,
@@ -698,7 +698,6 @@ pub async fn listen_supervisor(
             "ground_presence_listener_spawning"
         );
 
-        let generation_start = std::time::Instant::now();
         let handle = {
             let cache = cache.clone();
             let follower = follower.clone();
@@ -730,18 +729,12 @@ pub async fn listen_supervisor(
         health.restarts = health.restarts.saturating_add(1);
         write_listener_health(&health);
 
-        // A generation that ran healthy long enough resets the backoff so one
-        // eventual exit after a long good run does not start from the ceiling.
-        if generation_start.elapsed() >= LISTEN_HEALTHY_RUNTIME {
-            backoff = LISTEN_BACKOFF_START;
-        }
         tracing::warn!(
-            backoff_s = backoff.as_secs(),
+            retry_in_s = LISTEN_RETRY_INTERVAL.as_secs(),
             restarts = health.restarts,
-            "ground_presence_listener_backing_off"
+            "ground_presence_listener_retrying"
         );
-        tokio::time::sleep(backoff).await;
-        backoff = (backoff * 2).min(LISTEN_BACKOFF_MAX);
+        tokio::time::sleep(LISTEN_RETRY_INTERVAL).await;
     }
 }
 
@@ -1299,18 +1292,13 @@ mod tests {
     }
 
     #[test]
-    fn listener_backoff_bounds_are_sane() {
-        // Backoff must start small, never reach zero, and be capped so a flapping
-        // re-bind neither busy-spins nor stalls the presence input indefinitely.
-        assert!(!LISTEN_BACKOFF_START.is_zero());
-        assert!(LISTEN_BACKOFF_START <= LISTEN_BACKOFF_MAX);
-        assert!(LISTEN_BACKOFF_MAX <= Duration::from_secs(60));
-        // Doubling from the start reaches the ceiling and clamps there.
-        let mut b = LISTEN_BACKOFF_START;
-        for _ in 0..16 {
-            b = (b * 2).min(LISTEN_BACKOFF_MAX);
-        }
-        assert_eq!(b, LISTEN_BACKOFF_MAX);
+    fn the_listener_rebind_is_a_flat_retry_in_the_recovery_band() {
+        // Never zero (a hard-failing bind must not busy-spin) and never longer
+        // than the recovery band, because the presence input is what tells this
+        // ground station where the drone actually is.
+        assert!(!LISTEN_RETRY_INTERVAL.is_zero());
+        assert!(LISTEN_RETRY_INTERVAL >= Duration::from_secs(2));
+        assert!(LISTEN_RETRY_INTERVAL <= Duration::from_secs(5));
     }
 
     #[test]

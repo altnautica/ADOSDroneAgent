@@ -130,7 +130,7 @@ impl FcConnection {
         let mut guard = self.writer.lock().await;
         if let Some(w) = guard.as_mut() {
             match write_then_flush(w, data).await {
-                Ok(()) => self.wrote_since_open.store(true, Ordering::Relaxed),
+                Ok(()) => {}
                 Err(e) => {
                     *guard = None;
                     drop(guard);
@@ -163,10 +163,7 @@ impl FcConnection {
             return false;
         };
         match tokio::time::timeout(budget, write_then_flush(w, data)).await {
-            Ok(Ok(())) => {
-                self.wrote_since_open.store(true, Ordering::Relaxed);
-                true
-            }
+            Ok(Ok(())) => true,
             Ok(Err(e)) => {
                 *guard = None;
                 drop(guard);
