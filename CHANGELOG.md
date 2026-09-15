@@ -4,6 +4,26 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.372] - 2026-09-15
+
+### Security
+
+- A drone that holds no per-pair relay secret now refuses relayed requests
+  instead of serving them. A relayed call arrives on the drone's loopback and
+  is therefore treated as on-box, so an aircraft with no credential to check
+  was granting its full authority to anything holding the shared fleet radio
+  key. The one path still served without a ticket is
+  `POST /api/relay/peer-secret`, which is how the credential is delivered in
+  the first place and is bounded by the existing first-write-wins rule; a
+  refusal answers 401, and the absent-credential state is reported once per
+  boot as `aux_rpc_relay_secret_absent` so it is visible in the log store.
+- Plugin archive reads are bounded by total decompressed size (100 MB) and a
+  per-entry expansion ratio (200x above 1 MB), matching the caps the Rust
+  reader already applied. A 150 KB upload of deflated zeros previously
+  expanded to 150 MB held in memory inside the API service. The archive is
+  refused whole before any file is written, so an unpack cannot leave a
+  half-extracted install directory behind.
+
 ## [0.99.366] - 2026-08-20
 
 ### Fixed

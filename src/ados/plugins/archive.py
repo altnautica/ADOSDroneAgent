@@ -23,9 +23,13 @@ Canonical payload is sha256-of-sorted-list-of (path, sha256_of_bytes)
 across every entry except SIGNATURE itself. Sorting by path makes the
 signing payload deterministic regardless of zip ordering.
 
-The archive size limit is 50MB. The per-entry size limit is 25MB. Both
-fail at unpack with :class:`ArchiveError`. Path traversal entries
-(``..`` segments, absolute paths, symlinks) are rejected.
+The archive size limit is 50MB. The per-entry size limit is 25MB, checked
+against the bytes actually read rather than the size the entry declares.
+The sum of every entry's decompressed bytes is capped at 100MB, and a
+single entry may not expand by more than 200x from its compressed size.
+Every limit fails at parse/unpack with :class:`ArchiveError` before any
+file is written. Path traversal entries (``..`` segments, absolute paths,
+symlinks) are rejected.
 """
 
 from __future__ import annotations
@@ -46,6 +50,21 @@ log = get_logger("plugins.archive")
 
 ARCHIVE_MAX_BYTES = 50 * 1024 * 1024
 ENTRY_MAX_BYTES = 25 * 1024 * 1024
+# Cap on the sum of every entry's decompressed bytes. A zip can declare a
+# small uncompressed size per entry yet inflate to far more, and many small
+# entries can each stay under the per-entry cap while their sum exhausts
+# memory -- the install path runs inside ados-api under MemoryMax, so the
+# running total is bounded independently of the per-entry limit. Mirrors
+# TOTAL_DECOMPRESSED_MAX in the Rust reader (crates/ados-plugin-host).
+TOTAL_DECOMPRESSED_MAX = 100 * 1024 * 1024
+# Cap on one entry's expansion factor. The per-entry byte cap alone lets a
+# few hundred bytes of crafted deflate stream cost 25MB of RAM each; a
+# genuine plugin payload (wheels, bundles, models) is already compressed or
+# close to it and never approaches this.
+ENTRY_MAX_COMPRESSION_RATIO = 200
+# The ratio is only meaningful above this size. Small text entries routinely
+# compress by very large factors and are harmless.
+ENTRY_RATIO_FLOOR_BYTES = 1024 * 1024
 SIGNATURE_FILENAME = "SIGNATURE"
 MANIFEST_FILENAME = "manifest.yaml"
 
@@ -146,6 +165,67 @@ def _is_symlink_entry(info: zipfile.ZipInfo) -> bool:
     return (mode & 0o170000) == SYMLINK_MODE
 
 
+def _read_members_bounded(
+    zf: zipfile.ZipFile,
+) -> list[tuple[zipfile.ZipInfo, str, bytes]]:
+    """Read every file member under the decompression bounds.
+
+    One reader for both the parse path and the unpack path, so the caps
+    cannot hold on one and not the other. The declared uncompressed size is
+    used only as a cheap early reject: the authoritative check is the number
+    of bytes actually produced, because a zip is free to declare anything.
+
+    Returns ``(info, safe_name, data)`` per file member, in archive order.
+    Refuses the whole archive by raising :class:`ArchiveError`; because the
+    caller receives nothing until every member has passed, an unpack can
+    never leave a half-extracted tree behind.
+    """
+    members: list[tuple[zipfile.ZipInfo, str, bytes]] = []
+    total = 0
+    for info in zf.infolist():
+        name = _safe_member_path(info.filename)
+        if name.endswith("/"):
+            continue
+        if _is_symlink_entry(info):
+            raise ArchiveError(
+                f"archive entry {name} is a symlink; symlinks not allowed"
+            )
+        if info.file_size > ENTRY_MAX_BYTES:
+            raise ArchiveError(
+                f"archive entry {name} is {info.file_size} bytes; "
+                f"per-entry cap is {ENTRY_MAX_BYTES}"
+            )
+        try:
+            with zf.open(info) as fh:
+                # Bounded by our own cap, not by whatever the entry declared:
+                # one byte past it is enough to know the entry is over.
+                data = fh.read(ENTRY_MAX_BYTES + 1)
+        except (zipfile.BadZipFile, EOFError, OSError) as exc:
+            raise ArchiveError(f"archive entry {name} is unreadable: {exc}") from exc
+        if len(data) > ENTRY_MAX_BYTES:
+            raise ArchiveError(
+                f"archive entry {name} decompresses past the per-entry cap "
+                f"{ENTRY_MAX_BYTES}"
+            )
+        compressed = max(info.compress_size, 1)
+        if (
+            len(data) > ENTRY_RATIO_FLOOR_BYTES
+            and len(data) > compressed * ENTRY_MAX_COMPRESSION_RATIO
+        ):
+            raise ArchiveError(
+                f"archive entry {name} expands {len(data) // compressed}x from "
+                f"{info.compress_size} compressed bytes; per-entry ratio cap "
+                f"is {ENTRY_MAX_COMPRESSION_RATIO}x"
+            )
+        total += len(data)
+        if total > TOTAL_DECOMPRESSED_MAX:
+            raise ArchiveError(
+                f"archive decompresses past the total cap {TOTAL_DECOMPRESSED_MAX}"
+            )
+        members.append((info, name, data))
+    return members
+
+
 def _canonical_payload_hash(entries: dict[str, bytes]) -> bytes:
     """Compute the deterministic payload hash over manifest + assets.
 
@@ -182,7 +262,13 @@ def open_archive(path: str | Path) -> ArchiveContents:
 
 
 def parse_archive_bytes(raw: bytes) -> ArchiveContents:
-    """Parse archive bytes already in memory."""
+    """Parse archive bytes already in memory.
+
+    Members are read under the decompression bounds
+    (:data:`ENTRY_MAX_BYTES`, :data:`ENTRY_MAX_COMPRESSION_RATIO`,
+    :data:`TOTAL_DECOMPRESSED_MAX`), so a crafted archive cannot exhaust the
+    memory of the service that accepted the upload.
+    """
     if len(raw) > ARCHIVE_MAX_BYTES:
         raise ArchiveError(
             f"archive is {len(raw)} bytes; cap is {ARCHIVE_MAX_BYTES}"
@@ -193,22 +279,10 @@ def parse_archive_bytes(raw: bytes) -> ArchiveContents:
     except zipfile.BadZipFile as exc:
         raise ArchiveError(f"not a valid zip archive: {exc}") from exc
 
-    entries: dict[str, bytes] = {}
     try:
-        for info in zf.infolist():
-            name = _safe_member_path(info.filename)
-            if name.endswith("/"):
-                continue
-            if _is_symlink_entry(info):
-                raise ArchiveError(
-                    f"archive entry {name} is a symlink; symlinks not allowed"
-                )
-            if info.file_size > ENTRY_MAX_BYTES:
-                raise ArchiveError(
-                    f"archive entry {name} is {info.file_size} bytes; "
-                    f"per-entry cap is {ENTRY_MAX_BYTES}"
-                )
-            entries[name] = zf.read(info.filename)
+        entries: dict[str, bytes] = {
+            name: data for _info, name, data in _read_members_bounded(zf)
+        }
     finally:
         zf.close()
 
@@ -271,21 +345,21 @@ def _restore_exec_mode(target: Path, info: zipfile.ZipInfo) -> None:
 
 def unpack_to(archive_bytes: bytes, dest: Path) -> None:
     """Unpack archive bytes to ``dest`` directory. Caller is responsible for
-    having validated the archive (signature etc.) first."""
-    dest.mkdir(parents=True, exist_ok=True)
+    having validated the archive (signature etc.) first.
+
+    Every member is read and bound-checked before the first byte is written,
+    so an archive that breaches a decompression cap is refused whole rather
+    than leaving a partially extracted install directory behind for a caller
+    to clean up.
+    """
     with zipfile.ZipFile(io.BytesIO(archive_bytes)) as zf:
-        for info in zf.infolist():
-            name = _safe_member_path(info.filename)
-            if name.endswith("/"):
-                continue
-            if _is_symlink_entry(info):
-                raise ArchiveError(
-                    f"archive entry {name} is a symlink; symlinks not allowed"
-                )
-            target = dest / name
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(zf.read(info.filename))
-            _restore_exec_mode(target, info)
+        members = _read_members_bounded(zf)
+    dest.mkdir(parents=True, exist_ok=True)
+    for info, name, data in members:
+        target = dest / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        _restore_exec_mode(target, info)
 
 
 def _required_entrypoints(manifest: PluginManifest) -> list[tuple[str, str]]:

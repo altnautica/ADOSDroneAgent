@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import io
+import os
 import zipfile
 from pathlib import Path
 
 import pytest
 
+from ados.plugins import archive as archive_module
 from ados.plugins.archive import (
     ARCHIVE_MAX_BYTES,
+    ENTRY_MAX_BYTES,
     MANIFEST_FILENAME,
     SIGNATURE_FILENAME,
     open_archive,
@@ -85,6 +88,64 @@ def test_archive_size_cap_enforced() -> None:
     too_big = b"x" * (ARCHIVE_MAX_BYTES + 1)
     with pytest.raises(ArchiveError):
         parse_archive_bytes(too_big)
+
+
+def test_archive_entry_ratio_cap_refuses_a_zip_bomb() -> None:
+    """A small archive that inflates to a large one is refused.
+
+    This is the whole attack: 25 MiB of zeros deflates to a few tens of KiB,
+    so an upload well inside the 50 MiB archive cap costs 25 MiB of RAM per
+    entry in the service that accepted it.
+    """
+    archive_bytes = _make_zip(
+        {
+            MANIFEST_FILENAME: _good_manifest_yaml().encode(),
+            "assets/bomb.bin": b"\0" * ENTRY_MAX_BYTES,
+        }
+    )
+    assert len(archive_bytes) < ARCHIVE_MAX_BYTES, "the bomb must pass the archive cap"
+
+    with pytest.raises(ArchiveError, match="ratio cap"):
+        parse_archive_bytes(archive_bytes)
+
+
+def test_archive_total_decompression_cap_refuses_the_sum(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Entries that each clear the per-entry limits still cannot sum past the
+    total cap -- the many-small-entries shape the per-entry bound cannot see.
+
+    The cap is lowered rather than fed 100 MiB of real payload: the bound
+    being proved is the running total, not the constant's value.
+    """
+    monkeypatch.setattr(archive_module, "TOTAL_DECOMPRESSED_MAX", 4096)
+    # Incompressible, so each entry's expansion ratio is ~1 and only the
+    # running total can refuse this archive.
+    entries = {MANIFEST_FILENAME: _good_manifest_yaml().encode()}
+    for i in range(4):
+        entries[f"assets/blob{i}.bin"] = os.urandom(2048)
+    archive_bytes = _make_zip(entries)
+
+    with pytest.raises(ArchiveError, match="total cap 4096"):
+        parse_archive_bytes(archive_bytes)
+
+
+def test_unpack_refuses_a_bomb_without_writing_anything(tmp_path: Path) -> None:
+    """The refusal is whole-archive: nothing is extracted, so no caller is
+    left to clean up a half-populated install directory."""
+    archive_bytes = _make_zip(
+        {
+            MANIFEST_FILENAME: _good_manifest_yaml().encode(),
+            "agent/plugin.py": b"# stub\n",
+            "assets/bomb.bin": b"\0" * ENTRY_MAX_BYTES,
+        }
+    )
+    dest = tmp_path / "unpacked"
+
+    with pytest.raises(ArchiveError, match="ratio cap"):
+        unpack_to(archive_bytes, dest)
+
+    assert not dest.exists(), "a refused archive must not create the install dir"
 
 
 def test_signature_well_formed_round_trips() -> None:
